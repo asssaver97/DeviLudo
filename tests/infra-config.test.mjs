@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 13 }, (_, index) => {
+  const offsets = Array.from({ length: 14 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,20 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("physical Runner attempts require an append-only tenant execution lock", () => {
+  const migration = readFileSync(new URL("../infra/postgres/014_runner_execution_locks.sql", import.meta.url), "utf8");
+  const adapter = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.runner_execution_locks/);
+  assert.match(migration, /UNIQUE \(tenant_id, lock_key\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /runner_execution_locks_append_only/);
+  assert.match(migration, /FOREIGN KEY \(tenant_id, project_id, run_id, execution_lock_id\)/);
+  assert.match(migration, /workflow_operation_key IS NULL OR execution_lock_id IS NOT NULL/);
+  assert.match(adapter, /FROM deviludo\.runner_execution_locks/);
+  assert.match(adapter, /RUNNER_EXECUTION_LOCK_BINDING_CONFLICT/);
+  assert.match(adapter, /executionLockDigest/);
 });
 
 test("Runner workflow attempts are immutable, tenant-scoped and content-bound", () => {

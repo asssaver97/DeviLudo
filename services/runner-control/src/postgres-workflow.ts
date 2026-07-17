@@ -3,6 +3,7 @@ import type { TargetPlatform } from "../../../lib/domain/types";
 import { WorkflowJobError } from "../../temporal/src/job-processor";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import { sha256Canonical } from "./canonical";
+import { parseRunnerExecutionLock, runnerExecutionLockDigest, type RunnerExecutionLock } from "./execution-lock";
 import type { RunnerWorkflowPort, RunnerWorkflowReceipt } from "./workflow-handler";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -18,6 +19,7 @@ type AttemptRow = {
   workflow_id: string;
   workflow_operation_key: string;
   workflow_request_digest: string;
+  execution_lock_id: string;
   mode: string;
   commit_sha: string;
   source_digest: string;
@@ -52,6 +54,12 @@ type SourceBinding = {
   spec_revision_id: string | null;
 };
 
+type ExecutionLockRow = {
+  id: string;
+  payload: unknown;
+  payload_digest: string;
+};
+
 type LockedConfiguration = {
   readonly specRevisionId: string;
   readonly specDigest: string;
@@ -66,6 +74,8 @@ type AttemptBinding = LockedConfiguration & {
   readonly requestDigest: string;
   readonly iterationId: string;
   readonly mode: WorkflowInput["mode"];
+  readonly executionLockId: string;
+  readonly executionLockDigest: string;
 };
 
 /**
@@ -130,6 +140,7 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
         || source.spec_revision_id !== locked.specRevisionId) {
         throw new WorkflowJobError("RUNNER_SOURCE_BINDING_MISSING");
       }
+      const executionLock = await this.#resolveExecutionLock(client, input, locked, source.source_digest);
       const binding: AttemptBinding = Object.freeze({
         schemaVersion: "deviludo.e2e-attempt.v1",
         workflowId: input.workflowId,
@@ -137,6 +148,8 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
         requestDigest: input.requestDigest,
         iterationId: run.iteration_id,
         mode: input.mode,
+        executionLockId: executionLock.id,
+        executionLockDigest: executionLock.digest,
         ...locked,
       });
       await client.query(
@@ -144,11 +157,11 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
           (tenant_id, project_id, run_id, attempt_number, commit_sha,
            source_digest, binding, target_matrix, state, workflow_id,
            workflow_operation_key, workflow_request_digest, mode,
-           draft_pull_request, steam_build_id)
+           draft_pull_request, steam_build_id, execution_lock_id)
          SELECT $1::uuid, $2::uuid, $3::uuid,
                 COALESCE(MAX(existing.attempt_number), 0) + 1,
                 $4, $5, $6::jsonb, $7::text[], 'QUEUED', $8, $9, $10, $11,
-                $12::bigint, $13
+                $12::bigint, $13, $14::uuid
            FROM deviludo.e2e_attempts existing
           WHERE existing.tenant_id = $1::uuid
             AND existing.run_id = $3::uuid
@@ -167,11 +180,12 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
           input.mode,
           input.draftPullRequest,
           input.steamBuildId,
+          executionLock.id,
         ],
       );
       const selected = await client.query<AttemptRow>(
         `SELECT id::text, run_id::text, workflow_id, workflow_operation_key,
-                workflow_request_digest, mode, commit_sha, source_digest,
+                workflow_request_digest, execution_lock_id::text, mode, commit_sha, source_digest,
                 binding, target_matrix, draft_pull_request, steam_build_id,
                 state, repair_prompt_id, completed_at::text
            FROM deviludo.e2e_attempts
@@ -185,6 +199,45 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
       validateAttempt(attempt, input, binding, source.source_digest);
       return attempt;
     });
+  }
+
+  async #resolveExecutionLock(
+    client: PostgresWorkflowClient,
+    input: WorkflowInput,
+    configuration: LockedConfiguration,
+    sourceDigest: string,
+  ): Promise<Readonly<{ id: string; digest: string; payload: RunnerExecutionLock }>> {
+    const result = await client.query<ExecutionLockRow>(
+      `SELECT id::text, payload, payload_digest
+         FROM deviludo.runner_execution_locks
+        WHERE tenant_id = $1::uuid
+          AND project_id = $2::uuid
+          AND run_id = $3::uuid
+          AND lock_key = $4
+        FOR SHARE`,
+      [input.tenantId, input.projectId, input.runId, input.requestDigest],
+    );
+    if (result.rows.length !== 1) throw new WorkflowJobError("RUNNER_EXECUTION_LOCK_MISSING");
+    const row = result.rows[0] as ExecutionLockRow;
+    let payload: Readonly<RunnerExecutionLock>;
+    try {
+      payload = parseRunnerExecutionLock(row.payload);
+    } catch {
+      throw new WorkflowJobError("RUNNER_EXECUTION_LOCK_INVALID", true);
+    }
+    const digest = runnerExecutionLockDigest(payload);
+    if (!UUID.test(row.id) || !SHA256.test(row.payload_digest) || digest !== row.payload_digest
+      || payload.tenantId !== input.tenantId || payload.projectId !== input.projectId
+      || payload.runId !== input.runId || payload.mode !== input.mode
+      || payload.commitSha !== input.commitSha || payload.sourceDigest !== sourceDigest
+      || payload.steamBuildId !== input.steamBuildId
+      || payload.specRevisionId !== configuration.specRevisionId
+      || payload.specDigest !== configuration.specDigest
+      || payload.testPlanDigest !== configuration.testPlanDigest
+      || JSON.stringify(payload.targetMatrix) !== JSON.stringify(input.targetMatrix)) {
+      throw new WorkflowJobError("RUNNER_EXECUTION_LOCK_BINDING_CONFLICT", true);
+    }
+    return Object.freeze({ id: row.id, digest, payload });
   }
 
   async #resolveSource(client: PostgresWorkflowClient, input: WorkflowInput): Promise<SourceBinding> {
@@ -236,7 +289,7 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
       const result = await client.query<AttemptRow & EvidenceRow>(
         `SELECT attempt.id::text, attempt.run_id::text, attempt.workflow_id,
                 attempt.workflow_operation_key, attempt.workflow_request_digest,
-                attempt.mode, attempt.commit_sha, attempt.source_digest,
+                attempt.execution_lock_id::text, attempt.mode, attempt.commit_sha, attempt.source_digest,
                 attempt.binding, attempt.target_matrix, attempt.draft_pull_request,
                 attempt.steam_build_id, attempt.state, attempt.repair_prompt_id,
                 attempt.completed_at::text,
@@ -334,6 +387,7 @@ function validateAttempt(attempt: AttemptRow, input: WorkflowInput, binding: Att
   const terminal = attempt.state === "PASSED" || attempt.state === "FAILED";
   if (!UUID.test(attempt.id) || attempt.run_id !== input.runId || attempt.workflow_id !== input.workflowId
     || attempt.workflow_operation_key !== input.operationKey || attempt.workflow_request_digest !== input.requestDigest
+    || attempt.execution_lock_id !== binding.executionLockId
     || attempt.mode !== input.mode || attempt.commit_sha !== input.commitSha || attempt.source_digest !== sourceDigest
     || draftPullRequest !== input.draftPullRequest || attempt.steam_build_id !== input.steamBuildId
     || JSON.stringify(attempt.target_matrix) !== JSON.stringify(input.targetMatrix)
@@ -369,6 +423,8 @@ function parseAttemptBinding(value: unknown): AttemptBinding {
     requestDigest: requiredString(body.requestDigest, SHA256, "request digest"),
     iterationId: requiredString(body.iterationId, SAFE_ID, "iteration"),
     mode,
+    executionLockId: requiredString(body.executionLockId, UUID, "execution lock"),
+    executionLockDigest: requiredString(body.executionLockDigest, SHA256, "execution lock digest"),
     specRevisionId: requiredString(body.specRevisionId, SAFE_ID, "spec revision"),
     specDigest: requiredString(body.specDigest, SHA256, "spec digest"),
     testPlanDigest: requiredString(body.testPlanDigest, SHA256, "test plan digest"),
@@ -443,6 +499,8 @@ function validateEvidence(row: EvidenceRow, attempt: AttemptRow): EvidenceBundle
 function validateEvidenceBinding(value: unknown, attempt: AttemptRow, binding: AttemptBinding): void {
   const body = record(value, "Evidence row binding is invalid");
   if (body.schemaVersion !== "deviludo.evidence-binding.v1" || body.attemptId !== attempt.id
+    || body.executionLockId !== binding.executionLockId
+    || body.executionLockDigest !== binding.executionLockDigest
     || body.specRevisionId !== binding.specRevisionId || body.specDigest !== binding.specDigest
     || body.testPlanDigest !== binding.testPlanDigest || body.commitSha !== attempt.commit_sha
     || body.sourceDigest !== attempt.source_digest
@@ -455,6 +513,7 @@ function attemptFromTerminalRow(row: Record<string, unknown>): AttemptRow {
   return {
     id: String(row.id), run_id: String(row.run_id), workflow_id: String(row.workflow_id),
     workflow_operation_key: String(row.workflow_operation_key), workflow_request_digest: String(row.workflow_request_digest),
+    execution_lock_id: String(row.execution_lock_id),
     mode: String(row.mode), commit_sha: String(row.commit_sha), source_digest: String(row.source_digest),
     binding: row.binding, target_matrix: row.target_matrix as string[],
     draft_pull_request: row.draft_pull_request as string | number | null,
@@ -476,7 +535,8 @@ function evidenceFromTerminalRow(row: Record<string, unknown>): EvidenceRow {
 function parseMatrix(value: unknown): readonly TargetPlatform[] {
   if (!Array.isArray(value) || !value.length || value.length > 3
     || value.some((entry) => typeof entry !== "string" || !TARGETS.has(entry as TargetPlatform))
-    || new Set(value).size !== value.length) throw new WorkflowJobError("RUNNER_TARGET_MATRIX_INVALID", true);
+    || new Set(value).size !== value.length
+    || JSON.stringify([...value].sort()) !== JSON.stringify(value)) throw new WorkflowJobError("RUNNER_TARGET_MATRIX_INVALID", true);
   return Object.freeze([...value]) as readonly TargetPlatform[];
 }
 

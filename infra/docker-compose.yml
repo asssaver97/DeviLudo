@@ -24,6 +24,7 @@ services:
       - ./postgres/011_admin_catalog.sql:/docker-entrypoint-initdb.d/011_admin_catalog.sql:ro
       - ./postgres/012_workflow_signal_outbox.sql:/docker-entrypoint-initdb.d/012_workflow_signal_outbox.sql:ro
       - ./postgres/013_runner_workflow_attempts.sql:/docker-entrypoint-initdb.d/013_runner_workflow_attempts.sql:ro
+      - ./postgres/014_runner_execution_locks.sql:/docker-entrypoint-initdb.d/014_runner_execution_locks.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

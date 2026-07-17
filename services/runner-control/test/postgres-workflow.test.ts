@@ -6,6 +6,7 @@ import type {
   PostgresWorkflowPool,
 } from "../../temporal/src/postgres-inbox";
 import { sha256Canonical } from "../src/canonical";
+import { runnerExecutionLockDigest, type RunnerExecutionLock } from "../src/execution-lock";
 import { PostgresRunnerWorkflowPort } from "../src/postgres-workflow";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -15,11 +16,41 @@ const jobId = "44444444-4444-4444-8444-444444444444";
 const attemptId = "55555555-5555-4555-8555-555555555555";
 const evidenceId = "66666666-6666-4666-8666-666666666666";
 const specRevisionId = "77777777-7777-4777-8777-777777777777";
+const executionLockId = "99999999-9999-4999-8999-999999999999";
 const sha = (value: string) => value.repeat(64);
 const commitSha = "a".repeat(40);
 const sourceDigest = sha("b");
 const specDigest = sha("c");
 const testPlanDigest = sha("d");
+
+const executionLock: RunnerExecutionLock = Object.freeze({
+  schemaVersion: "deviludo.runner-execution-lock.v1",
+  tenantId,
+  projectId,
+  runId,
+  mode: "CANDIDATE",
+  commitSha,
+  sourceDigest,
+  steamBuildId: null,
+  specRevisionId,
+  specDigest,
+  testPlanDigest,
+  targetMatrix: Object.freeze(["linux"] as const),
+  requiredGodotVersion: "4.6.2-stable",
+  godotTestKitDigest: sha("8"),
+  exportTemplates: Object.freeze({ linux: sha("0") }),
+  buildManifestDigest: sha("9"),
+  sbomDigest: sha("a"),
+  vulnerabilityScanDigest: sha("b"),
+  assetLicenseLedgerDigest: sha("c"),
+  execution: Object.freeze({
+    kind: "SOURCE_ARTIFACT",
+    objectKey: `tenants/${tenantId}/projects/${projectId}/source/${sourceDigest}.tar.zst`,
+    artifactDigest: sha("f"),
+  }),
+  preparedAt: "2026-07-18T00:00:00.000Z",
+});
+const executionLockDigest = runnerExecutionLockDigest(executionLock);
 
 const input = Object.freeze({
   operationKey: `workflow-job:${jobId}`,
@@ -44,6 +75,8 @@ function binding() {
     requestDigest: input.requestDigest,
     iterationId: "88888888-8888-4888-8888-888888888888",
     mode: input.mode,
+    executionLockId,
+    executionLockDigest,
     specRevisionId,
     specDigest,
     testPlanDigest,
@@ -58,6 +91,7 @@ function attempt(state: "QUEUED" | "RUNNING" | "PASSED" | "FAILED" = "QUEUED") {
     workflow_id: input.workflowId,
     workflow_operation_key: input.operationKey,
     workflow_request_digest: input.requestDigest,
+    execution_lock_id: executionLockId,
     mode: input.mode,
     commit_sha: commitSha,
     source_digest: sourceDigest,
@@ -112,6 +146,8 @@ function terminalRow(status: "PASSED" | "FAILED", digestOverride?: string) {
     evidence_binding: {
       schemaVersion: "deviludo.evidence-binding.v1",
       attemptId,
+      executionLockId,
+      executionLockDigest,
       specRevisionId,
       specDigest,
       testPlanDigest,
@@ -135,6 +171,8 @@ class ScriptedClient implements PostgresWorkflowClient {
     readonly terminal: "PASSED" | "FAILED" = "PASSED",
     readonly tamperedDigest = false,
     readonly missingSource = false,
+    readonly missingExecutionLock = false,
+    readonly tamperedExecutionLock = false,
   ) {}
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -154,10 +192,17 @@ class ScriptedClient implements PostgresWorkflowClient {
     if (text.includes("FROM deviludo.github_candidate_receipts")) {
       return result((this.missingSource ? [] : [{ source_digest: sourceDigest, spec_revision_id: specRevisionId }]) as unknown as Row[]);
     }
+    if (text.includes("FROM deviludo.runner_execution_locks")) {
+      assert.deepEqual(values, [tenantId, projectId, runId, input.requestDigest]);
+      if (this.missingExecutionLock) return result([]);
+      const payload = this.tamperedExecutionLock ? { ...executionLock, commitSha: "f".repeat(40) } : executionLock;
+      return result([{ id: executionLockId, payload, payload_digest: executionLockDigest }] as unknown as Row[]);
+    }
     if (text.includes("INSERT INTO deviludo.e2e_attempts")) {
       assert.equal(values[8], input.operationKey);
       assert.equal(values[9], input.requestDigest);
       assert.equal(values[10], "CANDIDATE");
+      assert.equal(values[13], executionLockId);
       return { rowCount: 1, rows: [] };
     }
     if (text.includes("workflow_operation_key = $3") && !text.includes("LEFT JOIN")) {
@@ -236,4 +281,27 @@ test("PostgreSQL Runner workflow does not invent a source digest when the author
   await assert.rejects(port.execute(input), /GitHub candidate source receipt is not available/);
   assert.equal(client.polls, 0);
   assert.ok(client.sql.includes("ROLLBACK"));
+});
+
+test("PostgreSQL Runner workflow waits when artifact preparation has not created its execution lock", async () => {
+  const client = new ScriptedClient("PASSED", false, false, true);
+  const port = new PostgresRunnerWorkflowPort({ pool: pool(client) });
+  await assert.rejects(port.execute(input), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "RUNNER_EXECUTION_LOCK_MISSING");
+    assert.equal((error as { terminal?: boolean }).terminal, false);
+    return true;
+  });
+  assert.equal(client.polls, 0);
+  assert.ok(client.sql.includes("ROLLBACK"));
+});
+
+test("PostgreSQL Runner workflow rejects an execution lock whose content no longer matches its digest", async () => {
+  const client = new ScriptedClient("PASSED", false, false, false, true);
+  const port = new PostgresRunnerWorkflowPort({ pool: pool(client) });
+  await assert.rejects(port.execute(input), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "RUNNER_EXECUTION_LOCK_BINDING_CONFLICT");
+    assert.equal((error as { terminal?: boolean }).terminal, true);
+    return true;
+  });
+  assert.equal(client.polls, 0);
 });

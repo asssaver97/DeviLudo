@@ -31,6 +31,14 @@ and complete source/spec/test/matrix binding verify. It never runs a localhost
 fixture or fabricates a passing result. Missing SCM/Steam receipts and old merge
 receipts without `main_source_digest` fail closed.
 
+Before it inserts a workflow attempt, the scheduler also requires one
+append-only `RunnerExecutionLock` addressed by the tenant-scoped workflow
+request digest. That lock fixes the prepared source artifact or one-time Steam
+install grant, exact Godot version, signed TestKit, per-platform export-template
+digests and build/SBOM/vulnerability/license evidence. The attempt stores a
+same-tenant foreign key and digest for the lock. Missing locks remain retryable;
+malformed, tampered or input-mismatched locks are terminal conflicts.
+
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the
 content-addressed object store. It must expose those operations only behind a
