@@ -91,6 +91,8 @@ export interface GitHubScmConnector {
   getRepository(binding: GitHubRepositoryBinding): Promise<GitHubRepositorySnapshot>;
   getReference(binding: GitHubRepositoryBinding, branch: string): Promise<GitHubReference | null>;
   getCommit(binding: GitHubRepositoryBinding, commitSha: string): Promise<GitHubCommitSnapshot>;
+  /** SHA-256 of canonical `git ls-tree -r -z --full-tree` compatible bytes. */
+  getSourceDigest(binding: GitHubRepositoryBinding, commitSha: string): Promise<string>;
   createBlob(binding: GitHubRepositoryBinding, contentBase64: string): Promise<{ readonly blobSha: string }>;
   createTree(binding: GitHubRepositoryBinding, input: {
     readonly baseTreeSha: string;
@@ -220,6 +222,7 @@ export interface GitHubMergeReceipt {
   readonly mergeCommitSha: string;
   readonly defaultBranch: string;
   readonly defaultBranchHeadSha: string;
+  readonly mainSourceDigest: string;
   readonly requiresFreshMainSnapshot: boolean;
   readonly acceptanceNonce: string;
   readonly evidenceBundleDigest: string;

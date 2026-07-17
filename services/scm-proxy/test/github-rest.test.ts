@@ -167,3 +167,28 @@ test("connector pins api.github.com, disables redirects and strips upstream erro
   assert.doesNotMatch(message, /upstream included/);
   assert.match(message, /REQ-123/);
 });
+
+test("REST connector derives a deterministic source digest from the complete GitHub tree", async () => {
+  const entries = [
+    { path: "game/z.gd", mode: "100755", type: "blob", sha: "3".repeat(40) },
+    { path: "game", mode: "040000", type: "tree", sha: "4".repeat(40) },
+    { path: "game/a.gd", mode: "100644", type: "blob", sha: "2".repeat(40) },
+  ];
+  const connector = new GitHubRestConnector({
+    tokens: { async issue() { return { value: token, expiresAt: "2099-01-01T00:00:00.000Z", installationId: "123456", repositoryId: 991 }; } },
+    fetch: (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith(`/git/commits/${"c".repeat(40)}`)) {
+        return jsonResponse({ sha: "c".repeat(40), tree: { sha: "d".repeat(40) } });
+      }
+      if (url.pathname.endsWith(`/git/trees/${"d".repeat(40)}`) && url.searchParams.get("recursive") === "1") {
+        return jsonResponse({ sha: "d".repeat(40), truncated: false, tree: entries });
+      }
+      throw new Error(`unexpected tree fixture ${url}`);
+    }) as typeof fetch,
+  });
+  const canonical = [entries[2], entries[0]]
+    .map((entry) => `${entry.mode} ${entry.type} ${entry.sha}\t${entry.path}\0`).join("");
+  const expected = (await import("node:crypto")).createHash("sha256").update(canonical).digest("hex");
+  assert.equal(await connector.getSourceDigest(binding, "c".repeat(40)), expected);
+});

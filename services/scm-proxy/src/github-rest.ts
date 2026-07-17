@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   GitHubAppJwtSigner,
   GitHubCommitSnapshot,
@@ -131,6 +132,34 @@ export class GitHubRestConnector implements GitHubScmConnector {
       commitSha: requireSha(requireString(body, "sha", 40), "commit"),
       treeSha: requireSha(requireString(tree, "sha", 40), "tree"),
     });
+  }
+
+  async getSourceDigest(binding: GitHubRepositoryBinding, commitSha: string): Promise<string> {
+    const commit = await this.getCommit(binding, commitSha);
+    const raw = await this.#request(
+      binding,
+      "GET",
+      `${repositoryPath(binding)}/git/trees/${commit.treeSha}`,
+      undefined,
+      false,
+      { recursive: "1" },
+    );
+    const body = requireJsonObject(raw);
+    if (body.truncated !== false || !Array.isArray(body.tree) || body.tree.length > 100_000) {
+      throw new Error("GitHub source tree is incomplete or exceeds the entry limit");
+    }
+    const entries = body.tree.map((value) => {
+      const entry = requireJsonObject(value);
+      const path = requireTreePath(entry.path);
+      const mode = requireTreeMode(entry.mode);
+      const type = requireTreeType(entry.type);
+      const sha = requireSha(String(entry.sha ?? ""), "tree entry");
+      return { path, mode, type, sha };
+    }).filter((entry) => entry.type !== "tree");
+    entries.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
+    const hash = createHash("sha256");
+    for (const entry of entries) hash.update(`${entry.mode} ${entry.type} ${entry.sha}\t${entry.path}\0`, "utf8");
+    return hash.digest("hex");
   }
 
   async createBlob(binding: GitHubRepositoryBinding, contentBase64: string): Promise<{ readonly blobSha: string }> {
@@ -358,6 +387,25 @@ function requirePositiveInteger(value: number, label: string): number {
 
 function requireSha(value: string, label: string): string {
   if (!SHA1.test(value)) throw new Error(`GitHub ${label} SHA is invalid`);
+  return value;
+}
+
+function requireTreePath(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > 4_096 || value.startsWith("/")
+    || value.split("/").some((segment) => !segment || segment === "." || segment === "..")
+    || /[\0\t\r\n]/.test(value)) throw new Error("GitHub source tree path is invalid");
+  return value;
+}
+
+function requireTreeMode(value: unknown): string {
+  if (typeof value !== "string" || !/^(100644|100755|120000|160000|040000)$/.test(value)) {
+    throw new Error("GitHub source tree mode is invalid");
+  }
+  return value;
+}
+
+function requireTreeType(value: unknown): "blob" | "tree" | "commit" {
+  if (value !== "blob" && value !== "tree" && value !== "commit") throw new Error("GitHub source tree type is invalid");
   return value;
 }
 

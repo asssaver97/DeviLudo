@@ -50,6 +50,15 @@ four bindings; the next release gate always receives GitHub's observed default-
 branch head after merge, even when that head has already advanced beyond the
 merge commit.
 
+The production workflow entry is `npm run start:scm-proxy-workflow`. Its
+destination host sends only immutable IDs and digests over TLS 1.3 mTLS to the
+fixed `/v1/merges` endpoint of an isolated GitHub SCM Broker. The Broker resolves
+the repository binding, signed acceptance and evidence server-side, persists
+the append-only merge receipt including the actual `main_source_digest`, and
+returns the observed default-branch head. GitHub installation tokens and App
+signing keys never enter the Temporal destination process. Broker health is a
+readiness gate and long merges heartbeat the workflow job lease.
+
 The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1

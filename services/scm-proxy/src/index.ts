@@ -9,4 +9,5 @@ export * from "./github-contracts";
 export * from "./github-proxy";
 export * from "./github-rest";
 export * from "./local-git";
+export * from "./merge-broker";
 export * from "./workflow-handler";

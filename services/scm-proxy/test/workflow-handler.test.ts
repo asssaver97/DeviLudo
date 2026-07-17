@@ -34,9 +34,10 @@ function job(value: DeliverySnapshot = snapshot): ClaimedWorkflowJob {
 
 function receipt(overrides: Partial<ScmMergeWorkflowReceipt> = {}): ScmMergeWorkflowReceipt {
   return {
-    receiptId: "scm-merge-receipt-1", candidateCommitSha, pullRequestNumber: 91,
+    receiptId: "scm-merge-receipt-1", runId: "run-001", candidateCommitSha, pullRequestNumber: 91,
     evidenceBundleId: "candidate-evidence-1", acceptanceSignalId: acceptance.signalId,
-    mergeCommitSha, defaultBranchHeadSha: mergeCommitSha, requiresFreshMainSnapshot: false, ...overrides,
+    mergeCommitSha, defaultBranchHeadSha: mergeCommitSha, mainSourceDigest: "a".repeat(64),
+    requiresFreshMainSnapshot: false, ...overrides,
   };
 }
 
@@ -51,6 +52,7 @@ test("SCM workflow handler merges only the frozen candidate, evidence and accept
   assert.equal(observed[0]?.candidateCommitSha, candidateCommitSha);
   assert.equal(observed[0]?.evidenceBundleId, "candidate-evidence-1");
   assert.equal(observed[0]?.acceptanceSignalId, acceptance.signalId);
+  assert.equal(observed[0]?.runId, "run-001");
   assert.equal(observed[0]?.operationKey, "workflow-job:11111111-1111-4111-8111-111111111111");
 });
 

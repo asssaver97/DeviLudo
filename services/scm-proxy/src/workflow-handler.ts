@@ -2,16 +2,19 @@ import type { DeliverySignalWithoutId, WorkflowJobExecutionContext, WorkflowJobH
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
 
 const SHA1 = /^[a-f0-9]{40}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 const RECEIPT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 
 export interface ScmMergeWorkflowReceipt {
   readonly receiptId: string;
+  readonly runId: string;
   readonly candidateCommitSha: string;
   readonly pullRequestNumber: number;
   readonly evidenceBundleId: string;
   readonly acceptanceSignalId: string;
   readonly mergeCommitSha: string;
   readonly defaultBranchHeadSha: string;
+  readonly mainSourceDigest: string;
   readonly requiresFreshMainSnapshot: boolean;
 }
 
@@ -27,6 +30,7 @@ export interface ScmMergeWorkflowPort {
     readonly tenantId: string;
     readonly projectId: string;
     readonly workflowId: string;
+    readonly runId: string;
     readonly specRevisionId: string;
     readonly candidateCommitSha: string;
     readonly pullRequestNumber: number;
@@ -48,6 +52,7 @@ export class ScmProxyWorkflowHandler implements WorkflowJobHandler {
       || job.request.kind !== "COMMAND") throw new Error("SCM workflow destination is invalid");
     const snapshot = job.request.payload.snapshot;
     if (snapshot.state !== "MERGING" || !snapshot.specRevisionId || !validId(snapshot.specRevisionId)
+      || !snapshot.runId || !validId(snapshot.runId)
       || !snapshot.candidateCommitSha || !SHA1.test(snapshot.candidateCommitSha)
       || !Number.isSafeInteger(snapshot.draftPullRequest) || (snapshot.draftPullRequest as number) < 1
       || !snapshot.candidateEvidenceBundleId || !validId(snapshot.candidateEvidenceBundleId)) {
@@ -63,6 +68,7 @@ export class ScmProxyWorkflowHandler implements WorkflowJobHandler {
       tenantId: job.tenantId,
       projectId: job.projectId,
       workflowId: job.workflowId,
+      runId: snapshot.runId,
       specRevisionId: snapshot.specRevisionId,
       candidateCommitSha: snapshot.candidateCommitSha,
       pullRequestNumber: snapshot.draftPullRequest as number,
@@ -71,6 +77,7 @@ export class ScmProxyWorkflowHandler implements WorkflowJobHandler {
       heartbeat: context.heartbeat,
     });
     validateReceipt(receipt, {
+      runId: snapshot.runId,
       candidateCommitSha: snapshot.candidateCommitSha,
       pullRequestNumber: snapshot.draftPullRequest as number,
       evidenceBundleId: snapshot.candidateEvidenceBundleId,
@@ -85,15 +92,17 @@ export class ScmProxyWorkflowHandler implements WorkflowJobHandler {
 
 function validateReceipt(
   receipt: ScmMergeWorkflowReceipt,
-  expected: Pick<ScmMergeWorkflowReceipt, "candidateCommitSha" | "pullRequestNumber" | "evidenceBundleId" | "acceptanceSignalId">,
+  expected: Pick<ScmMergeWorkflowReceipt, "runId" | "candidateCommitSha" | "pullRequestNumber" | "evidenceBundleId" | "acceptanceSignalId">,
 ): void {
   if (!RECEIPT_ID.test(receipt.receiptId)
+    || receipt.runId !== expected.runId
     || receipt.candidateCommitSha !== expected.candidateCommitSha
     || receipt.pullRequestNumber !== expected.pullRequestNumber
     || receipt.evidenceBundleId !== expected.evidenceBundleId
     || receipt.acceptanceSignalId !== expected.acceptanceSignalId
     || !SHA1.test(receipt.mergeCommitSha)
     || !SHA1.test(receipt.defaultBranchHeadSha)
+    || !SHA256.test(receipt.mainSourceDigest)
     || receipt.requiresFreshMainSnapshot !== (receipt.defaultBranchHeadSha !== receipt.mergeCommitSha)) {
     throw new Error("SCM workflow merge receipt binding is invalid");
   }

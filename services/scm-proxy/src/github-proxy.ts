@@ -104,6 +104,10 @@ export class GitHubAppScmProxy {
     if (!SHA1.test(createdCommit.commitSha) || createdCommit.commitSha === artifact.expectedBaseCommitSha) {
       throw new Error("GitHub did not create a valid candidate commit");
     }
+    const observedSourceDigest = await this.#connector.getSourceDigest(request.binding, createdCommit.commitSha);
+    if (observedSourceDigest !== artifact.sourceDigest) {
+      throw new Error("GitHub candidate tree does not match the attested source digest");
+    }
 
     const existingBranch = await this.#connector.getReference(request.binding, artifact.candidateBranch);
     if (existingBranch && existingBranch.commitSha !== createdCommit.commitSha) {
@@ -221,6 +225,8 @@ export class GitHubAppScmProxy {
     if (!mergeCommitSha || !SHA1.test(mergeCommitSha)) throw new Error("Merged pull request is missing its merge commit SHA");
     const defaultReference = await this.#connector.getReference(request.binding, request.binding.defaultBranch);
     if (!defaultReference || !SHA1.test(defaultReference.commitSha)) throw new Error("GitHub default branch is unavailable after merge");
+    const mainSourceDigest = await this.#connector.getSourceDigest(request.binding, defaultReference.commitSha);
+    if (!SHA256.test(mainSourceDigest)) throw new Error("GitHub main source digest is invalid");
 
     const receipt: GitHubMergeReceipt = deepFreeze({
       scmProxy: "github-app-proxy-v1",
@@ -232,6 +238,7 @@ export class GitHubAppScmProxy {
       mergeCommitSha,
       defaultBranch: request.binding.defaultBranch,
       defaultBranchHeadSha: defaultReference.commitSha,
+      mainSourceDigest,
       requiresFreshMainSnapshot: defaultReference.commitSha !== mergeCommitSha,
       acceptanceNonce: request.acceptance.claims.nonce,
       evidenceBundleDigest: request.evidence.evidenceBundleDigest,

@@ -96,6 +96,11 @@ class FakeGitHubConnector implements GitHubScmConnector {
     return { commitSha: baseSha, treeSha: baseTreeSha };
   }
 
+  async getSourceDigest(_binding: GitHubRepositoryBinding, commitSha: string) {
+    this.calls.push(`getSourceDigest:${commitSha}`);
+    return commitSha === candidateSha ? "e".repeat(64) : "f".repeat(64);
+  }
+
   async createBlob(_binding: GitHubRepositoryBinding, contentBase64: string) {
     this.calls.push("createBlob");
     return { blobSha: createHash("sha1").update(Buffer.from(contentBase64, "base64")).digest("hex") };
@@ -285,6 +290,7 @@ test("merges only a fresh signed acceptance backed by authoritative passing evid
   assert.equal(merged.mergeCommitSha, mergeSha);
   assert.equal(merged.defaultBranchHeadSha, mergeSha);
   assert.equal(merged.requiresFreshMainSnapshot, false);
+  assert.equal(merged.mainSourceDigest, "f".repeat(64));
   assert.equal(connector.calls.includes("markPullRequestReady"), true);
   assert.equal(connector.calls.includes("mergePullRequest"), true);
 
