@@ -53,6 +53,22 @@ from being smuggled through the Web workload. Interactive credential and Guard
 entry belong to the broker's separately hosted public UI, not this control
 plane route.
 
+Release authorization is a separate state machine. The internal Web route can
+only reserve an MFA challenge from an authoritative `WAITING_MFA` release
+snapshot. The isolated MFA UI completes the challenge under its own HttpOnly
+session/Origin/CSRF gate; an injected verifier must return a fresh AAL2 receipt
+for the same tenant user. The coordinator then asks Vault/KMS to sign an
+authorization bound to the exact release, main SHA and evidence digest,
+archives it idempotently, and emits stable `mfa:<approval-id>` to the same
+Temporal workflow. A failure after signing resumes from `VERIFIED` without
+asking the user to repeat MFA or minting a second authorization.
+
+`PostgresReleaseAuthorizationStore` runs every operation under tenant RLS.
+Migration `006_release_authorizations.sql` makes identity and release bindings
+immutable and permits only `CREATING → MFA_REQUIRED → VERIFIED → DISPATCHED`
+(plus explicit failure/expiry paths). Browser MFA assertion bodies are never
+persisted.
+
 Run the contract tests from the repository root:
 
 ```bash

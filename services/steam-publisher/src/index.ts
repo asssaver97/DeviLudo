@@ -5,4 +5,8 @@ export * from "./enrollment-contracts";
 export * from "./enrollment";
 export * from "./enrollment-http";
 export * from "./enrollment-postgres";
+export * from "./release-authorization-contracts";
+export * from "./release-authorization";
+export * from "./release-authorization-http";
+export * from "./release-authorization-postgres";
 export * from "./steamcmd";
