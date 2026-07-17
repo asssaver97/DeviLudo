@@ -161,6 +161,15 @@ revision carried by the workflow and activities; the Worker never silently
 swaps Claude Code and Codex CLI. Public release is not terminal on dispatch:
 the workflow waits for a bound `STEAM_RELEASED` result.
 
+Each destination registers `registerWorkflowCommandRoute` with its fixed
+destination, a `WorkflowCommandReceiver`, and an mTLS/SPIFFE authorizer. The
+receiver rejects state/command drift and missing PR, evidence, MFA, BuildID or
+approval bindings before a handler runs. It returns `202` only after the
+handler has durably queued the operation. `PostgresWorkflowCommandInbox`
+implements the retry claim under tenant `SET LOCAL` RLS; exact retries replay
+the original receipt, while reuse of an idempotency key with a different body
+is rejected. The in-memory inbox is explicitly test/local-only.
+
 ## Verification
 
 ```bash

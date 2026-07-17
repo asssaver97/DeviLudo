@@ -12,7 +12,9 @@ E2E runners, inference connectors, and Steam publishers live in separate network
 segments and service accounts.
 
 `postgres/001_core.sql` demonstrates forced RLS, append-only revisions/audit,
-and immutable run locks. Application transactions must set `app.tenant_id`
+and immutable run locks. `postgres/002_workflow_dispatch.sql` adds a leased,
+idempotent activity inbox plus append-only, gate-bound external approval
+receipts. Application transactions must set `app.tenant_id`
 from an already-authorized session; accepting it directly from a request header
 would defeat RLS. Credential values never enter these tables—only Vault refs,
 fingerprints, and version IDs do.

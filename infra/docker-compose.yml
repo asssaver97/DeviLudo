@@ -12,6 +12,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/001_core.sql:/docker-entrypoint-initdb.d/001_core.sql:ro
+      - ./postgres/002_workflow_dispatch.sql:/docker-entrypoint-initdb.d/002_workflow_dispatch.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s
