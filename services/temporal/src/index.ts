@@ -2,6 +2,7 @@ export * from "./activities";
 export * from "./bundler";
 export * from "./client";
 export * from "./contracts";
+export * from "./job-processor";
 export * from "./postgres-inbox";
 export * from "./postgres-queue";
 export * from "./receiver";

@@ -177,6 +177,16 @@ with a fresh claim token and monotonically increasing attempt, and records
 completion/retry/terminal failure under tenant RLS. A receiver therefore never
 returns an acceptance receipt for an in-memory-only task.
 
+`WorkflowJobProcessor` is the shared destination-side execution loop. It
+claims only one configured destination, exposes a fenced lease heartbeat to
+long-running connectors, assigns every Temporal signal the stable
+`job:<job-id>` identity, applies bounded exponential retry, and records only
+sanitized error codes. If signaling succeeds but queue completion loses its
+response, lease reclaim safely replays both the idempotent connector and signal.
+Migration `007_workflow_job_heartbeats.sql` permits same-token heartbeats while
+still requiring a new token and incremented attempt for an expired-lease
+reclaim.
+
 ## Verification
 
 ```bash

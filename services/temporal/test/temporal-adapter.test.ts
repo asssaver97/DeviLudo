@@ -23,6 +23,12 @@ import {
 } from "../src/postgres-inbox";
 import { PostgresWorkflowCommandQueue } from "../src/postgres-queue";
 import {
+  WorkflowJobError,
+  WorkflowJobProcessor,
+  type WorkflowJobQueuePort,
+} from "../src/job-processor";
+import type { ClaimedWorkflowJob } from "../src/postgres-queue";
+import {
   parseWorkflowSpiffeId,
   registerWorkflowCommandRoute,
 } from "../src/receiver-http";
@@ -206,6 +212,96 @@ test("command receiver queues once and replays a fully bound receipt", async () 
   assert.deepEqual(replay, first);
   assert.equal(first.destination, "agent-worker");
   assert.equal(first.operation, "START_LOCKED_AGENT_RUN");
+});
+
+function claimedJob(attempt = 1): ClaimedWorkflowJob {
+  const request = agentDispatch();
+  return Object.freeze({
+    id: "11111111-1111-4111-8111-111111111111",
+    tenantId: request.payload.tenantId,
+    projectId: request.payload.projectId,
+    workflowId: request.payload.workflowId,
+    destination: request.destination,
+    operation: request.payload.command,
+    requestDigest: "a".repeat(64),
+    request,
+    attempt,
+    claimToken: "22222222-2222-4222-8222-222222222222",
+    claimExpiresAt: "2026-07-17T00:05:00.000Z",
+  });
+}
+
+test("job processor heartbeats, signals with a stable job ID and completes the exact claim", async () => {
+  const events: string[] = [];
+  const job = claimedJob();
+  const queue: WorkflowJobQueuePort = {
+    async claimNext(input) {
+      assert.equal(input.destination, "agent-worker");
+      events.push("claim");
+      return job;
+    },
+    async renew(input) {
+      assert.equal(input.claimToken, job.claimToken);
+      events.push("heartbeat");
+      return "2026-07-17T00:10:00.000Z";
+    },
+    async complete(input) {
+      assert.equal(input.jobId, job.id);
+      assert.equal(input.result.signalId, `job:${job.id}`);
+      events.push("complete");
+    },
+    async fail() { throw new Error("must not fail"); },
+  };
+  const processor = new WorkflowJobProcessor({
+    queue,
+    destination: "agent-worker",
+    workerId: "agent-worker-01",
+    handler: {
+      async execute(_job, context) {
+        await context.heartbeat();
+        events.push("execute");
+        return { result: { runId: "run-1" }, signal: { type: "AGENT_STARTED", runId: "run-1" } };
+      },
+    },
+    signals: {
+      async signal(workflowId, signal) {
+        assert.equal(workflowId, job.workflowId);
+        assert.deepEqual(signal, { signalId: `job:${job.id}`, type: "AGENT_STARTED", runId: "run-1" });
+        events.push("signal");
+      },
+    },
+  });
+  assert.deepEqual(await processor.processOne(job.tenantId), { kind: "COMPLETED", jobId: job.id, signalId: `job:${job.id}` });
+  assert.deepEqual(events, ["claim", "heartbeat", "execute", "signal", "complete"]);
+});
+
+test("job processor records bounded retries and makes the final attempt terminal without leaking errors", async () => {
+  const failures: Parameters<WorkflowJobQueuePort["fail"]>[0][] = [];
+  const job = claimedJob(2);
+  const queue: WorkflowJobQueuePort = {
+    async claimNext() { return job; },
+    async renew() { throw new Error("must not renew"); },
+    async complete() { throw new Error("must not complete"); },
+    async fail(input) { failures.push(input); },
+  };
+  const processor = new WorkflowJobProcessor({
+    queue,
+    destination: "agent-worker",
+    workerId: "agent-worker-01",
+    maxAttempts: 2,
+    now: () => new Date("2026-07-17T00:00:00.000Z"),
+    handler: { async execute() { throw new WorkflowJobError("PROVIDER_UNAVAILABLE"); } },
+    signals: { async signal() { throw new Error("must not signal"); } },
+  });
+  assert.deepEqual(await processor.processOne(job.tenantId), {
+    kind: "FAILED",
+    jobId: job.id,
+    terminal: true,
+    errorCode: "PROVIDER_UNAVAILABLE",
+  });
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]?.terminal, true);
+  assert.equal(failures[0]?.retryAt, undefined);
 });
 
 test("command receiver rejects confused-deputy, transport and state drift", async () => {
@@ -405,6 +501,9 @@ test("Postgres job queue enqueues idempotently and claims an exact destination j
           }],
         } as unknown as PostgresQueryResult<Row>;
       }
+      if (text.includes("RETURNING claim_expires_at")) {
+        return { rowCount: 1, rows: [{ claim_expires_at: "2026-07-17T00:10:00.000Z" }] } as unknown as PostgresQueryResult<Row>;
+      }
       if (text.includes("RETURNING id")) {
         return { rowCount: 1, rows: [{ id: "33333333-3333-4333-8333-333333333333" }] } as unknown as PostgresQueryResult<Row>;
       }
@@ -425,6 +524,11 @@ test("Postgres job queue enqueues idempotently and claims an exact destination j
   assert.ok(claimed);
   assert.equal(claimed.requestDigest, requestDigest);
   assert.equal(claimed.request.payload.idempotencyKey, request.payload.idempotencyKey);
+  assert.equal(await queue.renew({
+    tenantId: request.payload.tenantId,
+    jobId: claimed.id,
+    claimToken: claimed.claimToken,
+  }), "2026-07-17T00:10:00.000Z");
   await queue.complete({
     tenantId: request.payload.tenantId,
     jobId: claimed.id,
@@ -433,7 +537,7 @@ test("Postgres job queue enqueues idempotently and claims an exact destination j
   });
   const begins = statements.filter((entry) => entry.text === "BEGIN").length;
   const tenantBindings = statements.filter((entry) => entry.text.includes("set_config")).length;
-  assert.equal(begins, 3);
+  assert.equal(begins, 4);
   assert.equal(tenantBindings, begins);
 });
 

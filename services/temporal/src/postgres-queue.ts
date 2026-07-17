@@ -165,6 +165,32 @@ export class PostgresWorkflowCommandQueue implements WorkflowCommandHandler {
     });
   }
 
+  async renew(input: {
+    readonly tenantId: string;
+    readonly jobId: string;
+    readonly claimToken: string;
+    readonly leaseSeconds?: number;
+  }): Promise<string> {
+    const leaseSeconds = input.leaseSeconds ?? 300;
+    if (!Number.isInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 900) {
+      throw new Error("Workflow job lease duration is invalid");
+    }
+    return this.#transaction(input.tenantId, async (client) => {
+      const renewed = await client.query<{ claim_expires_at: string | Date }>(
+        `UPDATE deviludo.workflow_command_jobs
+            SET claim_expires_at = now() + ($4::int * interval '1 second'),
+                updated_at = now()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid
+            AND state = 'RUNNING' AND claim_token = $3::uuid
+        RETURNING claim_expires_at`,
+        [input.tenantId, input.jobId, input.claimToken, leaseSeconds],
+      );
+      const value = renewed.rows[0]?.claim_expires_at;
+      if (!value || !Number.isFinite(Date.parse(String(value)))) throw new Error("Workflow job claim was lost before lease renewal");
+      return new Date(value).toISOString();
+    });
+  }
+
   async fail(input: {
     readonly tenantId: string;
     readonly jobId: string;

@@ -69,6 +69,14 @@ immutable and permits only `CREATING → MFA_REQUIRED → VERIFIED → DISPATCHE
 (plus explicit failure/expiry paths). Browser MFA assertion bodies are never
 persisted.
 
+`SteamPublisherWorkflowHandler` connects the durable workflow processor to the
+two Steam operations. For private Beta it resolves the main SHA, main evidence,
+MFA approval and target matrix only from the claimed snapshot and emits the
+returned BuildID. For public release it requires all three ordered external
+approvals and allows only `SetLive` promotion of that same clean-install-tested
+BuildID; a Connector that returns a new or different build is rejected before
+the `STEAM_RELEASED` signal is produced.
+
 Run the contract tests from the repository root:
 
 ```bash
