@@ -17,7 +17,13 @@ idempotent activity inbox plus append-only, gate-bound external approval
 receipts. `postgres/003_workflow_jobs.sql` adds destination-specific durable
 jobs with `SKIP LOCKED` leasing, exact attempt fencing and terminal-state
 immutability. `postgres/004_github_verified_identity.sql` adds the verified
-numeric GitHub user binding to each active installation. Application
+numeric GitHub user binding to each active installation. Migrations `005`–`008`
+add Steam Guard enrollment metadata, release MFA authorization, safe job
+heartbeats and durable control-plane wait actions. All eight migrations are
+mounted in numeric order for a newly initialized local PostgreSQL volume.
+Docker's initialization directory is not rerun for an existing volume, so an
+existing development database must be migrated explicitly before using newer
+service code. Application
 transactions must set `app.tenant_id`
 from an already-authorized session; accepting it directly from a request header
 would defeat RLS. Credential values never enter these tables—only Vault refs,

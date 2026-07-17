@@ -34,8 +34,8 @@ DROP POLICY IF EXISTS workflow_control_actions_tenant_isolation
   ON deviludo.workflow_control_actions;
 CREATE POLICY workflow_control_actions_tenant_isolation
   ON deviludo.workflow_control_actions
-  USING (tenant_id = current_setting('app.current_tenant', true)::uuid)
-  WITH CHECK (tenant_id = current_setting('app.current_tenant', true)::uuid);
+  USING (tenant_id = deviludo.current_tenant_id())
+  WITH CHECK (tenant_id = deviludo.current_tenant_id());
 
 CREATE INDEX IF NOT EXISTS workflow_control_actions_waiting_idx
   ON deviludo.workflow_control_actions (tenant_id, project_id, status, created_at)

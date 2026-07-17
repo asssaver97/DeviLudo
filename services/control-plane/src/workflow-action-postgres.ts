@@ -43,7 +43,7 @@ export class PostgresControlPlaneWorkflowActionStore implements ControlPlaneWork
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT set_config('app.current_tenant', $1, true)", [input.tenantId]);
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [input.tenantId]);
       const expectedStatus = input.operation === "CANCEL_DELIVERY" ? "ACKNOWLEDGED" : "WAITING";
       await client.query(
         `INSERT INTO deviludo.workflow_control_actions

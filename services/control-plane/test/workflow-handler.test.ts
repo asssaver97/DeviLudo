@@ -159,7 +159,7 @@ test("Postgres control-plane action store applies RLS and replays only an exact 
   assert.equal(result.actionId, `control-action:${row.id}`);
   assert.equal(heartbeats, 1);
   assert.equal(sql[0], "BEGIN");
-  assert.equal(sql[1], "SELECT set_config('app.current_tenant', $1, true)");
+  assert.equal(sql[1], "SELECT set_config('app.tenant_id', $1, true)");
   assert.deepEqual(values[1], [row.tenant_id]);
   assert.match(sql[2] ?? "", /INSERT INTO deviludo\.workflow_control_actions/);
   assert.equal(sql.at(-1), "COMMIT");
