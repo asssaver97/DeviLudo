@@ -3,8 +3,10 @@ import {
   approveLocalSpec,
   createLocalDelivery,
   invalidateLocalDelivery,
+  recordLocalValidation,
   type LocalDeliveryAction,
   type LocalDeliverySnapshot,
+  type LocalValidationSnapshot,
 } from "./model";
 
 type SnapshotRow = { snapshot: string };
@@ -230,4 +232,12 @@ export async function invalidateLocalEvidence(
     (current) => invalidateLocalDelivery(current, nextSpecRevisionId),
     nextSpecRevisionId,
   );
+}
+
+export async function saveLocalValidation(
+  projectId: string,
+  validation: Omit<LocalValidationSnapshot, "valid">,
+  commandKey: string,
+): Promise<MutationResult> {
+  return mutate(projectId, commandKey, (current) => recordLocalValidation(current, validation));
 }

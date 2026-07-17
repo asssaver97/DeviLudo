@@ -2,6 +2,7 @@
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
+const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const READY_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const RETRY_INTERVAL_MS = 250;
@@ -16,7 +17,18 @@ Options:
   -h, --help         Show this help
 
 Environment:
-  DEVILUDO_LOCAL_PORT  Alternative way to select the port`);
+  DEVILUDO_LOCAL_PORT          Alternative way to select the Web port
+  DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})`);
+}
+
+function parseEnvironmentPort(name, fallback) {
+  const rawPort = process.env[name] ?? String(fallback);
+  if (!/^\d+$/.test(rawPort)) throw new Error(`${name} is not a valid port: ${rawPort}`);
+  const value = Number(rawPort);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`${name} must be an integer between 1 and 65535: ${rawPort}`);
+  }
+  return value;
 }
 
 function parsePort(argv) {
@@ -122,30 +134,41 @@ async function checkHtmlRoute(baseUrl, route, expectedText) {
 }
 
 let port;
+let localRuntimePort;
 try {
   port = parsePort(process.argv.slice(2));
+  if (port !== null) localRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_RUNTIME_PORT", DEFAULT_LOCAL_RUNTIME_PORT);
 } catch (error) {
+  port = undefined;
+  localRuntimePort = undefined;
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);
   usage();
   process.exitCode = 1;
 }
 
-if (port === null || port === undefined) {
+if (port === null || port === undefined || localRuntimePort === undefined) {
   process.exit();
 }
 
 const baseUrl = `http://${HOST}:${port}`;
+const runtimeUrl = `http://${HOST}:${localRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin] = await Promise.all([
+  const [home, admin, runtime] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
+    request(runtimeUrl, "/health"),
   ]);
+  const runtimeHealth = await runtime.response.json();
+  if (!runtime.response.ok || runtimeHealth.status !== "ok" || !runtimeHealth.godotVersion) {
+    throw new Error("local runtime or Godot is not ready");
+  }
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
+  console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log("[local:smoke] All local smoke checks passed.");
 } catch (error) {
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);

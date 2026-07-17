@@ -14,11 +14,12 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件，可完整验证 Provider 暂停/恢复、Fixture Agent、三平台矩阵、验收、main SHA、MFA、Steam Beta 回装和外部批准门禁；页面刷新和服务重启后状态仍保留。
 - `/admin/agents`：Claude Code（全局默认）与 Codex CLI 的目录、版本、安装、灰度、回滚、Provider、凭据、三级继承、健康、审计和 RBAC 演示。
 - `/settings/connections`：GitHub App OAuth 和 Steam Guard 会话流程；不接收或保存 GitHub/Steam 主密码。
-- `/runners`、`/evidence`：多系统 Runner 与签名证据包视图。
+- `/runners`、`/evidence`：读取本地健康状态、持久交付快照和真实 Godot evidence manifest；未连接的 Windows/Linux 不显示为在线。
 - `lib/domain`：规格、迭代、AgentVersion、Installation、Profile、Run、E2E、Steam 的严格状态机和不可变快照。
 - `lib/agent`、`adapters`、`lib/security`：统一 Runtime Adapter、精确 CLI 参数、固定模型、SSRF/DNS rebinding/redirect 校验、短期 run token、SecretRef 与显式 fallback。
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
+- `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
 - `db`、`drizzle`：26 张 D1 Beta 表、不可变触发器及本地交付事件迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。
@@ -62,7 +63,9 @@ npm install
 npm run local:dev
 ```
 
-打开 `http://127.0.0.1:3000`。该命令只绑定 loopback，不向局域网开放。产品页面、D1 持久状态和 Fixture Executor 不会调用真实模型、GitHub 或 Steam。
+打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面和 `127.0.0.1:4311` Godot 验证侧车，两者都只绑定 loopback。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。
+
+若缺少与 Godot 版本匹配的 export templates，本机 headless 测试仍可通过，但发布门禁会停在 `WAITING_EXPORT_TEMPLATES`。Windows/Linux 保持未连接，直到真实 mTLS Runner 可用。
 
 保持测试站运行时，可在另一个终端检查关键页面和健康 API：
 
@@ -129,6 +132,7 @@ lib/security/           SSRF、凭据、短期 token
 lib/orchestration/      确定性交付工作流
 adapters/               Claude Code / Codex CLI Adapter
 services/               NestJS/Fastify、Temporal 与 Agent Worker 生产入口
+fixtures/               固定 Godot 本机验证样例与测试脚本
 db/ + drizzle/          D1 Beta schema/migrations
 infra/                  Postgres/Temporal/Redis/S3/Vault/OTel
 openapi/                生产 HTTP 合同

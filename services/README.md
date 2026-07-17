@@ -14,6 +14,11 @@ behind the web console:
   applies a minimal environment allowlist, resolves opaque SecretRefs only at
   process start, redacts JSONL/stderr, and distinguishes cancellation, timeout,
   signal and exit-code failures.
+- `local-runtime`: a loopback-only development sidecar. It creates an isolated
+  Git repository from the pinned Godot fixture, runs the installed Godot binary
+  for import/boot/TestKit/export checks, and writes content-bound manifest,
+  JUnit and log evidence below the ignored `.deviludo/` directory. Missing
+  export templates remain an explicit release gate.
 
 The root application can keep using its lightweight route handlers for the
 Sites preview. Production traffic should route `/admin/*` to the control-plane
@@ -126,9 +131,11 @@ and activities; the Worker never silently swaps Claude Code and Codex CLI.
 ./node_modules/.bin/tsc -p services/control-plane/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/temporal/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/local-runtime/tsconfig.json --pretty false
 node --import tsx --test services/control-plane/test/control-plane.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
+node --import tsx --test services/local-runtime/test/godot-fixture.test.ts
 ```
 
 The control-plane tests use Fastify's in-process `inject()` API, so they do not

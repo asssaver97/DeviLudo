@@ -23,6 +23,19 @@ export type LocalDeliveryEvent = {
   at: string;
 };
 
+export type LocalValidationSnapshot = {
+  evidenceId: string;
+  status: "TESTS_PASSED" | "FAILED";
+  releaseGate: "WAITING_EXPORT_TEMPLATES" | "LOCAL_VALIDATION_PASSED" | "TESTS_FAILED";
+  candidateSha: string;
+  sourceDigest: string;
+  bundleDigest: string;
+  godotVersion: string;
+  checks: Array<{ name: string; status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY"; durationMs: number; detail: string }>;
+  createdAt: string;
+  valid: boolean;
+};
+
 export type LocalDeliverySnapshot = {
   projectId: string;
   revision: number;
@@ -44,6 +57,7 @@ export type LocalDeliverySnapshot = {
   evidenceValid: boolean;
   targetResults: Record<"linux" | "windows" | "macos", LocalPlatformStatus>;
   steamBranch: "local-password-beta" | null;
+  localValidation: LocalValidationSnapshot | null;
   events: LocalDeliveryEvent[];
   updatedAt: string;
 };
@@ -77,7 +91,7 @@ function event(snapshot: LocalDeliverySnapshot, type: string, message: string): 
     revision: snapshot.revision + 1,
     updatedAt: at,
     events: [
-      { id: `LOCAL-EVT-${String(snapshot.events.length + 1).padStart(4, "0")}`, type, message, at },
+      { id: `LOCAL-EVT-${String(snapshot.revision + 1).padStart(4, "0")}`, type, message, at },
       ...snapshot.events,
     ].slice(0, 40),
   };
@@ -99,6 +113,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     evidenceValid: false,
     targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
     steamBranch: null,
+    localValidation: null,
     events: [{ id: "LOCAL-EVT-0001", type: "PROJECT_CREATED", message: "本地项目已创建，等待批准规格。", at }],
     updatedAt: at,
   };
@@ -122,6 +137,7 @@ export function approveLocalSpec(
       evidenceValid: false,
       targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
       steamBranch: null,
+      localValidation: null,
     },
     "SPEC_APPROVED",
     `${specRevisionId} 已冻结；Claude Code Profile 与目标矩阵已锁定。`,
@@ -143,9 +159,37 @@ export function invalidateLocalDelivery(
       targetResults: Object.fromEntries(
         Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
       ) as LocalDeliverySnapshot["targetResults"],
+      localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
     },
     "FEEDBACK_CREATED",
     "用户反馈已创建新规格修订，旧候选证据立即失效。",
+  );
+}
+
+export function recordLocalValidation(
+  current: LocalDeliverySnapshot,
+  validation: Omit<LocalValidationSnapshot, "valid">,
+): LocalDeliverySnapshot {
+  if (!current.runId) throw new Error("本地验证缺少锁定运行");
+  if (current.stage === "AWAITING_SPEC_APPROVAL" || current.stage === "RELEASED") {
+    throw new Error("当前交付阶段不能写入本地验证证据");
+  }
+  const stage = validation.status === "TESTS_PASSED" && (current.stage === "AGENT_QUEUED" || current.stage === "AGENT_RUNNING")
+    ? "CANDIDATE_READY"
+    : current.stage;
+  return event(
+    {
+      ...current,
+      stage,
+      candidateSha: validation.candidateSha.slice(0, 7),
+      localValidation: { ...validation, valid: true },
+    },
+    validation.status === "TESTS_PASSED" ? "LOCAL_GODOT_EVIDENCE_CREATED" : "LOCAL_GODOT_VALIDATION_FAILED",
+    validation.status === "FAILED"
+      ? "本机 Git 候选提交已生成，但 Godot 验证失败；交付阶段保持阻塞。"
+      : validation.releaseGate === "LOCAL_VALIDATION_PASSED"
+      ? "本机 Git 候选提交与 macOS Godot 测试、导出证据已生成。"
+      : "本机 Git 候选提交与 macOS Godot 测试证据已生成；生产导出等待模板。",
   );
 }
 
@@ -153,7 +197,14 @@ export function applyLocalDeliveryAction(
   current: LocalDeliverySnapshot,
   action: LocalDeliveryAction,
 ): LocalDeliverySnapshot {
-  if (action === "reset") return createLocalDelivery(current.projectId, current.specRevisionId);
+  if (action === "reset") {
+    const fresh = createLocalDelivery(current.projectId, current.specRevisionId);
+    return event(
+      { ...fresh, revision: current.revision, events: current.events },
+      "DELIVERY_RESET",
+      "本地交付运行已重置；历史事件和证据文件保留用于审计。",
+    );
+  }
 
   if (action === "provider-fail") {
     if (!['AGENT_QUEUED', 'AGENT_RUNNING'].includes(current.stage)) {

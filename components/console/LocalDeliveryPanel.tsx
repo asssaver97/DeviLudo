@@ -100,6 +100,24 @@ export function LocalDeliveryPanel({
     }
   }
 
+  async function runLocalValidation() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/local-validation`, {
+        method: "POST",
+        headers: { "idempotency-key": `godot-${snapshot?.runId ?? "pending"}` },
+      });
+      const payload = await response.json() as { delivery?: LocalDeliverySnapshot; error?: { message?: string } };
+      if (!response.ok || !payload.delivery) throw new Error(payload.error?.message ?? "本机 Git/Godot 验证失败");
+      publish(payload.delivery);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "本机 Git/Godot 验证失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="local-delivery" aria-live="polite">
       <div className="local-delivery-heading">
@@ -133,6 +151,32 @@ export function LocalDeliveryPanel({
                 {snapshot.targetResults[platform] === "PASSED" ? <CheckIcon /> : <ClockIcon />}
               </div>
             ))}
+          </div>
+
+          <div className={`local-real-validation ${snapshot.localValidation?.valid ? "ready" : "pending"}`}>
+            <div className="local-real-validation-copy">
+              <span className="eyebrow">真实本机执行</span>
+              <h3>{snapshot.localValidation?.valid ? snapshot.localValidation.evidenceId : "Git fixture + Godot macOS headless"}</h3>
+              <p>{snapshot.localValidation?.valid
+                ? `${snapshot.localValidation.godotVersion} · ${snapshot.localValidation.checks.filter((check) => check.status === "PASSED").length} 项通过`
+                : "创建隔离 Git 候选提交，运行项目导入、启动、核心循环、存档回读和性能检查。"}</p>
+            </div>
+            {snapshot.localValidation?.valid ? (
+              <div className="local-real-validation-result">
+                <span className={snapshot.localValidation.status === "FAILED" ? "failed" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "passed" : "waiting"}>
+                  {snapshot.localValidation.status === "FAILED" ? "本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "本机门禁通过" : "测试通过 · 等待导出模板"}
+                </span>
+                <div>
+                  <a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>
+                  <a href={`/api/projects/${projectId}/local-validation/evidence/junit.xml`} rel="noreferrer" target="_blank">JUnit</a>
+                  <a href={`/api/projects/${projectId}/local-validation/evidence/godot.log`} rel="noreferrer" target="_blank">日志</a>
+                </div>
+              </div>
+            ) : snapshot.runId && snapshot.stage !== "RELEASED" ? (
+              <button className="button button-primary" disabled={busy || snapshot.stage === "WAITING_PROVIDER"} onClick={runLocalValidation} type="button">
+                {busy ? "正在执行…" : "运行真实本机验证"}
+              </button>
+            ) : <span className="local-real-validation-wait">批准规格后可运行</span>}
           </div>
 
           <div className="local-delivery-actions">

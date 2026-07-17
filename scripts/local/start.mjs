@@ -9,6 +9,7 @@ import path from "node:path";
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
+const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const FORCE_STOP_AFTER_MS = 5_000;
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -22,7 +23,9 @@ Options:
   -h, --help         Show this help
 
 Environment:
-  DEVILUDO_LOCAL_PORT  Alternative way to select the port`);
+  DEVILUDO_LOCAL_PORT          Alternative way to select the Web port
+  DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})
+  DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable`);
 }
 
 function fail(message) {
@@ -69,6 +72,16 @@ function parsePort(argv) {
   return port;
 }
 
+function parseEnvironmentPort(name, fallback) {
+  const rawPort = process.env[name] ?? String(fallback);
+  if (!/^\d+$/.test(rawPort)) throw new Error(`${name} is not a valid port: ${rawPort}`);
+  const value = Number(rawPort);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`${name} must be an integer between 1 and 65535: ${rawPort}`);
+  }
+  return value;
+}
+
 function assertPortAvailable(port) {
   return new Promise((resolve, reject) => {
     const probe = createServer();
@@ -92,21 +105,31 @@ function signalExitCode(signal) {
 }
 
 let port;
+let localRuntimePort;
 try {
   port = parsePort(process.argv.slice(2));
+  if (port !== null) {
+    localRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_RUNTIME_PORT", DEFAULT_LOCAL_RUNTIME_PORT);
+    if (port === localRuntimePort) throw new Error("Web and local runtime ports must be different");
+  }
 } catch (error) {
+  port = undefined;
+  localRuntimePort = undefined;
   fail(error instanceof Error ? error.message : String(error));
   usage();
 }
 
-if (port === null || port === undefined) {
+if (port === null || port === undefined || localRuntimePort === undefined) {
   process.exit();
 }
 
 const vinextCli = path.join(workspaceRoot, "node_modules", "vinext", "dist", "cli.js");
+const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
 try {
   await access(vinextCli);
+  await access(localRuntimeEntry);
   await assertPortAvailable(port);
+  await assertPortAvailable(localRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
@@ -117,9 +140,25 @@ try {
 }
 
 console.log(`[local:dev] Starting DeviLudo at http://${HOST}:${port}`);
+console.log(`[local:dev] Starting the constrained local runtime at http://${HOST}:${localRuntimePort}`);
 console.log("[local:dev] Press Ctrl-C to stop the server and its child processes.");
 
-const child = spawn(
+const localRuntimeChild = spawn(
+  process.execPath,
+  ["--import", "tsx", localRuntimeEntry],
+  {
+    cwd: workspaceRoot,
+    detached: process.platform !== "win32",
+    env: {
+      ...process.env,
+      NODE_ENV: "development",
+      DEVILUDO_LOCAL_RUNTIME_PORT: String(localRuntimePort),
+    },
+    stdio: "inherit",
+  },
+);
+
+const siteChild = spawn(
   process.execPath,
   [vinextCli, "dev", "--hostname", HOST, "--port", String(port)],
   {
@@ -128,6 +167,7 @@ const child = spawn(
     env: {
       ...process.env,
       NODE_ENV: "development",
+      DEVILUDO_LOCAL_RUNTIME_URL: `http://${HOST}:${localRuntimePort}`,
       WRANGLER_LOG_PATH: path.join(workspaceRoot, ".wrangler", "wrangler-local.log"),
     },
     stdio: "inherit",
@@ -139,7 +179,7 @@ let requestedSignal;
 let forceStopTimer;
 let shutdownStartedAt = 0;
 
-function killProcessTree(signal) {
+function killProcessTree(child, signal) {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
@@ -159,6 +199,11 @@ function killProcessTree(signal) {
   }
 }
 
+function killAll(signal) {
+  killProcessTree(siteChild, signal);
+  killProcessTree(localRuntimeChild, signal);
+}
+
 function beginShutdown(signal) {
   if (stopping) {
     // npm can forward the same terminal signal immediately after the parent
@@ -167,7 +212,7 @@ function beginShutdown(signal) {
       return;
     }
     console.error("\n[local:dev] Second stop request received; forcing shutdown.");
-    killProcessTree("SIGKILL");
+    killAll("SIGKILL");
     return;
   }
 
@@ -175,10 +220,10 @@ function beginShutdown(signal) {
   shutdownStartedAt = Date.now();
   requestedSignal = signal;
   console.log(`\n[local:dev] ${signal} received; stopping the local site...`);
-  killProcessTree("SIGTERM");
+  killAll("SIGTERM");
   forceStopTimer = setTimeout(() => {
     console.error(`[local:dev] Server did not stop within ${FORCE_STOP_AFTER_MS / 1_000}s; forcing shutdown.`);
-    killProcessTree("SIGKILL");
+    killAll("SIGKILL");
   }, FORCE_STOP_AFTER_MS);
 }
 
@@ -187,13 +232,27 @@ for (const signal of handledSignals) {
   process.on(signal, () => beginShutdown(signal));
 }
 
-child.once("error", (error) => {
+siteChild.once("error", (error) => {
   console.error(`[local:dev] Could not start vinext: ${error.message}`);
   process.exitCode = 1;
 });
 
-child.once("exit", (code, signal) => {
+localRuntimeChild.once("error", (error) => {
+  console.error(`[local:dev] Could not start the local runtime: ${error.message}`);
+  killProcessTree(siteChild, "SIGTERM");
+  process.exitCode = 1;
+});
+
+localRuntimeChild.once("exit", (code, signal) => {
+  if (stopping) return;
+  console.error(`[local:dev] Local runtime exited unexpectedly (${signal ?? code ?? "unknown"}).`);
+  killProcessTree(siteChild, "SIGTERM");
+  process.exitCode = code ?? 1;
+});
+
+siteChild.once("exit", (code, signal) => {
   clearTimeout(forceStopTimer);
+  killProcessTree(localRuntimeChild, "SIGTERM");
   for (const handledSignal of handledSignals) {
     process.removeAllListeners(handledSignal);
   }
@@ -213,4 +272,4 @@ child.once("exit", (code, signal) => {
   process.exitCode = code ?? 1;
 });
 
-process.once("exit", () => killProcessTree("SIGKILL"));
+process.once("exit", () => killAll("SIGKILL"));

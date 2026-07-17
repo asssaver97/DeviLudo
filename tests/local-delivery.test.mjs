@@ -5,6 +5,7 @@ import {
   approveLocalSpec,
   createLocalDelivery,
   invalidateLocalDelivery,
+  recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
 
 test("local delivery fixture exercises the complete gated chain without external calls", () => {
@@ -47,10 +48,53 @@ test("local delivery fixture exercises the complete gated chain without external
 
 test("feedback invalidates all local evidence and requires a new immutable approval", () => {
   let state = approveLocalSpec(createLocalDelivery("project-feedback"), "SPEC-008", "RUN-LOCAL-2");
+  state = recordLocalValidation(state, {
+    evidenceId: "EV-LOCAL-TEST",
+    status: "TESTS_PASSED",
+    releaseGate: "WAITING_EXPORT_TEMPLATES",
+    candidateSha: "a".repeat(40),
+    sourceDigest: "b".repeat(64),
+    bundleDigest: "c".repeat(64),
+    godotVersion: "4.6.2.stable",
+    checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
+    createdAt: "2026-07-18T00:00:00.000Z",
+  });
+  assert.equal(state.stage, "CANDIDATE_READY");
+  assert.equal(state.localValidation.valid, true);
   state = { ...state, evidenceValid: true, targetResults: { linux: "PASSED", windows: "PASSED", macos: "PASSED" } };
   state = invalidateLocalDelivery(state, "SPEC-009");
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
   assert.equal(state.evidenceValid, false);
   assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
+  assert.equal(state.localValidation.valid, false);
   assert.throws(() => applyLocalDeliveryAction(state, "advance"), /先批准/);
+});
+
+test("failed local validation is auditable but cannot advance the candidate gate", () => {
+  let state = approveLocalSpec(createLocalDelivery("project-failed"), "SPEC-010", "RUN-LOCAL-FAILED");
+  state = recordLocalValidation(state, {
+    evidenceId: "EV-LOCAL-FAILED",
+    status: "FAILED",
+    releaseGate: "TESTS_FAILED",
+    candidateSha: "d".repeat(40),
+    sourceDigest: "e".repeat(64),
+    bundleDigest: "f".repeat(64),
+    godotVersion: "4.6.2.stable",
+    checks: [{ name: "macos-export", status: "FAILED", durationMs: 3, detail: "configuration error" }],
+    createdAt: "2026-07-18T00:00:00.000Z",
+  });
+  assert.equal(state.stage, "AGENT_QUEUED");
+  assert.equal(state.localValidation.valid, true);
+  assert.equal(state.events[0].type, "LOCAL_GODOT_VALIDATION_FAILED");
+});
+
+test("reset keeps event revisions monotonic for the persistent D1 audit log", () => {
+  let state = approveLocalSpec(createLocalDelivery("project-reset"), "SPEC-011", "RUN-RESET-001");
+  const previousRevision = state.revision;
+  state = applyLocalDeliveryAction(state, "reset");
+  assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
+  assert.equal(state.revision, previousRevision + 1);
+  assert.equal(state.events[0].id, `LOCAL-EVT-${String(state.revision).padStart(4, "0")}`);
+  assert.equal(state.events[0].type, "DELIVERY_RESET");
+  assert.equal(state.events[1].type, "SPEC_APPROVED");
 });

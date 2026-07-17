@@ -68,6 +68,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
   const [feedbackCount, setFeedbackCount] = useState(2);
   const [deliveryRefresh, setDeliveryRefresh] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const approvalCommandRef = useRef<string | null>(null);
 
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
   const completion = useMemo(() => Math.min(92, 44 + messages.length * 6), [messages.length]);
@@ -91,14 +92,16 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
   async function approveSpec() {
     setBusy(true);
     const projectId = mode === "new" ? "new-project-draft" : "ember-archipelago";
+    approvalCommandRef.current ??= crypto.randomUUID();
     try {
       const response = await fetch(`/api/projects/${projectId}/spec-revisions`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `approve-${specId}` },
+        headers: { "content-type": "application/json", "idempotency-key": `approve-${specId}-${approvalCommandRef.current}` },
         body: JSON.stringify({ revision: specId, action: "approve" }),
       });
       const payload = await response.json() as { error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "规格批准失败");
+      approvalCommandRef.current = null;
       setApproved(true);
       setDeliveryRefresh((value) => value + 1);
       setNotice(`${specId} 已冻结，Claude Code 开发任务已锁定并入队。`);

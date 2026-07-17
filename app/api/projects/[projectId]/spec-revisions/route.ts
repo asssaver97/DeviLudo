@@ -49,7 +49,7 @@ export async function POST(
         store.specRevision = parsedRevision;
       }
       store.specState = "APPROVED";
-      const runId = `RUN-${1043 + store.feedback.length}`;
+      const runId = stableRunId(`${projectId}:${revision}:${requestKey}`);
       appendDemoAudit("SPEC_APPROVED", revision, "ProjectOwner", { projectId, runId, agent: "claude-code" });
       return {
         specRevisionId: revision,
@@ -81,4 +81,16 @@ export async function POST(
   } catch (error) {
     return problemResponse(error);
   }
+}
+
+function stableRunId(value: string) {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code ^ index, 0x85ebca6b);
+  }
+  const part = (hash: number) => (hash >>> 0).toString(16).toUpperCase().padStart(8, "0");
+  return `RUN-${part(first)}${part(second)}`;
 }
