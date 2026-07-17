@@ -7,6 +7,7 @@ import {
 import { createHash } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { map, Observable } from "rxjs";
+import { authenticatedAdminActor } from "./admin-principal";
 import { ServiceProblem } from "./contracts";
 import { header } from "./rbac.guard";
 
@@ -33,12 +34,15 @@ export class IdempotencyInterceptor implements NestInterceptor {
       throw new ServiceProblem(400, "IDEMPOTENCY_KEY_REQUIRED", "A valid Idempotency-Key header is required for mutations");
     }
     this.evictExpired();
+    const actor = authenticatedAdminActor(request);
     const identity = [
       request.method,
       request.routeOptions.url,
       request.params ? JSON.stringify(request.params) : "",
-      header(request, "x-deviludo-role") ?? "Auditor",
-      header(request, "x-deviludo-actor") ?? "anonymous",
+      actor.role,
+      actor.actorId,
+      actor.tenantId ?? "platform",
+      actor.projectId ?? "all-projects",
       idempotencyKey,
     ].join("|");
     const requestFingerprint = fingerprintRequest(request.body);

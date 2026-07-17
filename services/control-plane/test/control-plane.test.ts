@@ -329,6 +329,28 @@ test("tenant and project administrators cannot cross signed scope or BYOK bounda
   assert.equal(crossProject.json().error.code, "SCOPE_FORBIDDEN");
 });
 
+test("idempotency results are isolated by the signed tenant and project scope", async () => {
+  const shared = {
+    method: "POST" as const,
+    url: "/admin/credentials",
+    role: "TenantAdmin",
+    key: "same-user-same-idempotency-key",
+    payload: { label: "Scoped BYOK", apiKey: "same-fixture-body-for-scope-test" },
+  };
+  const alpha = await inject({ ...shared, tenantId: "tenant-idempotency-alpha" });
+  const beta = await inject({ ...shared, tenantId: "tenant-idempotency-beta" });
+  assert.equal(alpha.statusCode, 201);
+  assert.equal(beta.statusCode, 201);
+  assert.equal(alpha.json().data.scopeId, "tenant-idempotency-alpha");
+  assert.equal(beta.json().data.scopeId, "tenant-idempotency-beta");
+  assert.notEqual(alpha.json().data.id, beta.json().data.id);
+
+  const alphaReplay = await inject({ ...shared, tenantId: "tenant-idempotency-alpha" });
+  assert.equal(alphaReplay.statusCode, 200);
+  assert.equal(alphaReplay.headers["idempotent-replayed"], "true");
+  assert.equal(alphaReplay.json().data.id, alpha.json().data.id);
+});
+
 test("unsafe Provider endpoints and floating models are rejected", async () => {
   const response = await inject({
     method: "POST",
