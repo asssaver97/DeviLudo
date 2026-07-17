@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { LocalAgentReadiness, LocalHealth } from "@/components/console/useLocalPlatform";
+import { agentAdminCapabilities } from "@/lib/admin/agent-permissions";
 import {
   agents,
   rolePermissions,
@@ -181,7 +182,8 @@ export default function AgentAdminDashboard() {
     window.setTimeout(() => setToast(null), 3400);
   };
 
-  const canOperateVersions = role === "PlatformAgentAdmin";
+  const permissions = agentAdminCapabilities(role);
+  const canOperateVersions = permissions.manageVersions;
 
   const updateVersion = async (id: string, status: AgentVersionRow["status"]) => {
     if (!canOperateVersions) {
@@ -320,8 +322,8 @@ export default function AgentAdminDashboard() {
             <p>治理开发 Agent 的版本、部署、Provider 与配置继承。运行时锁定配置，不受后续变更影响。</p>
           </div>
           <div className={styles.headerActions}>
-            <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions()}><AdminIcon name="refresh" />发现版本</button>
-            <button className={styles.primaryButton} type="button" onClick={() => { setActiveTab("providers"); notify("已打开 Provider 草稿编辑器", "neutral"); }}>新建 Provider</button>
+            <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions()} disabled={!permissions.manageVersions} title={permissions.manageVersions ? undefined : "需要 PlatformAgentAdmin 权限"}><AdminIcon name="refresh" />发现版本</button>
+            <button className={styles.primaryButton} type="button" onClick={() => { setActiveTab("providers"); notify("已打开 Provider 草稿编辑器", "neutral"); }} disabled={!permissions.editPlatformProvider} title={permissions.editPlatformProvider ? undefined : "当前角色不能编辑平台级 Provider"}>新建 Provider</button>
           </div>
         </div>
 
@@ -340,9 +342,9 @@ export default function AgentAdminDashboard() {
         </div>
 
         <div className={styles.content}>
-          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
+          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} canOperate={canOperateVersions} onUpdate={updateVersion} />}
-          {activeTab === "deployments" && <DeploymentsTab percent={claudeRollout} state={claudeState} onAdvance={advanceRollout} onRollback={rollback} onDrain={() => { setClaudeState("DRAINING"); notify("Worker 池正在排空，不再接收新任务", "warning"); }} />}
+          {activeTab === "deployments" && <DeploymentsTab percent={claudeRollout} state={claudeState} canOperate={permissions.manageInstallations} onAdvance={advanceRollout} onRollback={rollback} onDrain={() => { setClaudeState("DRAINING"); notify("Worker 池正在排空，不再接收新任务", "warning"); }} />}
           {activeTab === "providers" && <ProvidersTab role={role} localHealth={localHealth} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
           {activeTab === "inheritance" && <InheritanceTab defaultAgent={defaultAgent} notify={notify} />}
           {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
@@ -359,7 +361,7 @@ export default function AgentAdminDashboard() {
   );
 }
 
-function OverviewTab({ defaultAgent, localAgents, localHealth, onDefaultChange, onNavigate }: { defaultAgent: AgentKind; localAgents: LocalAgentReadiness[]; localHealth: LocalHealth | null; onDefaultChange: (agent: AgentKind) => void; onNavigate: (tab: TabId) => void }) {
+function OverviewTab({ defaultAgent, localAgents, localHealth, canChangeDefault, onDefaultChange, onNavigate }: { defaultAgent: AgentKind; localAgents: LocalAgentReadiness[]; localHealth: LocalHealth | null; canChangeDefault: boolean; onDefaultChange: (agent: AgentKind) => void; onNavigate: (tab: TabId) => void }) {
   const exactMatches = localAgents.filter((agent) => agent.state === "READY").length;
   const workerReady = localHealth?.dependencies?.developmentWorker === "READY";
   return (
@@ -390,7 +392,7 @@ function OverviewTab({ defaultAgent, localAgents, localHealth, onDefaultChange, 
                 <small>{agent.platforms.join(" · ")}</small>
               </div>
               <div className={styles.agentActions}>
-                {defaultAgent === agent.id ? <button className={styles.selectedButton} type="button"><AdminIcon name="check" />已选择</button> : <button className={styles.secondaryButton} type="button" onClick={() => onDefaultChange(agent.id)}>设为默认</button>}
+                {defaultAgent === agent.id ? <button className={styles.selectedButton} type="button" disabled><AdminIcon name="check" />已选择</button> : <button className={styles.secondaryButton} type="button" onClick={() => onDefaultChange(agent.id)} disabled={!canChangeDefault} title={canChangeDefault ? undefined : "需要 PlatformAgentAdmin 权限"}>设为默认</button>}
                 <button className={styles.moreButton} type="button" aria-label={`${agent.name} 更多操作`}><AdminIcon name="more" /></button>
               </div>
             </article>
@@ -456,11 +458,12 @@ function VersionsTab({ rows, canOperate, onUpdate }: { rows: AgentVersionRow[]; 
   );
 }
 
-function DeploymentsTab({ percent, state, onAdvance, onRollback, onDrain }: { percent: number; state: string; onAdvance: () => void; onRollback: () => void; onDrain: () => void }) {
+function DeploymentsTab({ percent, state, canOperate, onAdvance, onRollback, onDrain }: { percent: number; state: string; canOperate: boolean; onAdvance: () => void; onRollback: () => void; onDrain: () => void }) {
   return (
     <>
       <section className={styles.section}>
         <SectionHeading title="开发 Worker 安装" description="不可变镜像以 digest 部署；灰度只分配新任务，已运行任务继续使用锁定版本。" />
+        {!canOperate && <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看部署。灰度、回滚与排空需要 PlatformAgentAdmin。</div>}
         <div className={styles.installationRow}>
           <AgentMark kind="claude-code" />
           <div className={styles.installationIdentity}><h3>Claude Code 2.1.14</h3><code>registry.deviludo.internal/agent/claude@sha256:0a7c…9d21</code><span>dev-linux-a · 本地未部署 · adapter 1.3.0</span></div>
@@ -470,8 +473,8 @@ function DeploymentsTab({ percent, state, onAdvance, onRollback, onDrain }: { pe
             <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
           </div>
           <div className={styles.verticalActions}>
-            <button className={styles.primaryButton} type="button" onClick={onAdvance} disabled={percent === 100}>推进至 {percent < 25 ? "25%" : "100%"}</button>
-            <button className={styles.secondaryButton} type="button" onClick={onRollback}>回滚</button>
+            <button className={styles.primaryButton} type="button" onClick={onAdvance} disabled={!canOperate || percent === 100}>推进至 {percent < 25 ? "25%" : "100%"}</button>
+            <button className={styles.secondaryButton} type="button" onClick={onRollback} disabled={!canOperate}>回滚</button>
           </div>
         </div>
         <div className={styles.installationRow}>
@@ -482,7 +485,7 @@ function DeploymentsTab({ percent, state, onAdvance, onRollback, onDrain }: { pe
             <div className={styles.progressTrack}><span style={{ width: "100%" }} /></div>
             <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
           </div>
-          <div className={styles.verticalActions}><button className={styles.secondaryButton} type="button" onClick={onDrain}>排空 Worker</button><button className={styles.secondaryButton} type="button">查看历史</button></div>
+          <div className={styles.verticalActions}><button className={styles.secondaryButton} type="button" onClick={onDrain} disabled={!canOperate}>排空 Worker</button><button className={styles.secondaryButton} type="button">查看历史</button></div>
         </div>
       </section>
       <section className={styles.section}>
@@ -507,6 +510,7 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
   const [testing, setTesting] = useState(false);
   const [credentialMask, setCredentialMask] = useState("•••• •••• •••• 8D3A");
   const [draftProfileId, setDraftProfileId] = useState("");
+  const permissions = agentAdminCapabilities(role);
 
   const protocol = agent === "claude-code" ? "Anthropic Messages / Gateway" : "OpenAI Responses";
 
@@ -529,8 +533,10 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
   };
 
   const persistDraft = async () => {
+    if (!permissions.editPlatformProvider) throw new Error("当前角色不能编辑平台级 Provider");
     let credentialId = agent === "claude-code" ? "cred-claude-platform-v4" : "cred-codex-platform-v2";
     if (apiKey) {
+      if (!permissions.manageGlobalCredentials) throw new Error("替换平台凭据需要 SecurityAdmin 权限");
       const credential = await adminRequest<{ id: string; fingerprint: string }>("credentials", {
         method: "POST",
         role,
@@ -563,6 +569,7 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
 
   const saveDraft = async (event: FormEvent) => {
     event.preventDefault();
+    if (!permissions.editPlatformProvider) { setError("当前角色不能编辑平台级 Provider"); return; }
     const message = validate();
     if (message) { setError(message); return; }
     setError("");
@@ -578,9 +585,9 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
   };
 
   const testAndActivate = async () => {
+    if (!permissions.activatePlatformProvider) { setError("第三方端点激活需要 SecurityAdmin 权限"); return; }
     const message = validate();
     if (message) { setError(message); return; }
-    if (role !== "SecurityAdmin") { setError("第三方端点激活需要 SecurityAdmin 权限"); return; }
     setError("");
     setTesting(true);
     try {
@@ -602,6 +609,7 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
       <section className={styles.section}>
         <SectionHeading title="生效 Provider" description="每种 Agent 使用独立协议 Schema，不执行静默跨 Agent 切换。" />
         {localHealth?.dependencies?.providerBindingProbe !== "CONFIGURED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />下列为控制面配置快照；本机没有受信 Provider 绑定探针，不能用于 Agent 执行。</div> : null}
+        {!permissions.editPlatformProvider ? <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看平台 Provider。租户和项目覆盖应在对应作用域页面配置。</div> : null}
         <div className={styles.providerRows}>
           <button type="button" className={`${styles.providerRow} ${agent === "claude-code" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>
             <AgentMark kind="claude-code" small /><div><strong>Anthropic · cn-gateway</strong><span>Messages · claude-sonnet-4-5-20250929</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
@@ -613,7 +621,7 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
           <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>仅显示掩码；版本、轮换与最后使用时间由 Vault 元数据提供</small></div>
-          <button type="button" onClick={() => notify("已创建双版本轮换草稿；旧版本仍可回滚", "neutral")}>轮换</button>
+          <button type="button" disabled={!permissions.manageGlobalCredentials} title={permissions.manageGlobalCredentials ? undefined : "需要 SecurityAdmin 权限"} onClick={() => notify("已创建双版本轮换草稿；旧版本仍可回滚", "neutral")}>轮换</button>
         </div>
         <div className={styles.gatewayDiagram}>
           <div><span>Agent Worker</span><small>短期 run token</small></div><i>→</i><div className={styles.gatewayCore}><span>Inference Gateway</span><small>白名单 · 配额 · 审计</small></div><i>→</i><div><span>第三方端点</span><small>上游 Key 仅在 Gateway</small></div>
@@ -625,22 +633,22 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         <div className={styles.formGroup}>
           <label>Agent</label>
           <div className={styles.segmented}>
-            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>Claude Code</button>
-            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setDraftProfileId(""); }}>Codex CLI</button>
+            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>Claude Code</button>
+            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setDraftProfileId(""); }}>Codex CLI</button>
           </div>
         </div>
         <div className={styles.formGroup}><label htmlFor="protocol">协议</label><input id="protocol" value={protocol} disabled /><small>协议由 Agent Adapter 固定，不可混用。</small></div>
-        <div className={styles.formGroup}><label htmlFor="baseUrl">Base URL</label><input id="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} spellCheck="false" /><small>仅 HTTPS；DNS 与每次 redirect 都会重新执行 SSRF 校验。</small></div>
-        <div className={styles.formGroup}><label htmlFor="primaryModel">Primary Model <em>必填</em></label><input id="primaryModel" value={primaryModel} onChange={(event) => setPrimaryModel(event.target.value)} spellCheck="false" /><small>必须是精确模型 ID，禁止 latest / default / sonnet 等浮动别名。</small></div>
+        <div className={styles.formGroup}><label htmlFor="baseUrl">Base URL</label><input id="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} spellCheck="false" disabled={!permissions.editPlatformProvider} /><small>仅 HTTPS；DNS 与每次 redirect 都会重新执行 SSRF 校验。</small></div>
+        <div className={styles.formGroup}><label htmlFor="primaryModel">Primary Model <em>必填</em></label><input id="primaryModel" value={primaryModel} onChange={(event) => setPrimaryModel(event.target.value)} spellCheck="false" disabled={!permissions.editPlatformProvider} /><small>必须是精确模型 ID，禁止 latest / default / sonnet 等浮动别名。</small></div>
         <div className={styles.fieldPair}>
-          <div className={styles.formGroup}><label htmlFor="planningModel">Planning Model</label><input id="planningModel" value={planningModel} onChange={(event) => setPlanningModel(event.target.value)} placeholder="留空则固定到 Primary" /></div>
-          <div className={styles.formGroup}><label htmlFor="fastModel">Small / Fast Model</label><input id="fastModel" value={fastModel} onChange={(event) => setFastModel(event.target.value)} placeholder="留空则固定到 Primary" /></div>
+          <div className={styles.formGroup}><label htmlFor="planningModel">Planning Model</label><input id="planningModel" value={planningModel} onChange={(event) => setPlanningModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
+          <div className={styles.formGroup}><label htmlFor="fastModel">Small / Fast Model</label><input id="fastModel" value={fastModel} onChange={(event) => setFastModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
         </div>
-        <div className={styles.formGroup}><label htmlFor="apiKey">替换 API Key</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="留空以沿用当前凭据版本" autoComplete="new-password" /></div><small>写入后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。</small></div>
-        <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>
+        <div className={styles.formGroup}><label htmlFor="apiKey">替换 API Key</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="留空以沿用当前凭据版本" autoComplete="new-password" disabled={!permissions.manageGlobalCredentials} /></div><small>写入后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。平台凭据仅由 SecurityAdmin 替换。</small></div>
+        <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} disabled={!permissions.editPlatformProvider} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>
         {error && <div className={styles.formError}><AdminIcon name="alert" />{error}</div>}
         <div className={styles.probeList}><span>激活探针</span><div>{["认证", "模型", "流式", "工具", "取消", "Usage", "超时", "无工具"].map((probe) => <em key={probe}>{probe}</em>)}</div></div>
-        <div className={styles.formActions}><button className={styles.secondaryButton} type="submit" disabled={testing}>保存草稿</button><button className={styles.primaryButton} type="button" disabled={testing} onClick={testAndActivate}>{testing ? "正在校验门禁…" : "测试并激活"}</button></div>
+        <div className={styles.formActions}><button className={styles.secondaryButton} type="submit" disabled={testing || !permissions.editPlatformProvider}>保存草稿</button><button className={styles.primaryButton} type="button" disabled={testing || !permissions.activatePlatformProvider} title={permissions.activatePlatformProvider ? undefined : "需要 SecurityAdmin 权限"} onClick={testAndActivate}>{testing ? "正在校验门禁…" : "测试并激活"}</button></div>
       </form>
     </div>
   );

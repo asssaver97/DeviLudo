@@ -407,7 +407,11 @@
 }
 
 .primaryButton:disabled,
-.secondaryButton:disabled {
+.secondaryButton:disabled,
+.selectedButton:disabled,
+.credentialPanel button:disabled,
+.segmented button:disabled,
+.checkLabel input:disabled + span {
   cursor: not-allowed;
   opacity: .46;
 }
