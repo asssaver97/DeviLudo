@@ -5,3 +5,4 @@ export * from "./path-policy";
 export * from "./redaction";
 export * from "./runtime-files";
 export * from "./supervisor";
+export * from "./workflow-handler";

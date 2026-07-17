@@ -1,0 +1,173 @@
+import {
+  WorkflowJobError,
+  type DeliverySignalWithoutId,
+  type WorkflowJobExecutionContext,
+  type WorkflowJobHandler,
+} from "../../temporal/src/job-processor";
+import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
+
+const SHA1 = /^[a-f0-9]{40}$/;
+const SHA256_IMAGE = /^sha256:[a-f0-9]{64}$/;
+const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+
+export interface AgentWorkflowRunReceipt {
+  readonly status: "COMPLETED" | "FAILED";
+  readonly runId: string;
+  readonly lockedRunConfigurationId: string;
+  readonly agent: "claude-code" | "codex-cli";
+  readonly profileRevisionId: string;
+  readonly installationId: string;
+  readonly imageDigest: string;
+  readonly providerRevisionId: string;
+  readonly model: string;
+  readonly candidateCommitSha: string | null;
+  readonly draftPullRequest: number | null;
+  readonly diagnosticId: string | null;
+  readonly receiptId: string;
+}
+
+export interface AgentWorkflowRun {
+  readonly runId: string;
+  readonly providerRevisionId: string;
+  /** True only when a durable Provider outage record has become healthy. */
+  readonly recoveredFromOutage: boolean;
+  readonly completion: Promise<AgentWorkflowRunReceipt>;
+}
+
+export interface LockedAgentWorkflowPort {
+  start(input: {
+    readonly operationKey: string;
+    readonly requestDigest: string;
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly workflowId: string;
+    readonly lockedRunConfigurationId: string;
+    readonly iteration: number;
+    readonly repairAttempts: number;
+  }): Promise<AgentWorkflowRun>;
+}
+
+export class AgentProviderUnavailableError extends Error {
+  constructor(readonly providerRevisionId: string) {
+    super("Agent Provider is unavailable");
+    if (!ID.test(providerRevisionId)) throw new Error("Provider revision ID is invalid");
+  }
+}
+
+export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
+  constructor(private readonly runs: LockedAgentWorkflowPort) {}
+
+  async execute(job: ClaimedWorkflowJob, context: WorkflowJobExecutionContext): Promise<{
+    readonly result: Readonly<Record<string, unknown>>;
+    readonly signal: DeliverySignalWithoutId;
+  }> {
+    if (job.destination !== "agent-worker" || job.operation !== "START_LOCKED_AGENT_RUN"
+      || job.request.kind !== "COMMAND") throw new Error("Agent workflow operation is invalid");
+    const snapshot = job.request.payload.snapshot;
+    if (snapshot.state !== "DEVELOPMENT_QUEUED" || !snapshot.lockedRunConfigurationId) {
+      throw new Error("Agent workflow lock binding is incomplete");
+    }
+
+    let run: AgentWorkflowRun;
+    try {
+      run = await this.runs.start({
+        operationKey: `workflow-job:${job.id}`,
+        requestDigest: job.requestDigest,
+        tenantId: job.tenantId,
+        projectId: job.projectId,
+        workflowId: job.workflowId,
+        lockedRunConfigurationId: snapshot.lockedRunConfigurationId,
+        iteration: snapshot.iteration,
+        repairAttempts: snapshot.repairAttempts,
+      });
+    } catch (error) {
+      if (error instanceof AgentProviderUnavailableError) {
+        await context.emitSignal("provider-unavailable", {
+          type: "PROVIDER_UNAVAILABLE",
+          providerRevisionId: error.providerRevisionId,
+        });
+        throw new WorkflowJobError("PROVIDER_UNAVAILABLE");
+      }
+      throw error;
+    }
+    validateOpaqueId(run.runId, "Agent run");
+    validateOpaqueId(run.providerRevisionId, "Provider revision");
+    if (run.recoveredFromOutage) {
+      await context.emitSignal("provider-restored", {
+        type: "PROVIDER_RESTORED",
+        providerRevisionId: run.providerRevisionId,
+      });
+    }
+    await context.emitSignal("started", { type: "AGENT_STARTED", runId: run.runId });
+    await context.heartbeat();
+
+    let receipt: AgentWorkflowRunReceipt;
+    try {
+      receipt = await run.completion;
+    } catch (error) {
+      if (error instanceof AgentProviderUnavailableError) {
+        await context.emitSignal("provider-unavailable", {
+          type: "PROVIDER_UNAVAILABLE",
+          providerRevisionId: error.providerRevisionId,
+        });
+        throw new WorkflowJobError("PROVIDER_UNAVAILABLE");
+      }
+      throw error;
+    }
+    validateReceipt(receipt, run, snapshot.lockedRunConfigurationId);
+    if (receipt.status === "FAILED") {
+      return Object.freeze({
+        result: publicReceipt(receipt),
+        signal: Object.freeze({ type: "AGENT_FAILED", diagnosticId: receipt.diagnosticId as string }),
+      });
+    }
+    return Object.freeze({
+      result: publicReceipt(receipt),
+      signal: Object.freeze({
+        type: "AGENT_COMPLETED",
+        candidateCommitSha: receipt.candidateCommitSha as string,
+        draftPullRequest: receipt.draftPullRequest as number,
+      }),
+    });
+  }
+}
+
+function validateReceipt(receipt: AgentWorkflowRunReceipt, run: AgentWorkflowRun, lockedId: string): void {
+  if (receipt.runId !== run.runId || receipt.lockedRunConfigurationId !== lockedId
+    || receipt.providerRevisionId !== run.providerRevisionId
+    || ![receipt.profileRevisionId, receipt.installationId, receipt.model, receipt.receiptId].every(ID.test.bind(ID))
+    || !["COMPLETED", "FAILED"].includes(receipt.status)
+    || !["claude-code", "codex-cli"].includes(receipt.agent)
+    || !SHA256_IMAGE.test(receipt.imageDigest)) {
+    throw new Error("Agent workflow receipt lock binding is invalid");
+  }
+  if (receipt.status === "COMPLETED") {
+    if (!receipt.candidateCommitSha || !SHA1.test(receipt.candidateCommitSha)
+      || !Number.isSafeInteger(receipt.draftPullRequest) || (receipt.draftPullRequest as number) < 1
+      || receipt.diagnosticId !== null) throw new Error("Completed Agent workflow receipt is invalid");
+  } else if (!receipt.diagnosticId || !ID.test(receipt.diagnosticId)
+    || receipt.candidateCommitSha !== null || receipt.draftPullRequest !== null) {
+    throw new Error("Failed Agent workflow receipt is invalid");
+  }
+}
+
+function publicReceipt(receipt: AgentWorkflowRunReceipt): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    receiptId: receipt.receiptId,
+    runId: receipt.runId,
+    status: receipt.status,
+    agent: receipt.agent,
+    profileRevisionId: receipt.profileRevisionId,
+    installationId: receipt.installationId,
+    imageDigest: receipt.imageDigest,
+    providerRevisionId: receipt.providerRevisionId,
+    model: receipt.model,
+    candidateCommitSha: receipt.candidateCommitSha,
+    draftPullRequest: receipt.draftPullRequest,
+    diagnosticId: receipt.diagnosticId,
+  });
+}
+
+function validateOpaqueId(value: string, label: string): void {
+  if (!ID.test(value)) throw new Error(`${label} ID is invalid`);
+}

@@ -19,11 +19,20 @@ Security properties enforced immediately before process creation:
 - timeout and cancellation through `SIGTERM`, followed by bounded `SIGKILL`;
 - explicit exit code, signal, timeout, cancellation, and adapter diagnostics.
 
+`AgentWorkerWorkflowHandler` connects this execution boundary to the durable
+job processor. It resolves only the queued `lockedRunConfigurationId`, emits a
+stable `started` signal, and accepts completion only when run, Profile,
+Installation, image digest, Provider revision and model all echo the immutable
+lock. A Provider outage emits `PROVIDER_UNAVAILABLE`, keeps the same queued job
+and Agent, and resumes only after the durable Provider record reports recovery;
+there is no Claude/Codex fallback. Candidate completion requires an
+authoritative commit SHA and Draft PR number.
+
 The contract tests inject the process boundary and verify call ordering,
 version/image mismatch rejection, file modes, overwrite protection and symlink
 defence without invoking an installed Agent CLI:
 
 ```sh
 npx tsc -p services/agent-worker/tsconfig.json --pretty false
-node --import tsx --test services/agent-worker/test/supervisor.test.ts
+node --import tsx --test services/agent-worker/test/*.test.ts
 ```

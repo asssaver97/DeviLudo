@@ -38,13 +38,17 @@ export interface WorkflowJobQueuePort {
 }
 
 export interface WorkflowJobHandler {
-  execute(job: ClaimedWorkflowJob, context: {
-    /** Long-running connectors must call this before the current lease expires. */
-    readonly heartbeat: () => Promise<string>;
-  }): Promise<{
+  execute(job: ClaimedWorkflowJob, context: WorkflowJobExecutionContext): Promise<{
     readonly result: Readonly<Record<string, unknown>>;
     readonly signal?: DeliverySignalWithoutId;
   }>;
+}
+
+export interface WorkflowJobExecutionContext {
+  /** Long-running connectors must call this before the current lease expires. */
+  readonly heartbeat: () => Promise<string>;
+  /** Emits ordered progress using a phase-stable, replay-safe signal identity. */
+  readonly emitSignal: (phase: string, signal: DeliverySignalWithoutId) => Promise<string>;
 }
 
 export interface WorkflowSignalPort {
@@ -110,6 +114,7 @@ export class WorkflowJobProcessor {
 
     let outcome: Awaited<ReturnType<WorkflowJobHandler["execute"]>>;
     let signalId: string | null = null;
+    const emittedSignalIds: string[] = [];
     try {
       outcome = await this.#handler.execute(job, {
         heartbeat: () => this.#queue.renew({
@@ -118,10 +123,19 @@ export class WorkflowJobProcessor {
           claimToken: job.claimToken,
           leaseSeconds: this.#leaseSeconds,
         }),
+        emitSignal: async (phase, value) => {
+          if (!/^[a-z][a-z0-9-]{1,31}$/.test(phase)) throw new WorkflowJobError("INVALID_SIGNAL_PHASE", true);
+          const progressSignalId = `job:${job.id}:${phase}`;
+          const progressSignal = Object.freeze({ signalId: progressSignalId, ...value }) as DeliverySignal;
+          assertDeliverySignal(progressSignal);
+          await this.#signals.signal(job.workflowId, progressSignal);
+          if (!emittedSignalIds.includes(progressSignalId)) emittedSignalIds.push(progressSignalId);
+          return progressSignalId;
+        },
       });
       validateResult(outcome.result);
       if (outcome.signal) {
-        signalId = `job:${job.id}`;
+        signalId = `job:${job.id}:final`;
         const signal = Object.freeze({ signalId, ...outcome.signal }) as DeliverySignal;
         assertDeliverySignal(signal);
         await this.#signals.signal(job.workflowId, signal);
@@ -146,6 +160,7 @@ export class WorkflowJobProcessor {
       requestDigest: job.requestDigest,
       attempt: job.attempt,
       signalId,
+      emittedSignalIds: Object.freeze([...emittedSignalIds]),
       output: outcome.result,
     });
     // A lost response here is intentionally not converted into failure: the

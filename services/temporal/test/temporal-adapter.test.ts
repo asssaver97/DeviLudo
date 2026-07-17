@@ -247,7 +247,7 @@ test("job processor heartbeats, signals with a stable job ID and completes the e
     },
     async complete(input) {
       assert.equal(input.jobId, job.id);
-      assert.equal(input.result.signalId, `job:${job.id}`);
+      assert.equal(input.result.signalId, `job:${job.id}:final`);
       events.push("complete");
     },
     async fail() { throw new Error("must not fail"); },
@@ -259,20 +259,26 @@ test("job processor heartbeats, signals with a stable job ID and completes the e
     handler: {
       async execute(_job, context) {
         await context.heartbeat();
+        await context.emitSignal("started", { type: "AGENT_STARTED", runId: "run-1" });
         events.push("execute");
-        return { result: { runId: "run-1" }, signal: { type: "AGENT_STARTED", runId: "run-1" } };
+        return { result: { runId: "run-1" }, signal: { type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 91 } };
       },
     },
     signals: {
       async signal(workflowId, signal) {
         assert.equal(workflowId, job.workflowId);
-        assert.deepEqual(signal, { signalId: `job:${job.id}`, type: "AGENT_STARTED", runId: "run-1" });
-        events.push("signal");
+        if (signal.signalId.endsWith(":started")) {
+          assert.deepEqual(signal, { signalId: `job:${job.id}:started`, type: "AGENT_STARTED", runId: "run-1" });
+          events.push("signal-started");
+        } else {
+          assert.deepEqual(signal, { signalId: `job:${job.id}:final`, type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 91 });
+          events.push("signal-final");
+        }
       },
     },
   });
-  assert.deepEqual(await processor.processOne(job.tenantId), { kind: "COMPLETED", jobId: job.id, signalId: `job:${job.id}` });
-  assert.deepEqual(events, ["claim", "heartbeat", "execute", "signal", "complete"]);
+  assert.deepEqual(await processor.processOne(job.tenantId), { kind: "COMPLETED", jobId: job.id, signalId: `job:${job.id}:final` });
+  assert.deepEqual(events, ["claim", "heartbeat", "signal-started", "execute", "signal-final", "complete"]);
 });
 
 test("job processor records bounded retries and makes the final attempt terminal without leaking errors", async () => {
