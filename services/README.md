@@ -168,6 +168,10 @@ never Worker environment variables.
 ```bash
 export TEMPORAL_ADDRESS=localhost:7233
 export TEMPORAL_NAMESPACE=default
+export DEVILUDO_TEMPORAL_TLS_CA_FILE=/run/secrets/temporal-cluster/ca.crt
+export DEVILUDO_TEMPORAL_TLS_CERT_FILE=/run/secrets/temporal-cluster/tls.crt
+export DEVILUDO_TEMPORAL_TLS_KEY_FILE=/run/secrets/temporal-cluster/tls.key
+export DEVILUDO_TEMPORAL_TLS_SERVER_NAME=temporal.internal
 export DEVILUDO_CONTROL_PLANE_DISPATCH_URL=https://control-plane.internal/v1/workflow-commands
 export DEVILUDO_AGENT_WORKER_DISPATCH_URL=https://agent-worker.internal/v1/workflow-commands
 export DEVILUDO_RUNNER_CONTROL_DISPATCH_URL=https://runner-control.internal/v1/workflow-commands
@@ -186,6 +190,10 @@ Supported environment variables:
   command family to its owning service; a command cannot select its own URL.
 - `DEVILUDO_MAX_CONCURRENT_ACTIVITIES` and
   `DEVILUDO_MAX_CONCURRENT_WORKFLOWS`
+- Worker, destination-service clients and the command-line client all require
+  complete Temporal cluster mTLS material in production. A partial certificate
+  set fails startup. `DEVILUDO_ALLOW_INSECURE_LOCAL_TEMPORAL=1` is accepted
+  only outside production for the local integration cluster.
 - `DEVILUDO_ALLOW_INSECURE_LOCAL_DISPATCH=1`, only for a loopback HTTP
   dispatcher during non-production local development. Production startup
   rejects this flag.

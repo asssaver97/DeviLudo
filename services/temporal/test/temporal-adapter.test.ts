@@ -42,6 +42,7 @@ import {
 } from "../src/tenant-assignments";
 import { postgresWorkflowPoolFromEnv } from "../src/node-postgres";
 import { MtlsCommandDispatcher } from "../src/mtls-dispatcher";
+import { temporalTlsConfigFromEnv } from "../src/temporal-tls";
 import { dispatchKey } from "../src/workflows/game-delivery.workflow";
 
 const snapshot: DeliverySnapshot = {
@@ -236,6 +237,25 @@ test("mTLS dispatcher presents workload material and preserves immutable headers
     { ...endpoints, "agent-worker": "http://agent.internal/v1/workflow-commands" },
     { key: pem, certificate: pem, ca: pem },
   ), /credential-free HTTPS/);
+});
+
+test("production Temporal connections require complete mTLS material", async () => {
+  await assert.rejects(
+    temporalTlsConfigFromEnv({ NODE_ENV: "production" }),
+    /mTLS material is required/,
+  );
+  await assert.rejects(
+    temporalTlsConfigFromEnv({
+      NODE_ENV: "production",
+      DEVILUDO_ALLOW_INSECURE_LOCAL_TEMPORAL: "1",
+    }),
+    /cannot disable TLS/,
+  );
+  await assert.rejects(
+    temporalTlsConfigFromEnv({ DEVILUDO_TEMPORAL_TLS_CA_FILE: "/tmp/ca.crt" }),
+    /material is incomplete/,
+  );
+  assert.equal(await temporalTlsConfigFromEnv({ DEVILUDO_ALLOW_INSECURE_LOCAL_TEMPORAL: "1" }), undefined);
 });
 
 test("command receiver queues once and replays a fully bound receipt", async () => {

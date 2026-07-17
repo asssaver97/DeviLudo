@@ -9,6 +9,7 @@ import {
 import { temporalWebpackConfigHook } from "./bundler";
 import { DELIVERY_TASK_QUEUE } from "./contracts";
 import { mtlsCommandDispatcherFromEnv } from "./mtls-dispatcher";
+import { temporalTlsConfigFromEnv } from "./temporal-tls";
 
 export async function runDeliveryWorker(): Promise<void> {
   const endpoints = deliveryDispatchEndpointsFromEnv();
@@ -19,8 +20,10 @@ export async function runDeliveryWorker(): Promise<void> {
   const dispatcher = allowLocalDispatch
     ? new HttpCommandDispatcher(endpoints)
     : await mtlsCommandDispatcherFromEnv(endpoints);
+  const tls = await temporalTlsConfigFromEnv();
   const connection = await NativeConnection.connect({
     address: process.env.TEMPORAL_ADDRESS ?? "localhost:7233",
+    tls,
   });
   const sourceWorkflow = fileURLToPath(new URL("./workflows/game-delivery.workflow.ts", import.meta.url));
   const compiledWorkflow = fileURLToPath(new URL("./workflows/game-delivery.workflow.js", import.meta.url));
