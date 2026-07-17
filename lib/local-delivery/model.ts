@@ -1,3 +1,5 @@
+import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
+
 export type LocalDeliveryStage =
   | "AWAITING_SPEC_APPROVAL"
   | "AGENT_QUEUED"
@@ -36,6 +38,8 @@ export type LocalValidationSnapshot = {
   valid: boolean;
 };
 
+export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
+
 export type LocalDeliverySnapshot = {
   projectId: string;
   revision: number;
@@ -61,6 +65,7 @@ export type LocalDeliverySnapshot = {
   evidenceValid: boolean;
   targetResults: Record<"linux" | "windows" | "macos", LocalPlatformStatus>;
   steamBranch: "local-password-beta" | null;
+  agentExecution: LocalAgentExecutionSnapshot | null;
   localValidation: LocalValidationSnapshot | null;
   events: LocalDeliveryEvent[];
   updatedAt: string;
@@ -90,7 +95,7 @@ const profile = {
 
 /** Add newly locked fields when reading an older localhost JSON snapshot. */
 export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
-  return { ...snapshot, lockedProfile: { ...profile, ...snapshot.lockedProfile } };
+  return { ...snapshot, agentExecution: snapshot.agentExecution ?? null, lockedProfile: { ...profile, ...snapshot.lockedProfile } };
 }
 
 function now() {
@@ -126,6 +131,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     evidenceValid: false,
     targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
     steamBranch: null,
+    agentExecution: null,
     localValidation: null,
     events: [{ id: "LOCAL-EVT-0001", type: "PROJECT_CREATED", message: "本地项目已创建，等待批准规格。", at }],
     updatedAt: at,
@@ -150,6 +156,7 @@ export function approveLocalSpec(
       evidenceValid: false,
       targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
       steamBranch: null,
+      agentExecution: null,
       localValidation: null,
     },
     "SPEC_APPROVED",
@@ -173,9 +180,47 @@ export function invalidateLocalDelivery(
         Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
       ) as LocalDeliverySnapshot["targetResults"],
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+      agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
     },
     "FEEDBACK_CREATED",
     "用户反馈已创建新规格修订，旧候选证据立即失效。",
+  );
+}
+
+export function recordLocalAgentExecution(
+  current: LocalDeliverySnapshot,
+  receipt: LocalAgentExecutionReceipt,
+): LocalDeliverySnapshot {
+  if (!current.runId || !["AGENT_QUEUED", "AGENT_RUNNING"].includes(current.stage)) {
+    throw new Error("当前交付阶段不能接收 Agent 运行回执");
+  }
+  const locked = current.lockedProfile;
+  if (receipt.projectId !== current.projectId
+    || receipt.runId !== current.runId
+    || receipt.specRevisionId !== current.specRevisionId
+    || receipt.profileRevisionId !== locked.profileRevisionId
+    || receipt.installationId !== locked.installationId
+    || receipt.imageDigest !== locked.imageDigest
+    || receipt.adapterVersion !== locked.adapterVersion
+    || receipt.providerRevisionId !== locked.providerRevisionId
+    || receipt.credentialVersionId !== locked.credentialVersionId
+    || receipt.model !== locked.model
+    || receipt.agent !== locked.agent) {
+    throw new Error("Agent 运行回执与不可变任务锁不一致");
+  }
+  return event(
+    {
+      ...current,
+      stage: "CANDIDATE_READY",
+      candidatePr: receipt.candidate.draftPullRequest,
+      candidateSha: receipt.candidate.commitSha,
+      evidenceValid: false,
+      agentExecution: { ...receipt, valid: true },
+      localValidation: null,
+      targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
+    },
+    "AGENT_CANDIDATE_RECORDED",
+    `${receipt.agent} 已完成；SCM 代理冻结候选提交 ${receipt.candidate.commitSha.slice(0, 7)}，等待 E2E。`,
   );
 }
 

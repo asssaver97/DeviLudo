@@ -59,3 +59,51 @@ export interface LocalAgentPreflightResult {
   readonly model: string;
   readonly message: string;
 }
+
+export interface LocalAgentExecutionRequest extends LocalAgentPreflightRequest {
+  readonly attemptId: string;
+  readonly specRevisionId: string;
+  readonly installationId: string;
+  readonly adapterVersion: string;
+  readonly providerProtocol: "anthropic-messages" | "openai-responses";
+  readonly prompt: string;
+}
+
+export interface LocalAgentExecutionReceipt {
+  readonly schemaVersion: 1;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly specRevisionId: string;
+  readonly profileRevisionId: string;
+  readonly installationId: string;
+  readonly imageDigest: string;
+  readonly adapterVersion: string;
+  readonly providerRevisionId: string;
+  readonly credentialVersionId: string;
+  readonly model: string;
+  readonly agent: AgentKind;
+  readonly status: "completed";
+  readonly sessionId?: string;
+  readonly summary: string;
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly costUsd: number;
+  };
+  readonly warnings: readonly string[];
+  readonly candidate: {
+    readonly scmProxy: "local-git-proxy-v1";
+    readonly branch: string;
+    readonly commitSha: string;
+    readonly sourceDigest: string;
+    readonly changedFiles: readonly string[];
+    readonly draftPullRequest: number | null;
+  };
+  readonly completedAt: string;
+}
+
+/** Implemented only inside an isolated development Worker, never in the Web process. */
+export interface LocalAgentExecutor {
+  execute(request: LocalAgentExecutionRequest): Promise<LocalAgentExecutionReceipt>;
+}

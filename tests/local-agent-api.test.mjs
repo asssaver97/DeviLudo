@@ -1,0 +1,94 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { POST } from "../app/api/projects/[projectId]/agent-run/route.ts";
+import { readLocalDelivery, startLocalDelivery } from "../lib/local-delivery/store.ts";
+
+function receipt(delivery, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    projectId: delivery.projectId,
+    runId: delivery.runId,
+    attemptId: `ATT-${delivery.runId}`,
+    specRevisionId: delivery.specRevisionId,
+    profileRevisionId: delivery.lockedProfile.profileRevisionId,
+    installationId: delivery.lockedProfile.installationId,
+    imageDigest: delivery.lockedProfile.imageDigest,
+    adapterVersion: delivery.lockedProfile.adapterVersion,
+    providerRevisionId: delivery.lockedProfile.providerRevisionId,
+    credentialVersionId: delivery.lockedProfile.credentialVersionId,
+    model: delivery.lockedProfile.model,
+    agent: delivery.lockedProfile.agent,
+    status: "completed",
+    sessionId: "session-local-agent-api",
+    summary: "Completed the approved specification.",
+    usage: { inputTokens: 250, outputTokens: 80, costUsd: 0.31 },
+    warnings: [],
+    candidate: {
+      scmProxy: "local-git-proxy-v1",
+      branch: "deviludo/local-agent-api",
+      commitSha: "a".repeat(40),
+      sourceDigest: "b".repeat(64),
+      changedFiles: ["scripts/game_state.gd"],
+      draftPullRequest: null,
+    },
+    completedAt: "2026-07-18T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function request(projectId, key) {
+  return new Request(`http://127.0.0.1:3000/api/projects/${projectId}/agent-run`, {
+    method: "POST",
+    headers: { "idempotency-key": key },
+  });
+}
+
+test("project Agent route persists only a sidecar receipt bound to the locked run", async () => {
+  const projectId = "agent-api-success";
+  const started = await startLocalDelivery(projectId, "SPEC-020", "RUN-AGENT-API-1", "start-agent-api-success");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ data: receipt(started.snapshot) }, { status: 201 });
+  try {
+    const response = await POST(request(projectId, "execute-agent-api-success"), { params: Promise.resolve({ projectId }) });
+    assert.equal(response.status, 201);
+    const payload = await response.json();
+    assert.equal(payload.delivery.stage, "CANDIDATE_READY");
+    assert.equal(payload.delivery.agentExecution.candidate.commitSha, "a".repeat(40));
+    assert.equal((await readLocalDelivery(projectId)).agentExecution.valid, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("project Agent route rejects a drifted receipt and does not advance delivery", async () => {
+  const projectId = "agent-api-drift";
+  const started = await startLocalDelivery(projectId, "SPEC-021", "RUN-AGENT-API-2", "start-agent-api-drift");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ data: receipt(started.snapshot, { model: "claude-unapproved-model-20260718" }) }, { status: 201 });
+  try {
+    const response = await POST(request(projectId, "execute-agent-api-drift"), { params: Promise.resolve({ projectId }) });
+    assert.equal(response.status, 502);
+    assert.equal((await response.json()).error.code, "INVALID_LOCAL_AGENT_RECEIPT");
+    assert.equal((await readLocalDelivery(projectId)).stage, "AGENT_QUEUED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("project Agent route preserves the exact sidecar gate code", async () => {
+  const projectId = "agent-api-blocked";
+  await startLocalDelivery(projectId, "SPEC-022", "RUN-AGENT-API-3", "start-agent-api-blocked");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    error: { code: "WAITING_PROVIDER", message: "Locked Provider is unavailable" },
+    data: { preflight: { status: "BLOCKED", code: "WAITING_PROVIDER" } },
+  }, { status: 409 });
+  try {
+    const response = await POST(request(projectId, "execute-agent-api-blocked"), { params: Promise.resolve({ projectId }) });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, "WAITING_PROVIDER");
+    assert.equal((await readLocalDelivery(projectId)).stage, "AGENT_QUEUED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -35,7 +35,7 @@ function primaryAction(stage: LocalDeliveryStage): { action: LocalDeliveryAction
   if (stage === "AWAITING_ACCEPTANCE") return { action: "accept", label: "接受候选版本" };
   if (stage === "MFA_REQUIRED") return { action: "confirm-mfa", label: "本地确认 MFA" };
   if (stage === "EXTERNAL_APPROVAL_REQUIRED") return { action: "external-approve", label: "模拟外部批准" };
-  return { action: "advance", label: "推进下一步" };
+  return { action: "advance", label: "推进 Fixture 演示" };
 }
 
 export function LocalDeliveryPanel({
@@ -136,6 +136,29 @@ export function LocalDeliveryPanel({
     }
   }
 
+  async function runAgentExecution() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/agent-run`, {
+        method: "POST",
+        headers: { "idempotency-key": `agent-${snapshot?.runId ?? "pending"}` },
+      });
+      const payload = await response.json() as {
+        delivery?: LocalDeliverySnapshot;
+        data?: { preflight?: LocalAgentPreflightResult };
+        error?: { message?: string };
+      };
+      if (payload.data?.preflight) setAgentPreflight(payload.data.preflight);
+      if (!response.ok || !payload.delivery) throw new Error(payload.error?.message ?? "本机 Agent 运行失败");
+      publish(payload.delivery);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "本机 Agent 运行失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="local-delivery" aria-live="polite">
       <div className="local-delivery-heading">
@@ -182,12 +205,29 @@ export function LocalDeliveryPanel({
             {agentPreflight ? (
               <div className="local-real-validation-result">
                 <span className={agentPreflight.status === "READY" ? "passed" : "waiting"}>{agentPreflight.status === "READY" ? "可以领取任务" : "执行已阻止"}</span>
-                <button className="button button-secondary" disabled={busy} onClick={runAgentPreflight} type="button">重新预检</button>
+                <div>
+                  <button className="button button-secondary" disabled={busy} onClick={runAgentPreflight} type="button">重新预检</button>
+                  {agentPreflight.status === "READY" ? <button className="button button-primary" disabled={busy} onClick={runAgentExecution} type="button">启动真实 Agent</button> : null}
+                </div>
               </div>
             ) : snapshot.runId ? (
               <button className="button button-secondary" disabled={busy} onClick={runAgentPreflight} type="button">{busy ? "正在预检…" : "检查真实 Agent"}</button>
             ) : <span className="local-real-validation-wait">批准规格后可预检</span>}
           </div>
+
+          {snapshot.agentExecution ? (
+            <div className={`local-real-validation ${snapshot.agentExecution.valid ? "ready" : "pending"}`}>
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">Agent + SCM 运行回执</span>
+                <h3>{snapshot.agentExecution.candidate.commitSha.slice(0, 12)}</h3>
+                <p>{snapshot.agentExecution.summary}</p>
+              </div>
+              <div className="local-real-validation-result">
+                <span className={snapshot.agentExecution.valid ? "passed" : "waiting"}>{snapshot.agentExecution.valid ? "候选已冻结" : "回执已失效"}</span>
+                <div>{snapshot.agentExecution.candidate.changedFiles.length} 个文件 · ${snapshot.agentExecution.usage.costUsd.toFixed(4)}</div>
+              </div>
+            </div>
+          ) : null}
 
           <div className={`local-real-validation ${snapshot.localValidation?.valid ? "ready" : "pending"}`}>
             <div className="local-real-validation-copy">

@@ -164,7 +164,7 @@ const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin, adminState, runtime, agentRuntime, agentPreflight] = await Promise.all([
+  const [home, admin, adminState, runtime, agentRuntime, agentPreflight, agentExecutionGate] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     request(baseUrl, "/api/admin/agents"),
@@ -183,6 +183,27 @@ try {
         providerRevisionId: "provider-platform-claude-r1",
         credentialVersionId: "credential-platform-claude-v1",
         model: "claude-sonnet-4-6-20250514",
+      }),
+    }),
+    request(agentRuntimeUrl, "/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
+      body: JSON.stringify({
+        projectId: "smoke-project",
+        runId: "smoke-run",
+        attemptId: "smoke-attempt",
+        specRevisionId: "SPEC-001",
+        profileRevisionId: "profile-claude-platform-r5",
+        installationId: "claude-installation-214",
+        agent: "claude-code",
+        expectedVersion: "2.1.14",
+        imageDigest: `sha256:${"a".repeat(64)}`,
+        adapterVersion: "1.0.0",
+        providerRevisionId: "provider-platform-claude-r1",
+        providerProtocol: "anthropic-messages",
+        credentialVersionId: "credential-platform-claude-v1",
+        model: "claude-sonnet-4-6-20250514",
+        prompt: "Smoke contract only; execution must remain gated.",
       }),
     }),
   ]);
@@ -206,6 +227,11 @@ try {
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
     throw new Error("local Agent preflight contract failed");
   }
+  const executionGatePayload = await agentExecutionGate.response.json();
+  if (![409, 503].includes(agentExecutionGate.response.status)
+    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"].includes(executionGatePayload.error?.code)) {
+    throw new Error("local Agent execution gate did not fail closed");
+  }
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
@@ -214,6 +240,7 @@ try {
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
+  console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log("[local:smoke] All local smoke checks passed.");
 } catch (error) {
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);

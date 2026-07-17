@@ -5,6 +5,7 @@ import {
   approveLocalSpec,
   createLocalDelivery,
   invalidateLocalDelivery,
+  recordLocalAgentExecution,
   recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
 
@@ -97,4 +98,47 @@ test("reset keeps event revisions monotonic for the persistent D1 audit log", ()
   assert.equal(state.events[0].id, `LOCAL-EVT-${String(state.revision).padStart(4, "0")}`);
   assert.equal(state.events[0].type, "DELIVERY_RESET");
   assert.equal(state.events[1].type, "SPEC_APPROVED");
+});
+
+test("a completed Agent receipt must match every immutable lock before becoming a candidate", () => {
+  let state = approveLocalSpec(createLocalDelivery("project-agent"), "SPEC-012", "RUN-AGENT-001");
+  const receipt = {
+    schemaVersion: 1,
+    projectId: state.projectId,
+    runId: state.runId,
+    attemptId: "ATT-RUN-AGENT-001",
+    specRevisionId: state.specRevisionId,
+    profileRevisionId: state.lockedProfile.profileRevisionId,
+    installationId: state.lockedProfile.installationId,
+    imageDigest: state.lockedProfile.imageDigest,
+    adapterVersion: state.lockedProfile.adapterVersion,
+    providerRevisionId: state.lockedProfile.providerRevisionId,
+    credentialVersionId: state.lockedProfile.credentialVersionId,
+    model: state.lockedProfile.model,
+    agent: state.lockedProfile.agent,
+    status: "completed",
+    summary: "Implemented the approved immutable specification.",
+    usage: { inputTokens: 400, outputTokens: 120, costUsd: 0.42 },
+    warnings: [],
+    candidate: {
+      scmProxy: "local-git-proxy-v1",
+      branch: "deviludo/run-agent-001",
+      commitSha: "a".repeat(40),
+      sourceDigest: "b".repeat(64),
+      changedFiles: ["scripts/game_state.gd"],
+      draftPullRequest: null,
+    },
+    completedAt: "2026-07-18T00:00:00.000Z",
+  };
+  assert.throws(
+    () => recordLocalAgentExecution(state, { ...receipt, credentialVersionId: "credential-other-v2" }),
+    /不可变任务锁/,
+  );
+  state = recordLocalAgentExecution(state, receipt);
+  assert.equal(state.stage, "CANDIDATE_READY");
+  assert.equal(state.candidateSha, receipt.candidate.commitSha);
+  assert.equal(state.agentExecution.valid, true);
+  assert.equal(state.events[0].type, "AGENT_CANDIDATE_RECORDED");
+  state = invalidateLocalDelivery(state, "SPEC-013");
+  assert.equal(state.agentExecution.valid, false);
 });

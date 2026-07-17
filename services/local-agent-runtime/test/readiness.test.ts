@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { LocalAgentExecutionReceipt } from "../src/contracts";
+import { LocalAgentExecutionService } from "../src/execution";
 import { LocalAgentReadinessService } from "../src/readiness";
 
 const digest = `sha256:${"c".repeat(64)}`;
@@ -14,6 +16,59 @@ const preflight = {
   credentialVersionId: "credential-claude-v1",
   model: "claude-sonnet-4-6-20250514",
 };
+const execution = {
+  ...preflight,
+  attemptId: "attempt-1",
+  specRevisionId: "SPEC-001",
+  installationId: "claude-installation-214",
+  adapterVersion: "1.0.0",
+  providerProtocol: "anthropic-messages" as const,
+  prompt: "Implement the approved immutable game specification.",
+};
+
+function readyService() {
+  return new LocalAgentReadinessService({
+    inspector: { async inspect(executable) { return executable === "claude" ? "2.1.14" : "0.91.0"; } },
+    executionEnabled: true,
+    inferenceGatewayUrl: "https://inference.internal.example/v1",
+    workerImageIdentity: digest,
+    expectedWorkerImageIdentity: digest,
+    providerBindingVerifier: { async verify() { return true; } },
+  });
+}
+
+function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgentExecutionReceipt {
+  return {
+    schemaVersion: 1 as const,
+    projectId: execution.projectId,
+    runId: execution.runId,
+    attemptId: execution.attemptId,
+    specRevisionId: execution.specRevisionId,
+    profileRevisionId: execution.profileRevisionId,
+    installationId: execution.installationId,
+    imageDigest: execution.imageDigest,
+    adapterVersion: execution.adapterVersion,
+    providerRevisionId: execution.providerRevisionId,
+    credentialVersionId: execution.credentialVersionId,
+    model: execution.model,
+    agent: execution.agent,
+    status: "completed" as const,
+    sessionId: "session-1",
+    summary: "Implemented the approved fixture.",
+    usage: { inputTokens: 120, outputTokens: 48, costUsd: 0.21 },
+    warnings: [],
+    candidate: {
+      scmProxy: "local-git-proxy-v1" as const,
+      branch: "deviludo/run-1-attempt-1",
+      commitSha: "a".repeat(40),
+      sourceDigest: "b".repeat(64),
+      changedFiles: ["scripts/game_state.gd"],
+      draftPullRequest: null,
+    },
+    completedAt: "2026-07-18T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 test("reports exact local CLI matches without claiming execution readiness", async () => {
   const service = new LocalAgentReadinessService({
@@ -101,4 +156,37 @@ test("does not expose probe errors and rejects floating expected versions", asyn
   assert.equal(health.status, "degraded");
   assert.ok(health.agents.every((agent) => agent.state === "UNAVAILABLE" && agent.observedVersion === null));
   assert.throws(() => new LocalAgentReadinessService({ claudeVersion: "latest" }), /exact versions/);
+});
+
+test("execution cannot reach an executor until every preflight gate is ready", async () => {
+  let calls = 0;
+  const blocked = new LocalAgentExecutionService({
+    readiness: new LocalAgentReadinessService({ inspector: { async inspect() { return "2.1.201"; } } }),
+    executor: { async execute() { calls += 1; return receipt(); } },
+  });
+  const outcome = await blocked.execute(execution);
+  assert.equal(outcome.state, "BLOCKED");
+  assert.equal(outcome.state === "BLOCKED" ? outcome.preflight.code : null, "INSTALLATION_MISMATCH");
+  assert.equal(calls, 0);
+
+  const missing = await new LocalAgentExecutionService({ readiness: readyService() }).execute(execution);
+  assert.equal(missing.state, "EXECUTOR_NOT_CONFIGURED");
+});
+
+test("execution accepts only a complete receipt bound to the immutable lock", async () => {
+  const service = new LocalAgentExecutionService({
+    readiness: readyService(),
+    executor: { async execute() { return receipt(); } },
+  });
+  const outcome = await service.execute(execution);
+  assert.equal(outcome.state, "COMPLETED");
+  if (outcome.state !== "COMPLETED") return;
+  assert.equal(outcome.receipt.candidate.commitSha.length, 40);
+  assert.equal(Object.isFrozen(outcome.receipt.candidate.changedFiles), true);
+
+  const drifted = new LocalAgentExecutionService({
+    readiness: readyService(),
+    executor: { async execute() { return receipt({ credentialVersionId: "credential-other-v2" }); } },
+  });
+  await assert.rejects(drifted.execute(execution), /immutable run lock/);
 });

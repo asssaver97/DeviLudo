@@ -4,11 +4,13 @@ import {
   createLocalDelivery,
   invalidateLocalDelivery,
   normalizeLocalDeliverySnapshot,
+  recordLocalAgentExecution,
   recordLocalValidation,
   type LocalDeliveryAction,
   type LocalDeliverySnapshot,
   type LocalValidationSnapshot,
 } from "./model";
+import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
 
 type SnapshotRow = { snapshot: string };
 type CommandRow = { response: string };
@@ -241,4 +243,12 @@ export async function saveLocalValidation(
   commandKey: string,
 ): Promise<MutationResult> {
   return mutate(projectId, commandKey, (current) => recordLocalValidation(current, validation));
+}
+
+export async function saveLocalAgentExecution(
+  projectId: string,
+  receipt: LocalAgentExecutionReceipt,
+  commandKey: string,
+): Promise<MutationResult> {
+  return mutate(projectId, commandKey, (current) => recordLocalAgentExecution(current, receipt));
 }
