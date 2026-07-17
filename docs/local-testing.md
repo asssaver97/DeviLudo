@@ -29,7 +29,7 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 在项目页批准规格后，点击“运行真实本机验证”。侧车会：
 
 1. 将固定 Godot 样例复制到 `.deviludo/local-runtime/<project>/<run>/workspace`；
-2. 初始化隔离的真实 Git 仓库并提交锁定规格；
+2. 通过 SCM 代理在工作区外初始化 base Git 元数据，再由代理提交样例候选并生成 base/candidate SHA 与 tree digest；
 3. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
 4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml` 和 `godot.log`。
 

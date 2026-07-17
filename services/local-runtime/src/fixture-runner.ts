@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, cp, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
 import type { LocalRuntimeCheck, LocalRuntimeEvidence, LocalRuntimeRequest } from "./contracts";
 
 const execFileAsync = promisify(execFile);
@@ -24,6 +25,7 @@ export class LocalFixtureRunner {
   readonly #storageRoot: string;
   readonly #godotBinary: string;
   readonly #gitBinary: string;
+  readonly #scmProxy: LocalGitScmProxy;
 
   constructor(options: {
     repositoryRoot: string;
@@ -37,6 +39,7 @@ export class LocalFixtureRunner {
     this.#storageRoot = path.resolve(options.storageRoot ?? path.join(this.#repositoryRoot, ".deviludo/local-runtime"));
     this.#godotBinary = path.resolve(options.godotBinary ?? "/Applications/Godot.app/Contents/MacOS/Godot");
     this.#gitBinary = path.resolve(options.gitBinary ?? "/usr/bin/git");
+    this.#scmProxy = new LocalGitScmProxy({ storageRoot: this.#storageRoot, gitBinary: this.#gitBinary });
   }
 
   get storageRoot() { return this.#storageRoot; }
@@ -80,10 +83,26 @@ export class LocalFixtureRunner {
     const workspace = path.join(runRoot, "workspace");
     const evidence = path.join(runRoot, "evidence");
     const runtimeHome = path.join(runRoot, "home");
-    await archivePartialRun(runRoot);
+    await archivePartialRun(runRoot, path.join(this.#storageRoot, ".scm", request.projectId, request.runId));
     await mkdir(evidence, { recursive: true });
     await mkdir(runtimeHome, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+
+    const scmBinding = {
+      projectId: request.projectId,
+      runId: request.runId,
+      attemptId: "fixture-attempt-1",
+      specRevisionId: request.specRevisionId,
+      workspaceRoot: workspace,
+    };
+    const base = await this.#scmProxy.prepare(scmBinding);
     await cp(this.#fixtureRoot, workspace, { recursive: true, force: false });
+    const candidate = await this.#scmProxy.finalize({
+      ...scmBinding,
+      expectedBaseCommitSha: base.baseCommitSha,
+      candidateBranch: `deviludo/local/${sha256(`${request.projectId}:${request.runId}`).slice(0, 16)}`,
+      commitMessage: `fixture: implement ${request.specRevisionId}`,
+    });
 
     const environment: NodeJS.ProcessEnv = {
       NODE_ENV: "test",
@@ -92,16 +111,9 @@ export class LocalFixtureRunner {
       HOME: runtimeHome,
       TMPDIR: os.tmpdir(),
     };
-    const log: string[] = [];
-    const git = async (args: string[]) => this.#checked(this.#gitBinary, args, workspace, environment, log);
-    await git(["init", "--initial-branch=main"]);
-    await git(["config", "user.name", "DeviLudo Local Fixture"]);
-    await git(["config", "user.email", "local-fixture@deviludo.invalid"]);
-    await git(["add", "."]);
-    await git(["commit", "-m", `fixture: implement ${request.specRevisionId}`]);
-    const sha = await git(["rev-parse", "HEAD"]);
-    const candidateSha = sha.stdout.trim();
-    const sourceDigest = await digestTree(workspace);
+    const log: string[] = [`[scm-proxy] base=${base.baseCommitSha} candidate=${candidate.commitSha} source=${candidate.sourceDigest}`];
+    const candidateSha = candidate.commitSha;
+    const sourceDigest = candidate.sourceDigest;
     const godotVersion = await this.godotVersion();
 
     const checks: LocalRuntimeCheck[] = [];
@@ -249,33 +261,20 @@ function validateIdentifier(value: string, name: string) {
   if (!IDENTIFIER.test(value)) throw new Error(`${name} is invalid`);
 }
 
-async function archivePartialRun(runRoot: string) {
+async function archivePartialRun(runRoot: string, scmRunRoot: string) {
+  const suffix = `.partial-${Date.now()}`;
   try {
     await access(runRoot);
-    await rename(runRoot, `${runRoot}.partial-${Date.now()}`);
+    await rename(runRoot, `${runRoot}${suffix}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-}
-
-async function digestTree(root: string) {
-  const hash = createHash("sha256");
-  async function visit(directory: string) {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (entry.name === ".git" || entry.name === ".godot") continue;
-      const absolute = path.join(directory, entry.name);
-      const relative = path.relative(root, absolute).split(path.sep).join("/");
-      if (entry.isDirectory()) await visit(absolute);
-      else if (entry.isFile()) {
-        hash.update(relative);
-        hash.update(await readFile(absolute));
-      }
-    }
+  try {
+    await access(scmRunRoot);
+    await rename(scmRunRoot, `${scmRunRoot}${suffix}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await visit(root);
-  return hash.digest("hex");
 }
 
 function sha256(value: string) { return createHash("sha256").update(value).digest("hex"); }

@@ -61,20 +61,31 @@ export interface LocalAgentPreflightResult {
 }
 
 export interface LocalAgentExecutionRequest extends LocalAgentPreflightRequest {
+  readonly tenantId: string;
   readonly attemptId: string;
   readonly specRevisionId: string;
+  readonly testPlanRevisionId: string;
   readonly installationId: string;
   readonly adapterVersion: string;
   readonly providerProtocol: "anthropic-messages" | "openai-responses";
+  readonly budget: {
+    readonly maxTurns: number;
+    readonly maxCostUsd: number;
+    readonly maxInputTokens: number;
+    readonly maxOutputTokens: number;
+  };
+  readonly timeoutSeconds: number;
   readonly prompt: string;
 }
 
 export interface LocalAgentExecutionReceipt {
   readonly schemaVersion: 1;
+  readonly tenantId: string;
   readonly projectId: string;
   readonly runId: string;
   readonly attemptId: string;
   readonly specRevisionId: string;
+  readonly testPlanRevisionId: string;
   readonly profileRevisionId: string;
   readonly installationId: string;
   readonly imageDigest: string;
@@ -83,6 +94,8 @@ export interface LocalAgentExecutionReceipt {
   readonly credentialVersionId: string;
   readonly model: string;
   readonly agent: AgentKind;
+  readonly budget: LocalAgentExecutionRequest["budget"];
+  readonly timeoutSeconds: number;
   readonly status: "completed";
   readonly sessionId?: string;
   readonly summary: string;
@@ -95,6 +108,7 @@ export interface LocalAgentExecutionReceipt {
   readonly candidate: {
     readonly scmProxy: "local-git-proxy-v1";
     readonly branch: string;
+    readonly baseCommitSha: string;
     readonly commitSha: string;
     readonly sourceDigest: string;
     readonly changedFiles: readonly string[];

@@ -18,11 +18,15 @@ const preflight = {
 };
 const execution = {
   ...preflight,
+  tenantId: "tenant-1",
   attemptId: "attempt-1",
   specRevisionId: "SPEC-001",
+  testPlanRevisionId: "godot-testkit-1.0.0",
   installationId: "claude-installation-214",
   adapterVersion: "1.0.0",
   providerProtocol: "anthropic-messages" as const,
+  budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 },
+  timeoutSeconds: 7200,
   prompt: "Implement the approved immutable game specification.",
 };
 
@@ -40,10 +44,12 @@ function readyService() {
 function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgentExecutionReceipt {
   return {
     schemaVersion: 1 as const,
+    tenantId: execution.tenantId,
     projectId: execution.projectId,
     runId: execution.runId,
     attemptId: execution.attemptId,
     specRevisionId: execution.specRevisionId,
+    testPlanRevisionId: execution.testPlanRevisionId,
     profileRevisionId: execution.profileRevisionId,
     installationId: execution.installationId,
     imageDigest: execution.imageDigest,
@@ -52,6 +58,8 @@ function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgen
     credentialVersionId: execution.credentialVersionId,
     model: execution.model,
     agent: execution.agent,
+    budget: execution.budget,
+    timeoutSeconds: execution.timeoutSeconds,
     status: "completed" as const,
     sessionId: "session-1",
     summary: "Implemented the approved fixture.",
@@ -60,6 +68,7 @@ function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgen
     candidate: {
       scmProxy: "local-git-proxy-v1" as const,
       branch: "deviludo/run-1-attempt-1",
+      baseCommitSha: "c".repeat(40),
       commitSha: "a".repeat(40),
       sourceDigest: "b".repeat(64),
       changedFiles: ["scripts/game_state.gd"],

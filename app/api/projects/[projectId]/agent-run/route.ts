@@ -22,10 +22,12 @@ export async function POST(
     const locked = delivery.lockedProfile;
     const attemptId = `ATT-${delivery.runId}`;
     const executionRequest = {
+      tenantId: "tenant-local",
       projectId,
       runId: delivery.runId,
       attemptId,
       specRevisionId: delivery.specRevisionId,
+      testPlanRevisionId: locked.testPlanRevisionId,
       profileRevisionId: locked.profileRevisionId,
       installationId: locked.installationId,
       agent: locked.agent,
@@ -36,6 +38,8 @@ export async function POST(
       providerProtocol: locked.providerProtocol,
       credentialVersionId: locked.credentialVersionId,
       model: locked.model,
+      budget: locked.budget,
+      timeoutSeconds: locked.timeoutSeconds,
       prompt: `Implement the approved immutable game specification ${delivery.specRevisionId}. Do not modify platform test policy, credentials, hooks, plugins, MCP configuration, or files outside the workspace.`,
     };
 
@@ -75,9 +79,11 @@ function validateReceipt(
   value: unknown,
   expected: {
     projectId: string;
+    tenantId: string;
     runId: string;
     attemptId: string;
     specRevisionId: string;
+    testPlanRevisionId: string;
     profileRevisionId: string;
     installationId: string;
     imageDigest: string;
@@ -86,26 +92,38 @@ function validateReceipt(
     credentialVersionId: string;
     model: string;
     agent: string;
+    budget: { maxTurns: number; maxCostUsd: number; maxInputTokens: number; maxOutputTokens: number };
+    timeoutSeconds: number;
   },
 ): LocalAgentExecutionReceipt {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("本机 Agent 运行回执无效");
   const receipt = value as Record<string, unknown>;
-  for (const key of ["projectId", "runId", "attemptId", "specRevisionId", "profileRevisionId", "installationId", "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "agent"] as const) {
+  for (const key of ["tenantId", "projectId", "runId", "attemptId", "specRevisionId", "testPlanRevisionId", "profileRevisionId", "installationId", "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "agent", "timeoutSeconds"] as const) {
     if (receipt[key] !== expected[key]) throw new Error("本机 Agent 运行回执与锁定任务不一致");
   }
   const candidate = object(receipt.candidate);
   const usage = object(receipt.usage);
+  const budget = object(receipt.budget);
   if (receipt.schemaVersion !== 1 || receipt.status !== "completed"
     || typeof receipt.summary !== "string" || !receipt.summary || receipt.summary.length > 4_000
     || (receipt.sessionId !== undefined && (typeof receipt.sessionId !== "string" || receipt.sessionId.length > 256))
     || !Number.isSafeInteger(usage.inputTokens) || (usage.inputTokens as number) < 0
     || !Number.isSafeInteger(usage.outputTokens) || (usage.outputTokens as number) < 0
     || typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0
+    || (usage.inputTokens as number) > expected.budget.maxInputTokens
+    || (usage.outputTokens as number) > expected.budget.maxOutputTokens
+    || usage.costUsd > expected.budget.maxCostUsd
     || candidate.scmProxy !== "local-git-proxy-v1"
     || typeof candidate.branch !== "string" || !validCandidateBranch(candidate.branch)
+    || typeof candidate.baseCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(candidate.baseCommitSha)
     || typeof candidate.commitSha !== "string" || !/^[a-f0-9]{40}$/.test(candidate.commitSha)
+    || candidate.baseCommitSha === candidate.commitSha
     || typeof candidate.sourceDigest !== "string" || !/^[a-f0-9]{64}$/.test(candidate.sourceDigest)
     || candidate.draftPullRequest !== null
+    || budget.maxTurns !== expected.budget.maxTurns
+    || budget.maxCostUsd !== expected.budget.maxCostUsd
+    || budget.maxInputTokens !== expected.budget.maxInputTokens
+    || budget.maxOutputTokens !== expected.budget.maxOutputTokens
     || !validChangedFiles(candidate.changedFiles)
     || !validStrings(receipt.warnings, 100, 1_000)
     || typeof receipt.completedAt !== "string" || !Number.isFinite(Date.parse(receipt.completedAt))) {

@@ -20,8 +20,10 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
 - `services/inference-gateway`：短期 run token、不可变运行注册表、精确 Provider/凭据/模型、累计预算与逐请求 DNS/SSRF 门禁；未配置可信 Vault/DNS-pinning Connector 时拒绝推理请求。
+- `services/scm-proxy`：无网络的本地 SCM 信任边界；Git 元数据位于 Agent 工作区之外，禁用 shell、hooks、credential helper、file protocol 与全局配置，拒绝 symlink/嵌套 `.git`/特殊文件，并生成权威 base/candidate SHA、changed-files 与 SHA-256 tree digest。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
 - `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`/v1/runs` 必须复用预检，默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
+- `IsolatedLocalAgentExecutor`：把 Claude/Codex Adapter、短期 token broker、Agent Worker 监督器和 SCM 代理组合成一次尝试；完成回执固定租户、测试计划、turn/cost/token 预算、超时和 base/candidate 提交。服务端只有在注入可信 workspace provisioner 与 token broker 后才能启用它。
 - 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。完成回执必须再次绑定全部锁定字段以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态。
 - `db`、`drizzle`：26 张 D1 Beta 表、不可变触发器及本地交付事件迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
@@ -136,7 +138,7 @@ lib/agent/              Provider/Profile/事件协议
 lib/security/           SSRF、凭据、短期 token
 lib/orchestration/      确定性交付工作流
 adapters/               Claude Code / Codex CLI Adapter
-services/               NestJS/Fastify、Temporal 与 Agent Worker 生产入口
+services/               控制面、Temporal、Agent Worker、Inference Gateway 与 SCM 代理
 fixtures/               固定 Godot 本机验证样例与测试脚本
 db/ + drizzle/          D1 Beta schema/migrations
 infra/                  Postgres/Temporal/Redis/S3/Vault/OTel

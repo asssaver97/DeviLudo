@@ -58,6 +58,14 @@ export type LocalDeliverySnapshot = {
     providerProtocol: "anthropic-messages";
     credentialVersionId: "credential-platform-claude-v1";
     model: "claude-sonnet-4-6-20250514";
+    testPlanRevisionId: "godot-testkit-1.0.0";
+    budget: {
+      maxTurns: 64;
+      maxCostUsd: 25;
+      maxInputTokens: 200000;
+      maxOutputTokens: 50000;
+    };
+    timeoutSeconds: 7200;
   };
   candidatePr: number | null;
   candidateSha: string | null;
@@ -91,11 +99,27 @@ const profile = {
   providerProtocol: "anthropic-messages" as const,
   credentialVersionId: "credential-platform-claude-v1" as const,
   model: "claude-sonnet-4-6-20250514" as const,
+  testPlanRevisionId: "godot-testkit-1.0.0" as const,
+  budget: {
+    maxTurns: 64 as const,
+    maxCostUsd: 25 as const,
+    maxInputTokens: 200000 as const,
+    maxOutputTokens: 50000 as const,
+  },
+  timeoutSeconds: 7200 as const,
 };
 
 /** Add newly locked fields when reading an older localhost JSON snapshot. */
 export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
-  return { ...snapshot, agentExecution: snapshot.agentExecution ?? null, lockedProfile: { ...profile, ...snapshot.lockedProfile } };
+  return {
+    ...snapshot,
+    agentExecution: snapshot.agentExecution ?? null,
+    lockedProfile: {
+      ...profile,
+      ...snapshot.lockedProfile,
+      budget: { ...profile.budget, ...snapshot.lockedProfile?.budget },
+    },
+  };
 }
 
 function now() {
@@ -195,9 +219,11 @@ export function recordLocalAgentExecution(
     throw new Error("当前交付阶段不能接收 Agent 运行回执");
   }
   const locked = current.lockedProfile;
-  if (receipt.projectId !== current.projectId
+  if (receipt.tenantId !== "tenant-local"
+    || receipt.projectId !== current.projectId
     || receipt.runId !== current.runId
     || receipt.specRevisionId !== current.specRevisionId
+    || receipt.testPlanRevisionId !== locked.testPlanRevisionId
     || receipt.profileRevisionId !== locked.profileRevisionId
     || receipt.installationId !== locked.installationId
     || receipt.imageDigest !== locked.imageDigest
@@ -207,6 +233,13 @@ export function recordLocalAgentExecution(
     || receipt.model !== locked.model
     || receipt.agent !== locked.agent) {
     throw new Error("Agent 运行回执与不可变任务锁不一致");
+  }
+  if (receipt.timeoutSeconds !== locked.timeoutSeconds
+    || receipt.budget.maxTurns !== locked.budget.maxTurns
+    || receipt.budget.maxCostUsd !== locked.budget.maxCostUsd
+    || receipt.budget.maxInputTokens !== locked.budget.maxInputTokens
+    || receipt.budget.maxOutputTokens !== locked.budget.maxOutputTokens) {
+    throw new Error("Agent 运行回执预算与不可变任务锁不一致");
   }
   return event(
     {

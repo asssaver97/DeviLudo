@@ -6,10 +6,12 @@ import { readLocalDelivery, startLocalDelivery } from "../lib/local-delivery/sto
 function receipt(delivery, overrides = {}) {
   return {
     schemaVersion: 1,
+    tenantId: "tenant-local",
     projectId: delivery.projectId,
     runId: delivery.runId,
     attemptId: `ATT-${delivery.runId}`,
     specRevisionId: delivery.specRevisionId,
+    testPlanRevisionId: delivery.lockedProfile.testPlanRevisionId,
     profileRevisionId: delivery.lockedProfile.profileRevisionId,
     installationId: delivery.lockedProfile.installationId,
     imageDigest: delivery.lockedProfile.imageDigest,
@@ -18,6 +20,8 @@ function receipt(delivery, overrides = {}) {
     credentialVersionId: delivery.lockedProfile.credentialVersionId,
     model: delivery.lockedProfile.model,
     agent: delivery.lockedProfile.agent,
+    budget: delivery.lockedProfile.budget,
+    timeoutSeconds: delivery.lockedProfile.timeoutSeconds,
     status: "completed",
     sessionId: "session-local-agent-api",
     summary: "Completed the approved specification.",
@@ -26,6 +30,7 @@ function receipt(delivery, overrides = {}) {
     candidate: {
       scmProxy: "local-git-proxy-v1",
       branch: "deviludo/local-agent-api",
+      baseCommitSha: "c".repeat(40),
       commitSha: "a".repeat(40),
       sourceDigest: "b".repeat(64),
       changedFiles: ["scripts/game_state.gd"],

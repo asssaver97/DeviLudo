@@ -104,10 +104,12 @@ test("a completed Agent receipt must match every immutable lock before becoming 
   let state = approveLocalSpec(createLocalDelivery("project-agent"), "SPEC-012", "RUN-AGENT-001");
   const receipt = {
     schemaVersion: 1,
+    tenantId: "tenant-local",
     projectId: state.projectId,
     runId: state.runId,
     attemptId: "ATT-RUN-AGENT-001",
     specRevisionId: state.specRevisionId,
+    testPlanRevisionId: state.lockedProfile.testPlanRevisionId,
     profileRevisionId: state.lockedProfile.profileRevisionId,
     installationId: state.lockedProfile.installationId,
     imageDigest: state.lockedProfile.imageDigest,
@@ -116,6 +118,8 @@ test("a completed Agent receipt must match every immutable lock before becoming 
     credentialVersionId: state.lockedProfile.credentialVersionId,
     model: state.lockedProfile.model,
     agent: state.lockedProfile.agent,
+    budget: state.lockedProfile.budget,
+    timeoutSeconds: state.lockedProfile.timeoutSeconds,
     status: "completed",
     summary: "Implemented the approved immutable specification.",
     usage: { inputTokens: 400, outputTokens: 120, costUsd: 0.42 },
@@ -123,6 +127,7 @@ test("a completed Agent receipt must match every immutable lock before becoming 
     candidate: {
       scmProxy: "local-git-proxy-v1",
       branch: "deviludo/run-agent-001",
+      baseCommitSha: "c".repeat(40),
       commitSha: "a".repeat(40),
       sourceDigest: "b".repeat(64),
       changedFiles: ["scripts/game_state.gd"],

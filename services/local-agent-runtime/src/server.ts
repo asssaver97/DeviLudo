@@ -71,11 +71,15 @@ async function readExecutionRequest(request: IncomingMessage): Promise<LocalAgen
   const item = await readObject(request);
   return {
     ...preflightFrom(item),
+    tenantId: requireString(item.tenantId),
     attemptId: requireString(item.attemptId),
     specRevisionId: requireString(item.specRevisionId),
+    testPlanRevisionId: requireString(item.testPlanRevisionId),
     installationId: requireString(item.installationId),
     adapterVersion: requireString(item.adapterVersion),
     providerProtocol: requireProtocol(item.providerProtocol),
+    budget: requireBudget(item.budget),
+    timeoutSeconds: requireInteger(item.timeoutSeconds),
     prompt: requireString(item.prompt, 64 * 1024),
   };
 }
@@ -128,6 +132,27 @@ function requireAgent(value: unknown): "claude-code" | "codex-cli" {
 
 function requireProtocol(value: unknown): LocalAgentExecutionRequest["providerProtocol"] {
   if (value !== "anthropic-messages" && value !== "openai-responses") throw new LocalRequestError("Local Agent protocol is invalid");
+  return value;
+}
+
+function requireBudget(value: unknown): LocalAgentExecutionRequest["budget"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new LocalRequestError("Local Agent budget is invalid");
+  const budget = value as Record<string, unknown>;
+  return {
+    maxTurns: requireInteger(budget.maxTurns),
+    maxCostUsd: requireNumber(budget.maxCostUsd),
+    maxInputTokens: requireInteger(budget.maxInputTokens),
+    maxOutputTokens: requireInteger(budget.maxOutputTokens),
+  };
+}
+
+function requireInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value)) throw new LocalRequestError("Local Agent integer field is invalid");
+  return value as number;
+}
+
+function requireNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new LocalRequestError("Local Agent number field is invalid");
   return value;
 }
 

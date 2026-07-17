@@ -39,7 +39,7 @@ export class LocalAgentExecutionService {
 }
 
 function validateExecutionRequest(request: LocalAgentExecutionRequest): void {
-  for (const value of [request.attemptId, request.specRevisionId, request.installationId, request.adapterVersion]) {
+  for (const value of [request.tenantId, request.attemptId, request.specRevisionId, request.testPlanRevisionId, request.installationId, request.adapterVersion]) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new LocalAgentExecutionRequestError("Local Agent execution binding is invalid");
   }
   if (request.prompt.length < 1 || request.prompt.length > 64 * 1024 || request.prompt.includes("\0")) {
@@ -47,15 +47,23 @@ function validateExecutionRequest(request: LocalAgentExecutionRequest): void {
   }
   const expectedProtocol = request.agent === "claude-code" ? "anthropic-messages" : "openai-responses";
   if (request.providerProtocol !== expectedProtocol) throw new LocalAgentExecutionRequestError("Local Agent execution protocol does not match the locked Agent");
+  if (!validBudget(request.budget)
+    || !Number.isSafeInteger(request.timeoutSeconds)
+    || request.timeoutSeconds < 60
+    || request.timeoutSeconds > 14_400) {
+    throw new LocalAgentExecutionRequestError("Local Agent execution budget or timeout is invalid");
+  }
 }
 
 function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgentExecutionRequest): void {
   if (receipt.schemaVersion !== 1
     || receipt.status !== "completed"
+    || receipt.tenantId !== request.tenantId
     || receipt.projectId !== request.projectId
     || receipt.runId !== request.runId
     || receipt.attemptId !== request.attemptId
     || receipt.specRevisionId !== request.specRevisionId
+    || receipt.testPlanRevisionId !== request.testPlanRevisionId
     || receipt.profileRevisionId !== request.profileRevisionId
     || receipt.installationId !== request.installationId
     || receipt.imageDigest !== request.imageDigest
@@ -63,10 +71,12 @@ function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgen
     || receipt.providerRevisionId !== request.providerRevisionId
     || receipt.credentialVersionId !== request.credentialVersionId
     || receipt.model !== request.model
-    || receipt.agent !== request.agent) {
+    || receipt.agent !== request.agent
+    || receipt.timeoutSeconds !== request.timeoutSeconds
+    || !sameBudget(receipt.budget, request.budget)) {
     throw new Error("Local Agent execution receipt does not match the immutable run lock");
   }
-  if (!receipt.summary || receipt.summary.length > 4_000 || !validUsage(receipt.usage)) {
+  if (!receipt.summary || receipt.summary.length > 4_000 || !validUsage(receipt.usage) || !usageWithinBudget(receipt.usage, request.budget)) {
     throw new Error("Local Agent execution receipt result is invalid");
   }
   if (receipt.sessionId !== undefined && (!receipt.sessionId || receipt.sessionId.length > 256)) {
@@ -77,7 +87,9 @@ function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgen
   }
   if (receipt.candidate.scmProxy !== "local-git-proxy-v1"
     || !validCandidateBranch(receipt.candidate.branch)
+    || !/^[a-f0-9]{40}$/.test(receipt.candidate.baseCommitSha)
     || !/^[a-f0-9]{40}$/.test(receipt.candidate.commitSha)
+    || receipt.candidate.baseCommitSha === receipt.candidate.commitSha
     || !/^[a-f0-9]{64}$/.test(receipt.candidate.sourceDigest)
     || receipt.candidate.draftPullRequest !== null
     || !validChangedFiles(receipt.candidate.changedFiles)) {
@@ -97,6 +109,26 @@ function validUsage(value: LocalAgentExecutionReceipt["usage"]): boolean {
   return Number.isSafeInteger(value.inputTokens) && value.inputTokens >= 0
     && Number.isSafeInteger(value.outputTokens) && value.outputTokens >= 0
     && Number.isFinite(value.costUsd) && value.costUsd >= 0;
+}
+
+function usageWithinBudget(usage: LocalAgentExecutionReceipt["usage"], budget: LocalAgentExecutionRequest["budget"]): boolean {
+  return usage.inputTokens <= budget.maxInputTokens
+    && usage.outputTokens <= budget.maxOutputTokens
+    && usage.costUsd <= budget.maxCostUsd;
+}
+
+function validBudget(value: LocalAgentExecutionRequest["budget"]): boolean {
+  return Number.isSafeInteger(value.maxTurns) && value.maxTurns >= 1 && value.maxTurns <= 200
+    && Number.isFinite(value.maxCostUsd) && value.maxCostUsd > 0 && value.maxCostUsd <= 100
+    && Number.isSafeInteger(value.maxInputTokens) && value.maxInputTokens >= 1 && value.maxInputTokens <= 10_000_000
+    && Number.isSafeInteger(value.maxOutputTokens) && value.maxOutputTokens >= 1 && value.maxOutputTokens <= 1_000_000;
+}
+
+function sameBudget(left: LocalAgentExecutionRequest["budget"], right: LocalAgentExecutionRequest["budget"]): boolean {
+  return left.maxTurns === right.maxTurns
+    && left.maxCostUsd === right.maxCostUsd
+    && left.maxInputTokens === right.maxInputTokens
+    && left.maxOutputTokens === right.maxOutputTokens;
 }
 
 function validChangedFiles(files: readonly string[]): boolean {

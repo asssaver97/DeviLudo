@@ -173,6 +173,24 @@ from the CLI. Upstream traffic is unavailable until a trusted Connector can
 resolve the exact Vault credential, connect only to the validated addresses,
 revalidate redirects and atomically record response usage.
 
+## SCM proxy and candidate provenance
+
+The Agent process never owns a GitHub token and does not create the authoritative
+candidate commit. Before execution, the SCM proxy places Git metadata in a
+platform-owned directory outside the writable workspace and records the exact
+base SHA. After the supervised Agent process terminates, the proxy rejects
+symlinks, special files, nested `.git`, unsafe paths and resource-limit
+violations, then stages the workspace with an absolute Git binary and no shell.
+
+Hooks, credential helpers, terminal prompting, the file protocol and
+global/system Git configuration are disabled. The proxy creates only a validated
+`deviludo/*` branch and returns the base SHA, candidate SHA, authoritative diff
+paths and a SHA-256 digest of the committed tree listing. Adapter file-change
+events are advisory; E2E and delivery state bind to the SCM proxy receipt. The
+local implementation has no remote. A production GitHub adapter must obtain a
+short-lived GitHub App installation token inside a separate connector and retain
+the same immutable receipt contract.
+
 ## Failure behavior and audit requirements
 
 `selectRunnableProfile()` returns `WAITING_PROVIDER` when the primary provider is
