@@ -43,7 +43,7 @@ export class PostgresWorkflowCommandInbox implements WorkflowCommandInbox {
           (idempotency_key, tenant_id, project_id, workflow_id, destination,
            operation, request_digest, claim_token, claim_expires_at)
          VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8::uuid, $9::timestamptz)
-         ON CONFLICT (idempotency_key) DO NOTHING`,
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING`,
         [
           input.idempotencyKey,
           input.tenantId,
@@ -61,9 +61,10 @@ export class PostgresWorkflowCommandInbox implements WorkflowCommandInbox {
                 COALESCE(claim_expires_at > now(), false) AS claim_active,
                 receipt
            FROM deviludo.workflow_command_inbox
-          WHERE idempotency_key = $1
+          WHERE tenant_id = $2::uuid
+            AND idempotency_key = $1
           FOR UPDATE`,
-        [input.idempotencyKey],
+        [input.idempotencyKey, input.tenantId],
       );
       const row = selected.rows[0];
       if (!row) throw new Error("Workflow command claim is not visible in the authorized tenant");
@@ -75,14 +76,15 @@ export class PostgresWorkflowCommandInbox implements WorkflowCommandInbox {
       if (row.claim_token && row.claim_active) return { kind: "BUSY" };
       const reclaimed = await client.query(
         `UPDATE deviludo.workflow_command_inbox
-            SET claim_token = $2::uuid, claim_expires_at = $3::timestamptz,
+            SET claim_token = $3::uuid, claim_expires_at = $4::timestamptz,
                 updated_at = now()
-          WHERE idempotency_key = $1
-            AND request_digest = $4
+          WHERE tenant_id = $2::uuid
+            AND idempotency_key = $1
+            AND request_digest = $5
             AND receipt_id IS NULL
             AND (claim_token IS NULL OR claim_expires_at <= now())
         RETURNING idempotency_key`,
-        [input.idempotencyKey, input.claimToken, input.claimExpiresAt, input.requestDigest],
+        [input.idempotencyKey, input.tenantId, input.claimToken, input.claimExpiresAt, input.requestDigest],
       );
       if (reclaimed.rowCount !== 1) return { kind: "BUSY" };
       return { kind: "ACQUIRED" };
@@ -94,15 +96,17 @@ export class PostgresWorkflowCommandInbox implements WorkflowCommandInbox {
       const completed = await client.query(
         `UPDATE deviludo.workflow_command_inbox
             SET claim_token = NULL, claim_expires_at = NULL,
-                receipt_id = $4::uuid, receipt = $5::jsonb,
-                accepted_at = $6::timestamptz, updated_at = now()
-          WHERE idempotency_key = $1
-            AND request_digest = $2
-            AND claim_token = $3::uuid
+                receipt_id = $5::uuid, receipt = $6::jsonb,
+                accepted_at = $7::timestamptz, updated_at = now()
+          WHERE tenant_id = $2::uuid
+            AND idempotency_key = $1
+            AND request_digest = $3
+            AND claim_token = $4::uuid
             AND receipt_id IS NULL
         RETURNING idempotency_key`,
         [
           input.idempotencyKey,
+          input.tenantId,
           input.requestDigest,
           input.claimToken,
           input.receipt.receiptId,
@@ -119,12 +123,13 @@ export class PostgresWorkflowCommandInbox implements WorkflowCommandInbox {
       const released = await client.query(
         `UPDATE deviludo.workflow_command_inbox
             SET claim_token = NULL, claim_expires_at = NULL, updated_at = now()
-          WHERE idempotency_key = $1
-            AND request_digest = $2
-            AND claim_token = $3::uuid
+          WHERE tenant_id = $2::uuid
+            AND idempotency_key = $1
+            AND request_digest = $3
+            AND claim_token = $4::uuid
             AND receipt_id IS NULL
         RETURNING idempotency_key`,
-        [input.idempotencyKey, input.requestDigest, input.claimToken],
+        [input.idempotencyKey, input.tenantId, input.requestDigest, input.claimToken],
       );
       if (released.rowCount !== 1) throw new Error("Workflow command claim was lost before release");
     });

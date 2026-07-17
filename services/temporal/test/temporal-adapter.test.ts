@@ -401,6 +401,9 @@ test("Postgres inbox sets tenant RLS before claiming and commits a receipt", asy
   assert.equal(statements[0]?.text, "BEGIN");
   assert.match(statements[1]?.text ?? "", /set_config/);
   assert.deepEqual(statements[1]?.values, [claim.tenantId]);
+  assert.match(statements[2]?.text ?? "", /ON CONFLICT \(tenant_id, idempotency_key\)/);
+  assert.match(statements[3]?.text ?? "", /WHERE tenant_id = \$2::uuid/);
+  assert.deepEqual(statements[3]?.values, [claim.idempotencyKey, claim.tenantId]);
   assert.equal(statements.at(-1)?.text, "COMMIT");
   assert.equal(released, true);
 
@@ -419,6 +422,7 @@ test("Postgres inbox sets tenant RLS before claiming and commits a receipt", asy
     },
   });
   assert.match(statements.at(-2)?.text ?? "", /receipt_id/);
+  assert.match(statements.at(-2)?.text ?? "", /WHERE tenant_id = \$2::uuid/);
   assert.equal(statements.at(-1)?.text, "COMMIT");
 });
 

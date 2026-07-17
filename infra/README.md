@@ -19,7 +19,10 @@ jobs with `SKIP LOCKED` leasing, exact attempt fencing and terminal-state
 immutability. `postgres/004_github_verified_identity.sql` adds the verified
 numeric GitHub user binding to each active installation. Migrations `005`–`008`
 add Steam Guard enrollment metadata, release MFA authorization, safe job
-heartbeats and durable control-plane wait actions. All eight migrations are
+heartbeats and durable control-plane wait actions. Migration `009` scopes the
+workflow inbox primary key to `tenant_id + idempotency_key`, preventing a key
+used by one tenant from blocking another tenant through an RLS-hidden row. All
+nine migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

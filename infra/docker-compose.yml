@@ -19,6 +19,7 @@ services:
       - ./postgres/006_release_authorizations.sql:/docker-entrypoint-initdb.d/006_release_authorizations.sql:ro
       - ./postgres/007_workflow_job_heartbeats.sql:/docker-entrypoint-initdb.d/007_workflow_job_heartbeats.sql:ro
       - ./postgres/008_workflow_control_actions.sql:/docker-entrypoint-initdb.d/008_workflow_control_actions.sql:ro
+      - ./postgres/009_workflow_inbox_tenant_key.sql:/docker-entrypoint-initdb.d/009_workflow_inbox_tenant_key.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s
