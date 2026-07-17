@@ -164,6 +164,15 @@ receives a long-lived key. Protected secret environment entries contain SecretRe
 identifiers in persisted launch plans; the executor resolves them only at process
 start and redacts them from logs, errors and evidence.
 
+The service implementation also compares the token against the active run
+registry (including nonce, exact model order and budget), checks the locked
+Provider/credential revision and cumulative usage, caps the outgoing request by
+the remaining output-token allowance, and performs a fresh public DNS check.
+Its HTTP layer never accepts a Base URL, Provider id, SecretRef or upstream key
+from the CLI. Upstream traffic is unavailable until a trusted Connector can
+resolve the exact Vault credential, connect only to the validated addresses,
+revalidate redirects and atomically record response usage.
+
 ## Failure behavior and audit requirements
 
 `selectRunnableProfile()` returns `WAITING_PROVIDER` when the primary provider is

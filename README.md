@@ -19,6 +19,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `lib/agent`、`adapters`、`lib/security`：统一 Runtime Adapter、精确 CLI 参数、固定模型、SSRF/DNS rebinding/redirect 校验、短期 run token、SecretRef 与显式 fallback。
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
+- `services/inference-gateway`：短期 run token、不可变运行注册表、精确 Provider/凭据/模型、累计预算与逐请求 DNS/SSRF 门禁；未配置可信 Vault/DNS-pinning Connector 时拒绝推理请求。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
 - `services/local-agent-runtime`：仅 loopback 的 Agent 就绪探针；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway 和显式启用状态作为联合门禁。默认只探测、绝不执行 Agent。
 - `db`、`drizzle`：26 张 D1 Beta 表、不可变触发器及本地交付事件迁移。

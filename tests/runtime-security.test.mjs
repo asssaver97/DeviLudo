@@ -3,7 +3,7 @@ import test from "node:test";
 import { ClaudeCodeAdapter, CodexCliAdapter } from "../adapters/index.ts";
 import { normalizeModelRoles } from "../lib/agent/providers.ts";
 import { selectRunnableProfile } from "../lib/agent/provider-selection.ts";
-import { fingerprintSecret, issueRunToken, verifyRunToken } from "../lib/security/credentials.ts";
+import { fingerprintSecret, issueRunToken, verifyRunToken, verifyRunTokenIntegrity } from "../lib/security/credentials.ts";
 import { validateEndpointForConnection, validateProviderBaseUrl } from "../lib/security/network.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -79,5 +79,8 @@ test("credentials are fingerprinted and short run tokens are bound to one run", 
   const token = await issueRunToken(key, claims);
   const verified = await verifyRunToken(key, token, { tenantId: "tenant-1", projectId: "project-1", runId: "run-1", profileRevisionId: "profile-r1" }, now + 1);
   assert.equal(verified.credentialVersionId, "credential-v1");
+  const integrity = await verifyRunTokenIntegrity(key, token, now + 1);
+  assert.equal(Object.isFrozen(integrity.models), true);
+  assert.equal(Object.isFrozen(integrity.budget), true);
   await assert.rejects(verifyRunToken(key, token, { tenantId: "tenant-1", projectId: "other", runId: "run-1", profileRevisionId: "profile-r1" }, now + 1), /binding mismatch/);
 });

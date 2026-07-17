@@ -129,11 +129,29 @@ export async function verifyRunToken(
   binding: RunTokenBinding,
   nowEpochSeconds = Math.floor(Date.now() / 1000),
 ): Promise<RunTokenClaims> {
+  const claims = await verifyRunTokenIntegrity(signingKey, token, nowEpochSeconds);
+  if (
+    claims.tenantId !== binding.tenantId ||
+    claims.projectId !== binding.projectId ||
+    claims.runId !== binding.runId ||
+    claims.profileRevisionId !== binding.profileRevisionId
+  ) {
+    throw new Error("Run token binding mismatch");
+  }
+  return claims;
+}
+
+/** Verify signature, issuer, audience and lifetime before registry authorization. */
+export async function verifyRunTokenIntegrity(
+  signingKey: Uint8Array,
+  token: string,
+  nowEpochSeconds = Math.floor(Date.now() / 1000),
+): Promise<RunTokenClaims> {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("Malformed run token");
   const [headerPart = "", claimsPart = "", signaturePart = ""] = parts;
   const header = parseJsonObject(base64UrlDecode(headerPart));
-  if (header.alg !== "HS256" || header.typ !== "DLRT") {
+  if (header.alg !== "HS256" || header.typ !== "DLRT" || header.kid !== "inference-gateway-v1") {
     throw new Error("Unsupported run token header");
   }
 
@@ -152,15 +170,15 @@ export async function verifyRunToken(
   if (claims.exp <= nowEpochSeconds || claims.iat > nowEpochSeconds + 30) {
     throw new Error("Run token is expired or not yet valid");
   }
-  if (
-    claims.tenantId !== binding.tenantId ||
-    claims.projectId !== binding.projectId ||
-    claims.runId !== binding.runId ||
-    claims.profileRevisionId !== binding.profileRevisionId
-  ) {
-    throw new Error("Run token binding mismatch");
-  }
-  return Object.freeze(claims);
+  return freezeRunTokenClaims(claims);
+}
+
+function freezeRunTokenClaims(claims: RunTokenClaims): RunTokenClaims {
+  return Object.freeze({
+    ...claims,
+    models: Object.freeze([...claims.models]),
+    budget: Object.freeze({ ...claims.budget }),
+  });
 }
 
 function assertRunTokenClaims(claims: RunTokenClaims): void {
@@ -179,19 +197,26 @@ function assertRunTokenClaims(claims: RunTokenClaims): void {
     claims.providerRevisionId,
     claims.nonce,
   ]) {
-    if (typeof value !== "string" || value.length === 0) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 256 || /[\u0000-\u001f]/.test(value)) {
       throw new Error("Run token is missing an immutable binding");
     }
   }
   if (
     !Array.isArray(claims.models) ||
     claims.models.length === 0 ||
-    claims.models.some((model) => typeof model !== "string" || !model || /\s/.test(model))
+    claims.models.length > 16 ||
+    new Set(claims.models).size !== claims.models.length ||
+    claims.models.some((model) => typeof model !== "string" || !model || model.length > 256 || /\s/.test(model))
   ) {
     throw new Error("Run token must carry a model allowlist");
   }
-  if (!claims.budget || claims.budget.maxCostUsd <= 0) {
+  if (!claims.budget || !Number.isFinite(claims.budget.maxCostUsd) || claims.budget.maxCostUsd <= 0) {
     throw new Error("Run token must carry a positive budget");
+  }
+  for (const limit of [claims.budget.maxInputTokens, claims.budget.maxOutputTokens]) {
+    if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+      throw new Error("Run token token limits must be positive integers");
+    }
   }
   if (
     !Number.isInteger(claims.iat) ||
