@@ -202,9 +202,9 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
 - `services/runner-control`: mTLS workload identity, immutable capabilities,
   Ed25519 job envelopes, per-platform leases and matrix evidence aggregation.
 - `db/schema.ts`: D1-backed hosted demo schema.
-- `infra/postgres/001_core.sql` through `003_workflow_jobs.sql`: production
-  PostgreSQL/RLS, immutable bindings, activity claims, durable jobs and
-  approval receipts.
+- `infra/postgres/001_core.sql` through `004_github_verified_identity.sql`:
+  production PostgreSQL/RLS, immutable bindings, activity claims, durable jobs,
+  approval receipts and verified GitHub identities.
 - `infra/docker-compose.yml`: local PostgreSQL, Temporal, Redis, MinIO, Vault,
   and OTel integration stack.
 - `infra/vault` and `infra/otel`: least-privilege and telemetry redaction

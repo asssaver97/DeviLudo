@@ -61,12 +61,14 @@ export interface GitHubAuthorizationStore {
     readonly completedAt: string;
   }): Promise<void>;
   completeOAuth(input: {
+    readonly tenantId: string;
     readonly intentId: string;
     readonly claimToken: string;
     readonly installation: GitHubVerifiedInstallation;
     readonly completedAt: string;
   }): Promise<void>;
   fail(input: {
+    readonly tenantId: string;
     readonly intentId: string;
     readonly claimToken: string;
     readonly failureCode: string;

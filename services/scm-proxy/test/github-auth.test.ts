@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Fastify from "fastify";
 import {
   GitHubInstallationAuthorizationBroker,
   InMemoryGitHubAuthorizationSecretStore,
@@ -7,6 +8,15 @@ import {
 } from "../src/github-auth";
 import { GitHubRestUserAuthorizationVerifier } from "../src/github-auth-rest";
 import type { GitHubAuthorizationPrincipal, GitHubVerifiedInstallation } from "../src/github-auth-contracts";
+import {
+  InMemoryGitHubBrokerRequestLedger,
+  registerGitHubAuthorizationBrokerRoutes,
+} from "../src/github-auth-http";
+import {
+  PostgresGitHubAuthorizationStore,
+  type ScmPostgresClient,
+  type ScmPostgresQueryResult,
+} from "../src/github-auth-postgres";
 
 const principal: GitHubAuthorizationPrincipal = Object.freeze({
   tenantId: "tenant-north-dock",
@@ -99,6 +109,134 @@ test("GitHub authorization state is bound to tenant, user, session, stage and ex
     /expired or already used/,
   );
   await assert.rejects(broker.begin(principal, "//attacker.example"), /return path/);
+});
+
+test("internal GitHub broker HTTP route is workload-authenticated and idempotent", async () => {
+  const store = new InMemoryGitHubAuthorizationStore();
+  const broker = new GitHubInstallationAuthorizationBroker({
+    appSlug: "deviludo-app",
+    clientId: "Iv1.abcdefghijklmnop",
+    redirectUri: "https://deviludo.example/api/connections/github/callback",
+    store,
+    secrets: new InMemoryGitHubAuthorizationSecretStore(),
+    verifier: { async verify(input) { return { ...verifiedInstallation, verifiedAt: input.at }; } },
+    now: () => new Date("2099-01-01T00:00:00.000Z"),
+  });
+  let authorized = false;
+  const server = Fastify({ logger: false });
+  registerGitHubAuthorizationBrokerRoutes(server, {
+    broker,
+    ledger: new InMemoryGitHubBrokerRequestLedger(),
+    authorize() {
+      if (!authorized) throw new Error("not authorized");
+    },
+  });
+  const beginRequest = {
+    method: "POST",
+    url: "/v1/github/authorizations/begin",
+    headers: { "idempotency-key": "github-begin-http-001" },
+    payload: { principal, returnPath: "/settings/connections" },
+  } as const;
+  assert.equal((await server.inject(beginRequest)).statusCode, 401);
+  authorized = true;
+  const first = await server.inject(beginRequest);
+  const replay = await server.inject(beginRequest);
+  assert.equal(first.statusCode, 201);
+  assert.deepEqual(replay.json(), first.json());
+  assert.equal(store.intents.size, 1);
+  const installState = new URL(first.json().authorizeUrl).searchParams.get("state") ?? "";
+
+  const setup = await server.inject({
+    method: "POST",
+    url: "/v1/github/authorizations/setup",
+    headers: { "idempotency-key": "github-setup-http-001" },
+    payload: { principal, state: installState, installationId: "42", setupAction: "install" },
+  });
+  assert.equal(setup.statusCode, 200);
+  const oauthState = new URL(setup.json().authorizeUrl).searchParams.get("state") ?? "";
+  const completed = await server.inject({
+    method: "POST",
+    url: "/v1/github/authorizations/complete",
+    headers: { "idempotency-key": "github-oauth-http-001" },
+    payload: { principal, state: oauthState, code: "single-use-code" },
+  });
+  assert.equal(completed.statusCode, 200);
+  assert.deepEqual(completed.json(), { returnPath: "/settings/connections" });
+  assert.doesNotMatch(completed.body, /single-use-code|session-binding/);
+  await server.close();
+});
+
+test("Postgres GitHub authorization store applies tenant RLS and persists only digests", async () => {
+  const statements: { text: string; values?: readonly unknown[] }[] = [];
+  const intent = {
+    id: "11111111-1111-4111-8111-111111111111",
+    stateDigest: "a".repeat(64),
+    tenantId: "22222222-2222-4222-8222-222222222222",
+    userId: "user-ada",
+    sessionBindingDigest: "b".repeat(64),
+    stage: "INSTALL",
+    installationId: null,
+    pkceVerifierSecretRef: null,
+    returnPath: "/settings/connections",
+    status: "PENDING",
+    claimToken: null,
+    claimExpiresAt: null,
+    createdAt: "2099-01-01T00:00:00.000Z",
+    expiresAt: "2099-01-01T00:10:00.000Z",
+    completedAt: null,
+    failureCode: null,
+  } as const;
+  const client: ScmPostgresClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      values?: readonly unknown[],
+    ): Promise<ScmPostgresQueryResult<Row>> {
+      statements.push({ text, values });
+      if (text.includes("SET status = 'CLAIMED'")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            id: intent.id,
+            state_digest: intent.stateDigest,
+            tenant_id: intent.tenantId,
+            user_subject: intent.userId,
+            session_binding_digest: intent.sessionBindingDigest,
+            stage: intent.stage,
+            installation_id: null,
+            pkce_verifier_secret_ref: null,
+            return_path: intent.returnPath,
+            status: "CLAIMED",
+            claim_token: values?.[5],
+            claim_expires_at: values?.[7],
+            created_at: intent.createdAt,
+            expires_at: intent.expiresAt,
+            completed_at: null,
+            failure_code: null,
+          }],
+        } as unknown as ScmPostgresQueryResult<Row>;
+      }
+      if (text.includes("RETURNING")) return { rowCount: 1, rows: [{ id: intent.id }] } as unknown as ScmPostgresQueryResult<Row>;
+      return { rowCount: 0, rows: [] } as ScmPostgresQueryResult<Row>;
+    },
+    release() {},
+  };
+  const store = new PostgresGitHubAuthorizationStore({ async connect() { return client; } });
+  await store.create(intent);
+  const claimed = await store.claim({
+    stateDigest: intent.stateDigest,
+    stage: "INSTALL",
+    tenantId: intent.tenantId,
+    userId: intent.userId,
+    sessionBindingDigest: intent.sessionBindingDigest,
+    claimToken: "33333333-3333-4333-8333-333333333333",
+    claimedAt: intent.createdAt,
+    claimExpiresAt: "2099-01-01T00:02:00.000Z",
+  });
+  assert.equal(claimed.status, "CLAIMED");
+  const begins = statements.filter((entry) => entry.text === "BEGIN").length;
+  assert.equal(statements.filter((entry) => entry.text.includes("set_config")).length, begins);
+  assert.equal(JSON.stringify(statements).includes(principal.sessionBinding), false);
+  assert.equal(JSON.stringify(statements).includes(intent.sessionBindingDigest), true);
 });
 
 test("REST verifier proves the signed-in user can access the exact installation and revokes its ephemeral token", async () => {

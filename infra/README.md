@@ -16,7 +16,9 @@ and immutable run locks. `postgres/002_workflow_dispatch.sql` adds a leased,
 idempotent activity inbox plus append-only, gate-bound external approval
 receipts. `postgres/003_workflow_jobs.sql` adds destination-specific durable
 jobs with `SKIP LOCKED` leasing, exact attempt fencing and terminal-state
-immutability. Application transactions must set `app.tenant_id`
+immutability. `postgres/004_github_verified_identity.sql` adds the verified
+numeric GitHub user binding to each active installation. Application
+transactions must set `app.tenant_id`
 from an already-authorized session; accepting it directly from a request header
 would defeat RLS. Credential values never enter these tables—only Vault refs,
 fingerprints, and version IDs do.

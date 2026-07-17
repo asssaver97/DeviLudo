@@ -5,6 +5,12 @@ import { normalizeModelRoles } from "../lib/agent/providers.ts";
 import { selectRunnableProfile } from "../lib/agent/provider-selection.ts";
 import { fingerprintSecret, issueRunToken, verifyRunToken, verifyRunTokenIntegrity } from "../lib/security/credentials.ts";
 import { validateEndpointForConnection, validateProviderBaseUrl } from "../lib/security/network.ts";
+import {
+  GitHubAuthorizationBrokerClient,
+  githubCallbackIdempotencyKey,
+  signTrustedGitHubSession,
+  verifyTrustedGitHubSession,
+} from "../lib/connections/github-broker.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
 
@@ -83,4 +89,99 @@ test("credentials are fingerprinted and short run tokens are bound to one run", 
   assert.equal(Object.isFrozen(integrity.models), true);
   assert.equal(Object.isFrozen(integrity.budget), true);
   await assert.rejects(verifyRunToken(key, token, { tenantId: "tenant-1", projectId: "other", runId: "run-1", profileRevisionId: "profile-r1" }, now + 1), /binding mismatch/);
+});
+
+test("GitHub connection session assertions bind identity, method and callback path", async () => {
+  const key = new Uint8Array(32).fill(19);
+  const at = new Date("2026-07-17T00:00:00.000Z");
+  const values = {
+    tenantId: "tenant-001",
+    userId: "user-001",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    githubUserId: "424242",
+    issuedAt: String(at.getTime()),
+  };
+  const signature = await signTrustedGitHubSession({
+    method: "POST",
+    pathname: "/api/connections/github",
+    ...values,
+    key,
+  });
+  const headers = {
+    "x-deviludo-session-tenant": values.tenantId,
+    "x-deviludo-session-user": values.userId,
+    "x-deviludo-session-binding": values.sessionBinding,
+    "x-deviludo-session-github-user-id": values.githubUserId,
+    "x-deviludo-session-issued-at": values.issuedAt,
+    "x-deviludo-session-signature": signature,
+  };
+  const principal = await verifyTrustedGitHubSession(
+    new Request("https://deviludo.example/api/connections/github", { method: "POST", headers }),
+    key,
+    at,
+  );
+  assert.equal(principal.expectedGithubUserId, 424242);
+  await assert.rejects(
+    verifyTrustedGitHubSession(
+      new Request("https://deviludo.example/api/connections/github/callback", { method: "POST", headers }),
+      key,
+      at,
+    ),
+    /signature is invalid/,
+  );
+});
+
+test("GitHub Web broker client accepts only fixed GitHub redirects and hashes callback idempotency", async () => {
+  const state = "s".repeat(43);
+  const challenge = "c".repeat(43);
+  const requests = [];
+  const broker = new GitHubAuthorizationBrokerClient({
+    endpoint: "https://github-auth.internal/",
+    async fetch(url, init) {
+      requests.push({ url: String(url), init });
+      if (String(url).endsWith("/begin")) {
+        return Response.json({
+          authorizeUrl: `https://github.com/apps/deviludo/installations/new?state=${state}`,
+          expiresAt: "2026-07-17T00:10:00.000Z",
+        });
+      }
+      if (String(url).endsWith("/setup")) {
+        return Response.json({
+          authorizeUrl: `https://github.com/login/oauth/authorize?client_id=Iv1.abcdefghijklmnop&state=${state}&code_challenge=${challenge}&code_challenge_method=S256`,
+          expiresAt: "2026-07-17T00:10:00.000Z",
+        });
+      }
+      return Response.json({ returnPath: "/settings/connections" });
+    },
+  });
+  const principal = {
+    tenantId: "tenant-001",
+    userId: "user-001",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    expectedGithubUserId: 424242,
+  };
+  const begin = await broker.begin(principal, "github-begin-001");
+  assert.match(begin.authorizeUrl, /^https:\/\/github\.com\/apps\//);
+  const setup = await broker.setup({
+    principal,
+    state,
+    installationId: "99",
+    setupAction: "install",
+    idempotencyKey: "github-setup-001",
+  });
+  assert.match(setup.authorizeUrl, /code_challenge_method=S256/);
+  assert.equal((await broker.complete({ principal, state, code: "oauth-code-value", idempotencyKey: "github-oauth-001" })).returnPath, "/settings/connections");
+  assert.equal(requests.every((entry) => entry.init.redirect === "error"), true);
+  const callbackKey = await githubCallbackIdempotencyKey("oauth", state);
+  assert.match(callbackKey, /^github-oauth-[a-f0-9]{64}$/);
+  assert.doesNotMatch(callbackKey, new RegExp(state));
+
+  const malicious = new GitHubAuthorizationBrokerClient({
+    endpoint: "https://github-auth.internal/",
+    fetch: async () => Response.json({
+      authorizeUrl: `https://evil.example/install?state=${state}`,
+      expiresAt: "2026-07-17T00:10:00.000Z",
+    }),
+  });
+  await assert.rejects(malicious.begin(principal, "github-begin-evil"), /invalid installation URL/);
 });

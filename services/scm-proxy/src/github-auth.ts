@@ -114,7 +114,7 @@ export class GitHubInstallationAuthorizationBroker {
       await this.#store.completeSetup({ intentId: installIntent.id, claimToken, oauthIntent, completedAt: claimedAt });
     } catch (error) {
       if (secretRef) await this.#secrets.delete(secretRef).catch(() => undefined);
-      await this.#store.fail({ intentId: installIntent.id, claimToken, failureCode: "SETUP_TRANSITION_FAILED", failedAt: claimedAt }).catch(() => undefined);
+      await this.#store.fail({ tenantId: installIntent.tenantId, intentId: installIntent.id, claimToken, failureCode: "SETUP_TRANSITION_FAILED", failedAt: claimedAt }).catch(() => undefined);
       throw error;
     }
 
@@ -148,13 +148,13 @@ export class GitHubInstallationAuthorizationBroker {
       claimExpiresAt: new Date(Date.parse(claimedAt) + CLAIM_LIFETIME_MS).toISOString(),
     });
     if (!intent.pkceVerifierSecretRef || !intent.installationId) {
-      await this.#store.fail({ intentId: intent.id, claimToken, failureCode: "OAUTH_INTENT_INVALID", failedAt: claimedAt }).catch(() => undefined);
+      await this.#store.fail({ tenantId: intent.tenantId, intentId: intent.id, claimToken, failureCode: "OAUTH_INTENT_INVALID", failedAt: claimedAt }).catch(() => undefined);
       throw new Error("GitHub authorization intent is incomplete");
     }
 
     const codeVerifier = await this.#secrets.take(intent.pkceVerifierSecretRef);
     if (!codeVerifier || !PKCE_VERIFIER.test(codeVerifier)) {
-      await this.#store.fail({ intentId: intent.id, claimToken, failureCode: "PKCE_SECRET_UNAVAILABLE", failedAt: claimedAt }).catch(() => undefined);
+      await this.#store.fail({ tenantId: intent.tenantId, intentId: intent.id, claimToken, failureCode: "PKCE_SECRET_UNAVAILABLE", failedAt: claimedAt }).catch(() => undefined);
       throw new Error("GitHub authorization verifier is unavailable");
     }
 
@@ -167,10 +167,10 @@ export class GitHubInstallationAuthorizationBroker {
         at: claimedAt,
       });
       validateVerifiedInstallation(installation, intent.installationId, input.principal.expectedGithubUserId, this.#appSlug);
-      await this.#store.completeOAuth({ intentId: intent.id, claimToken, installation, completedAt: claimedAt });
+      await this.#store.completeOAuth({ tenantId: intent.tenantId, intentId: intent.id, claimToken, installation, completedAt: claimedAt });
       return Object.freeze({ installation, returnPath: intent.returnPath });
     } catch (error) {
-      await this.#store.fail({ intentId: intent.id, claimToken, failureCode: "GITHUB_IDENTITY_VERIFICATION_FAILED", failedAt: claimedAt }).catch(() => undefined);
+      await this.#store.fail({ tenantId: intent.tenantId, intentId: intent.id, claimToken, failureCode: "GITHUB_IDENTITY_VERIFICATION_FAILED", failedAt: claimedAt }).catch(() => undefined);
       throw error;
     }
   }
@@ -206,13 +206,14 @@ export class InMemoryGitHubAuthorizationStore implements GitHubAuthorizationStor
 
   async completeOAuth(input: Parameters<GitHubAuthorizationStore["completeOAuth"]>[0]): Promise<void> {
     const current = this.#claimed(input.intentId, input.claimToken);
+    if (current.tenantId !== input.tenantId) throw new Error("GitHub authorization tenant binding mismatch");
     this.installations.set(`${current.tenantId}:${input.installation.installationId}`, Object.freeze({ ...input.installation }));
     this.#replace(current.stateDigest, { ...current, status: "COMPLETED", completedAt: input.completedAt });
   }
 
   async fail(input: Parameters<GitHubAuthorizationStore["fail"]>[0]): Promise<void> {
     const current = [...this.intents.values()].find((intent) => intent.id === input.intentId);
-    if (!current || current.claimToken !== input.claimToken || current.status !== "CLAIMED") return;
+    if (!current || current.tenantId !== input.tenantId || current.claimToken !== input.claimToken || current.status !== "CLAIMED") return;
     this.#replace(current.stateDigest, { ...current, status: "FAILED", failureCode: input.failureCode, completedAt: input.failedAt });
   }
 

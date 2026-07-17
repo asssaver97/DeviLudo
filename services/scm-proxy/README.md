@@ -48,9 +48,15 @@ Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1
 until a SecurityAdmin-approved, DNS-pinning Connector is added.
 
-The public Web preview deliberately returns `503` for install/setup/callback
-routes until the authenticated-session adapter, PostgreSQL authorization store
-and Vault resolver are injected. It never simulates a successful connection.
+The public Web preview returns `503` for install/setup/callback routes until
+`DEVILUDO_GITHUB_AUTH_BROKER_URL` and a Vault-injected session HMAC key are
+configured. When enabled, the Web route verifies a short-lived, method/path-
+bound session assertion, calls only the fixed internal HTTPS Broker, validates
+every returned GitHub redirect, and never reflects callback code/state.
+`registerGitHubAuthorizationBrokerRoutes` exposes the workload-authenticated
+internal endpoint; `PostgresGitHubAuthorizationStore` persists only state and
+session digests under tenant RLS and records the numeric GitHub user that proved
+access to the exact installation. It never simulates a successful connection.
 
 Run its contract tests from the repository root:
 

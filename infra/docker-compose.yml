@@ -14,6 +14,7 @@ services:
       - ./postgres/001_core.sql:/docker-entrypoint-initdb.d/001_core.sql:ro
       - ./postgres/002_workflow_dispatch.sql:/docker-entrypoint-initdb.d/002_workflow_dispatch.sql:ro
       - ./postgres/003_workflow_jobs.sql:/docker-entrypoint-initdb.d/003_workflow_jobs.sql:ro
+      - ./postgres/004_github_verified_identity.sql:/docker-entrypoint-initdb.d/004_github_verified_identity.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

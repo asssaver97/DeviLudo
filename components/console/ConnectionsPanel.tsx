@@ -1,19 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "./AppShell";
 import { CheckIcon, GithubIcon, ShieldIcon, SteamIcon } from "./Icons";
 
-export function ConnectionsPanel() {
-  const [githubConnected] = useState(false);
+export function ConnectionsPanel({ initialGitHubConnected = false }: { initialGitHubConnected?: boolean }) {
+  const [githubConnected] = useState(initialGitHubConnected);
   const [githubBusy, setGithubBusy] = useState(false);
   const [steamState, setSteamState] = useState<"unconfigured" | "ready" | "waiting">("unconfigured");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(initialGitHubConnected ? "GitHub App 安装与当前账号已完成验证。" : "");
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("github") === "connected") {
+      url.searchParams.delete("github");
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+  }, []);
 
   async function connectGithub() {
     setGithubBusy(true);
     try {
-      const response = await fetch("/api/connections/github", { method: "POST" });
+      const response = await fetch("/api/connections/github", {
+        method: "POST",
+        headers: { "idempotency-key": crypto.randomUUID() },
+      });
       const payload = await response.json() as { data?: { authorizeUrl?: string }; error?: { message?: string } };
       if (!response.ok || !payload.data?.authorizeUrl) {
         setNotice(payload.error?.message ?? "GitHub App 安装服务尚未配置。");
@@ -35,7 +46,10 @@ export function ConnectionsPanel() {
   async function beginSteamLogin() {
     setSteamState("waiting");
     try {
-      const response = await fetch("/api/connections/steam", { method: "POST" });
+      const response = await fetch("/api/connections/steam", {
+        method: "POST",
+        headers: { "idempotency-key": crypto.randomUUID() },
+      });
       const payload = await response.json() as { data?: { state?: string }; error?: { message?: string } };
       if (!response.ok) {
         setSteamState("unconfigured");
@@ -65,10 +79,10 @@ export function ConnectionsPanel() {
               <div className="connection-title"><div><h2>GitHub App</h2><p>仓库身份、分支与 Draft PR</p></div><span className={githubConnected ? "connected" : "not-connected"}><i />{githubConnected ? "已连接" : "未连接"}</span></div>
               {githubConnected ? (
                 <div className="connection-details">
-                  <div><span>组织</span><b>north-dock-studio</b></div>
-                  <div><span>授权仓库</span><b>2 个选定仓库</b></div>
+                  <div><span>安装</span><b>当前账号已验证</b></div>
+                  <div><span>授权仓库</span><b>由 GitHub App 范围控制</b></div>
                   <div><span>权限</span><b>Contents / Pull requests</b></div>
-                  <div><span>上次验证</span><b>今天 09:41</b></div>
+                  <div><span>状态</span><b>连接有效</b></div>
                 </div>
               ) : <p className="connection-empty">连接后，代码修改只会进入工作分支和 Draft PR。</p>}
               <div className="connection-actions">
