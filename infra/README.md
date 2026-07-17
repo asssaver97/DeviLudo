@@ -21,8 +21,10 @@ numeric GitHub user binding to each active installation. Migrations `005`–`008
 add Steam Guard enrollment metadata, release MFA authorization, safe job
 heartbeats and durable control-plane wait actions. Migration `009` scopes the
 workflow inbox primary key to `tenant_id + idempotency_key`, preventing a key
-used by one tenant from blocking another tenant through an RLS-hidden row. All
-nine migrations are
+used by one tenant from blocking another tenant through an RLS-hidden row.
+Migration `010` adds bounded, digest-keyed administrator mutation claims so
+idempotent results survive control-plane restarts and remain atomic across
+replicas. All ten migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

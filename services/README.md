@@ -63,7 +63,11 @@ It listens on `0.0.0.0:4100` by default. Set
 `DEVILUDO_CONTROL_PLANE_HOST`/`DEVILUDO_CONTROL_PLANE_PORT` to override that.
 Every mutation requires an `Idempotency-Key` header. Reusing a key with a
 different body returns `409 IDEMPOTENCY_KEY_REUSED`; a byte-for-byte equivalent
-retry returns the cached result and `Idempotent-Replayed: true`.
+retry returns the cached result and `Idempotent-Replayed: true`. Production uses
+PostgreSQL migration `010` to claim and persist these results atomically across
+replicas; only non-production tests use the in-memory implementation. A second
+request arriving while the first claim is active receives
+`409 IDEMPOTENCY_REQUEST_IN_PROGRESS` with `Retry-After: 1`.
 
 The trusted authentication proxy supplies a short-lived, request-bound
 assertion. The control-plane rejects the request unless the assertion HMAC is

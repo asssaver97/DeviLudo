@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 9 }, (_, index) => {
+  const offsets = Array.from({ length: 10 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -21,6 +21,15 @@ test("workflow inbox idempotency is tenant-scoped in schema and adapter", () => 
   assert.match(adapter, /ON CONFLICT \(tenant_id, idempotency_key\) DO NOTHING/);
   assert.match(adapter, /WHERE tenant_id = \$2::uuid\s+AND idempotency_key = \$1/g);
   assert.doesNotMatch(adapter, /ON CONFLICT \(idempotency_key\)/);
+});
+
+test("production admin idempotency has a pinned PostgreSQL driver and durable claim schema", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/010_admin_idempotency.sql", import.meta.url), "utf8");
+  assert.equal(packageJson.dependencies.pg, "8.22.0");
+  assert.match(migration, /identity_digest text PRIMARY KEY/);
+  assert.match(migration, /state IN \('AVAILABLE', 'CLAIMED', 'COMPLETED'\)/);
+  assert.match(migration, /pg_column_size\(response_payload\) <= 1048576/);
 });
 
 test("control-plane wait persistence uses the shared tenant RLS setting", () => {

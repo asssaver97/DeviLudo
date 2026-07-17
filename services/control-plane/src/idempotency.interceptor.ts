@@ -2,25 +2,21 @@ import {
   CallHandler,
   ExecutionContext,
   Injectable,
+  Inject,
   NestInterceptor,
 } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { map, Observable } from "rxjs";
+import { catchError, from, map, mergeMap, Observable, of, throwError } from "rxjs";
 import { authenticatedAdminActor } from "./admin-principal";
+import { AdminIdempotencyStore } from "./admin-idempotency";
 import { ServiceProblem } from "./contracts";
 import { header } from "./rbac.guard";
 
-interface CachedResult {
-  readonly payload: unknown;
-  readonly requestFingerprint: string;
-  readonly createdAt: number;
-}
-
 export class IdempotencyInterceptor implements NestInterceptor {
-  readonly #results = new Map<string, CachedResult>();
+  constructor(private readonly store: AdminIdempotencyStore) {}
 
-  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+  async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<unknown>> {
     if (context.getType() !== "http") return next.handle();
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     const reply = context.switchToHttp().getResponse<FastifyReply>();
@@ -33,7 +29,6 @@ export class IdempotencyInterceptor implements NestInterceptor {
     if (!idempotencyKey || idempotencyKey.length > 160 || !/^[A-Za-z0-9._:-]+$/.test(idempotencyKey)) {
       throw new ServiceProblem(400, "IDEMPOTENCY_KEY_REQUIRED", "A valid Idempotency-Key header is required for mutations");
     }
-    this.evictExpired();
     const actor = authenticatedAdminActor(request);
     const identity = [
       request.method,
@@ -45,43 +40,45 @@ export class IdempotencyInterceptor implements NestInterceptor {
       actor.projectId ?? "all-projects",
       idempotencyKey,
     ].join("|");
+    const identityDigest = createHash("sha256").update(identity).digest("hex");
     const requestFingerprint = fingerprintRequest(request.body);
-    const cached = this.#results.get(identity);
-    if (cached) {
-      if (cached.requestFingerprint !== requestFingerprint) {
-        throw new ServiceProblem(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used with a different request");
-      }
+    const claim = await this.store.acquire({ identityDigest, requestFingerprint });
+    if (claim.kind === "CONFLICT") {
+      throw new ServiceProblem(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used with a different request");
+    }
+    if (claim.kind === "BUSY") {
+      reply.header("Retry-After", "1");
+      throw new ServiceProblem(409, "IDEMPOTENCY_REQUEST_IN_PROGRESS", "An equivalent administrator request is still in progress");
+    }
+    if (claim.kind === "REPLAY") {
       reply.status(200);
       reply.header("Idempotent-Replayed", "true");
-      return new Observable((subscriber) => {
-        subscriber.next({
-          data: structuredClone(cached.payload),
-          meta: { requestId: request.id, idempotentReplay: true },
-        });
-        subscriber.complete();
+      return of({
+        data: structuredClone(claim.payload),
+        meta: { requestId: request.id, idempotentReplay: true },
       });
     }
 
     return next.handle().pipe(
-      map((payload) => {
-        this.#results.set(identity, {
-          payload: structuredClone(payload),
-          requestFingerprint,
-          createdAt: Date.now(),
-        });
-        return { data: payload, meta: { requestId: request.id, idempotentReplay: false } };
-      }),
+      mergeMap((payload) => from(this.store.complete({
+        identityDigest,
+        requestFingerprint,
+        claimToken: claim.claimToken,
+        payload,
+      })).pipe(map(() => ({
+        data: payload,
+        meta: { requestId: request.id, idempotentReplay: false },
+      })))),
+      catchError((error: unknown) => from(this.store.release({
+        identityDigest,
+        requestFingerprint,
+        claimToken: claim.claimToken,
+      }).catch(() => undefined)).pipe(mergeMap(() => throwError(() => error)))),
     );
-  }
-
-  private evictExpired(): void {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    for (const [key, result] of this.#results) {
-      if (result.createdAt < cutoff) this.#results.delete(key);
-    }
   }
 }
 
+Inject(AdminIdempotencyStore)(IdempotencyInterceptor, undefined, 0);
 Injectable()(IdempotencyInterceptor);
 
 function fingerprintRequest(value: unknown): string {
