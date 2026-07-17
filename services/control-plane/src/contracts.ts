@@ -1,0 +1,170 @@
+export const ADMIN_ROLES = [
+  "PlatformAgentAdmin",
+  "SecurityAdmin",
+  "TenantAdmin",
+  "ProjectOwner",
+  "Auditor",
+] as const;
+
+export type AdminRole = (typeof ADMIN_ROLES)[number];
+export type AgentKind = "claude-code" | "codex-cli";
+export type ProfileScope = "platform" | "tenant" | "project";
+
+export type AgentVersionState =
+  | "DISCOVERED"
+  | "VALIDATING"
+  | "APPROVED"
+  | "DEPRECATED"
+  | "BLOCKED"
+  | "REJECTED";
+
+export type InstallationState =
+  | "BUILDING"
+  | "SCANNING"
+  | "SMOKE_TESTING"
+  | "READY"
+  | "CANARY"
+  | "ACTIVE"
+  | "DRAINING"
+  | "RETIRED"
+  | "FAILED"
+  | "QUARANTINED";
+
+export type ProfileState =
+  | "DRAFT"
+  | "VALIDATING"
+  | "READY"
+  | "ACTIVE"
+  | "SUPERSEDED"
+  | "DEGRADED"
+  | "DISABLED";
+
+export interface AgentVersionRecord {
+  readonly id: string;
+  readonly agent: AgentKind;
+  readonly version: string;
+  state: AgentVersionState;
+  readonly source: string;
+  readonly integrity: string;
+  readonly signatureVerified: boolean;
+  readonly sbomRef: string;
+  readonly scan: "PASS" | "FAIL" | "PENDING";
+  readonly discoveredAt: string;
+}
+
+export interface InstallationRecord {
+  readonly id: string;
+  readonly agent: AgentKind;
+  readonly agentVersionId: string;
+  readonly workerPool: string;
+  readonly imageDigest: string;
+  readonly adapterVersion: string;
+  state: InstallationState;
+  rolloutPercent: 0 | 5 | 25 | 100;
+  previousRolloutPercent: 0 | 5 | 25 | 100;
+  readonly selfUpdateDisabled: true;
+  readonly createdAt: string;
+}
+
+export interface ProviderRevisionRecord {
+  readonly id: string;
+  readonly revision: number;
+  readonly agent: AgentKind;
+  readonly protocol: "anthropic-messages" | "openai-responses";
+  readonly baseUrl: string;
+  readonly models: {
+    readonly primaryModel: string;
+    readonly planningModel: string;
+    readonly smallFastModel: string;
+    readonly subagentModel: string;
+  };
+  readonly credentialVersionId: string;
+  state: ProfileState;
+  probe: Readonly<Record<string, "PASS" | "FAIL">>;
+  readonly governance: {
+    readonly dataRegion: string;
+    readonly retentionPolicy: string;
+    readonly trainingPolicy: string;
+    readonly confirmedBy: string;
+    readonly confirmedAt: string;
+  };
+}
+
+export interface ProfileRevisionRecord {
+  readonly id: string;
+  readonly revision: number;
+  readonly scope: ProfileScope;
+  readonly scopeId: string;
+  readonly agent: AgentKind;
+  readonly installationId: string;
+  readonly providerRevisionId: string;
+  readonly credentialVersionId: string;
+  readonly budget: { readonly maxUsd: number; readonly maxTurns: number; readonly timeoutSeconds: number };
+  readonly fallbackProfileRevisionId: string | null;
+  state: ProfileState;
+  readonly createdAt: string;
+}
+
+export interface CredentialVersionRecord {
+  readonly id: string;
+  readonly familyId: string;
+  readonly version: number;
+  readonly label: string;
+  readonly secretRef: string;
+  readonly maskedFingerprint: string;
+  state: "ACTIVE" | "PREVIOUS" | "REVOKED";
+  readonly createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface AuditRecord {
+  readonly id: string;
+  readonly action: string;
+  readonly resource: string;
+  readonly actorRole: AdminRole;
+  readonly requestId: string;
+  readonly at: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface RequestActor {
+  readonly role: AdminRole;
+  readonly requestId: string;
+  readonly actorId: string;
+}
+
+export class ServiceProblem extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly details?: Readonly<Record<string, unknown>>,
+  ) {
+    super(message);
+  }
+}
+
+export function isAgentKind(value: unknown): value is AgentKind {
+  return value === "claude-code" || value === "codex-cli";
+}
+
+export function requiredString(
+  body: Record<string, unknown>,
+  field: string,
+  maxLength = 1000,
+): string {
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim() || value.length > maxLength) {
+    throw new ServiceProblem(400, "INVALID_FIELD", `${field} must be a non-empty string`, { field });
+  }
+  return value.trim();
+}
+
+export function optionalString(body: Record<string, unknown>, field: string): string | undefined {
+  const value = body[field];
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") {
+    throw new ServiceProblem(400, "INVALID_FIELD", `${field} must be a string`, { field });
+  }
+  return value.trim();
+}

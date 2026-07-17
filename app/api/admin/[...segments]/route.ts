@@ -1,0 +1,342 @@
+import { normalizeModelRoles } from "@/lib/agent/providers";
+import { appendDemoAudit, getDemoStore, withIdempotency, type DemoProfile } from "@/lib/control-plane/demo-store";
+import {
+  bodyObject,
+  HttpProblem,
+  idempotencyKey,
+  json,
+  problemResponse,
+  requireRole,
+  requireString,
+} from "@/lib/control-plane/http";
+import { fingerprintSecret, maskFingerprint } from "@/lib/security/credentials";
+import { validateProviderBaseUrl } from "@/lib/security/network";
+
+type RouteContext = { params: Promise<{ segments: string[] }> };
+const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
+const SECURITY_ROLES = ["SecurityAdmin"] as const;
+const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner"] as const;
+
+function agentCatalog() {
+  const store = getDemoStore();
+  return [
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      vendor: "Anthropic",
+      officialSource: "https://code.claude.com/docs/en/installation",
+      capabilities: ["plan", "code", "repair", "review"],
+      supportedWorkers: ["linux/amd64", "linux/arm64"],
+      default: true,
+      approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("claude-code@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
+    },
+    {
+      id: "codex-cli",
+      name: "Codex CLI",
+      vendor: "OpenAI",
+      officialSource: "https://developers.openai.com/codex/cli",
+      capabilities: ["plan", "code", "repair", "review"],
+      supportedWorkers: ["linux/amd64", "linux/arm64"],
+      default: false,
+      approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("codex-cli@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
+    },
+  ];
+}
+
+function routeKey(segments: string[]): string {
+  return segments.join("/");
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    const { segments } = await context.params;
+    const key = routeKey(segments);
+    const store = getDemoStore();
+    if (key === "agents") {
+      return json({ data: agentCatalog(), meta: { defaultAgent: "claude-code", revisionPolicy: "pinned-only" } });
+    }
+    if (key === "agent-health") {
+      return json({
+        data: {
+          workers: [
+            { pool: "dev-linux-a", agent: "claude-code", ready: 24, desired: 32, health: "HEALTHY" },
+            { pool: "dev-linux-b", agent: "codex-cli", ready: 14, desired: 16, health: "HEALTHY" },
+          ],
+          providers: store.providers.map(({ id, state, probe }) => ({ id, state, probe })),
+          e2eRunnersContainAgent: false,
+          steamPublishersContainAgent: false,
+        },
+      });
+    }
+    if (key === "audit") {
+      return json({ data: store.audit, meta: { appendOnly: true, redacted: true } });
+    }
+    throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
+  } catch (error) {
+    return problemResponse(error);
+  }
+}
+
+export async function POST(request: Request, context: RouteContext) {
+  try {
+    const { segments } = await context.params;
+    const key = routeKey(segments);
+    const body = await bodyObject(request);
+    const idempotency = idempotencyKey(request);
+
+    if (key === "agent-versions/discover") {
+      const role = requireRole(request, VERSION_ROLES);
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        store.agentVersions["claude-code@2.1.15"] = "DISCOVERED";
+        appendDemoAudit("AGENT_VERSION_DISCOVERED", "claude-code@2.1.15", role, { source: "official-manifest" });
+        return { candidates: [{ agent: "claude-code", version: "2.1.15", state: "DISCOVERED", activated: false }] };
+      });
+    }
+
+    if (key === "agent-versions/approve" || key === "agent-versions/block") {
+      const role = requireRole(request, VERSION_ROLES);
+      const id = requireString(body, "id", 120);
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        if (!(id in store.agentVersions)) throw new HttpProblem(404, "VERSION_NOT_FOUND", "Agent version was not discovered");
+        const state = key.endsWith("approve") ? "APPROVED" as const : "BLOCKED" as const;
+        store.agentVersions[id] = state;
+        appendDemoAudit(`AGENT_VERSION_${state}`, id, role, { automaticActivation: false });
+        return { id, state, immutable: true, activationRequired: state === "APPROVED" };
+      });
+    }
+
+    if (key === "agent-installations") {
+      const role = requireRole(request, VERSION_ROLES);
+      const version = requireString(body, "version", 120);
+      const agent = requireString(body, "agent", 32);
+      const imageDigest = requireString(body, "imageDigest", 160);
+      if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/i.test(version) || !/^sha256:[a-f0-9]{64}$/i.test(imageDigest)) {
+        throw new HttpProblem(400, "INVALID_INSTALLATION", "Version and sha256 image digest must be exact");
+      }
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const id = `${agent}-installation-${version.replaceAll(".", "")}`;
+        getDemoStore().rollouts[id] = { percent: 0, previous: 0, state: "READY" };
+        appendDemoAudit("AGENT_INSTALLATION_CREATED", id, role, { imageDigest, workerPool: "dev-linux" });
+        return { id, agent, version, imageDigest, state: "READY", rolloutPercent: 0, cliSelfUpdateDisabled: true };
+      });
+    }
+
+    const rolloutMatch = /^agent-rollouts\/([^/]+)\/(advance|rollback)$/.exec(key);
+    if (rolloutMatch) {
+      const role = requireRole(request, VERSION_ROLES);
+      const installationId = rolloutMatch[1] ?? "";
+      const action = rolloutMatch[2];
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const rollout = getDemoStore().rollouts[installationId];
+        if (!rollout) throw new HttpProblem(404, "INSTALLATION_NOT_FOUND", "Installation does not exist");
+        if (action === "rollback") {
+          rollout.previous = rollout.percent;
+          rollout.percent = 0;
+          rollout.state = "READY";
+        } else {
+          rollout.previous = rollout.percent;
+          rollout.percent = rollout.percent < 5 ? 5 : rollout.percent < 25 ? 25 : 100;
+          rollout.state = rollout.percent === 100 ? "ACTIVE" : "CANARY";
+        }
+        appendDemoAudit(`ROLLOUT_${action?.toUpperCase()}`, installationId, role, { percent: rollout.percent, affectsRunningTasks: false });
+        return { installationId, ...rollout, affectsNewTasksOnly: true };
+      });
+    }
+
+    if (key === "agent-profiles") {
+      const role = requireRole(request, PROFILE_ROLES);
+      const agent = requireString(body, "agent", 32);
+      if (agent !== "claude-code" && agent !== "codex-cli") throw new HttpProblem(400, "INVALID_AGENT", "Only claude-code and codex-cli are supported");
+      const baseUrl = requireString(body, "baseUrl", 1000);
+      try {
+        validateProviderBaseUrl(baseUrl, { approvedPorts: [443] });
+      } catch (error) {
+        throw new HttpProblem(400, "PROVIDER_ENDPOINT_REJECTED", error instanceof Error ? error.message : "Provider endpoint is unsafe");
+      }
+      const primaryModel = requireString(body, "primaryModel", 200);
+      let models;
+      try {
+        models = normalizeModelRoles({
+          primaryModel,
+          planningModel: typeof body.planningModel === "string" ? body.planningModel : undefined,
+          smallFastModel: typeof body.smallFastModel === "string" ? body.smallFastModel : undefined,
+          subagentModel: typeof body.subagentModel === "string" ? body.subagentModel : undefined,
+        });
+      } catch (error) {
+        throw new HttpProblem(400, "MODEL_ID_REJECTED", error instanceof Error ? error.message : "Model IDs must be exact");
+      }
+      const protocol = agent === "codex-cli" ? "openai-responses" : "anthropic-messages";
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const providerId = `provider-${agent}-${store.providers.length + 1}`;
+        const profile: DemoProfile = {
+          id: `profile-${agent}-${store.profiles.length + 1}-r1`,
+          revision: 1,
+          scope: body.scope === "tenant" || body.scope === "project" ? body.scope : "platform",
+          scopeId: typeof body.scopeId === "string" ? body.scopeId : "global",
+          agent,
+          providerId,
+          installationId: requireString(body, "installationId", 160),
+          state: "DRAFT",
+          budgetUsd: typeof body.budgetUsd === "number" ? Math.min(100, Math.max(0, body.budgetUsd)) : 25,
+          fallbackProfileId: typeof body.fallbackProfileId === "string" ? body.fallbackProfileId : null,
+        };
+        store.providers.push({
+          id: providerId,
+          revision: 1,
+          agent,
+          protocol,
+          baseUrl,
+          primaryModel: models.primaryModel,
+          credentialId: requireString(body, "credentialId", 160),
+          state: "DRAFT",
+          probe: {},
+        });
+        store.profiles.push(profile);
+        appendDemoAudit("AGENT_PROFILE_DRAFTED", profile.id, role, { agent, protocol, baseUrl });
+        return { profile, provider: { id: providerId, protocol, baseUrl, models, state: "DRAFT" } };
+      });
+    }
+
+    const profileMatch = /^agent-profiles\/([^/]+)\/(validate|activate|disable)$/.exec(key);
+    if (profileMatch) {
+      const role = requireRole(request, profileMatch[2] === "activate" ? SECURITY_ROLES : PROFILE_ROLES);
+      const profileId = profileMatch[1] ?? "";
+      const action = profileMatch[2];
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const profile = store.profiles.find((item) => item.id === profileId);
+        if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
+        const provider = store.providers.find((item) => item.id === profile.providerId);
+        if (!provider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
+        if (action === "validate") {
+          profile.state = "READY";
+          provider.state = "READY";
+          provider.probe = { authentication: "PASS", streaming: "PASS", tools: "PASS", cancellation: "PASS", usage: "PASS", timeout: "PASS" };
+        } else if (action === "activate") {
+          if (profile.state !== "READY" || provider.state !== "READY") throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
+          profile.state = "ACTIVE";
+          provider.state = "ACTIVE";
+        } else {
+          profile.state = "DISABLED";
+          provider.state = "DISABLED";
+        }
+        appendDemoAudit(`AGENT_PROFILE_${action?.toUpperCase()}`, profile.id, role, { providerRevisionId: provider.id, state: profile.state });
+        return { profile, provider: { id: provider.id, state: provider.state, probe: provider.probe }, previousActivePreserved: action === "validate" };
+      });
+    }
+
+    if (key === "credentials") {
+      const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
+      const label = requireString(body, "label", 120);
+      const secret = requireString(body, "apiKey", 8192);
+      if (secret.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Credential must be at least 8 characters");
+      const bytes = new TextEncoder().encode(secret);
+      let fingerprint: `sha256:${string}`;
+      try {
+        fingerprint = await fingerprintSecret(bytes);
+      } finally {
+        bytes.fill(0);
+        body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
+      }
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const id = `credential-${store.credentials.length + 1}-v1`;
+        const credential = {
+          id,
+          label,
+          secretRef: `vault://kv/data/deviludo/${id}#1`,
+          fingerprint,
+          masked: maskFingerprint(fingerprint),
+          version: 1,
+          state: "ACTIVE" as const,
+          createdAt: new Date().toISOString(),
+        };
+        store.credentials.push(credential);
+        appendDemoAudit("CREDENTIAL_CREATED", id, role, { label, secretRef: credential.secretRef });
+        return { ...credential, fingerprint: credential.masked, plaintextRecoverable: false };
+      });
+    }
+
+    const credentialMatch = /^credentials\/([^/]+)\/(rotate|revoke)$/.exec(key);
+    if (credentialMatch) {
+      const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
+      const credentialId = credentialMatch[1] ?? "";
+      const action = credentialMatch[2];
+      let replacementFingerprint: `sha256:${string}` | null = null;
+      if (action === "rotate") {
+        const replacement = requireString(body, "apiKey", 8192);
+        if (replacement.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Replacement credential must be at least 8 characters");
+        const bytes = new TextEncoder().encode(replacement);
+        try {
+          replacementFingerprint = await fingerprintSecret(bytes);
+        } finally {
+          bytes.fill(0);
+          body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
+        }
+      }
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const credential = store.credentials.find((item) => item.id === credentialId);
+        if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+        if (action === "revoke") {
+          credential.state = "REVOKED";
+          appendDemoAudit("CREDENTIAL_REVOKE", credential.id, role, { newTokensIssued: false });
+          return { id: credential.id, state: credential.state, newTokensIssued: false, plaintextRecoverable: false };
+        }
+        if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
+        if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+        credential.state = "PREVIOUS";
+        const nextVersion = credential.version + 1;
+        const replacement = {
+          ...credential,
+          id: credential.id.replace(/-v\d+$/, `-v${nextVersion}`),
+          secretRef: credential.secretRef.replace(/#\d+$/, `#${nextVersion}`),
+          fingerprint: replacementFingerprint,
+          masked: maskFingerprint(replacementFingerprint),
+          version: nextVersion,
+          state: "ACTIVE" as const,
+          createdAt: new Date().toISOString(),
+        };
+        store.credentials.push(replacement);
+        appendDemoAudit("CREDENTIAL_ROTATE", credential.id, role, { replacementVersionId: replacement.id, newTasksOnly: true });
+        return { id: replacement.id, previousId: credential.id, state: replacement.state, fingerprint: replacement.masked, newTokensIssued: true, oldVersionNoLongerIssued: true, plaintextRecoverable: false };
+      });
+    }
+
+    throw new HttpProblem(404, "NOT_FOUND", `Unknown admin action: ${key}`);
+  } catch (error) {
+    return problemResponse(error);
+  }
+}
+
+export async function PUT(request: Request, context: RouteContext) {
+  try {
+    const { segments } = await context.params;
+    const key = routeKey(segments);
+    const match = /^agent-defaults\/(platform|tenant:[a-z0-9-]+|project:[a-z0-9-]+)$/i.exec(key);
+    if (!match) throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
+    const role = requireRole(request, match[1]?.startsWith("platform") ? VERSION_ROLES : PROFILE_ROLES);
+    const body = await bodyObject(request);
+    const profileRevisionId = requireString(body, "profileRevisionId", 160);
+    const result = withIdempotency(`admin:${key}:${idempotencyKey(request)}`, () => {
+      const store = getDemoStore();
+      if (!store.profiles.some((profile) => profile.id === profileRevisionId && profile.state === "ACTIVE")) {
+        throw new HttpProblem(409, "PROFILE_NOT_ACTIVE", "Defaults can only reference an active immutable Profile revision");
+      }
+      store.defaults[match[1] ?? "platform"] = profileRevisionId;
+      appendDemoAudit("AGENT_DEFAULT_UPDATED", match[1] ?? "platform", role, { profileRevisionId, affectsRunningTasks: false });
+      return { scope: match[1], profileRevisionId, precedence: "project > tenant > platform > claude-code", affectsNewTasksOnly: true };
+    });
+    return json({ data: result.value, meta: { idempotentReplay: result.replayed } });
+  } catch (error) {
+    return problemResponse(error);
+  }
+}
+
+function mutate<T>(idempotency: string, operation: () => T): Response {
+  const result = withIdempotency(idempotency, operation);
+  return json({ data: result.value, meta: { idempotentReplay: result.replayed } }, { status: result.replayed ? 200 : 201 });
+}

@@ -1,0 +1,174 @@
+import {
+  Body,
+  Controller,
+  Get,
+  Inject,
+  Param,
+  Post,
+  Put,
+  Req,
+} from "@nestjs/common";
+import type { FastifyRequest } from "fastify";
+import { AdminService } from "./admin.service";
+import { ADMIN_ROLES, type AdminRole, type CredentialVersionRecord, type RequestActor } from "./contracts";
+import { header } from "./rbac.guard";
+import { Roles } from "./roles";
+
+const ALL_ROLES = ADMIN_ROLES;
+const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner"] as const;
+
+export class AdminController {
+  constructor(private readonly service: AdminService) {}
+
+  agents(): Readonly<Record<string, unknown>> {
+    return this.service.agents();
+  }
+
+  discoverVersions(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.discoverVersions(objectBody(body), actor(request));
+  }
+
+  approveVersion(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.setVersionState("approve", objectBody(body), actor(request));
+  }
+
+  blockVersion(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.setVersionState("block", objectBody(body), actor(request));
+  }
+
+  createInstallation(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.createInstallation(objectBody(body), actor(request));
+  }
+
+  advanceRollout(id: string, request: FastifyRequest) {
+    return this.service.rollout(id, "advance", actor(request));
+  }
+
+  rollbackRollout(id: string, request: FastifyRequest) {
+    return this.service.rollout(id, "rollback", actor(request));
+  }
+
+  createProfile(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.createProfile(objectBody(body), actor(request));
+  }
+
+  validateProfile(id: string, request: FastifyRequest) {
+    return this.service.transitionProfile(id, "validate", actor(request));
+  }
+
+  activateProfile(id: string, request: FastifyRequest) {
+    return this.service.transitionProfile(id, "activate", actor(request));
+  }
+
+  disableProfile(id: string, request: FastifyRequest) {
+    return this.service.transitionProfile(id, "disable", actor(request));
+  }
+
+  async createCredential(body: Record<string, unknown>, request: FastifyRequest) {
+    return credentialView(await this.service.createCredential(objectBody(body), actor(request)));
+  }
+
+  async rotateCredential(
+    id: string,
+    body: Record<string, unknown>,
+    request: FastifyRequest,
+  ) {
+    return credentialResultView(await this.service.rotateCredential(id, objectBody(body), actor(request)));
+  }
+
+  async revokeCredential(id: string, request: FastifyRequest) {
+    return credentialView(await this.service.revokeCredential(id, actor(request)));
+  }
+
+  updateDefault(
+    scope: string,
+    body: Record<string, unknown>,
+    request: FastifyRequest,
+  ) {
+    return this.service.updateDefault(scope, objectBody(body), actor(request));
+  }
+
+  health(): Readonly<Record<string, unknown>> {
+    return this.service.health();
+  }
+
+  audit() {
+    return this.service.auditLog();
+  }
+}
+
+// Decorators are applied imperatively so this service remains consumable from
+// the web workspace's standard-decorator tsconfig as well as Nest's legacy
+// decorator tsconfig. The resulting Nest route metadata is identical.
+Inject(AdminService)(AdminController, undefined, 0);
+applyRoute("agents", Get("agents"), ALL_ROLES, []);
+applyRoute("discoverVersions", Post("agent-versions/discover"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("approveVersion", Post("agent-versions/approve"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("blockVersion", Post("agent-versions/block"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("createInstallation", Post("agent-installations"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("advanceRollout", Post("agent-rollouts/:id/advance"), ["PlatformAgentAdmin"], [Param("id"), Req()]);
+applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAgentAdmin"], [Param("id"), Req()]);
+applyRoute("createProfile", Post("agent-profiles"), PROFILE_ROLES, [Body(), Req()]);
+applyRoute("validateProfile", Post("agent-profiles/:id/validate"), PROFILE_ROLES, [Param("id"), Req()]);
+applyRoute("activateProfile", Post("agent-profiles/:id/activate"), ["SecurityAdmin"], [Param("id"), Req()]);
+applyRoute("disableProfile", Post("agent-profiles/:id/disable"), PROFILE_ROLES, [Param("id"), Req()]);
+applyRoute("createCredential", Post("credentials"), ["SecurityAdmin", "TenantAdmin"], [Body(), Req()]);
+applyRoute("rotateCredential", Post("credentials/:id/rotate"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("revokeCredential", Post("credentials/:id/revoke"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Req()]);
+applyRoute("updateDefault", Put("agent-defaults/:scope"), PROFILE_ROLES, [Param("scope"), Body(), Req()]);
+applyRoute("health", Get("agent-health"), ALL_ROLES, []);
+applyRoute("audit", Get("audit"), ALL_ROLES, []);
+Controller("admin")(AdminController);
+
+function applyRoute(
+  method: keyof AdminController,
+  routeDecorator: MethodDecorator,
+  roles: readonly AdminRole[],
+  parameters: readonly ParameterDecorator[],
+): void {
+  const descriptor = Object.getOwnPropertyDescriptor(AdminController.prototype, method);
+  if (!descriptor) throw new Error(`Missing AdminController method ${String(method)}`);
+  parameters.forEach((decorator, index) => decorator(AdminController.prototype, method, index));
+  Roles(...roles)(AdminController.prototype, method, descriptor);
+  routeDecorator(AdminController.prototype, method, descriptor);
+}
+
+function objectBody(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  return body as Record<string, unknown>;
+}
+
+function actor(request: FastifyRequest): RequestActor {
+  return {
+    role: (header(request, "x-deviludo-role") ?? "Auditor") as AdminRole,
+    requestId: request.id,
+    actorId: header(request, "x-deviludo-actor") ?? "authenticated-admin",
+  };
+}
+
+function credentialView(record: CredentialVersionRecord): Readonly<Record<string, unknown>> {
+  return {
+    id: record.id,
+    familyId: record.familyId,
+    version: record.version,
+    label: record.label,
+    maskedFingerprint: record.maskedFingerprint,
+    state: record.state,
+    createdAt: record.createdAt,
+    lastUsedAt: record.lastUsedAt,
+    plaintextRecoverable: false,
+  };
+}
+
+function credentialResultView(result: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(result).map(([key, value]) => [
+      key,
+      isCredential(value) ? credentialView(value) : value,
+    ]),
+  );
+}
+
+function isCredential(value: unknown): value is CredentialVersionRecord {
+  return Boolean(value && typeof value === "object" && "maskedFingerprint" in value && "secretRef" in value);
+}

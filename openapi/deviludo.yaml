@@ -1,0 +1,200 @@
+openapi: 3.1.0
+info:
+  title: DeviLudo Control Plane API
+  version: 0.1.0-beta
+  description: Production API contract. The local Sites preview exposes the same operations below /api/admin.
+servers:
+  - url: https://api.deviludo.example
+security:
+  - bearerAuth: []
+paths:
+  /admin/agents:
+    get:
+      operationId: listAgents
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /admin/agent-versions/discover:
+    post:
+      operationId: discoverAgentVersions
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-versions/approve:
+    post:
+      operationId: approveAgentVersion
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionAction" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-versions/block:
+    post:
+      operationId: blockAgentVersion
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionAction" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-installations:
+    post:
+      operationId: createAgentInstallation
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-rollouts/{id}/advance:
+    post:
+      operationId: advanceAgentRollout
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-rollouts/{id}/rollback:
+    post:
+      operationId: rollbackAgentRollout
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-profiles:
+    post:
+      operationId: createAgentProfileRevision
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProfileDraft" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-profiles/{id}/validate:
+    post:
+      operationId: validateAgentProfile
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-profiles/{id}/activate:
+    post:
+      operationId: activateAgentProfile
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-profiles/{id}/disable:
+    post:
+      operationId: disableAgentProfile
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/credentials:
+    post:
+      operationId: createCredential
+      description: Plaintext is accepted once by the Vault ingress and is never returned or stored in business data.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, apiKey]
+              properties:
+                label: { type: string, maxLength: 120 }
+                apiKey: { type: string, format: password, writeOnly: true }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/credentials/{id}/rotate:
+    post:
+      operationId: rotateCredential
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/credentials/{id}/revoke:
+    post:
+      operationId: revokeCredential
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-defaults/{scope}:
+    put:
+      operationId: updateAgentDefault
+      parameters:
+        - name: scope
+          in: path
+          required: true
+          schema: { type: string, examples: [platform, "tenant:north-dock", "project:ember-archipelago"] }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-health:
+    get:
+      operationId: getAgentHealth
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+  /admin/audit:
+    get:
+      operationId: listAgentAudit
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+  /projects/{projectId}/spec-revisions:
+    post:
+      operationId: approveGameSpecRevision
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /projects/{projectId}/feedback:
+    post:
+      operationId: createFeedbackIteration
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 160 }
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  requestBodies:
+    VersionAction:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [id]
+            properties: { id: { type: string } }
+  responses:
+    Ok:
+      description: Successful response
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data: {}
+              meta: { type: object, additionalProperties: true }
+  schemas:
+    AgentProfileDraft:
+      type: object
+      required: [agent, baseUrl, primaryModel, credentialId, installationId]
+      properties:
+        agent: { type: string, enum: [claude-code, codex-cli] }
+        baseUrl: { type: string, format: uri }
+        primaryModel: { type: string, description: Exact version-bearing model ID; floating aliases are rejected. }
+        planningModel: { type: string }
+        smallFastModel: { type: string }
+        subagentModel: { type: string }
+        credentialId: { type: string }
+        installationId: { type: string }
+        scope: { type: string, enum: [platform, tenant, project] }
+        scopeId: { type: string }
+        budgetUsd: { type: number, minimum: 0, maximum: 100 }
+        fallbackProfileId: { type: [string, "null"], description: Explicit same-Agent fallback only. }
