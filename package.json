@@ -17,7 +17,7 @@
     "test:agent-worker": "tsc -p services/agent-worker/tsconfig.json --pretty false && node --import tsx --test services/agent-worker/test/*.test.ts",
     "test:inference-gateway": "tsc -p services/inference-gateway/tsconfig.json --pretty false && node --import tsx --test services/inference-gateway/test/gateway.test.ts",
     "test:scm-proxy": "tsc -p services/scm-proxy/tsconfig.json --pretty false && node --import tsx --test services/scm-proxy/test/*.test.ts",
-    "test:runner-control": "tsc -p services/runner-control/tsconfig.json --pretty false && node --import tsx --test services/runner-control/test/coordinator.test.ts",
+    "test:runner-control": "tsc -p services/runner-control/tsconfig.json --pretty false && node --import tsx --test services/runner-control/test/*.test.ts",
     "test:steam-publisher": "tsc -p services/steam-publisher/tsconfig.json --pretty false && node --import tsx --test services/steam-publisher/test/*.test.ts",
     "test:local-runtime": "tsc -p services/local-runtime/tsconfig.json --pretty false && node --import tsx --test services/local-runtime/test/godot-fixture.test.ts",
     "test:local-agent-runtime": "tsc -p services/local-agent-runtime/tsconfig.json --pretty false && node --import tsx --test services/local-agent-runtime/test/*.test.ts",

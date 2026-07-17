@@ -26,3 +26,9 @@ implementation. A production adapter must perform its lease/event mutations in
 PostgreSQL transactions with forced RLS and store artifact bytes in the
 content-addressed object store. It must expose the coordinator only behind a
 dedicated mTLS listener; the public web application route is not runner ingress.
+
+`RunnerControlWorkflowHandler` maps durable workflow jobs to three distinct
+modes: candidate matrix, merged-main release gate and clean Steam install.
+Receipts must repeat the exact commit, Steam BuildID (when applicable) and
+ordered target matrix. Candidate failure emits a repair signal; main or Steam
+failure is terminal so neither can be mistaken for reusable candidate evidence.
