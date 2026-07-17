@@ -14,7 +14,9 @@ segments and service accounts.
 `postgres/001_core.sql` demonstrates forced RLS, append-only revisions/audit,
 and immutable run locks. `postgres/002_workflow_dispatch.sql` adds a leased,
 idempotent activity inbox plus append-only, gate-bound external approval
-receipts. Application transactions must set `app.tenant_id`
+receipts. `postgres/003_workflow_jobs.sql` adds destination-specific durable
+jobs with `SKIP LOCKED` leasing, exact attempt fencing and terminal-state
+immutability. Application transactions must set `app.tenant_id`
 from an already-authorized session; accepting it directly from a request header
 would defeat RLS. Credential values never enter these tables—only Vault refs,
 fingerprints, and version IDs do.

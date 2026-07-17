@@ -13,6 +13,7 @@ import type { DeliverySnapshot } from "../src/contracts";
 import {
   InMemoryWorkflowCommandInbox,
   WorkflowCommandReceiver,
+  deliveryDispatchRequestDigest,
   type WorkflowDispatchHeaders,
 } from "../src/receiver";
 import {
@@ -20,6 +21,7 @@ import {
   type PostgresQueryResult,
   type PostgresWorkflowClient,
 } from "../src/postgres-inbox";
+import { PostgresWorkflowCommandQueue } from "../src/postgres-queue";
 import {
   parseWorkflowSpiffeId,
   registerWorkflowCommandRoute,
@@ -369,6 +371,70 @@ test("workflow SPIFFE parser accepts exactly one well-formed identity", () => {
     () => parseWorkflowSpiffeId("URI:spiffe://one/worker, URI:spiffe://two/worker"),
     /exactly one/,
   );
+});
+
+test("Postgres job queue enqueues idempotently and claims an exact destination job", async () => {
+  const request = agentDispatch();
+  const requestDigest = deliveryDispatchRequestDigest(request);
+  const statements: { text: string; values?: readonly unknown[] }[] = [];
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      values?: readonly unknown[],
+    ): Promise<PostgresQueryResult<Row>> {
+      statements.push({ text, values });
+      if (text.includes("SELECT request_digest") && text.includes("workflow_command_jobs")) {
+        return { rowCount: 1, rows: [{ request_digest: requestDigest }] } as unknown as PostgresQueryResult<Row>;
+      }
+      if (text.includes("WITH candidate AS")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            id: "33333333-3333-4333-8333-333333333333",
+            tenant_id: request.payload.tenantId,
+            project_id: request.payload.projectId,
+            workflow_id: request.payload.workflowId,
+            destination: request.destination,
+            operation: request.payload.command,
+            request_digest: requestDigest,
+            request_body: request,
+            state: "RUNNING",
+            attempt: 1,
+            claim_token: values?.[3],
+            claim_expires_at: "2026-07-17T00:05:00.000Z",
+          }],
+        } as unknown as PostgresQueryResult<Row>;
+      }
+      if (text.includes("RETURNING id")) {
+        return { rowCount: 1, rows: [{ id: "33333333-3333-4333-8333-333333333333" }] } as unknown as PostgresQueryResult<Row>;
+      }
+      return { rowCount: 0, rows: [] } as PostgresQueryResult<Row>;
+    },
+    release() {},
+  };
+  const queue = new PostgresWorkflowCommandQueue(
+    { async connect() { return client; } },
+    () => new Date("2026-07-17T00:00:00.000Z"),
+  );
+  await queue.enqueue(request);
+  const claimed = await queue.claimNext({
+    tenantId: request.payload.tenantId,
+    destination: "agent-worker",
+    workerId: "agent-worker-001",
+  });
+  assert.ok(claimed);
+  assert.equal(claimed.requestDigest, requestDigest);
+  assert.equal(claimed.request.payload.idempotencyKey, request.payload.idempotencyKey);
+  await queue.complete({
+    tenantId: request.payload.tenantId,
+    jobId: claimed.id,
+    claimToken: claimed.claimToken,
+    result: { runId: "run-001", signalId: "signal-run-started-001" },
+  });
+  const begins = statements.filter((entry) => entry.text === "BEGIN").length;
+  const tenantBindings = statements.filter((entry) => entry.text.includes("set_config")).length;
+  assert.equal(begins, 3);
+  assert.equal(tenantBindings, begins);
 });
 
 test("Temporal can bundle the deterministic workflow and signal-backed waits", async () => {

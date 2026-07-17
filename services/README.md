@@ -170,6 +170,13 @@ implements the retry claim under tenant `SET LOCAL` RLS; exact retries replay
 the original receipt, while reuse of an idempotency key with a different body
 is rejected. The in-memory inbox is explicitly test/local-only.
 
+`PostgresWorkflowCommandQueue` is the concrete durable handler used behind the
+receiver. It inserts the complete bound request idempotently, lets only the
+fixed destination claim work with `FOR UPDATE SKIP LOCKED`, fences every retry
+with a fresh claim token and monotonically increasing attempt, and records
+completion/retry/terminal failure under tenant RLS. A receiver therefore never
+returns an acceptance receipt for an in-memory-only task.
+
 ## Verification
 
 ```bash

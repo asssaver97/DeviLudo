@@ -81,7 +81,7 @@ export class WorkflowCommandReceiver {
   ): Promise<DeliveryActivityReceipt> {
     const request = assertDeliveryDispatchRequest(value, this.destination);
     assertTransportBinding(request, headers);
-    const requestDigest = digestRequest(request);
+    const requestDigest = deliveryDispatchRequestDigest(request);
     const claimToken = randomUUID();
     const acceptedAt = this.now();
     if (!Number.isFinite(acceptedAt.getTime())) throw new Error("Workflow receiver clock is invalid");
@@ -296,7 +296,7 @@ function assertClaim(
   }
 }
 
-function digestRequest(request: DeliveryDispatchRequest): string {
+export function deliveryDispatchRequestDigest(request: DeliveryDispatchRequest): string {
   return createHash("sha256").update(canonicalJson(request)).digest("hex");
 }
 
