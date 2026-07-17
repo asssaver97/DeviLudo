@@ -28,7 +28,11 @@ replicas. Migration `011` adds the versioned Agent administration catalog and
 its separate append-only audit ledger. Migration `012` atomically completes
 authoritative workflow actions and records their exact Temporal signals in a
 tenant-RLS transactional outbox so an approval cannot be lost after a process
-failure. All twelve migrations are
+failure. Migration `013` gives workflow-created E2E attempts a tenant-scoped
+idempotency binding, immutable mode/source/commit fields, terminal transition
+guards and immutable evidence bundles. It also requires SCM to record the
+actual merged-main source digest instead of reusing a candidate digest. All
+thirteen migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

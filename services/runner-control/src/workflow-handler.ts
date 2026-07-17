@@ -28,6 +28,7 @@ export interface RunnerWorkflowPort {
     readonly tenantId: string;
     readonly projectId: string;
     readonly workflowId: string;
+    readonly runId: string;
     readonly mode: RunnerWorkflowMode;
     readonly commitSha: string;
     readonly draftPullRequest: number | null;
@@ -52,7 +53,7 @@ export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
     const commitSha = mode === "CANDIDATE" ? snapshot.candidateCommitSha : snapshot.mainCommitSha;
     const draftPullRequest = mode === "CANDIDATE" ? snapshot.draftPullRequest : null;
     const steamBuildId = mode === "STEAM_CLEAN_INSTALL" ? snapshot.steamBuildId : null;
-    validateSnapshot(mode, snapshot.state, commitSha, draftPullRequest, steamBuildId);
+    validateSnapshot(mode, snapshot.state, snapshot.runId, commitSha, draftPullRequest, steamBuildId);
     const targetMatrix = validateMatrix(snapshot.targetMatrix);
     const receipt = await this.runner.execute({
       operationKey: `workflow-job:${job.id}`,
@@ -60,6 +61,7 @@ export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
       tenantId: job.tenantId,
       projectId: job.projectId,
       workflowId: job.workflowId,
+      runId: snapshot.runId as string,
       mode,
       commitSha: commitSha as string,
       draftPullRequest,
@@ -111,12 +113,14 @@ function modeFor(operation: string): RunnerWorkflowMode {
 function validateSnapshot(
   mode: RunnerWorkflowMode,
   state: string,
+  runId: string | null,
   commitSha: string | null,
   draftPullRequest: number | null,
   steamBuildId: string | null,
 ): void {
   const expectedState = mode === "CANDIDATE" ? "CROSS_PLATFORM_E2E" : mode === "MAIN_RELEASE_GATE" ? "MAIN_SHA_E2E" : "STEAM_INSTALL_E2E";
-  if (state !== expectedState || !commitSha || !/^[a-f0-9]{40}$/.test(commitSha)) throw new Error("Runner workflow commit binding is invalid");
+  if (state !== expectedState || !runId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(runId)
+    || !commitSha || !/^[a-f0-9]{40}$/.test(commitSha)) throw new Error("Runner workflow commit binding is invalid");
   if (mode === "CANDIDATE" && (!Number.isSafeInteger(draftPullRequest) || (draftPullRequest as number) < 1)) throw new Error("Runner workflow Draft PR binding is invalid");
   if (mode === "STEAM_CLEAN_INSTALL" && (!steamBuildId || !/^\d{1,20}$/.test(steamBuildId) || steamBuildId === "0")) throw new Error("Runner workflow Steam BuildID is invalid");
 }

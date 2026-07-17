@@ -40,6 +40,7 @@ test("Runner workflow handler turns candidate matrix evidence into pass or repai
   const handler = new RunnerControlWorkflowHandler({ async execute(input) {
     assert.equal(input.mode, "CANDIDATE");
     assert.equal(input.draftPullRequest, 91);
+    assert.equal(input.runId, "run-001");
     return response;
   } });
   const passed = await handler.execute(job(base, "START_TARGET_MATRIX_E2E"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });

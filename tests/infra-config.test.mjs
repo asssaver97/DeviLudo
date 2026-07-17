@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 12 }, (_, index) => {
+  const offsets = Array.from({ length: 13 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,18 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Runner workflow attempts are immutable, tenant-scoped and content-bound", () => {
+  const migration = readFileSync(new URL("../infra/postgres/013_runner_workflow_attempts.sql", import.meta.url), "utf8");
+  const adapter = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");
+  assert.match(migration, /UNIQUE \(tenant_id, workflow_operation_key\)/);
+  assert.match(migration, /main_source_digest/);
+  assert.match(migration, /e2e_attempt_workflow_binding_immutable/);
+  assert.match(migration, /evidence_bundle_immutable/);
+  assert.match(adapter, /set_config\('app\.tenant_id'/);
+  assert.match(adapter, /ON CONFLICT \(tenant_id, workflow_operation_key\) DO NOTHING/);
+  assert.match(adapter, /createEvidenceBundle/);
 });
 
 test("workflow inbox idempotency is tenant-scoped in schema and adapter", () => {

@@ -22,9 +22,18 @@ that a localhost process is a real Windows/Linux/macOS fleet.
   to the exact lease. The coordinator then creates the immutable bundle.
 
 `RunnerMatrixCoordinator` uses in-memory maps only as a deterministic contract
-implementation. A production adapter must perform its lease/event mutations in
-PostgreSQL transactions with forced RLS and store artifact bytes in the
-content-addressed object store. It must expose the coordinator only behind a
+implementation for the lease/event trust rules. `PostgresRunnerWorkflowPort`
+is the production Temporal-side scheduler: under forced tenant RLS it resolves
+the candidate, actual merged-main, or Steam Build source receipt, creates one
+idempotent immutable attempt, renews the workflow lease while waiting, and
+returns only a terminal content-addressed evidence bundle whose manifest digest
+and complete source/spec/test/matrix binding verify. It never runs a localhost
+fixture or fabricates a passing result. Missing SCM/Steam receipts and old merge
+receipts without `main_source_digest` fail closed.
+
+The separately authenticated Runner ingress remains the only owner of platform
+leases/events and terminal attempt writes; artifact bytes belong in the
+content-addressed object store. It must expose those operations only behind a
 dedicated mTLS listener; the public web application route is not runner ingress.
 
 `RunnerControlWorkflowHandler` maps durable workflow jobs to three distinct
@@ -32,3 +41,10 @@ modes: candidate matrix, merged-main release gate and clean Steam install.
 Receipts must repeat the exact commit, Steam BuildID (when applicable) and
 ordered target matrix. Candidate failure emits a repair signal; main or Steam
 failure is terminal so neither can be mistaken for reusable candidate evidence.
+
+Run the production workflow destination with `npm run
+start:runner-control-workflow`. In addition to the shared destination TLS,
+signed tenant-assignment, Temporal and PostgreSQL variables, it accepts
+`DEVILUDO_RUNNER_ATTEMPT_POLL_SECONDS` (default 5) and
+`DEVILUDO_RUNNER_ATTEMPT_MAX_WAIT_SECONDS` (default 7200). A timeout retries the
+durable workflow job; it never changes the attempt binding.
