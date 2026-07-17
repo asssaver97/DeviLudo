@@ -3,6 +3,7 @@ import {
   approveLocalSpec,
   createLocalDelivery,
   invalidateLocalDelivery,
+  normalizeLocalDeliverySnapshot,
   recordLocalValidation,
   type LocalDeliveryAction,
   type LocalDeliverySnapshot,
@@ -69,7 +70,7 @@ function parseSnapshot(value: string): LocalDeliverySnapshot {
   if (!parsed.projectId || !parsed.stage || !Number.isInteger(parsed.revision)) {
     throw new Error("本地交付快照已损坏");
   }
-  return parsed;
+  return normalizeLocalDeliverySnapshot(parsed);
 }
 
 async function insertInitial(
@@ -122,7 +123,7 @@ function readMemoryDelivery(projectId: string, specRevisionId?: string) {
     snapshot = createLocalDelivery(projectId, specRevisionId);
     state.snapshots.set(projectId, snapshot);
   }
-  return snapshot;
+  return normalizeLocalDeliverySnapshot(snapshot);
 }
 
 export async function readLocalDelivery(

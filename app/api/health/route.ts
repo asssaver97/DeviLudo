@@ -10,6 +10,7 @@ type LocalAgentHealth = {
   service?: string;
   executionEnabled?: boolean;
   inferenceGateway?: "CONFIGURED" | "NOT_CONFIGURED";
+  providerBindingProbe?: "CONFIGURED" | "NOT_CONFIGURED";
   workerImageIdentity?: string | null;
   expectedWorkerImageIdentity?: string | null;
   workerImageVerified?: boolean;
@@ -46,6 +47,7 @@ export async function GET(request: Request) {
         localAgentRuntime: localAgentRuntime.status === "NOT_CONNECTED" ? "NOT_CONNECTED" : "CONNECTED",
         localAgents: localAgentRuntime.agents ?? [],
         inferenceGateway: localAgentRuntime.inferenceGateway ?? "NOT_CONFIGURED",
+        providerBindingProbe: localAgentRuntime.providerBindingProbe ?? "NOT_CONFIGURED",
         workerImageIdentity: localAgentRuntime.workerImageIdentity ?? null,
         expectedWorkerImageIdentity: localAgentRuntime.expectedWorkerImageIdentity ?? null,
         workerImageVerified: localAgentRuntime.workerImageVerified === true,
@@ -72,6 +74,7 @@ function isVerifiedAgentRuntime(health: LocalAgentHealth): boolean {
     && health.status === "ok"
     && health.executionEnabled === true
     && health.inferenceGateway === "CONFIGURED"
+    && health.providerBindingProbe === "CONFIGURED"
     && health.workerImageVerified === true
     && Boolean(health.agents?.some((agent) => agent.state === "READY"));
 }

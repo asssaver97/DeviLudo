@@ -21,7 +21,8 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
 - `services/inference-gateway`：短期 run token、不可变运行注册表、精确 Provider/凭据/模型、累计预算与逐请求 DNS/SSRF 门禁；未配置可信 Vault/DNS-pinning Connector 时拒绝推理请求。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
-- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪探针；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway 和显式启用状态作为联合门禁。默认只探测、绝不执行 Agent。
+- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪探针；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。默认只探测、绝不执行 Agent。
+- 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；预检不产生模型请求或代码变更。
 - `db`、`drizzle`：26 张 D1 Beta 表、不可变触发器及本地交付事件迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。

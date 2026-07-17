@@ -6,6 +6,7 @@ import type {
   LocalDeliverySnapshot,
   LocalDeliveryStage,
 } from "@/lib/local-delivery/model";
+import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
 import { CheckIcon, ClockIcon, SparkIcon } from "./Icons";
 
 const stageLabels: Record<LocalDeliveryStage, string> = {
@@ -49,9 +50,11 @@ export function LocalDeliveryPanel({
   const [snapshot, setSnapshot] = useState<LocalDeliverySnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [agentPreflight, setAgentPreflight] = useState<LocalAgentPreflightResult | null>(null);
 
   const publish = useCallback((value: LocalDeliverySnapshot) => {
     setSnapshot(value);
+    setAgentPreflight((current) => current?.runId === value.runId ? current : null);
     onSnapshot?.(value);
   }, [onSnapshot]);
 
@@ -118,13 +121,28 @@ export function LocalDeliveryPanel({
     }
   }
 
+  async function runAgentPreflight() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/agent-preflight`, { method: "POST" });
+      const payload = await response.json() as { data?: LocalAgentPreflightResult; error?: { message?: string } };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "本机 Agent 预检失败");
+      setAgentPreflight(payload.data);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "本机 Agent 预检失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="local-delivery" aria-live="polite">
       <div className="local-delivery-heading">
         <div>
           <span className="eyebrow">Localhost · D1 持久状态</span>
           <h2>本地交付控制台</h2>
-          <p>确定性 Fixture 只验证编排和门禁；不会调用真实 Agent、GitHub 或 Steam。</p>
+          <p>Fixture 验证编排；真实 Agent 必须先通过独立预检，本地默认不会调用模型、GitHub 或 Steam。</p>
         </div>
         {snapshot ? <span className={`local-stage local-stage-${snapshot.stage.toLowerCase()}`}><i /> {stageLabels[snapshot.stage]}</span> : null}
       </div>
@@ -151,6 +169,24 @@ export function LocalDeliveryPanel({
                 {snapshot.targetResults[platform] === "PASSED" ? <CheckIcon /> : <ClockIcon />}
               </div>
             ))}
+          </div>
+
+          <div className={`local-real-validation ${agentPreflight?.status === "READY" ? "ready" : "pending"}`}>
+            <div className="local-real-validation-copy">
+              <span className="eyebrow">真实 Agent 启动预检</span>
+              <h3>{agentPreflight ? agentPreflight.code : `${snapshot.lockedProfile.agent} · ${snapshot.lockedProfile.exactAgentVersion}`}</h3>
+              <p>{agentPreflight
+                ? `${agentPreflight.message} 本机版本：${agentPreflight.observedVersion ?? "不可用"}`
+                : "只检查精确 CLI、WorkerImage、Gateway/Provider 和显式执行开关；预检本身不启动 Agent。"}</p>
+            </div>
+            {agentPreflight ? (
+              <div className="local-real-validation-result">
+                <span className={agentPreflight.status === "READY" ? "passed" : "waiting"}>{agentPreflight.status === "READY" ? "可以领取任务" : "执行已阻止"}</span>
+                <button className="button button-secondary" disabled={busy} onClick={runAgentPreflight} type="button">重新预检</button>
+              </div>
+            ) : snapshot.runId ? (
+              <button className="button button-secondary" disabled={busy} onClick={runAgentPreflight} type="button">{busy ? "正在预检…" : "检查真实 Agent"}</button>
+            ) : <span className="local-real-validation-wait">批准规格后可预检</span>}
           </div>
 
           <div className={`local-real-validation ${snapshot.localValidation?.valid ? "ready" : "pending"}`}>

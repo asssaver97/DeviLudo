@@ -47,8 +47,12 @@ export type LocalDeliverySnapshot = {
     agent: "claude-code";
     profileRevisionId: "profile-claude-platform-r5";
     installationId: "claude-installation-214";
+    imageDigest: `sha256:${string}`;
     exactAgentVersion: "2.1.14";
     adapterVersion: "1.0.0";
+    providerRevisionId: "provider-platform-claude-r1";
+    providerProtocol: "anthropic-messages";
+    credentialVersionId: "credential-platform-claude-v1";
     model: "claude-sonnet-4-6-20250514";
   };
   candidatePr: number | null;
@@ -75,10 +79,19 @@ const profile = {
   agent: "claude-code" as const,
   profileRevisionId: "profile-claude-platform-r5" as const,
   installationId: "claude-installation-214" as const,
+  imageDigest: `sha256:${"a".repeat(64)}` as const,
   exactAgentVersion: "2.1.14" as const,
   adapterVersion: "1.0.0" as const,
+  providerRevisionId: "provider-platform-claude-r1" as const,
+  providerProtocol: "anthropic-messages" as const,
+  credentialVersionId: "credential-platform-claude-v1" as const,
   model: "claude-sonnet-4-6-20250514" as const,
 };
+
+/** Add newly locked fields when reading an older localhost JSON snapshot. */
+export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
+  return { ...snapshot, lockedProfile: { ...profile, ...snapshot.lockedProfile } };
+}
 
 function now() {
   return new Date().toISOString();

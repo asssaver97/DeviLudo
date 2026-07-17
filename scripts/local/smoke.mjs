@@ -75,10 +75,11 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function request(baseUrl, route) {
+async function request(baseUrl, route, init = {}) {
   const startedAt = performance.now();
   const response = await fetch(`${baseUrl}${route}`, {
-    headers: { accept: route.startsWith("/api/") ? "application/json" : "text/html" },
+    ...init,
+    headers: { accept: route.startsWith("/api/") || route.startsWith("/v1/") ? "application/json" : "text/html", ...(init.headers ?? {}) },
     redirect: "follow",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -163,11 +164,26 @@ const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin, runtime, agentRuntime] = await Promise.all([
+  const [home, admin, runtime, agentRuntime, agentPreflight] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     request(runtimeUrl, "/health"),
     request(agentRuntimeUrl, "/health"),
+    request(agentRuntimeUrl, "/v1/preflight", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
+      body: JSON.stringify({
+        projectId: "smoke-project",
+        runId: "smoke-run",
+        profileRevisionId: "profile-claude-platform-r5",
+        agent: "claude-code",
+        expectedVersion: "2.1.14",
+        imageDigest: `sha256:${"a".repeat(64)}`,
+        providerRevisionId: "provider-platform-claude-r1",
+        credentialVersionId: "credential-platform-claude-v1",
+        model: "claude-sonnet-4-6-20250514",
+      }),
+    }),
   ]);
   const runtimeHealth = await runtime.response.json();
   if (!runtime.response.ok || runtimeHealth.status !== "ok" || !runtimeHealth.godotVersion) {
@@ -180,12 +196,17 @@ try {
   const agentSummary = agentHealth.agents
     .map((agent) => `${agent.agent} ${agent.observedVersion ?? "unavailable"} (${agent.state})`)
     .join(" · ");
+  const preflightPayload = await agentPreflight.response.json();
+  if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
+    throw new Error("local Agent preflight contract failed");
+  }
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
+  console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log("[local:smoke] All local smoke checks passed.");
 } catch (error) {
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);

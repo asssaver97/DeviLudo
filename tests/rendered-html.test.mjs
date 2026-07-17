@@ -32,6 +32,10 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.match(adminHtml, /Agent 运维台/);
   assert.match(adminHtml, /Claude Code/);
   assert.match(adminHtml, /Codex CLI/);
+
+  const project = await request("/projects/ember-archipelago", { headers: { accept: "text/html" } });
+  assert.equal(project.status, 200);
+  assert.match(await project.text(), /真实 Agent 必须先通过独立预检/);
 });
 
 test("exposes health, agent catalog and idempotent spec approval APIs", async () => {

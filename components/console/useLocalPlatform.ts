@@ -12,6 +12,7 @@ export type LocalHealth = {
     localAgentRuntime?: string;
     localAgents?: LocalAgentReadiness[];
     inferenceGateway?: string;
+    providerBindingProbe?: string;
     workerImageIdentity?: string | null;
     expectedWorkerImageIdentity?: string | null;
     workerImageVerified?: boolean;
