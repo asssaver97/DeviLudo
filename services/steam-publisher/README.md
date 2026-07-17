@@ -26,8 +26,17 @@ The coordinator:
 encrypted `config.vdf` SecretRef is materialized only inside the isolated Steam
 publisher runtime and is not placed in arguments, environment values or logs.
 
-The public preview deliberately returns `503` from the Steam enrollment route
-until an isolated interactive enrollment broker and Vault ingress are wired.
+The Web control plane enables Steam enrollment only when both the internal
+broker endpoint and its fixed public HTTPS origin are configured. It sends a
+short-lived signed platform-session binding to that broker and returns only a
+one-time `/enrollments/<id>` redirect. The isolated broker owns Steam account
+entry, the Steam Guard challenge and Vault ingress; after a successful SteamCMD
+login it persists encrypted `config.vdf` through a `SecretRef`. Passwords,
+Guard codes and `config.vdf` bytes are never accepted by the Web route.
+
+When the broker or platform-session verification is unavailable, the public
+route remains fail-closed (`503`) and does not fabricate an enrollment or a
+usable Steam session. The local preview intentionally exercises this state.
 
 Run the contract tests from the repository root:
 

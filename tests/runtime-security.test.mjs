@@ -11,6 +11,7 @@ import {
   signTrustedGitHubSession,
   verifyTrustedGitHubSession,
 } from "../lib/connections/github-broker.ts";
+import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
 
@@ -184,4 +185,49 @@ test("GitHub Web broker client accepts only fixed GitHub redirects and hashes ca
     }),
   });
   await assert.rejects(malicious.begin(principal, "github-begin-evil"), /invalid installation URL/);
+});
+
+test("Steam enrollment client sends no password and accepts only the configured isolated UI", async () => {
+  const calls = [];
+  const broker = new SteamEnrollmentBrokerClient({
+    endpoint: "https://steam-enrollment.internal/",
+    publicOrigin: "https://steam-enroll.deviludo.example/",
+    now: () => new Date("2026-07-17T00:00:00.000Z"),
+    async fetch(url, init) {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        enrollmentId: "enrollment-001",
+        state: "WAITING_STEAM_GUARD",
+        enrollmentUrl: "https://steam-enroll.deviludo.example/enrollments/enrollment-001",
+        expiresAt: "2026-07-17T00:10:00.000Z",
+      });
+    },
+  });
+  const result = await broker.begin({
+    tenantId: "tenant-001",
+    userId: "user-001",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    githubUserId: 424242,
+  }, "steam-enrollment-001");
+  assert.equal(result.state, "WAITING_STEAM_GUARD");
+  assert.equal(result.enrollmentUrl, "https://steam-enroll.deviludo.example/enrollments/enrollment-001");
+  const serializedRequest = JSON.stringify(calls[0]);
+  assert.doesNotMatch(serializedRequest, /password|guardCode|config\.vdf/i);
+  assert.equal(calls[0].init.redirect, "error");
+
+  const malicious = new SteamEnrollmentBrokerClient({
+    endpoint: "https://steam-enrollment.internal/",
+    publicOrigin: "https://steam-enroll.deviludo.example/",
+    now: () => new Date("2026-07-17T00:00:00.000Z"),
+    fetch: async () => Response.json({
+      enrollmentId: "enrollment-001",
+      state: "WAITING_STEAM_GUARD",
+      enrollmentUrl: "https://evil.example/enrollments/enrollment-001",
+      expiresAt: "2026-07-17T00:10:00.000Z",
+    }),
+  });
+  await assert.rejects(
+    malicious.begin({ tenantId: "tenant-001", userId: "user-001", sessionBinding: "x".repeat(40), githubUserId: 424242 }, "steam-enrollment-evil"),
+    /URL is invalid/,
+  );
 });

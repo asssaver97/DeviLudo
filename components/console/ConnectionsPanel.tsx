@@ -50,14 +50,24 @@ export function ConnectionsPanel({ initialGitHubConnected = false }: { initialGi
         method: "POST",
         headers: { "idempotency-key": crypto.randomUUID() },
       });
-      const payload = await response.json() as { data?: { state?: string }; error?: { message?: string } };
+      const payload = await response.json() as { data?: { state?: string; enrollmentUrl?: string | null }; error?: { message?: string } };
       if (!response.ok) {
         setSteamState("unconfigured");
         setNotice(payload.error?.message ?? "Steam Guard 登记服务尚未配置。");
         return;
       }
       setSteamState(payload.data?.state === "READY" ? "ready" : "waiting");
-      setNotice("Steam Guard 登记已开始；主密码不会发送到 DeviLudo Web 控制面。");
+      if (payload.data?.state !== "READY" && payload.data?.enrollmentUrl) {
+        const enrollmentUrl = new URL(payload.data.enrollmentUrl);
+        if (enrollmentUrl.protocol !== "https:" || enrollmentUrl.username || enrollmentUrl.password || enrollmentUrl.search || enrollmentUrl.hash) {
+          setSteamState("unconfigured");
+          setNotice("Steam Guard 登记地址未通过安全校验。");
+          return;
+        }
+        window.location.assign(enrollmentUrl.toString());
+        return;
+      }
+      setNotice(payload.data?.state === "READY" ? "Steam Build Account 会话已验证。" : "Steam Guard 登记已开始；主密码不会发送到 DeviLudo Web 控制面。");
     } catch {
       setSteamState("unconfigured");
       setNotice("无法连接隔离的 Steam Guard 登记服务。");

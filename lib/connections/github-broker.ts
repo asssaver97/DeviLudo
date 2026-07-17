@@ -12,6 +12,13 @@ export interface GitHubBrokerRuntime {
   readonly sessionHmacKey: Uint8Array;
 }
 
+export interface TrustedPlatformSession {
+  readonly tenantId: string;
+  readonly userId: string;
+  readonly sessionBinding: string;
+  readonly githubUserId: number;
+}
+
 export class GitHubAuthorizationBrokerClient {
   readonly #origin: URL;
   readonly #fetch: FetchLike;
@@ -131,6 +138,20 @@ export async function verifyTrustedGitHubSession(
   key: Uint8Array,
   now: Date = new Date(),
 ): Promise<GitHubAuthorizationPrincipal> {
+  const session = await verifyTrustedPlatformSession(request, key, now);
+  return Object.freeze({
+    tenantId: session.tenantId,
+    userId: session.userId,
+    sessionBinding: session.sessionBinding,
+    expectedGithubUserId: session.githubUserId,
+  });
+}
+
+export async function verifyTrustedPlatformSession(
+  request: Request,
+  key: Uint8Array,
+  now: Date = new Date(),
+): Promise<TrustedPlatformSession> {
   const tenantId = requiredHeader(request, "x-deviludo-session-tenant");
   const userId = requiredHeader(request, "x-deviludo-session-user");
   const sessionBinding = requiredHeader(request, "x-deviludo-session-binding", 512);
@@ -157,7 +178,7 @@ export async function verifyTrustedGitHubSession(
   const cryptoKey = await crypto.subtle.importKey("raw", toArrayBuffer(key), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
   const verified = await crypto.subtle.verify("HMAC", cryptoKey, toArrayBuffer(decodeBase64Url(signature)), new TextEncoder().encode(canonical));
   if (!verified) throw new Error("Trusted session signature is invalid");
-  return Object.freeze({ tenantId, userId, sessionBinding, expectedGithubUserId });
+  return Object.freeze({ tenantId, userId, sessionBinding, githubUserId: expectedGithubUserId });
 }
 
 /** Used by the trusted session proxy and contract tests, never by browsers. */
