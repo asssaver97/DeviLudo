@@ -26,6 +26,10 @@ behind the web console:
   applies independent fencing tokens and derives the final matrix result from
   content-addressed evidence manifests. The public Web process is deliberately
   not a Runner ingress.
+- `evidence-archive`: an Agent-free mTLS service that independently validates
+  completed matrix bundles and stores canonical evidence/repair prompts through
+  immutable S3 conditional writes. Production rejects its local filesystem
+  backend.
 - `scm-proxy`: finalizes a local authoritative candidate and provides the
   production GitHub App core. Signed candidate/acceptance payloads, exact
   repository binding, repository-scoped installation tokens, Git Data/Draft PR
@@ -294,6 +298,17 @@ an mTLS-isolated Broker; passwords, Guard codes, `config.vdf` and Steam build
 account access never enter the Temporal host. No placeholder connector reports
 successful work.
 
+The Runner ingress's separate evidence dependency has its own production entry:
+
+```bash
+npm run start:evidence-archive
+```
+
+It admits only explicitly allowed SPIFFE workloads, derives every tenant S3 key
+server-side, signs direct HTTPS requests with SigV4 and verifies the complete
+stored object on an idempotent retry. See
+`services/evidence-archive/.env.example`.
+
 `ControlPlaneWorkflowHandler` consumes the non-compute commands for ideation,
 spec approval, Provider recovery, candidate acceptance, release MFA, external
 Steam approvals and cancellation. It persists an exact request-digest-bound
@@ -321,6 +336,7 @@ not become availability errors.
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/inference-gateway/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/runner-control/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/evidence-archive/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/steam-publisher/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-runtime/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-agent-runtime/tsconfig.json --pretty false
@@ -329,6 +345,7 @@ node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/gateway.test.ts
 node --import tsx --test services/runner-control/test/coordinator.test.ts
+node --import tsx --test services/evidence-archive/test/*.test.ts
 node --import tsx --test services/steam-publisher/test/coordinator.test.ts
 node --import tsx --test services/local-runtime/test/godot-fixture.test.ts
 node --import tsx --test services/local-agent-runtime/test/readiness.test.ts

@@ -78,6 +78,12 @@ route repeats those probes and returns 503 on drift. See
 `services/runner-control/.env.example`. The public Web route remains a
 deliberate 503.
 
+The matching archive server is implemented in `services/evidence-archive` and
+starts with `npm run start:evidence-archive`. It admits only the configured
+Runner-ingress SPIFFE identity, revalidates the complete canonical bundle and
+uses no-overwrite S3 writes; it is not mounted into this service or the public
+Web application.
+
 The fleet manifest envelope is strictly shaped as follows. `issuedAt` to
 `expiresAt` may span no more than 15 minutes, IDs must be unique and sorted,
 and the file must be atomically replaced before expiry:

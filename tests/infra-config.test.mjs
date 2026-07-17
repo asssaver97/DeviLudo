@@ -73,6 +73,21 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   assert.match(daemon, /Promise\.all\(\[service\.ingress\.probe\(\), service\.executor\.probe\(\)\]\)/);
 });
 
+test("evidence archive is a separate mTLS and immutable S3 trust boundary", () => {
+  const ingress = readFileSync(new URL("../services/evidence-archive/src/ingress-http.ts", import.meta.url), "utf8");
+  const archive = readFileSync(new URL("../services/evidence-archive/src/archive.ts", import.meta.url), "utf8");
+  const s3 = readFileSync(new URL("../services/evidence-archive/src/s3-store.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/evidence-archive/src/run-service.ts", import.meta.url), "utf8");
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /allowedSpiffeIds\.has/);
+  assert.match(archive, /sha256Canonical\(core\)/);
+  assert.match(archive, /repair:\$\{request\.bundleDigest\}/);
+  assert.match(s3, /"if-none-match": "\*"/);
+  assert.match(s3, /existing\.body/);
+  assert.match(service, /filesystem backend is forbidden in production/);
+});
+
 test("physical Runner attempts require an append-only tenant execution lock", () => {
   const migration = readFileSync(new URL("../infra/postgres/014_runner_execution_locks.sql", import.meta.url), "utf8");
   const adapter = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");
