@@ -12,6 +12,8 @@ import {
   verifyTrustedGitHubSession,
 } from "../lib/connections/github-broker.ts";
 import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts";
+import { ReleaseAuthorizationBrokerClient } from "../lib/releases/publish-broker.ts";
+import { POST as acceptAndPublish } from "../app/api/releases/[releaseId]/accept-and-publish/route.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
 
@@ -230,4 +232,127 @@ test("Steam enrollment client sends no password and accepts only the configured 
     malicious.begin({ tenantId: "tenant-001", userId: "user-001", sessionBinding: "x".repeat(40), githubUserId: 424242 }, "steam-enrollment-evil"),
     /URL is invalid/,
   );
+});
+
+test("release authorization sends no client evidence or MFA proof and pins the isolated challenge UI", async () => {
+  const calls = [];
+  const broker = new ReleaseAuthorizationBrokerClient({
+    endpoint: "https://release-authorization.internal/",
+    publicOrigin: "https://mfa.deviludo.example/",
+    now: () => new Date("2026-07-17T00:00:00.000Z"),
+    async fetch(url, init) {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        releaseId: "release-001",
+        state: "MFA_REQUIRED",
+        approvalId: "approval-001",
+        authorizationUrl: "https://mfa.deviludo.example/approvals/approval-001",
+        workflowId: null,
+        expiresAt: "2026-07-17T00:05:00.000Z",
+      });
+    },
+  });
+  const result = await broker.begin({
+    tenantId: "tenant-001",
+    userId: "user-001",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    githubUserId: 424242,
+  }, "release-001", "release-authorization-001");
+  assert.equal(result.state, "MFA_REQUIRED");
+  assert.equal(result.authorizationUrl, "https://mfa.deviludo.example/approvals/approval-001");
+  assert.equal(calls[0].init.redirect, "error");
+  assert.doesNotMatch(JSON.stringify(calls[0]), /mainCommitSha|evidenceStatus|mfaProof|x-mfa-proof/i);
+
+  const malicious = new ReleaseAuthorizationBrokerClient({
+    endpoint: "https://release-authorization.internal/",
+    publicOrigin: "https://mfa.deviludo.example/",
+    now: () => new Date("2026-07-17T00:00:00.000Z"),
+    fetch: async () => Response.json({
+      releaseId: "release-001",
+      state: "MFA_REQUIRED",
+      approvalId: "approval-001",
+      authorizationUrl: "https://evil.example/approvals/approval-001",
+      workflowId: null,
+      expiresAt: "2026-07-17T00:05:00.000Z",
+    }),
+  });
+  await assert.rejects(
+    malicious.begin({ tenantId: "tenant-001", userId: "user-001", sessionBinding: "x".repeat(40), githubUserId: 424242 }, "release-001", "release-authorization-evil"),
+    /URL is invalid/,
+  );
+});
+
+test("accept-and-publish production route trusts only signed session context and its fixed broker", async () => {
+  const key = new Uint8Array(32).fill(29);
+  const at = new Date();
+  const pathname = "/api/releases/release-001/accept-and-publish";
+  const values = {
+    tenantId: "tenant-001",
+    userId: "user-001",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    githubUserId: "424242",
+    issuedAt: String(at.getTime()),
+  };
+  const signature = await signTrustedGitHubSession({ method: "POST", pathname, ...values, key });
+  const headers = {
+    "idempotency-key": "release-authorization-route-001",
+    "x-deviludo-session-tenant": values.tenantId,
+    "x-deviludo-session-user": values.userId,
+    "x-deviludo-session-binding": values.sessionBinding,
+    "x-deviludo-session-github-user-id": values.githubUserId,
+    "x-deviludo-session-issued-at": values.issuedAt,
+    "x-deviludo-session-signature": signature,
+  };
+  const previous = {
+    endpoint: process.env.DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL,
+    publicOrigin: process.env.DEVILUDO_RELEASE_AUTHORIZATION_PUBLIC_ORIGIN,
+    key: process.env.DEVILUDO_SESSION_HMAC_KEY,
+    fetch: globalThis.fetch,
+  };
+  const brokerCalls = [];
+  process.env.DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL = "https://release-authorization.internal/";
+  process.env.DEVILUDO_RELEASE_AUTHORIZATION_PUBLIC_ORIGIN = "https://mfa.deviludo.example/";
+  process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
+  globalThis.fetch = async (url, init) => {
+    brokerCalls.push({ url: String(url), init });
+    return Response.json({
+      releaseId: "release-001",
+      state: "MFA_REQUIRED",
+      approvalId: "approval-001",
+      authorizationUrl: "https://mfa.deviludo.example/approvals/approval-001",
+      workflowId: null,
+      expiresAt: new Date(at.getTime() + 5 * 60_000).toISOString(),
+    });
+  };
+  try {
+    const response = await acceptAndPublish(
+      new Request(`https://deviludo.example${pathname}`, { method: "POST", headers }),
+      { params: Promise.resolve({ releaseId: "release-001" }) },
+    );
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).data.state, "MFA_REQUIRED");
+    assert.equal(brokerCalls.length, 1);
+    assert.doesNotMatch(JSON.stringify(brokerCalls[0]), /mainCommitSha|evidenceStatus|mfaProof|x-mfa-proof/i);
+
+    const rejected = await acceptAndPublish(
+      new Request(`https://deviludo.example${pathname}`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json", "x-mfa-proof": "forged" },
+        body: JSON.stringify({ evidenceStatus: "PASSED" }),
+      }),
+      { params: Promise.resolve({ releaseId: "release-001" }) },
+    );
+    assert.equal(rejected.status, 400);
+    assert.equal(brokerCalls.length, 1);
+  } finally {
+    globalThis.fetch = previous.fetch;
+    for (const [name, value] of [
+      ["DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL", previous.endpoint],
+      ["DEVILUDO_RELEASE_AUTHORIZATION_PUBLIC_ORIGIN", previous.publicOrigin],
+      ["DEVILUDO_SESSION_HMAC_KEY", previous.key],
+    ]) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
