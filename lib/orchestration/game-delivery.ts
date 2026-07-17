@@ -23,7 +23,7 @@ export type ExternalApprovalGate =
   | "FIRST_RELEASE"
   | "DEFAULT_BRANCH_CONFIRMATION";
 
-export type DeliverySignal =
+export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "SPEC_READY"; specRevisionId: string }
   | { type: "SPEC_APPROVED"; lockedRunConfigurationId: string }
   | { type: "AGENT_STARTED"; runId: string }
@@ -39,10 +39,10 @@ export type DeliverySignal =
   | { type: "MFA_APPROVED"; approvalId: string }
   | { type: "BETA_ACTIVATED"; buildId: string }
   | { type: "STEAM_INSTALL_PASSED"; evidenceBundleId: string }
-  | { type: "EXTERNAL_APPROVAL_NEEDED"; gate: ExternalApprovalGate }
-  | { type: "EXTERNAL_APPROVED"; approvalId: string }
+  | { type: "EXTERNAL_APPROVED"; gate: ExternalApprovalGate; approvalId: string }
   | { type: "STEAM_RELEASED"; releaseId: string; defaultBranchBuildId: string }
-  | { type: "CANCEL"; reason: string };
+  | { type: "CANCEL"; reason: string }
+);
 
 export type DeliveryCommand =
   | "CONTINUE_IDEA_DIALOGUE"
@@ -160,6 +160,14 @@ export class GameDeliveryWorkflow {
   }
 
   signal(signal: DeliverySignal): DeepReadonly<DeliverySnapshot> {
+    assertDeliverySignal(signal);
+    const replay = this.snapshot.history.find((entry) => entry.signal.signalId === signal.signalId);
+    if (replay) {
+      if (canonicalSignal(replay.signal) !== canonicalSignal(signal)) {
+        throw new Error(`Signal ID ${signal.signalId} was reused with different content`);
+      }
+      return this.current();
+    }
     if (this.snapshot.state === "CANCELLED") throw new Error("Cancelled workflows are terminal");
     if (signal.type === "CANCEL") return this.commit(signal, { state: "CANCELLED" });
 
@@ -245,10 +253,14 @@ export class GameDeliveryWorkflow {
             externalGate: "VALVE_REVIEW",
           });
         }
-        if (signal.type === "EXTERNAL_APPROVAL_NEEDED") return this.commit(signal, { state: "EXTERNAL_APPROVAL_REQUIRED", externalGate: signal.gate });
         return this.invalid(signal);
       case "EXTERNAL_APPROVAL_REQUIRED": {
-        if (signal.type !== "EXTERNAL_APPROVED" || !this.snapshot.externalGate) return this.invalid(signal);
+        if (
+          signal.type !== "EXTERNAL_APPROVED" ||
+          !this.snapshot.externalGate ||
+          signal.gate !== this.snapshot.externalGate ||
+          this.snapshot.externalApprovals.some((approval) => approval.approvalId === signal.approvalId)
+        ) return this.invalid(signal);
         const gate = this.snapshot.externalGate;
         const externalApprovals = [
           ...this.snapshot.externalApprovals,
@@ -275,7 +287,7 @@ export class GameDeliveryWorkflow {
         });
       }
       case "READY_TO_PUBLISH":
-        return signal.type === "STEAM_RELEASED"
+        return signal.type === "STEAM_RELEASED" && signal.defaultBranchBuildId === this.snapshot.steamBuildId
           ? this.commit(signal, {
               state: "RELEASED",
               steamReleaseId: signal.releaseId,
@@ -300,4 +312,68 @@ export class GameDeliveryWorkflow {
   private invalid(signal: DeliverySignal): never {
     throw new Error(`Signal ${signal.type} is invalid while delivery is ${this.snapshot.state}`);
   }
+}
+
+const SIGNAL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/;
+const SHA1 = /^[a-f0-9]{40}$/;
+const STEAM_BUILD_ID = /^[0-9]{1,20}$/;
+
+export function assertDeliverySignal(signal: DeliverySignal): void {
+  if (!SIGNAL_ID.test(signal.signalId)) throw new Error("Delivery signal ID is invalid");
+  switch (signal.type) {
+    case "SPEC_READY":
+      return assertOpaqueId(signal.specRevisionId, "Specification revision");
+    case "SPEC_APPROVED":
+      return assertOpaqueId(signal.lockedRunConfigurationId, "Run configuration lock");
+    case "AGENT_STARTED":
+      return assertOpaqueId(signal.runId, "Agent run");
+    case "PROVIDER_UNAVAILABLE":
+    case "PROVIDER_RESTORED":
+      return assertOpaqueId(signal.providerRevisionId, "Provider revision");
+    case "AGENT_COMPLETED":
+      if (!SHA1.test(signal.candidateCommitSha) || !Number.isSafeInteger(signal.draftPullRequest) || signal.draftPullRequest < 1) {
+        throw new Error("Agent completion binding is invalid");
+      }
+      return;
+    case "AGENT_FAILED":
+      return assertOpaqueId(signal.diagnosticId, "Agent diagnostic");
+    case "E2E_PASSED":
+    case "STEAM_INSTALL_PASSED":
+      return assertOpaqueId(signal.evidenceBundleId, "Evidence bundle");
+    case "E2E_FAILED":
+      assertOpaqueId(signal.evidenceBundleId, "Evidence bundle");
+      return assertOpaqueId(signal.repairPromptId, "Repair prompt");
+    case "USER_FEEDBACK":
+      assertOpaqueId(signal.nextSpecRevisionId, "Next specification revision");
+      return assertOpaqueId(signal.evidenceInvalidationId, "Evidence invalidation");
+    case "USER_ACCEPTED":
+      return;
+    case "MAIN_MERGED":
+      if (!SHA1.test(signal.mainCommitSha)) throw new Error("Main commit SHA is invalid");
+      return;
+    case "MFA_APPROVED":
+    case "EXTERNAL_APPROVED":
+      return assertOpaqueId(signal.approvalId, "Approval");
+    case "BETA_ACTIVATED":
+      if (!STEAM_BUILD_ID.test(signal.buildId)) throw new Error("Steam BuildID is invalid");
+      return;
+    case "STEAM_RELEASED":
+      assertOpaqueId(signal.releaseId, "Steam release");
+      if (!STEAM_BUILD_ID.test(signal.defaultBranchBuildId)) throw new Error("Default branch BuildID is invalid");
+      return;
+    case "CANCEL":
+      if (!signal.reason.trim() || signal.reason.length > 2_000) throw new Error("Cancellation reason is invalid");
+  }
+}
+
+function assertOpaqueId(value: string, label: string): void {
+  if (!value.trim() || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} identifier is invalid`);
+  }
+}
+
+function canonicalSignal(signal: DeliverySignal): string {
+  return JSON.stringify(
+    Object.fromEntries(Object.entries(signal).sort(([left], [right]) => left.localeCompare(right))),
+  );
 }

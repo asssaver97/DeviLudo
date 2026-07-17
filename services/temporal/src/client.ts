@@ -4,7 +4,7 @@ import type {
   DeliverySnapshot,
   GameDeliveryWorkflowInput,
 } from "./contracts";
-import { DELIVERY_TASK_QUEUE } from "./contracts";
+import { assertDeliverySignal, DELIVERY_TASK_QUEUE } from "./contracts";
 import {
   deliverySignal,
   deliverySnapshotQuery,
@@ -56,6 +56,7 @@ export async function signalGameDelivery(
   workflowId: string,
   signal: DeliverySignal,
 ): Promise<void> {
+  assertDeliverySignal(signal);
   await client.workflow.getHandle(workflowId).signal(deliverySignal, signal);
 }
 

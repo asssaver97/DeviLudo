@@ -6,6 +6,11 @@ and maps `nextCommand()` to activities with retry, heartbeat and cancellation
 policies. Long waits—user approval, Provider recovery, MFA, Valve review and
 phone confirmation—are signals, not polling loops.
 
+Every signal carries a caller-generated `signalId`. Exact retries are no-ops;
+reusing an ID with different content is rejected. External approval signals
+also bind the exact current gate, so a delayed Valve-review callback cannot be
+mistaken for first-release or default-branch confirmation.
+
 The workflow never resolves a moving Agent default after approval. The control
 plane first creates an `AgentRunConfigurationLock`; the workflow receives only
 its immutable ID. A Provider outage moves the run to `WAITING_PROVIDER` and a
@@ -20,7 +25,12 @@ Activity boundaries are:
 4. `runMainShaReleaseGate` against the actual merge SHA.
 5. `uploadSteamPrivateBeta` on the isolated publisher.
 6. `installFromCleanSteamClient` and rerun platform E2E.
-7. `publishDefaultBranch` only after external approval signals.
+7. `publishDefaultBranch` only after the ordered Valve review, first-release
+   and default-branch confirmation signals.
+
+Accepting the publish activity is not a release result. The workflow remains
+open until `STEAM_RELEASED` binds the release ID and the same numeric Steam
+BuildID that passed private-Beta clean-client testing.
 
 Every activity is idempotent, takes an idempotency key, and writes an append-only
 audit event. E2E activity completions are accepted only through the fencing gate

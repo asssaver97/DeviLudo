@@ -3,6 +3,7 @@ import type {
   DeliverySignal,
   DeliverySnapshot,
 } from "../../../lib/orchestration/game-delivery";
+export { assertDeliverySignal } from "../../../lib/orchestration/game-delivery";
 import type { TargetPlatform } from "../../../lib/domain/types";
 
 export const DELIVERY_TASK_QUEUE = "deviludo-game-delivery-v1";
