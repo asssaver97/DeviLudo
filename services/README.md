@@ -67,7 +67,9 @@ retry returns the cached result and `Idempotent-Replayed: true`. Production uses
 PostgreSQL migration `010` to claim and persist these results atomically across
 replicas; only non-production tests use the in-memory implementation. A second
 request arriving while the first claim is active receives
-`409 IDEMPOTENCY_REQUEST_IN_PROGRESS` with `Retry-After: 1`.
+`409 IDEMPOTENCY_REQUEST_IN_PROGRESS` with `Retry-After: 1`. Claims use a
+five-minute lease so a full Provider probe cannot be duplicated by an early
+retry after only a few seconds.
 
 The trusted authentication proxy supplies a short-lived, request-bound
 assertion. The control-plane rejects the request unless the assertion HMAC is
@@ -119,6 +121,14 @@ Routes:
 The built-in platform default is an exact Claude Code profile. Selection is
 `project > tenant > platform > built-in Claude Code`. Defaults only reference
 an `ACTIVE` immutable Profile revision and only affect new tasks.
+
+In production, migration `011` stores Agent versions, installations, Provider
+and Profile revisions, credential metadata and defaults as one versioned
+catalog aggregate. Mutations lock the latest row and must advance exactly one
+revision, preventing lost updates across control-plane replicas. Audit entries
+are committed in the same PostgreSQL transaction to a separate append-only
+ledger; scoped TenantAdmin and ProjectOwner reads are filtered to their signed
+tenant/project. Non-production tests use the seeded in-memory implementation.
 
 `SecretVault` intentionally exposes `write` and `revoke`, but no `read` method.
 The bundled implementation is process-isolated for tests; production startup

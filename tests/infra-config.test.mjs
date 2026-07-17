@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 10 }, (_, index) => {
+  const offsets = Array.from({ length: 11 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -30,6 +30,14 @@ test("production admin idempotency has a pinned PostgreSQL driver and durable cl
   assert.match(migration, /identity_digest text PRIMARY KEY/);
   assert.match(migration, /state IN \('AVAILABLE', 'CLAIMED', 'COMPLETED'\)/);
   assert.match(migration, /pg_column_size\(response_payload\) <= 1048576/);
+});
+
+test("production Agent administration has a versioned catalog and append-only audit schema", () => {
+  const migration = readFileSync(new URL("../infra/postgres/011_admin_catalog.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.admin_catalog_state/);
+  assert.match(migration, /NEW\.revision <> OLD\.revision \+ 1/);
+  assert.match(migration, /CREATE TABLE deviludo\.admin_audit_records/);
+  assert.match(migration, /admin_audit_append_only/);
 });
 
 test("control-plane wait persistence uses the shared tenant RLS setting", () => {

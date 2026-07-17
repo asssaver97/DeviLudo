@@ -60,7 +60,7 @@ export class InMemoryAdminIdempotencyStore extends AdminIdempotencyStore {
         requestFingerprint: input.requestFingerprint,
         state: "CLAIMED",
         claimToken,
-        claimExpiresAt: now + 30_000,
+        claimExpiresAt: now + 5 * 60_000,
         payload: null,
         expiresAt: now + 24 * 60 * 60_000,
       });
@@ -74,7 +74,7 @@ export class InMemoryAdminIdempotencyStore extends AdminIdempotencyStore {
       return Object.freeze({ kind: "BUSY" as const });
     }
     const claimToken = randomUUID();
-    Object.assign(record, { state: "CLAIMED", claimToken, claimExpiresAt: now + 30_000 });
+    Object.assign(record, { state: "CLAIMED", claimToken, claimExpiresAt: now + 5 * 60_000 });
     return Object.freeze({ kind: "ACQUIRED" as const, claimToken });
   }
 

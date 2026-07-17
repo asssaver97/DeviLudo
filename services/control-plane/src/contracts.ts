@@ -124,6 +124,9 @@ export interface AuditRecord {
   readonly action: string;
   readonly resource: string;
   readonly actorRole: AdminRole;
+  readonly actorId: string;
+  readonly tenantId: string | null;
+  readonly projectId: string | null;
   readonly requestId: string;
   readonly at: string;
   readonly metadata: Readonly<Record<string, unknown>>;

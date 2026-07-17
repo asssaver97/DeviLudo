@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
-import { AdminStore } from "./admin.store";
+import { AdminStore, recordAdminAudit, type AdminCatalogState } from "./admin.store";
 import {
   ServiceProblem,
   isAgentKind,
@@ -26,69 +26,73 @@ export class AdminService {
     private readonly providerProbe: ProviderProbe,
   ) {}
 
-  agents(): Readonly<Record<string, unknown>> {
-    const catalog = (["claude-code", "codex-cli"] as const).map((agent) => ({
-      id: agent,
-      name: agent === "claude-code" ? "Claude Code" : "Codex CLI",
-      vendor: agent === "claude-code" ? "Anthropic" : "OpenAI",
-      officialSource:
-        agent === "claude-code"
-          ? "https://code.claude.com/docs/en/installation"
-          : "https://github.com/openai/codex",
-      capabilities: ["plan", "code", "repair", "review"],
-      supportedWorkers: ["linux/amd64", "linux/arm64"],
-      installedOn: ["development-worker"],
-      forbiddenOn: ["e2e-runner", "steam-publisher"],
-      platformDefault: agent === "claude-code",
-      versions: [...this.store.versions.values()].filter((value) => value.agent === agent),
-      installations: [...this.store.installations.values()].filter((value) => value.agent === agent),
-    }));
-    return Object.freeze({
-      catalog,
-      platformDefault: this.store.defaults.get("platform") ?? null,
-      selectionPrecedence: ["project", "tenant", "platform", "built-in:claude-code"],
-      pinnedVersionsOnly: true,
+  async agents(): Promise<Readonly<Record<string, unknown>>> {
+    return this.store.read((state) => {
+      const catalog = (["claude-code", "codex-cli"] as const).map((agent) => ({
+        id: agent,
+        name: agent === "claude-code" ? "Claude Code" : "Codex CLI",
+        vendor: agent === "claude-code" ? "Anthropic" : "OpenAI",
+        officialSource:
+          agent === "claude-code"
+            ? "https://code.claude.com/docs/en/installation"
+            : "https://github.com/openai/codex",
+        capabilities: ["plan", "code", "repair", "review"],
+        supportedWorkers: ["linux/amd64", "linux/arm64"],
+        installedOn: ["development-worker"],
+        forbiddenOn: ["e2e-runner", "steam-publisher"],
+        platformDefault: agent === "claude-code",
+        versions: [...state.versions.values()].filter((value) => value.agent === agent),
+        installations: [...state.installations.values()].filter((value) => value.agent === agent),
+      }));
+      return Object.freeze({
+        catalog,
+        platformDefault: state.defaults.get("platform") ?? "built-in:claude-code",
+        selectionPrecedence: ["project", "tenant", "platform", "built-in:claude-code"],
+        pinnedVersionsOnly: true,
+      });
     });
   }
 
-  discoverVersions(body: Record<string, unknown>, actor: RequestActor): Readonly<Record<string, unknown>> {
+  async discoverVersions(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
     const agentInput = body.agent ?? "claude-code";
     if (!isAgentKind(agentInput)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const version = optionalString(body, "version") ?? (agentInput === "claude-code" ? "2.1.15" : "0.92.0");
     assertExactVersion(version);
     const id = `${agentInput}@${version}`;
-    const existing = this.store.versions.get(id);
-    if (existing) return { candidates: [existing], activationChanged: false };
-
-    const record = {
-      id,
-      agent: agentInput,
-      version,
-      state: "DISCOVERED" as const,
-      source:
-        agentInput === "claude-code"
-          ? "https://code.claude.com/docs/en/installation"
-          : "https://github.com/openai/codex",
-      integrity: `sha256:${"0".repeat(64)}`,
-      signatureVerified: false,
-      sbomRef: `pending://${id}`,
-      scan: "PENDING" as const,
-      discoveredAt: new Date().toISOString(),
-    };
-    this.store.versions.set(id, record);
-    this.audit("AGENT_VERSION_DISCOVERED", id, actor, { source: "official-catalog", activationChanged: false });
-    return { candidates: [record], activationChanged: false };
+    return this.store.mutate((state) => {
+      const existing = state.versions.get(id);
+      if (existing) return { candidates: [existing], activationChanged: false };
+      const record = {
+        id,
+        agent: agentInput,
+        version,
+        state: "DISCOVERED" as const,
+        source:
+          agentInput === "claude-code"
+            ? "https://code.claude.com/docs/en/installation"
+            : "https://github.com/openai/codex",
+        integrity: `sha256:${"0".repeat(64)}`,
+        signatureVerified: false,
+        sbomRef: `pending://${id}`,
+        scan: "PENDING" as const,
+        discoveredAt: new Date().toISOString(),
+      };
+      state.versions.set(id, record);
+      this.audit(state, "AGENT_VERSION_DISCOVERED", id, actor, { source: "official-catalog", activationChanged: false });
+      return { candidates: [record], activationChanged: false };
+    });
   }
 
   setVersionState(
     action: "approve" | "block",
     body: Record<string, unknown>,
     actor: RequestActor,
-  ): Readonly<Record<string, unknown>> {
+  ): Promise<Readonly<Record<string, unknown>>> {
     const id = requiredString(body, "id", 160);
-    const record = this.store.versions.get(id);
-    if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
-    if (action === "approve") {
+    return this.store.mutate((state) => {
+      const record = state.versions.get(id);
+      if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
+      if (action === "approve") {
       if (record.state !== "DISCOVERED" && record.state !== "VALIDATING") {
         throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered or validating version can be approved");
       }
@@ -107,25 +111,22 @@ export class AdminService {
         integrity,
         sbomRef,
       });
-    } else {
-      if (record.state === "DEPRECATED") {
-        throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "A deprecated version cannot be blocked in place");
+      } else {
+        if (record.state === "DEPRECATED") {
+          throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "A deprecated version cannot be blocked in place");
+        }
+        record.state = "BLOCKED";
       }
-      record.state = "BLOCKED";
-    }
-    this.audit(`AGENT_VERSION_${record.state}`, record.id, actor, { automaticActivation: false });
-    return { version: record, automaticActivation: false };
+      this.audit(state, `AGENT_VERSION_${record.state}`, record.id, actor, { automaticActivation: false });
+      return { version: record, automaticActivation: false };
+    });
   }
 
-  createInstallation(body: Record<string, unknown>, actor: RequestActor): InstallationRecord {
+  async createInstallation(body: Record<string, unknown>, actor: RequestActor): Promise<InstallationRecord> {
     const agent = body.agent;
     if (!isAgentKind(agent)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const version = requiredString(body, "version", 100);
     assertExactVersion(version);
-    const versionRecord = this.store.versions.get(`${agent}@${version}`);
-    if (!versionRecord || versionRecord.state !== "APPROVED") {
-      throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
-    }
     const imageDigest = requiredString(body, "imageDigest", 80);
     if (!/^sha256:[a-f0-9]{64}$/i.test(imageDigest)) {
       throw new ServiceProblem(400, "INVALID_IMAGE_DIGEST", "imageDigest must be an exact sha256 OCI digest");
@@ -136,61 +137,68 @@ export class AdminService {
     }
     const adapterVersion = requiredString(body, "adapterVersion", 100);
     assertExactVersion(adapterVersion);
-    const id = `${agent}-installation-${randomUUID()}`;
-    const installation: InstallationRecord = {
-      id,
-      agent,
-      agentVersionId: versionRecord.id,
-      workerPool,
-      imageDigest: imageDigest.toLowerCase(),
-      adapterVersion,
-      state: "READY",
-      rolloutPercent: 0,
-      previousRolloutPercent: 0,
-      selfUpdateDisabled: true,
-      createdAt: new Date().toISOString(),
-    };
-    this.store.installations.set(id, installation);
-    this.audit("AGENT_INSTALLATION_READY", id, actor, {
-      agent,
-      version,
-      workerPool,
-      imageDigest: installation.imageDigest,
-      supplyChainGates: "signature,sbom,vulnerability,malware,adapter-smoke,sandbox-smoke",
+    return this.store.mutate((state) => {
+      const versionRecord = state.versions.get(`${agent}@${version}`);
+      if (!versionRecord || versionRecord.state !== "APPROVED") {
+        throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
+      }
+      const id = `${agent}-installation-${randomUUID()}`;
+      const installation: InstallationRecord = {
+        id,
+        agent,
+        agentVersionId: versionRecord.id,
+        workerPool,
+        imageDigest: imageDigest.toLowerCase(),
+        adapterVersion,
+        state: "READY",
+        rolloutPercent: 0,
+        previousRolloutPercent: 0,
+        selfUpdateDisabled: true,
+        createdAt: new Date().toISOString(),
+      };
+      state.installations.set(id, installation);
+      this.audit(state, "AGENT_INSTALLATION_READY", id, actor, {
+        agent,
+        version,
+        workerPool,
+        imageDigest: installation.imageDigest,
+        supplyChainGates: "signature,sbom,vulnerability,malware,adapter-smoke,sandbox-smoke",
+      });
+      return installation;
     });
-    return installation;
   }
 
   rollout(
     installationId: string,
     action: "advance" | "rollback",
     actor: RequestActor,
-  ): Readonly<Record<string, unknown>> {
-    const installation = this.store.installations.get(installationId);
-    if (!installation) throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
-    if (["FAILED", "QUARANTINED", "RETIRED"].includes(installation.state)) {
-      throw new ServiceProblem(409, "INSTALLATION_NOT_ROLLOUT_ELIGIBLE", "Installation cannot accept new tasks");
-    }
-
-    installation.previousRolloutPercent = installation.rolloutPercent;
-    if (action === "rollback") {
-      installation.rolloutPercent = 0;
-      installation.state = "READY";
-    } else {
-      installation.rolloutPercent =
-        installation.rolloutPercent < 5 ? 5 : installation.rolloutPercent < 25 ? 25 : 100;
-      installation.state = installation.rolloutPercent === 100 ? "ACTIVE" : "CANARY";
-    }
-    this.audit(`AGENT_ROLLOUT_${action.toUpperCase()}`, installationId, actor, {
-      rolloutPercent: installation.rolloutPercent,
-      runningTasksUnaffected: true,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    return this.store.mutate((state) => {
+      const installation = state.installations.get(installationId);
+      if (!installation) throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
+      if (["FAILED", "QUARANTINED", "RETIRED"].includes(installation.state)) {
+        throw new ServiceProblem(409, "INSTALLATION_NOT_ROLLOUT_ELIGIBLE", "Installation cannot accept new tasks");
+      }
+      installation.previousRolloutPercent = installation.rolloutPercent;
+      if (action === "rollback") {
+        installation.rolloutPercent = 0;
+        installation.state = "READY";
+      } else {
+        installation.rolloutPercent =
+          installation.rolloutPercent < 5 ? 5 : installation.rolloutPercent < 25 ? 25 : 100;
+        installation.state = installation.rolloutPercent === 100 ? "ACTIVE" : "CANARY";
+      }
+      this.audit(state, `AGENT_ROLLOUT_${action.toUpperCase()}`, installationId, actor, {
+        rolloutPercent: installation.rolloutPercent,
+        runningTasksUnaffected: true,
+      });
+      return {
+        installation,
+        newTasksOnly: true,
+        activeRunsKeepPinnedImage: true,
+        incompatibleSessionsNeverResumeAcrossVersions: true,
+      };
     });
-    return {
-      installation,
-      newTasksOnly: true,
-      activeRunsKeepPinnedImage: true,
-      incompatibleSessionsNeverResumeAcrossVersions: true,
-    };
   }
 
   async createCredential(body: Record<string, unknown>, actor: RequestActor): Promise<CredentialVersionRecord> {
@@ -211,9 +219,16 @@ export class AdminService {
     } finally {
       body.apiKey = "";
     }
-    this.store.credentials.set(credential.id, credential);
-    this.audit("CREDENTIAL_CREATED", credential.id, actor, { label, version: 1 });
-    return credential;
+    try {
+      return await this.store.mutate((state) => {
+        state.credentials.set(credential.id, credential);
+        this.audit(state, "CREDENTIAL_CREATED", credential.id, actor, { label, version: 1 });
+        return credential;
+      });
+    } catch (error) {
+      await this.vault.revoke(credential.secretRef).catch(() => undefined);
+      throw error;
+    }
   }
 
   async rotateCredential(
@@ -221,7 +236,10 @@ export class AdminService {
     body: Record<string, unknown>,
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
-    const current = this.store.credentials.get(credentialId);
+    const current = await this.store.read((state) => {
+      const value = state.credentials.get(credentialId);
+      return value ? structuredClone(value) : undefined;
+    });
     if (!current) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
     if (current.state !== "ACTIVE") throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only an active credential can be rotated");
     assertCredentialActor(current, actor);
@@ -243,42 +261,50 @@ export class AdminService {
       await this.vault.revoke(replacement.secretRef);
       throw new ServiceProblem(409, "CREDENTIAL_REUSED", "Replacement credential must contain new secret material");
     }
-    current.state = "PREVIOUS";
-    this.store.credentials.set(replacement.id, replacement);
-    this.audit("CREDENTIAL_ROTATED", current.id, actor, {
-      replacementVersionId: replacement.id,
-      oldVersionNoLongerIssued: true,
-    });
-    return { active: replacement, previous: current, newTasksOnly: true };
+    try {
+      return await this.store.mutate((state) => {
+        const active = state.credentials.get(credentialId);
+        if (!active || active.state !== "ACTIVE" || active.version !== current.version
+          || active.maskedFingerprint !== current.maskedFingerprint) {
+          throw new ServiceProblem(409, "CREDENTIAL_ROTATION_RACE", "Credential changed before rotation could commit");
+        }
+        active.state = "PREVIOUS";
+        state.credentials.set(replacement.id, replacement);
+        this.audit(state, "CREDENTIAL_ROTATED", active.id, actor, {
+          replacementVersionId: replacement.id,
+          oldVersionNoLongerIssued: true,
+        });
+        return { active: replacement, previous: active, newTasksOnly: true };
+      });
+    } catch (error) {
+      await this.vault.revoke(replacement.secretRef).catch(() => undefined);
+      throw error;
+    }
   }
 
   async revokeCredential(credentialId: string, actor: RequestActor): Promise<CredentialVersionRecord> {
-    const credential = this.store.credentials.get(credentialId);
-    if (!credential) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
-    assertCredentialActor(credential, actor);
-    credential.state = "REVOKED";
+    const credential = await this.store.mutate((state) => {
+      const value = state.credentials.get(credentialId);
+      if (!value) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+      assertCredentialActor(value, actor);
+      if (value.state !== "REVOKED") {
+        value.state = "REVOKED";
+        this.audit(state, "CREDENTIAL_REVOKED", value.id, actor, { newTokensIssued: false });
+      }
+      return structuredClone(value);
+    });
     await this.vault.revoke(credential.secretRef);
-    this.audit("CREDENTIAL_REVOKED", credential.id, actor, { newTokensIssued: false });
     return credential;
   }
 
-  createProfile(body: Record<string, unknown>, actor: RequestActor): Readonly<Record<string, unknown>> {
+  async createProfile(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
     const agent = body.agent;
     if (!isAgentKind(agent)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const scope = parseScope(body.scope);
     const scopeId = requiredString(body, "scopeId", 160);
     assertScopeRole(scope, scopeId, actor);
     const installationId = requiredString(body, "installationId", 180);
-    const installation = this.store.installations.get(installationId);
-    if (!installation || installation.agent !== agent || !["READY", "CANARY", "ACTIVE"].includes(installation.state)) {
-      throw new ServiceProblem(409, "INSTALLATION_NOT_READY", "Profile requires a compatible ready Agent installation");
-    }
     const credentialVersionId = requiredString(body, "credentialVersionId", 180);
-    const credential = this.store.credentials.get(credentialVersionId);
-    if (!credential || credential.state !== "ACTIVE") {
-      throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Profile requires an active credential version");
-    }
-    assertProfileCredential(scope, scopeId, credential, actor);
 
     const baseUrl = requiredString(body, "baseUrl", 1000);
     try {
@@ -298,47 +324,61 @@ export class AdminService {
       throw new ServiceProblem(400, "MODEL_ID_REJECTED", safeMessage(error, "Model IDs must be exact and pinned"));
     }
     const governance = parseGovernance(body, actor);
-    const profileIndex = [...this.store.profiles.values()].filter(
-      (value) => value.scope === scope && value.scopeId === scopeId,
-    ).length + 1;
-    const providerRevisionId = `provider-${agent}-${randomUUID()}-r1`;
-    const profileId = `profile-${scope}-${scopeId}-${profileIndex}-r1`;
-    const provider: ProviderRevisionRecord = {
-      id: providerRevisionId,
-      revision: 1,
-      agent,
-      protocol: agent === "codex-cli" ? "openai-responses" : "anthropic-messages",
-      baseUrl: new URL(baseUrl).toString(),
-      models,
-      credentialVersionId,
-      state: "DRAFT",
-      probe: {},
-      governance,
-    };
-    const profile: ProfileRevisionRecord = {
-      id: profileId,
-      revision: 1,
-      scope,
-      scopeId,
-      agent,
-      installationId,
-      providerRevisionId,
-      credentialVersionId,
-      budget: parseBudget(body),
-      fallbackProfileRevisionId: optionalString(body, "fallbackProfileRevisionId") ?? null,
-      state: "DRAFT",
-      createdAt: new Date().toISOString(),
-    };
-    this.store.providers.set(provider.id, provider);
-    this.store.profiles.set(profile.id, profile);
-    this.audit("AGENT_PROFILE_DRAFTED", profile.id, actor, {
-      agent,
-      scope,
-      scopeId,
-      providerRevisionId,
-      baseUrl: provider.baseUrl,
+    const budget = parseBudget(body);
+    const fallbackProfileRevisionId = optionalString(body, "fallbackProfileRevisionId") ?? null;
+    return this.store.mutate((state) => {
+      const installation = state.installations.get(installationId);
+      if (!installation || installation.agent !== agent || !["READY", "CANARY", "ACTIVE"].includes(installation.state)) {
+        throw new ServiceProblem(409, "INSTALLATION_NOT_READY", "Profile requires a compatible ready Agent installation");
+      }
+      const credential = state.credentials.get(credentialVersionId);
+      if (!credential || credential.state !== "ACTIVE") {
+        throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Profile requires an active credential version");
+      }
+      assertProfileCredential(scope, scopeId, credential, actor);
+      assertFallbackProfile(state, fallbackProfileRevisionId, agent, scope, scopeId);
+      const profileIndex = [...state.profiles.values()].filter(
+        (value) => value.scope === scope && value.scopeId === scopeId,
+      ).length + 1;
+      const providerRevisionId = `provider-${agent}-${randomUUID()}-r1`;
+      const profileId = `profile-${scope}-${scopeId}-${profileIndex}-r1`;
+      const provider: ProviderRevisionRecord = {
+        id: providerRevisionId,
+        revision: 1,
+        agent,
+        protocol: agent === "codex-cli" ? "openai-responses" : "anthropic-messages",
+        baseUrl: new URL(baseUrl).toString(),
+        models,
+        credentialVersionId,
+        state: "DRAFT",
+        probe: {},
+        governance,
+      };
+      const profile: ProfileRevisionRecord = {
+        id: profileId,
+        revision: 1,
+        scope,
+        scopeId,
+        agent,
+        installationId,
+        providerRevisionId,
+        credentialVersionId,
+        budget,
+        fallbackProfileRevisionId,
+        state: "DRAFT",
+        createdAt: new Date().toISOString(),
+      };
+      state.providers.set(provider.id, provider);
+      state.profiles.set(profile.id, profile);
+      this.audit(state, "AGENT_PROFILE_DRAFTED", profile.id, actor, {
+        agent,
+        scope,
+        scopeId,
+        providerRevisionId,
+        baseUrl: provider.baseUrl,
+      });
+      return { profile, provider };
     });
-    return { profile, provider };
   }
 
   async transitionProfile(
@@ -346,79 +386,124 @@ export class AdminService {
     action: "validate" | "activate" | "disable",
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
-    const profile = this.store.profiles.get(profileId);
-    if (!profile) throw new ServiceProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
-    assertScopeRole(profile.scope, profile.scopeId, actor);
-    const provider = this.store.providers.get(profile.providerRevisionId);
-    if (!provider) throw new ServiceProblem(409, "PROVIDER_NOT_FOUND", "Provider revision does not exist");
-
     if (action === "validate") {
-      if (profile.state !== "DRAFT" && profile.state !== "DEGRADED") {
-        throw new ServiceProblem(409, "INVALID_PROFILE_TRANSITION", "Only a draft or degraded Profile can be validated");
+      const pending = await this.store.mutate((state) => {
+        const profile = requireProfile(state, profileId);
+        assertScopeRole(profile.scope, profile.scopeId, actor);
+        const provider = requireProvider(state, profile.providerRevisionId);
+        if (profile.state !== "DRAFT" && profile.state !== "DEGRADED") {
+          throw new ServiceProblem(409, "INVALID_PROFILE_TRANSITION", "Only a draft or degraded Profile can be validated");
+        }
+        profile.state = "VALIDATING";
+        provider.state = "VALIDATING";
+        this.audit(state, "AGENT_PROFILE_VALIDATION_STARTED", profile.id, actor, {
+          providerRevisionId: provider.id,
+          priorActiveConfigurationPreserved: true,
+        });
+        return { profileId: profile.id, provider: structuredClone(provider) };
+      });
+      let probe: ProviderRevisionRecord["probe"];
+      try {
+        probe = await this.providerProbe.run(pending.provider);
+      } catch (error) {
+        await this.store.mutate((state) => {
+          const profile = requireProfile(state, pending.profileId);
+          const provider = requireProvider(state, pending.provider.id);
+          if (profile.state === "VALIDATING" && provider.state === "VALIDATING") {
+            profile.state = "DEGRADED";
+            provider.state = "DEGRADED";
+            this.audit(state, "AGENT_PROFILE_VALIDATION_FAILED", profile.id, actor, {
+              providerRevisionId: provider.id,
+              priorActiveConfigurationPreserved: true,
+            });
+          }
+        });
+        throw error;
       }
-      profile.state = "VALIDATING";
-      provider.state = "VALIDATING";
-      provider.probe = await this.providerProbe.run(provider);
-      profile.state = "READY";
-      provider.state = "READY";
-    } else if (action === "activate") {
-      if (actor.role !== "SecurityAdmin") {
-        throw new ServiceProblem(403, "SECURITY_APPROVAL_REQUIRED", "SecurityAdmin must activate a third-party Provider endpoint");
-      }
-      if (profile.state !== "READY" || provider.state !== "READY" || Object.values(provider.probe).some((result) => result !== "PASS")) {
-        throw new ServiceProblem(409, "PROVIDER_PROBE_REQUIRED", "All Provider probes must pass before activation");
-      }
-      profile.state = "ACTIVE";
-      provider.state = "ACTIVE";
-    } else {
-      if (profile.state === "SUPERSEDED") {
-        throw new ServiceProblem(409, "PROFILE_IMMUTABLE", "A superseded Profile revision cannot be changed");
-      }
-      profile.state = "DISABLED";
-      provider.state = "DISABLED";
+      return this.store.mutate((state) => {
+        const profile = requireProfile(state, pending.profileId);
+        const provider = requireProvider(state, pending.provider.id);
+        if (profile.state !== "VALIDATING" || provider.state !== "VALIDATING") {
+          throw new ServiceProblem(409, "PROFILE_VALIDATION_RACE", "Profile changed before validation could commit");
+        }
+        provider.probe = probe;
+        profile.state = "READY";
+        provider.state = "READY";
+        this.audit(state, "AGENT_PROFILE_VALIDATE", profile.id, actor, {
+          state: profile.state,
+          providerRevisionId: provider.id,
+          priorActiveConfigurationPreserved: true,
+        });
+        return { profile, provider, affectsQueuedOrRunningTasks: false };
+      });
     }
-    this.audit(`AGENT_PROFILE_${action.toUpperCase()}`, profile.id, actor, {
-      state: profile.state,
-      providerRevisionId: provider.id,
-      priorActiveConfigurationPreserved: action === "validate",
+    return this.store.mutate((state) => {
+      const profile = requireProfile(state, profileId);
+      assertScopeRole(profile.scope, profile.scopeId, actor);
+      const provider = requireProvider(state, profile.providerRevisionId);
+      if (action === "activate") {
+        if (actor.role !== "SecurityAdmin") {
+          throw new ServiceProblem(403, "SECURITY_APPROVAL_REQUIRED", "SecurityAdmin must activate a third-party Provider endpoint");
+        }
+        if (profile.state !== "READY" || provider.state !== "READY" || Object.values(provider.probe).some((result) => result !== "PASS")) {
+          throw new ServiceProblem(409, "PROVIDER_PROBE_REQUIRED", "All Provider probes must pass before activation");
+        }
+        profile.state = "ACTIVE";
+        provider.state = "ACTIVE";
+      } else {
+        if (profile.state === "SUPERSEDED") {
+          throw new ServiceProblem(409, "PROFILE_IMMUTABLE", "A superseded Profile revision cannot be changed");
+        }
+        profile.state = "DISABLED";
+        provider.state = "DISABLED";
+      }
+      this.audit(state, `AGENT_PROFILE_${action.toUpperCase()}`, profile.id, actor, {
+        state: profile.state,
+        providerRevisionId: provider.id,
+        priorActiveConfigurationPreserved: false,
+      });
+      return { profile, provider, affectsQueuedOrRunningTasks: false };
     });
-    return { profile, provider, affectsQueuedOrRunningTasks: false };
   }
 
-  updateDefault(scopeKey: string, body: Record<string, unknown>, actor: RequestActor): Readonly<Record<string, unknown>> {
+  async updateDefault(scopeKey: string, body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
     const parsed = parseDefaultScope(scopeKey);
     assertScopeRole(parsed.scope, parsed.scopeId, actor);
     const profileRevisionId = requiredString(body, "profileRevisionId", 200);
-    const profile = this.store.profiles.get(profileRevisionId);
-    if (!profile || profile.state !== "ACTIVE") {
-      throw new ServiceProblem(409, "PROFILE_NOT_ACTIVE", "Defaults can only reference an active immutable Profile revision");
-    }
-    if (profile.scope !== parsed.scope || (parsed.scope !== "platform" && profile.scopeId !== parsed.scopeId)) {
-      throw new ServiceProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision does not belong to the requested default scope");
-    }
-    this.store.defaults.set(scopeKey, profileRevisionId);
-    this.audit("AGENT_DEFAULT_UPDATED", scopeKey, actor, { profileRevisionId, runningTasksUnaffected: true });
-    return {
-      scope: scopeKey,
-      profileRevisionId,
-      precedence: "project > tenant > platform > built-in Claude Code",
-      newTasksOnly: true,
-    };
+    return this.store.mutate((state) => {
+      const profile = state.profiles.get(profileRevisionId);
+      if (!profile || profile.state !== "ACTIVE") {
+        throw new ServiceProblem(409, "PROFILE_NOT_ACTIVE", "Defaults can only reference an active immutable Profile revision");
+      }
+      if (profile.scope !== parsed.scope || (parsed.scope !== "platform" && profile.scopeId !== parsed.scopeId)) {
+        throw new ServiceProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision does not belong to the requested default scope");
+      }
+      state.defaults.set(scopeKey, profileRevisionId);
+      this.audit(state, "AGENT_DEFAULT_UPDATED", scopeKey, actor, { profileRevisionId, runningTasksUnaffected: true });
+      return {
+        scope: scopeKey,
+        profileRevisionId,
+        precedence: "project > tenant > platform > built-in Claude Code",
+        newTasksOnly: true,
+      };
+    });
   }
 
-  health(): Readonly<Record<string, unknown>> {
-    const installations = [...this.store.installations.values()];
-    return {
-      status: installations.some((item) => ["FAILED", "QUARANTINED"].includes(item.state)) ? "DEGRADED" : "HEALTHY",
-      installations,
-      providers: [...this.store.providers.values()].map(({ id, state, probe }) => ({ id, state, probe })),
-      isolation: { developmentWorkers: true, e2eRunnersContainAgent: false, steamPublishersContainAgent: false },
-      checkedAt: new Date().toISOString(),
-    };
+  async health(): Promise<Readonly<Record<string, unknown>>> {
+    return this.store.read((state) => {
+      const installations = [...state.installations.values()];
+      return {
+        status: installations.some((item) => ["FAILED", "QUARANTINED"].includes(item.state)) ? "DEGRADED" : "HEALTHY",
+        installations,
+        providers: [...state.providers.values()].map(({ id, state: providerState, probe }) => ({ id, state: providerState, probe })),
+        isolation: { developmentWorkers: true, e2eRunnersContainAgent: false, steamPublishersContainAgent: false },
+        checkedAt: new Date().toISOString(),
+      };
+    });
   }
 
-  auditLog(): readonly AuditRecord[] {
-    return this.store.audit;
+  async auditLog(actor: RequestActor): Promise<readonly AuditRecord[]> {
+    return this.store.read((state) => Object.freeze(state.audit.filter((record) => auditVisibleTo(record, actor))));
   }
 
   private async ingestCredential(
@@ -451,12 +536,22 @@ export class AdminService {
   }
 
   private audit(
+    state: AdminCatalogState,
     action: string,
     resource: string,
     actor: RequestActor,
     metadata: Readonly<Record<string, unknown>>,
   ): void {
-    this.store.recordAudit({ action, resource, role: actor.role, requestId: actor.requestId, metadata });
+    recordAdminAudit(state, {
+      action,
+      resource,
+      role: actor.role,
+      actorId: actor.actorId,
+      tenantId: actor.tenantId,
+      projectId: actor.projectId,
+      requestId: actor.requestId,
+      metadata,
+    });
   }
 }
 
@@ -513,6 +608,45 @@ function assertProfileCredential(
     return;
   }
   throw new ServiceProblem(403, "CREDENTIAL_SCOPE_FORBIDDEN", "Profile cannot use a credential from another scope");
+}
+
+function assertFallbackProfile(
+  state: AdminCatalogState,
+  fallbackProfileRevisionId: string | null,
+  agent: ProfileRevisionRecord["agent"],
+  scope: ProfileScope,
+  scopeId: string,
+): void {
+  if (!fallbackProfileRevisionId) return;
+  const fallback = state.profiles.get(fallbackProfileRevisionId);
+  if (!fallback || fallback.state !== "ACTIVE" || fallback.agent !== agent
+    || fallback.scope !== scope || fallback.scopeId !== scopeId) {
+    throw new ServiceProblem(
+      409,
+      "FALLBACK_PROFILE_NOT_ALLOWED",
+      "Fallback must be an active exact Profile for the same Agent and scope",
+    );
+  }
+}
+
+function requireProfile(state: AdminCatalogState, profileId: string): ProfileRevisionRecord {
+  const profile = state.profiles.get(profileId);
+  if (!profile) throw new ServiceProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
+  return profile;
+}
+
+function requireProvider(state: AdminCatalogState, providerId: string): ProviderRevisionRecord {
+  const provider = state.providers.get(providerId);
+  if (!provider) throw new ServiceProblem(409, "PROVIDER_NOT_FOUND", "Provider revision does not exist");
+  return provider;
+}
+
+function auditVisibleTo(record: AuditRecord, actor: RequestActor): boolean {
+  if (actor.role === "PlatformAgentAdmin" || actor.role === "SecurityAdmin") return true;
+  if (actor.role === "Auditor" && !actor.tenantId) return true;
+  if (record.tenantId !== actor.tenantId) return false;
+  if (actor.projectId && record.projectId !== actor.projectId) return false;
+  return true;
 }
 
 function parseDefaultScope(value: string): { scope: ProfileScope; scopeId: string } {

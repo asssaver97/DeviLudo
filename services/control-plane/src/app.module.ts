@@ -5,6 +5,7 @@ import { AdminIdempotencyStore } from "./admin-idempotency";
 import { createAdminIdempotencyStore } from "./admin-idempotency-postgres";
 import { AdminService } from "./admin.service";
 import { AdminStore } from "./admin.store";
+import { createAdminStore } from "./admin-store-postgres";
 import { IdempotencyInterceptor } from "./idempotency.interceptor";
 import { ProblemFilter } from "./problem.filter";
 import { RbacGuard } from "./rbac.guard";
@@ -17,7 +18,7 @@ Module({
   controllers: [AdminController],
   providers: [
     AdminService,
-    AdminStore,
+    { provide: AdminStore, useFactory: createAdminStore },
     { provide: AdminIdempotencyStore, useFactory: createAdminIdempotencyStore },
     { provide: SecretVault, useFactory: createSecretVault },
     { provide: ProviderProbe, useClass: InferenceGatewayProviderProbe },

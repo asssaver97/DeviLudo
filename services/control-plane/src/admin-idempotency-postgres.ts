@@ -35,7 +35,7 @@ export class PostgresAdminIdempotencyStore extends AdminIdempotencyStore impleme
         `INSERT INTO deviludo.admin_idempotency_results
           (identity_digest, request_fingerprint, state, claim_token,
            claim_expires_at, expires_at)
-         VALUES ($1, $2, 'CLAIMED', $3::uuid, now() + interval '30 seconds',
+         VALUES ($1, $2, 'CLAIMED', $3::uuid, now() + interval '5 minutes',
                  now() + interval '24 hours')
          ON CONFLICT (identity_digest) DO NOTHING`,
         [input.identityDigest, input.requestFingerprint, claimToken],
@@ -67,7 +67,7 @@ export class PostgresAdminIdempotencyStore extends AdminIdempotencyStore impleme
       const reclaimed = await client.query(
         `UPDATE deviludo.admin_idempotency_results
             SET state = 'CLAIMED', claim_token = $3::uuid,
-                claim_expires_at = now() + interval '30 seconds', updated_at = now()
+                claim_expires_at = now() + interval '5 minutes', updated_at = now()
           WHERE identity_digest = $1 AND request_fingerprint = $2
             AND state <> 'COMPLETED'
             AND (claim_token IS NULL OR claim_expires_at <= now())

@@ -20,7 +20,7 @@ const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "Pr
 export class AdminController {
   constructor(private readonly service: AdminService) {}
 
-  agents(): Readonly<Record<string, unknown>> {
+  agents(): Promise<Readonly<Record<string, unknown>>> {
     return this.service.agents();
   }
 
@@ -88,12 +88,12 @@ export class AdminController {
     return this.service.updateDefault(scope, objectBody(body), actor(request));
   }
 
-  health(): Readonly<Record<string, unknown>> {
+  health(): Promise<Readonly<Record<string, unknown>>> {
     return this.service.health();
   }
 
-  audit() {
-    return this.service.auditLog();
+  audit(request: FastifyRequest) {
+    return this.service.auditLog(actor(request));
   }
 }
 
@@ -117,7 +117,7 @@ applyRoute("rotateCredential", Post("credentials/:id/rotate"), ["SecurityAdmin",
 applyRoute("revokeCredential", Post("credentials/:id/revoke"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Req()]);
 applyRoute("updateDefault", Put("agent-defaults/:scope"), PROFILE_ROLES, [Param("scope"), Body(), Req()]);
 applyRoute("health", Get("agent-health"), ALL_ROLES, []);
-applyRoute("audit", Get("audit"), ALL_ROLES, []);
+applyRoute("audit", Get("audit"), ALL_ROLES, [Req()]);
 Controller("admin")(AdminController);
 
 function applyRoute(

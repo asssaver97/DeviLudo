@@ -327,6 +327,17 @@ test("tenant and project administrators cannot cross signed scope or BYOK bounda
   });
   assert.equal(crossProject.statusCode, 403);
   assert.equal(crossProject.json().error.code, "SCOPE_FORBIDDEN");
+
+  const alphaAudit = await inject({
+    method: "GET",
+    url: "/admin/audit",
+    role: "TenantAdmin",
+    tenantId: "tenant-alpha",
+  });
+  assert.equal(alphaAudit.statusCode, 200);
+  assert.equal(alphaAudit.json().data.length > 0, true);
+  assert.equal(alphaAudit.json().data.every((record: { tenantId: string | null }) => record.tenantId === "tenant-alpha"), true);
+  assert.equal(alphaAudit.body.includes("tenant-beta"), false);
 });
 
 test("idempotency results are isolated by the signed tenant and project scope", async () => {

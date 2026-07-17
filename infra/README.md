@@ -24,7 +24,8 @@ workflow inbox primary key to `tenant_id + idempotency_key`, preventing a key
 used by one tenant from blocking another tenant through an RLS-hidden row.
 Migration `010` adds bounded, digest-keyed administrator mutation claims so
 idempotent results survive control-plane restarts and remain atomic across
-replicas. All ten migrations are
+replicas. Migration `011` adds the versioned Agent administration catalog and
+its separate append-only audit ledger. All eleven migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
