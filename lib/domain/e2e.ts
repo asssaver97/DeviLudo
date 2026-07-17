@@ -14,6 +14,17 @@ export interface RunnerLease {
   readonly targetMatrix: readonly TargetPlatform[];
 }
 
+/**
+ * A matrix attempt is leased independently per target OS. The complete target
+ * matrix remains in every lease for provenance, while `platform` is the only
+ * platform the bound runner may report. This prevents a Windows runner from
+ * claiming Linux/macOS completion and lets every platform receive its own
+ * monotonically increasing fencing token.
+ */
+export interface PlatformRunnerLease extends RunnerLease {
+  readonly platform: TargetPlatform;
+}
+
 export type RunnerEventType =
   | "STARTED"
   | "HEARTBEAT"
@@ -53,6 +64,8 @@ export type RunnerResultRejection =
   | "COMMIT_MISMATCH"
   | "SOURCE_DIGEST_MISMATCH"
   | "PLATFORM_NOT_SELECTED"
+  | "WRONG_PLATFORM_LEASE"
+  | "RUNNER_ATTEMPT_COMPLETION_FORBIDDEN"
   | "EVENT_AFTER_TERMINAL"
   | "INVALID_TERMINAL_EVENT";
 
@@ -105,6 +118,37 @@ export function acceptRunnerEvent(
       completedPlatforms,
       terminal: event.type === "ATTEMPT_COMPLETED",
     }),
+  };
+}
+
+/**
+ * Production runner ingestion uses one lease per target platform. A runner may
+ * terminate only its own platform stream; the control plane derives the matrix
+ * result after all platform leases terminate. `ATTEMPT_COMPLETED` therefore
+ * never crosses the runner trust boundary.
+ */
+export function acceptPlatformRunnerEvent(
+  lease: PlatformRunnerLease,
+  cursor: RunnerEventCursor,
+  event: RunnerEvent,
+  receivedAt: ISODateTime,
+): RunnerResultDecision {
+  if (event.platform !== lease.platform) {
+    return { accepted: false, reason: "WRONG_PLATFORM_LEASE" };
+  }
+  if (event.type === "ATTEMPT_COMPLETED") {
+    return { accepted: false, reason: "RUNNER_ATTEMPT_COMPLETION_FORBIDDEN" };
+  }
+  const decision = acceptRunnerEvent(
+    { ...lease, targetMatrix: [lease.platform] },
+    cursor,
+    event,
+    receivedAt,
+  );
+  if (!decision.accepted || event.type !== "PLATFORM_COMPLETED") return decision;
+  return {
+    accepted: true,
+    cursor: deepFreeze({ ...decision.cursor, terminal: true }),
   };
 }
 

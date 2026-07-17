@@ -164,7 +164,7 @@ const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin, adminState, runtime, agentRuntime, agentPreflight, agentExecutionGate] = await Promise.all([
+  const [home, admin, adminState, runtime, agentRuntime, agentPreflight, agentExecutionGate, runnerIngress] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     request(baseUrl, "/api/admin/agents"),
@@ -211,6 +211,11 @@ try {
         prompt: "Smoke contract only; execution must remain gated.",
       }),
     }),
+    request(baseUrl, "/api/runner/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-runner-id": "forged-local-runner" },
+      body: JSON.stringify({ type: "PLATFORM_COMPLETED", status: "PASSED" }),
+    }),
   ]);
   const adminPayload = await adminState.response.json();
   if (!adminState.response.ok || !Array.isArray(adminPayload.data) || !["claude-code", "codex-cli"].includes(adminPayload.meta?.defaultAgent) || !Array.isArray(adminPayload.meta?.versions)) {
@@ -237,6 +242,10 @@ try {
     || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"].includes(executionGatePayload.error?.code)) {
     throw new Error("local Agent execution gate did not fail closed");
   }
+  const runnerIngressPayload = await runnerIngress.response.json();
+  if (runnerIngress.response.status !== 503 || runnerIngressPayload.error?.code !== "RUNNER_MTLS_INGRESS_REQUIRED") {
+    throw new Error("public Web process unexpectedly accepted a Runner event write");
+  }
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
@@ -246,6 +255,7 @@ try {
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
+  console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);
   console.log("[local:smoke] All local smoke checks passed.");
 } catch (error) {
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);

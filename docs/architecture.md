@@ -109,17 +109,24 @@ evidence can never authorize release.
 
 ## Runner fencing and evidence
 
-Every lease binds `attempt_id`, monotonically increasing `fencing_token`,
-`runner_id`, expiry, `seq_no`, full commit SHA, source/spec/test-plan digests,
-and target matrix. `acceptRunnerEvent` is the single ingestion gate. It rejects:
+Every selected OS receives a separate lease binding `attempt_id`, platform,
+monotonically increasing `fencing_token`, `runner_id`, expiry, `seq_no`, full
+commit SHA, source/spec/test-plan digests, and the complete target matrix. Job
+payloads are canonicalized and Ed25519-signed. Runner identity is taken only
+from an authenticated mTLS peer certificate with one SPIFFE URI SAN; public web
+headers and the localhost UI are not runner identity sources.
+
+`acceptPlatformRunnerEvent` is the single platform-stream ingestion gate. It rejects:
 
 - old tokens or expired leases;
 - wrong attempt/runner, duplicate or skipped sequence numbers;
 - commit or source digest mismatch;
 - unselected platforms and events after a terminal event.
 
-A terminal result is accepted only after all selected platforms reported a
-terminal status, and the overall status is derived rather than trusted. Evidence
+A runner may send `PLATFORM_COMPLETED` only after submitting an exact
+content-addressed platform manifest. It may never send `ATTEMPT_COMPLETED`.
+After all selected platform streams terminate, the control plane derives the
+matrix status rather than trusting a runner-supplied aggregate. Evidence
 bundles include the signed Godot TestKit digest, production export hashes, logs,
 JUnit, deterministic input timelines, screenshots/video, runner capability,
 SBOM, scan, and asset-license ledger. The bundle binds one spec, test plan,
@@ -170,6 +177,8 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
 
 - `lib/domain`: framework-independent aggregates, policies, transitions, locks,
   runner ingestion, evidence, and audit contracts.
+- `services/runner-control`: mTLS workload identity, immutable capabilities,
+  Ed25519 job envelopes, per-platform leases and matrix evidence aggregation.
 - `db/schema.ts`: D1-backed hosted demo schema.
 - `infra/postgres/001_core.sql`: production PostgreSQL/RLS and immutability
   reference.

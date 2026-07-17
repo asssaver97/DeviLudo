@@ -82,3 +82,17 @@ test("credential ingress never echoes or stores the plaintext API key", async ()
   assert.match(serialized, /vault:\/\//);
   assert.match(serialized, /plaintextRecoverable.*false/);
 });
+
+test("public web worker remains fail-closed for runner event writes", async () => {
+  const readOnly = await request("/api/runner/events");
+  assert.equal(readOnly.status, 200);
+  assert.equal((await readOnly.json()).meta.readOnly, true);
+
+  const write = await request("/api/runner/events", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-runner-id": "forged-runner" },
+    body: JSON.stringify({ type: "PLATFORM_COMPLETED", status: "PASSED" }),
+  });
+  assert.equal(write.status, 503);
+  assert.equal((await write.json()).error.code, "RUNNER_MTLS_INGRESS_REQUIRED");
+});

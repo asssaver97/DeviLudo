@@ -86,3 +86,4 @@ Godot 侧车端口默认是 `4311`，Agent 探针端口默认是 `4312`。如需
 - `WAITING_EXPORT_TEMPLATES`：在 Godot 编辑器中安装与当前版本完全匹配的 export templates 后重新验证。
 - `VERSION_MISMATCH`：本机 CLI 可以被发现，但不等于任务锁定的批准版本；通过新的固定版本 WorkerImage 更新，不要放宽门禁或启用 CLI 自更新。
 - 页面通过但外部动作未执行：这是本地预览的预期行为；真实开发 Agent、Windows/Linux Runner、GitHub 和 Steam 工作流需要独立配置安全凭据与基础设施。
+- `/api/runner/events` 在本地仅提供只读演示状态；任何 POST 都会以 `RUNNER_MTLS_INGRESS_REQUIRED` 拒绝。真实 Runner 必须接入独立 mTLS 服务，不能通过浏览器或伪造 Header 上报结果。

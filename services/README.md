@@ -21,6 +21,11 @@ behind the web console:
   credential and remaining budget, and performs fresh DNS/SSRF validation.
   Without a trusted DNS-pinning/Vault connector it fails closed rather than
   using an unpinned HTTP client.
+- `runner-control`: registers only admitted mTLS/SPIFFE workloads, rejects E2E
+  hosts containing autonomous Agents, signs exact per-platform job envelopes,
+  applies independent fencing tokens and derives the final matrix result from
+  content-addressed evidence manifests. The public Web process is deliberately
+  not a Runner ingress.
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,
@@ -145,12 +150,14 @@ and activities; the Worker never silently swaps Claude Code and Codex CLI.
 ./node_modules/.bin/tsc -p services/temporal/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/inference-gateway/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/runner-control/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-runtime/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-agent-runtime/tsconfig.json --pretty false
 node --import tsx --test services/control-plane/test/control-plane.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/gateway.test.ts
+node --import tsx --test services/runner-control/test/coordinator.test.ts
 node --import tsx --test services/local-runtime/test/godot-fixture.test.ts
 node --import tsx --test services/local-agent-runtime/test/readiness.test.ts
 ```

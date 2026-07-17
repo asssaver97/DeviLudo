@@ -96,36 +96,69 @@ CREATE TABLE deviludo.e2e_attempts (
   project_id uuid NOT NULL REFERENCES deviludo.projects(id),
   run_id uuid NOT NULL REFERENCES deviludo.agent_runs(id),
   attempt_number integer NOT NULL CHECK (attempt_number > 0),
-  runner_id text,
-  fencing_token bigint NOT NULL CHECK (fencing_token > 0),
-  last_seq_no bigint NOT NULL DEFAULT 0,
   commit_sha text NOT NULL CHECK (commit_sha ~ '^[a-f0-9]{40}$'),
   source_digest text NOT NULL CHECK (source_digest ~ '^[a-f0-9]{64}$'),
   binding jsonb NOT NULL,
   target_matrix text[] NOT NULL,
-  lease_expires_at timestamptz,
   state text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (run_id, attempt_number),
-  UNIQUE (id, fencing_token)
+  UNIQUE (run_id, attempt_number)
 );
 
-CREATE TABLE deviludo.runner_events (
+-- Runners are platform infrastructure identities rather than tenant-owned
+-- records. Every write still lands in a tenant-bound lease/event row below.
+CREATE TABLE deviludo.runner_registrations (
+  id text PRIMARY KEY,
+  spiffe_id text NOT NULL UNIQUE CHECK (spiffe_id LIKE 'spiffe://%'),
+  certificate_fingerprint text NOT NULL UNIQUE CHECK (certificate_fingerprint ~ '^[a-f0-9]{64}$'),
+  certificate_serial text NOT NULL,
+  certificate_not_after timestamptz NOT NULL,
+  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
+  architecture text NOT NULL CHECK (architecture IN ('x86_64', 'arm64')),
+  capability_digest text NOT NULL CHECK (capability_digest ~ '^[a-f0-9]{64}$'),
+  capabilities jsonb NOT NULL,
+  state text NOT NULL CHECK (state IN ('ONLINE', 'DRAINING', 'OFFLINE', 'QUARANTINED')),
+  registered_at timestamptz NOT NULL,
+  last_seen_at timestamptz NOT NULL
+);
+
+CREATE TABLE deviludo.e2e_platform_leases (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  attempt_id uuid NOT NULL REFERENCES deviludo.e2e_attempts(id),
+  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
+  runner_id text NOT NULL REFERENCES deviludo.runner_registrations(id),
+  fencing_token bigint NOT NULL CHECK (fencing_token > 0),
+  lease_expires_at timestamptz NOT NULL,
+  last_seq_no bigint NOT NULL DEFAULT 0,
+  cursor jsonb NOT NULL,
+  job_digest text NOT NULL CHECK (job_digest ~ '^[a-f0-9]{64}$'),
+  job_signature text NOT NULL,
+  evidence_manifest_digest text CHECK (evidence_manifest_digest ~ '^[a-f0-9]{64}$'),
+  state text NOT NULL CHECK (state IN ('LEASED', 'RUNNING', 'PASSED', 'FAILED', 'EXPIRED', 'INVALIDATED')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (attempt_id, platform, fencing_token)
+);
+
+CREATE TABLE deviludo.platform_runner_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
   attempt_id uuid NOT NULL REFERENCES deviludo.e2e_attempts(id),
+  platform_lease_id uuid NOT NULL REFERENCES deviludo.e2e_platform_leases(id),
+  runner_id text NOT NULL REFERENCES deviludo.runner_registrations(id),
+  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
   fencing_token bigint NOT NULL,
   seq_no bigint NOT NULL CHECK (seq_no > 0),
   commit_sha text NOT NULL,
   source_digest text NOT NULL,
-  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
   event_type text NOT NULL,
   status text NOT NULL,
   artifact_digest text,
   occurred_at timestamptz NOT NULL,
   received_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (attempt_id, fencing_token, seq_no),
-  FOREIGN KEY (attempt_id, fencing_token) REFERENCES deviludo.e2e_attempts(id, fencing_token)
+  UNIQUE (platform_lease_id, seq_no)
 );
 
 CREATE TABLE deviludo.evidence_bundles (
@@ -227,7 +260,7 @@ DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'projects', 'immutable_revisions', 'agent_runs', 'e2e_attempts',
-    'credential_versions', 'runner_events', 'evidence_bundles',
+    'credential_versions', 'e2e_platform_leases', 'platform_runner_events', 'evidence_bundles',
     'steam_releases', 'audit_events'
   ] LOOP
     EXECUTE format('ALTER TABLE deviludo.%I ENABLE ROW LEVEL SECURITY', table_name);
@@ -240,7 +273,9 @@ BEGIN
 END $$;
 
 CREATE INDEX agent_runs_project_state_idx ON deviludo.agent_runs (tenant_id, project_id, state);
-CREATE INDEX e2e_lease_idx ON deviludo.e2e_attempts (state, lease_expires_at);
+CREATE INDEX e2e_attempt_state_idx ON deviludo.e2e_attempts (state, created_at);
+CREATE INDEX e2e_platform_lease_idx ON deviludo.e2e_platform_leases (state, lease_expires_at);
+CREATE INDEX e2e_platform_runner_idx ON deviludo.e2e_platform_leases (runner_id, state, lease_expires_at);
 CREATE INDEX evidence_commit_idx ON deviludo.evidence_bundles (tenant_id, project_id, commit_sha);
 CREATE INDEX audit_tenant_time_idx ON deviludo.audit_events (tenant_id, occurred_at DESC);
 

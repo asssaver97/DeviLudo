@@ -1,4 +1,4 @@
-import { acceptRunnerEvent, type RunnerEvent, type RunnerEventCursor, type RunnerLease } from "@/lib/domain/e2e";
+import type { RunnerEventCursor, RunnerLease } from "@/lib/domain/e2e";
 
 const digest = "a".repeat(64);
 const commit = "8b7e4a2b7c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f";
@@ -27,13 +27,6 @@ export function getRunnerDemoState(): RunnerDemoState {
     cursor: { lastAcceptedSeqNo: 0, completedPlatforms: {}, terminal: false },
   };
   return globalRunner.__deviludoRunnerDemo;
-}
-
-export function acceptDemoRunnerEvent(event: RunnerEvent, receivedAt: string) {
-  const state = getRunnerDemoState();
-  const decision = acceptRunnerEvent(state.lease, state.cursor, event, receivedAt);
-  if (decision.accepted) state.cursor = decision.cursor;
-  return decision;
 }
 
 export const runnerDemoFixture = Object.freeze({ digest, commit });

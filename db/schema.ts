@@ -337,6 +337,87 @@ export const runnerEvents = sqliteTable(
   (table) => [uniqueIndex("runner_event_seq_unique").on(table.attemptId, table.fencingToken, table.seqNo)],
 );
 
+/**
+ * Production-shaped Runner records. The older `runner_events` table above is
+ * retained only for the read-only hosted demo projection; real matrix jobs use
+ * one immutable lease generation and event stream per target platform.
+ */
+export const runnerRegistrations = sqliteTable(
+  "runner_registrations",
+  {
+    id: text("id").primaryKey(),
+    spiffeId: text("spiffe_id").notNull(),
+    certificateFingerprint: text("certificate_fingerprint").notNull(),
+    certificateSerial: text("certificate_serial").notNull(),
+    certificateNotAfter: text("certificate_not_after").notNull(),
+    platform: text("platform").$type<TargetPlatform>().notNull(),
+    architecture: text("architecture", { enum: ["x86_64", "arm64"] }).notNull(),
+    capabilityDigest: text("capability_digest").notNull(),
+    capabilities: text("capabilities", { mode: "json" }).$type<JsonRecord>().notNull(),
+    state: text("state", { enum: ["ONLINE", "DRAINING", "OFFLINE", "QUARANTINED"] }).notNull(),
+    registeredAt: text("registered_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("runner_spiffe_unique").on(table.spiffeId),
+    uniqueIndex("runner_certificate_unique").on(table.certificateFingerprint),
+    index("runner_platform_state_idx").on(table.platform, table.state),
+  ],
+);
+
+export const e2ePlatformLeases = sqliteTable(
+  "e2e_platform_leases",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    attemptId: text("attempt_id").notNull().references(() => e2eAttempts.id),
+    platform: text("platform").$type<TargetPlatform>().notNull(),
+    runnerId: text("runner_id").notNull().references(() => runnerRegistrations.id),
+    fencingToken: integer("fencing_token").notNull(),
+    leaseExpiresAt: text("lease_expires_at").notNull(),
+    lastSeqNo: integer("last_seq_no").notNull().default(0),
+    cursor: text("cursor", { mode: "json" }).$type<JsonRecord>().notNull(),
+    jobDigest: text("job_digest").notNull(),
+    jobSignature: text("job_signature").notNull(),
+    evidenceManifestDigest: text("evidence_manifest_digest"),
+    state: text("state", { enum: ["LEASED", "RUNNING", "PASSED", "FAILED", "EXPIRED", "INVALIDATED"] }).notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("e2e_platform_fencing_unique").on(table.attemptId, table.platform, table.fencingToken),
+    index("e2e_platform_active_lease_idx").on(table.attemptId, table.platform, table.state),
+    index("e2e_platform_runner_lease_idx").on(table.runnerId, table.state, table.leaseExpiresAt),
+  ],
+);
+
+export const platformRunnerEvents = sqliteTable(
+  "platform_runner_events",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    attemptId: text("attempt_id").notNull().references(() => e2eAttempts.id),
+    platformLeaseId: text("platform_lease_id").notNull().references(() => e2ePlatformLeases.id),
+    runnerId: text("runner_id").notNull().references(() => runnerRegistrations.id),
+    platform: text("platform").$type<TargetPlatform>().notNull(),
+    fencingToken: integer("fencing_token").notNull(),
+    seqNo: integer("seq_no").notNull(),
+    commitSha: text("commit_sha").notNull(),
+    sourceDigest: text("source_digest").notNull(),
+    eventType: text("event_type").notNull(),
+    status: text("status", { enum: ["RUNNING", "PASSED", "FAILED"] }).notNull(),
+    artifactDigest: text("artifact_digest"),
+    occurredAt: text("occurred_at").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("platform_runner_event_seq_unique").on(table.platformLeaseId, table.seqNo),
+    index("platform_runner_event_attempt_idx").on(table.attemptId, table.platform, table.fencingToken),
+  ],
+);
+
 export const evidenceBundles = sqliteTable(
   "evidence_bundles",
   {
