@@ -3,6 +3,7 @@ export * from "./bundler";
 export * from "./client";
 export * from "./contracts";
 export * from "./job-processor";
+export * from "./job-worker-host";
 export * from "./postgres-inbox";
 export * from "./postgres-queue";
 export * from "./receiver";

@@ -27,6 +27,7 @@ import {
   WorkflowJobProcessor,
   type WorkflowJobQueuePort,
 } from "../src/job-processor";
+import { WorkflowJobWorkerHost } from "../src/job-worker-host";
 import type { ClaimedWorkflowJob } from "../src/postgres-queue";
 import {
   parseWorkflowSpiffeId,
@@ -308,6 +309,98 @@ test("job processor records bounded retries and makes the final attempt terminal
   assert.equal(failures.length, 1);
   assert.equal(failures[0]?.terminal, true);
   assert.equal(failures[0]?.retryAt, undefined);
+});
+
+test("worker host drains assigned tenants, deduplicates IDs and stops from its idle wait", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const processed: string[] = [];
+  const delays: number[] = [];
+  const controller = new AbortController();
+  let calls = 0;
+  const host = new WorkflowJobWorkerHost({
+    destination: "agent-worker",
+    tenants: {
+      async listTenantIds(destination) {
+        assert.equal(destination, "agent-worker");
+        return [tenantId.toUpperCase(), tenantId];
+      },
+    },
+    processor: {
+      async processOne(assignedTenantId) {
+        processed.push(assignedTenantId);
+        calls += 1;
+        return calls === 1
+          ? { kind: "COMPLETED", jobId: "33333333-3333-4333-8333-333333333333", signalId: null }
+          : { kind: "IDLE" };
+      },
+    },
+    pause: async (delayMs) => {
+      delays.push(delayMs);
+      controller.abort();
+    },
+  });
+  await host.run(controller.signal);
+  assert.deepEqual(processed, [tenantId, tenantId]);
+  assert.deepEqual(delays, [1_000]);
+});
+
+test("worker host backs off and recovers from assignment and processor infrastructure errors", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const diagnostics: string[] = [];
+  const delays: number[] = [];
+  const controller = new AbortController();
+  let assignmentCalls = 0;
+  let processorCalls = 0;
+  const host = new WorkflowJobWorkerHost({
+    destination: "runner-control",
+    tenants: {
+      async listTenantIds() {
+        assignmentCalls += 1;
+        if (assignmentCalls === 1) throw new Error("secret database detail");
+        return [tenantId];
+      },
+    },
+    processor: {
+      async processOne() {
+        processorCalls += 1;
+        if (processorCalls === 1) throw new Error("secret connector detail");
+        return { kind: "IDLE" };
+      },
+    },
+    onDiagnostic: (diagnostic) => diagnostics.push(`${diagnostic.destination}:${diagnostic.code}`),
+    pause: async (delayMs) => {
+      delays.push(delayMs);
+      if (delays.length === 3) controller.abort();
+    },
+  });
+  await host.run(controller.signal);
+  assert.deepEqual(delays, [5_000, 5_000, 1_000]);
+  assert.deepEqual(diagnostics, [
+    "runner-control:TENANT_ASSIGNMENT_FAILED",
+    "runner-control:JOB_PROCESSOR_FAILED",
+  ]);
+  assert.equal(processorCalls, 2);
+  assert.equal(diagnostics.join(" ").includes("secret"), false);
+});
+
+test("worker host rejects invalid tenant assignments and concurrent runs", async () => {
+  const pauses: (() => void)[] = [];
+  const controller = new AbortController();
+  const host = new WorkflowJobWorkerHost({
+    destination: "scm-proxy",
+    tenants: { async listTenantIds() { return ["not-a-tenant"]; } },
+    processor: { async processOne() { return { kind: "IDLE" }; } },
+    pause: (_delayMs, signal) => new Promise((resolve) => {
+      pauses.push(resolve);
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }),
+  });
+  const running = host.run(controller.signal);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  await assert.rejects(host.run(controller.signal), /already running/);
+  controller.abort();
+  for (const resolve of pauses) resolve();
+  await running;
 });
 
 test("command receiver rejects confused-deputy, transport and state drift", async () => {

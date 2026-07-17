@@ -187,6 +187,13 @@ Migration `007_workflow_job_heartbeats.sql` permits same-token heartbeats while
 still requiring a new token and incremented attempt for an expired-lease
 reclaim.
 
+`WorkflowJobWorkerHost` supplies the long-running process loop around that
+single-job processor. It accepts tenant assignments only from an injected,
+trusted control-plane source (never an owner-role database scan), validates and
+deduplicates them, drains productive cycles immediately, backs off on an empty
+queue or infrastructure error, reports only bounded diagnostic codes, and
+stops through an `AbortSignal`. Only one loop may run per host instance.
+
 `ControlPlaneWorkflowHandler` consumes the non-compute commands for ideation,
 spec approval, Provider recovery, candidate acceptance, release MFA, external
 Steam approvals and cancellation. It persists an exact request-digest-bound
