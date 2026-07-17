@@ -11,19 +11,34 @@ export interface SteamPrivateBetaWorkflowPort {
     readonly mainEvidenceBundleId: string;
     readonly mfaApprovalId: string;
     readonly targetMatrix: readonly SteamTargetPlatform[];
-  }): Promise<{ readonly buildId: string; readonly receiptId: string }>;
+  }): Promise<SteamPrivateBetaWorkflowReceipt>;
+}
+
+export interface SteamPrivateBetaWorkflowReceipt {
+  readonly receiptId: string;
+  readonly runId: string;
+  readonly mainCommitSha: string;
+  readonly mainEvidenceBundleId: string;
+  readonly mfaApprovalId: string;
+  readonly targetMatrix: readonly SteamTargetPlatform[];
+  readonly buildId: string;
 }
 
 export interface SteamDefaultBranchWorkflowPort {
   publish(input: SteamWorkflowBinding & {
     readonly betaBuildId: string;
     readonly externalApprovalIds: readonly string[];
-  }): Promise<{
-    readonly releaseId: string;
-    /** SetLive promotes the same tested BuildID; it must not create another build. */
-    readonly defaultBranchBuildId: string;
-    readonly receiptId: string;
-  }>;
+  }): Promise<SteamDefaultBranchWorkflowReceipt>;
+}
+
+export interface SteamDefaultBranchWorkflowReceipt {
+  readonly runId: string;
+  readonly releaseId: string;
+  /** SetLive promotes the same tested BuildID; it must not create another build. */
+  readonly defaultBranchBuildId: string;
+  readonly receiptId: string;
+  readonly betaBuildId: string;
+  readonly externalApprovalIds: readonly string[];
 }
 
 interface SteamWorkflowBinding {
@@ -32,6 +47,8 @@ interface SteamWorkflowBinding {
   readonly tenantId: string;
   readonly projectId: string;
   readonly workflowId: string;
+  readonly runId: string;
+  readonly heartbeat: () => Promise<string>;
 }
 
 export class SteamPublisherWorkflowHandler implements WorkflowJobHandler {
@@ -54,6 +71,8 @@ export class SteamPublisherWorkflowHandler implements WorkflowJobHandler {
       tenantId: job.tenantId,
       projectId: job.projectId,
       workflowId: job.workflowId,
+      runId: requireRunId(snapshot.runId),
+      heartbeat: context.heartbeat,
     });
     if (job.operation === "UPLOAD_AND_ACTIVATE_PRIVATE_BETA") {
       if (snapshot.state !== "STEAM_PRIVATE_BETA" || !snapshot.mainCommitSha
@@ -68,10 +87,15 @@ export class SteamPublisherWorkflowHandler implements WorkflowJobHandler {
         mfaApprovalId: snapshot.mfaApprovalId,
         targetMatrix: validateMatrix(snapshot.targetMatrix),
       });
-      validateOpaqueId(receipt.receiptId, "Steam private Beta receipt");
-      validateBuildId(receipt.buildId);
+      validatePrivateBetaReceipt(receipt, {
+        runId: base.runId,
+        mainCommitSha: snapshot.mainCommitSha,
+        mainEvidenceBundleId: snapshot.mainEvidenceBundleId,
+        mfaApprovalId: snapshot.mfaApprovalId,
+        targetMatrix: snapshot.targetMatrix,
+      });
       return Object.freeze({
-        result: Object.freeze({ receiptId: receipt.receiptId, buildId: receipt.buildId }),
+        result: Object.freeze({ ...receipt, targetMatrix: Object.freeze([...receipt.targetMatrix]) }),
         signal: Object.freeze({ type: "BETA_ACTIVATED", buildId: receipt.buildId }),
       });
     }
@@ -93,15 +117,12 @@ export class SteamPublisherWorkflowHandler implements WorkflowJobHandler {
       validateOpaqueId(receipt.receiptId, "Steam release receipt");
       validateOpaqueId(receipt.releaseId, "Steam release");
       validateBuildId(receipt.defaultBranchBuildId);
-      if (receipt.defaultBranchBuildId !== snapshot.steamBuildId) {
+      if (receipt.runId !== base.runId || receipt.betaBuildId !== snapshot.steamBuildId || receipt.defaultBranchBuildId !== snapshot.steamBuildId
+        || JSON.stringify(receipt.externalApprovalIds) !== JSON.stringify(snapshot.externalApprovals.map((entry) => entry.approvalId))) {
         throw new Error("Steam default branch did not promote the tested BuildID");
       }
       return Object.freeze({
-        result: Object.freeze({
-          receiptId: receipt.receiptId,
-          releaseId: receipt.releaseId,
-          defaultBranchBuildId: receipt.defaultBranchBuildId,
-        }),
+        result: Object.freeze({ ...receipt, externalApprovalIds: Object.freeze([...receipt.externalApprovalIds]) }),
         signal: Object.freeze({
           type: "STEAM_RELEASED",
           releaseId: receipt.releaseId,
@@ -110,6 +131,20 @@ export class SteamPublisherWorkflowHandler implements WorkflowJobHandler {
       });
     }
     throw new Error("Steam workflow operation is unsupported");
+  }
+}
+
+function validatePrivateBetaReceipt(
+  receipt: SteamPrivateBetaWorkflowReceipt,
+  expected: Pick<SteamPrivateBetaWorkflowReceipt, "runId" | "mainCommitSha" | "mainEvidenceBundleId" | "mfaApprovalId" | "targetMatrix">,
+): void {
+  validateOpaqueId(receipt.receiptId, "Steam private Beta receipt");
+  validateBuildId(receipt.buildId);
+  if (receipt.runId !== expected.runId || receipt.mainCommitSha !== expected.mainCommitSha
+    || receipt.mainEvidenceBundleId !== expected.mainEvidenceBundleId
+    || receipt.mfaApprovalId !== expected.mfaApprovalId
+    || JSON.stringify(receipt.targetMatrix) !== JSON.stringify(expected.targetMatrix)) {
+    throw new Error("Steam private Beta receipt binding is invalid");
   }
 }
 
@@ -127,4 +162,10 @@ function validateBuildId(value: string): void {
 
 function validateOpaqueId(value: string, label: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value)) throw new Error(`${label} ID is invalid`);
+}
+
+function requireRunId(value: string | null): string {
+  if (!value) throw new Error("Steam workflow run binding is incomplete");
+  validateOpaqueId(value, "Steam Agent run");
+  return value;
 }

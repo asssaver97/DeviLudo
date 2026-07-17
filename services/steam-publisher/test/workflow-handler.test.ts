@@ -64,7 +64,9 @@ test("Steam workflow handler resolves private Beta inputs from the bound snapsho
       assert.equal(input.operationKey, "workflow-job:11111111-1111-4111-8111-111111111111");
       assert.equal(input.mainCommitSha, baseSnapshot.mainCommitSha);
       assert.equal(input.mfaApprovalId, baseSnapshot.mfaApprovalId);
-      return { buildId: "91234567", receiptId: "steam-beta-receipt-9" };
+      return { buildId: "91234567", receiptId: "steam-beta-receipt-9", runId: input.runId,
+        mainCommitSha: input.mainCommitSha, mainEvidenceBundleId: input.mainEvidenceBundleId,
+        mfaApprovalId: input.mfaApprovalId, targetMatrix: input.targetMatrix };
     },
   }, { async publish() { throw new Error("must not publish"); } });
   const outcome = await handler.execute(job(baseSnapshot, "UPLOAD_AND_ACTIVATE_PRIVATE_BETA"), { async heartbeat() { heartbeats += 1; return "2099-01-01T00:10:00.000Z"; } });
@@ -88,14 +90,18 @@ test("Steam workflow handler promotes only the same fully approved and install-t
     async publish(input) {
       assert.equal(input.betaBuildId, ready.steamBuildId);
       assert.deepEqual(input.externalApprovalIds, ["approval-valve-9", "approval-first-9", "approval-default-9"]);
-      return { releaseId: "steam-release-9", defaultBranchBuildId: "91234567", receiptId: "steam-release-receipt-9" };
+      return { releaseId: "steam-release-9", runId: input.runId, betaBuildId: input.betaBuildId,
+        defaultBranchBuildId: "91234567", receiptId: "steam-release-receipt-9",
+        externalApprovalIds: input.externalApprovalIds };
     },
   });
   const outcome = await handler.execute(job(ready, "PUBLISH_STEAM_DEFAULT_BRANCH"), { async heartbeat() { return "2099-01-01T00:10:00.000Z"; } });
   assert.deepEqual(outcome.signal, { type: "STEAM_RELEASED", releaseId: "steam-release-9", defaultBranchBuildId: "91234567" });
 
   const drifted = new SteamPublisherWorkflowHandler({ async upload() { throw new Error("must not upload"); } }, {
-    async publish() { return { releaseId: "steam-release-10", defaultBranchBuildId: "99999999", receiptId: "steam-release-receipt-10" }; },
+    async publish(input) { return { releaseId: "steam-release-10", runId: input.runId, betaBuildId: input.betaBuildId,
+      defaultBranchBuildId: "99999999", receiptId: "steam-release-receipt-10",
+      externalApprovalIds: input.externalApprovalIds }; },
   });
   await assert.rejects(drifted.execute(job(ready, "PUBLISH_STEAM_DEFAULT_BRANCH"), { async heartbeat() { return "2099-01-01T00:10:00.000Z"; } }), /tested BuildID/);
 });

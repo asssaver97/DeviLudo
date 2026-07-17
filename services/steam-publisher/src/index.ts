@@ -10,4 +10,5 @@ export * from "./release-authorization";
 export * from "./release-authorization-http";
 export * from "./release-authorization-postgres";
 export * from "./steamcmd";
+export * from "./workflow-broker";
 export * from "./workflow-handler";

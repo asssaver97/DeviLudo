@@ -77,6 +77,15 @@ approvals and allows only `SetLive` promotion of that same clean-install-tested
 BuildID; a Connector that returns a new or different build is rejected before
 the `STEAM_RELEASED` signal is produced.
 
+The production entry is `npm run start:steam-publisher-workflow`. It sends only
+the immutable run/main/evidence/MFA bindings or the tested BuildID and three
+ordered external approval IDs over TLS 1.3 mTLS to a fixed isolated Steam
+Workflow Broker. Only that Broker can materialize the Vault-backed `config.vdf`,
+invoke SteamCMD/SteamPipe or access the dedicated build account. Its exact
+health identity gates readiness, long uploads heartbeat their workflow lease,
+and its receipt must echo every authorization binding. Default publication is
+accepted only when `SetLive` returns the same private-Beta BuildID.
+
 Run the contract tests from the repository root:
 
 ```bash

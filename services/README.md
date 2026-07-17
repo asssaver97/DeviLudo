@@ -267,14 +267,15 @@ RLS tenants. A read-only public key is mounted on the Worker; its private
 signing key remains in the control plane/KMS.
 
 The concrete destination entries now include the control-plane action service,
-Agent execution dispatcher, durable Runner attempt scheduler and SCM merge
-dispatcher:
+Agent execution dispatcher, durable Runner attempt scheduler, SCM merge
+dispatcher and Steam release dispatcher:
 
 ```bash
 npm run start:control-plane-workflow
 npm run start:agent-worker-workflow
 npm run start:runner-control-workflow
 npm run start:scm-proxy-workflow
+npm run start:steam-publisher-workflow
 ```
 
 They require the destination TLS, signed-assignment and database variables in
@@ -288,8 +289,10 @@ the in-memory coordinator in production. The SCM destination sends only the
 frozen candidate/evidence/acceptance identifiers over mTLS to an isolated
 GitHub App Broker, requires the Broker's exact health identity, and accepts only
 an actual default-branch head plus a freshly derived main source digest. The
-Steam service entry remains disabled until its production connector factory is
-supplied; no placeholder connector reports successful work.
+Steam destination similarly sends only immutable evidence/MFA/approval IDs to
+an mTLS-isolated Broker; passwords, Guard codes, `config.vdf` and Steam build
+account access never enter the Temporal host. No placeholder connector reports
+successful work.
 
 `ControlPlaneWorkflowHandler` consumes the non-compute commands for ideation,
 spec approval, Provider recovery, candidate acceptance, release MFA, external
