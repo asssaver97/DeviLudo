@@ -6,3 +6,4 @@ export * from "./tls-identity";
 export * from "./workflow-handler";
 export * from "./postgres-workflow";
 export * from "./postgres-ingress";
+export * from "./ingress-http";

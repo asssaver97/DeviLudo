@@ -30,6 +30,17 @@ test("Runner ingress persists replayable signed jobs and immutable lease/event b
   assert.match(adapter, /FOR UPDATE/);
 });
 
+test("physical Runner HTTP ingress is an isolated fail-closed mTLS boundary", () => {
+  const ingress = readFileSync(new URL("../services/runner-control/src/ingress-http.ts", import.meta.url), "utf8");
+  assert.match(ingress, /identityFromTlsSocket/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(ingress, /RUNNER_REQUEST_TOO_LARGE/);
+  assert.match(ingress, /RUNNER_REQUEST_REJECTED/);
+  assert.doesNotMatch(ingress, /x-runner-id/);
+});
+
 test("physical Runner attempts require an append-only tenant execution lock", () => {
   const migration = readFileSync(new URL("../infra/postgres/014_runner_execution_locks.sql", import.meta.url), "utf8");
   const adapter = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");

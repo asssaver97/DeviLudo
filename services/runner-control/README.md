@@ -55,6 +55,16 @@ and derives the matrix result server-side. This store still requires the
 dedicated mTLS HTTP adapter described below; it is never mounted in the public
 Web process.
 
+`createRunnerIngressHttpsServer` provides that dedicated boundary. It forces
+TLS 1.3, `requestCert` and `rejectUnauthorized`, bounds headers/body/timeouts and
+derives the Runner identity exclusively from the authorized peer certificate.
+Its authenticated API is `POST /v1/register`, `/v1/lease`, `/v1/evidence` and
+`/v1/events`; `GET /health` also requires a client certificate. Identity-like
+HTTP headers are ignored and internal rejection details are reduced to bounded
+error codes. A production host must supply the PostgreSQL store, signed
+Runner-to-tenant assignment policy, Ed25519 job key and idempotent evidence
+archive; the public Web route remains a deliberate 503.
+
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the
 content-addressed object store. It must expose those operations only behind a
