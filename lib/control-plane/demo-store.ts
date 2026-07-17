@@ -129,6 +129,18 @@ const initialState = (): DemoStoreState => ({
       budgetUsd: 20,
       fallbackProfileId: null,
     },
+    {
+      id: "profile-codex-platform-r2",
+      revision: 2,
+      scope: "platform",
+      scopeId: "global",
+      agent: "codex-cli",
+      providerId: "provider-codex-platform-r2",
+      installationId: "codex-installation-091",
+      state: "ACTIVE",
+      budgetUsd: 20,
+      fallbackProfileId: null,
+    },
   ],
   credentials: [],
   defaults: {

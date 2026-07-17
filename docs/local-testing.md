@@ -22,6 +22,8 @@ npm run local:dev
 
 Agent 探针只运行固定的版本命令，不启动 Claude Code/Codex 编码任务。只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/模型通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。默认配置没有受信 Provider 绑定探针，会安全地报告 `BLOCKED`；这不是测试栈故障。
 
+`/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本阻止、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计。版本批准仍要求供应链证据；Provider 激活仍要求受信 Connector 的完整探针。默认测试栈不会伪造这两类结果，因此相关操作会以明确错误失败关闭。
+
 在项目页批准规格后，点击“运行真实本机验证”。侧车会：
 
 1. 将固定 Godot 样例复制到 `.deviludo/local-runtime/<project>/<run>/workspace`；
@@ -45,6 +47,7 @@ npm run local:smoke
 
 - `/` 返回 DeviLudo HTML 工作台；
 - `/admin/agents` 返回 Agent 管理台；
+- `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
 - 侧车 `/health` 返回 `deviludo-local-runtime` 和实际 Godot 版本。
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`；`degraded` 是未启用执行时的预期状态。

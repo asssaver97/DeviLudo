@@ -5,18 +5,42 @@ import type { FormEvent } from "react";
 import type { LocalAgentReadiness, LocalHealth } from "@/components/console/useLocalPlatform";
 import {
   agents,
-  auditEvents,
   rolePermissions,
   versionRows,
   type AdminRole,
   type AgentKind,
   type AgentVersionRow,
+  type AuditEvent,
 } from "@/lib/demo/admin-data";
 import { AdminIcon, type AdminIconName } from "./AdminIcons";
 import styles from "./admin.module.css";
 
 type TabId = "overview" | "versions" | "deployments" | "providers" | "inheritance" | "audit";
 type Toast = { message: string; tone: "success" | "warning" | "neutral" } | null;
+type AdminState = {
+  defaultAgent: AgentKind;
+  versions: Array<{ id: string; agent: AgentKind; version: string; state: AgentVersionRow["status"] }>;
+  rollouts: Record<string, { percent: number; state: string; previous: number }>;
+};
+
+async function adminRequest<T>(
+  path: string,
+  options: { method?: "POST" | "PUT"; role?: AdminRole; body?: Record<string, unknown> } = {},
+): Promise<T> {
+  const response = await fetch(`/api/admin/${path}`, {
+    method: options.method ?? "GET",
+    cache: "no-store",
+    headers: options.method ? {
+      "content-type": "application/json",
+      "idempotency-key": `admin-ui-${crypto.randomUUID()}`,
+      "x-deviludo-role": options.role ?? "Auditor",
+    } : undefined,
+    body: options.method ? JSON.stringify(options.body ?? {}) : undefined,
+  });
+  const payload = await response.json() as { data?: T; meta?: T; error?: { message?: string } };
+  if (!response.ok) throw new Error(payload.error?.message ?? `管理 API 返回 ${response.status}`);
+  return (payload.data ?? payload.meta) as T;
+}
 
 const tabs: { id: TabId; label: string; count?: string }[] = [
   { id: "overview", label: "总览" },
@@ -84,7 +108,41 @@ export default function AgentAdminDashboard() {
   const [claudeState, setClaudeState] = useState("CANARY");
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
+  const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
   const [localHealth, setLocalHealth] = useState<LocalHealth | null>(null);
+
+  const refreshAdminState = useCallback(async () => {
+    const response = await fetch("/api/admin/agents", { cache: "no-store" });
+    const payload = await response.json() as { meta?: AdminState; error?: { message?: string } };
+    if (!response.ok || !payload.meta) throw new Error(payload.error?.message ?? "读取 Agent 管理状态失败");
+    setDefaultAgent(payload.meta.defaultAgent);
+    setVersions((current) => current.map((row) => {
+      const live = payload.meta?.versions.find((item) => item.agent === row.agent && item.version === row.version);
+      return live ? { ...row, status: live.state } : row;
+    }));
+    const rollout = payload.meta.rollouts["claude-installation-214"];
+    if (rollout) {
+      setClaudeRollout(rollout.percent);
+      setClaudeState(rollout.state);
+    }
+  }, []);
+
+  const refreshAudit = useCallback(async () => {
+    const response = await fetch("/api/admin/audit", { cache: "no-store" });
+    const payload = await response.json() as { data?: Array<{ id: string; action: string; resource: string; actor: string; at: string; metadata: Record<string, unknown> }> };
+    if (!response.ok || !payload.data) return;
+    const live = payload.data.map<AuditEvent>((entry) => ({
+      id: entry.id,
+      at: new Date(entry.at).toLocaleTimeString("zh-CN", { hour12: false }),
+      actor: "local/session",
+      role: entry.actor,
+      action: entry.action,
+      target: entry.resource,
+      detail: Object.entries(entry.metadata).map(([key, value]) => `${key}=${String(value)}`).join(" · ") || "不可变管理事件",
+      tone: /BLOCK|ROLLBACK|REVOKE|FAIL/i.test(entry.action) ? "warning" : /APPROVE|ACTIVE|CREATED|UPDATED/i.test(entry.action) ? "success" : "neutral",
+    }));
+    setAuditRecords(live);
+  }, []);
 
   const refreshLocalHealth = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -107,6 +165,14 @@ export default function AgentAdminDashboard() {
     };
   }, [refreshLocalHealth]);
 
+  useEffect(() => {
+    const initial = window.setTimeout(() => {
+      void refreshAdminState().catch(() => undefined);
+      void refreshAudit();
+    }, 0);
+    return () => window.clearTimeout(initial);
+  }, [refreshAdminState, refreshAudit]);
+
   const localAgents = localHealth?.dependencies?.localAgents ?? [];
   const executionReady = localHealth?.dependencies?.developmentWorker === "READY";
 
@@ -117,34 +183,86 @@ export default function AgentAdminDashboard() {
 
   const canOperateVersions = role === "PlatformAgentAdmin";
 
-  const updateVersion = (id: string, status: AgentVersionRow["status"]) => {
+  const updateVersion = async (id: string, status: AgentVersionRow["status"]) => {
     if (!canOperateVersions) {
       notify("当前角色没有版本治理权限", "warning");
       return;
     }
-    setVersions((items) => items.map((item) => (item.id === id ? { ...item, status } : item)));
-    notify(status === "APPROVED" ? "版本已批准，可用于构建 WorkerImage" : "版本已阻止并记录审计");
+    const row = versions.find((item) => item.id === id);
+    if (!row) return;
+    try {
+      await adminRequest(`agent-versions/${status === "APPROVED" ? "approve" : "block"}`, {
+        method: "POST",
+        role,
+        body: { id: `${row.agent}@${row.version}` },
+      });
+      await refreshAdminState();
+      await refreshAudit();
+      notify(status === "APPROVED" ? "版本已批准，可用于构建 WorkerImage" : "版本已阻止并写入本地审计");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "版本治理失败", "warning");
+    }
   };
 
-  const advanceRollout = () => {
+  const advanceRollout = async () => {
     if (!canOperateVersions) {
       notify("切换为 PlatformAgentAdmin 后可推进灰度", "warning");
       return;
     }
-    const next = claudeRollout < 25 ? 25 : 100;
-    setClaudeRollout(next);
-    setClaudeState(next === 100 ? "ACTIVE" : "CANARY");
-    notify(next === 100 ? "新版本已切换至 100%，仅影响新任务" : `灰度已推进至 ${next}%`);
+    try {
+      const result = await adminRequest<{ percent: number }>("agent-rollouts/claude-installation-214/advance", { method: "POST", role });
+      await refreshAdminState();
+      await refreshAudit();
+      notify(result.percent === 100 ? "新版本已切换至 100%，仅影响新任务" : `灰度已推进至 ${result.percent}%`);
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "推进灰度失败", "warning");
+    }
   };
 
-  const rollback = () => {
+  const rollback = async () => {
     if (!canOperateVersions) {
       notify("当前角色不能执行回滚", "warning");
       return;
     }
-    setClaudeRollout(0);
-    setClaudeState("READY");
-    notify("已停止扩散，新任务回到 2.1.11；运行中任务不受影响", "warning");
+    try {
+      await adminRequest("agent-rollouts/claude-installation-214/rollback", { method: "POST", role });
+      await refreshAdminState();
+      await refreshAudit();
+      notify("已停止扩散；运行中任务继续使用原锁定版本", "warning");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "回滚失败", "warning");
+    }
+  };
+
+  const changeDefaultAgent = async (agent: AgentKind) => {
+    if (!canOperateVersions) {
+      notify("仅 PlatformAgentAdmin 可修改全局默认", "warning");
+      return;
+    }
+    const profileRevisionId = agent === "claude-code" ? "profile-claude-platform-r5" : "profile-codex-platform-r2";
+    try {
+      await adminRequest("agent-defaults/platform", { method: "PUT", role, body: { profileRevisionId } });
+      await refreshAdminState();
+      await refreshAudit();
+      notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} 已设为平台默认，仅影响新任务`);
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "默认 Agent 更新失败", "warning");
+    }
+  };
+
+  const discoverVersions = async () => {
+    if (!canOperateVersions) {
+      notify("仅 PlatformAgentAdmin 可发现版本", "warning");
+      return;
+    }
+    try {
+      await adminRequest("agent-versions/discover", { method: "POST", role });
+      await refreshAdminState();
+      await refreshAudit();
+      notify("官方候选已写入版本目录；不会自动激活", "neutral");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "版本发现失败", "warning");
+    }
   };
 
   return (
@@ -202,7 +320,7 @@ export default function AgentAdminDashboard() {
             <p>治理开发 Agent 的版本、部署、Provider 与配置继承。运行时锁定配置，不受后续变更影响。</p>
           </div>
           <div className={styles.headerActions}>
-            <button className={styles.secondaryButton} type="button" onClick={() => notify("已刷新目录，未发现新的官方版本", "neutral")}><AdminIcon name="refresh" />发现版本</button>
+            <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions()}><AdminIcon name="refresh" />发现版本</button>
             <button className={styles.primaryButton} type="button" onClick={() => { setActiveTab("providers"); notify("已打开 Provider 草稿编辑器", "neutral"); }}>新建 Provider</button>
           </div>
         </div>
@@ -222,12 +340,12 @@ export default function AgentAdminDashboard() {
         </div>
 
         <div className={styles.content}>
-          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} onDefaultChange={(agent) => { if (!canOperateVersions) { notify("仅 PlatformAgentAdmin 可修改全局默认", "warning"); return; } setDefaultAgent(agent); notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} 已设为平台默认，仅影响新任务`); }} onNavigate={setActiveTab} />}
+          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} canOperate={canOperateVersions} onUpdate={updateVersion} />}
           {activeTab === "deployments" && <DeploymentsTab percent={claudeRollout} state={claudeState} onAdvance={advanceRollout} onRollback={rollback} onDrain={() => { setClaudeState("DRAINING"); notify("Worker 池正在排空，不再接收新任务", "warning"); }} />}
-          {activeTab === "providers" && <ProvidersTab role={role} notify={notify} />}
+          {activeTab === "providers" && <ProvidersTab role={role} localHealth={localHealth} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
           {activeTab === "inheritance" && <InheritanceTab defaultAgent={defaultAgent} notify={notify} />}
-          {activeTab === "audit" && <AuditTab filter={auditFilter} setFilter={setAuditFilter} />}
+          {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
         </div>
       </main>
 
@@ -377,7 +495,7 @@ function DeploymentsTab({ percent, state, onAdvance, onRollback, onDrain }: { pe
   );
 }
 
-function ProvidersTab({ role, notify }: { role: AdminRole; notify: (message: string, tone?: "success" | "warning" | "neutral") => void }) {
+function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRole; localHealth: LocalHealth | null; notify: (message: string, tone?: "success" | "warning" | "neutral") => void; onChanged: () => void }) {
   const [agent, setAgent] = useState<AgentKind>("claude-code");
   const [baseUrl, setBaseUrl] = useState("https://gateway.example.com");
   const [primaryModel, setPrimaryModel] = useState("claude-sonnet-4-5-20250929");
@@ -388,6 +506,7 @@ function ProvidersTab({ role, notify }: { role: AdminRole; notify: (message: str
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
   const [credentialMask, setCredentialMask] = useState("•••• •••• •••• 8D3A");
+  const [draftProfileId, setDraftProfileId] = useState("");
 
   const protocol = agent === "claude-code" ? "Anthropic Messages / Gateway" : "OpenAI Responses";
 
@@ -409,13 +528,53 @@ function ProvidersTab({ role, notify }: { role: AdminRole; notify: (message: str
     return "";
   };
 
-  const saveDraft = (event: FormEvent) => {
+  const persistDraft = async () => {
+    let credentialId = agent === "claude-code" ? "cred-claude-platform-v4" : "cred-codex-platform-v2";
+    if (apiKey) {
+      const credential = await adminRequest<{ id: string; fingerprint: string }>("credentials", {
+        method: "POST",
+        role,
+        body: { label: `local-${agent}-provider`, apiKey },
+      });
+      credentialId = credential.id;
+      setCredentialMask(credential.fingerprint);
+    }
+    const created = await adminRequest<{ profile: { id: string } }>("agent-profiles", {
+      method: "POST",
+      role,
+      body: {
+        agent,
+        baseUrl,
+        primaryModel,
+        planningModel,
+        smallFastModel: fastModel,
+        installationId: agent === "claude-code" ? "claude-installation-214" : "codex-installation-091",
+        credentialId,
+        scope: "platform",
+        scopeId: "global",
+        budgetUsd: 25,
+      },
+    });
+    setDraftProfileId(created.profile.id);
+    setApiKey("");
+    onChanged();
+    return created.profile.id;
+  };
+
+  const saveDraft = async (event: FormEvent) => {
     event.preventDefault();
     const message = validate();
     if (message) { setError(message); return; }
     setError("");
-    setApiKey("");
-    notify("Provider 草稿已保存；当前生效配置未改变", "neutral");
+    setTesting(true);
+    try {
+      await persistDraft();
+      notify("Provider 草稿已写入本地控制面；当前生效配置未改变", "neutral");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Provider 草稿保存失败");
+    } finally {
+      setTesting(false);
+    }
   };
 
   const testAndActivate = async () => {
@@ -424,32 +583,36 @@ function ProvidersTab({ role, notify }: { role: AdminRole; notify: (message: str
     if (role !== "SecurityAdmin") { setError("第三方端点激活需要 SecurityAdmin 权限"); return; }
     setError("");
     setTesting(true);
-    await new Promise((resolve) => window.setTimeout(resolve, 900));
-    if (apiKey) {
-      let hash = 2166136261;
-      for (const char of apiKey) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
-      setCredentialMask(`•••• •••• •••• ${(hash >>> 0).toString(16).slice(-4).toUpperCase().padStart(4, "0")}`);
+    try {
+      const profileId = draftProfileId || await persistDraft();
+      await adminRequest(`agent-profiles/${profileId}/validate`, { method: "POST", role });
+      await adminRequest(`agent-profiles/${profileId}/activate`, { method: "POST", role });
+      onChanged();
+      notify("Provider 探针通过并已激活，仅用于新任务");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Provider 测试激活失败");
+      notify("Provider 未激活；当前生效配置保持不变", "warning");
+    } finally {
+      setTesting(false);
     }
-    setApiKey("");
-    setTesting(false);
-    notify("8/8 探针通过。Profile Revision 12 已激活，仅用于新任务");
   };
 
   return (
     <div className={styles.providerLayout}>
       <section className={styles.section}>
         <SectionHeading title="生效 Provider" description="每种 Agent 使用独立协议 Schema，不执行静默跨 Agent 切换。" />
+        {localHealth?.dependencies?.providerBindingProbe !== "CONFIGURED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />下列为控制面配置快照；本机没有受信 Provider 绑定探针，不能用于 Agent 执行。</div> : null}
         <div className={styles.providerRows}>
-          <button type="button" className={`${styles.providerRow} ${agent === "claude-code" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); }}>
+          <button type="button" className={`${styles.providerRow} ${agent === "claude-code" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>
             <AgentMark kind="claude-code" small /><div><strong>Anthropic · cn-gateway</strong><span>Messages · claude-sonnet-4-5-20250929</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
           </button>
-          <button type="button" className={`${styles.providerRow} ${agent === "codex-cli" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); }}>
+          <button type="button" className={`${styles.providerRow} ${agent === "codex-cli" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setDraftProfileId(""); }}>
             <AgentMark kind="codex-cli" small /><div><strong>OpenAI · platform</strong><span>Responses · gpt-5.2-codex-2026-02-01</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
           </button>
         </div>
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
-          <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>版本 v8 · 12 分钟前轮换 · 最后使用 2 分钟前</small></div>
+          <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>仅显示掩码；版本、轮换与最后使用时间由 Vault 元数据提供</small></div>
           <button type="button" onClick={() => notify("已创建双版本轮换草稿；旧版本仍可回滚", "neutral")}>轮换</button>
         </div>
         <div className={styles.gatewayDiagram}>
@@ -458,12 +621,12 @@ function ProvidersTab({ role, notify }: { role: AdminRole; notify: (message: str
       </section>
 
       <form className={`${styles.section} ${styles.providerForm}`} onSubmit={saveDraft} noValidate>
-        <SectionHeading eyebrow="DRAFT" title="编辑 Provider" description="保存草稿与测试激活分离；此演示表单不会向网络发送数据。" />
+        <SectionHeading eyebrow="DRAFT" title="编辑 Provider" description="保存草稿与测试激活分离；本地 API 不会在缺少受信 Connector 时访问上游。" />
         <div className={styles.formGroup}>
           <label>Agent</label>
           <div className={styles.segmented}>
-            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); }}>Claude Code</button>
-            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); }}>Codex CLI</button>
+            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>Claude Code</button>
+            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setDraftProfileId(""); }}>Codex CLI</button>
           </div>
         </div>
         <div className={styles.formGroup}><label htmlFor="protocol">协议</label><input id="protocol" value={protocol} disabled /><small>协议由 Agent Adapter 固定，不可混用。</small></div>
@@ -477,7 +640,7 @@ function ProvidersTab({ role, notify }: { role: AdminRole; notify: (message: str
         <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>
         {error && <div className={styles.formError}><AdminIcon name="alert" />{error}</div>}
         <div className={styles.probeList}><span>激活探针</span><div>{["认证", "模型", "流式", "工具", "取消", "Usage", "超时", "无工具"].map((probe) => <em key={probe}>{probe}</em>)}</div></div>
-        <div className={styles.formActions}><button className={styles.secondaryButton} type="submit">保存草稿</button><button className={styles.primaryButton} type="button" disabled={testing} onClick={testAndActivate}>{testing ? "正在执行 8 项探针…" : "测试并激活"}</button></div>
+        <div className={styles.formActions}><button className={styles.secondaryButton} type="submit" disabled={testing}>保存草稿</button><button className={styles.primaryButton} type="button" disabled={testing} onClick={testAndActivate}>{testing ? "正在校验门禁…" : "测试并激活"}</button></div>
       </form>
     </div>
   );
@@ -516,13 +679,15 @@ function InheritanceTab({ defaultAgent, notify }: { defaultAgent: AgentKind; not
   );
 }
 
-function AuditTab({ filter, setFilter }: { filter: string; setFilter: (value: string) => void }) {
-  const filtered = useMemo(() => filter === "全部事件" ? auditEvents : auditEvents.filter((event) => filter === "仅告警" ? event.tone === "warning" : event.action.includes("Provider") || event.action.includes("凭据")), [filter]);
+function AuditTab({ events, filter, localHealth, setFilter }: { events: AuditEvent[]; filter: string; localHealth: LocalHealth | null; setFilter: (value: string) => void }) {
+  const filtered = useMemo(() => filter === "全部事件" ? events : events.filter((event) => filter === "仅告警" ? event.tone === "warning" : event.action.includes("PROVIDER") || event.action.includes("CREDENTIAL") || event.action.includes("Provider") || event.action.includes("凭据")), [events, filter]);
+  const readyAgents = localHealth?.dependencies?.localAgents?.filter((agent) => agent.state === "READY").length ?? 0;
+  const workerReady = localHealth?.dependencies?.developmentWorker === "READY";
   return (
     <>
       <div className={styles.healthBanner}>
-        <div><span className={styles.pulseRing}><i /></span><div><strong>所有关键组件正常</strong><small>最近一次全量探针：42 秒前</small></div></div>
-        <dl><div><dt>Agent Adapter</dt><dd>2 / 2</dd></div><div><dt>Inference Gateway</dt><dd>3 / 3</dd></div><div><dt>Worker 池</dt><dd>38 / 40</dd></div><div><dt>凭据轮换</dt><dd>0 逾期</dd></div></dl>
+        <div><span className={styles.pulseRing}><i /></span><div><strong>{workerReady ? "本机 Agent Worker 就绪" : "本机 Agent 执行受门禁保护"}</strong><small>数据来自当前 `/api/health`，不使用模拟在线数</small></div></div>
+        <dl><div><dt>精确 CLI</dt><dd>{readyAgents} / 2</dd></div><div><dt>Inference Gateway</dt><dd>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</dd></div><div><dt>Provider 绑定</dt><dd>{localHealth?.dependencies?.providerBindingProbe === "CONFIGURED" ? "已验证" : "未配置"}</dd></div><div><dt>开发 Worker</dt><dd>{workerReady ? "READY" : "BLOCKED"}</dd></div></dl>
       </div>
       <section className={styles.section}>
         <SectionHeading title="不可变审计记录" description="配置 revision、探针、版本治理和凭据使用均记录 actor、差异与幂等键。" action={<select className={styles.projectSelect} value={filter} onChange={(event) => setFilter(event.target.value)}><option>全部事件</option><option>仅告警</option><option>Provider / 凭据</option></select>} />

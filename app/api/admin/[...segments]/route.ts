@@ -17,8 +17,15 @@ const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
 const SECURITY_ROLES = ["SecurityAdmin"] as const;
 const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner"] as const;
 
+function defaultAgent() {
+  const store = getDemoStore();
+  const profile = store.profiles.find((item) => item.id === store.defaults.platform && item.state === "ACTIVE");
+  return profile?.agent ?? "claude-code";
+}
+
 function agentCatalog() {
   const store = getDemoStore();
+  const selected = defaultAgent();
   return [
     {
       id: "claude-code",
@@ -27,7 +34,7 @@ function agentCatalog() {
       officialSource: "https://code.claude.com/docs/en/installation",
       capabilities: ["plan", "code", "repair", "review"],
       supportedWorkers: ["linux/amd64", "linux/arm64"],
-      default: true,
+      default: selected === "claude-code",
       approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("claude-code@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
     },
     {
@@ -37,7 +44,7 @@ function agentCatalog() {
       officialSource: "https://developers.openai.com/codex/cli",
       capabilities: ["plan", "code", "repair", "review"],
       supportedWorkers: ["linux/amd64", "linux/arm64"],
-      default: false,
+      default: selected === "codex-cli",
       approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("codex-cli@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
     },
   ];
@@ -53,7 +60,22 @@ export async function GET(request: Request, context: RouteContext) {
     const key = routeKey(segments);
     const store = getDemoStore();
     if (key === "agents") {
-      return json({ data: agentCatalog(), meta: { defaultAgent: "claude-code", revisionPolicy: "pinned-only" } });
+      return json({
+        data: agentCatalog(),
+        meta: {
+          defaultAgent: defaultAgent(),
+          revisionPolicy: "pinned-only",
+          versions: Object.entries(store.agentVersions).map(([id, state]) => {
+            const separator = id.lastIndexOf("@");
+            return { id, agent: id.slice(0, separator), version: id.slice(separator + 1), state };
+          }),
+          rollouts: store.rollouts,
+          providers: store.providers,
+          profiles: store.profiles,
+          credentials: store.credentials.map(({ id, label, masked, version, state, createdAt }) => ({ id, label, masked, version, state, createdAt })),
+          defaults: store.defaults,
+        },
+      });
     }
     if (key === "agent-health") {
       return json({
@@ -101,6 +123,13 @@ export async function POST(request: Request, context: RouteContext) {
         const store = getDemoStore();
         if (!(id in store.agentVersions)) throw new HttpProblem(404, "VERSION_NOT_FOUND", "Agent version was not discovered");
         const state = key.endsWith("approve") ? "APPROVED" as const : "BLOCKED" as const;
+        if (state === "APPROVED") {
+          const integrity = typeof body.integrity === "string" ? body.integrity.toLowerCase() : "";
+          const sbomRef = typeof body.sbomRef === "string" ? body.sbomRef : "";
+          if (!/^sha256:[a-f0-9]{64}$/.test(integrity) || body.signatureVerified !== true || body.scan !== "PASS" || !/^oci:\/\/[a-z0-9._:/@-]+$/i.test(sbomRef)) {
+            throw new HttpProblem(409, "SUPPLY_CHAIN_GATES_FAILED", "签名、精确哈希、内部 SBOM 与扫描必须全部通过后才能批准版本");
+          }
+        }
         store.agentVersions[id] = state;
         appendDemoAudit(`AGENT_VERSION_${state}`, id, role, { automaticActivation: false });
         return { id, state, immutable: true, activationRequired: state === "APPROVED" };
@@ -160,9 +189,9 @@ export async function POST(request: Request, context: RouteContext) {
       try {
         models = normalizeModelRoles({
           primaryModel,
-          planningModel: typeof body.planningModel === "string" ? body.planningModel : undefined,
-          smallFastModel: typeof body.smallFastModel === "string" ? body.smallFastModel : undefined,
-          subagentModel: typeof body.subagentModel === "string" ? body.subagentModel : undefined,
+          planningModel: optionalModel(body.planningModel),
+          smallFastModel: optionalModel(body.smallFastModel),
+          subagentModel: optionalModel(body.subagentModel),
         });
       } catch (error) {
         throw new HttpProblem(400, "MODEL_ID_REJECTED", error instanceof Error ? error.message : "Model IDs must be exact");
@@ -205,17 +234,20 @@ export async function POST(request: Request, context: RouteContext) {
       const role = requireRole(request, profileMatch[2] === "activate" ? SECURITY_ROLES : PROFILE_ROLES);
       const profileId = profileMatch[1] ?? "";
       const action = profileMatch[2];
+      if (action === "validate") {
+        throw new HttpProblem(
+          503,
+          "PROVIDER_PROBE_NOT_CONFIGURED",
+          "本地测试站尚未配置受信 Provider Connector；草稿已保留，不能伪造探针通过或覆盖当前生效配置",
+        );
+      }
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const profile = store.profiles.find((item) => item.id === profileId);
         if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
         const provider = store.providers.find((item) => item.id === profile.providerId);
         if (!provider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
-        if (action === "validate") {
-          profile.state = "READY";
-          provider.state = "READY";
-          provider.probe = { authentication: "PASS", streaming: "PASS", tools: "PASS", cancellation: "PASS", usage: "PASS", timeout: "PASS" };
-        } else if (action === "activate") {
+        if (action === "activate") {
           if (profile.state !== "READY" || provider.state !== "READY") throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
           profile.state = "ACTIVE";
           provider.state = "ACTIVE";
@@ -323,8 +355,14 @@ export async function PUT(request: Request, context: RouteContext) {
     const profileRevisionId = requireString(body, "profileRevisionId", 160);
     const result = withIdempotency(`admin:${key}:${idempotencyKey(request)}`, () => {
       const store = getDemoStore();
-      if (!store.profiles.some((profile) => profile.id === profileRevisionId && profile.state === "ACTIVE")) {
+      const profile = store.profiles.find((item) => item.id === profileRevisionId && item.state === "ACTIVE");
+      if (!profile) {
         throw new HttpProblem(409, "PROFILE_NOT_ACTIVE", "Defaults can only reference an active immutable Profile revision");
+      }
+      const scope = match[1] ?? "platform";
+      const [scopeKind, scopeId = "global"] = scope.split(":");
+      if (profile.scope !== scopeKind || (scopeKind !== "platform" && profile.scopeId !== scopeId)) {
+        throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision does not belong to the requested default scope");
       }
       store.defaults[match[1] ?? "platform"] = profileRevisionId;
       appendDemoAudit("AGENT_DEFAULT_UPDATED", match[1] ?? "platform", role, { profileRevisionId, affectsRunningTasks: false });
@@ -339,4 +377,8 @@ export async function PUT(request: Request, context: RouteContext) {
 function mutate<T>(idempotency: string, operation: () => T): Response {
   const result = withIdempotency(idempotency, operation);
   return json({ data: result.value, meta: { idempotentReplay: result.replayed } }, { status: result.replayed ? 200 : 201 });
+}
+
+function optionalModel(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }

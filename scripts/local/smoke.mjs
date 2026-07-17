@@ -164,9 +164,10 @@ const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin, runtime, agentRuntime, agentPreflight] = await Promise.all([
+  const [home, admin, adminState, runtime, agentRuntime, agentPreflight] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
+    request(baseUrl, "/api/admin/agents"),
     request(runtimeUrl, "/health"),
     request(agentRuntimeUrl, "/health"),
     request(agentRuntimeUrl, "/v1/preflight", {
@@ -185,6 +186,11 @@ try {
       }),
     }),
   ]);
+  const adminPayload = await adminState.response.json();
+  if (!adminState.response.ok || !Array.isArray(adminPayload.data) || !["claude-code", "codex-cli"].includes(adminPayload.meta?.defaultAgent) || !Array.isArray(adminPayload.meta?.versions)) {
+    throw new Error("local Agent admin state contract failed");
+  }
+  if (JSON.stringify(adminPayload).includes("secretRef")) throw new Error("Agent admin state exposed a secret reference");
   const runtimeHealth = await runtime.response.json();
   if (!runtime.response.ok || runtimeHealth.status !== "ok" || !runtimeHealth.godotVersion) {
     throw new Error("local runtime or Godot is not ready");
@@ -203,6 +209,7 @@ try {
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
+  console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
