@@ -1,7 +1,8 @@
 import { CanActivate, ExecutionContext, Inject, Injectable } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import type { FastifyRequest } from "fastify";
-import { ADMIN_ROLES, ServiceProblem, type AdminRole } from "./contracts";
+import { ServiceProblem, type AdminRole } from "./contracts";
+import { authenticateAdminPrincipal } from "./admin-principal";
 import { ADMIN_ROLES_METADATA } from "./roles";
 
 export class RbacGuard implements CanActivate {
@@ -14,11 +15,8 @@ export class RbacGuard implements CanActivate {
     ]);
     if (!allowed?.length) return true;
     const request = context.switchToHttp().getRequest<FastifyRequest>();
-    const rawRole = header(request, "x-deviludo-role") ?? "Auditor";
-    if (!ADMIN_ROLES.includes(rawRole as AdminRole)) {
-      throw new ServiceProblem(401, "INVALID_ADMIN_ROLE", "The authenticated principal has no recognized admin role");
-    }
-    if (!allowed.includes(rawRole as AdminRole)) {
+    const actor = authenticateAdminPrincipal(request);
+    if (!allowed.includes(actor.role)) {
       throw new ServiceProblem(403, "FORBIDDEN", "The authenticated principal cannot perform this operation", {
         requiredRoles: allowed,
       });

@@ -10,8 +10,8 @@ import {
 } from "@nestjs/common";
 import type { FastifyRequest } from "fastify";
 import { AdminService } from "./admin.service";
+import { authenticatedAdminActor } from "./admin-principal";
 import { ADMIN_ROLES, type AdminRole, type CredentialVersionRecord, type RequestActor } from "./contracts";
-import { header } from "./rbac.guard";
 import { Roles } from "./roles";
 
 const ALL_ROLES = ADMIN_ROLES;
@@ -139,11 +139,7 @@ function objectBody(body: unknown): Record<string, unknown> {
 }
 
 function actor(request: FastifyRequest): RequestActor {
-  return {
-    role: (header(request, "x-deviludo-role") ?? "Auditor") as AdminRole,
-    requestId: request.id,
-    actorId: header(request, "x-deviludo-actor") ?? "authenticated-admin",
-  };
+  return authenticatedAdminActor(request);
 }
 
 function credentialView(record: CredentialVersionRecord): Readonly<Record<string, unknown>> {
@@ -152,6 +148,8 @@ function credentialView(record: CredentialVersionRecord): Readonly<Record<string
     familyId: record.familyId,
     version: record.version,
     label: record.label,
+    scope: record.scope,
+    scopeId: record.scopeId,
     maskedFingerprint: record.maskedFingerprint,
     state: record.state,
     createdAt: record.createdAt,

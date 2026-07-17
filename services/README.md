@@ -65,12 +65,30 @@ Every mutation requires an `Idempotency-Key` header. Reusing a key with a
 different body returns `409 IDEMPOTENCY_KEY_REUSED`; a byte-for-byte equivalent
 retry returns the cached result and `Idempotent-Replayed: true`.
 
-The authentication proxy supplies:
+The trusted authentication proxy supplies a short-lived, request-bound
+assertion. The control-plane rejects the request unless the assertion HMAC is
+valid, no more than five minutes old, and matches the exact HTTP method and raw
+path. Configure its 32-byte-or-longer base64 key through
+`DEVILUDO_ADMIN_SESSION_HMAC_KEY`; a browser never receives this key.
+
+Signed headers:
 
 - `x-deviludo-role`: `PlatformAgentAdmin`, `SecurityAdmin`, `TenantAdmin`,
   `ProjectOwner`, or `Auditor`.
 - `x-deviludo-actor`: the immutable authenticated principal ID.
+- `x-deviludo-tenant-id`: required for TenantAdmin and ProjectOwner.
+- `x-deviludo-project-id`: required for ProjectOwner.
+- `x-deviludo-admin-session` and `x-deviludo-admin-issued-at`: session binding
+  and issuance timestamp.
+- `x-deviludo-admin-signature`: base64url HMAC-SHA256 over the canonical role,
+  actor, scope, session, timestamp, method and path assertion.
 - `x-request-id`: an optional tracing ID; Fastify creates one when omitted.
+
+Platform/Security roles cannot smuggle tenant scope into their assertion;
+TenantAdmin can administer only its signed tenant and its BYOK credentials;
+ProjectOwner can administer only its signed project. Credential revisions carry
+their scope, so a tenant key cannot be reused by another tenant or a platform
+Profile.
 
 Routes:
 

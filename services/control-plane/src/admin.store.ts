@@ -76,6 +76,8 @@ export class AdminStore {
       familyId: "credential-platform-claude",
       version: 1,
       label: "Platform Claude gateway key",
+      scope: "platform",
+      scopeId: "global",
       secretRef: "vault://kv/data/deviludo/platform/claude?version=1",
       maskedFingerprint: "sha256:managed0…000001",
       state: "ACTIVE",

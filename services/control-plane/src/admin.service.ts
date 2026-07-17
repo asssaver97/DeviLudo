@@ -197,9 +197,17 @@ export class AdminService {
     const label = requiredString(body, "label", 120);
     const apiKey = requiredString(body, "apiKey", 8192);
     const familyId = `credential-${randomUUID()}`;
+    const credentialScope = scopeForCredentialActor(actor);
     let credential: CredentialVersionRecord;
     try {
-      credential = await this.ingestCredential(familyId, 1, label, apiKey);
+      credential = await this.ingestCredential(
+        familyId,
+        1,
+        label,
+        credentialScope.scope,
+        credentialScope.scopeId,
+        apiKey,
+      );
     } finally {
       body.apiKey = "";
     }
@@ -216,10 +224,18 @@ export class AdminService {
     const current = this.store.credentials.get(credentialId);
     if (!current) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
     if (current.state !== "ACTIVE") throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only an active credential can be rotated");
+    assertCredentialActor(current, actor);
     const apiKey = requiredString(body, "apiKey", 8192);
     let replacement: CredentialVersionRecord;
     try {
-      replacement = await this.ingestCredential(current.familyId, current.version + 1, current.label, apiKey);
+      replacement = await this.ingestCredential(
+        current.familyId,
+        current.version + 1,
+        current.label,
+        current.scope,
+        current.scopeId,
+        apiKey,
+      );
     } finally {
       body.apiKey = "";
     }
@@ -239,6 +255,7 @@ export class AdminService {
   async revokeCredential(credentialId: string, actor: RequestActor): Promise<CredentialVersionRecord> {
     const credential = this.store.credentials.get(credentialId);
     if (!credential) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+    assertCredentialActor(credential, actor);
     credential.state = "REVOKED";
     await this.vault.revoke(credential.secretRef);
     this.audit("CREDENTIAL_REVOKED", credential.id, actor, { newTokensIssued: false });
@@ -249,8 +266,8 @@ export class AdminService {
     const agent = body.agent;
     if (!isAgentKind(agent)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const scope = parseScope(body.scope);
-    assertScopeRole(scope, actor);
     const scopeId = requiredString(body, "scopeId", 160);
+    assertScopeRole(scope, scopeId, actor);
     const installationId = requiredString(body, "installationId", 180);
     const installation = this.store.installations.get(installationId);
     if (!installation || installation.agent !== agent || !["READY", "CANARY", "ACTIVE"].includes(installation.state)) {
@@ -261,6 +278,7 @@ export class AdminService {
     if (!credential || credential.state !== "ACTIVE") {
       throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Profile requires an active credential version");
     }
+    assertProfileCredential(scope, scopeId, credential, actor);
 
     const baseUrl = requiredString(body, "baseUrl", 1000);
     try {
@@ -330,7 +348,7 @@ export class AdminService {
   ): Promise<Readonly<Record<string, unknown>>> {
     const profile = this.store.profiles.get(profileId);
     if (!profile) throw new ServiceProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
-    assertScopeRole(profile.scope, actor);
+    assertScopeRole(profile.scope, profile.scopeId, actor);
     const provider = this.store.providers.get(profile.providerRevisionId);
     if (!provider) throw new ServiceProblem(409, "PROVIDER_NOT_FOUND", "Provider revision does not exist");
 
@@ -369,7 +387,7 @@ export class AdminService {
 
   updateDefault(scopeKey: string, body: Record<string, unknown>, actor: RequestActor): Readonly<Record<string, unknown>> {
     const parsed = parseDefaultScope(scopeKey);
-    assertScopeRole(parsed.scope, actor);
+    assertScopeRole(parsed.scope, parsed.scopeId, actor);
     const profileRevisionId = requiredString(body, "profileRevisionId", 200);
     const profile = this.store.profiles.get(profileRevisionId);
     if (!profile || profile.state !== "ACTIVE") {
@@ -407,6 +425,8 @@ export class AdminService {
     familyId: string,
     version: number,
     label: string,
+    scope: CredentialVersionRecord["scope"],
+    scopeId: string,
     apiKey: string,
   ): Promise<CredentialVersionRecord> {
     const bytes = new TextEncoder().encode(apiKey);
@@ -417,6 +437,8 @@ export class AdminService {
         familyId,
         version,
         label,
+        scope,
+        scopeId,
         secretRef: result.secretRef,
         maskedFingerprint: result.maskedFingerprint,
         state: "ACTIVE",
@@ -454,12 +476,43 @@ function parseScope(value: unknown): ProfileScope {
   throw new ServiceProblem(400, "INVALID_SCOPE", "scope must be platform, tenant, or project");
 }
 
-function assertScopeRole(scope: ProfileScope, actor: RequestActor): void {
+function assertScopeRole(scope: ProfileScope, scopeId: string, actor: RequestActor): void {
+  if (scope === "platform" && scopeId !== "global") {
+    throw new ServiceProblem(400, "INVALID_SCOPE", "Platform Agent configuration must use scopeId global");
+  }
   if (actor.role === "SecurityAdmin") return;
-  if (scope === "platform" && actor.role === "PlatformAgentAdmin") return;
-  if (scope === "tenant" && actor.role === "TenantAdmin") return;
-  if (scope === "project" && (actor.role === "ProjectOwner" || actor.role === "TenantAdmin")) return;
+  if (scope === "platform" && scopeId === "global" && actor.role === "PlatformAgentAdmin") return;
+  if (scope === "tenant" && actor.role === "TenantAdmin" && actor.tenantId === scopeId) return;
+  if (scope === "project" && actor.role === "ProjectOwner" && actor.projectId === scopeId && actor.tenantId) return;
   throw new ServiceProblem(403, "SCOPE_FORBIDDEN", `Role ${actor.role} cannot administer ${scope} Agent configuration`);
+}
+
+function scopeForCredentialActor(actor: RequestActor): Pick<CredentialVersionRecord, "scope" | "scopeId"> {
+  if (actor.role === "SecurityAdmin") return { scope: "platform", scopeId: "global" };
+  if (actor.role === "TenantAdmin" && actor.tenantId) return { scope: "tenant", scopeId: actor.tenantId };
+  throw new ServiceProblem(403, "CREDENTIAL_SCOPE_FORBIDDEN", "This principal cannot create Provider credentials");
+}
+
+function assertCredentialActor(credential: CredentialVersionRecord, actor: RequestActor): void {
+  if (actor.role === "SecurityAdmin") return;
+  if (actor.role === "TenantAdmin" && credential.scope === "tenant" && credential.scopeId === actor.tenantId) return;
+  throw new ServiceProblem(403, "CREDENTIAL_SCOPE_FORBIDDEN", "Credential does not belong to the authenticated scope");
+}
+
+function assertProfileCredential(
+  profileScope: ProfileScope,
+  profileScopeId: string,
+  credential: CredentialVersionRecord,
+  actor: RequestActor,
+): void {
+  if (profileScope === "platform") {
+    if (credential.scope === "platform" && credential.scopeId === "global") return;
+  } else if (profileScope === "tenant") {
+    if (credential.scope === "tenant" && credential.scopeId === profileScopeId) return;
+  } else if (credential.scope === "tenant" && credential.scopeId === actor.tenantId) {
+    return;
+  }
+  throw new ServiceProblem(403, "CREDENTIAL_SCOPE_FORBIDDEN", "Profile cannot use a credential from another scope");
 }
 
 function parseDefaultScope(value: string): { scope: ProfileScope; scopeId: string } {

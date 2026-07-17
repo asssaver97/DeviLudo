@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
+import { createAdminPrincipalSignature } from "../src/admin-principal";
+import type { AdminRole } from "../src/contracts";
 import { createControlPlaneApp } from "../src/bootstrap";
 
 let app: NestFastifyApplication;
+const adminSessionKey = Buffer.from("deviludo-control-plane-test-admin-session-key-2026", "utf8");
 
 before(async () => {
+  process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY = adminSessionKey.toString("base64");
   app = await createControlPlaneApp();
   await app.getHttpAdapter().getInstance().ready();
 });
@@ -59,6 +63,34 @@ test("mutations require RBAC and Idempotency-Key", async () => {
   });
   assert.equal(conflict.statusCode, 409);
   assert.equal(conflict.json().error.code, "IDEMPOTENCY_KEY_REUSED");
+});
+
+test("admin API rejects unsigned, forged, expired and route-replayed principal assertions", async () => {
+  const unsigned = await app.getHttpAdapter().getInstance().inject({
+    method: "GET",
+    url: "/admin/agents",
+    headers: { "x-deviludo-role": "Auditor", "x-deviludo-actor": "test-admin" },
+  });
+  assert.equal(unsigned.statusCode, 401);
+  assert.equal(unsigned.json().error.code, "ADMIN_SESSION_INVALID");
+
+  const forgedHeaders = adminHeaders("GET", "/admin/agents", "SecurityAdmin");
+  forgedHeaders["x-deviludo-admin-signature"] = "invalid-signature";
+  const forged = await app.getHttpAdapter().getInstance().inject({ method: "GET", url: "/admin/agents", headers: forgedHeaders });
+  assert.equal(forged.statusCode, 401);
+
+  const expiredHeaders = adminHeaders("GET", "/admin/agents", "Auditor", {
+    issuedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+  });
+  const expired = await app.getHttpAdapter().getInstance().inject({ method: "GET", url: "/admin/agents", headers: expiredHeaders });
+  assert.equal(expired.statusCode, 401);
+
+  const replayedPath = await app.getHttpAdapter().getInstance().inject({
+    method: "GET",
+    url: "/admin/agent-health",
+    headers: adminHeaders("GET", "/admin/agents", "Auditor"),
+  });
+  assert.equal(replayedPath.statusCode, 401);
 });
 
 test("exact Agent supply-chain and canary routes are independently injectable", async () => {
@@ -215,6 +247,88 @@ test("credentials never echo plaintext and Provider activation is a separate sec
   assert.equal(audit.body.includes(plaintext), false);
 });
 
+test("tenant and project administrators cannot cross signed scope or BYOK boundaries", async () => {
+  const tenantCredential = await inject({
+    method: "POST",
+    url: "/admin/credentials",
+    role: "TenantAdmin",
+    tenantId: "tenant-alpha",
+    key: "tenant-alpha-credential",
+    payload: { label: "Tenant Alpha Claude BYOK", apiKey: "tenant-alpha-secret-material" },
+  });
+  assert.equal(tenantCredential.statusCode, 201);
+  assert.equal(tenantCredential.json().data.scope, "tenant");
+  assert.equal(tenantCredential.json().data.scopeId, "tenant-alpha");
+  const credentialId = tenantCredential.json().data.id as string;
+
+  const ownProfile = await inject({
+    method: "POST",
+    url: "/admin/agent-profiles",
+    role: "TenantAdmin",
+    tenantId: "tenant-alpha",
+    key: "tenant-alpha-profile",
+    payload: {
+      scope: "tenant",
+      scopeId: "tenant-alpha",
+      agent: "claude-code",
+      installationId: "claude-code-installation-2-1-14",
+      credentialVersionId: credentialId,
+      baseUrl: "https://tenant-alpha-gateway.example.com/v1",
+      primaryModel: "claude-sonnet-4-6-20250514",
+      dataRegion: "eu-west",
+      retentionPolicy: "zero retention",
+      trainingPolicy: "no training",
+    },
+  });
+  assert.equal(ownProfile.statusCode, 201);
+  assert.equal(ownProfile.json().data.profile.scopeId, "tenant-alpha");
+
+  const crossTenantProfile = await inject({
+    method: "POST",
+    url: "/admin/agent-profiles",
+    role: "TenantAdmin",
+    tenantId: "tenant-beta",
+    key: "tenant-beta-cross-profile",
+    payload: {
+      scope: "tenant",
+      scopeId: "tenant-alpha",
+      agent: "claude-code",
+      installationId: "claude-code-installation-2-1-14",
+      credentialVersionId: credentialId,
+      baseUrl: "https://tenant-beta-gateway.example.com/v1",
+      primaryModel: "claude-sonnet-4-6-20250514",
+      dataRegion: "us-west",
+      retentionPolicy: "zero retention",
+      trainingPolicy: "no training",
+    },
+  });
+  assert.equal(crossTenantProfile.statusCode, 403);
+  assert.equal(crossTenantProfile.json().error.code, "SCOPE_FORBIDDEN");
+
+  const crossTenantRotation = await inject({
+    method: "POST",
+    url: `/admin/credentials/${credentialId}/rotate`,
+    role: "TenantAdmin",
+    tenantId: "tenant-beta",
+    key: "tenant-beta-cross-rotation",
+    payload: { apiKey: "tenant-beta-must-not-replace-alpha" },
+  });
+  assert.equal(crossTenantRotation.statusCode, 403);
+  assert.equal(crossTenantRotation.json().error.code, "CREDENTIAL_SCOPE_FORBIDDEN");
+
+  const crossProject = await inject({
+    method: "PUT",
+    url: "/admin/agent-defaults/project:project-alpha",
+    role: "ProjectOwner",
+    tenantId: "tenant-alpha",
+    projectId: "project-beta",
+    key: "project-beta-cross-default",
+    payload: { profileRevisionId: ownProfile.json().data.profile.id },
+  });
+  assert.equal(crossProject.statusCode, 403);
+  assert.equal(crossProject.json().error.code, "SCOPE_FORBIDDEN");
+});
+
 test("unsafe Provider endpoints and floating models are rejected", async () => {
   const response = await inject({
     method: "POST",
@@ -243,6 +357,8 @@ interface InjectInput {
   method: "GET" | "POST" | "PUT";
   url: string;
   role: string;
+  tenantId?: string;
+  projectId?: string;
   key?: string;
   payload?: Record<string, unknown>;
 }
@@ -252,10 +368,40 @@ async function inject(input: InjectInput) {
     method: input.method,
     url: input.url,
     headers: {
-      "x-deviludo-role": input.role,
-      "x-deviludo-actor": "test-admin",
+      ...adminHeaders(input.method, input.url, input.role as AdminRole, {
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+      }),
       ...(input.key ? { "idempotency-key": input.key } : {}),
     },
     payload: input.payload,
   });
+}
+
+function adminHeaders(
+  method: string,
+  path: string,
+  role: AdminRole,
+  options: { issuedAt?: string; tenantId?: string; projectId?: string } = {},
+): Record<string, string> {
+  const issuedAt = options.issuedAt ?? new Date().toISOString();
+  const assertion = {
+    method,
+    path,
+    actorId: "test-admin",
+    role,
+    tenantId: options.tenantId ?? null,
+    projectId: options.projectId ?? null,
+    sessionId: "test-admin-session",
+    issuedAt,
+  } as const;
+  return {
+    "x-deviludo-role": role,
+    "x-deviludo-actor": assertion.actorId,
+    "x-deviludo-admin-session": assertion.sessionId,
+    "x-deviludo-admin-issued-at": assertion.issuedAt,
+    "x-deviludo-admin-signature": createAdminPrincipalSignature(assertion, adminSessionKey),
+    ...(options.tenantId ? { "x-deviludo-tenant-id": options.tenantId } : {}),
+    ...(options.projectId ? { "x-deviludo-project-id": options.projectId } : {}),
+  };
 }

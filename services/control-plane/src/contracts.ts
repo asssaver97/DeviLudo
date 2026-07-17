@@ -110,6 +110,8 @@ export interface CredentialVersionRecord {
   readonly familyId: string;
   readonly version: number;
   readonly label: string;
+  readonly scope: "platform" | "tenant";
+  readonly scopeId: string;
   readonly secretRef: string;
   readonly maskedFingerprint: string;
   state: "ACTIVE" | "PREVIOUS" | "REVOKED";
@@ -131,6 +133,8 @@ export interface RequestActor {
   readonly role: AdminRole;
   readonly requestId: string;
   readonly actorId: string;
+  readonly tenantId: string | null;
+  readonly projectId: string | null;
 }
 
 export class ServiceProblem extends Error {
