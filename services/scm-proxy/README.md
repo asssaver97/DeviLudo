@@ -43,6 +43,13 @@ every binding and content digest, and delegates only fixed GitHub operations to
   side effects, allowing crash recovery without concurrent duplicate PRs or
   merges.
 
+`ScmProxyWorkflowHandler` consumes only the durable `MERGING` command. It binds
+the exact candidate SHA, Draft PR number, candidate evidence bundle and final
+`USER_ACCEPTED` signal to the idempotent merge call. Its receipt must repeat all
+four bindings; the next release gate always receives GitHub's observed default-
+branch head after merge, even when that head has already advanced beyond the
+merge commit.
+
 The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1
