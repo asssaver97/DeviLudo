@@ -109,6 +109,27 @@ leases/events and terminal attempt writes; artifact bytes belong in the
 content-addressed object store. It must expose those operations only behind a
 dedicated mTLS listener; the public web application route is not runner ingress.
 
+`PhysicalRunnerAgent` is the portable protocol state machine intended to run
+unchanged on Windows, Linux and macOS. It verifies the Ed25519 job before
+invoking an injected, idempotent TestKit executor and independently checks the
+tenant, Runner ID, platform, capability digest, exact Godot version and export
+template digest. It persists STARTED, evidence and completion through a
+`PhysicalRunnerJournal` before transmission, so a process restart replays the
+same sequence numbers, timestamps, manifest and fencing token rather than
+inventing a second result. `MemoryPhysicalRunnerJournal` exists only for the
+contract suite; a deployment must provide an OS-local durable implementation.
+
+`MtlsPhysicalRunnerIngressClient` is the corresponding Runner-side transport.
+It pins one HTTPS origin, uses TLS 1.3 with the machine workload certificate,
+follows no redirects and calls only `/v1/register`, `/v1/lease`,
+`/v1/evidence` and `/v1/events`. It never sends SPIFFE or Runner identity in an
+HTTP header; the server derives both from the certificate. Its certificate
+paths use the operating system's absolute-path rules so the same client can be
+configured on all three target systems. The portable contract suite exercises
+all three platform identities, journal replay, signature tampering,
+cross-tenant jobs and capability drift; this is not a substitute for the final
+physical-machine E2E gate.
+
 `RunnerControlWorkflowHandler` maps durable workflow jobs to three distinct
 modes: candidate matrix, merged-main release gate and clean Steam install.
 Receipts must repeat the exact commit, Steam BuildID (when applicable) and

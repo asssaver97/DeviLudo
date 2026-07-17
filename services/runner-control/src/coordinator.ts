@@ -406,14 +406,30 @@ export function validateRunnerCapabilities(capabilities: RunnerCapabilities): vo
   }
   if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(capabilities.runnerId)) throw new Error("Runner ID is invalid");
   if (!TARGET_PLATFORMS.includes(capabilities.platform)) throw new Error("Runner platform is invalid");
-  if (!capabilities.osVersion.trim() || !capabilities.godotVersion.trim() || !capabilities.gpu.trim()) throw new Error("Runner capability metadata is incomplete");
+  if (capabilities.architecture !== "x86_64" && capabilities.architecture !== "arm64") {
+    throw new Error("Runner architecture is invalid");
+  }
+  if (typeof capabilities.osVersion !== "string" || capabilities.osVersion.length < 1 || capabilities.osVersion.length > 160
+    || typeof capabilities.godotVersion !== "string"
+    || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){1,5}$/.test(capabilities.godotVersion)
+    || typeof capabilities.gpu !== "string" || capabilities.gpu.length < 1 || capabilities.gpu.length > 160) {
+    throw new Error("Runner capability metadata is incomplete");
+  }
+  if (capabilities.display !== "physical" && capabilities.display !== "virtual" && capabilities.display !== "headless") {
+    throw new Error("Runner display capability is invalid");
+  }
+  if (capabilities.audio !== "physical" && capabilities.audio !== "virtual" && capabilities.audio !== "none") {
+    throw new Error("Runner audio capability is invalid");
+  }
   for (const [field, value] of Object.entries({
     runnerImageDigest: capabilities.runnerImageDigest,
     godotBinaryDigest: capabilities.godotBinaryDigest,
     exportTemplatesDigest: capabilities.exportTemplatesDigest,
     capabilityDigest: capabilities.capabilityDigest,
   })) assertSha256(value, field);
-  if (capabilities.installedAutonomousAgents.length) throw new Error("Autonomous Agents are forbidden on E2E runners");
+  if (!Array.isArray(capabilities.installedAutonomousAgents) || capabilities.installedAutonomousAgents.length) {
+    throw new Error("Autonomous Agents are forbidden on E2E runners");
+  }
   const expected = immutableCapabilityDigest({ ...capabilities, capabilityDigest: "" });
   if (capabilities.capabilityDigest !== expected) throw new Error("Runner capability digest mismatch");
 }

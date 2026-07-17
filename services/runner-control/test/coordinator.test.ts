@@ -7,6 +7,7 @@ import {
   RunnerMatrixCoordinator,
   createPlatformEvidenceManifest,
   createRunnerCapabilityDigest,
+  validateRunnerCapabilities,
   verifyRunnerJob,
 } from "../src/coordinator";
 import type {
@@ -93,6 +94,26 @@ function coordinator() {
     },
   });
 }
+
+test("Runner capability validation rejects runtime JSON outside the declared machine contract", () => {
+  const baseline = capabilities("runner-linux-1", "linux", "a");
+  const { capabilityDigest: _ignoredDigest, ...baselineCore } = baseline;
+  assert.match(_ignoredDigest, /^[a-f0-9]{64}$/);
+  for (const mutation of [
+    { architecture: "riscv64" },
+    { godotVersion: "latest" },
+    { display: "browser" },
+    { audio: "network" },
+    { installedAutonomousAgents: "" },
+  ]) {
+    const core = { ...baselineCore, ...mutation } as unknown as Omit<RunnerCapabilities, "capabilityDigest">;
+    const candidate = {
+      ...core,
+      capabilityDigest: createRunnerCapabilityDigest(core),
+    } as RunnerCapabilities;
+    assert.throws(() => validateRunnerCapabilities(candidate), /invalid|incomplete|forbidden/i);
+  }
+});
 
 function started(job: SignedRunnerJob): RunnerEvent {
   return {
