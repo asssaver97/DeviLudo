@@ -61,9 +61,48 @@ derives the Runner identity exclusively from the authorized peer certificate.
 Its authenticated API is `POST /v1/register`, `/v1/lease`, `/v1/evidence` and
 `/v1/events`; `GET /health` also requires a client certificate. Identity-like
 HTTP headers are ignored and internal rejection details are reduced to bounded
-error codes. A production host must supply the PostgreSQL store, signed
-Runner-to-tenant assignment policy, Ed25519 job key and idempotent evidence
-archive; the public Web route remains a deliberate 503.
+error codes. `SignedRunnerFleetPolicy` reloads an at-most-15-minute Ed25519
+manifest for every admission and lease decision. Each sorted entry fixes one
+Runner ID to its exact SPIFFE ID, certificate fingerprint, capability digest,
+platform and sorted tenant allow-list; signature, expiry or ordering failure
+closes both registration and tenant assignment.
+
+`npm run start:runner-ingress` is the production host. It loads the server
+certificate, Runner client CA and Ed25519 job private key only from absolute
+files, composes the PostgreSQL store and signed fleet policy, and talks to a
+separate evidence archive over client-certificate-authenticated HTTPS. The
+archive owns object-store credentials and must echo the exact tenant, project,
+attempt and bundle digest before its receipt is accepted. Startup probes all
+three dependencies before listening; the certificate-authenticated `/health`
+route repeats those probes and returns 503 on drift. See
+`services/runner-control/.env.example`. The public Web route remains a
+deliberate 503.
+
+The fleet manifest envelope is strictly shaped as follows. `issuedAt` to
+`expiresAt` may span no more than 15 minutes, IDs must be unique and sorted,
+and the file must be atomically replaced before expiry:
+
+```json
+{
+  "keyId": "runner-fleet-key-01",
+  "claims": {
+    "kind": "deviludo-runner-fleet",
+    "version": 1,
+    "revision": 42,
+    "issuedAt": "2030-01-01T00:00:00.000Z",
+    "expiresAt": "2030-01-01T00:10:00.000Z",
+    "runners": [{
+      "runnerId": "runner-linux-1",
+      "spiffeId": "spiffe://deviludo.internal/e2e/runner-linux-1",
+      "certificateFingerprint": "<64 lowercase hex>",
+      "capabilityDigest": "<64 lowercase hex>",
+      "platform": "linux",
+      "tenantIds": ["11111111-1111-4111-8111-111111111111"]
+    }]
+  },
+  "signature": "<Ed25519 base64url over canonical claims>"
+}
+```
 
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the

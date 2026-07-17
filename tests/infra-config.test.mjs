@@ -41,6 +41,22 @@ test("physical Runner HTTP ingress is an isolated fail-closed mTLS boundary", ()
   assert.doesNotMatch(ingress, /x-runner-id/);
 });
 
+test("physical Runner host composes signed fleet authorization and mTLS evidence archival", () => {
+  const host = readFileSync(new URL("../services/runner-control/src/run-ingress-service.ts", import.meta.url), "utf8");
+  const fleet = readFileSync(new URL("../services/runner-control/src/fleet-manifest.ts", import.meta.url), "utf8");
+  const archive = readFileSync(new URL("../services/runner-control/src/evidence-archive.ts", import.meta.url), "utf8");
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(packageJson.scripts["start:runner-ingress"], "node --import tsx services/runner-control/src/run-ingress-service.ts");
+  assert.match(host, /await readiness\(\);\s+await listen/);
+  assert.match(host, /DEVILUDO_RUNNER_JOB_SIGNING_KEY_FILE/);
+  assert.match(fleet, /MAX_VALIDITY_MS = 15 \* 60_000/);
+  assert.match(fleet, /certificateFingerprint === identity\.certificateFingerprint/);
+  assert.match(fleet, /entry\.tenantIds\.includes/);
+  assert.match(archive, /minVersion: "TLSv1\.3"/);
+  assert.match(archive, /"idempotency-key": input\.bundle\.bundleDigest/);
+  assert.match(archive, /body\.bundleDigest !== expected\.bundle\.bundleDigest/);
+});
+
 test("physical Runner attempts require an append-only tenant execution lock", () => {
   const migration = readFileSync(new URL("../infra/postgres/014_runner_execution_locks.sql", import.meta.url), "utf8");
   const adapter = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");

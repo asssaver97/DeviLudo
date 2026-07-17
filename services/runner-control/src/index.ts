@@ -7,3 +7,6 @@ export * from "./workflow-handler";
 export * from "./postgres-workflow";
 export * from "./postgres-ingress";
 export * from "./ingress-http";
+export * from "./fleet-manifest";
+export * from "./evidence-archive";
+export * from "./run-ingress-service";

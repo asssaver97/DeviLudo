@@ -31,6 +31,7 @@ export function createRunnerIngressHandler(options: {
   readonly operations: RunnerIngressOperations;
   readonly now?: () => Date;
   readonly extractIdentity?: (socket: unknown) => TlsRunnerIdentity;
+  readonly readiness?: () => Promise<void>;
 }): (request: RunnerIngressRequest) => Promise<RunnerIngressResponse> {
   const now = options.now ?? (() => new Date());
   const extractIdentity = options.extractIdentity ?? identityFromTlsSocket;
@@ -43,6 +44,8 @@ export function createRunnerIngressHandler(options: {
     catch { return error(503, "RUNNER_INGRESS_CLOCK_INVALID"); }
     if (!Number.isFinite(Date.parse(at))) return error(503, "RUNNER_INGRESS_CLOCK_INVALID");
     if (request.method === "GET" && request.path === "/health") {
+      try { if (options.readiness) await options.readiness(); }
+      catch { return error(503, "RUNNER_INGRESS_NOT_READY"); }
       return { status: 200, body: { status: "ok", service: "deviludo-runner-ingress" } };
     }
     if (request.method !== "POST") return error(404, "RUNNER_ROUTE_NOT_FOUND");

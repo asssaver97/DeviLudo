@@ -116,6 +116,19 @@ test("Runner handler redacts internal failures and health is also certificate-au
   assert.equal(health.status, 200);
 });
 
+test("Runner health fails closed when a production dependency is unavailable", async () => {
+  const handler = createRunnerIngressHandler({
+    operations: operations([]),
+    extractIdentity: () => identity,
+    now: () => new Date("2030-01-01T00:00:00.000Z"),
+    readiness: async () => { throw new Error("DATABASE_URL=secret"); },
+  });
+  const health = await handler({ method: "GET", path: "/health", headers: {}, socket: {}, rawBody: "" });
+  assert.equal(health.status, 503);
+  assert.equal((health.body as { error: { code: string } }).error.code, "RUNNER_INGRESS_NOT_READY");
+  assert.doesNotMatch(JSON.stringify(health.body), /DATABASE_URL|secret/);
+});
+
 test("Runner HTTPS server refuses incomplete TLS material and unsafe body limits", () => {
   const handler = createRunnerIngressHandler({ operations: operations([]), extractIdentity: () => identity });
   assert.throws(() => createRunnerIngressHttpsServer({ tls: {}, handler }), /TLS material is incomplete/);

@@ -27,6 +27,7 @@
     "start:control-plane-workflow": "node --import tsx services/control-plane/src/run-workflow-service.ts",
     "start:agent-worker-workflow": "node --import tsx services/agent-worker/src/run-workflow-service.ts",
     "start:runner-control-workflow": "node --import tsx services/runner-control/src/run-workflow-service.ts",
+    "start:runner-ingress": "node --import tsx services/runner-control/src/run-ingress-service.ts",
     "start:scm-proxy-workflow": "node --import tsx services/scm-proxy/src/run-workflow-service.ts",
     "start:steam-publisher-workflow": "node --import tsx services/steam-publisher/src/run-workflow-service.ts",
     "start:temporal-worker": "node --import tsx services/temporal/src/run-worker.ts",
