@@ -187,6 +187,13 @@ Migration `007_workflow_job_heartbeats.sql` permits same-token heartbeats while
 still requiring a new token and incremented attempt for an expired-lease
 reclaim.
 
+`ControlPlaneWorkflowHandler` consumes the non-compute commands for ideation,
+spec approval, Provider recovery, candidate acceptance, release MFA, external
+Steam approvals and cancellation. It persists an exact request-digest-bound
+action and deliberately emits no completion signal: only the corresponding
+authenticated UI, broker or monitor callback may signal Temporal. A queued
+notification therefore cannot be mistaken for user approval.
+
 ## Verification
 
 ```bash
@@ -198,7 +205,7 @@ reclaim.
 ./node_modules/.bin/tsc -p services/steam-publisher/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-runtime/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-agent-runtime/tsconfig.json --pretty false
-node --import tsx --test services/control-plane/test/control-plane.test.ts
+node --import tsx --test services/control-plane/test/*.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/gateway.test.ts
