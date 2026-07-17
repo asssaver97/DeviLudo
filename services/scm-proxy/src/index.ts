@@ -1,4 +1,7 @@
 export * from "./contracts";
+export * from "./github-auth-contracts";
+export * from "./github-auth";
+export * from "./github-auth-rest";
 export * from "./github-artifacts";
 export * from "./github-contracts";
 export * from "./github-proxy";

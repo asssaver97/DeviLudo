@@ -20,12 +20,12 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
 - `services/inference-gateway`：短期 run token、不可变运行注册表、精确 Provider/凭据/模型、累计预算与逐请求 DNS/SSRF 门禁；未配置可信 Vault/DNS-pinning Connector 时拒绝推理请求。
-- `services/scm-proxy`：本地 SCM 信任边界及 GitHub App 远端 Connector。远端候选包和用户验收均须 Ed25519 签名；Connector 使用仓库级短期安装令牌，通过 Git Data API 创建 blob/tree/commit/`deviludo/*` ref 和 Draft PR，验收合并前重新校验 PR head 与权威 E2E 证据。外部副作用使用带租约的持久 claim，支持崩溃恢复且不会并发重复执行。
+- `services/scm-proxy`：本地 SCM 信任边界及 GitHub App 远端 Connector。安装使用单次 state + PKCE 用户授权，只有用户令牌证明当前用户可访问精确 installation 后才绑定；OAuth code/token/refresh token 均不入库。远端候选包和用户验收均须 Ed25519 签名；Connector 使用仓库级短期安装令牌，通过 Git Data API 创建 blob/tree/commit/`deviludo/*` ref 和 Draft PR，验收合并前重新校验 PR head 与权威 E2E 证据。外部副作用使用带租约的持久 claim，支持崩溃恢复且不会并发重复执行。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
 - `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`/v1/runs` 必须复用预检，默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
 - `IsolatedLocalAgentExecutor`：把 Claude/Codex Adapter、短期 token broker、Agent Worker 监督器和 SCM 代理组合成一次尝试；完成回执固定租户、测试计划、turn/cost/token 预算、超时和 base/candidate 提交。服务端只有在注入可信 workspace provisioner 与 token broker 后才能启用它。
 - 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。完成回执必须再次绑定全部锁定字段以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态。
-- `db`、`drizzle`：34 张 D1 Beta 表、不可变触发器、GitHub 安装/仓库绑定/SCM 回执、分平台 Runner 和本地交付事件迁移。
+- `db`、`drizzle`：35 张 D1 Beta 表、不可变触发器、GitHub 安装授权/仓库绑定/SCM 回执、分平台 Runner 和本地交付事件迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。
 
@@ -120,7 +120,7 @@ API Key 只允许写入或替换。响应只返回 Vault `SecretRef`、不可逆
 
 仓库默认不会执行外部副作用。部署到真实环境前需要运维方提供：
 
-1. GitHub App 的 App ID、私钥 Vault 引用、回调域名和允许安装的组织。
+1. GitHub App 的 App/Client ID、私钥与 Client Secret 的 Vault 引用、Setup/PKCE Callback 域名和允许安装的组织。
 2. Claude/Codex Provider 的 SecurityAdmin 审批、数据政策确认、Vault Key 与全套探针结果。
 3. 内部镜像库、签名密钥、SBOM/漏洞/恶意软件扫描器和隔离 microVM Worker 池。
 4. 通过出站 mTLS 注册的 Windows、Linux、macOS Runner 与固定 Godot/export-template digest。

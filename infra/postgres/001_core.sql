@@ -46,6 +46,32 @@ CREATE TABLE deviludo.github_installations (
   UNIQUE (tenant_id, installation_id)
 );
 
+-- Raw OAuth state, PKCE verifiers, authorization codes and user access tokens
+-- are never persisted here. State/session values are SHA-256 digests; the
+-- verifier is a short-lived Vault reference consumed exactly once.
+CREATE TABLE deviludo.github_installation_authorizations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  state_digest text NOT NULL UNIQUE CHECK (state_digest ~ '^[a-f0-9]{64}$'),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  user_subject text NOT NULL,
+  session_binding_digest text NOT NULL CHECK (session_binding_digest ~ '^[a-f0-9]{64}$'),
+  stage text NOT NULL CHECK (stage IN ('INSTALL', 'OAUTH')),
+  installation_id bigint CHECK (installation_id > 0),
+  pkce_verifier_secret_ref text,
+  return_path text NOT NULL,
+  status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'COMPLETED', 'FAILED', 'EXPIRED')),
+  claim_token uuid,
+  claim_expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  failure_code text,
+  CHECK ((stage = 'INSTALL' AND installation_id IS NULL AND pkce_verifier_secret_ref IS NULL)
+    OR (stage = 'OAUTH' AND installation_id IS NOT NULL AND pkce_verifier_secret_ref IS NOT NULL)),
+  CHECK (return_path = '/settings/connections'
+    OR return_path ~ '^/projects/[A-Za-z0-9][A-Za-z0-9._-]{0,99}/settings/connections$')
+);
+
 CREATE TABLE deviludo.github_repository_bindings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
@@ -348,7 +374,7 @@ DO $$
 DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
-    'projects', 'github_installations', 'github_repository_bindings',
+    'projects', 'github_installations', 'github_installation_authorizations', 'github_repository_bindings',
     'immutable_revisions', 'agent_runs', 'e2e_attempts',
     'credential_versions', 'e2e_platform_leases', 'platform_runner_events', 'evidence_bundles',
     'scm_operation_claims', 'github_candidate_receipts', 'github_merge_receipts',
@@ -368,6 +394,8 @@ CREATE INDEX e2e_attempt_state_idx ON deviludo.e2e_attempts (state, created_at);
 CREATE INDEX e2e_platform_lease_idx ON deviludo.e2e_platform_leases (state, lease_expires_at);
 CREATE INDEX e2e_platform_runner_idx ON deviludo.e2e_platform_leases (runner_id, state, lease_expires_at);
 CREATE INDEX github_installation_status_idx ON deviludo.github_installations (tenant_id, status);
+CREATE INDEX github_authorization_principal_status_idx ON deviludo.github_installation_authorizations (tenant_id, user_subject, status);
+CREATE INDEX github_authorization_expiry_idx ON deviludo.github_installation_authorizations (expires_at, status);
 CREATE INDEX github_repository_installation_idx ON deviludo.github_repository_bindings (github_installation_id, status);
 CREATE INDEX scm_operation_claim_idx ON deviludo.scm_operation_claims (tenant_id, project_id, claim_expires_at);
 CREATE INDEX github_candidate_project_commit_idx ON deviludo.github_candidate_receipts (project_id, candidate_commit_sha);

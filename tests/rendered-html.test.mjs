@@ -104,4 +104,14 @@ test("localhost never fabricates a successful GitHub App authorization", async (
   assert.equal(payload.error.code, "GITHUB_APP_INSTALLATION_BROKER_REQUIRED");
   assert.equal(payload.error.details.passwordAccepted, false);
   assert.doesNotMatch(JSON.stringify(payload), /demo-authorized|github password/i);
+
+  for (const path of [
+    "/api/connections/github/setup?installation_id=42&state=attacker-controlled",
+    "/api/connections/github/callback?code=secret-code&state=attacker-controlled",
+  ]) {
+    const callback = await request(path);
+    assert.equal(callback.status, 503);
+    const serialized = JSON.stringify(await callback.json());
+    assert.doesNotMatch(serialized, /attacker-controlled|secret-code|installation_id/);
+  }
 });

@@ -26,6 +26,13 @@ every binding and content digest, and delegates only fixed GitHub operations to
 
 - requests a short-lived GitHub App installation token scoped to one numeric
   repository ID with only Contents and Pull requests write permissions;
+- starts with a single-use, server-side installation state and then performs a
+  separate PKCE-protected GitHub user authorization. The setup callback's
+  `installation_id` is accepted only after the user token proves that the
+  signed-in numeric GitHub user can access that exact installation;
+- stores only state/session digests and a one-use Vault reference for the PKCE
+  verifier. OAuth codes, user tokens and refresh tokens are never persisted,
+  and the ephemeral user token is revoked after verification;
 - fixes the upstream to `https://api.github.com`, sends the versioned API
   header, rejects redirects and never includes upstream bodies or tokens in
   errors;
@@ -40,6 +47,10 @@ The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1
 until a SecurityAdmin-approved, DNS-pinning Connector is added.
+
+The public Web preview deliberately returns `503` for install/setup/callback
+routes until the authenticated-session adapter, PostgreSQL authorization store
+and Vault resolver are injected. It never simulates a successful connection.
 
 Run its contract tests from the repository root:
 

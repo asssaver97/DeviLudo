@@ -197,6 +197,14 @@ that token. The endpoint is fixed to `https://api.github.com`, redirects are
 disabled, upstream error bodies are discarded, and the versioned Git Data API
 creates blobs, a tree, deterministic commit, branch and Draft PR.
 
+Installation binding is a separate two-stage protocol: a one-use installation
+state is followed by explicit GitHub user authorization with PKCE. A setup
+callback's `installation_id` remains untrusted until the ephemeral user token
+proves that the signed-in numeric user can access it. Only state/session digests
+and a one-use Vault reference for the verifier are persisted; OAuth codes,
+access tokens and refresh tokens are not, and the user token is revoked after
+verification.
+
 Merge requires a ten-minute control-plane acceptance signature and an
 authoritative, still-valid PASSED evidence lookup. The PR node, base, branch and
 head SHA are fetched again before the Draft is marked ready and merged. Candidate

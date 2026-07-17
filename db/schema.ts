@@ -88,6 +88,33 @@ export const githubInstallations = sqliteTable(
   ],
 );
 
+export const githubInstallationAuthorizations = sqliteTable(
+  "github_installation_authorizations",
+  {
+    id: text("id").primaryKey(),
+    stateDigest: text("state_digest").notNull(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    userId: text("user_id").notNull().references(() => users.id),
+    sessionBindingDigest: text("session_binding_digest").notNull(),
+    stage: text("stage", { enum: ["INSTALL", "OAUTH"] }).notNull(),
+    installationId: text("installation_id"),
+    pkceVerifierSecretRef: text("pkce_verifier_secret_ref"),
+    returnPath: text("return_path").notNull(),
+    status: text("status", { enum: ["PENDING", "CLAIMED", "COMPLETED", "FAILED", "EXPIRED"] }).notNull(),
+    claimToken: text("claim_token"),
+    claimExpiresAt: text("claim_expires_at"),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    completedAt: text("completed_at"),
+    failureCode: text("failure_code"),
+  },
+  (table) => [
+    uniqueIndex("github_authorization_state_unique").on(table.stateDigest),
+    index("github_authorization_principal_status_idx").on(table.tenantId, table.userId, table.status),
+    index("github_authorization_expiry_idx").on(table.expiresAt, table.status),
+  ],
+);
+
 export const githubRepositoryBindings = sqliteTable(
   "github_repository_bindings",
   {

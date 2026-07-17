@@ -115,6 +115,12 @@ signed acceptance proof and a database lookup of the exact valid candidate
 evidence. If the default branch advances immediately after merge, the receipt
 marks `requiresFreshMainSnapshot` instead of reusing the candidate source digest.
 
+Repository selection begins with a hashed single-use GitHub installation state,
+transitions through a separate PKCE OAuth state, and uses the resulting
+ephemeral GitHub App user token only to verify the current numeric user's access
+to the exact installation. A bare setup callback never establishes a tenant
+binding.
+
 ## Runner fencing and evidence
 
 Every selected OS receives a separate lease binding `attempt_id`, platform,
