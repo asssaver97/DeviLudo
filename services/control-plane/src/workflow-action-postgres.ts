@@ -8,12 +8,15 @@ import type {
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
 
-export interface ControlPlaneWorkflowSqlResult<Row> {
+export interface ControlPlaneWorkflowSqlResult<Row extends Record<string, unknown>> {
   readonly rows: readonly Row[];
 }
 
 export interface ControlPlaneWorkflowSqlClient {
-  query<Row = Record<string, unknown>>(sql: string, values?: readonly unknown[]): Promise<ControlPlaneWorkflowSqlResult<Row>>;
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    values?: readonly unknown[],
+  ): Promise<ControlPlaneWorkflowSqlResult<Row>>;
   release(): void;
 }
 

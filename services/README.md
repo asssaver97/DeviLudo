@@ -149,9 +149,10 @@ adapter versions and self-update disabled.
 
 ## Temporal Worker and Client
 
-The Worker requires a command dispatcher. In production this is an internal
-HTTPS service reached through workload identity/mTLS (normally via the service
-mesh sidecar); upstream provider keys are never Worker environment variables.
+The Worker requires a command dispatcher. In production it presents its own
+short-lived workload certificate to each internal HTTPS destination; ordinary
+`fetch` without a client identity is not accepted. Upstream provider keys are
+never Worker environment variables.
 
 ```bash
 export TEMPORAL_ADDRESS=localhost:7233
@@ -161,6 +162,9 @@ export DEVILUDO_AGENT_WORKER_DISPATCH_URL=https://agent-worker.internal/v1/workf
 export DEVILUDO_RUNNER_CONTROL_DISPATCH_URL=https://runner-control.internal/v1/workflow-commands
 export DEVILUDO_SCM_PROXY_DISPATCH_URL=https://scm-proxy.internal/v1/workflow-commands
 export DEVILUDO_STEAM_PUBLISHER_DISPATCH_URL=https://steam-publisher.internal/v1/workflow-commands
+export DEVILUDO_TEMPORAL_DISPATCH_TLS_KEY_FILE=/run/secrets/temporal-dispatch/tls.key
+export DEVILUDO_TEMPORAL_DISPATCH_TLS_CERT_FILE=/run/secrets/temporal-dispatch/tls.crt
+export DEVILUDO_TEMPORAL_DISPATCH_CA_FILE=/run/secrets/temporal-dispatch/ca.crt
 node --import tsx services/temporal/src/run-worker.ts
 ```
 
@@ -172,7 +176,8 @@ Supported environment variables:
 - `DEVILUDO_MAX_CONCURRENT_ACTIVITIES` and
   `DEVILUDO_MAX_CONCURRENT_WORKFLOWS`
 - `DEVILUDO_ALLOW_INSECURE_LOCAL_DISPATCH=1`, only for a loopback HTTP
-  dispatcher during local development
+  dispatcher during non-production local development. Production startup
+  rejects this flag.
 
 Client examples:
 
@@ -225,6 +230,35 @@ trusted control-plane source (never an owner-role database scan), validates and
 deduplicates them, drains productive cycles immediately, backs off on an empty
 queue or infrastructure error, reports only bounded diagnostic codes, and
 stops through an `AbortSignal`. Only one loop may run per host instance.
+
+`WorkflowDestinationRuntime` now composes the receiver, PostgreSQL inbox/job
+queue, Temporal signal client and long-running consumer into one fail-closed
+service host. `/healthz` becomes ready only after PostgreSQL and the current
+tenant assignment have passed their probes. SIGINT/SIGTERM drains the loop,
+closes Fastify, then closes the Temporal and PostgreSQL connections. The
+Temporal worker uses a direct TLS 1.3 client certificate; the destination
+extracts the one SPIFFE URI SAN from the authorized peer certificate and does
+not trust identity headers.
+
+Tenant access is delivered as a short-lived Ed25519-signed manifest bound to
+the exact workload ID and destination. The manifest is re-read and verified on
+every polling cycle, expires within fifteen minutes, rejects duplicate or
+non-UUID tenant IDs, and never asks a database-owner connection to enumerate
+RLS tenants. A read-only public key is mounted on the Worker; its private
+signing key remains in the control plane/KMS.
+
+The first concrete destination entry is the control-plane action service,
+because its production PostgreSQL action adapter already exists:
+
+```bash
+npm run start:control-plane-workflow
+```
+
+It requires the destination TLS, signed-assignment and database variables in
+`services/temporal/.env.example`. Agent, Runner, SCM and Steam handlers use the
+same runtime composition, but their service entries stay disabled until their
+respective production connector factories are supplied; no placeholder
+connector reports successful work.
 
 `ControlPlaneWorkflowHandler` consumes the non-compute commands for ideation,
 spec approval, Provider recovery, candidate acceptance, release MFA, external

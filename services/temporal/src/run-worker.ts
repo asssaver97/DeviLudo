@@ -8,9 +8,17 @@ import {
 } from "./activities";
 import { temporalWebpackConfigHook } from "./bundler";
 import { DELIVERY_TASK_QUEUE } from "./contracts";
+import { mtlsCommandDispatcherFromEnv } from "./mtls-dispatcher";
 
 export async function runDeliveryWorker(): Promise<void> {
   const endpoints = deliveryDispatchEndpointsFromEnv();
+  const allowLocalDispatch = process.env.DEVILUDO_ALLOW_INSECURE_LOCAL_DISPATCH === "1";
+  if (process.env.NODE_ENV === "production" && allowLocalDispatch) {
+    throw new Error("Production Temporal dispatch cannot disable mTLS");
+  }
+  const dispatcher = allowLocalDispatch
+    ? new HttpCommandDispatcher(endpoints)
+    : await mtlsCommandDispatcherFromEnv(endpoints);
   const connection = await NativeConnection.connect({
     address: process.env.TEMPORAL_ADDRESS ?? "localhost:7233",
   });
@@ -22,7 +30,7 @@ export async function runDeliveryWorker(): Promise<void> {
     taskQueue: process.env.DEVILUDO_TEMPORAL_TASK_QUEUE ?? DELIVERY_TASK_QUEUE,
     workflowsPath: existsSync(compiledWorkflow) ? compiledWorkflow : sourceWorkflow,
     bundlerOptions: { webpackConfigHook: temporalWebpackConfigHook },
-    activities: createDeliveryActivities(new HttpCommandDispatcher(endpoints)),
+    activities: createDeliveryActivities(dispatcher),
     maxConcurrentActivityTaskExecutions: parsePositiveInteger(
       process.env.DEVILUDO_MAX_CONCURRENT_ACTIVITIES,
       100,

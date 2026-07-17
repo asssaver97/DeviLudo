@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { bundleWorkflowCode } from "@temporalio/worker";
@@ -33,6 +34,14 @@ import {
   parseWorkflowSpiffeId,
   registerWorkflowCommandRoute,
 } from "../src/receiver-http";
+import { createWorkflowDestinationRuntime } from "../src/destination-runtime";
+import {
+  SignedWorkflowTenantAssignmentSource,
+  signWorkflowTenantAssignments,
+  type WorkflowTenantAssignmentClaims,
+} from "../src/tenant-assignments";
+import { postgresWorkflowPoolFromEnv } from "../src/node-postgres";
+import { MtlsCommandDispatcher } from "../src/mtls-dispatcher";
 import { dispatchKey } from "../src/workflows/game-delivery.workflow";
 
 const snapshot: DeliverySnapshot = {
@@ -196,6 +205,37 @@ test("dispatcher endpoint configuration is complete and service-specific", () =>
     () => deliveryDispatchEndpointsFromEnv({}),
     /DEVILUDO_CONTROL_PLANE_DISPATCH_URL is required/,
   );
+});
+
+test("mTLS dispatcher presents workload material and preserves immutable headers", async () => {
+  const request = agentDispatch();
+  const endpoints = deliveryDispatchEndpointsFromEnv({
+    DEVILUDO_CONTROL_PLANE_DISPATCH_URL: "https://control.internal/v1/workflow-commands",
+    DEVILUDO_AGENT_WORKER_DISPATCH_URL: "https://agent.internal/v1/workflow-commands",
+    DEVILUDO_RUNNER_CONTROL_DISPATCH_URL: "https://runner.internal/v1/workflow-commands",
+    DEVILUDO_SCM_PROXY_DISPATCH_URL: "https://scm.internal/v1/workflow-commands",
+    DEVILUDO_STEAM_PUBLISHER_DISPATCH_URL: "https://steam.internal/v1/workflow-commands",
+  });
+  const pem = Buffer.from("-----BEGIN TEST-----\n" + "a".repeat(64) + "\n-----END TEST-----");
+  const dispatcher = new MtlsCommandDispatcher(
+    endpoints,
+    { key: pem, certificate: pem, ca: pem },
+    12_000,
+    async (url, input) => {
+      assert.equal(url.toString(), endpoints["agent-worker"]);
+      assert.equal(input.timeoutMs, 12_000);
+      assert.equal(input.tls.certificate, pem);
+      assert.equal(input.headers["idempotency-key"], request.payload.idempotencyKey);
+      assert.equal(input.headers["x-deviludo-destination"], "agent-worker");
+      assert.deepEqual(JSON.parse(input.body), request);
+      return { statusCode: 202, payload: receiptFor(request) };
+    },
+  );
+  assert.deepEqual(await dispatcher.dispatch(request), receiptFor(request));
+  assert.throws(() => new MtlsCommandDispatcher(
+    { ...endpoints, "agent-worker": "http://agent.internal/v1/workflow-commands" },
+    { key: pem, certificate: pem, ca: pem },
+  ), /credential-free HTTPS/);
 });
 
 test("command receiver queues once and replays a fully bound receipt", async () => {
@@ -401,6 +441,121 @@ test("worker host rejects invalid tenant assignments and concurrent runs", async
   controller.abort();
   for (const resolve of pauses) resolve();
   await running;
+});
+
+test("signed tenant assignments bind workload, destination, expiry and exact tenant set", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const claims: WorkflowTenantAssignmentClaims = {
+    kind: "deviludo-workflow-tenant-assignments",
+    version: 1,
+    workloadId: "agent-worker-pool-01",
+    destination: "agent-worker",
+    revision: 7,
+    tenantIds: [tenantId],
+    issuedAt: "2026-07-18T00:00:00.000Z",
+    expiresAt: "2026-07-18T00:10:00.000Z",
+  };
+  let envelope: unknown = signWorkflowTenantAssignments("assignments-key-01", privateKey, claims);
+  const source = new SignedWorkflowTenantAssignmentSource(
+    { async load() { return envelope; } },
+    new Map([["assignments-key-01", publicKey]]),
+    claims.workloadId,
+    () => new Date("2026-07-18T00:05:00.000Z"),
+  );
+  assert.deepEqual(await source.listTenantIds("agent-worker"), [tenantId]);
+  await assert.rejects(source.listTenantIds("runner-control"), /manifest is invalid/);
+
+  envelope = { ...envelope as object, claims: { ...claims, tenantIds: [] } };
+  await assert.rejects(source.listTenantIds("agent-worker"), /signature is invalid/);
+
+  const expired = new SignedWorkflowTenantAssignmentSource(
+    { async load() { return signWorkflowTenantAssignments("assignments-key-01", privateKey, claims); } },
+    new Map([["assignments-key-01", publicKey]]),
+    claims.workloadId,
+    () => new Date("2026-07-18T00:10:00.000Z"),
+  );
+  await assert.rejects(expired.listTenantIds("agent-worker"), /manifest is invalid/);
+});
+
+test("destination runtime becomes ready only after probes and durably accepts commands", async () => {
+  const request = agentDispatch();
+  const queued: DeliveryDispatchRequest[] = [];
+  const queue = {
+    async enqueue(value: DeliveryDispatchRequest) { queued.push(value); },
+    async claimNext() { return null; },
+    async renew() { throw new Error("must not renew"); },
+    async complete() { throw new Error("must not complete"); },
+    async fail() { throw new Error("must not fail"); },
+  };
+  const server = Fastify({ logger: false });
+  const runtime = createWorkflowDestinationRuntime({
+    server,
+    destination: "agent-worker",
+    workerId: "agent-worker-pool-01",
+    inbox: new InMemoryWorkflowCommandInbox(() => new Date("2026-07-18T00:00:00.000Z")),
+    queue,
+    handler: { async execute() { throw new Error("must not execute"); } },
+    signals: { async signal() { throw new Error("must not signal"); } },
+    tenants: { async listTenantIds() { return []; } },
+    authorize() {},
+    probes: [async () => undefined],
+  });
+  await runtime.start(async () => { await server.ready(); });
+  assert.equal(runtime.state, "READY");
+  const health = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(health.statusCode, 200);
+  assert.deepEqual(health.json(), {
+    service: "deviludo-workflow-destination",
+    destination: "agent-worker",
+    state: "READY",
+    ready: true,
+  });
+  const accepted = await server.inject({
+    method: "POST",
+    url: "/v1/workflow-commands",
+    headers: {
+      "idempotency-key": request.payload.idempotencyKey,
+      "x-deviludo-workflow-id": request.payload.workflowId,
+      "x-deviludo-destination": request.destination,
+      "x-deviludo-operation": request.payload.command,
+    },
+    payload: request,
+  });
+  assert.equal(accepted.statusCode, 202);
+  assert.equal(queued.length, 1);
+  await runtime.stop();
+  assert.equal(runtime.state, "STOPPED");
+});
+
+test("destination runtime fails closed when a readiness dependency is unavailable", async () => {
+  const server = Fastify({ logger: false });
+  const runtime = createWorkflowDestinationRuntime({
+    server,
+    destination: "runner-control",
+    workerId: "runner-control-pool-01",
+    inbox: new InMemoryWorkflowCommandInbox(),
+    queue: {
+      async enqueue() {}, async claimNext() { return null; }, async renew() { return ""; },
+      async complete() {}, async fail() {},
+    },
+    handler: { async execute() { return { result: {} }; } },
+    signals: { async signal() {} },
+    tenants: { async listTenantIds() { return []; } },
+    authorize() {},
+    probes: [async () => { throw new Error("database unavailable"); }],
+  });
+  await assert.rejects(runtime.start(async () => { await server.ready(); }), /database unavailable/);
+  assert.equal(runtime.state, "FAILED");
+  await runtime.stop();
+});
+
+test("production workflow PostgreSQL configuration cannot opt out of TLS", () => {
+  assert.throws(() => postgresWorkflowPoolFromEnv({
+    NODE_ENV: "production",
+    DATABASE_URL: "postgresql://deviludo:secret@postgres.internal/deviludo",
+    DEVILUDO_ALLOW_INSECURE_LOCAL_POSTGRES: "1",
+  }), /cannot disable TLS/);
 });
 
 test("command receiver rejects confused-deputy, transport and state drift", async () => {
