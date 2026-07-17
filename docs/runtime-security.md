@@ -186,10 +186,25 @@ Hooks, credential helpers, terminal prompting, the file protocol and
 global/system Git configuration are disabled. The proxy creates only a validated
 `deviludo/*` branch and returns the base SHA, candidate SHA, authoritative diff
 paths and a SHA-256 digest of the committed tree listing. Adapter file-change
-events are advisory; E2E and delivery state bind to the SCM proxy receipt. The
-local implementation has no remote. A production GitHub adapter must obtain a
-short-lived GitHub App installation token inside a separate connector and retain
-the same immutable receipt contract.
+events are advisory; E2E and delivery state bind to the SCM proxy receipt.
+
+The GitHub adapter accepts only an Ed25519-attested candidate artifact whose
+tenant, project, run, attempt, specification, base SHA, branch, file content
+digests and source digest are fixed. Its trusted Connector obtains a short-lived
+installation token restricted to the numeric repository ID and `contents:write`
+plus `pull_requests:write`; neither the Agent nor SCM business logic receives
+that token. The endpoint is fixed to `https://api.github.com`, redirects are
+disabled, upstream error bodies are discarded, and the versioned Git Data API
+creates blobs, a tree, deterministic commit, branch and Draft PR.
+
+Merge requires a ten-minute control-plane acceptance signature and an
+authoritative, still-valid PASSED evidence lookup. The PR node, base, branch and
+head SHA are fetched again before the Draft is marked ready and merged. Candidate
+evidence never authorizes release: the merge receipt records the returned merge
+SHA and the then-observed default-branch head so a fresh main snapshot and full
+gate can follow. Every external operation is authorized into a persistent
+five-minute claim before network effects; an expired claim can be recovered
+without silently re-authorizing or allowing two workers to execute concurrently.
 
 ## Failure behavior and audit requirements
 

@@ -2,12 +2,14 @@ import { json } from "@/lib/control-plane/http";
 
 export async function POST() {
   return json({
-    data: {
-      mode: "github-app-oauth",
-      state: "DEMO",
-      authorizeUrl: "/settings/connections?github=demo-authorized",
-      requestedPermissions: ["contents:write", "pull_requests:write", "checks:read"],
-      passwordAccepted: false,
+    error: {
+      code: "GITHUB_APP_INSTALLATION_BROKER_REQUIRED",
+      message: "GitHub authorization requires the production installation-state broker and callback verifier.",
+      details: {
+        mode: "github-app-installation",
+        requestedPermissions: ["contents:write", "pull_requests:write", "metadata:read"],
+        passwordAccepted: false,
+      },
     },
-  }, { status: 201 });
+  }, { status: 503 });
 }

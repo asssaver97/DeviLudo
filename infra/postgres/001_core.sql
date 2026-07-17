@@ -31,6 +31,37 @@ CREATE TABLE deviludo.projects (
   UNIQUE (tenant_id, slug)
 );
 
+CREATE TABLE deviludo.github_installations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  installation_id bigint NOT NULL CHECK (installation_id > 0),
+  account_node_id text NOT NULL,
+  account_login text NOT NULL,
+  repository_selection text NOT NULL CHECK (repository_selection IN ('all', 'selected')),
+  permissions jsonb NOT NULL,
+  status text NOT NULL CHECK (status IN ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED', 'REVOKED')),
+  verified_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, installation_id)
+);
+
+CREATE TABLE deviludo.github_repository_bindings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL UNIQUE REFERENCES deviludo.projects(id),
+  github_installation_id uuid NOT NULL REFERENCES deviludo.github_installations(id),
+  repository_id bigint NOT NULL CHECK (repository_id > 0),
+  repository_node_id text NOT NULL,
+  owner_name text NOT NULL,
+  repository_name text NOT NULL,
+  default_branch text NOT NULL,
+  status text NOT NULL CHECK (status IN ('ACTIVE', 'REVOKED', 'MISSING_PERMISSION')),
+  bound_at timestamptz NOT NULL DEFAULT now(),
+  version integer NOT NULL DEFAULT 1,
+  UNIQUE (tenant_id, repository_node_id)
+);
+
 CREATE TABLE deviludo.immutable_revisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
@@ -161,6 +192,56 @@ CREATE TABLE deviludo.platform_runner_events (
   UNIQUE (platform_lease_id, seq_no)
 );
 
+CREATE TABLE deviludo.scm_operation_claims (
+  operation_key text PRIMARY KEY,
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  operation text NOT NULL CHECK (operation IN ('PUBLISH_CANDIDATE', 'MERGE_ACCEPTED_CANDIDATE')),
+  request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  claim_token uuid NOT NULL,
+  claim_expires_at timestamptz NOT NULL,
+  response jsonb,
+  authorized_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz
+);
+
+CREATE TABLE deviludo.github_candidate_receipts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  run_id uuid NOT NULL REFERENCES deviludo.agent_runs(id),
+  attempt_id text NOT NULL UNIQUE,
+  spec_revision_id uuid NOT NULL REFERENCES deviludo.immutable_revisions(id),
+  repository_binding_id uuid NOT NULL REFERENCES deviludo.github_repository_bindings(id),
+  artifact_digest text NOT NULL CHECK (artifact_digest ~ '^[a-f0-9]{64}$'),
+  base_commit_sha text NOT NULL CHECK (base_commit_sha ~ '^[a-f0-9]{40}$'),
+  candidate_branch text NOT NULL,
+  candidate_commit_sha text NOT NULL CHECK (candidate_commit_sha ~ '^[a-f0-9]{40}$'),
+  source_digest text NOT NULL CHECK (source_digest ~ '^[a-f0-9]{64}$'),
+  pull_request_number bigint NOT NULL CHECK (pull_request_number > 0),
+  pull_request_node_id text NOT NULL,
+  pull_request_url text NOT NULL,
+  receipt jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (repository_binding_id, pull_request_number)
+);
+
+CREATE TABLE deviludo.github_merge_receipts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  candidate_receipt_id uuid NOT NULL UNIQUE REFERENCES deviludo.github_candidate_receipts(id),
+  acceptance_nonce text NOT NULL,
+  evidence_bundle_digest text NOT NULL CHECK (evidence_bundle_digest ~ '^[a-f0-9]{64}$'),
+  candidate_commit_sha text NOT NULL CHECK (candidate_commit_sha ~ '^[a-f0-9]{40}$'),
+  merge_commit_sha text NOT NULL CHECK (merge_commit_sha ~ '^[a-f0-9]{40}$'),
+  default_branch_head_sha text NOT NULL CHECK (default_branch_head_sha ~ '^[a-f0-9]{40}$'),
+  requires_fresh_main_snapshot boolean NOT NULL,
+  receipt jsonb NOT NULL,
+  merged_at timestamptz NOT NULL,
+  UNIQUE (tenant_id, acceptance_nonce)
+);
+
 CREATE TABLE deviludo.evidence_bundles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
@@ -225,6 +306,14 @@ CREATE TRIGGER audit_events_append_only
 BEFORE UPDATE OR DELETE ON deviludo.audit_events
 FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
 
+CREATE TRIGGER github_candidate_receipts_append_only
+BEFORE UPDATE OR DELETE ON deviludo.github_candidate_receipts
+FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
+
+CREATE TRIGGER github_merge_receipts_append_only
+BEFORE UPDATE OR DELETE ON deviludo.github_merge_receipts
+FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
+
 CREATE OR REPLACE FUNCTION deviludo.protect_run_configuration()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -259,8 +348,10 @@ DO $$
 DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
-    'projects', 'immutable_revisions', 'agent_runs', 'e2e_attempts',
+    'projects', 'github_installations', 'github_repository_bindings',
+    'immutable_revisions', 'agent_runs', 'e2e_attempts',
     'credential_versions', 'e2e_platform_leases', 'platform_runner_events', 'evidence_bundles',
+    'scm_operation_claims', 'github_candidate_receipts', 'github_merge_receipts',
     'steam_releases', 'audit_events'
   ] LOOP
     EXECUTE format('ALTER TABLE deviludo.%I ENABLE ROW LEVEL SECURITY', table_name);
@@ -276,6 +367,11 @@ CREATE INDEX agent_runs_project_state_idx ON deviludo.agent_runs (tenant_id, pro
 CREATE INDEX e2e_attempt_state_idx ON deviludo.e2e_attempts (state, created_at);
 CREATE INDEX e2e_platform_lease_idx ON deviludo.e2e_platform_leases (state, lease_expires_at);
 CREATE INDEX e2e_platform_runner_idx ON deviludo.e2e_platform_leases (runner_id, state, lease_expires_at);
+CREATE INDEX github_installation_status_idx ON deviludo.github_installations (tenant_id, status);
+CREATE INDEX github_repository_installation_idx ON deviludo.github_repository_bindings (github_installation_id, status);
+CREATE INDEX scm_operation_claim_idx ON deviludo.scm_operation_claims (tenant_id, project_id, claim_expires_at);
+CREATE INDEX github_candidate_project_commit_idx ON deviludo.github_candidate_receipts (project_id, candidate_commit_sha);
+CREATE INDEX github_merge_project_commit_idx ON deviludo.github_merge_receipts (project_id, merge_commit_sha);
 CREATE INDEX evidence_commit_idx ON deviludo.evidence_bundles (tenant_id, project_id, commit_sha);
 CREATE INDEX audit_tenant_time_idx ON deviludo.audit_events (tenant_id, occurred_at DESC);
 

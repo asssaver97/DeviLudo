@@ -26,6 +26,11 @@ behind the web console:
   applies independent fencing tokens and derives the final matrix result from
   content-addressed evidence manifests. The public Web process is deliberately
   not a Runner ingress.
+- `scm-proxy`: finalizes a local authoritative candidate and provides the
+  production GitHub App core. Signed candidate/acceptance payloads, exact
+  repository binding, repository-scoped installation tokens, Git Data/Draft PR
+  APIs, evidence-gated merge and lease-claimed idempotency keep credentials and
+  branch authority outside Agent workers.
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,

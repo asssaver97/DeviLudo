@@ -5,13 +5,31 @@ import { AppShell } from "./AppShell";
 import { CheckIcon, GithubIcon, ShieldIcon, SteamIcon } from "./Icons";
 
 export function ConnectionsPanel() {
-  const [githubConnected, setGithubConnected] = useState(true);
+  const [githubConnected] = useState(false);
+  const [githubBusy, setGithubBusy] = useState(false);
   const [steamState, setSteamState] = useState<"ready" | "waiting">("ready");
   const [notice, setNotice] = useState("");
 
-  function connectGithub() {
-    setGithubConnected(true);
-    setNotice("演示授权完成：生产环境将跳转至 GitHub App OAuth，不保存 GitHub 密码。");
+  async function connectGithub() {
+    setGithubBusy(true);
+    try {
+      const response = await fetch("/api/connections/github", { method: "POST" });
+      const payload = await response.json() as { data?: { authorizeUrl?: string }; error?: { message?: string } };
+      if (!response.ok || !payload.data?.authorizeUrl) {
+        setNotice(payload.error?.message ?? "GitHub App 安装服务尚未配置。");
+        return;
+      }
+      const authorizeUrl = new URL(payload.data.authorizeUrl);
+      if (authorizeUrl.protocol !== "https:" || authorizeUrl.hostname !== "github.com") {
+        setNotice("GitHub 授权地址未通过安全校验。");
+        return;
+      }
+      window.location.assign(authorizeUrl.toString());
+    } catch {
+      setNotice("无法连接 GitHub App 安装服务。");
+    } finally {
+      setGithubBusy(false);
+    }
   }
 
   function beginSteamLogin() {
@@ -41,7 +59,7 @@ export function ConnectionsPanel() {
                 </div>
               ) : <p className="connection-empty">连接后，代码修改只会进入工作分支和 Draft PR。</p>}
               <div className="connection-actions">
-                <button className="button button-secondary" onClick={() => githubConnected ? setGithubConnected(false) : connectGithub()} type="button">{githubConnected ? "重新授权" : "使用 GitHub 授权"}</button>
+                <button className="button button-secondary" disabled={githubBusy} onClick={connectGithub} type="button">{githubBusy ? "正在创建授权…" : githubConnected ? "重新授权" : "使用 GitHub 授权"}</button>
                 {githubConnected ? <button className="quiet-button" onClick={() => setNotice("仓库范围选择器将在 GitHub App 安装页打开。") } type="button">管理仓库范围</button> : null}
               </div>
             </div>

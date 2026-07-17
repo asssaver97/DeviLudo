@@ -67,6 +67,50 @@ export const projects = sqliteTable(
   ],
 );
 
+export const githubInstallations = sqliteTable(
+  "github_installations",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    installationId: text("installation_id").notNull(),
+    accountNodeId: text("account_node_id").notNull(),
+    accountLogin: text("account_login").notNull(),
+    repositorySelection: text("repository_selection", { enum: ["all", "selected"] }).notNull(),
+    permissions: text("permissions", { mode: "json" }).$type<JsonRecord>().notNull(),
+    status: text("status", { enum: ["PENDING_VERIFICATION", "ACTIVE", "SUSPENDED", "REVOKED"] }).notNull(),
+    verifiedAt: text("verified_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("github_installation_tenant_unique").on(table.tenantId, table.installationId),
+    index("github_installation_status_idx").on(table.tenantId, table.status),
+  ],
+);
+
+export const githubRepositoryBindings = sqliteTable(
+  "github_repository_bindings",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    githubInstallationId: text("github_installation_id").notNull().references(() => githubInstallations.id),
+    repositoryId: integer("repository_id").notNull(),
+    repositoryNodeId: text("repository_node_id").notNull(),
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    status: text("status", { enum: ["ACTIVE", "REVOKED", "MISSING_PERMISSION"] }).notNull(),
+    boundAt: text("bound_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    uniqueIndex("github_repository_project_unique").on(table.projectId),
+    uniqueIndex("github_repository_tenant_node_unique").on(table.tenantId, table.repositoryNodeId),
+    index("github_repository_installation_idx").on(table.githubInstallationId, table.status),
+  ],
+);
+
 export const gameSpecRevisions = sqliteTable(
   "game_spec_revisions",
   {
@@ -415,6 +459,74 @@ export const platformRunnerEvents = sqliteTable(
   (table) => [
     uniqueIndex("platform_runner_event_seq_unique").on(table.platformLeaseId, table.seqNo),
     index("platform_runner_event_attempt_idx").on(table.attemptId, table.platform, table.fencingToken),
+  ],
+);
+
+export const scmOperationClaims = sqliteTable(
+  "scm_operation_claims",
+  {
+    key: text("key").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    operation: text("operation", { enum: ["PUBLISH_CANDIDATE", "MERGE_ACCEPTED_CANDIDATE"] }).notNull(),
+    requestDigest: text("request_digest").notNull(),
+    claimToken: text("claim_token").notNull(),
+    claimExpiresAt: text("claim_expires_at").notNull(),
+    response: text("response", { mode: "json" }).$type<JsonRecord>(),
+    authorizedAt: text("authorized_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [index("scm_operation_active_claim_idx").on(table.tenantId, table.projectId, table.claimExpiresAt)],
+);
+
+export const githubCandidateReceipts = sqliteTable(
+  "github_candidate_receipts",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    specRevisionId: text("spec_revision_id").notNull().references(() => gameSpecRevisions.id),
+    repositoryBindingId: text("repository_binding_id").notNull().references(() => githubRepositoryBindings.id),
+    artifactDigest: text("artifact_digest").notNull(),
+    baseCommitSha: text("base_commit_sha").notNull(),
+    candidateBranch: text("candidate_branch").notNull(),
+    candidateCommitSha: text("candidate_commit_sha").notNull(),
+    sourceDigest: text("source_digest").notNull(),
+    pullRequestNumber: integer("pull_request_number").notNull(),
+    pullRequestNodeId: text("pull_request_node_id").notNull(),
+    pullRequestUrl: text("pull_request_url").notNull(),
+    receipt: text("receipt", { mode: "json" }).$type<JsonRecord>().notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("github_candidate_attempt_unique").on(table.attemptId),
+    uniqueIndex("github_candidate_pr_unique").on(table.repositoryBindingId, table.pullRequestNumber),
+    index("github_candidate_project_commit_idx").on(table.projectId, table.candidateCommitSha),
+  ],
+);
+
+export const githubMergeReceipts = sqliteTable(
+  "github_merge_receipts",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    candidateReceiptId: text("candidate_receipt_id").notNull().references(() => githubCandidateReceipts.id),
+    acceptanceNonce: text("acceptance_nonce").notNull(),
+    evidenceBundleDigest: text("evidence_bundle_digest").notNull(),
+    candidateCommitSha: text("candidate_commit_sha").notNull(),
+    mergeCommitSha: text("merge_commit_sha").notNull(),
+    defaultBranchHeadSha: text("default_branch_head_sha").notNull(),
+    requiresFreshMainSnapshot: integer("requires_fresh_main_snapshot", { mode: "boolean" }).notNull(),
+    receipt: text("receipt", { mode: "json" }).$type<JsonRecord>().notNull(),
+    mergedAt: text("merged_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("github_merge_candidate_unique").on(table.candidateReceiptId),
+    uniqueIndex("github_merge_acceptance_nonce_unique").on(table.tenantId, table.acceptanceNonce),
+    index("github_merge_project_commit_idx").on(table.projectId, table.mergeCommitSha),
   ],
 );
 

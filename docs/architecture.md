@@ -107,6 +107,14 @@ iteration and invalidates all prior candidate evidence. User acceptance permits
 merge, after which a full gate reruns against the actual main SHA—candidate PR
 evidence can never authorize release.
 
+The GitHub Connector is repository-scoped by installation ID plus numeric and
+GraphQL repository IDs. An Ed25519-attested candidate artifact drives GitHub's
+blob/tree/commit/ref APIs; the Agent never pushes. Draft PR creation and merge
+are idempotent, lease-claimed external operations. A merge requires a fresh
+signed acceptance proof and a database lookup of the exact valid candidate
+evidence. If the default branch advances immediately after merge, the receipt
+marks `requiresFreshMainSnapshot` instead of reusing the candidate source digest.
+
 ## Runner fencing and evidence
 
 Every selected OS receives a separate lease binding `attempt_id`, platform,

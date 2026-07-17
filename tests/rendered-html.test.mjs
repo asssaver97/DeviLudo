@@ -96,3 +96,12 @@ test("public web worker remains fail-closed for runner event writes", async () =
   assert.equal(write.status, 503);
   assert.equal((await write.json()).error.code, "RUNNER_MTLS_INGRESS_REQUIRED");
 });
+
+test("localhost never fabricates a successful GitHub App authorization", async () => {
+  const response = await request("/api/connections/github", { method: "POST" });
+  assert.equal(response.status, 503);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "GITHUB_APP_INSTALLATION_BROKER_REQUIRED");
+  assert.equal(payload.error.details.passwordAccepted, false);
+  assert.doesNotMatch(JSON.stringify(payload), /demo-authorized|github password/i);
+});
