@@ -5,7 +5,7 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 
 type FetchLike = typeof fetch;
 
-export type SteamEnrollmentState = "WAITING_STEAM_GUARD" | "READY";
+export type SteamEnrollmentState = "WAITING_CREDENTIALS" | "WAITING_STEAM_GUARD" | "READY";
 
 export interface SteamEnrollmentResult {
   readonly enrollmentId: string;
@@ -79,14 +79,14 @@ export class SteamEnrollmentBrokerClient {
     const body = await readObject(response);
     const enrollmentId = requireOpaqueId(body.enrollmentId, "Steam enrollment");
     const state = body.state;
-    if (state !== "WAITING_STEAM_GUARD" && state !== "READY") throw new Error("Steam enrollment state is invalid");
+    if (state !== "WAITING_CREDENTIALS" && state !== "WAITING_STEAM_GUARD" && state !== "READY") throw new Error("Steam enrollment state is invalid");
     const expiresAt = requireIso(body.expiresAt, "Steam enrollment expiry");
     const now = this.#now();
     if (!Number.isFinite(now.getTime()) || Date.parse(expiresAt) <= now.getTime() || Date.parse(expiresAt) > now.getTime() + 30 * 60_000) {
       throw new Error("Steam enrollment expiry is invalid");
     }
     let enrollmentUrl: string | null = null;
-    if (state === "WAITING_STEAM_GUARD") {
+    if (state !== "READY") {
       if (typeof body.enrollmentUrl !== "string") throw new Error("Steam enrollment URL is missing");
       enrollmentUrl = validateEnrollmentUrl(body.enrollmentUrl, this.#publicOrigin, enrollmentId);
     } else if (body.enrollmentUrl !== null && body.enrollmentUrl !== undefined) {

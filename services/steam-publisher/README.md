@@ -38,6 +38,21 @@ When the broker or platform-session verification is unavailable, the public
 route remains fail-closed (`503`) and does not fabricate an enrollment or a
 usable Steam session. The local preview intentionally exercises this state.
 
+`SteamEnrollmentCoordinator` owns the isolated enrollment state machine:
+`WAITING_CREDENTIALS → WAITING_STEAM_GUARD → READY`. It binds each enrollment
+to tenant, user, platform-session digest, expiry and idempotency digest; clears
+password, Guard-code and `config.vdf` buffers after use; and revokes a Vault
+write if the database transaction cannot commit. `PostgresSteamEnrollmentStore`
+applies tenant RLS and atomically creates the credential metadata, build session
+and terminal enrollment record. Migration `005_steam_enrollments.sql` stores no
+passwords, Guard codes or `config.vdf` bytes.
+
+The internal `POST /v1/steam/enrollments` adapter accepts only the three-field
+platform principal and explicitly rejects extra fields, preventing credentials
+from being smuggled through the Web workload. Interactive credential and Guard
+entry belong to the broker's separately hosted public UI, not this control
+plane route.
+
 Run the contract tests from the repository root:
 
 ```bash
