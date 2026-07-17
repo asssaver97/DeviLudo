@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 14 }, (_, index) => {
+  const offsets = Array.from({ length: 15 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,19 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Runner ingress persists replayable signed jobs and immutable lease/event bindings", () => {
+  const migration = readFileSync(new URL("../infra/postgres/015_runner_ingress_transactions.sql", import.meta.url), "utf8");
+  const adapter = readFileSync(new URL("../services/runner-control/src/postgres-ingress.ts", import.meta.url), "utf8");
+  assert.match(migration, /ADD COLUMN job jsonb/);
+  assert.match(migration, /runner identity and capabilities are immutable/);
+  assert.match(migration, /platform lease binding and signed job are immutable/);
+  assert.match(migration, /platform_runner_events_append_only/);
+  assert.match(adapter, /FOR UPDATE OF attempt SKIP LOCKED/);
+  assert.match(adapter, /COALESCE\(MAX\(fencing_token\), 0\) \+ 1/);
+  assert.match(adapter, /Runner is not assigned to this tenant/);
+  assert.match(adapter, /signCanonical/);
 });
 
 test("physical Runner attempts require an append-only tenant execution lock", () => {

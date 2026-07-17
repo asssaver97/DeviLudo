@@ -56,8 +56,24 @@ export interface SourceArtifact {
   readonly digest: string;
 }
 
+export type RunnerJobExecution =
+  | Readonly<{
+      kind: "SOURCE_ARTIFACT";
+      objectKey: string;
+      artifactDigest: string;
+    }>
+  | Readonly<{
+      kind: "STEAM_CLEAN_INSTALL";
+      steamAppId: string;
+      buildId: string;
+      betaBranch: string;
+      installGrantId: string;
+    }>;
+
 export interface MatrixAttemptSpec {
   readonly attemptId: string;
+  readonly executionLockId: string;
+  readonly executionLockDigest: string;
   readonly tenantId: string;
   readonly projectId: string;
   readonly runId: string;
@@ -80,7 +96,7 @@ export interface MatrixAttemptSpec {
 }
 
 export interface RunnerJobPayload {
-  readonly schemaVersion: "deviludo.runner-job.v1";
+  readonly schemaVersion: "deviludo.runner-job.v2";
   readonly attemptId: string;
   readonly tenantId: string;
   readonly projectId: string;
@@ -90,9 +106,11 @@ export interface RunnerJobPayload {
   readonly platform: TargetPlatform;
   readonly fencingToken: number;
   readonly leaseExpiresAt: string;
+  readonly executionLockId: string;
+  readonly executionLockDigest: string;
   readonly commitSha: string;
   readonly sourceDigest: string;
-  readonly sourceArtifact: SourceArtifact;
+  readonly execution: RunnerJobExecution;
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
@@ -101,6 +119,10 @@ export interface RunnerJobPayload {
   readonly godotTestKitDigest: string;
   readonly exportTemplatesDigest: string;
   readonly runnerCapabilityDigest: string;
+  readonly buildManifestDigest: string;
+  readonly sbomDigest: string;
+  readonly vulnerabilityScanDigest: string;
+  readonly assetLicenseLedgerDigest: string;
   readonly requiredEvidence: readonly (
     | "logs"
     | "junit"

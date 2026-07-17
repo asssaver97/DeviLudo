@@ -32,7 +32,7 @@ import type {
   TlsRunnerIdentity,
 } from "./contracts";
 
-const REQUIRED_EVIDENCE: RunnerJobPayload["requiredEvidence"] = Object.freeze([
+export const REQUIRED_RUNNER_EVIDENCE: RunnerJobPayload["requiredEvidence"] = Object.freeze([
   "logs",
   "junit",
   "input-timeline",
@@ -66,8 +66,8 @@ export class RunnerMatrixCoordinator {
     capabilities: RunnerCapabilities,
     at = new Date().toISOString(),
   ): Promise<RegisteredRunner> {
-    validateIdentity(identity, at);
-    validateCapabilities(capabilities);
+    validateRunnerIdentity(identity, at);
+    validateRunnerCapabilities(capabilities);
     if (!(await this.#admission.authorize({ identity, capabilities }))) {
       throw new Error("Runner admission policy rejected this workload identity");
     }
@@ -237,7 +237,7 @@ export class RunnerMatrixCoordinator {
 
   #signedJob(spec: MatrixAttemptSpec, runner: RegisteredRunner, lease: PlatformRunnerLease): SignedRunnerJob {
     const payload: RunnerJobPayload = deepFreeze({
-      schemaVersion: "deviludo.runner-job.v1",
+      schemaVersion: "deviludo.runner-job.v2",
       attemptId: spec.attemptId,
       tenantId: spec.tenantId,
       projectId: spec.projectId,
@@ -247,9 +247,15 @@ export class RunnerMatrixCoordinator {
       platform: runner.platform,
       fencingToken: lease.fencingToken,
       leaseExpiresAt: lease.leaseExpiresAt,
+      executionLockId: spec.executionLockId,
+      executionLockDigest: spec.executionLockDigest,
       commitSha: spec.commitSha,
       sourceDigest: spec.sourceDigest,
-      sourceArtifact: spec.sourceArtifact,
+      execution: {
+        kind: "SOURCE_ARTIFACT",
+        objectKey: spec.sourceArtifact.objectKey,
+        artifactDigest: spec.sourceArtifact.digest,
+      },
       specRevisionId: spec.specRevisionId,
       specDigest: spec.specDigest,
       testPlanDigest: spec.testPlanDigest,
@@ -258,7 +264,11 @@ export class RunnerMatrixCoordinator {
       godotTestKitDigest: spec.godotTestKitDigest,
       exportTemplatesDigest: spec.exportTemplates[runner.platform],
       runnerCapabilityDigest: runner.capabilityDigest,
-      requiredEvidence: REQUIRED_EVIDENCE,
+      buildManifestDigest: spec.buildManifestDigest,
+      sbomDigest: spec.sbomDigest,
+      vulnerabilityScanDigest: spec.vulnerabilityScanDigest,
+      assetLicenseLedgerDigest: spec.assetLicenseLedgerDigest,
+      requiredEvidence: REQUIRED_RUNNER_EVIDENCE,
     });
     return deepFreeze({
       payload,
@@ -271,7 +281,7 @@ export class RunnerMatrixCoordinator {
   }
 
   #authorizedRunner(identity: TlsRunnerIdentity, runnerId: string, at: string): RegisteredRunner {
-    validateIdentity(identity, at);
+    validateRunnerIdentity(identity, at);
     const runner = this.#runners.get(runnerId);
     if (!runner || runner.spiffeId !== identity.spiffeId || runner.certificateFingerprint !== identity.certificateFingerprint || runner.certificateSerial !== identity.certificateSerial) {
       throw new Error("Runner workload identity does not match the registered runner");
@@ -342,20 +352,40 @@ export function verifyRunnerJob(
   publicKey: Parameters<typeof verifyCanonical>[0],
   expected: RunnerJobVerificationContext,
 ): boolean {
-  return job.payload.schemaVersion === "deviludo.runner-job.v1"
+  return job.payload.schemaVersion === "deviludo.runner-job.v2"
     && job.signature.algorithm === "Ed25519"
     && job.signature.keyId === expected.keyId
     && job.payload.runnerId === expected.runnerId
     && job.payload.platform === expected.platform
     && job.payload.targetMatrix.includes(expected.platform)
+    && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(job.payload.executionLockId)
+    && [
+      job.payload.executionLockDigest,
+      job.payload.buildManifestDigest,
+      job.payload.sbomDigest,
+      job.payload.vulnerabilityScanDigest,
+      job.payload.assetLicenseLedgerDigest,
+    ].every((value) => /^[a-f0-9]{64}$/.test(value))
     && Number.isFinite(Date.parse(expected.now))
     && Number.isFinite(Date.parse(job.payload.leaseExpiresAt))
     && Date.parse(job.payload.leaseExpiresAt) >= Date.parse(expected.now)
-    && sha256Canonical(job.payload.requiredEvidence) === sha256Canonical(REQUIRED_EVIDENCE)
+    && validRunnerJobExecution(job.payload.execution)
+    && sha256Canonical(job.payload.requiredEvidence) === sha256Canonical(REQUIRED_RUNNER_EVIDENCE)
     && verifyCanonical(publicKey, job.payload, job.signature.value);
 }
 
-function validateIdentity(identity: TlsRunnerIdentity, at: string): void {
+function validRunnerJobExecution(value: RunnerJobPayload["execution"]): boolean {
+  if (value.kind === "SOURCE_ARTIFACT") {
+    return !!value.objectKey && !value.objectKey.startsWith("/") && !value.objectKey.includes("..")
+      && /^[a-f0-9]{64}$/.test(value.artifactDigest);
+  }
+  return /^[1-9][0-9]{0,19}$/.test(value.steamAppId)
+    && /^[1-9][0-9]{0,19}$/.test(value.buildId)
+    && /^[a-z0-9][a-z0-9_-]{2,39}$/.test(value.betaBranch)
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value.installGrantId);
+}
+
+export function validateRunnerIdentity(identity: TlsRunnerIdentity, at: string): void {
   if (!identity.spiffeId.startsWith("spiffe://")) throw new Error("Runner SPIFFE identity is required");
   assertSha256(identity.certificateFingerprint, "certificateFingerprint");
   if (!identity.certificateSerial.trim()) throw new Error("Runner certificate serial is required");
@@ -364,7 +394,16 @@ function validateIdentity(identity: TlsRunnerIdentity, at: string): void {
   }
 }
 
-function validateCapabilities(capabilities: RunnerCapabilities): void {
+export function validateRunnerCapabilities(capabilities: RunnerCapabilities): void {
+  const keys = Object.keys(capabilities).sort();
+  const expectedKeys = [
+    "runnerId", "platform", "architecture", "osVersion", "runnerImageDigest",
+    "godotVersion", "godotBinaryDigest", "exportTemplatesDigest", "gpu",
+    "display", "audio", "installedAutonomousAgents", "capabilityDigest",
+  ].sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error("Runner capability fields are invalid");
+  }
   if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(capabilities.runnerId)) throw new Error("Runner ID is invalid");
   if (!TARGET_PLATFORMS.includes(capabilities.platform)) throw new Error("Runner platform is invalid");
   if (!capabilities.osVersion.trim() || !capabilities.godotVersion.trim() || !capabilities.gpu.trim()) throw new Error("Runner capability metadata is incomplete");
@@ -386,6 +425,7 @@ function validateAttemptSpec(spec: MatrixAttemptSpec): void {
   assertGitSha(spec.commitSha);
   for (const [field, value] of Object.entries({
     sourceDigest: spec.sourceDigest,
+    executionLockDigest: spec.executionLockDigest,
     sourceArtifactDigest: spec.sourceArtifact.digest,
     specDigest: spec.specDigest,
     testPlanDigest: spec.testPlanDigest,
@@ -395,6 +435,9 @@ function validateAttemptSpec(spec: MatrixAttemptSpec): void {
     vulnerabilityScanDigest: spec.vulnerabilityScanDigest,
     assetLicenseLedgerDigest: spec.assetLicenseLedgerDigest,
   })) assertSha256(value, field);
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(spec.executionLockId)) {
+    throw new Error("Runner execution lock ID is invalid");
+  }
   if (!spec.sourceArtifact.objectKey.trim() || spec.sourceArtifact.objectKey.startsWith("/") || spec.sourceArtifact.objectKey.includes("..")) throw new Error("Source artifact object key is invalid");
   const matrix = uniqueSorted(spec.targetMatrix);
   if (!matrix.length || matrix.some((platform) => !TARGET_PLATFORMS.includes(platform))) throw new Error("Target matrix is invalid");

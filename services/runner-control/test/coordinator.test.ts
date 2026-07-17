@@ -59,6 +59,8 @@ const templates: Record<TargetPlatform, string> = {
 function attempt(attemptId = "attempt-matrix-1", matrix: readonly TargetPlatform[] = ["windows", "linux", "macos"]): MatrixAttemptSpec {
   return {
     attemptId,
+    executionLockId: "99999999-9999-4999-8999-999999999999",
+    executionLockDigest: digest("0"),
     tenantId: "tenant-1",
     projectId: "project-1",
     runId: "run-1",

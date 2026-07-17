@@ -5,3 +5,4 @@ export * from "./execution-lock";
 export * from "./tls-identity";
 export * from "./workflow-handler";
 export * from "./postgres-workflow";
+export * from "./postgres-ingress";

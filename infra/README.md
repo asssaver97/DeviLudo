@@ -35,7 +35,11 @@ actual merged-main source digest instead of reusing a candidate digest.
 Migration `014` introduces an append-only, tenant-RLS Runner execution lock that
 content-binds prepared source/Steam inputs, the exact Godot/TestKit/export
 toolchain and supply-chain evidence before any physical job can be scheduled.
-Workflow E2E attempts hold a same-tenant foreign key to that lock. All fourteen migrations are
+Workflow E2E attempts hold a same-tenant foreign key to that lock.
+Migration `015` hardens physical Runner registrations and platform leases,
+persists the complete Ed25519-signed job for exact retry replay, reserves an
+immutable platform-evidence slot and makes Runner events append-only. All
+fifteen migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

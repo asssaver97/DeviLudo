@@ -39,6 +39,16 @@ digests and build/SBOM/vulnerability/license evidence. The attempt stores a
 same-tenant foreign key and digest for the lock. Missing locks remain retryable;
 malformed, tampered or input-mismatched locks are terminal conflicts.
 
+`PostgresRunnerIngressStore` is the production transaction core for physical
+registration and leasing. Admission fixes the SPIFFE/certificate/capability
+binding, a server-side assignment policy authorizes the tenant, and forced RLS
+selects an eligible attempt with `SKIP LOCKED`. It increments the platform
+fencing token, derives a v2 Source/Steam job only from the execution lock,
+includes all supply-chain digests, signs it with Ed25519 and persists the whole
+envelope. A retry re-verifies and returns those identical signed bytes instead
+of issuing a second lease. This store still requires the dedicated mTLS HTTP
+adapter described below; it is never mounted in the public Web process.
+
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the
 content-addressed object store. It must expose those operations only behind a
