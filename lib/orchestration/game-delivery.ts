@@ -319,6 +319,7 @@ const SHA1 = /^[a-f0-9]{40}$/;
 const STEAM_BUILD_ID = /^[0-9]{1,20}$/;
 
 export function assertDeliverySignal(signal: DeliverySignal): void {
+  if (!signal || typeof signal !== "object") throw new Error("Delivery signal is invalid");
   if (!SIGNAL_ID.test(signal.signalId)) throw new Error("Delivery signal ID is invalid");
   switch (signal.type) {
     case "SPEC_READY":
@@ -363,6 +364,9 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
       return;
     case "CANCEL":
       if (!signal.reason.trim() || signal.reason.length > 2_000) throw new Error("Cancellation reason is invalid");
+      return;
+    default:
+      throw new Error("Delivery signal type is invalid");
   }
 }
 

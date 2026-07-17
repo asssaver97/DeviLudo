@@ -25,7 +25,10 @@ used by one tenant from blocking another tenant through an RLS-hidden row.
 Migration `010` adds bounded, digest-keyed administrator mutation claims so
 idempotent results survive control-plane restarts and remain atomic across
 replicas. Migration `011` adds the versioned Agent administration catalog and
-its separate append-only audit ledger. All eleven migrations are
+its separate append-only audit ledger. Migration `012` atomically completes
+authoritative workflow actions and records their exact Temporal signals in a
+tenant-RLS transactional outbox so an approval cannot be lost after a process
+failure. All twelve migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

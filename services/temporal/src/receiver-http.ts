@@ -60,17 +60,25 @@ export function authorizeTemporalWorkerTls(
   allowedSpiffeIds: ReadonlySet<string>,
   at: Date = new Date(),
 ): void {
+  const spiffeId = workflowSpiffeIdFromAuthorizedTls(request, at);
+  if (!allowedSpiffeIds.has(spiffeId)) throw new Error("Temporal workload identity is not allowed");
+}
+
+export function workflowSpiffeIdFromAuthorizedTls(
+  request: FastifyRequest,
+  at: Date = new Date(),
+): string {
   const socket = request.raw.socket;
   if (!(socket instanceof TLSSocket) || !socket.authorized) {
     throw new Error("Workflow dispatch requires an authorized mutual-TLS socket");
   }
   const peer = socket.getPeerCertificate(false);
   const spiffeId = parseWorkflowSpiffeId(peer.subjectaltname ?? "");
-  if (!allowedSpiffeIds.has(spiffeId)) throw new Error("Temporal workload identity is not allowed");
   const expiresAt = Date.parse(peer.valid_to);
   if (!peer.serialNumber || !Number.isFinite(expiresAt) || expiresAt <= at.getTime()) {
     throw new Error("Temporal workload certificate is invalid");
   }
+  return spiffeId;
 }
 
 export function parseWorkflowSpiffeId(subjectAlternativeName: string): string {

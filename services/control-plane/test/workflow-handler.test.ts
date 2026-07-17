@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
+import Fastify from "fastify";
 import type { DeliverySnapshot, DeliverySignal } from "../../temporal/src/contracts";
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
 import {
@@ -12,6 +14,16 @@ import {
   PostgresControlPlaneWorkflowActionStore,
   type ControlPlaneWorkflowSqlClient,
 } from "../src/workflow-action-postgres";
+import { PostgresWorkflowActionCompletionStore } from "../src/workflow-action-completion-postgres";
+import {
+  PostgresWorkflowSignalOutbox,
+  WorkflowSignalOutboxProcessor,
+  type WorkflowSignalOutboxPort,
+} from "../src/workflow-signal-outbox";
+import {
+  registerWorkflowActionCompletionRoute,
+  workflowCompletionSourceMapFromEnv,
+} from "../src/workflow-action-completion-http";
 
 const digest = "b".repeat(64);
 const base: DeliverySnapshot = Object.freeze({
@@ -194,4 +206,243 @@ test("Postgres control-plane action store rolls back an idempotency collision", 
     async heartbeat() { return "renewed"; },
   }), /idempotency binding mismatch/);
   assert.equal(sql.at(-1), "ROLLBACK");
+});
+
+test("workflow action completion atomically binds an authoritative signal to its outbox", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const outboxId = "44444444-4444-4444-8444-444444444444";
+  const signal: DeliverySignal = Object.freeze({
+    signalId: "spec-approved-signal-001",
+    type: "SPEC_APPROVED",
+    lockedRunConfigurationId: "locked-run-config-r1",
+  });
+  const statements: string[] = [];
+  let inserted: readonly unknown[] | undefined;
+  let outboxState: "PENDING" | "DELIVERED" = "PENDING";
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation: "REQUEST_SPEC_APPROVAL", status: "WAITING",
+    binding: {
+      state: "WAITING_SPEC_APPROVAL", specRevisionId: "spec-r1", lockedRunConfigurationId: null,
+      providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
+      evidenceBundleId: null, mainCommitSha: null, steamBuildId: null,
+      externalGate: null, cancellationReason: null,
+    },
+    completion_signal_id: null, completion_signal_digest: null,
+    completion_source: null, completion_receipt_id: null,
+  };
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values?: readonly unknown[]) {
+      statements.push(statement);
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) inserted = values;
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: signal.signalId, signal_digest: inserted?.[5],
+        signal: JSON.parse(String(inserted?.[6])), state: outboxState,
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  const receipt = await store.complete({
+    tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "SPEC_SERVICE", sourceReceiptId: "spec-approval-receipt-001", signal,
+  });
+  assert.equal(receipt.outboxId, outboxId);
+  assert.equal(receipt.state, "PENDING_DELIVERY");
+  assert.equal(receipt.replayed, false);
+  assert.equal(statements[0], "BEGIN");
+  assert.equal(statements[1], "SELECT set_config('app.tenant_id', $1, true)");
+  assert.equal(statements.at(-1), "COMMIT");
+  assert.ok(statements.findIndex((value) => value.includes("INSERT INTO deviludo.workflow_signal_outbox"))
+    < statements.findIndex((value) => value.includes("UPDATE deviludo.workflow_control_actions")));
+
+  Object.assign(action, {
+    status: "COMPLETED", completion_signal_id: signal.signalId,
+    completion_signal_digest: receipt.signalDigest, completion_source: "SPEC_SERVICE",
+    completion_receipt_id: "spec-approval-receipt-001",
+  });
+  outboxState = "DELIVERED";
+  const replay = await store.complete({
+    tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "SPEC_SERVICE", sourceReceiptId: "spec-approval-receipt-001", signal,
+  });
+  assert.equal(replay.state, "DELIVERED");
+  assert.equal(replay.replayed, true);
+});
+
+test("workflow action completion rejects a signal from the wrong authority", async () => {
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string) {
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [{
+        id: "33333333-3333-4333-8333-333333333333",
+        tenant_id: "11111111-1111-4111-8111-111111111111",
+        project_id: "22222222-2222-4222-8222-222222222222",
+        workflow_id: "delivery-001", operation: "REQUEST_FRESH_MFA", status: "WAITING",
+        binding: {
+          state: "WAITING_MFA", specRevisionId: null, lockedRunConfigurationId: null,
+          providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
+          evidenceBundleId: "main-evidence-1", mainCommitSha: "d".repeat(40), steamBuildId: null,
+          externalGate: null, cancellationReason: null,
+        },
+        completion_signal_id: null, completion_signal_digest: null,
+        completion_source: null, completion_receipt_id: null,
+      }] as Row[] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  await assert.rejects(store.complete({
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    projectId: "22222222-2222-4222-8222-222222222222",
+    workflowId: "delivery-001", actionId: "33333333-3333-4333-8333-333333333333",
+    source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: "user-receipt-001",
+    signal: { signalId: "mfa-approved-signal-001", type: "MFA_APPROVED", approvalId: "mfa-approval-001" },
+  }), /signal binding is invalid/);
+});
+
+test("workflow signal outbox processor retries Temporal failures without changing signal identity", async () => {
+  const item = {
+    id: "44444444-4444-4444-8444-444444444444",
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    workflowId: "delivery-001", signalId: "user-accepted-signal-001", signalDigest: "a".repeat(64),
+    signal: { signalId: "user-accepted-signal-001", type: "USER_ACCEPTED" } as const,
+    attempt: 1, claimToken: "55555555-5555-4555-8555-555555555555",
+  };
+  const events: string[] = [];
+  const successful: WorkflowSignalOutboxPort = {
+    async claimNext() { return item; },
+    async complete() { events.push("complete"); },
+    async fail() { throw new Error("must not fail"); },
+  };
+  const success = new WorkflowSignalOutboxProcessor(successful, {
+    async signal(workflowId, value) {
+      assert.equal(workflowId, item.workflowId);
+      assert.equal(value.signalId, item.signalId);
+      events.push("signal");
+    },
+  }, "control-signal-outbox-01");
+  assert.deepEqual(await success.processOne(item.tenantId), {
+    kind: "COMPLETED", jobId: item.id, signalId: item.signalId,
+  });
+  assert.deepEqual(events, ["signal", "complete"]);
+
+  let failed: Parameters<WorkflowSignalOutboxPort["fail"]>[0] | undefined;
+  const retry = new WorkflowSignalOutboxProcessor({
+    async claimNext() { return item; }, async complete() { throw new Error("must not complete"); },
+    async fail(input) { failed = input; },
+  }, { async signal() { throw new Error("Temporal unavailable"); } }, "control-signal-outbox-01",
+  () => new Date("2030-01-01T00:00:00.000Z"));
+  assert.deepEqual(await retry.processOne(item.tenantId), {
+    kind: "FAILED", jobId: item.id, terminal: false, errorCode: "TEMPORAL_SIGNAL_FAILED",
+  });
+  assert.equal(failed?.retryAt, "2030-01-01T00:00:05.000Z");
+});
+
+test("Postgres workflow signal outbox claims under tenant RLS with a fenced lease", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const signal = { signalId: "user-accepted-signal-001", type: "USER_ACCEPTED" } as const;
+  const signalDigest = createHash("sha256")
+    .update(JSON.stringify({ signalId: signal.signalId, type: signal.type }))
+    .digest("hex");
+  const statements: string[] = [];
+  const values: (readonly unknown[] | undefined)[] = [];
+  let released = false;
+  const store = new PostgresWorkflowSignalOutbox({
+    async connect() {
+      return {
+        async query<Row>(statement: string, parameters?: readonly unknown[]) {
+          statements.push(statement);
+          values.push(parameters);
+          if (statement.includes("RETURNING item.id")) return { rows: [{
+            id: "44444444-4444-4444-8444-444444444444", tenant_id: tenantId,
+            workflow_id: "delivery-001", signal_id: signal.signalId, signal_digest: signalDigest,
+            signal, attempt: 1, claim_token: "55555555-5555-4555-8555-555555555555",
+          }] as Row[], rowCount: 1 };
+          return { rows: [], rowCount: 0 };
+        },
+        release() { released = true; },
+      };
+    },
+  });
+  const claimed = await store.claimNext({ tenantId, workerId: "control-signal-outbox-01", leaseSeconds: 60 });
+  assert.equal(claimed?.signalId, signal.signalId);
+  assert.equal(statements[0], "BEGIN");
+  assert.equal(statements[1], "SELECT set_config('app.tenant_id', $1, true)");
+  assert.deepEqual(values[1], [tenantId]);
+  assert.match(statements[2] ?? "", /FOR UPDATE SKIP LOCKED/);
+  assert.match(statements[2] ?? "", /claim_expires_at = now\(\) \+ \(\$4::int \* interval '1 second'\)/);
+  assert.equal(statements.at(-1), "COMMIT");
+  assert.equal(released, true);
+});
+
+test("workflow action completion HTTP route derives authority outside the request body", async () => {
+  const server = Fastify({ logger: false });
+  let authorized = false;
+  let observed: Record<string, unknown> | undefined;
+  registerWorkflowActionCompletionRoute(server, {
+    authorize() {
+      if (!authorized) throw new Error("unauthorized");
+      return "MFA_BROKER";
+    },
+    store: {
+      async complete(input) {
+        observed = input as unknown as Record<string, unknown>;
+        return {
+          actionId: input.actionId, outboxId: "44444444-4444-4444-8444-444444444444",
+          workflowId: input.workflowId, signalId: input.signal.signalId,
+          signalDigest: "a".repeat(64), state: "PENDING_DELIVERY", replayed: false,
+        };
+      },
+    },
+  });
+  const payload = {
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    projectId: "22222222-2222-4222-8222-222222222222",
+    workflowId: "delivery-001", sourceReceiptId: "mfa-broker-receipt-001",
+    signal: { signalId: "mfa-approved-signal-001", type: "MFA_APPROVED", approvalId: "approval-001" },
+  };
+  const unauthorized = await server.inject({
+    method: "POST", url: "/v1/workflow-actions/33333333-3333-4333-8333-333333333333/complete", payload,
+  });
+  assert.equal(unauthorized.statusCode, 401);
+  authorized = true;
+  const accepted = await server.inject({
+    method: "POST", url: "/v1/workflow-actions/33333333-3333-4333-8333-333333333333/complete", payload,
+  });
+  assert.equal(accepted.statusCode, 202);
+  assert.equal(observed?.source, "MFA_BROKER");
+  assert.equal("source" in payload, false);
+  const spoofed = await server.inject({
+    method: "POST", url: "/v1/workflow-actions/33333333-3333-4333-8333-333333333333/complete",
+    payload: { ...payload, source: "SPEC_SERVICE" },
+  });
+  assert.equal(spoofed.statusCode, 400);
+  const unknownSignal = await server.inject({
+    method: "POST", url: "/v1/workflow-actions/33333333-3333-4333-8333-333333333333/complete",
+    payload: { ...payload, signal: { signalId: "unknown-signal-001", type: "UNKNOWN" } },
+  });
+  assert.equal(unknownSignal.statusCode, 400);
+  await server.close();
+});
+
+test("workflow completion SPIFFE source configuration accepts only fixed source roles", () => {
+  const sources = workflowCompletionSourceMapFromEnv({
+    DEVILUDO_WORKFLOW_COMPLETION_SPIFFE_SOURCES_JSON: JSON.stringify({
+      "spiffe://deviludo.internal/broker/mfa": "MFA_BROKER",
+      "spiffe://deviludo.internal/service/spec": "SPEC_SERVICE",
+    }),
+  });
+  assert.equal(sources.get("spiffe://deviludo.internal/broker/mfa"), "MFA_BROKER");
+  assert.throws(() => workflowCompletionSourceMapFromEnv({
+    DEVILUDO_WORKFLOW_COMPLETION_SPIFFE_SOURCES_JSON: JSON.stringify({
+      "https://not-spiffe.example": "MFA_BROKER",
+    }),
+  }), /source map is invalid/);
 });

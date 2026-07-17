@@ -501,6 +501,7 @@ test("signed tenant assignments bind workload, destination, expiry and exact ten
 test("destination runtime becomes ready only after probes and durably accepts commands", async () => {
   const request = agentDispatch();
   const queued: DeliveryDispatchRequest[] = [];
+  let auxiliaryCalls = 0;
   const queue = {
     async enqueue(value: DeliveryDispatchRequest) { queued.push(value); },
     async claimNext() { return null; },
@@ -517,7 +518,13 @@ test("destination runtime becomes ready only after probes and durably accepts co
     queue,
     handler: { async execute() { throw new Error("must not execute"); } },
     signals: { async signal() { throw new Error("must not signal"); } },
-    tenants: { async listTenantIds() { return []; } },
+    tenants: { async listTenantIds() { return ["11111111-1111-4111-8111-111111111111"]; } },
+    auxiliaryProcessors: [{
+      async processOne() {
+        auxiliaryCalls += 1;
+        return { kind: "IDLE" };
+      },
+    }],
     authorize() {},
     probes: [async () => undefined],
   });
@@ -544,6 +551,8 @@ test("destination runtime becomes ready only after probes and durably accepts co
   });
   assert.equal(accepted.statusCode, 202);
   assert.equal(queued.length, 1);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(auxiliaryCalls > 0);
   await runtime.stop();
   assert.equal(runtime.state, "STOPPED");
 });

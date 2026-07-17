@@ -9,6 +9,7 @@ import {
 import {
   WorkflowJobWorkerHost,
   type WorkflowTenantAssignmentSource,
+  type WorkflowJobProcessorPort,
   type WorkflowWorkerHostDiagnostic,
 } from "./job-worker-host";
 import { PostgresWorkflowCommandInbox, type PostgresWorkflowPool } from "./postgres-inbox";
@@ -35,7 +36,7 @@ export interface WorkflowDestinationRuntimeDiagnostic {
 
 export class WorkflowDestinationRuntime {
   readonly #server: FastifyInstance;
-  readonly #worker: WorkflowJobWorkerHost;
+  readonly #workers: readonly WorkflowJobWorkerHost[];
   readonly #destination: DeliveryCommandDestination;
   readonly #probes: readonly (() => Promise<void>)[];
   readonly #onDiagnostic: (diagnostic: WorkflowDestinationRuntimeDiagnostic) => void;
@@ -46,13 +47,16 @@ export class WorkflowDestinationRuntime {
 
   constructor(options: {
     readonly server: FastifyInstance;
-    readonly worker: WorkflowJobWorkerHost;
+    readonly workers: readonly WorkflowJobWorkerHost[];
     readonly destination: DeliveryCommandDestination;
     readonly probes?: readonly (() => Promise<void>)[];
     readonly onDiagnostic?: (diagnostic: WorkflowDestinationRuntimeDiagnostic) => void;
   }) {
     this.#server = options.server;
-    this.#worker = options.worker;
+    if (!options.workers.length || options.workers.length > 10) {
+      throw new Error("Workflow destination runtime worker set is invalid");
+    }
+    this.#workers = Object.freeze([...options.workers]);
     this.#destination = options.destination;
     this.#probes = Object.freeze([...(options.probes ?? [])]);
     this.#onDiagnostic = options.onDiagnostic ?? (() => undefined);
@@ -73,16 +77,9 @@ export class WorkflowDestinationRuntime {
       if (this.#abort.signal.aborted) throw new Error("Workflow destination runtime was stopped during startup");
       await openServer();
       this.#state = "READY";
-      this.#workerPromise = this.#worker.run(this.#abort.signal).then(() => {
-        if (!this.#abort.signal.aborted) {
-          this.#state = "FAILED";
-          this.#diagnostic("WORKER_HOST_STOPPED");
-        }
-      }).catch((error: unknown) => {
-        this.#workerFailure = error;
-        this.#state = "FAILED";
-        this.#diagnostic("WORKER_HOST_STOPPED");
-      });
+      this.#workerPromise = Promise.all(this.#workers.map((worker) => worker.run(this.#abort.signal)
+        .then(() => this.#workerStopped())
+        .catch((error: unknown) => this.#workerStopped(error)))).then(() => undefined);
     } catch (error) {
       this.#state = "FAILED";
       this.#diagnostic("DEPENDENCY_PROBE_FAILED");
@@ -126,6 +123,14 @@ export class WorkflowDestinationRuntime {
       // Telemetry cannot terminate the receiver or worker host.
     }
   }
+
+  #workerStopped(error?: unknown): void {
+    if (this.#abort.signal.aborted) return;
+    this.#workerFailure = error ?? new Error("Workflow destination worker stopped unexpectedly");
+    this.#state = "FAILED";
+    this.#diagnostic("WORKER_HOST_STOPPED");
+    this.#abort.abort();
+  }
 }
 
 export function createWorkflowDestinationRuntime(options: {
@@ -138,6 +143,7 @@ export function createWorkflowDestinationRuntime(options: {
   readonly handler: WorkflowJobHandler;
   readonly signals: WorkflowSignalPort;
   readonly tenants: WorkflowTenantAssignmentSource;
+  readonly auxiliaryProcessors?: readonly WorkflowJobProcessorPort[];
   readonly authorize: (request: FastifyRequest) => void | Promise<void>;
   readonly probes?: readonly (() => Promise<void>)[];
   readonly onDiagnostic?: (diagnostic: WorkflowDestinationRuntimeDiagnostic) => void;
@@ -167,9 +173,15 @@ export function createWorkflowDestinationRuntime(options: {
     destination: options.destination,
     onDiagnostic: options.onDiagnostic,
   });
+  const auxiliaryWorkers = (options.auxiliaryProcessors ?? []).map((processor) => new WorkflowJobWorkerHost({
+    processor,
+    tenants: options.tenants,
+    destination: options.destination,
+    onDiagnostic: options.onDiagnostic,
+  }));
   return new WorkflowDestinationRuntime({
     server: options.server,
-    worker,
+    workers: [worker, ...auxiliaryWorkers],
     destination: options.destination,
     probes: options.probes,
     onDiagnostic: options.onDiagnostic,

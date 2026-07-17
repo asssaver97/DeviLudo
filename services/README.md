@@ -286,6 +286,18 @@ action and deliberately emits no completion signal: only the corresponding
 authenticated UI, broker or monitor callback may signal Temporal. A queued
 notification therefore cannot be mistaken for user approval.
 
+Those authoritative services complete an action through the internal mTLS-only
+`POST /v1/workflow-actions/:actionId/complete` route. The peer certificate's
+SPIFFE URI maps to exactly one fixed source role through
+`DEVILUDO_WORKFLOW_COMPLETION_SPIFFE_SOURCES_JSON`; a request body cannot choose
+or override that role. Completion validates the frozen action binding, writes
+the exact signal and marks the action complete in one PostgreSQL transaction.
+An auxiliary leased outbox worker then signals Temporal and records delivery;
+process loss before or after signaling is safe because both the outbox signal
+identity and the workflow's signal replay handling are idempotent. Browser
+traffic never reaches this route directly, and malformed approval payloads do
+not become availability errors.
+
 ## Verification
 
 ```bash

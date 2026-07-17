@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
-import type { FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WorkflowJobHandler } from "./job-processor";
+import type { WorkflowJobProcessorPort } from "./job-worker-host";
 import { connectDeliveryClient } from "./client";
 import type { DeliveryCommandDestination } from "./contracts";
 import { createWorkflowDestinationRuntime } from "./destination-runtime";
@@ -14,6 +15,16 @@ import { workflowAssignmentSourceFromEnv } from "./tenant-assignments";
 export async function runWorkflowDestinationService(options: {
   readonly destination: DeliveryCommandDestination;
   readonly createHandler: (pool: ClosablePostgresWorkflowPool) => WorkflowJobHandler | Promise<WorkflowJobHandler>;
+  readonly createAuxiliaryProcessors?: (
+    pool: ClosablePostgresWorkflowPool,
+    signals: TemporalWorkflowSignalPort,
+    workerId: string,
+  ) => readonly WorkflowJobProcessorPort[] | Promise<readonly WorkflowJobProcessorPort[]>;
+  readonly configureServer?: (
+    server: FastifyInstance,
+    pool: ClosablePostgresWorkflowPool,
+    env: Readonly<Record<string, string | undefined>>,
+  ) => void | Promise<void>;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<void> {
   const env: Readonly<Record<string, string | undefined>> = Object.freeze({
@@ -41,7 +52,12 @@ export async function runWorkflowDestinationService(options: {
       },
     });
     const handler = await options.createHandler(pool);
+    if (options.configureServer) await options.configureServer(server, pool, env);
     const assignments = workflowAssignmentSourceFromEnv(env);
+    const signals = new TemporalWorkflowSignalPort(temporal.client);
+    const auxiliaryProcessors = options.createAuxiliaryProcessors
+      ? await options.createAuxiliaryProcessors(pool, signals, config.workerId)
+      : [];
     const authorize = (request: FastifyRequest) => authorizeTemporalWorkerTls(request, config.allowedDispatcherSpiffeIds);
     const runtime = createWorkflowDestinationRuntime({
       server,
@@ -49,8 +65,9 @@ export async function runWorkflowDestinationService(options: {
       workerId: config.workerId,
       pool,
       handler,
-      signals: new TemporalWorkflowSignalPort(temporal.client),
+      signals,
       tenants: assignments,
+      auxiliaryProcessors,
       authorize,
       probes: [() => pool.probe(), () => assignments.listTenantIds(options.destination).then(() => undefined)],
       onDiagnostic: (diagnostic) => process.stderr.write(`${JSON.stringify(diagnostic)}\n`),

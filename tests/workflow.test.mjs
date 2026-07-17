@@ -81,3 +81,13 @@ test("delivery signals are idempotent and gate-bound", () => {
     /reused with different content/,
   );
 });
+
+test("delivery workflow rejects an unknown runtime signal type", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-unknown-signal", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
+  });
+  assert.throws(
+    () => workflow.signal({ signalId: "signal-unknown-001", type: "UNKNOWN" }),
+    /Delivery signal type is invalid/,
+  );
+});

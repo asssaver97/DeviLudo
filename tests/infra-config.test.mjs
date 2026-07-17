@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 11 }, (_, index) => {
+  const offsets = Array.from({ length: 12 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -47,4 +47,17 @@ test("control-plane wait persistence uses the shared tenant RLS setting", () => 
   assert.doesNotMatch(adapter, /app\.current_tenant/);
   assert.match(migration, /deviludo\.current_tenant_id\(\)/);
   assert.doesNotMatch(migration, /app\.current_tenant/);
+});
+
+test("workflow action completions use a tenant-isolated transactional signal outbox", () => {
+  const migration = readFileSync(new URL("../infra/postgres/012_workflow_signal_outbox.sql", import.meta.url), "utf8");
+  const adapter = readFileSync(new URL("../services/control-plane/src/workflow-action-completion-postgres.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.workflow_signal_outbox/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /UNIQUE \(tenant_id, signal_id\)/);
+  assert.match(migration, /FOREIGN KEY \(tenant_id, project_id, workflow_id, action_id\)/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, workflow_id, id\)/);
+  assert.match(adapter, /set_config\('app\.tenant_id'/);
+  assert.match(adapter, /INSERT INTO deviludo\.workflow_signal_outbox/);
+  assert.match(adapter, /status = 'COMPLETED'/);
 });
