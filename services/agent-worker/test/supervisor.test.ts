@@ -4,18 +4,31 @@ import type {
   SpawnOptionsWithoutStdio,
 } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { ClaudeCodeAdapter } from "../../../adapters/claude-code";
 import { CodexCliAdapter } from "../../../adapters/codex-cli";
 import type { RunHandle, RuntimeSpec } from "../../../lib/agent/types";
 import type { SpawnImplementation } from "../src/contracts";
+import { CliInstallationVerifier } from "../src/installation-verifier";
+import { SecureRuntimeFileMaterializer } from "../src/runtime-files";
 import { AgentExecutionSupervisor } from "../src/supervisor";
 
 const RUN_ROOT = "/srv/deviludo/runs/run-1/attempt-1";
 const WORKSPACE = `${RUN_ROOT}/workspace`;
 const SECRET_REF = "vault://transit/run-token/run-1-attempt-1";
 const SECRET_VALUE = "fixture-runtime-secret-934857";
+const IMAGE_DIGEST = `sha256:${"a".repeat(64)}` as const;
+const codexProbe = Object.freeze({
+  agent: "codex-cli" as const,
+  executable: "codex" as const,
+  argv: Object.freeze(["--version"]),
+  expectedVersion: "0.91.0",
+  imageDigest: IMAGE_DIGEST,
+});
 
 const handle: RunHandle = Object.freeze({
   runId: "run-1",
@@ -109,6 +122,13 @@ test("applies the same supervisor contract to Claude Code stream-json output", a
   const run = await supervisor.start({
     adapter: new ClaudeCodeAdapter(),
     runHandle: claudeHandle,
+    installationProbe: {
+      agent: "claude-code",
+      executable: "claude",
+      argv: ["--version"],
+      expectedVersion: "2.1.14",
+      imageDigest: IMAGE_DIGEST,
+    },
     runtimeSpec,
     workerRunRoot: RUN_ROOT,
     workspaceRoot: WORKSPACE,
@@ -254,6 +274,114 @@ test("non-zero exits, malformed output and oversized lines yield bounded diagnos
   assert.match(execution.events.at(-1)?.message ?? "", /code 7/);
 });
 
+test("verifies the pinned installation and materializes runtime files before resolving a secret", async () => {
+  const harness = createHarness();
+  const order: string[] = [];
+  const supervisor = new AgentExecutionSupervisor({
+    spawn(executable, args, options) {
+      order.push("spawn");
+      return harness.spawn(executable, args, options);
+    },
+    installationVerifier: {
+      async verify(plan) {
+        order.push("probe");
+        return { agent: plan.agent, executable: plan.executable, expectedVersion: plan.expectedVersion, observedVersion: plan.expectedVersion, imageDigest: plan.imageDigest };
+      },
+    },
+    runtimeFileMaterializer: {
+      async materialize() { order.push("files"); },
+    },
+    secretResolver: {
+      async resolve() {
+        order.push("secret");
+        return SECRET_VALUE;
+      },
+    },
+    hostEnvironment: { PATH: "/usr/bin" },
+  });
+  const run = await supervisor.start(request(runtime()));
+  assert.deepEqual(order, ["probe", "files", "secret", "spawn"]);
+  harness.child.stdout.write('{"type":"turn.completed"}\n');
+  harness.child.close(0, null);
+  assert.equal((await run.completion).status, "completed");
+});
+
+test("installation mismatch stops before files, secrets, or Agent process creation", async () => {
+  const harness = createHarness();
+  let materializations = 0;
+  let resolutions = 0;
+  const supervisor = new AgentExecutionSupervisor({
+    spawn: harness.spawn,
+    installationVerifier: { async verify() { throw new Error("Installed Agent CLI version mismatch: expected 0.91.0, observed 0.92.0"); } },
+    runtimeFileMaterializer: { async materialize() { materializations += 1; } },
+    secretResolver: { async resolve() { resolutions += 1; return SECRET_VALUE; } },
+    hostEnvironment: { PATH: "/usr/bin" },
+  });
+  await assert.rejects(supervisor.start(request(runtime())), /version mismatch/);
+  assert.equal(materializations, 0);
+  assert.equal(resolutions, 0);
+  assert.equal(harness.calls.length, 0);
+});
+
+test("CLI installation verifier accepts only the exact fixed version command", async () => {
+  const calls: string[] = [];
+  const verifier = new CliInstallationVerifier({
+    hostEnvironment: { PATH: "/opt/agents/bin", NODE_OPTIONS: "--inspect", AWS_SECRET_ACCESS_KEY: "no" },
+    observedImageDigest: IMAGE_DIGEST,
+    async run(executable, argv, options) {
+      calls.push(`${executable} ${argv.join(" ")}`);
+      assert.equal(options.env.PATH, "/opt/agents/bin");
+      assert.equal(options.env.NODE_OPTIONS, undefined);
+      assert.equal(options.env.AWS_SECRET_ACCESS_KEY, undefined);
+      return { stdout: "codex-cli 0.91.0", stderr: "" };
+    },
+  });
+  const verified = await verifier.verify(codexProbe);
+  assert.equal(verified.observedVersion, "0.91.0");
+  assert.deepEqual(calls, ["codex --version"]);
+  await assert.rejects(verifier.verify({ ...codexProbe, expectedVersion: "0.92.0" }), /version mismatch/);
+  await assert.rejects(verifier.verify({ ...codexProbe, argv: ["--help"] }), /fixed --version/);
+  const wrongImage = new CliInstallationVerifier({
+    observedImageDigest: `sha256:${"b".repeat(64)}`,
+    async run() { throw new Error("must not execute"); },
+  });
+  await assert.rejects(wrongImage.verify(codexProbe), /image digest/);
+  const missingImage = new CliInstallationVerifier({
+    hostEnvironment: { PATH: "/usr/bin" },
+    async run() { throw new Error("must not execute"); },
+  });
+  await assert.rejects(missingImage.verify(codexProbe), /image identity/);
+});
+
+test("runtime file materializer creates immutable files and rejects overwrite or symlink parents", async () => {
+  const temporaryInput = await mkdtemp(path.join(os.tmpdir(), "deviludo-agent-files-"));
+  const temporary = await realpath(temporaryInput);
+  const runRoot = path.join(temporary, "attempt");
+  const outside = path.join(temporary, "outside");
+  await mkdir(runRoot, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  const materializer = new SecureRuntimeFileMaterializer();
+  try {
+    await materializer.materialize(runRoot, [{ relativePath: "codex-home/config.toml", contents: "locked=true\n", mode: 0o600 }]);
+    const target = path.join(runRoot, "codex-home/config.toml");
+    assert.equal(await readFile(target, "utf8"), "locked=true\n");
+    assert.equal((await stat(target)).mode & 0o777, 0o600);
+    await assert.rejects(
+      materializer.materialize(runRoot, [{ relativePath: "codex-home/config.toml", contents: "replace=true\n", mode: 0o600 }]),
+      /could not be materialized/,
+    );
+    assert.equal(await readFile(target, "utf8"), "locked=true\n");
+
+    await symlink(outside, path.join(runRoot, "linked"), "dir");
+    await assert.rejects(
+      materializer.materialize(runRoot, [{ relativePath: "linked/secret", contents: "x", mode: 0o400 }]),
+      /symbolic links/,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 interface SpawnCall {
   readonly executable: string;
   readonly args: readonly string[];
@@ -323,6 +451,18 @@ function makeSupervisor(
     },
     hostEnvironment,
     limits,
+    installationVerifier: {
+      async verify(plan) {
+        return {
+          agent: plan.agent,
+          executable: plan.executable,
+          expectedVersion: plan.expectedVersion,
+          observedVersion: plan.expectedVersion,
+          imageDigest: plan.imageDigest,
+        };
+      },
+    },
+    runtimeFileMaterializer: { async materialize() {} },
   });
 }
 
@@ -330,6 +470,7 @@ function request(runtimeSpec: RuntimeSpec) {
   return {
     adapter: new CodexCliAdapter(),
     runHandle: handle,
+    installationProbe: codexProbe,
     runtimeSpec,
     workerRunRoot: RUN_ROOT,
     workspaceRoot: WORKSPACE,

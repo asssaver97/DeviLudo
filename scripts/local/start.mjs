@@ -10,6 +10,7 @@ import path from "node:path";
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
 const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
+const DEFAULT_LOCAL_AGENT_RUNTIME_PORT = 4312;
 const FORCE_STOP_AFTER_MS = 5_000;
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -25,6 +26,7 @@ Options:
 Environment:
   DEVILUDO_LOCAL_PORT          Alternative way to select the Web port
   DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})
+  DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
   DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable`);
 }
 
@@ -106,30 +108,36 @@ function signalExitCode(signal) {
 
 let port;
 let localRuntimePort;
+let localAgentRuntimePort;
 try {
   port = parsePort(process.argv.slice(2));
   if (port !== null) {
     localRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_RUNTIME_PORT", DEFAULT_LOCAL_RUNTIME_PORT);
-    if (port === localRuntimePort) throw new Error("Web and local runtime ports must be different");
+    localAgentRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT", DEFAULT_LOCAL_AGENT_RUNTIME_PORT);
+    if (new Set([port, localRuntimePort, localAgentRuntimePort]).size !== 3) throw new Error("Web, Godot runtime and Agent runtime ports must be different");
   }
 } catch (error) {
   port = undefined;
   localRuntimePort = undefined;
+  localAgentRuntimePort = undefined;
   fail(error instanceof Error ? error.message : String(error));
   usage();
 }
 
-if (port === null || port === undefined || localRuntimePort === undefined) {
+if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined) {
   process.exit();
 }
 
 const vinextCli = path.join(workspaceRoot, "node_modules", "vinext", "dist", "cli.js");
 const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
+const localAgentRuntimeEntry = path.join(workspaceRoot, "services", "local-agent-runtime", "src", "server.ts");
 try {
   await access(vinextCli);
   await access(localRuntimeEntry);
+  await access(localAgentRuntimeEntry);
   await assertPortAvailable(port);
   await assertPortAvailable(localRuntimePort);
+  await assertPortAvailable(localAgentRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
@@ -141,6 +149,7 @@ try {
 
 console.log(`[local:dev] Starting DeviLudo at http://${HOST}:${port}`);
 console.log(`[local:dev] Starting the constrained local runtime at http://${HOST}:${localRuntimePort}`);
+console.log(`[local:dev] Starting Agent readiness at http://${HOST}:${localAgentRuntimePort}`);
 console.log("[local:dev] Press Ctrl-C to stop the server and its child processes.");
 
 const localRuntimeChild = spawn(
@@ -158,6 +167,21 @@ const localRuntimeChild = spawn(
   },
 );
 
+const localAgentRuntimeChild = spawn(
+  process.execPath,
+  ["--import", "tsx", localAgentRuntimeEntry],
+  {
+    cwd: workspaceRoot,
+    detached: process.platform !== "win32",
+    env: {
+      ...process.env,
+      NODE_ENV: "development",
+      DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: String(localAgentRuntimePort),
+    },
+    stdio: "inherit",
+  },
+);
+
 const siteChild = spawn(
   process.execPath,
   [vinextCli, "dev", "--hostname", HOST, "--port", String(port)],
@@ -168,6 +192,7 @@ const siteChild = spawn(
       ...process.env,
       NODE_ENV: "development",
       DEVILUDO_LOCAL_RUNTIME_URL: `http://${HOST}:${localRuntimePort}`,
+      DEVILUDO_LOCAL_AGENT_RUNTIME_URL: `http://${HOST}:${localAgentRuntimePort}`,
       WRANGLER_LOG_PATH: path.join(workspaceRoot, ".wrangler", "wrangler-local.log"),
     },
     stdio: "inherit",
@@ -202,6 +227,7 @@ function killProcessTree(child, signal) {
 function killAll(signal) {
   killProcessTree(siteChild, signal);
   killProcessTree(localRuntimeChild, signal);
+  killProcessTree(localAgentRuntimeChild, signal);
 }
 
 function beginShutdown(signal) {
@@ -243,16 +269,33 @@ localRuntimeChild.once("error", (error) => {
   process.exitCode = 1;
 });
 
+localAgentRuntimeChild.once("error", (error) => {
+  console.error(`[local:dev] Could not start Agent readiness: ${error.message}`);
+  killProcessTree(siteChild, "SIGTERM");
+  killProcessTree(localRuntimeChild, "SIGTERM");
+  process.exitCode = 1;
+});
+
 localRuntimeChild.once("exit", (code, signal) => {
   if (stopping) return;
   console.error(`[local:dev] Local runtime exited unexpectedly (${signal ?? code ?? "unknown"}).`);
   killProcessTree(siteChild, "SIGTERM");
+  killProcessTree(localAgentRuntimeChild, "SIGTERM");
+  process.exitCode = code ?? 1;
+});
+
+localAgentRuntimeChild.once("exit", (code, signal) => {
+  if (stopping) return;
+  console.error(`[local:dev] Agent readiness exited unexpectedly (${signal ?? code ?? "unknown"}).`);
+  killProcessTree(siteChild, "SIGTERM");
+  killProcessTree(localRuntimeChild, "SIGTERM");
   process.exitCode = code ?? 1;
 });
 
 siteChild.once("exit", (code, signal) => {
   clearTimeout(forceStopTimer);
   killProcessTree(localRuntimeChild, "SIGTERM");
+  killProcessTree(localAgentRuntimeChild, "SIGTERM");
   for (const handledSignal of handledSignals) {
     process.removeAllListeners(handledSignal);
   }

@@ -20,6 +20,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
+- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪探针；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway 和显式启用状态作为联合门禁。默认只探测、绝不执行 Agent。
 - `db`、`drizzle`：26 张 D1 Beta 表、不可变触发器及本地交付事件迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。
@@ -63,7 +64,7 @@ npm install
 npm run local:dev
 ```
 
-打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面和 `127.0.0.1:4311` Godot 验证侧车，两者都只绑定 loopback。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。
+打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车和 `127.0.0.1:4312` Agent 就绪探针，三个进程都只绑定 loopback。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
 
 若缺少与 Godot 版本匹配的 export templates，本机 headless 测试仍可通过，但发布门禁会停在 `WAITING_EXPORT_TEMPLATES`。Windows/Linux 保持未连接，直到真实 mTLS Runner 可用。
 

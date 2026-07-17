@@ -12,8 +12,10 @@ import type {
   SupervisorLimits,
 } from "./contracts";
 import { BoundedJsonLineDecoder } from "./jsonl";
+import { CliInstallationVerifier, validateProbePlan } from "./installation-verifier";
 import { assertExecutableMatchesAdapter, validateExecutionPaths } from "./path-policy";
 import { SecretRedactor } from "./redaction";
+import { SecureRuntimeFileMaterializer } from "./runtime-files";
 
 const DEFAULT_LIMITS: SupervisorLimits = Object.freeze({
   maxStdinBytes: 2 * 1024 * 1024,
@@ -47,6 +49,8 @@ export class AgentExecutionSupervisor {
   readonly #hostEnvironment: Readonly<Record<string, string | undefined>>;
   readonly #limits: SupervisorLimits;
   readonly #now: () => number;
+  readonly #installationVerifier: NonNullable<AgentExecutionSupervisorOptions["installationVerifier"]>;
+  readonly #runtimeFileMaterializer: NonNullable<AgentExecutionSupervisorOptions["runtimeFileMaterializer"]>;
 
   constructor(options: AgentExecutionSupervisorOptions) {
     this.#spawn = options.spawn ?? nodeSpawn;
@@ -54,12 +58,16 @@ export class AgentExecutionSupervisor {
     this.#hostEnvironment = options.hostEnvironment ?? process.env;
     this.#limits = Object.freeze({ ...DEFAULT_LIMITS, ...options.limits });
     this.#now = options.now ?? Date.now;
+    this.#installationVerifier = options.installationVerifier ?? new CliInstallationVerifier({ hostEnvironment: this.#hostEnvironment });
+    this.#runtimeFileMaterializer = options.runtimeFileMaterializer ?? new SecureRuntimeFileMaterializer();
     validateLimits(this.#limits);
   }
 
   async start(request: AgentExecutionRequest): Promise<SupervisedRun> {
     validateRequest(request, this.#limits);
     const { adapter, runHandle, runtimeSpec } = request;
+    await this.#installationVerifier.verify(request.installationProbe);
+    await this.#runtimeFileMaterializer.materialize(request.workerRunRoot, runtimeSpec.files);
     const secretValues = await this.#resolveSecrets(runtimeSpec, runHandle);
     const redactor = new SecretRedactor(Object.values(secretValues));
     const stderrCaptureLimit =
@@ -227,9 +235,14 @@ export class AgentExecutionSupervisor {
 function validateRequest(request: AgentExecutionRequest, limits: SupervisorLimits): void {
   const { adapter, runHandle, runtimeSpec } = request;
   if (adapter.agent !== runHandle.agent) throw new Error("Run handle uses the wrong adapter");
+  if (request.installationProbe.agent !== adapter.agent || request.installationProbe.executable !== runtimeSpec.executable) {
+    throw new Error("Installation probe does not match the locked runtime adapter");
+  }
+  validateProbePlan(request.installationProbe);
   assertExecutableMatchesAdapter(adapter.agent, runtimeSpec);
   validateExecutionPaths(request.workerRunRoot, request.workspaceRoot, runtimeSpec);
   validateEnvironmentKeys(runtimeSpec);
+  validateSecretReferences(runtimeSpec);
   if (!Number.isFinite(runtimeSpec.timeoutSeconds) || runtimeSpec.timeoutSeconds <= 0) {
     throw new Error("Runtime timeout must be positive");
   }
@@ -238,6 +251,14 @@ function validateRequest(request: AgentExecutionRequest, limits: SupervisorLimit
   }
   if (new Set(runtimeSpec.files.map((file) => file.relativePath)).size !== runtimeSpec.files.length) {
     throw new Error("Runtime file paths must be unique");
+  }
+}
+
+function validateSecretReferences(runtimeSpec: RuntimeSpec): void {
+  for (const secretRef of Object.values(runtimeSpec.secretEnv)) {
+    if (!/^(?:vault|kms|secret):\/\/[^\s?#]{1,480}$/.test(secretRef)) {
+      throw new Error("Runtime secret must be an opaque SecretRef");
+    }
   }
 }
 

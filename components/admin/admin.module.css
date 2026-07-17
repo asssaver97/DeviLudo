@@ -826,7 +826,8 @@
 }
 
 .healthDotGood,
-.healthDotMuted {
+.healthDotMuted,
+.healthDotWarning {
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -835,6 +836,11 @@
 
 .healthDotMuted {
   background: #aeb5b0;
+}
+
+.healthDotWarning {
+  background: #dc8b3a !important;
+  box-shadow: 0 0 0 3px rgba(220, 139, 58, .12) !important;
 }
 
 .policyList {

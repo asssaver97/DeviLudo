@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import type { LocalAgentReadiness, LocalHealth } from "@/components/console/useLocalPlatform";
 import {
   agents,
   auditEvents,
@@ -83,6 +84,31 @@ export default function AgentAdminDashboard() {
   const [claudeState, setClaudeState] = useState("CANARY");
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
+  const [localHealth, setLocalHealth] = useState<LocalHealth | null>(null);
+
+  const refreshLocalHealth = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await fetch("/api/health", { cache: "no-store", signal });
+      if (!response.ok) return;
+      setLocalHealth(await response.json() as LocalHealth);
+    } catch {
+      // The page remains usable when the optional localhost probes are offline.
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const initial = window.setTimeout(() => void refreshLocalHealth(controller.signal), 0);
+    const timer = window.setInterval(() => void refreshLocalHealth(controller.signal), 4_000);
+    return () => {
+      controller.abort();
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [refreshLocalHealth]);
+
+  const localAgents = localHealth?.dependencies?.localAgents ?? [];
+  const executionReady = localHealth?.dependencies?.developmentWorker === "READY";
 
   const notify = (message: string, tone: NonNullable<Toast>["tone"] = "success") => {
     setToast({ message, tone });
@@ -145,7 +171,7 @@ export default function AgentAdminDashboard() {
         </nav>
 
         <div className={styles.sidebarFooter}>
-          <div className={styles.systemHealth}><span />平台运行正常</div>
+          <div className={styles.systemHealth}><span className={executionReady ? "" : styles.healthDotWarning} />{executionReady ? "本地 Agent Worker 就绪" : "本地 Agent 执行受门禁保护"}</div>
           <div className={styles.userBlock}>
             <div className={styles.avatar}>WT</div>
             <div><strong>Wang Tianyang</strong><small>平台管理员</small></div>
@@ -158,7 +184,7 @@ export default function AgentAdminDashboard() {
         <header className={styles.topbar}>
           <div className={styles.breadcrumb}><span>平台</span><AdminIcon name="chevron" /><span>管理</span><AdminIcon name="chevron" /><strong>Agents</strong></div>
           <div className={styles.topActions}>
-            <div className={styles.environment}><span />生产环境</div>
+            <div className={styles.environment}><span />本地测试环境</div>
             <button className={styles.iconButton} type="button" aria-label="搜索"><AdminIcon name="search" /></button>
             <button className={`${styles.iconButton} ${styles.bellButton}`} type="button" aria-label="通知"><AdminIcon name="bell" /><span /></button>
             <label className={styles.roleSelect}>
@@ -172,7 +198,7 @@ export default function AgentAdminDashboard() {
 
         <div className={styles.pageHeader}>
           <div>
-            <div className={styles.titleRow}><h1>Agent 运维台</h1><StatusPill tone="success">2 个可用</StatusPill></div>
+            <div className={styles.titleRow}><h1>Agent 运维台</h1><StatusPill tone={executionReady ? "success" : "warning"}>{executionReady ? "本机可执行" : "本机执行已阻止"}</StatusPill></div>
             <p>治理开发 Agent 的版本、部署、Provider 与配置继承。运行时锁定配置，不受后续变更影响。</p>
           </div>
           <div className={styles.headerActions}>
@@ -196,7 +222,7 @@ export default function AgentAdminDashboard() {
         </div>
 
         <div className={styles.content}>
-          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} onDefaultChange={(agent) => { if (!canOperateVersions) { notify("仅 PlatformAgentAdmin 可修改全局默认", "warning"); return; } setDefaultAgent(agent); notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} 已设为平台默认，仅影响新任务`); }} onNavigate={setActiveTab} />}
+          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} onDefaultChange={(agent) => { if (!canOperateVersions) { notify("仅 PlatformAgentAdmin 可修改全局默认", "warning"); return; } setDefaultAgent(agent); notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} 已设为平台默认，仅影响新任务`); }} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} canOperate={canOperateVersions} onUpdate={updateVersion} />}
           {activeTab === "deployments" && <DeploymentsTab percent={claudeRollout} state={claudeState} onAdvance={advanceRollout} onRollback={rollback} onDrain={() => { setClaudeState("DRAINING"); notify("Worker 池正在排空，不再接收新任务", "warning"); }} />}
           {activeTab === "providers" && <ProvidersTab role={role} notify={notify} />}
@@ -215,14 +241,16 @@ export default function AgentAdminDashboard() {
   );
 }
 
-function OverviewTab({ defaultAgent, onDefaultChange, onNavigate }: { defaultAgent: AgentKind; onDefaultChange: (agent: AgentKind) => void; onNavigate: (tab: TabId) => void }) {
+function OverviewTab({ defaultAgent, localAgents, localHealth, onDefaultChange, onNavigate }: { defaultAgent: AgentKind; localAgents: LocalAgentReadiness[]; localHealth: LocalHealth | null; onDefaultChange: (agent: AgentKind) => void; onNavigate: (tab: TabId) => void }) {
+  const exactMatches = localAgents.filter((agent) => agent.state === "READY").length;
+  const workerReady = localHealth?.dependencies?.developmentWorker === "READY";
   return (
     <>
       <div className={styles.metricRail}>
-        <div><span>开发任务</span><strong>18</strong><small>12 运行 · 6 排队</small></div>
-        <div><span>任务成功率 · 7 天</span><strong>96.4%</strong><small className={styles.goodDelta}>↑ 1.8%</small></div>
-        <div><span>推理费用 · 今日</span><strong>$84.20</strong><small>预算使用 41%</small></div>
-        <div><span>Provider 延迟 P95</span><strong>1.24s</strong><small>所有探针正常</small></div>
+        <div><span>本机 Agent 发现</span><strong>{localAgents.length} / 2</strong><small>只读版本探针</small></div>
+        <div><span>精确版本匹配</span><strong>{exactMatches} / 2</strong><small>{exactMatches === 2 ? "均匹配锁定版本" : "不匹配时禁止启动"}</small></div>
+        <div><span>Inference Gateway</span><strong>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</strong><small>长期 Key 不下发 Worker</small></div>
+        <div><span>开发 Worker</span><strong>{workerReady ? "READY" : "BLOCKED"}</strong><small>{workerReady ? "镜像与执行门禁已满足" : "等待版本、镜像与 Gateway"}</small></div>
       </div>
 
       <section className={styles.section}>
@@ -256,8 +284,15 @@ function OverviewTab({ defaultAgent, onDefaultChange, onNavigate }: { defaultAge
         <section className={styles.section}>
           <SectionHeading eyebrow="LIVE" title="Worker 池健康" action={<button className={styles.textButton} type="button" onClick={() => onNavigate("deployments")}>查看部署 <AdminIcon name="chevron" /></button>} />
           <div className={styles.healthList}>
-            <div><span className={styles.healthDotGood} /><strong>dev-linux-a</strong><span>Claude Code</span><em>24 / 32 就绪</em></div>
-            <div><span className={styles.healthDotGood} /><strong>dev-linux-b</strong><span>Codex CLI</span><em>14 / 16 就绪</em></div>
+            {localAgents.map((agent) => (
+              <div key={agent.agent}>
+                <span className={agent.state === "READY" ? styles.healthDotGood : styles.healthDotWarning} />
+                <strong>{agent.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong>
+                <span>{agent.observedVersion ?? "未安装"}</span>
+                <em>{agent.state === "READY" ? "精确版本匹配" : `${agent.state} · 期望 ${agent.expectedVersion}`}</em>
+              </div>
+            ))}
+            {localAgents.length === 0 && <div><span className={styles.healthDotMuted} /><strong>local-probe</strong><span>未连接</span><em>等待 127.0.0.1:4312</em></div>}
             <div><span className={styles.healthDotMuted} /><strong>e2e-runners</strong><span>无 Agent</span><em>策略隔离</em></div>
           </div>
         </section>
@@ -310,7 +345,7 @@ function DeploymentsTab({ percent, state, onAdvance, onRollback, onDrain }: { pe
         <SectionHeading title="开发 Worker 安装" description="不可变镜像以 digest 部署；灰度只分配新任务，已运行任务继续使用锁定版本。" />
         <div className={styles.installationRow}>
           <AgentMark kind="claude-code" />
-          <div className={styles.installationIdentity}><h3>Claude Code 2.1.12</h3><code>registry.deviludo.internal/agent/claude@sha256:0a7c…9d21</code><span>dev-linux-a · 32 workers · adapter 1.3.0</span></div>
+          <div className={styles.installationIdentity}><h3>Claude Code 2.1.14</h3><code>registry.deviludo.internal/agent/claude@sha256:0a7c…9d21</code><span>dev-linux-a · 本地未部署 · adapter 1.3.0</span></div>
           <div className={styles.rolloutBlock}>
             <div><span>新任务流量</span><strong>{percent}%</strong><StatusPill tone={state === "ACTIVE" ? "success" : state === "DRAINING" ? "warning" : "info"}>{state}</StatusPill></div>
             <div className={styles.progressTrack}><span style={{ width: `${percent}%` }} /></div>
@@ -323,7 +358,7 @@ function DeploymentsTab({ percent, state, onAdvance, onRollback, onDrain }: { pe
         </div>
         <div className={styles.installationRow}>
           <AgentMark kind="codex-cli" />
-          <div className={styles.installationIdentity}><h3>Codex CLI 0.115.0</h3><code>registry.deviludo.internal/agent/codex@sha256:812e…f19a</code><span>dev-linux-b · 16 workers · adapter 1.2.2</span></div>
+          <div className={styles.installationIdentity}><h3>Codex CLI 0.91.0</h3><code>registry.deviludo.internal/agent/codex@sha256:812e…f19a</code><span>dev-linux-b · 本地未部署 · adapter 1.2.2</span></div>
           <div className={styles.rolloutBlock}>
             <div><span>新任务流量</span><strong>100%</strong><StatusPill tone="success">ACTIVE</StatusPill></div>
             <div className={styles.progressTrack}><span style={{ width: "100%" }} /></div>
@@ -463,7 +498,7 @@ function InheritanceTab({ defaultAgent, notify }: { defaultAgent: AgentKind; not
           <div className={`${styles.inheritanceNode} ${styles.inheritanceNodeEffective}`}><span>{project === "clockwork-island" ? "Clockwork Island" : "Paper Kingdom"} · 项目</span><AgentMark kind={resolved as AgentKind} small /><strong>{resolved === "codex-cli" ? "Codex CLI" : "Claude Code"}</strong><small>{project === "clockwork-island" ? "显式项目覆盖 · profile/codex-strict · rev 6" : "无项目覆盖 · 继承租户配置"}</small><StatusPill tone="info">EFFECTIVE</StatusPill></div>
         </div>
         <div className={styles.resolutionTable}>
-          <div><span>Installation</span><strong>{resolved === "codex-cli" ? "codex-0.115.0 / dev-linux-b" : "claude-2.1.12 / dev-linux-a"}</strong><small>来源：{project === "clockwork-island" ? "项目覆盖" : "平台默认"}</small></div>
+          <div><span>Installation</span><strong>{resolved === "codex-cli" ? "codex-0.91.0 / dev-linux-b" : "claude-2.1.14 / dev-linux-a"}</strong><small>来源：{project === "clockwork-island" ? "项目覆盖" : "平台默认"}</small></div>
           <div><span>Provider / Model</span><strong>{resolved === "codex-cli" ? "OpenAI Responses" : "Anthropic Messages"}</strong><small>{resolved === "codex-cli" ? "gpt-5.2-codex-2026-02-01" : "claude-sonnet-4-5-20250929"}</small></div>
           <div><span>权限</span><strong>workspace-write</strong><small>网络仅 SCM / inference 代理</small></div>
           <div><span>任务预算 / 超时</span><strong>$80 · 90 min</strong><small>租户策略收紧平台上限</small></div>

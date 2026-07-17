@@ -3,8 +3,10 @@ import type {
   AgentDiagnostics,
   AgentEvent,
   AgentRunResult,
+  ProbePlan,
   RunHandle,
   RuntimeAdapter,
+  RuntimeFile,
   RuntimeSpec,
 } from "../../../lib/agent/types";
 
@@ -33,12 +35,30 @@ export interface SupervisorLimits {
 export interface AgentExecutionRequest {
   readonly adapter: RuntimeAdapter;
   readonly runHandle: RunHandle;
+  /** Exact immutable CLI/image binding selected when the task was queued. */
+  readonly installationProbe: ProbePlan;
   readonly runtimeSpec: RuntimeSpec;
   /** Absolute root dedicated to this one run attempt. */
   readonly workerRunRoot: string;
   /** Absolute checkout root. It must be within workerRunRoot. */
   readonly workspaceRoot: string;
   readonly abortSignal?: AbortSignal;
+}
+
+export interface InstallationProbeResult {
+  readonly agent: ProbePlan["agent"];
+  readonly executable: ProbePlan["executable"];
+  readonly expectedVersion: string;
+  readonly observedVersion: string;
+  readonly imageDigest: ProbePlan["imageDigest"];
+}
+
+export interface InstallationVerifier {
+  verify(plan: ProbePlan): Promise<InstallationProbeResult>;
+}
+
+export interface RuntimeFileMaterializer {
+  materialize(workerRunRoot: string, files: readonly RuntimeFile[]): Promise<void>;
 }
 
 export type SupervisedStatus = "completed" | "failed" | "cancelled" | "timed_out";
@@ -75,4 +95,6 @@ export interface AgentExecutionSupervisorOptions {
   readonly hostEnvironment?: Readonly<Record<string, string | undefined>>;
   readonly limits?: Partial<SupervisorLimits>;
   readonly now?: () => number;
+  readonly installationVerifier?: InstallationVerifier;
+  readonly runtimeFileMaterializer?: RuntimeFileMaterializer;
 }

@@ -8,11 +8,26 @@ export type LocalHealth = {
   dependencies?: {
     fixtureExecutor?: string;
     localGodot?: string | null;
+    developmentWorker?: string;
+    localAgentRuntime?: string;
+    localAgents?: LocalAgentReadiness[];
+    inferenceGateway?: string;
+    workerImageIdentity?: string | null;
+    expectedWorkerImageIdentity?: string | null;
+    workerImageVerified?: boolean;
     windowsRunner?: string;
     linuxRunner?: string;
     macosRunner?: string;
     steam?: string;
   };
+};
+
+export type LocalAgentReadiness = {
+  agent: "claude-code" | "codex-cli";
+  executable: "claude" | "codex";
+  expectedVersion: string;
+  observedVersion: string | null;
+  state: "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
 };
 
 export function useLocalPlatform(projectId = "ember-archipelago") {

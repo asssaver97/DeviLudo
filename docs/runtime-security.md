@@ -39,6 +39,14 @@ argv differences from the adapter plan and must never invoke a shell. Both
 adapters reject permission bypass options including `--yolo` and
 `--dangerously-skip-permissions`.
 
+Immediately before process creation, the worker independently executes the
+fixed `--version` probe. The observed CLI version must equal the queued exact
+version, and `DEVILUDO_WORKER_IMAGE_DIGEST` supplied by immutable workload
+metadata must equal the locked image digest. A mismatch is rejected before
+runtime files, run-token resolution or process creation. Adapter files are then
+created with exclusive/no-follow opens and `0400`/`0600` modes; retries cannot
+overwrite an existing attempt and symlink parents are rejected.
+
 ### Codex CLI launch
 
 The Codex adapter pins this shape:

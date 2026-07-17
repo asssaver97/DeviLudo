@@ -11,14 +11,22 @@ behind the web console:
   polls a database or sleeps in a loop.
 - `agent-worker`: a one-run supervisor for the exact Claude Code or Codex CLI
   RuntimeSpec. It uses `shell: false`, validates all workspace/runtime paths,
-  applies a minimal environment allowlist, resolves opaque SecretRefs only at
-  process start, redacts JSONL/stderr, and distinguishes cancellation, timeout,
-  signal and exit-code failures.
+  verifies the locked CLI version and WorkerImage digest, writes Adapter files
+  exclusively with no-follow semantics, applies a minimal environment allowlist,
+  resolves opaque SecretRefs only after every static/runtime gate, redacts
+  JSONL/stderr, and distinguishes cancellation, timeout, signal and exit-code
+  failures.
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,
   JUnit and log evidence below the ignored `.deviludo/` directory. Missing
   export templates remain an explicit release gate.
+- `local-agent-runtime`: a loopback-only readiness sidecar. It executes only
+  fixed `--version` probes and reports the observed Claude Code/Codex CLI
+  versions. Execution stays blocked unless an exact approved version, verified
+  WorkerImage identity matching a separately pinned expected digest, a safe
+  HTTPS internal inference gateway and explicit opt-in all
+  exist; the sidecar has no Agent execution endpoint.
 
 The root application can keep using its lightweight route handlers for the
 Sites preview. Production traffic should route `/admin/*` to the control-plane
@@ -132,10 +140,12 @@ and activities; the Worker never silently swaps Claude Code and Codex CLI.
 ./node_modules/.bin/tsc -p services/temporal/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-runtime/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/local-agent-runtime/tsconfig.json --pretty false
 node --import tsx --test services/control-plane/test/control-plane.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/local-runtime/test/godot-fixture.test.ts
+node --import tsx --test services/local-agent-runtime/test/readiness.test.ts
 ```
 
 The control-plane tests use Fastify's in-process `inject()` API, so they do not
