@@ -57,6 +57,22 @@ test("physical Runner host composes signed fleet authorization and mTLS evidence
   assert.match(archive, /body\.bundleDigest !== expected\.bundle\.bundleDigest/);
 });
 
+test("physical Runner daemon locks local recovery, TestKit execution and machine identity", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const journal = readFileSync(new URL("../services/runner-control/src/physical-runner-journal.ts", import.meta.url), "utf8");
+  const testkit = readFileSync(new URL("../services/runner-control/src/testkit-executor.ts", import.meta.url), "utf8");
+  const daemon = readFileSync(new URL("../services/runner-control/src/run-physical-runner.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:physical-runner"], "node --import tsx services/runner-control/src/run-physical-runner.ts");
+  assert.match(journal, /createHmac\("sha256"/);
+  assert.match(journal, /timingSafeEqual/);
+  assert.match(journal, /await rename\(temporary, path\)/);
+  assert.match(testkit, /observedTestKit !== this\.#testKitDigest/);
+  assert.match(testkit, /shell: false/);
+  assert.match(testkit, /"--request-file", requestPath/);
+  assert.match(daemon, /config\.capabilities\.platform !== expectedPlatform/);
+  assert.match(daemon, /Promise\.all\(\[service\.ingress\.probe\(\), service\.executor\.probe\(\)\]\)/);
+});
+
 test("physical Runner attempts require an append-only tenant execution lock", () => {
   const migration = readFileSync(new URL("../infra/postgres/014_runner_execution_locks.sql", import.meta.url), "utf8");
   const adapter = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");

@@ -21,7 +21,7 @@ export interface PhysicalRunnerIngressTlsMaterial {
 }
 
 export interface PhysicalRunnerIngressHttpRequest {
-  readonly method: "POST";
+  readonly method: "GET" | "POST";
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
   readonly timeoutMs: number;
@@ -95,6 +95,21 @@ export class MtlsPhysicalRunnerIngressClient implements PhysicalRunnerIngress {
 
   async acceptEvent(tenantId: string, event: RunnerEvent): Promise<RunnerEventReceipt> {
     return Object.freeze(record(await this.#post("/v1/events", { tenantId, event })) as unknown as RunnerEventReceipt);
+  }
+
+  async probe(): Promise<void> {
+    const response = await this.#http(new URL("/health", this.#origin), {
+      method: "GET",
+      timeoutMs: this.#timeoutMs,
+      tls: this.#tls,
+      headers: Object.freeze({ accept: "application/json" }),
+      body: "",
+    });
+    const body = record(response.payload);
+    exactKeys(body, ["status", "service"]);
+    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-runner-ingress") {
+      throw new Error("Physical Runner ingress readiness probe failed");
+    }
   }
 
   async #post(path: string, payload: unknown): Promise<unknown> {

@@ -130,6 +130,34 @@ all three platform identities, journal replay, signature tampering,
 cross-tenant jobs and capability drift; this is not a substitute for the final
 physical-machine E2E gate.
 
+`FilePhysicalRunnerJournal` is the production journal implementation. Every
+attempt/fencing-token record is strict canonical JSON authenticated with a
+machine-local HMAC key, written through an fsynced temporary file and atomic
+rename, and restricted to the Runner service account. State can advance only
+from STARTED to evidence to completion; rollback, a different job digest,
+another machine key or manual file edits fail closed. The server-signed job is
+rechecked independently after journal recovery.
+
+`LockedTestKitExecutor` is the production execution boundary. Before every
+attempt it hashes the platform-owned TestKit controller and Godot executable
+and compares them to the immutable lock. It invokes only
+`deviludo-testkit run --request-file <fixed> --output-file <fixed>` through
+`execFile` with `shell: false`, a minimal environment, private per-attempt home
+and bounded output/timeout. The controller must download the locked Source or
+Steam build and upload logs/JUnit/timeline/screenshots/video/export to the
+artifact service; its result is accepted only when it echoes the exact job,
+TestKit and Godot digests. A prior exact result is reused after restart, while
+an existing request with different bytes is rejected.
+
+Run the machine daemon with `npm run start:physical-runner`. Startup verifies
+that the configured platform/architecture match the actual Node host, loads
+all TLS/HMAC/public-key material from files, probes both executable digests and
+the authenticated ingress `/health`, then polls serially with bounded
+exponential backoff. Diagnostics contain only stable codes. Configuration
+templates are `.physical-runner.env.example` and
+`physical-runner.config.example.json`; they intentionally contain no private
+key or platform credential.
+
 `RunnerControlWorkflowHandler` maps durable workflow jobs to three distinct
 modes: candidate matrix, merged-main release gate and clean Steam install.
 Receipts must repeat the exact commit, Steam BuildID (when applicable) and

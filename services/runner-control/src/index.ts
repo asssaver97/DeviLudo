@@ -12,3 +12,6 @@ export * from "./evidence-archive";
 export * from "./run-ingress-service";
 export * from "./physical-runner";
 export * from "./runner-ingress-client";
+export * from "./physical-runner-journal";
+export * from "./testkit-executor";
+export * from "./run-physical-runner";

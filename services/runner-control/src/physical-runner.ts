@@ -144,7 +144,7 @@ export class PhysicalRunnerAgent {
 
     if (!record.evidenceManifest) {
       const output = await this.#executor.execute(job.payload);
-      validateExecutionOutput(output);
+      validatePhysicalRunnerExecutionOutput(output);
       const evidenceManifest = createPlatformEvidenceManifest({
         schemaVersion: "deviludo.platform-evidence.v1",
         attemptId: job.payload.attemptId,
@@ -211,10 +211,10 @@ export class MemoryPhysicalRunnerJournal implements PhysicalRunnerJournal {
   }
 
   async save(record: PhysicalRunnerJournalRecord): Promise<void> {
-    validateJournalShape(record);
+    validatePhysicalRunnerJournalRecord(record);
     const key = journalKey(record.attemptId, record.fencingToken);
     const current = this.#records.get(key);
-    if (current) assertJournalAdvance(current, record);
+    if (current) assertPhysicalRunnerJournalAdvance(current, record);
     this.#records.set(key, record);
   }
 }
@@ -301,7 +301,7 @@ function assertEventReceipt(receipt: RunnerEventReceipt, event: RunnerEvent, seq
 }
 
 function assertJournal(record: PhysicalRunnerJournalRecord, job: SignedRunnerJob, jobDigest: string): void {
-  validateJournalShape(record);
+  validatePhysicalRunnerJournalRecord(record);
   if (record.attemptId !== job.payload.attemptId || record.fencingToken !== job.payload.fencingToken
     || record.jobDigest !== jobDigest || !eventMatchesJob(record.startedEvent, job.payload)) {
     throw new Error("Physical Runner journal conflicts with the signed job");
@@ -331,7 +331,15 @@ function assertJournal(record: PhysicalRunnerJournalRecord, job: SignedRunnerJob
   }
 }
 
-function assertJournalAdvance(current: PhysicalRunnerJournalRecord, next: PhysicalRunnerJournalRecord): void {
+export function assertPhysicalRunnerJournalAdvance(
+  current: PhysicalRunnerJournalRecord,
+  next: PhysicalRunnerJournalRecord,
+): void {
+  validatePhysicalRunnerJournalRecord(current);
+  validatePhysicalRunnerJournalRecord(next);
+  if (current.attemptId !== next.attemptId || current.fencingToken !== next.fencingToken) {
+    throw new Error("Physical Runner journal identity cannot change");
+  }
   if (current.jobDigest !== next.jobDigest || sha256Canonical(current.startedEvent) !== sha256Canonical(next.startedEvent)
     || (current.evidenceManifest && sha256Canonical(current.evidenceManifest) !== sha256Canonical(next.evidenceManifest))
     || (current.completionEvent && sha256Canonical(current.completionEvent) !== sha256Canonical(next.completionEvent))
@@ -341,7 +349,7 @@ function assertJournalAdvance(current: PhysicalRunnerJournalRecord, next: Physic
   }
 }
 
-function validateJournalShape(record: PhysicalRunnerJournalRecord): void {
+export function validatePhysicalRunnerJournalRecord(record: PhysicalRunnerJournalRecord): void {
   const keys = Object.keys(record).sort();
   const expected = [
     "schemaVersion", "attemptId", "fencingToken", "jobDigest", "startedEvent",
@@ -368,7 +376,7 @@ function eventMatchesJob(event: RunnerEvent, job: RunnerJobPayload): boolean {
     && event.sourceDigest === job.sourceDigest && event.platform === job.platform;
 }
 
-function validateExecutionOutput(output: PhysicalRunnerExecutionOutput): void {
+export function validatePhysicalRunnerExecutionOutput(output: PhysicalRunnerExecutionOutput): void {
   const keys = Object.keys(output).sort();
   const expected = [
     "exportDigest", "logsDigest", "junitDigest", "inputTimelineDigest",

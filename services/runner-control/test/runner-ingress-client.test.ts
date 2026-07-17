@@ -91,3 +91,16 @@ test("physical Runner client rejects response envelope drift and unsafe origins"
     assert.throws(() => new MtlsPhysicalRunnerIngressClient({ origin, tls }), /origin is invalid/);
   }
 });
+
+test("physical Runner client readiness requires the exact authenticated ingress identity", async () => {
+  const client = new MtlsPhysicalRunnerIngressClient({
+    origin: "https://runner-control.internal",
+    tls,
+    http: async (url, input) => {
+      assert.equal(url.pathname, "/health");
+      assert.equal(input.method, "GET");
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-runner-ingress" } };
+    },
+  });
+  await client.probe();
+});
