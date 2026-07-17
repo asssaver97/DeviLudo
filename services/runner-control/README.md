@@ -46,8 +46,14 @@ selects an eligible attempt with `SKIP LOCKED`. It increments the platform
 fencing token, derives a v2 Source/Steam job only from the execution lock,
 includes all supply-chain digests, signs it with Ed25519 and persists the whole
 envelope. A retry re-verifies and returns those identical signed bytes instead
-of issuing a second lease. This store still requires the dedicated mTLS HTTP
-adapter described below; it is never mounted in the public Web process.
+of issuing a second lease. Evidence can be written only after `STARTED` and is
+validated against that signed job before occupying the lease's immutable slot.
+Events then advance under the attempt row lock, exact fencing token and
+monotonic sequence. A Runner can end only its own platform; the store verifies
+every latest platform job and manifest, archives the content-addressed bundle,
+and derives the matrix result server-side. This store still requires the
+dedicated mTLS HTTP adapter described below; it is never mounted in the public
+Web process.
 
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the

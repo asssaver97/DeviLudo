@@ -171,7 +171,7 @@ export class RunnerMatrixCoordinator {
     if (attempt.state === "PASSED" || attempt.state === "FAILED" || attempt.state === "INVALIDATED") throw new Error("Attempt is terminal");
     const platformState = attempt.platforms[manifest.platform];
     if (!platformState) throw new Error("Platform has no active lease");
-    validateManifest(manifest, attempt.spec, runner, platformState.lease);
+    validatePlatformEvidenceManifest(manifest, attempt.spec, runner, platformState.lease);
     if (platformState.evidence) {
       if (platformState.evidence.manifestDigest !== manifest.manifestDigest) throw new Error("Platform evidence is immutable for a fencing token");
       return platformState.evidence;
@@ -194,7 +194,7 @@ export class RunnerMatrixCoordinator {
     if (attempt.state === "PASSED" || attempt.state === "FAILED" || attempt.state === "INVALIDATED") throw new Error("Attempt is terminal");
     const platformState = attempt.platforms[event.platform];
     if (!platformState) throw new Error("Platform has no active lease");
-    validateEventShape(event, platformState.cursor, receivedAt);
+    validateRunnerEventShape(event, platformState.cursor, receivedAt);
     if (event.type === "PLATFORM_COMPLETED") {
       if (!platformState.evidence) throw new Error("Platform completion requires a validated evidence manifest");
       if (event.artifactDigest !== platformState.evidence.manifestDigest) throw new Error("Platform completion evidence digest mismatch");
@@ -451,7 +451,29 @@ function assertRunnerMatchesAttempt(runner: RegisteredRunner, spec: MatrixAttemp
   if (runner.exportTemplatesDigest !== spec.exportTemplates[runner.platform]) throw new Error("Runner export templates do not match the attempt lock");
 }
 
-function validateManifest(manifest: PlatformEvidenceManifest, spec: MatrixAttemptSpec, runner: RegisteredRunner, lease: PlatformRunnerLease): void {
+type PlatformEvidenceAttemptBinding = Pick<MatrixAttemptSpec,
+  | "attemptId" | "commitSha" | "sourceDigest" | "specRevisionId"
+  | "specDigest" | "testPlanDigest" | "targetMatrix" | "godotTestKitDigest"
+>;
+
+export function validatePlatformEvidenceManifest(
+  manifest: PlatformEvidenceManifest,
+  spec: PlatformEvidenceAttemptBinding,
+  runner: Pick<RegisteredRunner, "runnerId" | "platform" | "exportTemplatesDigest" | "capabilityDigest">,
+  lease: PlatformRunnerLease,
+): void {
+  const keys = Object.keys(manifest).sort();
+  const expectedKeys = [
+    "schemaVersion", "attemptId", "fencingToken", "commitSha", "sourceDigest",
+    "specRevisionId", "specDigest", "testPlanDigest", "targetMatrix",
+    "godotTestKitDigest", "exportTemplatesDigest", "platform", "runnerId",
+    "runnerCapabilityDigest", "exportDigest", "logsDigest", "junitDigest",
+    "inputTimelineDigest", "screenshotManifestDigest", "videoManifestDigest",
+    "status", "createdAt", "manifestDigest",
+  ].sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error("Platform evidence manifest fields are invalid");
+  }
   if (manifest.schemaVersion !== "deviludo.platform-evidence.v1"
     || manifest.attemptId !== spec.attemptId
     || manifest.runnerId !== runner.runnerId
@@ -512,7 +534,15 @@ export function createPlatformEvidenceManifest(
   return deepFreeze({ ...input, manifestDigest: sha256Canonical(input) });
 }
 
-function validateEventShape(event: RunnerEvent, cursor: RunnerEventCursor, receivedAt: string): void {
+export function validateRunnerEventShape(event: RunnerEvent, cursor: RunnerEventCursor, receivedAt: string): void {
+  const keys = Object.keys(event).sort();
+  const expectedKeys = [
+    "attemptId", "runnerId", "fencingToken", "seqNo", "commitSha",
+    "sourceDigest", "platform", "type", "status", "artifactDigest", "occurredAt",
+  ].sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error("Runner event fields are invalid");
+  }
   if (!Number.isFinite(Date.parse(event.occurredAt)) || !Number.isFinite(Date.parse(receivedAt))) throw new Error("Runner event timestamp is invalid");
   if (Date.parse(event.occurredAt) > Date.parse(receivedAt) + 5 * 60_000) throw new Error("Runner event timestamp is too far in the future");
   if (cursor.lastAcceptedSeqNo === 0 && event.type !== "STARTED") throw new Error("The first platform event must be STARTED");

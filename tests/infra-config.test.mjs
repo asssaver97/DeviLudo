@@ -25,6 +25,9 @@ test("Runner ingress persists replayable signed jobs and immutable lease/event b
   assert.match(adapter, /COALESCE\(MAX\(fencing_token\), 0\) \+ 1/);
   assert.match(adapter, /Runner is not assigned to this tenant/);
   assert.match(adapter, /signCanonical/);
+  assert.match(adapter, /INSERT INTO deviludo\.platform_runner_events/);
+  assert.match(adapter, /INSERT INTO deviludo\.evidence_bundles/);
+  assert.match(adapter, /FOR UPDATE/);
 });
 
 test("physical Runner attempts require an append-only tenant execution lock", () => {
