@@ -266,15 +266,18 @@ non-UUID tenant IDs, and never asks a database-owner connection to enumerate
 RLS tenants. A read-only public key is mounted on the Worker; its private
 signing key remains in the control plane/KMS.
 
-The first concrete destination entry is the control-plane action service,
-because its production PostgreSQL action adapter already exists:
+The first concrete destination entries are the control-plane action service
+and the Agent execution dispatcher:
 
 ```bash
 npm run start:control-plane-workflow
+npm run start:agent-worker-workflow
 ```
 
-It requires the destination TLS, signed-assignment and database variables in
-`services/temporal/.env.example`. Agent, Runner, SCM and Steam handlers use the
+They require the destination TLS, signed-assignment and database variables in
+`services/temporal/.env.example`. The Agent destination additionally requires
+the isolated execution Broker mTLS settings and remains unready if that Broker
+cannot prove its exact health identity. Runner, SCM and Steam handlers use the
 same runtime composition, but their service entries stay disabled until their
 respective production connector factories are supplied; no placeholder
 connector reports successful work.

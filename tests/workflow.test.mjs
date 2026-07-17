@@ -91,3 +91,17 @@ test("delivery workflow rejects an unknown runtime signal type", () => {
     /Delivery signal type is invalid/,
   );
 });
+
+test("an in-flight Provider recovery queues a fresh command for the same recorded run", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-provider-resume", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
+  });
+  workflow.signal({ signalId: "resume-signal-001", type: "SPEC_READY", specRevisionId: "SPEC-001" });
+  workflow.signal({ signalId: "resume-signal-002", type: "SPEC_APPROVED", lockedRunConfigurationId: "lock-001" });
+  workflow.signal({ signalId: "resume-signal-003", type: "AGENT_STARTED", runId: "run-001" });
+  workflow.signal({ signalId: "resume-signal-004", type: "PROVIDER_UNAVAILABLE", providerRevisionId: "provider-001" });
+  workflow.signal({ signalId: "resume-signal-005", type: "PROVIDER_RESTORED", providerRevisionId: "provider-001" });
+  assert.equal(workflow.current().state, "DEVELOPMENT_QUEUED");
+  assert.equal(workflow.current().runId, "run-001");
+  assert.equal(workflow.nextCommand(), "START_LOCKED_AGENT_RUN");
+});

@@ -14,7 +14,10 @@ import { workflowAssignmentSourceFromEnv } from "./tenant-assignments";
 
 export async function runWorkflowDestinationService(options: {
   readonly destination: DeliveryCommandDestination;
-  readonly createHandler: (pool: ClosablePostgresWorkflowPool) => WorkflowJobHandler | Promise<WorkflowJobHandler>;
+  readonly createHandler: (
+    pool: ClosablePostgresWorkflowPool,
+    env: Readonly<Record<string, string | undefined>>,
+  ) => WorkflowJobHandler | Promise<WorkflowJobHandler>;
   readonly createAuxiliaryProcessors?: (
     pool: ClosablePostgresWorkflowPool,
     signals: TemporalWorkflowSignalPort,
@@ -25,6 +28,7 @@ export async function runWorkflowDestinationService(options: {
     pool: ClosablePostgresWorkflowPool,
     env: Readonly<Record<string, string | undefined>>,
   ) => void | Promise<void>;
+  readonly probes?: readonly (() => Promise<void>)[];
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<void> {
   const env: Readonly<Record<string, string | undefined>> = Object.freeze({
@@ -51,7 +55,7 @@ export async function runWorkflowDestinationService(options: {
         minVersion: "TLSv1.3",
       },
     });
-    const handler = await options.createHandler(pool);
+    const handler = await options.createHandler(pool, env);
     if (options.configureServer) await options.configureServer(server, pool, env);
     const assignments = workflowAssignmentSourceFromEnv(env);
     const signals = new TemporalWorkflowSignalPort(temporal.client);
@@ -69,7 +73,11 @@ export async function runWorkflowDestinationService(options: {
       tenants: assignments,
       auxiliaryProcessors,
       authorize,
-      probes: [() => pool.probe(), () => assignments.listTenantIds(options.destination).then(() => undefined)],
+      probes: [
+        () => pool.probe(),
+        () => assignments.listTenantIds(options.destination).then(() => undefined),
+        ...(options.probes ?? []),
+      ],
       onDiagnostic: (diagnostic) => process.stderr.write(`${JSON.stringify(diagnostic)}\n`),
     });
     const shutdown = new AbortController();

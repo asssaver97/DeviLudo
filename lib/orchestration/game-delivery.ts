@@ -199,8 +199,9 @@ export class GameDeliveryWorkflow {
         return this.invalid(signal);
       case "WAITING_PROVIDER":
         if (signal.type !== "PROVIDER_RESTORED" || signal.providerRevisionId !== this.snapshot.waitingProviderRevisionId) return this.invalid(signal);
-        // The same locked Profile and Agent continue; never silently switch CLI.
-        return this.commit(signal, { state: this.snapshot.runId ? "DEVELOPING" : "DEVELOPMENT_QUEUED", waitingProviderRevisionId: null });
+        // Queue a fresh durable command that must resume the same lock/run.
+        // The old destination job has already closed and cannot race this one.
+        return this.commit(signal, { state: "DEVELOPMENT_QUEUED", waitingProviderRevisionId: null });
       case "CROSS_PLATFORM_E2E":
         if (signal.type === "E2E_PASSED") {
           return this.commit(signal, {

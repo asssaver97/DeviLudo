@@ -1,10 +1,10 @@
 import {
-  WorkflowJobError,
   type DeliverySignalWithoutId,
   type WorkflowJobExecutionContext,
   type WorkflowJobHandler,
 } from "../../temporal/src/job-processor";
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
+import { assertPinnedModelId } from "../../../lib/agent/providers";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256_IMAGE = /^sha256:[a-f0-9]{64}$/;
@@ -29,9 +29,8 @@ export interface AgentWorkflowRunReceipt {
 export interface AgentWorkflowRun {
   readonly runId: string;
   readonly providerRevisionId: string;
-  /** True only when a durable Provider outage record has become healthy. */
-  readonly recoveredFromOutage: boolean;
-  readonly completion: Promise<AgentWorkflowRunReceipt>;
+  /** Starts completion polling only after AGENT_STARTED is durably signaled. */
+  complete(): Promise<AgentWorkflowRunReceipt>;
 }
 
 export interface LockedAgentWorkflowPort {
@@ -42,8 +41,10 @@ export interface LockedAgentWorkflowPort {
     readonly projectId: string;
     readonly workflowId: string;
     readonly lockedRunConfigurationId: string;
+    readonly expectedRunId: string | null;
     readonly iteration: number;
     readonly repairAttempts: number;
+    readonly heartbeat: () => Promise<string>;
   }): Promise<AgentWorkflowRun>;
 }
 
@@ -59,7 +60,7 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
 
   async execute(job: ClaimedWorkflowJob, context: WorkflowJobExecutionContext): Promise<{
     readonly result: Readonly<Record<string, unknown>>;
-    readonly signal: DeliverySignalWithoutId;
+    readonly signal?: DeliverySignalWithoutId;
   }> {
     if (job.destination !== "agent-worker" || job.operation !== "START_LOCKED_AGENT_RUN"
       || job.request.kind !== "COMMAND") throw new Error("Agent workflow operation is invalid");
@@ -77,8 +78,10 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
         projectId: job.projectId,
         workflowId: job.workflowId,
         lockedRunConfigurationId: snapshot.lockedRunConfigurationId,
+        expectedRunId: snapshot.runId,
         iteration: snapshot.iteration,
         repairAttempts: snapshot.repairAttempts,
+        heartbeat: context.heartbeat,
       });
     } catch (error) {
       if (error instanceof AgentProviderUnavailableError) {
@@ -86,31 +89,28 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
           type: "PROVIDER_UNAVAILABLE",
           providerRevisionId: error.providerRevisionId,
         });
-        throw new WorkflowJobError("PROVIDER_UNAVAILABLE");
+        return providerWaitResult(snapshot.lockedRunConfigurationId, error.providerRevisionId, null);
       }
       throw error;
     }
     validateOpaqueId(run.runId, "Agent run");
     validateOpaqueId(run.providerRevisionId, "Provider revision");
-    if (run.recoveredFromOutage) {
-      await context.emitSignal("provider-restored", {
-        type: "PROVIDER_RESTORED",
-        providerRevisionId: run.providerRevisionId,
-      });
+    if (snapshot.runId !== null && run.runId !== snapshot.runId) {
+      throw new Error("Agent workflow recovery run binding is invalid");
     }
     await context.emitSignal("started", { type: "AGENT_STARTED", runId: run.runId });
     await context.heartbeat();
 
     let receipt: AgentWorkflowRunReceipt;
     try {
-      receipt = await run.completion;
+      receipt = await run.complete();
     } catch (error) {
       if (error instanceof AgentProviderUnavailableError) {
         await context.emitSignal("provider-unavailable", {
           type: "PROVIDER_UNAVAILABLE",
           providerRevisionId: error.providerRevisionId,
         });
-        throw new WorkflowJobError("PROVIDER_UNAVAILABLE");
+        return providerWaitResult(snapshot.lockedRunConfigurationId, error.providerRevisionId, run.runId);
       }
       throw error;
     }
@@ -132,13 +132,28 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
   }
 }
 
+function providerWaitResult(
+  lockedRunConfigurationId: string,
+  providerRevisionId: string,
+  runId: string | null,
+): { readonly result: Readonly<Record<string, unknown>> } {
+  return Object.freeze({
+    result: Object.freeze({
+      status: "WAITING_PROVIDER",
+      lockedRunConfigurationId,
+      providerRevisionId,
+      runId,
+    }),
+  });
+}
+
 function validateReceipt(receipt: AgentWorkflowRunReceipt, run: AgentWorkflowRun, lockedId: string): void {
   if (receipt.runId !== run.runId || receipt.lockedRunConfigurationId !== lockedId
     || receipt.providerRevisionId !== run.providerRevisionId
-    || ![receipt.profileRevisionId, receipt.installationId, receipt.model, receipt.receiptId].every(ID.test.bind(ID))
+    || ![receipt.profileRevisionId, receipt.installationId, receipt.receiptId].every(ID.test.bind(ID))
     || !["COMPLETED", "FAILED"].includes(receipt.status)
     || !["claude-code", "codex-cli"].includes(receipt.agent)
-    || !SHA256_IMAGE.test(receipt.imageDigest)) {
+    || !SHA256_IMAGE.test(receipt.imageDigest) || !validModel(receipt.model)) {
     throw new Error("Agent workflow receipt lock binding is invalid");
   }
   if (receipt.status === "COMPLETED") {
@@ -148,6 +163,16 @@ function validateReceipt(receipt: AgentWorkflowRunReceipt, run: AgentWorkflowRun
   } else if (!receipt.diagnosticId || !ID.test(receipt.diagnosticId)
     || receipt.candidateCommitSha !== null || receipt.draftPullRequest !== null) {
     throw new Error("Failed Agent workflow receipt is invalid");
+  }
+}
+
+function validModel(value: string): boolean {
+  if (value.length > 512) return false;
+  try {
+    assertPinnedModelId(value);
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -28,6 +28,30 @@ and Agent, and resumes only after the durable Provider record reports recovery;
 there is no Claude/Codex fallback. Candidate completion requires an
 authoritative commit SHA and Draft PR number.
 
+The production destination process is started with:
+
+```sh
+npm run start:agent-worker-workflow
+```
+
+It hosts the durable Temporal command receiver but does not install either CLI.
+`MtlsAgentExecutionBroker` submits only the workflow job identity, request
+digest and `lockedRunConfigurationId` to the isolated microVM Broker over TLS
+1.3 mutual authentication. The Broker resolves the immutable Profile,
+Installation, Provider and short-lived inference token in its own trust
+boundary. While a run is active, the connector polls the same Broker run and
+renews the PostgreSQL job lease before every poll. Replays must preserve the
+run ID, Provider revision and complete receipt binding; response fields outside
+the receipt allow-list are discarded.
+
+Provider outage is a completed outcome for the current destination job after
+it emits `PROVIDER_UNAVAILABLE`. Only the Provider monitor may later emit
+`PROVIDER_RESTORED`; the resumed workflow dispatches a new idempotent job for
+the same locked run. This avoids an old retry racing the recovery monitor or
+silently switching Claude Code and Codex CLI. The destination health check is
+not ready unless PostgreSQL, Temporal assignments and the execution Broker's
+exact workload health response all pass.
+
 The contract tests inject the process boundary and verify call ordering,
 version/image mismatch rejection, file modes, overwrite protection and symlink
 defence without invoking an installed Agent CLI:

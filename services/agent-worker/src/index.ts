@@ -6,3 +6,4 @@ export * from "./redaction";
 export * from "./runtime-files";
 export * from "./supervisor";
 export * from "./workflow-handler";
+export * from "./execution-broker";
