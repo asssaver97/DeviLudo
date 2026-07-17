@@ -1,7 +1,7 @@
 # DeviLudo production service entries
 
-This directory contains the two long-running Node.js processes that sit behind
-the web console:
+This directory contains the long-running Node.js service boundaries that sit
+behind the web console:
 
 - `control-plane`: NestJS 11 on Fastify 5, with the exact Agent administration
   API, RBAC, immutable revisions, mutation idempotency and secret-safe error
@@ -9,6 +9,11 @@ the web console:
 - `temporal`: the durable wrapper around `lib/orchestration/GameDeliveryWorkflow`,
   plus Worker and Client entry points. External waits are signals; no wait path
   polls a database or sleeps in a loop.
+- `agent-worker`: a one-run supervisor for the exact Claude Code or Codex CLI
+  RuntimeSpec. It uses `shell: false`, validates all workspace/runtime paths,
+  applies a minimal environment allowlist, resolves opaque SecretRefs only at
+  process start, redacts JSONL/stderr, and distinguishes cancellation, timeout,
+  signal and exit-code failures.
 
 The root application can keep using its lightweight route handlers for the
 Sites preview. Production traffic should route `/admin/*` to the control-plane
@@ -120,8 +125,10 @@ and activities; the Worker never silently swaps Claude Code and Codex CLI.
 ```bash
 ./node_modules/.bin/tsc -p services/control-plane/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/temporal/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 node --import tsx --test services/control-plane/test/control-plane.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
+node --import tsx --test services/agent-worker/test/supervisor.test.ts
 ```
 
 The control-plane tests use Fastify's in-process `inject()` API, so they do not

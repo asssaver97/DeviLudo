@@ -438,3 +438,39 @@ export const outboxEvents = sqliteTable(
   },
   (table) => [index("outbox_unpublished_idx").on(table.publishedAt, table.createdAt)],
 );
+
+/**
+ * Local-first delivery projection used by the localhost test environment.
+ * Production continues to use the normalized aggregates above; this compact
+ * projection lets the complete workflow be exercised without Docker or
+ * external credentials while remaining durable across browser refreshes.
+ */
+export const localDeliverySnapshots = sqliteTable("local_delivery_snapshots", {
+  projectId: text("project_id").primaryKey(),
+  revision: integer("revision").notNull(),
+  snapshot: text("snapshot", { mode: "json" }).$type<JsonRecord>().notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const localDeliveryEvents = sqliteTable(
+  "local_delivery_events",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    revision: integer("revision").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: text("payload", { mode: "json" }).$type<JsonRecord>().notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("local_delivery_event_revision_unique").on(table.projectId, table.revision),
+    index("local_delivery_event_project_time_idx").on(table.projectId, table.createdAt),
+  ],
+);
+
+export const localDeliveryCommands = sqliteTable("local_delivery_commands", {
+  key: text("key").primaryKey(),
+  projectId: text("project_id").notNull(),
+  response: text("response", { mode: "json" }).$type<JsonRecord>().notNull(),
+  createdAt: text("created_at").notNull(),
+});

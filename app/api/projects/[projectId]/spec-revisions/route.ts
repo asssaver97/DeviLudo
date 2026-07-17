@@ -1,5 +1,6 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
+import { startLocalDelivery } from "@/lib/local-delivery/store";
 
 export async function GET(
   _request: Request,
@@ -32,7 +33,8 @@ export async function POST(
     if (action !== "approve") {
       return json({ error: { code: "UNSUPPORTED_ACTION", message: "Only approve is supported" } }, { status: 400 });
     }
-    const result = withIdempotency(`spec:${projectId}:${idempotencyKey(request)}`, () => {
+    const requestKey = idempotencyKey(request);
+    const result = withIdempotency(`spec:${projectId}:${requestKey}`, () => {
       const store = getDemoStore();
       const expected = `SPEC-${String(store.specRevision).padStart(3, "0")}`;
       const isNewProjectDraft = projectId === "new-project-draft";
@@ -66,7 +68,16 @@ export async function POST(
         },
       };
     });
-    return json({ data: result.value, meta: { idempotentReplay: result.replayed } }, { status: result.replayed ? 200 : 201 });
+    const delivery = await startLocalDelivery(
+      projectId,
+      revision,
+      result.value.run.id,
+      `spec-delivery:${projectId}:${requestKey}`,
+    );
+    return json(
+      { data: { ...result.value, delivery: delivery.snapshot }, meta: { idempotentReplay: result.replayed || delivery.replayed } },
+      { status: result.replayed || delivery.replayed ? 200 : 201 },
+    );
   } catch (error) {
     return problemResponse(error);
   }

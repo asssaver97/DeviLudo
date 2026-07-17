@@ -1,0 +1,280 @@
+export type LocalDeliveryStage =
+  | "AWAITING_SPEC_APPROVAL"
+  | "AGENT_QUEUED"
+  | "AGENT_RUNNING"
+  | "WAITING_PROVIDER"
+  | "CANDIDATE_READY"
+  | "E2E_RUNNING"
+  | "AWAITING_ACCEPTANCE"
+  | "MERGING"
+  | "MAIN_GATE_RUNNING"
+  | "MFA_REQUIRED"
+  | "STEAM_BETA_UPLOADING"
+  | "STEAM_REINSTALL_E2E"
+  | "EXTERNAL_APPROVAL_REQUIRED"
+  | "RELEASED";
+
+export type LocalPlatformStatus = "QUEUED" | "RUNNING" | "PASSED" | "INVALIDATED";
+
+export type LocalDeliveryEvent = {
+  id: string;
+  type: string;
+  message: string;
+  at: string;
+};
+
+export type LocalDeliverySnapshot = {
+  projectId: string;
+  revision: number;
+  specRevisionId: string;
+  runId: string | null;
+  stage: LocalDeliveryStage;
+  resumeStage: LocalDeliveryStage | null;
+  lockedProfile: {
+    agent: "claude-code";
+    profileRevisionId: "profile-claude-platform-r5";
+    installationId: "claude-installation-214";
+    exactAgentVersion: "2.1.14";
+    adapterVersion: "1.0.0";
+    model: "claude-sonnet-4-6-20250514";
+  };
+  candidatePr: number | null;
+  candidateSha: string | null;
+  mainSha: string | null;
+  evidenceValid: boolean;
+  targetResults: Record<"linux" | "windows" | "macos", LocalPlatformStatus>;
+  steamBranch: "local-password-beta" | null;
+  events: LocalDeliveryEvent[];
+  updatedAt: string;
+};
+
+export type LocalDeliveryAction =
+  | "advance"
+  | "provider-fail"
+  | "provider-resume"
+  | "accept"
+  | "confirm-mfa"
+  | "external-approve"
+  | "reset";
+
+const profile = {
+  agent: "claude-code" as const,
+  profileRevisionId: "profile-claude-platform-r5" as const,
+  installationId: "claude-installation-214" as const,
+  exactAgentVersion: "2.1.14" as const,
+  adapterVersion: "1.0.0" as const,
+  model: "claude-sonnet-4-6-20250514" as const,
+};
+
+function now() {
+  return new Date().toISOString();
+}
+
+function event(snapshot: LocalDeliverySnapshot, type: string, message: string): LocalDeliverySnapshot {
+  const at = now();
+  return {
+    ...snapshot,
+    revision: snapshot.revision + 1,
+    updatedAt: at,
+    events: [
+      { id: `LOCAL-EVT-${String(snapshot.events.length + 1).padStart(4, "0")}`, type, message, at },
+      ...snapshot.events,
+    ].slice(0, 40),
+  };
+}
+
+export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-001"): LocalDeliverySnapshot {
+  const at = now();
+  return {
+    projectId,
+    revision: 1,
+    specRevisionId,
+    runId: null,
+    stage: "AWAITING_SPEC_APPROVAL",
+    resumeStage: null,
+    lockedProfile: profile,
+    candidatePr: null,
+    candidateSha: null,
+    mainSha: null,
+    evidenceValid: false,
+    targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
+    steamBranch: null,
+    events: [{ id: "LOCAL-EVT-0001", type: "PROJECT_CREATED", message: "本地项目已创建，等待批准规格。", at }],
+    updatedAt: at,
+  };
+}
+
+export function approveLocalSpec(
+  current: LocalDeliverySnapshot,
+  specRevisionId: string,
+  runId: string,
+): LocalDeliverySnapshot {
+  const started = event(
+    {
+      ...current,
+      specRevisionId,
+      runId,
+      stage: "AGENT_QUEUED",
+      resumeStage: null,
+      candidatePr: null,
+      candidateSha: null,
+      mainSha: null,
+      evidenceValid: false,
+      targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
+      steamBranch: null,
+    },
+    "SPEC_APPROVED",
+    `${specRevisionId} 已冻结；Claude Code Profile 与目标矩阵已锁定。`,
+  );
+  return started;
+}
+
+export function invalidateLocalDelivery(
+  current: LocalDeliverySnapshot,
+  nextSpecRevisionId: string,
+): LocalDeliverySnapshot {
+  return event(
+    {
+      ...current,
+      specRevisionId: nextSpecRevisionId,
+      stage: "AWAITING_SPEC_APPROVAL",
+      resumeStage: null,
+      evidenceValid: false,
+      targetResults: Object.fromEntries(
+        Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
+      ) as LocalDeliverySnapshot["targetResults"],
+    },
+    "FEEDBACK_CREATED",
+    "用户反馈已创建新规格修订，旧候选证据立即失效。",
+  );
+}
+
+export function applyLocalDeliveryAction(
+  current: LocalDeliverySnapshot,
+  action: LocalDeliveryAction,
+): LocalDeliverySnapshot {
+  if (action === "reset") return createLocalDelivery(current.projectId, current.specRevisionId);
+
+  if (action === "provider-fail") {
+    if (!['AGENT_QUEUED', 'AGENT_RUNNING'].includes(current.stage)) {
+      throw new Error("Provider 只能在 Agent 排队或运行期间进入等待状态");
+    }
+    return event(
+      { ...current, resumeStage: current.stage, stage: "WAITING_PROVIDER" },
+      "PROVIDER_UNAVAILABLE",
+      "Provider 探针失败；任务保持原 Profile 锁并暂停，没有切换 Agent。",
+    );
+  }
+
+  if (action === "provider-resume") {
+    if (current.stage !== "WAITING_PROVIDER" || !current.resumeStage) {
+      throw new Error("当前任务不在 WAITING_PROVIDER");
+    }
+    return event(
+      { ...current, stage: current.resumeStage, resumeStage: null },
+      "PROVIDER_RESUMED",
+      "Provider 已恢复，任务继续使用原有锁定配置。",
+    );
+  }
+
+  if (action === "accept") {
+    if (current.stage !== "AWAITING_ACCEPTANCE") throw new Error("当前候选版本尚不可验收");
+    return event({ ...current, stage: "MERGING" }, "CANDIDATE_ACCEPTED", "用户已接受候选版本，开始合并 Draft PR。 ");
+  }
+
+  if (action === "confirm-mfa") {
+    if (current.stage !== "MFA_REQUIRED") throw new Error("当前不需要 MFA 确认");
+    return event(
+      { ...current, stage: "STEAM_BETA_UPLOADING", steamBranch: "local-password-beta" },
+      "MFA_CONFIRMED",
+      "本地测试 MFA 已确认；开始模拟上传密码保护 Beta。",
+    );
+  }
+
+  if (action === "external-approve") {
+    if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED") throw new Error("当前没有外部发布批准待处理");
+    return event(
+      { ...current, stage: "RELEASED" },
+      "EXTERNAL_APPROVAL_CONFIRMED",
+      "本地模拟外部批准完成；未调用真实 Steam 发布接口。",
+    );
+  }
+
+  if (action !== "advance") throw new Error("不支持的本地交付动作");
+
+  switch (current.stage) {
+    case "AGENT_QUEUED":
+      return event({ ...current, stage: "AGENT_RUNNING" }, "AGENT_STARTED", "隔离 Worker 已领取锁定任务。 ");
+    case "AGENT_RUNNING":
+      return event(
+        { ...current, stage: "CANDIDATE_READY", candidatePr: 18, candidateSha: "8b7e4a2" },
+        "CANDIDATE_READY",
+        "Fixture Executor 产出候选提交与 Draft PR；未调用真实第三方 Agent。",
+      );
+    case "CANDIDATE_READY":
+      return event(
+        { ...current, stage: "E2E_RUNNING", targetResults: { linux: "RUNNING", windows: "QUEUED", macos: "QUEUED" } },
+        "E2E_STARTED",
+        "已冻结同一提交、规格与 TestKit，开始目标矩阵测试。",
+      );
+    case "E2E_RUNNING": {
+      const targets = { ...current.targetResults };
+      let message = "";
+      let stage: LocalDeliveryStage = current.stage;
+      if (targets.linux === "RUNNING") {
+        targets.linux = "PASSED";
+        targets.windows = "RUNNING";
+        message = "Linux 证据通过；Windows Runner 开始执行。";
+      } else if (targets.windows === "RUNNING") {
+        targets.windows = "PASSED";
+        targets.macos = "RUNNING";
+        message = "Windows 证据通过；macOS Runner 开始执行。";
+      } else if (targets.macos === "RUNNING") {
+        targets.macos = "PASSED";
+        stage = "AWAITING_ACCEPTANCE";
+        message = "所选三个目标全部通过，候选证据包已冻结。";
+      } else {
+        throw new Error("E2E 状态缺少正在运行的平台");
+      }
+      return event(
+        { ...current, stage, targetResults: targets, evidenceValid: stage === "AWAITING_ACCEPTANCE" },
+        stage === "AWAITING_ACCEPTANCE" ? "E2E_PASSED" : "E2E_PLATFORM_PASSED",
+        message,
+      );
+    }
+    case "MERGING":
+      return event(
+        { ...current, stage: "MAIN_GATE_RUNNING", mainSha: "f21c0de" },
+        "MAIN_SHA_LOCKED",
+        "Draft PR 已在本地 SCM 合并；发布门禁锁定实际 main SHA。",
+      );
+    case "MAIN_GATE_RUNNING":
+      return event({ ...current, stage: "MFA_REQUIRED" }, "MAIN_GATE_PASSED", "main SHA 完整门禁通过，等待 MFA。 ");
+    case "STEAM_BETA_UPLOADING":
+      return event(
+        { ...current, stage: "STEAM_REINSTALL_E2E" },
+        "STEAM_BETA_READY",
+        "本地模拟 Beta 已激活；开始干净客户端回装测试。",
+      );
+    case "STEAM_REINSTALL_E2E":
+      return event(
+        { ...current, stage: "EXTERNAL_APPROVAL_REQUIRED" },
+        "STEAM_REINSTALL_PASSED",
+        "回装测试通过；等待 Valve/首次发行等外部批准。",
+      );
+    case "AWAITING_SPEC_APPROVAL":
+      throw new Error("请先批准当前规格修订");
+    case "AWAITING_ACCEPTANCE":
+      throw new Error("请使用接受候选版本动作");
+    case "MFA_REQUIRED":
+      throw new Error("请先完成 MFA 确认");
+    case "EXTERNAL_APPROVAL_REQUIRED":
+      throw new Error("请使用本地模拟外部批准动作");
+    case "WAITING_PROVIDER":
+      throw new Error("Provider 未恢复，任务不会静默切换 Agent");
+    case "RELEASED":
+      throw new Error("本地交付链路已经完成");
+    default:
+      throw new Error(`没有可用的下一步：${current.stage satisfies never}`);
+  }
+}

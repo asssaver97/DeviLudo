@@ -11,13 +11,15 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `/`：项目总览、候选版本流水线、跨平台状态、审计流和 Runner 集群。
 - `/projects/new`：可交互的多轮构想对话、实时 `GameSpecRevision`、验收标准、冻结测试计划和明确批准动作。构想助手与开发 Agent 分离。
 - `/projects/ember-archipelago`：候选 PR 上的反馈迭代；新反馈创建不可变规格并让旧证据失效。
+- 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件，可完整验证 Provider 暂停/恢复、Fixture Agent、三平台矩阵、验收、main SHA、MFA、Steam Beta 回装和外部批准门禁；页面刷新和服务重启后状态仍保留。
 - `/admin/agents`：Claude Code（全局默认）与 Codex CLI 的目录、版本、安装、灰度、回滚、Provider、凭据、三级继承、健康、审计和 RBAC 演示。
 - `/settings/connections`：GitHub App OAuth 和 Steam Guard 会话流程；不接收或保存 GitHub/Steam 主密码。
 - `/runners`、`/evidence`：多系统 Runner 与签名证据包视图。
 - `lib/domain`：规格、迭代、AgentVersion、Installation、Profile、Run、E2E、Steam 的严格状态机和不可变快照。
 - `lib/agent`、`adapters`、`lib/security`：统一 Runtime Adapter、精确 CLI 参数、固定模型、SSRF/DNS rebinding/redirect 校验、短期 run token、SecretRef 与显式 fallback。
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
-- `db`、`drizzle`：23 张 D1 Beta 演示表和不可变触发器。
+- `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
+- `db`、`drizzle`：26 张 D1 Beta 表、不可变触发器及本地交付事件迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。
 
@@ -57,10 +59,18 @@ flowchart LR
 
 ```bash
 npm install
-npm run dev
+npm run local:dev
 ```
 
-打开 `http://localhost:3000`。产品页面和管理动作默认使用安全的本地演示数据，不会调用真实模型、GitHub 或 Steam。
+打开 `http://127.0.0.1:3000`。该命令只绑定 loopback，不向局域网开放。产品页面、D1 持久状态和 Fixture Executor 不会调用真实模型、GitHub 或 Steam。
+
+保持测试站运行时，可在另一个终端检查关键页面和健康 API：
+
+```bash
+npm run local:smoke
+```
+
+端口选择、退出信号和故障排查见 [本地测试说明](docs/local-testing.md)。
 
 完整校验：
 
@@ -118,7 +128,7 @@ lib/agent/              Provider/Profile/事件协议
 lib/security/           SSRF、凭据、短期 token
 lib/orchestration/      确定性交付工作流
 adapters/               Claude Code / Codex CLI Adapter
-services/               NestJS/Fastify 与 Temporal 生产入口
+services/               NestJS/Fastify、Temporal 与 Agent Worker 生产入口
 db/ + drizzle/          D1 Beta schema/migrations
 infra/                  Postgres/Temporal/Redis/S3/Vault/OTel
 openapi/                生产 HTTP 合同

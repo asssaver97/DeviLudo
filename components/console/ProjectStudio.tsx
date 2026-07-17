@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import type { LocalDeliverySnapshot } from "@/lib/local-delivery/model";
 import { AppShell } from "./AppShell";
 import { ArrowIcon, CheckIcon, ClockIcon, FileIcon, GithubIcon, SparkIcon } from "./Icons";
+import { LocalDeliveryPanel } from "./LocalDeliveryPanel";
 
 type Message = {
   id: number;
@@ -64,6 +66,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
   const [notice, setNotice] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackCount, setFeedbackCount] = useState(2);
+  const [deliveryRefresh, setDeliveryRefresh] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
@@ -89,15 +92,20 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     setBusy(true);
     const projectId = mode === "new" ? "new-project-draft" : "ember-archipelago";
     try {
-      await fetch(`/api/projects/${projectId}/spec-revisions`, {
+      const response = await fetch(`/api/projects/${projectId}/spec-revisions`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `approve-${specId}` },
         body: JSON.stringify({ revision: specId, action: "approve" }),
       });
-    } finally {
+      const payload = await response.json() as { error?: { message?: string } };
+      if (!response.ok) throw new Error(payload.error?.message ?? "规格批准失败");
       setApproved(true);
-      setBusy(false);
+      setDeliveryRefresh((value) => value + 1);
       setNotice(`${specId} 已冻结，Claude Code 开发任务已锁定并入队。`);
+    } catch (reason) {
+      setNotice(reason instanceof Error ? `批准失败：${reason.message}` : "规格批准失败");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -105,20 +113,31 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     if (!feedback.trim()) return;
     setBusy(true);
     try {
-      await fetch("/api/projects/ember-archipelago/feedback", {
+      const response = await fetch("/api/projects/ember-archipelago/feedback", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `feedback-${Date.now()}` },
         body: JSON.stringify({ feedback }),
       });
-    } finally {
+      const payload = await response.json() as { error?: { message?: string } };
+      if (!response.ok) throw new Error(payload.error?.message ?? "创建反馈迭代失败");
       setFeedback("");
       setFeedbackCount((count) => count + 1);
       setRevision((current) => current + 1);
       setApproved(false);
-      setBusy(false);
+      setDeliveryRefresh((value) => value + 1);
       setNotice("反馈已创建为新的不可变迭代；旧候选版本的测试证据已失效。");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? `反馈失败：${reason.message}` : "创建反馈迭代失败");
+    } finally {
+      setBusy(false);
     }
   }
+
+  const syncDelivery = useCallback((snapshot: LocalDeliverySnapshot) => {
+    setApproved(snapshot.stage !== "AWAITING_SPEC_APPROVAL");
+    const persistedRevision = Number.parseInt(snapshot.specRevisionId.replace(/^SPEC-/, ""), 10);
+    if (Number.isInteger(persistedRevision)) setRevision(persistedRevision);
+  }, []);
 
   return (
     <AppShell>
@@ -243,6 +262,12 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
           <div className="release-gate-note"><ClockIcon /><span><b>接受并发布尚未开放</b><small>所选三个平台全部通过后，系统会要求 MFA 并以实际 main SHA 重跑发布门禁。</small></span></div>
         </section>
       ) : null}
+
+      <LocalDeliveryPanel
+        onSnapshot={syncDelivery}
+        projectId={mode === "new" ? "new-project-draft" : "ember-archipelago"}
+        refreshToken={deliveryRefresh}
+      />
     </AppShell>
   );
 }
