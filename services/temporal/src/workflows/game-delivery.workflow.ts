@@ -13,6 +13,7 @@ import type {
   DeliverySnapshot,
   GameDeliveryWorkflowInput,
 } from "../contracts";
+import { deliveryCommandDestination } from "../contracts";
 
 export const deliverySignal = defineSignal<[DeliverySignal]>("deliverySignal");
 export const deliverySnapshotQuery = defineQuery<DeliverySnapshot>("deliverySnapshot");
@@ -58,6 +59,7 @@ export async function gameDeliveryWorkflow(
           workflowId: snapshot.workflowId,
           tenantId: snapshot.tenantId,
           projectId: snapshot.projectId,
+          destination: "control-plane",
           reason: signal.reason,
           snapshot,
         });
@@ -74,14 +76,16 @@ export async function gameDeliveryWorkflow(
         workflowId: snapshot.workflowId,
         tenantId: snapshot.tenantId,
         projectId: snapshot.projectId,
+        destination: deliveryCommandDestination(command),
         command,
         snapshot,
       });
       lastDispatchedKey = currentDispatchKey;
     }
 
-    // RELEASED means the external publish command above was accepted. The
-    // immutable receipt remains in activity history and this workflow closes.
+    // A publish dispatch receipt only means the command was accepted. The
+    // state reaches RELEASED exclusively after the STEAM_RELEASED signal binds
+    // the resulting release and default-branch build identifiers.
     if (snapshot.state === "RELEASED") return snapshot;
 
     await condition(() => queue.length > 0);

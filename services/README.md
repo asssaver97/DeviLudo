@@ -124,13 +124,19 @@ mesh sidecar); upstream provider keys are never Worker environment variables.
 ```bash
 export TEMPORAL_ADDRESS=localhost:7233
 export TEMPORAL_NAMESPACE=default
-export DEVILUDO_ACTIVITY_DISPATCH_URL=https://delivery-dispatch.internal/v1/commands
+export DEVILUDO_CONTROL_PLANE_DISPATCH_URL=https://control-plane.internal/v1/workflow-commands
+export DEVILUDO_AGENT_WORKER_DISPATCH_URL=https://agent-worker.internal/v1/workflow-commands
+export DEVILUDO_RUNNER_CONTROL_DISPATCH_URL=https://runner-control.internal/v1/workflow-commands
+export DEVILUDO_SCM_PROXY_DISPATCH_URL=https://scm-proxy.internal/v1/workflow-commands
+export DEVILUDO_STEAM_PUBLISHER_DISPATCH_URL=https://steam-publisher.internal/v1/workflow-commands
 node --import tsx services/temporal/src/run-worker.ts
 ```
 
 Supported environment variables:
 
 - `DEVILUDO_TEMPORAL_TASK_QUEUE` (default `deviludo-game-delivery-v1`)
+- The five `DEVILUDO_*_DISPATCH_URL` values above are mandatory and pin each
+  command family to its owning service; a command cannot select its own URL.
 - `DEVILUDO_MAX_CONCURRENT_ACTIVITIES` and
   `DEVILUDO_MAX_CONCURRENT_WORKFLOWS`
 - `DEVILUDO_ALLOW_INSECURE_LOCAL_DISPATCH=1`, only for a loopback HTTP
@@ -146,11 +152,14 @@ node --import tsx services/temporal/src/run-client.ts query delivery-001
 
 The single `deliverySignal` accepts the repository's complete `DeliverySignal`
 union. Each state produces one idempotent activity command keyed by workflow,
-history sequence, state and command. `WAITING_PROVIDER`, user acceptance, MFA,
-Steam Guard/installation and external Valve approval remain open via Temporal
-signals and consume no polling workers. Runtime configuration remains the
-locked profile/version/image/model/credential revision carried by the workflow
-and activities; the Worker never silently swaps Claude Code and Codex CLI.
+history sequence, state and command. Receipts must echo the destination,
+workflow, idempotency key and operation before they are accepted. `WAITING_PROVIDER`,
+user acceptance, MFA, Steam Guard/installation and all three Steam external
+gates remain open via Temporal signals and consume no polling workers. Runtime
+configuration remains the locked profile/version/image/model/credential
+revision carried by the workflow and activities; the Worker never silently
+swaps Claude Code and Codex CLI. Public release is not terminal on dispatch:
+the workflow waits for a bound `STEAM_RELEASED` result.
 
 ## Verification
 

@@ -1,13 +1,16 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { createDeliveryActivities, HttpCommandDispatcher } from "./activities";
+import {
+  createDeliveryActivities,
+  deliveryDispatchEndpointsFromEnv,
+  HttpCommandDispatcher,
+} from "./activities";
 import { temporalWebpackConfigHook } from "./bundler";
 import { DELIVERY_TASK_QUEUE } from "./contracts";
 
 export async function runDeliveryWorker(): Promise<void> {
-  const endpoint = process.env.DEVILUDO_ACTIVITY_DISPATCH_URL;
-  if (!endpoint) throw new Error("DEVILUDO_ACTIVITY_DISPATCH_URL is required");
+  const endpoints = deliveryDispatchEndpointsFromEnv();
   const connection = await NativeConnection.connect({
     address: process.env.TEMPORAL_ADDRESS ?? "localhost:7233",
   });
@@ -19,7 +22,7 @@ export async function runDeliveryWorker(): Promise<void> {
     taskQueue: process.env.DEVILUDO_TEMPORAL_TASK_QUEUE ?? DELIVERY_TASK_QUEUE,
     workflowsPath: existsSync(compiledWorkflow) ? compiledWorkflow : sourceWorkflow,
     bundlerOptions: { webpackConfigHook: temporalWebpackConfigHook },
-    activities: createDeliveryActivities(new HttpCommandDispatcher(endpoint)),
+    activities: createDeliveryActivities(new HttpCommandDispatcher(endpoints)),
     maxConcurrentActivityTaskExecutions: parsePositiveInteger(
       process.env.DEVILUDO_MAX_CONCURRENT_ACTIVITIES,
       100,

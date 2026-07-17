@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 
-test("delivery workflow runs idea to Steam external gate and release", () => {
+test("delivery workflow requires every Steam external gate and release receipt", () => {
   const workflow = new GameDeliveryWorkflow({ workflowId: "delivery-1", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["windows", "linux", "macos"] });
   assert.equal(workflow.nextCommand(), "CONTINUE_IDEA_DIALOGUE");
   workflow.signal({ type: "SPEC_READY", specRevisionId: "SPEC-001" });
@@ -10,6 +10,7 @@ test("delivery workflow runs idea to Steam external gate and release", () => {
   assert.equal(workflow.nextCommand(), "START_LOCKED_AGENT_RUN");
   workflow.signal({ type: "AGENT_STARTED", runId: "run-1" });
   workflow.signal({ type: "AGENT_COMPLETED", candidateCommitSha: "candidate-1", draftPullRequest: 18 });
+  assert.equal(workflow.current().draftPullRequest, 18);
   workflow.signal({ type: "E2E_PASSED", evidenceBundleId: "evidence-candidate" });
   workflow.signal({ type: "USER_ACCEPTED" });
   workflow.signal({ type: "MAIN_MERGED", mainCommitSha: "main-1" });
@@ -18,10 +19,24 @@ test("delivery workflow runs idea to Steam external gate and release", () => {
   workflow.signal({ type: "BETA_ACTIVATED", buildId: "steam-build-1" });
   workflow.signal({ type: "STEAM_INSTALL_PASSED", evidenceBundleId: "evidence-steam-install" });
   assert.equal(workflow.current().state, "EXTERNAL_APPROVAL_REQUIRED");
+  assert.equal(workflow.current().externalGate, "VALVE_REVIEW");
+  assert.equal(workflow.current().mfaApprovalId, "mfa-1");
+  assert.equal(workflow.current().steamBuildId, "steam-build-1");
   assert.equal(workflow.nextCommand(), "WAIT_FOR_EXTERNAL_APPROVAL");
   workflow.signal({ type: "EXTERNAL_APPROVED", approvalId: "valve-1" });
+  assert.equal(workflow.current().state, "EXTERNAL_APPROVAL_REQUIRED");
+  assert.equal(workflow.current().externalGate, "FIRST_RELEASE");
+  workflow.signal({ type: "EXTERNAL_APPROVED", approvalId: "first-release-1" });
+  assert.equal(workflow.current().externalGate, "DEFAULT_BRANCH_CONFIRMATION");
+  workflow.signal({ type: "EXTERNAL_APPROVED", approvalId: "mobile-confirmation-1" });
+  assert.equal(workflow.current().state, "READY_TO_PUBLISH");
+  assert.equal(workflow.nextCommand(), "PUBLISH_STEAM_DEFAULT_BRANCH");
+  assert.equal(workflow.current().externalApprovals.length, 3);
+  workflow.signal({ type: "STEAM_RELEASED", releaseId: "release-1", defaultBranchBuildId: "steam-build-1" });
   assert.equal(workflow.current().state, "RELEASED");
-  assert.equal(workflow.current().history.length, 12);
+  assert.equal(workflow.nextCommand(), "NONE");
+  assert.equal(workflow.current().steamReleaseId, "release-1");
+  assert.equal(workflow.current().history.length, 15);
 });
 
 test("feedback invalidates evidence and provider outage resumes the locked Agent", () => {
@@ -38,6 +53,8 @@ test("feedback invalidates evidence and provider outage resumes the locked Agent
   workflow.signal({ type: "USER_FEEDBACK", nextSpecRevisionId: "SPEC-002", evidenceInvalidationId: "invalidate-1" });
   assert.equal(workflow.current().state, "WAITING_SPEC_APPROVAL");
   assert.equal(workflow.current().evidenceBundleId, null);
+  assert.equal(workflow.current().candidateCommitSha, null);
+  assert.equal(workflow.current().draftPullRequest, null);
   assert.equal(workflow.current().lockedRunConfigurationId, null);
   assert.equal(workflow.current().iteration, 2);
 });
