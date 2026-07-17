@@ -138,6 +138,14 @@ export interface RequestActor {
   readonly actorId: string;
   readonly tenantId: string | null;
   readonly projectId: string | null;
+  /** Present only after the mutation interceptor owns this exact request claim. */
+  readonly mutation?: AdminMutationClaimBinding;
+}
+
+export interface AdminMutationClaimBinding {
+  readonly identityDigest: string;
+  readonly requestFingerprint: string;
+  readonly claimToken: string;
 }
 
 export class ServiceProblem extends Error {

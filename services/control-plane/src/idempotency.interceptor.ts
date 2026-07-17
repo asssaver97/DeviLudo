@@ -8,7 +8,7 @@ import {
 import { createHash } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { catchError, from, map, mergeMap, Observable, of, throwError } from "rxjs";
-import { authenticatedAdminActor } from "./admin-principal";
+import { authenticatedAdminActor, bindAdminMutationClaim } from "./admin-principal";
 import { AdminIdempotencyStore } from "./admin-idempotency";
 import { ServiceProblem } from "./contracts";
 import { header } from "./rbac.guard";
@@ -58,6 +58,12 @@ export class IdempotencyInterceptor implements NestInterceptor {
         meta: { requestId: request.id, idempotentReplay: true },
       });
     }
+
+    bindAdminMutationClaim(request, {
+      identityDigest,
+      requestFingerprint,
+      claimToken: claim.claimToken,
+    });
 
     return next.handle().pipe(
       mergeMap((payload) => from(this.store.complete({

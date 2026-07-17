@@ -13,7 +13,9 @@ import {
   emptyAdminCatalogState,
   InMemoryAdminStore,
   type AdminCatalogState,
+  type AdminMutationCompletion,
 } from "./admin.store";
+import { validatePayload } from "./admin-idempotency";
 
 interface CatalogPayload {
   readonly versions: readonly AgentVersionRecord[];
@@ -67,13 +69,18 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
     }
   }
 
-  async mutate<T>(operation: (state: AdminCatalogState) => T): Promise<T> {
+  async mutate<T>(
+    operation: (state: AdminCatalogState) => T,
+    completion?: AdminMutationCompletion<T>,
+  ): Promise<T> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       const catalog = await this.#catalog(client, true);
       const state = deserializeCatalog(catalog.payload, []);
       const result = operation(state);
+      const completionPayload = completion ? completion.payload(result) : undefined;
+      if (completion) validatePayload(completionPayload);
       const payload = serializeCatalog(state);
       validateCatalogSize(payload);
       const updated = await client.query(
@@ -85,6 +92,26 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
       );
       if (updated.rowCount !== 1) throw new Error("Administrator catalog revision was concurrently replaced");
       for (const record of [...state.audit].reverse()) await insertAudit(client, record);
+      if (completion) {
+        const completed = await client.query(
+          `UPDATE deviludo.admin_idempotency_results
+              SET state = 'COMPLETED', claim_token = NULL,
+                  claim_expires_at = NULL, response_payload = $4::jsonb,
+                  completed_at = now(), updated_at = now()
+            WHERE identity_digest = $1 AND request_fingerprint = $2
+              AND state = 'CLAIMED' AND claim_token = $3::uuid
+          RETURNING identity_digest`,
+          [
+            completion.identityDigest,
+            completion.requestFingerprint,
+            completion.claimToken,
+            JSON.stringify(completionPayload),
+          ],
+        );
+        if (completed.rowCount !== 1) {
+          throw new Error("Administrator idempotency claim was lost before catalog commit");
+        }
+      }
       await client.query("COMMIT");
       return result;
     } catch (error) {

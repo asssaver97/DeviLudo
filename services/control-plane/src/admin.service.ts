@@ -18,6 +18,7 @@ import {
 } from "./contracts";
 import { SecretVault } from "./secret-vault";
 import { ProviderProbe } from "./provider-probe";
+import { credentialResultView, credentialView } from "./admin-public";
 
 export class AdminService {
   constructor(
@@ -59,7 +60,7 @@ export class AdminService {
     const version = optionalString(body, "version") ?? (agentInput === "claude-code" ? "2.1.15" : "0.92.0");
     assertExactVersion(version);
     const id = `${agentInput}@${version}`;
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const existing = state.versions.get(id);
       if (existing) return { candidates: [existing], activationChanged: false };
       const record = {
@@ -89,7 +90,7 @@ export class AdminService {
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
     const id = requiredString(body, "id", 160);
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const record = state.versions.get(id);
       if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
       if (action === "approve") {
@@ -137,7 +138,7 @@ export class AdminService {
     }
     const adapterVersion = requiredString(body, "adapterVersion", 100);
     assertExactVersion(adapterVersion);
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const versionRecord = state.versions.get(`${agent}@${version}`);
       if (!versionRecord || versionRecord.state !== "APPROVED") {
         throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
@@ -173,7 +174,7 @@ export class AdminService {
     action: "advance" | "rollback",
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const installation = state.installations.get(installationId);
       if (!installation) throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
       if (["FAILED", "QUARANTINED", "RETIRED"].includes(installation.state)) {
@@ -220,11 +221,11 @@ export class AdminService {
       body.apiKey = "";
     }
     try {
-      return await this.store.mutate((state) => {
+      return await this.mutate(actor, (state) => {
         state.credentials.set(credential.id, credential);
         this.audit(state, "CREDENTIAL_CREATED", credential.id, actor, { label, version: 1 });
         return credential;
-      });
+      }, credentialView);
     } catch (error) {
       await this.vault.revoke(credential.secretRef).catch(() => undefined);
       throw error;
@@ -262,7 +263,7 @@ export class AdminService {
       throw new ServiceProblem(409, "CREDENTIAL_REUSED", "Replacement credential must contain new secret material");
     }
     try {
-      return await this.store.mutate((state) => {
+      return await this.mutate(actor, (state) => {
         const active = state.credentials.get(credentialId);
         if (!active || active.state !== "ACTIVE" || active.version !== current.version
           || active.maskedFingerprint !== current.maskedFingerprint) {
@@ -275,7 +276,7 @@ export class AdminService {
           oldVersionNoLongerIssued: true,
         });
         return { active: replacement, previous: active, newTasksOnly: true };
-      });
+      }, credentialResultView);
     } catch (error) {
       await this.vault.revoke(replacement.secretRef).catch(() => undefined);
       throw error;
@@ -283,7 +284,16 @@ export class AdminService {
   }
 
   async revokeCredential(credentialId: string, actor: RequestActor): Promise<CredentialVersionRecord> {
-    const credential = await this.store.mutate((state) => {
+    const current = await this.store.read((state) => {
+      const value = state.credentials.get(credentialId);
+      if (!value) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+      assertCredentialActor(value, actor);
+      return structuredClone(value);
+    });
+    // Revoke first: a database failure can leave a fail-closed dead SecretRef,
+    // while the reverse order could keep issuing a credential after success was recorded.
+    await this.vault.revoke(current.secretRef);
+    return this.mutate(actor, (state) => {
       const value = state.credentials.get(credentialId);
       if (!value) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
       assertCredentialActor(value, actor);
@@ -292,9 +302,7 @@ export class AdminService {
         this.audit(state, "CREDENTIAL_REVOKED", value.id, actor, { newTokensIssued: false });
       }
       return structuredClone(value);
-    });
-    await this.vault.revoke(credential.secretRef);
-    return credential;
+    }, credentialView);
   }
 
   async createProfile(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
@@ -326,7 +334,7 @@ export class AdminService {
     const governance = parseGovernance(body, actor);
     const budget = parseBudget(body);
     const fallbackProfileRevisionId = optionalString(body, "fallbackProfileRevisionId") ?? null;
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const installation = state.installations.get(installationId);
       if (!installation || installation.agent !== agent || !["READY", "CANARY", "ACTIVE"].includes(installation.state)) {
         throw new ServiceProblem(409, "INSTALLATION_NOT_READY", "Profile requires a compatible ready Agent installation");
@@ -391,6 +399,9 @@ export class AdminService {
         const profile = requireProfile(state, profileId);
         assertScopeRole(profile.scope, profile.scopeId, actor);
         const provider = requireProvider(state, profile.providerRevisionId);
+        if (profile.state === "VALIDATING" && provider.state === "VALIDATING") {
+          return { profileId: profile.id, provider: structuredClone(provider) };
+        }
         if (profile.state !== "DRAFT" && profile.state !== "DEGRADED") {
           throw new ServiceProblem(409, "INVALID_PROFILE_TRANSITION", "Only a draft or degraded Profile can be validated");
         }
@@ -420,7 +431,7 @@ export class AdminService {
         });
         throw error;
       }
-      return this.store.mutate((state) => {
+      return this.mutate(actor, (state) => {
         const profile = requireProfile(state, pending.profileId);
         const provider = requireProvider(state, pending.provider.id);
         if (profile.state !== "VALIDATING" || provider.state !== "VALIDATING") {
@@ -437,7 +448,7 @@ export class AdminService {
         return { profile, provider, affectsQueuedOrRunningTasks: false };
       });
     }
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const profile = requireProfile(state, profileId);
       assertScopeRole(profile.scope, profile.scopeId, actor);
       const provider = requireProvider(state, profile.providerRevisionId);
@@ -470,7 +481,7 @@ export class AdminService {
     const parsed = parseDefaultScope(scopeKey);
     assertScopeRole(parsed.scope, parsed.scopeId, actor);
     const profileRevisionId = requiredString(body, "profileRevisionId", 200);
-    return this.store.mutate((state) => {
+    return this.mutate(actor, (state) => {
       const profile = state.profiles.get(profileRevisionId);
       if (!profile || profile.state !== "ACTIVE") {
         throw new ServiceProblem(409, "PROFILE_NOT_ACTIVE", "Defaults can only reference an active immutable Profile revision");
@@ -504,6 +515,17 @@ export class AdminService {
 
   async auditLog(actor: RequestActor): Promise<readonly AuditRecord[]> {
     return this.store.read((state) => Object.freeze(state.audit.filter((record) => auditVisibleTo(record, actor))));
+  }
+
+  private mutate<T>(
+    actor: RequestActor,
+    operation: (state: AdminCatalogState) => T,
+    publicPayload: (result: T) => unknown = (result) => result,
+  ): Promise<T> {
+    return this.store.mutate(
+      operation,
+      actor.mutation ? { ...actor.mutation, payload: publicPayload } : undefined,
+    );
   }
 
   private async ingestCredential(

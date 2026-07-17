@@ -4,6 +4,7 @@ import { Pool, type PoolClient } from "pg";
 import {
   AdminIdempotencyStore,
   InMemoryAdminIdempotencyStore,
+  canonicalAdminJson,
   type AdminIdempotencyClaim,
   validatePayload,
 } from "./admin-idempotency";
@@ -96,7 +97,21 @@ export class PostgresAdminIdempotencyStore extends AdminIdempotencyStore impleme
       RETURNING identity_digest`,
       [input.identityDigest, input.requestFingerprint, input.claimToken, JSON.stringify(input.payload)],
     );
-    if (completed.rowCount !== 1) throw new Error("Administrator idempotency claim was lost before completion");
+    if (completed.rowCount === 1) return;
+    const existing = await this.pool.query<{
+      request_fingerprint: string;
+      state: string;
+      response_payload: unknown;
+    }>(
+      `SELECT request_fingerprint, state, response_payload
+         FROM deviludo.admin_idempotency_results
+        WHERE identity_digest = $1`,
+      [input.identityDigest],
+    );
+    const row = existing.rows[0];
+    if (row?.request_fingerprint === input.requestFingerprint && row.state === "COMPLETED"
+      && canonicalAdminJson(row.response_payload) === canonicalAdminJson(input.payload)) return;
+    throw new Error("Administrator idempotency claim was lost before completion");
   }
 
   async release(input: {

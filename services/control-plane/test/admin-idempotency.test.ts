@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { Pool, QueryResult } from "pg";
 import { InMemoryAdminIdempotencyStore } from "../src/admin-idempotency";
+import { PostgresAdminIdempotencyStore } from "../src/admin-idempotency-postgres";
 
 const identityDigest = "a".repeat(64);
 const requestFingerprint = "b".repeat(64);
@@ -23,6 +25,13 @@ test("admin idempotency store fences concurrent claims and replays only a comple
 
   const payload = { credential: { id: "credential-1", plaintextRecoverable: false } };
   await store.complete({ identityDigest, requestFingerprint, claimToken: reclaimed.claimToken, payload });
+  await store.complete({ identityDigest, requestFingerprint, claimToken: reclaimed.claimToken, payload: structuredClone(payload) });
+  await assert.rejects(store.complete({
+    identityDigest,
+    requestFingerprint,
+    claimToken: reclaimed.claimToken,
+    payload: { credential: { id: "credential-other", plaintextRecoverable: false } },
+  }), /claim was lost/);
   assert.deepEqual(await store.acquire({ identityDigest, requestFingerprint }), { kind: "REPLAY", payload });
 
   now += 24 * 60 * 60_000 + 1;
@@ -47,3 +56,36 @@ test("admin idempotency completion rejects a lost claim and oversized response",
     payload: { value: "x".repeat(1024 * 1024) },
   }), /result is invalid/);
 });
+
+test("Postgres completion accepts the identical result already committed with the catalog", async () => {
+  const payload = { credential: { id: "credential-1", plaintextRecoverable: false } };
+  const pool = {
+    async query(text: string) {
+      if (text.includes("UPDATE deviludo.admin_idempotency_results")) return result([]);
+      if (text.includes("SELECT request_fingerprint")) return result([{
+        request_fingerprint: requestFingerprint,
+        state: "COMPLETED",
+        response_payload: structuredClone(payload),
+      }]);
+      throw new Error("unexpected statement");
+    },
+    async end() {},
+  } as unknown as Pool;
+  const store = new PostgresAdminIdempotencyStore(pool);
+  await store.complete({
+    identityDigest,
+    requestFingerprint,
+    claimToken: "11111111-1111-4111-8111-111111111111",
+    payload,
+  });
+  await assert.rejects(store.complete({
+    identityDigest,
+    requestFingerprint,
+    claimToken: "11111111-1111-4111-8111-111111111111",
+    payload: { credential: { id: "credential-other", plaintextRecoverable: false } },
+  }), /claim was lost/);
+});
+
+function result<Row extends Record<string, unknown>>(rows: Row[]): QueryResult<Row> {
+  return { command: "", rowCount: rows.length, oid: 0, fields: [], rows };
+}

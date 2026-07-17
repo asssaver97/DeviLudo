@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
+  AdminMutationClaimBinding,
   AdminRole,
   AgentVersionRecord,
   AuditRecord,
@@ -19,9 +20,17 @@ export interface AdminCatalogState {
   readonly audit: AuditRecord[];
 }
 
+export interface AdminMutationCompletion<T> extends AdminMutationClaimBinding {
+  /** Must produce the exact already-redacted controller payload. */
+  readonly payload: (result: T) => unknown;
+}
+
 export abstract class AdminStore {
   abstract read<T>(operation: (state: AdminCatalogState) => T): Promise<T>;
-  abstract mutate<T>(operation: (state: AdminCatalogState) => T): Promise<T>;
+  abstract mutate<T>(
+    operation: (state: AdminCatalogState) => T,
+    completion?: AdminMutationCompletion<T>,
+  ): Promise<T>;
 }
 
 export class InMemoryAdminStore extends AdminStore {
@@ -31,7 +40,9 @@ export class InMemoryAdminStore extends AdminStore {
     return operation(this.#state);
   }
 
-  async mutate<T>(operation: (state: AdminCatalogState) => T): Promise<T> {
+  async mutate<T>(
+    operation: (state: AdminCatalogState) => T,
+  ): Promise<T> {
     return operation(this.#state);
   }
 }

@@ -18,6 +18,7 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
   let payload: unknown = structuredClone(emptyPayload);
   const statements: string[] = [];
   const audits: unknown[][] = [];
+  let idempotencyPayload: unknown = null;
   let released = 0;
   const client = {
     async query(text: string, values?: unknown[]) {
@@ -28,6 +29,13 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
         payload = JSON.parse(String(values?.[1]));
         revision += 1;
         return result([{ revision }]);
+      }
+      if (text.includes("UPDATE deviludo.admin_idempotency_results")) {
+        assert.equal(values?.[0], "a".repeat(64));
+        assert.equal(values?.[1], "b".repeat(64));
+        assert.equal(values?.[2], "11111111-1111-4111-8111-111111111111");
+        idempotencyPayload = JSON.parse(String(values?.[3]));
+        return result([{ identity_digest: values?.[0] }]);
       }
       if (text.includes("INSERT INTO deviludo.admin_audit_records")) {
         audits.push(values ?? []);
@@ -73,13 +81,20 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
       requestId: "request-1",
     });
     return version.id;
+  }, {
+    identityDigest: "a".repeat(64),
+    requestFingerprint: "b".repeat(64),
+    claimToken: "11111111-1111-4111-8111-111111111111",
+    payload: (versionId) => ({ versionId }),
   });
   assert.equal(created, "codex-cli@1.2.3");
   assert.equal(revision, 1);
   assert.equal((payload as { versions: unknown[] }).versions.length, 1);
   assert.equal(audits.length, 1);
   assert.equal(audits[0]?.[5], "tenant-1");
+  assert.deepEqual(idempotencyPayload, { versionId: "codex-cli@1.2.3" });
   assert.equal(statements.some((text) => text.includes("FOR UPDATE")), true);
+  assert.ok(statements.indexOf("COMMIT") > statements.findIndex((text) => text.includes("UPDATE deviludo.admin_idempotency_results")));
 
   const read = await store.read((state) => ({
     version: state.versions.get("codex-cli@1.2.3")?.version,

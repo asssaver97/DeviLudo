@@ -86,6 +86,8 @@ export class InMemoryAdminIdempotencyStore extends AdminIdempotencyStore {
   }): Promise<void> {
     validatePayload(input.payload);
     const record = this.#records.get(input.identityDigest);
+    if (record?.requestFingerprint === input.requestFingerprint && record.state === "COMPLETED"
+      && canonicalJson(record.payload) === canonicalJson(input.payload)) return;
     if (!record || record.requestFingerprint !== input.requestFingerprint
       || record.state !== "CLAIMED" || record.claimToken !== input.claimToken) {
       throw new Error("Administrator idempotency claim was lost before completion");
@@ -124,4 +126,17 @@ function validateDigest(value: string): void {
 function validNow(value: number): number {
   if (!Number.isFinite(value)) throw new Error("Administrator idempotency clock is invalid");
   return value;
+}
+
+export function canonicalAdminJson(value: unknown): string {
+  return canonicalJson(value);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+    .join(",")}}`;
 }

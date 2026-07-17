@@ -71,6 +71,17 @@ request arriving while the first claim is active receives
 five-minute lease so a full Provider probe cannot be duplicated by an early
 retry after only a few seconds.
 
+Production catalog mutations now commit the catalog revision, append-only
+audit records and the already-redacted idempotency response in the same
+PostgreSQL transaction. If the process loses its HTTP response after commit, a
+retry replays that exact result instead of creating another installation,
+Provider/Profile revision or credential family. Credential result projectors
+strip `SecretRef` before the transaction writes the response, and the
+interceptor's normal post-handler completion accepts an identical result that
+was already committed. Multi-step Provider validation marks `VALIDATING`
+without completing the claim, can resume that same state after a process loss,
+and completes atomically only with the final `READY` revision.
+
 The trusted authentication proxy supplies a short-lived, request-bound
 assertion. The control-plane rejects the request unless the assertion HMAC is
 valid, no more than five minutes old, and matches the exact HTTP method and raw

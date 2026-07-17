@@ -3,6 +3,7 @@ import type { FastifyRequest } from "fastify";
 import {
   ADMIN_ROLES,
   ServiceProblem,
+  type AdminMutationClaimBinding,
   type AdminRole,
   type RequestActor,
 } from "./contracts";
@@ -12,6 +13,7 @@ const MAX_FUTURE_SKEW_MS = 30_000;
 const SAFE_SUBJECT = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/;
 const SAFE_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const authenticated = new WeakMap<FastifyRequest, RequestActor>();
+const mutationClaims = new WeakMap<FastifyRequest, AdminMutationClaimBinding>();
 
 export interface AdminPrincipalAssertion {
   readonly method: string;
@@ -82,6 +84,25 @@ export function authenticateAdminPrincipal(
 
 export function authenticatedAdminActor(request: FastifyRequest): RequestActor {
   return authenticated.get(request) ?? authenticateAdminPrincipal(request);
+}
+
+export function bindAdminMutationClaim(
+  request: FastifyRequest,
+  claim: AdminMutationClaimBinding,
+): void {
+  if (!/^[a-f0-9]{64}$/.test(claim.identityDigest)
+    || !/^[a-f0-9]{64}$/.test(claim.requestFingerprint)
+    || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(claim.claimToken)
+    || mutationClaims.has(request)) {
+    throw new Error("Administrator mutation claim binding is invalid");
+  }
+  mutationClaims.set(request, Object.freeze({ ...claim }));
+}
+
+export function authenticatedAdminMutationActor(request: FastifyRequest): RequestActor {
+  const actor = authenticatedAdminActor(request);
+  const mutation = mutationClaims.get(request);
+  return mutation ? Object.freeze({ ...actor, mutation }) : actor;
 }
 
 function canonicalAssertion(value: AdminPrincipalAssertion): string {
