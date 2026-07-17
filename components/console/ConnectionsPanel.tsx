@@ -7,7 +7,7 @@ import { CheckIcon, GithubIcon, ShieldIcon, SteamIcon } from "./Icons";
 export function ConnectionsPanel() {
   const [githubConnected] = useState(false);
   const [githubBusy, setGithubBusy] = useState(false);
-  const [steamState, setSteamState] = useState<"ready" | "waiting">("ready");
+  const [steamState, setSteamState] = useState<"unconfigured" | "ready" | "waiting">("unconfigured");
   const [notice, setNotice] = useState("");
 
   async function connectGithub() {
@@ -32,9 +32,22 @@ export function ConnectionsPanel() {
     }
   }
 
-  function beginSteamLogin() {
+  async function beginSteamLogin() {
     setSteamState("waiting");
-    setNotice("已创建一次性 Steam 登录会话。生产环境只保存加密后的 config.vdf，不保存主密码。");
+    try {
+      const response = await fetch("/api/connections/steam", { method: "POST" });
+      const payload = await response.json() as { data?: { state?: string }; error?: { message?: string } };
+      if (!response.ok) {
+        setSteamState("unconfigured");
+        setNotice(payload.error?.message ?? "Steam Guard 登记服务尚未配置。");
+        return;
+      }
+      setSteamState(payload.data?.state === "READY" ? "ready" : "waiting");
+      setNotice("Steam Guard 登记已开始；主密码不会发送到 DeviLudo Web 控制面。");
+    } catch {
+      setSteamState("unconfigured");
+      setNotice("无法连接隔离的 Steam Guard 登记服务。");
+    }
   }
 
   return (
@@ -68,15 +81,15 @@ export function ConnectionsPanel() {
           <article className="connection-card">
             <div className="connection-logo steam"><SteamIcon /></div>
             <div className="connection-summary">
-              <div className="connection-title"><div><h2>Steamworks</h2><p>私有 Beta 上传、激活与回装测试</p></div><span className={steamState === "ready" ? "connected" : "waiting"}><i />{steamState === "ready" ? "会话可用" : "等待 Guard"}</span></div>
+              <div className="connection-title"><div><h2>Steamworks</h2><p>私有 Beta 上传、激活与回装测试</p></div><span className={steamState === "ready" ? "connected" : steamState === "waiting" ? "waiting" : "not-connected"}><i />{steamState === "ready" ? "会话可用" : steamState === "waiting" ? "等待 Guard" : "未配置"}</span></div>
               <div className="connection-details">
-                <div><span>发布身份</span><b>DeviLudo Build Bot</b></div>
-                <div><span>权限</span><b>App 2841930 · Build only</b></div>
+                <div><span>发布身份</span><b>{steamState === "ready" ? "已验证 Build Account" : "尚未绑定"}</b></div>
+                <div><span>权限</span><b>{steamState === "ready" ? "固定 App · Build only" : "待最小权限验证"}</b></div>
                 <div><span>会话形式</span><b>加密 config.vdf</b></div>
-                <div><span>到期时间</span><b>{steamState === "ready" ? "12 天后" : "尚未建立"}</b></div>
+                <div><span>到期时间</span><b>{steamState === "ready" ? "已登记" : "尚未建立"}</b></div>
               </div>
               <div className="connection-actions">
-                <button className="button button-secondary" onClick={beginSteamLogin} type="button">{steamState === "ready" ? "刷新 Steam Guard 会话" : "我已完成 Guard 验证"}</button>
+                <button className="button button-secondary" disabled={steamState === "waiting"} onClick={beginSteamLogin} type="button">{steamState === "ready" ? "刷新 Steam Guard 会话" : steamState === "waiting" ? "等待登记服务…" : "登记 Steam Guard 会话"}</button>
                 <button className="quiet-button" onClick={() => setNotice("最小权限检查通过：该账号不能访问商店财务和所有者设置。") } type="button">检查最小权限</button>
               </div>
             </div>

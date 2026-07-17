@@ -214,6 +214,24 @@ gate can follow. Every external operation is authorized into a persistent
 five-minute claim before network effects; an expired claim can be recovered
 without silently re-authorizing or allowing two workers to execute concurrently.
 
+## Steam publisher and Guard session
+
+The public Web control plane never accepts a Steam password or Guard code and
+does not fabricate a ready session. Interactive enrollment occurs in an isolated
+broker; only the encrypted `config.vdf` Vault reference, build-account identity,
+credential revision, exact allowed App IDs, verified minimal permissions and
+expiry are persisted.
+
+The Agent-free publisher accepts an Ed25519-signed RC bound to the merged main
+SHA and full release evidence plus an independent ten-minute MFA publish
+authorization. SteamCMD is invoked without a shell and with `+login <account>`
+but no password; the session file is materialized into its private runtime.
+Build scripts are platform-generated, `SetLive` rejects `default` and `public`,
+and the private branch password is another SecretRef. A lease-claimed upload
+records the BuildID and every depot manifest, then dispatches clean Steam Client
+installs for the exact target matrix. Only authoritative reinstall evidence may
+advance to Valve review, first-release and default-branch confirmation gates.
+
 ## Failure behavior and audit requirements
 
 `selectRunnableProfile()` returns `WAITING_PROVIDER` when the primary provider is

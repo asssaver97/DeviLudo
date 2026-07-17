@@ -31,6 +31,10 @@ behind the web console:
   repository binding, repository-scoped installation tokens, Git Data/Draft PR
   APIs, evidence-gated merge and lease-claimed idempotency keep credentials and
   branch authority outside Agent workers.
+- `steam-publisher`: verifies signed main-SHA RCs and fresh MFA publish
+  authorizations, consumes only an exact-App encrypted `config.vdf` SecretRef,
+  plans a shell-free SteamCMD private-Beta upload, and dispatches clean Steam
+  Client reinstall E2E across the selected matrix before external release gates.
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,
@@ -156,6 +160,7 @@ and activities; the Worker never silently swaps Claude Code and Codex CLI.
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/inference-gateway/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/runner-control/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/steam-publisher/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-runtime/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/local-agent-runtime/tsconfig.json --pretty false
 node --import tsx --test services/control-plane/test/control-plane.test.ts
@@ -163,6 +168,7 @@ node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/gateway.test.ts
 node --import tsx --test services/runner-control/test/coordinator.test.ts
+node --import tsx --test services/steam-publisher/test/coordinator.test.ts
 node --import tsx --test services/local-runtime/test/godot-fixture.test.ts
 node --import tsx --test services/local-agent-runtime/test/readiness.test.ts
 ```

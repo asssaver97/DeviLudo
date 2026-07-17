@@ -587,6 +587,29 @@ export const evidenceInvalidations = sqliteTable("evidence_invalidations", {
   invalidatedAt: text("invalidated_at").notNull(),
 });
 
+export const steamBuildSessions = sqliteTable(
+  "steam_build_sessions",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    accountId: text("account_id").notNull(),
+    accountName: text("account_name").notNull(),
+    configVdfSecretRef: text("config_vdf_secret_ref").notNull(),
+    credentialVersionId: text("credential_version_id").notNull().references(() => credentialVersions.id),
+    allowedAppIds: text("allowed_app_ids", { mode: "json" }).$type<string[]>().notNull(),
+    permissions: text("permissions", { mode: "json" }).$type<string[]>().notNull(),
+    state: text("state", { enum: ["ACTIVE", "REVOKED", "EXPIRED"] }).notNull(),
+    verifiedAt: text("verified_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    revokedAt: text("revoked_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("steam_build_session_account_version_unique").on(table.tenantId, table.accountId, table.credentialVersionId),
+    index("steam_build_session_state_idx").on(table.tenantId, table.state, table.expiresAt),
+  ],
+);
+
 export const steamReleases = sqliteTable(
   "steam_releases",
   {
@@ -607,6 +630,50 @@ export const steamReleases = sqliteTable(
     version: integer("version").notNull().default(1),
   },
   (table) => [index("steam_release_project_state_idx").on(table.projectId, table.state)],
+);
+
+export const steamPublishClaims = sqliteTable(
+  "steam_publish_claims",
+  {
+    key: text("key").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    releaseId: text("release_id").notNull().references(() => steamReleases.id),
+    requestDigest: text("request_digest").notNull(),
+    claimToken: text("claim_token").notNull(),
+    claimExpiresAt: text("claim_expires_at").notNull(),
+    response: text("response", { mode: "json" }).$type<JsonRecord>(),
+    authorizedAt: text("authorized_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [index("steam_publish_active_claim_idx").on(table.tenantId, table.projectId, table.claimExpiresAt)],
+);
+
+export const steamBuildReceipts = sqliteTable(
+  "steam_build_receipts",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    releaseId: text("release_id").notNull().references(() => steamReleases.id),
+    steamAppId: text("steam_app_id").notNull(),
+    buildId: text("build_id").notNull(),
+    mainCommitSha: text("main_commit_sha").notNull(),
+    sourceDigest: text("source_digest").notNull(),
+    evidenceBundleDigest: text("evidence_bundle_digest").notNull(),
+    betaBranch: text("beta_branch").notNull(),
+    depotManifestIds: text("depot_manifest_ids", { mode: "json" }).$type<JsonRecord>().notNull(),
+    installAttempts: text("install_attempts", { mode: "json" }).$type<JsonRecord>().notNull(),
+    steamInstallEvidenceBundleDigest: text("steam_install_evidence_bundle_digest"),
+    state: text("state", { enum: ["INSTALL_TESTING", "EXTERNAL_APPROVAL_REQUIRED"] }).notNull(),
+    uploadedAt: text("uploaded_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("steam_build_receipt_release_unique").on(table.releaseId),
+    uniqueIndex("steam_build_receipt_app_build_unique").on(table.steamAppId, table.buildId),
+    index("steam_build_receipt_project_state_idx").on(table.projectId, table.state),
+  ],
 );
 
 export const auditEvents = sqliteTable(

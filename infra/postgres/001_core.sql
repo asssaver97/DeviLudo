@@ -299,6 +299,57 @@ CREATE TABLE deviludo.steam_releases (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE deviludo.steam_build_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  account_id text NOT NULL,
+  account_name text NOT NULL,
+  config_vdf_secret_ref text NOT NULL,
+  credential_version_id uuid NOT NULL REFERENCES deviludo.credential_versions(id),
+  allowed_app_ids text[] NOT NULL,
+  permissions text[] NOT NULL,
+  state text NOT NULL CHECK (state IN ('ACTIVE', 'REVOKED', 'EXPIRED')),
+  verified_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, account_id, credential_version_id),
+  CHECK (permissions @> ARRAY['EditAppMetadata', 'PublishAppChanges']::text[])
+);
+
+CREATE TABLE deviludo.steam_publish_claims (
+  key text PRIMARY KEY,
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  release_id uuid NOT NULL REFERENCES deviludo.steam_releases(id),
+  request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  claim_token uuid NOT NULL,
+  claim_expires_at timestamptz NOT NULL,
+  response jsonb,
+  authorized_at timestamptz NOT NULL,
+  completed_at timestamptz
+);
+
+CREATE TABLE deviludo.steam_build_receipts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  release_id uuid NOT NULL UNIQUE REFERENCES deviludo.steam_releases(id),
+  steam_app_id text NOT NULL CHECK (steam_app_id ~ '^[0-9]+$'),
+  build_id text NOT NULL CHECK (build_id ~ '^[0-9]+$'),
+  main_commit_sha text NOT NULL CHECK (main_commit_sha ~ '^[a-f0-9]{40}$'),
+  source_digest text NOT NULL CHECK (source_digest ~ '^[a-f0-9]{64}$'),
+  evidence_bundle_digest text NOT NULL CHECK (evidence_bundle_digest ~ '^[a-f0-9]{64}$'),
+  beta_branch text NOT NULL CHECK (beta_branch ~ '^[a-z0-9][a-z0-9_-]{2,39}$' AND beta_branch NOT IN ('default', 'public')),
+  depot_manifest_ids jsonb NOT NULL,
+  install_attempts jsonb NOT NULL,
+  steam_install_evidence_bundle_digest text CHECK (steam_install_evidence_bundle_digest ~ '^[a-f0-9]{64}$'),
+  state text NOT NULL CHECK (state IN ('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED')),
+  uploaded_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (steam_app_id, build_id)
+);
+
 CREATE TABLE deviludo.audit_events (
   sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   id uuid NOT NULL UNIQUE,
@@ -340,6 +391,35 @@ CREATE TRIGGER github_merge_receipts_append_only
 BEFORE UPDATE OR DELETE ON deviludo.github_merge_receipts
 FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
 
+CREATE OR REPLACE FUNCTION deviludo.protect_steam_build_receipt()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.tenant_id, NEW.project_id, NEW.release_id, NEW.steam_app_id,
+         NEW.build_id, NEW.main_commit_sha, NEW.source_digest,
+         NEW.evidence_bundle_digest, NEW.beta_branch, NEW.depot_manifest_ids,
+         NEW.install_attempts, NEW.uploaded_at, NEW.created_at)
+     IS DISTINCT FROM
+     ROW(OLD.tenant_id, OLD.project_id, OLD.release_id, OLD.steam_app_id,
+         OLD.build_id, OLD.main_commit_sha, OLD.source_digest,
+         OLD.evidence_bundle_digest, OLD.beta_branch, OLD.depot_manifest_ids,
+         OLD.install_attempts, OLD.uploaded_at, OLD.created_at)
+     OR OLD.state <> 'INSTALL_TESTING'
+     OR NEW.state <> 'EXTERNAL_APPROVAL_REQUIRED'
+     OR OLD.steam_install_evidence_bundle_digest IS NOT NULL
+     OR NEW.steam_install_evidence_bundle_digest IS NULL THEN
+    RAISE EXCEPTION 'steam build receipt binding is immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER steam_build_receipt_binding_immutable
+BEFORE UPDATE ON deviludo.steam_build_receipts
+FOR EACH ROW EXECUTE FUNCTION deviludo.protect_steam_build_receipt();
+
+CREATE TRIGGER steam_build_receipt_no_delete
+BEFORE DELETE ON deviludo.steam_build_receipts
+FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
+
 CREATE OR REPLACE FUNCTION deviludo.protect_run_configuration()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -378,7 +458,7 @@ BEGIN
     'immutable_revisions', 'agent_runs', 'e2e_attempts',
     'credential_versions', 'e2e_platform_leases', 'platform_runner_events', 'evidence_bundles',
     'scm_operation_claims', 'github_candidate_receipts', 'github_merge_receipts',
-    'steam_releases', 'audit_events'
+    'steam_releases', 'steam_build_sessions', 'steam_publish_claims', 'steam_build_receipts', 'audit_events'
   ] LOOP
     EXECUTE format('ALTER TABLE deviludo.%I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('ALTER TABLE deviludo.%I FORCE ROW LEVEL SECURITY', table_name);
@@ -401,6 +481,9 @@ CREATE INDEX scm_operation_claim_idx ON deviludo.scm_operation_claims (tenant_id
 CREATE INDEX github_candidate_project_commit_idx ON deviludo.github_candidate_receipts (project_id, candidate_commit_sha);
 CREATE INDEX github_merge_project_commit_idx ON deviludo.github_merge_receipts (project_id, merge_commit_sha);
 CREATE INDEX evidence_commit_idx ON deviludo.evidence_bundles (tenant_id, project_id, commit_sha);
+CREATE INDEX steam_build_session_state_idx ON deviludo.steam_build_sessions (tenant_id, state, expires_at);
+CREATE INDEX steam_publish_active_claim_idx ON deviludo.steam_publish_claims (tenant_id, project_id, claim_expires_at);
+CREATE INDEX steam_build_receipt_project_state_idx ON deviludo.steam_build_receipts (project_id, state);
 CREATE INDEX audit_tenant_time_idx ON deviludo.audit_events (tenant_id, occurred_at DESC);
 
 COMMIT;

@@ -115,3 +115,23 @@ test("localhost never fabricates a successful GitHub App authorization", async (
     assert.doesNotMatch(serialized, /attacker-controlled|secret-code|installation_id/);
   }
 });
+
+test("localhost never fabricates a Steam Guard or build-account session", async () => {
+  const response = await request("/api/connections/steam", { method: "POST" });
+  assert.equal(response.status, 503);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "STEAM_GUARD_ENROLLMENT_BROKER_REQUIRED");
+  assert.equal(payload.error.details.storesPrimaryPassword, false);
+  assert.doesNotMatch(JSON.stringify(payload), /steam-bootstrap|DeviLudo Build Bot|2841930/);
+
+  const publish = await request("/api/releases/release-forged/accept-and-publish", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "forged", "x-mfa-proof": "forged-mfa-proof-long" },
+    body: JSON.stringify({ mainCommitSha: "a".repeat(40), evidenceStatus: "PASSED" }),
+  });
+  assert.equal(publish.status, 503);
+  const publishPayload = await publish.json();
+  assert.equal(publishPayload.error.code, "STEAM_PUBLISH_DISPATCH_REQUIRED");
+  assert.equal(publishPayload.error.details.acceptsHeaderMfaProof, false);
+  assert.equal(publishPayload.error.details.acceptsClientEvidenceStatus, false);
+});

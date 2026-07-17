@@ -2,12 +2,13 @@ import { json } from "@/lib/control-plane/http";
 
 export async function POST() {
   return json({
-    data: {
-      sessionId: `steam-bootstrap-${Date.now()}`,
-      state: "AWAITING_STEAM_GUARD",
-      expiresInSeconds: 300,
-      storesAfterCompletion: "encrypted-config-vdf-session",
-      storesPrimaryPassword: false,
+    error: {
+      code: "STEAM_GUARD_ENROLLMENT_BROKER_REQUIRED",
+      message: "Steam Guard enrollment requires the isolated production enrollment broker.",
+      details: {
+        acceptedCredential: "encrypted-config-vdf-session-only",
+        storesPrimaryPassword: false,
+      },
     },
-  }, { status: 201 });
+  }, { status: 503 });
 }

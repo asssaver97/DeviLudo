@@ -157,6 +157,14 @@ action, and default-branch mobile/SMS confirmation transition the workflow to
 `EXTERNAL_APPROVAL_REQUIRED`; a verified callback resumes the same Temporal
 workflow.
 
+The publisher verifies separate Ed25519 RC and fresh-MFA authorization
+envelopes, then claims the upload before any SteamPipe side effect. Its generated
+SteamCMD invocation contains the build-account name but no password; an exact-App
+`config.vdf` Vault reference is materialized only inside the isolated publisher.
+`SetLive` can target only a fixed non-default private branch. The BuildID and all
+depot manifest IDs are bound to clean-client attempts for the full selected OS
+matrix before external approvals can begin.
+
 ## Tenant isolation and authorization
 
 The API authenticates through a GitHub App/OAuth flow, authorizes a tenant and
