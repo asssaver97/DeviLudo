@@ -14,6 +14,13 @@ import {
 
 const sha = (character: string) => character.repeat(64);
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
+const connectorIdentity = Object.freeze({ runnerId: "runner-linux-1", platform: "linux" as const, version: "1.0.0", binaryDigest: sha("9") });
+const connectorHealth = Object.freeze({
+  schemaVersion: "deviludo.steam-client-connector-health.v1",
+  status: "ok",
+  service: "deviludo-steam-client-connector",
+  ...connectorIdentity,
+});
 
 test("mTLS Steam installed-game driver binds a clean BuildID and returns validated product evidence", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-steam-installed-game-"));
@@ -24,6 +31,7 @@ test("mTLS Steam installed-game driver binds a clean BuildID and returns validat
       endpoint: "https://steam-install.internal:4843",
       tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
       stagingRoot: root,
+      expectedConnector: connectorIdentity,
       http: async (input) => {
         assert.equal(input.url.href, "https://steam-install.internal:4843/v1/clean-install-executions");
         assert.equal(input.method, "POST");
@@ -54,9 +62,10 @@ test("Steam installed-game driver readiness requires the exact authenticated Con
     endpoint: "https://steam-install.internal:4843",
     tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
     stagingRoot: tmpdir(),
+    expectedConnector: connectorIdentity,
     http: async (input) => {
       calls.push(`${input.method} ${input.url.pathname}`);
-      return { statusCode: 200, payload: { status: "ok", service: "deviludo-steam-client-connector" } };
+      return { statusCode: 200, payload: connectorHealth };
     },
   });
   await driver.probe();
@@ -65,7 +74,8 @@ test("Steam installed-game driver readiness requires the exact authenticated Con
     endpoint: "https://steam-install.internal:4843",
     tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
     stagingRoot: tmpdir(),
-    http: async () => ({ statusCode: 200, payload: { status: "ok", service: "other" } }),
+    expectedConnector: connectorIdentity,
+    http: async () => ({ statusCode: 200, payload: { ...connectorHealth, binaryDigest: sha("8") } }),
   });
   await assert.rejects(drifted.probe(), /not ready/);
 });
@@ -78,6 +88,7 @@ test("Steam installed-game driver rejects BuildID drift, escaped paths and crede
       endpoint: "https://steam-install.internal",
       tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
       stagingRoot: root,
+      expectedConnector: connectorIdentity,
       http: async () => {
         const { receiptDigest: _ignored, ...receiptCore } = fixture.receipt;
         void _ignored;
@@ -95,6 +106,10 @@ test("Steam installed-game driver rejects BuildID drift, escaped paths and crede
 test("Steam installed-game child environment is complete, pinned and secret-free", () => {
   const env = testKitSteamProcessEnvironmentFromEnv({
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL: "https://steam-install.internal:4843",
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: "runner-linux-1",
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: "linux",
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: "1.0.0",
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: sha("9"),
     DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE: "/run/secrets/steam/client.key",
     DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: "/run/secrets/steam/client.crt",
     DEVILUDO_TESTKIT_STEAM_CA_FILE: "/run/secrets/steam/ca.crt",
@@ -103,6 +118,7 @@ test("Steam installed-game child environment is complete, pinned and secret-free
     STEAM_PASSWORD: "must-not-leak",
   });
   assert.equal(env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL, "https://steam-install.internal:4843");
+  assert.equal(env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST, sha("9"));
   assert.equal(env.DEVILUDO_TESTKIT_STEAM_TIMEOUT_SECONDS, "3000");
   assert.equal(env.STEAM_PASSWORD, undefined);
   assert.throws(() => testKitSteamProcessEnvironmentFromEnv({

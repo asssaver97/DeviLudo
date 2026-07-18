@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server as HttpsServer, type ServerOptions } from "node:https";
+import type { TargetPlatform } from "../../../lib/domain/types";
 import type { EvidenceArchiveWorkloadIdentity } from "../../evidence-archive/src/contracts";
 import { evidenceArchiveIdentityFromTlsSocket } from "../../evidence-archive/src/ingress-http";
 import type { SteamClientConnectorService } from "./connector";
@@ -19,12 +20,21 @@ export interface SteamClientConnectorHttpResponse {
   readonly body: Readonly<Record<string, unknown>>;
 }
 
+export interface SteamClientConnectorHealthIdentity {
+  readonly runnerId: string;
+  readonly platform: TargetPlatform;
+  readonly version: string;
+  readonly binaryDigest: string;
+}
+
 export function createSteamClientConnectorHandler(options: Readonly<{
   service: Pick<SteamClientConnectorService, "execute" | "probe">;
   allowedSpiffeIds: ReadonlySet<string>;
+  healthIdentity: SteamClientConnectorHealthIdentity;
   extractIdentity?: (socket: unknown) => EvidenceArchiveWorkloadIdentity;
 }>): (request: SteamClientConnectorHttpRequest) => Promise<SteamClientConnectorHttpResponse> {
   if (!options.allowedSpiffeIds.size) throw new Error("Steam Client Connector workload allow-list is empty");
+  validateHealthIdentity(options.healthIdentity);
   const extractIdentity = options.extractIdentity ?? evidenceArchiveIdentityFromTlsSocket;
   return async (request) => {
     let identity: EvidenceArchiveWorkloadIdentity;
@@ -34,7 +44,15 @@ export function createSteamClientConnectorHandler(options: Readonly<{
     if (request.method === "GET" && request.path === "/healthz") {
       try { await options.service.probe(); }
       catch { return failure(503, "STEAM_CLIENT_CONNECTOR_NOT_READY"); }
-      return { status: 200, body: { status: "ok", service: "deviludo-steam-client-connector" } };
+      return {
+        status: 200,
+        body: {
+          schemaVersion: "deviludo.steam-client-connector-health.v1",
+          status: "ok",
+          service: "deviludo-steam-client-connector",
+          ...options.healthIdentity,
+        },
+      };
     }
     if (request.method !== "POST" || request.path !== "/v1/clean-install-executions") {
       return failure(404, "STEAM_CLIENT_CONNECTOR_ROUTE_NOT_FOUND");
@@ -49,6 +67,19 @@ export function createSteamClientConnectorHandler(options: Readonly<{
       return failure(409, "STEAM_CLIENT_CONNECTOR_EXECUTION_REJECTED");
     }
   };
+}
+
+function validateHealthIdentity(value: SteamClientConnectorHealthIdentity): void {
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 4 || keys[0] !== "binaryDigest" || keys[1] !== "platform"
+    || keys[2] !== "runnerId" || keys[3] !== "version"
+    || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(value.runnerId)
+    || !["windows", "linux", "macos"].includes(value.platform)
+    || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value.version)
+    || /(?:latest|stable|default)/i.test(value.version)
+    || !/^[a-f0-9]{64}$/.test(value.binaryDigest)) {
+    throw new Error("Steam Client Connector health identity is invalid");
+  }
 }
 
 export function createSteamClientConnectorHttpsServer(options: Readonly<{

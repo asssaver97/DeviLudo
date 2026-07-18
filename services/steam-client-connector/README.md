@@ -17,10 +17,16 @@ rejection or receipt mismatch prevents the native Steam session from running.
 
 `SteamClientNativeExecutor` is intentionally an injected port. The native,
 signed OS artifact owns the protected Steam session after the Node boundary
-has redeemed the opaque install grant; account passwords, Steam Guard answers, branch passwords and
-`config.vdf` never cross this Node service contract. The native artifact must
+has redeemed the opaque install grant; account passwords, Steam Guard answers,
+branch passwords and `config.vdf` never cross this Node service contract. The native artifact must
 implement `executionId` idempotency and perform a clean client reset before
 installing the exact BuildID.
+
+The authenticated health receipt includes the exact Runner ID, target platform,
+Connector version and native bridge digest. Runner Control derives the expected
+values from the immutable machine capability lock and forwards them into the
+locked TestKit environment; registration fails before job leasing if any field
+does not match the live Connector.
 
 This repository tests the service and native adapter contract. It does not ship
 Valve credentials or pretend that the local developer machine is an enrolled

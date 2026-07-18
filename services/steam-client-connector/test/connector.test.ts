@@ -30,6 +30,7 @@ const identity = {
   spiffeId: "spiffe://deviludo.test/testkit/runner-linux-1",
   certificateFingerprint: sha("f"), certificateSerial: "01", certificateNotAfter: "2031-01-01T00:00:00.000Z",
 };
+const healthIdentity = Object.freeze({ runnerId: "runner-linux-1", platform: "linux" as const, version: "1.0.0", binaryDigest: sha("9") });
 
 test("Connector verifies one signed BuildID, validates native evidence and replays idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-steam-connector-"));
@@ -181,6 +182,7 @@ test("mTLS handler admits one TestKit identity and fails closed on route, conten
   const calls = { execute: 0, probe: 0 };
   const handler = createSteamClientConnectorHandler({
     allowedSpiffeIds: new Set([identity.spiffeId]),
+    healthIdentity,
     extractIdentity: () => identity,
     service: {
       async probe() { calls.probe += 1; },
@@ -189,6 +191,10 @@ test("mTLS handler admits one TestKit identity and fails closed on route, conten
   });
   const health = await handler({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" });
   assert.equal(health.status, 200);
+  assert.deepEqual(health.body, {
+    schemaVersion: "deviludo.steam-client-connector-health.v1",
+    status: "ok", service: "deviludo-steam-client-connector", ...healthIdentity,
+  });
   const accepted = await handler({ method: "POST", path: "/v1/clean-install-executions", headers: { "content-type": "application/json" }, socket: {}, rawBody: "{}" });
   assert.equal(accepted.status, 200);
   assert.deepEqual(calls, { execute: 1, probe: 1 });
@@ -196,12 +202,12 @@ test("mTLS handler admits one TestKit identity and fails closed on route, conten
   assert.equal((await handler({ method: "GET", path: "/missing", headers: {}, socket: {}, rawBody: "" })).status, 404);
 
   const forbidden = createSteamClientConnectorHandler({
-    allowedSpiffeIds: new Set(["spiffe://deviludo.test/other"]), extractIdentity: () => identity,
+    allowedSpiffeIds: new Set(["spiffe://deviludo.test/other"]), healthIdentity, extractIdentity: () => identity,
     service: { async probe() {}, async execute() { throw new Error("must not execute"); } },
   });
   assert.equal((await forbidden({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 403);
   const missingIdentity = createSteamClientConnectorHandler({
-    allowedSpiffeIds: new Set([identity.spiffeId]), extractIdentity: () => { throw new Error("no cert"); },
+    allowedSpiffeIds: new Set([identity.spiffeId]), healthIdentity, extractIdentity: () => { throw new Error("no cert"); },
     service: { async probe() {}, async execute() { throw new Error("must not execute"); } },
   });
   assert.equal((await missingIdentity({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 401);

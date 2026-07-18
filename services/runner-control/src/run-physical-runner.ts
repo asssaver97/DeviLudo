@@ -135,8 +135,15 @@ export async function physicalRunnerServiceFromEnv(
       || expectedDigest !== config.capabilities.steamClientConnector.binaryDigest) {
       throw new Error("Physical Runner Steam Connector capability does not match its machine lock");
     }
-    steamEnvironment = testKitSteamProcessEnvironmentFromEnv(env);
-    steamConnector = await steamInstalledGameDriverFromEnv(env);
+    const lockedSteamEnv = {
+      ...env,
+      DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: config.capabilities.runnerId,
+      DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: config.capabilities.platform,
+      DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: expectedVersion,
+      DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: expectedDigest,
+    };
+    steamEnvironment = testKitSteamProcessEnvironmentFromEnv(lockedSteamEnv);
+    steamConnector = await steamInstalledGameDriverFromEnv(lockedSteamEnv);
   } else {
     for (const name of [...REQUIRED_TESTKIT_STEAM_ENV_NAMES, ...OPTIONAL_TESTKIT_STEAM_ENV_NAMES,
       "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION", "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST"]) {

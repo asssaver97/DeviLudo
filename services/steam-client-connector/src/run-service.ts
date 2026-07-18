@@ -29,6 +29,9 @@ export async function steamClientConnectorServiceFromEnv(
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_WORK_ROOT"),
   ]);
   const jobPublicKey = createPublicKey(jobKeyPem);
+  const runnerId = safeId(env, "DEVILUDO_STEAM_CONNECTOR_RUNNER_ID");
+  const connectorVersion = version(env, "DEVILUDO_STEAM_CONNECTOR_VERSION");
+  const nativeBridgeDigest = digest(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE_DIGEST");
   const grants = new MtlsSteamInstallGrantClient({
     endpoint: required(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_URL"),
     tls: { key: grantKey, certificate: grantCertificate, ca: grantCa },
@@ -36,14 +39,14 @@ export async function steamClientConnectorServiceFromEnv(
   });
   const executor = new LockedNativeSteamClientExecutor({
     executable: requiredAbsolute(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE"),
-    executableDigest: digest(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE_DIGEST"),
+    executableDigest: nativeBridgeDigest,
     workRoot,
     timeoutMs: seconds(env.DEVILUDO_STEAM_CONNECTOR_EXECUTION_TIMEOUT_SECONDS, 3_000, 30, 3_600) * 1_000,
   });
   const service = new SteamClientConnectorService({
     jobPublicKey,
     jobKeyId: safeId(env, "DEVILUDO_STEAM_CONNECTOR_JOB_KEY_ID"),
-    runnerId: safeId(env, "DEVILUDO_STEAM_CONNECTOR_RUNNER_ID"),
+    runnerId,
     platform,
     stagingRoot,
     executor,
@@ -52,6 +55,7 @@ export async function steamClientConnectorServiceFromEnv(
   const handler = createSteamClientConnectorHandler({
     service,
     allowedSpiffeIds: spiffeIds(required(env, "DEVILUDO_STEAM_CONNECTOR_ALLOWED_SPIFFE_IDS")),
+    healthIdentity: { runnerId, platform, version: connectorVersion, binaryDigest: nativeBridgeDigest },
   });
   const server = createSteamClientConnectorHttpsServer({
     tls: { key: tlsKey, cert: tlsCertificate, ca: tlsCa },
@@ -121,6 +125,13 @@ function digest(env: Readonly<Record<string, string | undefined>>, name: string)
 function safeId(env: Readonly<Record<string, string | undefined>>, name: string): string {
   const value = required(env, name);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value)) throw new Error(`${name} is invalid`);
+  return value;
+}
+
+function version(env: Readonly<Record<string, string | undefined>>, name: string): string {
+  const value = required(env, name);
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value)
+    || /(?:latest|stable|default)/i.test(value)) throw new Error(`${name} is invalid`);
   return value;
 }
 

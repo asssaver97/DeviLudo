@@ -15,6 +15,10 @@ const CODE = /^[A-Z0-9_]{2,64}$/;
 
 export const REQUIRED_TESTKIT_STEAM_ENV_NAMES = Object.freeze([
   "DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL",
+  "DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID",
+  "DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM",
+  "DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION",
+  "DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST",
   "DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE",
   "DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE",
   "DEVILUDO_TESTKIT_STEAM_CA_FILE",
@@ -40,6 +44,13 @@ export interface SteamInstalledGameConnectorTls {
   readonly ca: Buffer;
 }
 
+export interface SteamInstalledGameConnectorIdentity {
+  readonly runnerId: string;
+  readonly platform: "windows" | "linux" | "macos";
+  readonly version: string;
+  readonly binaryDigest: string;
+}
+
 export type SteamInstalledGameConnectorHttp = (input: {
   readonly url: URL;
   readonly method: "GET" | "POST";
@@ -59,11 +70,13 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
   readonly #stagingRoot: string;
   readonly #timeoutMs: number;
   readonly #http: SteamInstalledGameConnectorHttp;
+  readonly #expectedConnector: SteamInstalledGameConnectorIdentity;
 
   constructor(options: {
     readonly endpoint: string | URL;
     readonly tls: SteamInstalledGameConnectorTls;
     readonly stagingRoot: string;
+    readonly expectedConnector: SteamInstalledGameConnectorIdentity;
     readonly timeoutMs?: number;
     readonly http?: SteamInstalledGameConnectorHttp;
   }) {
@@ -71,6 +84,7 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
     validateTls(options.tls);
     this.#tls = Object.freeze({ ...options.tls });
     this.#stagingRoot = absolutePath(options.stagingRoot, "Steam staging root");
+    this.#expectedConnector = connectorIdentity(options.expectedConnector);
     this.#timeoutMs = integer(options.timeoutMs ?? 50 * 60_000, 30_000, 60 * 60_000);
     this.#http = options.http ?? steamInstalledGameConnectorHttpsJson;
   }
@@ -124,8 +138,14 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
       body: "",
     });
     const body = record(response.payload);
-    exactKeys(body, ["status", "service"]);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-steam-client-connector") {
+    exactKeys(body, ["schemaVersion", "status", "service", "runnerId", "platform", "version", "binaryDigest"]);
+    if (response.statusCode !== 200
+      || body.schemaVersion !== "deviludo.steam-client-connector-health.v1"
+      || body.status !== "ok" || body.service !== "deviludo-steam-client-connector"
+      || body.runnerId !== this.#expectedConnector.runnerId
+      || body.platform !== this.#expectedConnector.platform
+      || body.version !== this.#expectedConnector.version
+      || body.binaryDigest !== this.#expectedConnector.binaryDigest) {
       throw new Error("Steam installed-game Connector is not ready");
     }
   }
@@ -145,6 +165,12 @@ export async function steamInstalledGameDriverFromEnv(
     endpoint: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL!,
     tls: { key, certificate, ca },
     stagingRoot,
+    expectedConnector: {
+      runnerId: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID!,
+      platform: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM! as SteamInstalledGameConnectorIdentity["platform"],
+      version: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION!,
+      binaryDigest: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST!,
+    },
     timeoutMs: seconds(controlled.DEVILUDO_TESTKIT_STEAM_TIMEOUT_SECONDS, 3_000, 30, 3_600) * 1_000,
   });
 }
@@ -155,6 +181,10 @@ export function testKitSteamProcessEnvironmentFromEnv(
 ): Readonly<Record<string, string>> {
   const result: Record<string, string> = {
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL: strictOrigin(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL")).origin,
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: runnerId(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID")),
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: platform(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM")),
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: fixedVersion(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION")),
+    DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: requiredDigest(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST")),
     DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE: absolutePath(required(env, "DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE"), "Steam TLS key"),
     DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: absolutePath(required(env, "DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE"), "Steam TLS certificate"),
     DEVILUDO_TESTKIT_STEAM_CA_FILE: absolutePath(required(env, "DEVILUDO_TESTKIT_STEAM_CA_FILE"), "Steam CA"),
@@ -310,6 +340,38 @@ function validateTls(value: SteamInstalledGameConnectorTls): void {
     || value.key.byteLength < 32 || value.certificate.byteLength < 32 || value.ca.byteLength < 32) {
     throw new Error("Steam installed-game TLS material is invalid");
   }
+}
+
+function connectorIdentity(value: SteamInstalledGameConnectorIdentity): SteamInstalledGameConnectorIdentity {
+  const body = record(value);
+  exactKeys(body, ["runnerId", "platform", "version", "binaryDigest"]);
+  return Object.freeze({
+    runnerId: runnerId(value.runnerId),
+    platform: platform(value.platform),
+    version: fixedVersion(value.version),
+    binaryDigest: requiredDigest(value.binaryDigest),
+  });
+}
+
+function runnerId(value: string): string {
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(value)) throw new Error("Steam Connector Runner ID is invalid");
+  return value;
+}
+
+function platform(value: string): SteamInstalledGameConnectorIdentity["platform"] {
+  if (value !== "windows" && value !== "linux" && value !== "macos") throw new Error("Steam Connector platform is invalid");
+  return value;
+}
+
+function fixedVersion(value: string): string {
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value)
+    || /(?:latest|stable|default)/i.test(value)) throw new Error("Steam Connector version is invalid");
+  return value;
+}
+
+function requiredDigest(value: string): string {
+  if (!SHA256.test(value)) throw new Error("Steam Connector binary digest is invalid");
+  return value;
 }
 
 function strictOrigin(value: string | URL): URL {

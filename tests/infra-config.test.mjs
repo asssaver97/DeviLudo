@@ -189,11 +189,16 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   assert.match(ingress, /rejectUnauthorized: true/);
   assert.match(ingress, /minVersion: "TLSv1\.3"/);
   assert.match(ingress, /allowedSpiffeIds\.has/);
+  assert.match(ingress, /deviludo\.steam-client-connector-health\.v1/);
+  assert.match(ingress, /\.\.\.options\.healthIdentity/);
+  assert.match(connector, /options\.grants\.redeem/);
+  assert.ok(connector.indexOf("options.grants.redeem") < connector.indexOf("options.executor.execute"));
   assert.match(native, /shell: false/);
   assert.match(native, /"execute", "--request-file"/);
   assert.match(native, /verifyExecutable/);
   assert.doesNotMatch(native, /process\.env/);
   assert.match(runtime, /platform does not match this host/);
+  assert.match(runtime, /healthIdentity: \{ runnerId, platform, version: connectorVersion, binaryDigest: nativeBridgeDigest \}/);
   assert.doesNotMatch(connector, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.match(readme, /does not ship\s+Valve credentials/);
 });
