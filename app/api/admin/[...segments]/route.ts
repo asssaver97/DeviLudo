@@ -203,13 +203,15 @@ export async function POST(request: Request, context: RouteContext) {
         throw new HttpProblem(409, "VERSION_NOT_APPROVED", "Only a Broker-attested approved version can build a WorkerImage");
       }
       const versionSlug = version.replaceAll(".", "").replaceAll("-", "");
-      const id = `${agentKind === "claude-code" ? "claude" : "codex"}-installation-${versionSlug}`;
+      const identityDigest = await fingerprintSecret(new TextEncoder().encode(
+        `local-installation-identity:v2:${agentKind}:${version}:${adapterVersion}:${workerPool}`,
+      ));
+      const id = `${agentKind === "claude-code" ? "claude" : "codex"}-installation-${versionSlug}-${identityDigest.slice(7, 23)}`;
       const imageDigest = await fingerprintSecret(new TextEncoder().encode(`local-worker-image:v1:${agentKind}:${version}:${adapterVersion}`));
       const buildReceiptDigest = await fingerprintSecret(new TextEncoder().encode(`local-build-receipt:v1:${id}:${imageDigest}:${workerPool}`));
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
-        const rollbackInstallationId = store.installations.find((item) => item.agent === agentKind
-          && item.workerPool === workerPool && item.state === "ACTIVE" && item.rolloutPercent === 100)?.id ?? null;
+        const rollbackInstallationId = selectDemoRollbackInstallation(store, agentKind, workerPool)?.id ?? null;
         const installation = {
           id,
           agent: agentKind,
@@ -224,6 +226,7 @@ export async function POST(request: Request, context: RouteContext) {
           rolloutPercent: 0 as const,
           rollbackInstallationId,
           createdAt: new Date().toISOString(),
+          activatedAt: null,
         };
         const current = store.installations.findIndex((item) => item.id === id);
         if (current >= 0) {
@@ -264,12 +267,14 @@ export async function POST(request: Request, context: RouteContext) {
         if (installation) {
           installation.rolloutPercent = rollout.percent;
           installation.state = rollout.state;
+          if (rollout.percent === 100) installation.activatedAt = new Date().toISOString();
         }
         const rollbackProfileRevisionIds = action === "rollback" && installation
           ? rollbackDemoProfiles(getDemoStore(), installation)
           : [];
         appendDemoAudit(`ROLLOUT_${action?.toUpperCase()}`, installationId, role, {
           percent: rollout.percent,
+          ...(installation?.activatedAt ? { activatedAt: installation.activatedAt } : {}),
           affectsRunningTasks: false,
           rollbackProfileCount: rollbackProfileRevisionIds.length,
         });
@@ -580,6 +585,23 @@ function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallat
     }
   }
   return Object.freeze(replacements.map((profile) => profile.id));
+}
+
+function selectDemoRollbackInstallation(
+  store: DemoStoreState,
+  agent: DemoInstallation["agent"],
+  workerPool: string,
+): DemoInstallation | null {
+  const candidates = store.installations.filter((item) => item.agent === agent && item.workerPool === workerPool
+    && item.state === "ACTIVE" && item.health === "HEALTHY" && item.rolloutPercent === 100 && !!item.activatedAt
+    && Number.isFinite(Date.parse(item.activatedAt)));
+  candidates.sort((left, right) => {
+    const activationOrder = Date.parse(right.activatedAt!) - Date.parse(left.activatedAt!);
+    if (activationOrder !== 0) return activationOrder;
+    const creationOrder = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+    return creationOrder || right.id.localeCompare(left.id);
+  });
+  return candidates[0] ?? null;
 }
 
 function mutate<T>(idempotency: string, operation: () => T): Response {

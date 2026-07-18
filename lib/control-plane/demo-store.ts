@@ -65,6 +65,7 @@ export type DemoInstallation = {
   rolloutPercent: 0 | 5 | 25 | 100;
   rollbackInstallationId: string | null;
   createdAt: string;
+  activatedAt: string | null;
 };
 
 export type DemoStoreState = {
@@ -111,6 +112,7 @@ const initialState = (): DemoStoreState => ({
       rolloutPercent: 25,
       rollbackInstallationId: null,
       createdAt: "2026-07-18T08:42:00.000Z",
+      activatedAt: null,
     },
     {
       id: "codex-installation-091",
@@ -126,6 +128,7 @@ const initialState = (): DemoStoreState => ({
       rolloutPercent: 100,
       rollbackInstallationId: null,
       createdAt: "2026-07-17T18:20:00.000Z",
+      activatedAt: "2026-07-17T18:25:00.000Z",
     },
   ],
   rollouts: {

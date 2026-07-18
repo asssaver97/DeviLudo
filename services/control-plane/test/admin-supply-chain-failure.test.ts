@@ -145,6 +145,35 @@ test("canary failure stops rollout and atomically restores the default to the pr
   assert.equal(result.audit?.metadata.failureCode, "CANARY_HEALTH_FAILED");
 });
 
+test("a new Installation selects the most recently activated healthy rollback target instead of Map order", async () => {
+  const store = new InMemoryAdminStore();
+  const chain = new FailingAgentSupplyChain();
+  const service = adminService(store, chain);
+  await store.mutate((state) => {
+    const seeded = state.installations.get("claude-code-installation-2-1-14");
+    assert.ok(seeded);
+    seeded.activatedAt = "2026-07-17T08:00:00.000Z";
+  });
+  const first = await service.createInstallation({
+    agent: "claude-code",
+    version: "2.1.14",
+    workerPool: "development-linux-primary",
+    adapterVersion: "1.3.0",
+  }, actor("build-recent-rollback-target"));
+  await service.rollout(first.id, "advance", actor("recent-target-5"));
+  await service.rollout(first.id, "advance", actor("recent-target-25"));
+  await service.rollout(first.id, "advance", actor("recent-target-100"));
+
+  const second = await service.createInstallation({
+    agent: "claude-code",
+    version: "2.1.14",
+    workerPool: "development-linux-primary",
+    adapterVersion: "1.4.0",
+  }, actor("build-after-recent-target"));
+  assert.equal(first.activatedAt, "2026-07-18T08:00:00.000Z");
+  assert.equal(second.rollbackInstallationId, first.id);
+});
+
 test("manual rollout rollback atomically rebinds defaults and fallback dependents to immutable Profile successors", async () => {
   const store = new InMemoryAdminStore();
   const chain = new FailingAgentSupplyChain();

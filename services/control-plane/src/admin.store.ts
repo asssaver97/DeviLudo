@@ -127,6 +127,7 @@ function seededState(): AdminCatalogState {
     previousRolloutPercent: 25,
     selfUpdateDisabled: true,
     createdAt: now,
+    activatedAt: now,
   };
   const provider: ProviderRevisionRecord = {
     id: "provider-platform-claude-r1",

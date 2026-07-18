@@ -77,6 +77,7 @@ export interface InstallationRecord {
   previousRolloutPercent: 0 | 5 | 25 | 100;
   readonly selfUpdateDisabled: true;
   readonly createdAt: string;
+  activatedAt: string | null;
   failure?: Readonly<{
     failureCode: string;
     evidenceDigest: string;

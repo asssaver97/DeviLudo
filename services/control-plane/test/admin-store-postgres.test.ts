@@ -152,6 +152,58 @@ test("Postgres admin catalog rolls back a failed mutation without writing state 
   assert.equal(statements.some((text) => text.includes("UPDATE deviludo.admin_catalog_state")), false);
 });
 
+test("Postgres admin catalog backfills legacy active Installation activation time deterministically", async () => {
+  const createdAt = "2026-07-17T08:00:00.000Z";
+  const legacyPayload = {
+    ...emptyPayload,
+    installations: [{
+      id: "claude-code-installation-legacy",
+      agent: "claude-code",
+      agentVersionId: "claude-code@2.1.14",
+      workerPool: "development-linux-primary",
+      imageDigest: `sha256:${"a".repeat(64)}`,
+      workerImageId: "worker-image-legacy",
+      adapterVersion: "1.2.0",
+      buildReceiptId: "build-legacy",
+      buildReceiptDigest: "b".repeat(64),
+      rollbackInstallationId: null,
+      health: "HEALTHY",
+      state: "ACTIVE",
+      rolloutPercent: 100,
+      previousRolloutPercent: 25,
+      selfUpdateDisabled: true,
+      createdAt,
+    }],
+  };
+  const client = {
+    async query(text: string) {
+      if (text.includes("SELECT revision, payload")) return result([{ revision: 7, payload: legacyPayload }]);
+      if (text.includes("FROM deviludo.admin_audit_records")) return result([]);
+      return result([]);
+    },
+    release() {},
+  } as unknown as PoolClient;
+  const store = new PostgresAdminStore({ async connect() { return client; }, async end() {} } as unknown as Pool);
+  const activatedAt = await store.read((state) => state.installations.get("claude-code-installation-legacy")?.activatedAt);
+  assert.equal(activatedAt, createdAt);
+
+  const malformedClient = {
+    async query(text: string) {
+      if (text.includes("SELECT revision, payload")) {
+        return result([{ revision: 8, payload: {
+          ...legacyPayload,
+          installations: [{ ...legacyPayload.installations[0], activatedAt: "not-a-timestamp" }],
+        } }]);
+      }
+      if (text.includes("FROM deviludo.admin_audit_records")) return result([]);
+      return result([]);
+    },
+    release() {},
+  } as unknown as PoolClient;
+  const malformed = new PostgresAdminStore({ async connect() { return malformedClient; }, async end() {} } as unknown as Pool);
+  await assert.rejects(malformed.read(() => undefined), /activation timestamp is invalid/);
+});
+
 function result<Row extends Record<string, unknown>>(rows: Row[]): QueryResult<Row> {
   return { command: "", rowCount: rows.length, oid: 0, fields: [], rows };
 }

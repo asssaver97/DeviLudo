@@ -240,8 +240,7 @@ export class AdminService {
       if (!versionRecord || versionRecord.state !== "APPROVED") {
         throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
       }
-      const rollback = [...state.installations.values()].find((item) => item.agent === agent
-        && item.workerPool === workerPool && item.state === "ACTIVE") ?? null;
+      const rollback = mostRecentlyActivatedInstallation(state, agent, workerPool);
       const existing = state.installations.get(id);
       const rollbackInstallationId = existing?.rollbackInstallationId ?? rollback?.id ?? null;
       if (existing) {
@@ -273,6 +272,7 @@ export class AdminService {
           previousRolloutPercent: 0,
           selfUpdateDisabled: true,
           createdAt: new Date().toISOString(),
+          activatedAt: null,
         });
         this.audit(state, "AGENT_INSTALLATION_BUILDING", id, actor, {
           agent, version, workerPool, adapterVersion, rollbackInstallationId,
@@ -424,6 +424,7 @@ export class AdminService {
       installation.rolloutPercent = receipt.toPercent;
       installation.state = receipt.state;
       installation.health = receipt.health;
+      if (receipt.toPercent === 100) installation.activatedAt = receipt.completedAt;
       const rollbackProfiles = action === "rollback"
         ? restoreProfilesToRollback(state, installation, {
           operationDigest: receipt.rolloutReceiptDigest,
@@ -434,6 +435,7 @@ export class AdminService {
         rolloutPercent: installation.rolloutPercent,
         rolloutReceiptId: receipt.rolloutReceiptId,
         rolloutReceiptDigest: receipt.rolloutReceiptDigest,
+        activatedAt: installation.activatedAt,
         rollbackProfileRevisionIds: rollbackProfiles,
         runningTasksUnaffected: true,
       });
@@ -1234,6 +1236,24 @@ function rollbackProfileRevisionId(
     .digest("hex")
     .slice(0, 24);
   return `profile-installation-rollback-${digest}-r${profile.revision + 1}`;
+}
+
+function mostRecentlyActivatedInstallation(
+  state: AdminCatalogState,
+  agent: InstallationRecord["agent"],
+  workerPool: string,
+): InstallationRecord | null {
+  const candidates = [...state.installations.values()].filter((item) => item.agent === agent
+    && item.workerPool === workerPool && item.state === "ACTIVE" && item.health === "HEALTHY"
+    && item.rolloutPercent === 100 && !!item.imageDigest && !!item.activatedAt
+    && Number.isFinite(Date.parse(item.activatedAt)));
+  candidates.sort((left, right) => {
+    const activationOrder = Date.parse(right.activatedAt!) - Date.parse(left.activatedAt!);
+    if (activationOrder !== 0) return activationOrder;
+    const creationOrder = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+    return creationOrder || right.id.localeCompare(left.id);
+  });
+  return candidates[0] ?? null;
 }
 
 function failureAudit(receipt: AgentSupplyChainTerminalFailureReceipt): Readonly<Record<string, unknown>> {

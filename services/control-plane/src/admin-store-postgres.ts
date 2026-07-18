@@ -172,6 +172,7 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   const state = emptyAdminCatalogState();
   loadRecords(payload.versions, state.versions, "version");
   loadRecords(payload.installations, state.installations, "installation");
+  for (const installation of state.installations.values()) normalizeInstallationActivation(installation);
   loadRecords(payload.providers, state.providers, "provider");
   loadRecords(payload.profiles, state.profiles, "profile");
   loadRecords(payload.credentials, state.credentials, "credential");
@@ -184,6 +185,20 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   }
   state.audit.push(...audit);
   return state;
+}
+
+function normalizeInstallationActivation(installation: InstallationRecord): void {
+  const mutable = installation as unknown as { activatedAt?: unknown };
+  if (mutable.activatedAt === undefined) {
+    mutable.activatedAt = installation.state === "ACTIVE" && installation.health === "HEALTHY"
+      && installation.rolloutPercent === 100
+      ? installation.createdAt
+      : null;
+  }
+  if (mutable.activatedAt !== null
+    && (typeof mutable.activatedAt !== "string" || !Number.isFinite(Date.parse(mutable.activatedAt)))) {
+    throw new Error("Administrator catalog installation activation timestamp is invalid");
+  }
 }
 
 function loadRecords<T extends { readonly id: string }>(

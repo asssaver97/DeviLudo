@@ -158,6 +158,42 @@ test("local rollout rollback moves the default to an immutable Profile on the pr
   assert.equal(store.defaults.platform, successor?.id);
 });
 
+test("local installation lineage selects the most recently activated healthy generation", async () => {
+  resetDemoStore();
+  const firstResponse = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "codex-cli",
+      version: "0.91.0",
+      workerPool: "dev-linux-b",
+      adapterVersion: "1.3.0",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(firstResponse.status, 201);
+  const first = (await firstResponse.json()).data;
+  assert.equal(first.rollbackInstallationId, "codex-installation-091");
+  for (const expected of [5, 25, 100]) {
+    const path = `agent-rollouts/${first.id}/advance`;
+    const advanced = await POST(request(path, "POST", "PlatformAgentAdmin"), context(path));
+    assert.equal(advanced.status, 201);
+    assert.equal((await advanced.json()).data.percent, expected);
+  }
+  getDemoStore().installations.reverse();
+
+  const secondResponse = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "codex-cli",
+      version: "0.91.0",
+      workerPool: "dev-linux-b",
+      adapterVersion: "1.4.0",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(secondResponse.status, 201);
+  const second = (await secondResponse.json()).data;
+  assert.equal(second.rollbackInstallationId, first.id);
+});
+
 test("local rollout without a target degrades Profiles whose fallback chain would be broken", async () => {
   const store = resetDemoStore();
   const source = store.profiles.find((profile) => profile.id === "profile-claude-platform-r5");

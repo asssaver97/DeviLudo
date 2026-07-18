@@ -42,7 +42,10 @@ Profile successors pinned to the previous healthy `100% ACTIVE` Installation,
 remaps fallback-dependent Profile successors, and moves every matching default.
 Provider, model, credential, permission and budget bindings do not change. If no
 fully active rollback target exists, affected Profiles become `DEGRADED` and new
-work fails closed; already locked runs retain their original image digest.
+work fails closed; already locked runs retain their original image digest. Each
+successful `100%` Fleet receipt records `activatedAt`; the next image selects the
+healthy same-Agent/same-pool target with the newest activation timestamp rather
+than relying on catalog insertion order.
 
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
 
