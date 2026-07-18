@@ -14,8 +14,16 @@ class Client implements PostgresWorkflowClient {
   readonly calls: Array<{ text: string; values: readonly unknown[] }> = [];
   releases = 0;
   drift = false;
+  redemptionDrift = false;
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values: readonly unknown[] = []): Promise<PostgresQueryResult<Row>> {
     this.calls.push({ text, values });
+    if (text.includes("SELECT redemption.grant_id::text")) return result([{
+      grant_id: grantId, platform: "linux", runner_id: "runner-linux-1",
+      job_digest: this.redemptionDrift ? "f".repeat(64) : "b".repeat(64),
+      execution_lock_digest: "c".repeat(64), redeemed_at: "2030-01-01T00:00:00.000Z",
+      steam_app_id: "2841930", build_id: "91234567", beta_branch: "deviludo_private_9",
+      expires_at: "2030-01-01T03:00:00.000Z", revoked_at: null,
+    }] as unknown as Row[]);
     if (text.includes("SELECT grant_id::text")) return result([{
       grant_id: grantId, tenant_id: tenantId, project_id: projectId, run_id: runId,
       lock_key: "a".repeat(64), build_receipt_id: buildReceiptId,
@@ -63,6 +71,26 @@ test("PostgreSQL issuer rejects binding drift and rolls back without exposing cr
   assert.equal(client.calls.at(-1)?.text, "ROLLBACK");
   assert.doesNotMatch(JSON.stringify(client.calls), /password|config\.vdf|steam.?guard/i);
   await assert.rejects(store.issue({ ...input, targetMatrix: ["windows", "linux"] }), /grant is invalid/);
+});
+
+test("PostgreSQL grant redemption is idempotent only for one exact platform job", async () => {
+  const client = new Client();
+  const store = new PostgresSteamCleanInstallGrantStore({ async connect() { return client; } }, { now: () => new Date(now) });
+  const redemption = {
+    tenantId, projectId, runId, grantId, platform: "linux" as const,
+    runnerId: "runner-linux-1", jobDigest: "b".repeat(64), executionLockDigest: "c".repeat(64),
+    steamAppId: "2841930", buildId: "91234567", betaBranch: "deviludo_private_9",
+  };
+  assert.deepEqual(await store.redeem(redemption), {
+    grantId, platform: "linux", steamAppId: "2841930", buildId: "91234567",
+    betaBranch: "deviludo_private_9", redeemedAt: now,
+  });
+  const insert = client.calls.find((call) => call.text.includes("steam_install_grant_redemptions"))!;
+  assert.match(insert.text, /ON CONFLICT \(tenant_id, grant_id, platform\) DO NOTHING/);
+  assert.ok(insert.text.includes("grant.expires_at > $12::timestamptz"));
+  client.redemptionDrift = true;
+  await assert.rejects(store.redeem(redemption), /grant is invalid/);
+  assert.equal(client.calls.at(-1)?.text, "ROLLBACK");
 });
 
 function result<Row extends Record<string, unknown>>(rows: Row[]): PostgresQueryResult<Row> {

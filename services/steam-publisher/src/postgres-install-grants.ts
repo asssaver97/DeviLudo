@@ -24,6 +24,18 @@ type GrantRow = {
   revoked_at: string | null;
 };
 
+export interface SteamInstallGrantRedemptionStore {
+  redeem(input: Readonly<{
+    tenantId: string; projectId: string; runId: string; grantId: string;
+    platform: TargetPlatform; runnerId: string; jobDigest: string;
+    executionLockDigest: string; steamAppId: string; buildId: string; betaBranch: string;
+  }>): Promise<Readonly<{
+    grantId: string; platform: TargetPlatform; steamAppId: string; buildId: string;
+    betaBranch: string; redeemedAt: string;
+  }>>;
+  probe(): Promise<void>;
+}
+
 /** Idempotently issues only opaque, expiring grant IDs under tenant RLS. */
 export class PostgresSteamCleanInstallGrantStore implements SteamCleanInstallGrantIssuer {
   readonly #now: () => Date;
@@ -95,6 +107,65 @@ export class PostgresSteamCleanInstallGrantStore implements SteamCleanInstallGra
       const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
       if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
     } finally { client.release(); }
+  }
+
+  async redeem(input: Parameters<SteamInstallGrantRedemptionStore["redeem"]>[0]) {
+    if (![input.tenantId, input.projectId, input.runId, input.grantId].every((value) => UUID.test(value))
+      || !SHA256.test(input.jobDigest) || !SHA256.test(input.executionLockDigest)
+      || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(input.runnerId)
+      || !APP_ID.test(input.steamAppId) || !APP_ID.test(input.buildId) || !BRANCH.test(input.betaBranch)
+      || !["windows", "linux", "macos"].includes(input.platform)) invalid();
+    const redeemedAt = validDate(this.#now()).toISOString();
+    return this.#transaction(input.tenantId, async (client) => {
+      await client.query(
+        `INSERT INTO deviludo.steam_install_grant_redemptions
+          (tenant_id, project_id, run_id, grant_id, platform, runner_id,
+           job_digest, execution_lock_digest, redeemed_at)
+         SELECT grant.tenant_id, grant.project_id, grant.run_id, grant.grant_id,
+                $5, $6, $7, $8, $12::timestamptz
+           FROM deviludo.steam_install_grants grant
+          WHERE grant.tenant_id = $1::uuid AND grant.project_id = $2::uuid
+            AND grant.run_id = $3::uuid AND grant.grant_id = $4::uuid
+            AND $5 = ANY(grant.target_matrix) AND grant.steam_app_id = $9
+            AND grant.build_id = $10 AND grant.beta_branch = $11
+            AND grant.revoked_at IS NULL AND grant.expires_at > $12::timestamptz
+         ON CONFLICT (tenant_id, grant_id, platform) DO NOTHING`,
+        [input.tenantId, input.projectId, input.runId, input.grantId, input.platform,
+          input.runnerId, input.jobDigest, input.executionLockDigest, input.steamAppId,
+          input.buildId, input.betaBranch, redeemedAt],
+      );
+      const selected = await client.query<{
+        grant_id: string; platform: string; runner_id: string; job_digest: string;
+        execution_lock_digest: string; redeemed_at: string; steam_app_id: string;
+        build_id: string; beta_branch: string; expires_at: string; revoked_at: string | null;
+      }>(
+        `SELECT redemption.grant_id::text, redemption.platform, redemption.runner_id,
+                redemption.job_digest, redemption.execution_lock_digest,
+                redemption.redeemed_at::text, grant.steam_app_id, grant.build_id,
+                grant.beta_branch, grant.expires_at::text, grant.revoked_at::text
+           FROM deviludo.steam_install_grant_redemptions redemption
+           JOIN deviludo.steam_install_grants grant
+             ON grant.tenant_id = redemption.tenant_id AND grant.grant_id = redemption.grant_id
+          WHERE redemption.tenant_id = $1::uuid AND redemption.grant_id = $2::uuid
+            AND redemption.platform = $3
+          FOR SHARE OF redemption, grant`,
+        [input.tenantId, input.grantId, input.platform],
+      );
+      if (selected.rows.length !== 1) invalid();
+      const row = selected.rows[0]!;
+      if (row.grant_id !== input.grantId || row.platform !== input.platform
+        || row.runner_id !== input.runnerId || row.job_digest !== input.jobDigest
+        || row.execution_lock_digest !== input.executionLockDigest
+        || row.steam_app_id !== input.steamAppId || row.build_id !== input.buildId
+        || row.beta_branch !== input.betaBranch || row.revoked_at !== null
+        || Date.parse(row.expires_at) <= Date.parse(redeemedAt)
+        || !Number.isFinite(Date.parse(row.redeemed_at))) invalid();
+      return Object.freeze({
+        grantId: row.grant_id, platform: row.platform as TargetPlatform,
+        steamAppId: row.steam_app_id, buildId: row.build_id,
+        betaBranch: row.beta_branch, redeemedAt: row.redeemed_at,
+      });
+    });
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
