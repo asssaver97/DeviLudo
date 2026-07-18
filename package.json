@@ -40,6 +40,7 @@
     "start:artifact-preparer": "node --import tsx services/artifact-preparer/src/run-service.ts",
     "start:steam-publisher-workflow": "node --import tsx services/steam-publisher/src/run-workflow-service.ts",
     "start:steam-client-connector": "node --import tsx services/steam-client-connector/src/run-service.ts",
+    "start:steam-install-services": "node --import tsx services/steam-publisher/src/run-clean-install-services.ts",
     "start:temporal-worker": "node --import tsx services/temporal/src/run-worker.ts",
     "start:local-runtime": "node --import tsx services/local-runtime/src/server.ts",
     "start:local-agent-runtime": "node --import tsx services/local-agent-runtime/src/server.ts",

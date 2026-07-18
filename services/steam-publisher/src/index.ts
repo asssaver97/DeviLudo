@@ -6,6 +6,7 @@ export * from "./postgres-clean-install-authority";
 export * from "./postgres-install-grants";
 export * from "./install-grant-redemption";
 export * from "./install-grant-http";
+export * from "./run-clean-install-services";
 export * from "./coordinator";
 export * from "./enrollment-contracts";
 export * from "./enrollment";

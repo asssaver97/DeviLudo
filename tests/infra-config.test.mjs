@@ -15,12 +15,18 @@ test("local integration PostgreSQL applies every migration in order", () => {
 });
 
 test("Steam install grants are tenant-isolated, expiring and once-per-platform", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/018_steam_install_grants.sql", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/steam-publisher/src/run-clean-install-services.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:steam-install-services"], "node --import tsx services/steam-publisher/src/run-clean-install-services.ts");
   assert.match(migration, /CREATE TABLE deviludo\.steam_install_grants/);
   assert.match(migration, /expires_at <= issued_at \+ interval '24 hours'/);
   assert.match(migration, /UNIQUE \(tenant_id, grant_id, platform\)/);
   assert.match(migration, /FORCE ROW LEVEL SECURITY/g);
   assert.match(migration, /steam_install_grant_redemptions_append_only/);
+  assert.match(runtime, /preparationPort === redemptionPort/);
+  assert.match(runtime, /Promise\.all\(\[runtime\.pool\.probe\(\), runtime\.preparation\.probe\(\), runtime\.redemption\.probe\(\)\]\)/);
+  assert.match(runtime, /O_NOFOLLOW/);
 });
 
 test("approved specifications bind one append-only Runner toolchain revision", () => {
