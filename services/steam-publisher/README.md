@@ -21,6 +21,15 @@ The coordinator:
 - leaves Valve review, first release and default-branch confirmation as explicit
   human/external gates.
 
+Production upload claims use `PostgresSteamPublishOperationStore`, not the
+contract-only in-memory store. It inserts once under forced tenant RLS, locks the
+claim row before every decision, fences concurrent replicas with a UUID lease,
+reclaims only after expiry and accepts a completion replay only when the entire
+private-Beta receipt is identical. Migration `019_steam_publish_claims.sql`
+makes tenant/project/release/request bindings immutable, prevents reclaiming a
+completed upload and forbids deletion. A process restart therefore cannot turn
+one approved release into a duplicate SteamPipe upload.
+
 `buildSteamCmdRuntimePlan()` produces a shell-free invocation using `+login
 <account>` without a password and a platform-generated VDF build script. The
 encrypted `config.vdf` SecretRef is materialized only inside the isolated Steam

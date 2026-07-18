@@ -4,6 +4,7 @@ export * from "./clean-install-preparation";
 export * from "./clean-install-http";
 export * from "./postgres-clean-install-authority";
 export * from "./postgres-install-grants";
+export * from "./postgres-publish-operations";
 export * from "./install-grant-redemption";
 export * from "./install-grant-http";
 export * from "./run-clean-install-services";

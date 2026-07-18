@@ -94,6 +94,9 @@ export class SteamReleaseCoordinator {
     const claimToken = randomUUID();
     const claim = await this.#operations.acquire({
       key: operationKey,
+      tenantId: input.rc.claims.tenantId,
+      projectId: input.rc.claims.projectId,
+      releaseId: input.rc.claims.releaseId,
       requestDigest,
       claimToken,
       claimExpiresAt: new Date(Date.parse(at) + CLAIM_MS).toISOString(),
@@ -141,7 +144,16 @@ export class SteamReleaseCoordinator {
       state: "INSTALL_TESTING",
       uploadedAt: upload.uploadedAt,
     });
-    await this.#operations.complete({ key: operationKey, requestDigest, claimToken, response, completedAt: at });
+    await this.#operations.complete({
+      key: operationKey,
+      tenantId: input.rc.claims.tenantId,
+      projectId: input.rc.claims.projectId,
+      releaseId: input.rc.claims.releaseId,
+      requestDigest,
+      claimToken,
+      response,
+      completedAt: at,
+    });
     return response;
   }
 
@@ -290,6 +302,9 @@ function validateSecretRef(value: string, label: string): void {
 }
 
 type StoredOperation = {
+  tenantId: string;
+  projectId: string;
+  releaseId: string;
   requestDigest: string;
   claimToken: string;
   claimExpiresAt: string;
@@ -306,16 +321,24 @@ export class InMemorySteamPublishOperationStore implements SteamPublishOperation
 
   async acquire(input: Parameters<SteamPublishOperationStore["acquire"]>[0]) {
     const current = this.#operations.get(input.key);
-    if (current?.requestDigest !== undefined && current.requestDigest !== input.requestDigest) throw new Error("Steam idempotency key was reused with another request");
+    if (current && (current.requestDigest !== input.requestDigest || current.tenantId !== input.tenantId
+      || current.projectId !== input.projectId || current.releaseId !== input.releaseId)) {
+      throw new Error("Steam idempotency key was reused with another request");
+    }
     if (current?.response) return { kind: "COMPLETED" as const, response: current.response };
     if (current && Date.parse(current.claimExpiresAt) > this.#now().getTime()) return { kind: "BUSY" as const };
-    this.#operations.set(input.key, { requestDigest: input.requestDigest, claimToken: input.claimToken, claimExpiresAt: input.claimExpiresAt });
+    this.#operations.set(input.key, {
+      tenantId: input.tenantId, projectId: input.projectId, releaseId: input.releaseId,
+      requestDigest: input.requestDigest, claimToken: input.claimToken, claimExpiresAt: input.claimExpiresAt,
+    });
     return { kind: "ACQUIRED" as const };
   }
 
   async complete(input: Parameters<SteamPublishOperationStore["complete"]>[0]): Promise<void> {
     const current = this.#operations.get(input.key);
-    if (!current || current.requestDigest !== input.requestDigest || current.claimToken !== input.claimToken || current.response) {
+    if (!current || current.tenantId !== input.tenantId || current.projectId !== input.projectId
+      || current.releaseId !== input.releaseId || current.requestDigest !== input.requestDigest
+      || current.claimToken !== input.claimToken || current.response) {
       throw new Error("Steam publish claim was lost before completion");
     }
     this.#operations.set(input.key, { ...current, response: input.response });

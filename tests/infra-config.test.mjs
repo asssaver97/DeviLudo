@@ -223,6 +223,19 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   assert.match(readme, /does not ship\s+Valve credentials/);
 });
 
+test("Steam private Beta upload claims are durable, tenant-scoped and immutable", () => {
+  const migration = readFileSync(new URL("../infra/postgres/019_steam_publish_claims.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/steam-publisher/src/postgres-publish-operations.ts", import.meta.url), "utf8");
+  assert.match(migration, /steam_publish_claim_binding_immutable/);
+  assert.match(migration, /completed steam publish claim is immutable/);
+  assert.match(migration, /WHERE response IS NULL/);
+  assert.match(store, /set_config\('app\.tenant_id'/);
+  assert.match(store, /ON CONFLICT \(key\) DO NOTHING/);
+  assert.match(store, /FOR UPDATE/);
+  assert.match(store, /claim_expires_at/);
+  assert.match(store, /sha256Canonical\(existing\)/);
+});
+
 test("artifact preparation publishes canonical source and plan objects before the append-only lock", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const preparer = readFileSync(new URL("../services/artifact-preparer/src/preparer.ts", import.meta.url), "utf8");

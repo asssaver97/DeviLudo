@@ -140,6 +140,9 @@ export interface SteamInstallEvidenceGate {
 export interface SteamPublishOperationStore {
   acquire(input: {
     readonly key: string;
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly releaseId: string;
     readonly requestDigest: string;
     readonly claimToken: string;
     readonly claimExpiresAt: string;
@@ -151,6 +154,9 @@ export interface SteamPublishOperationStore {
   >;
   complete(input: {
     readonly key: string;
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly releaseId: string;
     readonly requestDigest: string;
     readonly claimToken: string;
     readonly response: SteamPrivateBetaReceipt;
