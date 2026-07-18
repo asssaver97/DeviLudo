@@ -101,7 +101,7 @@ test("Steam operation Worker heartbeats and commits only an exact request-bound 
       assert.equal(input.claimToken, claimToken);
       assert.equal(input.claimedAt, now);
       assert.equal(input.claimExpiresAt, "2030-01-01T00:05:00.000Z");
-      return { kind: "ACQUIRED" as const, request };
+      return { kind: "ACQUIRED" as const, request, attempt: 1 };
     },
     async heartbeat(input: Parameters<SteamWorkflowOperationPersistence["heartbeat"]>[0]) {
       events.push("heartbeat");
@@ -140,21 +140,23 @@ test("Steam operation Worker fences duplicate, terminal, invalid and retryable e
   assert.deepEqual(await busy.execute({ tenantId, operationId }), running);
   assert.equal(executions, 0);
 
-  let releases = 0;
+  const retries: Array<{ releasedAt: string; retryAt: string }> = [];
   const retryPersistence = {
-    async claim() { return { kind: "ACQUIRED" as const, request }; },
-    async release() { releases += 1; },
+    async claim() { return { kind: "ACQUIRED" as const, request, attempt: 1 }; },
+    async release(input: Parameters<SteamWorkflowOperationPersistence["release"]>[0]) {
+      retries.push({ releasedAt: input.releasedAt, retryAt: input.retryAt });
+    },
   } as unknown as SteamWorkflowOperationPersistence;
   const retrying = new SteamWorkflowOperationWorker(retryPersistence, {
     async execute() { throw new SteamWorkflowExecutionError("STEAM_UPSTREAM_UNAVAILABLE", false); },
     async probe() {},
-  }, { claimToken: () => claimToken });
+  }, { claimToken: () => claimToken, now: () => new Date(now) });
   await assert.rejects(retrying.execute({ tenantId, operationId }), /STEAM_UPSTREAM_UNAVAILABLE/);
-  assert.equal(releases, 1);
+  assert.deepEqual(retries, [{ releasedAt: now, retryAt: "2030-01-01T00:00:05.000Z" }]);
 
   let failures = 0;
   const terminal = new SteamWorkflowOperationWorker({
-    async claim() { return { kind: "ACQUIRED" as const, request }; },
+    async claim() { return { kind: "ACQUIRED" as const, request, attempt: 1 }; },
     async fail(input: Parameters<SteamWorkflowOperationPersistence["fail"]>[0]) {
       failures += 1;
       assert.equal(input.errorCode, "STEAM_AUTHORIZATION_REVOKED");
@@ -169,7 +171,7 @@ test("Steam operation Worker fences duplicate, terminal, invalid and retryable e
 
   const drifted = new SteamWorkflowOperationWorker(retryPersistence, {
     async execute() { return { ...receipt, runId: projectId }; }, async probe() {},
-  }, { claimToken: () => claimToken });
+  }, { claimToken: () => claimToken, now: () => new Date(now) });
   await assert.rejects(drifted.execute({ tenantId, operationId }), /invalid/);
-  assert.equal(releases, 2);
+  assert.equal(retries.length, 2);
 });

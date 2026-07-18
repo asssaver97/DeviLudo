@@ -32,7 +32,7 @@ export interface SteamWorkflowOperationPersistence {
     claimedAt: string;
     claimExpiresAt: string;
   }>): Promise<
-    | Readonly<{ kind: "ACQUIRED"; request: SteamWorkflowOperationRequest }>
+    | Readonly<{ kind: "ACQUIRED"; request: SteamWorkflowOperationRequest; attempt: number }>
     | Readonly<{ kind: "BUSY" | "TERMINAL"; status: SteamWorkflowOperationStatus }>
   >;
   heartbeat(input: Readonly<{
@@ -62,6 +62,7 @@ export interface SteamWorkflowOperationPersistence {
     operationId: string;
     claimToken: string;
     releasedAt: string;
+    retryAt: string;
   }>): Promise<void>;
   probe(): Promise<void>;
 }
@@ -206,7 +207,7 @@ export class SteamWorkflowOperationWorker {
       await this.operations.release({
         ...input,
         claimToken,
-        releasedAt: validNow(this.#now()).toISOString(),
+        ...retryWindow(validNow(this.#now()), claim.attempt),
       });
       throw error;
     }
@@ -247,6 +248,15 @@ function validNow(value: Date): Date {
 function boundedLease(value: number): number {
   if (!Number.isInteger(value) || value < 30_000 || value > 15 * 60_000) invalid();
   return value;
+}
+
+function retryWindow(now: Date, attempt: number): Readonly<{ releasedAt: string; retryAt: string }> {
+  if (!Number.isSafeInteger(attempt) || attempt < 1) invalid();
+  const delayMs = Math.min(15 * 60_000, 5_000 * (2 ** Math.min(8, attempt - 1)));
+  return Object.freeze({
+    releasedAt: now.toISOString(),
+    retryAt: new Date(now.getTime() + delayMs).toISOString(),
+  });
 }
 
 function invalid(): never { throw new Error("Steam workflow operation is invalid"); }

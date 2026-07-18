@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 18 }, (_, index) => {
+  const offsets = Array.from({ length: 22 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -251,6 +251,28 @@ test("Steam Workflow Broker persists before dispatch and fences isolated executo
   assert.match(operations, /operations\.heartbeat/);
   assert.match(operations, /operations\.release/);
   assert.doesNotMatch(operations, /configVdf|accountPassword|steamGuard/);
+});
+
+test("Steam Workflow Broker production host uses a recoverable RLS outbox and credential-free mTLS ingress", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/022_steam_workflow_dispatch.sql", import.meta.url), "utf8");
+  const dispatch = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-dispatch.ts", import.meta.url), "utf8");
+  const broker = readFileSync(new URL("../services/steam-publisher/src/run-workflow-broker-service.ts", import.meta.url), "utf8");
+  const worker = readFileSync(new URL("../services/steam-publisher/src/run-workflow-worker.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:steam-workflow-broker"], "node --import tsx services/steam-publisher/src/run-workflow-broker-service.ts");
+  assert.match(migration, /available_at timestamptz/);
+  assert.match(migration, /enqueue_count integer/);
+  assert.match(migration, /steam_workflow_operation_poll_idx/);
+  assert.doesNotMatch(migration, /UPDATE deviludo\.steam_workflow_operations/);
+  assert.match(dispatch, /FOR UPDATE SKIP LOCKED/);
+  assert.match(dispatch, /SELECT set_config\('app\.tenant_id'/);
+  assert.doesNotMatch(dispatch, /request_payload|configVdf|accountPassword|steamGuard/);
+  assert.match(broker, /createSteamWorkflowBrokerHttpsServer/);
+  assert.match(broker, /O_NOFOLLOW/);
+  assert.match(broker, /new DurableSteamWorkflowOperationService\(operations, dispatch\)/);
+  assert.doesNotMatch(broker, /configVdf|accountPassword|guardCode|branchPassword/);
+  assert.match(worker, /new SteamWorkflowOperationWorker\(operations, executor/);
+  assert.doesNotMatch(worker, /import\(|exec\(|spawn\(|shell:/);
 });
 
 test("Steam execution re-resolves signed release authority and archives the tested BuildID", () => {

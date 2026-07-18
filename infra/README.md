@@ -38,8 +38,14 @@ toolchain and supply-chain evidence before any physical job can be scheduled.
 Workflow E2E attempts hold a same-tenant foreign key to that lock.
 Migration `015` hardens physical Runner registrations and platform leases,
 persists the complete Ed25519-signed job for exact retry replay, reserves an
-immutable platform-evidence slot and makes Runner events append-only. All
-fifteen migrations are
+immutable platform-evidence slot and makes Runner events append-only.
+Migrations `016`–`018` bind approved test plans and fixed Runner toolchains,
+then add expiring, once-per-platform Steam install grants. Migration `019`
+persists fenced private-Beta upload claims. Migrations `020`–`021` add durable
+Steam workflow operations, signed RC authority and append-only private-Beta and
+default-branch receipts. Migration `022` turns each operation into a recoverable
+tenant-RLS dispatch outbox with bounded retry scheduling. All twenty-two
+migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

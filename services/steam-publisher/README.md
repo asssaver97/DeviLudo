@@ -117,6 +117,21 @@ failures release the lease for idempotent redispatch; only bounded terminal
 codes are persisted. Neither the HTTP process nor the queue message receives
 Steam credentials.
 
+Migration `022_steam_workflow_dispatch.sql` makes that same row a durable
+tenant-RLS outbox with an `available_at` retry schedule. The credential-free
+production Broker starts with `npm run start:steam-workflow-broker`, reads only
+file-mounted TLS material, and never loads a Steam session or Beta password.
+`PostgresSteamWorkflowOperationDispatch` polls only `tenantId + operationId`;
+the request is re-read and claimed by a fenced Worker transaction. Retryable
+executor failures use capped exponential delay, and process loss is recovered
+from `PENDING` or an expired `RUNNING` lease rather than an in-memory message.
+
+The isolated executor image composes its audited native connector with
+`steamWorkflowWorkerFromEnv()`/`runSteamWorkflowWorker()`. Its sorted tenant
+scope is explicit, startup probes the queue, operation store and executor, and
+its logs contain only bounded lifecycle events. There is intentionally no
+generic CLI entry that accepts an arbitrary module path or shell command.
+
 Immediately before execution, `PostgresSteamWorkflowExecutionAuthority`
 re-joins the signed RC, non-invalidated main evidence, dispatched MFA
 authorization, release state and active App-scoped build session under the

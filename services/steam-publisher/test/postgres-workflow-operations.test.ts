@@ -43,6 +43,7 @@ type Row = {
   state: string; claim_token: string | null; claim_expires_at: string | null;
   attempt_count: number; receipt: unknown | null; error_code: string | null;
   terminal: boolean | null; created_at: string; updated_at: string; completed_at: string | null;
+  available_at: string; last_enqueued_at: string; enqueue_count: number;
 };
 
 class Client implements PostgresWorkflowClient {
@@ -65,6 +66,7 @@ class Client implements PostgresWorkflowClient {
         state: "PENDING", claim_token: null, claim_expires_at: null, attempt_count: 0,
         receipt: null, error_code: null, terminal: null,
         created_at: String(values[11]), updated_at: String(values[11]), completed_at: null,
+        available_at: String(values[11]), last_enqueued_at: String(values[11]), enqueue_count: 1,
       };
       return result([], 1);
     }
@@ -84,7 +86,7 @@ class Client implements PostgresWorkflowClient {
       this.row.claim_expires_at = String(values[3]);
       this.row.attempt_count += 1;
       this.row.updated_at = String(values[4]);
-      return result([], 1);
+      return result([{ attempt_count: this.row.attempt_count }] as unknown as ResultRow[], 1);
     }
     if (text.includes("SET claim_expires_at")) {
       if (!this.row || this.row.state !== "RUNNING" || this.row.claim_token !== values[2]
@@ -120,6 +122,7 @@ class Client implements PostgresWorkflowClient {
       this.row.claim_token = null;
       this.row.claim_expires_at = null;
       this.row.updated_at = String(values[3]);
+      this.row.available_at = String(values[4]);
       return result([], 1);
     }
     if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as ResultRow[]);
@@ -173,6 +176,7 @@ test("PostgreSQL Steam workflow lease heartbeats, fences duplicates and commits 
     claimExpiresAt: "2030-01-01T00:05:00.000Z",
   });
   assert.equal(claimed.kind, "ACQUIRED");
+  if (claimed.kind === "ACQUIRED") assert.equal(claimed.attempt, 1);
   assert.equal(client.row?.attempt_count, 1);
   const busy = await operations.claim({
     tenantId, operationId, claimToken: secondToken, claimedAt: "2030-01-01T00:01:00.000Z",
@@ -213,6 +217,7 @@ test("PostgreSQL Steam workflow reclaims only expired leases and rejects stale c
     claimExpiresAt: "2030-01-01T00:11:00.000Z",
   });
   assert.equal(reclaimed.kind, "ACQUIRED");
+  if (reclaimed.kind === "ACQUIRED") assert.equal(reclaimed.attempt, 2);
   assert.equal(client.row?.attempt_count, 2);
   await assert.rejects(operations.complete({
     tenantId, operationId, claimToken: firstToken, receipt,
@@ -220,8 +225,10 @@ test("PostgreSQL Steam workflow reclaims only expired leases and rejects stale c
   }), /persistence is invalid/);
   await operations.release({
     tenantId, operationId, claimToken: secondToken, releasedAt: "2030-01-01T00:07:00.000Z",
+    retryAt: "2030-01-01T00:07:05.000Z",
   });
   assert.equal(client.row?.state, "PENDING");
+  assert.equal(client.row?.available_at, "2030-01-01T00:07:05.000Z");
   await operations.claim({
     tenantId, operationId, claimToken: firstToken, claimedAt: "2030-01-01T00:08:00.000Z",
     claimExpiresAt: "2030-01-01T00:13:00.000Z",

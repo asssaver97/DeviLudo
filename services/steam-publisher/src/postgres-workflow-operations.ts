@@ -35,6 +35,9 @@ type OperationRow = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  available_at: string;
+  last_enqueued_at: string;
+  enqueue_count: number;
 };
 
 /** Tenant-RLS durable operation queue for isolated Steam execution workers. */
@@ -52,9 +55,11 @@ export class PostgresSteamWorkflowOperationPersistence implements SteamWorkflowO
         `INSERT INTO deviludo.steam_workflow_operations
           (id, tenant_id, project_id, submitter_spiffe_id, workflow_id, run_id,
            kind, operation_key, request_digest, payload_digest, request_payload,
-           state, created_at, updated_at)
+           state, created_at, updated_at, available_at, last_enqueued_at, enqueue_count)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid,
-                 $7, $8, $9, $10, $11::jsonb, 'PENDING', $12::timestamptz, $12::timestamptz)
+                 $7, $8, $9, $10, $11::jsonb, 'PENDING',
+                 $12::timestamptz, $12::timestamptz, $12::timestamptz,
+                 $12::timestamptz, 1)
          ON CONFLICT (tenant_id, operation_key) DO NOTHING`,
         [input.operationId, request.tenantId, request.projectId, input.submitterSpiffeId,
           request.workflowId, request.runId, request.kind, request.operationKey,
@@ -99,18 +104,21 @@ export class PostgresSteamWorkflowOperationPersistence implements SteamWorkflowO
       if (row.state === "RUNNING" && Date.parse(row.claim_expires_at as string) > Date.parse(claimedAt)) {
         return Object.freeze({ kind: "BUSY" as const, status });
       }
-      const updated = await client.query(
+      const updated = await client.query<{ attempt_count: number }>(
         `UPDATE deviludo.steam_workflow_operations
             SET state = 'RUNNING', claim_token = $3::uuid,
                 claim_expires_at = $4::timestamptz,
                 attempt_count = attempt_count + 1, updated_at = $5::timestamptz
           WHERE tenant_id = $1::uuid AND id = $2::uuid
             AND state IN ('PENDING', 'RUNNING')
-            AND (claim_token IS NULL OR claim_expires_at <= $5::timestamptz)`,
+            AND available_at <= $5::timestamptz
+            AND (claim_token IS NULL OR claim_expires_at <= $5::timestamptz)
+        RETURNING attempt_count`,
         [input.tenantId, input.operationId, input.claimToken, claimExpiresAt, claimedAt],
       );
-      if (updated.rowCount !== 1) invalid();
-      return Object.freeze({ kind: "ACQUIRED" as const, request: row.request });
+      const attempt = updated.rows[0]?.attempt_count;
+      if (updated.rowCount !== 1 || !Number.isSafeInteger(attempt) || attempt < 1) invalid();
+      return Object.freeze({ kind: "ACQUIRED" as const, request: row.request, attempt });
     });
   }
 
@@ -197,14 +205,17 @@ export class PostgresSteamWorkflowOperationPersistence implements SteamWorkflowO
     validateTenantOperation(input.tenantId, input.operationId);
     validateUuid(input.claimToken);
     const releasedAt = validTime(input.releasedAt);
+    const retryAt = validTime(input.retryAt);
+    if (Date.parse(retryAt) <= Date.parse(releasedAt)
+      || Date.parse(retryAt) - Date.parse(releasedAt) > 15 * 60_000) invalid();
     await this.#transaction(input.tenantId, async (client) => {
       const updated = await client.query(
         `UPDATE deviludo.steam_workflow_operations
             SET state = 'PENDING', claim_token = NULL, claim_expires_at = NULL,
-                updated_at = $4::timestamptz
+                updated_at = $4::timestamptz, available_at = $5::timestamptz
           WHERE tenant_id = $1::uuid AND id = $2::uuid
             AND state = 'RUNNING' AND claim_token = $3::uuid`,
-        [input.tenantId, input.operationId, input.claimToken, releasedAt],
+        [input.tenantId, input.operationId, input.claimToken, releasedAt, retryAt],
       );
       if (updated.rowCount !== 1) invalid();
     });
@@ -240,7 +251,8 @@ const SELECT_OPERATION = `SELECT id::text, tenant_id::text, project_id::text,
                                   payload_digest::text, request_payload, state,
                                   claim_token::text, claim_expires_at::text,
                                   attempt_count, receipt, error_code, terminal,
-                                  created_at::text, updated_at::text, completed_at::text`;
+                                  created_at::text, updated_at::text, completed_at::text,
+                                  available_at::text, last_enqueued_at::text, enqueue_count`;
 
 async function selectByOperationKey(client: PostgresWorkflowClient, tenantId: string, operationKey: string): Promise<OperationRow> {
   const selected = await client.query<OperationRow>(
@@ -276,7 +288,9 @@ function parseRow(value: OperationRow): ParsedRow {
     || !SHA256.test(value.request_digest) || !SHA256.test(value.payload_digest)
     || !["PENDING", "RUNNING", "COMPLETED", "FAILED"].includes(value.state)
     || !Number.isInteger(value.attempt_count) || value.attempt_count < 0
+    || !Number.isInteger(value.enqueue_count) || value.enqueue_count < 1
     || !Number.isFinite(Date.parse(value.created_at)) || !Number.isFinite(Date.parse(value.updated_at))
+    || !Number.isFinite(Date.parse(value.available_at)) || !Number.isFinite(Date.parse(value.last_enqueued_at))
     || request.tenantId !== value.tenant_id || request.projectId !== value.project_id
     || request.workflowId !== value.workflow_id || request.runId !== value.run_id
     || request.kind !== value.kind || request.operationKey !== value.operation_key
