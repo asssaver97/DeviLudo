@@ -9,8 +9,10 @@ import type {
   AgentInstallationBuildRequest,
   AgentInstallationRolloutRequest,
   AgentSupplyChainOperationKind,
+  AgentSupplyChainOperationResult,
   AgentSupplyChainRequest,
   AgentSupplyChainResponse,
+  AgentSupplyChainTerminalFailureReceipt,
   AgentVersionDiscoveryRequest,
   AgentVersionDiscoveryResponse,
   AgentVersionValidationRequest,
@@ -20,6 +22,15 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{2,199}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const VALIDATION_FAILURES = new Set([
+  "SIGNATURE_INVALID", "INTEGRITY_MISMATCH", "SBOM_INVALID", "MALWARE_DETECTED",
+  "VULNERABILITY_POLICY_FAILED", "ADAPTER_CONTRACT_FAILED", "SANDBOX_POLICY_FAILED", "SYNTHETIC_TASK_FAILED",
+]);
+const BUILD_FAILURES = new Set([
+  "SBOM_INVALID", "MALWARE_DETECTED", "VULNERABILITY_POLICY_FAILED", "ADAPTER_CONTRACT_FAILED",
+  "SANDBOX_POLICY_FAILED", "SYNTHETIC_TASK_FAILED", "IMAGE_BUILD_FAILED",
+]);
+const ROLLOUT_FAILURES = new Set(["CANARY_HEALTH_FAILED", "DEPLOYMENT_HEALTH_FAILED"]);
 
 export function parseAgentSupplyChainRequest(value: unknown): AgentSupplyChainRequest {
   const body = record(value);
@@ -59,6 +70,54 @@ export function validateAgentSupplyChainResponse(
     return parseAgentInstallationBuildReceipt(value, request);
   }
   return parseAgentInstallationRolloutReceipt(value, request);
+}
+
+export function validateAgentSupplyChainOperationResult(
+  value: unknown,
+  request: AgentSupplyChainRequest,
+): AgentSupplyChainOperationResult {
+  if (isTerminalFailureShape(value)) return parseAgentSupplyChainTerminalFailure(value, request);
+  return validateAgentSupplyChainResponse(value, request);
+}
+
+export function parseAgentSupplyChainTerminalFailure(
+  value: unknown,
+  request: AgentSupplyChainRequest,
+): AgentSupplyChainTerminalFailureReceipt {
+  const body = record(value);
+  exactKeys(body, [
+    "schemaVersion", "operationKey", "requestDigest", "operationKind", "disposition", "failureCode",
+    "evidenceDigest", "failureReceiptId", "failedAt", "failureReceiptDigest",
+  ]);
+  const expectedKind = agentSupplyChainOperationKind(request);
+  if (body.schemaVersion !== "deviludo.agent-supply-chain-terminal-failure.v1"
+    || expectedKind === "DISCOVER" || body.operationKind !== expectedKind
+    || body.operationKey !== request.operationKey || body.requestDigest !== request.requestDigest
+    || body.disposition !== (expectedKind === "VALIDATE" ? "REJECTED" : "QUARANTINED")
+    || typeof body.failureCode !== "string" || !failureCodeAllowed(expectedKind, body.failureCode)
+    || typeof body.evidenceDigest !== "string" || !SHA256.test(body.evidenceDigest)
+    || typeof body.failureReceiptId !== "string" || !SAFE_ID.test(body.failureReceiptId)
+    || typeof body.failedAt !== "string" || !Number.isFinite(Date.parse(body.failedAt))
+    || typeof body.failureReceiptDigest !== "string" || !SHA256.test(body.failureReceiptDigest)) invalid();
+  const core = Object.freeze({
+    schemaVersion: body.schemaVersion,
+    operationKey: body.operationKey,
+    requestDigest: body.requestDigest,
+    operationKind: body.operationKind,
+    disposition: body.disposition,
+    failureCode: body.failureCode,
+    evidenceDigest: body.evidenceDigest,
+    failureReceiptId: body.failureReceiptId,
+    failedAt: body.failedAt,
+  });
+  if (sha256Canonical(core) !== body.failureReceiptDigest) invalid();
+  return Object.freeze({ ...core, failureReceiptDigest: body.failureReceiptDigest }) as AgentSupplyChainTerminalFailureReceipt;
+}
+
+export function isAgentSupplyChainTerminalFailure(
+  value: AgentSupplyChainOperationResult,
+): value is AgentSupplyChainTerminalFailureReceipt {
+  return "schemaVersion" in value && value.schemaVersion === "deviludo.agent-supply-chain-terminal-failure.v1";
 }
 
 export function agentSupplyChainOperationKind(request: AgentSupplyChainRequest): AgentSupplyChainOperationKind {
@@ -166,6 +225,15 @@ function officialCandidate(candidate: ReturnType<typeof parseAgentVersionCandida
 function rolloutTransition(action: unknown, from: unknown, to: unknown): boolean {
   return action === "ROLLBACK" ? to === 0 && (from === 5 || from === 25 || from === 100)
     : action === "ADVANCE" && ((from === 0 && to === 5) || (from === 5 && to === 25) || (from === 25 && to === 100));
+}
+
+function isTerminalFailureShape(value: unknown): boolean {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).schemaVersion === "deviludo.agent-supply-chain-terminal-failure.v1";
+}
+
+function failureCodeAllowed(kind: Exclude<AgentSupplyChainOperationKind, "DISCOVER">, code: string): boolean {
+  return (kind === "VALIDATE" ? VALIDATION_FAILURES : kind === "BUILD" ? BUILD_FAILURES : ROLLOUT_FAILURES).has(code);
 }
 
 function record(value: unknown): Record<string, unknown> {

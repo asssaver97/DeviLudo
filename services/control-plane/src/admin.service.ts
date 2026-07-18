@@ -22,7 +22,11 @@ import { ProviderProbe } from "./provider-probe";
 import { credentialResultView, credentialView } from "./admin-public";
 import {
   AgentSupplyChain,
+  AgentSupplyChainPolicyFailure,
+  type AgentInstallationBuildReceipt,
+  type AgentInstallationRolloutReceipt,
   type AgentSupplyChainHealth,
+  type AgentSupplyChainTerminalFailureReceipt,
   type AgentVersionCandidateReceipt,
   type AgentVersionValidationReceipt,
 } from "./agent-supply-chain";
@@ -155,10 +159,13 @@ export class AdminService {
       await this.store.mutate((state) => {
         const record = state.versions.get(id);
         if (record?.state === "VALIDATING") {
-          record.state = error instanceof ServiceProblem && error.status < 500 ? "REJECTED" : "DISCOVERED";
+          const terminal = error instanceof AgentSupplyChainPolicyFailure && error.receipt.disposition === "REJECTED";
+          record.state = terminal ? "REJECTED" : "DISCOVERED";
+          record.scan = terminal ? "FAIL" : "PENDING";
           this.audit(state, record.state === "REJECTED" ? "AGENT_VERSION_REJECTED" : "AGENT_VERSION_VALIDATION_DEFERRED", id, actor, {
             catalogReceiptId: record.catalogReceiptId,
             automaticActivation: false,
+            ...(terminal ? failureAudit(error.receipt) : {}),
           });
         }
       });
@@ -208,57 +215,112 @@ export class AdminService {
     }
     const adapterVersion = requiredString(body, "adapterVersion", 100);
     assertExactVersion(adapterVersion);
-    const snapshot = await this.store.read((state) => {
+    const operation = supplyChainOperation(actor);
+    const id = `${agent}-installation-${operation.operationKey.slice(0, 24)}`;
+    const snapshot = await this.store.mutate((state) => {
       const versionRecord = state.versions.get(`${agent}@${version}`);
       if (!versionRecord || versionRecord.state !== "APPROVED") {
         throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
       }
       const rollback = [...state.installations.values()].find((item) => item.agent === agent
         && item.workerPool === workerPool && item.state === "ACTIVE") ?? null;
-      return { candidate: versionCandidate(versionRecord), validation: versionValidation(versionRecord), rollbackInstallationId: rollback?.id ?? null };
+      const existing = state.installations.get(id);
+      const rollbackInstallationId = existing?.rollbackInstallationId ?? rollback?.id ?? null;
+      if (existing) {
+        if (existing.agentVersionId !== versionRecord.id || existing.workerPool !== workerPool
+          || existing.adapterVersion !== adapterVersion) {
+          throw new ServiceProblem(409, "INSTALLATION_BUILD_DRIFT", "Installation reservation conflicts with the immutable request");
+        }
+        if (existing.state === "READY" && existing.imageDigest && existing.buildReceiptDigest) {
+          return { completed: structuredClone(existing), candidate: null, validation: null, rollbackInstallationId };
+        }
+        if (existing.state !== "BUILDING" && existing.state !== "QUARANTINED") {
+          throw new ServiceProblem(409, "INSTALLATION_BUILD_NOT_RETRYABLE", "Installation build cannot be resumed");
+        }
+      } else {
+        state.installations.set(id, {
+          id,
+          agent,
+          agentVersionId: versionRecord.id,
+          workerPool,
+          imageDigest: null,
+          workerImageId: null,
+          adapterVersion,
+          buildReceiptId: null,
+          buildReceiptDigest: null,
+          rollbackInstallationId,
+          health: "UNHEALTHY",
+          state: "BUILDING",
+          rolloutPercent: 0,
+          previousRolloutPercent: 0,
+          selfUpdateDisabled: true,
+          createdAt: new Date().toISOString(),
+        });
+        this.audit(state, "AGENT_INSTALLATION_BUILDING", id, actor, {
+          agent, version, workerPool, adapterVersion, rollbackInstallationId,
+        });
+      }
+      return {
+        completed: null,
+        candidate: versionCandidate(versionRecord),
+        validation: versionValidation(versionRecord),
+        rollbackInstallationId,
+      };
     });
-    const operation = supplyChainOperation(actor);
-    const id = `${agent}-installation-${operation.operationKey.slice(0, 24)}`;
-    const built = await this.supplyChain.buildInstallation({
-      ...operation,
-      installationId: id,
-      candidate: snapshot.candidate,
-      validation: snapshot.validation,
-      workerPool,
-      adapterVersion,
-      rollbackInstallationId: snapshot.rollbackInstallationId,
-    });
+    if (snapshot.completed) return this.mutate(actor, () => snapshot.completed!);
+    let built: AgentInstallationBuildReceipt;
+    try {
+      built = await this.supplyChain.buildInstallation({
+        ...operation,
+        installationId: id,
+        candidate: snapshot.candidate!,
+        validation: snapshot.validation!,
+        workerPool,
+        adapterVersion,
+        rollbackInstallationId: snapshot.rollbackInstallationId,
+      });
+    } catch (error) {
+      await this.store.mutate((state) => {
+        const installation = state.installations.get(id);
+        if (!installation || installation.state !== "BUILDING" && installation.state !== "QUARANTINED") return;
+        if (error instanceof AgentSupplyChainPolicyFailure && error.receipt.disposition === "QUARANTINED") {
+          const alreadyRecorded = installation.failure?.failureReceiptDigest === error.receipt.failureReceiptDigest;
+          quarantineInstallation(installation, error.receipt);
+          const rollbackProfiles = restoreProfilesToRollback(state, installation, error.receipt);
+          if (!alreadyRecorded) {
+            this.audit(state, "AGENT_INSTALLATION_QUARANTINED", id, actor, {
+              ...failureAudit(error.receipt),
+              rolloutStoppedAtPercent: 0,
+              rollbackInstallationId: installation.rollbackInstallationId,
+              rollbackProfileRevisionIds: rollbackProfiles,
+              runningTasksUnaffected: true,
+            });
+          }
+        } else {
+          this.audit(state, "AGENT_INSTALLATION_BUILD_DEFERRED", id, actor, {
+            state: installation.state,
+            retryable: true,
+          });
+        }
+      });
+      throw error;
+    }
     return this.mutate(actor, (state) => {
       const versionRecord = state.versions.get(`${agent}@${version}`);
       if (!versionRecord || versionRecord.state !== "APPROVED") {
         throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
       }
-      const existing = state.installations.get(id);
-      if (existing) {
-        if (existing.buildReceiptDigest !== built.buildReceiptDigest) {
-          throw new ServiceProblem(409, "INSTALLATION_BUILD_DRIFT", "Installation build receipt conflicts with the existing immutable image");
-        }
-        return existing;
+      const installation = state.installations.get(id);
+      if (!installation || installation.state !== "BUILDING") {
+        throw new ServiceProblem(409, "INSTALLATION_BUILD_RACE", "Installation reservation changed before build receipt could commit");
       }
-      const installation: InstallationRecord = {
-        id,
-        agent,
-        agentVersionId: versionRecord.id,
-        workerPool,
-        imageDigest: built.imageDigest,
-        workerImageId: built.workerImageId,
-        adapterVersion,
-        buildReceiptId: built.buildReceiptId,
-        buildReceiptDigest: built.buildReceiptDigest,
-        rollbackInstallationId: built.rollbackInstallationId,
-        health: built.health,
-        state: "READY",
-        rolloutPercent: 0,
-        previousRolloutPercent: 0,
-        selfUpdateDisabled: true,
-        createdAt: built.completedAt,
-      };
-      state.installations.set(id, installation);
+      installation.imageDigest = built.imageDigest;
+      installation.workerImageId = built.workerImageId;
+      installation.buildReceiptId = built.buildReceiptId;
+      installation.buildReceiptDigest = built.buildReceiptDigest;
+      installation.health = built.health;
+      installation.state = "READY";
+      delete installation.failure;
       this.audit(state, "AGENT_INSTALLATION_READY", id, actor, {
         agent,
         version,
@@ -281,7 +343,7 @@ export class AdminService {
     const snapshot = await this.store.read((state) => {
       const installation = state.installations.get(installationId);
       if (!installation) throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
-      if (["FAILED", "QUARANTINED", "RETIRED"].includes(installation.state)) {
+      if (!["READY", "CANARY", "ACTIVE"].includes(installation.state) || !installation.imageDigest) {
         throw new ServiceProblem(409, "INSTALLATION_NOT_ROLLOUT_ELIGIBLE", "Installation cannot accept new tasks");
       }
       const toPercent: InstallationRecord["rolloutPercent"] = action === "rollback" ? 0
@@ -291,14 +353,42 @@ export class AdminService {
       }
       return structuredClone({ installation, toPercent });
     });
-    const receipt = await this.supplyChain.rollout({
-      ...supplyChainOperation(actor),
-      installationId,
-      imageDigest: snapshot.installation.imageDigest,
-      action: action === "advance" ? "ADVANCE" : "ROLLBACK",
-      fromPercent: snapshot.installation.rolloutPercent,
-      toPercent: snapshot.toPercent,
-    });
+    let receipt: AgentInstallationRolloutReceipt;
+    try {
+      receipt = await this.supplyChain.rollout({
+        ...supplyChainOperation(actor),
+        installationId,
+        imageDigest: snapshot.installation.imageDigest!,
+        action: action === "advance" ? "ADVANCE" : "ROLLBACK",
+        fromPercent: snapshot.installation.rolloutPercent,
+        toPercent: snapshot.toPercent,
+      });
+    } catch (error) {
+      await this.store.mutate((state) => {
+        const installation = state.installations.get(installationId);
+        if (!installation || installation.imageDigest !== snapshot.installation.imageDigest
+          || installation.rolloutPercent !== snapshot.installation.rolloutPercent
+          || installation.state !== snapshot.installation.state) return;
+        if (error instanceof AgentSupplyChainPolicyFailure && error.receipt.disposition === "QUARANTINED") {
+          const stoppedAt = installation.rolloutPercent;
+          quarantineInstallation(installation, error.receipt);
+          const rollbackProfiles = restoreProfilesToRollback(state, installation, error.receipt);
+          this.audit(state, "AGENT_INSTALLATION_QUARANTINED", installationId, actor, {
+            ...failureAudit(error.receipt),
+            rolloutStoppedAtPercent: stoppedAt,
+            rollbackInstallationId: installation.rollbackInstallationId,
+            rollbackProfileRevisionIds: rollbackProfiles,
+            runningTasksUnaffected: true,
+          });
+        } else {
+          this.audit(state, "AGENT_ROLLOUT_DEFERRED", installationId, actor, {
+            rolloutPercent: installation.rolloutPercent,
+            retryable: true,
+          });
+        }
+      });
+      throw error;
+    }
     return this.mutate(actor, (state) => {
       const installation = state.installations.get(installationId);
       if (!installation || installation.imageDigest !== snapshot.installation.imageDigest
@@ -755,6 +845,99 @@ function versionValidation(record: AgentVersionRecord): AgentVersionValidationRe
     validationReceiptId: record.validationReceiptId,
     validationReceiptDigest: record.validationReceiptDigest,
     validatedAt: record.validatedAt,
+  });
+}
+
+function quarantineInstallation(
+  installation: InstallationRecord,
+  receipt: AgentSupplyChainTerminalFailureReceipt,
+): void {
+  installation.previousRolloutPercent = installation.rolloutPercent;
+  installation.rolloutPercent = 0;
+  installation.state = "QUARANTINED";
+  installation.health = "UNHEALTHY";
+  installation.failure = Object.freeze({
+    failureCode: receipt.failureCode,
+    evidenceDigest: receipt.evidenceDigest,
+    failureReceiptId: receipt.failureReceiptId,
+    failureReceiptDigest: receipt.failureReceiptDigest,
+    failedAt: receipt.failedAt,
+  });
+}
+
+/**
+ * Replaces active immutable Profile revisions with revisions pinned to the last
+ * healthy installation. Defaults move atomically; already-running tasks keep
+ * their original lock and image digest.
+ */
+function restoreProfilesToRollback(
+  state: AdminCatalogState,
+  installation: InstallationRecord,
+  receipt: AgentSupplyChainTerminalFailureReceipt,
+): readonly string[] {
+  const rollback = installation.rollbackInstallationId
+    ? state.installations.get(installation.rollbackInstallationId)
+    : undefined;
+  const rollbackReady = !!rollback && rollback.health === "HEALTHY" && !!rollback.imageDigest
+    && ["READY", "CANARY", "ACTIVE"].includes(rollback.state);
+  const replacements: string[] = [];
+  for (const profile of [...state.profiles.values()]) {
+    if (profile.installationId !== installation.id || ["SUPERSEDED", "DISABLED"].includes(profile.state)) continue;
+    if (profile.state !== "ACTIVE" || !rollbackReady) {
+      profile.state = "DEGRADED";
+      continue;
+    }
+    const configuredFallback = profile.fallbackProfileRevisionId
+      ? state.profiles.get(profile.fallbackProfileRevisionId)
+      : undefined;
+    let replacement = configuredFallback?.state === "ACTIVE"
+      && configuredFallback.installationId === rollback!.id
+      && configuredFallback.agent === profile.agent
+      && configuredFallback.scope === profile.scope
+      && configuredFallback.scopeId === profile.scopeId
+      ? configuredFallback
+      : [...state.profiles.values()].find((candidate) => candidate.id !== profile.id
+        && candidate.state === "ACTIVE" && candidate.installationId === rollback!.id
+        && candidate.agent === profile.agent && candidate.scope === profile.scope && candidate.scopeId === profile.scopeId);
+    if (!replacement) {
+      const revision = profile.revision + 1;
+      const id = `${profile.id}-rollback-${receipt.failureReceiptDigest.slice(0, 12)}-r${revision}`;
+      const existing = state.profiles.get(id);
+      if (existing) {
+        if (existing.installationId !== rollback!.id || existing.providerRevisionId !== profile.providerRevisionId) {
+          profile.state = "DEGRADED";
+          continue;
+        }
+        replacement = existing;
+      } else {
+        replacement = {
+          ...profile,
+          id,
+          revision,
+          installationId: rollback!.id,
+          state: "ACTIVE",
+          createdAt: receipt.failedAt,
+        };
+        state.profiles.set(id, replacement);
+      }
+    }
+    profile.state = "SUPERSEDED";
+    for (const [scope, profileId] of state.defaults.entries()) {
+      if (profileId === profile.id) state.defaults.set(scope, replacement.id);
+    }
+    replacements.push(replacement.id);
+  }
+  return Object.freeze([...new Set(replacements)]);
+}
+
+function failureAudit(receipt: AgentSupplyChainTerminalFailureReceipt): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    failureCode: receipt.failureCode,
+    evidenceDigest: receipt.evidenceDigest,
+    failureReceiptId: receipt.failureReceiptId,
+    failureReceiptDigest: receipt.failureReceiptDigest,
+    failedAt: receipt.failedAt,
+    terminalDisposition: receipt.disposition,
   });
 }
 

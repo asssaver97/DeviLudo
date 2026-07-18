@@ -3,7 +3,11 @@ import test from "node:test";
 import { DevelopmentAgentSupplyChain } from "../../control-plane/src/agent-supply-chain";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
-import type { AgentVersionDiscoveryRequest } from "../src/contracts";
+import type {
+  AgentSupplyChainTerminalFailureReceipt,
+  AgentVersionDiscoveryRequest,
+  AgentVersionValidationRequest,
+} from "../src/contracts";
 import { agentSupplyChainPayloadDigest } from "../src/request-contract";
 import { PostgresAgentSupplyChainOperations } from "../src/postgres-operations";
 
@@ -95,6 +99,69 @@ test("PostgreSQL Agent supply-chain operations fence, complete and replay one ex
   assert.equal(statements.some((statement) => statement.includes("FOR UPDATE")), true);
   assert.equal(statements.includes("ROLLBACK"), false);
   assert.equal(releases, 3);
+});
+
+test("PostgreSQL Agent supply-chain operations replay a terminal receipt as completed evidence", async () => {
+  const implementation = new DevelopmentAgentSupplyChain(() => new Date("2026-07-18T08:00:00.000Z"));
+  const [candidate] = await implementation.discover({
+    operationKey: "c".repeat(64), requestDigest: "d".repeat(64), agent: "claude-code", requestedVersion: "2.1.15",
+  });
+  const request: AgentVersionValidationRequest = Object.freeze({
+    schemaVersion: "deviludo.agent-version-validation-request.v1",
+    operationKey: "e".repeat(64),
+    requestDigest: "f".repeat(64),
+    candidate: candidate!,
+  });
+  const core = Object.freeze({
+    schemaVersion: "deviludo.agent-supply-chain-terminal-failure.v1" as const,
+    operationKey: request.operationKey,
+    requestDigest: request.requestDigest,
+    operationKind: "VALIDATE" as const,
+    disposition: "REJECTED" as const,
+    failureCode: "INTEGRITY_MISMATCH" as const,
+    evidenceDigest: "1".repeat(64),
+    failureReceiptId: "failure-postgres-validation-001",
+    failedAt: "2026-07-18T08:01:00.000Z",
+  });
+  const failure: AgentSupplyChainTerminalFailureReceipt = Object.freeze({
+    ...core,
+    failureReceiptDigest: sha256Canonical(core),
+  });
+  const row = {
+    operation_key: request.operationKey,
+    request_digest: request.requestDigest,
+    kind: "VALIDATE",
+    payload_digest: agentSupplyChainPayloadDigest(request),
+    request_payload: request,
+    state: "COMPLETED",
+    claim_token: null,
+    claim_expires_at: null,
+    attempt_count: 1,
+    response_payload: failure,
+    response_digest: sha256Canonical(failure),
+    created_at: "2026-07-18T08:00:00.000Z",
+    updated_at: "2026-07-18T08:01:00.000Z",
+    completed_at: "2026-07-18T08:01:00.000Z",
+  };
+  const client = {
+    async query(text: string) {
+      if (text.includes("FOR UPDATE")) return result([row]);
+      return result([]);
+    },
+    release() {},
+  };
+  const operations = new PostgresAgentSupplyChainOperations({ async connect() { return client; } } as unknown as PostgresWorkflowPool);
+  const replay = await operations.claim({
+    operationKey: request.operationKey,
+    requestDigest: request.requestDigest,
+    kind: "VALIDATE",
+    payloadDigest: agentSupplyChainPayloadDigest(request),
+    request,
+    claimToken: "33333333-3333-4333-8333-333333333333",
+    claimedAt: "2026-07-18T08:02:00.000Z",
+    claimExpiresAt: "2026-07-18T08:10:00.000Z",
+  });
+  assert.deepEqual(replay, { kind: "REPLAY", response: failure });
 });
 
 function result<Row extends Record<string, unknown>>(rows: Row[], rowCount = rows.length) {

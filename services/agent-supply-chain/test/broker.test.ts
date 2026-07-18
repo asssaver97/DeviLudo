@@ -6,8 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { DevelopmentAgentSupplyChain } from "../../control-plane/src/agent-supply-chain";
 import { sha256Canonical } from "../../runner-control/src/canonical";
-import { DurableAgentSupplyChainBrokerService } from "../src/broker-service";
-import type { AgentSupplyChainNativeExecutor, AgentSupplyChainRequest } from "../src/contracts";
+import { AgentSupplyChainTerminalError, DurableAgentSupplyChainBrokerService } from "../src/broker-service";
+import type {
+  AgentSupplyChainNativeExecutor,
+  AgentSupplyChainRequest,
+  AgentSupplyChainTerminalFailureReceipt,
+} from "../src/contracts";
 import { createAgentSupplyChainHandler, createAgentSupplyChainHttpsServer } from "../src/ingress-http";
 import { LockedNativeAgentSupplyChainExecutor } from "../src/locked-native-executor";
 import { InMemoryAgentSupplyChainOperations } from "../src/operation-memory";
@@ -211,6 +215,43 @@ test("Broker releases a failed native claim and retries the same immutable opera
   assert.equal(operations.entries.get(operationKey)?.state, "COMPLETED");
 });
 
+test("Broker durably replays a sanitized terminal policy failure without rerunning native code", async () => {
+  const operations = new InMemoryAgentSupplyChainOperations();
+  const fixture = new FixtureNativeExecutor();
+  const [candidate] = await fixture.implementation.discover({
+    operationKey, requestDigest, agent: "claude-code", requestedVersion: "2.1.15",
+  });
+  const request = {
+    schemaVersion: "deviludo.agent-version-validation-request.v1" as const,
+    operationKey: "7".repeat(64),
+    requestDigest: "8".repeat(64),
+    candidate: candidate!,
+  };
+  const terminal = terminalFailure(request, "SIGNATURE_INVALID");
+  let executions = 0;
+  let tokens = 0;
+  const service = new DurableAgentSupplyChainBrokerService(operations, {
+    async probe() {},
+    async execute() { executions += 1; throw new AgentSupplyChainTerminalError(terminal); },
+  }, {
+    claimToken: () => `${String(++tokens).padStart(8, "0")}-0000-4000-8000-000000000000`,
+    now: () => new Date("2026-07-18T08:00:00.000Z"),
+  });
+  const handler = createAgentSupplyChainHandler({
+    service,
+    allowedSpiffeIds: new Set([identity.spiffeId]),
+    healthIdentity: { version: "1.0.0", binaryDigest: "d".repeat(64) },
+    extractIdentity: () => identity,
+  });
+  const first = await post(handler, "/v1/agent-versions/validate", request);
+  const replay = await post(handler, "/v1/agent-versions/validate", request);
+  assert.equal(first.status, 422);
+  assert.deepEqual(replay, first);
+  assert.deepEqual((first.body as { error: { failure: unknown } }).error.failure, terminal);
+  assert.equal(executions, 1);
+  assert.equal(operations.entries.get(request.operationKey)?.state, "COMPLETED");
+});
+
 test("locked native executor pins artifacts, argv, child environment and immutable replay", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-agent-supply-chain-"));
   const executable = join(root, "native-agent-supply-chain");
@@ -253,6 +294,42 @@ test("locked native executor pins artifacts, argv, child environment and immutab
   assert.deepEqual(calls[1]?.args.slice(0, 3), ["discover-version", "--config-file", config]);
   assert.deepEqual(Object.keys(calls[1]?.env ?? {}).sort(), ["DISABLE_UPDATES", "HOME", "LANG", "NODE_ENV", "TEMP", "TMP", "TMPDIR", "USERPROFILE"].sort());
   assert.equal(JSON.stringify(calls).includes("apiKey"), false);
+});
+
+test("locked native executor accepts terminal failures only on the dedicated exit code", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-agent-supply-chain-terminal-"));
+  const executable = join(root, "native-agent-supply-chain");
+  const config = join(root, "policy.json");
+  const workRoot = join(root, "work");
+  await Promise.all([writeFile(executable, "signed-native-fixture"), writeFile(config, "fixed-policy-fixture"), mkdir(workRoot)]);
+  await chmod(executable, 0o500);
+  const fixture = new FixtureNativeExecutor();
+  const [candidate] = await fixture.implementation.discover({
+    operationKey, requestDigest, agent: "codex-cli", requestedVersion: "0.92.0",
+  });
+  const request = {
+    schemaVersion: "deviludo.agent-version-validation-request.v1" as const,
+    operationKey: "9".repeat(64), requestDigest: "a".repeat(64), candidate: candidate!,
+  };
+  const terminal = terminalFailure(request, "MALWARE_DETECTED");
+  const executor = new LockedNativeAgentSupplyChainExecutor({
+    executable,
+    executableDigest: digest(await readFile(executable)),
+    configFile: config,
+    configDigest: digest(await readFile(config)),
+    workRoot,
+    process: async (_file, args) => {
+      const responsePath = args[args.indexOf("--response-file") + 1];
+      assert.ok(responsePath);
+      await writeFile(responsePath, JSON.stringify(terminal), { mode: 0o400 });
+      return { exitCode: 42, stdout: "", stderr: "" };
+    },
+  });
+  await assert.rejects(executor.execute(request), (error) => {
+    assert.ok(error instanceof AgentSupplyChainTerminalError);
+    assert.deepEqual(error.receipt, terminal);
+    return true;
+  });
 });
 
 test("production service config accepts only file-mounted mTLS and pinned native artifacts", async () => {
@@ -298,3 +375,21 @@ async function post(
 }
 
 function digest(value: Buffer): string { return createHash("sha256").update(value).digest("hex"); }
+
+function terminalFailure(
+  request: Extract<AgentSupplyChainRequest, { schemaVersion: "deviludo.agent-version-validation-request.v1" }>,
+  failureCode: AgentSupplyChainTerminalFailureReceipt["failureCode"],
+): AgentSupplyChainTerminalFailureReceipt {
+  const core = Object.freeze({
+    schemaVersion: "deviludo.agent-supply-chain-terminal-failure.v1" as const,
+    operationKey: request.operationKey,
+    requestDigest: request.requestDigest,
+    operationKind: "VALIDATE" as const,
+    disposition: "REJECTED" as const,
+    failureCode,
+    evidenceDigest: "e".repeat(64),
+    failureReceiptId: `failure-${request.operationKey.slice(0, 16)}`,
+    failedAt: "2026-07-18T08:00:00.000Z",
+  });
+  return Object.freeze({ ...core, failureReceiptDigest: sha256Canonical(core) });
+}

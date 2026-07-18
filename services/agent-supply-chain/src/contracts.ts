@@ -1,9 +1,11 @@
 import type {
   AgentInstallationBuildReceipt,
   AgentInstallationRolloutReceipt,
+  AgentSupplyChainTerminalFailureReceipt,
   AgentVersionCandidateReceipt,
   AgentVersionValidationReceipt,
 } from "../../control-plane/src/agent-supply-chain";
+export type { AgentSupplyChainTerminalFailureReceipt } from "../../control-plane/src/agent-supply-chain";
 import type { AgentKind } from "../../control-plane/src/contracts";
 
 export interface AgentSupplyChainOperationBinding {
@@ -60,6 +62,8 @@ export type AgentSupplyChainResponse =
 
 export type AgentSupplyChainOperationKind = "DISCOVER" | "VALIDATE" | "BUILD" | "ROLLOUT";
 
+export type AgentSupplyChainOperationResult = AgentSupplyChainResponse | AgentSupplyChainTerminalFailureReceipt;
+
 export interface AgentSupplyChainNativeExecutor {
   execute(request: AgentSupplyChainRequest): Promise<AgentSupplyChainResponse>;
   probe(): Promise<void>;
@@ -78,12 +82,12 @@ export interface AgentSupplyChainOperationPersistence {
   }>): Promise<
     | Readonly<{ kind: "ACQUIRED"; attempt: number }>
     | Readonly<{ kind: "BUSY" }>
-    | Readonly<{ kind: "REPLAY"; response: AgentSupplyChainResponse }>
+    | Readonly<{ kind: "REPLAY"; response: AgentSupplyChainOperationResult }>
   >;
   complete(input: Readonly<{
     operationKey: string;
     claimToken: string;
-    response: AgentSupplyChainResponse;
+    response: AgentSupplyChainOperationResult;
     responseDigest: string;
     completedAt: string;
   }>): Promise<void>;

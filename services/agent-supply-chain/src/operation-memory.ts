@@ -1,9 +1,10 @@
+import { sha256Canonical } from "../../runner-control/src/canonical";
 import type {
   AgentSupplyChainOperationPersistence,
+  AgentSupplyChainOperationResult,
   AgentSupplyChainRequest,
-  AgentSupplyChainResponse,
 } from "./contracts";
-import { parseAgentSupplyChainRequest, validateAgentSupplyChainResponse } from "./request-contract";
+import { parseAgentSupplyChainRequest, validateAgentSupplyChainOperationResult } from "./request-contract";
 
 type Entry = {
   operationKey: string;
@@ -15,7 +16,7 @@ type Entry = {
   claimToken: string | null;
   claimExpiresAt: string | null;
   attempt: number;
-  response: AgentSupplyChainResponse | null;
+  response: AgentSupplyChainOperationResult | null;
   responseDigest: string | null;
 };
 
@@ -30,7 +31,9 @@ export class InMemoryAgentSupplyChainOperations implements AgentSupplyChainOpera
       if (existing.requestDigest !== input.requestDigest || existing.kind !== input.kind
         || existing.payloadDigest !== input.payloadDigest) invalid();
       if (existing.state === "COMPLETED" && existing.response) {
-        return Object.freeze({ kind: "REPLAY" as const, response: validateAgentSupplyChainResponse(existing.response, request) });
+        const response = validateAgentSupplyChainOperationResult(existing.response, request);
+        if (sha256Canonical(response) !== existing.responseDigest) invalid();
+        return Object.freeze({ kind: "REPLAY" as const, response });
       }
       if (existing.state === "RUNNING" && Date.parse(existing.claimExpiresAt ?? "") > Date.parse(input.claimedAt)) {
         return Object.freeze({ kind: "BUSY" as const });
@@ -60,9 +63,11 @@ export class InMemoryAgentSupplyChainOperations implements AgentSupplyChainOpera
   async complete(input: Parameters<AgentSupplyChainOperationPersistence["complete"]>[0]): Promise<void> {
     const entry = this.entries.get(input.operationKey);
     if (!entry) invalid();
-    const response = validateAgentSupplyChainResponse(input.response, entry.request);
+    const response = validateAgentSupplyChainOperationResult(input.response, entry.request);
+    if (sha256Canonical(response) !== input.responseDigest) invalid();
     if (entry.state === "COMPLETED") {
-      if (entry.responseDigest !== input.responseDigest) invalid();
+      if (entry.responseDigest !== input.responseDigest || !entry.response
+        || sha256Canonical(entry.response) !== input.responseDigest) invalid();
       return;
     }
     if (entry.state !== "RUNNING" || entry.claimToken !== input.claimToken

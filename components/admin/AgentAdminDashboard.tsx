@@ -24,11 +24,19 @@ type AgentInstallation = {
   version: string;
   workerPool: string;
   adapterVersion: string;
-  imageDigest: string;
-  buildReceiptId: string;
+  imageDigest: string | null;
+  buildReceiptId: string | null;
   state: string;
   health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   rolloutPercent: number;
+  rollbackInstallationId?: string | null;
+  failure?: {
+    failureCode: string;
+    evidenceDigest: string;
+    failureReceiptId: string;
+    failureReceiptDigest: string;
+    failedAt: string;
+  };
 };
 type AdminState = {
   defaultAgent: AgentKind;
@@ -489,7 +497,7 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
                 <td><div className={styles.tableAgent}><AgentMark kind={row.agent} small /><div><strong>{row.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong><code>{row.version}</code></div></div></td>
                 <td>{row.releasedAt}</td><td><span className={row.integrity.includes("待") ? styles.pendingText : ""}>{row.integrity}</span></td><td>{row.sbom}</td>
                 <td><span className={row.vulnerabilities.includes("1 高危") ? styles.dangerText : styles.goodText}>{row.vulnerabilities}</span></td>
-                <td><StatusPill tone={row.status === "APPROVED" ? "success" : row.status === "BLOCKED" ? "danger" : "warning"}>{row.status}</StatusPill></td>
+                <td><StatusPill tone={row.status === "APPROVED" ? "success" : row.status === "BLOCKED" || row.status === "REJECTED" ? "danger" : "warning"}>{row.status}</StatusPill></td>
                 <td>
                   {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : row.status === "APPROVED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onInstall(row.id)} disabled={!canOperate || installations.some((item) => item.agent === row.agent && item.version === row.version)}>{installations.some((item) => item.agent === row.agent && item.version === row.version) ? "已构建" : "构建镜像"}</button></div> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
                 </td>
@@ -520,15 +528,26 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
           return (
             <div className={styles.installationRow} key={installation.id}>
               <AgentMark kind={installation.agent} />
-              <div className={styles.installationIdentity}><h3>{installation.agent === "claude-code" ? "Claude Code" : "Codex CLI"} {installation.version}</h3><code>{installation.imageDigest.slice(0, 22)}…{installation.imageDigest.slice(-8)}</code><span>{installation.workerPool} · {installation.health} · adapter {installation.adapterVersion}</span></div>
+              <div className={styles.installationIdentity}>
+                <h3>{installation.agent === "claude-code" ? "Claude Code" : "Codex CLI"} {installation.version}</h3>
+                <code>{installation.imageDigest ? `${installation.imageDigest.slice(0, 22)}…${installation.imageDigest.slice(-8)}` : "镜像未生成"}</code>
+                <span>{installation.workerPool} · {installation.health} · adapter {installation.adapterVersion}</span>
+                {installation.failure && (
+                  <div className={styles.failureEvidence}>
+                    <strong>{installation.failure.failureCode}</strong>
+                    <span>证据 {installation.failure.evidenceDigest.slice(0, 12)}… · 回执 {installation.failure.failureReceiptId}</span>
+                    <span>{installation.rollbackInstallationId ? `默认 Profile 已回退至 ${installation.rollbackInstallationId}` : "无可用回退安装；新任务保持停发"}</span>
+                  </div>
+                )}
+              </div>
               <div className={styles.rolloutBlock}>
-                <div><span>新任务流量</span><strong>{percent}%</strong><StatusPill tone={installation.state === "ACTIVE" ? "success" : installation.state === "DRAINING" ? "warning" : "info"}>{installation.state}</StatusPill></div>
+                <div><span>新任务流量</span><strong>{percent}%</strong><StatusPill tone={installation.state === "ACTIVE" ? "success" : installation.state === "QUARANTINED" || installation.state === "FAILED" ? "danger" : installation.state === "DRAINING" ? "warning" : "info"}>{installation.state}</StatusPill></div>
                 <div className={styles.progressTrack}><span style={{ width: `${percent}%` }} /></div>
                 <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
               </div>
               <div className={styles.verticalActions}>
-                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || percent === 100}>推进至 {next}</button>
-                <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || percent === 0}>回滚</button>
+                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || percent === 100 || installation.state === "QUARANTINED" || installation.state === "FAILED" || !installation.imageDigest}>推进至 {next}</button>
+                <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || percent === 0 || installation.state === "QUARANTINED" || installation.state === "FAILED"}>回滚</button>
               </div>
             </div>
           );

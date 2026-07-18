@@ -11,6 +11,15 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{2,199}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_SECRET_BYTES = 1024 * 1024;
+const VALIDATION_FAILURES = new Set([
+  "SIGNATURE_INVALID", "INTEGRITY_MISMATCH", "SBOM_INVALID", "MALWARE_DETECTED",
+  "VULNERABILITY_POLICY_FAILED", "ADAPTER_CONTRACT_FAILED", "SANDBOX_POLICY_FAILED", "SYNTHETIC_TASK_FAILED",
+]);
+const BUILD_FAILURES = new Set([
+  "SBOM_INVALID", "MALWARE_DETECTED", "VULNERABILITY_POLICY_FAILED", "ADAPTER_CONTRACT_FAILED",
+  "SANDBOX_POLICY_FAILED", "SYNTHETIC_TASK_FAILED", "IMAGE_BUILD_FAILED",
+]);
+const ROLLOUT_FAILURES = new Set(["CANARY_HEALTH_FAILED", "DEPLOYMENT_HEALTH_FAILED"]);
 
 export interface AgentVersionCandidateReceipt {
   readonly agent: AgentKind;
@@ -67,6 +76,46 @@ export interface AgentInstallationRolloutReceipt {
   readonly rolloutReceiptId: string;
   readonly rolloutReceiptDigest: string;
   readonly completedAt: string;
+}
+
+export type AgentSupplyChainFailureCode =
+  | "SIGNATURE_INVALID"
+  | "INTEGRITY_MISMATCH"
+  | "SBOM_INVALID"
+  | "MALWARE_DETECTED"
+  | "VULNERABILITY_POLICY_FAILED"
+  | "ADAPTER_CONTRACT_FAILED"
+  | "SANDBOX_POLICY_FAILED"
+  | "SYNTHETIC_TASK_FAILED"
+  | "IMAGE_BUILD_FAILED"
+  | "CANARY_HEALTH_FAILED"
+  | "DEPLOYMENT_HEALTH_FAILED";
+
+export interface AgentSupplyChainTerminalFailureReceipt {
+  readonly schemaVersion: "deviludo.agent-supply-chain-terminal-failure.v1";
+  readonly operationKey: string;
+  readonly requestDigest: string;
+  readonly operationKind: "VALIDATE" | "BUILD" | "ROLLOUT";
+  readonly disposition: "REJECTED" | "QUARANTINED";
+  readonly failureCode: AgentSupplyChainFailureCode;
+  readonly evidenceDigest: string;
+  readonly failureReceiptId: string;
+  readonly failedAt: string;
+  readonly failureReceiptDigest: string;
+}
+
+export class AgentSupplyChainPolicyFailure extends ServiceProblem {
+  constructor(readonly receipt: AgentSupplyChainTerminalFailureReceipt) {
+    super(422, "AGENT_SUPPLY_CHAIN_POLICY_REJECTED", "Agent supply-chain policy rejected the operation", Object.freeze({
+      disposition: receipt.disposition,
+      failureCode: receipt.failureCode,
+      evidenceDigest: receipt.evidenceDigest,
+      failureReceiptId: receipt.failureReceiptId,
+      failureReceiptDigest: receipt.failureReceiptDigest,
+      failedAt: receipt.failedAt,
+    }));
+    this.name = "AgentSupplyChainPolicyFailure";
+  }
 }
 
 export interface AgentSupplyChainHealth {
@@ -307,6 +356,7 @@ export class MtlsAgentSupplyChain extends AgentSupplyChain {
     const url = new URL(this.#endpoint.href); url.pathname = path;
     const response = await this.#http({ url, body: JSON.stringify(body), tls: this.#tls, timeoutMs: this.#timeoutMs });
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (response.statusCode === 422) throw new AgentSupplyChainPolicyFailure(policyFailureReceipt(response.payload, body));
       throw new ServiceProblem(response.statusCode === 409 ? 409 : 503, "AGENT_SUPPLY_CHAIN_REJECTED", "Agent supply-chain Broker rejected the operation");
     }
     return response.payload;
@@ -437,6 +487,56 @@ function rolloutReceipt(value: unknown, input: Parameters<AgentSupplyChain["roll
     newTasksOnly: true, runningTasksUnaffected: true, rolloutReceiptId: body.rolloutReceiptId, completedAt: body.completedAt };
   if (sha256Canonical(core) !== body.rolloutReceiptDigest) invalidReceipt();
   return Object.freeze({ ...core, rolloutReceiptDigest: body.rolloutReceiptDigest }) as AgentInstallationRolloutReceipt;
+}
+
+function policyFailureReceipt(
+  value: unknown,
+  request: Readonly<Record<string, unknown>>,
+): AgentSupplyChainTerminalFailureReceipt {
+  const envelope = record(value);
+  exactKeys(envelope, ["error"]);
+  const error = record(envelope.error);
+  exactKeys(error, ["code", "failure"]);
+  if (error.code !== "AGENT_SUPPLY_CHAIN_POLICY_REJECTED") invalidReceipt();
+  const body = record(error.failure);
+  exactKeys(body, [
+    "schemaVersion", "operationKey", "requestDigest", "operationKind", "disposition", "failureCode",
+    "evidenceDigest", "failureReceiptId", "failedAt", "failureReceiptDigest",
+  ]);
+  const operationKind = failureOperationKind(request.schemaVersion);
+  if (body.schemaVersion !== "deviludo.agent-supply-chain-terminal-failure.v1"
+    || body.operationKey !== request.operationKey || body.requestDigest !== request.requestDigest
+    || body.operationKind !== operationKind
+    || body.disposition !== (operationKind === "VALIDATE" ? "REJECTED" : "QUARANTINED")
+    || typeof body.failureCode !== "string" || !failureCodeAllowed(operationKind, body.failureCode)
+    || typeof body.evidenceDigest !== "string" || !SHA256.test(body.evidenceDigest)
+    || typeof body.failureReceiptId !== "string" || !SAFE_ID.test(body.failureReceiptId)
+    || typeof body.failedAt !== "string" || !Number.isFinite(Date.parse(body.failedAt))
+    || typeof body.failureReceiptDigest !== "string" || !SHA256.test(body.failureReceiptDigest)) invalidReceipt();
+  const core = Object.freeze({
+    schemaVersion: body.schemaVersion,
+    operationKey: body.operationKey,
+    requestDigest: body.requestDigest,
+    operationKind: body.operationKind,
+    disposition: body.disposition,
+    failureCode: body.failureCode,
+    evidenceDigest: body.evidenceDigest,
+    failureReceiptId: body.failureReceiptId,
+    failedAt: body.failedAt,
+  });
+  if (sha256Canonical(core) !== body.failureReceiptDigest) invalidReceipt();
+  return Object.freeze({ ...core, failureReceiptDigest: body.failureReceiptDigest }) as AgentSupplyChainTerminalFailureReceipt;
+}
+
+function failureOperationKind(value: unknown): AgentSupplyChainTerminalFailureReceipt["operationKind"] {
+  if (value === "deviludo.agent-version-validation-request.v1") return "VALIDATE";
+  if (value === "deviludo.agent-installation-build-request.v1") return "BUILD";
+  if (value === "deviludo.agent-installation-rollout-request.v1") return "ROLLOUT";
+  invalidReceipt();
+}
+
+function failureCodeAllowed(kind: AgentSupplyChainTerminalFailureReceipt["operationKind"], code: string): boolean {
+  return (kind === "VALIDATE" ? VALIDATION_FAILURES : kind === "BUILD" ? BUILD_FAILURES : ROLLOUT_FAILURES).has(code);
 }
 
 function validateOperation(input: AgentSupplyChainOperation): void {

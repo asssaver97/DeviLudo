@@ -65,11 +65,11 @@ export interface InstallationRecord {
   readonly agent: AgentKind;
   readonly agentVersionId: string;
   readonly workerPool: string;
-  readonly imageDigest: string;
-  readonly workerImageId: string;
+  imageDigest: string | null;
+  workerImageId: string | null;
   readonly adapterVersion: string;
-  readonly buildReceiptId: string;
-  readonly buildReceiptDigest: string;
+  buildReceiptId: string | null;
+  buildReceiptDigest: string | null;
   readonly rollbackInstallationId: string | null;
   health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   state: InstallationState;
@@ -77,6 +77,13 @@ export interface InstallationRecord {
   previousRolloutPercent: 0 | 5 | 25 | 100;
   readonly selfUpdateDisabled: true;
   readonly createdAt: string;
+  failure?: Readonly<{
+    failureCode: string;
+    evidenceDigest: string;
+    failureReceiptId: string;
+    failureReceiptDigest: string;
+    failedAt: string;
+  }>;
 }
 
 export interface ProviderRevisionRecord {

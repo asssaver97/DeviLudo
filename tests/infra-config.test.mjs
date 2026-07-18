@@ -504,6 +504,9 @@ test("production Agent administration trusts only pinned mTLS supply-chain Broke
   assert.match(service, /AGENT_VERSION_VALIDATION_RACE/);
   assert.match(service, /INSTALLATION_BUILD_DRIFT/);
   assert.match(service, /ROLLOUT_CONFIGURATION_RACE/);
+  assert.match(service, /AgentSupplyChainPolicyFailure/);
+  assert.match(service, /AGENT_INSTALLATION_QUARANTINED/);
+  assert.match(service, /restoreProfilesToRollback/);
   assert.match(env, /DEVILUDO_AGENT_SUPPLY_CHAIN_TIMEOUT_SECONDS=600/);
   assert.doesNotMatch(env, /PRIVATE KEY|BEGIN CERTIFICATE|@latest/);
   assert.equal(packageJson.scripts["start:agent-supply-chain"], "node --import tsx services/agent-supply-chain/src/run-service.ts");
@@ -530,6 +533,10 @@ test("isolated Agent supply-chain Broker persists and fences fixed native execut
   assert.match(native, /shell: false/);
   assert.match(native, /constants\.O_RDONLY \| constants\.O_NOFOLLOW/);
   assert.match(native, /DISABLE_UPDATES: "1"/);
+  assert.match(native, /TERMINAL_POLICY_EXIT_CODE = 42/);
+  assert.match(ingress, /AGENT_SUPPLY_CHAIN_POLICY_REJECTED/);
+  assert.match(request, /deviludo\.agent-supply-chain-terminal-failure\.v1/);
+  assert.match(request, /sha256Canonical\(core\) !== body\.failureReceiptDigest/);
   assert.doesNotMatch(native, /curl\s*\||npm install|@latest|dangerously-skip-permissions|--yolo/);
   assert.match(runtime, /NODE_ENV !== "production"/);
   assert.match(runtime, /DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST/);

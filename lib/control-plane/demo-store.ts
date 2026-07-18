@@ -68,7 +68,7 @@ export type DemoStoreState = {
   specState: "DRAFT" | "APPROVED";
   feedback: Array<{ id: string; text: string; revision: number; at: string }>;
   invalidatedEvidence: string[];
-  agentVersions: Record<string, "DISCOVERED" | "APPROVED" | "BLOCKED">;
+  agentVersions: Record<string, "DISCOVERED" | "VALIDATING" | "APPROVED" | "DEPRECATED" | "BLOCKED" | "REJECTED">;
   installations: DemoInstallation[];
   rollouts: Record<string, { percent: 0 | 5 | 25 | 100; state: string; previous: number }>;
   providers: DemoProvider[];

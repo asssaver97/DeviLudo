@@ -6,15 +6,18 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { canonicalJson } from "../../runner-control/src/canonical";
 import type {
   AgentSupplyChainNativeExecutor,
+  AgentSupplyChainOperationResult,
   AgentSupplyChainRequest,
   AgentSupplyChainResponse,
 } from "./contracts";
-import { validateAgentSupplyChainResponse } from "./request-contract";
+import { AgentSupplyChainTerminalError } from "./broker-service";
+import { isAgentSupplyChainTerminalFailure, validateAgentSupplyChainOperationResult } from "./request-contract";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const FORBIDDEN_OUTPUT = /api.?key|authorization|bearer|password|secret|token|vault:\/\/|registry.?credential/i;
+const TERMINAL_POLICY_EXIT_CODE = 42;
 
 export interface NativeAgentSupplyChainProcessResult {
   readonly exitCode: number;
@@ -78,16 +81,22 @@ export class LockedNativeAgentSupplyChainExecutor implements AgentSupplyChainNat
     const requestPath = join(runRoot, "request.json");
     const responsePath = join(runRoot, "response.json");
     await writeImmutable(requestPath, Buffer.from(canonicalJson(request)));
-    const replay = await readResponseIfPresent(responsePath, runRoot, request);
-    if (replay) return replay;
+    const replay = await readResultIfPresent(responsePath, runRoot, request);
+    if (replay) {
+      if (isAgentSupplyChainTerminalFailure(replay)) throw new AgentSupplyChainTerminalError(replay);
+      return replay;
+    }
     const result = await this.#process(this.#executable, [
       command(request), "--config-file", this.#configFile,
       "--request-file", requestPath, "--response-file", responsePath,
     ], processOptions(runRoot, this.#timeoutMs));
-    if (result.exitCode !== 0 || result.stdout || result.stderr
-      || FORBIDDEN_OUTPUT.test(`${result.stdout}\n${result.stderr}`)) invalid("execution");
-    const response = await readResponseIfPresent(responsePath, runRoot, request);
-    if (!response) invalid("missing response");
+    if (result.stdout || result.stderr || FORBIDDEN_OUTPUT.test(`${result.stdout}\n${result.stderr}`)) invalid("execution output");
+    const response = await readResultIfPresent(responsePath, runRoot, request);
+    if (result.exitCode === TERMINAL_POLICY_EXIT_CODE) {
+      if (!response || !isAgentSupplyChainTerminalFailure(response)) invalid("terminal failure");
+      throw new AgentSupplyChainTerminalError(response);
+    }
+    if (result.exitCode !== 0 || !response || isAgentSupplyChainTerminalFailure(response)) invalid("execution");
     return response;
   }
 
@@ -115,7 +124,7 @@ export function executeNativeAgentSupplyChain(
       maxBuffer: options.maxOutputBytes,
       shell: false,
     }, (error, stdout, stderr) => accept(Object.freeze({
-      exitCode: error ? 1 : 0,
+      exitCode: nativeExitCode(error),
       stdout: bounded(stdout),
       stderr: bounded(stderr),
     })));
@@ -131,11 +140,11 @@ function command(request: AgentSupplyChainRequest): string {
   }
 }
 
-async function readResponseIfPresent(
+async function readResultIfPresent(
   path: string,
   root: string,
   request: AgentSupplyChainRequest,
-): Promise<AgentSupplyChainResponse | null> {
+): Promise<AgentSupplyChainOperationResult | null> {
   try {
     const [canonical, boundary] = await Promise.all([realpath(path), realpath(root)]);
     if (!canonical.startsWith(`${boundary}${sep}`)) invalid("response boundary");
@@ -146,7 +155,7 @@ async function readResponseIfPresent(
       const contents = await file.readFile({ encoding: "utf8" });
       const after = await file.stat();
       if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) invalid("response mutation");
-      return validateAgentSupplyChainResponse(JSON.parse(contents) as unknown, request);
+      return validateAgentSupplyChainOperationResult(JSON.parse(contents) as unknown, request);
     } finally { await file.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -217,6 +226,11 @@ function integer(value: number, minimum: number, maximum: number): number {
 }
 
 function bounded(value: string): string { return value.length <= MAX_OUTPUT_BYTES ? value : value.slice(0, MAX_OUTPUT_BYTES); }
+function nativeExitCode(error: Error | null): number {
+  if (!error) return 0;
+  const code = (error as Error & { code?: unknown }).code;
+  return typeof code === "number" && Number.isInteger(code) && code > 0 && code <= 255 ? code : 1;
+}
 function parseJson(value: string): Record<string, unknown> { try { return record(JSON.parse(value) as unknown); } catch { invalid("JSON"); } }
 function record(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) invalid("response"); return value as Record<string, unknown>; }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void { const actual = Object.keys(value).sort(); const expected = [...keys].sort(); if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) invalid("response fields"); }

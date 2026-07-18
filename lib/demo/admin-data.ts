@@ -22,7 +22,7 @@ export type AgentVersionRow = {
   integrity: string;
   sbom: string;
   vulnerabilities: string;
-  status: "APPROVED" | "DISCOVERED" | "BLOCKED";
+  status: "APPROVED" | "DISCOVERED" | "VALIDATING" | "DEPRECATED" | "BLOCKED" | "REJECTED";
 };
 
 export type AuditEvent = {

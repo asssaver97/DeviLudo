@@ -2,7 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server as HttpsServer, type ServerOptions } from "node:https";
 import type { EvidenceArchiveWorkloadIdentity } from "../../evidence-archive/src/contracts";
 import { evidenceArchiveIdentityFromTlsSocket } from "../../evidence-archive/src/ingress-http";
-import { AgentSupplyChainBusyError, type DurableAgentSupplyChainBrokerService } from "./broker-service";
+import {
+  AgentSupplyChainBusyError,
+  AgentSupplyChainTerminalError,
+  type DurableAgentSupplyChainBrokerService,
+} from "./broker-service";
 import { parseAgentSupplyChainRequest } from "./request-contract";
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -72,6 +76,9 @@ export function createAgentSupplyChainHandler(options: Readonly<{
       return { status: 200, body: response };
     } catch (error) {
       if (error instanceof AgentSupplyChainBusyError) return failure(503, "AGENT_SUPPLY_CHAIN_OPERATION_BUSY");
+      if (error instanceof AgentSupplyChainTerminalError) {
+        return terminalFailure(error.receipt);
+      }
       return failure(503, "AGENT_SUPPLY_CHAIN_EXECUTION_FAILED");
     }
   };
@@ -164,6 +171,15 @@ function contentType(value: string | readonly string[] | undefined): string {
 
 function failure(status: number, code: string): AgentSupplyChainIngressResponse {
   return { status, body: Object.freeze({ error: Object.freeze({ code }) }) };
+}
+
+function terminalFailure(receipt: AgentSupplyChainTerminalError["receipt"]): AgentSupplyChainIngressResponse {
+  return {
+    status: 422,
+    body: Object.freeze({
+      error: Object.freeze({ code: "AGENT_SUPPLY_CHAIN_POLICY_REJECTED", failure: receipt }),
+    }),
+  };
 }
 
 function integer(value: number, minimum: number, maximum: number): number {

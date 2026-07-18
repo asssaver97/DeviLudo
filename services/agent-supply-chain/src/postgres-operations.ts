@@ -4,7 +4,7 @@ import type {
   AgentSupplyChainOperationPersistence,
   AgentSupplyChainRequest,
 } from "./contracts";
-import { parseAgentSupplyChainRequest, validateAgentSupplyChainResponse } from "./request-contract";
+import { parseAgentSupplyChainRequest, validateAgentSupplyChainOperationResult } from "./request-contract";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -49,7 +49,7 @@ export class PostgresAgentSupplyChainOperations implements AgentSupplyChainOpera
       validateRowBinding(row, input, request);
       if (row.state === "COMPLETED") {
         if (!row.response_payload || !row.response_digest) invalid();
-        const response = validateAgentSupplyChainResponse(row.response_payload, request);
+        const response = validateAgentSupplyChainOperationResult(row.response_payload, request);
         if (sha256Canonical(response) !== row.response_digest) invalid();
         return Object.freeze({ kind: "REPLAY" as const, response });
       }
@@ -77,7 +77,7 @@ export class PostgresAgentSupplyChainOperations implements AgentSupplyChainOpera
     await this.#transaction(async (client) => {
       const row = parseRow(await select(client, input.operationKey));
       const request = parseAgentSupplyChainRequest(row.request_payload);
-      const response = validateAgentSupplyChainResponse(input.response, request);
+      const response = validateAgentSupplyChainOperationResult(input.response, request);
       if (sha256Canonical(response) !== input.responseDigest) invalid();
       if (row.state === "COMPLETED") {
         if (row.response_digest !== input.responseDigest || sha256Canonical(row.response_payload) !== input.responseDigest) invalid();

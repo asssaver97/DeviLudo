@@ -3,7 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { sha256Canonical } from "../../runner-control/src/canonical";
 import {
+  AgentSupplyChainPolicyFailure,
   createAgentSupplyChain,
   DevelopmentAgentSupplyChain,
   MtlsAgentSupplyChain,
@@ -106,6 +108,35 @@ test("mTLS supply-chain client pins routes, health identity and exact receipt di
     endpoint: "https://agent-supply-chain.internal?token=bad", version: "latest", binaryDigest: "c".repeat(64),
     tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },
   }), /configuration is invalid/);
+
+  const failureCore = Object.freeze({
+    schemaVersion: "deviludo.agent-supply-chain-terminal-failure.v1" as const,
+    operationKey: operation.operationKey,
+    requestDigest: operation.requestDigest,
+    operationKind: "VALIDATE" as const,
+    disposition: "REJECTED" as const,
+    failureCode: "SIGNATURE_INVALID" as const,
+    evidenceDigest: "e".repeat(64),
+    failureReceiptId: "failure-codex-signature-001",
+    failedAt: now().toISOString(),
+  });
+  const failure = Object.freeze({ ...failureCore, failureReceiptDigest: sha256Canonical(failureCore) });
+  const rejected = new MtlsAgentSupplyChain({
+    endpoint: "https://agent-supply-chain.internal", version: "1.4.2", binaryDigest: "c".repeat(64),
+    tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },
+    async http() { return { statusCode: 422, payload: { error: { code: "AGENT_SUPPLY_CHAIN_POLICY_REJECTED", failure } } }; },
+  });
+  await assert.rejects(rejected.validateVersion({ ...operation, candidate: candidate! }), (error) => {
+    assert.ok(error instanceof AgentSupplyChainPolicyFailure);
+    assert.equal(error.receipt.failureCode, "SIGNATURE_INVALID");
+    return true;
+  });
+  const forged = new MtlsAgentSupplyChain({
+    endpoint: "https://agent-supply-chain.internal", version: "1.4.2", binaryDigest: "c".repeat(64),
+    tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },
+    async http() { return { statusCode: 422, payload: { error: { code: "AGENT_SUPPLY_CHAIN_POLICY_REJECTED", failure: { ...failure, failureCode: "MALWARE_DETECTED" } } } }; },
+  });
+  await assert.rejects(forged.validateVersion({ ...operation, candidate: candidate! }), /receipt is invalid/);
 });
 
 test("production supply-chain configuration accepts only file-mounted mTLS material", async (t) => {

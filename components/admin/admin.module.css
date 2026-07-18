@@ -969,6 +969,21 @@
 
 .pendingText { color: #937330; }
 .dangerText { color: #b14c38; font-weight: 610; }
+
+.failureEvidence {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e4bbb2;
+  border-radius: 8px;
+  background: #f8e9e5;
+  color: #873829;
+  font-size: 11px;
+}
+
+.failureEvidence strong,
+.failureEvidence span { display: block; }
 .goodText { color: #34745a; }
 
 .inlineActions button,

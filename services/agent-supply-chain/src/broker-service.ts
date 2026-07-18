@@ -5,11 +5,15 @@ import type {
   AgentSupplyChainOperationPersistence,
   AgentSupplyChainRequest,
   AgentSupplyChainResponse,
+  AgentSupplyChainTerminalFailureReceipt,
 } from "./contracts";
 import {
   agentSupplyChainOperationKind,
   agentSupplyChainPayloadDigest,
+  isAgentSupplyChainTerminalFailure,
   parseAgentSupplyChainRequest,
+  parseAgentSupplyChainTerminalFailure,
+  validateAgentSupplyChainOperationResult,
   validateAgentSupplyChainResponse,
 } from "./request-contract";
 
@@ -18,6 +22,13 @@ const DEFAULT_LEASE_MS = 10 * 60_000;
 
 export class AgentSupplyChainBusyError extends Error {
   constructor() { super("Agent supply-chain operation is already running"); this.name = "AgentSupplyChainBusyError"; }
+}
+
+export class AgentSupplyChainTerminalError extends Error {
+  constructor(readonly receipt: AgentSupplyChainTerminalFailureReceipt) {
+    super("Agent supply-chain policy rejected the operation");
+    this.name = "AgentSupplyChainTerminalError";
+  }
 }
 
 /** Durable, fenced composition around the fixed native supply-chain executable. */
@@ -52,7 +63,11 @@ export class DurableAgentSupplyChainBrokerService {
       claimExpiresAt: new Date(claimedAt.getTime() + this.#leaseMs).toISOString(),
     });
     if (claim.kind === "BUSY") throw new AgentSupplyChainBusyError();
-    if (claim.kind === "REPLAY") return validateAgentSupplyChainResponse(claim.response, request);
+    if (claim.kind === "REPLAY") {
+      const replay = validateAgentSupplyChainOperationResult(claim.response, request);
+      if (isAgentSupplyChainTerminalFailure(replay)) throw new AgentSupplyChainTerminalError(replay);
+      return replay;
+    }
     try {
       const response = validateAgentSupplyChainResponse(await this.executor.execute(request), request);
       const completedAt = validDate(this.#now()).toISOString();
@@ -65,6 +80,18 @@ export class DurableAgentSupplyChainBrokerService {
       });
       return response;
     } catch (error) {
+      if (error instanceof AgentSupplyChainTerminalError) {
+        const receipt = parseAgentSupplyChainTerminalFailure(error.receipt, request);
+        const completedAt = validDate(this.#now()).toISOString();
+        await this.operations.complete({
+          operationKey: request.operationKey,
+          claimToken,
+          response: receipt,
+          responseDigest: sha256Canonical(receipt),
+          completedAt,
+        });
+        throw new AgentSupplyChainTerminalError(receipt);
+      }
       await this.operations.release({
         operationKey: request.operationKey,
         claimToken,
