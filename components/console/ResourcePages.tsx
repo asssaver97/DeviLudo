@@ -16,22 +16,27 @@ type RunnerView = {
 
 export function RunnersPage() {
   const [selected, setSelected] = useState<RunnerView["os"]>("macOS");
-  const { delivery, health, error } = useLocalPlatform(projectId);
+  const { delivery, productionDelivery, health, error } = useLocalPlatform(projectId);
+  const productionTargetState = (platform: "linux" | "windows" | "macos") => {
+    if (!productionDelivery?.targetMatrix.includes(platform)) return "NOT_SELECTED";
+    if (productionDelivery.candidateEvidenceBundleId) return "PASSED";
+    return productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED";
+  };
   const runners: RunnerView[] = [
     {
       os: "macOS",
       online: health?.dependencies?.fixtureExecutor === "READY",
       detail: health?.dependencies?.localGodot ?? "本机 Godot 未连接",
-      targetState: delivery?.targetResults.macos ?? "QUEUED",
+      targetState: delivery?.targetResults.macos ?? productionTargetState("macos"),
     },
-    { os: "Windows", online: false, detail: "等待出站 mTLS Runner 注册", targetState: delivery?.targetResults.windows ?? "QUEUED" },
-    { os: "Linux", online: false, detail: "等待出站 mTLS Runner 注册", targetState: delivery?.targetResults.linux ?? "QUEUED" },
+    { os: "Windows", online: false, detail: "等待出站 mTLS Runner 注册", targetState: delivery?.targetResults.windows ?? productionTargetState("windows") },
+    { os: "Linux", online: false, detail: "等待出站 mTLS Runner 注册", targetState: delivery?.targetResults.linux ?? productionTargetState("linux") },
   ];
   const selectedRunner = runners.find((runner) => runner.os === selected) ?? runners[0];
   const onlineCount = runners.filter((runner) => runner.online).length;
   return (
     <AppShell>
-      <section className="page-heading resource-heading"><div><span className="eyebrow">跨平台执行面 · 本地实况</span><h1>运行节点</h1><p>{error ? `状态读取失败：${error}` : "本机侧车与未来通过出站 mTLS 注册的 E2E Runner；开发 Agent 不会安装在这些节点。"}</p></div><span className="resource-stat"><b>{onlineCount}</b><small>在线节点</small></span></section>
+      <section className="page-heading resource-heading"><div><span className="eyebrow">跨平台执行面 · {productionDelivery ? "生产投影" : "本地实况"}</span><h1>运行节点</h1><p>{error ? `状态读取失败：${error}` : "本机侧车与未来通过出站 mTLS 注册的 E2E Runner；开发 Agent 不会安装在这些节点。"}</p></div><span className="resource-stat"><b>{onlineCount}</b><small>在线节点</small></span></section>
       <div className="resource-grid">
         <section className="resource-list">
           {runners.map((runner) => (
@@ -53,9 +58,10 @@ export function RunnersPage() {
 }
 
 export function EvidencePage() {
-  const { delivery, error } = useLocalPlatform(projectId);
+  const { delivery, productionDelivery, projectionMeta, error } = useLocalPlatform(projectId);
   const [verification, setVerification] = useState<{ evidenceId: string; message: string; ok: boolean } | null>(null);
   const evidence = delivery?.localValidation ?? null;
+  const productionEvidenceId = productionDelivery?.evidenceBundleId ?? null;
 
   async function verifyEvidence() {
     if (!evidence) return;
@@ -91,7 +97,7 @@ export function EvidencePage() {
 
   return (
     <AppShell>
-      <section className="page-heading resource-heading"><div><span className="eyebrow">可追溯交付 · 本地实况</span><h1>证据中心</h1><p>{error ? `状态读取失败：${error}` : "真实本机证据绑定冻结规格、隔离 Git 提交、Godot 版本和构建摘要；缺少依赖时保持门禁。"}</p></div><span className="resource-stat"><b>{evidence?.valid ? 1 : 0}</b><small>有效证据包</small></span></section>
+      <section className="page-heading resource-heading"><div><span className="eyebrow">可追溯交付 · {productionDelivery ? "生产投影" : "本地实况"}</span><h1>证据中心</h1><p>{error ? `状态读取失败：${error}` : "证据绑定冻结规格、锁定提交与目标矩阵；生产页面只展示权威证据引用，不从 Web 进程读取制品库。"}</p></div><span className="resource-stat"><b>{evidence?.valid || productionEvidenceId ? 1 : 0}</b><small>有效证据包</small></span></section>
       {verification ? <div className={`inline-notice ${verification.ok ? "" : "danger"}`}><CheckIcon /> {verification.evidenceId}：{verification.message}</div> : null}
       <section className="evidence-table-panel">
         <div className="evidence-head"><span>证据包</span><span>平台</span><span>提交</span><span>测试</span><span>签名</span><span>生成时间</span><span /></div>
@@ -99,7 +105,16 @@ export function EvidencePage() {
           <div className="evidence-row" key={evidence.evidenceId}>
             <span><FileIcon /><b>{evidence.evidenceId}</b></span><span>macOS 本机</span><span className="mono" title={evidence.candidateSha}>{evidence.candidateSha.slice(0, 7)}</span><span>{evidence.checks.filter((check) => check.status === "PASSED").length} / {evidence.checks.length}</span><span className={evidence.valid ? "signed" : "invalid"}>{evidence.valid ? "有效" : "已失效"}</span><span>{new Date(evidence.createdAt).toLocaleString("zh-CN")}</span><button disabled={!evidence.valid} onClick={() => void verifyEvidence()} type="button">验证</button>
           </div>
-        ) : <div className="evidence-empty"><FileIcon /><b>尚无真实证据</b><span>批准项目规格后，在项目页运行“真实本机验证”。</span></div>}
+        ) : productionDelivery && productionEvidenceId ? (
+          <div className="evidence-row">
+            <span><FileIcon /><b>{productionEvidenceId}</b></span>
+            <span>{productionDelivery.targetMatrix.join(" / ")}</span>
+            <span className="mono">{(productionDelivery.mainCommitSha ?? productionDelivery.candidateCommitSha ?? "—").slice(0, 12)}</span>
+            <span>权威门禁</span><span className="signed">已绑定</span>
+            <span>{projectionMeta ? new Date(projectionMeta.projectedAt).toLocaleString("zh-CN") : "—"}</span>
+            <button disabled type="button">制品库隔离</button>
+          </div>
+        ) : <div className="evidence-empty"><FileIcon /><b>尚无真实证据</b><span>完成锁定目标矩阵后，权威投影会显示证据引用。</span></div>}
       </section>
       {evidence ? <div className="evidence-artifacts"><b>原始证据</b><a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${projectId}/local-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${projectId}/local-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{evidence.godotVersion} · {evidence.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待导出模板" : "本地门禁通过"}</span></div> : null}
     </AppShell>

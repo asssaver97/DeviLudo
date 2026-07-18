@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 40 }, (_, index) => {
+  const offsets = Array.from({ length: 41 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,21 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Temporal projects replay-validated delivery state for production Web reads", () => {
+  const migration = readFileSync(new URL("../infra/postgres/041_delivery_state_projections.sql", import.meta.url), "utf8");
+  const workflow = readFileSync(new URL("../services/temporal/src/workflows/game-delivery.workflow.ts", import.meta.url), "utf8");
+  const projection = readFileSync(new URL("../lib/orchestration/delivery-projection.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.delivery_state_projection_events/);
+  assert.match(migration, /CREATE TABLE deviludo\.delivery_state_projections/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/g);
+  assert.match(migration, /NEW\.projection_sequence <> OLD\.projection_sequence \+ 1/);
+  assert.match(migration, /delivery_state_projection_event_append_only/);
+  assert.match(workflow, /persistDeliverySnapshot/);
+  assert.match(workflow, /await persist\(machine\.current\(\)/);
+  assert.match(projection, /machine\.signal\(signal\)/);
+  assert.match(projection, /canonicalJson\(replayed\) !== canonicalJson\(candidate\)/);
 });
 
 test("SCM merge authority binds one delivered acceptance to GitHub and merged-main evidence", () => {

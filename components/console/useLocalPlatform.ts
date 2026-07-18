@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { LocalDeliverySnapshot } from "@/lib/local-delivery/model";
+import type { DeliverySnapshot } from "@/lib/orchestration/game-delivery";
 
 export type LocalHealth = {
   status: "ok" | "degraded";
@@ -33,6 +34,8 @@ export type LocalAgentReadiness = {
 
 export function useLocalPlatform(projectId = "ember-archipelago") {
   const [delivery, setDelivery] = useState<LocalDeliverySnapshot | null>(null);
+  const [productionDelivery, setProductionDelivery] = useState<DeliverySnapshot | null>(null);
+  const [projectionMeta, setProjectionMeta] = useState<{ projectedAt: string; snapshotDigest: string } | null>(null);
   const [health, setHealth] = useState<LocalHealth | null>(null);
   const [error, setError] = useState("");
 
@@ -42,11 +45,24 @@ export function useLocalPlatform(projectId = "ember-archipelago") {
         fetch(`/api/projects/${projectId}/delivery`, { cache: "no-store", signal }),
         fetch("/api/health", { cache: "no-store", signal }),
       ]);
-      const deliveryPayload = await deliveryResponse.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
+      const deliveryPayload = await deliveryResponse.json() as {
+        data?: LocalDeliverySnapshot | DeliverySnapshot;
+        meta?: { mode?: "LOCAL_D1" | "PRODUCTION"; projectedAt?: string; snapshotDigest?: string };
+        error?: { message?: string };
+      };
       const healthPayload = await healthResponse.json() as LocalHealth & { error?: string };
       if (!deliveryResponse.ok || !deliveryPayload.data) throw new Error(deliveryPayload.error?.message ?? "交付状态不可用");
       if (!healthResponse.ok) throw new Error(healthPayload.error ?? "本地健康状态不可用");
-      setDelivery(deliveryPayload.data);
+      if (deliveryPayload.meta?.mode === "PRODUCTION") {
+        if (!deliveryPayload.meta.projectedAt || !deliveryPayload.meta.snapshotDigest) throw new Error("生产交付投影元数据无效");
+        setDelivery(null);
+        setProductionDelivery(deliveryPayload.data as DeliverySnapshot);
+        setProjectionMeta({ projectedAt: deliveryPayload.meta.projectedAt, snapshotDigest: deliveryPayload.meta.snapshotDigest });
+      } else {
+        setDelivery(deliveryPayload.data as LocalDeliverySnapshot);
+        setProductionDelivery(null);
+        setProjectionMeta(null);
+      }
       setHealth(healthPayload);
       setError("");
     } catch (reason) {
@@ -66,5 +82,5 @@ export function useLocalPlatform(projectId = "ember-archipelago") {
     };
   }, [refresh]);
 
-  return { delivery, health, error, refresh };
+  return { delivery, productionDelivery, projectionMeta, health, error, refresh };
 }

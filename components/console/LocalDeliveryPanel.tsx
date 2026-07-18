@@ -7,6 +7,7 @@ import type {
   LocalDeliveryStage,
 } from "@/lib/local-delivery/model";
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
+import type { DeliverySnapshot, DeliveryState } from "@/lib/orchestration/game-delivery";
 import { CheckIcon, ClockIcon, SparkIcon } from "./Icons";
 
 const stageLabels: Record<LocalDeliveryStage, string> = {
@@ -29,6 +30,28 @@ const stageLabels: Record<LocalDeliveryStage, string> = {
 const platformLabels = { linux: "Linux", windows: "Windows", macos: "macOS" } as const;
 const statusLabels = { QUEUED: "排队", RUNNING: "运行中", PASSED: "通过", INVALIDATED: "已失效" } as const;
 
+const productionStageLabels: Record<DeliveryState, string> = {
+  IDEATION: "构想对话中", WAITING_SPEC_APPROVAL: "等待规格批准",
+  RESOLVING_AGENT_CONFIGURATION: "解析 Agent 配置", DEVELOPMENT_QUEUED: "开发已入队",
+  DEVELOPING: "Agent 开发中", WAITING_PROVIDER: "等待原 Provider",
+  CROSS_PLATFORM_E2E: "目标矩阵 E2E", WAITING_USER_ACCEPTANCE: "等待用户验收",
+  MERGING: "合并固定候选 PR", MAIN_SHA_E2E: "main SHA 发布门禁",
+  WAITING_MFA: "等待 MFA", STEAM_PRIVATE_BETA: "Steam 私有 Beta",
+  STEAM_INSTALL_E2E: "Steam 干净回装 E2E", EXTERNAL_APPROVAL_REQUIRED: "等待外部批准",
+  READY_TO_PUBLISH: "等待发布 Steam 默认分支", RELEASED: "已发布",
+  CANCELLED: "已取消",
+};
+
+export type DeliveryPanelStatus =
+  | { readonly mode: "LOCAL_D1"; readonly stage: LocalDeliveryStage; readonly specRevisionId: string }
+  | { readonly mode: "PRODUCTION"; readonly stage: DeliveryState; readonly specRevisionId: string | null };
+
+type ProductionProjection = {
+  readonly snapshot: DeliverySnapshot;
+  readonly projectedAt: string;
+  readonly snapshotDigest: string;
+};
+
 function primaryAction(stage: LocalDeliveryStage): { action: LocalDeliveryAction; label: string } | null {
   if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED") return null;
   if (stage === "WAITING_PROVIDER") return { action: "provider-resume", label: "恢复原 Provider" };
@@ -41,39 +64,54 @@ function primaryAction(stage: LocalDeliveryStage): { action: LocalDeliveryAction
 export function LocalDeliveryPanel({
   projectId,
   refreshToken,
-  onSnapshot,
+  onStatus,
 }: {
   projectId: string;
   refreshToken: number;
-  onSnapshot?: (snapshot: LocalDeliverySnapshot) => void;
+  onStatus?: (status: DeliveryPanelStatus) => void;
 }) {
   const [snapshot, setSnapshot] = useState<LocalDeliverySnapshot | null>(null);
+  const [production, setProduction] = useState<ProductionProjection | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [agentPreflight, setAgentPreflight] = useState<LocalAgentPreflightResult | null>(null);
 
   const publish = useCallback((value: LocalDeliverySnapshot) => {
     setSnapshot(value);
+    setProduction(null);
     setAgentPreflight((current) => current?.runId === value.runId ? current : null);
-    onSnapshot?.(value);
-  }, [onSnapshot]);
+    onStatus?.({ mode: "LOCAL_D1", stage: value.stage, specRevisionId: value.specRevisionId });
+  }, [onStatus]);
 
   useEffect(() => {
     let active = true;
     fetch(`/api/projects/${projectId}/delivery`, { cache: "no-store" })
       .then(async (response) => {
-        const payload = await response.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
+        const payload = await response.json() as {
+          data?: LocalDeliverySnapshot | DeliverySnapshot;
+          meta?: { mode?: "LOCAL_D1" | "PRODUCTION"; projectedAt?: string; snapshotDigest?: string };
+          error?: { message?: string };
+        };
         if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "读取本地交付状态失败");
         if (active) {
           setError("");
-          publish(payload.data);
+          if (payload.meta?.mode === "PRODUCTION") {
+            const value = payload.data as DeliverySnapshot;
+            if (!payload.meta.projectedAt || !payload.meta.snapshotDigest) throw new Error("生产交付投影元数据无效");
+            setSnapshot(null);
+            setAgentPreflight(null);
+            setProduction({ snapshot: value, projectedAt: payload.meta.projectedAt, snapshotDigest: payload.meta.snapshotDigest });
+            onStatus?.({ mode: "PRODUCTION", stage: value.state, specRevisionId: value.specRevisionId });
+          } else {
+            publish(payload.data as LocalDeliverySnapshot);
+          }
         }
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "读取本地交付状态失败");
       });
     return () => { active = false; };
-  }, [projectId, publish, refreshToken]);
+  }, [projectId, publish, refreshToken, onStatus]);
 
   const action = snapshot ? primaryAction(snapshot.stage) : null;
   const completedTargets = useMemo(
@@ -158,6 +196,8 @@ export function LocalDeliveryPanel({
       setBusy(false);
     }
   }
+
+  if (production) return <ProductionDeliveryProjection projection={production} />;
 
   return (
     <section className="local-delivery" aria-live="polite">
@@ -275,6 +315,65 @@ export function LocalDeliveryPanel({
           </div>
         </>
       )}
+    </section>
+  );
+}
+
+function ProductionDeliveryProjection({ projection }: { readonly projection: ProductionProjection }) {
+  const snapshot = projection.snapshot;
+  const targetGatePassed = Boolean(snapshot.candidateEvidenceBundleId);
+  return (
+    <section className="local-delivery" aria-live="polite">
+      <div className="local-delivery-heading">
+        <div>
+          <span className="eyebrow">Production · Temporal 权威投影</span>
+          <h2>生产交付状态</h2>
+          <p>该页面为租户隔离的只读状态；工作流只能通过规格、反馈、验收、MFA 与外部批准接口推进。</p>
+        </div>
+        <span className={`local-stage local-stage-${snapshot.state.toLowerCase()}`}><i /> {productionStageLabels[snapshot.state]}</span>
+      </div>
+
+      <div className="local-delivery-grid">
+        <div className="local-delivery-lock">
+          <span><SparkIcon /></span>
+          <div><small>Temporal 工作流</small><b>{snapshot.workflowId}</b><p>状态序号 {snapshot.history.length} · 迭代 {snapshot.iteration}</p></div>
+          <code>{snapshot.runId ?? "等待锁定开发运行"}</code>
+        </div>
+        <div className="local-delivery-metric"><small>规格</small><b>{snapshot.specRevisionId ?? "—"}</b><span>{snapshot.testPlanRevisionId ? "测试计划已冻结" : "尚未冻结测试计划"}</span></div>
+        <div className="local-delivery-metric"><small>证据</small><b>{snapshot.evidenceBundleId ?? "—"}</b><span>{targetGatePassed ? "候选矩阵证据已记录" : "尚无有效候选证据"}</span></div>
+        <div className="local-delivery-metric"><small>提交</small><b>{snapshot.mainCommitSha ?? snapshot.candidateCommitSha ?? "—"}</b><span>{snapshot.mainCommitSha ? "实际 main SHA" : snapshot.candidateCommitSha ? "候选 SHA" : "尚未产出"}</span></div>
+      </div>
+
+      <div className="local-platform-row">
+        {snapshot.targetMatrix.map((platform) => (
+          <div className={`local-platform local-platform-${targetGatePassed ? "passed" : "queued"}`} key={platform}>
+            <span>{platform === "linux" ? "L" : platform === "windows" ? "W" : "m"}</span>
+            <div><b>{platformLabels[platform]}</b><small>{targetGatePassed ? "候选门禁已通过" : "锁定目标"}</small></div>
+            {targetGatePassed ? <CheckIcon /> : <ClockIcon />}
+          </div>
+        ))}
+      </div>
+
+      <div className="local-real-validation ready">
+        <div className="local-real-validation-copy">
+          <span className="eyebrow">投影完整性</span>
+          <h3>{projection.snapshotDigest.slice(0, 16)}…</h3>
+          <p>快照已由服务端重放全部 {snapshot.history.length} 个信号并校验 SHA-256；Web 进程没有数据库写权限。</p>
+        </div>
+        <div className="local-real-validation-result">
+          <span className="passed">只读权威状态</span>
+          <div>{new Date(projection.projectedAt).toLocaleString("zh-CN")}</div>
+        </div>
+      </div>
+
+      <div className="local-event-log">
+        <div><span>Temporal 状态历史</span><small>不可由项目代码修改</small></div>
+        <ol>
+          {[...snapshot.history].reverse().slice(0, 6).map((entry) => (
+            <li key={entry.sequence}><i /><span><b>{entry.signal.type}</b>{productionStageLabels[entry.resultingState]}</span><time>#{entry.sequence}</time></li>
+          ))}
+        </ol>
+      </div>
     </section>
   );
 }

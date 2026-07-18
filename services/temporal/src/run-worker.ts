@@ -10,6 +10,11 @@ import { temporalWebpackConfigHook } from "./bundler";
 import { DELIVERY_TASK_QUEUE } from "./contracts";
 import { mtlsCommandDispatcherFromEnv } from "./mtls-dispatcher";
 import { temporalTlsConfigFromEnv } from "./temporal-tls";
+import {
+  deliveryProjectionEndpointFromEnv,
+  HttpDeliveryProjectionWriter,
+  mtlsDeliveryProjectionWriterFromEnv,
+} from "./projection-writer";
 
 export async function runDeliveryWorker(): Promise<void> {
   const endpoints = deliveryDispatchEndpointsFromEnv();
@@ -20,6 +25,10 @@ export async function runDeliveryWorker(): Promise<void> {
   const dispatcher = allowLocalDispatch
     ? new HttpCommandDispatcher(endpoints)
     : await mtlsCommandDispatcherFromEnv(endpoints);
+  const projectionEndpoint = deliveryProjectionEndpointFromEnv();
+  const projections = allowLocalDispatch
+    ? new HttpDeliveryProjectionWriter(projectionEndpoint)
+    : await mtlsDeliveryProjectionWriterFromEnv(projectionEndpoint);
   const tls = await temporalTlsConfigFromEnv();
   const connection = await NativeConnection.connect({
     address: process.env.TEMPORAL_ADDRESS ?? "localhost:7233",
@@ -33,7 +42,7 @@ export async function runDeliveryWorker(): Promise<void> {
     taskQueue: process.env.DEVILUDO_TEMPORAL_TASK_QUEUE ?? DELIVERY_TASK_QUEUE,
     workflowsPath: existsSync(compiledWorkflow) ? compiledWorkflow : sourceWorkflow,
     bundlerOptions: { webpackConfigHook: temporalWebpackConfigHook },
-    activities: createDeliveryActivities(dispatcher),
+    activities: createDeliveryActivities(dispatcher, projections),
     maxConcurrentActivityTaskExecutions: parsePositiveInteger(
       process.env.DEVILUDO_MAX_CONCURRENT_ACTIVITIES,
       100,

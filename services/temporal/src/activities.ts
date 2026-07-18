@@ -6,6 +6,11 @@ import type {
   DispatchDeliveryCommandInput,
 } from "./contracts";
 import { deliveryCommandDestination } from "./contracts";
+import {
+  parseDeliveryProjectionRequest,
+  type DeliveryProjectionReceipt,
+  type DeliveryProjectionRequest,
+} from "../../../lib/orchestration/delivery-projection";
 
 export type DeliveryDispatchRequest =
   | {
@@ -27,7 +32,14 @@ export interface CommandDispatcher {
   dispatch(request: DeliveryDispatchRequest): Promise<DeliveryActivityReceipt>;
 }
 
-export function createDeliveryActivities(dispatcher: CommandDispatcher): DeliveryActivities {
+export interface DeliveryProjectionWriter {
+  persist(request: DeliveryProjectionRequest): Promise<DeliveryProjectionReceipt>;
+}
+
+export function createDeliveryActivities(
+  dispatcher: CommandDispatcher,
+  projections: DeliveryProjectionWriter,
+): DeliveryActivities {
   return {
     async dispatchDeliveryCommand(input) {
       assertDispatchInput(input);
@@ -46,6 +58,10 @@ export function createDeliveryActivities(dispatcher: CommandDispatcher): Deliver
       }
       const request = { kind: "CANCEL", destination: "control-plane", payload: input } as const;
       return assertReceiptBinding(await dispatcher.dispatch(request), request);
+    },
+    async persistDeliverySnapshot(input) {
+      const request = parseDeliveryProjectionRequest(input);
+      return assertProjectionReceipt(await projections.persist(request), request);
     },
   };
 }
@@ -159,6 +175,22 @@ function assertReceiptBinding(
     receipt.operation !== operation
   ) {
     throw new Error("Activity receipt binding mismatch");
+  }
+  return Object.freeze({ ...receipt });
+}
+
+function assertProjectionReceipt(
+  receipt: DeliveryProjectionReceipt,
+  request: DeliveryProjectionRequest,
+): DeliveryProjectionReceipt {
+  if (!receipt || !receipt.receiptId?.trim() || !Number.isFinite(Date.parse(receipt.acceptedAt))
+    || receipt.projectionKey !== request.projectionKey
+    || receipt.workflowId !== request.snapshot.workflowId
+    || receipt.sequence !== request.snapshot.history.length
+    || receipt.state !== request.snapshot.state
+    || !/^[a-f0-9]{64}$/.test(receipt.snapshotDigest)
+    || typeof receipt.replayed !== "boolean") {
+    throw new Error("Delivery projection receipt binding mismatch");
   }
   return Object.freeze({ ...receipt });
 }

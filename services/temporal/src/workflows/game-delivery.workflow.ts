@@ -14,6 +14,10 @@ import type {
   GameDeliveryWorkflowInput,
 } from "../contracts";
 import { deliveryCommandDestination } from "../contracts";
+import {
+  DELIVERY_PROJECTION_SCHEMA_VERSION,
+  deliveryProjectionKey,
+} from "../../../../lib/orchestration/delivery-projection";
 
 export const deliverySignal = defineSignal<[DeliverySignal]>("deliverySignal");
 export const deliverySnapshotQuery = defineQuery<DeliverySnapshot>("deliverySnapshot");
@@ -41,6 +45,18 @@ export async function gameDeliveryWorkflow(
   const machine = new GameDeliveryWorkflow(input);
   const queue: DeliverySignal[] = [];
   let lastDispatchedKey: string | null = null;
+  let lastProjectedKey: string | null = null;
+
+  const persist = async (snapshot: DeliverySnapshot) => {
+    const projectionKey = deliveryProjectionKey(snapshot);
+    if (projectionKey === lastProjectedKey) return;
+    await activities.persistDeliverySnapshot({
+      schemaVersion: DELIVERY_PROJECTION_SCHEMA_VERSION,
+      projectionKey,
+      snapshot,
+    });
+    lastProjectedKey = projectionKey;
+  };
 
   setHandler(deliverySignal, (signal) => {
     queue.push(signal);
@@ -48,11 +64,14 @@ export async function gameDeliveryWorkflow(
   setHandler(deliverySnapshotQuery, () => machine.current() as DeliverySnapshot);
   setHandler(deliveryNextCommandQuery, () => machine.nextCommand());
 
+  await persist(machine.current() as DeliverySnapshot);
+
   while (true) {
     while (queue.length > 0) {
       const signal = queue.shift();
       if (!signal) continue;
       const snapshot = machine.signal(signal) as DeliverySnapshot;
+      await persist(snapshot);
       if (signal.type === "CANCEL") {
         await activities.cancelDelivery({
           idempotencyKey: dispatchKey(snapshot, "CANCEL_DELIVERY"),

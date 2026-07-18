@@ -51,6 +51,7 @@ services:
       - ./postgres/038_user_feedback_iterations.sql:/docker-entrypoint-initdb.d/038_user_feedback_iterations.sql:ro
       - ./postgres/039_user_candidate_acceptances.sql:/docker-entrypoint-initdb.d/039_user_candidate_acceptances.sql:ro
       - ./postgres/040_scm_authoritative_merges.sql:/docker-entrypoint-initdb.d/040_scm_authoritative_merges.sql:ro
+      - ./postgres/041_delivery_state_projections.sql:/docker-entrypoint-initdb.d/041_delivery_state_projections.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

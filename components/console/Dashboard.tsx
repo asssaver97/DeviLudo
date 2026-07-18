@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import type { LocalDeliverySnapshot, LocalDeliveryStage } from "@/lib/local-delivery/model";
+import type { DeliverySnapshot, DeliveryState } from "@/lib/orchestration/game-delivery";
 import { activeProject, pipelineStages as demoPipeline, recentActivity } from "@/lib/demo/platform-data";
 import { AppShell } from "./AppShell";
 import { ArrowIcon, CheckIcon, ClockIcon, PlusIcon, ServerIcon, SparkIcon } from "./Icons";
@@ -22,6 +23,22 @@ const stageOrder: LocalDeliveryStage[] = [
   "STEAM_BETA_UPLOADING", "STEAM_REINSTALL_E2E", "EXTERNAL_APPROVAL_REQUIRED", "RELEASED",
 ];
 
+const productionStageNames: Record<DeliveryState, string> = {
+  IDEATION: "构想对话中", WAITING_SPEC_APPROVAL: "等待规格批准", RESOLVING_AGENT_CONFIGURATION: "解析 Agent 配置",
+  DEVELOPMENT_QUEUED: "Agent 已入队", DEVELOPING: "Agent 开发中", WAITING_PROVIDER: "等待 Provider",
+  CROSS_PLATFORM_E2E: "目标矩阵 E2E", WAITING_USER_ACCEPTANCE: "等待用户验收", MERGING: "正在合并",
+  MAIN_SHA_E2E: "main SHA 门禁", WAITING_MFA: "等待 MFA", STEAM_PRIVATE_BETA: "Steam 私有 Beta",
+  STEAM_INSTALL_E2E: "Steam 回装测试", EXTERNAL_APPROVAL_REQUIRED: "等待外部批准",
+  READY_TO_PUBLISH: "等待公开发布", RELEASED: "已发布", CANCELLED: "已取消",
+};
+
+const productionOrder: DeliveryState[] = [
+  "IDEATION", "WAITING_SPEC_APPROVAL", "RESOLVING_AGENT_CONFIGURATION", "DEVELOPMENT_QUEUED",
+  "DEVELOPING", "WAITING_PROVIDER", "CROSS_PLATFORM_E2E", "WAITING_USER_ACCEPTANCE", "MERGING",
+  "MAIN_SHA_E2E", "WAITING_MFA", "STEAM_PRIVATE_BETA", "STEAM_INSTALL_E2E",
+  "EXTERNAL_APPROVAL_REQUIRED", "READY_TO_PUBLISH", "RELEASED", "CANCELLED",
+];
+
 function pipelineFor(delivery: LocalDeliverySnapshot | null) {
   if (!delivery) return demoPipeline;
   const rank = stageOrder.indexOf(delivery.stage);
@@ -34,9 +51,28 @@ function pipelineFor(delivery: LocalDeliverySnapshot | null) {
   }));
 }
 
+function productionPipelineFor(delivery: DeliverySnapshot | null) {
+  if (!delivery) return demoPipeline;
+  const rank = productionOrder.indexOf(delivery.state);
+  const points = [1, 4, 6, 6, 7, 15];
+  const meta = [
+    delivery.specRevisionId ?? "草稿",
+    delivery.runId ?? "等待",
+    delivery.candidateCommitSha?.slice(0, 7) ?? "等待候选",
+    `${delivery.candidateEvidenceBundleId ? delivery.targetMatrix.length : 0} / ${delivery.targetMatrix.length}`,
+    delivery.state === "WAITING_USER_ACCEPTANCE" ? "待确认" : rank > 7 ? "已确认" : "等待",
+    delivery.state === "RELEASED" ? "完成" : "门禁",
+  ];
+  return demoPipeline.map((stage, index) => ({
+    ...stage,
+    state: rank > points[index]! ? "complete" : rank === points[index] ? "active" : "pending",
+    meta: meta[index],
+  }));
+}
+
 export function Dashboard() {
   const [activityFilter, setActivityFilter] = useState<"全部" | "运行" | "测试">("全部");
-  const { delivery, health, error } = useLocalPlatform();
+  const { delivery, productionDelivery, projectionMeta, health, error } = useLocalPlatform();
   const localActivity = delivery?.events.map((event) => ({
     id: event.id,
     title: event.message,
@@ -45,22 +81,35 @@ export function Dashboard() {
     status: event.type.includes("FAILED") ? "失败" : "已记录",
     tone: event.type.includes("FAILED") ? "danger" : event.type.includes("E2E") || event.type.includes("GODOT") ? "green" : "blue",
     time: new Date(event.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
+  })) ?? productionDelivery?.history.slice().reverse().map((event) => ({
+    id: event.signal.signalId,
+    title: `${event.signal.type} → ${productionStageNames[event.resultingState]}`,
+    kind: event.signal.type.includes("E2E") ? "测试" : "运行",
+    agent: "Temporal",
+    status: "已投影",
+    tone: event.signal.type.includes("E2E") ? "green" : "blue",
+    time: `#${event.sequence}`,
   })) ?? recentActivity;
   const visibleActivity = localActivity.filter((item) => {
     if (activityFilter === "运行") return item.kind === "运行";
     if (activityFilter === "测试") return item.kind === "测试";
     return true;
   });
-  const pipelineStages = pipelineFor(delivery);
-  const passedTargets = delivery ? Object.values(delivery.targetResults).filter((value) => value === "PASSED").length : 0;
+  const pipelineStages = delivery ? pipelineFor(delivery) : productionPipelineFor(productionDelivery);
+  const passedTargets = delivery
+    ? Object.values(delivery.targetResults).filter((value) => value === "PASSED").length
+    : productionDelivery?.candidateEvidenceBundleId ? productionDelivery.targetMatrix.length : 0;
+  const targetCount = delivery ? 3 : productionDelivery?.targetMatrix.length ?? 3;
+  const stageName = delivery ? stageNames[delivery.stage]
+    : productionDelivery ? productionStageNames[productionDelivery.state] : null;
 
   return (
     <AppShell>
       <section className="page-heading dashboard-heading">
         <div>
-          <span className="eyebrow">本地控制面 · 持久状态</span>
+          <span className="eyebrow">{productionDelivery ? "生产控制面 · Temporal 投影" : "本地控制面 · 持久状态"}</span>
           <h1>早上好，天扬。</h1>
-          <p>{error ? `本地状态暂不可用：${error}` : delivery ? `${stageNames[delivery.stage]}，${passedTargets} / 3 个目标已通过。` : "正在读取本地交付状态…"}</p>
+          <p>{error ? `交付状态暂不可用：${error}` : stageName ? `${stageName}，${passedTargets} / ${targetCount} 个目标已通过。` : "正在读取交付状态…"}</p>
         </div>
         <Link className="button button-primary" href="/projects/new"><PlusIcon /> 开始新构想</Link>
       </section>
@@ -68,13 +117,13 @@ export function Dashboard() {
       <section className="dashboard-grid">
         <article className="focus-project">
           <div className="focus-project-topline">
-            <span className="live-label"><i /> {delivery ? stageNames[delivery.stage] : "读取状态"}</span>
-            <span>{delivery ? new Date(delivery.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : activeProject.updatedAt} 更新</span>
+            <span className="live-label"><i /> {stageName ?? "读取状态"}</span>
+            <span>{delivery ? new Date(delivery.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : projectionMeta ? new Date(projectionMeta.projectedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : activeProject.updatedAt} 更新</span>
           </div>
           <div className="focus-project-title">
             <div className="project-glyph" aria-hidden="true"><span>岛</span></div>
             <div>
-              <p>{delivery?.specRevisionId ?? activeProject.specRevision} · {activeProject.genre}</p>
+              <p>{delivery?.specRevisionId ?? productionDelivery?.specRevisionId ?? activeProject.specRevision} · {activeProject.genre}</p>
               <h2>{activeProject.name}</h2>
             </div>
             <Link aria-label="打开余烬群岛项目" className="round-arrow" href={`/projects/${activeProject.id}`}><ArrowIcon /></Link>
@@ -83,15 +132,15 @@ export function Dashboard() {
           <div className="build-summary">
             <div>
               <span>当前阶段</span>
-              <strong>{delivery ? stageNames[delivery.stage] : activeProject.currentStage}</strong>
+              <strong>{stageName ?? activeProject.currentStage}</strong>
             </div>
             <div>
               <span>锁定 Agent</span>
-              <strong>{activeProject.agent} <small>v{activeProject.agentVersion}</small></strong>
+              <strong>{productionDelivery ? productionDelivery.lockedRunConfigurationId ?? "等待锁定" : <>{activeProject.agent} <small>v{activeProject.agentVersion}</small></>}</strong>
             </div>
             <div>
               <span>候选提交</span>
-              <strong className="mono">{delivery?.mainSha ?? delivery?.candidateSha ?? "等待产出"}</strong>
+              <strong className="mono">{delivery?.mainSha ?? delivery?.candidateSha ?? productionDelivery?.mainCommitSha ?? productionDelivery?.candidateCommitSha ?? "等待产出"}</strong>
             </div>
           </div>
 
@@ -108,7 +157,7 @@ export function Dashboard() {
           </div>
 
           <div className="platform-row">
-            {(delivery ? (["linux", "windows", "macos"] as const).map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: delivery.targetResults[id] })) : activeProject.platforms.map((item) => ({ id: item.id, label: item.label, state: item.status.toUpperCase() }))).map((platform) => (
+            {(delivery ? (["linux", "windows", "macos"] as const).map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: delivery.targetResults[id] })) : productionDelivery ? productionDelivery.targetMatrix.map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: productionDelivery.candidateEvidenceBundleId ? "PASSED" : productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED" })) : activeProject.platforms.map((item) => ({ id: item.id, label: item.label, state: item.status.toUpperCase() }))).map((platform) => (
               <div className={`platform-status ${platform.state === "PASSED" ? "passed" : platform.state === "RUNNING" ? "running" : "queued"}`} key={platform.id}>
                 <span className="os-mark">{platform.label.slice(0, 1)}</span>
                 <span><b>{platform.label}</b><small>{platform.label === "macOS" && delivery?.localValidation?.valid ? `本机 ${delivery.localValidation.godotVersion}` : "锁定目标"}</small></span>
@@ -125,7 +174,7 @@ export function Dashboard() {
           </div>
           <div className="attention-item">
             <span className="attention-icon amber"><ClockIcon /></span>
-            <div><b>{delivery?.localValidation?.status === "FAILED" ? "本机 Godot 验证失败" : delivery?.localValidation?.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待 Godot macOS 导出模板" : "目标 Runner 门禁"}</b><p>{delivery?.localValidation?.status === "FAILED" ? "失败证据已保留，修复后需创建新的锁定运行。" : delivery?.localValidation ? "真实 headless 测试已有证据，生产导出仍保持阻塞。" : "运行本机 Git + Godot 验证以生成首份真实证据。"}</p></div>
+            <div><b>{productionDelivery ? productionStageNames[productionDelivery.state] : delivery?.localValidation?.status === "FAILED" ? "本机 Godot 验证失败" : delivery?.localValidation?.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待 Godot macOS 导出模板" : "目标 Runner 门禁"}</b><p>{productionDelivery ? `权威投影序号 ${productionDelivery.history.length}；所有推进必须来自对应业务服务。` : delivery?.localValidation?.status === "FAILED" ? "失败证据已保留，修复后需创建新的锁定运行。" : delivery?.localValidation ? "真实 headless 测试已有证据，生产导出仍保持阻塞。" : "运行本机 Git + Godot 验证以生成首份真实证据。"}</p></div>
           </div>
           <div className="attention-item">
             <span className="attention-icon violet"><SparkIcon /></span>

@@ -2,11 +2,10 @@
 
 import Link from "next/link";
 import { useCallback, useMemo, useRef, useState } from "react";
-import type { LocalDeliverySnapshot } from "@/lib/local-delivery/model";
 import type { SpecDialogueMessage, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
 import { AppShell } from "./AppShell";
 import { ArrowIcon, CheckIcon, ClockIcon, FileIcon, GithubIcon, SparkIcon } from "./Icons";
-import { LocalDeliveryPanel } from "./LocalDeliveryPanel";
+import { LocalDeliveryPanel, type DeliveryPanelStatus } from "./LocalDeliveryPanel";
 
 type Message = {
   id: string;
@@ -68,7 +67,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     testPlanRevisionId: string;
   } | null>(null);
   const [deliveryRefresh, setDeliveryRefresh] = useState(0);
-  const [deliveryStage, setDeliveryStage] = useState<LocalDeliverySnapshot["stage"] | null>(null);
+  const [candidateAcceptanceReady, setCandidateAcceptanceReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const approvalCommandRef = useRef<string | null>(null);
   const acceptanceCommandRef = useRef<string | null>(null);
@@ -225,12 +224,20 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     }
   }
 
-  const syncDelivery = useCallback((snapshot: LocalDeliverySnapshot) => {
-    if (snapshot.stage !== "AWAITING_ACCEPTANCE") acceptanceCommandRef.current = null;
-    setDeliveryStage(snapshot.stage);
-    setApproved(snapshot.stage !== "AWAITING_SPEC_APPROVAL");
-    const persistedRevision = Number.parseInt(snapshot.specRevisionId.replace(/^SPEC-/, ""), 10);
-    if (Number.isInteger(persistedRevision)) setRevision(persistedRevision);
+  const syncDelivery = useCallback((status: DeliveryPanelStatus) => {
+    const ready = status.mode === "LOCAL_D1"
+      ? status.stage === "AWAITING_ACCEPTANCE"
+      : status.stage === "WAITING_USER_ACCEPTANCE";
+    if (!ready) acceptanceCommandRef.current = null;
+    setCandidateAcceptanceReady(ready);
+    const awaitingApproval = status.mode === "LOCAL_D1"
+      ? status.stage === "AWAITING_SPEC_APPROVAL"
+      : status.stage === "IDEATION" || status.stage === "WAITING_SPEC_APPROVAL";
+    setApproved(!awaitingApproval);
+    if (status.mode === "LOCAL_D1") {
+      const persistedRevision = Number.parseInt(status.specRevisionId.replace(/^SPEC-/, ""), 10);
+      if (Number.isInteger(persistedRevision)) setRevision(persistedRevision);
+    }
   }, []);
 
   return (
@@ -353,7 +360,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
             <textarea aria-label="候选版本反馈" onChange={(event) => setFeedback(event.target.value)} placeholder="例如：风暴出现得太频繁，希望新手前五分钟最多出现一次……" rows={3} value={feedback} />
             <button className="button button-primary" disabled={!feedback.trim() || busy} onClick={submitFeedback} type="button">创建新迭代 <ArrowIcon /></button>
           </div>
-          {deliveryStage === "AWAITING_ACCEPTANCE" ? (
+          {candidateAcceptanceReady ? (
             <button className="button button-acid" disabled={busy} onClick={acceptCandidate} type="button"><CheckIcon /> 接受候选版本并合并</button>
           ) : (
             <div className="release-gate-note"><ClockIcon /><span><b>候选验收尚未开放</b><small>所选三个平台全部通过后，才可合并；发布仍需实际 main SHA 门禁与 MFA。</small></span></div>
@@ -362,7 +369,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
       ) : null}
 
       <LocalDeliveryPanel
-        onSnapshot={syncDelivery}
+        onStatus={syncDelivery}
         projectId={mode === "new" ? "new-project-draft" : "ember-archipelago"}
         refreshToken={deliveryRefresh}
       />

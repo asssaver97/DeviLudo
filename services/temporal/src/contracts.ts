@@ -5,6 +5,10 @@ import type {
 } from "../../../lib/orchestration/game-delivery";
 export { assertDeliverySignal } from "../../../lib/orchestration/game-delivery";
 import type { TargetPlatform } from "../../../lib/domain/types";
+import type {
+  DeliveryProjectionReceipt,
+  DeliveryProjectionRequest,
+} from "../../../lib/orchestration/delivery-projection";
 
 export const DELIVERY_TASK_QUEUE = "deviludo-game-delivery-v1";
 export const DELIVERY_WORKFLOW_TYPE = "gameDeliveryWorkflow";
@@ -80,6 +84,7 @@ export interface DeliveryActivityReceipt {
 export interface DeliveryActivities {
   dispatchDeliveryCommand(input: DispatchDeliveryCommandInput): Promise<DeliveryActivityReceipt>;
   cancelDelivery(input: CancelDeliveryInput): Promise<DeliveryActivityReceipt>;
+  persistDeliverySnapshot(input: DeliveryProjectionRequest): Promise<DeliveryProjectionReceipt>;
 }
 
 export type { DeliveryCommand, DeliverySignal, DeliverySnapshot };

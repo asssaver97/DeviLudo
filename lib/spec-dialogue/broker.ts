@@ -60,11 +60,17 @@ export class SpecDialogueBrokerClient {
 export function specDialogueBrokerRuntimeFromEnvironment(env: Readonly<Record<string, string | undefined>> = process.env) {
   const endpoint = env.DEVILUDO_SPEC_DIALOGUE_BROKER_URL?.trim();
   if (!endpoint) return null;
+  return Object.freeze({ broker: new SpecDialogueBrokerClient(endpoint), sessionHmacKey: trustedSessionKeyFromEnvironment(env) });
+}
+
+export function trustedSessionKeyFromEnvironment(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Uint8Array {
   const encodedKey = env.DEVILUDO_SESSION_HMAC_KEY?.trim();
-  if (!encodedKey) throw new Error("DEVILUDO_SESSION_HMAC_KEY is required with the specification dialogue Broker");
+  if (!encodedKey) throw new Error("DEVILUDO_SESSION_HMAC_KEY is required for trusted platform sessions");
   const key = decodeBase64Url(encodedKey);
   if (key.byteLength < 32 || key.byteLength > 64) throw new Error("Platform session HMAC key is invalid");
-  return Object.freeze({ broker: new SpecDialogueBrokerClient(endpoint), sessionHmacKey: key });
+  return key;
 }
 
 export async function verifyTrustedSpecSession(request: Request, key: Uint8Array, now = new Date()): Promise<TrustedSpecSession> {

@@ -9,6 +9,12 @@ behind the web console:
 - `temporal`: the durable wrapper around `lib/orchestration/GameDeliveryWorkflow`,
   plus Worker and Client entry points. External waits are signals; no wait path
   polls a database or sleeps in a loop.
+- `delivery-projection`: a separate mTLS/RLS read-model boundary. Temporal is
+  its only writer, the Web workload is read-only, and every accepted snapshot
+  must exactly equal a deterministic replay of its complete signal history.
+  An append-only event stream and a monotonic current row retain initial,
+  intermediate and terminal state without giving the Web process Temporal or
+  database write authority.
 - `agent-worker`: a one-run supervisor for the exact Claude Code or Codex CLI
   RuntimeSpec. It uses `shell: false`, validates all workspace/runtime paths,
   verifies the locked CLI version and WorkerImage digest, writes Adapter files
@@ -67,6 +73,18 @@ behind the web console:
 The root application can keep using its lightweight route handlers for the
 Sites preview. Production traffic should route `/admin/*` to the control-plane
 process and delivery commands to Temporal.
+
+Production project pages read workflow state through:
+
+```bash
+npm run start:delivery-projection
+```
+
+The Temporal Worker must set `DEVILUDO_DELIVERY_PROJECTION_URL`; the Web process
+must set `DEVILUDO_DELIVERY_PROJECTION_BROKER_URL`. The service requires
+disjoint Temporal-writer and Web-reader SPIFFE allow-lists from
+`services/delivery-projection/.env.example`. Localhost deliberately continues
+to use the D1 fixture and never needs this service.
 
 ## Control-plane
 
@@ -379,6 +397,7 @@ not become availability errors.
 ```bash
 ./node_modules/.bin/tsc -p services/control-plane/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/temporal/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/delivery-projection/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/inference-gateway/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/spec-dialogue/tsconfig.json --pretty false
@@ -390,6 +409,7 @@ not become availability errors.
 ./node_modules/.bin/tsc -p services/local-agent-runtime/tsconfig.json --pretty false
 node --import tsx --test services/control-plane/test/*.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
+node --import tsx --test services/delivery-projection/test/*.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/*.test.ts
 node --import tsx --test services/spec-dialogue/test/*.test.ts

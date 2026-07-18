@@ -44,6 +44,15 @@ import { postgresWorkflowPoolFromEnv } from "../src/node-postgres";
 import { MtlsCommandDispatcher } from "../src/mtls-dispatcher";
 import { temporalTlsConfigFromEnv } from "../src/temporal-tls";
 import { dispatchKey } from "../src/workflows/game-delivery.workflow";
+import { GameDeliveryWorkflow } from "../../../lib/orchestration/game-delivery";
+import {
+  DELIVERY_PROJECTION_SCHEMA_VERSION,
+  deliveryProjectionKey,
+} from "../../../lib/orchestration/delivery-projection";
+
+const unusedProjections = {
+  async persist(): Promise<never> { throw new Error("must not project"); },
+};
 
 const snapshot: DeliverySnapshot = {
   workflowId: "delivery-001",
@@ -120,7 +129,7 @@ test("activity adapter preserves immutable bindings and deterministic idempotenc
       seen.push(request);
       return receiptFor(request);
     },
-  });
+  }, unusedProjections);
   const idempotencyKey = dispatchKey(snapshot, "START_LOCKED_AGENT_RUN");
   const receipt = await activities.dispatchDeliveryCommand({
     idempotencyKey,
@@ -142,7 +151,7 @@ test("activity adapter rejects a snapshot from another tenant or workflow", asyn
     async dispatch() {
       throw new Error("must not be called");
     },
-  });
+  }, unusedProjections);
   await assert.rejects(
     activities.dispatchDeliveryCommand({
       idempotencyKey: "delivery-001:0:DEVELOPMENT_QUEUED:START_LOCKED_AGENT_RUN",
@@ -162,7 +171,7 @@ test("activity adapter rejects destination spoofing and unbound receipts", async
     async dispatch(request) {
       return receiptFor(request);
     },
-  });
+  }, unusedProjections);
   await assert.rejects(
     spoofed.dispatchDeliveryCommand({
       idempotencyKey: "delivery-001:0:DEVELOPMENT_QUEUED:START_LOCKED_AGENT_RUN",
@@ -180,7 +189,7 @@ test("activity adapter rejects destination spoofing and unbound receipts", async
     async dispatch(request) {
       return { ...receiptFor(request), workflowId: "delivery-other" };
     },
-  });
+  }, unusedProjections);
   await assert.rejects(
     mismatchedReceipt.dispatchDeliveryCommand({
       idempotencyKey: "delivery-001:0:DEVELOPMENT_QUEUED:START_LOCKED_AGENT_RUN",
@@ -193,6 +202,43 @@ test("activity adapter rejects destination spoofing and unbound receipts", async
     }),
     /receipt binding mismatch/,
   );
+});
+
+test("activity adapter persists a replay-valid and fully bound workflow projection", async () => {
+  const machine = new GameDeliveryWorkflow({
+    workflowId: "delivery-11111111-1111-4111-8111-111111111111",
+    tenantId: "22222222-2222-4222-8222-222222222222",
+    projectId: "33333333-3333-4333-8333-333333333333",
+    targetMatrix: ["linux", "macos"],
+  });
+  const projected = machine.current() as DeliverySnapshot;
+  const key = deliveryProjectionKey(projected);
+  let calls = 0;
+  const activities = createDeliveryActivities({
+    async dispatch() { throw new Error("must not dispatch"); },
+  }, {
+    async persist(request) {
+      calls += 1;
+      assert.equal(request.projectionKey, key);
+      return {
+        receiptId: "projection-receipt-1",
+        acceptedAt: "2026-07-18T00:00:00.000Z",
+        projectionKey: key,
+        workflowId: projected.workflowId,
+        sequence: 0,
+        state: "IDEATION",
+        snapshotDigest: "a".repeat(64),
+        replayed: false,
+      };
+    },
+  });
+  const receipt = await activities.persistDeliverySnapshot({
+    schemaVersion: DELIVERY_PROJECTION_SCHEMA_VERSION,
+    projectionKey: key,
+    snapshot: projected,
+  });
+  assert.equal(calls, 1);
+  assert.equal(receipt.state, "IDEATION");
 });
 
 test("dispatcher endpoint configuration is complete and service-specific", () => {
