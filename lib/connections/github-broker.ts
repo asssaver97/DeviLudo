@@ -158,16 +158,14 @@ export async function verifyTrustedPlatformSession(
   now: Date = new Date(),
 ): Promise<TrustedPlatformSession> {
   if (!request.headers.has("x-deviludo-session-tenant")) {
-    const assertion = await assertBrowserSession(request);
-    const headers = new Headers(request.headers);
-    headers.set("x-deviludo-session-tenant", assertion.tenantId);
-    headers.set("x-deviludo-session-user", assertion.userId);
-    headers.set("x-deviludo-session-binding", assertion.sessionBinding);
-    headers.set("x-deviludo-session-github-user-id", String(assertion.githubUserId));
-    headers.set("x-deviludo-session-issued-at", assertion.issuedAt);
-    headers.set("x-deviludo-session-signature", assertion.signature);
-    return verifyTrustedPlatformSession(new Request(request.url, { method: request.method, headers }), key, now);
+    const assertion = await verifyBrowserSession(request, key, now);
+    return Object.freeze({ tenantId: assertion.tenantId, userId: assertion.userId,
+      sessionBinding: assertion.sessionBinding, githubUserId: assertion.githubUserId });
   }
+  return verifyTrustedSessionHeaders(request, key, now);
+}
+
+async function verifyTrustedSessionHeaders(request: Request, key: Uint8Array, now: Date): Promise<TrustedPlatformSession> {
   const tenantId = requiredHeader(request, "x-deviludo-session-tenant");
   const userId = requiredHeader(request, "x-deviludo-session-user");
   const sessionBinding = requiredHeader(request, "x-deviludo-session-binding", 512);
@@ -202,6 +200,19 @@ export async function assertBrowserSession(request: Request): Promise<BrowserSes
   if (!broker) throw new Error("Identity Broker is required for browser sessions");
   const cookies = browserSessionCookies(request);
   return broker.assert({ ...cookies, method: request.method, pathname: new URL(request.url).pathname });
+}
+
+export async function verifyBrowserSession(request: Request, key: Uint8Array, now = new Date()): Promise<BrowserSessionAssertion> {
+  const assertion = await assertBrowserSession(request);
+  const headers = new Headers(request.headers);
+  headers.set("x-deviludo-session-tenant", assertion.tenantId);
+  headers.set("x-deviludo-session-user", assertion.userId);
+  headers.set("x-deviludo-session-binding", assertion.sessionBinding);
+  headers.set("x-deviludo-session-github-user-id", String(assertion.githubUserId));
+  headers.set("x-deviludo-session-issued-at", assertion.issuedAt);
+  headers.set("x-deviludo-session-signature", assertion.signature);
+  await verifyTrustedSessionHeaders(new Request(request.url, { method: request.method, headers }), key, now);
+  return assertion;
 }
 
 /** Used by the trusted session proxy and contract tests, never by browsers. */

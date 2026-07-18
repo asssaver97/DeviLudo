@@ -1,4 +1,4 @@
-import { assertBrowserSession } from "@/lib/connections/github-broker";
+import { trustedGitHubSessionKeyFromEnvironment, verifyBrowserSession } from "@/lib/connections/github-broker";
 import { BROWSER_BINDING_COOKIE, SESSION_COOKIE, browserSessionCookies, clearCookie, identityBrokerFromEnvironment } from "@/lib/auth/identity-broker";
 import { json } from "@/lib/control-plane/http";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -6,7 +6,7 @@ import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 export async function GET(request: Request) {
   if (isLoopbackTestRequest(request)) return json({ data: localPrincipal() }, { headers: { "cache-control": "no-store" } });
   try {
-    const principal = await assertBrowserSession(request);
+    const principal = await verifyBrowserSession(request, trustedGitHubSessionKeyFromEnvironment());
     return json({ data: publicPrincipal(principal) }, { headers: { "cache-control": "no-store" } });
   } catch { return json({ error: { code: "AUTHENTICATION_REQUIRED", message: "需要使用受邀 GitHub 账号登录。" } }, { status: 401, headers: { "cache-control": "no-store" } }); }
 }
@@ -22,7 +22,7 @@ export async function DELETE(request: Request) {
   return new Response(null, { status: 204, headers });
 }
 
-function publicPrincipal(value: Awaited<ReturnType<typeof assertBrowserSession>>) {
+function publicPrincipal(value: Awaited<ReturnType<typeof verifyBrowserSession>>) {
   return { tenantId: value.tenantId, tenantSlug: value.tenantSlug, tenantName: value.tenantName, userId: value.userId,
     role: value.role, githubUserId: value.githubUserId, githubLogin: value.githubLogin, displayName: value.displayName,
     avatarUrl: value.avatarUrl };

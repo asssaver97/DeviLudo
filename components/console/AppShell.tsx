@@ -23,6 +23,7 @@ const navigation = [
 
 const settings = [
   { href: "/settings/connections", label: "账号连接", icon: LinkIcon },
+  { href: "/admin/invitations", label: "受邀账号", icon: ShieldIcon },
   { href: "/admin/agents", label: "Agent 管理", icon: ShieldIcon },
 ];
 

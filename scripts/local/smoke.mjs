@@ -170,11 +170,13 @@ const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, login, admin, adminState, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
+  const [home, login, admin, invitations, adminState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
+    checkHtmlRoute(baseUrl, "/admin/invitations", "受邀账号管理"),
     request(baseUrl, "/api/admin/agents"),
+    request(baseUrl, "/api/admin/invitations", { method: "POST" }),
     request(baseUrl, "/api/auth/session"),
     request(runtimeUrl, "/health"),
     request(agentRuntimeUrl, "/health"),
@@ -246,6 +248,10 @@ try {
     throw new Error("local Agent admin state contract failed");
   }
   if (JSON.stringify(adminPayload).includes("secretRef")) throw new Error("Agent admin state exposed a secret reference");
+  const invitationGatePayload = await invitationGate.response.json();
+  if (invitationGate.response.status !== 503 || invitationGatePayload.error?.code !== "IDENTITY_ADMIN_BROKER_REQUIRED") {
+    throw new Error("local admin unexpectedly fabricated a production invitation");
+  }
   const sessionPayload = await localSession.response.json();
   if (!localSession.response.ok || sessionPayload.data?.tenantId !== "tenant-local"
     || sessionPayload.data?.githubLogin !== "local-developer" || sessionPayload.data?.role !== "TenantAdmin") {
@@ -318,7 +324,9 @@ try {
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /login         ${login.response.status} (${login.elapsedMs}ms) · invite-only login`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
+  console.log(`✓ GET /admin/invitations ${invitations.response.status} (${invitations.elapsedMs}ms) · invite console`);
   console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
+  console.log(`✓ Invitation gate    ${invitationGate.response.status} (${invitationGate.elapsedMs}ms) · ${invitationGatePayload.error.code}`);
   console.log(`✓ Local session      ${localSession.response.status} (${localSession.elapsedMs}ms) · @${sessionPayload.data.githubLogin}`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);

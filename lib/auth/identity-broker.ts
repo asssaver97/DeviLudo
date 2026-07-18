@@ -36,6 +36,16 @@ export class IdentityBrokerClient {
     if (!Number.isSafeInteger(timeout) || timeout < 1_000 || timeout > 60_000) invalid();
     this.#origin = endpoint; this.#fetch = options.fetch ?? fetch; this.#timeoutMs = timeout;
   }
+  async createInvitation(input: { tenantId: string; role: "TenantAdmin" | "ProjectOwner" | "Auditor"; expiresAt: string; createdBy: string }): Promise<{
+    invitationToken: string; invitationId: string; expiresAt: string;
+  }> {
+    if (!UUID.test(input.tenantId) || !ROLES.has(input.role) || !Number.isFinite(Date.parse(input.expiresAt))
+      || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/.test(input.createdBy)) invalid();
+    const body = await this.#call("/v1/invitations", input, 201);
+    exactKeys(body, ["expiresAt", "invitationId", "invitationToken"]);
+    const invitationToken = string(body, "invitationToken", 100); if (!LOCATOR.test(invitationToken)) invalid();
+    return Object.freeze({ invitationToken, invitationId: uuid(body, "invitationId"), expiresAt: iso(body, "expiresAt") });
+  }
   async begin(input: { invitationToken: string; browserBinding: string }): Promise<{ authorizeUrl: string; expiresAt: string }> {
     if (!LOCATOR.test(input.invitationToken) || !RANDOM.test(input.browserBinding)) invalid();
     const body = await this.#call("/v1/auth/github/begin", input, 201);
@@ -78,6 +88,10 @@ export class IdentityBrokerClient {
 
 export function identityBrokerFromEnvironment(env: Readonly<Record<string, string | undefined>> = process.env): IdentityBrokerClient | null {
   const endpoint = env.DEVILUDO_IDENTITY_BROKER_URL?.trim(); return endpoint ? new IdentityBrokerClient({ endpoint }) : null;
+}
+
+export function identityAdminBrokerFromEnvironment(env: Readonly<Record<string, string | undefined>> = process.env): IdentityBrokerClient | null {
+  const endpoint = env.DEVILUDO_IDENTITY_ADMIN_BROKER_URL?.trim(); return endpoint ? new IdentityBrokerClient({ endpoint }) : null;
 }
 
 export function browserSessionCookies(request: Request): { sessionToken: string; browserBinding: string } {

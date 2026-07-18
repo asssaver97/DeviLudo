@@ -46,6 +46,26 @@ paths:
       operationId: listAgents
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+  /admin/invitations:
+    post:
+      operationId: issueTenantInvitation
+      description: Returns a single-use invitation URL once. It must not be persisted in an idempotency result, browser storage, logs, or audit metadata.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [tenantId, role, expiresAt]
+              properties:
+                tenantId: { type: string, format: uuid }
+                role: { type: string, enum: [TenantAdmin, ProjectOwner, Auditor] }
+                expiresAt: { type: string, format: date-time }
+      responses:
+        "201": { description: One-time invitation URL; response has no-store and no-referrer controls. }
+        "403": { description: Requires signed platform admin authority or a same-tenant TenantAdmin that does not delegate TenantAdmin. }
   /admin/agent-versions/discover:
     post:
       operationId: discoverAgentVersions

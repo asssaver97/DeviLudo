@@ -15,7 +15,9 @@ import {
 import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts";
 import { ReleaseAuthorizationBrokerClient } from "../lib/releases/publish-broker.ts";
 import { POST as acceptAndPublish } from "../app/api/releases/[releaseId]/accept-and-publish/route.ts";
+import { POST as issueInvitation } from "../app/api/admin/invitations/route.ts";
 import { isLoopbackTestRequest } from "../lib/security/local-test-mode.ts";
+import { createAdminPrincipalSignature } from "../services/control-plane/src/admin-principal.ts";
 import {
   BROWSER_BINDING_COOKIE,
   SESSION_COOKIE,
@@ -218,6 +220,93 @@ test("platform APIs exchange browser cookies for a fresh route-bound Broker asse
   }
 });
 
+test("TenantAdmin invitation issuance is tenant-bound, role-narrowing and never persists the raw link in Web state", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEndpoint = process.env.DEVILUDO_IDENTITY_BROKER_URL;
+  const originalAdminEndpoint = process.env.DEVILUDO_IDENTITY_ADMIN_BROKER_URL;
+  const originalSessionKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
+  const key = new Uint8Array(32).fill(31);
+  const at = new Date();
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const userId = "22222222-2222-4222-8222-222222222222";
+  const membershipId = "33333333-3333-4333-8333-333333333333";
+  const browserBinding = Buffer.from(new Uint8Array(32).fill(11)).toString("base64url");
+  const sessionToken = `${tenantId}.${Buffer.from(new Uint8Array(32).fill(12)).toString("base64url")}`;
+  const sessionBinding = Buffer.from(new Uint8Array(32).fill(13)).toString("base64url");
+  const issuedAt = String(at.getTime());
+  const signature = await signTrustedGitHubSession({ method: "POST", pathname: "/api/admin/invitations", tenantId, userId,
+    sessionBinding, githubUserId: "4242", issuedAt, key });
+  const invitationToken = `${tenantId}.${Buffer.from(new Uint8Array(32).fill(14)).toString("base64url")}`;
+  try {
+    process.env.DEVILUDO_IDENTITY_BROKER_URL = "https://identity.internal/";
+    process.env.DEVILUDO_IDENTITY_ADMIN_BROKER_URL = "https://identity-admin.internal/";
+    process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/v1/sessions/assert")) return Response.json({ tenantId, tenantSlug: "north-dock", tenantName: "North Dock",
+        userId, membershipId, role: "TenantAdmin", githubUserId: 4242, githubNodeId: "MDQ6VXNlcjQyNDI=", githubLogin: "octocat",
+        displayName: "The Octocat", avatarUrl: "https://avatars.githubusercontent.com/u/4242?v=4", sessionBinding, issuedAt, signature });
+      assert.equal(String(url), "https://identity-admin.internal/v1/invitations");
+      const body = JSON.parse(init.body);
+      assert.equal(body.tenantId, tenantId); assert.equal(body.role, "ProjectOwner"); assert.equal(body.createdBy, userId);
+      return Response.json({ invitationToken, invitationId: "44444444-4444-4444-8444-444444444444", expiresAt: body.expiresAt }, { status: 201 });
+    };
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const response = await issueInvitation(new Request("https://deviludo.example/api/admin/invitations", { method: "POST",
+      headers: { "content-type": "application/json", origin: "https://deviludo.example", cookie: `${SESSION_COOKIE}=${sessionToken}; ${BROWSER_BINDING_COOKIE}=${browserBinding}` },
+      body: JSON.stringify({ tenantId, role: "ProjectOwner", expiresAt }) }));
+    assert.equal(response.status, 201); const payload = await response.json();
+    assert.match(payload.data.invitationUrl, /^https:\/\/deviludo\.example\/api\/auth\/github\?invite=/);
+    assert.doesNotMatch(JSON.stringify(payload.data), /invitationToken/);
+    const escalation = await issueInvitation(new Request("https://deviludo.example/api/admin/invitations", { method: "POST",
+      headers: { "content-type": "application/json", origin: "https://deviludo.example", cookie: `${SESSION_COOKIE}=${sessionToken}; ${BROWSER_BINDING_COOKIE}=${browserBinding}` },
+      body: JSON.stringify({ tenantId, role: "TenantAdmin", expiresAt }) }));
+    assert.equal(escalation.status, 403);
+    const crossOrigin = await issueInvitation(new Request("https://deviludo.example/api/admin/invitations", { method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.deviludo.example",
+        cookie: `${SESSION_COOKIE}=${sessionToken}; ${BROWSER_BINDING_COOKIE}=${browserBinding}` },
+      body: JSON.stringify({ tenantId, role: "ProjectOwner", expiresAt }) }));
+    assert.equal(crossOrigin.status, 403);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv("DEVILUDO_IDENTITY_BROKER_URL", originalEndpoint); restoreEnv("DEVILUDO_IDENTITY_ADMIN_BROKER_URL", originalAdminEndpoint);
+    restoreEnv("DEVILUDO_SESSION_HMAC_KEY", originalSessionKey);
+  }
+});
+
+test("platform administrator invitation issuance requires the existing signed admin principal", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEndpoint = process.env.DEVILUDO_IDENTITY_ADMIN_BROKER_URL;
+  const originalAdminKey = process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY;
+  const key = Buffer.alloc(32, 41); const issuedAt = new Date().toISOString();
+  const assertion = { method: "POST", path: "/api/admin/invitations", actorId: "platform-admin-1", role: "PlatformAgentAdmin",
+    tenantId: null, projectId: null, sessionId: "admin-session-1", issuedAt };
+  const signature = createAdminPrincipalSignature(assertion, key);
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  try {
+    process.env.DEVILUDO_IDENTITY_ADMIN_BROKER_URL = "https://identity-admin.internal/";
+    process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY = key.toString("base64");
+    globalThis.fetch = async (url, init) => {
+      assert.equal(String(url), "https://identity-admin.internal/v1/invitations"); const body = JSON.parse(init.body);
+      assert.equal(body.createdBy, assertion.actorId); assert.equal(body.role, "TenantAdmin");
+      return Response.json({ invitationToken: `${tenantId}.${Buffer.from(new Uint8Array(32).fill(15)).toString("base64url")}`,
+        invitationId: "44444444-4444-4444-8444-444444444444", expiresAt: body.expiresAt }, { status: 201 });
+    };
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const headers = { "content-type": "application/json", "x-deviludo-role": assertion.role, "x-deviludo-actor": assertion.actorId,
+      "x-deviludo-admin-session": assertion.sessionId, "x-deviludo-admin-issued-at": issuedAt, "x-deviludo-admin-signature": signature };
+    const response = await issueInvitation(new Request("https://deviludo.example/api/admin/invitations", { method: "POST", headers,
+      body: JSON.stringify({ tenantId, role: "TenantAdmin", expiresAt }) }));
+    assert.equal(response.status, 201);
+    const forged = await issueInvitation(new Request("https://deviludo.example/api/admin/invitations", { method: "POST",
+      headers: { "content-type": "application/json", "x-deviludo-role": "PlatformAgentAdmin" },
+      body: JSON.stringify({ tenantId, role: "TenantAdmin", expiresAt }) }));
+    assert.equal(forged.status, 403);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv("DEVILUDO_IDENTITY_ADMIN_BROKER_URL", originalEndpoint); restoreEnv("DEVILUDO_ADMIN_SESSION_HMAC_KEY", originalAdminKey);
+  }
+});
+
 test("GitHub Web broker client accepts only fixed GitHub redirects and hashes callback idempotency", async () => {
   const state = "s".repeat(43);
   const challenge = "c".repeat(43);
@@ -317,6 +406,11 @@ test("Steam enrollment client sends no password and accepts only the configured 
     /URL is invalid/,
   );
 });
+
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 test("release authorization sends no client evidence or MFA proof and pins the isolated challenge UI", async () => {
   const calls = [];
