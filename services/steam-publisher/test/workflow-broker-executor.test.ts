@@ -91,6 +91,7 @@ const publishAuthority: SteamDefaultBranchExecutionAuthority = Object.freeze({
 });
 
 function executor(options: {
+  releaseError?: Error;
   preparedRc?: SteamPrivateBetaExecutionAuthority["rc"];
   uploadAuthority?: SteamPrivateBetaExecutionAuthority;
   publishAuthority?: SteamDefaultBranchExecutionAuthority;
@@ -99,6 +100,9 @@ function executor(options: {
 }) {
   const events = options.events ?? [];
   return new AuthoritativeSteamWorkflowExecutor({
+    async prepare() { events.push("prepare-release"); if (options.releaseError) throw options.releaseError; },
+    async probe() { events.push("release-preparer-probe"); },
+  }, {
     async ensure() { events.push("prepare-rc"); return options.preparedRc ?? uploadAuthority.rc; },
     async probe() { events.push("rc-preparer-probe"); },
   }, {
@@ -150,8 +154,8 @@ test("authoritative Steam executor resolves, uploads and archives the exact appr
     receiptId: workflowReceiptId, runId, mainCommitSha, mainEvidenceBundleId: evidenceId,
     mfaApprovalId: mfaId, targetMatrix: ["linux", "windows"], buildId,
   });
-  assert.deepEqual(events, ["prepare-rc", "resolve-upload", "upload", "archive-build"]);
-  assert.equal(heartbeats, 4);
+  assert.deepEqual(events, ["prepare-release", "prepare-rc", "resolve-upload", "upload", "archive-build"]);
+  assert.equal(heartbeats, 5);
 });
 
 test("authoritative Steam executor promotes and archives only the clean-install-tested BuildID", async () => {
@@ -172,19 +176,26 @@ test("authoritative Steam executor promotes and archives only the clean-install-
 });
 
 test("authoritative Steam executor rejects authority drift before any irreversible connector call", async () => {
+  const releaseEvents: string[] = [];
+  await assert.rejects(executor({
+    events: releaseEvents,
+    releaseError: new Error("authorization not dispatched"),
+  }).execute(uploadRequest, { async heartbeat() {} }), /authorization not dispatched/);
+  assert.deepEqual(releaseEvents, ["prepare-release"]);
+
   const events: string[] = [];
   await assert.rejects(executor({
     events,
     uploadAuthority: { ...uploadAuthority, rc: { ...uploadAuthority.rc, claims: { ...rcClaims, mainCommitSha: "f".repeat(40) } } },
   }).execute(uploadRequest, { async heartbeat() {} }), /execution is invalid/);
-  assert.deepEqual(events, ["prepare-rc", "resolve-upload"]);
+  assert.deepEqual(events, ["prepare-release", "prepare-rc", "resolve-upload"]);
 
   const preparedDriftEvents: string[] = [];
   await assert.rejects(executor({
     events: preparedDriftEvents,
     preparedRc: { ...uploadAuthority.rc, signature: "different-signed-rc" },
   }).execute(uploadRequest, { async heartbeat() {} }), /execution is invalid/);
-  assert.deepEqual(preparedDriftEvents, ["prepare-rc", "resolve-upload"]);
+  assert.deepEqual(preparedDriftEvents, ["prepare-release", "prepare-rc", "resolve-upload"]);
 
   const publishEvents: string[] = [];
   await assert.rejects(executor({
@@ -201,5 +212,5 @@ test("authoritative Steam executor rejects authority drift before any irreversib
 test("authoritative Steam executor readiness includes every authority and archive dependency", async () => {
   const events: string[] = [];
   await executor({ events }).probe();
-  assert.deepEqual(events.sort(), ["rc-preparer-probe", "authority-probe", "build-probe", "connector-probe", "publication-probe"].sort());
+  assert.deepEqual(events.sort(), ["release-preparer-probe", "rc-preparer-probe", "authority-probe", "build-probe", "connector-probe", "publication-probe"].sort());
 });

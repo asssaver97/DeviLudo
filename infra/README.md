@@ -46,7 +46,10 @@ Steam workflow operations, signed RC authority and append-only private-Beta and
 default-branch receipts. Migration `022` turns each operation into a recoverable
 tenant-RLS dispatch outbox with bounded retry scheduling. Migration `023` adds
 immutable project Steam depot revisions and freezes their ID and canonical
-digest into every newly issued signed release candidate. All twenty-three migrations are
+digest into every newly issued signed release candidate. Migration `024`
+freezes a complete project release configuration, creates the workflow-bound
+`WAITING_MFA` release from passed main evidence and permits only the one-way
+binding of a dispatched MFA approval. All twenty-four migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

@@ -6,6 +6,7 @@ export * from "./postgres-clean-install-authority";
 export * from "./postgres-install-grants";
 export * from "./postgres-publish-operations";
 export * from "./postgres-rc-issuance";
+export * from "./postgres-release-lifecycle";
 export * from "./postgres-workflow-operations";
 export * from "./postgres-workflow-execution";
 export * from "./postgres-workflow-dispatch";

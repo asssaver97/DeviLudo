@@ -34,6 +34,7 @@ services:
       - ./postgres/021_steam_release_execution.sql:/docker-entrypoint-initdb.d/021_steam_release_execution.sql:ro
       - ./postgres/022_steam_workflow_dispatch.sql:/docker-entrypoint-initdb.d/022_steam_workflow_dispatch.sql:ro
       - ./postgres/023_steam_rc_issuance.sql:/docker-entrypoint-initdb.d/023_steam_rc_issuance.sql:ro
+      - ./postgres/024_steam_release_preparation.sql:/docker-entrypoint-initdb.d/024_steam_release_preparation.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

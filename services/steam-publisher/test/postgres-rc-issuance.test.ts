@@ -136,7 +136,7 @@ test("PostgreSQL RC authority binds passed merged-main evidence to one active de
   })));
   const query = client.calls.find((call) => call.text.includes("steam_releases release"))!;
   assert.deepEqual(query.values, [tenantId, projectId, mainCommitSha, evidenceId, mfaId, runId]);
-  assert.match(query.text, /depot\.state = 'ACTIVE'/);
+  assert.match(query.text, /depot\.id = release_configuration\.depot_configuration_id/);
   assert.match(query.text, /attempt\.mode = 'MAIN_RELEASE_GATE'/);
   assert.ok(client.calls.some((call) => call.text.includes("set_config('app.tenant_id'")));
 

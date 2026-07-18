@@ -65,6 +65,11 @@ export interface SteamPrivateBetaRcPreparer {
   probe(): Promise<void>;
 }
 
+export interface SteamPrivateBetaReleasePreparer {
+  prepare(request: SteamPrivateBetaOperationRequest): Promise<void>;
+  probe(): Promise<void>;
+}
+
 export interface SteamBuildReceiptArchive {
   persist(input: Readonly<{
     operationKey: string;
@@ -119,6 +124,7 @@ export interface SteamDefaultBranchReceiptArchive {
 /** Resolves server authority immediately before each irreversible Steam action. */
 export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperationExecutor {
   constructor(
+    private readonly releasePreparer: SteamPrivateBetaReleasePreparer,
     private readonly rcPreparer: SteamPrivateBetaRcPreparer,
     private readonly authority: SteamWorkflowExecutionAuthority,
     private readonly privateBeta: Pick<SteamReleaseCoordinator, "uploadPrivateBeta">,
@@ -139,7 +145,7 @@ export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperatio
 
   async probe(): Promise<void> {
     await Promise.all([
-      this.rcPreparer.probe(), this.authority.probe(), this.builds.probe(),
+      this.releasePreparer.probe(), this.rcPreparer.probe(), this.authority.probe(), this.builds.probe(),
       this.defaultBranch.probe(), this.publications.probe(),
     ]);
   }
@@ -148,6 +154,8 @@ export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperatio
     request: SteamPrivateBetaOperationRequest,
     context: Readonly<{ heartbeat: () => Promise<void> }>,
   ): Promise<SteamPrivateBetaWorkflowReceipt> {
+    await this.releasePreparer.prepare(request);
+    await context.heartbeat();
     const preparedRc = await this.rcPreparer.ensure(request);
     await context.heartbeat();
     const authority = await this.authority.resolvePrivateBeta(request);

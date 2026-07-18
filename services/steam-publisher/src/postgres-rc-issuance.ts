@@ -90,13 +90,17 @@ export class PostgresSteamRcIssuanceAuthority implements SteamRcIssuanceAuthorit
             AND attempt.id = evidence.attempt_id
            LEFT JOIN deviludo.steam_rc_artifacts rc
              ON rc.tenant_id = release.tenant_id AND rc.release_id = release.id
+           JOIN deviludo.steam_project_release_configurations release_configuration
+             ON release_configuration.tenant_id = release.tenant_id
+            AND release_configuration.project_id = release.project_id
+            AND release_configuration.id = release.release_configuration_id
            JOIN deviludo.steam_project_depot_configurations depot
              ON depot.tenant_id = release.tenant_id
             AND depot.project_id = release.project_id
             AND depot.steam_app_id = release.steam_app_id
-            AND ((rc.id IS NULL AND depot.state = 'ACTIVE')
-              OR (rc.id IS NOT NULL AND depot.id = rc.depot_configuration_id
-                AND depot.configuration_digest = rc.depot_configuration_digest))
+            AND depot.id = release_configuration.depot_configuration_id
+            AND (rc.id IS NULL OR (depot.id = rc.depot_configuration_id
+              AND depot.configuration_digest = rc.depot_configuration_digest))
           WHERE release.tenant_id = $1::uuid AND release.project_id = $2::uuid
             AND release.main_commit_sha = $3
             AND release.evidence_bundle_id = $4::uuid
@@ -105,7 +109,7 @@ export class PostgresSteamRcIssuanceAuthority implements SteamRcIssuanceAuthorit
             AND evidence.status = 'PASSED' AND evidence.invalidated_at IS NULL
             AND attempt.run_id = $6::uuid
             AND attempt.mode = 'MAIN_RELEASE_GATE' AND attempt.state = 'PASSED'
-          FOR SHARE OF release, evidence, attempt, depot`,
+          FOR SHARE OF release, evidence, attempt, release_configuration, depot`,
         [request.tenantId, request.projectId, request.mainCommitSha,
           request.mainEvidenceBundleId, request.mfaApprovalId, request.runId],
       );

@@ -26,6 +26,9 @@ import {
 } from "../src/workflow-action-completion-http";
 
 const digest = "b".repeat(64);
+const runId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const releaseId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const releaseConfigurationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const base: DeliverySnapshot = Object.freeze({
   workflowId: "delivery-001", tenantId: "tenant-001", projectId: "project-001", state: "IDEATION",
   specRevisionId: null, lockedRunConfigurationId: null, runId: null, candidateCommitSha: null,
@@ -48,7 +51,7 @@ function snapshotFor(operation: ControlPlaneWorkflowAction): DeliverySnapshot {
   });
   if (operation === "REQUEST_FRESH_MFA") return Object.freeze({
     ...base, state: "WAITING_MFA", mainCommitSha: "d".repeat(40), evidenceBundleId: "main-evidence-1",
-    mainEvidenceBundleId: "main-evidence-1",
+    mainEvidenceBundleId: "main-evidence-1", runId,
   });
   if (operation === "WAIT_FOR_EXTERNAL_APPROVAL") return Object.freeze({
     ...base, state: "EXTERNAL_APPROVAL_REQUIRED", steamBuildId: "91234567", evidenceBundleId: "steam-evidence-1",
@@ -89,12 +92,33 @@ function receipt(operation: ControlPlaneWorkflowAction): ControlPlaneWorkflowAct
   };
 }
 
+const releases = Object.freeze({
+  async ensure(input: {
+    workflowId: string;
+    runId: string;
+    mainCommitSha: string;
+    mainEvidenceBundleId: string;
+    targetMatrix: readonly ("windows" | "linux" | "macos")[];
+  }) {
+    return Object.freeze({
+      releaseId,
+      workflowId: input.workflowId,
+      runId: input.runId,
+      mainCommitSha: input.mainCommitSha,
+      mainEvidenceBundleId: input.mainEvidenceBundleId,
+      releaseConfigurationId,
+      targetMatrix: input.targetMatrix,
+      state: "WAITING_MFA" as const,
+    });
+  },
+});
+
 test("control-plane workflow handler registers every user or external wait with exact bindings", async () => {
   const observed: Parameters<ControlPlaneWorkflowPort["ensureAction"]>[0][] = [];
   const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) {
     observed.push(input);
     return receipt(input.operation);
-  } });
+  } }, releases);
   const operations: ControlPlaneWorkflowAction[] = [
     "CONTINUE_IDEA_DIALOGUE", "REQUEST_SPEC_APPROVAL", "WAIT_FOR_PROVIDER", "REQUEST_USER_ACCEPTANCE",
     "REQUEST_FRESH_MFA", "WAIT_FOR_EXTERNAL_APPROVAL", "CANCEL_DELIVERY",
@@ -106,12 +130,13 @@ test("control-plane workflow handler registers every user or external wait with 
   assert.equal(observed[2]?.binding.providerRevisionId, "provider-r7");
   assert.equal(observed[3]?.binding.candidateCommitSha, "c".repeat(40));
   assert.equal(observed[4]?.binding.mainCommitSha, "d".repeat(40));
+  assert.equal(observed[4]?.binding.releaseId, releaseId);
   assert.equal(observed[5]?.binding.externalGate, "VALVE_REVIEW");
   assert.equal(observed[6]?.binding.cancellationReason, "user cancelled");
 });
 
 test("control-plane workflow handler never emits a completion signal from a registered wait", async () => {
-  const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } });
+  const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } }, releases);
   const outcome = await handler.execute(job("REQUEST_USER_ACCEPTANCE"), {
     async heartbeat() { return "renewed"; }, async emitSignal() { throw new Error("must not emit"); },
   });
@@ -120,14 +145,14 @@ test("control-plane workflow handler never emits a completion signal from a regi
 });
 
 test("control-plane workflow handler rejects state, receipt and cancellation drift terminally", async () => {
-  const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } });
+  const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } }, releases);
   await assert.rejects(handler.execute(job("REQUEST_SPEC_APPROVAL", base), {
     async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; },
   }), /CONTROL_PLANE_BINDING_INVALID/);
 
   const drift = new ControlPlaneWorkflowHandler({ async ensureAction(input) {
     return { ...receipt(input.operation), requestDigest: "a".repeat(64) };
-  } });
+  } }, releases);
   await assert.rejects(drift.execute(job("REQUEST_FRESH_MFA"), {
     async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; },
   }), /CONTROL_PLANE_RECEIPT_DRIFT/);
@@ -145,7 +170,7 @@ test("Postgres control-plane action store applies RLS and replays only an exact 
   const binding = Object.freeze({
     state: "WAITING_SPEC_APPROVAL", specRevisionId: "spec-r1", lockedRunConfigurationId: null,
     providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null,
-    mainCommitSha: null, steamBuildId: null, externalGate: null, cancellationReason: null,
+    mainCommitSha: null, releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null,
   });
   const row = {
     id: "33333333-3333-4333-8333-333333333333", tenant_id: "11111111-1111-4111-8111-111111111111",
@@ -183,7 +208,7 @@ test("Postgres control-plane action store rolls back an idempotency collision", 
   const binding = Object.freeze({
     state: "IDEATION", specRevisionId: null, lockedRunConfigurationId: null, providerRevisionId: null,
     candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null, mainCommitSha: null,
-    steamBuildId: null, externalGate: null, cancellationReason: null,
+    releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null,
   });
   const client: ControlPlaneWorkflowSqlClient = {
     async query<Row>(statement: string) {
@@ -227,7 +252,7 @@ test("workflow action completion atomically binds an authoritative signal to its
     binding: {
       state: "WAITING_SPEC_APPROVAL", specRevisionId: "spec-r1", lockedRunConfigurationId: null,
       providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
-      evidenceBundleId: null, mainCommitSha: null, steamBuildId: null,
+      evidenceBundleId: null, mainCommitSha: null, releaseId: null, steamBuildId: null,
       externalGate: null, cancellationReason: null,
     },
     completion_signal_id: null, completion_signal_digest: null,
@@ -287,7 +312,7 @@ test("workflow action completion rejects a signal from the wrong authority", asy
         binding: {
           state: "WAITING_MFA", specRevisionId: null, lockedRunConfigurationId: null,
           providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
-          evidenceBundleId: "main-evidence-1", mainCommitSha: "d".repeat(40), steamBuildId: null,
+          evidenceBundleId: "main-evidence-1", mainCommitSha: "d".repeat(40), releaseId, steamBuildId: null,
           externalGate: null, cancellationReason: null,
         },
         completion_signal_id: null, completion_signal_digest: null,

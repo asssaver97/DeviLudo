@@ -155,6 +155,18 @@ revision and freezes its ID and canonical digest into the append-only RC row.
 Retries replay that byte-equivalent artifact; evidence, depot or signature
 drift fails before SteamPipe is called.
 
+The control-plane `REQUEST_FRESH_MFA` action now first calls
+`PostgresSteamReleasePreparation`. It accepts no App ID, session or branch from
+the browser: passed merged-main evidence selects one active immutable project
+release revision, which binds the exact build-session SecretRef, Depot revision,
+private branch and branch-password SecretRef. Migration
+`024_steam_release_preparation.sql` records that workflow/run binding and creates
+one idempotent `WAITING_MFA` release with a null approval. The MFA resolver then
+requires the same waiting control action. Immediately before RC issuance,
+`PostgresSteamPrivateBetaReleasePreparer` verifies the matching authorization is
+already `DISPATCHED` and performs the only permitted one-way approval binding to
+`STEAM_PRIVATE_BETA`; retries cannot select a newer project configuration.
+
 `npm run start:steam-install-services` mounts two separate TLS 1.3 mTLS
 listeners with different client CAs. The preparation listener exposes only
 `POST /v1/clean-install-execution-preparations` to Runner Control and accepts

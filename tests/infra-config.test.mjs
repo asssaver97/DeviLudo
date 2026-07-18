@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 23 }, (_, index) => {
+  const offsets = Array.from({ length: 24 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -278,8 +278,12 @@ test("Steam Workflow Broker production host uses a recoverable RLS outbox and cr
 test("Steam execution re-resolves signed release authority and archives the tested BuildID", () => {
   const migration = readFileSync(new URL("../infra/postgres/021_steam_release_execution.sql", import.meta.url), "utf8");
   const issuanceMigration = readFileSync(new URL("../infra/postgres/023_steam_rc_issuance.sql", import.meta.url), "utf8");
+  const preparationMigration = readFileSync(new URL("../infra/postgres/024_steam_release_preparation.sql", import.meta.url), "utf8");
   const executor = readFileSync(new URL("../services/steam-publisher/src/workflow-broker-executor.ts", import.meta.url), "utf8");
   const issuance = readFileSync(new URL("../services/steam-publisher/src/postgres-rc-issuance.ts", import.meta.url), "utf8");
+  const lifecycle = readFileSync(new URL("../services/steam-publisher/src/postgres-release-lifecycle.ts", import.meta.url), "utf8");
+  const controlHandler = readFileSync(new URL("../services/control-plane/src/workflow-handler.ts", import.meta.url), "utf8");
+  const controlRuntime = readFileSync(new URL("../services/control-plane/src/run-workflow-service.ts", import.meta.url), "utf8");
   const postgres = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-execution.ts", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE deviludo\.steam_rc_artifacts/);
   assert.match(migration, /CREATE TABLE deviludo\.steam_default_branch_receipts/);
@@ -297,8 +301,19 @@ test("Steam execution re-resolves signed release authority and archives the test
   assert.match(issuanceMigration, /steam_project_depot_configuration_no_delete/);
   assert.match(issuanceMigration, /FORCE ROW LEVEL SECURITY/);
   assert.match(issuanceMigration, /ADD COLUMN depot_configuration_id uuid/);
+  assert.match(preparationMigration, /CREATE TABLE deviludo\.steam_project_release_configurations/);
+  assert.match(preparationMigration, /ALTER COLUMN mfa_approval_id DROP NOT NULL/);
+  assert.match(preparationMigration, /steam_release_workflow_idx/);
+  assert.match(preparationMigration, /OLD\.state = 'WAITING_MFA' AND NEW\.state = 'STEAM_PRIVATE_BETA'/);
+  assert.match(preparationMigration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(lifecycle, /attempt\.mode = 'MAIN_RELEASE_GATE'/);
+  assert.match(lifecycle, /ON CONFLICT \(tenant_id, workflow_id\)/);
+  assert.match(lifecycle, /authorization\.state = 'DISPATCHED'/);
+  assert.match(lifecycle, /set_config\('app\.tenant_id'/);
+  assert.match(controlHandler, /this\.releases\.ensure/);
+  assert.match(controlRuntime, /new PostgresSteamReleasePreparation\(pool\)/);
   assert.match(issuance, /runnerArtifactObjectKey/);
-  assert.match(issuance, /depot\.state = 'ACTIVE'/);
+  assert.match(issuance, /depot\.id = release_configuration\.depot_configuration_id/);
   assert.match(issuance, /ON CONFLICT \(tenant_id, release_id\) DO NOTHING/);
   assert.match(issuance, /set_config\('app\.tenant_id'/);
   assert.match(postgres, /authorization\.state = 'DISPATCHED'/);
@@ -307,6 +322,7 @@ test("Steam execution re-resolves signed release authority and archives the test
   assert.match(postgres, /set_config\('app\.tenant_id'/);
   const uploadMethod = executor.slice(executor.indexOf("async #upload"), executor.indexOf("async #publish"));
   const publishMethod = executor.slice(executor.indexOf("async #publish"));
+  assert.ok(uploadMethod.indexOf("releasePreparer.prepare") < uploadMethod.indexOf("rcPreparer.ensure"));
   assert.ok(uploadMethod.indexOf("rcPreparer.ensure") < uploadMethod.indexOf("resolvePrivateBeta"));
   assert.ok(uploadMethod.indexOf("resolvePrivateBeta") < uploadMethod.indexOf("uploadPrivateBeta"));
   assert.ok(publishMethod.indexOf("resolveDefaultBranch") < publishMethod.indexOf("defaultBranch.promote"));

@@ -9,6 +9,7 @@ import {
   workflowCompletionSourceMapFromEnv,
 } from "./workflow-action-completion-http";
 import { PostgresWorkflowActionCompletionStore } from "./workflow-action-completion-postgres";
+import { PostgresSteamReleasePreparation } from "../../steam-publisher/src/postgres-release-lifecycle";
 
 export async function runControlPlaneWorkflowService(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -18,6 +19,7 @@ export async function runControlPlaneWorkflowService(
     env,
     createHandler: (pool) => new ControlPlaneWorkflowHandler(
       new PostgresControlPlaneWorkflowActionStore(pool),
+      new PostgresSteamReleasePreparation(pool),
     ),
     configureServer: (server, pool, serviceEnv) => {
       const sources = workflowCompletionSourceMapFromEnv(serviceEnv);

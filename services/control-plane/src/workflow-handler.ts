@@ -1,9 +1,11 @@
 import type { ExternalApprovalGate } from "../../../lib/orchestration/game-delivery";
 import { WorkflowJobError, type WorkflowJobExecutionContext, type WorkflowJobHandler } from "../../temporal/src/job-processor";
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
+import type { SteamReleasePreparationPort, SteamReleasePreparationReceipt } from "../../steam-publisher/src/postgres-release-lifecycle";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 export type ControlPlaneWorkflowAction =
@@ -24,6 +26,7 @@ export interface ControlPlaneWorkflowBinding {
   readonly draftPullRequest: number | null;
   readonly evidenceBundleId: string | null;
   readonly mainCommitSha: string | null;
+  readonly releaseId: string | null;
   readonly steamBuildId: string | null;
   readonly externalGate: ExternalApprovalGate | null;
   readonly cancellationReason: string | null;
@@ -60,14 +63,31 @@ export interface ControlPlaneWorkflowPort {
  * server-authoritative Temporal signal.
  */
 export class ControlPlaneWorkflowHandler implements WorkflowJobHandler {
-  constructor(private readonly controlPlane: ControlPlaneWorkflowPort) {}
+  constructor(
+    private readonly controlPlane: ControlPlaneWorkflowPort,
+    private readonly releases: Pick<SteamReleasePreparationPort, "ensure">,
+  ) {}
 
   async execute(job: ClaimedWorkflowJob, context: WorkflowJobExecutionContext): Promise<{
     readonly result: Readonly<Record<string, unknown>>;
   }> {
     if (job.destination !== "control-plane") invalid();
     const operation = actionFor(job);
-    const binding = bindingFor(job, operation);
+    let binding = bindingFor(job, operation);
+    if (operation === "REQUEST_FRESH_MFA") {
+      const snapshot = job.request.payload.snapshot;
+      const prepared = await this.releases.ensure({
+        tenantId: job.tenantId,
+        projectId: job.projectId,
+        workflowId: job.workflowId,
+        runId: requiredId(snapshot.runId),
+        mainCommitSha: requiredSha(snapshot.mainCommitSha),
+        mainEvidenceBundleId: requiredId(snapshot.mainEvidenceBundleId),
+        targetMatrix: validateTargetMatrix(snapshot.targetMatrix),
+      });
+      validateReleasePreparation(prepared, job, snapshot);
+      binding = Object.freeze({ ...binding, releaseId: prepared.releaseId });
+    }
     const receipt = await this.controlPlane.ensureAction({
       operationKey: `workflow-job:${job.id}`,
       requestDigest: job.requestDigest,
@@ -117,6 +137,7 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
   let draftPullRequest: number | null = null;
   let evidenceBundleId: string | null = null;
   let mainCommitSha: string | null = null;
+  const releaseId: string | null = null;
   let steamBuildId: string | null = null;
   let externalGate: ExternalApprovalGate | null = null;
   let cancellationReason: string | null = null;
@@ -154,10 +175,30 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
     draftPullRequest,
     evidenceBundleId,
     mainCommitSha,
+    releaseId,
     steamBuildId,
     externalGate,
     cancellationReason,
   });
+}
+
+function validateReleasePreparation(
+  receipt: SteamReleasePreparationReceipt,
+  job: ClaimedWorkflowJob,
+  snapshot: ClaimedWorkflowJob["request"]["payload"]["snapshot"],
+): void {
+  if (!UUID.test(receipt.releaseId) || receipt.workflowId !== job.workflowId
+    || receipt.runId !== snapshot.runId || receipt.mainCommitSha !== snapshot.mainCommitSha
+    || receipt.mainEvidenceBundleId !== snapshot.mainEvidenceBundleId
+    || !UUID.test(receipt.releaseConfigurationId) || receipt.state !== "WAITING_MFA"
+    || JSON.stringify(receipt.targetMatrix) !== JSON.stringify(snapshot.targetMatrix)) invalid();
+}
+
+function validateTargetMatrix(value: readonly string[]): readonly ("windows" | "linux" | "macos")[] {
+  if (!value.length || value.length > 3 || new Set(value).size !== value.length
+    || value.some((entry) => entry !== "windows" && entry !== "linux" && entry !== "macos")
+    || JSON.stringify([...value].sort()) !== JSON.stringify(value)) invalid();
+  return Object.freeze([...value]) as readonly ("windows" | "linux" | "macos")[];
 }
 
 function validateReceipt(
