@@ -26,6 +26,7 @@ services:
       - ./postgres/013_runner_workflow_attempts.sql:/docker-entrypoint-initdb.d/013_runner_workflow_attempts.sql:ro
       - ./postgres/014_runner_execution_locks.sql:/docker-entrypoint-initdb.d/014_runner_execution_locks.sql:ro
       - ./postgres/015_runner_ingress_transactions.sql:/docker-entrypoint-initdb.d/015_runner_ingress_transactions.sql:ro
+      - ./postgres/016_approved_test_plan_bindings.sql:/docker-entrypoint-initdb.d/016_approved_test_plan_bindings.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

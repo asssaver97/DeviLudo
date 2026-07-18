@@ -17,6 +17,7 @@ export interface AuthoritativeSourceSnapshotPort {
     readonly runId: string;
     readonly mode: SourceExecutionPreparationRequest["mode"];
     readonly commitSha: string;
+    readonly expectedSourceDigest: string;
     readonly destinationPath: string;
   }): Promise<Readonly<{ sourceDigest: string }>>;
 }
@@ -106,9 +107,10 @@ export class SourceExecutionPreparer {
         runId: request.runId,
         mode: request.mode,
         commitSha: request.commitSha,
+        expectedSourceDigest: request.sourceDigest,
         destinationPath: snapshotPath,
       });
-      if (!source || !SHA256.test(source.sourceDigest)) invalid("source receipt");
+      if (!source || !SHA256.test(source.sourceDigest) || source.sourceDigest !== request.sourceDigest) invalid("source receipt");
       const planBytes = await this.#plans.read({
         tenantId: request.tenantId,
         projectId: request.projectId,

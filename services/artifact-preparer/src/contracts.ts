@@ -14,6 +14,7 @@ export interface SourceExecutionPreparationRequest {
   readonly lockKey: string;
   readonly mode: "CANDIDATE" | "MAIN_RELEASE_GATE";
   readonly commitSha: string;
+  readonly sourceDigest: string;
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
@@ -33,7 +34,7 @@ export function parseSourceExecutionPreparationRequest(value: unknown): SourceEx
   const body = record(value, "request");
   exactKeys(body, [
     "schemaVersion", "tenantId", "projectId", "runId", "lockKey", "mode", "commitSha",
-    "specRevisionId", "specDigest", "testPlanDigest", "targetMatrix", "toolchain",
+    "sourceDigest", "specRevisionId", "specDigest", "testPlanDigest", "targetMatrix", "toolchain",
   ], "request");
   if (body.schemaVersion !== "deviludo.source-execution-preparation.v1") invalid("schema version");
   const targetMatrix = matrix(body.targetMatrix);
@@ -56,6 +57,7 @@ export function parseSourceExecutionPreparationRequest(value: unknown): SourceEx
     lockKey: required(body.lockKey, SHA256, "lock key"),
     mode: mode(body.mode),
     commitSha: required(body.commitSha, SHA1, "commit"),
+    sourceDigest: required(body.sourceDigest, SHA256, "source digest"),
     specRevisionId: required(body.specRevisionId, UUID, "spec revision"),
     specDigest: required(body.specDigest, SHA256, "spec digest"),
     testPlanDigest: required(body.testPlanDigest, SHA256, "test plan digest"),

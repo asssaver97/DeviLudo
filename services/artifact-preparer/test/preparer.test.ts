@@ -57,6 +57,10 @@ test("source execution preparer rejects plan, source and receipt drift before pe
     await assert.rejects(invalidSource.preparer.prepare(invalidSource.request), /source receipt/);
     assert.equal(invalidSource.locks.size, 0);
 
+    const mismatchedSource = createFixture(join(root, "source-mismatch"), { mismatchedSourceDigest: true });
+    await assert.rejects(mismatchedSource.preparer.prepare(mismatchedSource.request), /source receipt/);
+    assert.equal(mismatchedSource.locks.size, 0);
+
     const drift = createFixture(join(root, "receipt"), { driftReceipt: true });
     await assert.rejects(drift.preparer.prepare(drift.request), /object receipt/);
     assert.equal(drift.locks.size, 0);
@@ -69,6 +73,7 @@ test("source execution preparer rejects plan, source and receipt drift before pe
 function createFixture(root: string, options: {
   readonly corruptPlan?: boolean;
   readonly invalidSourceDigest?: boolean;
+  readonly mismatchedSourceDigest?: boolean;
   readonly driftReceipt?: boolean;
 } = {}) {
   const plan = testPlan();
@@ -81,6 +86,7 @@ function createFixture(root: string, options: {
     lockKey: sha("1"),
     mode: "CANDIDATE" as const,
     commitSha: "a".repeat(40),
+    sourceDigest: sha("a"),
     specRevisionId: "55555555-5555-4555-8555-555555555555",
     specDigest: sha("2"),
     testPlanDigest: digest(planBytes),
@@ -102,7 +108,7 @@ function createFixture(root: string, options: {
         writeFile(join(input.destinationPath, "project.godot"), "config_version=5\n[application]\nconfig/name=\"Fixture\"\n"),
         writeFile(join(input.destinationPath, "scripts", "main.gd"), "extends Node\n"),
       ]);
-      return { sourceDigest: options.invalidSourceDigest ? "invalid" : sha("a") };
+      return { sourceDigest: options.invalidSourceDigest ? "invalid" : options.mismatchedSourceDigest ? sha("f") : sha("a") };
     },
   };
   const plans: FrozenTestPlanPort = {

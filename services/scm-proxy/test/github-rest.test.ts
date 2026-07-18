@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { GitHubRepositoryBinding } from "../src/github-contracts";
 import { GitHubAppInstallationTokenBroker, GitHubRestConnector } from "../src/github-rest";
@@ -24,6 +25,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 
 test("installation token broker signs a short App JWT and requests one repository-scoped token", async () => {
   let signingInput = "";
+  let tokenRequests = 0;
   let observed: { url: string; authorization: string; body: unknown; version: string } | null = null;
   const broker = new GitHubAppInstallationTokenBroker({
     appId: "778899",
@@ -35,6 +37,7 @@ test("installation token broker signs a short App JWT and requests one repositor
       },
     },
     fetch: (async (input, init) => {
+      tokenRequests += 1;
       const headers = new Headers(init?.headers);
       observed = {
         url: String(input),
@@ -67,6 +70,34 @@ test("installation token broker signs a short App JWT and requests one repositor
   assert.equal(capture.version, "2026-03-10");
   assert.equal(access.value, token);
   assert.equal(access.repositoryId, binding.repositoryId);
+  assert.equal((await broker.issue(binding)).value, token);
+  assert.equal(tokenRequests, 1, "a fresh token must not be minted for every Git blob request");
+});
+
+test("source snapshot token broker requests only repository Contents read", async () => {
+  let requestBody: unknown;
+  const broker = new GitHubAppInstallationTokenBroker({
+    appId: "778899",
+    permissionMode: "source-read",
+    signer: {
+      keyId: "vault-github-app-key-v3",
+      async signRs256() { return new Uint8Array(256).fill(7); },
+    },
+    fetch: (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body));
+      return jsonResponse({
+        token,
+        expires_at: "2099-01-01T00:00:00.000Z",
+        repositories: [{ id: binding.repositoryId }],
+        permissions: { contents: "read", metadata: "read" },
+      }, 201);
+    }) as typeof fetch,
+  });
+  await broker.issue(binding);
+  assert.deepEqual(requestBody, {
+    repository_ids: [991],
+    permissions: { contents: "read" },
+  });
 });
 
 test("REST connector maps Git data, Draft PR, GraphQL ready and merge operations without exposing its token", async () => {
@@ -191,4 +222,40 @@ test("REST connector derives a deterministic source digest from the complete Git
     .map((entry) => `${entry.mode} ${entry.type} ${entry.sha}\t${entry.path}\0`).join("");
   const expected = (await import("node:crypto")).createHash("sha256").update(canonical).digest("hex");
   assert.equal(await connector.getSourceDigest(binding, "c".repeat(40)), expected);
+  const tree = await connector.getSourceTree(binding, "c".repeat(40));
+  assert.equal(tree.sourceDigest, expected);
+  assert.deepEqual(tree.entries.map((entry) => entry.path), ["game/a.gd", "game/z.gd"]);
+});
+
+test("REST connector verifies exact Git blob SHA, declared size and canonical base64", async () => {
+  const content = Buffer.from("extends Node\n");
+  const blobSha = createHash("sha1").update(`blob ${content.byteLength}\0`).update(content).digest("hex");
+  let response: unknown = {
+    sha: blobSha,
+    size: content.byteLength,
+    encoding: "base64",
+    content: content.toString("base64"),
+  };
+  const connector = new GitHubRestConnector({
+    tokens: { async issue() { return { value: token, expiresAt: "2099-01-01T00:00:00.000Z", installationId: "123456", repositoryId: 991 }; } },
+    fetch: (async () => jsonResponse(response)) as typeof fetch,
+  });
+  assert.deepEqual(await connector.getBlob(binding, blobSha), content);
+  response = { ...response as object, content: Buffer.from("tampered").toString("base64"), size: 8 };
+  await assert.rejects(connector.getBlob(binding, blobSha), /integrity/);
+});
+
+test("REST connector stops reading a streamed GitHub response at the configured bound", async () => {
+  const connector = new GitHubRestConnector({
+    tokens: { async issue() { return { value: token, expiresAt: "2099-01-01T00:00:00.000Z", installationId: "123456", repositoryId: 991 }; } },
+    fetch: (async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1024 * 1024));
+        controller.enqueue(new Uint8Array(1024 * 1024));
+        controller.enqueue(new Uint8Array(1));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch,
+  });
+  await assert.rejects(connector.getRepository(binding), /size limit/);
 });

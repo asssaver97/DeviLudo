@@ -1,0 +1,174 @@
+import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import type { GitHubRepositoryBinding } from "./github-contracts";
+import type { SourceSnapshotAuthority } from "./source-snapshot-service";
+
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const SHA1 = /^[a-f0-9]{40}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
+
+type AuthorityRow = {
+  tenant_id: string;
+  project_id: string;
+  installation_id: string | number | bigint;
+  repository_id: string | number | bigint;
+  repository_node_id: string;
+  owner_name: string;
+  repository_name: string;
+  default_branch: string;
+  source_digest: string;
+};
+
+/** Resolves an SCM snapshot only from append-only GitHub receipts under tenant RLS. */
+export class PostgresSourceSnapshotAuthority implements SourceSnapshotAuthority {
+  constructor(private readonly pool: PostgresWorkflowPool) {}
+
+  async resolve(input: Parameters<SourceSnapshotAuthority["resolve"]>[0]): Promise<Readonly<{
+    binding: GitHubRepositoryBinding;
+    sourceDigest: string;
+  }>> {
+    validateInput(input);
+    return this.#transaction(input.tenantId, async (client) => {
+      const selected = input.mode === "CANDIDATE"
+        ? await candidateReceipt(client, input)
+        : await mainReceipt(client, input);
+      if (selected.rows.length !== 1) invalid();
+      const row = selected.rows[0]!;
+      if (row.tenant_id !== input.tenantId || row.project_id !== input.projectId
+        || row.source_digest !== input.sourceDigest) invalid();
+      const installationId = positiveBigintString(row.installation_id);
+      const repositoryId = safePositiveNumber(row.repository_id);
+      const binding = Object.freeze({
+        tenantId: row.tenant_id,
+        projectId: row.project_id,
+        installationId,
+        repositoryId,
+        repositoryNodeId: safeText(row.repository_node_id, 256),
+        owner: safeText(row.owner_name, 100),
+        name: safeText(row.repository_name, 100),
+        defaultBranch: safeText(row.default_branch, 255),
+      });
+      return Object.freeze({ binding, sourceDigest: row.source_digest });
+    });
+  }
+
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
+      if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
+    } finally { client.release(); }
+  }
+
+  async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+      const value = await operation(client);
+      await client.query("COMMIT");
+      return value;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* preserve the authority error */ }
+      throw error;
+    } finally { client.release(); }
+  }
+}
+
+function candidateReceipt(
+  client: PostgresWorkflowClient,
+  input: Parameters<SourceSnapshotAuthority["resolve"]>[0],
+) {
+  return client.query<AuthorityRow>(
+    `SELECT repository.tenant_id::text,
+            repository.project_id::text,
+            installation.installation_id,
+            repository.repository_id,
+            repository.repository_node_id,
+            repository.owner_name,
+            repository.repository_name,
+            repository.default_branch,
+            candidate.source_digest
+       FROM deviludo.github_candidate_receipts candidate
+       JOIN deviludo.github_repository_bindings repository
+         ON repository.id = candidate.repository_binding_id
+        AND repository.tenant_id = candidate.tenant_id
+        AND repository.project_id = candidate.project_id
+        AND repository.status = 'ACTIVE'
+       JOIN deviludo.github_installations installation
+         ON installation.id = repository.github_installation_id
+        AND installation.tenant_id = repository.tenant_id
+        AND installation.status = 'ACTIVE'
+      WHERE candidate.tenant_id = $1::uuid
+        AND candidate.project_id = $2::uuid
+        AND candidate.run_id = $3::uuid
+        AND candidate.candidate_commit_sha = $4
+        AND candidate.source_digest = $5
+      FOR SHARE OF candidate, repository, installation`,
+    [input.tenantId, input.projectId, input.runId, input.commitSha, input.sourceDigest],
+  );
+}
+
+function mainReceipt(
+  client: PostgresWorkflowClient,
+  input: Parameters<SourceSnapshotAuthority["resolve"]>[0],
+) {
+  return client.query<AuthorityRow>(
+    `SELECT repository.tenant_id::text,
+            repository.project_id::text,
+            installation.installation_id,
+            repository.repository_id,
+            repository.repository_node_id,
+            repository.owner_name,
+            repository.repository_name,
+            repository.default_branch,
+            merge.main_source_digest AS source_digest
+       FROM deviludo.github_merge_receipts merge
+       JOIN deviludo.github_candidate_receipts candidate
+         ON candidate.id = merge.candidate_receipt_id
+        AND candidate.tenant_id = merge.tenant_id
+        AND candidate.project_id = merge.project_id
+       JOIN deviludo.github_repository_bindings repository
+         ON repository.id = candidate.repository_binding_id
+        AND repository.tenant_id = merge.tenant_id
+        AND repository.project_id = merge.project_id
+        AND repository.status = 'ACTIVE'
+       JOIN deviludo.github_installations installation
+         ON installation.id = repository.github_installation_id
+        AND installation.tenant_id = repository.tenant_id
+        AND installation.status = 'ACTIVE'
+      WHERE merge.tenant_id = $1::uuid
+        AND merge.project_id = $2::uuid
+        AND candidate.run_id = $3::uuid
+        AND merge.default_branch_head_sha = $4
+        AND merge.main_source_digest = $5
+      FOR SHARE OF merge, candidate, repository, installation`,
+    [input.tenantId, input.projectId, input.runId, input.commitSha, input.sourceDigest],
+  );
+}
+
+function validateInput(input: Parameters<SourceSnapshotAuthority["resolve"]>[0]): void {
+  if (!UUID.test(input.tenantId) || !UUID.test(input.projectId) || !UUID.test(input.runId)
+    || (input.mode !== "CANDIDATE" && input.mode !== "MAIN_RELEASE_GATE")
+    || !SHA1.test(input.commitSha) || !SHA256.test(input.sourceDigest)) invalid();
+}
+
+function positiveBigintString(value: string | number | bigint): string {
+  const selected = String(value);
+  if (!/^[1-9][0-9]{0,19}$/.test(selected)) invalid();
+  return selected;
+}
+
+function safePositiveNumber(value: string | number | bigint): number {
+  const selected = Number(value);
+  if (!Number.isSafeInteger(selected) || selected < 1) invalid();
+  return selected;
+}
+
+function safeText(value: string, maximum: number): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > maximum || /[\0\r\n]/.test(value)) invalid();
+  return value;
+}
+
+function invalid(): never {
+  throw new Error("SCM source snapshot authority receipt is invalid");
+}

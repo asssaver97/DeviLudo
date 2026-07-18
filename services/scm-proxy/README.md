@@ -59,10 +59,22 @@ returns the observed default-branch head. GitHub installation tokens and App
 signing keys never enter the Temporal destination process. Broker health is a
 readiness gate and long merges heartbeat the workflow job lease.
 
+The isolated source-snapshot Broker uses a separate installation-token profile
+with only repository Contents read. It resolves the exact candidate or fresh
+merged-main SHA and source digest from append-only PostgreSQL receipts under
+tenant RLS, reconstructs the tree from integrity-checked Git blobs, uploads a
+deterministic zstd USTAR to immutable storage, and returns only a five-minute
+download grant to the Artifact Preparer. Git redirects, floating branch names,
+symlinks, submodules and mutable source archives are not accepted.
+
 The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1
 until a SecurityAdmin-approved, DNS-pinning Connector is added.
+
+Run the production source boundary with `npm run start:source-snapshot` and the
+file-mounted configuration in `.source-snapshot.env.example`. The process uses
+an mTLS Vault/KMS signing Broker; it has no GitHub App private-key file setting.
 
 The public Web preview returns `503` for install/setup/callback routes until
 `DEVILUDO_GITHUB_AUTH_BROKER_URL` and a Vault-injected session HMAC key are

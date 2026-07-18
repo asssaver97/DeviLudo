@@ -28,15 +28,21 @@ transfer to a sorted HTTPS origin allow-list and requires an independently
 verified commit receipt. TLS keys and CAs are read only from absolute mounted
 files; the normalized service environment excludes unrelated keys and secrets.
 
+`MtlsAuthoritativeSourceSnapshotClient` now obtains the exact commit/source
+tuple from the isolated production `start:source-snapshot` service. That service
+resolves append-only GitHub candidate/merge receipts under tenant RLS, uses a
+repository-scoped Contents-read installation token, verifies every Git blob,
+and returns only a short immutable S3 download grant. `PostgresFrozenTestPlanPort`
+independently reads the canonical frozen plan bound to the approved spec.
+
 Run the core contract suite with:
 
 ```bash
 npm run test:artifact-preparer
 ```
 
-The core intentionally receives SCM snapshot and approved-plan ports. The
-Evidence Archive object-publish port is implemented, but production deployment
-is not complete until the remaining two ports are wired to separate
-mTLS-authenticated GitHub App/spec brokers and an Artifact Preparer host is
-started from the workflow path. Tests use in-process transports and do not
+All four production ports now exist. The remaining deployment boundary is the
+Artifact Preparer host and its durable trigger from the Runner workflow path;
+until that host is configured, Runner Control intentionally remains at
+`RUNNER_EXECUTION_LOCK_MISSING`. Tests use in-process transports and do not
 claim that an external GitHub repository or S3 service was contacted.

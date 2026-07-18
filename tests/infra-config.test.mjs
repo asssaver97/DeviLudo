@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 15 }, (_, index) => {
+  const offsets = Array.from({ length: 16 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,46 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("approved specifications bind one append-only canonical test plan", () => {
+  const migration = readFileSync(new URL("../infra/postgres/016_approved_test_plan_bindings.sql", import.meta.url), "utf8");
+  const reader = readFileSync(new URL("../services/artifact-preparer/src/postgres-test-plan.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.approved_test_plan_bindings/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, spec_revision_id\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /approved_test_plan_bindings_append_only/);
+  assert.match(reader, /spec\.aggregate_type = 'GAME_SPEC'/);
+  assert.match(reader, /plan\.aggregate_type = 'TEST_PLAN'/);
+  assert.match(reader, /set_config\('app\.tenant_id'/);
+  assert.match(reader, /createHash\("sha256"\)/);
+});
+
+test("authoritative GitHub source snapshots are tenant-bound, read-only and mTLS isolated", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const authority = readFileSync(new URL("../services/scm-proxy/src/postgres-source-snapshot-authority.ts", import.meta.url), "utf8");
+  const connector = readFileSync(new URL("../services/scm-proxy/src/github-rest.ts", import.meta.url), "utf8");
+  const materializer = readFileSync(new URL("../services/scm-proxy/src/github-source-materializer.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/scm-proxy/src/source-snapshot-http.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/scm-proxy/src/run-source-snapshot-service.ts", import.meta.url), "utf8");
+  const signer = readFileSync(new URL("../services/scm-proxy/src/github-app-signer-client.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:source-snapshot"], "node --import tsx services/scm-proxy/src/run-source-snapshot-service.ts");
+  assert.match(authority, /set_config\('app\.tenant_id'/);
+  assert.match(authority, /merge\.main_source_digest = \$5/);
+  assert.match(authority, /repository\.status = 'ACTIVE'/);
+  assert.match(connector, /"source-read"/);
+  assert.match(connector, /permissions: requestedPermissions/);
+  assert.match(connector, /gitBlobSha\(content\) !== expectedSha/);
+  assert.match(materializer, /constants\.O_NOFOLLOW/);
+  assert.match(materializer, /type !== "blob"/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(runtime, /new PostgresSourceSnapshotAuthority\(pool\)/);
+  assert.match(runtime, /permissionMode: "source-read"/);
+  assert.doesNotMatch(runtime, /GITHUB_APP_PRIVATE_KEY/);
+  assert.match(signer, /\/v1\/github-app\/sign-rs256/);
+  assert.doesNotMatch(signer, /createPrivateKey|PRIVATE KEY/);
 });
 
 test("Runner ingress persists replayable signed jobs and immutable lease/event bindings", () => {

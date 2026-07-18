@@ -9,14 +9,18 @@ import type {
   GitHubRepositoryBinding,
   GitHubRepositorySnapshot,
   GitHubScmConnector,
+  GitHubSourceTreeSnapshot,
 } from "./github-contracts";
 
 const DEFAULT_API_BASE_URL = "https://api.github.com/";
 const DEFAULT_API_VERSION = "2026-03-10";
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_BLOB_BYTES = 100 * 1024 * 1024;
+const MAX_BLOB_RESPONSE_BYTES = 140 * 1024 * 1024;
 const SHA1 = /^[a-f0-9]{40}$/;
 
 type FetchLike = typeof fetch;
+export type GitHubInstallationPermissionMode = "scm-write" | "source-read";
 
 export class GitHubAppInstallationTokenBroker implements GitHubInstallationTokenBroker {
   readonly #appId: string;
@@ -25,6 +29,9 @@ export class GitHubAppInstallationTokenBroker implements GitHubInstallationToken
   readonly #apiBaseUrl: URL;
   readonly #apiVersion: string;
   readonly #timeoutMs: number;
+  readonly #permissionMode: GitHubInstallationPermissionMode;
+  readonly #cache = new Map<string, GitHubInstallationAccessToken>();
+  readonly #pending = new Map<string, Promise<GitHubInstallationAccessToken>>();
 
   constructor(options: {
     readonly appId: string;
@@ -33,6 +40,7 @@ export class GitHubAppInstallationTokenBroker implements GitHubInstallationToken
     readonly apiBaseUrl?: string;
     readonly apiVersion?: string;
     readonly timeoutMs?: number;
+    readonly permissionMode?: GitHubInstallationPermissionMode;
   }) {
     if (!/^\d+$/.test(options.appId)) throw new Error("GitHub App ID must be numeric");
     if (!options.signer.keyId.trim()) throw new Error("GitHub App JWT signer key ID is required");
@@ -42,11 +50,27 @@ export class GitHubAppInstallationTokenBroker implements GitHubInstallationToken
     this.#apiBaseUrl = validateApiBaseUrl(options.apiBaseUrl ?? DEFAULT_API_BASE_URL);
     this.#apiVersion = validateApiVersion(options.apiVersion ?? DEFAULT_API_VERSION);
     this.#timeoutMs = validateTimeout(options.timeoutMs ?? 15_000);
+    this.#permissionMode = permissionMode(options.permissionMode ?? "scm-write");
   }
 
   async issue(binding: GitHubRepositoryBinding): Promise<GitHubInstallationAccessToken> {
     validateNumericInstallationId(binding.installationId);
     if (!Number.isSafeInteger(binding.repositoryId) || binding.repositoryId <= 0) throw new Error("GitHub repository ID is invalid");
+    const cacheKey = `${binding.installationId}:${binding.repositoryId}`;
+    const cached = this.#cache.get(cacheKey);
+    if (cached && Date.parse(cached.expiresAt) > Date.now() + 5 * 60_000) return cached;
+    this.#cache.delete(cacheKey);
+    const existing = this.#pending.get(cacheKey);
+    if (existing) return existing;
+    const issuance = this.#issueFresh(binding).then((access) => {
+      this.#cache.set(cacheKey, access);
+      return access;
+    }).finally(() => this.#pending.delete(cacheKey));
+    this.#pending.set(cacheKey, issuance);
+    return issuance;
+  }
+
+  async #issueFresh(binding: GitHubRepositoryBinding): Promise<GitHubInstallationAccessToken> {
     const now = Math.floor(Date.now() / 1_000);
     const header = base64UrlJson({ alg: "RS256", typ: "JWT" });
     const claims = base64UrlJson({ iat: now - 60, exp: now + 9 * 60, iss: this.#appId });
@@ -55,13 +79,16 @@ export class GitHubAppInstallationTokenBroker implements GitHubInstallationToken
     if (!(signature instanceof Uint8Array) || signature.byteLength < 128) throw new Error("GitHub App JWT signer returned an invalid signature");
     const appJwt = `${signingInput}.${Buffer.from(signature).toString("base64url")}`;
     const url = new URL(`/app/installations/${encodeURIComponent(binding.installationId)}/access_tokens`, this.#apiBaseUrl);
+    const requestedPermissions = this.#permissionMode === "source-read"
+      ? { contents: "read" }
+      : { contents: "write", pull_requests: "write" };
     const response = await fetchWithTimeout(this.#fetch, url, {
       method: "POST",
       redirect: "error",
       headers: githubHeaders(this.#apiVersion, appJwt),
       body: JSON.stringify({
         repository_ids: [binding.repositoryId],
-        permissions: { contents: "write", pull_requests: "write" },
+        permissions: requestedPermissions,
       }),
     }, this.#timeoutMs);
     if (response.status !== 201) throw githubStatusError("installation-token", response);
@@ -74,7 +101,10 @@ export class GitHubAppInstallationTokenBroker implements GitHubInstallationToken
     const ids = repositories.map((item) => objectNumber(item, "id"));
     if (ids.length !== 1 || ids[0] !== binding.repositoryId) throw new Error("GitHub installation token is not scoped only to the bound repository");
     const permissions = requireObject(body, "permissions");
-    if (permissions.contents !== "write" || permissions.pull_requests !== "write") {
+    const receivedRequiredPermissions = this.#permissionMode === "source-read"
+      ? permissions.contents === "read"
+      : permissions.contents === "write" && permissions.pull_requests === "write";
+    if (!receivedRequiredPermissions) {
       throw new Error("GitHub installation token did not receive the required least privileges");
     }
     return Object.freeze({ value: token, expiresAt, installationId: binding.installationId, repositoryId: binding.repositoryId });
@@ -135,6 +165,10 @@ export class GitHubRestConnector implements GitHubScmConnector {
   }
 
   async getSourceDigest(binding: GitHubRepositoryBinding, commitSha: string): Promise<string> {
+    return (await this.getSourceTree(binding, commitSha)).sourceDigest;
+  }
+
+  async getSourceTree(binding: GitHubRepositoryBinding, commitSha: string): Promise<GitHubSourceTreeSnapshot> {
     const commit = await this.getCommit(binding, commitSha);
     const raw = await this.#request(
       binding,
@@ -148,18 +182,49 @@ export class GitHubRestConnector implements GitHubScmConnector {
     if (body.truncated !== false || !Array.isArray(body.tree) || body.tree.length > 100_000) {
       throw new Error("GitHub source tree is incomplete or exceeds the entry limit");
     }
-    const entries = body.tree.map((value) => {
+    const allEntries = body.tree.map((value) => {
       const entry = requireJsonObject(value);
       const path = requireTreePath(entry.path);
       const mode = requireTreeMode(entry.mode);
       const type = requireTreeType(entry.type);
       const sha = requireSha(String(entry.sha ?? ""), "tree entry");
       return { path, mode, type, sha };
-    }).filter((entry) => entry.type !== "tree");
+    });
+    const entries = allEntries.filter((entry) => entry.type !== "tree");
     entries.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
     const hash = createHash("sha256");
     for (const entry of entries) hash.update(`${entry.mode} ${entry.type} ${entry.sha}\t${entry.path}\0`, "utf8");
-    return hash.digest("hex");
+    return Object.freeze({
+      commitSha: commit.commitSha,
+      treeSha: commit.treeSha,
+      sourceDigest: hash.digest("hex"),
+      entries: Object.freeze(entries.map((entry) => Object.freeze(entry))),
+    }) as GitHubSourceTreeSnapshot;
+  }
+
+  async getBlob(binding: GitHubRepositoryBinding, blobSha: string): Promise<Buffer> {
+    const expectedSha = requireSha(blobSha, "blob");
+    const body = requireJsonObject(await this.#request(
+      binding,
+      "GET",
+      `${repositoryPath(binding)}/git/blobs/${expectedSha}`,
+      undefined,
+      false,
+      undefined,
+      MAX_BLOB_RESPONSE_BYTES,
+    ));
+    const observedSha = requireSha(requireString(body, "sha", 40), "blob response");
+    const size = body.size;
+    const encoded = body.content;
+    if (observedSha !== expectedSha || body.encoding !== "base64" || !Number.isSafeInteger(size)
+      || (size as number) < 0 || (size as number) > MAX_BLOB_BYTES || typeof encoded !== "string"
+      || encoded.length > Math.ceil(MAX_BLOB_BYTES / 3) * 4 + 1_000_000
+      || /[^A-Za-z0-9+/=\r\n]/.test(encoded)) throw new Error("GitHub blob response is invalid");
+    const normalized = encoded.replace(/[\r\n]/g, "");
+    const content = Buffer.from(normalized, "base64");
+    if (content.byteLength !== size || content.toString("base64") !== normalized
+      || gitBlobSha(content) !== expectedSha) throw new Error("GitHub blob content failed integrity verification");
+    return content;
   }
 
   async createBlob(binding: GitHubRepositoryBinding, contentBase64: string): Promise<{ readonly blobSha: string }> {
@@ -259,6 +324,7 @@ export class GitHubRestConnector implements GitHubScmConnector {
     body?: unknown,
     allowNotFound = false,
     query?: Readonly<Record<string, string>>,
+    maxResponseBytes = MAX_RESPONSE_BYTES,
   ): Promise<Record<string, unknown> | unknown[] | null> {
     const access = await this.#tokens.issue(binding);
     validateAccessToken(access, binding);
@@ -272,7 +338,7 @@ export class GitHubRestConnector implements GitHubScmConnector {
     }, this.#timeoutMs);
     if (allowNotFound && response.status === 404) return null;
     if (response.status < 200 || response.status >= 300) throw githubStatusError(`${method} ${pathname}`, response);
-    return readJson(response);
+    return readJson(response, maxResponseBytes);
   }
 
   async #requestObject(
@@ -330,11 +396,28 @@ async function fetchWithTimeout(fetcher: FetchLike, url: URL, init: RequestInit,
   }
 }
 
-async function readJson(response: Response): Promise<Record<string, unknown> | unknown[]> {
+async function readJson(response: Response, maxResponseBytes = MAX_RESPONSE_BYTES): Promise<Record<string, unknown> | unknown[]> {
   const declared = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error("GitHub API response exceeds the size limit");
-  const text = await response.text();
-  if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) throw new Error("GitHub API response exceeds the size limit");
+  if (Number.isFinite(declared) && declared > maxResponseBytes) throw new Error("GitHub API response exceeds the size limit");
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  const reader = response.body?.getReader();
+  if (reader) {
+    try {
+      while (true) {
+        const item = await reader.read();
+        if (item.done) break;
+        const chunk = Buffer.from(item.value);
+        bytes += chunk.byteLength;
+        if (bytes > maxResponseBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error("GitHub API response exceeds the size limit");
+        }
+        chunks.push(chunk);
+      }
+    } finally { reader.releaseLock(); }
+  }
+  const text = Buffer.concat(chunks, bytes).toString("utf8");
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -343,6 +426,10 @@ async function readJson(response: Response): Promise<Record<string, unknown> | u
   }
   if (!parsed || typeof parsed !== "object") throw new Error("GitHub API returned an invalid JSON payload");
   return parsed as Record<string, unknown> | unknown[];
+}
+
+function gitBlobSha(content: Buffer): string {
+  return createHash("sha1").update(`blob ${content.byteLength}\0`, "utf8").update(content).digest("hex");
 }
 
 async function readJsonObject(response: Response): Promise<Record<string, unknown>> {
@@ -442,6 +529,11 @@ function validateApiVersion(value: string): string {
 
 function validateTimeout(value: number): number {
   if (!Number.isInteger(value) || value < 1_000 || value > 60_000) throw new Error("GitHub API timeout is invalid");
+  return value;
+}
+
+function permissionMode(value: string): GitHubInstallationPermissionMode {
+  if (value !== "scm-write" && value !== "source-read") throw new Error("GitHub installation permission mode is invalid");
   return value;
 }
 

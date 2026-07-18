@@ -74,6 +74,25 @@ export interface GitHubCommitSnapshot {
   readonly treeSha: string;
 }
 
+export interface GitHubSourceTreeEntry {
+  readonly path: string;
+  readonly mode: "100644" | "100755" | "120000" | "160000";
+  readonly type: "blob" | "commit";
+  readonly sha: string;
+}
+
+export interface GitHubSourceTreeSnapshot {
+  readonly commitSha: string;
+  readonly treeSha: string;
+  readonly sourceDigest: string;
+  readonly entries: readonly GitHubSourceTreeEntry[];
+}
+
+export interface GitHubSourceTreeConnector {
+  getSourceTree(binding: GitHubRepositoryBinding, commitSha: string): Promise<GitHubSourceTreeSnapshot>;
+  getBlob(binding: GitHubRepositoryBinding, blobSha: string): Promise<Buffer>;
+}
+
 export interface GitHubPullRequestSnapshot {
   readonly number: number;
   readonly nodeId: string;
