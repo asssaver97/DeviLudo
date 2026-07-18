@@ -10,6 +10,7 @@ import type {
   InferenceGatewayAuthorizerOptions,
 } from "../src/contracts";
 import { PROVIDER_PROBE_CHECKS } from "../src/provider-probe";
+import { InferenceRequestClaimError } from "../src/production-connector";
 
 const signingKey = new Uint8Array(32).fill(19);
 const now = 1_800_000_000;
@@ -68,7 +69,11 @@ function options(overrides: Partial<{
     signingKey,
     runs: { async get() { return overrides.run === undefined ? activeRun : overrides.run; } },
     providers: { async get() { return overrides.provider === undefined ? provider : overrides.provider; } },
-    usage: { async get() { return overrides.usage ?? zeroUsage; }, async record() {} },
+    usage: {
+      async get() { return overrides.usage ?? zeroUsage; },
+      async claim() { return "ACQUIRED"; },
+      async complete() {}, async release() {}, async abandon() {},
+    },
     dns: { async resolve() { return [{ address: overrides.address ?? "93.184.216.34", family: 4 }]; } },
   };
 }
@@ -222,4 +227,25 @@ test("Provider probe HTTP boundary requires its workload authorizer and returns 
   assert.equal(denied.statusCode, 403);
   assert.equal(denied.json().error.code, "PROVIDER_PROBE_WORKLOAD_FORBIDDEN");
   await forbidden.close();
+});
+
+test("HTTP boundary returns stable run-claim errors without exposing internal state", async () => {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const token = await issueRunToken(signingKey, { ...claims, iat: issuedAt, exp: issuedAt + 600 });
+  for (const [code, status] of [
+    ["RUN_INFERENCE_BUSY", 409],
+    ["RUN_INFERENCE_RECONCILIATION_REQUIRED", 503],
+    ["RUN_BUDGET_EXHAUSTED", 429],
+  ] as const) {
+    const server = buildInferenceGateway({
+      ...options(),
+      connector: { async forward() { throw new InferenceRequestClaimError(code, status); } },
+    });
+    const response = await server.inject({
+      method: "POST", url: "/v1/responses", headers: { authorization: `Bearer ${token}` }, payload: { model, input: "x" },
+    });
+    assert.equal(response.statusCode, status);
+    assert.equal(response.json().error.code, code);
+    await server.close();
+  }
 });

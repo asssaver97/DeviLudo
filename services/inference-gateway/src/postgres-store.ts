@@ -6,6 +6,7 @@ import type {
   ActiveRunAuthorization,
   GatewayProviderRevision,
   GatewayUsage,
+  GatewayUsageClaimBinding,
   ProviderRevisionRegistry,
   RunAuthorizationRegistry,
   UsageLedger,
@@ -49,6 +50,18 @@ type UsageEventRow = UsageRow & {
   provider_revision_id: string;
   credential_version_id: string;
   model: string;
+};
+type ClaimRow = {
+  request_id: string;
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  provider_revision_id: string;
+  credential_version_id: string;
+  model: string;
+  claim_token: string;
+  state: string;
+  expired: boolean;
 };
 
 /** Tenant-RLS registry and append-only usage ledger for the production Gateway. */
@@ -109,37 +122,150 @@ export class PostgresInferenceGatewayStore {
     });
   }
 
-  async record(input: Parameters<UsageLedger["record"]>[0]): Promise<void> {
-    validateUsageInput(input);
+  async claim(input: GatewayUsageClaimBinding): Promise<"ACQUIRED" | "BUSY" | "INDETERMINATE" | "BUDGET_EXHAUSTED"> {
+    validateClaimBinding(input);
+    return this.#transaction(input.tenantId, async (client) => {
+      const runResult = await client.query<RunRow>(
+        `SELECT tenant_id::text, project_id::text, run_id::text,
+                profile_revision_id, provider_revision_id, credential_version_id,
+                models, budget, nonce, state
+           FROM deviludo.inference_run_authorizations
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+            AND expires_at > now()
+          FOR UPDATE`,
+        [input.tenantId, input.runId],
+      );
+      if (runResult.rows.length !== 1) invalid();
+      const run = parseRun(runResult.rows[0]!);
+      if (run.state !== "ACTIVE" || run.projectId !== input.projectId
+        || run.providerRevisionId !== input.providerRevisionId
+        || run.credentialVersionId !== input.credentialVersionId
+        || !run.models.includes(input.model)) invalid();
+      const unresolved = await client.query<ClaimRow>(
+        `SELECT request_id::text, tenant_id::text, project_id::text, run_id::text,
+                provider_revision_id, credential_version_id, model, claim_token::text,
+                state, claim_expires_at <= now() AS expired
+           FROM deviludo.inference_request_claims
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+            AND state IN ('ACTIVE', 'INDETERMINATE')
+          FOR UPDATE`,
+        [input.tenantId, input.runId],
+      );
+      if (unresolved.rows.length > 1) invalid();
+      const existing = unresolved.rows[0];
+      if (existing) {
+        validateClaimRow(existing);
+        if (existing.tenant_id !== input.tenantId || existing.run_id !== input.runId) invalid();
+        if (existing.state === "INDETERMINATE") return "INDETERMINATE";
+        if (!existing.expired) return "BUSY";
+        const abandoned = await client.query(
+          `UPDATE deviludo.inference_request_claims
+              SET state = 'INDETERMINATE'
+            WHERE tenant_id = $1::uuid AND request_id = $2::uuid
+              AND claim_token = $3::uuid AND state = 'ACTIVE'`,
+          [input.tenantId, existing.request_id, existing.claim_token],
+        );
+        if (abandoned.rowCount !== 1) invalid();
+        return "INDETERMINATE";
+      }
+      const usageResult = await client.query<UsageRow>(
+        `SELECT COALESCE(sum(input_tokens), 0)::text AS input_tokens,
+                COALESCE(sum(output_tokens), 0)::text AS output_tokens,
+                COALESCE(sum(cost_usd), 0)::text AS cost_usd
+           FROM deviludo.inference_usage_events
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid`,
+        [input.tenantId, input.runId],
+      );
+      if (usageResult.rows.length !== 1) invalid();
+      if (budgetExhausted(run.budget, parseUsage(usageResult.rows[0]!))) return "BUDGET_EXHAUSTED";
+      const inserted = await client.query(
+        `INSERT INTO deviludo.inference_request_claims
+          (request_id, tenant_id, project_id, run_id, provider_revision_id,
+           credential_version_id, model, claim_token, state, claim_expires_at)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7,
+                 $8::uuid, 'ACTIVE', now() + make_interval(secs => $9::double precision))`,
+        [
+          input.requestId, input.tenantId, input.projectId, input.runId,
+          input.providerRevisionId, input.credentialVersionId, input.model,
+          input.claimToken, input.leaseSeconds,
+        ],
+      );
+      if (inserted.rowCount !== 1) invalid();
+      return "ACQUIRED";
+    });
+  }
+
+  async complete(input: GatewayUsageClaimBinding & Readonly<{ usage: GatewayUsage }>): Promise<void> {
+    validateClaimBinding(input);
+    parseUsage({ input_tokens: input.usage.inputTokens, output_tokens: input.usage.outputTokens, cost_usd: input.usage.costUsd });
     await this.#transaction(input.tenantId, async (client) => {
-      await client.query(
+      const selected = await client.query<ClaimRow>(
+        `SELECT request_id::text, tenant_id::text, project_id::text, run_id::text,
+                provider_revision_id, credential_version_id, model, claim_token::text,
+                state, claim_expires_at <= now() AS expired
+           FROM deviludo.inference_request_claims
+          WHERE tenant_id = $1::uuid AND request_id = $2::uuid
+          FOR UPDATE`,
+        [input.tenantId, input.requestId],
+      );
+      if (selected.rows.length !== 1) invalid();
+      const claim = selected.rows[0]!;
+      assertClaimBinding(claim, input);
+      if (claim.state === "COMPLETED") {
+        await assertUsageReplay(client, input);
+        return;
+      }
+      if (claim.state !== "ACTIVE" || claim.expired) invalid();
+      const inserted = await client.query(
         `INSERT INTO deviludo.inference_usage_events
           (request_id, tenant_id, project_id, run_id, provider_revision_id,
            credential_version_id, model, input_tokens, output_tokens, cost_usd)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (request_id) DO NOTHING`,
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10)`,
         [
           input.requestId, input.tenantId, input.projectId, input.runId,
           input.providerRevisionId, input.credentialVersionId, input.model,
           input.usage.inputTokens, input.usage.outputTokens, input.usage.costUsd,
         ],
       );
-      const selected = await client.query<UsageEventRow>(
-        `SELECT tenant_id::text, project_id::text, run_id::text,
-                provider_revision_id, credential_version_id, model,
-                input_tokens::text, output_tokens::text, cost_usd::text
-           FROM deviludo.inference_usage_events
-          WHERE tenant_id = $2::uuid AND request_id = $1::uuid
+      if (inserted.rowCount !== 1) invalid();
+      const completed = await client.query(
+        `UPDATE deviludo.inference_request_claims
+            SET state = 'COMPLETED', completed_at = now()
+          WHERE tenant_id = $1::uuid AND request_id = $2::uuid
+            AND claim_token = $3::uuid AND state = 'ACTIVE'`,
+        [input.tenantId, input.requestId, input.claimToken],
+      );
+      if (completed.rowCount !== 1) invalid();
+    });
+  }
+
+  async release(input: GatewayUsageClaimBinding): Promise<void> { await this.#transition(input, "RELEASED"); }
+  async abandon(input: GatewayUsageClaimBinding): Promise<void> { await this.#transition(input, "INDETERMINATE"); }
+
+  async #transition(input: GatewayUsageClaimBinding, target: "RELEASED" | "INDETERMINATE"): Promise<void> {
+    validateClaimBinding(input);
+    await this.#transaction(input.tenantId, async (client) => {
+      const updated = await client.query(
+        `UPDATE deviludo.inference_request_claims
+            SET state = $4
+          WHERE tenant_id = $1::uuid AND request_id = $2::uuid
+            AND claim_token = $3::uuid AND state = 'ACTIVE'`,
+        [input.tenantId, input.requestId, input.claimToken, target],
+      );
+      if (updated.rowCount === 1) return;
+      const selected = await client.query<ClaimRow>(
+        `SELECT request_id::text, tenant_id::text, project_id::text, run_id::text,
+                provider_revision_id, credential_version_id, model, claim_token::text,
+                state, claim_expires_at <= now() AS expired
+           FROM deviludo.inference_request_claims
+          WHERE tenant_id = $1::uuid AND request_id = $2::uuid
           FOR SHARE`,
-        [input.requestId, input.tenantId],
+        [input.tenantId, input.requestId],
       );
       if (selected.rows.length !== 1) invalid();
-      const row = selected.rows[0]!;
-      const usage = parseUsage(row);
-      if (row.tenant_id !== input.tenantId || row.project_id !== input.projectId || row.run_id !== input.runId
-        || row.provider_revision_id !== input.providerRevisionId || row.credential_version_id !== input.credentialVersionId
-        || row.model !== input.model || usage.inputTokens !== input.usage.inputTokens
-        || usage.outputTokens !== input.usage.outputTokens || usage.costUsd !== input.usage.costUsd) invalid();
+      const claim = selected.rows[0]!;
+      assertClaimBinding(claim, input);
+      if (claim.state !== target && !(target === "INDETERMINATE" && claim.state === "COMPLETED")) invalid();
     });
   }
 
@@ -175,7 +301,10 @@ export function inferenceGatewayRegistries(store: PostgresInferenceGatewayStore)
     providers: { get: (tenantId, providerRevisionId) => store.getProvider(tenantId, providerRevisionId) },
     usage: {
       get: (tenantId, runId) => store.getUsage(tenantId, runId),
-      record: (input) => store.record(input),
+      claim: (input) => store.claim(input),
+      complete: (input) => store.complete(input),
+      release: (input) => store.release(input),
+      abandon: (input) => store.abandon(input),
     },
   });
 }
@@ -256,11 +385,52 @@ function parseUsage(row: UsageRow): GatewayUsage {
     costUsd: safeNumber(row.cost_usd),
   });
 }
-function validateUsageInput(input: Parameters<UsageLedger["record"]>[0]): void {
+function validateClaimBinding(input: GatewayUsageClaimBinding): void {
   validateTenantRun(input.tenantId, input.runId);
-  if (!UUID.test(input.requestId) || !UUID.test(input.projectId) || !SAFE_ID.test(input.providerRevisionId)
-    || !SAFE_ID.test(input.credentialVersionId) || pinned(input.model) !== input.model) invalid();
-  parseUsage({ input_tokens: input.usage.inputTokens, output_tokens: input.usage.outputTokens, cost_usd: input.usage.costUsd });
+  if (!UUID.test(input.requestId) || !UUID.test(input.claimToken) || !UUID.test(input.projectId)
+    || !SAFE_ID.test(input.providerRevisionId) || !SAFE_ID.test(input.credentialVersionId)
+    || pinned(input.model) !== input.model || !Number.isSafeInteger(input.leaseSeconds)
+    || input.leaseSeconds < 30 || input.leaseSeconds > 15 * 60) invalid();
+}
+function validateClaimRow(row: ClaimRow): void {
+  if (!UUID.test(row.request_id) || !UUID.test(row.tenant_id) || !UUID.test(row.project_id)
+    || !UUID.test(row.run_id) || !UUID.test(row.claim_token) || !SAFE_ID.test(row.provider_revision_id)
+    || !SAFE_ID.test(row.credential_version_id) || pinned(row.model) !== row.model
+    || (row.state !== "ACTIVE" && row.state !== "COMPLETED" && row.state !== "RELEASED" && row.state !== "INDETERMINATE")
+    || typeof row.expired !== "boolean") invalid();
+}
+function assertClaimBinding(row: ClaimRow, input: GatewayUsageClaimBinding): void {
+  validateClaimRow(row);
+  if (row.request_id !== input.requestId || row.claim_token !== input.claimToken
+    || row.tenant_id !== input.tenantId || row.project_id !== input.projectId || row.run_id !== input.runId
+    || row.provider_revision_id !== input.providerRevisionId || row.credential_version_id !== input.credentialVersionId
+    || row.model !== input.model) invalid();
+}
+async function assertUsageReplay(
+  client: PostgresWorkflowClient,
+  input: GatewayUsageClaimBinding & Readonly<{ usage: GatewayUsage }>,
+): Promise<void> {
+  const selected = await client.query<UsageEventRow>(
+    `SELECT tenant_id::text, project_id::text, run_id::text,
+            provider_revision_id, credential_version_id, model,
+            input_tokens::text, output_tokens::text, cost_usd::text
+       FROM deviludo.inference_usage_events
+      WHERE tenant_id = $2::uuid AND request_id = $1::uuid
+      FOR SHARE`,
+    [input.requestId, input.tenantId],
+  );
+  if (selected.rows.length !== 1) invalid();
+  const row = selected.rows[0]!;
+  const usage = parseUsage(row);
+  if (row.tenant_id !== input.tenantId || row.project_id !== input.projectId || row.run_id !== input.runId
+    || row.provider_revision_id !== input.providerRevisionId || row.credential_version_id !== input.credentialVersionId
+    || row.model !== input.model || usage.inputTokens !== input.usage.inputTokens
+    || usage.outputTokens !== input.usage.outputTokens || usage.costUsd !== input.usage.costUsd) invalid();
+}
+function budgetExhausted(budget: RunTokenBudget, usage: GatewayUsage): boolean {
+  return usage.costUsd >= budget.maxCostUsd
+    || (budget.maxInputTokens !== undefined && usage.inputTokens >= budget.maxInputTokens)
+    || (budget.maxOutputTokens !== undefined && usage.outputTokens >= budget.maxOutputTokens);
 }
 function validateTenantRun(tenantId: string, runId: string): void { if (!UUID.test(tenantId) || !UUID.test(runId)) invalid(); }
 function pinned(value: unknown): string { if (typeof value !== "string") invalid(); try { return assertPinnedModelId(value); } catch { invalid(); } }

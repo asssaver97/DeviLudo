@@ -171,9 +171,12 @@ access. Without it, production validation returns 503; local development uses
 the contract probe. The control-plane probe client and Gateway listener both
 require TLS 1.3 workload certificates; the control plane sends only the exact
 Provider and credential-version identities. The production Gateway is started
-with `npm run start:inference-gateway`, uses migration `028` for tenant-RLS run,
-Provider and append-only usage records, and resolves a five-minute key lease
-from the fixed mTLS credential Broker. See
+with `npm run start:inference-gateway`, uses migrations `028` and `029` for
+tenant-RLS run/Provider projections, append-only usage and per-run fenced
+request claims, and resolves a five-minute key lease from the fixed mTLS
+credential Broker. An expired or transport-ambiguous claim becomes
+`INDETERMINATE`; new calls fail closed until an operator reconciles upstream
+usage, rather than risking an automatic duplicate charge. See
 `services/inference-gateway/.env.example`; PEM and run-token key material must
 be file-mounted, never placed directly in environment variables.
 

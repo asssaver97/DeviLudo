@@ -50,16 +50,22 @@ export interface ProviderRevisionRegistry {
 
 export interface UsageLedger {
   get(tenantId: string, runId: string): Promise<GatewayUsage>;
-  record(input: Readonly<{
-    requestId: string;
-    tenantId: string;
-    projectId: string;
-    runId: string;
-    providerRevisionId: string;
-    credentialVersionId: string;
-    model: string;
-    usage: GatewayUsage;
-  }>): Promise<void>;
+  claim(input: GatewayUsageClaimBinding): Promise<"ACQUIRED" | "BUSY" | "INDETERMINATE" | "BUDGET_EXHAUSTED">;
+  complete(input: GatewayUsageClaimBinding & Readonly<{ usage: GatewayUsage }>): Promise<void>;
+  release(input: GatewayUsageClaimBinding): Promise<void>;
+  abandon(input: GatewayUsageClaimBinding): Promise<void>;
+}
+
+export interface GatewayUsageClaimBinding {
+  readonly requestId: string;
+  readonly claimToken: string;
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly providerRevisionId: string;
+  readonly credentialVersionId: string;
+  readonly model: string;
+  readonly leaseSeconds: number;
 }
 
 export interface GatewayAuthorizationRequest {

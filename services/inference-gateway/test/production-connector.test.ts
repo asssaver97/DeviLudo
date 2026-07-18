@@ -7,6 +7,7 @@ import type {
   UsageLedger,
 } from "../src/contracts";
 import {
+  InferenceRequestClaimError,
   ProductionGatewayConnector,
   type GatewayCredentialResolver,
   type GatewayUpstreamTransport,
@@ -29,6 +30,9 @@ test("production connector resolves one bound key, pins the Responses endpoint a
   assert.equal(fixture.records.length, 1);
   assert.deepEqual(fixture.records[0]?.usage, { inputTokens: 100, outputTokens: 50, costUsd: 0.0006 });
   assert.equal(fixture.records[0]?.model, fixture.authorization.model);
+  assert.equal(fixture.claims.length, 1);
+  assert.equal(fixture.released.length, 0);
+  assert.equal(fixture.abandoned.length, 0);
 });
 
 test("production connector preserves Messages SSE while metering its terminal usage", async () => {
@@ -89,6 +93,7 @@ test("production connector revalidates a same-origin 307 and refuses to send a k
     signal: new AbortController().signal,
   }), /connector policy is invalid/);
   assert.equal(blocked.destroyed(), true);
+  assert.equal(blocked.abandoned.length, 1);
 });
 
 test("production connector strips credential-like upstream error bodies", async () => {
@@ -100,6 +105,53 @@ test("production connector strips credential-like upstream error bodies", async 
   assert.equal(result.statusCode, 502);
   assert.deepEqual(result.body, { error: { code: "UPSTREAM_REQUEST_REJECTED" } });
   assert.equal(fixture.records.length, 0);
+  assert.equal(fixture.released.length, 1);
+});
+
+test("production connector rejects busy or indeterminate runs before resolving a credential", async () => {
+  for (const claimResult of ["BUSY", "INDETERMINATE", "BUDGET_EXHAUSTED"] as const) {
+    const fixture = connectorFixture("openai-responses", { claimResult });
+    await assert.rejects(fixture.connector.forward({
+      authorization: fixture.authorization,
+      body: { model: fixture.authorization.model, input: "x" },
+      signal: new AbortController().signal,
+    }), (error: unknown) => {
+      assert.ok(error instanceof InferenceRequestClaimError);
+      assert.equal(error.statusCode, claimResult === "BUSY" ? 409 : claimResult === "INDETERMINATE" ? 503 : 429);
+      return true;
+    });
+    assert.equal(fixture.destroyed(), false);
+    assert.equal(fixture.calls.length, 0);
+  }
+});
+
+test("production connector marks an ambiguous transport failure indeterminate", async () => {
+  const fixture = connectorFixture("openai-responses", {
+    transport: { async request() { throw new Error("connection reset after dispatch"); } },
+  });
+  await assert.rejects(fixture.connector.forward({
+    authorization: fixture.authorization,
+    body: { model: fixture.authorization.model, input: "x" },
+    signal: new AbortController().signal,
+  }), /connection reset/);
+  assert.equal(fixture.abandoned.length, 1);
+  assert.equal(fixture.released.length, 0);
+});
+
+test("production connector marks a stream without terminal usage indeterminate", async () => {
+  const fixture = connectorFixture("openai-responses", {
+    contentType: "text/event-stream",
+    response: [`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "partial" })}\n\n`],
+  });
+  const result = await fixture.connector.forward({
+    authorization: fixture.authorization,
+    body: { model: fixture.authorization.model, input: "x", stream: true },
+    signal: new AbortController().signal,
+  });
+  assert.ok(result.body instanceof Readable);
+  await assert.rejects(readAll(result.body), /connector policy is invalid/);
+  assert.equal(fixture.records.length, 0);
+  assert.equal(fixture.abandoned.length, 1);
 });
 
 test("production connector destroys a malformed credential lease before any network request", async () => {
@@ -107,12 +159,18 @@ test("production connector destroys a malformed credential lease before any netw
   const value = Buffer.from("short");
   let destroyed = false;
   let connected = false;
+  let released = false;
+  let abandoned = false;
   const connector = new ProductionGatewayConnector({
     credentials: {
       async probe() {},
       async resolve() { return { value, destroy() { value.fill(0); destroyed = true; } }; },
     },
-    usage: { async get() { return { inputTokens: 0, outputTokens: 0, costUsd: 0 }; }, async record() {} },
+    usage: {
+      async get() { return { inputTokens: 0, outputTokens: 0, costUsd: 0 }; },
+      async claim() { return "ACQUIRED"; }, async complete() {},
+      async release() { released = true; }, async abandon() { abandoned = true; },
+    },
     dns: { async resolve() { return [{ address: "93.184.216.34", family: 4 as const }]; } },
     transport: { async request() { connected = true; throw new Error("must not connect"); } },
   });
@@ -123,6 +181,8 @@ test("production connector destroys a malformed credential lease before any netw
   }), /connector policy is invalid/);
   assert.equal(destroyed, true);
   assert.equal(connected, false);
+  assert.equal(released, true);
+  assert.equal(abandoned, false);
   assert.ok([...value].every((byte) => byte === 0));
 });
 
@@ -131,11 +191,15 @@ function connectorFixture(protocol: GatewayProtocol, overrides: Readonly<{
   contentType?: string;
   statusCode?: number;
   transport?: GatewayUpstreamTransport;
+  claimResult?: Awaited<ReturnType<UsageLedger["claim"]>>;
 }> = {}) {
   const authorization = authorizationFixture(protocol);
   let leaseDestroyed = false;
   let dnsCalls = 0;
-  const records: Array<Parameters<UsageLedger["record"]>[0]> = [];
+  const records: Array<Parameters<UsageLedger["complete"]>[0]> = [];
+  const claims: Array<Parameters<UsageLedger["claim"]>[0]> = [];
+  const released: Array<Parameters<UsageLedger["release"]>[0]> = [];
+  const abandoned: Array<Parameters<UsageLedger["abandon"]>[0]> = [];
   const calls: Array<{ url: URL; headers: Readonly<Record<string, string>> }> = [];
   const credentials: GatewayCredentialResolver = {
     async probe() {},
@@ -147,7 +211,10 @@ function connectorFixture(protocol: GatewayProtocol, overrides: Readonly<{
   };
   const usage: UsageLedger = {
     async get() { return { inputTokens: 0, outputTokens: 0, costUsd: 0 }; },
-    async record(input) { records.push(input); },
+    async claim(input) { claims.push(input); return overrides.claimResult ?? "ACQUIRED"; },
+    async complete(input) { records.push(input); },
+    async release(input) { released.push(input); },
+    async abandon(input) { abandoned.push(input); },
   };
   const defaultBody = JSON.stringify({ id: "resp_01", usage: { input_tokens: 100, output_tokens: 50 } });
   const transport: GatewayUpstreamTransport = overrides.transport ?? {
@@ -168,7 +235,7 @@ function connectorFixture(protocol: GatewayProtocol, overrides: Readonly<{
     },
     transport,
   });
-  return { connector, authorization, calls, records, destroyed: () => leaseDestroyed, dnsCalls: () => dnsCalls };
+  return { connector, authorization, calls, records, claims, released, abandoned, destroyed: () => leaseDestroyed, dnsCalls: () => dnsCalls };
 }
 
 function authorizationFixture(protocol: GatewayProtocol): AuthorizedGatewayRequest {

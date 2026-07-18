@@ -9,6 +9,7 @@ import type {
   GatewayConnectorResponse,
   GatewayProtocol,
   GatewayUsage,
+  GatewayUsageClaimBinding,
   UsageLedger,
 } from "./contracts";
 
@@ -16,6 +17,14 @@ const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 1024 * 1024;
 const MAX_STREAM_BYTES = 256 * 1024 * 1024;
+const REQUEST_LEASE_SECONDS = 11 * 60;
+
+export class InferenceRequestClaimError extends Error {
+  constructor(
+    readonly code: "RUN_INFERENCE_BUSY" | "RUN_INFERENCE_RECONCILIATION_REQUIRED" | "RUN_BUDGET_EXHAUSTED",
+    readonly statusCode: 409 | 429 | 503,
+  ) { super("Inference request claim was not acquired"); }
+}
 
 export interface GatewayCredentialLease {
   readonly value: Uint8Array;
@@ -63,54 +72,72 @@ export class ProductionGatewayConnector implements GatewayConnector {
   async forward(input: Parameters<GatewayConnector["forward"]>[0]): Promise<GatewayConnectorResponse> {
     const requestBody = Buffer.from(JSON.stringify(input.body));
     if (requestBody.byteLength < 2 || requestBody.byteLength > MAX_REQUEST_BYTES) invalid();
-    const lease = await this.options.credentials.resolve({
-      tenantId: input.authorization.run.tenantId,
-      projectId: input.authorization.run.projectId,
-      runId: input.authorization.run.runId,
-      providerRevisionId: input.authorization.provider.providerRevisionId,
-      credentialVersionId: input.authorization.provider.credentialVersionId,
-    });
-    let response: GatewayUpstreamResponse;
+    const claim = usageClaim(input.authorization);
+    const claimResult = await this.options.usage.claim(claim);
+    if (claimResult !== "ACQUIRED") throw claimError(claimResult);
+    let dispatched = false;
+    let handedOff = false;
+    let settled = false;
     try {
-      const secret = secretText(lease.value);
-      const headers = upstreamHeaders(input.authorization, secret);
-      const transport = this.options.transport ?? new PinnedHttpsGatewayTransport();
-      response = await this.#requestFollowingSafeRedirects(
-        transport, input.authorization, headers, requestBody, input.signal,
-      );
-    } finally {
-      lease.destroy();
-    }
-    const responseHeaders = safeResponseHeaders(response.headers);
-    const streaming = input.body.stream === true;
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      const raw = await readBounded(response.body, MAX_ERROR_RESPONSE_BYTES);
-      return Object.freeze({
-        statusCode: safeUpstreamStatus(response.statusCode),
-        headers: responseHeaders,
-        body: sanitizedUpstreamError(raw),
+      const lease = await this.options.credentials.resolve({
+        tenantId: input.authorization.run.tenantId,
+        projectId: input.authorization.run.projectId,
+        runId: input.authorization.run.runId,
+        providerRevisionId: input.authorization.provider.providerRevisionId,
+        credentialVersionId: input.authorization.provider.credentialVersionId,
       });
-    }
-    if (streaming) {
-      if (!contentType(response.headers).startsWith("text/event-stream")) invalid();
-      return Object.freeze({
-        statusCode: response.statusCode,
-        headers: Object.freeze({ ...responseHeaders, "content-type": "text/event-stream" }),
-        body: response.body.pipe(new UsageMeteringTransform({
+      let response: GatewayUpstreamResponse;
+      try {
+        const secret = secretText(lease.value);
+        const headers = upstreamHeaders(input.authorization, secret);
+        const transport = this.options.transport ?? new PinnedHttpsGatewayTransport();
+        dispatched = true;
+        response = await this.#requestFollowingSafeRedirects(
+          transport, input.authorization, headers, requestBody, input.signal,
+        );
+      } finally { lease.destroy(); }
+      const responseHeaders = safeResponseHeaders(response.headers);
+      const streaming = input.body.stream === true;
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        const raw = await readBounded(response.body, MAX_ERROR_RESPONSE_BYTES);
+        await this.options.usage.release(claim);
+        settled = true;
+        return Object.freeze({
+          statusCode: safeUpstreamStatus(response.statusCode),
+          headers: responseHeaders,
+          body: sanitizedUpstreamError(raw),
+        });
+      }
+      if (streaming) {
+        if (!contentType(response.headers).startsWith("text/event-stream")) invalid();
+        const body = response.body.pipe(new UsageMeteringTransform({
           protocol: input.authorization.provider.protocol,
           authorization: input.authorization,
           usage: this.options.usage,
-          requestId: randomUUID(),
-        })),
-      });
+          claim,
+        }));
+        handedOff = true;
+        return Object.freeze({
+          statusCode: response.statusCode,
+          headers: Object.freeze({ ...responseHeaders, "content-type": "text/event-stream" }),
+          body,
+        });
+      }
+      if (!contentType(response.headers).includes("json")) invalid();
+      const raw = await readBounded(response.body, MAX_JSON_RESPONSE_BYTES);
+      let body: unknown;
+      try { body = JSON.parse(raw.toString("utf8")) as unknown; } catch { invalid(); }
+      const usage = responseUsage(input.authorization.provider.protocol, body);
+      await completeUsage(this.options.usage, input.authorization, claim, usage);
+      settled = true;
+      return Object.freeze({ statusCode: response.statusCode, headers: responseHeaders, body });
+    } catch (error) {
+      if (!settled && !handedOff) {
+        if (dispatched) await this.options.usage.abandon(claim);
+        else await this.options.usage.release(claim);
+      }
+      throw error;
     }
-    if (!contentType(response.headers).includes("json")) invalid();
-    const raw = await readBounded(response.body, MAX_JSON_RESPONSE_BYTES);
-    let body: unknown;
-    try { body = JSON.parse(raw.toString("utf8")) as unknown; } catch { invalid(); }
-    const usage = responseUsage(input.authorization.provider.protocol, body);
-    await recordUsage(this.options.usage, input.authorization, randomUUID(), usage);
-    return Object.freeze({ statusCode: response.statusCode, headers: responseHeaders, body });
   }
 
   async #requestFollowingSafeRedirects(
@@ -178,11 +205,12 @@ class UsageMeteringTransform extends Transform {
   #bytes = 0;
   #inputTokens = 0;
   #outputTokens = 0;
+  #settled = false;
   constructor(private readonly options: Readonly<{
     protocol: GatewayProtocol;
     authorization: AuthorizedGatewayRequest;
     usage: UsageLedger;
-    requestId: string;
+    claim: GatewayUsageClaimBinding;
   }>) { super(); }
 
   override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
@@ -207,9 +235,15 @@ class UsageMeteringTransform extends Transform {
       if (this.#buffer.trim()) this.#consumeEvent(this.#buffer);
       if (this.#inputTokens < 0 || this.#outputTokens < 0 || this.#inputTokens + this.#outputTokens < 1) invalid();
       const usage = pricedUsage(this.options.authorization, this.#inputTokens, this.#outputTokens);
-      void recordUsage(this.options.usage, this.options.authorization, this.options.requestId, usage)
-        .then(() => callback()).catch((error: unknown) => callback(error as Error));
+      void completeUsage(this.options.usage, this.options.authorization, this.options.claim, usage)
+        .then(() => { this.#settled = true; callback(); }).catch((error: unknown) => callback(error as Error));
     } catch (error) { callback(error as Error); }
+  }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    if (this.#settled) { callback(error); return; }
+    void this.options.usage.abandon(this.options.claim)
+      .then(() => callback(error)).catch((abandonError: unknown) => callback(abandonError as Error));
   }
 
   #consumeEvent(value: string): void {
@@ -285,18 +319,34 @@ function pricedUsageFromValues(inputTokens: number, outputTokens: number, author
   return Object.freeze({ inputTokens, outputTokens, costUsd });
 }
 
-async function recordUsage(ledger: UsageLedger, authorization: AuthorizedGatewayRequest, requestId: string, usage: GatewayUsage): Promise<void> {
-  const priced = usage.costUsd === 0 && (usage.inputTokens || usage.outputTokens) ? pricedUsage(authorization, usage.inputTokens, usage.outputTokens) : usage;
-  await ledger.record({
-    requestId,
+function usageClaim(authorization: AuthorizedGatewayRequest): GatewayUsageClaimBinding {
+  return Object.freeze({
+    requestId: randomUUID(),
+    claimToken: randomUUID(),
     tenantId: authorization.run.tenantId,
     projectId: authorization.run.projectId,
     runId: authorization.run.runId,
     providerRevisionId: authorization.provider.providerRevisionId,
     credentialVersionId: authorization.provider.credentialVersionId,
     model: authorization.model,
-    usage: priced,
+    leaseSeconds: REQUEST_LEASE_SECONDS,
   });
+}
+
+function claimError(value: Exclude<Awaited<ReturnType<UsageLedger["claim"]>>, "ACQUIRED">): InferenceRequestClaimError {
+  if (value === "BUSY") return new InferenceRequestClaimError("RUN_INFERENCE_BUSY", 409);
+  if (value === "INDETERMINATE") return new InferenceRequestClaimError("RUN_INFERENCE_RECONCILIATION_REQUIRED", 503);
+  return new InferenceRequestClaimError("RUN_BUDGET_EXHAUSTED", 429);
+}
+
+async function completeUsage(
+  ledger: UsageLedger,
+  authorization: AuthorizedGatewayRequest,
+  claim: GatewayUsageClaimBinding,
+  usage: GatewayUsage,
+): Promise<void> {
+  const priced = usage.costUsd === 0 && (usage.inputTokens || usage.outputTokens) ? pricedUsage(authorization, usage.inputTokens, usage.outputTokens) : usage;
+  await ledger.complete({ ...claim, usage: priced });
 }
 
 async function readBounded(stream: Readable, maximum: number): Promise<Buffer> {

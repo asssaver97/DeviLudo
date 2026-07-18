@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 27 }, (_, index) => {
+  const offsets = Array.from({ length: 29 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,20 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Inference Gateway serializes each run and fails closed on ambiguous usage", () => {
+  const migration = readFileSync(new URL("../infra/postgres/029_inference_request_claims.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/inference-gateway/src/postgres-store.ts", import.meta.url), "utf8");
+  const connector = readFileSync(new URL("../services/inference-gateway/src/production-connector.ts", import.meta.url), "utf8");
+  assert.match(migration, /inference_one_active_request_per_run/);
+  assert.match(migration, /state IN \('ACTIVE', 'COMPLETED', 'RELEASED', 'INDETERMINATE'\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /inference_usage_request_claim_fk/);
+  assert.ok(store.indexOf("FROM deviludo.inference_run_authorizations") < store.indexOf("FROM deviludo.inference_request_claims"));
+  assert.match(store, /SET state = 'INDETERMINATE'/);
+  assert.match(connector, /usage\.abandon\(claim\)/);
+  assert.match(connector, /RUN_INFERENCE_RECONCILIATION_REQUIRED/);
 });
 
 test("Steam release lifecycle advances only from authoritative persisted evidence", () => {

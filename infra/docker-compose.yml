@@ -38,6 +38,8 @@ services:
       - ./postgres/025_steam_release_lifecycle.sql:/docker-entrypoint-initdb.d/025_steam_release_lifecycle.sql:ro
       - ./postgres/026_steam_clean_install_reservations.sql:/docker-entrypoint-initdb.d/026_steam_clean_install_reservations.sql:ro
       - ./postgres/027_agent_supply_chain_operations.sql:/docker-entrypoint-initdb.d/027_agent_supply_chain_operations.sql:ro
+      - ./postgres/028_inference_gateway.sql:/docker-entrypoint-initdb.d/028_inference_gateway.sql:ro
+      - ./postgres/029_inference_request_claims.sql:/docker-entrypoint-initdb.d/029_inference_request_claims.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

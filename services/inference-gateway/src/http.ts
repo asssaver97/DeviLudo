@@ -3,6 +3,7 @@ import type { SecureVersion } from "node:tls";
 import { GatewayAuthorizationError, InferenceGatewayAuthorizer } from "./authorization";
 import type { GatewayConnector, GatewayProtocol, InferenceGatewayAuthorizerOptions } from "./contracts";
 import type { GatewayProviderProbeService } from "./provider-probe";
+import { InferenceRequestClaimError } from "./production-connector";
 
 const SAFE_RESPONSE_HEADERS = new Set(["content-type", "x-request-id", "request-id"]);
 
@@ -52,6 +53,10 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
   server.setErrorHandler((error, _request, reply) => {
     if (error instanceof GatewayAuthorizationError) {
       void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      return;
+    }
+    if (error instanceof InferenceRequestClaimError) {
+      void reply.code(error.statusCode).send({ error: { code: error.code, message: "Inference run is not available for another request" } });
       return;
     }
     void reply.code(500).send({ error: { code: "GATEWAY_REQUEST_FAILED", message: "Inference Gateway request failed" } });
