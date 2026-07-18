@@ -1,4 +1,5 @@
 import type { UserFeedbackReceipt } from "@/services/user-acceptance/src/contracts";
+import type { CandidateAcceptanceReceipt } from "@/services/user-acceptance/src/candidate-acceptance";
 import { parseSpecModelResult, type SpecDialogueMessage } from "@/services/spec-dialogue/src/contracts";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -17,7 +18,15 @@ export class UserAcceptanceBrokerClient {
   }
 
   async submit(command: Readonly<Record<string, unknown>>): Promise<UserFeedbackReceipt> {
-    const response = await this.#fetch(this.#endpoint, {
+    return parseReceipt(await this.#call("/v1/user-feedback", command), command);
+  }
+
+  async accept(command: Readonly<Record<string, unknown>>): Promise<CandidateAcceptanceReceipt> {
+    return parseAcceptanceReceipt(await this.#call("/v1/candidate-acceptance", command), command);
+  }
+
+  async #call(path: string, command: Readonly<Record<string, unknown>>): Promise<unknown> {
+    const response = await this.#fetch(new URL(path, this.#endpoint), {
       method: "POST",
       redirect: "manual",
       headers: {
@@ -31,7 +40,7 @@ export class UserAcceptanceBrokerClient {
     if (response.status !== 201) throw new Error(`User acceptance Broker rejected the request with status ${response.status}`);
     const envelope = object(await response.json());
     if (JSON.stringify(Object.keys(envelope)) !== JSON.stringify(["data"])) invalid();
-    return parseReceipt(envelope.data, command);
+    return envelope.data;
   }
 }
 
@@ -51,6 +60,19 @@ export async function userFeedbackOperationKey(input: {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(["deviludo-user-feedback-v1", ...Object.values(input)].join("\0")),
+  );
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+export async function candidateAcceptanceOperationKey(input: {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly userId: string;
+  readonly idempotencyKey: string;
+}): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(["deviludo-candidate-acceptance-v1", ...Object.values(input)].join("\0")),
   );
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -123,6 +145,53 @@ function parseReceipt(value: unknown, command: Readonly<Record<string, unknown>>
       result,
     }),
     state: "AWAITING_SPEC_APPROVAL" as const,
+    delivery: Object.freeze({
+      actionId: body.actionId,
+      outboxId: delivery.outboxId,
+      workflowId: body.workflowId,
+      signalId: body.signalId,
+      signalDigest: delivery.signalDigest,
+      state: delivery.state,
+      replayed: delivery.replayed,
+    }),
+  });
+}
+
+function parseAcceptanceReceipt(value: unknown, command: Readonly<Record<string, unknown>>): CandidateAcceptanceReceipt {
+  const body = object(value);
+  const delivery = object(body.delivery);
+  if (body.operationKey !== command.operationKey || body.tenantId !== command.tenantId
+    || body.projectId !== command.projectId || body.actorId !== command.actorId
+    || body.state !== "MERGE_QUEUED" || typeof body.workflowId !== "string" || !body.workflowId
+    || typeof body.actionId !== "string" || !UUID.test(body.actionId)
+    || typeof body.specRevisionId !== "string" || !UUID.test(body.specRevisionId)
+    || typeof body.candidateReceiptId !== "string" || !UUID.test(body.candidateReceiptId)
+    || typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
+    || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
+    || typeof body.evidenceBundleId !== "string" || !UUID.test(body.evidenceBundleId)
+    || typeof body.signalId !== "string" || body.signalId.length < 8
+    || typeof body.acceptedAt !== "string" || !Number.isFinite(Date.parse(body.acceptedAt))
+    || delivery.actionId !== body.actionId || delivery.workflowId !== body.workflowId
+    || delivery.signalId !== body.signalId || typeof delivery.outboxId !== "string"
+    || !UUID.test(delivery.outboxId) || typeof delivery.signalDigest !== "string"
+    || !SHA256.test(delivery.signalDigest)
+    || (delivery.state !== "PENDING_DELIVERY" && delivery.state !== "DELIVERED")
+    || typeof delivery.replayed !== "boolean") invalid();
+  return Object.freeze({
+    operationKey: body.operationKey as string,
+    tenantId: body.tenantId as string,
+    projectId: body.projectId as string,
+    actorId: body.actorId as string,
+    workflowId: body.workflowId,
+    actionId: body.actionId,
+    specRevisionId: body.specRevisionId,
+    candidateReceiptId: body.candidateReceiptId,
+    candidateCommitSha: body.candidateCommitSha,
+    draftPullRequest: body.draftPullRequest as number,
+    evidenceBundleId: body.evidenceBundleId,
+    signalId: body.signalId,
+    acceptedAt: new Date(body.acceptedAt).toISOString(),
+    state: "MERGE_QUEUED",
     delivery: Object.freeze({
       actionId: body.actionId,
       outboxId: delivery.outboxId,

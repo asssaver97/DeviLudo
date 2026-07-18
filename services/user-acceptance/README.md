@@ -12,6 +12,11 @@ model, atomically commits the next DRAFT `GAME_SPEC`/`TEST_PLAN` pair and a new
 dialogue, and only then emits `USER_FEEDBACK`. The control-plane completion
 transaction invalidates the exact candidate evidence.
 
+Candidate acceptance uses the same server-side authority resolution. It writes
+an immutable actor, candidate receipt, commit, PR and evidence binding before
+emitting `USER_ACCEPTED`; this record is the input for the later SCM acceptance
+signature. The browser can submit only an idempotency-bound empty decision.
+
 `GENERATING`, `DRAFT_READY` and `COMPLETED` are durable recovery points. Model
 failure only expires the generation claim. Completion failure preserves the
 new draft and retries delivery without regenerating it.

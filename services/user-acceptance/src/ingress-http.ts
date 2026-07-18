@@ -3,6 +3,11 @@ import { createServer, type Server as HttpsServer, type ServerOptions } from "no
 import type { EvidenceArchiveWorkloadIdentity } from "../../evidence-archive/src/contracts";
 import { evidenceArchiveIdentityFromTlsSocket } from "../../evidence-archive/src/ingress-http";
 import { UserFeedbackRequestError } from "./contracts";
+import {
+  CandidateAcceptanceConflict,
+  CandidateAcceptanceRequestError,
+  type CandidateAcceptanceService,
+} from "./candidate-acceptance";
 import { UserFeedbackConflict, type UserAcceptanceService } from "./service";
 
 const MAX_BODY_BYTES = 32 * 1024;
@@ -22,6 +27,7 @@ export interface UserAcceptanceHttpResponse {
 
 export function createUserAcceptanceHandler(options: {
   readonly service: Pick<UserAcceptanceService, "submit" | "probe">;
+  readonly acceptance: Pick<CandidateAcceptanceService, "accept" | "probe">;
   readonly allowedSpiffeIds: ReadonlySet<string>;
   readonly extractIdentity?: (socket: unknown) => EvidenceArchiveWorkloadIdentity;
 }) {
@@ -33,11 +39,11 @@ export function createUserAcceptanceHandler(options: {
     catch { return failure(401, "USER_ACCEPTANCE_MTLS_IDENTITY_REQUIRED"); }
     if (!options.allowedSpiffeIds.has(identity.spiffeId)) return failure(403, "USER_ACCEPTANCE_WORKLOAD_FORBIDDEN");
     if (request.method === "GET" && request.path === "/healthz") {
-      try { await options.service.probe(); }
+      try { await Promise.all([options.service.probe(), options.acceptance.probe()]); }
       catch { return failure(503, "USER_ACCEPTANCE_NOT_READY"); }
       return { status: 200, body: { status: "ok", service: "deviludo-user-acceptance" } };
     }
-    if (request.method !== "POST" || request.path !== "/v1/user-feedback") {
+    if (request.method !== "POST" || !["/v1/user-feedback", "/v1/candidate-acceptance"].includes(request.path)) {
       return failure(404, "USER_ACCEPTANCE_ROUTE_NOT_FOUND");
     }
     if (contentType(request.headers["content-type"]) !== "application/json") {
@@ -47,10 +53,13 @@ export function createUserAcceptanceHandler(options: {
     try { body = JSON.parse(request.rawBody) as unknown; }
     catch { return failure(400, "INVALID_USER_FEEDBACK_REQUEST"); }
     try {
-      return { status: 201, body: { data: await options.service.submit(body) } };
+      return {
+        status: 201,
+        body: { data: request.path === "/v1/user-feedback" ? await options.service.submit(body) : await options.acceptance.accept(body) },
+      };
     } catch (error) {
-      if (error instanceof UserFeedbackRequestError) return failure(400, error.code);
-      if (error instanceof UserFeedbackConflict) return failure(409, error.code);
+      if (error instanceof UserFeedbackRequestError || error instanceof CandidateAcceptanceRequestError) return failure(400, error.code);
+      if (error instanceof UserFeedbackConflict || error instanceof CandidateAcceptanceConflict) return failure(409, error.code);
       return failure(503, "USER_ACCEPTANCE_UNAVAILABLE");
     }
   };

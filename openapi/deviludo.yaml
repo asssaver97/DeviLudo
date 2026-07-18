@@ -203,6 +203,24 @@ paths:
           schema: { type: string }
         - { $ref: "#/components/parameters/IdempotencyKey" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /projects/{projectId}/acceptance:
+    post:
+      operationId: acceptCandidate
+      description: The service resolves the authoritative candidate commit, Draft PR, passed E2E attempt, and non-invalidated evidence; clients cannot supply those bindings.
+      parameters:
+        - { $ref: "#/components/parameters/ProjectId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              maxProperties: 0
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: No single authoritative candidate is awaiting this user's acceptance. }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }

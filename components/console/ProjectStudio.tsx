@@ -68,8 +68,10 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     testPlanRevisionId: string;
   } | null>(null);
   const [deliveryRefresh, setDeliveryRefresh] = useState(0);
+  const [deliveryStage, setDeliveryStage] = useState<LocalDeliverySnapshot["stage"] | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const approvalCommandRef = useRef<string | null>(null);
+  const acceptanceCommandRef = useRef<string | null>(null);
 
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
   const completion = useMemo(() => generated?.completeness ?? Math.min(92, 44 + messages.length * 6), [generated, messages.length]);
@@ -202,7 +204,30 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     }
   }
 
+  async function acceptCandidate() {
+    setBusy(true);
+    try {
+      acceptanceCommandRef.current ??= `accept-${crypto.randomUUID()}`;
+      const response = await fetch("/api/projects/ember-archipelago/acceptance", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": acceptanceCommandRef.current },
+        body: "{}",
+      });
+      const payload = await response.json() as { error?: { message?: string } };
+      if (!response.ok) throw new Error(payload.error?.message ?? "候选版本验收失败");
+      acceptanceCommandRef.current = null;
+      setDeliveryRefresh((value) => value + 1);
+      setNotice("候选版本已验收；系统正在合并固定的 Draft PR，随后会基于实际 main SHA 重跑发布门禁。");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? `验收失败：${reason.message}` : "候选版本验收失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const syncDelivery = useCallback((snapshot: LocalDeliverySnapshot) => {
+    if (snapshot.stage !== "AWAITING_ACCEPTANCE") acceptanceCommandRef.current = null;
+    setDeliveryStage(snapshot.stage);
     setApproved(snapshot.stage !== "AWAITING_SPEC_APPROVAL");
     const persistedRevision = Number.parseInt(snapshot.specRevisionId.replace(/^SPEC-/, ""), 10);
     if (Number.isInteger(persistedRevision)) setRevision(persistedRevision);
@@ -328,7 +353,11 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
             <textarea aria-label="候选版本反馈" onChange={(event) => setFeedback(event.target.value)} placeholder="例如：风暴出现得太频繁，希望新手前五分钟最多出现一次……" rows={3} value={feedback} />
             <button className="button button-primary" disabled={!feedback.trim() || busy} onClick={submitFeedback} type="button">创建新迭代 <ArrowIcon /></button>
           </div>
-          <div className="release-gate-note"><ClockIcon /><span><b>接受并发布尚未开放</b><small>所选三个平台全部通过后，系统会要求 MFA 并以实际 main SHA 重跑发布门禁。</small></span></div>
+          {deliveryStage === "AWAITING_ACCEPTANCE" ? (
+            <button className="button button-acid" disabled={busy} onClick={acceptCandidate} type="button"><CheckIcon /> 接受候选版本并合并</button>
+          ) : (
+            <div className="release-gate-note"><ClockIcon /><span><b>候选验收尚未开放</b><small>所选三个平台全部通过后，才可合并；发布仍需实际 main SHA 门禁与 MFA。</small></span></div>
+          )}
         </section>
       ) : null}
 

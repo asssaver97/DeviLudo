@@ -113,6 +113,7 @@ test("production feedback ingress requires an allow-listed mTLS workload", async
   };
   const allowed = createUserAcceptanceHandler({
     service: fixture.service,
+    acceptance: unusedAcceptance(),
     allowedSpiffeIds: new Set([identity.spiffeId]),
     extractIdentity: () => identity,
   });
@@ -134,12 +135,14 @@ test("production feedback ingress requires an allow-listed mTLS workload", async
   assert.equal(injectedAuthority.status, 400);
   const missing = createUserAcceptanceHandler({
     service: fixture.service,
+    acceptance: unusedAcceptance(),
     allowedSpiffeIds: new Set([identity.spiffeId]),
     extractIdentity: () => { throw new Error("missing"); },
   });
   assert.equal((await missing({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 401);
   const forbidden = createUserAcceptanceHandler({
     service: fixture.service,
+    acceptance: unusedAcceptance(),
     allowedSpiffeIds: new Set(["spiffe://deviludo.internal/other"]),
     extractIdentity: () => identity,
   });
@@ -382,4 +385,11 @@ function rows<Row extends Record<string, unknown>>(values: readonly Record<strin
 
 function result<Row extends Record<string, unknown>>(rowCount: number) {
   return { rowCount, rows: [] as readonly Row[] };
+}
+
+function unusedAcceptance() {
+  return {
+    async accept() { throw new Error("unused"); },
+    async probe() {},
+  };
 }

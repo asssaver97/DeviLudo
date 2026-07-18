@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  candidateAcceptanceOperationKey,
   UserAcceptanceBrokerClient,
   userFeedbackOperationKey,
 } from "../lib/user-acceptance/broker.ts";
@@ -35,6 +36,42 @@ test("feedback operation identity is tenant, project, user and idempotency bound
   assert.match(first, /^[a-f0-9]{64}$/);
   assert.equal(first, replay);
   assert.notEqual(first, otherUser);
+});
+
+test("candidate acceptance operation identity is user and idempotency bound", async () => {
+  const first = await candidateAcceptanceOperationKey({
+    tenantId: command.tenantId,
+    projectId: command.projectId,
+    userId: command.actorId,
+    idempotencyKey: "accept-1",
+  });
+  const changed = await candidateAcceptanceOperationKey({
+    tenantId: command.tenantId,
+    projectId: command.projectId,
+    userId: command.actorId,
+    idempotencyKey: "accept-2",
+  });
+  assert.match(first, /^[a-f0-9]{64}$/);
+  assert.notEqual(first, changed);
+});
+
+test("Web acceptance Broker rejects an actor or delivery binding drift", async () => {
+  const acceptanceCommand = {
+    operationKey: "e".repeat(64),
+    tenantId: command.tenantId,
+    projectId: command.projectId,
+    actorId: command.actorId,
+  };
+  const payload = acceptanceReceipt(acceptanceCommand);
+  payload.data.delivery.signalId = "accepted-other-signal";
+  const client = new UserAcceptanceBrokerClient(
+    "https://user-acceptance.internal/",
+    async () => new Response(JSON.stringify(payload), {
+      status: 201,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  await assert.rejects(client.accept(acceptanceCommand), /response binding/);
 });
 
 test("Web feedback Broker rejects drifted immutable authority", async () => {
@@ -105,6 +142,36 @@ function receipt() {
         workflowId,
         signalId,
         signalDigest: "d".repeat(64),
+        state: "PENDING_DELIVERY",
+        replayed: false,
+      },
+    },
+  };
+}
+
+function acceptanceReceipt(acceptanceCommand) {
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const workflowId = "delivery-001";
+  const signalId = "accepted-signal-001";
+  return {
+    data: {
+      ...acceptanceCommand,
+      workflowId,
+      actionId,
+      specRevisionId: "44444444-4444-4444-8444-444444444444",
+      candidateReceiptId: "55555555-5555-4555-8555-555555555555",
+      candidateCommitSha: "a".repeat(40),
+      draftPullRequest: 18,
+      evidenceBundleId: "66666666-6666-4666-8666-666666666666",
+      signalId,
+      acceptedAt: "2026-07-18T12:00:00.000Z",
+      state: "MERGE_QUEUED",
+      delivery: {
+        actionId,
+        outboxId: "77777777-7777-4777-8777-777777777777",
+        workflowId,
+        signalId,
+        signalDigest: "b".repeat(64),
         state: "PENDING_DELIVERY",
         replayed: false,
       },

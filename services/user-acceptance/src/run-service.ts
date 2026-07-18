@@ -8,6 +8,7 @@ import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { createUserAcceptanceHandler, createUserAcceptanceHttpsServer } from "./ingress-http";
 import { PostgresUserFeedbackStore } from "./postgres-store";
 import { UserAcceptanceService } from "./service";
+import { CandidateAcceptanceService, PostgresCandidateAcceptanceStore } from "./candidate-acceptance";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -30,13 +31,19 @@ export async function userAcceptanceRuntimeFromEnv(
       tls: { key: brokerKey, certificate: brokerCertificate, ca: brokerCa },
       timeoutMs: integer(env.DEVILUDO_USER_ACCEPTANCE_MODEL_TIMEOUT_SECONDS, 120, 1, 120) * 1_000,
     });
+    const completions = new PostgresWorkflowActionCompletionStore(pool);
     const service = new UserAcceptanceService(
       store,
       model,
-      new PostgresWorkflowActionCompletionStore(pool),
+      completions,
+    );
+    const acceptance = new CandidateAcceptanceService(
+      new PostgresCandidateAcceptanceStore(pool),
+      completions,
     );
     const handler = createUserAcceptanceHandler({
       service,
+      acceptance,
       allowedSpiffeIds: spiffeSet(required(env, "DEVILUDO_USER_ACCEPTANCE_WEB_SPIFFE_IDS")),
     });
     const server = createUserAcceptanceHttpsServer({
@@ -49,6 +56,7 @@ export async function userAcceptanceRuntimeFromEnv(
       pool,
       store,
       service,
+      acceptance,
       server,
     });
   } catch (error) {

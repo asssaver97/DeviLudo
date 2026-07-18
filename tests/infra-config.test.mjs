@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 38 }, (_, index) => {
+  const offsets = Array.from({ length: 39 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,22 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("candidate acceptance is an immutable actor and evidence-bound decision", () => {
+  const migration = readFileSync(new URL("../infra/postgres/039_user_candidate_acceptances.sql", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/user-acceptance/src/candidate-acceptance.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.user_candidate_acceptances/);
+  assert.match(migration, /candidate_commit_sha/);
+  assert.match(migration, /evidence_bundle_id/);
+  assert.match(migration, /user_candidate_acceptance_guard/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(service, /action\.operation = 'REQUEST_USER_ACCEPTANCE'/);
+  assert.match(service, /evidence\.invalidated_at IS NULL/);
+  assert.match(service, /attempt\.binding->>'specRevisionId' = spec\.id::text/);
+  assert.match(service, /evidence\.binding->>'specRevisionId' = spec\.id::text/);
+  assert.match(service, /source: "USER_ACCEPTANCE_SERVICE"/);
+  assert.match(service, /type: "USER_ACCEPTED"/);
 });
 
 test("user feedback generation is durable and cannot invalidate evidence before a draft exists", () => {
