@@ -95,6 +95,17 @@ health identity gates readiness, long uploads heartbeat their workflow lease,
 and its receipt must echo every authorization binding. Default publication is
 accepted only when `SetLive` returns the same private-Beta BuildID.
 
+The Broker ingress contract is implemented by
+`createSteamWorkflowBrokerHandler()` and
+`createSteamWorkflowBrokerHttpsServer()`. It requires an allow-listed SPIFFE
+workload over TLS 1.3 mutual authentication and binds every POST/GET to the
+same tenant header, idempotency key and request digest. Requests, status
+variants and receipts use exact-key schemas; unknown fields (including any
+credential material), executor identity drift and receipt drift fail closed.
+Readiness exposes a fixed semantic version and binary digest that the workflow
+client must pin. The irreversible executor remains an injected service behind
+this boundary and cannot control the wire schema.
+
 `npm run start:steam-install-services` mounts two separate TLS 1.3 mTLS
 listeners with different client CAs. The preparation listener exposes only
 `POST /v1/clean-install-execution-preparations` to Runner Control and accepts

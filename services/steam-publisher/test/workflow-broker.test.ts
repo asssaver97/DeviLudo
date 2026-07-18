@@ -13,6 +13,7 @@ const requestDigest = "a".repeat(64);
 const tls = Object.freeze({
   key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3),
 });
+const expectedBroker = Object.freeze({ version: "1.0.0", binaryDigest: "9".repeat(64) });
 
 function common(heartbeats: string[] = []) {
   return {
@@ -38,7 +39,10 @@ function publishInput(heartbeats: string[] = []) {
 function running(kind: "PRIVATE_BETA_UPLOAD" | "DEFAULT_BRANCH_PUBLISH", operationId = "steam-operation-001") {
   return {
     statusCode: 202,
-    payload: { status: "RUNNING", kind, operationId, operationKey, requestDigest, receipt: null },
+    payload: {
+      schemaVersion: "deviludo.steam-workflow-operation-status.v1",
+      status: "RUNNING", kind, operationId, operationKey, requestDigest, receipt: null,
+    },
   };
 }
 
@@ -46,6 +50,7 @@ function uploaded(overrides: Record<string, unknown> = {}) {
   return {
     statusCode: 200,
     payload: {
+      schemaVersion: "deviludo.steam-workflow-operation-status.v1",
       status: "COMPLETED", kind: "PRIVATE_BETA_UPLOAD", operationId: "steam-operation-001",
       operationKey, requestDigest,
       receipt: {
@@ -61,6 +66,7 @@ function published(overrides: Record<string, unknown> = {}) {
   return {
     statusCode: 200,
     payload: {
+      schemaVersion: "deviludo.steam-workflow-operation-status.v1",
       status: "COMPLETED", kind: "DEFAULT_BRANCH_PUBLISH", operationId: "steam-operation-002",
       operationKey, requestDigest,
       receipt: {
@@ -78,7 +84,7 @@ test("mTLS Steam Broker uploads a bound private Beta and heartbeats without cred
   const heartbeats: string[] = [];
   let now = 1_000;
   const broker = new MtlsSteamWorkflowBroker({
-    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
     pollIntervalMs: 250, maxWaitMs: 30_000, now: () => now,
     pause: async (delay) => { now += delay; },
     http: async (url, request) => {
@@ -91,6 +97,8 @@ test("mTLS Steam Broker uploads a bound private Beta and heartbeats without cred
   assert.deepEqual(heartbeats, ["heartbeat"]);
   assert.equal(calls[0]?.url, "https://steam-workflow.internal/v1/steam-operations");
   assert.equal(calls[1]?.url, "https://steam-workflow.internal/v1/steam-operations/steam-operation-001");
+  assert.equal(calls[0]?.request.headers["x-deviludo-tenant-id"], tenantId);
+  assert.equal(calls[1]?.request.headers["x-deviludo-tenant-id"], tenantId);
   const submitted = JSON.parse(calls[0]?.request.body ?? "null") as Record<string, unknown>;
   assert.equal(submitted.kind, "PRIVATE_BETA_UPLOAD");
   assert.equal(submitted.mainEvidenceBundleId, evidenceId);
@@ -102,7 +110,7 @@ test("mTLS Steam Broker uploads a bound private Beta and heartbeats without cred
 
 test("mTLS Steam Broker promotes only the same approved, clean-install-tested BuildID", async () => {
   const broker = new MtlsSteamWorkflowBroker({
-    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
     http: async () => published(),
   });
   const receipt = await broker.publish(publishInput());
@@ -110,7 +118,7 @@ test("mTLS Steam Broker promotes only the same approved, clean-install-tested Bu
   assert.deepEqual(receipt.externalApprovalIds, publishInput().externalApprovalIds);
 
   const drifted = new MtlsSteamWorkflowBroker({
-    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
     http: async () => published({ defaultBranchBuildId: "99999999" }),
   });
   await assert.rejects(drifted.publish(publishInput()), /invalid bound response/);
@@ -119,7 +127,7 @@ test("mTLS Steam Broker promotes only the same approved, clean-install-tested Bu
 test("mTLS Steam Broker rejects operation drift and carries bounded Broker failure codes", async () => {
   let now = 1_000;
   const drifted = new MtlsSteamWorkflowBroker({
-    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
     pollIntervalMs: 250, maxWaitMs: 30_000, now: () => now,
     pause: async (delay) => { now += delay; },
     http: async (_url, request) => request.method === "POST" ? running("PRIVATE_BETA_UPLOAD") : {
@@ -129,8 +137,9 @@ test("mTLS Steam Broker rejects operation drift and carries bounded Broker failu
   await assert.rejects(drifted.upload(uploadInput()), /changed the immutable operation identity/);
 
   const failed = new MtlsSteamWorkflowBroker({
-    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
     http: async () => ({ statusCode: 200, payload: {
+      schemaVersion: "deviludo.steam-workflow-operation-status.v1",
       status: "FAILED", kind: "DEFAULT_BRANCH_PUBLISH", operationId: "steam-operation-002",
       operationKey, requestDigest, errorCode: "STEAM_EXTERNAL_APPROVAL_REVOKED", terminal: true, receipt: null,
     } }),
@@ -145,10 +154,13 @@ test("mTLS Steam Broker rejects operation drift and carries bounded Broker failu
 test("mTLS Steam Broker pins its endpoint and exact health identity", async () => {
   const calls: string[] = [];
   const broker = new MtlsSteamWorkflowBroker({
-    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+    endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
     http: async (url) => {
       calls.push(url.href);
-      return { statusCode: 200, payload: { status: "ok", service: "deviludo-steam-workflow-broker" } };
+      return { statusCode: 200, payload: {
+        schemaVersion: "deviludo.steam-workflow-broker-health.v1",
+        status: "ok", service: "deviludo-steam-workflow-broker", ...expectedBroker,
+      } };
     },
   });
   await broker.probe();
@@ -158,5 +170,49 @@ test("mTLS Steam Broker pins its endpoint and exact health identity", async () =
     "https://user:secret@steam-workflow.internal/v1/steam-operations",
     "https://steam-workflow.internal/v1/steam-operations?token=secret",
     "https://steam-workflow.internal/other",
-  ]) assert.throws(() => new MtlsSteamWorkflowBroker({ endpoint, tls }), /endpoint is invalid/);
+  ]) assert.throws(() => new MtlsSteamWorkflowBroker({ endpoint, tls, expectedBroker }), /endpoint is invalid/);
+});
+
+test("mTLS Steam Broker rejects unversioned, extra-field and binary-identity drift", async () => {
+  for (const response of [
+    { ...uploaded(), payload: { ...(uploaded().payload as Record<string, unknown>), configVdf: "secret" } },
+    uploaded({ password: "secret" }),
+    { ...uploaded(), payload: { ...(uploaded().payload as Record<string, unknown>), schemaVersion: "deviludo.steam-workflow-operation-status.v2" } },
+  ]) {
+    const broker = new MtlsSteamWorkflowBroker({
+      endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
+      http: async () => response,
+    });
+    await assert.rejects(broker.upload(uploadInput()), /invalid bound response/);
+  }
+
+  for (const payload of [
+    {
+      schemaVersion: "deviludo.steam-workflow-broker-health.v1",
+      status: "ok", service: "deviludo-steam-workflow-broker", ...expectedBroker,
+      configVdf: "secret",
+    },
+    {
+      schemaVersion: "deviludo.steam-workflow-broker-health.v1",
+      status: "ok", service: "deviludo-steam-workflow-broker",
+      version: expectedBroker.version, binaryDigest: "8".repeat(64),
+    },
+  ]) {
+    const broker = new MtlsSteamWorkflowBroker({
+      endpoint: "https://steam-workflow.internal/v1/steam-operations", tls, expectedBroker,
+      http: async () => ({ statusCode: 200, payload }),
+    });
+    await assert.rejects(broker.probe(), /invalid bound response|readiness probe failed/);
+  }
+
+  for (const identity of [
+    { version: "latest", binaryDigest: expectedBroker.binaryDigest },
+    { version: "1.0.0", binaryDigest: "invalid" },
+    { ...expectedBroker, unexpected: "value" },
+  ]) {
+    assert.throws(() => new MtlsSteamWorkflowBroker({
+      endpoint: "https://steam-workflow.internal/v1/steam-operations", tls,
+      expectedBroker: identity,
+    }), /invalid bound response|BINDING_INVALID/);
+  }
 });

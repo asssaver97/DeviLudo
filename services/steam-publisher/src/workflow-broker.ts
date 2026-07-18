@@ -51,6 +51,11 @@ type OperationStatus = {
   readonly receipt: SteamWorkflowReceipt | null;
 };
 
+export interface SteamWorkflowBrokerIdentity {
+  readonly version: string;
+  readonly binaryDigest: string;
+}
+
 /**
  * Both Steam workflow commands use one isolated Broker. The Broker alone may
  * materialize config.vdf, call SteamCMD/SteamPipe or use a build account.
@@ -62,12 +67,14 @@ export class MtlsSteamWorkflowBroker implements SteamPrivateBetaWorkflowPort, St
   readonly #pollIntervalMs: number;
   readonly #maxWaitMs: number;
   readonly #http: SteamWorkflowBrokerHttp;
+  readonly #expectedBroker: SteamWorkflowBrokerIdentity;
   readonly #pause: (delayMs: number) => Promise<void>;
   readonly #now: () => number;
 
   constructor(options: {
     readonly endpoint: string | URL;
     readonly tls: SteamWorkflowBrokerTlsMaterial;
+    readonly expectedBroker: SteamWorkflowBrokerIdentity;
     readonly requestTimeoutMs?: number;
     readonly pollIntervalMs?: number;
     readonly maxWaitMs?: number;
@@ -78,6 +85,7 @@ export class MtlsSteamWorkflowBroker implements SteamPrivateBetaWorkflowPort, St
     this.#endpoint = strictEndpoint(options.endpoint);
     validateTls(options.tls);
     this.#tls = Object.freeze({ ...options.tls });
+    this.#expectedBroker = brokerIdentity(options.expectedBroker);
     this.#requestTimeoutMs = boundedInteger(options.requestTimeoutMs ?? 30_000, 1_000, 600_000, "request timeout");
     this.#pollIntervalMs = boundedInteger(options.pollIntervalMs ?? 10_000, 250, 60_000, "poll interval");
     this.#maxWaitMs = boundedInteger(options.maxWaitMs ?? 2 * 60 * 60_000, 30_000, 24 * 60 * 60_000, "maximum wait");
@@ -106,7 +114,10 @@ export class MtlsSteamWorkflowBroker implements SteamPrivateBetaWorkflowPort, St
       headers: Object.freeze({ accept: "application/json" }),
     });
     const body = record(response.payload);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-steam-workflow-broker") {
+    exactKeys(body, ["schemaVersion", "status", "service", "version", "binaryDigest"]);
+    if (response.statusCode !== 200 || body.schemaVersion !== "deviludo.steam-workflow-broker-health.v1"
+      || body.status !== "ok" || body.service !== "deviludo-steam-workflow-broker"
+      || body.version !== this.#expectedBroker.version || body.binaryDigest !== this.#expectedBroker.binaryDigest) {
       throw new Error("Steam workflow Broker readiness probe failed");
     }
   }
@@ -140,6 +151,7 @@ export class MtlsSteamWorkflowBroker implements SteamPrivateBetaWorkflowPort, St
         "content-type": "application/json",
         "idempotency-key": input.operationKey,
         "x-deviludo-request-digest": input.requestDigest,
+        "x-deviludo-tenant-id": input.tenantId,
       }),
       body,
     }), kind, input);
@@ -158,6 +170,7 @@ export class MtlsSteamWorkflowBroker implements SteamPrivateBetaWorkflowPort, St
           accept: "application/json",
           "idempotency-key": input.operationKey,
           "x-deviludo-request-digest": input.requestDigest,
+          "x-deviludo-tenant-id": input.tenantId,
         }),
       }), kind, input);
       if (current.operationId !== initial.operationId) throw new Error("Steam workflow Broker changed the immutable operation identity");
@@ -178,6 +191,10 @@ export async function steamWorkflowBrokerFromEnv(
   return new MtlsSteamWorkflowBroker({
     endpoint: requiredEnv(env, "DEVILUDO_STEAM_WORKFLOW_BROKER_URL"),
     tls: { key, certificate, ca },
+    expectedBroker: {
+      version: requiredEnv(env, "DEVILUDO_STEAM_WORKFLOW_BROKER_VERSION"),
+      binaryDigest: requiredEnv(env, "DEVILUDO_STEAM_WORKFLOW_BROKER_BINARY_DIGEST"),
+    },
     requestTimeoutMs: seconds(env.DEVILUDO_STEAM_OPERATION_REQUEST_TIMEOUT_SECONDS, 30, 1, 600) * 1_000,
     pollIntervalMs: seconds(env.DEVILUDO_STEAM_OPERATION_POLL_SECONDS, 10, 1, 60) * 1_000,
     maxWaitMs: seconds(env.DEVILUDO_STEAM_OPERATION_MAX_WAIT_SECONDS, 7_200, 30, 86_400) * 1_000,
@@ -246,18 +263,22 @@ function parseStatus(
     throw new Error(`Steam workflow Broker rejected the request with status ${response.statusCode}`);
   }
   const body = record(response.payload);
-  if (body.kind !== kind || body.operationKey !== expected.operationKey || body.requestDigest !== expected.requestDigest) invalidResponse();
+  if (body.schemaVersion !== "deviludo.steam-workflow-operation-status.v1"
+    || body.kind !== kind || body.operationKey !== expected.operationKey || body.requestDigest !== expected.requestDigest) invalidResponse();
   const operationId = stringId(body.operationId);
   if (body.status === "FAILED") {
+    exactKeys(body, ["schemaVersion", "status", "kind", "operationId", "operationKey", "requestDigest", "errorCode", "terminal", "receipt"]);
     if (response.statusCode !== 200 || typeof body.errorCode !== "string" || !ERROR_CODE.test(body.errorCode)
       || typeof body.terminal !== "boolean" || (body.receipt !== null && body.receipt !== undefined)) invalidResponse();
     throw new WorkflowJobError(body.errorCode, body.terminal);
   }
   if (body.status === "RUNNING") {
+    exactKeys(body, ["schemaVersion", "status", "kind", "operationId", "operationKey", "requestDigest", "receipt"]);
     if (response.statusCode !== 202 || (body.receipt !== null && body.receipt !== undefined)) invalidResponse();
     return Object.freeze({ status: "RUNNING", operationId, receipt: null });
   }
   if (body.status !== "COMPLETED" || response.statusCode !== 200) invalidResponse();
+  exactKeys(body, ["schemaVersion", "status", "kind", "operationId", "operationKey", "requestDigest", "receipt"]);
   const receipt = kind === "PRIVATE_BETA_UPLOAD"
     ? parseUploadReceipt(body.receipt, expected as UploadInput)
     : parsePublishReceipt(body.receipt, expected as PublishInput);
@@ -266,6 +287,7 @@ function parseStatus(
 
 function parseUploadReceipt(value: unknown, expected: UploadInput): SteamPrivateBetaWorkflowReceipt {
   const body = record(value);
+  exactKeys(body, ["receiptId", "runId", "mainCommitSha", "mainEvidenceBundleId", "mfaApprovalId", "targetMatrix", "buildId"]);
   const targetMatrix = parseMatrix(body.targetMatrix);
   if (!SAFE_ID.test(String(body.receiptId ?? "")) || body.runId !== expected.runId
     || body.mainCommitSha !== expected.mainCommitSha || body.mainEvidenceBundleId !== expected.mainEvidenceBundleId
@@ -284,6 +306,7 @@ function parseUploadReceipt(value: unknown, expected: UploadInput): SteamPrivate
 
 function parsePublishReceipt(value: unknown, expected: PublishInput): SteamDefaultBranchWorkflowReceipt {
   const body = record(value);
+  exactKeys(body, ["receiptId", "releaseId", "runId", "betaBuildId", "defaultBranchBuildId", "externalApprovalIds"]);
   const approvals = parseIds(body.externalApprovalIds, 3);
   if (!SAFE_ID.test(String(body.receiptId ?? "")) || !SAFE_ID.test(String(body.releaseId ?? ""))
     || body.runId !== expected.runId || body.betaBuildId !== expected.betaBuildId
@@ -354,9 +377,24 @@ function validateTls(tls: SteamWorkflowBrokerTlsMaterial): void {
   }
 }
 
+function brokerIdentity(value: SteamWorkflowBrokerIdentity): SteamWorkflowBrokerIdentity {
+  const body = record(value);
+  exactKeys(body, ["version", "binaryDigest"]);
+  if (typeof body.version !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(body.version)
+    || /(?:latest|stable|default)/i.test(body.version)
+    || typeof body.binaryDigest !== "string" || !SHA256.test(body.binaryDigest)) invalidBinding();
+  return Object.freeze({ version: body.version, binaryDigest: body.binaryDigest });
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalidResponse();
   return value as Record<string, unknown>;
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) invalidResponse();
 }
 
 function stringId(value: unknown): string {
