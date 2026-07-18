@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 34 }, (_, index) => {
+  const offsets = Array.from({ length: 37 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,18 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("user feedback atomically invalidates the candidate evidence through an append-only receipt", () => {
+  const migration = readFileSync(new URL("../infra/postgres/037_feedback_evidence_invalidation.sql", import.meta.url), "utf8");
+  const completion = readFileSync(new URL("../services/control-plane/src/workflow-action-completion-postgres.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.workflow_feedback_invalidations/);
+  assert.match(migration, /workflow_feedback_invalidations_append_only/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, evidence_bundle_id\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(completion, /UPDATE deviludo\.evidence_bundles/);
+  assert.match(completion, /evidence\.invalidated_at IS NULL/);
+  assert.match(completion, /next\.previous_revision_id/);
 });
 
 test("approved specifications enter Temporal through an ordered durable bridge", () => {

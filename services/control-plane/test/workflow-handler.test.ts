@@ -423,6 +423,155 @@ test("Agent configuration completion re-resolves the queued immutable lock befor
   assert.equal(statements.at(-1), "ROLLBACK");
 });
 
+test("user feedback atomically tombstones exact candidate evidence before signaling the new draft iteration", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const outboxId = "44444444-4444-4444-8444-444444444444";
+  const currentSpecId = "55555555-5555-4555-8555-555555555555";
+  const nextSpecId = "66666666-6666-4666-8666-666666666666";
+  const evidenceId = "77777777-7777-4777-8777-777777777777";
+  const invalidationId = "88888888-8888-4888-8888-888888888888";
+  const candidateReceiptId = "99999999-9999-4999-8999-999999999999";
+  const candidateRunId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const attemptId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const planId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const candidateSha = "d".repeat(40);
+  const sourceDigest = "e".repeat(64);
+  const invalidatedAt = "2030-01-01T00:00:00.000Z";
+  const signal: DeliverySignal = Object.freeze({
+    signalId: "user-feedback-signal-001", type: "USER_FEEDBACK",
+    nextSpecRevisionId: nextSpecId, evidenceInvalidationId: invalidationId,
+  });
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation: "REQUEST_USER_ACCEPTANCE", status: "WAITING",
+    binding: { state: "WAITING_USER_ACCEPTANCE", specRevisionId: currentSpecId,
+      testPlanRevisionId: planId, specApprovalReceiptId: "f".repeat(64),
+      lockedRunConfigurationId: candidateRunId, providerRevisionId: null,
+      candidateCommitSha: candidateSha, draftPullRequest: 91, evidenceBundleId: evidenceId,
+      mainCommitSha: null, releaseId: null, steamBuildId: null, externalGate: null,
+      cancellationReason: null },
+    completion_signal_id: null, completion_signal_digest: null,
+    completion_source: null, completion_receipt_id: null,
+  };
+  let evidenceInvalidatedAt: string | null = null;
+  let invalidationInsert: readonly unknown[] | undefined;
+  let outboxInsert: readonly unknown[] | undefined;
+  let evidenceUpdates = 0;
+  const statements: string[] = [];
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values?: readonly unknown[]) {
+      statements.push(statement);
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.github_candidate_receipts candidate")) return { rows: [{
+        candidate_receipt_id: candidateReceiptId, candidate_run_id: candidateRunId,
+        candidate_spec_revision_id: currentSpecId, candidate_commit_sha: candidateSha,
+        candidate_source_digest: sourceDigest, candidate_pull_request: "91",
+        attempt_id: attemptId, attempt_state: "PASSED", attempt_mode: "CANDIDATE",
+        attempt_workflow_id: "delivery-001", attempt_commit_sha: candidateSha,
+        attempt_source_digest: sourceDigest, attempt_binding: { specRevisionId: currentSpecId },
+        evidence_id: evidenceId, evidence_commit_sha: candidateSha,
+        evidence_source_digest: sourceDigest, evidence_status: "PASSED",
+        evidence_invalidated_at: evidenceInvalidatedAt,
+        evidence_binding: { specRevisionId: currentSpecId },
+      }] as Row[] };
+      if (statement.includes("FROM deviludo.immutable_revisions next")) return { rows: [{
+        next_spec_revision_id: nextSpecId, next_spec_state: "DRAFT", next_spec_revision: 8,
+        next_previous_revision_id: currentSpecId, previous_spec_revision_id: currentSpecId,
+        previous_spec_state: "APPROVED", previous_spec_revision: 7,
+        conversation_state: "DRAFT", current_spec_revision_id: nextSpecId,
+        current_test_plan_revision_id: planId,
+      }] as Row[] };
+      if (statement.includes("INSERT INTO deviludo.workflow_feedback_invalidations")) {
+        invalidationInsert = values;
+        return { rows: [], rowCount: 1 };
+      }
+      if (statement.includes("FROM deviludo.workflow_feedback_invalidations")) return { rows: [{
+        id: invalidationId, candidate_receipt_id: candidateReceiptId,
+        evidence_bundle_id: evidenceId, previous_spec_revision_id: currentSpecId,
+        next_spec_revision_id: nextSpecId, source_receipt_id: "feedback-receipt-001",
+        reason: "USER_FEEDBACK", receipt_digest: invalidationInsert?.[10],
+        receipt: JSON.parse(String(invalidationInsert?.[11])), invalidated_at: invalidatedAt,
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.evidence_bundles")) {
+        evidenceUpdates += 1;
+        evidenceInvalidatedAt = invalidatedAt;
+        return { rows: [{ id: evidenceId }] as Row[] };
+      }
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) {
+        outboxInsert = values;
+        return { rows: [], rowCount: 1 };
+      }
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: signal.signalId, signal_digest: outboxInsert?.[5],
+        signal: JSON.parse(String(outboxInsert?.[6])), state: "PENDING",
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    }, release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  const receipt = await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: "feedback-receipt-001", signal });
+  assert.equal(receipt.outboxId, outboxId);
+  assert.equal(evidenceUpdates, 1);
+  assert.ok(statements.findIndex((value) => value.includes("UPDATE deviludo.evidence_bundles"))
+    < statements.findIndex((value) => value.includes("INSERT INTO deviludo.workflow_signal_outbox")));
+
+  Object.assign(action, {
+    status: "COMPLETED", completion_signal_id: signal.signalId,
+    completion_signal_digest: receipt.signalDigest, completion_source: "USER_ACCEPTANCE_SERVICE",
+    completion_receipt_id: "feedback-receipt-001",
+  });
+  const replay = await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: "feedback-receipt-001", signal });
+  assert.equal(replay.replayed, true);
+  assert.equal(evidenceUpdates, 1);
+});
+
+test("user acceptance cannot merge evidence that feedback already invalidated", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const specId = "55555555-5555-4555-8555-555555555555";
+  const evidenceId = "77777777-7777-4777-8777-777777777777";
+  const candidateSha = "d".repeat(40);
+  const sourceDigest = "e".repeat(64);
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string) {
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [{
+        id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        operation: "REQUEST_USER_ACCEPTANCE", status: "WAITING",
+        binding: { state: "WAITING_USER_ACCEPTANCE", specRevisionId: specId,
+          candidateCommitSha: candidateSha, draftPullRequest: 91, evidenceBundleId: evidenceId },
+        completion_signal_id: null, completion_signal_digest: null,
+        completion_source: null, completion_receipt_id: null,
+      }] as Row[] };
+      if (statement.includes("FROM deviludo.github_candidate_receipts candidate")) return { rows: [{
+        candidate_receipt_id: "99999999-9999-4999-8999-999999999999",
+        candidate_run_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        candidate_spec_revision_id: specId, candidate_commit_sha: candidateSha,
+        candidate_source_digest: sourceDigest, candidate_pull_request: 91,
+        attempt_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", attempt_state: "PASSED",
+        attempt_mode: "CANDIDATE", attempt_workflow_id: "delivery-001",
+        attempt_commit_sha: candidateSha, attempt_source_digest: sourceDigest,
+        attempt_binding: { specRevisionId: specId }, evidence_id: evidenceId,
+        evidence_commit_sha: candidateSha, evidence_source_digest: sourceDigest,
+        evidence_status: "PASSED", evidence_invalidated_at: "2030-01-01T00:00:00.000Z",
+        evidence_binding: { specRevisionId: specId },
+      }] as Row[] };
+      return { rows: [] };
+    }, release() {},
+  };
+  await assert.rejects(new PostgresWorkflowActionCompletionStore({ async connect() { return client; } }).complete({
+    tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: "acceptance-receipt-001",
+    signal: { signalId: "user-accepted-signal-001", type: "USER_ACCEPTED" },
+  }), /evidence has been invalidated/);
+});
+
 test("workflow action completion rejects a signal from the wrong authority", async () => {
   const client: ControlPlaneWorkflowSqlClient = {
     async query<Row>(statement: string) {

@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/p
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { canonicalJson } from "../../runner-control/src/canonical";
 import { verifyGitHubCandidateArtifact } from "../../scm-proxy/src/github-artifacts";
-import type { IsolatedAgentExecutionRequest, IsolatedAgentExecutionResult, LockedAgentExecution } from "./contracts";
+import type { IsolatedAgentExecutionRequest, IsolatedAgentExecutionResult } from "./contracts";
 import { validateIsolatedResult } from "./contracts";
 import type { IsolatedAgentExecutionDispatcher } from "./operations";
 import type { AgentDevelopmentWorkPackagePort } from "./postgres-work-package";

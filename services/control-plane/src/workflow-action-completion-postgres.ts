@@ -98,6 +98,52 @@ type RunConfigurationAuthorityRow = {
   configuration_lock: unknown;
 };
 
+type CandidateAcceptanceAuthorityRow = {
+  candidate_receipt_id: string;
+  candidate_run_id: string;
+  candidate_spec_revision_id: string;
+  candidate_commit_sha: string;
+  candidate_source_digest: string;
+  candidate_pull_request: string | number;
+  attempt_id: string;
+  attempt_state: string;
+  attempt_mode: string;
+  attempt_workflow_id: string;
+  attempt_commit_sha: string;
+  attempt_source_digest: string;
+  attempt_binding: unknown;
+  evidence_id: string;
+  evidence_commit_sha: string;
+  evidence_source_digest: string;
+  evidence_status: string;
+  evidence_invalidated_at: string | null;
+  evidence_binding: unknown;
+};
+type FeedbackSpecAuthorityRow = {
+  next_spec_revision_id: string;
+  next_spec_state: string;
+  next_spec_revision: number;
+  next_previous_revision_id: string | null;
+  previous_spec_revision_id: string;
+  previous_spec_state: string;
+  previous_spec_revision: number;
+  conversation_state: string;
+  current_spec_revision_id: string;
+  current_test_plan_revision_id: string | null;
+};
+type FeedbackInvalidationRow = {
+  id: string;
+  candidate_receipt_id: string;
+  evidence_bundle_id: string;
+  previous_spec_revision_id: string;
+  next_spec_revision_id: string;
+  source_receipt_id: string;
+  reason: string;
+  receipt_digest: string;
+  receipt: unknown;
+  invalidated_at: string;
+};
+
 type ExternalApprovalSignal = Extract<DeliverySignal, { type: "EXTERNAL_APPROVED" }>;
 type ExternalApprovalAuthorityRow = {
   release_id: string;
@@ -175,6 +221,11 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
       if (input.source === "AGENT_CONFIGURATION_SERVICE"
         && input.signal.type === "RUN_CONFIGURATION_LOCKED") {
         await this.#assertRunConfigurationAuthority(client, action, input.signal.lockedRunConfigurationId);
+      }
+
+      if (input.source === "USER_ACCEPTANCE_SERVICE"
+        && (input.signal.type === "USER_ACCEPTED" || input.signal.type === "USER_FEEDBACK")) {
+        await this.#recordUserAcceptance(client, action, input, input.signal);
       }
 
       if (input.source === "STEAM_APPROVAL_MONITOR" && input.signal.type === "EXTERNAL_APPROVED") {
@@ -358,6 +409,217 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
     }
   }
 
+  async #recordUserAcceptance(
+    client: ControlPlaneWorkflowSqlClient,
+    action: ActionRow,
+    input: Parameters<WorkflowActionCompletionPort["complete"]>[0],
+    signal: Extract<DeliverySignal, { type: "USER_ACCEPTED" | "USER_FEEDBACK" }>,
+  ): Promise<void> {
+    const specRevisionId = action.binding.specRevisionId;
+    const evidenceBundleId = action.binding.evidenceBundleId;
+    const candidateCommitSha = action.binding.candidateCommitSha;
+    const draftPullRequest = action.binding.draftPullRequest;
+    if (!specRevisionId || !UUID.test(specRevisionId) || !evidenceBundleId || !UUID.test(evidenceBundleId)
+      || !candidateCommitSha || !/^[a-f0-9]{40}$/.test(candidateCommitSha)
+      || !Number.isSafeInteger(draftPullRequest) || (draftPullRequest as number) < 1) invalidAuthority();
+    const selected = await client.query<CandidateAcceptanceAuthorityRow>(
+      `SELECT candidate.id::text AS candidate_receipt_id,
+              candidate.run_id::text AS candidate_run_id,
+              candidate.spec_revision_id::text AS candidate_spec_revision_id,
+              candidate.candidate_commit_sha,
+              candidate.source_digest AS candidate_source_digest,
+              candidate.pull_request_number AS candidate_pull_request,
+              attempt.id::text AS attempt_id,
+              attempt.state AS attempt_state,
+              attempt.mode AS attempt_mode,
+              attempt.workflow_id AS attempt_workflow_id,
+              attempt.commit_sha AS attempt_commit_sha,
+              attempt.source_digest AS attempt_source_digest,
+              attempt.binding AS attempt_binding,
+              evidence.id::text AS evidence_id,
+              evidence.commit_sha AS evidence_commit_sha,
+              evidence.source_digest AS evidence_source_digest,
+              evidence.status AS evidence_status,
+              evidence.invalidated_at::text AS evidence_invalidated_at,
+              evidence.binding AS evidence_binding
+         FROM deviludo.github_candidate_receipts candidate
+         JOIN deviludo.e2e_attempts attempt
+           ON attempt.tenant_id = candidate.tenant_id
+          AND attempt.project_id = candidate.project_id
+          AND attempt.run_id = candidate.run_id
+          AND attempt.workflow_id = $3
+          AND attempt.mode = 'CANDIDATE'
+          AND attempt.commit_sha = candidate.candidate_commit_sha
+          AND attempt.source_digest = candidate.source_digest
+          AND attempt.draft_pull_request = candidate.pull_request_number
+         JOIN deviludo.evidence_bundles evidence
+           ON evidence.tenant_id = attempt.tenant_id
+          AND evidence.project_id = attempt.project_id
+          AND evidence.attempt_id = attempt.id
+          AND evidence.id = $7::uuid
+        WHERE candidate.tenant_id = $1::uuid AND candidate.project_id = $2::uuid
+          AND candidate.spec_revision_id = $4::uuid
+          AND candidate.candidate_commit_sha = $5
+          AND candidate.pull_request_number = $6::bigint
+          AND attempt.state = 'PASSED' AND evidence.status = 'PASSED'
+        FOR UPDATE OF evidence`,
+      [action.tenant_id, action.project_id, action.workflow_id, specRevisionId,
+        candidateCommitSha, draftPullRequest, evidenceBundleId],
+    );
+    const authority = selected.rows[0];
+    const attemptBinding = authority ? record(authority.attempt_binding) : {};
+    const evidenceBinding = authority ? record(authority.evidence_binding) : {};
+    if (selected.rows.length !== 1 || !authority || !UUID.test(authority.candidate_receipt_id)
+      || !UUID.test(authority.candidate_run_id) || !UUID.test(authority.attempt_id)
+      || authority.candidate_spec_revision_id !== specRevisionId
+      || authority.candidate_commit_sha !== candidateCommitSha
+      || Number(authority.candidate_pull_request) !== draftPullRequest
+      || authority.attempt_state !== "PASSED" || authority.attempt_mode !== "CANDIDATE"
+      || authority.attempt_workflow_id !== action.workflow_id
+      || authority.attempt_commit_sha !== candidateCommitSha
+      || authority.evidence_commit_sha !== candidateCommitSha
+      || authority.attempt_source_digest !== authority.candidate_source_digest
+      || authority.evidence_source_digest !== authority.candidate_source_digest
+      || authority.evidence_id !== evidenceBundleId || authority.evidence_status !== "PASSED"
+      || attemptBinding.specRevisionId !== specRevisionId
+      || evidenceBinding.specRevisionId !== specRevisionId) {
+      throw new WorkflowActionCompletionConflictError("Candidate acceptance evidence authority is unavailable");
+    }
+    if (signal.type === "USER_ACCEPTED") {
+      if (authority.evidence_invalidated_at !== null) {
+        throw new WorkflowActionCompletionConflictError("Candidate acceptance evidence has been invalidated");
+      }
+      return;
+    }
+    await this.#recordFeedbackInvalidation(client, action, input, signal, authority);
+  }
+
+  async #recordFeedbackInvalidation(
+    client: ControlPlaneWorkflowSqlClient,
+    action: ActionRow,
+    input: Parameters<WorkflowActionCompletionPort["complete"]>[0],
+    signal: Extract<DeliverySignal, { type: "USER_FEEDBACK" }>,
+    authority: CandidateAcceptanceAuthorityRow,
+  ): Promise<void> {
+    if (!UUID.test(signal.nextSpecRevisionId) || !UUID.test(signal.evidenceInvalidationId)) invalidAuthority();
+    const specResult = await client.query<FeedbackSpecAuthorityRow>(
+      `SELECT next.id::text AS next_spec_revision_id,
+              next.state AS next_spec_state,
+              next.revision AS next_spec_revision,
+              next.previous_revision_id::text AS next_previous_revision_id,
+              previous.id::text AS previous_spec_revision_id,
+              previous.state AS previous_spec_state,
+              previous.revision AS previous_spec_revision,
+              conversation.state AS conversation_state,
+              conversation.current_spec_revision_id::text,
+              conversation.current_test_plan_revision_id::text
+         FROM deviludo.immutable_revisions next
+         JOIN deviludo.immutable_revisions previous
+           ON previous.tenant_id = next.tenant_id
+          AND previous.project_id = next.project_id
+          AND previous.id = next.previous_revision_id
+          AND previous.aggregate_type = 'GAME_SPEC'
+          AND previous.aggregate_id = next.aggregate_id
+         JOIN deviludo.spec_conversations conversation
+           ON conversation.tenant_id = next.tenant_id
+          AND conversation.project_id = next.project_id
+          AND conversation.spec_aggregate_id = next.aggregate_id
+          AND conversation.current_spec_revision_id = next.id
+        WHERE next.tenant_id = $1::uuid AND next.project_id = $2::uuid
+          AND next.id = $3::uuid AND next.aggregate_type = 'GAME_SPEC'
+          AND next.previous_revision_id = $4::uuid
+        FOR SHARE OF next, previous, conversation`,
+      [action.tenant_id, action.project_id, signal.nextSpecRevisionId, action.binding.specRevisionId],
+    );
+    const spec = specResult.rows[0];
+    if (specResult.rows.length !== 1 || !spec
+      || spec.next_spec_revision_id !== signal.nextSpecRevisionId
+      || spec.next_spec_state !== "DRAFT"
+      || spec.next_previous_revision_id !== action.binding.specRevisionId
+      || spec.previous_spec_revision_id !== action.binding.specRevisionId
+      || spec.previous_spec_state !== "APPROVED"
+      || spec.next_spec_revision !== spec.previous_spec_revision + 1
+      || spec.conversation_state !== "DRAFT"
+      || spec.current_spec_revision_id !== signal.nextSpecRevisionId
+      || !spec.current_test_plan_revision_id) {
+      throw new WorkflowActionCompletionConflictError("Feedback specification revision authority is unavailable");
+    }
+    const receipt = Object.freeze({
+      schemaVersion: "deviludo.feedback-evidence-invalidation.v1",
+      source: input.source,
+      sourceReceiptId: input.sourceReceiptId,
+      actionId: input.actionId,
+      workflowId: input.workflowId,
+      candidateReceiptId: authority.candidate_receipt_id,
+      candidateCommitSha: authority.candidate_commit_sha,
+      draftPullRequest: Number(authority.candidate_pull_request),
+      evidenceBundleId: authority.evidence_id,
+      previousSpecRevisionId: action.binding.specRevisionId,
+      nextSpecRevisionId: signal.nextSpecRevisionId,
+      reason: "USER_FEEDBACK",
+    });
+    const receiptDigest = digest(receipt);
+    if (action.status === "WAITING") {
+      if (authority.evidence_invalidated_at !== null) {
+        throw new WorkflowActionCompletionConflictError("Candidate feedback evidence was already invalidated");
+      }
+      await client.query(
+        `INSERT INTO deviludo.workflow_feedback_invalidations
+          (id, tenant_id, project_id, workflow_id, action_id,
+           candidate_receipt_id, evidence_bundle_id, previous_spec_revision_id,
+           next_spec_revision_id, source_receipt_id, reason, receipt_digest, receipt)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6::uuid,
+                 $7::uuid, $8::uuid, $9::uuid, $10, 'USER_FEEDBACK', $11, $12::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [signal.evidenceInvalidationId, action.tenant_id, action.project_id,
+          action.workflow_id, action.id, authority.candidate_receipt_id, authority.evidence_id,
+          action.binding.specRevisionId, signal.nextSpecRevisionId, input.sourceReceiptId,
+          receiptDigest, JSON.stringify(receipt)],
+      );
+    }
+    const storedResult = await client.query<FeedbackInvalidationRow>(
+      `SELECT id::text, candidate_receipt_id::text, evidence_bundle_id::text,
+              previous_spec_revision_id::text, next_spec_revision_id::text,
+              source_receipt_id, reason, receipt_digest, receipt,
+              invalidated_at::text
+         FROM deviludo.workflow_feedback_invalidations
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+        FOR SHARE`,
+      [action.tenant_id, action.project_id, signal.evidenceInvalidationId],
+    );
+    const stored = storedResult.rows[0];
+    const storedReceipt = typeof stored?.receipt === "string"
+      ? JSON.parse(stored.receipt) as unknown : stored?.receipt;
+    if (storedResult.rows.length !== 1 || !stored
+      || stored.id !== signal.evidenceInvalidationId
+      || stored.candidate_receipt_id !== authority.candidate_receipt_id
+      || stored.evidence_bundle_id !== authority.evidence_id
+      || stored.previous_spec_revision_id !== action.binding.specRevisionId
+      || stored.next_spec_revision_id !== signal.nextSpecRevisionId
+      || stored.source_receipt_id !== input.sourceReceiptId
+      || stored.reason !== "USER_FEEDBACK" || stored.receipt_digest !== receiptDigest
+      || digest(storedReceipt) !== receiptDigest || !stored.invalidated_at) {
+      throw new WorkflowActionCompletionConflictError("Feedback invalidation receipt idempotency binding mismatch");
+    }
+    if (action.status === "COMPLETED") {
+      if (authority.evidence_invalidated_at !== stored.invalidated_at) {
+        throw new WorkflowActionCompletionConflictError("Feedback invalidation replay conflicts with evidence state");
+      }
+      return;
+    }
+    const invalidated = await client.query(
+      `UPDATE deviludo.evidence_bundles
+          SET invalidated_at = $4::timestamptz
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+          AND status = 'PASSED' AND invalidated_at IS NULL
+      RETURNING id`,
+      [action.tenant_id, action.project_id, authority.evidence_id, stored.invalidated_at],
+    );
+    if (invalidated.rows.length !== 1) {
+      throw new WorkflowActionCompletionConflictError("Candidate evidence invalidation race was lost");
+    }
+  }
+
   async #recordExternalApproval(
     client: ControlPlaneWorkflowSqlClient,
     action: ActionRow,
@@ -526,7 +788,8 @@ function validateSignalBinding(
     && signal.providerRevisionId === binding.providerRevisionId) return;
   if (operation === "REQUEST_USER_ACCEPTANCE"
     && (signal.type === "USER_ACCEPTED" || signal.type === "USER_FEEDBACK")
-    && binding.candidateCommitSha && binding.evidenceBundleId) return;
+    && binding.specRevisionId && binding.candidateCommitSha
+    && binding.draftPullRequest && binding.evidenceBundleId) return;
   if (operation === "REQUEST_FRESH_MFA" && signal.type === "MFA_APPROVED"
     && binding.mainCommitSha && binding.evidenceBundleId) return;
   if (operation === "WAIT_FOR_EXTERNAL_APPROVAL" && signal.type === "EXTERNAL_APPROVED"

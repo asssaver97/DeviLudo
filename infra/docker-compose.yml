@@ -45,6 +45,9 @@ services:
       - ./postgres/032_spec_workflow_bridge.sql:/docker-entrypoint-initdb.d/032_spec_workflow_bridge.sql:ro
       - ./postgres/033_agent_configuration_resolution.sql:/docker-entrypoint-initdb.d/033_agent_configuration_resolution.sql:ro
       - ./postgres/034_inference_provider_projection.sql:/docker-entrypoint-initdb.d/034_inference_provider_projection.sql:ro
+      - ./postgres/035_agent_execution_broker.sql:/docker-entrypoint-initdb.d/035_agent_execution_broker.sql:ro
+      - ./postgres/036_scm_candidate_publication.sql:/docker-entrypoint-initdb.d/036_scm_candidate_publication.sql:ro
+      - ./postgres/037_feedback_evidence_invalidation.sql:/docker-entrypoint-initdb.d/037_feedback_evidence_invalidation.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s
