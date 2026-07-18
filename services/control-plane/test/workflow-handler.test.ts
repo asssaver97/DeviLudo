@@ -132,6 +132,11 @@ test("control-plane workflow handler registers every user or external wait with 
   for (const operation of operations) {
     const outcome = await handler.execute(job(operation), { async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; } });
     assert.equal(outcome.result.operation, operation);
+    if (operation === "REQUEST_FRESH_MFA") {
+      assert.deepEqual(outcome.signal, { type: "RELEASE_PREPARED", releaseId });
+    } else {
+      assert.equal("signal" in outcome, false);
+    }
   }
   assert.equal(observed[2]?.binding.testPlanRevisionId, "approved-plan-r2");
   assert.equal(observed[3]?.binding.providerRevisionId, "provider-r7");
@@ -142,7 +147,7 @@ test("control-plane workflow handler registers every user or external wait with 
   assert.equal(observed[7]?.binding.cancellationReason, "user cancelled");
 });
 
-test("control-plane workflow handler never emits a completion signal from a registered wait", async () => {
+test("control-plane workflow handler never emits an approval signal from a registered user wait", async () => {
   const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } }, releases);
   const outcome = await handler.execute(job("REQUEST_USER_ACCEPTANCE"), {
     async heartbeat() { return "renewed"; }, async emitSignal() { throw new Error("must not emit"); },

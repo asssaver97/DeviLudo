@@ -284,6 +284,12 @@ revision carried by the workflow and activities; the Worker never silently
 swaps Claude Code and Codex CLI. Public release is not terminal on dispatch:
 the workflow waits for a bound `STEAM_RELEASED` result.
 
+`REQUEST_FRESH_MFA` first freezes the authoritative release and emits the
+non-approval `RELEASE_PREPARED` signal. This makes the exact release ID visible
+in the replay-validated Web projection without granting Web database or
+Temporal write access. The project page can then invoke only the fixed
+accept-and-publish route for that ID and redirects to the isolated MFA origin.
+
 Each destination registers `registerWorkflowCommandRoute` with its fixed
 destination, a `WorkflowCommandReceiver`, and an mTLS/SPIFFE authorizer. The
 receiver rejects state/command drift and missing PR, evidence, MFA, BuildID or

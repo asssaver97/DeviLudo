@@ -43,6 +43,7 @@ export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "USER_FEEDBACK"; nextSpecRevisionId: string; evidenceInvalidationId: string }
   | { type: "USER_ACCEPTED" }
   | { type: "MAIN_MERGED"; mainCommitSha: string }
+  | { type: "RELEASE_PREPARED"; releaseId: string }
   | { type: "MFA_APPROVED"; approvalId: string }
   | { type: "BETA_ACTIVATED"; buildId: string }
   | { type: "STEAM_INSTALL_PASSED"; evidenceBundleId: string }
@@ -161,7 +162,7 @@ export class GameDeliveryWorkflow {
       WAITING_USER_ACCEPTANCE: "REQUEST_USER_ACCEPTANCE",
       MERGING: "MERGE_DRAFT_PULL_REQUEST",
       MAIN_SHA_E2E: "START_MAIN_SHA_RELEASE_GATE",
-      WAITING_MFA: "REQUEST_FRESH_MFA",
+      WAITING_MFA: this.snapshot.steamReleaseId ? "NONE" : "REQUEST_FRESH_MFA",
       STEAM_PRIVATE_BETA: "UPLOAD_AND_ACTIVATE_PRIVATE_BETA",
       STEAM_INSTALL_E2E: "INSTALL_FROM_CLEAN_STEAM_CLIENT",
       EXTERNAL_APPROVAL_REQUIRED: "WAIT_FOR_EXTERNAL_APPROVAL",
@@ -265,6 +266,12 @@ export class GameDeliveryWorkflow {
             })
           : this.invalid(signal);
       case "WAITING_MFA":
+        if (signal.type === "RELEASE_PREPARED" && !this.snapshot.steamReleaseId) {
+          return this.commit(signal, { steamReleaseId: signal.releaseId });
+        }
+        // MFA_APPROVED remains replay-compatible with workflows created before
+        // RELEASE_PREPARED became a projected signal. New workflows always
+        // project the release first so the Web UI can bind its authorization.
         return signal.type === "MFA_APPROVED"
           ? this.commit(signal, { state: "STEAM_PRIVATE_BETA", mfaApprovalId: signal.approvalId })
           : this.invalid(signal);
@@ -315,7 +322,9 @@ export class GameDeliveryWorkflow {
         });
       }
       case "READY_TO_PUBLISH":
-        return signal.type === "STEAM_RELEASED" && signal.defaultBranchBuildId === this.snapshot.steamBuildId
+        return signal.type === "STEAM_RELEASED"
+          && (!this.snapshot.steamReleaseId || signal.releaseId === this.snapshot.steamReleaseId)
+          && signal.defaultBranchBuildId === this.snapshot.steamBuildId
           ? this.commit(signal, {
               state: "RELEASED",
               steamReleaseId: signal.releaseId,
@@ -384,6 +393,8 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
     case "MAIN_MERGED":
       if (!SHA1.test(signal.mainCommitSha)) throw new Error("Main commit SHA is invalid");
       return;
+    case "RELEASE_PREPARED":
+      return assertOpaqueId(signal.releaseId, "Steam release");
     case "MFA_APPROVED":
     case "EXTERNAL_APPROVED":
       return assertOpaqueId(signal.approvalId, "Approval");

@@ -48,6 +48,7 @@ const SIGNAL_FIELDS = Object.freeze({
   USER_FEEDBACK: ["signalId", "type", "nextSpecRevisionId", "evidenceInvalidationId"],
   USER_ACCEPTED: ["signalId", "type"],
   MAIN_MERGED: ["signalId", "type", "mainCommitSha"],
+  RELEASE_PREPARED: ["signalId", "type", "releaseId"],
   MFA_APPROVED: ["signalId", "type", "approvalId"],
   BETA_ACTIVATED: ["signalId", "type", "buildId"],
   STEAM_INSTALL_PASSED: ["signalId", "type", "evidenceBundleId"],

@@ -76,6 +76,13 @@ intersected; budgets, turns, timeouts, and workspace limits take the minimum;
 mandatory protections are logical-OR. Thus a lower scope can constrain but
 cannot expand the platform policy.
 
+A project default may select an active Profile owned by that project, its
+tenant, or the platform; a tenant default may select its own or a platform
+Profile. The selected Profile keeps its original credential authority, so an
+inherited platform Profile does not get rebound to a tenant key. Cross-tenant
+and cross-project Profile references fail closed when the immutable Agent run
+configuration is resolved.
+
 Only `claude-code` and `codex-cli` are registered in v1. An Agent image contains
 one exact CLI and adapter, has a read-only root filesystem, and disables CLI
 self-updates. Promotion is `READY → 5% CANARY → 25% rollout checkpoint → 100%
@@ -187,6 +194,12 @@ session material, never the user's master password. Valve review, first-release
 action, and default-branch mobile/SMS confirmation transition the workflow to
 `EXTERNAL_APPROVAL_REQUIRED`; a verified callback resumes the same Temporal
 workflow.
+
+The release ID is created server-side from passed main-SHA evidence and then
+projected through the replay-valid `RELEASE_PREPARED` workflow signal. Only
+while that exact release is in `WAITING_MFA` does the project console show the
+publish action; the browser sends no commit, evidence, App ID, credential, or
+MFA assertion to the Web route.
 
 The publisher verifies separate Ed25519 RC and fresh-MFA authorization
 envelopes, then claims the upload before any SteamPipe side effect. Its generated

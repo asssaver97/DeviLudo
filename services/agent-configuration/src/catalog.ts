@@ -72,12 +72,10 @@ export function resolveCatalogConfiguration(input: {
   if (!selected) invalid("No active Agent default is configured");
   const profileId = defaults.get(selected);
   const profile = requireRecord(profiles, profileId, "profile");
-  const expectedScope = selected === "platform" ? ["platform", "global"]
-    : selected.startsWith("tenant:") ? ["tenant", input.tenantId]
-      : ["project", input.projectId];
-  if (profile.state !== "ACTIVE" || profile.scope !== expectedScope[0] || profile.scopeId !== expectedScope[1]) {
+  if (profile.state !== "ACTIVE") {
     invalid("Selected Agent Profile is inactive or belongs to another scope");
   }
+  const profileScope = selectableProfileScope(profile, selected, input.tenantId, input.projectId);
   const agent = agentKind(profile.agent);
   const installationId = safeId(profile.installationId);
   const providerRevisionId = safeId(profile.providerRevisionId);
@@ -152,7 +150,7 @@ export function resolveCatalogConfiguration(input: {
   });
   const credential = requireRecord(credentials, credentialVersionId, "credential");
   if (credential.state !== "ACTIVE") invalid("Agent credential version is inactive");
-  const credentialScopeAllowed = selected === "platform"
+  const credentialScopeAllowed = profileScope === "platform"
     ? credential.scope === "platform" && credential.scopeId === "global"
     : credential.scope === "tenant" && credential.scopeId === input.tenantId;
   if (!credentialScopeAllowed) invalid("Agent credential version belongs to another tenant scope");
@@ -188,6 +186,26 @@ export function resolveCatalogConfiguration(input: {
     credentialVersionId,
     budget,
   });
+}
+
+function selectableProfileScope(
+  profile: Readonly<Record<string, unknown>>,
+  selectedDefault: string,
+  tenantId: string,
+  projectId: string,
+): "platform" | "tenant" | "project" {
+  const scope = profile.scope;
+  const scopeId = profile.scopeId;
+  const platformProfile = scope === "platform" && scopeId === "global";
+  const tenantProfile = scope === "tenant" && scopeId === tenantId;
+  const projectProfile = scope === "project" && scopeId === projectId;
+  const allowed = selectedDefault === "platform"
+    ? platformProfile
+    : selectedDefault.startsWith("tenant:")
+      ? platformProfile || tenantProfile
+      : platformProfile || tenantProfile || projectProfile;
+  if (!allowed) invalid("Selected Agent Profile is inactive or belongs to another scope");
+  return scope as "platform" | "tenant" | "project";
 }
 
 function index(value: unknown, label: string): ReadonlyMap<string, Readonly<Record<string, unknown>>> {

@@ -20,6 +20,10 @@ test("delivery workflow requires every Steam external gate and release receipt",
   workflow.signal({ signalId: "signal-006", type: "USER_ACCEPTED" });
   workflow.signal({ signalId: "signal-007", type: "MAIN_MERGED", mainCommitSha: mainSha });
   workflow.signal({ signalId: "signal-008", type: "E2E_PASSED", evidenceBundleId: "evidence-main" });
+  assert.equal(workflow.nextCommand(), "REQUEST_FRESH_MFA");
+  workflow.signal({ signalId: "signal-release-prepared", type: "RELEASE_PREPARED", releaseId: "release-1" });
+  assert.equal(workflow.current().steamReleaseId, "release-1");
+  assert.equal(workflow.nextCommand(), "NONE");
   workflow.signal({ signalId: "signal-009", type: "MFA_APPROVED", approvalId: "mfa-1" });
   workflow.signal({ signalId: "signal-010", type: "BETA_ACTIVATED", buildId: "1001" });
   workflow.signal({ signalId: "signal-011", type: "STEAM_INSTALL_PASSED", evidenceBundleId: "evidence-steam-install" });
@@ -44,11 +48,15 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.current().state, "READY_TO_PUBLISH");
   assert.equal(workflow.nextCommand(), "PUBLISH_STEAM_DEFAULT_BRANCH");
   assert.equal(workflow.current().externalApprovals.length, 3);
+  assert.throws(
+    () => workflow.signal({ signalId: "signal-wrong-release", type: "STEAM_RELEASED", releaseId: "release-other", defaultBranchBuildId: "1001" }),
+    /invalid while delivery is READY_TO_PUBLISH/,
+  );
   workflow.signal({ signalId: "signal-015", type: "STEAM_RELEASED", releaseId: "release-1", defaultBranchBuildId: "1001" });
   assert.equal(workflow.current().state, "RELEASED");
   assert.equal(workflow.nextCommand(), "NONE");
   assert.equal(workflow.current().steamReleaseId, "release-1");
-  assert.equal(workflow.current().history.length, 16);
+  assert.equal(workflow.current().history.length, 17);
 });
 
 test("feedback invalidates evidence and the approved second iteration returns through development and E2E", () => {

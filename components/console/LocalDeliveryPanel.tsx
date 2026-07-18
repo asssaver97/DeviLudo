@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   LocalDeliveryAction,
   LocalDeliverySnapshot,
@@ -87,8 +87,10 @@ export function LocalDeliveryPanel({
 
   useEffect(() => {
     let active = true;
-    fetch(`/api/projects/${projectId}/delivery`, { cache: "no-store" })
-      .then(async (response) => {
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    async function loadProjection() {
+      try {
+        const response = await fetch(`/api/projects/${projectId}/delivery`, { cache: "no-store" });
         const payload = await response.json() as {
           data?: LocalDeliverySnapshot | DeliverySnapshot;
           meta?: { mode?: "LOCAL_D1" | "PRODUCTION"; projectedAt?: string; snapshotDigest?: string };
@@ -108,12 +110,18 @@ export function LocalDeliveryPanel({
             publish(payload.data as LocalDeliverySnapshot);
           }
         }
-      })
-      .catch((reason: unknown) => {
+      } catch (reason: unknown) {
         if (active) setError(reason instanceof Error ? reason.message : "读取本地交付状态失败");
-      });
-    return () => { active = false; };
-  }, [projectId, publish, refreshToken, onStatus]);
+      } finally {
+        if (active && !localFixture) refreshTimer = setTimeout(loadProjection, 5_000);
+      }
+    }
+    void loadProjection();
+    return () => {
+      active = false;
+      if (refreshTimer) clearTimeout(refreshTimer);
+    };
+  }, [localFixture, projectId, publish, refreshToken, onStatus]);
 
   const action = snapshot ? primaryAction(snapshot.stage) : null;
   const completedTargets = useMemo(
@@ -324,6 +332,46 @@ export function LocalDeliveryPanel({
 function ProductionDeliveryProjection({ projection }: { readonly projection: ProductionProjection }) {
   const snapshot = projection.snapshot;
   const targetGatePassed = Boolean(snapshot.candidateEvidenceBundleId);
+  const publishCommandRef = useRef<string | null>(null);
+  const [publishBusy, setPublishBusy] = useState(false);
+  const [publishNotice, setPublishNotice] = useState("");
+
+  async function beginAcceptAndPublish() {
+    if (snapshot.state !== "WAITING_MFA" || !snapshot.steamReleaseId || publishBusy) return;
+    setPublishBusy(true);
+    setPublishNotice("");
+    publishCommandRef.current ??= `publish-${crypto.randomUUID()}`;
+    try {
+      const response = await fetch(
+        `/api/releases/${encodeURIComponent(snapshot.steamReleaseId)}/accept-and-publish`,
+        { method: "POST", headers: { "idempotency-key": publishCommandRef.current } },
+      );
+      const payload = await response.json() as {
+        data?: { state?: "MFA_REQUIRED" | "DISPATCHED"; authorizationUrl?: string | null };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.data?.state) {
+        throw new Error(payload.error?.message ?? "Steam 发布授权服务未接受请求");
+      }
+      if (payload.data.state === "MFA_REQUIRED") {
+        if (!payload.data.authorizationUrl) throw new Error("Steam 发布授权地址缺失");
+        const authorizationUrl = new URL(payload.data.authorizationUrl);
+        if (authorizationUrl.protocol !== "https:" || authorizationUrl.username || authorizationUrl.password
+          || authorizationUrl.search || authorizationUrl.hash) {
+          throw new Error("Steam 发布授权地址未通过安全校验");
+        }
+        window.location.assign(authorizationUrl.toString());
+        return;
+      }
+      publishCommandRef.current = null;
+      setPublishNotice("MFA 授权已完成，私有 Beta 上传会由工作流自动继续。");
+    } catch (reason) {
+      setPublishNotice(reason instanceof Error ? reason.message : "Steam 发布授权失败");
+    } finally {
+      setPublishBusy(false);
+    }
+  }
+
   return (
     <section className="local-delivery" aria-live="polite">
       <div className="local-delivery-heading">
@@ -367,6 +415,22 @@ function ProductionDeliveryProjection({ projection }: { readonly projection: Pro
           <div>{new Date(projection.projectedAt).toLocaleString("zh-CN")}</div>
         </div>
       </div>
+
+      {snapshot.state === "WAITING_MFA" ? (
+        <div className={`local-real-validation ${snapshot.steamReleaseId ? "ready" : "pending"}`}>
+          <div className="local-real-validation-copy">
+            <span className="eyebrow">接受并发布</span>
+            <h3>{snapshot.steamReleaseId ?? "正在签发 Release"}</h3>
+            <p>确认后会跳转到隔离的 MFA 页面；通过后自动上传 Steam 私有 Beta、执行干净客户端回装 E2E，并等待 Valve 外部门禁。</p>
+            {publishNotice ? <p role="status">{publishNotice}</p> : null}
+          </div>
+          {snapshot.steamReleaseId ? (
+            <button className="button button-acid" disabled={publishBusy} onClick={beginAcceptAndPublish} type="button">
+              {publishBusy ? "正在创建 MFA 授权…" : "确认发布并完成 MFA"}
+            </button>
+          ) : <span className="local-real-validation-wait">工作流正在绑定 main SHA 与发布证据</span>}
+        </div>
+      ) : null}
 
       <div className="local-event-log">
         <div><span>Temporal 状态历史</span><small>不可由项目代码修改</small></div>

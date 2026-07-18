@@ -117,7 +117,8 @@ export class SteamPublisherWorkflowHandler implements WorkflowJobHandler {
       validateOpaqueId(receipt.receiptId, "Steam release receipt");
       validateOpaqueId(receipt.releaseId, "Steam release");
       validateBuildId(receipt.defaultBranchBuildId);
-      if (receipt.runId !== base.runId || receipt.betaBuildId !== snapshot.steamBuildId || receipt.defaultBranchBuildId !== snapshot.steamBuildId
+      if (receipt.runId !== base.runId || (snapshot.steamReleaseId && receipt.releaseId !== snapshot.steamReleaseId)
+        || receipt.betaBuildId !== snapshot.steamBuildId || receipt.defaultBranchBuildId !== snapshot.steamBuildId
         || JSON.stringify(receipt.externalApprovalIds) !== JSON.stringify(snapshot.externalApprovals.map((entry) => entry.approvalId))) {
         throw new Error("Steam default branch did not promote the tested BuildID");
       }

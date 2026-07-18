@@ -32,6 +32,15 @@ Accepting the publish activity is not a release result. The workflow remains
 open until `STEAM_RELEASED` binds the release ID and the same numeric Steam
 BuildID that passed private-Beta clean-client testing.
 
+After the merged-main gate passes, `REQUEST_FRESH_MFA` first creates the
+authoritative release record. Its durable worker emits `RELEASE_PREPARED`, so
+the read-only delivery projection exposes the exact release ID before the Web
+console can open the isolated MFA flow. The state remains `WAITING_MFA` and no
+Steam upload command is dispatched until that flow returns `MFA_APPROVED`.
+Existing workflow histories that predate this projection signal remain
+replay-compatible; their signed MFA authorization is still resolved by the
+release authority rather than by browser input.
+
 Every activity is idempotent, takes an idempotency key, and writes an append-only
 audit event. E2E activity completions are accepted only through the fencing gate
 in `lib/domain/e2e.ts`.

@@ -35,6 +35,56 @@ test("Agent catalog fails closed on a broken higher-precedence override", () => 
   assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload, tenantId, projectId }), /missing/);
 });
 
+test("Agent catalog lets tenant and project defaults select an active inherited Profile", () => {
+  const tenantPlatformPayload = catalog();
+  tenantPlatformPayload.defaults.push([`tenant:${tenantId}`, "profile-platform-r1"]);
+  const tenantPlatform = resolveCatalogConfiguration({
+    revision: 10, payload: tenantPlatformPayload, tenantId, projectId,
+  });
+  assert.equal(tenantPlatform.profileRevisionId, "profile-platform-r1");
+  assert.equal(tenantPlatform.profileSource, `tenant:${tenantId}`);
+
+  const projectPlatformPayload = catalog();
+  projectPlatformPayload.defaults.push([`project:${projectId}`, "profile-platform-r1"]);
+  const projectPlatform = resolveCatalogConfiguration({
+    revision: 11, payload: projectPlatformPayload, tenantId, projectId,
+  });
+  assert.equal(projectPlatform.profileRevisionId, "profile-platform-r1");
+  assert.equal(projectPlatform.profileSource, `project:${projectId}`);
+
+  const projectTenantPayload = catalog();
+  projectTenantPayload.profiles.push(profile("profile-tenant-r1", "tenant", tenantId));
+  projectTenantPayload.credentials[0]!.scope = "tenant";
+  projectTenantPayload.credentials[0]!.scopeId = tenantId;
+  projectTenantPayload.defaults.push([`project:${projectId}`, "profile-tenant-r1"]);
+  const projectTenant = resolveCatalogConfiguration({
+    revision: 12, payload: projectTenantPayload, tenantId, projectId,
+  });
+  assert.equal(projectTenant.profileRevisionId, "profile-tenant-r1");
+  assert.equal(projectTenant.profileSource, `project:${projectId}`);
+});
+
+test("Agent catalog rejects inherited Profiles from another tenant or project", () => {
+  const otherTenant = "33333333-3333-4333-8333-333333333333";
+  const otherProject = "44444444-4444-4444-8444-444444444444";
+
+  const crossTenant = catalog();
+  crossTenant.profiles.push(profile("profile-other-tenant-r1", "tenant", otherTenant));
+  crossTenant.defaults.push([`project:${projectId}`, "profile-other-tenant-r1"]);
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 13, payload: crossTenant, tenantId, projectId }),
+    /belongs to another scope/,
+  );
+
+  const crossProject = catalog();
+  crossProject.profiles.push(profile("profile-other-project-r1", "project", otherProject));
+  crossProject.defaults.push([`project:${projectId}`, "profile-other-project-r1"]);
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 14, payload: crossProject, tenantId, projectId }),
+    /belongs to another scope/,
+  );
+});
+
 test("Agent catalog rejects unhealthy installations, inactive Providers, floating models and cross-tenant credentials", () => {
   const unhealthy = catalog();
   unhealthy.installations[0]!.health = "UNHEALTHY";

@@ -23,7 +23,7 @@ const baseSnapshot: DeliverySnapshot = Object.freeze({
   steamInstallEvidenceBundleId: null,
   mfaApprovalId: "mfa-approval-9",
   steamBuildId: null,
-  steamReleaseId: null,
+  steamReleaseId: "steam-release-9",
   defaultBranchBuildId: null,
   targetMatrix: Object.freeze(["windows", "linux", "macos"] as const),
   iteration: 1,
@@ -106,4 +106,11 @@ test("Steam workflow handler promotes only the same fully approved and install-t
       externalApprovalIds: input.externalApprovalIds }; },
   });
   await assert.rejects(drifted.execute(job(ready, "PUBLISH_STEAM_DEFAULT_BRANCH"), { async heartbeat() { return "2099-01-01T00:10:00.000Z"; } }), /tested BuildID/);
+
+  const wrongRelease = new SteamPublisherWorkflowHandler({ async upload() { throw new Error("must not upload"); } }, {
+    async publish(input) { return { releaseId: "steam-release-other", runId: input.runId, betaBuildId: input.betaBuildId,
+      defaultBranchBuildId: input.betaBuildId, receiptId: "steam-release-receipt-other",
+      externalApprovalIds: input.externalApprovalIds }; },
+  });
+  await assert.rejects(wrongRelease.execute(job(ready, "PUBLISH_STEAM_DEFAULT_BRANCH"), { async heartbeat() { return "2099-01-01T00:10:00.000Z"; } }), /tested BuildID/);
 });

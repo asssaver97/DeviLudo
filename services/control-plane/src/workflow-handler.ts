@@ -1,5 +1,10 @@
 import type { ExternalApprovalGate } from "../../../lib/orchestration/game-delivery";
-import { WorkflowJobError, type WorkflowJobExecutionContext, type WorkflowJobHandler } from "../../temporal/src/job-processor";
+import {
+  WorkflowJobError,
+  type DeliverySignalWithoutId,
+  type WorkflowJobExecutionContext,
+  type WorkflowJobHandler,
+} from "../../temporal/src/job-processor";
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
 import type { SteamReleasePreparationPort, SteamReleasePreparationReceipt } from "../../steam-publisher/src/postgres-release-lifecycle";
 
@@ -73,10 +78,12 @@ export class ControlPlaneWorkflowHandler implements WorkflowJobHandler {
 
   async execute(job: ClaimedWorkflowJob, context: WorkflowJobExecutionContext): Promise<{
     readonly result: Readonly<Record<string, unknown>>;
+    readonly signal?: DeliverySignalWithoutId;
   }> {
     if (job.destination !== "control-plane") invalid();
     const operation = actionFor(job);
     let binding = bindingFor(job, operation);
+    let preparedReleaseId: string | null = null;
     if (operation === "REQUEST_FRESH_MFA") {
       const snapshot = job.request.payload.snapshot;
       const prepared = await this.releases.ensure({
@@ -89,6 +96,7 @@ export class ControlPlaneWorkflowHandler implements WorkflowJobHandler {
         targetMatrix: validateTargetMatrix(snapshot.targetMatrix),
       });
       validateReleasePreparation(prepared, job, snapshot);
+      preparedReleaseId = prepared.releaseId;
       binding = Object.freeze({ ...binding, releaseId: prepared.releaseId });
     }
     const receipt = await this.controlPlane.ensureAction({
@@ -102,7 +110,12 @@ export class ControlPlaneWorkflowHandler implements WorkflowJobHandler {
       heartbeat: context.heartbeat,
     });
     validateReceipt(receipt, operation, job.requestDigest);
-    return Object.freeze({ result: Object.freeze({ ...receipt, binding: Object.freeze({ ...binding }) }) });
+    return Object.freeze({
+      result: Object.freeze({ ...receipt, binding: Object.freeze({ ...binding }) }),
+      ...(preparedReleaseId ? {
+        signal: Object.freeze({ type: "RELEASE_PREPARED" as const, releaseId: preparedReleaseId }),
+      } : {}),
+    });
   }
 }
 
