@@ -115,6 +115,34 @@ test("fleet policy reloads each decision and rejects tampering, expiry and unkno
   await assert.rejects(unknown.probe(), /signature is invalid/);
 });
 
+test("fleet policy authorizes an exact signed-job identity tuple for secondary Runner services", async () => {
+  const manifest = signRunnerFleetManifest("fleet-key-1", keys.privateKey, claims());
+  const policy = new SignedRunnerFleetPolicy({ load: async () => manifest }, new Map([["fleet-key-1", keys.publicKey]]), () => at);
+  const runnerIdentity = identity();
+  const runnerCapabilities = capabilities();
+  assert.equal(await policy.authorizeJob({
+    identity: runnerIdentity,
+    runnerId: runnerCapabilities.runnerId,
+    platform: runnerCapabilities.platform,
+    capabilityDigest: runnerCapabilities.capabilityDigest,
+    tenantId,
+  }), true);
+  assert.equal(await policy.authorizeJob({
+    identity: runnerIdentity,
+    runnerId: runnerCapabilities.runnerId,
+    platform: "windows",
+    capabilityDigest: runnerCapabilities.capabilityDigest,
+    tenantId,
+  }), false);
+  assert.equal(await policy.authorizeJob({
+    identity: { ...runnerIdentity, certificateFingerprint: sha("f") },
+    runnerId: runnerCapabilities.runnerId,
+    platform: runnerCapabilities.platform,
+    capabilityDigest: runnerCapabilities.capabilityDigest,
+    tenantId,
+  }), false);
+});
+
 test("fleet claims are strict, ordered and use exact non-floating bindings", () => {
   assert.throws(() => signRunnerFleetManifest("runner-fleet-key-01", keys.privateKey, claims({
     runners: [...claims().runners, claims().runners[0]!],

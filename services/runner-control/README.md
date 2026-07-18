@@ -155,6 +155,20 @@ artifact service; its result is accepted only when it echoes the exact job,
 TestKit and Godot digests. A prior exact result is reused after restart, while
 an existing request with different bytes is rejected.
 
+The request now carries the full server-signed job envelope, not a mutable bare
+payload. `MtlsTestKitArtifactClient` uses that envelope to request short-lived,
+job-bound source/test-plan download and evidence-upload grants from the isolated evidence
+archive. It pins the configured HTTPS transfer origins, follows no redirects,
+streams through bounded files, verifies SHA-256 before materializing input,
+rehashes evidence after upload before commit, and accepts only the archive's
+exact object binding. The TestKit child receives only the explicit artifact
+endpoint, certificate/CA file paths and transfer limits from the host; arbitrary
+Runner environment variables are rejected and API keys are not inherited.
+The child may inherit only the explicit graphical/audio session allowlist needed
+by a physical Linux display host; those values are filtered again before Godot
+starts. See `services/godot-testkit/README.md` for the fixed DSL, evidence and
+native packaging contract.
+
 Run the machine daemon with `npm run start:physical-runner`. Startup verifies
 that the configured platform/architecture match the actual Node host, loads
 all TLS/HMAC/public-key material from files, probes both executable digests and

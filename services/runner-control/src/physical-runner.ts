@@ -40,7 +40,7 @@ export interface PhysicalRunnerExecutionOutput {
 
 export interface PhysicalRunnerExecutor {
   /** Must be idempotent for the signed attempt/fencing token. */
-  execute(job: RunnerJobPayload): Promise<PhysicalRunnerExecutionOutput>;
+  execute(job: SignedRunnerJob): Promise<PhysicalRunnerExecutionOutput>;
 }
 
 export interface PhysicalRunnerJournalRecord {
@@ -143,7 +143,7 @@ export class PhysicalRunnerAgent {
     assertEventReceipt(started, record.startedEvent, 1);
 
     if (!record.evidenceManifest) {
-      const output = await this.#executor.execute(job.payload);
+      const output = await this.#executor.execute(job);
       validatePhysicalRunnerExecutionOutput(output);
       const evidenceManifest = createPlatformEvidenceManifest({
         schemaVersion: "deviludo.platform-evidence.v1",

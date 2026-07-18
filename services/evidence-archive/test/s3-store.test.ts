@@ -78,3 +78,50 @@ test("S3 readiness signs a bucket HEAD and rejects unsafe endpoints or credentia
     }), /configuration/);
   }
 });
+
+test("S3 Runner grants are short-lived, checksum-bound and contain no secret key", async () => {
+  const backend = store(async () => response(500));
+  const expiresAt = "2030-01-02T03:09:05.000Z";
+  const download = await backend.createDownloadGrant({ objectKey, artifactDigest: digest, expiresAt });
+  const downloadUrl = new URL(download.url);
+  assert.equal(download.method, "GET");
+  assert.equal(downloadUrl.searchParams.get("X-Amz-Expires"), "300");
+  assert.equal(downloadUrl.searchParams.get("X-Amz-Algorithm"), "AWS4-HMAC-SHA256");
+  assert.equal(download.url.includes("super-secret-test-key-material"), false);
+
+  const upload = await backend.createUploadGrant({
+    objectKey,
+    artifactDigest: digest,
+    sizeBytes: body.byteLength,
+    contentType: "application/json",
+    expiresAt,
+  });
+  assert.equal(upload.method, "PUT");
+  assert.equal(upload.requiredHeaders["if-none-match"], "*");
+  assert.equal(upload.requiredHeaders["content-length"], String(body.byteLength));
+  assert.equal(upload.requiredHeaders["x-amz-checksum-sha256"], Buffer.from(digest, "hex").toString("base64"));
+  assert.match(new URL(upload.url).searchParams.get("X-Amz-SignedHeaders") ?? "", /x-amz-checksum-sha256/);
+});
+
+test("S3 Runner commit verifies server checksum, metadata and exact size", async () => {
+  const checksum = Buffer.from(digest, "hex").toString("base64");
+  let observed: S3HttpRequest | undefined;
+  const backend = store(async (_url, input) => {
+    observed = input;
+    return response(200, {
+      "content-length": String(body.byteLength),
+      "x-amz-meta-deviludo-sha256": digest,
+      "x-amz-checksum-sha256": checksum,
+    });
+  });
+  assert.deepEqual(await backend.verifyObject({ objectKey, artifactDigest: digest, sizeBytes: body.byteLength }), { sizeBytes: body.byteLength });
+  assert.equal(observed!.method, "HEAD");
+  assert.equal(observed!.headers["x-amz-checksum-mode"], "ENABLED");
+
+  const corrupt = store(async () => response(200, {
+    "content-length": String(body.byteLength),
+    "x-amz-meta-deviludo-sha256": digest,
+    "x-amz-checksum-sha256": Buffer.from("0".repeat(64), "hex").toString("base64"),
+  }));
+  await assert.rejects(corrupt.verifyObject({ objectKey, artifactDigest: digest, sizeBytes: body.byteLength }), /verification failed/);
+});

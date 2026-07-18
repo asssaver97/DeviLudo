@@ -125,6 +125,23 @@ test("archive validation rejects digest, matrix, status, field and request-bindi
   }, now), /target matrix order/);
 });
 
+test("bundle persistence requires every referenced top-level evidence object before writing the manifest", async () => {
+  const store = new MemoryStore();
+  let probes = 0;
+  const archive = new EvidenceArchiveService({
+    store,
+    now: () => now,
+    artifactVerifier: {
+      probe: async () => { probes += 1; },
+      verifyEvidenceArtifacts: async () => { throw new Error("missing JUnit object"); },
+    },
+  });
+  await assert.rejects(archive.persist(request()), /missing JUnit object/);
+  assert.equal(store.objects.size, 0);
+  await archive.probe();
+  assert.equal(probes, 1);
+});
+
 test("filesystem backend uses no-replace content checks and rejects traversal", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-evidence-archive-"));
   const store = new FilesystemImmutableObjectStore({ root: join(root, "objects") });

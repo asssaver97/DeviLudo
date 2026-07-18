@@ -91,3 +91,45 @@ test("archive HTTPS server forces TLS 1.3 client certificates and bounded bodies
     maxBodyBytes: 16,
   }), /body limit/);
 });
+
+test("physical Runner artifact routes delegate only after mTLS and return bounded grant failures", async () => {
+  const calls: string[] = [];
+  const handler = createEvidenceArchiveHandler({
+    archive: { probe: async () => undefined, persist: async () => { throw new Error("not evidence"); } },
+    allowedSpiffeIds: new Set([spiffeId]),
+    extractIdentity: () => identity,
+    runnerArtifacts: {
+      grant: async (_identity, value) => {
+        calls.push(`grant:${String((value as Record<string, unknown>).schemaVersion)}`);
+        return { schemaVersion: "grant-receipt" };
+      },
+      commit: async (_identity, value) => {
+        calls.push(`commit:${String((value as Record<string, unknown>).schemaVersion)}`);
+        return { schemaVersion: "commit-receipt" };
+      },
+    },
+  });
+  const headers = { "content-type": "application/json" };
+  assert.equal((await handler({
+    method: "POST", path: "/v1/runner-artifact-grants", headers, socket: {},
+    rawBody: JSON.stringify({ schemaVersion: "grant-request" }),
+  })).status, 200);
+  assert.equal((await handler({
+    method: "POST", path: "/v1/runner-artifact-commits", headers, socket: {},
+    rawBody: JSON.stringify({ schemaVersion: "commit-request" }),
+  })).status, 200);
+  assert.deepEqual(calls, ["grant:grant-request", "commit:commit-request"]);
+
+  const rejecting = createEvidenceArchiveHandler({
+    archive: { probe: async () => undefined, persist: async () => { throw new Error("not evidence"); } },
+    allowedSpiffeIds: new Set([spiffeId]),
+    extractIdentity: () => identity,
+    runnerArtifacts: {
+      grant: async () => { throw new Error("bad job"); },
+      commit: async () => { throw new Error("bad object"); },
+    },
+  });
+  assert.deepEqual(await rejecting({
+    method: "POST", path: "/v1/runner-artifact-grants", headers, socket: {}, rawBody: "{}",
+  }), { status: 409, body: { error: { code: "RUNNER_ARTIFACT_GRANT_REJECTED" } } });
+});

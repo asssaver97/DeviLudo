@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { canonicalJson, sha256Canonical } from "./canonical";
-import type { RunnerJobPayload } from "./contracts";
+import type { SignedRunnerJob } from "./contracts";
+import {
+  OPTIONAL_TESTKIT_ARTIFACT_ENV_NAMES,
+  REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES,
+} from "./testkit-artifact-client";
 import {
   type PhysicalRunnerExecutionOutput,
   type PhysicalRunnerExecutor,
@@ -36,7 +40,7 @@ export type TestKitProcess = (
 ) => Promise<TestKitProcessResult>;
 
 interface TestKitRunRequest {
-  readonly schemaVersion: "deviludo.testkit-run-request.v1";
+  readonly schemaVersion: "deviludo.testkit-run-request.v2";
   readonly jobDigest: string;
   readonly testKitDigest: string;
   readonly godot: Readonly<{
@@ -44,7 +48,7 @@ interface TestKitRunRequest {
     binaryDigest: string;
     version: string;
   }>;
-  readonly job: RunnerJobPayload;
+  readonly signedJob: SignedRunnerJob;
 }
 
 /**
@@ -62,6 +66,7 @@ export class LockedTestKitExecutor implements PhysicalRunnerExecutor {
   readonly #timeoutMs: number;
   readonly #process: TestKitProcess;
   readonly #hostEnvironment: Readonly<Record<string, string | undefined>>;
+  readonly #testKitEnvironment: Readonly<Record<string, string>>;
   readonly #now: () => Date;
 
   constructor(options: {
@@ -74,6 +79,7 @@ export class LockedTestKitExecutor implements PhysicalRunnerExecutor {
     readonly timeoutMs?: number;
     readonly process?: TestKitProcess;
     readonly hostEnvironment?: Readonly<Record<string, string | undefined>>;
+    readonly testKitEnvironment?: Readonly<Record<string, string | undefined>>;
     readonly now?: () => Date;
   }) {
     this.#testKitExecutable = absolutePath(options.testKitExecutable, "TestKit executable");
@@ -89,10 +95,12 @@ export class LockedTestKitExecutor implements PhysicalRunnerExecutor {
     this.#timeoutMs = boundedInteger(options.timeoutMs ?? 30 * 60_000, 1_000, 4 * 60 * 60_000);
     this.#process = options.process ?? execTestKitProcess;
     this.#hostEnvironment = options.hostEnvironment ?? process.env;
+    this.#testKitEnvironment = controlledTestKitEnvironment(options.testKitEnvironment ?? {});
     this.#now = options.now ?? (() => new Date());
   }
 
-  async execute(job: RunnerJobPayload): Promise<PhysicalRunnerExecutionOutput> {
+  async execute(signedJob: SignedRunnerJob): Promise<PhysicalRunnerExecutionOutput> {
+    const job = signedJob.payload;
     if (job.godotTestKitDigest !== this.#testKitDigest
       || job.requiredGodotVersion !== this.#godotVersion) {
       throw new Error("Physical Runner job does not match the installed TestKit lock");
@@ -113,7 +121,7 @@ export class LockedTestKitExecutor implements PhysicalRunnerExecutor {
     const outputPath = join(runDirectory, "result.json");
     const jobDigest = sha256Canonical(job);
     const request: TestKitRunRequest = Object.freeze({
-      schemaVersion: "deviludo.testkit-run-request.v1",
+      schemaVersion: "deviludo.testkit-run-request.v2",
       jobDigest,
       testKitDigest: this.#testKitDigest,
       godot: Object.freeze({
@@ -121,7 +129,7 @@ export class LockedTestKitExecutor implements PhysicalRunnerExecutor {
         binaryDigest: this.#godotBinaryDigest,
         version: this.#godotVersion,
       }),
-      job,
+      signedJob,
     });
     await materializeImmutableJson(requestPath, request);
     const cached = await readOptionalJson(outputPath);
@@ -133,7 +141,7 @@ export class LockedTestKitExecutor implements PhysicalRunnerExecutor {
       "--output-file", outputPath,
     ], {
       cwd: runDirectory,
-      env: minimalEnvironment(this.#hostEnvironment, home, temporary),
+      env: minimalEnvironment(this.#hostEnvironment, home, temporary, this.#testKitEnvironment),
       timeoutMs: this.#timeoutMs,
       maxOutputBytes: MAX_PROCESS_OUTPUT_BYTES,
     });
@@ -289,6 +297,7 @@ function minimalEnvironment(
   host: Readonly<Record<string, string | undefined>>,
   home: string,
   temporary: string,
+  testKit: Readonly<Record<string, string>>,
 ): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {
     NODE_ENV: "production",
@@ -298,11 +307,36 @@ function minimalEnvironment(
     TMP: temporary,
     TEMP: temporary,
   };
-  for (const name of ["LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"] as const) {
+  for (const name of [
+    "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+    "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+    "PULSE_SERVER", "PIPEWIRE_REMOTE",
+  ] as const) {
     const value = host[name];
-    if (value !== undefined && !value.includes("\0")) result[name] = value;
+    if (value !== undefined && value.length <= 4_096 && !/[\0\r\n]/.test(value)) result[name] = value;
   }
+  Object.assign(result, testKit);
   return result;
+}
+
+function controlledTestKitEnvironment(
+  value: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string>> {
+  const keys = Object.keys(value).sort();
+  if (keys.length === 0) return Object.freeze({});
+  const required = new Set<string>(REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES);
+  const allowed = new Set<string>([...REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES, ...OPTIONAL_TESTKIT_ARTIFACT_ENV_NAMES]);
+  const result: Record<string, string> = {};
+  for (const name of keys) {
+    const item = value[name];
+    if (!allowed.has(name) || typeof item !== "string" || !item || item.length > 8_192 || /\0|\r|\n/.test(item)) {
+      throw new Error("Physical Runner TestKit environment is invalid");
+    }
+    result[name] = item;
+    required.delete(name);
+  }
+  if (required.size !== 0) throw new Error("Physical Runner TestKit environment is incomplete");
+  return Object.freeze(result);
 }
 
 function exactKeys(body: Record<string, unknown>, expected: readonly string[]): void {

@@ -18,15 +18,34 @@ const MAX_ARCHIVE_BYTES = 4 * 1024 * 1024;
 
 export class EvidenceArchiveService {
   readonly #store: ImmutableObjectStore;
+  readonly #artifactVerifier: Readonly<{
+    verifyEvidenceArtifacts(input: { readonly tenantId: string; readonly projectId: string; readonly bundle: EvidenceBundle }): Promise<void>;
+    probe(): Promise<void>;
+  }> | null;
   readonly #now: () => Date;
 
-  constructor(options: { readonly store: ImmutableObjectStore; readonly now?: () => Date }) {
+  constructor(options: {
+    readonly store: ImmutableObjectStore;
+    readonly artifactVerifier?: Readonly<{
+      verifyEvidenceArtifacts(input: { readonly tenantId: string; readonly projectId: string; readonly bundle: EvidenceBundle }): Promise<void>;
+      probe(): Promise<void>;
+    }>;
+    readonly now?: () => Date;
+  }) {
     this.#store = options.store;
+    this.#artifactVerifier = options.artifactVerifier ?? null;
     this.#now = options.now ?? (() => new Date());
   }
 
   async persist(value: unknown): Promise<EvidenceArchivePersistResult> {
     const request = parseEvidenceArchiveRequest(value, this.#now());
+    if (this.#artifactVerifier) {
+      await this.#artifactVerifier.verifyEvidenceArtifacts({
+        tenantId: request.tenantId,
+        projectId: request.projectId,
+        bundle: request.bundle,
+      });
+    }
     const objectKey = evidenceObjectKey(request.tenantId, request.projectId, request.bundleDigest);
     const bundleBytes = jsonBytes(request.bundle);
     const storedBundle = await this.#store.putImmutable({
@@ -64,7 +83,7 @@ export class EvidenceArchiveService {
   }
 
   async probe(): Promise<void> {
-    await this.#store.probe();
+    await Promise.all([this.#store.probe(), this.#artifactVerifier?.probe()]);
   }
 }
 

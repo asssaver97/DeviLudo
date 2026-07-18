@@ -107,6 +107,28 @@ export class SignedRunnerFleetPolicy implements RunnerAdmissionPolicy, RunnerTen
     return "tenantId" in input ? entry.tenantIds.includes(input.tenantId.toLowerCase()) : true;
   }
 
+  /**
+   * Authorizes a server-signed job at a secondary Runner service without
+   * requiring that service to trust a mutable registration row.
+   */
+  async authorizeJob(input: {
+    readonly identity: TlsRunnerIdentity;
+    readonly runnerId: string;
+    readonly platform: TargetPlatform;
+    readonly capabilityDigest: string;
+    readonly tenantId: string;
+  }): Promise<boolean> {
+    const claims = await this.#verifiedClaims();
+    const entry = claims.runners.find((candidate) => candidate.runnerId === input.runnerId);
+    return !!entry
+      && matchesEntry(entry, input.identity, {
+        runnerId: input.runnerId,
+        platform: input.platform,
+        capabilityDigest: input.capabilityDigest,
+      })
+      && entry.tenantIds.includes(input.tenantId.toLowerCase());
+  }
+
   async probe(): Promise<void> {
     await this.#verifiedClaims();
   }

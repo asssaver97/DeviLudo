@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import type { ImmutableObjectPut, ImmutableObjectStore } from "./contracts";
+import type { RunnerArtifactTransfer, RunnerArtifactTransferGrant } from "./runner-artifacts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -24,7 +25,7 @@ export interface S3HttpResponse {
 export type S3Http = (url: URL, input: S3HttpRequest) => Promise<S3HttpResponse>;
 
 /** Exact, path-style S3 client that never overwrites a content-addressed key. */
-export class S3ImmutableObjectStore implements ImmutableObjectStore {
+export class S3ImmutableObjectStore implements ImmutableObjectStore, RunnerArtifactTransfer {
   readonly #endpoint: URL;
   readonly #bucket: string;
   readonly #region: string;
@@ -93,10 +94,112 @@ export class S3ImmutableObjectStore implements ImmutableObjectStore {
     if (response.statusCode !== 200) throw new Error("Evidence archive S3 readiness probe failed");
   }
 
+  async createDownloadGrant(input: {
+    readonly objectKey: string;
+    readonly artifactDigest: string;
+    readonly expiresAt: string;
+  }): Promise<RunnerArtifactTransferGrant> {
+    validateTransferInput(input.objectKey, input.artifactDigest);
+    return this.#presign(this.#objectUrl(input.objectKey), "GET", {}, input.expiresAt);
+  }
+
+  async createUploadGrant(input: {
+    readonly objectKey: string;
+    readonly artifactDigest: string;
+    readonly sizeBytes: number;
+    readonly contentType: string;
+    readonly expiresAt: string;
+  }): Promise<RunnerArtifactTransferGrant> {
+    validateTransferInput(input.objectKey, input.artifactDigest);
+    if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1 || input.sizeBytes > 8 * 1024 * 1024 * 1024
+      || !/^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/.test(input.contentType)) invalidConfig();
+    return this.#presign(this.#objectUrl(input.objectKey), "PUT", {
+      "content-length": String(input.sizeBytes),
+      "content-type": input.contentType,
+      "if-none-match": "*",
+      "x-amz-checksum-sha256": Buffer.from(input.artifactDigest, "hex").toString("base64"),
+      "x-amz-meta-deviludo-sha256": input.artifactDigest,
+    }, input.expiresAt);
+  }
+
+  async verifyObject(input: {
+    readonly objectKey: string;
+    readonly artifactDigest: string;
+    readonly sizeBytes?: number;
+  }): Promise<Readonly<{ sizeBytes: number }>> {
+    validateTransferInput(input.objectKey, input.artifactDigest);
+    if (input.sizeBytes !== undefined && (!Number.isSafeInteger(input.sizeBytes)
+      || input.sizeBytes < 1 || input.sizeBytes > 8 * 1024 * 1024 * 1024)) invalidConfig();
+    const response = await this.#signedRequest(
+      this.#objectUrl(input.objectKey),
+      "HEAD",
+      EMPTY_SHA256,
+      { "x-amz-checksum-mode": "ENABLED" },
+      undefined,
+    );
+    const sizeBytes = Number(single(response.headers["content-length"]));
+    const metadataDigest = single(response.headers["x-amz-meta-deviludo-sha256"]);
+    const checksum = single(response.headers["x-amz-checksum-sha256"]);
+    const expectedChecksum = Buffer.from(input.artifactDigest, "hex").toString("base64");
+    if (response.statusCode !== 200 || !Number.isSafeInteger(sizeBytes) || sizeBytes < 1
+      || (input.sizeBytes !== undefined && sizeBytes !== input.sizeBytes)
+      || metadataDigest !== input.artifactDigest || checksum !== expectedChecksum) {
+      throw new Error("Evidence archive S3 artifact verification failed");
+    }
+    return Object.freeze({ sizeBytes });
+  }
+
   #objectUrl(key: string): URL {
     const url = new URL(this.#endpoint.href);
     url.pathname = `/${encodeSegment(this.#bucket)}/${key.split("/").map(encodeSegment).join("/")}`;
     return url;
+  }
+
+  #presign(
+    url: URL,
+    method: "GET" | "PUT",
+    requiredHeaders: Readonly<Record<string, string>>,
+    expiresAt: string,
+  ): RunnerArtifactTransferGrant {
+    const now = this.#now();
+    const expiry = Date.parse(expiresAt);
+    const expiresSeconds = Math.floor((expiry - now.getTime()) / 1_000);
+    if (!Number.isFinite(now.getTime()) || !Number.isFinite(expiry)
+      || expiresSeconds < 1 || expiresSeconds > 300) invalidConfig();
+    const amzDate = awsTimestamp(now);
+    const date = amzDate.slice(0, 8);
+    const headers: Record<string, string> = { host: url.host, ...requiredHeaders };
+    const names = Object.keys(headers).map((name) => name.toLowerCase()).sort();
+    const canonicalHeaders = names.map((name) => `${name}:${normalizeHeader(headers[name] ?? "")}\n`).join("");
+    const signedHeaders = names.join(";");
+    const scope = `${date}/${this.#region}/s3/aws4_request`;
+    const parameters: Readonly<Record<string, string>> = {
+      "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+      "X-Amz-Credential": `${this.#accessKeyId}/${scope}`,
+      "X-Amz-Date": amzDate,
+      "X-Amz-Expires": String(expiresSeconds),
+      "X-Amz-SignedHeaders": signedHeaders,
+    };
+    const canonicalQuery = canonicalQueryString(parameters);
+    const canonicalRequest = [
+      method,
+      url.pathname,
+      canonicalQuery,
+      canonicalHeaders,
+      signedHeaders,
+      "UNSIGNED-PAYLOAD",
+    ].join("\n");
+    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
+    const signature = createHmac("sha256", signingKey(this.#secretAccessKey, date, this.#region))
+      .update(stringToSign)
+      .digest("hex");
+    url.search = `${canonicalQuery}&X-Amz-Signature=${signature}`;
+    return Object.freeze({
+      url: url.href,
+      method,
+      requiredHeaders: Object.freeze({ ...requiredHeaders }),
+      expiresAt,
+    });
   }
 
   async #signedRequest(
@@ -202,6 +305,14 @@ function encodeSegment(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
+function canonicalQueryString(values: Readonly<Record<string, string>>): string {
+  return Object.entries(values)
+    .map(([name, value]) => [encodeSegment(name), encodeSegment(value)] as const)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}=${value}`)
+    .join("&");
+}
+
 function strictEndpoint(value: string | URL): URL {
   const url = new URL(value);
   if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.search || url.hash
@@ -217,6 +328,14 @@ function validatePut(input: ImmutableObjectPut): void {
     || input.objectKey.length < 3 || input.objectKey.length > 1_024
     || parts.some((part) => !part || part === "." || part === ".." || !/^[A-Za-z0-9._:-]+$/.test(part))) {
     throw new Error("Evidence archive S3 object is invalid");
+  }
+}
+
+function validateTransferInput(objectKey: string, artifactDigest: string): void {
+  const parts = objectKey.split("/");
+  if (!SHA256.test(artifactDigest) || objectKey.length < 3 || objectKey.length > 1_024
+    || parts.some((part) => !part || part === "." || part === ".." || !/^[A-Za-z0-9._:-]+$/.test(part))) {
+    throw new Error("Evidence archive S3 transfer input is invalid");
   }
 }
 

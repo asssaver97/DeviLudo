@@ -14,4 +14,5 @@ export * from "./physical-runner";
 export * from "./runner-ingress-client";
 export * from "./physical-runner-journal";
 export * from "./testkit-executor";
+export * from "./testkit-artifact-client";
 export * from "./run-physical-runner";

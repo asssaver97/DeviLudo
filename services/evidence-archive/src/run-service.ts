@@ -1,11 +1,14 @@
+import { createPublicKey } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { FileRunnerFleetManifestLoader, SignedRunnerFleetPolicy } from "../../runner-control/src/fleet-manifest";
 import type { ImmutableObjectStore } from "./contracts";
 import { EvidenceArchiveService } from "./archive";
 import { FilesystemImmutableObjectStore } from "./filesystem-store";
 import { createEvidenceArchiveHandler, createEvidenceArchiveHttpsServer } from "./ingress-http";
 import { S3ImmutableObjectStore } from "./s3-store";
+import { RunnerArtifactGrantService } from "./runner-artifacts";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -16,10 +19,12 @@ export async function evidenceArchiveServiceFromEnv(
   port: number;
   store: ImmutableObjectStore;
   archive: EvidenceArchiveService;
+  runnerArtifacts: RunnerArtifactGrantService | null;
   server: ReturnType<typeof createEvidenceArchiveHttpsServer>;
 }>> {
   const mode = requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_STORE");
   let store: ImmutableObjectStore;
+  let runnerArtifacts: RunnerArtifactGrantService | null = null;
   if (mode === "filesystem") {
     if (env.NODE_ENV === "production") {
       throw new Error("Evidence archive filesystem backend is forbidden in production");
@@ -35,7 +40,7 @@ export async function evidenceArchiveServiceFromEnv(
     const secretAccessKey = Buffer.from(secretKey.toString("utf8").trim(), "utf8");
     accessKey.fill(0);
     secretKey.fill(0);
-    store = new S3ImmutableObjectStore({
+    const s3 = new S3ImmutableObjectStore({
       endpoint: requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_S3_ENDPOINT"),
       bucket: requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_S3_BUCKET"),
       region: requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_S3_REGION"),
@@ -45,6 +50,27 @@ export async function evidenceArchiveServiceFromEnv(
       timeoutMs: seconds(env.DEVILUDO_EVIDENCE_ARCHIVE_S3_TIMEOUT_SECONDS, 30, 1, 600) * 1_000,
     });
     secretAccessKey.fill(0);
+    store = s3;
+    const [jobPublicKeyPem, fleetPublicKeyPem] = await Promise.all([
+      readSecret(env, "DEVILUDO_EVIDENCE_ARCHIVE_RUNNER_JOB_PUBLIC_KEY_FILE", 32, MAX_SECRET_BYTES),
+      readSecret(env, "DEVILUDO_EVIDENCE_ARCHIVE_RUNNER_FLEET_PUBLIC_KEY_FILE", 32, MAX_SECRET_BYTES),
+    ]);
+    const jobPublicKey = createPublicKey(jobPublicKeyPem);
+    const fleetPublicKey = createPublicKey(fleetPublicKeyPem);
+    if (jobPublicKey.asymmetricKeyType !== "ed25519" || fleetPublicKey.asymmetricKeyType !== "ed25519") {
+      throw new Error("Evidence archive Runner verification keys must be Ed25519");
+    }
+    const fleet = new SignedRunnerFleetPolicy(
+      new FileRunnerFleetManifestLoader(requiredAbsolutePath(env, "DEVILUDO_EVIDENCE_ARCHIVE_RUNNER_FLEET_MANIFEST_FILE")),
+      new Map([[requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_RUNNER_FLEET_KEY_ID"), fleetPublicKey]]),
+    );
+    runnerArtifacts = new RunnerArtifactGrantService({
+      jobKeyId: requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_RUNNER_JOB_KEY_ID"),
+      jobPublicKey,
+      fleet,
+      transfer: s3,
+      reservations: s3,
+    });
   } else {
     throw new Error("Evidence archive store mode is invalid");
   }
@@ -55,14 +81,15 @@ export async function evidenceArchiveServiceFromEnv(
     readSecret(env, "DEVILUDO_EVIDENCE_ARCHIVE_CLIENT_CA_FILE", 32, MAX_SECRET_BYTES),
   ]);
   const allowedSpiffeIds = parseSpiffeIds(requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_ALLOWED_SPIFFE_IDS_JSON"));
-  const archive = new EvidenceArchiveService({ store });
-  const handler = createEvidenceArchiveHandler({ archive, allowedSpiffeIds });
+  const archive = new EvidenceArchiveService({ store, ...(runnerArtifacts ? { artifactVerifier: runnerArtifacts } : {}) });
+  const handler = createEvidenceArchiveHandler({ archive, allowedSpiffeIds, ...(runnerArtifacts ? { runnerArtifacts } : {}) });
   const server = createEvidenceArchiveHttpsServer({ tls: { key, cert, ca: clientCa }, handler });
   return Object.freeze({
     host: host(env.DEVILUDO_EVIDENCE_ARCHIVE_HOST),
     port: port(env.DEVILUDO_EVIDENCE_ARCHIVE_PORT),
     store,
     archive,
+    runnerArtifacts,
     server,
   });
 }
@@ -71,7 +98,7 @@ export async function runEvidenceArchiveService(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<void> {
   const service = await evidenceArchiveServiceFromEnv(env);
-  await service.store.probe();
+  await service.archive.probe();
   await new Promise<void>((resolve, reject) => {
     const fail = (error: Error) => reject(error);
     service.server.once("error", fail);

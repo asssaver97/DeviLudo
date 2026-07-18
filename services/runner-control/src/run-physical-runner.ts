@@ -7,6 +7,7 @@ import { validateRunnerCapabilities } from "./coordinator";
 import { PhysicalRunnerAgent, type PhysicalRunnerCycleResult } from "./physical-runner";
 import { FilePhysicalRunnerJournal } from "./physical-runner-journal";
 import { physicalRunnerIngressClientFromEnv } from "./runner-ingress-client";
+import { testKitArtifactProcessEnvironmentFromEnv } from "./testkit-artifact-client";
 import { LockedTestKitExecutor } from "./testkit-executor";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -117,6 +118,7 @@ export async function physicalRunnerServiceFromEnv(
     hmacKey: journalHmacKey,
   });
   journalHmacKey.fill(0);
+  const testKitEnvironment = testKitArtifactProcessEnvironmentFromEnv(env);
   const executor = new LockedTestKitExecutor({
     testKitExecutable: requiredAbsolutePath(env, "DEVILUDO_PHYSICAL_RUNNER_TESTKIT_EXECUTABLE"),
     testKitDigest: requiredDigest(env, "DEVILUDO_PHYSICAL_RUNNER_TESTKIT_DIGEST"),
@@ -125,6 +127,7 @@ export async function physicalRunnerServiceFromEnv(
     godotVersion: config.capabilities.godotVersion,
     workRoot: requiredAbsolutePath(env, "DEVILUDO_PHYSICAL_RUNNER_WORK_ROOT"),
     timeoutMs: seconds(env.DEVILUDO_PHYSICAL_RUNNER_TESTKIT_TIMEOUT_SECONDS, 1_800, 1, 14_400) * 1_000,
+    testKitEnvironment,
   });
   const agent = new PhysicalRunnerAgent({
     capabilities: config.capabilities,

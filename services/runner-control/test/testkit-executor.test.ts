@@ -4,7 +4,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RunnerJobPayload } from "../src/contracts";
+import type { RunnerJobPayload, SignedRunnerJob } from "../src/contracts";
 import type { PhysicalRunnerExecutionOutput } from "../src/physical-runner";
 import { LockedTestKitExecutor, type TestKitProcess } from "../src/testkit-executor";
 
@@ -48,6 +48,13 @@ function job(testKitDigest: string, overrides: Partial<RunnerJobPayload> = {}): 
     assetLicenseLedgerDigest: sha("b"),
     requiredEvidence: ["logs", "junit", "input-timeline", "screenshots", "video", "production-export"],
     ...overrides,
+  };
+}
+
+function signedJob(testKitDigest: string, overrides: Partial<RunnerJobPayload> = {}): SignedRunnerJob {
+  return {
+    payload: job(testKitDigest, overrides),
+    signature: { algorithm: "Ed25519", keyId: "runner-job-key-01", value: "signed-envelope-test-value" },
   };
 }
 
@@ -95,11 +102,18 @@ test("locked TestKit executor verifies binaries, fixed argv and reuses one conte
       assert.equal(options.cwd.startsWith(await realpath(files.workRoot)), true);
       assert.equal(options.env.API_KEY, undefined);
       assert.equal(options.env.NODE_ENV, "production");
+      assert.equal(options.env.DISPLAY, ":91");
+      assert.equal(options.env.XDG_RUNTIME_DIR, "/run/user/1000");
+      assert.equal(options.env.DEVILUDO_TESTKIT_ARTIFACT_BROKER_URL, "https://archive.internal");
       const request = JSON.parse(await readFile(args[2]!, "utf8")) as {
+        schemaVersion: string;
         jobDigest: string;
         testKitDigest: string;
         godot: { binaryDigest: string };
+        signedJob: SignedRunnerJob;
       };
+      assert.equal(request.schemaVersion, "deviludo.testkit-run-request.v2");
+      assert.equal(request.signedJob.signature.keyId, "runner-job-key-01");
       await writeFile(args[4]!, JSON.stringify({
         schemaVersion: "deviludo.testkit-run-result.v1",
         jobDigest: request.jobDigest,
@@ -113,16 +127,52 @@ test("locked TestKit executor verifies binaries, fixed argv and reuses one conte
       ...files,
       godotVersion: "4.6.2-stable",
       process,
-      hostEnvironment: { API_KEY: "must-not-leak", LANG: "C.UTF-8" },
+      hostEnvironment: {
+        API_KEY: "must-not-leak",
+        LANG: "C.UTF-8",
+        DISPLAY: ":91",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+        WAYLAND_DISPLAY: "wayland-0\ninvalid",
+      },
+      testKitEnvironment: artifactEnvironment(),
       now: () => new Date("2030-01-01T00:00:02.000Z"),
     });
-    assert.equal((await executor.execute(job(files.testKitDigest))).status, "PASSED");
-    assert.equal((await executor.execute(job(files.testKitDigest))).status, "PASSED");
+    assert.equal((await executor.execute(signedJob(files.testKitDigest))).status, "PASSED");
+    assert.equal((await executor.execute(signedJob(files.testKitDigest))).status, "PASSED");
     assert.equal(calls, 1);
   } finally {
     await rm(files.root, { recursive: true, force: true });
   }
 });
+
+test("locked TestKit executor rejects partial or unknown child environment", async () => {
+  const files = await fixture();
+  try {
+    assert.throws(() => new LockedTestKitExecutor({
+      ...files,
+      godotVersion: "4.6.2-stable",
+      testKitEnvironment: { DEVILUDO_TESTKIT_ARTIFACT_BROKER_URL: "https://archive.internal" },
+    }), /environment is incomplete/);
+    assert.throws(() => new LockedTestKitExecutor({
+      ...files,
+      godotVersion: "4.6.2-stable",
+      testKitEnvironment: { ...artifactEnvironment(), API_KEY: "must-not-leak" },
+    }), /environment is invalid/);
+  } finally {
+    await rm(files.root, { recursive: true, force: true });
+  }
+});
+
+function artifactEnvironment(): Readonly<Record<string, string>> {
+  return {
+    DEVILUDO_TESTKIT_ARTIFACT_BROKER_URL: "https://archive.internal",
+    DEVILUDO_TESTKIT_ARTIFACT_TLS_KEY_FILE: "/run/secrets/testkit/tls.key",
+    DEVILUDO_TESTKIT_ARTIFACT_TLS_CERT_FILE: "/run/secrets/testkit/tls.crt",
+    DEVILUDO_TESTKIT_ARTIFACT_CA_FILE: "/run/secrets/testkit/archive-ca.crt",
+    DEVILUDO_TESTKIT_TRANSFER_CA_FILE: "/run/secrets/testkit/transfer-ca.crt",
+    DEVILUDO_TESTKIT_ALLOWED_TRANSFER_ORIGINS_JSON: '["https://s3.internal"]',
+  };
+}
 
 test("locked TestKit executor rejects binary, request and result binding drift", async () => {
   const files = await fixture();
@@ -149,11 +199,11 @@ test("locked TestKit executor rejects binary, request and result binding drift",
       now: () => new Date("2030-01-01T00:00:02.000Z"),
     });
     resultDigest = sha("f");
-    await assert.rejects(executor.execute(job(files.testKitDigest)), /result binding is invalid/);
+    await assert.rejects(executor.execute(signedJob(files.testKitDigest)), /result binding is invalid/);
 
     await rm(files.workRoot, { recursive: true, force: true });
     await writeFile(files.testKitExecutable, "tampered-controller");
-    await assert.rejects(executor.execute(job(files.testKitDigest)), /integrity check failed/);
+    await assert.rejects(executor.execute(signedJob(files.testKitDigest)), /integrity check failed/);
   } finally {
     await rm(files.root, { recursive: true, force: true });
   }
@@ -173,9 +223,9 @@ test("locked TestKit executor fails closed on an existing request collision and 
       process,
       now: () => new Date("2030-01-01T00:00:02.000Z"),
     });
-    await assert.rejects(executor.execute(job(files.testKitDigest)), /controller failed/);
+    await assert.rejects(executor.execute(signedJob(files.testKitDigest)), /controller failed/);
     assert.equal(calls, 1);
-    await assert.rejects(executor.execute(job(files.testKitDigest, { sourceDigest: sha("f") })), /request conflicts/);
+    await assert.rejects(executor.execute(signedJob(files.testKitDigest, { sourceDigest: sha("f") })), /request conflicts/);
     assert.equal(calls, 1);
   } finally {
     await rm(files.root, { recursive: true, force: true });

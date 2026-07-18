@@ -1,0 +1,29 @@
+config_version=5
+
+[application]
+
+config/name="DeviLudo TestKit Smoke"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3")
+
+[display]
+
+window/size/viewport_width=640
+window/size/viewport_height=360
+window/size/window_width_override=640
+window/size/window_height_override=360
+
+[input]
+
+test_win={"deadzone": 0.5, "events": []}
+test_lose={"deadzone": 0.5, "events": []}
+test_pause={"deadzone": 0.5, "events": []}
+test_save={"deadzone": 0.5, "events": []}
+test_mutate={"deadzone": 0.5, "events": []}
+test_load={"deadzone": 0.5, "events": []}
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.08, 0.1, 0.16, 1)

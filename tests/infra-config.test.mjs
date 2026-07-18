@@ -61,6 +61,7 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const journal = readFileSync(new URL("../services/runner-control/src/physical-runner-journal.ts", import.meta.url), "utf8");
   const testkit = readFileSync(new URL("../services/runner-control/src/testkit-executor.ts", import.meta.url), "utf8");
+  const artifacts = readFileSync(new URL("../services/runner-control/src/testkit-artifact-client.ts", import.meta.url), "utf8");
   const daemon = readFileSync(new URL("../services/runner-control/src/run-physical-runner.ts", import.meta.url), "utf8");
   assert.equal(packageJson.scripts["start:physical-runner"], "node --import tsx services/runner-control/src/run-physical-runner.ts");
   assert.match(journal, /createHmac\("sha256"/);
@@ -69,8 +70,48 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   assert.match(testkit, /observedTestKit !== this\.#testKitDigest/);
   assert.match(testkit, /shell: false/);
   assert.match(testkit, /"--request-file", requestPath/);
+  assert.match(testkit, /signedJob/);
+  assert.match(artifacts, /changed during upload/);
+  assert.match(artifacts, /x-amz-checksum-sha256/);
+  assert.match(artifacts, /allowedTransferOrigins/);
   assert.match(daemon, /config\.capabilities\.platform !== expectedPlatform/);
   assert.match(daemon, /Promise\.all\(\[service\.ingress\.probe\(\), service\.executor\.probe\(\)\]\)/);
+});
+
+test("Godot TestKit is a fixed signed-job CLI and part of the full service gate", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const cli = readFileSync(new URL("../services/godot-testkit/src/run-cli.ts", import.meta.url), "utf8");
+  const controller = readFileSync(new URL("../services/godot-testkit/src/controller.ts", import.meta.url), "utf8");
+  const driver = readFileSync(new URL("../services/godot-testkit/src/godot-driver.ts", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../services/godot-testkit/README.md", import.meta.url), "utf8");
+  assert.match(packageJson.scripts["test:services"], /npm run test:godot-testkit/);
+  assert.equal(packageJson.scripts["start:godot-testkit"], "node --import tsx services/godot-testkit/src/run-cli.ts");
+  assert.match(cli, /parseGodotTestKitRunRequest/);
+  assert.match(cli, /basename\(requestPath\) !== "request\.json"/);
+  assert.match(controller, /maximumExecutionSeconds \+ 300/);
+  assert.match(controller, /exportedFiles\.length > 0/);
+  assert.match(driver, /shell: false/);
+  assert.match(driver, /--write-movie/);
+  assert.doesNotMatch(driver, /dangerously|--yolo/);
+  assert.match(readme, /not a production Runner artifact/);
+  assert.match(readme, /signed the native artifacts for all selected Runner systems/);
+});
+
+test("artifact preparation publishes canonical source and plan objects before the append-only lock", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const preparer = readFileSync(new URL("../services/artifact-preparer/src/preparer.ts", import.meta.url), "utf8");
+  const postgres = readFileSync(new URL("../services/artifact-preparer/src/postgres-lock-store.ts", import.meta.url), "utf8");
+  const builder = readFileSync(new URL("../services/godot-testkit/src/source-bundle-builder.ts", import.meta.url), "utf8");
+  assert.match(packageJson.scripts["test:services"], /npm run test:artifact-preparer/);
+  assert.match(preparer, /Promise\.all\(\[\s*this\.#objects\.publishFile/);
+  assert.match(preparer, /exactObjectReceipt\(sourceReceipt/);
+  assert.match(preparer, /this\.#locks\.persist/);
+  assert.ok(preparer.indexOf("this.#locks.persist") > preparer.indexOf("exactObjectReceipt(sourceReceipt"));
+  assert.match(postgres, /set_config\('app\.tenant_id'/);
+  assert.match(postgres, /ON CONFLICT \(tenant_id, lock_key\) DO NOTHING/);
+  assert.match(builder, /constants\.O_NOFOLLOW/);
+  assert.match(builder, /createZstdCompress/);
+  assert.match(builder, /source snapshot mutation/);
 });
 
 test("evidence archive is a separate mTLS and immutable S3 trust boundary", () => {
@@ -78,6 +119,7 @@ test("evidence archive is a separate mTLS and immutable S3 trust boundary", () =
   const archive = readFileSync(new URL("../services/evidence-archive/src/archive.ts", import.meta.url), "utf8");
   const s3 = readFileSync(new URL("../services/evidence-archive/src/s3-store.ts", import.meta.url), "utf8");
   const service = readFileSync(new URL("../services/evidence-archive/src/run-service.ts", import.meta.url), "utf8");
+  const artifacts = readFileSync(new URL("../services/evidence-archive/src/runner-artifacts.ts", import.meta.url), "utf8");
   assert.match(ingress, /requestCert: true/);
   assert.match(ingress, /rejectUnauthorized: true/);
   assert.match(ingress, /allowedSpiffeIds\.has/);
@@ -85,6 +127,12 @@ test("evidence archive is a separate mTLS and immutable S3 trust boundary", () =
   assert.match(archive, /repair:\$\{request\.bundleDigest\}/);
   assert.match(s3, /"if-none-match": "\*"/);
   assert.match(s3, /existing\.body/);
+  assert.match(s3, /x-amz-checksum-sha256/);
+  assert.match(ingress, /\/v1\/runner-artifact-grants/);
+  assert.match(ingress, /\/v1\/runner-artifact-commits/);
+  assert.match(artifacts, /verifyRunnerJob/);
+  assert.match(artifacts, /MAX_GRANT_SECONDS = 300/);
+  assert.match(artifacts, /verifyEvidenceArtifacts/);
   assert.match(service, /filesystem backend is forbidden in production/);
 });
 

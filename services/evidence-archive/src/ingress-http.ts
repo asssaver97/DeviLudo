@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { TLSSocket } from "node:tls";
 import type { EvidenceArchiveWorkloadIdentity } from "./contracts";
 import type { EvidenceArchiveService } from "./archive";
+import type { RunnerArtifactGrantService } from "./runner-artifacts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -23,6 +24,7 @@ export interface EvidenceArchiveHttpResponse {
 export function createEvidenceArchiveHandler(options: {
   readonly archive: Pick<EvidenceArchiveService, "persist" | "probe">;
   readonly allowedSpiffeIds: ReadonlySet<string>;
+  readonly runnerArtifacts?: Pick<RunnerArtifactGrantService, "grant" | "commit">;
   readonly extractIdentity?: (socket: unknown) => EvidenceArchiveWorkloadIdentity;
 }): (request: EvidenceArchiveHttpRequest) => Promise<EvidenceArchiveHttpResponse> {
   if (!options.allowedSpiffeIds.size) throw new Error("Evidence archive workload allow-list is empty");
@@ -31,16 +33,41 @@ export function createEvidenceArchiveHandler(options: {
     let identity: EvidenceArchiveWorkloadIdentity;
     try { identity = extractIdentity(request.socket); }
     catch { return failure(401, "EVIDENCE_ARCHIVE_MTLS_IDENTITY_REQUIRED"); }
-    if (!options.allowedSpiffeIds.has(identity.spiffeId)) {
-      return failure(403, "EVIDENCE_ARCHIVE_WORKLOAD_FORBIDDEN");
-    }
     if (request.method === "GET" && request.path === "/healthz") {
+      if (!options.allowedSpiffeIds.has(identity.spiffeId)) {
+        return failure(403, "EVIDENCE_ARCHIVE_WORKLOAD_FORBIDDEN");
+      }
       try { await options.archive.probe(); }
       catch { return failure(503, "EVIDENCE_ARCHIVE_NOT_READY"); }
       return { status: 200, body: { status: "ok", service: "deviludo-evidence-archive" } };
     }
+    if (request.method === "POST" && request.path === "/v1/runner-artifact-grants") {
+      if (!options.runnerArtifacts) return failure(404, "EVIDENCE_ARCHIVE_ROUTE_NOT_FOUND");
+      if (contentType(request.headers["content-type"]) !== "application/json") {
+        return failure(415, "EVIDENCE_ARCHIVE_JSON_REQUIRED");
+      }
+      try {
+        return { status: 200, body: await options.runnerArtifacts.grant(identity, parseJsonObject(request.rawBody)) };
+      } catch {
+        return failure(409, "RUNNER_ARTIFACT_GRANT_REJECTED");
+      }
+    }
+    if (request.method === "POST" && request.path === "/v1/runner-artifact-commits") {
+      if (!options.runnerArtifacts) return failure(404, "EVIDENCE_ARCHIVE_ROUTE_NOT_FOUND");
+      if (contentType(request.headers["content-type"]) !== "application/json") {
+        return failure(415, "EVIDENCE_ARCHIVE_JSON_REQUIRED");
+      }
+      try {
+        return { status: 200, body: await options.runnerArtifacts.commit(identity, parseJsonObject(request.rawBody)) };
+      } catch {
+        return failure(409, "RUNNER_ARTIFACT_COMMIT_REJECTED");
+      }
+    }
     if (request.method !== "POST" || request.path !== "/v1/runner-evidence") {
       return failure(404, "EVIDENCE_ARCHIVE_ROUTE_NOT_FOUND");
+    }
+    if (!options.allowedSpiffeIds.has(identity.spiffeId)) {
+      return failure(403, "EVIDENCE_ARCHIVE_WORKLOAD_FORBIDDEN");
     }
     if (contentType(request.headers["content-type"]) !== "application/json") {
       return failure(415, "EVIDENCE_ARCHIVE_JSON_REQUIRED");
@@ -50,11 +77,10 @@ export function createEvidenceArchiveHandler(options: {
     if (!idempotencyKey || !claimedDigest || idempotencyKey !== claimedDigest || !SHA256.test(claimedDigest)) {
       return failure(400, "EVIDENCE_ARCHIVE_BINDING_REQUIRED");
     }
-    let body: unknown;
-    try { body = JSON.parse(request.rawBody) as unknown; }
+    let body: Record<string, unknown>;
+    try { body = parseJsonObject(request.rawBody); }
     catch { return failure(400, "EVIDENCE_ARCHIVE_REQUEST_INVALID"); }
-    if (!body || typeof body !== "object" || Array.isArray(body)
-      || (body as Record<string, unknown>).bundleDigest !== claimedDigest) {
+    if (body.bundleDigest !== claimedDigest) {
       return failure(400, "EVIDENCE_ARCHIVE_REQUEST_INVALID");
     }
     try {
@@ -186,3 +212,9 @@ function failure(status: number, code: string): EvidenceArchiveHttpResponse {
 }
 
 class BodyTooLargeError extends Error {}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  const body = JSON.parse(value) as unknown;
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("JSON object required");
+  return body as Record<string, unknown>;
+}

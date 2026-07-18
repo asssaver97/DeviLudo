@@ -16,6 +16,11 @@ behind the web console:
   resolves opaque SecretRefs only after every static/runtime gate, redacts
   JSONL/stderr, and distinguishes cancellation, timeout, signal and exit-code
   failures.
+- `artifact-preparer`: freezes an authoritative SCM snapshot and approved v2
+  matrix plan into content-addressed source/test-plan objects, verifies their
+  exact publication receipts, then persists the append-only execution lock in
+  PostgreSQL under tenant RLS. Production broker adapters remain explicit mTLS
+  dependencies rather than implicit filesystem or public-Web access.
 - `inference-gateway`: verifies short-lived run tokens against the complete
   active immutable run registration, enforces exact protocol/model/Provider/
   credential and remaining budget, and performs fresh DNS/SSRF validation.
@@ -26,10 +31,16 @@ behind the web console:
   applies independent fencing tokens and derives the final matrix result from
   content-addressed evidence manifests. The public Web process is deliberately
   not a Runner ingress.
-- `evidence-archive`: an Agent-free mTLS service that independently validates
-  completed matrix bundles and stores canonical evidence/repair prompts through
-  immutable S3 conditional writes. Production rejects its local filesystem
-  backend.
+- `evidence-archive`: an Agent-free mTLS service that issues at-most-five-minute
+  source/evidence grants only after signed-job and signed-fleet authorization,
+  verifies S3 checksums at upload commit, independently validates completed
+  matrix bundles and stores canonical evidence/repair prompts through immutable
+  S3 conditional writes. Production rejects its local filesystem backend.
+- `godot-testkit`: the Agent-free, platform-owned physical-game controller. It
+  consumes only a signed Runner job, exact source/test-plan grants and pinned
+  Godot executable, runs a fixed scenario DSL without a shell, and uploads six
+  immutable evidence categories. The repository `tsx` entry is local-only;
+  production requires a signed self-contained binary per target OS.
 - `scm-proxy`: finalizes a local authoritative candidate and provides the
   production GitHub App core. Signed candidate/acceptance payloads, exact
   repository binding, repository-scoped installation tokens, Git Data/Draft PR

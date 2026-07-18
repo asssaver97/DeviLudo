@@ -151,6 +151,12 @@ test("physical Runner production composition loads only file-backed keys and exa
       DEVILUDO_PHYSICAL_RUNNER_TLS_KEY_FILE: tlsKey,
       DEVILUDO_PHYSICAL_RUNNER_TLS_CERT_FILE: tlsCert,
       DEVILUDO_PHYSICAL_RUNNER_CA_FILE: ca,
+      DEVILUDO_TESTKIT_ARTIFACT_BROKER_URL: "https://evidence-archive.internal",
+      DEVILUDO_TESTKIT_ARTIFACT_TLS_KEY_FILE: tlsKey,
+      DEVILUDO_TESTKIT_ARTIFACT_TLS_CERT_FILE: tlsCert,
+      DEVILUDO_TESTKIT_ARTIFACT_CA_FILE: ca,
+      DEVILUDO_TESTKIT_TRANSFER_CA_FILE: ca,
+      DEVILUDO_TESTKIT_ALLOWED_TRANSFER_ORIGINS_JSON: '["https://s3.internal"]',
     }, { platform: process.platform, arch: process.arch });
     assert.equal(service.config.capabilities.capabilityDigest, finalCap.capabilityDigest);
     assert.equal(service.jobPublicKey.asymmetricKeyType, "ed25519");
