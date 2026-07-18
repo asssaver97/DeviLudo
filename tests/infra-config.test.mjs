@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 17 }, (_, index) => {
+  const offsets = Array.from({ length: 18 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,15 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Steam install grants are tenant-isolated, expiring and once-per-platform", () => {
+  const migration = readFileSync(new URL("../infra/postgres/018_steam_install_grants.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.steam_install_grants/);
+  assert.match(migration, /expires_at <= issued_at \+ interval '24 hours'/);
+  assert.match(migration, /UNIQUE \(tenant_id, grant_id, platform\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/g);
+  assert.match(migration, /steam_install_grant_redemptions_append_only/);
 });
 
 test("approved specifications bind one append-only Runner toolchain revision", () => {

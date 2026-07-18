@@ -28,6 +28,7 @@ services:
       - ./postgres/015_runner_ingress_transactions.sql:/docker-entrypoint-initdb.d/015_runner_ingress_transactions.sql:ro
       - ./postgres/016_approved_test_plan_bindings.sql:/docker-entrypoint-initdb.d/016_approved_test_plan_bindings.sql:ro
       - ./postgres/017_runner_toolchain_revisions.sql:/docker-entrypoint-initdb.d/017_runner_toolchain_revisions.sql:ro
+      - ./postgres/018_steam_install_grants.sql:/docker-entrypoint-initdb.d/018_steam_install_grants.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

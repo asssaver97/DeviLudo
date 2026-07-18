@@ -3,6 +3,7 @@ export * from "./contracts";
 export * from "./clean-install-preparation";
 export * from "./clean-install-http";
 export * from "./postgres-clean-install-authority";
+export * from "./postgres-install-grants";
 export * from "./coordinator";
 export * from "./enrollment-contracts";
 export * from "./enrollment";
