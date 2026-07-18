@@ -1,6 +1,7 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
+import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const AGENT_RUNTIME_URL = loopbackAgentRuntimeUrl();
 
@@ -9,7 +10,7 @@ export async function POST(
   context: { params: Promise<{ projectId: string }> },
 ) {
   try {
-    requireLoopback(request);
+    assertLoopbackTestRequest(request, "本机 Agent 预检只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId) {
@@ -75,11 +76,6 @@ function validatePreflight(
   }
   if ((item.status === "READY") !== (item.code === "READY")) throw new Error("本机 Agent 预检状态矛盾");
   return item as unknown as LocalAgentPreflightResult;
-}
-
-function requireLoopback(request: Request) {
-  const hostname = new URL(request.url).hostname;
-  if (hostname !== "127.0.0.1" && hostname !== "localhost") throw new Error("本机 Agent 预检只在 loopback 测试站可用");
 }
 
 function loopbackAgentRuntimeUrl() {

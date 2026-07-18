@@ -1,5 +1,6 @@
 import { json } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const localRuntimeUrl = loopbackRuntimeUrl();
 const localAgentRuntimeUrl = loopbackOrigin("DEVILUDO_LOCAL_AGENT_RUNTIME_URL", "http://127.0.0.1:4312");
@@ -19,20 +20,18 @@ type LocalAgentHealth = {
 
 export async function GET(request: Request) {
   try {
+    if (!isLoopbackTestRequest(request)) return productionHealth();
     const delivery = await readLocalDelivery("ember-archipelago", "SPEC-008");
-    const hostname = new URL(request.url).hostname;
     let localRuntime: { status: string; godotVersion?: string | null } = { status: "NOT_CONNECTED" };
     let localAgentRuntime: LocalAgentHealth = { status: "NOT_CONNECTED" };
-    if (hostname === "127.0.0.1" || hostname === "localhost") {
-      try {
-        const response = await fetch(`${localRuntimeUrl}/health`, { signal: AbortSignal.timeout(2_000) });
-        if (response.ok) localRuntime = await response.json() as { status: string; godotVersion?: string | null };
-      } catch { /* the local runtime is an optional, explicit process */ }
-      try {
-        const response = await fetch(`${localAgentRuntimeUrl}/health`, { signal: AbortSignal.timeout(2_000) });
-        if (response.ok) localAgentRuntime = await response.json() as LocalAgentHealth;
-      } catch { /* Agent discovery is optional and never enables execution by itself */ }
-    }
+    try {
+      const response = await fetch(`${localRuntimeUrl}/health`, { signal: AbortSignal.timeout(2_000) });
+      if (response.ok) localRuntime = await response.json() as { status: string; godotVersion?: string | null };
+    } catch { /* the local runtime is an optional, explicit process */ }
+    try {
+      const response = await fetch(`${localAgentRuntimeUrl}/health`, { signal: AbortSignal.timeout(2_000) });
+      if (response.ok) localAgentRuntime = await response.json() as LocalAgentHealth;
+    } catch { /* Agent discovery is optional and never enables execution by itself */ }
     return json({
       status: "ok",
       service: "deviludo-control-plane-preview",
@@ -67,6 +66,26 @@ export async function GET(request: Request) {
       time: new Date().toISOString(),
     }, { status: 503 });
   }
+}
+
+function productionHealth(): Response {
+  return json({
+    status: "ok",
+    service: "deviludo-control-plane",
+    version: "0.1.0-beta",
+    mode: "PRODUCTION",
+    dependencies: {
+      specDialogueBroker: configured("DEVILUDO_SPEC_DIALOGUE_BROKER_URL"),
+      deliveryProjectionBroker: configured("DEVILUDO_DELIVERY_PROJECTION_BROKER_URL"),
+      githubAuthorizationBroker: configured("DEVILUDO_GITHUB_AUTH_BROKER_URL"),
+    },
+    capabilities: ["spec-dialogue", "agent-governance", "delivery-projection", "github-app"],
+    time: new Date().toISOString(),
+  }, { headers: { "cache-control": "no-store" } });
+}
+
+function configured(name: string): "CONFIGURED" | "NOT_CONFIGURED" {
+  return process.env[name] ? "CONFIGURED" : "NOT_CONFIGURED";
 }
 
 function isVerifiedAgentRuntime(health: LocalAgentHealth): boolean {

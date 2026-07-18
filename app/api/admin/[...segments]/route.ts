@@ -11,6 +11,7 @@ import {
 } from "@/lib/control-plane/http";
 import { fingerprintSecret, maskFingerprint } from "@/lib/security/credentials";
 import { validateProviderBaseUrl } from "@/lib/security/network";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 type RouteContext = { params: Promise<{ segments: string[] }> };
 const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
@@ -56,6 +57,7 @@ function routeKey(segments: string[]): string {
 
 export async function GET(request: Request, context: RouteContext) {
   try {
+    requireLocalAdmin(request);
     const { segments } = await context.params;
     const key = routeKey(segments);
     const store = getDemoStore();
@@ -115,6 +117,7 @@ export async function GET(request: Request, context: RouteContext) {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    requireLocalAdmin(request);
     const { segments } = await context.params;
     const key = routeKey(segments);
     const body = await bodyObject(request);
@@ -447,6 +450,7 @@ export async function POST(request: Request, context: RouteContext) {
 
 export async function PUT(request: Request, context: RouteContext) {
   try {
+    requireLocalAdmin(request);
     const { segments } = await context.params;
     const key = routeKey(segments);
     const match = /^agent-defaults\/(platform|tenant:[a-z0-9-]+|project:[a-z0-9-]+)$/i.exec(key);
@@ -482,4 +486,10 @@ function mutate<T>(idempotency: string, operation: () => T): Response {
 
 function optionalModel(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function requireLocalAdmin(request: Request): void {
+  if (!isLoopbackTestRequest(request)) {
+    throw new HttpProblem(503, "ADMIN_CONTROL_PLANE_REQUIRED", "生产管理员操作需要独立的身份认证与 Agent 控制面；本地演示存储已禁用");
+  }
 }

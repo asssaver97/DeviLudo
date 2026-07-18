@@ -5,6 +5,7 @@ import {
   candidateAcceptanceOperationKey,
   userAcceptanceBrokerFromEnvironment,
 } from "@/lib/user-acceptance/broker";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
@@ -20,7 +21,7 @@ export async function POST(
       return json({ error: { code: "INVALID_CANDIDATE_ACCEPTANCE_REQUEST", message: "候选验收不接受客户端证据或提交绑定" } }, { status: 400 });
     }
     const requestKey = idempotencyKey(request);
-    if (isLocal(request)) {
+    if (isLoopbackTestRequest(request)) {
       const result = await commandLocalDelivery(projectId, "accept", `acceptance:${projectId}:${requestKey}`);
       return json(
         { data: result.snapshot, meta: { mode: "LOCAL_D1", idempotentReplay: result.replayed } },
@@ -46,11 +47,6 @@ export async function POST(
   } catch (error) {
     return problemResponse(error);
   }
-}
-
-function isLocal(request: Request): boolean {
-  const host = new URL(request.url).hostname;
-  return host === "127.0.0.1" || host === "localhost";
 }
 
 function brokerRequired(): Response {

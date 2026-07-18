@@ -70,7 +70,7 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   assert.match(source, /if \(production\) return <ProductionDeliveryProjection/);
   assert.doesNotMatch(source.slice(source.indexOf("function ProductionDeliveryProjection")), /runAction\(/);
   const routeSource = readFileSync(new URL("../app/api/projects/[projectId]/delivery/route.ts", import.meta.url), "utf8");
-  assert.match(routeSource, /process\.env\.NODE_ENV === "production"\) return false/);
+  assert.match(routeSource, /isLoopbackTestRequest\(request\)/);
 });
 
 test("production delivery GET requires a signed tenant session and returns only its projection", async () => {

@@ -170,6 +170,7 @@ const localRuntimeChild = spawn(
     env: {
       ...process.env,
       NODE_ENV: "development",
+      DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_RUNTIME_PORT: String(localRuntimePort),
     },
     stdio: "inherit",
@@ -185,6 +186,7 @@ const localAgentRuntimeChild = spawn(
     env: {
       ...process.env,
       NODE_ENV: "development",
+      DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: String(localAgentRuntimePort),
     },
     stdio: "inherit",
@@ -200,6 +202,7 @@ const localSpecRuntimeChild = spawn(
     env: {
       ...process.env,
       NODE_ENV: "development",
+      DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_SPEC_RUNTIME_PORT: String(localSpecRuntimePort),
     },
     stdio: "inherit",
@@ -215,6 +218,7 @@ const siteChild = spawn(
     env: {
       ...process.env,
       NODE_ENV: "development",
+      DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_RUNTIME_URL: `http://${HOST}:${localRuntimePort}`,
       DEVILUDO_LOCAL_AGENT_RUNTIME_URL: `http://${HOST}:${localAgentRuntimePort}`,
       DEVILUDO_LOCAL_SPEC_RUNTIME_URL: `http://${HOST}:${localSpecRuntimePort}`,

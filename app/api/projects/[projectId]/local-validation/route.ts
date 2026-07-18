@@ -1,6 +1,7 @@
 import { idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery, saveLocalValidation } from "@/lib/local-delivery/store";
 import type { LocalValidationSnapshot } from "@/lib/local-delivery/model";
+import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const RUNTIME_URL = loopbackRuntimeUrl();
 
@@ -9,7 +10,7 @@ export async function GET(
   context: { params: Promise<{ projectId: string }> },
 ) {
   try {
-    requireLoopback(request);
+    assertLoopbackTestRequest(request, "本机验证 API 只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
     const delivery = await readLocalDelivery(projectId);
     return json({ data: delivery.localValidation, meta: { runId: delivery.runId, stage: delivery.stage } });
@@ -23,7 +24,7 @@ export async function POST(
   context: { params: Promise<{ projectId: string }> },
 ) {
   try {
-    requireLoopback(request);
+    assertLoopbackTestRequest(request, "本机验证 API 只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId) {
@@ -60,13 +61,6 @@ export async function POST(
     );
   } catch (error) {
     return problemResponse(error);
-  }
-}
-
-function requireLoopback(request: Request) {
-  const hostname = new URL(request.url).hostname;
-  if (hostname !== "127.0.0.1" && hostname !== "localhost") {
-    throw new Error("本机验证 API 只在 loopback 测试站可用");
   }
 }
 

@@ -3,6 +3,7 @@ import { bodyObject, idempotencyKey, json, problemResponse, requireString } from
 import { invalidateLocalEvidence } from "@/lib/local-delivery/store";
 import { specDialogueBrokerRuntimeFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
 import { userAcceptanceBrokerFromEnvironment, userFeedbackOperationKey } from "@/lib/user-acceptance/broker";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
@@ -11,7 +12,7 @@ export async function GET(
   context: { params: Promise<{ projectId: string }> },
 ) {
   const { projectId } = await context.params;
-  if (isLocal(request)) return json({ data: getDemoStore().feedback, meta: { projectId } });
+  if (isLoopbackTestRequest(request)) return json({ data: getDemoStore().feedback, meta: { projectId } });
   return json({ error: { code: "METHOD_NOT_ALLOWED", message: "生产反馈历史由项目迭代视图读取" } }, {
     status: 405,
     headers: { allow: "POST" },
@@ -31,7 +32,7 @@ export async function POST(
     }
     const feedback = requireString(body, "feedback", 4000);
     const requestKey = idempotencyKey(request);
-    if (!isLocal(request)) {
+    if (!isLoopbackTestRequest(request)) {
       const session = specDialogueBrokerRuntimeFromEnvironment();
       const broker = userAcceptanceBrokerFromEnvironment();
       if (!session || !broker) return productionBrokerRequired();
@@ -87,11 +88,6 @@ export async function POST(
   } catch (error) {
     return problemResponse(error);
   }
-}
-
-function isLocal(request: Request): boolean {
-  const host = new URL(request.url).hostname;
-  return host === "127.0.0.1" || host === "localhost";
 }
 
 function productionBrokerRequired(): Response {

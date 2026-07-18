@@ -80,6 +80,8 @@ DEVILUDO_LOCAL_PORT=4310 npm run local:smoke
 
 Godot 侧车端口默认是 `4311`，Agent 探针端口默认是 `4312`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT` / `DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`。
 
+`npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。
+
 ## 常见问题
 
 - `is already in use`：停止占用对应端口的旧进程，或为启动和检查命令选择相同的新端口。

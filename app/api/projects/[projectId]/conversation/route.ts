@@ -1,4 +1,5 @@
 import { bodyObject, idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 import {
   deterministicConversationId,
   specDialogueBrokerRuntimeFromEnvironment,
@@ -97,8 +98,7 @@ function brokerRequired(): Response {
 }
 
 function localRuntimeUrl(request: Request): URL | null {
-  const requestHost = new URL(request.url).hostname;
-  if (requestHost !== "127.0.0.1" && requestHost !== "localhost") return null;
+  if (!isLoopbackTestRequest(request)) return null;
   const raw = process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_URL ?? "http://127.0.0.1:4313";
   const url = new URL(raw);
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password

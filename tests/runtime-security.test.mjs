@@ -14,8 +14,20 @@ import {
 import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts";
 import { ReleaseAuthorizationBrokerClient } from "../lib/releases/publish-broker.ts";
 import { POST as acceptAndPublish } from "../app/api/releases/[releaseId]/accept-and-publish/route.ts";
+import { isLoopbackTestRequest } from "../lib/security/local-test-mode.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
+
+test("local fixture authorization requires explicit mode, non-production and a real loopback URL", () => {
+  const loopback = new Request("http://127.0.0.1:3000/api/admin/agents");
+  assert.equal(isLoopbackTestRequest(loopback, { NODE_ENV: "development", DEVILUDO_LOCAL_TEST_MODE: "1" }), true);
+  assert.equal(isLoopbackTestRequest(loopback, { NODE_ENV: "development" }), false);
+  assert.equal(isLoopbackTestRequest(loopback, { NODE_ENV: "production", DEVILUDO_LOCAL_TEST_MODE: "1" }), false);
+  assert.equal(isLoopbackTestRequest(
+    new Request("https://app.deviludo.example/api/admin/agents", { headers: { host: "127.0.0.1:3000" } }),
+    { NODE_ENV: "development", DEVILUDO_LOCAL_TEST_MODE: "1" },
+  ), false);
+});
 
 function profile(agent) {
   const primaryModel = agent === "claude-code" ? "claude-sonnet-4-6-20250514" : "gpt-5.3-codex-2026-06-12";

@@ -1,5 +1,6 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
+import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const RUNTIME_URL = loopbackRuntimeUrl();
 const allowedFiles = new Set(["manifest.json", "junit.xml", "godot.log"]);
@@ -9,8 +10,7 @@ export async function GET(
   context: { params: Promise<{ projectId: string; file: string }> },
 ) {
   try {
-    const hostname = new URL(request.url).hostname;
-    if (hostname !== "127.0.0.1" && hostname !== "localhost") throw new Error("证据文件只在本机测试站可用");
+    assertLoopbackTestRequest(request, "证据文件只在显式启用的 loopback 测试站可用");
     const { projectId, file } = await context.params;
     if (!allowedFiles.has(file)) return json({ error: { code: "NOT_FOUND", message: "证据文件不存在" } }, { status: 404 });
     const delivery = await readLocalDelivery(projectId);

@@ -1,7 +1,9 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { startLocalDelivery } from "@/lib/local-delivery/store";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 import {
+  deterministicConversationId,
   specDialogueBrokerRuntimeFromEnvironment,
   specOperationKey,
   verifyTrustedSpecSession,
@@ -9,10 +11,33 @@ import {
 import type { SpecApprovalReceipt } from "@/services/spec-dialogue/src/contracts";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
   const { projectId } = await context.params;
+  if (!isLoopbackTestRequest(request)) {
+    try {
+      const runtime = specDialogueBrokerRuntimeFromEnvironment();
+      if (!runtime) return productionBrokerRequired();
+      const principal = await verifyTrustedSpecSession(request, runtime.sessionHmacKey);
+      const conversationId = await deterministicConversationId(principal.tenantId, projectId);
+      const snapshot = await runtime.broker.snapshot({ tenantId: principal.tenantId, projectId, conversationId });
+      if (!snapshot) return json({ error: { code: "SPEC_REVISION_NOT_FOUND", message: "项目尚未生成规格修订。" } }, { status: 404 });
+      return json({
+        data: {
+          id: snapshot.specRevisionId,
+          projectId,
+          revision: snapshot.revision,
+          state: snapshot.state,
+          immutable: true,
+          targetMatrix: snapshot.result?.spec.targetPlatforms ?? [],
+          testPlan: snapshot.result ? { version: snapshot.result.testPlan.version, frozen: snapshot.state === "APPROVED" } : null,
+        },
+      });
+    } catch (error) {
+      return problemResponse(error);
+    }
+  }
   const store = getDemoStore();
   return json({
     data: {
@@ -40,6 +65,21 @@ export async function POST(
       return json({ error: { code: "UNSUPPORTED_ACTION", message: "Only approve is supported" } }, { status: 400 });
     }
     const requestKey = idempotencyKey(request);
+    const local = isLoopbackTestRequest(request);
+    if (!local) {
+      if (!hasDialogueAuthority(body)) {
+        return json({ error: { code: "SPEC_APPROVAL_AUTHORITY_REQUIRED", message: "生产规格批准必须绑定当前对话、规格修订和冻结测试计划。" } }, { status: 400 });
+      }
+      const authority = await approveDialogue(request, projectId, requestKey, body);
+      return json({
+        data: {
+          specRevisionId: authority.specRevisionId,
+          state: authority.state,
+          authority,
+          workflow: { state: "DISPATCHED_BY_SPEC_WORKFLOW_BRIDGE", localFixture: false },
+        },
+      }, { status: 201 });
+    }
     const authority = hasDialogueAuthority(body)
       ? await approveDialogue(request, projectId, requestKey, body)
       : null;
@@ -146,13 +186,16 @@ async function approveDialogue(
 }
 
 function localSpecRuntimeUrl(request: Request): URL | null {
-  const requestHost = new URL(request.url).hostname;
-  if (requestHost !== "127.0.0.1" && requestHost !== "localhost") return null;
+  if (!isLoopbackTestRequest(request)) return null;
   const raw = process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_URL ?? "http://127.0.0.1:4313";
   const url = new URL(raw);
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/"
     || url.username || url.password || url.search || url.hash) throw new Error("Local specification runtime URL is invalid");
   return url;
+}
+
+function productionBrokerRequired(): Response {
+  return json({ error: { code: "SPEC_DIALOGUE_BROKER_REQUIRED", message: "生产规格读取需要独立的规格对话 Broker。" } }, { status: 503 });
 }
 
 function stableRunId(value: string) {

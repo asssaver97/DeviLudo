@@ -1,6 +1,7 @@
 import { idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery, saveLocalAgentExecution } from "@/lib/local-delivery/store";
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
+import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const AGENT_RUNTIME_URL = loopbackAgentRuntimeUrl();
 
@@ -9,7 +10,7 @@ export async function POST(
   context: { params: Promise<{ projectId: string }> },
 ) {
   try {
-    requireLoopback(request);
+    assertLoopbackTestRequest(request, "本机 Agent 运行 API 只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId) {
@@ -155,11 +156,6 @@ function validCandidateBranch(value: string): boolean {
     && /^deviludo\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/i.test(value)
     && !value.includes("..")
     && !value.endsWith(".lock");
-}
-
-function requireLoopback(request: Request) {
-  const hostname = new URL(request.url).hostname;
-  if (hostname !== "127.0.0.1" && hostname !== "localhost") throw new Error("本机 Agent 运行 API 只在 loopback 测试站可用");
 }
 
 function loopbackAgentRuntimeUrl() {

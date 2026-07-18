@@ -6,6 +6,7 @@ import {
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
 import { trustedSessionKeyFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const actions = new Set<LocalDeliveryAction>([
   "advance",
@@ -24,7 +25,7 @@ export async function GET(
 ) {
   try {
     const { projectId } = await context.params;
-    if (isLocal(request)) {
+    if (isLoopbackTestRequest(request)) {
       return json({ data: await readLocalDelivery(projectId), meta: { mode: "LOCAL_D1" } });
     }
     if (!UUID.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效。" } }, { status: 400 });
@@ -68,7 +69,7 @@ export async function POST(
 ) {
   try {
     const { projectId } = await context.params;
-    if (!isLocal(request)) {
+    if (!isLoopbackTestRequest(request)) {
       return json({
         error: {
           code: "DELIVERY_PROJECTION_READ_ONLY",
@@ -93,12 +94,6 @@ export async function POST(
   } catch (error) {
     return problemResponse(error);
   }
-}
-
-function isLocal(request: Request): boolean {
-  if (process.env.NODE_ENV === "production") return false;
-  const host = new URL(request.url).hostname;
-  return host === "127.0.0.1" || host === "localhost";
 }
 
 function projectionRequired(): Response {
