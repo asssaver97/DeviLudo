@@ -1,0 +1,174 @@
+import { assertPinnedModelId } from "../../../lib/agent/providers";
+import type { AgentWorkflowRunReceipt } from "../../agent-worker/src/workflow-handler";
+
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
+
+export interface AgentExecutionRequest {
+  readonly schemaVersion: "deviludo.agent-execution.v1";
+  readonly operationKey: string;
+  readonly requestDigest: string;
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly workflowId: string;
+  readonly lockedRunConfigurationId: string;
+  readonly expectedRunId: string | null;
+  readonly iteration: number;
+  readonly repairAttempts: number;
+}
+
+export interface AgentExecutionStatus {
+  readonly status: "RUNNING" | "COMPLETED" | "FAILED";
+  readonly runId: string;
+  readonly providerRevisionId: string;
+  readonly receipt: AgentWorkflowRunReceipt | null;
+}
+
+export interface AgentExecutionLookup {
+  readonly tenantId: string;
+  readonly runId: string;
+  readonly operationKey: string;
+  readonly requestDigest: string;
+}
+
+export interface LockedAgentExecution {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly resolutionDigest: string;
+  readonly profileRevisionId: string;
+  readonly installationId: string;
+  readonly imageDigest: string;
+  readonly exactAgentVersion: string;
+  readonly adapterVersion: string;
+  readonly agent: "claude-code" | "codex-cli";
+  readonly providerRevisionId: string;
+  readonly providerProtocol: "anthropic-messages" | "openai-responses";
+  readonly providerBaseUrl: string;
+  readonly credentialVersionId: string;
+  readonly model: string;
+  readonly authorizedModels: readonly string[];
+  readonly authorizationNonce: string;
+  readonly authorizationExpiresAt: string;
+  readonly budget: Readonly<{ maxUsd: number; maxTurns: number; timeoutSeconds: number }>;
+  readonly specRevisionId: string;
+  readonly testPlanRevisionId: string;
+  readonly sourceBaselineReceiptId: string;
+  readonly baseCommitSha: string;
+  readonly sourceDigest: string;
+}
+
+export interface IsolatedAgentExecutionRequest extends LockedAgentExecution {
+  readonly attemptId: string;
+  readonly inferenceTokenSecretRef: string;
+  readonly inferenceTokenExpiresAt: string;
+}
+
+export interface IsolatedAgentExecutionResult {
+  readonly status: "COMPLETED" | "FAILED";
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly resolutionDigest: string;
+  readonly profileRevisionId: string;
+  readonly installationId: string;
+  readonly imageDigest: string;
+  readonly adapterVersion: string;
+  readonly providerRevisionId: string;
+  readonly credentialVersionId: string;
+  readonly model: string;
+  readonly candidateCommitSha: string | null;
+  readonly draftPullRequest: number | null;
+  readonly diagnosticId: string | null;
+  readonly receiptId: string;
+}
+
+export interface AgentExecutionBrokerIdentity {
+  readonly spiffeId: string;
+}
+
+export function parseAgentExecutionRequest(value: unknown): AgentExecutionRequest {
+  const body = typeof value === "string" ? parseJson(value) : record(value);
+  exactKeys(body, ["schemaVersion", "operationKey", "requestDigest", "tenantId", "projectId", "workflowId",
+    "lockedRunConfigurationId", "expectedRunId", "iteration", "repairAttempts"]);
+  if (body.schemaVersion !== "deviludo.agent-execution.v1"
+    || typeof body.operationKey !== "string" || !/^workflow-job:[a-f0-9-]{36}$/i.test(body.operationKey)
+    || typeof body.requestDigest !== "string" || !SHA256.test(body.requestDigest)
+    || typeof body.tenantId !== "string" || !UUID.test(body.tenantId)
+    || typeof body.projectId !== "string" || !UUID.test(body.projectId)
+    || typeof body.workflowId !== "string" || !SAFE_ID.test(body.workflowId)
+    || typeof body.lockedRunConfigurationId !== "string" || !UUID.test(body.lockedRunConfigurationId)
+    || body.expectedRunId !== null && (typeof body.expectedRunId !== "string" || !UUID.test(body.expectedRunId))
+    || !Number.isSafeInteger(body.iteration) || (body.iteration as number) < 1
+    || !Number.isSafeInteger(body.repairAttempts) || (body.repairAttempts as number) < 0) invalid();
+  if (body.expectedRunId !== null && body.expectedRunId !== body.lockedRunConfigurationId) invalid();
+  return Object.freeze({
+    schemaVersion: "deviludo.agent-execution.v1",
+    operationKey: body.operationKey,
+    requestDigest: body.requestDigest,
+    tenantId: body.tenantId,
+    projectId: body.projectId,
+    workflowId: body.workflowId,
+    lockedRunConfigurationId: body.lockedRunConfigurationId,
+    expectedRunId: body.expectedRunId,
+    iteration: body.iteration as number,
+    repairAttempts: body.repairAttempts as number,
+  });
+}
+
+export function validateAgentExecutionStatus(value: unknown, expected: Pick<AgentExecutionRequest, "lockedRunConfigurationId">): AgentExecutionStatus {
+  const body = record(value);
+  if (!UUID.test(String(body.runId ?? "")) || body.runId !== expected.lockedRunConfigurationId
+    || typeof body.providerRevisionId !== "string" || !SAFE_ID.test(body.providerRevisionId)
+    || !["RUNNING", "COMPLETED", "FAILED"].includes(String(body.status))) invalid();
+  if (body.status === "RUNNING") {
+    if (body.receipt !== null) invalid();
+    return Object.freeze({ status: "RUNNING", runId: body.runId as string,
+      providerRevisionId: body.providerRevisionId, receipt: null });
+  }
+  const receipt = validateReceipt(body.receipt, body.status as "COMPLETED" | "FAILED", body.runId as string,
+    body.providerRevisionId);
+  return Object.freeze({ status: body.status as "COMPLETED" | "FAILED", runId: body.runId as string,
+    providerRevisionId: body.providerRevisionId, receipt });
+}
+
+export function validateIsolatedResult(value: unknown, lock: LockedAgentExecution, attemptId: string): IsolatedAgentExecutionResult {
+  const body = record(value);
+  if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
+    || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
+    || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
+    || body.imageDigest !== lock.imageDigest || body.adapterVersion !== lock.adapterVersion
+    || body.providerRevisionId !== lock.providerRevisionId || body.credentialVersionId !== lock.credentialVersionId
+    || body.model !== lock.model || typeof body.receiptId !== "string" || !SAFE_ID.test(body.receiptId)) invalid();
+  if (body.status === "COMPLETED") {
+    if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
+      || body.candidateCommitSha === lock.baseCommitSha || !Number.isSafeInteger(body.draftPullRequest)
+      || (body.draftPullRequest as number) < 1 || body.diagnosticId !== null) invalid();
+  } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
+    || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
+  return Object.freeze({ ...body }) as unknown as IsolatedAgentExecutionResult;
+}
+
+function validateReceipt(value: unknown, status: "COMPLETED" | "FAILED", runId: string, providerRevisionId: string): AgentWorkflowRunReceipt {
+  const body = record(value);
+  if (body.status !== status || body.runId !== runId || body.lockedRunConfigurationId !== runId
+    || body.providerRevisionId !== providerRevisionId || (body.agent !== "claude-code" && body.agent !== "codex-cli")
+    || ![body.profileRevisionId, body.installationId, body.receiptId].every((item) => typeof item === "string" && SAFE_ID.test(item))
+    || typeof body.imageDigest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(body.imageDigest)
+    || typeof body.model !== "string" || !validModel(body.model)) invalid();
+  if (status === "COMPLETED") {
+    if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
+      || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
+      || body.diagnosticId !== null) invalid();
+  } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
+    || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
+  return Object.freeze({ ...body }) as unknown as AgentWorkflowRunReceipt;
+}
+
+function validModel(value: string): boolean { try { assertPinnedModelId(value); return true; } catch { return false; } }
+function parseJson(value: string): Record<string, unknown> { try { return record(JSON.parse(value) as unknown); } catch { invalid(); } }
+function record(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) invalid(); return value as Record<string, unknown>; }
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) invalid();
+}
+function invalid(): never { throw new Error("Agent execution Broker contract is invalid"); }

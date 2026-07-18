@@ -106,6 +106,7 @@ export class MtlsAgentExecutionBroker implements LockedAgentWorkflowPort {
         "content-type": "application/json",
         "idempotency-key": input.operationKey,
         "x-deviludo-request-digest": input.requestDigest,
+        "x-deviludo-tenant-id": input.tenantId,
       }),
       body,
     });
@@ -157,6 +158,7 @@ export class MtlsAgentExecutionBroker implements LockedAgentWorkflowPort {
           accept: "application/json",
           "idempotency-key": input.operationKey,
           "x-deviludo-request-digest": input.requestDigest,
+          "x-deviludo-tenant-id": input.tenantId,
         }),
       });
       const current = parseStatus(response, input.lockedRunConfigurationId);

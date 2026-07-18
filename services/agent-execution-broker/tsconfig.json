@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "../../lib/agent/**/*.ts", "../../lib/security/credentials.ts", "../agent-worker/src/workflow-handler.ts", "../evidence-archive/src/contracts.ts", "../evidence-archive/src/ingress-http.ts", "../runner-control/src/canonical.ts", "../temporal/src/postgres-inbox.ts"]
+}

@@ -80,6 +80,8 @@ test("mTLS Agent Broker starts once, polls a bound run and heartbeats its workfl
   assert.equal(calls[0]?.request.method, "POST");
   assert.equal(calls[1]?.request.method, "GET");
   assert.equal(calls[0]?.request.headers["idempotency-key"], input().operationKey);
+  assert.equal(calls[0]?.request.headers["x-deviludo-tenant-id"], tenantId);
+  assert.equal(calls[1]?.request.headers["x-deviludo-tenant-id"], tenantId);
   const submitted = JSON.parse(calls[0]?.request.body ?? "null") as Record<string, unknown>;
   assert.equal(submitted.lockedRunConfigurationId, lockedId);
   assert.equal(submitted.expectedRunId, null);
