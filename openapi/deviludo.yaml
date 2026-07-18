@@ -8,6 +8,39 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /auth/github:
+    get:
+      operationId: beginInvitedGitHubLogin
+      security: []
+      parameters:
+        - name: invite
+          in: query
+          required: true
+          schema: { type: string, format: password, writeOnly: true }
+      responses:
+        "303": { description: Redirect to the fixed GitHub OAuth authorization endpoint and set the short-lived browser-binding cookie. }
+        "400": { description: Invitation is invalid, expired, revoked, claimed, or consumed. }
+  /auth/github/callback:
+    get:
+      operationId: completeInvitedGitHubLogin
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, required: true, schema: { type: string, writeOnly: true } }
+      responses:
+        "303": { description: Consume the invitation, set the Secure/HttpOnly platform session, and continue to GitHub App repository setup. }
+  /auth/session:
+    get:
+      operationId: getPlatformSession
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { description: Session is absent, expired, revoked, or suspended. }
+    delete:
+      operationId: revokePlatformSession
+      security: [{ cookieAuth: [] }]
+      responses:
+        "204": { description: Session was revoked if present and both cookies were cleared. }
   /admin/agents:
     get:
       operationId: listAgents
@@ -259,6 +292,7 @@ paths:
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    cookieAuth: { type: apiKey, in: cookie, name: __Host-deviludo-session }
   parameters:
     ProjectId:
       name: projectId

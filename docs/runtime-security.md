@@ -23,6 +23,29 @@ files and stdin. They never spawn a process or contact an upstream model service
    its workspace; it has no GitHub credential and can reach only DeviLudo's
    inference gateway.
 
+## Browser identity and invited access
+
+The public console does not accept a GitHub password. A platform identity
+administrator creates a tenant- and role-bound invitation through an mTLS-only
+endpoint; the response contains the raw token once, while PostgreSQL stores only
+its SHA-256 digest. Invitation, login-intent, user, membership, and session rows
+all use forced tenant RLS.
+
+GitHub login uses a random state, S256 PKCE, `allow_signup=false`, and an
+independent 256-bit browser-binding cookie. The verifier exchanges the callback
+code, calls GitHub `/user`, and revokes the returned `ghu_`/`gho_` token before
+returning only public account identity. OAuth codes, tokens, PKCE values and raw
+platform sessions are never logged or persisted. A failed verification consumes
+its PKCE value and releases an unexpired invitation; a successful verification
+atomically consumes it.
+
+The browser receives `__Host-` Secure, HttpOnly, SameSite=Lax session and binding
+cookies. An API route cannot trust those values directly: the Web workload sends
+them over mTLS to the Identity Broker, which checks tenant/user/membership state,
+expiry and revocation, then emits a fresh HMAC assertion bound to the exact HTTP
+method and path. The Web verifies that assertion before using the tenant ID.
+Logout revokes the server-side digest first and then clears both cookies.
+
 ## Runtime adapter contract
 
 `RuntimeAdapter` exposes the planned six operations:

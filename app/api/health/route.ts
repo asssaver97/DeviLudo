@@ -78,9 +78,10 @@ function productionHealth(): Response {
       specDialogueBroker: configured("DEVILUDO_SPEC_DIALOGUE_BROKER_URL"),
       deliveryProjectionBroker: configured("DEVILUDO_DELIVERY_PROJECTION_BROKER_URL"),
       githubAuthorizationBroker: configured("DEVILUDO_GITHUB_AUTH_BROKER_URL"),
+      identityBroker: configured("DEVILUDO_IDENTITY_BROKER_URL"),
       projectRepositoryBroker: configured("DEVILUDO_PROJECT_REPOSITORY_BROKER_URL"),
     },
-    capabilities: ["spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding"],
+    capabilities: ["invited-github-login", "revocable-platform-session", "spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding"],
     time: new Date().toISOString(),
   }, { headers: { "cache-control": "no-store" } });
 }

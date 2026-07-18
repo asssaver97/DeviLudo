@@ -10,11 +10,19 @@ import {
   githubCallbackIdempotencyKey,
   signTrustedGitHubSession,
   verifyTrustedGitHubSession,
+  verifyTrustedPlatformSession,
 } from "../lib/connections/github-broker.ts";
 import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts";
 import { ReleaseAuthorizationBrokerClient } from "../lib/releases/publish-broker.ts";
 import { POST as acceptAndPublish } from "../app/api/releases/[releaseId]/accept-and-publish/route.ts";
 import { isLoopbackTestRequest } from "../lib/security/local-test-mode.ts";
+import {
+  BROWSER_BINDING_COOKIE,
+  SESSION_COOKIE,
+  IdentityBrokerClient,
+  browserSessionCookies,
+  secureCookie,
+} from "../lib/auth/identity-broker.ts";
 
 const digest = `sha256:${"a".repeat(64)}`;
 
@@ -144,6 +152,70 @@ test("GitHub connection session assertions bind identity, method and callback pa
     ),
     /signature is invalid/,
   );
+});
+
+test("browser identity client accepts only fixed session contracts and rejects cookie smuggling", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const userId = "22222222-2222-4222-8222-222222222222";
+  const membershipId = "33333333-3333-4333-8333-333333333333";
+  const random = new Uint8Array(32).fill(4);
+  const browserBinding = Buffer.from(random).toString("base64url");
+  const sessionToken = `${tenantId}.${Buffer.from(new Uint8Array(32).fill(5)).toString("base64url")}`;
+  const broker = new IdentityBrokerClient({ endpoint: "https://identity.internal/", async fetch(url, init) {
+    assert.equal(String(url), "https://identity.internal/v1/sessions/assert");
+    assert.equal(init.redirect, "error");
+    return Response.json({ tenantId, tenantSlug: "north-dock", tenantName: "North Dock", userId, membershipId,
+      role: "ProjectOwner", githubUserId: 4242, githubNodeId: "MDQ6VXNlcjQyNDI=", githubLogin: "octocat",
+      displayName: "The Octocat", avatarUrl: "https://avatars.githubusercontent.com/u/4242?v=4",
+      sessionBinding: Buffer.from(new Uint8Array(32).fill(6)).toString("base64url"),
+      issuedAt: "1970000000000", signature: Buffer.from(new Uint8Array(32).fill(7)).toString("base64url") });
+  } });
+  assert.equal((await broker.assert({ sessionToken, browserBinding, method: "GET", pathname: "/api/projects" })).githubUserId, 4242);
+  const request = new Request("https://deviludo.example/api/projects", { headers: {
+    cookie: `${SESSION_COOKIE}=${sessionToken}; ${BROWSER_BINDING_COOKIE}=${browserBinding}`,
+  } });
+  assert.deepEqual(browserSessionCookies(request), { sessionToken, browserBinding });
+  assert.match(secureCookie(SESSION_COOKIE, sessionToken, "2032-01-01T00:00:00.000Z"), /HttpOnly; Secure; SameSite=Lax/);
+  assert.throws(() => browserSessionCookies(new Request(request.url, { headers: {
+    cookie: `${SESSION_COOKIE}=${sessionToken}; ${SESSION_COOKIE}=${sessionToken}; ${BROWSER_BINDING_COOKIE}=${browserBinding}`,
+  } })), /Duplicate/);
+  assert.throws(() => new IdentityBrokerClient({ endpoint: "http://identity.internal/" }), /contract/);
+});
+
+test("platform APIs exchange browser cookies for a fresh route-bound Broker assertion", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEndpoint = process.env.DEVILUDO_IDENTITY_BROKER_URL;
+  const key = new Uint8Array(32).fill(29);
+  const at = new Date("2032-01-02T03:04:05.000Z");
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const userId = "22222222-2222-4222-8222-222222222222";
+  const membershipId = "33333333-3333-4333-8333-333333333333";
+  const browserBinding = Buffer.from(new Uint8Array(32).fill(8)).toString("base64url");
+  const sessionToken = `${tenantId}.${Buffer.from(new Uint8Array(32).fill(9)).toString("base64url")}`;
+  const sessionBinding = Buffer.from(new Uint8Array(32).fill(10)).toString("base64url");
+  const issuedAt = String(at.getTime());
+  const signature = await signTrustedGitHubSession({ method: "GET", pathname: "/api/projects", tenantId, userId,
+    sessionBinding, githubUserId: "4242", issuedAt, key });
+  try {
+    process.env.DEVILUDO_IDENTITY_BROKER_URL = "https://identity.internal/";
+    globalThis.fetch = async (url, init) => {
+      assert.equal(String(url), "https://identity.internal/v1/sessions/assert");
+      const body = JSON.parse(init.body);
+      assert.deepEqual(body, { sessionToken, browserBinding, method: "GET", pathname: "/api/projects" });
+      return Response.json({ tenantId, tenantSlug: "north-dock", tenantName: "North Dock", userId, membershipId,
+        role: "ProjectOwner", githubUserId: 4242, githubNodeId: "MDQ6VXNlcjQyNDI=", githubLogin: "octocat",
+        displayName: "The Octocat", avatarUrl: "https://avatars.githubusercontent.com/u/4242?v=4",
+        sessionBinding, issuedAt, signature });
+    };
+    const principal = await verifyTrustedPlatformSession(new Request("https://deviludo.example/api/projects", { headers: {
+      cookie: `${SESSION_COOKIE}=${sessionToken}; ${BROWSER_BINDING_COOKIE}=${browserBinding}`,
+    } }), key, at);
+    assert.deepEqual(principal, { tenantId, userId, sessionBinding, githubUserId: 4242 });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalEndpoint === undefined) delete process.env.DEVILUDO_IDENTITY_BROKER_URL;
+    else process.env.DEVILUDO_IDENTITY_BROKER_URL = originalEndpoint;
+  }
 });
 
 test("GitHub Web broker client accepts only fixed GitHub redirects and hashes callback idempotency", async () => {

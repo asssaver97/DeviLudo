@@ -129,7 +129,7 @@ API Key 只允许写入或替换。响应只返回 Vault `SecretRef`、不可逆
 
 仓库默认不会执行外部副作用。部署到真实环境前需要运维方提供：
 
-1. GitHub App 的 App/Client ID、私钥与 Client Secret 的 Vault 引用、Setup/PKCE Callback 域名和允许安装的组织。
+1. GitHub App 的 App/Client ID、私钥与 Client Secret 的 Vault 引用、登录与 Setup/PKCE Callback 域名、Identity Broker mTLS 身份和允许安装的组织；用户只通过一次性邀请登录，不保存 GitHub 密码。
 2. Claude/Codex Provider 的 SecurityAdmin 审批、数据政策确认、Vault Key 与全套探针结果。
 3. 内部镜像库、签名密钥、SBOM/漏洞/恶意软件扫描器和隔离 microVM Worker 池。
 4. 通过出站 mTLS 注册的 Windows、Linux、macOS Runner 与固定 Godot/export-template digest。
@@ -139,6 +139,7 @@ API Key 只允许写入或替换。响应只返回 Vault `SecretRef`、不可逆
 这些边界刻意不使用模拟凭据“自动绕过”。未配置时工作流会停在 `WAITING_PROVIDER` 或 `EXTERNAL_APPROVAL_REQUIRED`。
 
 Agent 供应链生产打包、固定工具参数和策略配置方法见 [Agent 供应链运维说明](docs/agent-supply-chain.md)。
+受邀 GitHub 登录、mTLS 部署与邀请签发见 [身份 Broker 运维说明](docs/identity.md)。
 
 ## 目录
 

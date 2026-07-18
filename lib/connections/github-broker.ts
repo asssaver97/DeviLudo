@@ -1,4 +1,5 @@
 import type { GitHubAuthorizationPrincipal } from "@/services/scm-proxy/src/github-auth-contracts";
+import { browserSessionCookies, identityBrokerFromEnvironment, type BrowserSessionAssertion } from "@/lib/auth/identity-broker";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -156,6 +157,17 @@ export async function verifyTrustedPlatformSession(
   key: Uint8Array,
   now: Date = new Date(),
 ): Promise<TrustedPlatformSession> {
+  if (!request.headers.has("x-deviludo-session-tenant")) {
+    const assertion = await assertBrowserSession(request);
+    const headers = new Headers(request.headers);
+    headers.set("x-deviludo-session-tenant", assertion.tenantId);
+    headers.set("x-deviludo-session-user", assertion.userId);
+    headers.set("x-deviludo-session-binding", assertion.sessionBinding);
+    headers.set("x-deviludo-session-github-user-id", String(assertion.githubUserId));
+    headers.set("x-deviludo-session-issued-at", assertion.issuedAt);
+    headers.set("x-deviludo-session-signature", assertion.signature);
+    return verifyTrustedPlatformSession(new Request(request.url, { method: request.method, headers }), key, now);
+  }
   const tenantId = requiredHeader(request, "x-deviludo-session-tenant");
   const userId = requiredHeader(request, "x-deviludo-session-user");
   const sessionBinding = requiredHeader(request, "x-deviludo-session-binding", 512);
@@ -183,6 +195,13 @@ export async function verifyTrustedPlatformSession(
   const verified = await crypto.subtle.verify("HMAC", cryptoKey, toArrayBuffer(decodeBase64Url(signature)), new TextEncoder().encode(canonical));
   if (!verified) throw new Error("Trusted session signature is invalid");
   return Object.freeze({ tenantId, userId, sessionBinding, githubUserId: expectedGithubUserId });
+}
+
+export async function assertBrowserSession(request: Request): Promise<BrowserSessionAssertion> {
+  const broker = identityBrokerFromEnvironment();
+  if (!broker) throw new Error("Identity Broker is required for browser sessions");
+  const cookies = browserSessionCookies(request);
+  return broker.assert({ ...cookies, method: request.method, pathname: new URL(request.url).pathname });
 }
 
 /** Used by the trusted session proxy and contract tests, never by browsers. */

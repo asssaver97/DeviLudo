@@ -53,7 +53,11 @@ binding of a dispatched MFA approval. Migrations `025`–`043` complete Steam
 release lifecycle authority, inference reconciliation, specification dialogue,
 Agent configuration, source/candidate/feedback/acceptance/merge projections,
 GitHub authorization anti-replay, and atomic project-to-repository onboarding.
-All forty-three migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
+Migration `044` adds invite-only GitHub identities, tenant memberships,
+single-use login intents and revocable platform sessions. Raw invitation,
+OAuth state, PKCE and session values never enter PostgreSQL; all five identity
+tables force tenant RLS.
+All forty-four migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
 service code. Application

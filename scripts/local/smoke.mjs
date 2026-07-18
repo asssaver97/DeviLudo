@@ -170,10 +170,12 @@ const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin, adminState, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
+  const [home, login, admin, adminState, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
+    checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     request(baseUrl, "/api/admin/agents"),
+    request(baseUrl, "/api/auth/session"),
     request(runtimeUrl, "/health"),
     request(agentRuntimeUrl, "/health"),
     request(specRuntimeUrl, "/health"),
@@ -244,6 +246,11 @@ try {
     throw new Error("local Agent admin state contract failed");
   }
   if (JSON.stringify(adminPayload).includes("secretRef")) throw new Error("Agent admin state exposed a secret reference");
+  const sessionPayload = await localSession.response.json();
+  if (!localSession.response.ok || sessionPayload.data?.tenantId !== "tenant-local"
+    || sessionPayload.data?.githubLogin !== "local-developer" || sessionPayload.data?.role !== "TenantAdmin") {
+    throw new Error("local browser session fixture contract failed");
+  }
   const runtimeHealth = await runtime.response.json();
   if (!runtime.response.ok || runtimeHealth.status !== "ok" || !runtimeHealth.godotVersion) {
     throw new Error("local runtime or Godot is not ready");
@@ -309,8 +316,10 @@ try {
   }
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
+  console.log(`✓ GET /login         ${login.response.status} (${login.elapsedMs}ms) · invite-only login`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
   console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
+  console.log(`✓ Local session      ${localSession.response.status} (${localSession.elapsedMs}ms) · @${sessionPayload.data.githubLogin}`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);

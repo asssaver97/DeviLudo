@@ -29,6 +29,9 @@ There are four isolated execution identities:
 ```mermaid
 flowchart LR
   UI["User / Admin console"] --> API["Control-plane API"]
+  UI --> ID["Invite-only Identity Broker"]
+  ID --> GH["GitHub OAuth / public identity"]
+  ID --> PG
   API --> PG[("PostgreSQL + forced RLS")]
   API --> T["Temporal workflows"]
   API --> V["Vault / KMS"]
@@ -195,8 +198,17 @@ matrix before external approvals can begin.
 
 ## Tenant isolation and authorization
 
-The API authenticates through a GitHub App/OAuth flow, authorizes a tenant and
-project before opening a database transaction, and executes `SET LOCAL
+The API authenticates through an invite-only GitHub App/OAuth flow. An
+administrator creates a random invitation through an admin-only mTLS workload;
+only its SHA-256 digest is stored. Login binds the invitation, random OAuth
+state, PKCE verifier and an independent HttpOnly browser binding. The callback
+revalidates `/user`, revokes the ephemeral GitHub token, atomically consumes the
+invitation and creates the user, membership and an eight-hour revocable session.
+The raw platform session exists only in a Secure/HttpOnly/SameSite cookie; every
+API request exchanges it for a fresh, method-and-path-bound HMAC assertion.
+Logout revokes the durable session before clearing both cookies.
+
+The API then authorizes a tenant and project before opening a database transaction, and executes `SET LOCAL
 app.tenant_id = ...`. Forced PostgreSQL RLS applies to all tenant tables; the
 application role is neither owner nor `BYPASSRLS`. `PlatformAgentAdmin`,
 `SecurityAdmin`, `TenantAdmin`, `ProjectOwner`, and `Auditor` permissions are
@@ -229,6 +241,8 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
   runner ingestion, evidence, and audit contracts.
 - `services/runner-control`: mTLS workload identity, immutable capabilities,
   Ed25519 job envelopes, per-platform leases and matrix evidence aggregation.
+- `services/identity`: invitation issuance, GitHub OAuth/PKCE, tenant membership,
+  revocable platform sessions and route-bound trusted assertions.
 - `db/schema.ts`: D1-backed hosted demo schema.
 - `infra/postgres/001_core.sql` through `004_github_verified_identity.sql`:
   production PostgreSQL/RLS, immutable bindings, activity claims, durable jobs,

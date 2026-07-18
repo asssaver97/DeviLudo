@@ -1,4 +1,5 @@
 import { parseSpecModelResult, type SpecApprovalReceipt, type SpecDialogueMessage, type SpecDialogueSnapshot } from "@/services/spec-dialogue/src/contracts";
+import { verifyTrustedPlatformSession } from "@/lib/connections/github-broker";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -74,6 +75,10 @@ export function trustedSessionKeyFromEnvironment(
 }
 
 export async function verifyTrustedSpecSession(request: Request, key: Uint8Array, now = new Date()): Promise<TrustedSpecSession> {
+  if (!request.headers.has("x-deviludo-session-tenant")) {
+    const session = await verifyTrustedPlatformSession(request, key, now);
+    return Object.freeze({ tenantId: session.tenantId, userId: session.userId, sessionBinding: session.sessionBinding });
+  }
   const tenantId = header(request, "x-deviludo-session-tenant", 200);
   const userId = header(request, "x-deviludo-session-user", 200);
   const sessionBinding = header(request, "x-deviludo-session-binding", 512);

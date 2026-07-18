@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   BellIcon,
   FileIcon,
@@ -40,6 +40,27 @@ function NavItem({ href, label, icon: Icon }: (typeof navigation)[number]) {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
+  const [account, setAccount] = useState<{
+    tenantName: string; displayName: string; githubLogin: string; role: string; local?: boolean;
+  } | null | undefined>(undefined);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/auth/session", { headers: { accept: "application/json" }, signal: controller.signal })
+      .then(async (response) => response.ok ? (await response.json() as { data: NonNullable<typeof account> }).data : null)
+      .then(setAccount)
+      .catch(() => { if (!controller.signal.aborted) setAccount(null); });
+    return () => controller.abort();
+  }, []);
+
+  const tenantName = account?.tenantName ?? (account === undefined ? "正在验证…" : "未登录");
+  const initials = account ? account.displayName.slice(0, 2).toUpperCase() : "—";
+
+  async function signOut() {
+    await fetch("/api/auth/session", { method: "DELETE" }).catch(() => undefined);
+    window.location.assign("/login");
+  }
+
   return (
     <div className="app-shell">
       <aside className="shell-sidebar">
@@ -50,7 +71,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <div className="workspace-switcher">
           <span className="workspace-avatar">ND</span>
-          <span><b>North Dock</b><small>受邀 Beta</small></span>
+          <span><b>{tenantName}</b><small>受邀 Beta</small></span>
           <span className="workspace-chevron">⌄</span>
         </div>
 
@@ -70,18 +91,20 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="shell-main">
         <header className="shell-topbar">
           <div className="topbar-context">
-            <span>North Dock Studio</span>
+            <span>{account ? `${account.tenantName} Studio` : "DeviLudo"}</span>
             <span className="crumb">/</span>
             <strong>生产空间</strong>
           </div>
           <div className="topbar-actions">
             <span className="system-pill"><i /> 系统正常</span>
             <button aria-label="通知" className="icon-button" type="button"><BellIcon /></button>
-            <button className="profile-button" type="button">
-              <span>WT</span>
-              <b>王天扬</b>
-              <small>⌄</small>
-            </button>
+            {account ? (
+              <button aria-label="退出当前账号" className="profile-button" onClick={signOut} title={`@${account.githubLogin} · ${account.role}`} type="button">
+                <span>{initials}</span><b>{account.displayName}</b><small>退出</small>
+              </button>
+            ) : account === null ? (
+              <Link className="profile-login" href="/login">受邀登录</Link>
+            ) : <span className="profile-loading">验证会话…</span>}
           </div>
         </header>
         <main className="shell-content">{children}</main>
