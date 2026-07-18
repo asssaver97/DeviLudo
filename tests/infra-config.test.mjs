@@ -153,6 +153,32 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.match(readme, /signed the native artifacts for all selected Runner systems/);
 });
 
+test("Steam Client Connector independently verifies signed clean-install jobs behind mTLS", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const connector = readFileSync(new URL("../services/steam-client-connector/src/connector.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/steam-client-connector/src/ingress-http.ts", import.meta.url), "utf8");
+  const native = readFileSync(new URL("../services/steam-client-connector/src/locked-native-executor.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/steam-client-connector/src/run-service.ts", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../services/steam-client-connector/README.md", import.meta.url), "utf8");
+  assert.match(packageJson.scripts["test:services"], /npm run test:steam-client-connector/);
+  assert.equal(packageJson.scripts["start:steam-client-connector"], "node --import tsx services/steam-client-connector/src/run-service.ts");
+  assert.match(connector, /verifyRunnerJob/);
+  assert.match(connector, /parseFrozenGodotTestPlan/);
+  assert.match(connector, /execution\.kind !== "STEAM_CLEAN_INSTALL"/);
+  assert.match(connector, /escaped|staging boundary/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(ingress, /allowedSpiffeIds\.has/);
+  assert.match(native, /shell: false/);
+  assert.match(native, /"execute", "--request-file"/);
+  assert.match(native, /verifyExecutable/);
+  assert.doesNotMatch(native, /process\.env/);
+  assert.match(runtime, /platform does not match this host/);
+  assert.doesNotMatch(connector, /configVdf|branchPassword|accountPassword|steamGuard/);
+  assert.match(readme, /does not ship\s+Valve credentials/);
+});
+
 test("artifact preparation publishes canonical source and plan objects before the append-only lock", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const preparer = readFileSync(new URL("../services/artifact-preparer/src/preparer.ts", import.meta.url), "utf8");

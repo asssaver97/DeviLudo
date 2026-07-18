@@ -1,0 +1,27 @@
+# Steam Client Connector
+
+This service is the platform-owned boundary between the Godot TestKit and a
+clean Steam Client installation on one physical Windows, Linux or macOS Runner.
+
+It independently verifies the signed Runner job, lease, exact BuildID, target
+platform and canonical frozen test plan. Its TLS 1.3 mTLS ingress accepts only
+the fixed `/v1/clean-install-executions` contract. Successful native output is
+confined to the configured staging root and is re-validated before a
+content-bound receipt is returned.
+
+`SteamClientNativeExecutor` is intentionally an injected port. The native,
+signed OS artifact owns the protected Steam session and redeems the opaque
+install grant; account passwords, Steam Guard answers, branch passwords and
+`config.vdf` never cross this Node service contract. The native artifact must
+implement `executionId` idempotency and perform a clean client reset before
+installing the exact BuildID.
+
+This repository tests the service and native adapter contract. It does not ship
+Valve credentials or pretend that the local developer machine is an enrolled
+Steam build account. Release readiness still requires signed native artifacts
+and enrolled Steam Client machines for every selected target platform.
+
+`npm run start:steam-client-connector` starts the production mTLS service after
+checking the pinned native executable digest and its fixed `probe --json`
+contract. See `.env.example`; all paths must be absolute, and the configured
+platform must match the host OS.
