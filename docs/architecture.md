@@ -143,7 +143,11 @@ re-resolves the user's active installation, obtains a metadata-only installation
 token, reads the repository directly from GitHub, and revokes that token. It
 then atomically writes the project, derived owner/name/default-branch binding,
 and a tenant-RLS idempotency receipt. Browser-supplied repository names or
-branches are never authority.
+branches are never authority. Project workspace reads re-check the tenant plus
+either the creator subject or the still-active installation's verified GitHub
+user before returning metadata. The UI then reads the specification service's
+authoritative snapshot; an absent snapshot starts at revision zero rather than
+reusing a demo conversation.
 
 ## Runner fencing and evidence
 

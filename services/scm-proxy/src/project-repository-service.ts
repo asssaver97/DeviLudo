@@ -42,6 +42,13 @@ export class ProjectRepositoryOnboardingService {
     return Object.freeze({ installations: Object.freeze(result) });
   }
 
+  project(value: unknown): Promise<BoundProjectReceipt | null> {
+    const body = exactObject(value, ["principal", "projectId"]);
+    const principal = parsePrincipal(body.principal);
+    if (typeof body.projectId !== "string" || !UUID.test(body.projectId)) invalid();
+    return this.store.project(principal, body.projectId);
+  }
+
   async create(value: unknown): Promise<BoundProjectReceipt> {
     const command = parseCreateCommand(value);
     const requestDigest = digest({

@@ -28,6 +28,8 @@ test("project creation binds a live GitHub repository under tenant RLS and a dur
   assert.match(store, /verified_by_github_user_id = \$3::bigint/);
   assert.match(store, /INSERT INTO deviludo\.projects/);
   assert.match(store, /INSERT INTO deviludo\.github_repository_bindings/);
+  assert.match(store, /project\.created_by = \$3/);
+  assert.match(store, /installation\.verified_by_github_user_id = \$4::bigint/);
   assert.match(github, /permissions: \{ metadata: "read" \}/);
   assert.match(github, /DELETE", "\/installation\/token"/);
   assert.match(runtime, /minVersion: "TLSv1\.3"/);

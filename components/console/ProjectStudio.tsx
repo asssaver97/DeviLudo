@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useRef, useState } from "react";
-import type { SpecDialogueMessage, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SpecDialogueMessage, SpecDialogueSnapshot, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
 import { AppShell } from "./AppShell";
-import { ArrowIcon, CheckIcon, ClockIcon, FileIcon, GithubIcon, SparkIcon } from "./Icons";
+import { ArrowIcon, CheckIcon, FileIcon, GithubIcon, SparkIcon } from "./Icons";
 import { LocalDeliveryPanel, type DeliveryPanelStatus } from "./LocalDeliveryPanel";
 
 type Message = {
@@ -13,33 +13,6 @@ type Message = {
   text: string;
   meta?: string;
 };
-
-const initialMessages: Message[] = [
-  {
-    id: "history-1",
-    role: "user",
-    text: "我想做一款发生在漂浮群岛上的航海生存游戏。玩家驾驶一艘会成长的船，在岛屿之间收集余烬。",
-    meta: "10:06",
-  },
-  {
-    id: "history-2",
-    role: "assistant",
-    text: "这个核心意象很清楚。为了让首个可玩版本能在一周内闭环，我建议先确定一次航行的目标：玩家是带着资源安全返港，还是击败守护群岛的首领？",
-    meta: "构想助手 · 10:06",
-  },
-  {
-    id: "history-3",
-    role: "user",
-    text: "每局 20 分钟，找到三枚余烬核心后返港。途中会有风暴和海盗，但不想做成很硬核的生存游戏。",
-    meta: "10:08",
-  },
-  {
-    id: "history-4",
-    role: "assistant",
-    text: "明白：轻量资源压力、明确的 20 分钟目标。新手局可以把失败定义为船体归零或时间耗尽，并保留少量永久材料，避免失败没有收获。你希望战斗偏即时瞄准，还是让玩家更专注航线与技能组合？",
-    meta: "构想助手 · 10:08",
-  },
-];
 
 const acceptance = [
   "从新游戏进入核心循环不超过 45 秒",
@@ -58,14 +31,18 @@ export function ProjectStudio({
   mode?: "new" | "existing";
   projectId?: string;
 }) {
-  const [messages, setMessages] = useState<Message[]>(initialMessages);
+  const localFixture = process.env.DEVILUDO_LOCAL_TEST_MODE === "1";
+  const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
-  const [revision, setRevision] = useState(mode === "new" ? 1 : 8);
-  const [approved, setApproved] = useState(mode === "existing");
+  const [revision, setRevision] = useState(0);
+  const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [workspaceReady, setWorkspaceReady] = useState(false);
+  const [projectName, setProjectName] = useState(mode === "new" ? "新构想" : localFixture ? "余烬群岛" : "游戏项目");
+  const [repositoryLabel, setRepositoryLabel] = useState("");
   const [notice, setNotice] = useState("");
   const [feedback, setFeedback] = useState("");
-  const [feedbackCount, setFeedbackCount] = useState(2);
+  const [feedbackCount, setFeedbackCount] = useState(localFixture ? 2 : 0);
   const [generated, setGenerated] = useState<SpecModelResult | null>(null);
   const [dialogueAuthority, setDialogueAuthority] = useState<{
     conversationId: string;
@@ -81,6 +58,48 @@ export function ProjectStudio({
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
   const completion = useMemo(() => generated?.completeness ?? Math.min(92, 44 + messages.length * 6), [generated, messages.length]);
 
+  useEffect(() => {
+    if (mode === "new" || localFixture) return;
+    const controller = new AbortController();
+    void fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { data?: { name?: string; owner?: string; repositoryName?: string }; error?: { message?: string } };
+        if (!response.ok || !payload.data?.name || !payload.data.owner || !payload.data.repositoryName) {
+          throw new Error(payload.error?.message ?? "项目资料不可用");
+        }
+        setProjectName(payload.data.name);
+        setRepositoryLabel(`${payload.data.owner}/${payload.data.repositoryName}`);
+      })
+      .catch((reason) => { if (!controller.signal.aborted) setNotice(reason instanceof Error ? reason.message : "项目资料不可用"); });
+    return () => controller.abort();
+  }, [localFixture, mode, projectId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(`/api/projects/${encodeURIComponent(projectId)}/conversation`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { data?: SpecDialogueSnapshot | null; error?: { message?: string } };
+        if (!response.ok || !("data" in payload)) throw new Error(payload.error?.message ?? "规格快照不可用");
+        if (!payload.data) {
+          setMessages([]); setGenerated(null); setDialogueAuthority(null); setRevision(0); setApproved(false);
+          return;
+        }
+        const snapshot = payload.data;
+        setMessages(mergeMessages([], snapshot.messages));
+        setGenerated(snapshot.result);
+        setRevision(snapshot.revision);
+        setApproved(snapshot.state === "APPROVED");
+        setDialogueAuthority(snapshot.specRevisionId && snapshot.testPlanRevisionId ? {
+          conversationId: snapshot.conversationId,
+          specRevisionId: snapshot.specRevisionId,
+          testPlanRevisionId: snapshot.testPlanRevisionId,
+        } : null);
+      })
+      .catch((reason) => { if (!controller.signal.aborted) setNotice(reason instanceof Error ? `读取规格失败：${reason.message}` : "规格快照不可用"); })
+      .finally(() => { if (!controller.signal.aborted) setWorkspaceReady(true); });
+    return () => controller.abort();
+  }, [projectId]);
+
   async function sendMessage(text = draft) {
     const clean = text.trim();
     if (!clean || busy) return;
@@ -90,7 +109,7 @@ export function ProjectStudio({
     setDraft("");
     setBusy(true);
     try {
-      const response = await fetch(`/api/projects/${projectId}/conversation`, {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversation`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `spec-chat-${commandId}` },
         body: JSON.stringify({
@@ -131,7 +150,7 @@ export function ProjectStudio({
     setBusy(true);
     approvalCommandRef.current ??= crypto.randomUUID();
     try {
-      const response = await fetch(`/api/projects/${projectId}/spec-revisions`, {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/spec-revisions`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `approve-${specId}-${approvalCommandRef.current}` },
         body: JSON.stringify({
@@ -250,13 +269,13 @@ export function ProjectStudio({
 
       <section className="project-page-header">
         <div>
-          <div className="breadcrumb"><Link href="/">游戏项目</Link><span>/</span><b>{mode === "new" ? "新构想" : "余烬群岛"}</b></div>
-          <h1>{mode === "new" ? "把想法聊成可开发的游戏" : "余烬群岛"}</h1>
-          <p>{mode === "new" ? "构想助手会追问关键细节，并把每个决定实时写入规格。" : "候选 PR #18 · dev/spec-07 · 8b7e4a2"}</p>
+          <div className="breadcrumb"><Link href="/">游戏项目</Link><span>/</span><b>{mode === "new" ? "新构想" : projectName}</b></div>
+          <h1>{mode === "new" ? "把想法聊成可开发的游戏" : projectName}</h1>
+          <p>{mode === "new" ? "构想助手会追问关键细节，并把每个决定实时写入规格。" : localFixture ? "本地隔离项目 · Fixture 交付链" : repositoryLabel ? `${repositoryLabel} · GitHub App 已绑定` : "正在读取权威项目资料…"}</p>
         </div>
         <div className="project-header-actions">
           <span className={`spec-state ${approved ? "approved" : "draft"}`}><i /> {approved ? `${specId} 已批准` : `${specId} 草稿`}</span>
-          {mode === "existing" ? <a className="button button-secondary" href="https://github.com" rel="noreferrer" target="_blank"><GithubIcon /> Draft PR #18</a> : null}
+          {mode === "existing" && localFixture ? <a className="button button-secondary" href="https://github.com" rel="noreferrer" target="_blank"><GithubIcon /> Draft PR #18</a> : null}
         </div>
       </section>
 
@@ -269,6 +288,7 @@ export function ProjectStudio({
 
           <div className="conversation-stream" ref={scrollRef}>
             <div className="conversation-date"><span>今天</span></div>
+            {workspaceReady && messages.length === 0 ? <div className="message assistant"><span className="message-avatar">DL</span><div><p>先描述你想做的游戏：玩家是谁、核心目标是什么、一次游玩大约多久？我会逐轮把答案整理成可批准规格。</p><small>构想助手 · 新对话</small></div></div> : null}
             {messages.map((message) => (
               <div className={`message ${message.role}`} key={message.id}>
                 {message.role === "assistant" ? <span className="message-avatar">DL</span> : null}
@@ -279,14 +299,15 @@ export function ProjectStudio({
           </div>
 
           <div className="quick-replies">
-            <button onClick={() => sendMessage("战斗偏技能组合，玩家只需要控制船的方向和三种船载技能。") } type="button">技能组合优先</button>
-            <button onClick={() => sendMessage("允许随时保存退出，回来后从当前岛屿入口继续。") } type="button">随时保存退出</button>
-            <button onClick={() => sendMessage("首版只做简体中文，英文放到后续版本。") } type="button">首版仅中文</button>
+            <button disabled={!workspaceReady || busy} onClick={() => sendMessage("战斗偏技能组合，玩家只需要控制船的方向和三种船载技能。") } type="button">技能组合优先</button>
+            <button disabled={!workspaceReady || busy} onClick={() => sendMessage("允许随时保存退出，回来后从当前岛屿入口继续。") } type="button">随时保存退出</button>
+            <button disabled={!workspaceReady || busy} onClick={() => sendMessage("首版只做简体中文，英文放到后续版本。") } type="button">首版仅中文</button>
           </div>
 
           <div className="composer">
             <textarea
               aria-label="回复构想助手"
+              disabled={!workspaceReady}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
@@ -294,11 +315,11 @@ export function ProjectStudio({
                   sendMessage();
                 }
               }}
-              placeholder="描述你想要的体验、规则或修改……"
+              placeholder={workspaceReady ? "描述你想要的体验、规则或修改……" : "正在读取规格快照……"}
               rows={3}
               value={draft}
             />
-            <div><span>Enter 发送 · Shift + Enter 换行</span><button aria-label="发送" disabled={!draft.trim() || busy} onClick={() => sendMessage()} type="button"><ArrowIcon /></button></div>
+            <div><span>Enter 发送 · Shift + Enter 换行</span><button aria-label="发送" disabled={!workspaceReady || !draft.trim() || busy} onClick={() => sendMessage()} type="button"><ArrowIcon /></button></div>
           </div>
         </section>
 
@@ -346,14 +367,14 @@ export function ProjectStudio({
             {approved ? (
               <div className="approved-banner"><CheckIcon /><span><b>规格已冻结</b><small>新反馈将创建下一次不可变迭代</small></span></div>
             ) : (
-              <button className="button button-acid approve-button" disabled={busy || completion < 68} onClick={approveSpec} type="button"><CheckIcon /> 批准 {specId} 并启动开发</button>
+              <button className="button button-acid approve-button" disabled={!workspaceReady || busy || completion < 68 || !dialogueAuthority} onClick={approveSpec} type="button"><CheckIcon /> 批准 {specId} 并启动开发</button>
             )}
             <p>批准会锁定规格、Agent Profile、提交和目标矩阵。之后的配置变化不会影响本次任务。</p>
           </div>
         </aside>
       </div>
 
-      {mode === "existing" ? (
+      {mode === "existing" && candidateAcceptanceReady ? (
         <section className="iteration-section">
           <div className="iteration-heading">
             <div><span className="eyebrow">候选版本反馈</span><h2>继续迭代</h2><p>反馈会进入同一 Draft PR，并让旧证据立即失效。</p></div>
@@ -364,15 +385,12 @@ export function ProjectStudio({
             <textarea aria-label="候选版本反馈" onChange={(event) => setFeedback(event.target.value)} placeholder="例如：风暴出现得太频繁，希望新手前五分钟最多出现一次……" rows={3} value={feedback} />
             <button className="button button-primary" disabled={!feedback.trim() || busy} onClick={submitFeedback} type="button">创建新迭代 <ArrowIcon /></button>
           </div>
-          {candidateAcceptanceReady ? (
-            <button className="button button-acid" disabled={busy} onClick={acceptCandidate} type="button"><CheckIcon /> 接受候选版本并合并</button>
-          ) : (
-            <div className="release-gate-note"><ClockIcon /><span><b>候选验收尚未开放</b><small>所选三个平台全部通过后，才可合并；发布仍需实际 main SHA 门禁与 MFA。</small></span></div>
-          )}
+          <button className="button button-acid" disabled={busy} onClick={acceptCandidate} type="button"><CheckIcon /> 接受候选版本并合并</button>
         </section>
       ) : null}
 
       <LocalDeliveryPanel
+        localFixture={localFixture}
         onStatus={syncDelivery}
         projectId={projectId}
         refreshToken={deliveryRefresh}

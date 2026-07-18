@@ -43,6 +43,33 @@ export class PostgresProjectRepositoryOnboardingStore implements ProjectReposito
     });
   }
 
+  async project(principal: ProjectRepositoryPrincipal, projectId: string): Promise<BoundProjectReceipt | null> {
+    if (!UUID.test(projectId)) invalid();
+    return this.#transaction(principal.tenantId, async (client) => {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT project.id::text AS project_id, project.tenant_id::text AS tenant_id,
+                project.slug, project.name, project.created_at,
+                binding.id::text AS repository_binding_id,
+                installation.installation_id, binding.repository_id,
+                binding.repository_node_id, binding.owner_name,
+                binding.repository_name, binding.default_branch
+           FROM deviludo.projects project
+           JOIN deviludo.github_repository_bindings binding
+             ON binding.tenant_id = project.tenant_id AND binding.project_id = project.id
+           JOIN deviludo.github_installations installation
+             ON installation.tenant_id = project.tenant_id
+            AND installation.id = binding.github_installation_id
+          WHERE project.tenant_id = $1::uuid AND project.id = $2::uuid
+            AND binding.status = 'ACTIVE' AND installation.status = 'ACTIVE'
+            AND (project.created_by = $3
+              OR installation.verified_by_github_user_id = $4::bigint)`,
+        [principal.tenantId, projectId, principal.userId, principal.githubUserId],
+      );
+      if (result.rows.length > 1) invalid();
+      return result.rows[0] ? receiptFromProjectRow(result.rows[0], principal.tenantId, projectId) : null;
+    });
+  }
+
   async claim(command: CreateBoundProjectCommand, requestDigest: string, claimToken: string): Promise<
     | { readonly kind: "ACQUIRED" }
     | { readonly kind: "BUSY" }
@@ -217,8 +244,29 @@ function parseReceipt(value: unknown, command: CreateBoundProjectCommand): Bound
   return Object.freeze({ ...(body as unknown as BoundProjectReceipt) });
 }
 
+function receiptFromProjectRow(row: Record<string, unknown>, tenantId: string, projectId: string): BoundProjectReceipt {
+  if (uuid(row.project_id) !== projectId || uuid(row.tenant_id) !== tenantId) invalid();
+  const repositoryId = Number(positiveId(row.repository_id));
+  if (!Number.isSafeInteger(repositoryId)) invalid();
+  return Object.freeze({
+    projectId,
+    tenantId,
+    slug: text(row.slug, 63),
+    name: text(row.name, 120),
+    repositoryBindingId: uuid(row.repository_binding_id),
+    installationId: positiveId(row.installation_id),
+    repositoryId,
+    repositoryNodeId: text(row.repository_node_id, 256),
+    owner: text(row.owner_name, 100),
+    repositoryName: text(row.repository_name, 100),
+    defaultBranch: text(row.default_branch, 255),
+    createdAt: isoTimestamp(row.created_at),
+  });
+}
+
 function positiveId(value: unknown): string { const result = String(value); if (!/^\d{1,20}$/.test(result) || result === "0") invalid(); return result; }
 function text(value: unknown, maximum: number): string { if (typeof value !== "string" || !value || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) invalid(); return value; }
 function uuid(value: unknown): string { if (typeof value !== "string" || !UUID.test(value)) invalid(); return value; }
 function iso(value: string): string { const date = new Date(value); if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) invalid(); return value; }
+function isoTimestamp(value: unknown): string { if (!(value instanceof Date) && typeof value !== "string") invalid(); return iso(value instanceof Date ? value.toISOString() : value); }
 function invalid(): never { throw new Error("Project repository PostgreSQL binding is invalid"); }

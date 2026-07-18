@@ -35,7 +35,7 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
 
   const project = await request("/projects/ember-archipelago", { headers: { accept: "text/html" } });
   assert.equal(project.status, 200);
-  assert.match(await project.text(), /真实 Agent 必须先通过独立预检/);
+  assert.match(await project.text(), /Production · Temporal 权威投影/);
 });
 
 test("production worker exposes health but keeps local admin and specification fixtures disabled", async () => {

@@ -185,6 +185,14 @@ paths:
       responses:
         "201": { $ref: "#/components/responses/Ok" }
         "409": { description: The slug or repository is already bound, or the idempotency key has another request digest. }
+  /projects/{projectId}:
+    get:
+      operationId: getRepositoryBoundProject
+      description: Returns a project only when the signed-in tenant user created it or still controls its verified active GitHub App installation.
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { description: The project is missing or inaccessible to the current account. }
   /projects/{projectId}/conversation:
     get:
       operationId: getSpecConversation

@@ -62,10 +62,12 @@ function primaryAction(stage: LocalDeliveryStage): { action: LocalDeliveryAction
 }
 
 export function LocalDeliveryPanel({
+  localFixture,
   projectId,
   refreshToken,
   onStatus,
 }: {
+  localFixture: boolean;
   projectId: string;
   refreshToken: number;
   onStatus?: (status: DeliveryPanelStatus) => void;
@@ -203,9 +205,9 @@ export function LocalDeliveryPanel({
     <section className="local-delivery" aria-live="polite">
       <div className="local-delivery-heading">
         <div>
-          <span className="eyebrow">Localhost · D1 持久状态</span>
-          <h2>本地交付控制台</h2>
-          <p>Fixture 验证编排；真实 Agent 必须先通过独立预检，本地默认不会调用模型、GitHub 或 Steam。</p>
+          <span className="eyebrow">{localFixture ? "Localhost · D1 持久状态" : "Production · Temporal 权威投影"}</span>
+          <h2>{localFixture ? "本地交付控制台" : "交付工作流"}</h2>
+          <p>{localFixture ? "Fixture 验证编排；真实 Agent 必须先通过独立预检，本地默认不会调用模型、GitHub 或 Steam。" : "规格获批后会创建确定性工作流；Web 只读取租户隔离投影，不能直接推进状态。"}</p>
         </div>
         {snapshot ? <span className={`local-stage local-stage-${snapshot.stage.toLowerCase()}`}><i /> {stageLabels[snapshot.stage]}</span> : null}
       </div>

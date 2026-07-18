@@ -27,6 +27,18 @@ export class ProjectRepositoryBrokerClient {
     return parseCatalog(await this.#call("/v1/project-repositories/catalog", { principal }));
   }
 
+  async project(principal: ProjectRepositoryPrincipal, projectId: string): Promise<BoundProjectReceipt | null> {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(projectId)) invalid();
+    try {
+      const receipt = parseReceipt(await this.#call("/v1/projects/lookup", { principal, projectId }));
+      if (receipt.projectId !== projectId || receipt.tenantId !== principal.tenantId) invalid();
+      return receipt;
+    } catch (error) {
+      if (error instanceof ProjectRepositoryBrokerError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   async create(input: Readonly<{
     principal: ProjectRepositoryPrincipal;
     slug: string;

@@ -17,6 +17,19 @@ export function registerProjectRepositoryRoutes(server: FastifyInstance, options
     }
   });
 
+  server.post("/v1/projects/lookup", { bodyLimit: 32 * 1024 }, async (request, reply) => {
+    secure(reply);
+    try { await options.authorize(request); }
+    catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
+    try {
+      const body = exactObject(request.body, ["principal", "projectId"]);
+      const project = await options.service.project(body);
+      return project ? reply.send(project) : reply.status(404).send({ error: { code: "PROJECT_NOT_FOUND" } });
+    } catch {
+      return reply.status(400).send({ error: { code: "PROJECT_LOOKUP_REJECTED", message: "Project lookup request was rejected" } });
+    }
+  });
+
   server.post("/v1/projects", { bodyLimit: 32 * 1024 }, async (request, reply) => {
     secure(reply);
     try { await options.authorize(request); }
