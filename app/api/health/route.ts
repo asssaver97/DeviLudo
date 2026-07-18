@@ -80,6 +80,7 @@ function productionHealth(): Response {
       githubAuthorizationBroker: configured("DEVILUDO_GITHUB_AUTH_BROKER_URL"),
       identityBroker: configured("DEVILUDO_IDENTITY_BROKER_URL"),
       identityAdminBroker: configured("DEVILUDO_IDENTITY_ADMIN_BROKER_URL"),
+      adminControlPlaneBroker: configured("DEVILUDO_ADMIN_CONTROL_PLANE_BROKER_URL"),
       projectRepositoryBroker: configured("DEVILUDO_PROJECT_REPOSITORY_BROKER_URL"),
     },
     capabilities: ["invited-github-login", "revocable-platform-session", "spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding"],

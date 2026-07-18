@@ -40,9 +40,12 @@ type AgentInstallation = {
 };
 type AdminState = {
   defaultAgent: AgentKind;
-  versions: Array<{ id: string; agent: AgentKind; version: string; state: AgentVersionRow["status"] }>;
+  versions: AgentVersionRow[];
   installations: AgentInstallation[];
   rollouts: Record<string, { percent: number; state: string; previous: number }>;
+  profiles: Array<{ id: string; agent: AgentKind; scope: string; scopeId: string; state: string; installationId: string; providerRevisionId: string }>;
+  providers: Array<{ id: string; agent: AgentKind; protocol: string; baseUrl: string; primaryModel: string; state: string }>;
+  credentials: Array<{ id: string; label: string; maskedFingerprint: string; state: string }>;
 };
 
 async function adminRequest<T>(
@@ -55,7 +58,7 @@ async function adminRequest<T>(
     headers: options.method ? {
       "content-type": "application/json",
       "idempotency-key": `admin-ui-${crypto.randomUUID()}`,
-      "x-deviludo-role": options.role ?? "Auditor",
+      ...(isLoopbackBrowser() ? { "x-deviludo-role": options.role ?? "Auditor" } : {}),
     } : undefined,
     body: options.method ? JSON.stringify(options.body ?? {}) : undefined,
   });
@@ -95,6 +98,7 @@ const navGroups: { label: string; items: { label: string; icon: AdminIconName; a
 ];
 
 const roleOptions = Object.keys(rolePermissions) as AdminRole[];
+type AdminAuthMode = "loading" | "local-fixture" | "trusted-control-plane";
 
 function AgentMark({ kind, small = false }: { kind: AgentKind; small?: boolean }) {
   return (
@@ -127,6 +131,10 @@ export default function AgentAdminDashboard() {
   const [defaultAgent, setDefaultAgent] = useState<AgentKind>("claude-code");
   const [versions, setVersions] = useState<AgentVersionRow[]>(versionRows);
   const [installations, setInstallations] = useState<AgentInstallation[]>([]);
+  const [profiles, setProfiles] = useState<AdminState["profiles"]>([]);
+  const [providers, setProviders] = useState<AdminState["providers"]>([]);
+  const [credentials, setCredentials] = useState<AdminState["credentials"]>([]);
+  const [authMode, setAuthMode] = useState<AdminAuthMode>("loading");
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
   const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
@@ -134,28 +142,33 @@ export default function AgentAdminDashboard() {
 
   const refreshAdminState = useCallback(async () => {
     const response = await fetch("/api/admin/agents", { cache: "no-store" });
-    const payload = await response.json() as { meta?: AdminState; error?: { message?: string } };
-    if (!response.ok || !payload.meta) throw new Error(payload.error?.message ?? "读取 Agent 管理状态失败");
-    setDefaultAgent(payload.meta.defaultAgent);
-    setVersions((current) => current.map((row) => {
-      const live = payload.meta?.versions.find((item) => item.agent === row.agent && item.version === row.version);
-      return live ? { ...row, status: live.state } : row;
-    }));
-    setInstallations(payload.meta.installations.map((installation) => {
-      const rollout = payload.meta?.rollouts[installation.id];
+    const payload = await response.json() as Record<string, unknown> & { error?: { message?: string } };
+    if (!response.ok) throw new Error(payload.error?.message ?? "读取 Agent 管理状态失败");
+    const state = normalizeAdminState(payload);
+    setDefaultAgent(state.defaultAgent);
+    setVersions(state.versions);
+    setProfiles(state.profiles);
+    setProviders(state.providers);
+    setCredentials(state.credentials);
+    setInstallations(state.installations.map((installation) => {
+      const rollout = state.rollouts[installation.id];
       return rollout ? { ...installation, rolloutPercent: rollout.percent, state: rollout.state } : installation;
     }));
+    const mode = response.headers.get("x-deviludo-admin-auth-mode");
+    if (mode === "local-fixture" || mode === "trusted-control-plane") setAuthMode(mode);
+    const effectiveRole = response.headers.get("x-deviludo-effective-role");
+    if (mode === "trusted-control-plane" && isAdminRole(effectiveRole)) setRole(effectiveRole);
   }, []);
 
   const refreshAudit = useCallback(async () => {
     const response = await fetch("/api/admin/audit", { cache: "no-store" });
-    const payload = await response.json() as { data?: Array<{ id: string; action: string; resource: string; actor: string; at: string; metadata: Record<string, unknown> }> };
+    const payload = await response.json() as { data?: Array<{ id: string; action: string; resource: string; actor?: string; actorId?: string; actorRole?: string; at: string; metadata: Record<string, unknown> }> };
     if (!response.ok || !payload.data) return;
     const live = payload.data.map<AuditEvent>((entry) => ({
       id: entry.id,
       at: new Date(entry.at).toLocaleTimeString("zh-CN", { hour12: false }),
-      actor: "local/session",
-      role: entry.actor,
+      actor: entry.actor ?? entry.actorId ?? "trusted/session",
+      role: entry.actorRole ?? entry.actor ?? "Auditor",
       action: entry.action,
       target: entry.resource,
       detail: Object.entries(entry.metadata).map(([key, value]) => `${key}=${String(value)}`).join(" · ") || "不可变管理事件",
@@ -201,7 +214,8 @@ export default function AgentAdminDashboard() {
     window.setTimeout(() => setToast(null), 3400);
   };
 
-  const permissions = agentAdminCapabilities(role);
+  const effectivePermissionRole: AdminRole = authMode === "loading" ? "Auditor" : role;
+  const permissions = agentAdminCapabilities(effectivePermissionRole);
   const canOperateVersions = permissions.manageVersions;
 
   const updateVersion = async (id: string, status: AgentVersionRow["status"]) => {
@@ -259,10 +273,11 @@ export default function AgentAdminDashboard() {
       return;
     }
     try {
-      const result = await adminRequest<{ percent: number }>(`agent-rollouts/${installationId}/advance`, { method: "POST", role });
+      const result = await adminRequest<{ percent?: number; installation?: { rolloutPercent: number } }>(`agent-rollouts/${installationId}/advance`, { method: "POST", role });
       await refreshAdminState();
       await refreshAudit();
-      notify(result.percent === 100 ? "新版本已切换至 100%，仅影响新任务" : `灰度已推进至 ${result.percent}%`);
+      const percent = result.percent ?? result.installation?.rolloutPercent;
+      notify(percent === 100 ? "新版本已切换至 100%，仅影响新任务" : `灰度已推进至 ${percent ?? "下一阶段"}%`);
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "推进灰度失败", "warning");
     }
@@ -288,7 +303,9 @@ export default function AgentAdminDashboard() {
       notify("仅 PlatformAgentAdmin 可修改全局默认", "warning");
       return;
     }
-    const profileRevisionId = agent === "claude-code" ? "profile-claude-platform-r5" : "profile-codex-platform-r2";
+    const profileRevisionId = profiles.find((profile) => profile.agent === agent && profile.scope === "platform"
+      && profile.scopeId === "global" && profile.state === "ACTIVE")?.id;
+    if (!profileRevisionId) { notify("该 Agent 尚无可设为默认的 ACTIVE 平台 Profile", "warning"); return; }
     try {
       await adminRequest("agent-defaults/platform", { method: "PUT", role, body: { profileRevisionId } });
       await refreshAdminState();
@@ -340,8 +357,8 @@ export default function AgentAdminDashboard() {
         <div className={styles.sidebarFooter}>
           <div className={styles.systemHealth}><span className={executionReady ? "" : styles.healthDotWarning} />{executionReady ? "本地 Agent Worker 就绪" : "本地 Agent 执行受门禁保护"}</div>
           <div className={styles.userBlock}>
-            <div className={styles.avatar}>WT</div>
-            <div><strong>Wang Tianyang</strong><small>平台管理员</small></div>
+            <div className={styles.avatar}>{authMode === "local-fixture" ? "LT" : "TA"}</div>
+            <div><strong>{authMode === "local-fixture" ? "本地测试会话" : "可信管理员会话"}</strong><small>{authMode === "loading" ? "验证中" : role}</small></div>
             <AdminIcon name="more" />
           </div>
         </div>
@@ -351,15 +368,15 @@ export default function AgentAdminDashboard() {
         <header className={styles.topbar}>
           <div className={styles.breadcrumb}><span>平台</span><AdminIcon name="chevron" /><span>管理</span><AdminIcon name="chevron" /><strong>Agents</strong></div>
           <div className={styles.topActions}>
-            <div className={styles.environment}><span />本地测试环境</div>
+            <div className={styles.environment}><span />{authMode === "trusted-control-plane" ? "生产控制面" : authMode === "local-fixture" ? "本地测试环境" : "正在验证管理入口"}</div>
             <button className={styles.iconButton} type="button" aria-label="搜索"><AdminIcon name="search" /></button>
             <button className={`${styles.iconButton} ${styles.bellButton}`} type="button" aria-label="通知"><AdminIcon name="bell" /><span /></button>
-            <label className={styles.roleSelect}>
+            {authMode !== "local-fixture" ? <div className={styles.roleSelect}><span>{authMode === "loading" ? "身份" : "可信角色"}</span><strong>{authMode === "loading" ? "验证中" : role}</strong></div> : <label className={styles.roleSelect}>
               <span>模拟角色</span>
               <select value={role} onChange={(event) => setRole(event.target.value as AdminRole)} aria-label="切换管理角色">
                 {roleOptions.map((option) => <option key={option}>{option}</option>)}
               </select>
-            </label>
+            </label>}
           </div>
         </header>
 
@@ -381,18 +398,22 @@ export default function AgentAdminDashboard() {
         </div>
 
         <div className={styles.tabs} role="tablist" aria-label="Agent 管理分区">
-          {tabs.map((tab) => (
-            <button key={tab.id} className={activeTab === tab.id ? styles.tabActive : ""} onClick={() => setActiveTab(tab.id)} type="button" role="tab" aria-selected={activeTab === tab.id}>
-              {tab.label}{tab.count && <span>{tab.count}</span>}
-            </button>
-          ))}
+          {tabs.map((tab) => {
+            const count = tab.id === "versions" ? String(versions.length) : tab.id === "deployments" ? String(installations.length)
+              : tab.id === "providers" ? String(profiles.length) : tab.count;
+            return <button key={tab.id} className={activeTab === tab.id ? styles.tabActive : ""} onClick={() => setActiveTab(tab.id)} type="button" role="tab" aria-selected={activeTab === tab.id}>
+              {tab.label}{count && <span>{count}</span>}
+            </button>;
+          })}
         </div>
 
         <div className={styles.content}>
           {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
           {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations} onAdvance={advanceRollout} onRollback={rollback} />}
-          {activeTab === "providers" && <ProvidersTab role={role} localHealth={localHealth} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
+          {activeTab === "providers" && <ProvidersTab role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
+            providers={providers} credentials={credentials}
+            production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
           {activeTab === "inheritance" && <InheritanceTab defaultAgent={defaultAgent} notify={notify} />}
           {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
         </div>
@@ -564,24 +585,57 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
   );
 }
 
-function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRole; localHealth: LocalHealth | null; notify: (message: string, tone?: "success" | "warning" | "neutral") => void; onChanged: () => void }) {
+function ProvidersTab({ role, localHealth, installations, profiles, providers, credentials, production, notify, onChanged }: {
+  role: AdminRole;
+  localHealth: LocalHealth | null;
+  installations: AgentInstallation[];
+  profiles: AdminState["profiles"];
+  providers: AdminState["providers"];
+  credentials: AdminState["credentials"];
+  production: boolean;
+  notify: (message: string, tone?: "success" | "warning" | "neutral") => void;
+  onChanged: () => void;
+}) {
+  const initialProfile = profiles.find((item) => item.agent === "claude-code" && item.scope === "platform"
+    && item.scopeId === "global" && item.state === "ACTIVE");
+  const initialProvider = providers.find((item) => item.id === initialProfile?.providerRevisionId);
   const [agent, setAgent] = useState<AgentKind>("claude-code");
-  const [baseUrl, setBaseUrl] = useState("https://gateway.example.com");
-  const [primaryModel, setPrimaryModel] = useState("claude-sonnet-4-5-20250929");
+  const [baseUrl, setBaseUrl] = useState(initialProvider?.baseUrl ?? "https://gateway.example.com");
+  const [primaryModel, setPrimaryModel] = useState(initialProvider?.primaryModel ?? "claude-sonnet-4-5-20250929");
   const [planningModel, setPlanningModel] = useState("");
   const [fastModel, setFastModel] = useState("");
   const [authentication, setAuthentication] = useState<"bearer" | "x-api-key" | "authorization-bearer">("x-api-key");
   const [inputPrice, setInputPrice] = useState("3");
   const [outputPrice, setOutputPrice] = useState("15");
   const [apiKey, setApiKey] = useState("");
+  const [dataRegion, setDataRegion] = useState("新加坡");
+  const [retentionPolicy, setRetentionPolicy] = useState("最长保留 30 天，按供应商企业协议删除");
+  const [trainingPolicy, setTrainingPolicy] = useState("源码与提示词不用于模型训练");
   const [regionAcknowledged, setRegionAcknowledged] = useState(false);
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
-  const [credentialMask, setCredentialMask] = useState("•••• •••• •••• 8D3A");
+  const [writtenCredentialMasks, setWrittenCredentialMasks] = useState<Partial<Record<AgentKind, string>>>({});
   const [draftProfileId, setDraftProfileId] = useState("");
   const permissions = agentAdminCapabilities(role);
+  const matchingCredential = credentials.find((credential) => credential.state === "ACTIVE" && credentialMatchesAgent(credential.label, agent));
+
+  const credentialMask = writtenCredentialMasks[agent] ?? matchingCredential?.maskedFingerprint ?? "未绑定 ACTIVE 凭据";
+  const activeProviders = (["claude-code", "codex-cli"] as const).map((kind) => {
+    const profile = profiles.find((item) => item.agent === kind && item.scope === "platform" && item.scopeId === "global" && item.state === "ACTIVE");
+    return { kind, provider: providers.find((item) => item.id === profile?.providerRevisionId) ?? null };
+  });
 
   const protocol = agent === "claude-code" ? "Anthropic Messages / Gateway" : "OpenAI Responses";
+  const chooseAgent = (kind: AgentKind) => {
+    const current = activeProviders.find((item) => item.kind === kind)?.provider;
+    setAgent(kind);
+    setBaseUrl(current?.baseUrl ?? "https://gateway.example.com");
+    setPrimaryModel(current?.primaryModel ?? (kind === "claude-code" ? "claude-sonnet-4-5-20250929" : "gpt-5.2-codex-2026-02-01"));
+    setAuthentication(kind === "claude-code" ? "x-api-key" : "bearer");
+    setInputPrice(kind === "claude-code" ? "3" : "2.5");
+    setOutputPrice(kind === "claude-code" ? "15" : "10");
+    setDraftProfileId("");
+  };
 
   const validate = () => {
     try {
@@ -603,23 +657,29 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
       if (!value.trim() || !Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) return `${label} Token 单价必须是非负数`;
     }
     if (apiKey && apiKey.length < 12) return "凭据格式过短；请使用测试凭据或留空沿用当前版本";
+    if (!dataRegion.trim() || !retentionPolicy.trim() || !trainingPolicy.trim()) return "数据地域、保留和训练政策均为必填";
     if (!regionAcknowledged) return "请确认第三方端点的数据处理信息";
     return "";
   };
 
   const persistDraft = async () => {
     if (!permissions.editPlatformProvider) throw new Error("当前角色不能编辑平台级 Provider");
-    let credentialId = agent === "claude-code" ? "cred-claude-platform-v4" : "cred-codex-platform-v2";
+    let credentialId = matchingCredential?.id ?? "";
     if (apiKey) {
       if (!permissions.manageGlobalCredentials) throw new Error("替换平台凭据需要 SecurityAdmin 权限");
-      const credential = await adminRequest<{ id: string; fingerprint: string }>("credentials", {
+      const credential = await adminRequest<{ id: string; fingerprint?: string; maskedFingerprint?: string }>("credentials", {
         method: "POST",
         role,
-        body: { label: `local-${agent}-provider`, apiKey },
+        body: { label: `platform-${agent}-provider`, apiKey },
       });
       credentialId = credential.id;
-      setCredentialMask(credential.fingerprint);
+      setWrittenCredentialMasks((current) => ({ ...current,
+        [agent]: credential.maskedFingerprint ?? credential.fingerprint ?? "已写入 Vault" }));
     }
+    if (!credentialId) throw new Error(`当前没有 ${agent} 的 ACTIVE 平台凭据；请由 SecurityAdmin 写入 API Key`);
+    const installationId = installations.find((installation) => installation.agent === agent
+      && ["READY", "CANARY", "ACTIVE"].includes(installation.state) && installation.imageDigest)?.id;
+    if (!installationId) throw new Error(`当前没有 ${agent} 的 READY/CANARY/ACTIVE WorkerImage`);
     const created = await adminRequest<{ profile: { id: string } }>("agent-profiles", {
       method: "POST",
       role,
@@ -632,10 +692,17 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         authentication,
         inputUsdPerMillionTokens: Number(inputPrice),
         outputUsdPerMillionTokens: Number(outputPrice),
-        installationId: agent === "claude-code" ? "claude-installation-214" : "codex-installation-091",
+        installationId,
+        credentialVersionId: credentialId,
         credentialId,
         scope: "platform",
         scopeId: "global",
+        dataRegion: dataRegion.trim(),
+        retentionPolicy: retentionPolicy.trim(),
+        trainingPolicy: trainingPolicy.trim(),
+        maxBudgetUsd: 25,
+        maxTurns: 100,
+        timeoutSeconds: 7200,
         budgetUsd: 25,
       },
     });
@@ -654,7 +721,7 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
     setTesting(true);
     try {
       await persistDraft();
-      notify("Provider 草稿已写入本地控制面；当前生效配置未改变", "neutral");
+      notify(`Provider 草稿已写入${production ? "生产" : "本地"}控制面；当前生效配置未改变`, "neutral");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Provider 草稿保存失败");
     } finally {
@@ -689,12 +756,12 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         {localHealth?.dependencies?.providerBindingProbe !== "CONFIGURED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />下列为控制面配置快照；本机没有受信 Provider 绑定探针，不能用于 Agent 执行。</div> : null}
         {!permissions.editPlatformProvider ? <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看平台 Provider。租户和项目覆盖应在对应作用域页面配置。</div> : null}
         <div className={styles.providerRows}>
-          <button type="button" className={`${styles.providerRow} ${agent === "claude-code" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setAuthentication("x-api-key"); setInputPrice("3"); setOutputPrice("15"); setDraftProfileId(""); }}>
-            <AgentMark kind="claude-code" small /><div><strong>Anthropic · cn-gateway</strong><span>Messages · claude-sonnet-4-5-20250929</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
-          </button>
-          <button type="button" className={`${styles.providerRow} ${agent === "codex-cli" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setAuthentication("bearer"); setInputPrice("2.5"); setOutputPrice("10"); setDraftProfileId(""); }}>
-            <AgentMark kind="codex-cli" small /><div><strong>OpenAI · platform</strong><span>Responses · gpt-5.2-codex-2026-02-01</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
-          </button>
+          {activeProviders.map(({ kind, provider }) => <button type="button" key={kind}
+            className={`${styles.providerRow} ${agent === kind ? styles.providerRowSelected : ""}`} onClick={() => chooseAgent(kind)}>
+            <AgentMark kind={kind} small /><div><strong>{kind === "claude-code" ? "Anthropic Messages" : "OpenAI Responses"} · {provider ? providerHost(provider.baseUrl) : "未配置"}</strong>
+              <span>{provider ? `${provider.protocol} · ${provider.primaryModel}` : "尚无 ACTIVE 平台 Provider"}</span></div>
+            <StatusPill tone={provider?.state === "ACTIVE" ? "success" : "warning"}>{provider?.state ?? "NOT CONFIGURED"}</StatusPill><AdminIcon name="chevron" />
+          </button>)}
         </div>
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
@@ -711,8 +778,8 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         <div className={styles.formGroup}>
           <label>Agent</label>
           <div className={styles.segmented}>
-            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setAuthentication("x-api-key"); setInputPrice("3"); setOutputPrice("15"); setDraftProfileId(""); }}>Claude Code</button>
-            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setAuthentication("bearer"); setInputPrice("2.5"); setOutputPrice("10"); setDraftProfileId(""); }}>Codex CLI</button>
+            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => chooseAgent("claude-code")}>Claude Code</button>
+            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => chooseAgent("codex-cli")}>Codex CLI</button>
           </div>
         </div>
         <div className={styles.formGroup}><label htmlFor="protocol">协议</label><input id="protocol" value={protocol} disabled /><small>协议由 Agent Adapter 固定，不可混用。</small></div>
@@ -723,6 +790,9 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
           <div className={styles.formGroup}><label htmlFor="planningModel">Planning Model</label><input id="planningModel" value={planningModel} onChange={(event) => setPlanningModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
           <div className={styles.formGroup}><label htmlFor="fastModel">Small / Fast Model</label><input id="fastModel" value={fastModel} onChange={(event) => setFastModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
         </div>
+        <div className={styles.formGroup}><label htmlFor="dataRegion">数据地域</label><input id="dataRegion" value={dataRegion} onChange={(event) => setDataRegion(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
+        <div className={styles.formGroup}><label htmlFor="retentionPolicy">保留政策</label><input id="retentionPolicy" value={retentionPolicy} onChange={(event) => setRetentionPolicy(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
+        <div className={styles.formGroup}><label htmlFor="trainingPolicy">训练政策</label><input id="trainingPolicy" value={trainingPolicy} onChange={(event) => setTrainingPolicy(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         <div className={styles.fieldPair}>
           <div className={styles.formGroup}><label htmlFor="inputPrice">输入单价（USD / 1M Token）</label><input id="inputPrice" type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
           <div className={styles.formGroup}><label htmlFor="outputPrice">输出单价（USD / 1M Token）</label><input id="outputPrice" type="number" min="0" step="0.000001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
@@ -769,6 +839,121 @@ function InheritanceTab({ defaultAgent, notify }: { defaultAgent: AgentKind; not
     </>
   );
 }
+
+function normalizeAdminState(payload: Record<string, unknown>): AdminState {
+  const local = object(payload.meta);
+  if (local) {
+    const versions = records(local.versions).map(versionRow);
+    const installations = records(local.installations).map((value) => installationRow(value));
+    return {
+      defaultAgent: agentKind(local.defaultAgent) ?? "claude-code",
+      versions,
+      installations,
+      rollouts: rolloutRows(local.rollouts, installations),
+      profiles: records(local.profiles).map(profileRow).filter((value): value is AdminState["profiles"][number] => Boolean(value)),
+      providers: records(local.providers).map(providerRow).filter((value): value is AdminState["providers"][number] => Boolean(value)),
+      credentials: records(local.credentials).map(credentialRow).filter((value): value is AdminState["credentials"][number] => Boolean(value)),
+    };
+  }
+  const data = object(payload.data);
+  if (!data) throw new Error("Agent 管理状态响应无效");
+  const catalog = records(data.catalog);
+  const versions = catalog.flatMap((entry) => records(entry.versions).map(versionRow));
+  const installations = catalog.flatMap((entry) => records(entry.installations).map((value) => installationRow(value, agentKind(entry.id) ?? undefined)));
+  return {
+    defaultAgent: agentKind(data.effectivePlatformDefaultAgent) ?? "claude-code",
+    versions,
+    installations,
+    rollouts: rolloutRows(undefined, installations),
+    profiles: records(data.profiles).map(profileRow).filter((value): value is AdminState["profiles"][number] => Boolean(value)),
+    providers: records(data.providers).map(providerRow).filter((value): value is AdminState["providers"][number] => Boolean(value)),
+    credentials: records(data.credentials).map(credentialRow).filter((value): value is AdminState["credentials"][number] => Boolean(value)),
+  };
+}
+
+function versionRow(value: Record<string, unknown>): AgentVersionRow {
+  const agent = agentKind(value.agent);
+  const version = text(value.version);
+  const status = versionStatus(value.state);
+  if (!agent || !version || !status) throw new Error("Agent 版本目录响应无效");
+  const baseline = versionRows.find((item) => item.agent === agent && item.version === version);
+  const discoveredAt = text(value.discoveredAt);
+  return {
+    id: text(value.id) ?? `${agent}@${version}`,
+    agent,
+    version,
+    releasedAt: discoveredAt && Number.isFinite(Date.parse(discoveredAt))
+      ? new Date(discoveredAt).toLocaleString("zh-CN", { hour12: false }) : baseline?.releasedAt ?? "目录记录",
+    integrity: text(value.integrity) ?? baseline?.integrity ?? "等待供应链验证",
+    sbom: text(value.sbomRef) ?? baseline?.sbom ?? "等待 SBOM",
+    vulnerabilities: value.scan === "PASS" ? "扫描通过" : value.scan === "FAIL" ? "扫描失败" : baseline?.vulnerabilities ?? "扫描排队中",
+    status,
+  };
+}
+
+function installationRow(value: Record<string, unknown>, catalogAgent?: AgentKind): AgentInstallation {
+  const agent = agentKind(value.agent) ?? catalogAgent;
+  const id = text(value.id);
+  const version = text(value.version) ?? text(value.agentVersionId)?.split("@").at(-1);
+  const workerPool = text(value.workerPool);
+  const adapterVersion = text(value.adapterVersion);
+  const health = value.health === "HEALTHY" || value.health === "DEGRADED" || value.health === "UNHEALTHY" ? value.health : null;
+  if (!agent || !id || !version || !workerPool || !adapterVersion || !health) throw new Error("Agent Installation 响应无效");
+  return {
+    id, agent, version, workerPool, adapterVersion,
+    imageDigest: text(value.imageDigest),
+    buildReceiptId: text(value.buildReceiptId),
+    state: text(value.state) ?? "FAILED",
+    health,
+    rolloutPercent: number(value.rolloutPercent) ?? 0,
+    rollbackInstallationId: text(value.rollbackInstallationId),
+    ...(object(value.failure) ? { failure: object(value.failure) as AgentInstallation["failure"] } : {}),
+  };
+}
+
+function rolloutRows(value: unknown, installations: readonly AgentInstallation[]): AdminState["rollouts"] {
+  const source = object(value);
+  if (source) return Object.fromEntries(Object.entries(source).map(([id, child]) => {
+    const row = object(child) ?? {};
+    return [id, { percent: number(row.percent) ?? 0, state: text(row.state) ?? "READY", previous: number(row.previous) ?? 0 }];
+  }));
+  return Object.fromEntries(installations.map((installation) => [installation.id,
+    { percent: installation.rolloutPercent, state: installation.state, previous: 0 }]));
+}
+
+function profileRow(value: Record<string, unknown>): AdminState["profiles"][number] | null {
+  const agent = agentKind(value.agent); const id = text(value.id); const scope = text(value.scope); const scopeId = text(value.scopeId);
+  const state = text(value.state); const installationId = text(value.installationId);
+  const providerRevisionId = text(value.providerRevisionId) ?? text(value.providerId);
+  return agent && id && scope && scopeId && state && installationId && providerRevisionId
+    ? { id, agent, scope, scopeId, state, installationId, providerRevisionId } : null;
+}
+function providerRow(value: Record<string, unknown>): AdminState["providers"][number] | null {
+  const id = text(value.id); const agent = agentKind(value.agent); const protocol = text(value.protocol); const baseUrl = text(value.baseUrl);
+  const models = object(value.models); const primaryModel = text(models?.primaryModel) ?? text(value.primaryModel); const state = text(value.state);
+  return id && agent && protocol && baseUrl && primaryModel && state ? { id, agent, protocol, baseUrl, primaryModel, state } : null;
+}
+function credentialRow(value: Record<string, unknown>): AdminState["credentials"][number] | null {
+  const id = text(value.id); const label = text(value.label); const state = text(value.state);
+  const maskedFingerprint = text(value.maskedFingerprint) ?? text(value.masked);
+  return id && label && state && maskedFingerprint ? { id, label, state, maskedFingerprint } : null;
+}
+function object(value: unknown): Record<string, unknown> | null { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+function records(value: unknown): Record<string, unknown>[] { return Array.isArray(value) ? value.map(object).filter((item): item is Record<string, unknown> => Boolean(item)) : []; }
+function text(value: unknown): string | null { return typeof value === "string" && value ? value : null; }
+function number(value: unknown): number | null { return typeof value === "number" && Number.isFinite(value) ? value : null; }
+function agentKind(value: unknown): AgentKind | null { return value === "claude-code" || value === "codex-cli" ? value : null; }
+function versionStatus(value: unknown): AgentVersionRow["status"] | null {
+  return value === "APPROVED" || value === "DISCOVERED" || value === "VALIDATING" || value === "DEPRECATED"
+    || value === "BLOCKED" || value === "REJECTED" ? value : null;
+}
+function isAdminRole(value: unknown): value is AdminRole { return typeof value === "string" && value in rolePermissions; }
+function isLoopbackBrowser(): boolean { return typeof window !== "undefined" && ["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname); }
+function credentialMatchesAgent(label: string, agent: AgentKind): boolean {
+  const normalized = label.toLowerCase();
+  return agent === "claude-code" ? normalized.includes("claude") || normalized.includes("anthropic") : normalized.includes("codex") || normalized.includes("openai");
+}
+function providerHost(value: string): string { try { return new URL(value).host; } catch { return "无效端点"; } }
 
 function AuditTab({ events, filter, localHealth, setFilter }: { events: AuditEvent[]; filter: string; localHealth: LocalHealth | null; setFilter: (value: string) => void }) {
   const filtered = useMemo(() => filter === "全部事件" ? events : events.filter((event) => filter === "仅告警" ? event.tone === "warning" : event.action.includes("PROVIDER") || event.action.includes("CREDENTIAL") || event.action.includes("Provider") || event.action.includes("凭据")), [events, filter]);

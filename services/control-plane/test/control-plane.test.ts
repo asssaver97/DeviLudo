@@ -28,6 +28,22 @@ test("agent catalog is readable by an Auditor and defaults to Claude Code", asyn
   assert.equal(body.data.catalog[0].forbiddenOn.includes("e2e-runner"), true);
 });
 
+test("Agent console projection exposes usable public configuration without Vault references across scopes", async () => {
+  const platform = await inject({ method: "GET", url: "/admin/agents", role: "SecurityAdmin" });
+  assert.equal(platform.statusCode, 200);
+  const data = platform.json().data;
+  assert.equal(data.effectivePlatformDefaultAgent, "claude-code");
+  assert.equal(data.profiles.some((profile: { state: string }) => profile.state === "ACTIVE"), true);
+  assert.equal(data.credentials[0].maskedFingerprint.startsWith("sha256:"), true);
+  assert.equal(platform.body.includes("secretRef"), false);
+  assert.equal(platform.body.includes("vault://"), false);
+
+  const tenant = await inject({ method: "GET", url: "/admin/agents", role: "TenantAdmin", tenantId: "tenant-scope-1" });
+  assert.equal(tenant.statusCode, 200);
+  assert.equal(tenant.json().data.profiles.every((profile: { scope: string; state: string }) => profile.scope !== "platform" || profile.state === "ACTIVE"), true);
+  assert.deepEqual(tenant.json().data.credentials, []);
+});
+
 test("mutations require RBAC and Idempotency-Key", async () => {
   const forbidden = await inject({
     method: "POST",

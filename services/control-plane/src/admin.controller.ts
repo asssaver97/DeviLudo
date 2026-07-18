@@ -21,8 +21,8 @@ const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "Pr
 export class AdminController {
   constructor(private readonly service: AdminService) {}
 
-  agents(): Promise<Readonly<Record<string, unknown>>> {
-    return this.service.agents();
+  agents(request: FastifyRequest): Promise<Readonly<Record<string, unknown>>> {
+    return this.service.agents(actor(request));
   }
 
   discoverVersions(body: Record<string, unknown>, request: FastifyRequest) {
@@ -110,7 +110,7 @@ export class AdminController {
 // the web workspace's standard-decorator tsconfig as well as Nest's legacy
 // decorator tsconfig. The resulting Nest route metadata is identical.
 Inject(AdminService)(AdminController, undefined, 0);
-applyRoute("agents", Get("agents"), ALL_ROLES, []);
+applyRoute("agents", Get("agents"), ALL_ROLES, [Req()]);
 applyRoute("discoverVersions", Post("agent-versions/discover"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("approveVersion", Post("agent-versions/approve"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("blockVersion", Post("agent-versions/block"), ["PlatformAgentAdmin"], [Body(), Req()]);

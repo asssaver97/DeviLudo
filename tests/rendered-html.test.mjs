@@ -46,9 +46,9 @@ test("production worker exposes health but keeps local admin and specification f
   assert.equal(healthPayload.mode, "PRODUCTION");
 
   const agents = await request("/api/admin/agents");
-  assert.equal(agents.status, 503);
+  assert.equal(agents.status, 401);
   const agentPayload = await agents.json();
-  assert.equal(agentPayload.error.code, "ADMIN_CONTROL_PLANE_REQUIRED");
+  assert.equal(agentPayload.error.code, "ADMIN_SESSION_INVALID");
 
   const init = {
     method: "POST",
@@ -72,10 +72,10 @@ test("production worker never accepts credential plaintext into the local demo s
     },
     body: JSON.stringify({ label: "test credential", apiKey: plaintext }),
   });
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 401);
   const serialized = JSON.stringify(await response.json());
   assert.doesNotMatch(serialized, new RegExp(plaintext));
-  assert.match(serialized, /ADMIN_CONTROL_PLANE_REQUIRED/);
+  assert.match(serialized, /ADMIN_SESSION_INVALID/);
 });
 
 test("public web worker remains fail-closed for runner event writes", async () => {

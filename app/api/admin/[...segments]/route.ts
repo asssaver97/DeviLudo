@@ -1,4 +1,6 @@
 import { normalizeModelRoles } from "@/lib/agent/providers";
+import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
+import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
 import { appendDemoAudit, getDemoStore, withIdempotency, type DemoProfile, type DemoProvider } from "@/lib/control-plane/demo-store";
 import {
   bodyObject,
@@ -57,8 +59,9 @@ function routeKey(segments: string[]): string {
 
 export async function GET(request: Request, context: RouteContext) {
   try {
-    requireLocalAdmin(request);
     const { segments } = await context.params;
+    if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
+    requireLocalAdmin(request);
     const key = routeKey(segments);
     const store = getDemoStore();
     if (key === "agents") {
@@ -78,7 +81,8 @@ export async function GET(request: Request, context: RouteContext) {
           credentials: store.credentials.map(({ id, label, masked, version, state, createdAt }) => ({ id, label, masked, version, state, createdAt })),
           defaults: store.defaults,
         },
-      });
+      }, { headers: { "x-deviludo-effective-role": request.headers.get("x-deviludo-role") ?? "Auditor",
+        "x-deviludo-admin-auth-mode": "local-fixture" } });
     }
     if (key === "agent-health") {
       return json({
@@ -117,8 +121,9 @@ export async function GET(request: Request, context: RouteContext) {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
-    requireLocalAdmin(request);
     const { segments } = await context.params;
+    if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
+    requireLocalAdmin(request);
     const key = routeKey(segments);
     const body = await bodyObject(request);
     const idempotency = idempotencyKey(request);
@@ -450,8 +455,9 @@ export async function POST(request: Request, context: RouteContext) {
 
 export async function PUT(request: Request, context: RouteContext) {
   try {
-    requireLocalAdmin(request);
     const { segments } = await context.params;
+    if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
+    requireLocalAdmin(request);
     const key = routeKey(segments);
     const match = /^agent-defaults\/(platform|tenant:[a-z0-9-]+|project:[a-z0-9-]+)$/i.exec(key);
     if (!match) throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
@@ -492,4 +498,37 @@ function requireLocalAdmin(request: Request): void {
   if (!isLoopbackTestRequest(request)) {
     throw new HttpProblem(503, "ADMIN_CONTROL_PLANE_REQUIRED", "生产管理员操作需要独立的身份认证与 Agent 控制面；本地演示存储已禁用");
   }
+}
+
+async function productionAdminRequest(request: Request, segments: readonly string[]): Promise<Response> {
+  let downstreamPath: string;
+  try {
+    downstreamPath = resolveAdminControlPlanePath(request.method, segments);
+    const url = new URL(request.url);
+    if (url.search || url.pathname !== `/api${downstreamPath}`) throw new Error("route mismatch");
+  } catch {
+    return json({ error: { code: "ADMIN_ROUTE_NOT_ALLOWED", message: "该管理员控制面路由未开放。" } }, { status: 404 });
+  }
+  if (request.method !== "GET" && !browserMutationIsSameOrigin(request)) {
+    return json({ error: { code: "CROSS_ORIGIN_MUTATION_REJECTED", message: "浏览器管理操作必须来自当前站点。" } }, { status: 403 });
+  }
+  let principal;
+  try { principal = await verifyTrustedAdminPrincipal(request); }
+  catch { return json({ error: { code: "ADMIN_SESSION_INVALID", message: "需要可信平台管理员会话。" } }, { status: 401 }); }
+  let broker;
+  try { broker = adminControlPlaneBrokerFromEnvironment(); }
+  catch { return json({ error: { code: "ADMIN_CONTROL_PLANE_MISCONFIGURED", message: "管理员控制面连接配置无效。" } }, { status: 503 }); }
+  if (!broker) {
+    return json({ error: { code: "ADMIN_CONTROL_PLANE_REQUIRED", message: "生产管理员操作需要独立的 Agent 控制面连接器。" } }, { status: 503 });
+  }
+  try { return await broker.forward(request, downstreamPath, principal); }
+  catch { return json({ error: { code: "ADMIN_CONTROL_PLANE_UNAVAILABLE", message: "管理员控制面未能完成请求。" } }, { status: 502 }); }
+}
+
+function browserMutationIsSameOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin && !request.headers.has("cookie")) return true;
+  if (!origin) return false;
+  try { return new URL(origin).origin === new URL(request.url).origin; }
+  catch { return false; }
 }

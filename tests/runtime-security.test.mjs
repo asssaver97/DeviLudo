@@ -16,6 +16,8 @@ import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts"
 import { ReleaseAuthorizationBrokerClient } from "../lib/releases/publish-broker.ts";
 import { POST as acceptAndPublish } from "../app/api/releases/[releaseId]/accept-and-publish/route.ts";
 import { POST as issueInvitation } from "../app/api/admin/invitations/route.ts";
+import { GET as proxyAdminGet, POST as proxyAdminPost } from "../app/api/admin/[...segments]/route.ts";
+import { AdminControlPlaneBrokerClient, resolveAdminControlPlanePath } from "../lib/admin/control-plane-broker.ts";
 import { isLoopbackTestRequest } from "../lib/security/local-test-mode.ts";
 import { createAdminPrincipalSignature } from "../services/control-plane/src/admin-principal.ts";
 import {
@@ -305,6 +307,75 @@ test("platform administrator invitation issuance requires the existing signed ad
     globalThis.fetch = originalFetch;
     restoreEnv("DEVILUDO_IDENTITY_ADMIN_BROKER_URL", originalEndpoint); restoreEnv("DEVILUDO_ADMIN_SESSION_HMAC_KEY", originalAdminKey);
   }
+});
+
+test("production Agent administration rebinds a trusted ingress principal to one allow-listed control-plane route", async () => {
+  const ingressKey = Buffer.alloc(32, 51);
+  const egressKey = Buffer.alloc(32, 52);
+  const issuedAt = new Date().toISOString();
+  const assertion = { method: "GET", path: "/api/admin/agents", actorId: "platform-admin-51", role: "PlatformAgentAdmin",
+    tenantId: null, projectId: null, sessionId: "admin-session-51", issuedAt };
+  const incomingSignature = createAdminPrincipalSignature(assertion, ingressKey);
+  const previous = {
+    fetch: globalThis.fetch,
+    ingress: process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY,
+    endpoint: process.env.DEVILUDO_ADMIN_CONTROL_PLANE_BROKER_URL,
+    egress: process.env.DEVILUDO_ADMIN_CONTROL_PLANE_HMAC_KEY,
+  };
+  const calls = [];
+  try {
+    process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY = ingressKey.toString("base64");
+    process.env.DEVILUDO_ADMIN_CONTROL_PLANE_BROKER_URL = "https://admin-control.internal/";
+    process.env.DEVILUDO_ADMIN_CONTROL_PLANE_HMAC_KEY = egressKey.toString("base64");
+    globalThis.fetch = async (url, init) => {
+      const headers = new Headers(init.headers); calls.push({ url: String(url), init, headers });
+      assert.equal(String(url), "https://admin-control.internal/admin/agents");
+      assert.equal(headers.has("cookie"), false); assert.equal(headers.has("authorization"), false);
+      const downstream = { ...assertion, path: "/admin/agents", issuedAt: headers.get("x-deviludo-admin-issued-at") };
+      assert.equal(headers.get("x-deviludo-admin-signature"), createAdminPrincipalSignature(downstream, egressKey));
+      return Response.json({ data: { catalog: [], effectivePlatformDefaultAgent: "claude-code", profiles: [], credentials: [] }, meta: { requestId: "cp-1" } });
+    };
+    const headers = { "x-deviludo-role": assertion.role, "x-deviludo-actor": assertion.actorId,
+      "x-deviludo-admin-session": assertion.sessionId, "x-deviludo-admin-issued-at": issuedAt,
+      "x-deviludo-admin-signature": incomingSignature };
+    const response = await proxyAdminGet(new Request("https://deviludo.example/api/admin/agents", { headers }),
+      { params: Promise.resolve({ segments: ["agents"] }) });
+    assert.equal(response.status, 200); assert.equal(response.headers.get("x-deviludo-effective-role"), assertion.role);
+    assert.equal(response.headers.get("x-deviludo-admin-auth-mode"), "trusted-control-plane");
+    assert.equal(calls.length, 1);
+
+    const forged = await proxyAdminGet(new Request("https://deviludo.example/api/admin/agents", { headers: {
+      ...headers, "x-deviludo-admin-signature": "A".repeat(43),
+    } }), { params: Promise.resolve({ segments: ["agents"] }) });
+    assert.equal(forged.status, 401); assert.equal(calls.length, 1);
+    const unknown = await proxyAdminGet(new Request("https://deviludo.example/api/admin/arbitrary", { headers }),
+      { params: Promise.resolve({ segments: ["arbitrary"] }) });
+    assert.equal(unknown.status, 404); assert.equal(calls.length, 1);
+  } finally {
+    globalThis.fetch = previous.fetch;
+    restoreEnv("DEVILUDO_ADMIN_SESSION_HMAC_KEY", previous.ingress);
+    restoreEnv("DEVILUDO_ADMIN_CONTROL_PLANE_BROKER_URL", previous.endpoint);
+    restoreEnv("DEVILUDO_ADMIN_CONTROL_PLANE_HMAC_KEY", previous.egress);
+  }
+});
+
+test("Agent administration connector rejects cross-origin writes and credential response leakage", async () => {
+  const key = Buffer.alloc(32, 61);
+  assert.equal(resolveAdminControlPlanePath("POST", ["credentials"]), "/admin/credentials");
+  assert.throws(() => resolveAdminControlPlanePath("POST", ["shell", "run"]), /route/);
+  const crossOrigin = await proxyAdminPost(new Request("https://deviludo.example/api/admin/credentials", { method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "cross-origin", origin: "https://attacker.example" },
+    body: JSON.stringify({ label: "Claude", apiKey: "must-not-leak-credential" }) }),
+  { params: Promise.resolve({ segments: ["credentials"] }) });
+  assert.equal(crossOrigin.status, 403);
+
+  const secret = "must-not-leak-credential";
+  const broker = new AdminControlPlaneBrokerClient({ endpoint: "https://admin-control.internal/", hmacKey: key,
+    fetch: async () => Response.json({ data: { accidentallyEchoed: secret } }, { status: 201 }) });
+  await assert.rejects(broker.forward(new Request("https://deviludo.example/api/admin/credentials", { method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "credential-leak-test" },
+    body: JSON.stringify({ label: "Claude", apiKey: secret }) }), "/admin/credentials",
+  { role: "SecurityAdmin", actorId: "security-admin-61", sessionId: "admin-session-61" }), /credential plaintext/);
 });
 
 test("GitHub Web broker client accepts only fixed GitHub redirects and hashes callback idempotency", async () => {

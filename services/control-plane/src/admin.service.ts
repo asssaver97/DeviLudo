@@ -43,7 +43,7 @@ export class AdminService {
     private readonly inferenceReconciler: InferenceRequestReconciler,
   ) {}
 
-  async agents(): Promise<Readonly<Record<string, unknown>>> {
+  async agents(actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
     return this.store.read((state) => {
       const catalog = (["claude-code", "codex-cli"] as const).map((agent) => ({
         id: agent,
@@ -61,11 +61,25 @@ export class AdminService {
         versions: [...state.versions.values()].filter((value) => value.agent === agent),
         installations: [...state.installations.values()].filter((value) => value.agent === agent),
       }));
+      const profiles = [...state.profiles.values()].filter((profile) => profileVisibleTo(profile, actor));
+      const visibleProfileIds = new Set(profiles.map((profile) => profile.id));
+      const visibleProviderIds = new Set(profiles.map((profile) => profile.providerRevisionId));
+      const credentials = [...state.credentials.values()]
+        .filter((credential) => credentialVisibleTo(credential, actor))
+        .map(credentialView);
+      const defaults = Object.fromEntries([...state.defaults.entries()].filter(([scope, profileId]) =>
+        scope === "platform" || visibleProfileIds.has(profileId)));
+      const platformProfile = state.profiles.get(state.defaults.get("platform") ?? "");
       return Object.freeze({
         catalog,
         platformDefault: state.defaults.get("platform") ?? "built-in:claude-code",
+        effectivePlatformDefaultAgent: platformProfile?.agent ?? "claude-code",
         selectionPrecedence: ["project", "tenant", "platform", "built-in:claude-code"],
         pinnedVersionsOnly: true,
+        profiles: Object.freeze(profiles),
+        providers: Object.freeze([...state.providers.values()].filter((provider) => visibleProviderIds.has(provider.id))),
+        credentials: Object.freeze(credentials),
+        defaults: Object.freeze(defaults),
       });
     });
   }
@@ -1113,6 +1127,18 @@ function auditVisibleTo(record: AuditRecord, actor: RequestActor): boolean {
   if (record.tenantId !== actor.tenantId) return false;
   if (actor.projectId && record.projectId !== actor.projectId) return false;
   return true;
+}
+
+function profileVisibleTo(profile: ProfileRevisionRecord, actor: RequestActor): boolean {
+  if (actor.role === "PlatformAgentAdmin" || actor.role === "SecurityAdmin" || (actor.role === "Auditor" && !actor.tenantId)) return true;
+  if (profile.scope === "platform") return profile.state === "ACTIVE";
+  if (profile.scope === "tenant") return Boolean(actor.tenantId && profile.scopeId === actor.tenantId);
+  return Boolean(actor.projectId && profile.scopeId === actor.projectId && actor.tenantId);
+}
+
+function credentialVisibleTo(credential: CredentialVersionRecord, actor: RequestActor): boolean {
+  if (actor.role === "PlatformAgentAdmin" || actor.role === "SecurityAdmin" || (actor.role === "Auditor" && !actor.tenantId)) return true;
+  return actor.role === "TenantAdmin" && credential.scope === "tenant" && credential.scopeId === actor.tenantId;
 }
 
 function parseDefaultScope(value: string): { scope: ProfileScope; scopeId: string } {
