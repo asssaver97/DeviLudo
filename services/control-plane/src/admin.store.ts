@@ -157,6 +157,9 @@ function seededState(): AdminCatalogState {
       cancellation: "PASS",
       usage: "PASS",
       timeout: "PASS",
+      minimalReasoning: "PASS",
+      dnsPinning: "PASS",
+      redirectRevalidation: "PASS",
     },
     governance: {
       dataRegion: "vendor-managed",

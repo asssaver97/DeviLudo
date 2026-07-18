@@ -194,6 +194,26 @@ test("local installation lineage selects the most recently activated healthy gen
   assert.equal(second.rollbackInstallationId, first.id);
 });
 
+test("local default selection rejects an active Profile whose Installation has not reached 100%", async () => {
+  const store = resetDemoStore();
+  const profile = store.profiles.find((item) => item.id === "profile-claude-platform-r5");
+  const installation = store.installations.find((item) => item.id === "claude-installation-214");
+  assert.ok(profile);
+  assert.ok(installation);
+  installation.state = "CANARY";
+  installation.rolloutPercent = 25;
+  installation.activatedAt = null;
+  store.defaults.platform = "profile-codex-platform-r2";
+
+  const response = await PUT(
+    request("agent-defaults/platform", "PUT", "PlatformAgentAdmin", { profileRevisionId: profile.id }),
+    context("agent-defaults/platform"),
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "PROFILE_NOT_SERVING_READY");
+  assert.equal(store.defaults.platform, "profile-codex-platform-r2");
+});
+
 test("local rollout without a target degrades Profiles whose fallback chain would be broken", async () => {
   const store = resetDemoStore();
   const source = store.profiles.find((profile) => profile.id === "profile-claude-platform-r5");
@@ -287,7 +307,7 @@ test("simulated role headers cannot cross local admin RBAC boundaries", async ()
   );
   assert.equal(forbidden.status, 403);
   assert.equal((await forbidden.json()).error.code, "FORBIDDEN");
-  assert.equal(getDemoStore().rollouts["claude-installation-214"].percent, 25);
+  assert.equal(getDemoStore().rollouts["claude-installation-214"].percent, 100);
 });
 
 test("local admin never simulates an upstream inference billing reconciliation", async () => {

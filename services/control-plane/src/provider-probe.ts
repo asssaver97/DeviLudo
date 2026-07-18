@@ -58,12 +58,12 @@ export class InferenceGatewayProviderProbeClient {
           authentication: provider.authentication,
           models: provider.models,
           credentialVersionId: provider.credentialVersionId,
-          requiredChecks: requiredChecks,
+          requiredChecks: PROVIDER_REQUIRED_CHECKS,
         }),
       });
       if (response.statusCode !== 200) throw new ServiceProblem(409, "PROVIDER_PROBE_FAILED", "The inference gateway rejected the Provider probe");
       const checks = parseChecks(response.payload, provider.id);
-      if (requiredChecks.some((name) => checks[name] !== "PASS")) {
+      if (PROVIDER_REQUIRED_CHECKS.some((name) => checks[name] !== "PASS")) {
         throw new ServiceProblem(409, "PROVIDER_PROBE_FAILED", "Every Provider compatibility and network-safety probe must pass");
       }
       return checks;
@@ -83,7 +83,7 @@ export class InferenceGatewayProviderProbe extends ProviderProbe {
 
 Injectable()(InferenceGatewayProviderProbe);
 
-const requiredChecks = [
+export const PROVIDER_REQUIRED_CHECKS = [
   "authentication",
   "modelExistence",
   "streaming",
@@ -97,7 +97,7 @@ const requiredChecks = [
 ] as const;
 
 function developmentContractProbe(): Readonly<Record<string, "PASS">> {
-  return Object.freeze(Object.fromEntries(requiredChecks.map((name) => [name, "PASS"])) as Record<string, "PASS">);
+  return Object.freeze(Object.fromEntries(PROVIDER_REQUIRED_CHECKS.map((name) => [name, "PASS"])) as Record<string, "PASS">);
 }
 
 function validateProbeEndpoint(raw: string): string {
@@ -170,7 +170,7 @@ function parseChecks(raw: unknown, providerRevisionId: string): Readonly<Record<
     throw new ServiceProblem(409, "INVALID_PROBE_RESPONSE", "Provider probe response has no checks object");
   }
   const keys = Object.keys(value as Record<string, unknown>);
-  if (keys.length !== requiredChecks.length || requiredChecks.some((name) => !keys.includes(name))) {
+  if (keys.length !== PROVIDER_REQUIRED_CHECKS.length || PROVIDER_REQUIRED_CHECKS.some((name) => !keys.includes(name))) {
     throw new ServiceProblem(409, "INVALID_PROBE_RESPONSE", "Provider probe response check set is invalid");
   }
   const checks = Object.fromEntries(

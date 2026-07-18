@@ -398,7 +398,7 @@ test("project selection can pin an active inherited Profile without copying Prov
     key: "project-alpha-inherited-profile",
     payload: { profileRevisionId: inherited.id },
   });
-  assert.equal(selected.statusCode, 200);
+  assert.equal(selected.statusCode, 200, selected.body);
   assert.equal(selected.json().data.profileRevisionId, inherited.id);
 
   const otherTenant = await inject({

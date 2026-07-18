@@ -66,6 +66,30 @@ test("trusted validation failure rejects the exact version while transient error
   assert.equal(await transientStore.read((state) => state.versions.get("codex-cli@0.92.2")?.state), "DISCOVERED");
 });
 
+test("Profile activation rejects an incomplete Provider probe even when every stored result is PASS", async () => {
+  const store = new InMemoryAdminStore();
+  const service = adminService(store, new FailingAgentSupplyChain());
+  await store.mutate((state) => {
+    const profile = state.profiles.get("profile-platform-claude-r1");
+    const provider = state.providers.get("provider-platform-claude-r1");
+    assert.ok(profile); assert.ok(provider);
+    profile.state = "READY";
+    provider.state = "READY";
+    const incomplete = { ...provider.probe };
+    delete incomplete.redirectRevalidation;
+    provider.probe = incomplete;
+  });
+  await assert.rejects(
+    service.transitionProfile("profile-platform-claude-r1", "activate", actor("activate-incomplete-probe", "SecurityAdmin")),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "PROVIDER_PROBE_REQUIRED",
+  );
+  const state = await store.read((catalog) => ({
+    profile: catalog.profiles.get("profile-platform-claude-r1")?.state,
+    provider: catalog.providers.get("provider-platform-claude-r1")?.state,
+  }));
+  assert.deepEqual(state, { profile: "READY", provider: "READY" });
+});
+
 test("terminal image build failure leaves an auditable quarantined reservation without a fake image", async () => {
   const store = new InMemoryAdminStore();
   const chain = new FailingAgentSupplyChain();
@@ -94,7 +118,7 @@ test("terminal image build failure leaves an auditable quarantined reservation w
   assert.equal(result.audits[0]?.metadata.runningTasksUnaffected, true);
 });
 
-test("canary failure stops rollout and atomically restores the default to the previous healthy Profile", async () => {
+test("canary failure stops rollout and restores the active candidate Profile without moving the healthy default", async () => {
   const store = new InMemoryAdminStore();
   const chain = new FailingAgentSupplyChain();
   const service = adminService(store, chain);
@@ -122,24 +146,29 @@ test("canary failure stops rollout and atomically restores the default to the pr
   const profileId = (drafted.profile as { id: string }).id;
   await service.transitionProfile(profileId, "validate", actor("validate-profile"));
   await service.transitionProfile(profileId, "activate", actor("activate-profile", "SecurityAdmin"));
-  await service.updateDefault("platform", { profileRevisionId: profileId }, actor("select-profile"));
+  await assert.rejects(
+    service.updateDefault("platform", { profileRevisionId: profileId }, actor("select-profile")),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "PROFILE_NOT_SERVING_READY",
+  );
 
   chain.failureOperation = "ROLLOUT";
   await assert.rejects(service.rollout(installation.id, "advance", actor("fail-canary")), AgentSupplyChainPolicyFailure);
   const result = await store.read((state) => {
     const selected = state.defaults.get("platform");
+    const audit = state.audit.find((entry) => entry.action === "AGENT_INSTALLATION_QUARANTINED");
+    const replacementId = (audit?.metadata.rollbackProfileRevisionIds as readonly string[] | undefined)?.[0];
     return {
       installation: structuredClone(state.installations.get(installation.id)),
       failedProfile: structuredClone(state.profiles.get(profileId)),
       selected,
-      replacement: selected ? structuredClone(state.profiles.get(selected)) : undefined,
-      audit: state.audit.find((entry) => entry.action === "AGENT_INSTALLATION_QUARANTINED"),
+      replacement: replacementId ? structuredClone(state.profiles.get(replacementId)) : undefined,
+      audit,
     };
   });
   assert.equal(result.installation?.state, "QUARANTINED");
   assert.equal(result.installation?.previousRolloutPercent, 0);
   assert.equal(result.failedProfile?.state, "SUPERSEDED");
-  assert.notEqual(result.selected, profileId);
+  assert.equal(result.selected, "profile-platform-claude-r1");
   assert.equal(result.replacement?.installationId, installation.rollbackInstallationId);
   assert.equal(result.replacement?.state, "ACTIVE");
   assert.equal(result.audit?.metadata.failureCode, "CANARY_HEALTH_FAILED");

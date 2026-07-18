@@ -20,7 +20,7 @@ import {
   type RequestActor,
 } from "./contracts";
 import { SecretVault } from "./secret-vault";
-import { ProviderProbe } from "./provider-probe";
+import { ProviderProbe, PROVIDER_REQUIRED_CHECKS } from "./provider-probe";
 import { credentialResultView, credentialView } from "./admin-public";
 import {
   AgentSupplyChain,
@@ -852,7 +852,7 @@ export class AdminService {
         if (actor.role !== "SecurityAdmin") {
           throw new ServiceProblem(403, "SECURITY_APPROVAL_REQUIRED", "SecurityAdmin must activate a third-party Provider endpoint");
         }
-        if (profile.state !== "READY" || provider.state !== "READY" || Object.values(provider.probe).some((result) => result !== "PASS")) {
+        if (profile.state !== "READY" || provider.state !== "READY" || !providerProbePassed(provider)) {
           throw new ServiceProblem(409, "PROVIDER_PROBE_REQUIRED", "All Provider probes must pass before activation");
         }
         profile.state = "ACTIVE";
@@ -885,6 +885,7 @@ export class AdminService {
       if (!profileSelectableForDefault(profile, parsed, actor)) {
         throw new ServiceProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
+      assertProfileServingReady(state, profile, actor);
       state.defaults.set(scopeKey, profileRevisionId);
       this.audit(state, "AGENT_DEFAULT_UPDATED", scopeKey, actor, { profileRevisionId, runningTasksUnaffected: true });
       return {
@@ -1254,6 +1255,42 @@ function mostRecentlyActivatedInstallation(
     return creationOrder || right.id.localeCompare(left.id);
   });
   return candidates[0] ?? null;
+}
+
+function providerProbePassed(provider: ProviderRevisionRecord): boolean {
+  const keys = Object.keys(provider.probe);
+  return keys.length === PROVIDER_REQUIRED_CHECKS.length
+    && PROVIDER_REQUIRED_CHECKS.every((check) => provider.probe[check] === "PASS");
+}
+
+function assertProfileServingReady(
+  state: AdminCatalogState,
+  profile: ProfileRevisionRecord,
+  actor: RequestActor,
+): void {
+  const installation = state.installations.get(profile.installationId);
+  const version = installation ? state.versions.get(installation.agentVersionId) : undefined;
+  const provider = state.providers.get(profile.providerRevisionId);
+  const credential = state.credentials.get(profile.credentialVersionId);
+  const installationReady = installation?.agent === profile.agent && installation.state === "ACTIVE"
+    && installation.health === "HEALTHY" && installation.rolloutPercent === 100
+    && installation.selfUpdateDisabled === true && !!installation.imageDigest && !!installation.workerImageId
+    && !!installation.buildReceiptId && !!installation.buildReceiptDigest;
+  const versionReady = version?.agent === profile.agent && version.state === "APPROVED"
+    && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
+    && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest;
+  const providerReady = provider?.agent === profile.agent && provider.state === "ACTIVE"
+    && provider.credentialVersionId === profile.credentialVersionId && providerProbePassed(provider);
+  const credentialScopeReady = profile.scope === "platform"
+    ? credential?.scope === "platform" && credential.scopeId === "global"
+    : credential?.scope === "tenant" && !!actor.tenantId && credential.scopeId === actor.tenantId;
+  if (!installationReady || !versionReady || !providerReady || credential?.state !== "ACTIVE" || !credentialScopeReady) {
+    throw new ServiceProblem(
+      409,
+      "PROFILE_NOT_SERVING_READY",
+      "Defaults require a fully active Installation, approved version, probed Provider and active credential",
+    );
+  }
 }
 
 function failureAudit(receipt: AgentSupplyChainTerminalFailureReceipt): Readonly<Record<string, unknown>> {

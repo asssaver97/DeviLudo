@@ -107,12 +107,12 @@ const initialState = (): DemoStoreState => ({
       imageDigest: `sha256:${"0a7c".padEnd(64, "9")}`,
       buildReceiptId: "local-build-claude-214",
       buildReceiptDigest: `sha256:${"a214".padEnd(64, "1")}`,
-      state: "CANARY",
+      state: "ACTIVE",
       health: "HEALTHY",
-      rolloutPercent: 25,
+      rolloutPercent: 100,
       rollbackInstallationId: null,
       createdAt: "2026-07-18T08:42:00.000Z",
-      activatedAt: null,
+      activatedAt: "2026-07-18T08:50:00.000Z",
     },
     {
       id: "codex-installation-091",
@@ -132,7 +132,7 @@ const initialState = (): DemoStoreState => ({
     },
   ],
   rollouts: {
-    "claude-installation-214": { percent: 25, state: "CANARY", previous: 5 },
+    "claude-installation-214": { percent: 100, state: "ACTIVE", previous: 25 },
     "codex-installation-091": { percent: 100, state: "ACTIVE", previous: 25 },
   },
   providers: [
@@ -148,7 +148,11 @@ const initialState = (): DemoStoreState => ({
       primaryModel: "claude-sonnet-4-6-20250514",
       credentialId: "cred-claude-platform-v4",
       state: "ACTIVE",
-      probe: { authentication: "PASS", streaming: "PASS", tools: "PASS", cancellation: "PASS", usage: "PASS" },
+      probe: {
+        authentication: "PASS", modelExistence: "PASS", streaming: "PASS", toolCalling: "PASS",
+        cancellation: "PASS", usage: "PASS", timeout: "PASS", minimalReasoning: "PASS",
+        dnsPinning: "PASS", redirectRevalidation: "PASS",
+      },
     },
     {
       id: "provider-codex-platform-r2",
@@ -162,7 +166,11 @@ const initialState = (): DemoStoreState => ({
       primaryModel: "gpt-5.3-codex-2026-06-12",
       credentialId: "cred-codex-platform-v2",
       state: "ACTIVE",
-      probe: { authentication: "PASS", streaming: "PASS", tools: "PASS", cancellation: "PASS", usage: "PASS" },
+      probe: {
+        authentication: "PASS", modelExistence: "PASS", streaming: "PASS", toolCalling: "PASS",
+        cancellation: "PASS", usage: "PASS", timeout: "PASS", minimalReasoning: "PASS",
+        dnsPinning: "PASS", redirectRevalidation: "PASS",
+      },
     },
   ],
   profiles: [

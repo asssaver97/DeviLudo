@@ -518,6 +518,18 @@ export async function PUT(request: Request, context: RouteContext) {
       if (!selectable) {
         throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
+      const installation = store.installations.find((item) => item.id === profile.installationId);
+      const provider = store.providers.find((item) => item.id === profile.providerId);
+      if (!installation || installation.agent !== profile.agent || installation.state !== "ACTIVE"
+        || installation.health !== "HEALTHY" || installation.rolloutPercent !== 100 || !installation.activatedAt
+        || store.agentVersions[`${installation.agent}@${installation.version}`] !== "APPROVED"
+        || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE") {
+        throw new HttpProblem(
+          409,
+          "PROFILE_NOT_SERVING_READY",
+          "Defaults require a fully active Installation, approved version and active Provider",
+        );
+      }
       store.defaults[match[1] ?? "platform"] = profileRevisionId;
       appendDemoAudit("AGENT_DEFAULT_UPDATED", match[1] ?? "platform", role, { profileRevisionId, affectsRunningTasks: false });
       return { scope: match[1], profileRevisionId, precedence: "project > tenant > platform > claude-code", affectsNewTasksOnly: true };

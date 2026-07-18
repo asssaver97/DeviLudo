@@ -59,3 +59,10 @@ The platform administrator console is not reused as browser authorization for lo
 Project defaults may reference an ACTIVE project Profile, an ACTIVE Profile belonging to the signed tenant, or an ACTIVE platform Profile. This is a reference to one immutable revision, not a credential copy. Tenant defaults may similarly select an ACTIVE tenant or platform Profile. A lower scope cannot select another tenant's Profile or loosen the platform allow-list.
 
 TenantAdmin may write tenant BYOK credentials and create/validate tenant Provider drafts. SecurityAdmin remains the only role that can activate a third-party endpoint after the complete Provider probe. Configuration changes affect new tasks only; queued and running tasks keep their locked Profile revision.
+
+An ACTIVE Profile may be prepared before its Installation finishes canary, but no
+platform, tenant, or project default may select it until the whole serving chain
+is ready: the Installation is healthy `100% ACTIVE`, its exact Agent version is
+still approved, every required Provider probe is `PASS`, and the bound credential
+is active in the permitted scope. A failed selection leaves the previous default
+unchanged and returns `PROFILE_NOT_SERVING_READY`.
