@@ -60,6 +60,22 @@ type ExecutionLockRow = {
   payload_digest: string;
 };
 
+type SteamInstallProjectionRow = {
+  build_receipt_id: string;
+  build_state: string;
+  steam_install_evidence_bundle_digest: string | null;
+  release_id: string;
+  release_state: string;
+  external_gate: string;
+  workflow_id: string;
+  release_run_id: string;
+  main_commit_sha: string;
+  build_id: string;
+  target_matrix: string[];
+  evidence_id: string;
+  evidence_bundle_digest: string;
+};
+
 type LockedConfiguration = {
   readonly specRevisionId: string;
   readonly specDigest: string;
@@ -280,7 +296,8 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
          JOIN deviludo.agent_runs run ON run.id = main_attempt.run_id
         WHERE build.tenant_id = $1::uuid AND build.project_id = $2::uuid
           AND main_attempt.run_id = $3::uuid AND build.main_commit_sha = $4
-          AND build.build_id = $5 AND build.state = 'INSTALL_TESTING'
+          AND build.build_id = $5
+          AND build.state IN ('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED')
           AND build.source_digest = main_evidence.source_digest
           AND main_evidence.invalidated_at IS NULL`,
       [input.tenantId, input.projectId, input.runId, input.commitSha, input.steamBuildId],
@@ -328,6 +345,9 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
       if (attempt.state === "FAILED" && (!attempt.repair_prompt_id || !SAFE_ID.test(attempt.repair_prompt_id))) {
         throw new WorkflowJobError("E2E_REPAIR_PROMPT_MISSING", true);
       }
+      if (input.mode === "STEAM_CLEAN_INSTALL" && attempt.state === "PASSED") {
+        await this.#projectSteamInstallEvidence(client, input, attempt, evidence);
+      }
       return Object.freeze({
         receiptId: `runner-receipt:${attempt.id}:${evidence.bundle_digest}`,
         attemptId: attempt.id,
@@ -340,6 +360,87 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
         repairPromptId: attempt.repair_prompt_id,
       });
     });
+  }
+
+  async #projectSteamInstallEvidence(
+    client: PostgresWorkflowClient,
+    input: WorkflowInput,
+    attempt: AttemptRow,
+    evidence: EvidenceRow,
+  ): Promise<void> {
+    const result = await client.query<SteamInstallProjectionRow>(
+      `SELECT build.id::text AS build_receipt_id,
+              build.state AS build_state,
+              build.steam_install_evidence_bundle_digest,
+              release.id::text AS release_id,
+              release.state AS release_state,
+              release.external_gate,
+              release.workflow_id,
+              release.run_id::text AS release_run_id,
+              release.main_commit_sha,
+              release.target_matrix,
+              build.build_id,
+              install_evidence.id::text AS evidence_id,
+              install_evidence.bundle_digest AS evidence_bundle_digest
+         FROM deviludo.steam_build_receipts build
+         JOIN deviludo.steam_releases release
+           ON release.tenant_id = build.tenant_id
+          AND release.project_id = build.project_id
+          AND release.id = build.release_id
+         JOIN deviludo.evidence_bundles install_evidence
+           ON install_evidence.tenant_id = build.tenant_id
+          AND install_evidence.project_id = build.project_id
+          AND install_evidence.attempt_id = $6::uuid
+        WHERE build.tenant_id = $1::uuid AND build.project_id = $2::uuid
+          AND release.run_id = $3::uuid AND release.workflow_id = $4
+          AND build.build_id = $5 AND build.main_commit_sha = $7
+          AND install_evidence.id = $8::uuid
+          AND install_evidence.status = 'PASSED'
+          AND install_evidence.invalidated_at IS NULL
+        FOR UPDATE OF build, release`,
+      [input.tenantId, input.projectId, input.runId, input.workflowId, input.steamBuildId,
+        attempt.id, attempt.commit_sha, evidence.id],
+    );
+    const row = onlyRow(result.rows, "Steam clean-install evidence cannot be projected");
+    if (!UUID.test(row.build_receipt_id) || !UUID.test(row.release_id)
+      || row.workflow_id !== input.workflowId || row.release_run_id !== input.runId
+      || row.main_commit_sha !== attempt.commit_sha || row.build_id !== input.steamBuildId
+      || row.evidence_id !== evidence.id || row.evidence_bundle_digest !== evidence.bundle_digest
+      || JSON.stringify(row.target_matrix) !== JSON.stringify(input.targetMatrix)) {
+      throw new WorkflowJobError("STEAM_INSTALL_EVIDENCE_PROJECTION_BINDING_CONFLICT", true);
+    }
+    if (row.build_state === "INSTALL_TESTING" && row.steam_install_evidence_bundle_digest === null
+      && row.release_state === "INSTALL_TESTING" && row.external_gate === "NONE") {
+      const build = await client.query(
+        `UPDATE deviludo.steam_build_receipts
+            SET state = 'EXTERNAL_APPROVAL_REQUIRED',
+                steam_install_evidence_bundle_digest = $4
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+            AND state = 'INSTALL_TESTING'
+            AND steam_install_evidence_bundle_digest IS NULL
+        RETURNING id`,
+        [input.tenantId, input.projectId, row.build_receipt_id, evidence.bundle_digest],
+      );
+      const release = await client.query(
+        `UPDATE deviludo.steam_releases
+            SET state = 'EXTERNAL_APPROVAL_REQUIRED', external_gate = 'VALVE_REVIEW',
+                version = version + 1
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+            AND state = 'INSTALL_TESTING' AND external_gate = 'NONE'
+        RETURNING id`,
+        [input.tenantId, input.projectId, row.release_id],
+      );
+      if (build.rows.length !== 1 || release.rows.length !== 1) {
+        throw new WorkflowJobError("STEAM_INSTALL_EVIDENCE_PROJECTION_RACE", true);
+      }
+      return;
+    }
+    const downstreamState = row.release_state === "EXTERNAL_APPROVAL_REQUIRED"
+      || row.release_state === "READY_TO_PUBLISH" || row.release_state === "RELEASED";
+    if (row.build_state !== "EXTERNAL_APPROVAL_REQUIRED"
+      || row.steam_install_evidence_bundle_digest !== evidence.bundle_digest || !downstreamState) {
+      throw new WorkflowJobError("STEAM_INSTALL_EVIDENCE_PROJECTION_CONFLICT", true);
+    }
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

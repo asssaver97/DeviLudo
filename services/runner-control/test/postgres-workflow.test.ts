@@ -23,6 +23,8 @@ const commitSha = "a".repeat(40);
 const sourceDigest = sha("b");
 const specDigest = sha("c");
 const testPlanDigest = sha("d");
+const buildReceiptId = "12121212-1212-4212-8212-121212121212";
+const releaseId = "13131313-1313-4313-8313-131313131313";
 
 const executionLock: RunnerExecutionLock = Object.freeze({
   schemaVersion: "deviludo.runner-execution-lock.v1",
@@ -227,11 +229,123 @@ class ScriptedClient implements PostgresWorkflowClient {
   release(): void { this.releases += 1; }
 }
 
+const steamInput = Object.freeze({
+  ...input,
+  mode: "STEAM_CLEAN_INSTALL" as const,
+  draftPullRequest: null,
+  steamBuildId: "91234567",
+});
+const steamExecutionLock: RunnerExecutionLock = Object.freeze({
+  ...executionLock,
+  mode: steamInput.mode,
+  steamBuildId: steamInput.steamBuildId,
+  execution: Object.freeze({
+    kind: "STEAM_CLEAN_INSTALL" as const,
+    steamAppId: "2841930",
+    buildId: steamInput.steamBuildId,
+    betaBranch: "private_beta",
+    installGrantId: "steam-install-grant-001",
+  }),
+});
+const steamExecutionLockDigest = runnerExecutionLockDigest(steamExecutionLock);
+
+function steamBinding() {
+  return { ...binding(), mode: steamInput.mode, executionLockDigest: steamExecutionLockDigest };
+}
+
+function steamTerminalRow() {
+  const platformEvidence = [{
+    platform: "linux", runnerId: "linux-runner-001", runnerCapabilityDigest: sha("1"),
+    exportDigest: sha("2"), logsDigest: sha("3"), junitDigest: sha("4"), inputTimelineDigest: sha("5"),
+    screenshotManifestDigest: sha("6"), videoManifestDigest: sha("7"), status: "PASSED",
+  }];
+  const core = {
+    id: evidenceId, attemptId, specRevisionId, specDigest, testPlanDigest, commitSha, sourceDigest,
+    targetMatrix: ["linux"], godotTestKitDigest: sha("8"), buildManifestDigest: sha("9"),
+    sbomDigest: sha("a"), vulnerabilityScanDigest: sha("b"), assetLicenseLedgerDigest: sha("c"),
+    platformEvidence, status: "PASSED", valid: true, createdAt: "2026-07-18T00:01:00.000Z",
+  };
+  const bundleDigest = sha256Canonical(core);
+  return {
+    id: attemptId, run_id: runId, workflow_id: steamInput.workflowId,
+    workflow_operation_key: steamInput.operationKey, workflow_request_digest: steamInput.requestDigest,
+    execution_lock_id: executionLockId, mode: steamInput.mode, commit_sha: commitSha, source_digest: sourceDigest,
+    binding: steamBinding(), target_matrix: ["linux"], draft_pull_request: null,
+    steam_build_id: steamInput.steamBuildId, state: "PASSED", repair_prompt_id: null,
+    completed_at: "2026-07-18T00:01:00.000Z", evidence_id: evidenceId,
+    evidence_commit_sha: commitSha, evidence_source_digest: sourceDigest,
+    evidence_binding: {
+      schemaVersion: "deviludo.evidence-binding.v1", attemptId, executionLockId,
+      executionLockDigest: steamExecutionLockDigest,
+      specRevisionId, specDigest, testPlanDigest, runnerToolchainRevisionId,
+      runnerToolchainDigest: sha("0"), commitSha, sourceDigest, targetMatrix: ["linux"],
+    },
+    evidence_manifest: { ...core, bundleDigest }, evidence_bundle_digest: bundleDigest,
+    evidence_object_key: `tenants/${tenantId}/evidence/${bundleDigest}.json`,
+    evidence_status: "PASSED", evidence_invalidated_at: null,
+  };
+}
+
+class SteamProjectionClient implements PostgresWorkflowClient {
+  readonly sql: string[] = [];
+  projected: boolean;
+  readonly terminal = steamTerminalRow();
+
+  constructor(projected = false) { this.projected = projected; }
+
+  async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values: readonly unknown[] = [],
+  ): Promise<PostgresQueryResult<Row>> {
+    this.sql.push(text);
+    if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK" || text.includes("set_config('app.tenant_id'")) return result([]);
+    if (text.includes("FROM deviludo.agent_runs") && text.includes("FOR UPDATE")) {
+      return result([{ iteration_id: binding().iterationId, configuration_lock: {
+        specRevisionId, specDigest, testPlanDigest, runnerToolchainRevisionId,
+        runnerToolchainDigest: sha("0"), targetMatrix: ["linux"],
+      } }] as unknown as Row[]);
+    }
+    if (text.includes("FROM deviludo.steam_build_receipts build") && !text.includes("AS build_receipt_id")) {
+      assert.match(text, /build\.state IN \('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED'\)/);
+      return result([{ source_digest: sourceDigest, spec_revision_id: specRevisionId }] as unknown as Row[]);
+    }
+    if (text.includes("FROM deviludo.runner_execution_locks")) {
+      return result([{ id: executionLockId, payload: steamExecutionLock, payload_digest: steamExecutionLockDigest }] as unknown as Row[]);
+    }
+    if (text.includes("INSERT INTO deviludo.e2e_attempts")) return result([]);
+    if (text.includes("workflow_operation_key = $3") && !text.includes("LEFT JOIN")) {
+      return result([this.terminal] as unknown as Row[]);
+    }
+    if (text.includes("LEFT JOIN deviludo.evidence_bundles")) return result([this.terminal] as unknown as Row[]);
+    if (text.includes("AS build_receipt_id")) {
+      return result([{
+        build_receipt_id: buildReceiptId,
+        build_state: this.projected ? "EXTERNAL_APPROVAL_REQUIRED" : "INSTALL_TESTING",
+        steam_install_evidence_bundle_digest: this.projected ? this.terminal.evidence_bundle_digest : null,
+        release_id: releaseId,
+        release_state: this.projected ? "EXTERNAL_APPROVAL_REQUIRED" : "INSTALL_TESTING",
+        external_gate: this.projected ? "VALVE_REVIEW" : "NONE",
+        workflow_id: steamInput.workflowId, release_run_id: runId, main_commit_sha: commitSha,
+        build_id: steamInput.steamBuildId, target_matrix: ["linux"], evidence_id: evidenceId,
+        evidence_bundle_digest: this.terminal.evidence_bundle_digest,
+      }] as unknown as Row[]);
+    }
+    if (text.includes("UPDATE deviludo.steam_build_receipts")) return result([{ id: buildReceiptId }] as unknown as Row[]);
+    if (text.includes("UPDATE deviludo.steam_releases")) {
+      this.projected = true;
+      return result([{ id: releaseId }] as unknown as Row[]);
+    }
+    throw new Error(`Unexpected SQL: ${text}; values=${JSON.stringify(values)}`);
+  }
+
+  release(): void {}
+}
+
 function result<Row extends Record<string, unknown>>(rows: readonly Row[]): PostgresQueryResult<Row> {
   return { rowCount: rows.length, rows };
 }
 
-function pool(client: ScriptedClient): PostgresWorkflowPool {
+function pool(client: PostgresWorkflowClient): PostgresWorkflowPool {
   return { async connect() { return client; } };
 }
 
@@ -312,4 +426,20 @@ test("PostgreSQL Runner workflow rejects an execution lock whose content no long
     return true;
   });
   assert.equal(client.polls, 0);
+});
+
+test("PostgreSQL Runner projects passed clean-Steam-install evidence before returning its workflow receipt", async () => {
+  const client = new SteamProjectionClient();
+  const port = new PostgresRunnerWorkflowPort({ pool: pool(client), pollIntervalMs: 250, maxWaitMs: 30_000 });
+  const receipt = await port.execute(steamInput);
+  assert.equal(receipt.status, "PASSED");
+  assert.equal(receipt.steamBuildId, steamInput.steamBuildId);
+  assert.equal(client.projected, true);
+  assert.ok(client.sql.some((sql) => sql.includes("steam_install_evidence_bundle_digest = $4")));
+  assert.ok(client.sql.some((sql) => sql.includes("external_gate = 'VALVE_REVIEW'")));
+
+  const replayClient = new SteamProjectionClient(true);
+  const replay = await new PostgresRunnerWorkflowPort({ pool: pool(replayClient) }).execute(steamInput);
+  assert.equal(replay.evidenceBundleId, evidenceId);
+  assert.equal(replayClient.sql.some((sql) => sql.includes("UPDATE deviludo.steam_releases")), false);
 });

@@ -108,6 +108,8 @@ class Client implements PostgresWorkflowClient {
   authorityPublish = publishRow;
   buildRow: Record<string, unknown> | null = null;
   publicationRow: Record<string, unknown> | null = null;
+  lifecycleState = "STEAM_PRIVATE_BETA";
+  lifecycleGate = "NONE";
   releases = 0;
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -142,6 +144,17 @@ class Client implements PostgresWorkflowClient {
     }
     if (text.includes("FROM deviludo.steam_default_branch_receipts")) {
       return this.publicationRow ? result([this.publicationRow] as Row[]) : result([]);
+    }
+    if (text.includes("UPDATE deviludo.steam_releases") && text.includes("'INSTALL_TESTING'")) {
+      if (this.lifecycleState === "STEAM_PRIVATE_BETA") this.lifecycleState = "INSTALL_TESTING";
+      return result([]);
+    }
+    if (text.includes("UPDATE deviludo.steam_releases") && text.includes("'RELEASED'")) {
+      if (this.lifecycleState === "READY_TO_PUBLISH") this.lifecycleState = "RELEASED";
+      return result([]);
+    }
+    if (text.includes("FROM deviludo.steam_releases")) {
+      return result([{ id: releaseId, state: this.lifecycleState, external_gate: this.lifecycleGate }] as unknown as Row[]);
     }
     if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return result([]);
@@ -191,6 +204,7 @@ test("PostgreSQL Steam archives replay only an identical private-Beta and defaul
   const builds = new PostgresSteamBuildReceiptArchive(pool(client), () => buildReceiptId);
   assert.deepEqual(await builds.persist({ operationKey, requestDigest, receipt: privateBetaReceipt }), { receiptId: buildReceiptId });
   assert.deepEqual(await builds.persist({ operationKey, requestDigest, receipt: privateBetaReceipt }), { receiptId: buildReceiptId });
+  assert.equal(client.lifecycleState, "INSTALL_TESTING");
   assert.match(client.calls.find((call) => call.text.includes("INSERT INTO deviludo.steam_build_receipts"))!.text, /ON CONFLICT \(release_id\) DO NOTHING/);
 
   const publications = new PostgresSteamDefaultBranchReceiptArchive(pool(client), () => defaultReceiptId);
@@ -200,8 +214,10 @@ test("PostgreSQL Steam archives replay only an identical private-Beta and defaul
     steamInstallEvidenceBundleDigest: installEvidenceDigest,
     externalApprovalIds: approvals, publishedAt: "2030-01-02T00:00:00.000Z",
   };
+  client.lifecycleState = "READY_TO_PUBLISH";
   assert.deepEqual(await publications.persist(publication), { receiptId: defaultReceiptId });
   assert.deepEqual(await publications.persist(publication), { receiptId: defaultReceiptId });
+  assert.equal(client.lifecycleState, "RELEASED");
   assert.match(client.calls.find((call) => call.text.includes("INSERT INTO deviludo.steam_default_branch_receipts"))!.text, /ON CONFLICT \(tenant_id, release_id\) DO NOTHING/);
   assert.doesNotMatch(JSON.stringify(client.calls), /config\.vdf|password|steam.?guard/i);
 

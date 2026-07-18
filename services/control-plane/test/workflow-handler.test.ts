@@ -332,6 +332,86 @@ test("workflow action completion rejects a signal from the wrong authority", asy
   }), /signal binding is invalid/);
 });
 
+test("external approval completion appends the verified receipt and advances the exact release gate atomically", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const outboxId = "44444444-4444-4444-8444-444444444444";
+  const evidenceId = "55555555-5555-4555-8555-555555555555";
+  const buildReceiptId = "66666666-6666-4666-8666-666666666666";
+  const externalReceiptId = "77777777-7777-4777-8777-777777777777";
+  const installDigest = "d".repeat(64);
+  const signal = Object.freeze({
+    signalId: "external-valve-signal-001",
+    type: "EXTERNAL_APPROVED" as const,
+    gate: "VALVE_REVIEW" as const,
+    approvalId: "valve-review-approval-001",
+  });
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation: "WAIT_FOR_EXTERNAL_APPROVAL", status: "WAITING",
+    binding: {
+      state: "EXTERNAL_APPROVAL_REQUIRED", specRevisionId: null, lockedRunConfigurationId: null,
+      providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
+      evidenceBundleId: evidenceId, mainCommitSha: null, releaseId: null, steamBuildId: "91234567",
+      externalGate: "VALVE_REVIEW", cancellationReason: null,
+    },
+    completion_signal_id: null, completion_signal_digest: null,
+    completion_source: null, completion_receipt_id: null,
+  };
+  const statements: string[] = [];
+  let externalInsert: readonly unknown[] | undefined;
+  let outboxInsert: readonly unknown[] | undefined;
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values: readonly unknown[] = []) {
+      statements.push(statement);
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.steam_build_receipts build")) return { rows: [{
+        release_id: releaseId, release_state: "EXTERNAL_APPROVAL_REQUIRED", external_gate: "VALVE_REVIEW",
+        build_receipt_id: buildReceiptId, build_state: "EXTERNAL_APPROVAL_REQUIRED",
+        steam_install_evidence_bundle_digest: installDigest, evidence_id: evidenceId,
+        evidence_bundle_digest: installDigest, release_target_matrix: ["linux"], attempt_target_matrix: ["linux"],
+      }] as Row[] };
+      if (statement.includes("INSERT INTO deviludo.workflow_external_approval_receipts")) {
+        externalInsert = values;
+        return { rows: [], rowCount: 1 };
+      }
+      if (statement.includes("FROM deviludo.workflow_external_approval_receipts")) return { rows: [{
+        id: externalReceiptId, release_id: releaseId, workflow_id: "delivery-001",
+        signal_id: signal.signalId, gate: signal.gate, approval_id: signal.approvalId,
+        verifier_subject: "STEAM_APPROVAL_MONITOR", evidence_digest: externalInsert?.[8],
+        receipt: JSON.parse(String(externalInsert?.[9])),
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.steam_releases")) {
+        assert.deepEqual(values.slice(3), ["EXTERNAL_APPROVAL_REQUIRED", "FIRST_RELEASE", "VALVE_REVIEW"]);
+        return { rows: [{ id: releaseId }] as Row[] };
+      }
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) {
+        outboxInsert = values;
+        return { rows: [], rowCount: 1 };
+      }
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: signal.signalId, signal_digest: outboxInsert?.[5],
+        signal: JSON.parse(String(outboxInsert?.[6])), state: "PENDING",
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  const receipt = await store.complete({
+    tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "STEAM_APPROVAL_MONITOR", sourceReceiptId: "steam-monitor-receipt-001", signal,
+  });
+  assert.equal(receipt.state, "PENDING_DELIVERY");
+  assert.ok(statements.findIndex((value) => value.includes("workflow_external_approval_receipts"))
+    < statements.findIndex((value) => value.includes("workflow_signal_outbox")));
+  assert.equal(statements.at(-1), "COMMIT");
+  assert.match(JSON.stringify(externalInsert), /steam-monitor-receipt-001/);
+});
+
 test("workflow signal outbox processor retries Temporal failures without changing signal identity", async () => {
   const item = {
     id: "44444444-4444-4444-8444-444444444444",

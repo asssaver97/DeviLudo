@@ -287,6 +287,12 @@ type BuildReceiptRow = {
   uploaded_at: string;
 };
 
+type ReleaseLifecycleRow = {
+  id: string;
+  state: string;
+  external_gate: string;
+};
+
 export class PostgresSteamBuildReceiptArchive implements SteamBuildReceiptArchive {
   constructor(private readonly pool: PostgresWorkflowPool, private readonly receiptId: () => string = randomUUID) {}
 
@@ -322,6 +328,22 @@ export class PostgresSteamBuildReceiptArchive implements SteamBuildReceiptArchiv
       const row = selected.rows[0]!;
       const stored = buildReceiptFromRow(row);
       if (sha256Canonical(stored) !== sha256Canonical(receipt)) invalid();
+      await client.query(
+        `UPDATE deviludo.steam_releases
+            SET state = 'INSTALL_TESTING', external_gate = 'NONE', version = version + 1
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+            AND state = 'STEAM_PRIVATE_BETA' AND external_gate = 'NONE'`,
+        [receipt.tenantId, receipt.projectId, receipt.releaseId],
+      );
+      const release = await client.query<ReleaseLifecycleRow>(
+        `SELECT id::text, state, external_gate
+           FROM deviludo.steam_releases
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+          FOR UPDATE`,
+        [receipt.tenantId, receipt.projectId, receipt.releaseId],
+      );
+      if (release.rows.length !== 1 || release.rows[0]?.id !== receipt.releaseId
+        || release.rows[0]?.state !== "INSTALL_TESTING" || release.rows[0]?.external_gate !== "NONE") invalid();
       return Object.freeze({ receiptId: row.id });
     });
   }
@@ -385,6 +407,22 @@ export class PostgresSteamDefaultBranchReceiptArchive implements SteamDefaultBra
       if (selected.rows.length !== 1) invalid();
       const stored = publicationFromRow(selected.rows[0]!);
       if (sha256Canonical(stored) !== sha256Canonical(publicationReceipt(stored.receiptId, input))) invalid();
+      await client.query(
+        `UPDATE deviludo.steam_releases
+            SET state = 'RELEASED', external_gate = 'NONE', version = version + 1
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+            AND state = 'READY_TO_PUBLISH' AND external_gate = 'NONE'`,
+        [input.tenantId, input.projectId, input.releaseId],
+      );
+      const release = await client.query<ReleaseLifecycleRow>(
+        `SELECT id::text, state, external_gate
+           FROM deviludo.steam_releases
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+          FOR UPDATE`,
+        [input.tenantId, input.projectId, input.releaseId],
+      );
+      if (release.rows.length !== 1 || release.rows[0]?.id !== input.releaseId
+        || release.rows[0]?.state !== "RELEASED" || release.rows[0]?.external_gate !== "NONE") invalid();
       return Object.freeze({ receiptId: stored.receiptId });
     });
   }

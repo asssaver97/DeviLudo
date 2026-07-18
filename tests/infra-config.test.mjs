@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 24 }, (_, index) => {
+  const offsets = Array.from({ length: 25 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,22 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Steam release lifecycle advances only from authoritative persisted evidence", () => {
+  const migration = readFileSync(new URL("../infra/postgres/025_steam_release_lifecycle.sql", import.meta.url), "utf8");
+  const runner = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");
+  const completion = readFileSync(new URL("../services/control-plane/src/workflow-action-completion-postgres.ts", import.meta.url), "utf8");
+  const execution = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-execution.ts", import.meta.url), "utf8");
+  assert.match(migration, /steam_release_external_gate_shape/);
+  assert.match(migration, /VALVE_REVIEW'[\s\S]+FIRST_RELEASE'[\s\S]+DEFAULT_BRANCH_CONFIRMATION/);
+  assert.match(migration, /NEW\.version <> OLD\.version \+ 1/);
+  assert.match(runner, /#projectSteamInstallEvidence/);
+  assert.match(runner, /steam_install_evidence_bundle_digest = \$4/);
+  assert.match(completion, /INSERT INTO deviludo\.workflow_external_approval_receipts/);
+  assert.match(completion, /ON CONFLICT \(release_id, gate\) DO NOTHING/);
+  assert.match(execution, /SET state = 'INSTALL_TESTING'/);
+  assert.match(execution, /SET state = 'RELEASED'/);
 });
 
 test("Steam install grants are tenant-isolated, expiring and once-per-platform", () => {
