@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import type { AgentExecutionRequest, AgentExecutionStatus, LockedAgentExecution } from "./contracts";
-import { parseAgentExecutionRequest, validateAgentExecutionStatus, validateIsolatedResult } from "./contracts";
+import { parseAgentExecutionRequest, validateAgentExecutionStatus, validateAuthoritativeResult } from "./contracts";
 import {
   AgentProviderUnavailable,
   type AgentExecutionOperationPersistence,
@@ -191,7 +191,7 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
       const request = parseAgentExecutionRequest(operation.request_payload);
       const authority = await selectAuthority(client, input.tenantId, request.projectId, input.runId, "FOR UPDATE OF run");
       const lock = parseAuthority(authority, request);
-      const result = validateIsolatedResult(input.result, lock, operation.attempt_id ?? "");
+      const result = validateAuthoritativeResult(input.result, lock, operation.attempt_id ?? "");
       const receipt = validateAgentExecutionStatus({ status: result.status, runId: input.runId,
         providerRevisionId: lock.providerRevisionId, receipt: input.receipt }, request).receipt;
       if (!receipt) invalid();

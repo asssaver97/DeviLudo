@@ -6,3 +6,4 @@ export * from "./postgres-dispatch";
 export * from "./token-broker";
 export * from "./worker-host";
 export * from "./run-worker";
+export * from "./scm-candidate-client";

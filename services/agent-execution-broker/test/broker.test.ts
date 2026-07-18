@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { verifyRunToken } from "../../../lib/security/credentials";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { contentSha256, signGitHubCandidateArtifact } from "../../scm-proxy/src/github-artifacts";
 import type {
   AgentExecutionRequest,
   AgentExecutionStatus,
@@ -26,6 +28,7 @@ const runId = "33333333-3333-4333-8333-333333333333";
 const claimToken = "55555555-5555-4555-8555-555555555555";
 const attemptId = "66666666-6666-4666-8666-666666666666";
 const now = new Date("2030-01-01T00:00:00.000Z");
+const candidateKey = generateKeyPairSync("ed25519").privateKey;
 
 function request(): AgentExecutionRequest {
   return Object.freeze({
@@ -54,13 +57,21 @@ function lock(): LockedAgentExecution {
 
 function completedResult(): IsolatedAgentExecutionResult {
   const locked = lock();
+  const content = Buffer.from("extends Node\n", "utf8");
   return Object.freeze({
     status: "COMPLETED", runId, attemptId, resolutionDigest: locked.resolutionDigest,
     profileRevisionId: locked.profileRevisionId, installationId: locked.installationId,
     imageDigest: locked.imageDigest, adapterVersion: locked.adapterVersion,
     providerRevisionId: locked.providerRevisionId, credentialVersionId: locked.credentialVersionId,
-    model: locked.model, candidateCommitSha: "f".repeat(40), draftPullRequest: 42,
-    diagnosticId: null, receiptId: "receipt-r1",
+    model: locked.model, diagnosticId: null, executionReceiptId: "execution-receipt-r1",
+    candidateArtifact: signGitHubCandidateArtifact({
+      schemaVersion: "deviludo.github-candidate.v1", artifactId: "artifact-r1", tenantId, projectId,
+      runId, attemptId, specRevisionId: locked.specRevisionId, expectedBaseCommitSha: locked.baseCommitSha,
+      candidateBranch: "deviludo/project/run-1", commitMessage: "agent: implement approved specification",
+      sourceDigest: "1".repeat(64), changes: Object.freeze([{ operation: "UPSERT", path: "main.gd", mode: "100644",
+        contentBase64: content.toString("base64"), contentDigest: contentSha256(content), sizeBytes: content.byteLength }]),
+      createdAt: now.toISOString(),
+    }, candidateKey, "worker-image-attestation-v1"),
   });
 }
 
@@ -88,16 +99,23 @@ test("worker deposits a 15-minute bound DLRT, passes only its SecretRef, and rev
     async waitForProvider() { throw new Error("not expected"); }, async release() { throw new Error("not expected"); }, async probe() {},
   };
   let dispatchedSecretRef = "";
+  let candidatePublishes = 0;
   const worker = new AgentExecutionOperationWorker(persistence, tokens, {
     async execute(input, context) {
       dispatchedSecretRef = input.inferenceTokenSecretRef;
       assert.equal("apiKey" in input, false); assert.equal("token" in input, false);
       await context.heartbeat(); return completedResult();
     }, async probe() {},
+  }, { async publish(input) { candidatePublishes += 1; return { runId, attemptId,
+      artifactId: input.artifact.payload.artifactId, artifactDigest: input.artifact.payload.artifactDigest,
+      baseCommitSha: lock().baseCommitSha, candidateCommitSha: "f".repeat(40), sourceDigest: input.artifact.payload.sourceDigest,
+      draftPullRequest: 42, receiptId: "candidate-receipt-r1" }; }, async probe() {},
   }, { now: () => now, claimToken: () => claimToken });
   const status = await worker.execute({ tenantId, runId });
   assert.equal(status?.status, "COMPLETED");
   assert.equal(status?.receipt?.candidateCommitSha, "f".repeat(40));
+  assert.equal(status?.receipt?.receiptId, "candidate-receipt-r1");
+  assert.equal(candidatePublishes, 1);
   assert.equal(dispatchedSecretRef, `secret://agent-runs/${runId}/${attemptId}`);
   assert.deepEqual(revoked, [dispatchedSecretRef]);
   const token = new TextDecoder().decode(stored[0]);
@@ -122,7 +140,8 @@ test("expired authorization enters WAITING_PROVIDER before isolated execution", 
   }, () => now);
   const worker = new AgentExecutionOperationWorker(persistence, tokens, {
     async execute() { executed = true; return completedResult(); }, async probe() {},
-  }, { now: () => now, claimToken: () => claimToken });
+  }, { async publish() { throw new Error("not expected"); }, async probe() {} },
+  { now: () => now, claimToken: () => claimToken });
   assert.equal(await worker.execute({ tenantId, runId }), null);
   assert.equal(waited, true); assert.equal(executed, false);
 });

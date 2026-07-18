@@ -1,5 +1,6 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import type { AgentWorkflowRunReceipt } from "../../agent-worker/src/workflow-handler";
+import type { SignedGitHubCandidateArtifact } from "../../scm-proxy/src/github-contracts";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -65,7 +66,46 @@ export interface IsolatedAgentExecutionRequest extends LockedAgentExecution {
   readonly inferenceTokenExpiresAt: string;
 }
 
-export interface IsolatedAgentExecutionResult {
+interface IsolatedAgentExecutionResultBinding {
+  readonly status: "COMPLETED" | "FAILED";
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly resolutionDigest: string;
+  readonly profileRevisionId: string;
+  readonly installationId: string;
+  readonly imageDigest: string;
+  readonly adapterVersion: string;
+  readonly providerRevisionId: string;
+  readonly credentialVersionId: string;
+  readonly model: string;
+  readonly executionReceiptId: string;
+}
+
+export type IsolatedAgentExecutionResult =
+  | IsolatedAgentExecutionResultBinding & Readonly<{
+      status: "COMPLETED";
+      candidateArtifact: SignedGitHubCandidateArtifact;
+      diagnosticId: null;
+    }>
+  | IsolatedAgentExecutionResultBinding & Readonly<{
+      status: "FAILED";
+      candidateArtifact: null;
+      diagnosticId: string;
+    }>;
+
+export interface PublishedAgentCandidateReceipt {
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly artifactId: string;
+  readonly artifactDigest: string;
+  readonly baseCommitSha: string;
+  readonly candidateCommitSha: string;
+  readonly sourceDigest: string;
+  readonly draftPullRequest: number;
+  readonly receiptId: string;
+}
+
+export interface AuthoritativeAgentExecutionResult {
   readonly status: "COMPLETED" | "FAILED";
   readonly runId: string;
   readonly attemptId: string;
@@ -139,6 +179,33 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
     || body.imageDigest !== lock.imageDigest || body.adapterVersion !== lock.adapterVersion
     || body.providerRevisionId !== lock.providerRevisionId || body.credentialVersionId !== lock.credentialVersionId
+    || body.model !== lock.model || typeof body.executionReceiptId !== "string" || !SAFE_ID.test(body.executionReceiptId)) invalid();
+  if (body.status === "COMPLETED") {
+    const artifact = record(body.candidateArtifact);
+    const payload = record(artifact.payload);
+    const attestation = record(artifact.attestation);
+    if (body.diagnosticId !== null || payload.schemaVersion !== "deviludo.github-candidate.v1"
+      || payload.tenantId !== lock.tenantId || payload.projectId !== lock.projectId
+      || payload.runId !== lock.runId || payload.attemptId !== attemptId
+      || payload.specRevisionId !== lock.specRevisionId || payload.expectedBaseCommitSha !== lock.baseCommitSha
+      || typeof payload.artifactId !== "string" || !SAFE_ID.test(payload.artifactId)
+      || typeof payload.artifactDigest !== "string" || !SHA256.test(payload.artifactDigest)
+      || typeof payload.sourceDigest !== "string" || !SHA256.test(payload.sourceDigest)
+      || !Array.isArray(payload.changes) || payload.changes.length < 1
+      || attestation.algorithm !== "Ed25519" || typeof attestation.keyId !== "string" || !SAFE_ID.test(attestation.keyId)
+      || typeof attestation.signature !== "string" || attestation.signature.length < 32) invalid();
+  } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
+    || body.candidateArtifact !== null) invalid();
+  return Object.freeze({ ...body }) as unknown as IsolatedAgentExecutionResult;
+}
+
+export function validateAuthoritativeResult(value: unknown, lock: LockedAgentExecution, attemptId: string): AuthoritativeAgentExecutionResult {
+  const body = record(value);
+  if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
+    || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
+    || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
+    || body.imageDigest !== lock.imageDigest || body.adapterVersion !== lock.adapterVersion
+    || body.providerRevisionId !== lock.providerRevisionId || body.credentialVersionId !== lock.credentialVersionId
     || body.model !== lock.model || typeof body.receiptId !== "string" || !SAFE_ID.test(body.receiptId)) invalid();
   if (body.status === "COMPLETED") {
     if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
@@ -146,7 +213,20 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
       || (body.draftPullRequest as number) < 1 || body.diagnosticId !== null) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
     || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
-  return Object.freeze({ ...body }) as unknown as IsolatedAgentExecutionResult;
+  return Object.freeze({ ...body }) as unknown as AuthoritativeAgentExecutionResult;
+}
+
+export function validatePublishedCandidate(value: unknown, isolated: Extract<IsolatedAgentExecutionResult, { status: "COMPLETED" }>,
+  lock: LockedAgentExecution): PublishedAgentCandidateReceipt {
+  const body = record(value);
+  const payload = isolated.candidateArtifact.payload;
+  if (body.runId !== lock.runId || body.attemptId !== isolated.attemptId
+    || body.artifactId !== payload.artifactId || body.artifactDigest !== payload.artifactDigest
+    || body.baseCommitSha !== lock.baseCommitSha || body.sourceDigest !== payload.sourceDigest
+    || typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
+    || body.candidateCommitSha === lock.baseCommitSha || !Number.isSafeInteger(body.draftPullRequest)
+    || (body.draftPullRequest as number) < 1 || typeof body.receiptId !== "string" || !SAFE_ID.test(body.receiptId)) invalid();
+  return Object.freeze({ ...body }) as unknown as PublishedAgentCandidateReceipt;
 }
 
 function validateReceipt(value: unknown, status: "COMPLETED" | "FAILED", runId: string, providerRevisionId: string): AgentWorkflowRunReceipt {

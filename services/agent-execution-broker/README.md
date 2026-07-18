@@ -9,8 +9,11 @@ Agent destination and isolated development Workers.
 - The Worker receives an expiring `secret://`/Vault reference to a DLRT. The
   token and upstream API key are never stored in PostgreSQL or returned by HTTP.
 - Leases prevent a stale microVM attempt from committing a result.
+- The microVM can return only a signed candidate artifact. A separate mTLS SCM
+  Broker owns GitHub writes; only its archived Draft PR receipt can complete a
+  run.
 - Completed receipts are bound to the locked image, adapter, Provider, model,
-  candidate commit and Draft PR.
+  authoritative candidate commit and Draft PR.
 - Provider loss enters `WAITING_PROVIDER`; replay may resume only the same Run.
 
 The Broker process does not install Claude Code or Codex CLI. Polling Worker

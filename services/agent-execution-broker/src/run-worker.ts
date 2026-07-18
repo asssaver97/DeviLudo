@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { postgresWorkflowPoolFromEnv, type ClosablePostgresWorkflowPool } from "../../temporal/src/node-postgres";
-import { AgentExecutionOperationWorker, type IsolatedAgentExecutionDispatcher } from "./operations";
+import { AgentExecutionOperationWorker, type AgentCandidatePublisher, type IsolatedAgentExecutionDispatcher } from "./operations";
 import { PostgresAgentExecutionDispatch } from "./postgres-dispatch";
 import { PostgresAgentExecutionOperations } from "./postgres-operations";
 import { HmacEphemeralRunTokenBroker, type EphemeralRunTokenSecretStore } from "./token-broker";
@@ -17,6 +17,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-
  */
 export async function agentExecutionWorkerFromEnv(
   executor: IsolatedAgentExecutionDispatcher,
+  candidates: AgentCandidatePublisher,
   secrets: EphemeralRunTokenSecretStore,
   env: Readonly<Record<string, string | undefined>> = process.env,
   suppliedPool?: ClosablePostgresWorkflowPool,
@@ -29,7 +30,7 @@ export async function agentExecutionWorkerFromEnv(
     const operations = new PostgresAgentExecutionOperations(pool);
     const dispatch = new PostgresAgentExecutionDispatch(pool);
     const tokens = new HmacEphemeralRunTokenBroker(signingKey, secrets);
-    const worker = new AgentExecutionOperationWorker(operations, tokens, executor, {
+    const worker = new AgentExecutionOperationWorker(operations, tokens, executor, candidates, {
       leaseMs: integer(env.DEVILUDO_AGENT_EXECUTION_WORKER_LEASE_MS, 5 * 60_000, 30_000, 15 * 60_000),
     });
     const processor = new AgentExecutionOperationProcessor(dispatch, worker);
@@ -48,8 +49,9 @@ export async function agentExecutionWorkerFromEnv(
 }
 
 export async function runAgentExecutionWorker(executor: IsolatedAgentExecutionDispatcher,
-  secrets: EphemeralRunTokenSecretStore, env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
-  const runtime = await agentExecutionWorkerFromEnv(executor, secrets, env);
+  candidates: AgentCandidatePublisher, secrets: EphemeralRunTokenSecretStore,
+  env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
+  const runtime = await agentExecutionWorkerFromEnv(executor, candidates, secrets, env);
   const shutdown = new AbortController(); const stop = () => shutdown.abort();
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
   try { await runtime.host.run(shutdown.signal); }

@@ -75,6 +75,14 @@ test plan and approval operation. Its mTLS allow-list is distinct from the
 Artifact Preparer, and every retry must repeat the receipt operation key as the
 HTTP idempotency key.
 
+The Agent execution Worker submits only an Ed25519-attested candidate artifact
+to the TLS 1.3 mTLS `/v1/candidates` boundary. The production entry is
+`npm run start:scm-candidate-broker`, configured from
+`.env.candidate.example`. This Broker re-resolves the locked Run, source
+baseline, repository binding and active GitHub App installation under tenant
+RLS, then creates and archives the Draft PR. The Worker receives only the
+archived receipt; it never receives a GitHub installation token or App key.
+
 The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1

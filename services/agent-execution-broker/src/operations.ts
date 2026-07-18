@@ -5,11 +5,13 @@ import type {
   AgentExecutionLookup,
   AgentExecutionRequest,
   AgentExecutionStatus,
+  AuthoritativeAgentExecutionResult,
   IsolatedAgentExecutionRequest,
   IsolatedAgentExecutionResult,
   LockedAgentExecution,
+  PublishedAgentCandidateReceipt,
 } from "./contracts";
-import { parseAgentExecutionRequest, validateAgentExecutionStatus, validateIsolatedResult } from "./contracts";
+import { parseAgentExecutionRequest, validateAgentExecutionStatus, validateIsolatedResult, validatePublishedCandidate } from "./contracts";
 import { AgentRunAuthorizationUnavailableError, HmacEphemeralRunTokenBroker } from "./token-broker";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -27,7 +29,7 @@ export interface AgentExecutionOperationPersistence {
     Promise<Readonly<{ kind: "ACQUIRED"; request: AgentExecutionRequest; lock: LockedAgentExecution; attemptId: string; attempt: number }>
       | Readonly<{ kind: "BUSY" | "TERMINAL"; status: AgentExecutionStatus }>>;
   heartbeat(input: Readonly<{ tenantId: string; runId: string; claimToken: string; heartbeatAt: string; claimExpiresAt: string }>): Promise<void>;
-  complete(input: Readonly<{ tenantId: string; runId: string; claimToken: string; result: IsolatedAgentExecutionResult;
+  complete(input: Readonly<{ tenantId: string; runId: string; claimToken: string; result: AuthoritativeAgentExecutionResult;
     receipt: AgentWorkflowRunReceipt; completedAt: string }>): Promise<AgentExecutionStatus>;
   waitForProvider(input: Readonly<{ tenantId: string; runId: string; claimToken: string; providerRevisionId: string;
     observedAt: string }>): Promise<void>;
@@ -43,6 +45,13 @@ export interface AgentExecutionOperationDispatcher {
 /** This connector crosses into the isolated development Worker pool; it receives only an ephemeral SecretRef. */
 export interface IsolatedAgentExecutionDispatcher {
   execute(request: IsolatedAgentExecutionRequest, context: Readonly<{ heartbeat(): Promise<void> }>): Promise<IsolatedAgentExecutionResult>;
+  probe(): Promise<void>;
+}
+
+/** SCM Proxy owns GitHub writes; the isolated Worker can submit only a signed candidate artifact. */
+export interface AgentCandidatePublisher {
+  publish(input: Readonly<{ lock: LockedAgentExecution; attemptId: string;
+    artifact: Extract<IsolatedAgentExecutionResult, { status: "COMPLETED" }>["candidateArtifact"] }>): Promise<PublishedAgentCandidateReceipt>;
   probe(): Promise<void>;
 }
 
@@ -79,6 +88,7 @@ export class AgentExecutionOperationWorker {
     private readonly operations: AgentExecutionOperationPersistence,
     private readonly tokens: HmacEphemeralRunTokenBroker,
     private readonly executor: IsolatedAgentExecutionDispatcher,
+    private readonly candidates: AgentCandidatePublisher,
     private readonly options: Readonly<{ now?: () => Date; claimToken?: () => string; leaseMs?: number }> = {},
   ) {}
 
@@ -111,7 +121,7 @@ export class AgentExecutionOperationWorker {
       throw error;
     }
     try {
-      const result = validateIsolatedResult(await this.executor.execute(Object.freeze({
+      const isolated = validateIsolatedResult(await this.executor.execute(Object.freeze({
         ...claim.lock,
         attemptId: claim.attemptId,
         inferenceTokenSecretRef: prepared.secretRef,
@@ -121,6 +131,14 @@ export class AgentExecutionOperationWorker {
         await this.operations.heartbeat({ ...input, claimToken, heartbeatAt: heartbeatAt.toISOString(),
           claimExpiresAt: new Date(heartbeatAt.getTime() + leaseMs).toISOString() });
       } }), claim.lock, claim.attemptId);
+      let result: AuthoritativeAgentExecutionResult;
+      if (isolated.status === "COMPLETED") {
+        const candidate = validatePublishedCandidate(await this.candidates.publish({ lock: claim.lock,
+          attemptId: claim.attemptId, artifact: isolated.candidateArtifact }), isolated, claim.lock);
+        result = authoritativeResult(isolated, claim.lock, candidate);
+      } else {
+        result = authoritativeResult(isolated, claim.lock, null);
+      }
       const receipt = workflowReceipt(result, claim.lock);
       return await this.operations.complete({ ...input, claimToken, result, receipt, completedAt: validNow(now()).toISOString() });
     } catch (error) {
@@ -131,10 +149,24 @@ export class AgentExecutionOperationWorker {
     }
   }
 
-  async probe(): Promise<void> { await Promise.all([this.operations.probe(), this.tokens.probe(), this.executor.probe()]); }
+  async probe(): Promise<void> { await Promise.all([this.operations.probe(), this.tokens.probe(), this.executor.probe(), this.candidates.probe()]); }
 }
 
-function workflowReceipt(result: IsolatedAgentExecutionResult, lock: LockedAgentExecution): AgentWorkflowRunReceipt {
+function authoritativeResult(isolated: IsolatedAgentExecutionResult, lock: LockedAgentExecution,
+  candidate: PublishedAgentCandidateReceipt | null): AuthoritativeAgentExecutionResult {
+  return Object.freeze({
+    status: isolated.status, runId: lock.runId, attemptId: isolated.attemptId, resolutionDigest: lock.resolutionDigest,
+    profileRevisionId: lock.profileRevisionId, installationId: lock.installationId, imageDigest: lock.imageDigest,
+    adapterVersion: lock.adapterVersion, providerRevisionId: lock.providerRevisionId,
+    credentialVersionId: lock.credentialVersionId, model: lock.model,
+    candidateCommitSha: candidate?.candidateCommitSha ?? null,
+    draftPullRequest: candidate?.draftPullRequest ?? null,
+    diagnosticId: isolated.diagnosticId,
+    receiptId: candidate?.receiptId ?? isolated.executionReceiptId,
+  });
+}
+
+function workflowReceipt(result: AuthoritativeAgentExecutionResult, lock: LockedAgentExecution): AgentWorkflowRunReceipt {
   return Object.freeze({
     status: result.status,
     runId: lock.runId,
