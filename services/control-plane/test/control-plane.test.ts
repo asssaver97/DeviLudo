@@ -254,9 +254,34 @@ test("credentials never echo plaintext and Provider activation is a separate sec
   assert.equal(makeDefault.statusCode, 200);
   assert.equal(makeDefault.json().data.newTasksOnly, true);
 
+  const rotatedPlaintext = "fixture-rotated-secret-that-must-never-be-returned";
+  const rotate = await inject({
+    method: "POST",
+    url: `/admin/credentials/${credentialId}/rotate`,
+    role: "SecurityAdmin",
+    key: "credential-codex-rotate",
+    payload: { apiKey: rotatedPlaintext },
+  });
+  assert.equal(rotate.statusCode, 201);
+  assert.equal(rotate.body.includes(rotatedPlaintext), false);
+  assert.equal(rotate.body.includes("secretRef"), false);
+  assert.equal(rotate.json().data.previous.state, "PREVIOUS");
+  assert.equal(rotate.json().data.active.state, "ACTIVE");
+  assert.equal(rotate.json().data.oldVersionNoLongerIssued, true);
+  assert.equal(rotate.json().data.successorProfileRevisionIds.length > 0, true);
+
+  const rotatedCatalog = await inject({ method: "GET", url: "/admin/agents", role: "SecurityAdmin" });
+  const successorProfileId = rotate.json().data.successorProfileRevisionIds[0] as string;
+  assert.equal(rotatedCatalog.json().data.platformDefault, successorProfileId);
+  assert.equal(rotatedCatalog.json().data.profiles.find((item: { id: string }) => item.id === profileId).state, "SUPERSEDED");
+  const successor = rotatedCatalog.json().data.profiles.find((item: { id: string }) => item.id === successorProfileId);
+  assert.equal(successor.state, "ACTIVE");
+  assert.equal(successor.credentialVersionId, rotate.json().data.active.id);
+
   const audit = await inject({ method: "GET", url: "/admin/audit", role: "Auditor" });
   assert.equal(audit.statusCode, 200);
   assert.equal(audit.body.includes(plaintext), false);
+  assert.equal(audit.body.includes(rotatedPlaintext), false);
 });
 
 test("tenant and project administrators cannot cross signed scope or BYOK boundaries", async () => {

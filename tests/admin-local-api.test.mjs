@@ -144,6 +144,35 @@ test("Provider activation fails closed without its external trust gate", async (
   assert.equal(getDemoStore().providers.find((item) => item.id === "provider-claude-platform-r3")?.state, "ACTIVE");
 });
 
+test("active Provider credential rotation fails closed and preserves the current default", async () => {
+  const store = resetDemoStore();
+  const activeCredentialId = "cred-claude-platform-v4";
+  store.credentials.push({
+    id: activeCredentialId,
+    label: "Platform Claude",
+    secretRef: `vault://kv/data/deviludo/${activeCredentialId}#4`,
+    fingerprint: `sha256:${"a".repeat(64)}`,
+    masked: `sha256:${"a".repeat(8)}…${"a".repeat(8)}`,
+    version: 4,
+    state: "ACTIVE",
+    createdAt: "2026-07-18T08:42:00.000Z",
+  });
+  const defaultBefore = store.defaults.platform;
+
+  const response = await POST(
+    request(`credentials/${activeCredentialId}/rotate`, "POST", "SecurityAdmin", { apiKey: "replacement-local-key" }),
+    context(`credentials/${activeCredentialId}/rotate`),
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, "PROVIDER_PROBE_NOT_CONFIGURED");
+  assert.equal(store.defaults.platform, defaultBefore);
+  assert.equal(store.credentials.length, 1);
+  assert.equal(store.credentials[0]?.state, "ACTIVE");
+  assert.equal(store.providers.find((item) => item.id === "provider-claude-platform-r3")?.state, "ACTIVE");
+  assert.equal(store.profiles.find((item) => item.id === defaultBefore)?.state, "ACTIVE");
+});
+
 test("simulated role headers cannot cross local admin RBAC boundaries", async () => {
   resetDemoStore();
   const forbidden = await POST(

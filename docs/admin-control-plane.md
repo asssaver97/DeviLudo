@@ -21,6 +21,16 @@ The Connector must present the approved Web administration SPIFFE identity over 
 
 Credential request bodies are capped at 64 KiB and are never logged. Responses are capped, must be JSON, may not contain Vault `SecretRef` values, and are rejected if they reproduce submitted credential plaintext. The browser receives only masked fingerprints and public credential metadata.
 
+Rotating a credential used by an active Profile is a gated revision operation,
+not an in-place key swap. The control-plane first writes the replacement to the
+Secret Broker, stages immutable Provider/Profile successors, and runs the full
+Inference Gateway probe against the new credential. Only after every probe
+passes does one catalog transaction mark the old credential `PREVIOUS`, activate
+the successors and move matching platform/tenant/project defaults. Probe failure
+revokes the replacement and leaves the old active defaults untouched. Queued and
+running tasks retain their recorded revision IDs; the retired credential is not
+issued to new Gateway lease requests.
+
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
 
 ## Tenant and project configuration

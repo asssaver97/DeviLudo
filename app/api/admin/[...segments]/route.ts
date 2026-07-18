@@ -409,6 +409,17 @@ export async function POST(request: Request, context: RouteContext) {
           bytes.fill(0);
           body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
         }
+        const localStore = getDemoStore();
+        const activeProviderIds = new Set(localStore.providers
+          .filter((provider) => provider.credentialId === credentialId && provider.state === "ACTIVE")
+          .map((provider) => provider.id));
+        if (localStore.profiles.some((profile) => profile.state === "ACTIVE" && activeProviderIds.has(profile.providerId))) {
+          throw new HttpProblem(
+            503,
+            "PROVIDER_PROBE_NOT_CONFIGURED",
+            "本地测试站不会为生效 Provider 伪造新 Key 探针；当前凭据和默认 Profile 保持不变",
+          );
+        }
       }
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();

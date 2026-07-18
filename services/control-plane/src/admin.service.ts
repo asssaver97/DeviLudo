@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import type { InferenceReconciliationReceipt } from "../../inference-gateway/src/contracts";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
@@ -468,11 +468,16 @@ export class AdminService {
     body: Record<string, unknown>,
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
-    const current = await this.store.read((state) => {
+    const rotation = await this.store.read((state) => {
       const value = state.credentials.get(credentialId);
-      return value ? structuredClone(value) : undefined;
+      if (!value) return undefined;
+      const nextVersion = Math.max(0, ...[...state.credentials.values()]
+        .filter((candidate) => candidate.familyId === value.familyId)
+        .map((candidate) => candidate.version)) + 1;
+      return { current: structuredClone(value), nextVersion };
     });
-    if (!current) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+    if (!rotation) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+    const { current } = rotation;
     if (current.state !== "ACTIVE") throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only an active credential can be rotated");
     assertCredentialActor(current, actor);
     const apiKey = requiredString(body, "apiKey", 8192);
@@ -480,7 +485,7 @@ export class AdminService {
     try {
       replacement = await this.ingestCredential(
         current.familyId,
-        current.version + 1,
+        rotation.nextVersion,
         current.label,
         current.scope,
         current.scopeId,
@@ -493,23 +498,97 @@ export class AdminService {
       await this.vault.revoke(replacement.secretRef);
       throw new ServiceProblem(409, "CREDENTIAL_REUSED", "Replacement credential must contain new secret material");
     }
+    let stage: CredentialRotationStage | undefined;
     try {
+      stage = await this.store.mutate((state) => {
+        const result = stageCredentialRotation(state, current, replacement);
+        this.audit(state, "CREDENTIAL_ROTATION_VALIDATION_STARTED", current.id, actor, {
+          replacementVersionId: replacement.id,
+          successorProfileRevisionIds: result.profiles.map((item) => item.successorProfileId),
+          activeDefaultsPreservedUntilProbePasses: true,
+        });
+        return result;
+      });
+      const probes = new Map<string, ProviderRevisionRecord["probe"]>();
+      for (const provider of stage.providersToProbe) {
+        probes.set(provider.id, await this.providerProbe.run(provider));
+      }
       return await this.mutate(actor, (state) => {
-        const active = state.credentials.get(credentialId);
+        const active = state.credentials.get(current.id);
+        const next = state.credentials.get(replacement.id);
         if (!active || active.state !== "ACTIVE" || active.version !== current.version
-          || active.maskedFingerprint !== current.maskedFingerprint) {
-          throw new ServiceProblem(409, "CREDENTIAL_ROTATION_RACE", "Credential changed before rotation could commit");
+          || active.maskedFingerprint !== current.maskedFingerprint || !next || next.state !== "ACTIVE"
+          || next.maskedFingerprint !== replacement.maskedFingerprint) rotationRace();
+
+        const successorBySource = new Map(stage!.profiles.map((item) => [item.sourceProfileId, item.successorProfileId]));
+        const supersededProviders = new Set<string>();
+        for (const binding of stage!.profiles) {
+          const source = state.profiles.get(binding.sourceProfileId);
+          const successor = state.profiles.get(binding.successorProfileId);
+          if (!source || source.state !== "ACTIVE" || !successor || successor.state !== "VALIDATING") rotationRace();
+          if (binding.rotatesCredential) {
+            const sourceProvider = state.providers.get(binding.sourceProviderId);
+            const successorProvider = state.providers.get(binding.successorProviderId);
+            const probe = probes.get(binding.successorProviderId);
+            if (!sourceProvider || !successorProvider || !probe
+              || Object.values(probe).some((result) => result !== "PASS")) rotationRace();
+            if (!supersededProviders.has(sourceProvider.id)) {
+              if (sourceProvider.state !== "ACTIVE" || successorProvider.state !== "VALIDATING") rotationRace();
+              successorProvider.probe = probe;
+              successorProvider.state = "ACTIVE";
+              sourceProvider.state = "SUPERSEDED";
+              supersededProviders.add(sourceProvider.id);
+            } else if (sourceProvider.state !== "SUPERSEDED" || successorProvider.state !== "ACTIVE") rotationRace();
+          }
+          successor.state = "ACTIVE";
+          source.state = "SUPERSEDED";
+        }
+        for (const [scope, profileId] of state.defaults.entries()) {
+          const successorId = successorBySource.get(profileId);
+          if (successorId) state.defaults.set(scope, successorId);
+        }
+        for (const profile of state.profiles.values()) {
+          if (profile.credentialVersionId === current.id && !successorBySource.has(profile.id)
+            && !["SUPERSEDED", "DISABLED"].includes(profile.state)) profile.state = "DEGRADED";
+        }
+        for (const provider of state.providers.values()) {
+          if (provider.credentialVersionId === current.id && !supersededProviders.has(provider.id)
+            && !["SUPERSEDED", "DISABLED"].includes(provider.state)) provider.state = "DEGRADED";
         }
         active.state = "PREVIOUS";
-        state.credentials.set(replacement.id, replacement);
         this.audit(state, "CREDENTIAL_ROTATED", active.id, actor, {
           replacementVersionId: replacement.id,
+          successorProfileRevisionIds: stage!.profiles.map((item) => item.successorProfileId),
+          reboundDefaultCount: [...state.defaults.values()].filter((id) => stage!.profiles.some((item) => item.successorProfileId === id)).length,
           oldVersionNoLongerIssued: true,
+          runningTasksKeepImmutableRecordedBinding: true,
         });
-        return { active: replacement, previous: active, newTasksOnly: true };
+        return {
+          active: next,
+          previous: active,
+          successorProfileRevisionIds: stage!.profiles.map((item) => item.successorProfileId),
+          newTasksOnly: true,
+          oldVersionNoLongerIssued: true,
+        };
       }, credentialResultView);
     } catch (error) {
       await this.vault.revoke(replacement.secretRef).catch(() => undefined);
+      if (stage) await this.store.mutate((state) => {
+        const next = state.credentials.get(replacement.id);
+        if (next && next.state === "ACTIVE") next.state = "REVOKED";
+        for (const binding of stage!.profiles) {
+          const successor = state.profiles.get(binding.successorProfileId);
+          if (successor?.state === "VALIDATING") successor.state = "DEGRADED";
+          if (binding.rotatesCredential) {
+            const provider = state.providers.get(binding.successorProviderId);
+            if (provider?.state === "VALIDATING") provider.state = "DEGRADED";
+          }
+        }
+        this.audit(state, "CREDENTIAL_ROTATION_FAILED", current.id, actor, {
+          replacementVersionId: replacement.id,
+          priorActiveConfigurationPreserved: true,
+        });
+      }).catch(() => undefined);
       throw error;
     }
   }
@@ -1044,6 +1123,127 @@ function failureAudit(receipt: AgentSupplyChainTerminalFailureReceipt): Readonly
     failedAt: receipt.failedAt,
     terminalDisposition: receipt.disposition,
   });
+}
+
+interface CredentialRotationProfileBinding {
+  readonly sourceProfileId: string;
+  readonly successorProfileId: string;
+  readonly sourceProviderId: string;
+  readonly successorProviderId: string;
+  readonly rotatesCredential: boolean;
+}
+
+interface CredentialRotationStage {
+  readonly profiles: readonly CredentialRotationProfileBinding[];
+  readonly providersToProbe: readonly ProviderRevisionRecord[];
+}
+
+function stageCredentialRotation(
+  state: AdminCatalogState,
+  expected: CredentialVersionRecord,
+  replacement: CredentialVersionRecord,
+): CredentialRotationStage {
+  const active = state.credentials.get(expected.id);
+  if (!active || active.state !== "ACTIVE" || active.version !== expected.version
+    || active.maskedFingerprint !== expected.maskedFingerprint || active.familyId !== replacement.familyId
+    || replacement.version <= active.version || state.credentials.has(replacement.id)) rotationRace();
+  state.credentials.set(replacement.id, structuredClone(replacement));
+
+  const activeProfiles = [...state.profiles.values()].filter((profile) => profile.state === "ACTIVE");
+  const directlyAffected = new Set(activeProfiles
+    .filter((profile) => profile.credentialVersionId === expected.id)
+    .map((profile) => profile.id));
+  const affected = new Set(directlyAffected);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const profile of activeProfiles) {
+      if (!affected.has(profile.id) && profile.fallbackProfileRevisionId
+        && affected.has(profile.fallbackProfileRevisionId)) {
+        affected.add(profile.id);
+        changed = true;
+      }
+    }
+  }
+
+  const sources = activeProfiles.filter((profile) => affected.has(profile.id))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const successorIds = new Map(sources.map((profile) => [profile.id,
+    rotationRevisionId("profile", profile.id, replacement.id, profile.revision + 1)]));
+  const providerIds = new Map<string, string>();
+  const providersToProbe: ProviderRevisionRecord[] = [];
+
+  for (const profile of sources) {
+    if (!directlyAffected.has(profile.id)) continue;
+    const provider = state.providers.get(profile.providerRevisionId);
+    if (!provider || provider.state !== "ACTIVE" || provider.credentialVersionId !== expected.id
+      || provider.agent !== profile.agent) rotationRace();
+    if (!providerIds.has(provider.id)) {
+      const id = rotationRevisionId("provider", provider.id, replacement.id, provider.revision + 1);
+      if (state.providers.has(id)) rotationRace();
+      const successor: ProviderRevisionRecord = {
+        ...provider,
+        id,
+        revision: provider.revision + 1,
+        credentialVersionId: replacement.id,
+        state: "VALIDATING",
+        probe: Object.freeze({}),
+      };
+      state.providers.set(successor.id, successor);
+      providerIds.set(provider.id, successor.id);
+      providersToProbe.push(structuredClone(successor));
+    }
+  }
+
+  const bindings: CredentialRotationProfileBinding[] = [];
+  const createdAt = new Date().toISOString();
+  for (const profile of sources) {
+    const rotatesCredential = directlyAffected.has(profile.id);
+    const successorProfileId = successorIds.get(profile.id)!;
+    if (state.profiles.has(successorProfileId)) rotationRace();
+    const successorProviderId = rotatesCredential
+      ? providerIds.get(profile.providerRevisionId)
+      : profile.providerRevisionId;
+    if (!successorProviderId) rotationRace();
+    const successor: ProfileRevisionRecord = {
+      ...profile,
+      id: successorProfileId,
+      revision: profile.revision + 1,
+      providerRevisionId: successorProviderId,
+      credentialVersionId: rotatesCredential ? replacement.id : profile.credentialVersionId,
+      fallbackProfileRevisionId: profile.fallbackProfileRevisionId
+        ? successorIds.get(profile.fallbackProfileRevisionId) ?? profile.fallbackProfileRevisionId
+        : null,
+      state: "VALIDATING",
+      createdAt,
+    };
+    state.profiles.set(successor.id, successor);
+    bindings.push(Object.freeze({
+      sourceProfileId: profile.id,
+      successorProfileId: successor.id,
+      sourceProviderId: profile.providerRevisionId,
+      successorProviderId,
+      rotatesCredential,
+    }));
+  }
+  return Object.freeze({
+    profiles: Object.freeze(bindings),
+    providersToProbe: Object.freeze(providersToProbe),
+  });
+}
+
+function rotationRevisionId(
+  kind: "profile" | "provider",
+  sourceId: string,
+  replacementId: string,
+  revision: number,
+): string {
+  const digest = createHash("sha256").update(`${kind}\0${sourceId}\0${replacementId}`).digest("hex").slice(0, 24);
+  return `${kind}-credential-rotation-${digest}-r${revision}`;
+}
+
+function rotationRace(): never {
+  throw new ServiceProblem(409, "CREDENTIAL_ROTATION_RACE", "Credential configuration changed before rotation could commit");
 }
 
 function parseScope(value: unknown): ProfileScope {
