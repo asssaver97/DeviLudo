@@ -8,8 +8,9 @@ App operations, and signed job envelopes. Temporal owns durable waits and
 retries. PostgreSQL is authoritative; Redis is expendable cache only. Evidence
 and builds are content-addressed in S3-compatible storage. Vault/KMS stores
 provider credentials and the encrypted Steam `config.vdf` session. OpenTelemetry
-propagates `tenant_id`, `project_id`, `workflow_id`, and `run_id`—never prompts,
-source text, cookies, or credentials.
+propagates W3C trace context across service HTTP calls. Platform code may attach
+already-authorized opaque tenant/project/workflow/run identifiers, but never
+prompts, source text, URL queries, cookies, authorization headers or credentials.
 
 There are four isolated execution identities:
 

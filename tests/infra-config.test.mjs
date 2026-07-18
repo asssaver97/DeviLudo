@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+const observedServiceCommand = (service) =>
+  `node --import tsx scripts/observability/run-service.mjs ${service}`;
+
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
   const offsets = Array.from({ length: 43 }, (_, index) => {
@@ -20,7 +23,7 @@ test("project creation binds a live GitHub repository under tenant RLS and a dur
   const store = readFileSync(new URL("../services/scm-proxy/src/project-repository-postgres.ts", import.meta.url), "utf8");
   const github = readFileSync(new URL("../services/scm-proxy/src/github-repository-catalog.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/scm-proxy/src/run-project-repository-service.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:project-repository"], "node --import tsx services/scm-proxy/src/run-project-repository-service.ts");
+  assert.equal(packageJson.scripts["start:project-repository"], observedServiceCommand("project-repository"));
   assert.match(migration, /CREATE TABLE deviludo\.project_creation_operations/);
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
   assert.match(migration, /project_creation_terminal_guard/);
@@ -57,7 +60,7 @@ test("GitHub authorization production host is tenant-isolated, anti-replay and s
   const runtime = readFileSync(new URL("../services/scm-proxy/src/run-github-authorization-service.ts", import.meta.url), "utf8");
   const ledger = readFileSync(new URL("../services/scm-proxy/src/github-auth-ledger-postgres.ts", import.meta.url), "utf8");
   const secrets = readFileSync(new URL("../services/scm-proxy/src/github-auth-secret-client.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:github-authorization"], "node --import tsx services/scm-proxy/src/run-github-authorization-service.ts");
+  assert.equal(packageJson.scripts["start:github-authorization"], observedServiceCommand("github-authorization"));
   assert.match(migration, /CREATE TABLE deviludo\.github_authorization_request_ledger/);
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
   assert.match(migration, /stores no response body/i);
@@ -77,7 +80,7 @@ test("SCM merge authority binds one delivered acceptance to GitHub and merged-ma
   const authority = readFileSync(new URL("../services/scm-proxy/src/postgres-merge.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/scm-proxy/src/run-merge-service.ts", import.meta.url), "utf8");
   const signer = readFileSync(new URL("../services/scm-proxy/src/acceptance-signer-client.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:scm-merge-broker"], "node --import tsx services/scm-proxy/src/run-merge-service.ts");
+  assert.equal(packageJson.scripts["start:scm-merge-broker"], observedServiceCommand("scm-merge-broker"));
   assert.match(migration, /acceptance_operation_key/);
   assert.match(migration, /evidence_bundle_id/);
   assert.match(migration, /workflow_request_digest/);
@@ -166,7 +169,7 @@ test("approved specifications lock one tenant-bound source and Agent catalog rev
   const service = readFileSync(new URL("../services/agent-configuration/src/service.ts", import.meta.url), "utf8");
   const baseline = readFileSync(new URL("../services/scm-proxy/src/source-baseline-postgres.ts", import.meta.url), "utf8");
   const ingress = readFileSync(new URL("../services/scm-proxy/src/source-snapshot-http.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:agent-configuration"], "node --import tsx services/agent-configuration/src/run-service.ts");
+  assert.equal(packageJson.scripts["start:agent-configuration"], observedServiceCommand("agent-configuration"));
   assert.match(migration, /CREATE TABLE deviludo\.github_source_baseline_receipts/);
   assert.match(migration, /CREATE TABLE deviludo\.agent_configuration_resolutions/);
   assert.match(migration, /immutable_revisions_tenant_project_id_unique/);
@@ -266,7 +269,7 @@ test("Steam install grants are tenant-isolated, expiring and once-per-platform",
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/018_steam_install_grants.sql", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/steam-publisher/src/run-clean-install-services.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:steam-install-services"], "node --import tsx services/steam-publisher/src/run-clean-install-services.ts");
+  assert.equal(packageJson.scripts["start:steam-install-services"], observedServiceCommand("steam-install-services"));
   assert.match(migration, /CREATE TABLE deviludo\.steam_install_grants/);
   assert.match(migration, /expires_at <= issued_at \+ interval '24 hours'/);
   assert.match(migration, /UNIQUE \(tenant_id, grant_id, platform\)/);
@@ -308,7 +311,7 @@ test("authoritative GitHub source snapshots are tenant-bound, read-only and mTLS
   const ingress = readFileSync(new URL("../services/scm-proxy/src/source-snapshot-http.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/scm-proxy/src/run-source-snapshot-service.ts", import.meta.url), "utf8");
   const signer = readFileSync(new URL("../services/scm-proxy/src/github-app-signer-client.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:source-snapshot"], "node --import tsx services/scm-proxy/src/run-source-snapshot-service.ts");
+  assert.equal(packageJson.scripts["start:source-snapshot"], observedServiceCommand("source-snapshot"));
   assert.match(authority, /set_config\('app\.tenant_id'/);
   assert.match(authority, /merge\.main_source_digest = \$5/);
   assert.match(authority, /repository\.status = 'ACTIVE'/);
@@ -361,7 +364,7 @@ test("physical Runner host composes signed fleet authorization and mTLS evidence
   const fleet = readFileSync(new URL("../services/runner-control/src/fleet-manifest.ts", import.meta.url), "utf8");
   const archive = readFileSync(new URL("../services/runner-control/src/evidence-archive.ts", import.meta.url), "utf8");
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.scripts["start:runner-ingress"], "node --import tsx services/runner-control/src/run-ingress-service.ts");
+  assert.equal(packageJson.scripts["start:runner-ingress"], observedServiceCommand("runner-ingress"));
   assert.match(host, /await readiness\(\);\s+await listen/);
   assert.match(host, /DEVILUDO_RUNNER_JOB_SIGNING_KEY_FILE/);
   assert.match(fleet, /MAX_VALIDITY_MS = 15 \* 60_000/);
@@ -380,7 +383,7 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   const testkit = readFileSync(new URL("../services/runner-control/src/testkit-executor.ts", import.meta.url), "utf8");
   const artifacts = readFileSync(new URL("../services/runner-control/src/testkit-artifact-client.ts", import.meta.url), "utf8");
   const daemon = readFileSync(new URL("../services/runner-control/src/run-physical-runner.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:physical-runner"], "node --import tsx services/runner-control/src/run-physical-runner.ts");
+  assert.equal(packageJson.scripts["start:physical-runner"], observedServiceCommand("physical-runner"));
   assert.match(journal, /createHmac\("sha256"/);
   assert.match(journal, /timingSafeEqual/);
   assert.match(journal, /await rename\(temporary, path\)/);
@@ -405,7 +408,7 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   const steamDriver = readFileSync(new URL("../services/godot-testkit/src/steam-installed-game-driver.ts", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/godot-testkit/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:godot-testkit/);
-  assert.equal(packageJson.scripts["start:godot-testkit"], "node --import tsx services/godot-testkit/src/run-cli.ts");
+  assert.equal(packageJson.scripts["start:godot-testkit"], observedServiceCommand("godot-testkit"));
   assert.match(cli, /parseGodotTestKitRunRequest/);
   assert.match(cli, /basename\(requestPath\) !== "request\.json"/);
   assert.match(controller, /maximumExecutionSeconds \+ 300/);
@@ -434,7 +437,7 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   const runtime = readFileSync(new URL("../services/steam-client-connector/src/run-service.ts", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/steam-client-connector/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:steam-client-connector/);
-  assert.equal(packageJson.scripts["start:steam-client-connector"], "node --import tsx services/steam-client-connector/src/run-service.ts");
+  assert.equal(packageJson.scripts["start:steam-client-connector"], observedServiceCommand("steam-client-connector"));
   assert.match(connector, /verifyRunnerJob/);
   assert.match(connector, /parseFrozenGodotTestPlan/);
   assert.match(connector, /execution\.kind !== "STEAM_CLEAN_INSTALL"/);
@@ -507,7 +510,7 @@ test("Steam Workflow Broker production host uses a recoverable RLS outbox and cr
   const dispatch = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-dispatch.ts", import.meta.url), "utf8");
   const broker = readFileSync(new URL("../services/steam-publisher/src/run-workflow-broker-service.ts", import.meta.url), "utf8");
   const worker = readFileSync(new URL("../services/steam-publisher/src/run-workflow-worker.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:steam-workflow-broker"], "node --import tsx services/steam-publisher/src/run-workflow-broker-service.ts");
+  assert.equal(packageJson.scripts["start:steam-workflow-broker"], observedServiceCommand("steam-workflow-broker"));
   assert.match(migration, /available_at timestamptz/);
   assert.match(migration, /enqueue_count integer/);
   assert.match(migration, /steam_workflow_operation_poll_idx/);
@@ -530,7 +533,7 @@ test("isolated Steam execution worker pins native, PostgreSQL, S3 and KMS author
   const native = readFileSync(new URL("../services/steam-publisher/src/locked-native-publisher.ts", import.meta.url), "utf8");
   const evidence = readFileSync(new URL("../services/steam-publisher/src/postgres-release-evidence.ts", import.meta.url), "utf8");
   const reservations = readFileSync(new URL("../services/steam-publisher/src/postgres-clean-install-dispatch.ts", import.meta.url), "utf8");
-  assert.equal(packageJson.scripts["start:steam-workflow-executor"], "node --import tsx services/steam-publisher/src/run-workflow-executor-service.ts");
+  assert.equal(packageJson.scripts["start:steam-workflow-executor"], observedServiceCommand("steam-workflow-executor"));
   assert.match(migration, /CREATE TABLE deviludo\.steam_clean_install_reservations/);
   assert.match(migration, /UNIQUE \(release_id, platform\)/);
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
@@ -617,7 +620,7 @@ test("artifact preparation publishes canonical source and plan objects before th
   const runnerWorkflow = readFileSync(new URL("../services/runner-control/src/workflow-handler.ts", import.meta.url), "utf8");
   const builder = readFileSync(new URL("../services/godot-testkit/src/source-bundle-builder.ts", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:artifact-preparer/);
-  assert.equal(packageJson.scripts["start:artifact-preparer"], "node --import tsx services/artifact-preparer/src/run-service.ts");
+  assert.equal(packageJson.scripts["start:artifact-preparer"], observedServiceCommand("artifact-preparer"));
   assert.match(preparer, /Promise\.all\(\[\s*this\.#objects\.publishFile/);
   assert.match(preparer, /exactObjectReceipt\(sourceReceipt/);
   assert.match(preparer, /this\.#locks\.persist/);
@@ -741,7 +744,7 @@ test("production Agent administration trusts only pinned mTLS supply-chain Broke
   assert.match(service, /restoreProfilesToRollback/);
   assert.match(env, /DEVILUDO_AGENT_SUPPLY_CHAIN_TIMEOUT_SECONDS=600/);
   assert.doesNotMatch(env, /PRIVATE KEY|BEGIN CERTIFICATE|@latest/);
-  assert.equal(packageJson.scripts["start:agent-supply-chain"], "node --import tsx services/agent-supply-chain/src/run-service.ts");
+  assert.equal(packageJson.scripts["start:agent-supply-chain"], observedServiceCommand("agent-supply-chain"));
   assert.match(packageJson.scripts["test:services"], /npm run test:agent-supply-chain/);
 });
 

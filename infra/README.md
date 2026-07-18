@@ -11,6 +11,12 @@ OTel collector exporting to the operator's telemetry backend. Worker pools,
 E2E runners, inference connectors, and Steam publishers live in separate network
 segments and service accounts.
 
+Every Node service start command registers the platform-owned OpenTelemetry SDK
+before application imports. Production processes fail closed without a fixed
+OTLP traces endpoint. The recommended deployment gives each workload a
+loopback Collector sidecar; only that Collector holds any upstream telemetry
+authentication and TLS material. See `docs/observability.md`.
+
 `postgres/001_core.sql` demonstrates forced RLS, append-only revisions/audit,
 and immutable run locks. `postgres/002_workflow_dispatch.sql` adds a leased,
 idempotent activity inbox plus append-only, gate-bound external approval
