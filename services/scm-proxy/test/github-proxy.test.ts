@@ -333,7 +333,9 @@ test("a claimed merge resumes after connector interruption without re-authorizin
     recovery.proxy.mergeAcceptedCandidate(request, "2030-01-01T00:01:00.000Z"),
     /already in progress/,
   );
-  const resumed = await recovery.proxy.mergeAcceptedCandidate(request, "2030-01-01T00:10:01.000Z");
+  const resumed = await recovery.proxy.mergeAcceptedCandidate({ ...request,
+    acceptance: acceptance(receipt, { iat: nowEpoch + 590, exp: nowEpoch + 890 }),
+  }, "2030-01-01T00:10:01.000Z");
   assert.equal(resumed.mergeCommitSha, mergeSha);
   assert.equal(recovery.metrics.evidenceChecks, 1);
 });

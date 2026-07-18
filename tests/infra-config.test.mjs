@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 39 }, (_, index) => {
+  const offsets = Array.from({ length: 40 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,27 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("SCM merge authority binds one delivered acceptance to GitHub and merged-main evidence", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/040_scm_authoritative_merges.sql", import.meta.url), "utf8");
+  const authority = readFileSync(new URL("../services/scm-proxy/src/postgres-merge.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/scm-proxy/src/run-merge-service.ts", import.meta.url), "utf8");
+  const signer = readFileSync(new URL("../services/scm-proxy/src/acceptance-signer-client.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:scm-merge-broker"], "node --import tsx services/scm-proxy/src/run-merge-service.ts");
+  assert.match(migration, /acceptance_operation_key/);
+  assert.match(migration, /evidence_bundle_id/);
+  assert.match(migration, /workflow_request_digest/);
+  assert.match(migration, /github_merge_receipt_acceptance_fk/);
+  assert.match(authority, /workflow_signal_outbox signal/);
+  assert.match(authority, /signal\.state = 'DELIVERED'/);
+  assert.match(authority, /evidence\.invalidated_at IS NULL/);
+  assert.match(authority, /attempt\.mode = 'CANDIDATE'/);
+  assert.match(authority, /job\.state = 'RUNNING'/);
+  assert.match(runtime, /permissionMode: "scm-write"/);
+  assert.doesNotMatch(runtime, /GITHUB_APP_PRIVATE_KEY|createPrivateKey/);
+  assert.match(signer, /github-candidate-acceptance\/sign-ed25519/);
 });
 
 test("candidate acceptance is an immutable actor and evidence-bound decision", () => {

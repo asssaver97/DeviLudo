@@ -176,7 +176,10 @@ export class GitHubAppScmProxy {
       binding: request.binding,
       candidate: request.candidate,
       evidence: request.evidence,
-      acceptance: request.acceptance,
+      // iat/exp/signature are intentionally excluded: a KMS may issue a fresh
+      // short-lived proof while resuming the same already-authorized external
+      // operation. Every immutable acceptance binding remains in the digest.
+      acceptance: acceptanceIdempotencyBinding(request.acceptance.claims),
     });
     const storeKey = operationKey("merge", request.binding, request.idempotencyKey);
     const existing = await this.#operation<GitHubMergeReceipt>(storeKey, requestDigest);
@@ -269,6 +272,14 @@ export class GitHubAppScmProxy {
     if (acquired.status === "COMPLETED") throw new Error("SCM operation completed concurrently; retry to read its receipt");
     return acquired.claimToken;
   }
+}
+
+function acceptanceIdempotencyBinding(claims: import("./github-contracts").CandidateAcceptanceClaims) {
+  return Object.freeze({ iss: claims.iss, aud: claims.aud, tenantId: claims.tenantId,
+    projectId: claims.projectId, acceptedBy: claims.acceptedBy,
+    candidateCommitSha: claims.candidateCommitSha, sourceDigest: claims.sourceDigest,
+    specRevisionId: claims.specRevisionId, evidenceBundleDigest: claims.evidenceBundleDigest,
+    nonce: claims.nonce });
 }
 
 export class InMemoryScmOperationStore implements ScmOperationStore {

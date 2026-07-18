@@ -59,6 +59,16 @@ returns the observed default-branch head. GitHub installation tokens and App
 signing keys never enter the Temporal destination process. Broker health is a
 readiness gate and long merges heartbeat the workflow job lease.
 
+The isolated endpoint itself starts with `npm run start:scm-merge-broker` and
+the file-mounted `.env.merge.example` contract. Before touching GitHub it
+re-resolves the currently RUNNING workflow job, delivered `USER_ACCEPTED`
+outbox, immutable user decision, active repository installation, exact Draft
+PR receipt and non-invalidated PASSED candidate evidence under tenant RLS. A
+five-minute acceptance proof is signed by an mTLS Vault/KMS Broker and verified
+locally; neither the Ed25519 acceptance key nor the GitHub App key is loaded by
+the merge process. The archived merge row binds the user operation, workflow
+request digest, candidate, evidence and GitHub-observed main SHA/source digest.
+
 The isolated source-snapshot Broker uses a separate installation-token profile
 with only repository Contents read. It resolves the exact candidate or fresh
 merged-main SHA and source digest from append-only PostgreSQL receipts under
