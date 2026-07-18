@@ -26,6 +26,10 @@ export interface RunnerFleetEntry {
   readonly capabilityDigest: string;
   readonly platform: TargetPlatform;
   readonly tenantIds: readonly string[];
+  readonly steamClientConnectorIdentity: Readonly<{
+    readonly spiffeId: string;
+    readonly certificateFingerprint: string;
+  }> | null;
 }
 
 export interface RunnerFleetClaims {
@@ -117,11 +121,12 @@ export class SignedRunnerFleetPolicy implements RunnerAdmissionPolicy, RunnerTen
     readonly platform: TargetPlatform;
     readonly capabilityDigest: string;
     readonly tenantId: string;
+    readonly workload?: "runner" | "steam-client-connector";
   }): Promise<boolean> {
     const claims = await this.#verifiedClaims();
     const entry = claims.runners.find((candidate) => candidate.runnerId === input.runnerId);
     return !!entry
-      && matchesEntry(entry, input.identity, {
+      && matchesJobEntry(entry, input.identity, input.workload ?? "runner", {
         runnerId: input.runnerId,
         platform: input.platform,
         capabilityDigest: input.capabilityDigest,
@@ -181,11 +186,22 @@ function validateClaims(claims: RunnerFleetClaims, at: Date): void {
   let previousRunnerId = "";
   for (const entry of claims.runners) {
     const candidate = record(entry);
-    exactKeys(candidate, ["runnerId", "spiffeId", "certificateFingerprint", "capabilityDigest", "platform", "tenantIds"]);
+    exactKeys(candidate, [
+      "runnerId", "spiffeId", "certificateFingerprint", "capabilityDigest", "platform", "tenantIds",
+      "steamClientConnectorIdentity",
+    ]);
     if (!RUNNER_ID.test(entry.runnerId) || entry.runnerId <= previousRunnerId
       || !validSpiffeId(entry.spiffeId) || !SHA256.test(entry.certificateFingerprint)
       || !SHA256.test(entry.capabilityDigest) || !TARGET_PLATFORMS.has(entry.platform)
       || !Array.isArray(entry.tenantIds) || entry.tenantIds.length > 10_000) invalid();
+    if (entry.steamClientConnectorIdentity !== null) {
+      const connector = record(entry.steamClientConnectorIdentity);
+      exactKeys(connector, ["spiffeId", "certificateFingerprint"]);
+      if (!validSpiffeId(entry.steamClientConnectorIdentity.spiffeId)
+        || !SHA256.test(entry.steamClientConnectorIdentity.certificateFingerprint)
+        || (entry.steamClientConnectorIdentity.spiffeId === entry.spiffeId
+          && entry.steamClientConnectorIdentity.certificateFingerprint === entry.certificateFingerprint)) invalid();
+    }
     previousRunnerId = entry.runnerId;
     let previousTenant = "";
     for (const tenantId of entry.tenantIds) {
@@ -204,6 +220,23 @@ function matchesEntry(
   return entry.runnerId === runner.runnerId
     && entry.spiffeId === identity.spiffeId
     && entry.certificateFingerprint === identity.certificateFingerprint
+    && entry.capabilityDigest === runner.capabilityDigest
+    && entry.platform === runner.platform;
+}
+
+function matchesJobEntry(
+  entry: RunnerFleetEntry,
+  identity: TlsRunnerIdentity,
+  workload: "runner" | "steam-client-connector",
+  runner: Pick<RunnerCapabilities, "runnerId" | "platform" | "capabilityDigest">,
+): boolean {
+  const identityMatches = workload === "runner"
+    ? entry.spiffeId === identity.spiffeId && entry.certificateFingerprint === identity.certificateFingerprint
+    : entry.steamClientConnectorIdentity !== null
+      && entry.steamClientConnectorIdentity.spiffeId === identity.spiffeId
+      && entry.steamClientConnectorIdentity.certificateFingerprint === identity.certificateFingerprint;
+  return identityMatches
+    && entry.runnerId === runner.runnerId
     && entry.capabilityDigest === runner.capabilityDigest
     && entry.platform === runner.platform;
 }

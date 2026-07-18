@@ -94,7 +94,9 @@ the passed, non-invalidated main evidence, approved spec/test plan, exact Runner
 toolchain and `INSTALL_TESTING` Build receipt again under tenant RLS. The grant
 listener exposes only `POST /v1/steam-install-grant-redemptions` to Connector
 certificates and independently verifies the signed Runner job plus fresh fleet
-manifest. Grants expire, are idempotent only for the exact job and may be
+manifest. The signed fleet entry must contain a distinct
+`steamClientConnectorIdentity`; a Runner's primary certificate is rejected on
+this route. Grants expire, are idempotent only for the exact job and may be
 redeemed once per target platform. Steam credentials, branch passwords, Guard
 data and `config.vdf` never enter either contract. See
 `.clean-install.env.example` for file-mounted keys and separate listener ports.

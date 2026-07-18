@@ -58,6 +58,10 @@ function claims(overrides: Partial<RunnerFleetClaims> = {}): RunnerFleetClaims {
       capabilityDigest: capabilities().capabilityDigest,
       platform: "linux",
       tenantIds: [tenantId, otherTenantId],
+      steamClientConnectorIdentity: {
+        spiffeId: "spiffe://deviludo.test/steam-connector/runner-linux-1",
+        certificateFingerprint: sha("c"),
+      },
     }],
     ...overrides,
   };
@@ -129,6 +133,26 @@ test("fleet policy authorizes an exact signed-job identity tuple for secondary R
     tenantId,
   }), true);
   assert.equal(await policy.authorizeJob({
+    identity: {
+      ...runnerIdentity,
+      spiffeId: "spiffe://deviludo.test/steam-connector/runner-linux-1",
+      certificateFingerprint: sha("c"),
+    },
+    runnerId: runnerCapabilities.runnerId,
+    platform: runnerCapabilities.platform,
+    capabilityDigest: runnerCapabilities.capabilityDigest,
+    tenantId,
+    workload: "steam-client-connector",
+  }), true);
+  assert.equal(await policy.authorizeJob({
+    identity: runnerIdentity,
+    runnerId: runnerCapabilities.runnerId,
+    platform: runnerCapabilities.platform,
+    capabilityDigest: runnerCapabilities.capabilityDigest,
+    tenantId,
+    workload: "steam-client-connector",
+  }), false);
+  assert.equal(await policy.authorizeJob({
     identity: runnerIdentity,
     runnerId: runnerCapabilities.runnerId,
     platform: "windows",
@@ -157,5 +181,14 @@ test("fleet claims are strict, ordered and use exact non-floating bindings", () 
   } as RunnerFleetClaims), /manifest is invalid/);
   assert.throws(() => signRunnerFleetManifest("runner-fleet-key-01", keys.privateKey, claims({
     expiresAt: "2030-01-01T00:15:00.001Z",
+  })), /manifest is invalid/);
+  assert.throws(() => signRunnerFleetManifest("runner-fleet-key-01", keys.privateKey, claims({
+    runners: [{
+      ...claims().runners[0]!,
+      steamClientConnectorIdentity: {
+        spiffeId: identity().spiffeId,
+        certificateFingerprint: identity().certificateFingerprint,
+      },
+    }],
   })), /manifest is invalid/);
 });

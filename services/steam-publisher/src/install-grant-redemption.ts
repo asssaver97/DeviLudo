@@ -44,6 +44,7 @@ export class SteamInstallGrantRedemptionService {
       platform: job.payload.platform,
       capabilityDigest: job.payload.runnerCapabilityDigest,
       tenantId: job.payload.tenantId,
+      workload: "steam-client-connector",
     }))) invalid();
     const execution = job.payload.execution;
     const receipt = await this.options.store.redeem({

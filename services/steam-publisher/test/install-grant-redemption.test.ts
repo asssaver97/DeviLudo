@@ -18,7 +18,12 @@ test("redemption independently verifies signed job, fleet identity and exact gra
   const service = new SteamInstallGrantRedemptionService({
     jobKeyId: "runner-job-key-01", jobPublicKey: keys.publicKey, now: () => new Date(now),
     fleet: {
-      async authorizeJob(input) { authorized += 1; assert.equal(input.tenantId, job.payload.tenantId); return true; },
+      async authorizeJob(input) {
+        authorized += 1;
+        assert.equal(input.tenantId, job.payload.tenantId);
+        assert.equal(input.workload, "steam-client-connector");
+        return true;
+      },
       async probe() {},
     },
     store: {

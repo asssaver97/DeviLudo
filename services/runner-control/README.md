@@ -106,12 +106,20 @@ and the file must be atomically replaced before expiry:
       "certificateFingerprint": "<64 lowercase hex>",
       "capabilityDigest": "<64 lowercase hex>",
       "platform": "linux",
-      "tenantIds": ["11111111-1111-4111-8111-111111111111"]
+      "tenantIds": ["11111111-1111-4111-8111-111111111111"],
+      "steamClientConnectorIdentity": {
+        "spiffeId": "spiffe://deviludo.internal/steam-connector/runner-linux-1",
+        "certificateFingerprint": "<different 64 lowercase hex>"
+      }
     }]
   },
   "signature": "<Ed25519 base64url over canonical claims>"
 }
 ```
+
+`steamClientConnectorIdentity` is `null` on source-only machines. Steam grant
+redemption requires this distinct signed identity; the Runner's primary
+certificate cannot be reused as a Connector certificate.
 
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the

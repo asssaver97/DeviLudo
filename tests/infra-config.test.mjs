@@ -118,6 +118,8 @@ test("physical Runner host composes signed fleet authorization and mTLS evidence
   assert.match(host, /DEVILUDO_RUNNER_JOB_SIGNING_KEY_FILE/);
   assert.match(fleet, /MAX_VALIDITY_MS = 15 \* 60_000/);
   assert.match(fleet, /certificateFingerprint === identity\.certificateFingerprint/);
+  assert.match(fleet, /steamClientConnectorIdentity/);
+  assert.match(fleet, /workload === "runner"/);
   assert.match(fleet, /entry\.tenantIds\.includes/);
   assert.match(archive, /minVersion: "TLSv1\.3"/);
   assert.match(archive, /"idempotency-key": input\.bundle\.bundleDigest/);
