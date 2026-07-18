@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { ProjectStudio } from "@/components/console/ProjectStudio";
+import { NewProjectEntry } from "@/components/console/NewProjectEntry";
 
 export const metadata: Metadata = {
   title: "新游戏构想",
@@ -7,5 +7,5 @@ export const metadata: Metadata = {
 };
 
 export default function NewProjectPage() {
-  return <ProjectStudio mode="new" />;
+  return <NewProjectEntry />;
 }

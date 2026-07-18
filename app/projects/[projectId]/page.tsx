@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   description: "余烬群岛的规格、开发、测试和反馈迭代工作区。",
 };
 
-export default function ProjectPage() {
-  return <ProjectStudio mode="existing" />;
+export default async function ProjectPage({ params }: { params: Promise<{ projectId: string }> }) {
+  const { projectId } = await params;
+  return <ProjectStudio mode="existing" projectId={projectId} />;
 }

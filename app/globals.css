@@ -1042,6 +1042,20 @@ button {
   grid-template-columns: minmax(0, 1.46fr) minmax(320px, .76fr);
 }
 
+.repository-onboarding { background: var(--paper); border: 1px solid var(--line); margin-bottom: 28px; max-width: 780px; padding: 28px; }
+.repository-onboarding-title { align-items: center; border-bottom: 1px solid var(--line); display: flex; gap: 16px; padding-bottom: 20px; }
+.repository-onboarding-title > span { align-items: center; background: #232520; color: white; display: flex; height: 46px; justify-content: center; width: 46px; }
+.repository-onboarding-title svg { height: 22px; width: 22px; }
+.repository-onboarding-title b { font-size: 16px; }
+.repository-onboarding-title p, .repository-onboarding-state { color: var(--muted); font-size: 9px; margin: 5px 0 0; }
+.repository-onboarding-state { padding: 28px 0; }
+.repository-onboarding-state a, .repository-onboarding-error a { color: var(--ink); font-weight: 700; margin-left: 6px; text-decoration: underline; }
+.repository-onboarding-form { display: grid; gap: 18px; padding-top: 24px; }
+.repository-onboarding-form label { color: var(--muted); display: grid; font-size: 8px; font-weight: 700; gap: 7px; text-transform: uppercase; }
+.repository-onboarding-form input, .repository-onboarding-form select { background: white; border: 1px solid var(--line); color: var(--ink); font: 11px var(--font-geist-mono), monospace; min-height: 42px; padding: 0 12px; text-transform: none; }
+.repository-onboarding-form .button { justify-self: start; }
+.repository-onboarding-error { background: #fff0e8; color: #8a321f; font-size: 9px; margin: 18px 0 0; padding: 12px; }
+
 .conversation-panel,
 .spec-panel {
   background: var(--paper);

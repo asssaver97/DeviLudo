@@ -136,6 +136,15 @@ verifiers are deposited and consumed once through a separate mTLS Vault facade;
 the GitHub OAuth client secret is returned only as a short-lived binary-backed
 lease. OAuth codes and ephemeral user tokens never enter PostgreSQL or logs.
 
+Project creation uses a separate TLS 1.3/mTLS repository-onboarding workload.
+It accepts only the tenant, signed-in user, verified numeric GitHub user,
+installation ID, repository ID, project slug, and display name. The service
+re-resolves the user's active installation, obtains a metadata-only installation
+token, reads the repository directly from GitHub, and revokes that token. It
+then atomically writes the project, derived owner/name/default-branch binding,
+and a tenant-RLS idempotency receipt. Browser-supplied repository names or
+branches are never authority.
+
 ## Runner fencing and evidence
 
 Every selected OS receives a separate lease binding `attempt_id`, platform,

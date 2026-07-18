@@ -121,16 +121,20 @@ export function githubBrokerRuntimeFromEnvironment(
 ): GitHubBrokerRuntime | null {
   const endpoint = env.DEVILUDO_GITHUB_AUTH_BROKER_URL?.trim();
   if (!endpoint) return null;
-  const encodedKey = env.DEVILUDO_SESSION_HMAC_KEY?.trim();
-  if (!encodedKey) throw new Error("DEVILUDO_SESSION_HMAC_KEY is required with the GitHub broker");
-  const sessionHmacKey = decodeBase64Url(encodedKey);
-  if (sessionHmacKey.byteLength < 32 || sessionHmacKey.byteLength > 64) {
-    throw new Error("Platform session HMAC key is invalid");
-  }
   return Object.freeze({
     broker: new GitHubAuthorizationBrokerClient({ endpoint }),
-    sessionHmacKey,
+    sessionHmacKey: trustedGitHubSessionKeyFromEnvironment(env),
   });
+}
+
+export function trustedGitHubSessionKeyFromEnvironment(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Uint8Array {
+  const encodedKey = env.DEVILUDO_SESSION_HMAC_KEY?.trim();
+  if (!encodedKey) throw new Error("DEVILUDO_SESSION_HMAC_KEY is required");
+  const sessionHmacKey = decodeBase64Url(encodedKey);
+  if (sessionHmacKey.byteLength < 32 || sessionHmacKey.byteLength > 64) throw new Error("Platform session HMAC key is invalid");
+  return sessionHmacKey;
 }
 
 export async function verifyTrustedGitHubSession(

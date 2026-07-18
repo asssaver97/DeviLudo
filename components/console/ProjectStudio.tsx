@@ -51,7 +51,13 @@ const acceptance = [
 
 const frozenTests = ["启动与退出", "核心循环", "胜负条件", "存档回读", "暂停设置", "性能基线", "崩溃捕获", "视觉快照"];
 
-export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing" }) {
+export function ProjectStudio({
+  mode = "existing",
+  projectId = mode === "new" ? "new-project-draft" : "ember-archipelago",
+}: {
+  mode?: "new" | "existing";
+  projectId?: string;
+}) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [draft, setDraft] = useState("");
   const [revision, setRevision] = useState(mode === "new" ? 1 : 8);
@@ -78,7 +84,6 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
   async function sendMessage(text = draft) {
     const clean = text.trim();
     if (!clean || busy) return;
-    const projectId = mode === "new" ? "new-project-draft" : "ember-archipelago";
     const localId = `pending-${crypto.randomUUID()}`;
     const commandId = crypto.randomUUID();
     setMessages((current) => [...current, { id: localId, role: "user", text: clean, meta: "刚刚" }]);
@@ -124,7 +129,6 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
 
   async function approveSpec() {
     setBusy(true);
-    const projectId = mode === "new" ? "new-project-draft" : "ember-archipelago";
     approvalCommandRef.current ??= crypto.randomUUID();
     try {
       const response = await fetch(`/api/projects/${projectId}/spec-revisions`, {
@@ -159,7 +163,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     if (!feedback.trim()) return;
     setBusy(true);
     try {
-      const response = await fetch("/api/projects/ember-archipelago/feedback", {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/feedback`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `feedback-${Date.now()}` },
         body: JSON.stringify({ feedback }),
@@ -207,7 +211,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
     setBusy(true);
     try {
       acceptanceCommandRef.current ??= `accept-${crypto.randomUUID()}`;
-      const response = await fetch("/api/projects/ember-archipelago/acceptance", {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/acceptance`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": acceptanceCommandRef.current },
         body: "{}",
@@ -370,7 +374,7 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
 
       <LocalDeliveryPanel
         onStatus={syncDelivery}
-        projectId={mode === "new" ? "new-project-draft" : "ember-archipelago"}
+        projectId={projectId}
         refreshToken={deliveryRefresh}
       />
     </AppShell>

@@ -49,8 +49,11 @@ immutable project Steam depot revisions and freezes their ID and canonical
 digest into every newly issued signed release candidate. Migration `024`
 freezes a complete project release configuration, creates the workflow-bound
 `WAITING_MFA` release from passed main evidence and permits only the one-way
-binding of a dispatched MFA approval. All thirty migrations are
-mounted in numeric order for a newly initialized local PostgreSQL volume.
+binding of a dispatched MFA approval. Migrations `025`–`043` complete Steam
+release lifecycle authority, inference reconciliation, specification dialogue,
+Agent configuration, source/candidate/feedback/acceptance/merge projections,
+GitHub authorization anti-replay, and atomic project-to-repository onboarding.
+All forty-three migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
 service code. Application

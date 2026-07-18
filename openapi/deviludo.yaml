@@ -158,6 +158,33 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+  /projects/repositories:
+    get:
+      operationId: listAuthorizedProjectRepositories
+      description: Lists live repositories for GitHub App installations verified against the signed-in numeric GitHub user. No installation token is returned.
+      responses:
+        "200":
+          description: Current GitHub App repository catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/ProjectRepositoryCatalog" } }
+        "401": { description: A fresh trusted platform session is required. }
+  /projects:
+    post:
+      operationId: createRepositoryBoundProject
+      description: The server derives owner, repository name, node ID, and default branch from a fresh GitHub response and atomically persists the project and repository binding.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRepositoryBoundProject" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: The slug or repository is already bound, or the idempotency key has another request digest. }
   /projects/{projectId}/conversation:
     get:
       operationId: getSpecConversation
@@ -260,6 +287,47 @@ components:
               data: {}
               meta: { type: object, additionalProperties: true }
   schemas:
+    CreateRepositoryBoundProject:
+      type: object
+      additionalProperties: false
+      required: [slug, name, installationId, repositoryId]
+      properties:
+        slug: { type: string, pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$" }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        installationId: { type: string, pattern: "^[0-9]{1,20}$" }
+        repositoryId: { type: integer, minimum: 1 }
+    ProjectRepositoryCatalog:
+      type: object
+      additionalProperties: false
+      required: [installations]
+      properties:
+        installations:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [installationId, accountLogin, repositories]
+            properties:
+              installationId: { type: string, pattern: "^[0-9]{1,20}$" }
+              accountLogin: { type: string }
+              repositories:
+                type: array
+                maxItems: 1000
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [installationId, repositoryId, repositoryNodeId, owner, name, defaultBranch, private, archived, disabled]
+                  properties:
+                    installationId: { type: string, pattern: "^[0-9]{1,20}$" }
+                    repositoryId: { type: integer, minimum: 1 }
+                    repositoryNodeId: { type: string }
+                    owner: { type: string }
+                    name: { type: string }
+                    defaultBranch: { type: string }
+                    private: { type: boolean }
+                    archived: { const: false }
+                    disabled: { const: false }
     AgentProfileDraft:
       type: object
       required: [agent, baseUrl, primaryModel, credentialId, installationId]

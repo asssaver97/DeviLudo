@@ -58,6 +58,7 @@
     "start:scm-candidate-broker": "node --import tsx services/scm-proxy/src/run-candidate-publication-service.ts",
     "start:scm-merge-broker": "node --import tsx services/scm-proxy/src/run-merge-service.ts",
     "start:github-authorization": "node --import tsx services/scm-proxy/src/run-github-authorization-service.ts",
+    "start:project-repository": "node --import tsx services/scm-proxy/src/run-project-repository-service.ts",
     "start:source-snapshot": "node --import tsx services/scm-proxy/src/run-source-snapshot-service.ts",
     "start:artifact-preparer": "node --import tsx services/artifact-preparer/src/run-service.ts",
     "start:steam-publisher-workflow": "node --import tsx services/steam-publisher/src/run-workflow-service.ts",

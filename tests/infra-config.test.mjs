@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 42 }, (_, index) => {
+  const offsets = Array.from({ length: 43 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,26 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("project creation binds a live GitHub repository under tenant RLS and a durable claim", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/043_project_repository_onboarding.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/scm-proxy/src/project-repository-postgres.ts", import.meta.url), "utf8");
+  const github = readFileSync(new URL("../services/scm-proxy/src/github-repository-catalog.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/scm-proxy/src/run-project-repository-service.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:project-repository"], "node --import tsx services/scm-proxy/src/run-project-repository-service.ts");
+  assert.match(migration, /CREATE TABLE deviludo\.project_creation_operations/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /project_creation_terminal_guard/);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(store, /verified_by_github_user_id = \$3::bigint/);
+  assert.match(store, /INSERT INTO deviludo\.projects/);
+  assert.match(store, /INSERT INTO deviludo\.github_repository_bindings/);
+  assert.match(github, /permissions: \{ metadata: "read" \}/);
+  assert.match(github, /DELETE", "\/installation\/token"/);
+  assert.match(runtime, /minVersion: "TLSv1\.3"/);
+  assert.match(runtime, /workflowSpiffeIdFromAuthorizedTls/);
 });
 
 test("Temporal projects replay-validated delivery state for production Web reads", () => {
