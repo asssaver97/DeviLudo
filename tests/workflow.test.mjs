@@ -51,7 +51,7 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.current().history.length, 16);
 });
 
-test("feedback invalidates evidence and provider outage resumes the locked Agent", () => {
+test("feedback invalidates evidence and the approved second iteration returns through development and E2E", () => {
   const workflow = new GameDeliveryWorkflow({ workflowId: "delivery-2", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"] });
   workflow.signal({ signalId: "signal-101", type: "SPEC_READY", specRevisionId: "SPEC-001" });
   workflow.signal({ signalId: "signal-102", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-101" });
@@ -72,6 +72,27 @@ test("feedback invalidates evidence and provider outage resumes the locked Agent
   assert.equal(workflow.current().testPlanRevisionId, null);
   assert.equal(workflow.current().specApprovalReceiptId, null);
   assert.equal(workflow.current().iteration, 2);
+  assert.equal(workflow.nextCommand(), "REQUEST_SPEC_APPROVAL");
+
+  workflow.signal({
+    signalId: "signal-109",
+    type: "SPEC_APPROVED",
+    approvedSpecRevisionId: "SPEC-APPROVED-002",
+    testPlanRevisionId: "PLAN-002",
+    approvalReceiptId: "approval-102",
+  });
+  assert.equal(workflow.nextCommand(), "RESOLVE_AGENT_RUN_CONFIGURATION");
+  workflow.signal({ signalId: "signal-110", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-claude-r2" });
+  workflow.signal({ signalId: "signal-111", type: "AGENT_STARTED", runId: "run-2" });
+  workflow.signal({ signalId: "signal-112", type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 19 });
+  assert.equal(workflow.nextCommand(), "START_TARGET_MATRIX_E2E");
+  workflow.signal({ signalId: "signal-113", type: "E2E_PASSED", evidenceBundleId: "evidence-2" });
+  assert.equal(workflow.current().state, "WAITING_USER_ACCEPTANCE");
+  assert.equal(workflow.current().iteration, 2);
+  assert.equal(workflow.current().specRevisionId, "SPEC-APPROVED-002");
+  assert.equal(workflow.current().candidateCommitSha, "c".repeat(40));
+  assert.equal(workflow.current().draftPullRequest, 19);
+  assert.equal(workflow.current().candidateEvidenceBundleId, "evidence-2");
 });
 
 test("delivery signals are idempotent and gate-bound", () => {

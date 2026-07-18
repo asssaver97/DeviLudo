@@ -1,13 +1,21 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { invalidateLocalEvidence } from "@/lib/local-delivery/store";
+import { specDialogueBrokerRuntimeFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
+import { userAcceptanceBrokerFromEnvironment, userFeedbackOperationKey } from "@/lib/user-acceptance/broker";
+
+const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
   const { projectId } = await context.params;
-  return json({ data: getDemoStore().feedback, meta: { projectId } });
+  if (isLocal(request)) return json({ data: getDemoStore().feedback, meta: { projectId } });
+  return json({ error: { code: "METHOD_NOT_ALLOWED", message: "生产反馈历史由项目迭代视图读取" } }, {
+    status: 405,
+    headers: { allow: "POST" },
+  });
 }
 
 export async function POST(
@@ -16,9 +24,32 @@ export async function POST(
 ) {
   try {
     const { projectId } = await context.params;
+    if (!PROJECT.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效" } }, { status: 400 });
     const body = await bodyObject(request);
+    if (JSON.stringify(Object.keys(body)) !== JSON.stringify(["feedback"])) {
+      return json({ error: { code: "INVALID_USER_FEEDBACK_REQUEST", message: "候选版本反馈格式无效" } }, { status: 400 });
+    }
     const feedback = requireString(body, "feedback", 4000);
     const requestKey = idempotencyKey(request);
+    if (!isLocal(request)) {
+      const session = specDialogueBrokerRuntimeFromEnvironment();
+      const broker = userAcceptanceBrokerFromEnvironment();
+      if (!session || !broker) return productionBrokerRequired();
+      const principal = await verifyTrustedSpecSession(request, session.sessionHmacKey);
+      const receipt = await broker.submit({
+        operationKey: await userFeedbackOperationKey({
+          tenantId: principal.tenantId,
+          projectId,
+          userId: principal.userId,
+          idempotencyKey: requestKey,
+        }),
+        tenantId: principal.tenantId,
+        projectId,
+        actorId: principal.userId,
+        feedback,
+      });
+      return json({ data: receipt, meta: { idempotentReplay: receipt.delivery.replayed } }, { status: 201 });
+    }
     const result = withIdempotency(`feedback:${projectId}:${requestKey}`, () => {
       const store = getDemoStore();
       store.specRevision += 1;
@@ -56,4 +87,18 @@ export async function POST(
   } catch (error) {
     return problemResponse(error);
   }
+}
+
+function isLocal(request: Request): boolean {
+  const host = new URL(request.url).hostname;
+  return host === "127.0.0.1" || host === "localhost";
+}
+
+function productionBrokerRequired(): Response {
+  return json({
+    error: {
+      code: "USER_ACCEPTANCE_BROKER_REQUIRED",
+      message: "生产反馈需要独立的用户验收 Broker；Web 进程不会直接生成规格或失效证据。",
+    },
+  }, { status: 503 });
 }

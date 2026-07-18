@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 37 }, (_, index) => {
+  const offsets = Array.from({ length: 38 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,26 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("user feedback generation is durable and cannot invalidate evidence before a draft exists", () => {
+  const migration = readFileSync(new URL("../infra/postgres/038_user_feedback_iterations.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/user-acceptance/src/postgres-store.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/user-acceptance/src/service.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.user_feedback_operations/);
+  assert.match(migration, /state IN \('GENERATING', 'DRAFT_READY', 'COMPLETED'\)/);
+  assert.match(migration, /user_feedback_operation_guard/);
+  assert.match(migration, /previous_spec_revision_id/);
+  assert.match(migration, /next_spec_revision_id/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(store, /action\.operation = 'REQUEST_USER_ACCEPTANCE'/);
+  assert.match(store, /action\.status = 'WAITING'/);
+  assert.match(store, /NOT EXISTS[\s\S]*draft\.state = 'DRAFT'/);
+  assert.match(store, /previousRevisionId: claim\.previousSpecRevisionId/);
+  assert.match(store, /INSERT INTO deviludo\.spec_dialogue_operations/);
+  assert.match(store, /SET state = 'DRAFT_READY'/);
+  assert.match(service, /source: "USER_ACCEPTANCE_SERVICE"/);
+  assert.match(service, /type: "USER_FEEDBACK"/);
 });
 
 test("user feedback atomically invalidates the candidate evidence through an append-only receipt", () => {

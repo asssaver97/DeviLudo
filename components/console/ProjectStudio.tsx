@@ -87,7 +87,11 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
       const response = await fetch(`/api/projects/${projectId}/conversation`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `spec-chat-${commandId}` },
-        body: JSON.stringify({ expectedRevision: revision, message: clean }),
+        body: JSON.stringify({
+          expectedRevision: revision,
+          message: clean,
+          ...(dialogueAuthority ? { conversationId: dialogueAuthority.conversationId } : {}),
+        }),
       });
       const payload = await response.json() as {
         data?: {
@@ -159,11 +163,35 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
         headers: { "content-type": "application/json", "idempotency-key": `feedback-${Date.now()}` },
         body: JSON.stringify({ feedback }),
       });
-      const payload = await response.json() as { error?: { message?: string } };
+      const payload = await response.json() as {
+        data?: {
+          snapshot?: {
+            conversationId: string;
+            revision: number;
+            specRevisionId: string;
+            testPlanRevisionId: string;
+            messages: readonly SpecDialogueMessage[];
+            result: SpecModelResult;
+          };
+        };
+        error?: { message?: string };
+      };
       if (!response.ok) throw new Error(payload.error?.message ?? "创建反馈迭代失败");
       setFeedback("");
       setFeedbackCount((count) => count + 1);
-      setRevision((current) => current + 1);
+      if (payload.data?.snapshot) {
+        const snapshot = payload.data.snapshot;
+        setRevision(snapshot.revision);
+        setGenerated(snapshot.result);
+        setMessages((current) => mergeMessages(current, snapshot.messages));
+        setDialogueAuthority({
+          conversationId: snapshot.conversationId,
+          specRevisionId: snapshot.specRevisionId,
+          testPlanRevisionId: snapshot.testPlanRevisionId,
+        });
+      } else {
+        setRevision((current) => current + 1);
+      }
       setApproved(false);
       setDeliveryRefresh((value) => value + 1);
       setNotice("反馈已创建为新的不可变迭代；旧候选版本的测试证据已失效。");

@@ -31,19 +31,35 @@ export async function POST(
   try {
     const { projectId } = await context.params;
     const body = await bodyObject(request);
-    if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "message"])) {
+    const keys = Object.keys(body).sort();
+    const hasConversation = "conversationId" in body;
+    if (JSON.stringify(keys) !== JSON.stringify(hasConversation
+      ? ["conversationId", "expectedRevision", "message"]
+      : ["expectedRevision", "message"])) {
       return json({ error: { code: "INVALID_SPEC_DIALOGUE_REQUEST", message: "构想消息格式无效" } }, { status: 400 });
     }
     const local = localRuntimeUrl(request);
     if (local) return await proxyLocal(local, projectId, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": idempotencyKey(request) },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ expectedRevision: body.expectedRevision, message: body.message }),
     });
     const runtime = specDialogueBrokerRuntimeFromEnvironment();
     if (!runtime) return brokerRequired();
     const principal = await verifyTrustedSpecSession(request, runtime.sessionHmacKey);
-    const conversationId = await deterministicConversationId(principal.tenantId, projectId);
+    let conversationId = await deterministicConversationId(principal.tenantId, projectId);
+    if (hasConversation) {
+      if (typeof body.conversationId !== "string") throw new Error("Specification conversation binding is invalid");
+      const snapshot = await runtime.broker.snapshot({
+        tenantId: principal.tenantId,
+        projectId,
+        conversationId: body.conversationId,
+      });
+      if (!snapshot || snapshot.state !== "DRAFT" || snapshot.revision !== body.expectedRevision) {
+        throw new Error("Specification conversation binding is not the current draft");
+      }
+      conversationId = snapshot.conversationId;
+    }
     const commandKey = idempotencyKey(request);
     const snapshot = await runtime.broker.send({
       tenantId: principal.tenantId,

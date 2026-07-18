@@ -2,7 +2,6 @@ import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-pl
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { startLocalDelivery } from "@/lib/local-delivery/store";
 import {
-  deterministicConversationId,
   specDialogueBrokerRuntimeFromEnvironment,
   specOperationKey,
   verifyTrustedSpecSession,
@@ -126,8 +125,17 @@ async function approveDialogue(
   const runtime = specDialogueBrokerRuntimeFromEnvironment();
   if (!runtime) throw new Error("Specification approval Broker is not configured");
   const principal = await verifyTrustedSpecSession(request, runtime.sessionHmacKey);
-  const conversationId = await deterministicConversationId(principal.tenantId, projectId);
-  if (body.conversationId !== conversationId) throw new Error("Specification conversation binding changed");
+  const conversationId = body.conversationId;
+  const current = await runtime.broker.snapshot({
+    tenantId: principal.tenantId,
+    projectId,
+    conversationId,
+  });
+  if (!current || current.state !== "DRAFT" || current.revision !== body.expectedRevision
+    || current.specRevisionId !== body.specRevisionId
+    || current.testPlanRevisionId !== body.testPlanRevisionId) {
+    throw new Error("Specification conversation binding changed");
+  }
   return runtime.broker.approve({
     tenantId: principal.tenantId, projectId, conversationId, actorId: principal.userId,
     operationKey: await specOperationKey({ tenantId: principal.tenantId, projectId, conversationId, userId: principal.userId, idempotencyKey: requestKey }),

@@ -168,7 +168,10 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
         payload: testPlanPayload, payloadDigest: testPlanPayloadDigest,
         previousRevisionId: conversation.currentTestPlanRevisionId, createdBy: claim.command.actorId,
       });
-      const sequence = revision * 2 - 1;
+      // Feedback iterations inherit the aggregate revision but begin a fresh
+      // conversation, so message sequence is conversation-local rather than
+      // derived from the aggregate revision number.
+      const sequence = claim.history.length + 1;
       const insertedMessages = await client.query(
         `INSERT INTO deviludo.spec_conversation_messages
           (tenant_id, project_id, conversation_id, operation_key, sequence,

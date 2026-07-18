@@ -48,6 +48,7 @@ services:
       - ./postgres/035_agent_execution_broker.sql:/docker-entrypoint-initdb.d/035_agent_execution_broker.sql:ro
       - ./postgres/036_scm_candidate_publication.sql:/docker-entrypoint-initdb.d/036_scm_candidate_publication.sql:ro
       - ./postgres/037_feedback_evidence_invalidation.sql:/docker-entrypoint-initdb.d/037_feedback_evidence_invalidation.sql:ro
+      - ./postgres/038_user_feedback_iterations.sql:/docker-entrypoint-initdb.d/038_user_feedback_iterations.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s
