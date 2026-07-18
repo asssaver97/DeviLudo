@@ -54,6 +54,8 @@ export class InferenceGatewayProviderProbeClient {
           agent: provider.agent,
           protocol: provider.protocol,
           baseUrl: provider.baseUrl,
+          approvedPorts: provider.approvedPorts,
+          authentication: provider.authentication,
           models: provider.models,
           credentialVersionId: provider.credentialVersionId,
           requiredChecks: requiredChecks,

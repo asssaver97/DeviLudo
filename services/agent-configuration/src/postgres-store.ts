@@ -61,6 +61,8 @@ type RunRow = {
   resolution_digest: string;
   configuration_lock: unknown;
 };
+type ProviderProjectionRow = { provider_revision_id: string };
+type RunAuthorizationRow = { run_id: string };
 
 /** RLS authority that atomically snapshots moving administrator defaults into one AgentRun. */
 export class PostgresAgentConfigurationStore implements AgentConfigurationStore {
@@ -235,6 +237,7 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
       });
       const resolvedAt = this.now();
       if (!Number.isFinite(resolvedAt.getTime())) invalid();
+      const authorizationExpiresAt = new Date(resolvedAt.getTime() + catalog.budget.timeoutSeconds * 1_000);
       const targetMatrix = targetPlatforms(row.target_matrix);
       const lockWithoutDigest = Object.freeze({
         profileRevisionId: catalog.profileRevisionId,
@@ -253,7 +256,11 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
         providerRevisionId: catalog.providerRevisionId,
         providerProtocol: catalog.providerProtocol,
         providerBaseUrl: catalog.providerBaseUrl,
+        providerApprovedPorts: catalog.providerApprovedPorts,
         providerAuthentication: catalog.providerAuthentication,
+        providerPricing: catalog.providerPricing,
+        providerGovernance: catalog.providerGovernance,
+        inferenceAuthorizationExpiresAt: authorizationExpiresAt.toISOString(),
         modelRoles: catalog.modelRoles,
         credentialVersionId: catalog.credentialVersionId,
         budget: catalog.budget,
@@ -273,6 +280,45 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
       });
       const resolutionDigest = sha256Canonical(lockWithoutDigest);
       const configurationLock: AgentConfigurationLock = Object.freeze({ ...lockWithoutDigest, resolutionDigest });
+      const providerModels = JSON.stringify(catalog.modelRoles);
+      const providerPricing = catalog.providerPricing;
+      await client.query(
+        `INSERT INTO deviludo.inference_provider_revisions
+          (provider_revision_id, tenant_id, project_id, source_revision_id,
+           agent, protocol, base_url, approved_ports, authentication, models,
+           credential_version_id, input_usd_per_million_tokens,
+           output_usd_per_million_tokens, state)
+         VALUES ($2, $1::uuid, NULL, $2, $3, $4, $5, $6::integer[], $7,
+                 $8::jsonb, $9, $10::numeric, $11::numeric, 'ACTIVE')
+         ON CONFLICT (tenant_id, provider_revision_id) DO NOTHING`,
+        [claim.tenantId, catalog.providerRevisionId, catalog.agent,
+          catalog.providerProtocol, catalog.providerBaseUrl,
+          catalog.providerApprovedPorts, catalog.providerAuthentication,
+          providerModels, catalog.credentialVersionId,
+          providerPricing.inputUsdPerMillionTokens,
+          providerPricing.outputUsdPerMillionTokens],
+      );
+      const providerProjection = await client.query<ProviderProjectionRow>(
+        `SELECT provider_revision_id
+           FROM deviludo.inference_provider_revisions
+          WHERE tenant_id = $1::uuid AND provider_revision_id = $2
+            AND project_id IS NULL AND source_revision_id = $2
+            AND agent = $3 AND protocol = $4 AND base_url = $5
+            AND approved_ports = $6::integer[] AND authentication = $7
+            AND models = $8::jsonb AND credential_version_id = $9
+            AND input_usd_per_million_tokens = $10::numeric
+            AND output_usd_per_million_tokens = $11::numeric
+            AND state = 'ACTIVE'
+          FOR SHARE`,
+        [claim.tenantId, catalog.providerRevisionId, catalog.agent,
+          catalog.providerProtocol, catalog.providerBaseUrl,
+          catalog.providerApprovedPorts, catalog.providerAuthentication,
+          providerModels, catalog.credentialVersionId,
+          providerPricing.inputUsdPerMillionTokens,
+          providerPricing.outputUsdPerMillionTokens],
+      );
+      if (providerProjection.rows.length !== 1
+        || providerProjection.rows[0]?.provider_revision_id !== catalog.providerRevisionId) conflict();
       const runId = randomUUID();
       await client.query(
         `INSERT INTO deviludo.agent_runs
@@ -305,6 +351,37 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
       if (runResult.rows.length !== 1 || !run || !UUID.test(run.id) || run.state !== "QUEUED"
         || run.resolution_digest !== resolutionDigest
         || sha256Canonical(record(run.configuration_lock)) !== sha256Canonical(configurationLock)) conflict();
+      const authorizationModels = [...new Set(Object.values(catalog.modelRoles))];
+      const authorizationBudget = Object.freeze({ maxCostUsd: catalog.budget.maxUsd });
+      const authorizationNonce = randomUUID();
+      await client.query(
+        `INSERT INTO deviludo.inference_run_authorizations
+          (run_id, tenant_id, project_id, profile_revision_id,
+           provider_revision_id, credential_version_id, models, budget,
+           nonce, state, expires_at)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::text[],
+                 $8::jsonb, $9, 'ACTIVE', $10::timestamptz)
+         ON CONFLICT (tenant_id, run_id) DO NOTHING`,
+        [run.id, claim.tenantId, claim.projectId, catalog.profileRevisionId,
+          catalog.providerRevisionId, catalog.credentialVersionId,
+          authorizationModels, JSON.stringify(authorizationBudget),
+          authorizationNonce, authorizationExpiresAt.toISOString()],
+      );
+      const authorization = await client.query<RunAuthorizationRow>(
+        `SELECT run_id::text
+           FROM deviludo.inference_run_authorizations
+          WHERE tenant_id = $2::uuid AND project_id = $3::uuid
+            AND run_id = $1::uuid AND profile_revision_id = $4
+            AND provider_revision_id = $5 AND credential_version_id = $6
+            AND models = $7::text[] AND budget = $8::jsonb AND nonce = $9
+            AND state = 'ACTIVE' AND expires_at = $10::timestamptz
+          FOR SHARE`,
+        [run.id, claim.tenantId, claim.projectId, catalog.profileRevisionId,
+          catalog.providerRevisionId, catalog.credentialVersionId,
+          authorizationModels, JSON.stringify(authorizationBudget),
+          authorizationNonce, authorizationExpiresAt.toISOString()],
+      );
+      if (authorization.rows.length !== 1 || authorization.rows[0]?.run_id !== run.id) conflict();
       const updated = await client.query(
         `UPDATE deviludo.agent_configuration_resolutions
             SET state = 'LOCKED', claim_token = NULL, claim_expires_at = NULL,

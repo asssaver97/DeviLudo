@@ -183,6 +183,9 @@ test("credentials never echo plaintext and Provider activation is a separate sec
       installationId,
       credentialVersionId: credentialId,
       baseUrl: "https://responses.example.com/v1",
+      authentication: "bearer",
+      inputUsdPerMillionTokens: 2.5,
+      outputUsdPerMillionTokens: 10,
       primaryModel: "gpt-5.3-codex-2026-06-12",
       maxBudgetUsd: 20,
       maxTurns: 80,
@@ -267,6 +270,9 @@ test("tenant and project administrators cannot cross signed scope or BYOK bounda
       installationId: "claude-code-installation-2-1-14",
       credentialVersionId: credentialId,
       baseUrl: "https://tenant-alpha-gateway.example.com/v1",
+      authentication: "x-api-key",
+      inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15,
       primaryModel: "claude-sonnet-4-6-20250514",
       dataRegion: "eu-west",
       retentionPolicy: "zero retention",
@@ -414,6 +420,46 @@ test("unsafe Provider endpoints and floating models are rejected", async () => {
   assert.equal(response.statusCode, 400);
   assert.equal(response.json().error.code, "PROVIDER_ENDPOINT_REJECTED");
   assert.equal(response.body.includes("api_key=secret"), false);
+});
+
+test("Provider pricing and authentication must be explicit and protocol compatible", async () => {
+  const incompatible = await inject({
+    method: "POST",
+    url: "/admin/agent-profiles",
+    role: "PlatformAgentAdmin",
+    key: "profile-incompatible-auth",
+    payload: {
+      scope: "platform", scopeId: "global", agent: "codex-cli",
+      installationId: "codex-cli-installation-0-91-0",
+      credentialVersionId: "credential-platform-claude-v1",
+      baseUrl: "https://responses.example.com/v1",
+      authentication: "x-api-key",
+      inputUsdPerMillionTokens: 2.5,
+      outputUsdPerMillionTokens: 10,
+      primaryModel: "gpt-5.3-codex-2026-06-12",
+      dataRegion: "us-east", retentionPolicy: "zero retention", trainingPolicy: "no training",
+    },
+  });
+  assert.equal(incompatible.statusCode, 400);
+  assert.equal(incompatible.json().error.code, "PROVIDER_AUTHENTICATION_REJECTED");
+
+  const missingPricing = await inject({
+    method: "POST",
+    url: "/admin/agent-profiles",
+    role: "PlatformAgentAdmin",
+    key: "profile-missing-pricing",
+    payload: {
+      scope: "platform", scopeId: "global", agent: "claude-code",
+      installationId: "claude-code-installation-2-1-14",
+      credentialVersionId: "credential-platform-claude-v1",
+      baseUrl: "https://gateway.anthropic.example.com/v1",
+      authentication: "x-api-key",
+      primaryModel: "claude-sonnet-4-6-20250514",
+      dataRegion: "us-east", retentionPolicy: "zero retention", trainingPolicy: "no training",
+    },
+  });
+  assert.equal(missingPricing.statusCode, 400);
+  assert.equal(missingPricing.json().error.code, "PROVIDER_PRICING_REJECTED");
 });
 
 interface InjectInput {

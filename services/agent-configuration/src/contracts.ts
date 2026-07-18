@@ -48,7 +48,20 @@ export interface AgentConfigurationLock {
   readonly providerRevisionId: string;
   readonly providerProtocol: "anthropic-messages" | "openai-responses";
   readonly providerBaseUrl: string;
-  readonly providerAuthentication: "x-api-key" | "bearer";
+  readonly providerApprovedPorts: readonly number[];
+  readonly providerAuthentication: "x-api-key" | "authorization-bearer" | "bearer";
+  readonly providerPricing: Readonly<{
+    inputUsdPerMillionTokens: number;
+    outputUsdPerMillionTokens: number;
+  }>;
+  readonly providerGovernance: Readonly<{
+    dataRegion: string;
+    retentionPolicy: string;
+    trainingPolicy: string;
+    confirmedBy: string;
+    confirmedAt: string;
+  }>;
+  readonly inferenceAuthorizationExpiresAt: string;
   readonly modelRoles: Readonly<{
     primaryModel: string;
     planningModel: string;

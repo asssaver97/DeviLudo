@@ -92,11 +92,17 @@ export interface ProviderRevisionRecord {
   readonly agent: AgentKind;
   readonly protocol: "anthropic-messages" | "openai-responses";
   readonly baseUrl: string;
+  readonly approvedPorts: readonly number[];
+  readonly authentication: "bearer" | "x-api-key" | "authorization-bearer";
   readonly models: {
     readonly primaryModel: string;
     readonly planningModel: string;
     readonly smallFastModel: string;
     readonly subagentModel: string;
+  };
+  readonly pricing: {
+    readonly inputUsdPerMillionTokens: number;
+    readonly outputUsdPerMillionTokens: number;
   };
   readonly credentialVersionId: string;
   state: ProfileState;

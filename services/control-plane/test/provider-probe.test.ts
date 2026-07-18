@@ -38,6 +38,8 @@ test("control-plane Provider probe uses mounted mTLS material and sends SecretRe
     assert.equal(calls[0]?.request.key.byteLength, 64);
     const submitted = JSON.parse(calls[0]?.request.body ?? "null") as Record<string, unknown>;
     assert.equal(submitted.credentialVersionId, provider.credentialVersionId);
+    assert.deepEqual(submitted.approvedPorts, [443]);
+    assert.equal(submitted.authentication, "bearer");
     assert.equal("apiKey" in submitted, false);
     assert.equal("secretRef" in submitted, false);
     assert.equal("token" in submitted, false);
@@ -85,12 +87,15 @@ const provider: ProviderRevisionRecord = {
   agent: "codex-cli",
   protocol: "openai-responses",
   baseUrl: "https://provider.example.com/v1",
+  approvedPorts: Object.freeze([443]),
+  authentication: "bearer",
   models: {
     primaryModel: "gpt-5.3-codex-2026-06-12",
     planningModel: "gpt-5.3-codex-2026-06-12",
     smallFastModel: "gpt-5.3-codex-2026-06-12",
     subagentModel: "gpt-5.3-codex-2026-06-12",
   },
+  pricing: Object.freeze({ inputUsdPerMillionTokens: 2.5, outputUsdPerMillionTokens: 10 }),
   credentialVersionId: "credential-v1",
   state: "VALIDATING",
   probe: {},

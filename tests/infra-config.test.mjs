@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 33 }, (_, index) => {
+  const offsets = Array.from({ length: 34 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -34,6 +34,7 @@ test("approved specifications enter Temporal through an ordered durable bridge",
 test("approved specifications lock one tenant-bound source and Agent catalog revision", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/033_agent_configuration_resolution.sql", import.meta.url), "utf8");
+  const inferenceProjection = readFileSync(new URL("../infra/postgres/034_inference_provider_projection.sql", import.meta.url), "utf8");
   const store = readFileSync(new URL("../services/agent-configuration/src/postgres-store.ts", import.meta.url), "utf8");
   const resolver = readFileSync(new URL("../services/agent-configuration/src/catalog.ts", import.meta.url), "utf8");
   const service = readFileSync(new URL("../services/agent-configuration/src/service.ts", import.meta.url), "utf8");
@@ -49,6 +50,8 @@ test("approved specifications lock one tenant-bound source and Agent catalog rev
   assert.match(resolver, /tenant:\$\{input\.tenantId\}/);
   assert.match(store, /CROSS JOIN deviludo\.admin_catalog_state catalog/);
   assert.match(store, /INSERT INTO deviludo\.agent_runs/);
+  assert.match(store, /INSERT INTO deviludo\.inference_provider_revisions/);
+  assert.match(store, /INSERT INTO deviludo\.inference_run_authorizations/);
   assert.match(store, /ON CONFLICT \(tenant_id, idempotency_key\) DO NOTHING/);
   assert.match(store, /SELECT set_config\('app\.tenant_id'/);
   assert.match(service, /source: "AGENT_CONFIGURATION_SERVICE"/);
@@ -57,6 +60,8 @@ test("approved specifications lock one tenant-bound source and Agent catalog rev
   assert.match(baseline, /spec\.state = 'APPROVED'/);
   assert.match(ingress, /baselineSpiffeIds/);
   assert.match(ingress, /idempotency-key/);
+  assert.match(inferenceProjection, /PRIMARY KEY \(tenant_id, provider_revision_id\)/);
+  assert.match(inferenceProjection, /inference_run_authorization_agent_run_fk/);
 });
 
 test("specification dialogue persists tenant-isolated messages and immutable draft pairs", () => {

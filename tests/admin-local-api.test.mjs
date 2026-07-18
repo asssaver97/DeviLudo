@@ -103,6 +103,9 @@ test("Provider activation fails closed without its external trust gate", async (
     request("agent-profiles", "POST", "SecurityAdmin", {
       agent: "claude-code",
       baseUrl: "https://provider.example.com/v1",
+      authentication: "x-api-key",
+      inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15,
       primaryModel: "claude-sonnet-4-6-20250514",
       installationId: "claude-installation-214",
       credentialId: "cred-claude-platform-v4",

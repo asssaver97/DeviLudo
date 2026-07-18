@@ -21,6 +21,8 @@ export interface GatewayProviderProbeRequest {
   readonly agent: "claude-code" | "codex-cli";
   readonly protocol: GatewayProtocol;
   readonly baseUrl: string;
+  readonly approvedPorts: readonly number[];
+  readonly authentication: "bearer" | "x-api-key" | "authorization-bearer";
   readonly models: ModelRoles;
   readonly credentialVersionId: string;
   readonly requiredChecks: readonly ProviderProbeCheck[];
@@ -41,7 +43,7 @@ export class StrictGatewayProviderProbe implements GatewayProviderProbeService {
 
   async run(value: unknown): Promise<Readonly<{ providerRevisionId: string; checks: Readonly<Record<ProviderProbeCheck, "PASS">> }>> {
     const provider = parseProviderProbeRequest(value);
-    const endpoint = await validateEndpointForConnection(provider.baseUrl, this.options.dns, { approvedPorts: [443], maxRedirects: 3 });
+    const endpoint = await validateEndpointForConnection(provider.baseUrl, this.options.dns, { approvedPorts: provider.approvedPorts, maxRedirects: 3 });
     const lease = await this.options.credentials.resolveProviderProbe({
       providerRevisionId: provider.providerRevisionId,
       credentialVersionId: provider.credentialVersionId,
@@ -100,12 +102,12 @@ export class StrictGatewayProviderProbe implements GatewayProviderProbeService {
     let endpoint = initialEndpoint;
     let url = inferenceUrl(endpoint.url, provider.protocol);
     for (let redirect = 0; redirect <= 3; redirect += 1) {
-      const response = await this.#transport.request({ endpoint, url, headers: headers(provider.protocol, secret), body: encoded, signal });
+      const response = await this.#transport.request({ endpoint, url, headers: headers(provider.protocol, provider.authentication, secret), body: encoded, signal });
       if (![301, 302, 303, 307, 308].includes(response.statusCode)) return response;
       const location = singleHeader(response.headers.location);
       response.body.destroy();
       if ((response.statusCode !== 307 && response.statusCode !== 308) || !location || redirect === 3) invalid();
-      const next = await validateRedirectForConnection(url.toString(), location, redirect + 1, this.options.dns, { approvedPorts: [443], maxRedirects: 3 });
+      const next = await validateRedirectForConnection(url.toString(), location, redirect + 1, this.options.dns, { approvedPorts: provider.approvedPorts, maxRedirects: 3 });
       const nextUrl = inferenceUrl(next.url, provider.protocol);
       if (nextUrl.origin !== url.origin) invalid();
       endpoint = next;
@@ -157,6 +159,8 @@ export function parseProviderProbeRequest(value: unknown): GatewayProviderProbeR
   if (!Array.isArray(body.requiredChecks)
     || JSON.stringify(body.requiredChecks) !== JSON.stringify(PROVIDER_PROBE_CHECKS)) invalid();
   const modelsBody = record(body.models);
+  const approvedPorts = approvedProviderPorts(body.approvedPorts);
+  const authentication = providerAuthentication(body.authentication, body.agent);
   const models = Object.freeze({
     primaryModel: pinned(modelsBody.primaryModel),
     planningModel: pinned(modelsBody.planningModel),
@@ -168,6 +172,8 @@ export function parseProviderProbeRequest(value: unknown): GatewayProviderProbeR
     agent: body.agent,
     protocol: body.protocol,
     baseUrl: strictString(body.baseUrl, 2_048),
+    approvedPorts,
+    authentication,
     models,
     credentialVersionId: body.credentialVersionId as string,
     requiredChecks: PROVIDER_PROBE_CHECKS,
@@ -233,10 +239,15 @@ function validateToolCall(protocol: GatewayProtocol, value: unknown): void {
   })) invalid();
 }
 function usageRecord(_protocol: GatewayProtocol, body: Record<string, unknown>): Record<string, unknown> { return record(body.usage); }
-function headers(protocol: GatewayProtocol, secret: string): Readonly<Record<string, string>> {
+function headers(
+  protocol: GatewayProtocol,
+  authentication: GatewayProviderProbeRequest["authentication"],
+  secret: string,
+): Readonly<Record<string, string>> {
   return Object.freeze({
     "content-type": "application/json", accept: "application/json, text/event-stream", "user-agent": "DeviLudo-Provider-Probe/1",
-    ...(protocol === "anthropic-messages" ? { "x-api-key": secret, "anthropic-version": "2023-06-01" } : { authorization: `Bearer ${secret}` }),
+    ...(protocol === "anthropic-messages" ? { "anthropic-version": "2023-06-01" } : {}),
+    ...(authentication === "x-api-key" ? { "x-api-key": secret } : { authorization: `Bearer ${secret}` }),
   });
 }
 function inferenceUrl(base: string, protocol: GatewayProtocol): URL {
@@ -254,6 +265,15 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
 function secretText(value: Uint8Array): string { if (value.byteLength < 8 || value.byteLength > 64 * 1024) invalid(); const text = Buffer.from(value).toString("utf8"); if (/\0|\r|\n/.test(text)) invalid(); return text; }
 function pinned(value: unknown): string { if (typeof value !== "string") invalid(); try { return assertPinnedModelId(value); } catch { invalid(); } }
 function strictString(value: unknown, maximum: number): string { if (typeof value !== "string" || value.length < 1 || value.length > maximum || /\0/.test(value)) invalid(); return value; }
+function approvedProviderPorts(value: unknown): readonly number[] {
+  if (!Array.isArray(value) || value.length !== 1 || value[0] !== 443) invalid();
+  return Object.freeze([443]);
+}
+function providerAuthentication(value: unknown, agent: unknown): GatewayProviderProbeRequest["authentication"] {
+  if (agent === "codex-cli" && value === "bearer") return value;
+  if (agent === "claude-code" && (value === "x-api-key" || value === "authorization-bearer")) return value;
+  invalid();
+}
 function integer(value: unknown): number { if (!Number.isSafeInteger(value) || (value as number) < 0) invalid(); return value as number; }
 function record(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) invalid(); return value as Record<string, unknown>; }
 function invalid(): never { throw new Error("Inference Provider compatibility probe failed"); }

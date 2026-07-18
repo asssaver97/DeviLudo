@@ -54,6 +54,24 @@ test("Agent catalog rejects unhealthy installations, inactive Providers, floatin
   assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: scoped, tenantId, projectId }), /another tenant scope/);
 });
 
+test("Agent catalog rejects unprobed authentication, pricing and governance drift", () => {
+  const authentication = catalog();
+  authentication.providers[0]!.authentication = "bearer";
+  assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: authentication, tenantId, projectId }), /authentication is incompatible/);
+
+  const pricing = catalog();
+  pricing.providers[0]!.pricing.outputUsdPerMillionTokens = Number.NaN;
+  assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: pricing, tenantId, projectId }), /Decimal value/);
+
+  const probe = catalog();
+  delete (probe.providers[0]!.probe as Record<string, string>).dnsPinning;
+  assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: probe, tenantId, projectId }), /probe is incomplete/);
+
+  const governance = catalog();
+  governance.providers[0]!.governance.confirmedAt = "not-a-date";
+  assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: governance, tenantId, projectId }), /governance confirmation/);
+});
+
 function catalog() {
   return {
     versions: [{
@@ -89,12 +107,20 @@ function catalog() {
       state: "ACTIVE",
       protocol: "anthropic-messages",
       baseUrl: "https://gateway.anthropic.example/v1",
+      approvedPorts: [443],
+      authentication: "x-api-key",
       credentialVersionId: "credential-claude-v1",
       models: {
         primaryModel: "claude-sonnet-4-6-20250514",
         planningModel: "claude-sonnet-4-6-20250514",
         smallFastModel: "claude-sonnet-4-6-20250514",
         subagentModel: "claude-sonnet-4-6-20250514",
+      },
+      pricing: { inputUsdPerMillionTokens: 3, outputUsdPerMillionTokens: 15 },
+      governance: {
+        dataRegion: "vendor-managed", retentionPolicy: "zero-retention",
+        trainingPolicy: "no-training", confirmedBy: "security-admin",
+        confirmedAt: "2030-01-01T00:00:00.000Z",
       },
       probe: {
         authentication: "PASS",
@@ -104,6 +130,9 @@ function catalog() {
         cancellation: "PASS",
         usage: "PASS",
         timeout: "PASS",
+        minimalReasoning: "PASS",
+        dnsPinning: "PASS",
+        redirectRevalidation: "PASS",
       },
     }],
     profiles: [profile("profile-platform-r1", "platform", "global")],

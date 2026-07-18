@@ -134,12 +134,18 @@ function seededState(): AdminCatalogState {
     agent: "claude-code",
     protocol: "anthropic-messages",
     baseUrl: "https://gateway.anthropic.com/",
+    approvedPorts: Object.freeze([443]),
+    authentication: "x-api-key",
     models: {
       primaryModel: "claude-sonnet-4-6-20250514",
       planningModel: "claude-sonnet-4-6-20250514",
       smallFastModel: "claude-sonnet-4-6-20250514",
       subagentModel: "claude-sonnet-4-6-20250514",
     },
+    pricing: Object.freeze({
+      inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15,
+    }),
     credentialVersionId: credential.id,
     state: "ACTIVE",
     probe: {

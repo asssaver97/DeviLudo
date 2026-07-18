@@ -10,6 +10,7 @@ import {
   optionalString,
   requiredString,
   type AuditRecord,
+  type AgentKind,
   type AgentVersionRecord,
   type CredentialVersionRecord,
   type InstallationRecord,
@@ -548,6 +549,8 @@ export class AdminService {
       throw new ServiceProblem(400, "MODEL_ID_REJECTED", safeMessage(error, "Model IDs must be exact and pinned"));
     }
     const governance = parseGovernance(body, actor);
+    const authentication = parseProviderAuthentication(body, agent);
+    const pricing = parseProviderPricing(body);
     const budget = parseBudget(body);
     const fallbackProfileRevisionId = optionalString(body, "fallbackProfileRevisionId") ?? null;
     return this.mutate(actor, (state) => {
@@ -572,7 +575,10 @@ export class AdminService {
         agent,
         protocol: agent === "codex-cli" ? "openai-responses" : "anthropic-messages",
         baseUrl: new URL(baseUrl).toString(),
+        approvedPorts: Object.freeze([443]),
+        authentication,
         models,
+        pricing,
         credentialVersionId,
         state: "DRAFT",
         probe: {},
@@ -1134,6 +1140,26 @@ function parseBudget(body: Record<string, unknown>): ProfileRevisionRecord["budg
     throw new ServiceProblem(400, "BUDGET_OUT_OF_POLICY", "Profile budget or timeout exceeds platform limits");
   }
   return Object.freeze({ maxUsd, maxTurns, timeoutSeconds });
+}
+
+function parseProviderAuthentication(
+  body: Record<string, unknown>,
+  agent: AgentKind,
+): ProviderRevisionRecord["authentication"] {
+  const value = requiredString(body, "authentication", 40);
+  if (agent === "codex-cli" && value === "bearer") return value;
+  if (agent === "claude-code" && (value === "x-api-key" || value === "authorization-bearer")) return value;
+  throw new ServiceProblem(400, "PROVIDER_AUTHENTICATION_REJECTED", "Authentication is incompatible with the selected Agent protocol");
+}
+
+function parseProviderPricing(body: Record<string, unknown>): ProviderRevisionRecord["pricing"] {
+  const input = body.inputUsdPerMillionTokens;
+  const output = body.outputUsdPerMillionTokens;
+  if (typeof input !== "number" || !Number.isFinite(input) || input < 0 || input > 1_000_000
+    || typeof output !== "number" || !Number.isFinite(output) || output < 0 || output > 1_000_000) {
+    throw new ServiceProblem(400, "PROVIDER_PRICING_REJECTED", "Provider token pricing must be explicit non-negative USD per million tokens");
+  }
+  return Object.freeze({ inputUsdPerMillionTokens: input, outputUsdPerMillionTokens: output });
 }
 
 function safeMessage(error: unknown, fallback: string): string {

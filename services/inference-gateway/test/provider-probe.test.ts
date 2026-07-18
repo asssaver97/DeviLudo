@@ -5,8 +5,13 @@ import type { GatewayProtocol } from "../src/contracts";
 import { PROVIDER_PROBE_CHECKS, StrictGatewayProviderProbe } from "../src/provider-probe";
 import type { GatewayUpstreamTransport } from "../src/production-connector";
 
-for (const protocol of ["openai-responses", "anthropic-messages"] as const) {
-  test(`strict Provider probe executes the complete ${protocol} contract and wipes its lease`, async () => {
+for (const fixture of [
+  { protocol: "openai-responses", authentication: "bearer" },
+  { protocol: "anthropic-messages", authentication: "x-api-key" },
+  { protocol: "anthropic-messages", authentication: "authorization-bearer" },
+] as const) {
+  const { protocol, authentication } = fixture;
+  test(`strict Provider probe executes the complete ${protocol}/${authentication} contract and wipes its lease`, async () => {
     const calls: Array<{ path: string; headers: Readonly<Record<string, string>>; body: Record<string, unknown>; aborted: boolean }> = [];
     let destroyed = false;
     const transport: GatewayUpstreamTransport = {
@@ -25,7 +30,7 @@ for (const protocol of ["openai-responses", "anthropic-messages"] as const) {
     const probe = new StrictGatewayProviderProbe({
       credentials: {
         async resolveProviderProbe(input) {
-          assert.equal(input.providerRevisionId, `provider-${protocol}`);
+          assert.equal(input.providerRevisionId, `provider-${protocol}-${authentication}`);
           const value = Buffer.from("fixed-provider-key");
           return { value, destroy() { value.fill(0); destroyed = true; } };
         },
@@ -35,10 +40,12 @@ for (const protocol of ["openai-responses", "anthropic-messages"] as const) {
     });
     const model = protocol === "openai-responses" ? "gpt-5.3-codex-2026-06-12" : "claude-sonnet-4-20250514";
     const result = await probe.run({
-      providerRevisionId: `provider-${protocol}`,
+      providerRevisionId: `provider-${protocol}-${authentication}`,
       agent: protocol === "openai-responses" ? "codex-cli" : "claude-code",
       protocol,
       baseUrl: "https://provider.example.com/v1",
+      approvedPorts: [443],
+      authentication,
       models: { primaryModel: model, planningModel: model, smallFastModel: model, subagentModel: model },
       credentialVersionId: "credential-v1",
       requiredChecks: PROVIDER_PROBE_CHECKS,
@@ -48,8 +55,8 @@ for (const protocol of ["openai-responses", "anthropic-messages"] as const) {
     assert.equal(destroyed, true);
     assert.equal(calls.length, 5);
     assert.ok(calls.every((call) => call.path === (protocol === "openai-responses" ? "/v1/responses" : "/v1/messages")));
-    assert.equal(protocol === "openai-responses" ? calls[0]?.headers.authorization : calls[0]?.headers["x-api-key"],
-      protocol === "openai-responses" ? "Bearer fixed-provider-key" : "fixed-provider-key");
+    assert.equal(authentication === "x-api-key" ? calls[0]?.headers["x-api-key"] : calls[0]?.headers.authorization,
+      authentication === "x-api-key" ? "fixed-provider-key" : "Bearer fixed-provider-key");
     assert.equal(JSON.stringify(result).includes("fixed-provider-key"), false);
   });
 }
@@ -64,6 +71,7 @@ test("strict Provider probe refuses protocol drift and floating model aliases be
   const base = {
     providerRevisionId: "provider-r1", agent: "codex-cli", protocol: "openai-responses",
     baseUrl: "https://provider.example.com/v1", credentialVersionId: "credential-v1",
+    approvedPorts: [443], authentication: "bearer",
     requiredChecks: PROVIDER_PROBE_CHECKS,
   };
   await assert.rejects(probe.run({ ...base, protocol: "anthropic-messages", models: exactModels("gpt-5.3-codex-2026-06-12") }), /probe failed/);

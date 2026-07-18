@@ -570,6 +570,9 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
   const [primaryModel, setPrimaryModel] = useState("claude-sonnet-4-5-20250929");
   const [planningModel, setPlanningModel] = useState("");
   const [fastModel, setFastModel] = useState("");
+  const [authentication, setAuthentication] = useState<"bearer" | "x-api-key" | "authorization-bearer">("x-api-key");
+  const [inputPrice, setInputPrice] = useState("3");
+  const [outputPrice, setOutputPrice] = useState("15");
   const [apiKey, setApiKey] = useState("");
   const [regionAcknowledged, setRegionAcknowledged] = useState(false);
   const [error, setError] = useState("");
@@ -593,6 +596,12 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
     }
     if (!primaryModel.trim()) return "Primary Model 必填";
     if (/^(latest|default|sonnet|opus|haiku)$/i.test(primaryModel.trim())) return "Active Profile 禁止使用浮动模型别名";
+    if ((agent === "codex-cli" && authentication !== "bearer")
+      || (agent === "claude-code" && authentication !== "x-api-key" && authentication !== "authorization-bearer")) return "认证方式与 Agent 协议不兼容";
+    for (const [label, value] of [["输入", inputPrice], ["输出", outputPrice]] as const) {
+      const parsed = Number(value);
+      if (!value.trim() || !Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) return `${label} Token 单价必须是非负数`;
+    }
     if (apiKey && apiKey.length < 12) return "凭据格式过短；请使用测试凭据或留空沿用当前版本";
     if (!regionAcknowledged) return "请确认第三方端点的数据处理信息";
     return "";
@@ -620,6 +629,9 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         primaryModel,
         planningModel,
         smallFastModel: fastModel,
+        authentication,
+        inputUsdPerMillionTokens: Number(inputPrice),
+        outputUsdPerMillionTokens: Number(outputPrice),
         installationId: agent === "claude-code" ? "claude-installation-214" : "codex-installation-091",
         credentialId,
         scope: "platform",
@@ -677,10 +689,10 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         {localHealth?.dependencies?.providerBindingProbe !== "CONFIGURED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />下列为控制面配置快照；本机没有受信 Provider 绑定探针，不能用于 Agent 执行。</div> : null}
         {!permissions.editPlatformProvider ? <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看平台 Provider。租户和项目覆盖应在对应作用域页面配置。</div> : null}
         <div className={styles.providerRows}>
-          <button type="button" className={`${styles.providerRow} ${agent === "claude-code" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>
+          <button type="button" className={`${styles.providerRow} ${agent === "claude-code" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setAuthentication("x-api-key"); setInputPrice("3"); setOutputPrice("15"); setDraftProfileId(""); }}>
             <AgentMark kind="claude-code" small /><div><strong>Anthropic · cn-gateway</strong><span>Messages · claude-sonnet-4-5-20250929</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
           </button>
-          <button type="button" className={`${styles.providerRow} ${agent === "codex-cli" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setDraftProfileId(""); }}>
+          <button type="button" className={`${styles.providerRow} ${agent === "codex-cli" ? styles.providerRowSelected : ""}`} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setAuthentication("bearer"); setInputPrice("2.5"); setOutputPrice("10"); setDraftProfileId(""); }}>
             <AgentMark kind="codex-cli" small /><div><strong>OpenAI · platform</strong><span>Responses · gpt-5.2-codex-2026-02-01</span></div><StatusPill tone="success">ACTIVE</StatusPill><AdminIcon name="chevron" />
           </button>
         </div>
@@ -699,16 +711,21 @@ function ProvidersTab({ role, localHealth, notify, onChanged }: { role: AdminRol
         <div className={styles.formGroup}>
           <label>Agent</label>
           <div className={styles.segmented}>
-            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setDraftProfileId(""); }}>Claude Code</button>
-            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setDraftProfileId(""); }}>Codex CLI</button>
+            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("claude-code"); setPrimaryModel("claude-sonnet-4-5-20250929"); setAuthentication("x-api-key"); setInputPrice("3"); setOutputPrice("15"); setDraftProfileId(""); }}>Claude Code</button>
+            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => { setAgent("codex-cli"); setPrimaryModel("gpt-5.2-codex-2026-02-01"); setAuthentication("bearer"); setInputPrice("2.5"); setOutputPrice("10"); setDraftProfileId(""); }}>Codex CLI</button>
           </div>
         </div>
         <div className={styles.formGroup}><label htmlFor="protocol">协议</label><input id="protocol" value={protocol} disabled /><small>协议由 Agent Adapter 固定，不可混用。</small></div>
         <div className={styles.formGroup}><label htmlFor="baseUrl">Base URL</label><input id="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} spellCheck="false" disabled={!permissions.editPlatformProvider} /><small>仅 HTTPS；DNS 与每次 redirect 都会重新执行 SSRF 校验。</small></div>
+        <div className={styles.formGroup}><label htmlFor="authentication">上游认证</label><select id="authentication" value={authentication} onChange={(event) => setAuthentication(event.target.value as typeof authentication)} disabled={!permissions.editPlatformProvider}><option value={agent === "codex-cli" ? "bearer" : "x-api-key"}>{agent === "codex-cli" ? "Authorization: Bearer" : "x-api-key"}</option>{agent === "claude-code" ? <option value="authorization-bearer">Authorization: Bearer</option> : null}</select><small>认证方式固定进入 Provider revision，并由探针按同一方式验证。</small></div>
         <div className={styles.formGroup}><label htmlFor="primaryModel">Primary Model <em>必填</em></label><input id="primaryModel" value={primaryModel} onChange={(event) => setPrimaryModel(event.target.value)} spellCheck="false" disabled={!permissions.editPlatformProvider} /><small>必须是精确模型 ID，禁止 latest / default / sonnet 等浮动别名。</small></div>
         <div className={styles.fieldPair}>
           <div className={styles.formGroup}><label htmlFor="planningModel">Planning Model</label><input id="planningModel" value={planningModel} onChange={(event) => setPlanningModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
           <div className={styles.formGroup}><label htmlFor="fastModel">Small / Fast Model</label><input id="fastModel" value={fastModel} onChange={(event) => setFastModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
+        </div>
+        <div className={styles.fieldPair}>
+          <div className={styles.formGroup}><label htmlFor="inputPrice">输入单价（USD / 1M Token）</label><input id="inputPrice" type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
+          <div className={styles.formGroup}><label htmlFor="outputPrice">输出单价（USD / 1M Token）</label><input id="outputPrice" type="number" min="0" step="0.000001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         </div>
         <div className={styles.formGroup}><label htmlFor="apiKey">替换 API Key</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="留空以沿用当前凭据版本" autoComplete="new-password" disabled={!permissions.manageGlobalCredentials} /></div><small>写入后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。平台凭据仅由 SecurityAdmin 替换。</small></div>
         <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} disabled={!permissions.editPlatformProvider} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>

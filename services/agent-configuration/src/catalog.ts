@@ -26,7 +26,19 @@ export interface ResolvedCatalogConfiguration {
   readonly providerRevisionId: string;
   readonly providerProtocol: "anthropic-messages" | "openai-responses";
   readonly providerBaseUrl: string;
-  readonly providerAuthentication: "x-api-key" | "bearer";
+  readonly providerApprovedPorts: readonly number[];
+  readonly providerAuthentication: "x-api-key" | "authorization-bearer" | "bearer";
+  readonly providerPricing: Readonly<{
+    inputUsdPerMillionTokens: number;
+    outputUsdPerMillionTokens: number;
+  }>;
+  readonly providerGovernance: Readonly<{
+    dataRegion: string;
+    retentionPolicy: string;
+    trainingPolicy: string;
+    confirmedBy: string;
+    confirmedAt: string;
+  }>;
   readonly modelRoles: Readonly<{
     primaryModel: string;
     planningModel: string;
@@ -102,9 +114,16 @@ export function resolveCatalogConfiguration(input: {
   const providerProtocol = agent === "claude-code" ? "anthropic-messages" : "openai-responses";
   if (provider.protocol !== providerProtocol) invalid("Agent Provider protocol is incompatible");
   const providerBaseUrl = text(provider.baseUrl, 1_000);
-  validateProviderBaseUrl(providerBaseUrl, { approvedPorts: [443] });
+  const providerApprovedPorts = approvedPorts(provider.approvedPorts);
+  validateProviderBaseUrl(providerBaseUrl, { approvedPorts: providerApprovedPorts });
+  const canonicalProviderBaseUrl = new URL(providerBaseUrl).toString();
+  if (canonicalProviderBaseUrl !== providerBaseUrl) invalid("Agent Provider Base URL is not canonical");
+  const providerAuthentication = authentication(provider.authentication, agent);
   const probe = object(provider.probe, "provider probe");
-  for (const capability of ["authentication", "modelExistence", "streaming", "toolCalling", "cancellation", "usage", "timeout"]) {
+  for (const capability of [
+    "authentication", "modelExistence", "streaming", "toolCalling", "cancellation",
+    "usage", "timeout", "minimalReasoning", "dnsPinning", "redirectRevalidation",
+  ]) {
     if (probe[capability] !== "PASS") invalid("Agent Provider probe is incomplete");
   }
   const models = object(provider.models, "model roles");
@@ -113,6 +132,23 @@ export function resolveCatalogConfiguration(input: {
     planningModel: pinned(models.planningModel),
     smallFastModel: pinned(models.smallFastModel),
     subagentModel: pinned(models.subagentModel),
+  });
+  const pricingValue = object(provider.pricing, "provider pricing");
+  const providerPricing = Object.freeze({
+    inputUsdPerMillionTokens: nonNegativeDecimal(pricingValue.inputUsdPerMillionTokens, 1_000_000),
+    outputUsdPerMillionTokens: nonNegativeDecimal(pricingValue.outputUsdPerMillionTokens, 1_000_000),
+  });
+  const governanceValue = object(provider.governance, "provider governance");
+  const confirmedAt = text(governanceValue.confirmedAt, 80);
+  if (!Number.isFinite(Date.parse(confirmedAt)) || new Date(confirmedAt).toISOString() !== confirmedAt) {
+    invalid("Provider governance confirmation is invalid");
+  }
+  const providerGovernance = Object.freeze({
+    dataRegion: text(governanceValue.dataRegion, 120),
+    retentionPolicy: text(governanceValue.retentionPolicy, 500),
+    trainingPolicy: text(governanceValue.trainingPolicy, 500),
+    confirmedBy: text(governanceValue.confirmedBy, 160),
+    confirmedAt: new Date(confirmedAt).toISOString(),
   });
   const credential = requireRecord(credentials, credentialVersionId, "credential");
   if (credential.state !== "ACTIVE") invalid("Agent credential version is inactive");
@@ -143,8 +179,11 @@ export function resolveCatalogConfiguration(input: {
     agentVersionSourceDigest,
     providerRevisionId,
     providerProtocol,
-    providerBaseUrl: new URL(providerBaseUrl).toString(),
-    providerAuthentication: agent === "claude-code" ? "x-api-key" : "bearer",
+    providerBaseUrl: canonicalProviderBaseUrl,
+    providerApprovedPorts,
+    providerAuthentication,
+    providerPricing,
+    providerGovernance,
     modelRoles,
     credentialVersionId,
     budget,
@@ -207,6 +246,22 @@ function integer(value: unknown, minimum: number, maximum: number): number {
 function decimal(value: unknown, minimumExclusive: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= minimumExclusive || value > maximum) invalid("Decimal value is invalid");
   return value;
+}
+function nonNegativeDecimal(value: unknown, maximum: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > maximum) invalid("Decimal value is invalid");
+  return value;
+}
+function approvedPorts(value: unknown): readonly number[] {
+  if (!Array.isArray(value) || value.length !== 1 || value[0] !== 443) invalid("Provider approved ports require a trusted Connector");
+  return Object.freeze([443]);
+}
+function authentication(
+  value: unknown,
+  agent: AgentKind,
+): ResolvedCatalogConfiguration["providerAuthentication"] {
+  if (agent === "codex-cli" && value === "bearer") return value;
+  if (agent === "claude-code" && (value === "x-api-key" || value === "authorization-bearer")) return value;
+  invalid("Agent Provider authentication is incompatible");
 }
 function integerString(value: string | number | bigint): string {
   const selected = String(value);

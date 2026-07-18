@@ -1314,7 +1314,8 @@
   font-style: normal;
 }
 
-.formGroup input {
+.formGroup input,
+.formGroup select {
   height: 35px;
   border: 1px solid #cfd4d0;
   border-radius: 2px;
@@ -1326,12 +1327,14 @@
   font-size: 10px;
 }
 
-.formGroup input:focus {
+.formGroup input:focus,
+.formGroup select:focus {
   border-color: #5a8371;
   box-shadow: 0 0 0 2px rgba(55, 112, 88, .1);
 }
 
-.formGroup input:disabled {
+.formGroup input:disabled,
+.formGroup select:disabled {
   background: #f0f2ef;
   color: #7b837f;
 }

@@ -1,5 +1,5 @@
 import { normalizeModelRoles } from "@/lib/agent/providers";
-import { appendDemoAudit, getDemoStore, withIdempotency, type DemoProfile } from "@/lib/control-plane/demo-store";
+import { appendDemoAudit, getDemoStore, withIdempotency, type DemoProfile, type DemoProvider } from "@/lib/control-plane/demo-store";
 import {
   bodyObject,
   HttpProblem,
@@ -271,6 +271,20 @@ export async function POST(request: Request, context: RouteContext) {
         throw new HttpProblem(400, "MODEL_ID_REJECTED", error instanceof Error ? error.message : "Model IDs must be exact");
       }
       const protocol = agent === "codex-cli" ? "openai-responses" : "anthropic-messages";
+      const authenticationValue = requireString(body, "authentication", 40);
+      if ((agent === "codex-cli" && authenticationValue !== "bearer")
+        || (agent === "claude-code" && authenticationValue !== "x-api-key" && authenticationValue !== "authorization-bearer")) {
+        throw new HttpProblem(400, "PROVIDER_AUTHENTICATION_REJECTED", "Authentication is incompatible with the selected Agent protocol");
+      }
+      const authentication = authenticationValue as DemoProvider["authentication"];
+      const inputUsdPerMillionTokens = body.inputUsdPerMillionTokens;
+      const outputUsdPerMillionTokens = body.outputUsdPerMillionTokens;
+      if (typeof inputUsdPerMillionTokens !== "number" || !Number.isFinite(inputUsdPerMillionTokens)
+        || inputUsdPerMillionTokens < 0 || inputUsdPerMillionTokens > 1_000_000
+        || typeof outputUsdPerMillionTokens !== "number" || !Number.isFinite(outputUsdPerMillionTokens)
+        || outputUsdPerMillionTokens < 0 || outputUsdPerMillionTokens > 1_000_000) {
+        throw new HttpProblem(400, "PROVIDER_PRICING_REJECTED", "Provider token pricing must be explicit non-negative USD per million tokens");
+      }
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const providerId = `provider-${agent}-${store.providers.length + 1}`;
@@ -292,6 +306,9 @@ export async function POST(request: Request, context: RouteContext) {
           agent,
           protocol,
           baseUrl,
+          authentication,
+          inputUsdPerMillionTokens,
+          outputUsdPerMillionTokens,
           primaryModel: models.primaryModel,
           credentialId: requireString(body, "credentialId", 160),
           state: "DRAFT",
@@ -299,7 +316,8 @@ export async function POST(request: Request, context: RouteContext) {
         });
         store.profiles.push(profile);
         appendDemoAudit("AGENT_PROFILE_DRAFTED", profile.id, role, { agent, protocol, baseUrl });
-        return { profile, provider: { id: providerId, protocol, baseUrl, models, state: "DRAFT" } };
+        return { profile, provider: { id: providerId, protocol, baseUrl, authentication,
+          pricing: { inputUsdPerMillionTokens, outputUsdPerMillionTokens }, models, state: "DRAFT" } };
       });
     }
 

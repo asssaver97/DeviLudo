@@ -29,6 +29,9 @@ export type DemoProvider = {
   agent: "claude-code" | "codex-cli";
   protocol: "anthropic-messages" | "openai-responses";
   baseUrl: string;
+  authentication: "bearer" | "x-api-key" | "authorization-bearer";
+  inputUsdPerMillionTokens: number;
+  outputUsdPerMillionTokens: number;
   primaryModel: string;
   credentialId: string;
   state: "DRAFT" | "VALIDATING" | "READY" | "ACTIVE" | "DISABLED";
@@ -133,6 +136,9 @@ const initialState = (): DemoStoreState => ({
       agent: "claude-code",
       protocol: "anthropic-messages",
       baseUrl: "https://gateway.anthropic.example/v1",
+      authentication: "x-api-key",
+      inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15,
       primaryModel: "claude-sonnet-4-6-20250514",
       credentialId: "cred-claude-platform-v4",
       state: "ACTIVE",
@@ -144,6 +150,9 @@ const initialState = (): DemoStoreState => ({
       agent: "codex-cli",
       protocol: "openai-responses",
       baseUrl: "https://responses.openai.example/v1",
+      authentication: "bearer",
+      inputUsdPerMillionTokens: 2.5,
+      outputUsdPerMillionTokens: 10,
       primaryModel: "gpt-5.3-codex-2026-06-12",
       credentialId: "cred-codex-platform-v2",
       state: "ACTIVE",

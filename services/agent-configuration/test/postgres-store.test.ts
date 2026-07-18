@@ -54,6 +54,7 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   const sql: string[] = [];
   let persistedLock: Record<string, unknown> | null = null;
   let persistedDigest = "";
+  let authorizationValues: readonly unknown[] = [];
   const client = clientWith(async (statement, values) => {
     sql.push(statement);
     if (statement.includes("CROSS JOIN deviludo.admin_catalog_state catalog")) {
@@ -64,8 +65,18 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
       persistedDigest = String(values[14]);
       return rows([]);
     }
+    if (statement.includes("FROM deviludo.inference_provider_revisions")) {
+      return rows([{ provider_revision_id: "provider-claude-r1" }]);
+    }
     if (statement.includes("FROM deviludo.agent_runs")) {
       return rows([{ id: runId, state: "QUEUED", resolution_digest: persistedDigest, configuration_lock: persistedLock }]);
+    }
+    if (statement.includes("INSERT INTO deviludo.inference_run_authorizations")) {
+      authorizationValues = values;
+      return rows([]);
+    }
+    if (statement.includes("FROM deviludo.inference_run_authorizations")) {
+      return rows([{ run_id: runId }]);
     }
     if (statement.includes("SET state = 'LOCKED'")) return rows([{ action_id: actionId }]);
     return rows([]);
@@ -83,6 +94,25 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   assert.equal(observedLock.adminCatalogRevision, "12");
   assert.ok(sql.some((statement) => statement.includes("FOR SHARE OF spec, plan, binding, toolchain, baseline, catalog")));
   assert.ok(sql.some((statement) => statement.includes("ON CONFLICT (tenant_id, idempotency_key) DO NOTHING")));
+  assert.ok(sql.some((statement) => statement.includes("INSERT INTO deviludo.inference_provider_revisions")));
+  assert.ok(sql.some((statement) => statement.includes("INSERT INTO deviludo.inference_run_authorizations")));
+  assert.deepEqual(authorizationValues[6], ["claude-sonnet-4-6-20250514"]);
+  assert.deepEqual(JSON.parse(String(authorizationValues[7])), { maxCostUsd: 25 });
+  assert.equal(authorizationValues[9], "2030-01-01T03:02:03.000Z");
+});
+
+test("PostgreSQL Agent configuration refuses a drifted serving projection without creating a run", async () => {
+  const sql: string[] = [];
+  const client = clientWith(async (statement) => {
+    sql.push(statement);
+    if (statement.includes("CROSS JOIN deviludo.admin_catalog_state catalog")) return rows([authority()]);
+    if (statement.includes("FROM deviludo.inference_provider_revisions")) return rows([]);
+    return rows([]);
+  });
+  const store = new PostgresAgentConfigurationStore(pool(client), () => new Date("2030-01-01T01:02:03.000Z"));
+  await assert.rejects(store.lock(claim(), baseline()), /authority conflicts/);
+  assert.equal(sql.some((statement) => statement.includes("INSERT INTO deviludo.agent_runs")), false);
+  assert.equal(sql.at(-1), "ROLLBACK");
 });
 
 function claim(): AgentConfigurationClaim {
@@ -178,14 +208,22 @@ function catalog() {
     providers: [{
       id: "provider-claude-r1", agent: "claude-code", state: "ACTIVE",
       protocol: "anthropic-messages", baseUrl: "https://gateway.anthropic.example/v1",
+      approvedPorts: [443], authentication: "x-api-key",
       credentialVersionId: "credential-claude-v1",
       models: {
         primaryModel: "claude-sonnet-4-6-20250514", planningModel: "claude-sonnet-4-6-20250514",
         smallFastModel: "claude-sonnet-4-6-20250514", subagentModel: "claude-sonnet-4-6-20250514",
       },
+      pricing: { inputUsdPerMillionTokens: 3, outputUsdPerMillionTokens: 15 },
+      governance: {
+        dataRegion: "vendor-managed", retentionPolicy: "zero-retention",
+        trainingPolicy: "no-training", confirmedBy: "security-admin",
+        confirmedAt: "2030-01-01T00:00:00.000Z",
+      },
       probe: {
         authentication: "PASS", modelExistence: "PASS", streaming: "PASS", toolCalling: "PASS",
-        cancellation: "PASS", usage: "PASS", timeout: "PASS",
+        cancellation: "PASS", usage: "PASS", timeout: "PASS", minimalReasoning: "PASS",
+        dnsPinning: "PASS", redirectRevalidation: "PASS",
       },
     }],
     profiles: [{
