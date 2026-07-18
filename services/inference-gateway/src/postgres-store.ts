@@ -99,13 +99,26 @@ export class PostgresInferenceGatewayStore implements InferenceReconciliationSto
     validateTenantRun(tenantId, runId);
     return this.#transaction(tenantId, async (client) => {
       const selected = await client.query<RunRow>(
-        `SELECT tenant_id::text, project_id::text, run_id::text,
-                profile_revision_id, provider_revision_id, credential_version_id,
-                models, budget, nonce, state
-           FROM deviludo.inference_run_authorizations
-          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
-            AND expires_at > now()
-          FOR SHARE`,
+        `SELECT authorization.tenant_id::text, authorization.project_id::text,
+                authorization.run_id::text,
+                COALESCE(failover.to_profile_revision_id, authorization.profile_revision_id)
+                  AS profile_revision_id,
+                COALESCE(failover.to_provider_revision_id, authorization.provider_revision_id)
+                  AS provider_revision_id,
+                COALESCE(failover.to_credential_version_id, authorization.credential_version_id)
+                  AS credential_version_id,
+                COALESCE(failover.to_models, authorization.models) AS models,
+                COALESCE(failover.to_budget, authorization.budget) AS budget,
+                COALESCE(failover.authorization_nonce::text, authorization.nonce) AS nonce,
+                authorization.state
+           FROM deviludo.inference_run_authorizations authorization
+           LEFT JOIN deviludo.agent_run_provider_failovers failover
+             ON failover.tenant_id = authorization.tenant_id
+            AND failover.project_id = authorization.project_id
+            AND failover.run_id = authorization.run_id
+          WHERE authorization.tenant_id = $1::uuid AND authorization.run_id = $2::uuid
+            AND COALESCE(failover.authorization_expires_at, authorization.expires_at) > now()
+          FOR SHARE OF authorization`,
         [tenantId, runId],
       );
       if (selected.rows.length === 0) return null;
@@ -153,13 +166,26 @@ export class PostgresInferenceGatewayStore implements InferenceReconciliationSto
     validateClaimBinding(input);
     return this.#transaction(input.tenantId, async (client) => {
       const runResult = await client.query<RunRow>(
-        `SELECT tenant_id::text, project_id::text, run_id::text,
-                profile_revision_id, provider_revision_id, credential_version_id,
-                models, budget, nonce, state
-           FROM deviludo.inference_run_authorizations
-          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
-            AND expires_at > now()
-          FOR UPDATE`,
+        `SELECT authorization.tenant_id::text, authorization.project_id::text,
+                authorization.run_id::text,
+                COALESCE(failover.to_profile_revision_id, authorization.profile_revision_id)
+                  AS profile_revision_id,
+                COALESCE(failover.to_provider_revision_id, authorization.provider_revision_id)
+                  AS provider_revision_id,
+                COALESCE(failover.to_credential_version_id, authorization.credential_version_id)
+                  AS credential_version_id,
+                COALESCE(failover.to_models, authorization.models) AS models,
+                COALESCE(failover.to_budget, authorization.budget) AS budget,
+                COALESCE(failover.authorization_nonce::text, authorization.nonce) AS nonce,
+                authorization.state
+           FROM deviludo.inference_run_authorizations authorization
+           LEFT JOIN deviludo.agent_run_provider_failovers failover
+             ON failover.tenant_id = authorization.tenant_id
+            AND failover.project_id = authorization.project_id
+            AND failover.run_id = authorization.run_id
+          WHERE authorization.tenant_id = $1::uuid AND authorization.run_id = $2::uuid
+            AND COALESCE(failover.authorization_expires_at, authorization.expires_at) > now()
+          FOR UPDATE OF authorization`,
         [input.tenantId, input.runId],
       );
       if (runResult.rows.length !== 1) invalid();

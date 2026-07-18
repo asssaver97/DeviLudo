@@ -75,6 +75,9 @@ test("PostgreSQL Gateway registries use tenant RLS and preserve exact immutable 
   const tenantScopes = calls.filter((call) => call.text.includes("set_config('app.tenant_id'"));
   assert.equal(tenantScopes.length, 5);
   assert.ok(tenantScopes.every((call) => call.values?.[0] === tenantId));
+  const runReads = calls.filter((call) => call.text.includes("FROM deviludo.inference_run_authorizations"));
+  assert.ok(runReads.some((call) => call.text.includes("LEFT JOIN deviludo.agent_run_provider_failovers")));
+  assert.ok(runReads.some((call) => call.text.includes("COALESCE(failover.to_provider_revision_id")));
   const usageInsert = calls.find((call) => call.text.includes("INSERT INTO deviludo.inference_usage_events"));
   assert.deepEqual(usageInsert?.values, [
     requestId, tenantId, projectId, runId, providerRevisionId, credentialVersionId, model, 100, 50, 0.0006,

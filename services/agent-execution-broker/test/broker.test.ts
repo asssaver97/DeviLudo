@@ -289,3 +289,83 @@ test("PostgreSQL Provider wait commits before returning 409 semantics", async ()
   assert.equal(sql.includes("ROLLBACK"), false);
   assert.ok(sql.some((statement) => statement.includes("SET state = 'WAITING_PROVIDER'")));
 });
+
+test("PostgreSQL Broker activates only the exact locked same-Agent fallback", async () => {
+  const sql: string[] = [];
+  const primaryModel = "gateway/claude-sonnet-4-6-20250514";
+  const fallbackModel = "gateway/claude-sonnet-4-6-20250601";
+  const fallback = {
+    profileRevisionId: "profile-fallback-r1", installationId: "installation-fallback-r1",
+    imageDigest: `sha256:${"2".repeat(64)}`, exactAgentVersion: "2.1.15",
+    adapterVersion: "adapter-1.0.1", agent: "claude-code",
+    providerRevisionId: "provider-fallback-r1", providerProtocol: "anthropic-messages",
+    providerBaseUrl: "https://fallback.example.invalid/v1", credentialVersionId: "credential-fallback-v1",
+    modelRoles: { primaryModel: fallbackModel, planningModel: fallbackModel,
+      smallFastModel: fallbackModel, subagentModel: fallbackModel },
+    budget: { maxUsd: 8, maxTurns: 40, timeoutSeconds: 3_600 },
+    inferenceAuthorizationExpiresAt: "2030-01-01T00:50:00.000Z",
+  };
+  const lockWithoutDigest = {
+    profileSource: `project:${projectId}`, profileRevisionId: "profile-r1",
+    installationId: "installation-r1", imageDigest: `sha256:${"c".repeat(64)}`,
+    exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code",
+    providerRevisionId: "provider-r1", providerProtocol: "anthropic-messages",
+    providerBaseUrl: "https://gateway.example.invalid/v1", credentialVersionId: "credential-v1",
+    modelRoles: { primaryModel, planningModel: primaryModel, smallFastModel: primaryModel, subagentModel: primaryModel },
+    budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 3_600 }, fallback,
+    specRevisionId: "77777777-7777-4777-8777-777777777777", specDigest: "f".repeat(64),
+    testPlanRevisionId: "88888888-8888-4888-8888-888888888888", testPlanDigest: "1".repeat(64),
+    targetMatrix: ["linux", "windows"],
+    sourceBaselineReceiptId: "99999999-9999-4999-8999-999999999999",
+    commitSha: "d".repeat(40), sourceDigest: "e".repeat(64),
+  };
+  const resolutionDigest = sha256Canonical(lockWithoutDigest);
+  let failedOver = false;
+  const authority = () => ({
+    id: runId, tenant_id: tenantId, project_id: projectId, state: "QUEUED",
+    profile_revision_id: "profile-r1", installation_id: "installation-r1", image_digest: `sha256:${"c".repeat(64)}`,
+    adapter_version: "adapter-1.0.0", exact_agent_version: "2.1.14", provider_revision_id: "provider-r1",
+    model: primaryModel, credential_version_id: "credential-v1", resolution_digest: resolutionDigest,
+    configuration_lock: { ...lockWithoutDigest, resolutionDigest }, spec_revision_id: lockWithoutDigest.specRevisionId,
+    test_plan_revision_id: lockWithoutDigest.testPlanRevisionId,
+    source_baseline_receipt_id: lockWithoutDigest.sourceBaselineReceiptId,
+    authorization_profile_revision_id: "profile-r1", authorization_provider_revision_id: "provider-r1",
+    authorization_credential_version_id: "credential-v1", authorization_models: [primaryModel],
+    authorization_budget: { maxCostUsd: 10 }, authorization_nonce: "nonce-r1", authorization_state: "ACTIVE",
+    authorization_expires_at: "2030-01-01T01:00:00.000Z",
+    provider_state: failedOver ? "ACTIVE" : "DEGRADED",
+    failover_from_profile_revision_id: failedOver ? "profile-r1" : null,
+    failover_from_provider_revision_id: failedOver ? "provider-r1" : null,
+    failover_to_profile_revision_id: failedOver ? fallback.profileRevisionId : null,
+    failover_to_provider_revision_id: failedOver ? fallback.providerRevisionId : null,
+    failover_to_credential_version_id: failedOver ? fallback.credentialVersionId : null,
+    failover_to_models: failedOver ? [fallbackModel] : null,
+    failover_to_budget: failedOver ? { maxCostUsd: 8 } : null,
+    failover_authorization_nonce: failedOver ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : null,
+    failover_authorization_expires_at: failedOver ? fallback.inferenceAuthorizationExpiresAt : null,
+  });
+  const operation = { tenant_id: tenantId, project_id: projectId, run_id: runId,
+    operation_key: request().operationKey, request_digest: request().requestDigest,
+    provider_revision_id: "provider-r1", request_payload: request(), state: "QUEUED",
+    attempt_count: 0, claim_token: null, claim_expires_at: null, attempt_id: null, receipt_payload: null };
+  const client = {
+    async query<Row extends Record<string, unknown>>(statement: string) {
+      sql.push(statement.trim());
+      if (statement.includes("FROM deviludo.agent_runs run")) return { rowCount: 1, rows: [authority() as unknown as Row] };
+      if (statement.startsWith("SELECT state FROM deviludo.inference_provider_revisions")) {
+        return { rowCount: 1, rows: [{ state: "ACTIVE" } as unknown as Row] };
+      }
+      if (statement.includes("INSERT INTO deviludo.agent_run_provider_failovers")) failedOver = true;
+      if (statement.includes("FROM deviludo.agent_execution_operations")) return { rowCount: 1, rows: [operation as unknown as Row] };
+      return { rowCount: 0, rows: [] as Row[] };
+    }, release() {},
+  };
+  const pool: PostgresWorkflowPool = { async connect() { return client; } };
+  const store = new PostgresAgentExecutionOperations(pool);
+  const result = await store.reserve({ submitterSpiffeId: "spiffe://deviludo.internal/service/agent-worker",
+    request: request(), createdAt: now.toISOString() });
+  assert.equal(result.status.providerRevisionId, fallback.providerRevisionId);
+  assert.equal(failedOver, true);
+  assert.ok(sql.some((statement) => statement.includes("INSERT INTO deviludo.agent_run_provider_failovers")));
+  assert.equal(sql.at(-1), "COMMIT");
+});

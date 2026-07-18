@@ -37,19 +37,28 @@ export class PostgresInferenceCredentialAuthority implements InferenceCredential
     validateRun(input);
     return this.#transaction(input.tenantId, async (client) => {
       const authority = await client.query<{ credential_version_id: string }>(
-        `SELECT authorization.credential_version_id
+        `SELECT COALESCE(failover.to_credential_version_id, authorization.credential_version_id)
+                  AS credential_version_id
            FROM deviludo.inference_run_authorizations authorization
+           LEFT JOIN deviludo.agent_run_provider_failovers failover
+             ON failover.tenant_id = authorization.tenant_id
+            AND failover.project_id = authorization.project_id
+            AND failover.run_id = authorization.run_id
            JOIN deviludo.inference_provider_revisions provider
              ON provider.tenant_id = authorization.tenant_id
-            AND provider.provider_revision_id = authorization.provider_revision_id
+            AND provider.provider_revision_id = COALESCE(
+              failover.to_provider_revision_id, authorization.provider_revision_id
+            )
           WHERE authorization.tenant_id = $1::uuid
             AND authorization.project_id = $2::uuid
             AND authorization.run_id = $3::uuid
-            AND authorization.provider_revision_id = $4
-            AND authorization.credential_version_id = $5
+            AND COALESCE(failover.to_provider_revision_id, authorization.provider_revision_id) = $4
+            AND COALESCE(failover.to_credential_version_id, authorization.credential_version_id) = $5
             AND authorization.state = 'ACTIVE'
-            AND authorization.expires_at > now()
-            AND provider.credential_version_id = authorization.credential_version_id
+            AND COALESCE(failover.authorization_expires_at, authorization.expires_at) > now()
+            AND provider.credential_version_id = COALESCE(
+              failover.to_credential_version_id, authorization.credential_version_id
+            )
             AND provider.state = 'ACTIVE'
           FOR SHARE OF authorization, provider`,
         [input.tenantId, input.projectId, input.runId, input.providerRevisionId, input.credentialVersionId],

@@ -38,6 +38,15 @@ type AuthorityRow = {
   authorization_state: string;
   authorization_expires_at: string;
   provider_state: string;
+  failover_from_profile_revision_id: string | null;
+  failover_from_provider_revision_id: string | null;
+  failover_to_profile_revision_id: string | null;
+  failover_to_provider_revision_id: string | null;
+  failover_to_credential_version_id: string | null;
+  failover_to_models: string[] | null;
+  failover_to_budget: unknown | null;
+  failover_authorization_nonce: string | null;
+  failover_authorization_expires_at: string | null;
 };
 
 type OperationRow = {
@@ -66,7 +75,11 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
     validTime(input.createdAt);
     const outcome = await this.#transaction(request.tenantId, async (client) => {
       let authority = await selectAuthority(client, request.tenantId, request.projectId, request.lockedRunConfigurationId, "FOR UPDATE OF run");
-      const lock = parseAuthority(authority, request);
+      let lock = parseAuthority(authority, request);
+      if (!providerAvailable(authority, input.createdAt)) {
+        authority = await activateLockedFallback(client, authority, request, input.createdAt);
+        lock = parseAuthority(authority, request);
+      }
       const available = providerAvailable(authority, input.createdAt);
       await client.query(
         `INSERT INTO deviludo.agent_execution_operations
@@ -78,11 +91,11 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
          ON CONFLICT (tenant_id, operation_key) DO NOTHING`,
         [request.tenantId, request.projectId, request.lockedRunConfigurationId,
           request.operationKey, request.requestDigest, request.workflowId,
-          lock.providerRevisionId, JSON.stringify(request), available ? "QUEUED" : "WAITING_PROVIDER",
+          authority.provider_revision_id, JSON.stringify(request), available ? "QUEUED" : "WAITING_PROVIDER",
           input.submitterSpiffeId, input.createdAt],
       );
       let operation = await selectOperation(client, request.tenantId, request.lockedRunConfigurationId);
-      assertOperationBinding(operation, request, lock.providerRevisionId);
+      assertOperationBinding(operation, request, authority.provider_revision_id);
       if (!available) {
         await markProviderWait(client, request.tenantId, request.lockedRunConfigurationId, input.createdAt);
         return Object.freeze({ unavailableProviderRevisionId: lock.providerRevisionId });
@@ -128,8 +141,12 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
     const outcome = await this.#transaction(input.tenantId, async (client) => {
       const operation = await selectOperation(client, input.tenantId, input.runId);
       const request = parseAgentExecutionRequest(operation.request_payload);
-      const authority = await selectAuthority(client, input.tenantId, request.projectId, input.runId, "FOR UPDATE OF run");
-      const lock = parseAuthority(authority, request);
+      let authority = await selectAuthority(client, input.tenantId, request.projectId, input.runId, "FOR UPDATE OF run");
+      let lock = parseAuthority(authority, request);
+      if (!providerAvailable(authority, input.claimedAt)) {
+        authority = await activateLockedFallback(client, authority, request, input.claimedAt);
+        lock = parseAuthority(authority, request);
+      }
       if (!providerAvailable(authority, input.claimedAt)) {
         await markProviderWait(client, input.tenantId, input.runId, input.claimedAt);
         return Object.freeze({ kind: "PROVIDER_UNAVAILABLE" as const, providerRevisionId: lock.providerRevisionId });
@@ -232,7 +249,10 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
     validTime(input.observedAt);
     await this.#transaction(input.tenantId, async (client) => {
       const operation = await selectOperation(client, input.tenantId, input.runId);
-      if (operation.provider_revision_id !== input.providerRevisionId || operation.claim_token !== input.claimToken) invalid();
+      const request = parseAgentExecutionRequest(operation.request_payload);
+      const authority = await selectAuthority(client, input.tenantId, request.projectId, input.runId, "FOR SHARE");
+      const lock = parseAuthority(authority, request);
+      if (lock.providerRevisionId !== input.providerRevisionId || operation.claim_token !== input.claimToken) invalid();
       await markProviderWait(client, input.tenantId, input.runId, input.observedAt, input.claimToken);
     });
   }
@@ -295,14 +315,28 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
             authorization.nonce AS authorization_nonce,
             authorization.state AS authorization_state,
             authorization.expires_at::text AS authorization_expires_at,
+            failover.from_profile_revision_id AS failover_from_profile_revision_id,
+            failover.from_provider_revision_id AS failover_from_provider_revision_id,
+            failover.to_profile_revision_id AS failover_to_profile_revision_id,
+            failover.to_provider_revision_id AS failover_to_provider_revision_id,
+            failover.to_credential_version_id AS failover_to_credential_version_id,
+            failover.to_models AS failover_to_models,
+            failover.to_budget AS failover_to_budget,
+            failover.authorization_nonce::text AS failover_authorization_nonce,
+            failover.authorization_expires_at::text AS failover_authorization_expires_at,
             provider.state AS provider_state
        FROM deviludo.agent_runs run
        JOIN deviludo.inference_run_authorizations authorization
          ON authorization.tenant_id = run.tenant_id AND authorization.project_id = run.project_id
         AND authorization.run_id = run.id
+       LEFT JOIN deviludo.agent_run_provider_failovers failover
+         ON failover.tenant_id = run.tenant_id AND failover.project_id = run.project_id
+        AND failover.run_id = run.id
        JOIN deviludo.inference_provider_revisions provider
          ON provider.tenant_id = authorization.tenant_id
-        AND provider.provider_revision_id = authorization.provider_revision_id
+        AND provider.provider_revision_id = COALESCE(
+          failover.to_provider_revision_id, authorization.provider_revision_id
+        )
       WHERE run.tenant_id = $1::uuid AND run.project_id = $2::uuid AND run.id = $3::uuid
       ${lock}`,
     [tenantId, projectId, runId],
@@ -327,8 +361,8 @@ async function selectOperation(client: PostgresWorkflowClient, tenantId: string,
 
 function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): LockedAgentExecution {
   const value = record(row.configuration_lock);
-  const budget = record(value.budget);
-  const modelRoles = parseModelRoles(value.modelRoles);
+  const primaryBudget = record(value.budget);
+  const primaryModelRoles = parseModelRoles(value.modelRoles);
   const authBudget = record(row.authorization_budget);
   if (row.id !== request.lockedRunConfigurationId || row.tenant_id !== request.tenantId || row.project_id !== request.projectId
     || !["QUEUED", "PREPARING", "RUNNING", "WAITING_PROVIDER", "SUCCEEDED", "FAILED", "CANCELLED"].includes(row.state)
@@ -341,22 +375,58 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     || row.authorization_profile_revision_id !== row.profile_revision_id
     || row.authorization_provider_revision_id !== row.provider_revision_id
     || row.authorization_credential_version_id !== row.credential_version_id
-    || authBudget.maxCostUsd !== budget.maxUsd || !Array.isArray(row.authorization_models)
-    || row.model !== modelRoles.primaryModel
-    || !sameStringSet(row.authorization_models, Object.values(modelRoles))) invalid();
-  const agent = value.agent;
-  const protocol = value.providerProtocol;
+    || authBudget.maxCostUsd !== primaryBudget.maxUsd || !Array.isArray(row.authorization_models)
+    || row.model !== primaryModelRoles.primaryModel
+    || !sameStringSet(row.authorization_models, Object.values(primaryModelRoles))) invalid();
+
+  let runtime = value;
+  let modelRoles = primaryModelRoles;
+  let authorizedModels = row.authorization_models;
+  let budget = primaryBudget;
+  let authorizationNonce = row.authorization_nonce;
+  let authorizationExpiresAt = row.authorization_expires_at;
+  const failoverValues = [row.failover_from_profile_revision_id, row.failover_from_provider_revision_id,
+    row.failover_to_profile_revision_id, row.failover_to_provider_revision_id,
+    row.failover_to_credential_version_id, row.failover_to_models, row.failover_to_budget,
+    row.failover_authorization_nonce, row.failover_authorization_expires_at];
+  const hasFailover = failoverValues.some((entry) => entry !== null && entry !== undefined);
+  if (hasFailover) {
+    if (failoverValues.some((entry) => entry === null || entry === undefined)) invalid();
+    const fallback = record(value.fallback);
+    const fallbackModels = parseModelRoles(fallback.modelRoles);
+    const fallbackBudget = record(fallback.budget);
+    const fallbackAuthorizationBudget = record(row.failover_to_budget);
+    if (value.profileSource !== `project:${row.project_id}` || fallback.agent !== value.agent
+      || row.failover_from_profile_revision_id !== value.profileRevisionId
+      || row.failover_from_provider_revision_id !== value.providerRevisionId
+      || row.failover_to_profile_revision_id !== fallback.profileRevisionId
+      || row.failover_to_provider_revision_id !== fallback.providerRevisionId
+      || row.failover_to_credential_version_id !== fallback.credentialVersionId
+      || !Array.isArray(row.failover_to_models)
+      || !sameStringSet(row.failover_to_models, Object.values(fallbackModels))
+      || fallbackAuthorizationBudget.maxCostUsd !== fallbackBudget.maxUsd
+      || row.failover_authorization_expires_at !== fallback.inferenceAuthorizationExpiresAt
+      || !UUID.test(row.failover_authorization_nonce ?? "")) invalid();
+    runtime = fallback;
+    modelRoles = fallbackModels;
+    authorizedModels = row.failover_to_models;
+    budget = fallbackBudget;
+    authorizationNonce = string(row.failover_authorization_nonce);
+    authorizationExpiresAt = string(row.failover_authorization_expires_at);
+  }
+  const agent = runtime.agent;
+  const protocol = runtime.providerProtocol;
   if ((agent !== "claude-code" && agent !== "codex-cli")
     || (protocol !== "anthropic-messages" && protocol !== "openai-responses")) invalid();
   return Object.freeze({
     tenantId: row.tenant_id, projectId: row.project_id, runId: row.id,
-    resolutionDigest: row.resolution_digest, profileRevisionId: row.profile_revision_id,
-    installationId: row.installation_id, imageDigest: row.image_digest,
-    exactAgentVersion: row.exact_agent_version, adapterVersion: row.adapter_version,
-    agent, providerRevisionId: row.provider_revision_id, providerProtocol: protocol,
-    providerBaseUrl: string(value.providerBaseUrl), credentialVersionId: row.credential_version_id,
-    model: row.model, modelRoles, authorizedModels: Object.freeze([...row.authorization_models]),
-    authorizationNonce: row.authorization_nonce, authorizationExpiresAt: row.authorization_expires_at,
+    resolutionDigest: row.resolution_digest, profileRevisionId: string(runtime.profileRevisionId),
+    installationId: string(runtime.installationId), imageDigest: string(runtime.imageDigest),
+    exactAgentVersion: string(runtime.exactAgentVersion), adapterVersion: string(runtime.adapterVersion),
+    agent, providerRevisionId: string(runtime.providerRevisionId), providerProtocol: protocol,
+    providerBaseUrl: string(runtime.providerBaseUrl), credentialVersionId: string(runtime.credentialVersionId),
+    model: modelRoles.primaryModel, modelRoles, authorizedModels: Object.freeze([...authorizedModels]),
+    authorizationNonce: string(authorizationNonce), authorizationExpiresAt: string(authorizationExpiresAt),
     budget: Object.freeze({ maxUsd: number(budget.maxUsd), maxTurns: integer(budget.maxTurns), timeoutSeconds: integer(budget.timeoutSeconds) }),
     specRevisionId: row.spec_revision_id, specDigest: digest(value.specDigest),
     testPlanRevisionId: row.test_plan_revision_id, testPlanDigest: digest(value.testPlanDigest),
@@ -384,8 +454,58 @@ function assertOperationBinding(row: OperationRow, request: AgentExecutionReques
 }
 
 function providerAvailable(row: AuthorityRow, now: string): boolean {
+  const expiresAt = row.failover_authorization_expires_at ?? row.authorization_expires_at;
   return row.provider_state === "ACTIVE" && row.authorization_state === "ACTIVE"
-    && Date.parse(row.authorization_expires_at) > Date.parse(now) + 30_000;
+    && Date.parse(expiresAt) > Date.parse(now) + 30_000;
+}
+
+async function activateLockedFallback(
+  client: PostgresWorkflowClient,
+  row: AuthorityRow,
+  request: AgentExecutionRequest,
+  activatedAt: string,
+): Promise<AuthorityRow> {
+  if (row.failover_to_provider_revision_id !== null || row.provider_state === "ACTIVE"
+    || row.authorization_state !== "ACTIVE"
+    || Date.parse(row.authorization_expires_at) <= Date.parse(activatedAt) + 30_000) return row;
+  const value = record(row.configuration_lock);
+  if (value.fallback === null || value.fallback === undefined
+    || value.profileSource !== `project:${request.projectId}`) return row;
+  const fallback = record(value.fallback);
+  if (fallback.agent !== value.agent) invalid();
+  const modelRoles = parseModelRoles(fallback.modelRoles);
+  const budget = record(fallback.budget);
+  const expiresAt = string(fallback.inferenceAuthorizationExpiresAt);
+  if (Date.parse(expiresAt) <= Date.parse(activatedAt) + 30_000) return row;
+  const providerRevisionId = string(fallback.providerRevisionId);
+  const provider = await client.query<{ state: string }>(
+    `SELECT state FROM deviludo.inference_provider_revisions
+      WHERE tenant_id = $1::uuid AND provider_revision_id = $2
+      FOR SHARE`,
+    [request.tenantId, providerRevisionId],
+  );
+  if (provider.rows.length !== 1 || provider.rows[0]?.state !== "ACTIVE") return row;
+  const models = [...new Set(Object.values(modelRoles))];
+  const nonce = randomUUID();
+  await client.query(
+    `INSERT INTO deviludo.agent_run_provider_failovers
+      (tenant_id, project_id, run_id, from_profile_revision_id,
+       from_provider_revision_id, to_profile_revision_id,
+       to_provider_revision_id, to_credential_version_id, to_models,
+       to_budget, authorization_nonce, authorization_expires_at,
+       reason, activated_at)
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8,
+             $9::text[], $10::jsonb, $11::uuid, $12::timestamptz,
+             'PRIMARY_PROVIDER_UNAVAILABLE', $13::timestamptz)
+     ON CONFLICT (tenant_id, run_id) DO NOTHING`,
+    [request.tenantId, request.projectId, request.lockedRunConfigurationId,
+      string(value.profileRevisionId), string(value.providerRevisionId),
+      string(fallback.profileRevisionId), providerRevisionId,
+      string(fallback.credentialVersionId), models,
+      JSON.stringify({ maxCostUsd: number(budget.maxUsd) }), nonce, expiresAt, activatedAt],
+  );
+  return selectAuthority(client, request.tenantId, request.projectId,
+    request.lockedRunConfigurationId, "FOR SHARE");
 }
 
 async function markProviderWait(client: PostgresWorkflowClient, tenantId: string, runId: string, observedAt: string, claimToken?: string): Promise<void> {

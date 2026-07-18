@@ -57,3 +57,31 @@ test("project Provider probes cannot borrow a platform credential or a project f
     /rejected the binding/,
   );
 });
+
+test("run credential authority follows only the append-only Provider failover selection", async () => {
+  const queries: string[] = [];
+  const payload = catalog("platform", "global", "platform", "global");
+  payload.providers[0]!.state = "ACTIVE";
+  payload.profiles[0]!.state = "ACTIVE";
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(text: string) {
+      queries.push(text);
+      if (text.includes("FROM deviludo.inference_run_authorizations")) {
+        return { rowCount: 1, rows: [{ credential_version_id: "credential-v1" }] as unknown as Row[] };
+      }
+      if (text.includes("admin_catalog_state")) {
+        return { rowCount: 1, rows: [{ payload }] as unknown as Row[] };
+      }
+      return { rowCount: 0, rows: [] as Row[] };
+    },
+    release() {},
+  };
+  const pool: PostgresWorkflowPool = { async connect() { return client; } };
+  const authority = new PostgresInferenceCredentialAuthority(pool);
+  assert.equal(await authority.resolveRun({ tenantId, projectId,
+    runId: "33333333-3333-4333-8333-333333333333",
+    providerRevisionId: "provider-r1", credentialVersionId: "credential-v1" }), secretRef);
+  const runQuery = queries.find((query) => query.includes("FROM deviludo.inference_run_authorizations"));
+  assert.match(runQuery ?? "", /LEFT JOIN deviludo\.agent_run_provider_failovers/);
+  assert.match(runQuery ?? "", /COALESCE\(failover\.to_credential_version_id/);
+});

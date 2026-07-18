@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 45 }, (_, index) => {
+  const offsets = Array.from({ length: 46 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -217,6 +217,24 @@ test("approved specifications lock one tenant-bound source and Agent catalog rev
   assert.match(ingress, /idempotency-key/);
   assert.match(inferenceProjection, /PRIMARY KEY \(tenant_id, provider_revision_id\)/);
   assert.match(inferenceProjection, /inference_run_authorization_agent_run_fk/);
+});
+
+test("project-approved Agent fallback is append-only and shared by execution and inference authority", () => {
+  const migration = readFileSync(new URL("../infra/postgres/046_agent_run_provider_failovers.sql", import.meta.url), "utf8");
+  const execution = readFileSync(new URL("../services/agent-execution-broker/src/postgres-operations.ts", import.meta.url), "utf8");
+  const gateway = readFileSync(new URL("../services/inference-gateway/src/postgres-store.ts", import.meta.url), "utf8");
+  const secrets = readFileSync(new URL("../services/secret-broker/src/authority.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.agent_run_provider_failovers/);
+  assert.match(migration, /locked->>'profileSource' <> \('project:'/);
+  assert.match(migration, /locked->>'agent' <> fallback->>'agent'/);
+  assert.match(migration, /primary_provider_state = 'ACTIVE'/);
+  assert.match(migration, /claim\.state IN \('ACTIVE', 'INDETERMINATE'\)/);
+  assert.match(migration, /agent_run_provider_failover_append_only/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(execution, /INSERT INTO deviludo\.agent_run_provider_failovers/);
+  assert.match(gateway, /LEFT JOIN deviludo\.agent_run_provider_failovers/);
+  assert.match(secrets, /LEFT JOIN deviludo\.agent_run_provider_failovers/);
+  assert.doesNotMatch(execution, /UPDATE deviludo\.inference_run_authorizations SET provider_revision_id/);
 });
 
 test("specification dialogue persists tenant-isolated messages and immutable draft pairs", () => {
