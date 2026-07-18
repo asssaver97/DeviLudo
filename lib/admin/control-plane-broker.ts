@@ -1,5 +1,3 @@
-import type { TrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
-
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{1,160}$/;
@@ -8,6 +6,14 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-
 const RESPONSE_SECRET_FIELD = /^(?:apiKey|secret|secretRef|password|authorization|accessToken|refreshToken)$/i;
 
 type FetchLike = typeof fetch;
+
+export interface ControlPlaneAdminPrincipal {
+  readonly role: "PlatformAgentAdmin" | "SecurityAdmin" | "TenantAdmin" | "ProjectOwner" | "Auditor";
+  readonly actorId: string;
+  readonly sessionId: string;
+  readonly tenantId: string | null;
+  readonly projectId: string | null;
+}
 
 export class AdminControlPlaneBrokerClient {
   readonly #origin: URL;
@@ -36,7 +42,7 @@ export class AdminControlPlaneBrokerClient {
   async forward(
     request: Request,
     downstreamPath: string,
-    principal: TrustedAdminPrincipal,
+    principal: ControlPlaneAdminPrincipal,
     now = new Date(),
   ): Promise<Response> {
     if (!/^\/admin\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,1023}$/.test(downstreamPath)
@@ -47,8 +53,9 @@ export class AdminControlPlaneBrokerClient {
     const url = new URL(downstreamPath, this.#origin);
     if (url.origin !== this.#origin.origin || url.search || url.hash) invalid("route");
     const issuedAt = now.toISOString();
+    assertPrincipalScope(principal);
     const canonical = ["deviludo.admin-principal.v1", method, downstreamPath, principal.actorId,
-      principal.role, "", "", principal.sessionId, issuedAt].join("\n");
+      principal.role, principal.tenantId ?? "", principal.projectId ?? "", principal.sessionId, issuedAt].join("\n");
     const signature = await sign(canonical, this.#key);
     const headers = new Headers({
       accept: "application/json",
@@ -59,6 +66,8 @@ export class AdminControlPlaneBrokerClient {
       "x-deviludo-admin-signature": signature,
       "x-request-id": crypto.randomUUID(),
     });
+    if (principal.tenantId) headers.set("x-deviludo-tenant-id", principal.tenantId);
+    if (principal.projectId) headers.set("x-deviludo-project-id", principal.projectId);
 
     let body: ArrayBuffer | undefined;
     let sensitiveValues: readonly string[] = [];
@@ -175,4 +184,14 @@ function parseObject(text: string): Record<string, unknown> {
   catch (error) { if (error instanceof Error && error.message.startsWith("Administrator control-plane")) throw error; throw new Error("Administrator control plane returned invalid JSON"); }
 }
 function arrayBuffer(value: Uint8Array): ArrayBuffer { return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer; }
+function assertPrincipalScope(principal: ControlPlaneAdminPrincipal): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/.test(principal.actorId)
+    || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/.test(principal.sessionId)
+    || (principal.tenantId !== null && (typeof principal.tenantId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(principal.tenantId)))
+    || (principal.projectId !== null && (typeof principal.projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(principal.projectId)))) invalid("principal");
+  if ((principal.role === "PlatformAgentAdmin" || principal.role === "SecurityAdmin") && (principal.tenantId || principal.projectId)) invalid("principal");
+  if (principal.role === "TenantAdmin" && (!principal.tenantId || principal.projectId)) invalid("principal");
+  if (principal.role === "ProjectOwner" && (!principal.tenantId || !principal.projectId)) invalid("principal");
+  if (principal.projectId && !principal.tenantId) invalid("principal");
+}
 function invalid(label: string): never { throw new Error(`Administrator control-plane ${label} is invalid`); }

@@ -22,3 +22,14 @@ The Connector must present the approved Web administration SPIFFE identity over 
 Credential request bodies are capped at 64 KiB and are never logged. Responses are capped, must be JSON, may not contain Vault `SecretRef` values, and are rejected if they reproduce submitted credential plaintext. The browser receives only masked fingerprints and public credential metadata.
 
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
+
+## Tenant and project configuration
+
+The platform administrator console is not reused as browser authorization for lower scopes. Two dedicated Web boundaries exchange the invited GitHub browser session for a freshly signed control-plane assertion:
+
+- `/settings/agents` and `/api/settings/agents/**` bind `TenantAdmin` to the tenant returned by the Identity Broker. A submitted `scope` or `scopeId` is discarded and replaced server-side. `Auditor` receives the same tenant-filtered projection but cannot mutate it.
+- `/projects/{projectId}/agent-settings` and its API first ask the Project Repository Broker to prove that the signed-in user can access the exact active repository binding. Only then does Web issue `ProjectOwner + tenantId + projectId` to the control plane. A URL or request body can never establish project authority.
+
+Project defaults may reference an ACTIVE project Profile, an ACTIVE Profile belonging to the signed tenant, or an ACTIVE platform Profile. This is a reference to one immutable revision, not a credential copy. Tenant defaults may similarly select an ACTIVE tenant or platform Profile. A lower scope cannot select another tenant's Profile or loosen the platform allow-list.
+
+TenantAdmin may write tenant BYOK credentials and create/validate tenant Provider drafts. SecurityAdmin remains the only role that can activate a third-party endpoint after the complete Provider probe. Configuration changes affect new tasks only; queued and running tasks keep their locked Profile revision.

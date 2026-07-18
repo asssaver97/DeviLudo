@@ -375,7 +375,7 @@ test("Agent administration connector rejects cross-origin writes and credential 
   await assert.rejects(broker.forward(new Request("https://deviludo.example/api/admin/credentials", { method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "credential-leak-test" },
     body: JSON.stringify({ label: "Claude", apiKey: secret }) }), "/admin/credentials",
-  { role: "SecurityAdmin", actorId: "security-admin-61", sessionId: "admin-session-61" }), /credential plaintext/);
+  { role: "SecurityAdmin", actorId: "security-admin-61", sessionId: "admin-session-61", tenantId: null, projectId: null }), /credential plaintext/);
 });
 
 test("GitHub Web broker client accepts only fixed GitHub redirects and hashes callback idempotency", async () => {

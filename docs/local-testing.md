@@ -28,6 +28,8 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 
 `/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本阻止、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计。版本批准仍要求供应链证据；Provider 激活仍要求受信 Connector 的完整探针。默认测试栈不会伪造这两类结果，因此相关操作会以明确错误失败关闭。
 
+`/settings/agents` 使用租户作用域的本地代理验证 BYOK 只写响应、Provider 草稿和默认 Profile；`/projects/ember-archipelago/agent-settings` 验证项目从 ACTIVE 继承 Profile 中选择。两条本地路径与生产页面相同，但只对真实 loopback URL 且显式 `DEVILUDO_LOCAL_TEST_MODE=1` 生效，不会联系第三方 Provider。
+
 在项目页批准规格后，点击“运行真实本机验证”。侧车会：
 
 1. 将固定 Godot 样例复制到 `.deviludo/local-runtime/<project>/<run>/workspace`；
@@ -51,6 +53,8 @@ npm run local:smoke
 
 - `/` 返回 DeviLudo HTML 工作台；
 - `/admin/agents` 返回 Agent 管理台；
+- `/settings/agents` 返回租户 BYOK、Provider 与默认 Agent 页面；
+- `/projects/ember-archipelago/agent-settings` 返回项目 Profile 选择页；
 - `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
 - 侧车 `/health` 返回 `deviludo-local-runtime` 和实际 Godot 版本。

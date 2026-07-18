@@ -387,8 +387,9 @@ export async function POST(request: Request, context: RouteContext) {
           createdAt: new Date().toISOString(),
         };
         store.credentials.push(credential);
-        appendDemoAudit("CREDENTIAL_CREATED", id, role, { label, secretRef: credential.secretRef });
-        return { ...credential, fingerprint: credential.masked, plaintextRecoverable: false };
+        appendDemoAudit("CREDENTIAL_CREATED", id, role, { label, credentialVersion: credential.version });
+        return { id: credential.id, label: credential.label, maskedFingerprint: credential.masked,
+          version: credential.version, state: credential.state, createdAt: credential.createdAt, plaintextRecoverable: false };
       });
     }
 
@@ -472,8 +473,13 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       const scope = match[1] ?? "platform";
       const [scopeKind, scopeId = "global"] = scope.split(":");
-      if (profile.scope !== scopeKind || (scopeKind !== "platform" && profile.scopeId !== scopeId)) {
-        throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision does not belong to the requested default scope");
+      const selectable = scopeKind === "platform"
+        ? profile.scope === "platform" && profile.scopeId === "global"
+        : profile.scope === "platform" && profile.scopeId === "global"
+          || profile.scope === scopeKind && profile.scopeId === scopeId
+          || scopeKind === "project" && profile.scope === "tenant" && profile.scopeId === "tenant-local";
+      if (!selectable) {
+        throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
       store.defaults[match[1] ?? "platform"] = profileRevisionId;
       appendDemoAudit("AGENT_DEFAULT_UPDATED", match[1] ?? "platform", role, { profileRevisionId, affectsRunningTasks: false });

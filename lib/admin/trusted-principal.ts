@@ -9,6 +9,8 @@ export interface TrustedAdminPrincipal {
   readonly role: "PlatformAgentAdmin" | "SecurityAdmin" | "Auditor";
   readonly actorId: string;
   readonly sessionId: string;
+  readonly tenantId: null;
+  readonly projectId: null;
 }
 
 /** Verifies the same route-bound assertion consumed by the Nest admin API. */
@@ -38,7 +40,7 @@ export async function verifyTrustedAdminPrincipal(
     actorId, role, "", "", sessionId, issuedAt].join("\n");
   const cryptoKey = await crypto.subtle.importKey("raw", arrayBuffer(key), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
   if (!await crypto.subtle.verify("HMAC", cryptoKey, arrayBuffer(Buffer.from(signature, "base64url")), new TextEncoder().encode(canonical))) invalid();
-  return Object.freeze({ role: role as TrustedAdminPrincipal["role"], actorId, sessionId });
+  return Object.freeze({ role: role as TrustedAdminPrincipal["role"], actorId, sessionId, tenantId: null, projectId: null });
 }
 
 export async function verifyTrustedPlatformAdmin(

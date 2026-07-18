@@ -23,8 +23,9 @@ const navigation = [
 
 const settings = [
   { href: "/settings/connections", label: "账号连接", icon: LinkIcon },
+  { href: "/settings/agents", label: "开发 Agent", icon: SparkIcon },
   { href: "/admin/invitations", label: "受邀账号", icon: ShieldIcon },
-  { href: "/admin/agents", label: "Agent 管理", icon: ShieldIcon },
+  { href: "/admin/agents", label: "平台 Agent", icon: ShieldIcon },
 ];
 
 function NavItem({ href, label, icon: Icon }: (typeof navigation)[number]) {

@@ -355,6 +355,74 @@ test("tenant and project administrators cannot cross signed scope or BYOK bounda
   assert.equal(alphaAudit.body.includes("tenant-beta"), false);
 });
 
+test("project selection can pin an active inherited Profile without copying Provider credentials", async () => {
+  const catalog = await inject({ method: "GET", url: "/admin/agents", role: "ProjectOwner", tenantId: "tenant-alpha", projectId: "project-alpha" });
+  assert.equal(catalog.statusCode, 200);
+  const inherited = catalog.json().data.profiles.find((profile: { scope: string; state: string }) => profile.scope === "platform" && profile.state === "ACTIVE");
+  assert.ok(inherited);
+
+  const selected = await inject({
+    method: "PUT",
+    url: "/admin/agent-defaults/project:project-alpha",
+    role: "ProjectOwner",
+    tenantId: "tenant-alpha",
+    projectId: "project-alpha",
+    key: "project-alpha-inherited-profile",
+    payload: { profileRevisionId: inherited.id },
+  });
+  assert.equal(selected.statusCode, 200);
+  assert.equal(selected.json().data.profileRevisionId, inherited.id);
+
+  const otherTenant = await inject({
+    method: "PUT",
+    url: "/admin/agent-defaults/project:project-alpha",
+    role: "ProjectOwner",
+    tenantId: "tenant-beta",
+    projectId: "project-alpha",
+    key: "project-alpha-other-tenant-profile",
+    payload: { profileRevisionId: "profile-tenant-tenant-alpha-1-r1" },
+  });
+  assert.equal(otherTenant.statusCode, 409);
+  assert.equal(otherTenant.json().error.code, "PROFILE_NOT_ACTIVE");
+});
+
+test("an active tenant Profile is selectable only by projects in that signed tenant", async () => {
+  const tenantId = "tenant-inherited-alpha";
+  const credential = await inject({ method: "POST", url: "/admin/credentials", role: "TenantAdmin", tenantId,
+    key: "tenant-inherited-credential", payload: { label: "Inherited Claude", apiKey: "tenant-inherited-secret" } });
+  assert.equal(credential.statusCode, 201);
+  const draft = await inject({
+    method: "POST", url: "/admin/agent-profiles", role: "TenantAdmin", tenantId,
+    key: "tenant-inherited-profile", payload: {
+      scope: "tenant", scopeId: tenantId, agent: "claude-code",
+      installationId: "claude-code-installation-2-1-14", credentialVersionId: credential.json().data.id,
+      baseUrl: "https://tenant-inherited.example.com/v1", authentication: "x-api-key",
+      inputUsdPerMillionTokens: 3, outputUsdPerMillionTokens: 15,
+      primaryModel: "claude-sonnet-4-6-20250514", dataRegion: "eu-west",
+      retentionPolicy: "zero retention", trainingPolicy: "no training",
+    },
+  });
+  assert.equal(draft.statusCode, 201);
+  const profileId = draft.json().data.profile.id as string;
+  const validated = await inject({ method: "POST", url: `/admin/agent-profiles/${profileId}/validate`,
+    role: "TenantAdmin", tenantId, key: "tenant-inherited-validate", payload: {} });
+  assert.equal(validated.statusCode, 201);
+  const activated = await inject({ method: "POST", url: `/admin/agent-profiles/${profileId}/activate`,
+    role: "SecurityAdmin", key: "tenant-inherited-activate", payload: {} });
+  assert.equal(activated.statusCode, 201);
+
+  const ownProject = await inject({ method: "PUT", url: "/admin/agent-defaults/project:project-inherited-alpha",
+    role: "ProjectOwner", tenantId, projectId: "project-inherited-alpha", key: "project-inherited-own",
+    payload: { profileRevisionId: profileId } });
+  assert.equal(ownProject.statusCode, 200);
+
+  const foreignProject = await inject({ method: "PUT", url: "/admin/agent-defaults/project:project-inherited-beta",
+    role: "ProjectOwner", tenantId: "tenant-inherited-beta", projectId: "project-inherited-beta", key: "project-inherited-cross",
+    payload: { profileRevisionId: profileId } });
+  assert.equal(foreignProject.statusCode, 409);
+  assert.equal(foreignProject.json().error.code, "PROFILE_SCOPE_MISMATCH");
+});
+
 test("idempotency results are isolated by the signed tenant and project scope", async () => {
   const shared = {
     method: "POST" as const,

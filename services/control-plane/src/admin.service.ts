@@ -722,8 +722,8 @@ export class AdminService {
       if (!profile || profile.state !== "ACTIVE") {
         throw new ServiceProblem(409, "PROFILE_NOT_ACTIVE", "Defaults can only reference an active immutable Profile revision");
       }
-      if (profile.scope !== parsed.scope || (parsed.scope !== "platform" && profile.scopeId !== parsed.scopeId)) {
-        throw new ServiceProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision does not belong to the requested default scope");
+      if (!profileSelectableForDefault(profile, parsed, actor)) {
+        throw new ServiceProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
       state.defaults.set(scopeKey, profileRevisionId);
       this.audit(state, "AGENT_DEFAULT_UPDATED", scopeKey, actor, { profileRevisionId, runningTasksUnaffected: true });
@@ -1146,6 +1146,18 @@ function parseDefaultScope(value: string): { scope: ProfileScope; scopeId: strin
   const match = /^(tenant|project):([a-z0-9][a-z0-9_-]{0,159})$/i.exec(value);
   if (!match) throw new ServiceProblem(400, "INVALID_SCOPE", "Default scope must be platform, tenant:<id>, or project:<id>");
   return { scope: match[1] as "tenant" | "project", scopeId: match[2] ?? "" };
+}
+
+function profileSelectableForDefault(
+  profile: ProfileRevisionRecord,
+  target: Readonly<{ scope: ProfileScope; scopeId: string }>,
+  actor: RequestActor,
+): boolean {
+  if (target.scope === "platform") return profile.scope === "platform" && profile.scopeId === "global";
+  if (profile.scope === "platform") return profile.scopeId === "global";
+  if (target.scope === "tenant") return profile.scope === "tenant" && profile.scopeId === target.scopeId;
+  if (profile.scope === "project") return profile.scopeId === target.scopeId;
+  return profile.scope === "tenant" && Boolean(actor.tenantId) && profile.scopeId === actor.tenantId;
 }
 
 function parseGovernance(body: Record<string, unknown>, actor: RequestActor): ProviderRevisionRecord["governance"] {

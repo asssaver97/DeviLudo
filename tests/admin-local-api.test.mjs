@@ -43,6 +43,22 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_BLOCKED"), true);
 });
 
+test("local credential writes return only public metadata and never a SecretRef or plaintext", async () => {
+  resetDemoStore();
+  const plaintext = "local-test-credential-material";
+  const response = await POST(
+    request("credentials", "POST", "TenantAdmin", { label: "Tenant Claude", apiKey: plaintext }),
+    context("credentials"),
+  );
+  assert.equal(response.status, 201);
+  const text = await response.text();
+  assert.equal(text.includes(plaintext), false);
+  assert.equal(text.includes("secretRef"), false);
+  assert.match(JSON.parse(text).data.maskedFingerprint, /^sha256:/);
+  const audit = await GET(new Request("http://127.0.0.1:3000/api/admin/audit"), context("audit"));
+  assert.equal((await audit.text()).includes("secretRef"), false);
+});
+
 test("version approval and installation accept only local Broker receipts, never caller attestations", async () => {
   resetDemoStore();
   const forged = await POST(
