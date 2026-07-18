@@ -2,12 +2,14 @@
 
 This is the isolated content-addressed storage boundary used by the physical
 Runner ingress and platform-owned TestKit. It contains no Agent and exposes
-only four client-certificate-authenticated routes:
+only six client-certificate-authenticated routes:
 
 - `GET /healthz`
 - `POST /v1/runner-evidence`
 - `POST /v1/runner-artifact-grants`
 - `POST /v1/runner-artifact-commits`
+- `POST /v1/prepared-input-grants`
+- `POST /v1/prepared-input-commits`
 
 Health and final bundle submission are restricted to the sorted Runner-ingress
 SPIFFE allow-list. Artifact routes instead verify the complete Ed25519 Runner
@@ -23,6 +25,14 @@ content type, `If-None-Match: *`, metadata digest and S3 checksum. A separate
 commit request performs an authenticated S3 `HEAD` and checks server checksum,
 metadata and size. One immutable reservation per attempt/platform/category
 prevents a retry from substituting a different object.
+
+The Artifact Preparer publishes source bundles and frozen test plans through
+the prepared-input routes. Each operation reloads an at-most-15-minute
+Ed25519-signed assignment that binds its SPIFFE ID, current client-certificate
+fingerprint and sorted tenant set. The client cannot choose an object key or
+content type; both are derived from the tenant, project, kind and digest.
+Production S3 startup requires this assignment configuration, so a missing
+authorization boundary cannot silently disable input publication.
 
 The archive revalidates every UUID, digest, target-matrix member, platform manifest,
 derived status, timestamp and canonical bundle digest before writing anything.

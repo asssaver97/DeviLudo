@@ -133,3 +133,50 @@ test("physical Runner artifact routes delegate only after mTLS and return bounde
     method: "POST", path: "/v1/runner-artifact-grants", headers, socket: {}, rawBody: "{}",
   }), { status: 409, body: { error: { code: "RUNNER_ARTIFACT_GRANT_REJECTED" } } });
 });
+
+test("prepared-input routes delegate identity and fail health when signed assignments are unavailable", async () => {
+  const calls: string[] = [];
+  let ready = true;
+  const handler = createEvidenceArchiveHandler({
+    archive: { probe: async () => undefined, persist: async () => { throw new Error("not evidence"); } },
+    allowedSpiffeIds: new Set([spiffeId]),
+    extractIdentity: () => identity,
+    preparedInputs: {
+      async probe() { if (!ready) throw new Error("assignment expired"); },
+      async grant(observed, value) {
+        assert.deepEqual(observed, identity);
+        calls.push(`grant:${String((value as Record<string, unknown>).schemaVersion)}`);
+        return { schemaVersion: "prepared-input-grant" };
+      },
+      async commit(observed, value) {
+        assert.deepEqual(observed, identity);
+        calls.push(`commit:${String((value as Record<string, unknown>).schemaVersion)}`);
+        return { schemaVersion: "prepared-input-receipt" };
+      },
+    },
+  });
+  const headers = { "content-type": "application/json" };
+  assert.equal((await handler({
+    method: "POST", path: "/v1/prepared-input-grants", headers, socket: {},
+    rawBody: JSON.stringify({ schemaVersion: "grant-request" }),
+  })).status, 200);
+  assert.equal((await handler({
+    method: "POST", path: "/v1/prepared-input-commits", headers, socket: {},
+    rawBody: JSON.stringify({ schemaVersion: "commit-request" }),
+  })).status, 200);
+  assert.deepEqual(calls, ["grant:grant-request", "commit:commit-request"]);
+  ready = false;
+  assert.deepEqual(await handler({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" }), {
+    status: 503,
+    body: { error: { code: "EVIDENCE_ARCHIVE_NOT_READY" } },
+  });
+
+  const absent = createEvidenceArchiveHandler({
+    archive: { probe: async () => undefined, persist: async () => { throw new Error("not evidence"); } },
+    allowedSpiffeIds: new Set([spiffeId]),
+    extractIdentity: () => identity,
+  });
+  assert.equal((await absent({
+    method: "POST", path: "/v1/prepared-input-grants", headers, socket: {}, rawBody: "{}",
+  })).status, 404);
+});

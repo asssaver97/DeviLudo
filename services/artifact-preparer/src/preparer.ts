@@ -32,17 +32,16 @@ export interface FrozenTestPlanPort {
 
 export interface PreparedInputObjectPort {
   publishFile(input: {
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly runId: string;
+    readonly lockKey: string;
+    readonly artifactKind: "source-bundle" | "test-plan";
     readonly objectKey: string;
     readonly artifactDigest: string;
     readonly sizeBytes: number;
-    readonly contentType: "application/zstd";
+    readonly contentType: "application/zstd" | "application/json";
     readonly path: string;
-  }): Promise<Readonly<{ objectKey: string; artifactDigest: string; sizeBytes: number }>>;
-  publishBytes(input: {
-    readonly objectKey: string;
-    readonly artifactDigest: string;
-    readonly contentType: "application/json";
-    readonly body: Buffer;
   }): Promise<Readonly<{ objectKey: string; artifactDigest: string; sizeBytes: number }>>;
 }
 
@@ -124,21 +123,34 @@ export class SourceExecutionPreparer {
 
       const sourceBundlePath = join(temporary, "source.tar.zst");
       const bundle = await createSourceBundle(snapshotPath, sourceBundlePath);
+      const planPath = join(temporary, "test-plan.json");
+      await writeFile(planPath, planBytes, { flag: "wx", mode: 0o400 });
       const sourceObjectKey = `tenants/${request.tenantId}/projects/${request.projectId}/sources/${bundle.artifactDigest}.tar.zst`;
       const testPlanObjectKey = `tenants/${request.tenantId}/projects/${request.projectId}/test-plans/${request.testPlanDigest}.json`;
       const [sourceReceipt, planReceipt] = await Promise.all([
         this.#objects.publishFile({
+          tenantId: request.tenantId,
+          projectId: request.projectId,
+          runId: request.runId,
+          lockKey: request.lockKey,
+          artifactKind: "source-bundle",
           objectKey: sourceObjectKey,
           artifactDigest: bundle.artifactDigest,
           sizeBytes: bundle.sizeBytes,
           contentType: "application/zstd",
           path: sourceBundlePath,
         }),
-        this.#objects.publishBytes({
+        this.#objects.publishFile({
+          tenantId: request.tenantId,
+          projectId: request.projectId,
+          runId: request.runId,
+          lockKey: request.lockKey,
+          artifactKind: "test-plan",
           objectKey: testPlanObjectKey,
           artifactDigest: request.testPlanDigest,
+          sizeBytes: planBytes.byteLength,
           contentType: "application/json",
-          body: planBytes,
+          path: planPath,
         }),
       ]);
       exactObjectReceipt(sourceReceipt, sourceObjectKey, bundle.artifactDigest, bundle.sizeBytes);

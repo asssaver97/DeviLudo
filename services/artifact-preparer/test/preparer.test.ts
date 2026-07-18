@@ -122,7 +122,6 @@ function createFixture(root: string, options: {
   };
   const objectPort: PreparedInputObjectPort = {
     async publishFile(input) { return publish(input.objectKey, input.artifactDigest, await readFile(input.path)); },
-    async publishBytes(input) { return publish(input.objectKey, input.artifactDigest, input.body); },
   };
   const locks = new Map<string, { payload: RunnerExecutionLock; digest: string }>();
   const lockPort: RunnerExecutionLockPort = {

@@ -9,6 +9,8 @@ import { FilesystemImmutableObjectStore } from "./filesystem-store";
 import { createEvidenceArchiveHandler, createEvidenceArchiveHttpsServer } from "./ingress-http";
 import { S3ImmutableObjectStore } from "./s3-store";
 import { RunnerArtifactGrantService } from "./runner-artifacts";
+import { preparedInputTenantAuthorizerFromFiles } from "./prepared-input-assignments";
+import { PreparedInputGrantService } from "./prepared-inputs";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -20,11 +22,13 @@ export async function evidenceArchiveServiceFromEnv(
   store: ImmutableObjectStore;
   archive: EvidenceArchiveService;
   runnerArtifacts: RunnerArtifactGrantService | null;
+  preparedInputs: PreparedInputGrantService | null;
   server: ReturnType<typeof createEvidenceArchiveHttpsServer>;
 }>> {
   const mode = requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_STORE");
   let store: ImmutableObjectStore;
   let runnerArtifacts: RunnerArtifactGrantService | null = null;
+  let preparedInputs: PreparedInputGrantService | null = null;
   if (mode === "filesystem") {
     if (env.NODE_ENV === "production") {
       throw new Error("Evidence archive filesystem backend is forbidden in production");
@@ -71,6 +75,23 @@ export async function evidenceArchiveServiceFromEnv(
       transfer: s3,
       reservations: s3,
     });
+    const preparedInputPublicKeyPem = await readSecret(
+      env,
+      "DEVILUDO_EVIDENCE_ARCHIVE_PREPARED_INPUT_ASSIGNMENT_PUBLIC_KEY_FILE",
+      32,
+      MAX_SECRET_BYTES,
+    );
+    const preparedInputAuthorizer = preparedInputTenantAuthorizerFromFiles({
+      manifestPath: requiredAbsolutePath(env, "DEVILUDO_EVIDENCE_ARCHIVE_PREPARED_INPUT_ASSIGNMENT_MANIFEST_FILE"),
+      keyId: requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_PREPARED_INPUT_ASSIGNMENT_KEY_ID"),
+      publicKeyPem: preparedInputPublicKeyPem,
+      spiffeId: requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_PREPARED_INPUT_SPIFFE_ID"),
+    });
+    preparedInputs = new PreparedInputGrantService({
+      authorizer: preparedInputAuthorizer,
+      transfer: s3,
+      reservations: s3,
+    });
   } else {
     throw new Error("Evidence archive store mode is invalid");
   }
@@ -82,7 +103,12 @@ export async function evidenceArchiveServiceFromEnv(
   ]);
   const allowedSpiffeIds = parseSpiffeIds(requiredEnv(env, "DEVILUDO_EVIDENCE_ARCHIVE_ALLOWED_SPIFFE_IDS_JSON"));
   const archive = new EvidenceArchiveService({ store, ...(runnerArtifacts ? { artifactVerifier: runnerArtifacts } : {}) });
-  const handler = createEvidenceArchiveHandler({ archive, allowedSpiffeIds, ...(runnerArtifacts ? { runnerArtifacts } : {}) });
+  const handler = createEvidenceArchiveHandler({
+    archive,
+    allowedSpiffeIds,
+    ...(runnerArtifacts ? { runnerArtifacts } : {}),
+    ...(preparedInputs ? { preparedInputs } : {}),
+  });
   const server = createEvidenceArchiveHttpsServer({ tls: { key, cert, ca: clientCa }, handler });
   return Object.freeze({
     host: host(env.DEVILUDO_EVIDENCE_ARCHIVE_HOST),
@@ -90,6 +116,7 @@ export async function evidenceArchiveServiceFromEnv(
     store,
     archive,
     runnerArtifacts,
+    preparedInputs,
     server,
   });
 }

@@ -21,13 +21,22 @@ It uses `SET LOCAL app.tenant_id`, append-only table `runner_execution_locks`
 and `(tenant_id, lock_key)` idempotency. A replay is accepted only when the
 stored canonical payload has the same digest.
 
+`MtlsPreparedInputObjectClient` is the production boundary for step 4. It
+hashes the already materialized file before and after upload, accepts only a
+five-minute checksum-bound grant from the Evidence Archive, restricts the
+transfer to a sorted HTTPS origin allow-list and requires an independently
+verified commit receipt. TLS keys and CAs are read only from absolute mounted
+files; the normalized service environment excludes unrelated keys and secrets.
+
 Run the core contract suite with:
 
 ```bash
 npm run test:artifact-preparer
 ```
 
-The core intentionally receives SCM snapshot, approved-plan and object-publish
-ports. Production deployment is not complete until those ports are wired to
-separate mTLS-authenticated GitHub App/spec and Evidence Archive brokers; tests
-use in-process fakes and do not claim that external object publication occurred.
+The core intentionally receives SCM snapshot and approved-plan ports. The
+Evidence Archive object-publish port is implemented, but production deployment
+is not complete until the remaining two ports are wired to separate
+mTLS-authenticated GitHub App/spec brokers and an Artifact Preparer host is
+started from the workflow path. Tests use in-process transports and do not
+claim that an external GitHub repository or S3 service was contacted.
