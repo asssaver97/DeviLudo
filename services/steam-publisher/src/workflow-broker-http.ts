@@ -147,13 +147,13 @@ export function createSteamWorkflowBrokerHandler(options: Readonly<{
       }
       let body: SteamWorkflowOperationRequest;
       try {
-        body = parseOperationRequest(request.rawBody);
+        body = parseSteamWorkflowOperationRequest(request.rawBody);
         validateHeaders(request.headers, body.tenantId, body.operationKey, body.requestDigest);
       } catch {
         return failure(400, "STEAM_WORKFLOW_BROKER_REQUEST_INVALID");
       }
       try {
-        const status = validateStatus(await options.service.submit(identity, body), body);
+        const status = validateSteamWorkflowOperationStatus(await options.service.submit(identity, body), body);
         return statusResponse(status);
       } catch {
         return failure(409, "STEAM_WORKFLOW_BROKER_OPERATION_REJECTED");
@@ -174,7 +174,7 @@ export function createSteamWorkflowBrokerHandler(options: Readonly<{
         return failure(400, "STEAM_WORKFLOW_BROKER_REQUEST_INVALID");
       }
       try {
-        const status = validateStatus(await options.service.get(identity, lookup), lookup);
+        const status = validateSteamWorkflowOperationStatus(await options.service.get(identity, lookup), lookup);
         if (status.operationId !== lookup.operationId) throw new Error("operation identity drift");
         return statusResponse(status);
       } catch {
@@ -215,8 +215,8 @@ export function createSteamWorkflowBrokerHttpsServer(options: Readonly<{
   return server;
 }
 
-function parseOperationRequest(rawBody: string): SteamWorkflowOperationRequest {
-  const body = parseJsonObject(rawBody);
+export function parseSteamWorkflowOperationRequest(value: unknown): SteamWorkflowOperationRequest {
+  const body = typeof value === "string" ? parseJsonObject(value) : record(value);
   validateCommonRequest(body);
   if (body.kind === "PRIVATE_BETA_UPLOAD") {
     exactKeys(body, ["schemaVersion", "kind", "operationKey", "requestDigest", "tenantId", "projectId", "workflowId", "runId",
@@ -267,8 +267,8 @@ function validateCommonRequest(body: Record<string, unknown>): void {
     || typeof body.workflowId !== "string" || !SAFE_ID.test(body.workflowId)) invalid();
 }
 
-function validateStatus(
-  value: SteamWorkflowOperationStatus,
+export function validateSteamWorkflowOperationStatus(
+  value: unknown,
   expected: SteamWorkflowOperationRequest | Pick<SteamWorkflowOperationLookup, "operationKey" | "requestDigest">,
 ): SteamWorkflowOperationStatus {
   const body = record(value);

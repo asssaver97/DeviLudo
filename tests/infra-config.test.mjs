@@ -236,6 +236,42 @@ test("Steam private Beta upload claims are durable, tenant-scoped and immutable"
   assert.match(store, /sha256Canonical\(existing\)/);
 });
 
+test("Steam Workflow Broker persists before dispatch and fences isolated executors", () => {
+  const migration = readFileSync(new URL("../infra/postgres/020_steam_workflow_operations.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-operations.ts", import.meta.url), "utf8");
+  const operations = readFileSync(new URL("../services/steam-publisher/src/workflow-broker-operations.ts", import.meta.url), "utf8");
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /steam workflow operation binding is immutable/);
+  assert.match(migration, /FOREIGN KEY \(tenant_id, project_id, run_id\)/);
+  assert.match(migration, /terminal steam workflow operation is immutable/);
+  assert.match(store, /set_config\('app\.tenant_id'/);
+  assert.match(store, /ON CONFLICT \(tenant_id, operation_key\) DO NOTHING/);
+  assert.match(store, /claim_expires_at > \$5::timestamptz/);
+  assert.ok(operations.indexOf("operations.reserve") < operations.indexOf("dispatcher.enqueue"));
+  assert.match(operations, /operations\.heartbeat/);
+  assert.match(operations, /operations\.release/);
+  assert.doesNotMatch(operations, /configVdf|accountPassword|steamGuard/);
+});
+
+test("Steam execution re-resolves signed release authority and archives the tested BuildID", () => {
+  const migration = readFileSync(new URL("../infra/postgres/021_steam_release_execution.sql", import.meta.url), "utf8");
+  const executor = readFileSync(new URL("../services/steam-publisher/src/workflow-broker-executor.ts", import.meta.url), "utf8");
+  const postgres = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-execution.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.steam_rc_artifacts/);
+  assert.match(migration, /CREATE TABLE deviludo\.steam_default_branch_receipts/);
+  assert.match(migration, /default_branch_build_id = beta_build_id/);
+  assert.match(migration, /steam_default_branch_receipt_append_only/);
+  assert.match(migration, /FOREIGN KEY \(tenant_id, project_id, run_id\)/);
+  assert.match(postgres, /authorization\.state = 'DISPATCHED'/);
+  assert.match(postgres, /build\.state = 'EXTERNAL_APPROVAL_REQUIRED'/);
+  assert.match(postgres, /workflow_external_approval_receipts/);
+  assert.match(postgres, /set_config\('app\.tenant_id'/);
+  assert.ok(executor.indexOf("resolvePrivateBeta") < executor.indexOf("uploadPrivateBeta"));
+  assert.ok(executor.indexOf("resolveDefaultBranch") < executor.indexOf("defaultBranch.promote"));
+  assert.match(executor, /defaultBranchBuildId !== request\.betaBuildId/);
+  assert.doesNotMatch(executor, /accountPassword|guardCode|configVdfBytes/);
+});
+
 test("artifact preparation publishes canonical source and plan objects before the append-only lock", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const preparer = readFileSync(new URL("../services/artifact-preparer/src/preparer.ts", import.meta.url), "utf8");

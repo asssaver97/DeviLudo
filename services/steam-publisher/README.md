@@ -106,6 +106,29 @@ Readiness exposes a fixed semantic version and binary digest that the workflow
 client must pin. The irreversible executor remains an injected service behind
 this boundary and cannot control the wire schema.
 
+`DurableSteamWorkflowOperationService` writes the exact request to
+`steam_workflow_operations` before placing an opaque operation ID on the
+isolated executor queue. Migration `020_steam_workflow_operations.sql` binds
+the operation to the same tenant/project Agent run under forced RLS, makes its
+payload immutable, and permits only fenced `PENDING → RUNNING → terminal`
+transitions. `SteamWorkflowOperationWorker` heartbeats a bounded lease and a
+stale worker cannot commit after another attempt reclaims it. Retryable
+failures release the lease for idempotent redispatch; only bounded terminal
+codes are persisted. Neither the HTTP process nor the queue message receives
+Steam credentials.
+
+Immediately before execution, `PostgresSteamWorkflowExecutionAuthority`
+re-joins the signed RC, non-invalidated main evidence, dispatched MFA
+authorization, release state and active App-scoped build session under the
+same tenant RLS transaction. Default publication additionally requires the
+archived `EXTERNAL_APPROVAL_REQUIRED` Build, its clean-install evidence digest
+and the three ordered external approval receipts. The executor rejects any
+binding drift before its Steam connector is called, then archives private-Beta
+and default-branch receipts idempotently. Migration
+`021_steam_release_execution.sql` makes RCs and publication receipts
+append-only and enforces tenant/project/run foreign keys. Only Vault SecretRefs
+are stored for `config.vdf` and Beta passwords.
+
 `npm run start:steam-install-services` mounts two separate TLS 1.3 mTLS
 listeners with different client CAs. The preparation listener exposes only
 `POST /v1/clean-install-execution-preparations` to Runner Control and accepts
