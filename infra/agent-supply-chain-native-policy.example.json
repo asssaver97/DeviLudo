@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "deviludo.agent-supply-chain-native-policy.v1",
+  "policyVersion": "1.0.0",
+  "officialRegistryOrigin": "https://registry.npmjs.org",
+  "trustedNpmKeyIds": ["SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="],
+  "internalRegistryOrigin": "https://registry.deviludo.internal",
+  "packageRepositoryPrefix": "agent-packages",
+  "imageRepositoryPrefix": "agent-workers",
+  "sbomRepositoryPrefix": "agent-sboms",
+  "signingKeyRef": "kms://deviludo/agent-worker-signing",
+  "registryConfigDirectory": "/etc/deviludo/registry",
+  "scannerDataDirectory": "/var/lib/deviludo/scanners",
+  "fleetConfigFile": "/etc/deviludo/fleet.json",
+  "maxPackageBytes": 536870912,
+  "maxExtractedBytes": 2147483648,
+  "tools": {
+    "syft": { "path": "/opt/deviludo/bin/syft", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "1.30.0" },
+    "trivy": { "path": "/opt/deviludo/bin/trivy", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "0.69.3" },
+    "clamscan": { "path": "/opt/deviludo/bin/clamscan", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "1.4.3" },
+    "oras": { "path": "/opt/deviludo/bin/oras", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "1.3.0" },
+    "buildctl": { "path": "/opt/deviludo/bin/buildctl", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "0.25.2" },
+    "cosign": { "path": "/opt/deviludo/bin/cosign", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "3.0.2" },
+    "nerdctl": { "path": "/opt/deviludo/bin/nerdctl", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "2.2.0" },
+    "fleetctl": { "path": "/opt/deviludo/bin/fleetctl", "digest": "0000000000000000000000000000000000000000000000000000000000000000", "version": "1.0.0" }
+  },
+  "agents": {
+    "claude-code": {
+      "packageName": "@anthropic-ai/claude-code",
+      "workerBaseImage": "registry.deviludo.internal/base/agent-worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "validationHarnessImage": "registry.deviludo.internal/harness/agent-contract@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "adapterVersion": "1.3.0"
+    },
+    "codex-cli": {
+      "packageName": "@openai/codex",
+      "workerBaseImage": "registry.deviludo.internal/base/agent-worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "validationHarnessImage": "registry.deviludo.internal/harness/agent-contract@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "adapterVersion": "1.3.0"
+    }
+  },
+  "workerPools": [
+    { "id": "development-linux", "rolloutTarget": "dev-linux-workers" }
+  ]
+}
