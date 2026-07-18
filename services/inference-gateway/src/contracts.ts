@@ -1,6 +1,7 @@
 import type { AgentKind, ModelRoles } from "../../../lib/agent/types";
 import type { RunTokenBudget, RunTokenClaims } from "../../../lib/security/credentials";
 import type { DnsResolver, ValidatedEndpoint } from "../../../lib/security/network";
+import type { Readable } from "node:stream";
 
 export type GatewayProtocol = "openai-responses" | "anthropic-messages";
 
@@ -26,6 +27,10 @@ export interface GatewayProviderRevision {
   readonly authentication: "bearer" | "x-api-key" | "authorization-bearer";
   readonly models: ModelRoles;
   readonly credentialVersionId: string;
+  readonly pricing: Readonly<{
+    inputUsdPerMillionTokens: number;
+    outputUsdPerMillionTokens: number;
+  }>;
   readonly state: "ACTIVE" | "DEGRADED" | "DISABLED";
 }
 
@@ -36,15 +41,25 @@ export interface GatewayUsage {
 }
 
 export interface RunAuthorizationRegistry {
-  get(runId: string): Promise<ActiveRunAuthorization | null>;
+  get(tenantId: string, runId: string): Promise<ActiveRunAuthorization | null>;
 }
 
 export interface ProviderRevisionRegistry {
-  get(providerRevisionId: string): Promise<GatewayProviderRevision | null>;
+  get(tenantId: string, providerRevisionId: string): Promise<GatewayProviderRevision | null>;
 }
 
 export interface UsageLedger {
-  get(runId: string): Promise<GatewayUsage>;
+  get(tenantId: string, runId: string): Promise<GatewayUsage>;
+  record(input: Readonly<{
+    requestId: string;
+    tenantId: string;
+    projectId: string;
+    runId: string;
+    providerRevisionId: string;
+    credentialVersionId: string;
+    model: string;
+    usage: GatewayUsage;
+  }>): Promise<void>;
 }
 
 export interface GatewayAuthorizationRequest {
@@ -55,6 +70,7 @@ export interface GatewayAuthorizationRequest {
 }
 
 export interface AuthorizedGatewayRequest {
+  readonly model: string;
   readonly claims: RunTokenClaims;
   readonly run: ActiveRunAuthorization;
   readonly provider: GatewayProviderRevision;
@@ -74,7 +90,7 @@ export interface InferenceGatewayAuthorizerOptions {
 export interface GatewayConnectorResponse {
   readonly statusCode: number;
   readonly headers?: Readonly<Record<string, string>>;
-  readonly body: unknown;
+  readonly body: unknown | Buffer | Readable;
 }
 
 /**

@@ -1,17 +1,34 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import type { SecureVersion } from "node:tls";
 import { GatewayAuthorizationError, InferenceGatewayAuthorizer } from "./authorization";
 import type { GatewayConnector, GatewayProtocol, InferenceGatewayAuthorizerOptions } from "./contracts";
+import type { GatewayProviderProbeService } from "./provider-probe";
 
 const SAFE_RESPONSE_HEADERS = new Set(["content-type", "x-request-id", "request-id"]);
 
-export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions & { readonly connector?: GatewayConnector }): FastifyInstance {
-  const server = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+export interface InferenceGatewayTlsOptions {
+  readonly key: Buffer;
+  readonly cert: Buffer;
+  readonly ca: Buffer;
+  readonly minVersion: SecureVersion;
+  readonly requestCert: true;
+  readonly rejectUnauthorized: true;
+}
+
+export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions & {
+  readonly connector?: GatewayConnector;
+  readonly https?: InferenceGatewayTlsOptions;
+  readonly providerProbe?: GatewayProviderProbeService;
+  readonly authorizeProviderProbe?: (request: FastifyRequest) => void | Promise<void>;
+}): FastifyInstance {
+  const server = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, ...(options.https ? { https: options.https } : {}) });
   const authorizer = new InferenceGatewayAuthorizer(options);
 
   server.get("/health", async () => Object.freeze({
     status: options.connector ? "ok" : "degraded",
     service: "deviludo-inference-gateway",
     connector: options.connector ? "CONFIGURED" : "NOT_CONFIGURED",
+    providerProbe: options.providerProbe && options.authorizeProviderProbe ? "CONFIGURED" : "NOT_CONFIGURED",
   }));
 
   server.post("/v1/responses", async (request, reply) => {
@@ -19,6 +36,17 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
   });
   server.post("/v1/messages", async (request, reply) => {
     return forward(request, reply, "anthropic-messages", authorizer, options.connector);
+  });
+  server.post("/v1/provider-probes", async (request, reply) => {
+    if (!options.providerProbe || !options.authorizeProviderProbe) {
+      return reply.code(503).send({ error: { code: "PROVIDER_PROBE_NOT_CONFIGURED" } });
+    }
+    try { await options.authorizeProviderProbe(request); }
+    catch { return reply.code(403).send({ error: { code: "PROVIDER_PROBE_WORKLOAD_FORBIDDEN" } }); }
+    try {
+      reply.header("cache-control", "no-store");
+      return reply.code(200).send(await options.providerProbe.run(request.body));
+    } catch { return reply.code(409).send({ error: { code: "PROVIDER_PROBE_FAILED" } }); }
   });
 
   server.setErrorHandler((error, _request, reply) => {
@@ -39,6 +67,7 @@ async function forward(
   connector: GatewayConnector | undefined,
 ) {
   const body = objectBody(request.body);
+  rejectControlFields(body);
   const model = body.model;
   if (typeof model !== "string") throw new GatewayAuthorizationError("MODEL_REQUIRED", "Request must include an exact model", 400);
   const token = extractRunToken(request, protocol);
@@ -57,6 +86,17 @@ async function forward(
     return reply.code(safeStatus(upstream.statusCode)).send(upstream.body);
   } finally {
     request.raw.off("aborted", abort);
+  }
+}
+
+const FORBIDDEN_CONTROL_FIELDS = new Set([
+  "api_key", "apikey", "authorization", "base_url", "baseurl", "credential", "credential_id",
+  "credential_version_id", "secret", "secret_ref", "token", "upstream_url",
+]);
+
+function rejectControlFields(body: Readonly<Record<string, unknown>>): void {
+  if (Object.keys(body).some((key) => FORBIDDEN_CONTROL_FIELDS.has(key.toLowerCase()))) {
+    throw new GatewayAuthorizationError("FORBIDDEN_CONTROL_FIELD", "Inference request contains a gateway-owned field", 400);
   }
 }
 

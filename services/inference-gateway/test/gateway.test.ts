@@ -9,6 +9,7 @@ import type {
   GatewayUsage,
   InferenceGatewayAuthorizerOptions,
 } from "../src/contracts";
+import { PROVIDER_PROBE_CHECKS } from "../src/provider-probe";
 
 const signingKey = new Uint8Array(32).fill(19);
 const now = 1_800_000_000;
@@ -51,6 +52,7 @@ const provider: GatewayProviderRevision = Object.freeze({
   authentication: "bearer",
   models: Object.freeze({ primaryModel: model, planningModel: model, smallFastModel: model, subagentModel: model }),
   credentialVersionId: claims.credentialVersionId,
+  pricing: Object.freeze({ inputUsdPerMillionTokens: 2, outputUsdPerMillionTokens: 8 }),
   state: "ACTIVE",
 });
 
@@ -66,7 +68,7 @@ function options(overrides: Partial<{
     signingKey,
     runs: { async get() { return overrides.run === undefined ? activeRun : overrides.run; } },
     providers: { async get() { return overrides.provider === undefined ? provider : overrides.provider; } },
-    usage: { async get() { return overrides.usage ?? zeroUsage; } },
+    usage: { async get() { return overrides.usage ?? zeroUsage; }, async record() {} },
     dns: { async resolve() { return [{ address: overrides.address ?? "93.184.216.34", family: 4 }]; } },
   };
 }
@@ -184,4 +186,40 @@ test("HTTP boundary fails closed without a connector and never echoes invalid cr
   assert.equal(response.statusCode, 401);
   assert.equal(response.body.includes(invalid), false);
   await server.close();
+});
+
+test("Provider probe HTTP boundary requires its workload authorizer and returns only fixed checks", async () => {
+  let authorized = 0;
+  let received: unknown;
+  const server = buildInferenceGateway({
+    ...options(),
+    providerProbe: {
+      async run(value) {
+        received = value;
+        return {
+          providerRevisionId: "provider-r1",
+          checks: Object.freeze(Object.fromEntries(PROVIDER_PROBE_CHECKS.map((name) => [name, "PASS"])) as Record<(typeof PROVIDER_PROBE_CHECKS)[number], "PASS">),
+        };
+      },
+    },
+    authorizeProviderProbe() { authorized += 1; },
+  });
+  const payload = { providerRevisionId: "provider-r1", noCredentialBytes: true };
+  const response = await server.inject({ method: "POST", url: "/v1/provider-probes", payload });
+  assert.equal(response.statusCode, 200);
+  assert.equal(authorized, 1);
+  assert.deepEqual(received, payload);
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.deepEqual(Object.keys(response.json().checks), [...PROVIDER_PROBE_CHECKS]);
+  await server.close();
+
+  const forbidden = buildInferenceGateway({
+    ...options(),
+    providerProbe: { async run() { throw new Error("must not run"); } },
+    authorizeProviderProbe() { throw new Error("untrusted workload"); },
+  });
+  const denied = await forbidden.inject({ method: "POST", url: "/v1/provider-probes", payload });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().error.code, "PROVIDER_PROBE_WORKLOAD_FORBIDDEN");
+  await forbidden.close();
 });

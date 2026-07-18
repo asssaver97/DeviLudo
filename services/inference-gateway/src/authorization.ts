@@ -32,7 +32,7 @@ export class InferenceGatewayAuthorizer {
       throw new GatewayAuthorizationError("INVALID_RUN_TOKEN", "Run token is invalid or expired", 401);
     }
 
-    const storedRun = await this.#options.runs.get(claims.runId);
+    const storedRun = await this.#options.runs.get(claims.tenantId, claims.runId);
     if (!storedRun) throw new GatewayAuthorizationError("RUN_BINDING_MISMATCH", "Run authorization is not active");
     const run = snapshotRun(storedRun);
     if (run.state !== "ACTIVE" || !sameRunBinding(claims, run)) {
@@ -49,14 +49,14 @@ export class InferenceGatewayAuthorizer {
       throw new GatewayAuthorizationError("MODEL_NOT_ALLOWED", "Requested model is outside the run allowlist");
     }
 
-    const storedProvider = await this.#options.providers.get(claims.providerRevisionId);
+    const storedProvider = await this.#options.providers.get(claims.tenantId, claims.providerRevisionId);
     if (!storedProvider) throw new GatewayAuthorizationError("PROVIDER_UNAVAILABLE", "Locked Provider revision is unavailable", 409);
     const provider = snapshotProvider(storedProvider);
     if (!providerMatches(provider, claims, request.protocol, model)) {
       throw new GatewayAuthorizationError("PROVIDER_UNAVAILABLE", "Locked Provider revision is unavailable", 409);
     }
 
-    const usage = Object.freeze({ ...await this.#options.usage.get(claims.runId) });
+    const usage = Object.freeze({ ...await this.#options.usage.get(claims.tenantId, claims.runId) });
     const remainingBudget = remaining(claims.budget, usage);
     if (remainingBudget.maxCostUsd <= 0 || remainingBudget.maxInputTokens === 0 || remainingBudget.maxOutputTokens === 0) {
       throw new GatewayAuthorizationError("RUN_BUDGET_EXHAUSTED", "Run inference budget is exhausted", 429);
@@ -73,6 +73,7 @@ export class InferenceGatewayAuthorizer {
     }
 
     return Object.freeze({
+      model,
       claims,
       run,
       provider,
@@ -96,6 +97,7 @@ function snapshotProvider(provider: GatewayProviderRevision): GatewayProviderRev
     ...provider,
     approvedPorts: Object.freeze([...provider.approvedPorts]),
     models: Object.freeze({ ...provider.models }),
+    pricing: Object.freeze({ ...provider.pricing }),
   });
 }
 
@@ -112,13 +114,19 @@ function sameRunBinding(claims: RunTokenClaims, run: ActiveRunAuthorization): bo
 }
 
 function providerMatches(provider: GatewayProviderRevision, claims: RunTokenClaims, protocol: GatewayAuthorizationRequest["protocol"], model: string): boolean {
-  return provider.state === "ACTIVE"
+  return validPricing(provider.pricing)
+    && provider.state === "ACTIVE"
     && provider.protocol === protocol
     && provider.providerRevisionId === claims.providerRevisionId
     && provider.credentialVersionId === claims.credentialVersionId
     && Object.values(provider.models).includes(model)
     && ((protocol === "openai-responses" && provider.agent === "codex-cli")
       || (protocol === "anthropic-messages" && provider.agent === "claude-code"));
+}
+
+function validPricing(value: GatewayProviderRevision["pricing"]): boolean {
+  return Number.isFinite(value.inputUsdPerMillionTokens) && value.inputUsdPerMillionTokens >= 0
+    && Number.isFinite(value.outputUsdPerMillionTokens) && value.outputUsdPerMillionTokens >= 0;
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

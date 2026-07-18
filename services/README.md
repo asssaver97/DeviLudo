@@ -168,7 +168,14 @@ credential-free HTTPS endpoint on the internal inference gateway. That gateway
 performs DNS pinning, redirect revalidation, authentication, model, streaming,
 tools, cancellation, usage and timeout probes while it holds temporary Vault
 access. Without it, production validation returns 503; local development uses
-the contract probe.
+the contract probe. The control-plane probe client and Gateway listener both
+require TLS 1.3 workload certificates; the control plane sends only the exact
+Provider and credential-version identities. The production Gateway is started
+with `npm run start:inference-gateway`, uses migration `028` for tenant-RLS run,
+Provider and append-only usage records, and resolves a five-minute key lease
+from the fixed mTLS credential Broker. See
+`services/inference-gateway/.env.example`; PEM and run-token key material must
+be file-mounted, never placed directly in environment variables.
 
 The Agent version approval API requires an exact SHA-256 integrity value,
 verified signature flag, passing scan and internal OCI SBOM reference. Agent
@@ -357,7 +364,7 @@ not become availability errors.
 node --import tsx --test services/control-plane/test/*.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
-node --import tsx --test services/inference-gateway/test/gateway.test.ts
+node --import tsx --test services/inference-gateway/test/*.test.ts
 node --import tsx --test services/runner-control/test/coordinator.test.ts
 node --import tsx --test services/evidence-archive/test/*.test.ts
 node --import tsx --test services/steam-publisher/test/coordinator.test.ts

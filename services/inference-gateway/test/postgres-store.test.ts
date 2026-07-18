@@ -1,0 +1,102 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { PostgresQueryResult, PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { inferenceGatewayRegistries, PostgresInferenceGatewayStore } from "../src/postgres-store";
+
+const tenantId = "11111111-1111-4111-8111-111111111111";
+const projectId = "22222222-2222-4222-8222-222222222222";
+const runId = "33333333-3333-4333-8333-333333333333";
+const requestId = "44444444-4444-4444-8444-444444444444";
+const providerRevisionId = "provider-codex-r3";
+const credentialVersionId = "credential-codex-v4";
+const model = "gpt-5.3-codex-2026-06-12";
+
+test("PostgreSQL Gateway registries use tenant RLS and preserve exact immutable bindings", async () => {
+  const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
+  let releases = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: readonly unknown[]) {
+      calls.push({ text, values });
+      if (text.includes("FROM deviludo.inference_run_authorizations")) return result<Row>([{
+        tenant_id: tenantId, project_id: projectId, run_id: runId,
+        profile_revision_id: "profile-codex-r7", provider_revision_id: providerRevisionId,
+        credential_version_id: credentialVersionId, models: [model],
+        budget: { maxCostUsd: 12, maxInputTokens: 10_000, maxOutputTokens: 4_000 },
+        nonce: "run-nonce-1", state: "ACTIVE",
+      }]);
+      if (text.includes("FROM deviludo.inference_provider_revisions")) return result<Row>([{
+        provider_revision_id: providerRevisionId, agent: "codex-cli", protocol: "openai-responses",
+        base_url: "https://provider.example.com/v1", approved_ports: [443], authentication: "bearer",
+        models: { primaryModel: model, planningModel: model, smallFastModel: model, subagentModel: model },
+        credential_version_id: credentialVersionId, input_usd_per_million_tokens: "2.00000000",
+        output_usd_per_million_tokens: "8.00000000", state: "ACTIVE",
+      }]);
+      if (text.includes("sum(input_tokens)")) return result<Row>([{ input_tokens: "100", output_tokens: "50", cost_usd: "0.0006000000" }]);
+      if (text.includes("INSERT INTO deviludo.inference_usage_events")) return result<Row>([], 1);
+      if (text.includes("FROM deviludo.inference_usage_events")) return result<Row>([{
+        tenant_id: tenantId, project_id: projectId, run_id: runId,
+        provider_revision_id: providerRevisionId, credential_version_id: credentialVersionId,
+        model, input_tokens: "100", output_tokens: "50", cost_usd: "0.0006000000",
+      }]);
+      return result<Row>([]);
+    },
+    release() { releases += 1; },
+  };
+  const pool: PostgresWorkflowPool = { async connect() { return client; } };
+  const store = new PostgresInferenceGatewayStore(pool);
+  const registries = inferenceGatewayRegistries(store);
+
+  const run = await registries.runs.get(tenantId, runId);
+  const provider = await registries.providers.get(tenantId, providerRevisionId);
+  const usage = await registries.usage.get(tenantId, runId);
+  await registries.usage.record({
+    requestId, tenantId, projectId, runId, providerRevisionId, credentialVersionId, model,
+    usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.0006 },
+  });
+
+  assert.equal(run?.runId, runId);
+  assert.deepEqual(run?.models, [model]);
+  assert.equal(provider?.protocol, "openai-responses");
+  assert.equal(provider?.pricing.outputUsdPerMillionTokens, 8);
+  assert.deepEqual(usage, { inputTokens: 100, outputTokens: 50, costUsd: 0.0006 });
+  assert.equal(releases, 4);
+  const tenantScopes = calls.filter((call) => call.text.includes("set_config('app.tenant_id'"));
+  assert.equal(tenantScopes.length, 4);
+  assert.ok(tenantScopes.every((call) => call.values?.[0] === tenantId));
+  const usageInsert = calls.find((call) => call.text.includes("INSERT INTO deviludo.inference_usage_events"));
+  assert.deepEqual(usageInsert?.values, [
+    requestId, tenantId, projectId, runId, providerRevisionId, credentialVersionId, model, 100, 50, 0.0006,
+  ]);
+});
+
+test("PostgreSQL Gateway state parser rejects a floating model and rolls back", async () => {
+  const calls: string[] = [];
+  const pool: PostgresWorkflowPool = {
+    async connect() {
+      return {
+        async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string) {
+          calls.push(text);
+          if (text.includes("FROM deviludo.inference_provider_revisions")) return result<Row>([{
+            provider_revision_id: providerRevisionId, agent: "codex-cli", protocol: "openai-responses",
+            base_url: "https://provider.example.com/v1", approved_ports: [443], authentication: "bearer",
+            models: { primaryModel: "latest", planningModel: model, smallFastModel: model, subagentModel: model },
+            credential_version_id: credentialVersionId, input_usd_per_million_tokens: "2",
+            output_usd_per_million_tokens: "8", state: "ACTIVE",
+          }]);
+          return result<Row>([]);
+        },
+        release() {},
+      };
+    },
+  };
+  const store = new PostgresInferenceGatewayStore(pool);
+  await assert.rejects(store.getProvider(tenantId, providerRevisionId), /PostgreSQL state is invalid/);
+  assert.equal(calls.at(-1), "ROLLBACK");
+});
+
+function result<Row extends Record<string, unknown>>(
+  rows: readonly Record<string, unknown>[],
+  rowCount = rows.length,
+): PostgresQueryResult<Row> {
+  return { rows: rows as readonly Row[], rowCount };
+}
