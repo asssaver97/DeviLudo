@@ -33,8 +33,8 @@ export class PostgresRunnerExecutionLockPort implements RunnerExecutionLockPort 
         `INSERT INTO deviludo.runner_execution_locks
           (tenant_id, project_id, run_id, lock_key, mode, commit_sha,
            source_digest, steam_build_id, target_matrix, payload, payload_digest)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, NULL,
-                 $8::text[], $9::jsonb, $10)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8,
+                 $9::text[], $10::jsonb, $11)
          ON CONFLICT (tenant_id, lock_key) DO NOTHING`,
         [
           input.tenantId,
@@ -44,6 +44,7 @@ export class PostgresRunnerExecutionLockPort implements RunnerExecutionLockPort 
           payload.mode,
           payload.commitSha,
           payload.sourceDigest,
+          payload.steamBuildId,
           payload.targetMatrix,
           JSON.stringify(payload),
           payloadDigest,

@@ -29,7 +29,7 @@ const rcClaims: SteamRcArtifactClaims = Object.freeze({
   testPlanDigest: digest("d"),
   evidenceBundleDigest: digest("e"),
   steamAppId: "2841930",
-  targetMatrix: Object.freeze(["windows", "linux", "macos"] as const),
+  targetMatrix: Object.freeze(["linux", "macos", "windows"] as const),
   depots: Object.freeze([
     { depotId: "2841931", platform: "windows", objectRef: "s3://rc/windows.zip", artifactDigest: digest("1"), sizeBytes: 1_000 },
     { depotId: "2841932", platform: "linux", objectRef: "s3://rc/linux.zip", artifactDigest: digest("2"), sizeBytes: 2_000 },

@@ -270,8 +270,7 @@ function validateBetaReceiptBinding(beta: SteamPrivateBetaReceipt, rc: SignedSte
 function validateMatrix(matrix: readonly SteamTargetPlatform[]): void {
   if (!matrix.length || matrix.length > 3 || new Set(matrix).size !== matrix.length
     || matrix.some((value) => !["windows", "linux", "macos"].includes(value))) throw new Error("Steam target matrix is invalid");
-  const order = ["windows", "linux", "macos"];
-  if ([...matrix].sort((a, b) => order.indexOf(a) - order.indexOf(b)).join() !== matrix.join()) throw new Error("Steam target matrix must be canonical");
+  if (JSON.stringify([...matrix].sort()) !== JSON.stringify(matrix)) throw new Error("Steam target matrix must be canonical");
 }
 
 function validateTimeWindow(issuedAt: string, expiresAt: string, at: string, maxLifetimeMs: number, allowExpired: boolean): void {

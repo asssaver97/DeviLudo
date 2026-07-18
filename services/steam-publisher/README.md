@@ -86,6 +86,17 @@ health identity gates readiness, long uploads heartbeat their workflow lease,
 and its receipt must echo every authorization binding. Default publication is
 accepted only when `SetLive` returns the same private-Beta BuildID.
 
+The same isolated Broker also mounts
+`POST /v1/clean-install-execution-preparations` with
+`createSteamCleanInstallPreparationHandler`. The TLS 1.3 mTLS route accepts only
+the minimal tenant/project/run/BuildID trigger from Runner Control. It resolves
+the passed, non-invalidated main evidence, approved spec/test plan, exact Runner
+toolchain and `INSTALL_TESTING` Build receipt again under tenant RLS. An injected
+Broker-owned grant issuer returns only an opaque, BuildID/branch/matrix-bound
+install grant; Steam credentials, branch passwords, Guard data and `config.vdf`
+never enter the execution lock or response. The resulting lock is append-only,
+content-addressed and idempotent on the workflow request digest.
+
 Run the contract tests from the repository root:
 
 ```bash

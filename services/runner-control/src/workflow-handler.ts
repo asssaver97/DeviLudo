@@ -10,6 +10,10 @@ import type {
   RunnerArtifactPreparationPort,
   RunnerArtifactPreparationReceipt,
 } from "./artifact-preparation-client";
+import type {
+  RunnerSteamInstallPreparationPort,
+  RunnerSteamInstallPreparationReceipt,
+} from "./steam-install-preparation-client";
 
 export type RunnerWorkflowMode = "CANDIDATE" | "MAIN_RELEASE_GATE" | "STEAM_CLEAN_INSTALL";
 
@@ -48,6 +52,7 @@ export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
   constructor(
     private readonly runner: RunnerWorkflowPort,
     private readonly artifacts: RunnerArtifactPreparationPort,
+    private readonly steamInstalls: RunnerSteamInstallPreparationPort,
     options: { readonly heartbeatIntervalMs?: number } = {},
   ) {
     this.#heartbeatIntervalMs = options.heartbeatIntervalMs ?? 60_000;
@@ -70,20 +75,38 @@ export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
     const steamBuildId = mode === "STEAM_CLEAN_INSTALL" ? snapshot.steamBuildId : null;
     validateSnapshot(mode, snapshot.state, snapshot.runId, commitSha, draftPullRequest, steamBuildId);
     const targetMatrix = validateMatrix(snapshot.targetMatrix);
-    const preparation = mode === "STEAM_CLEAN_INSTALL" ? null : await withLeaseHeartbeats(
-      () => this.artifacts.prepare({
-        tenantId: job.tenantId,
-        projectId: job.projectId,
-        runId: snapshot.runId as string,
-        lockKey: job.requestDigest,
-        mode,
-        commitSha: commitSha as string,
-        targetMatrix,
-      }),
-      context.heartbeat,
-      this.#heartbeatIntervalMs,
-    );
-    if (preparation) validatePreparationReceipt(preparation, job.tenantId, job.projectId);
+    const preparation = mode === "STEAM_CLEAN_INSTALL"
+      ? await withLeaseHeartbeats(
+        () => this.steamInstalls.prepare({
+          tenantId: job.tenantId,
+          projectId: job.projectId,
+          runId: snapshot.runId as string,
+          lockKey: job.requestDigest,
+          commitSha: commitSha as string,
+          steamBuildId: steamBuildId as string,
+          targetMatrix,
+        }),
+        context.heartbeat,
+        this.#heartbeatIntervalMs,
+      )
+      : await withLeaseHeartbeats(
+        () => this.artifacts.prepare({
+          tenantId: job.tenantId,
+          projectId: job.projectId,
+          runId: snapshot.runId as string,
+          lockKey: job.requestDigest,
+          mode,
+          commitSha: commitSha as string,
+          targetMatrix,
+        }),
+        context.heartbeat,
+        this.#heartbeatIntervalMs,
+      );
+    if (mode === "STEAM_CLEAN_INSTALL") {
+      validateSteamPreparationReceipt(preparation as RunnerSteamInstallPreparationReceipt, steamBuildId as string, targetMatrix);
+    } else {
+      validatePreparationReceipt(preparation as RunnerArtifactPreparationReceipt, job.tenantId, job.projectId);
+    }
     const receipt = await this.runner.execute({
       operationKey: `workflow-job:${job.id}`,
       requestDigest: job.requestDigest,
@@ -109,7 +132,7 @@ export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
       targetMatrix: Object.freeze([...receipt.targetMatrix]),
       evidenceBundleId: receipt.evidenceBundleId,
       repairPromptId: receipt.repairPromptId,
-      preparation: preparation ? Object.freeze({ ...preparation }) : null,
+      preparation: Object.freeze({ ...preparation }),
     });
     if (receipt.status === "FAILED") {
       if (mode === "CANDIDATE") {
@@ -171,6 +194,22 @@ function validatePreparationReceipt(
     || receipt.sourceObjectKey !== sourceObjectKey || receipt.testPlanObjectKey !== testPlanObjectKey
     || typeof receipt.created !== "boolean") {
     throw new WorkflowJobError("RUNNER_ARTIFACT_PREPARATION_RECEIPT_INVALID", true);
+  }
+}
+
+function validateSteamPreparationReceipt(
+  receipt: RunnerSteamInstallPreparationReceipt,
+  buildId: string,
+  targetMatrix: readonly TargetPlatform[],
+): void {
+  if (!UUID_PATTERN.test(receipt.executionLockId) || !SHA256_PATTERN.test(receipt.executionLockDigest)
+    || !SHA256_PATTERN.test(receipt.sourceDigest) || !/^[1-9][0-9]{0,19}$/.test(receipt.steamAppId)
+    || receipt.buildId !== buildId || !/^[a-z0-9][a-z0-9_-]{2,39}$/.test(receipt.betaBranch)
+    || receipt.betaBranch === "default" || receipt.betaBranch === "public"
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(receipt.installGrantId)
+    || JSON.stringify(receipt.targetMatrix) !== JSON.stringify(targetMatrix)
+    || typeof receipt.created !== "boolean") {
+    throw new WorkflowJobError("RUNNER_STEAM_INSTALL_PREPARATION_RECEIPT_INVALID", true);
   }
 }
 

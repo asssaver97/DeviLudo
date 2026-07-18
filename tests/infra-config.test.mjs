@@ -155,6 +155,7 @@ test("artifact preparation publishes canonical source and plan objects before th
   const ingress = readFileSync(new URL("../services/artifact-preparer/src/ingress-http.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/artifact-preparer/src/run-service.ts", import.meta.url), "utf8");
   const runnerClient = readFileSync(new URL("../services/runner-control/src/artifact-preparation-client.ts", import.meta.url), "utf8");
+  const steamClient = readFileSync(new URL("../services/runner-control/src/steam-install-preparation-client.ts", import.meta.url), "utf8");
   const runnerWorkflow = readFileSync(new URL("../services/runner-control/src/workflow-handler.ts", import.meta.url), "utf8");
   const builder = readFileSync(new URL("../services/godot-testkit/src/source-bundle-builder.ts", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:artifact-preparer/);
@@ -173,8 +174,10 @@ test("artifact preparation publishes canonical source and plan objects before th
   assert.match(ingress, /minVersion: "TLSv1\.3"/);
   assert.match(runtime, /new PostgresSourceExecutionPreparationAuthority\(pool\)/);
   assert.match(runnerClient, /deviludo\.source-execution-preparation-trigger\.v1/);
+  assert.match(steamClient, /deviludo\.steam-clean-install-preparation-trigger\.v1/);
+  assert.doesNotMatch(steamClient, /configVdf|branchPassword|accountPassword/);
   assert.match(runnerWorkflow, /withLeaseHeartbeats/);
-  assert.match(runnerWorkflow, /mode === "STEAM_CLEAN_INSTALL" \? null/);
+  assert.match(runnerWorkflow, /this\.steamInstalls\.prepare/);
   assert.match(builder, /constants\.O_NOFOLLOW/);
   assert.match(builder, /createZstdCompress/);
   assert.match(builder, /source snapshot mutation/);

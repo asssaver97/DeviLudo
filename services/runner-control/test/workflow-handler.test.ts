@@ -55,6 +55,25 @@ function preparationPort(observed: Array<Record<string, unknown>> = []) {
   };
 }
 
+function steamPreparationPort(observed: Array<Record<string, unknown>> = []) {
+  return {
+    async prepare(input: Record<string, unknown>) {
+      observed.push(input);
+      return {
+        executionLockId: "44444444-4444-4444-8444-444444444444",
+        executionLockDigest: "7".repeat(64),
+        sourceDigest: "8".repeat(64),
+        steamAppId: "480",
+        buildId: String(input.steamBuildId),
+        betaBranch: "private_beta",
+        installGrantId: "steam-install-grant-001",
+        targetMatrix: input.targetMatrix as readonly ("windows" | "linux" | "macos")[],
+        created: true,
+      };
+    },
+  };
+}
+
 test("Runner workflow handler turns candidate matrix evidence into pass or repair signals", async () => {
   let response = receipt();
   const preparations: Array<Record<string, unknown>> = [];
@@ -63,7 +82,7 @@ test("Runner workflow handler turns candidate matrix evidence into pass or repai
     assert.equal(input.draftPullRequest, 91);
     assert.equal(input.runId, "run-001");
     return response;
-  } }, preparationPort(preparations));
+  } }, preparationPort(preparations), steamPreparationPort());
   const passed = await handler.execute(job(base, "START_TARGET_MATRIX_E2E"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(passed.signal, { type: "E2E_PASSED", evidenceBundleId: "evidence-bundle-1" });
   response = receipt({ status: "FAILED", evidenceBundleId: "failed-evidence-1", repairPromptId: "repair-prompt-1" });
@@ -78,22 +97,25 @@ test("Runner workflow handler gates main SHA and Steam clean-install evidence se
   const main = Object.freeze({ ...base, state: "MAIN_SHA_E2E" as const, mainCommitSha: "c".repeat(40) });
   const steam = Object.freeze({ ...main, state: "STEAM_INSTALL_E2E" as const, steamBuildId: "91234567" });
   const preparations: Array<Record<string, unknown>> = [];
+  const steamPreparations: Array<Record<string, unknown>> = [];
   const handler = new RunnerControlWorkflowHandler({ async execute(input) {
     return receipt({
       mode: input.mode, commitSha: input.commitSha, steamBuildId: input.steamBuildId,
       targetMatrix: input.targetMatrix, evidenceBundleId: `${input.mode.toLowerCase()}-evidence`,
     });
-  } }, preparationPort(preparations));
+  } }, preparationPort(preparations), steamPreparationPort(steamPreparations));
   const mainResult = await handler.execute(job(main, "START_MAIN_SHA_RELEASE_GATE"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(mainResult.signal, { type: "E2E_PASSED", evidenceBundleId: "main_release_gate-evidence" });
   const steamResult = await handler.execute(job(steam, "INSTALL_FROM_CLEAN_STEAM_CLIENT"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(steamResult.signal, { type: "STEAM_INSTALL_PASSED", evidenceBundleId: "steam_clean_install-evidence" });
   assert.equal(preparations.length, 1);
   assert.equal(preparations[0]?.mode, "MAIN_RELEASE_GATE");
+  assert.equal(steamPreparations.length, 1);
+  assert.equal(steamPreparations[0]?.steamBuildId, "91234567");
 
   const failing = new RunnerControlWorkflowHandler({ async execute(input) {
     return receipt({ mode: input.mode, status: "FAILED", commitSha: input.commitSha, steamBuildId: input.steamBuildId,
       targetMatrix: input.targetMatrix, evidenceBundleId: "main-failed-evidence", repairPromptId: "main-failure-diagnostic" });
-  } }, preparationPort());
+  } }, preparationPort(), steamPreparationPort());
   await assert.rejects(failing.execute(job(main, "START_MAIN_SHA_RELEASE_GATE"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } }), /MAIN_SHA_E2E_FAILED/);
 });

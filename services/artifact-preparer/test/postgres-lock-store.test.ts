@@ -24,8 +24,8 @@ test("PostgreSQL execution-lock store persists once under tenant RLS and rejects
           project_id: values[1],
           run_id: values[2],
           lock_key: values[3],
-          payload: JSON.parse(values[8] as string) as unknown,
-          payload_digest: values[9],
+          payload: JSON.parse(values[9] as string) as unknown,
+          payload_digest: values[10],
         };
         return { rowCount: 1, rows: [] };
       }
@@ -62,6 +62,45 @@ test("PostgreSQL execution-lock store persists once under tenant RLS and rejects
     payload: { ...payload, sourceDigest: sha("f") },
     payloadDigest: runnerExecutionLockDigest({ ...payload, sourceDigest: sha("f") }),
   }), /persistence is invalid/);
+});
+
+test("PostgreSQL execution-lock store binds the exact Steam BuildID", async () => {
+  let insertValues: readonly unknown[] = [];
+  const payload: RunnerExecutionLock = {
+    ...executionLock(),
+    mode: "STEAM_CLEAN_INSTALL",
+    steamBuildId: "91234567",
+    execution: {
+      kind: "STEAM_CLEAN_INSTALL",
+      steamAppId: "2841930",
+      buildId: "91234567",
+      betaBranch: "deviludo_private_9",
+      installGrantId: "install-grant-9",
+    },
+  };
+  const payloadDigest = runnerExecutionLockDigest(payload);
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(text: string, values: readonly unknown[] = []): Promise<PostgresQueryResult<Row>> {
+      if (text.startsWith("INSERT INTO deviludo.runner_execution_locks")) {
+        insertValues = values;
+        return { rowCount: 1, rows: [] };
+      }
+      if (text.includes("FROM deviludo.runner_execution_locks")) return {
+        rowCount: 1,
+        rows: [{
+          id: executionLockId, tenant_id: tenantId, project_id: projectId, run_id: runId,
+          lock_key: sha("d"), payload, payload_digest: payloadDigest,
+        } as unknown as Row],
+      };
+      return { rowCount: null, rows: [] };
+    },
+    release() {},
+  };
+  const store = new PostgresRunnerExecutionLockPort({ async connect() { return client; } });
+  await store.persist({ tenantId, projectId, runId, lockKey: sha("d"), payload, payloadDigest });
+  assert.equal(insertValues[7], "91234567");
+  assert.deepEqual(insertValues[8], ["linux"]);
+  assert.equal(JSON.parse(insertValues[9] as string).execution.installGrantId, "install-grant-9");
 });
 
 function executionLock(): RunnerExecutionLock {

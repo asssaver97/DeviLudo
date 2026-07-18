@@ -1,5 +1,6 @@
 export * from "./canonical";
 export * from "./artifact-preparation-client";
+export * from "./steam-install-preparation-client";
 export * from "./contracts";
 export * from "./coordinator";
 export * from "./execution-lock";
