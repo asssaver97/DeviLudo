@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -117,6 +117,7 @@ test("physical Runner production composition loads only file-backed keys and exa
     const jobPublicKey = join(root, "jobs.pub");
     const testKitExecutable = join(root, "testkit");
     const godotExecutable = join(root, "godot");
+    const steamStagingRoot = join(root, "steam-installs");
     const testKitBytes = Buffer.from("pinned-testkit-controller-v1");
     const godotBytes = Buffer.from("pinned-godot-binary-v1");
     const keys = generateKeyPairSync("ed25519");
@@ -136,6 +137,7 @@ test("physical Runner production composition loads only file-backed keys and exa
       writeFile(jobPublicKey, keys.publicKey.export({ format: "pem", type: "spki" })),
       writeFile(testKitExecutable, testKitBytes),
       writeFile(godotExecutable, godotBytes),
+      mkdir(steamStagingRoot),
     ]);
     const service = await physicalRunnerServiceFromEnv({
       DEVILUDO_PHYSICAL_RUNNER_CONFIG_FILE: configFile,
@@ -157,6 +159,11 @@ test("physical Runner production composition loads only file-backed keys and exa
       DEVILUDO_TESTKIT_ARTIFACT_CA_FILE: ca,
       DEVILUDO_TESTKIT_TRANSFER_CA_FILE: ca,
       DEVILUDO_TESTKIT_ALLOWED_TRANSFER_ORIGINS_JSON: '["https://s3.internal"]',
+      DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL: "https://steam-install.internal",
+      DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE: tlsKey,
+      DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: tlsCert,
+      DEVILUDO_TESTKIT_STEAM_CA_FILE: ca,
+      DEVILUDO_TESTKIT_STEAM_STAGING_ROOT: steamStagingRoot,
     }, { platform: process.platform, arch: process.arch });
     assert.equal(service.config.capabilities.capabilityDigest, finalCap.capabilityDigest);
     assert.equal(service.jobPublicKey.asymmetricKeyType, "ed25519");

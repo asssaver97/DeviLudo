@@ -5,6 +5,7 @@ import { canonicalJson } from "../../runner-control/src/canonical";
 import { testKitArtifactClientFromEnv } from "../../runner-control/src/testkit-artifact-client";
 import { GodotTestKitController } from "./controller";
 import { parseGodotTestKitRunRequest } from "./contracts";
+import { steamInstalledGameDriverFromEnv } from "./steam-installed-game-driver";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
@@ -26,6 +27,9 @@ export async function runGodotTestKitCli(
   const request = parseGodotTestKitRunRequest(await readBoundedJson(requestPath));
   const controller = dependencies.controller ?? new GodotTestKitController({
     artifacts: await testKitArtifactClientFromEnv(env),
+    ...(request.signedJob.payload.execution.kind === "STEAM_CLEAN_INSTALL"
+      ? { steamDriver: await steamInstalledGameDriverFromEnv(env) }
+      : {}),
   });
   const result = await controller.run(request, runRoot);
   await materializeResult(outputPath, {

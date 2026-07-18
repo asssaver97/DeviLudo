@@ -169,6 +169,16 @@ by a physical Linux display host; those values are filtered again before Godot
 starts. See `services/godot-testkit/README.md` for the fixed DSL, evidence and
 native packaging contract.
 
+Steam clean-install jobs take a separate route inside the same locked TestKit.
+The child receives only a fixed mTLS Steam Connector origin, certificate/CA
+file paths and a staging root. It sends the signed BuildID-bound job and frozen
+plan; the platform Connector returns no Steam credentials, only a canonical
+receipt and bounded local evidence paths under that staging root. TestKit
+requires clean-client reset, exact installation, production boot and platform
+suite receipts, then packages the installed tree instead of downloading source
+or creating a second export. Partial Connector configuration is rejected before
+the child starts.
+
 Run the machine daemon with `npm run start:physical-runner`. Startup verifies
 that the configured platform/architecture match the actual Node host, loads
 all TLS/HMAC/public-key material from files, probes both executable digests and

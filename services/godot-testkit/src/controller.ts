@@ -9,6 +9,7 @@ import { parseGodotTestKitRunRequest, parseGodotTestPlan, type GodotTestKitRunRe
 import { createEvidencePackage, type EvidencePackageEntry } from "./evidence-package";
 import { ExecFileGodotPlatformDriver, type GodotDriverResult, type GodotPlatformDriver } from "./godot-driver";
 import { extractSourceBundle } from "./source-bundle";
+import type { SteamInstalledGameDriver } from "./steam-installed-game-driver";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_STATE_BYTES = 1024 * 1024;
@@ -43,15 +44,18 @@ interface PreparedState {
 export class GodotTestKitController {
   readonly #artifacts: GodotTestKitArtifactPort;
   readonly #driver: GodotPlatformDriver;
+  readonly #steamDriver: SteamInstalledGameDriver | null;
   readonly #now: () => Date;
 
   constructor(options: {
     readonly artifacts: GodotTestKitArtifactPort;
     readonly driver?: GodotPlatformDriver;
+    readonly steamDriver?: SteamInstalledGameDriver;
     readonly now?: () => Date;
   }) {
     this.#artifacts = options.artifacts;
     this.#driver = options.driver ?? new ExecFileGodotPlatformDriver();
+    this.#steamDriver = options.steamDriver ?? null;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -91,19 +95,31 @@ export class GodotTestKitController {
   async #prepare(request: GodotTestKitRunRequest, runRoot: string): Promise<PreparedState> {
     const inputRoot = join(runRoot, "inputs");
     await ensureDirectory(inputRoot);
-    const sourcePath = join(inputRoot, "source.tar.zst");
     const planPath = join(inputRoot, "test-plan.json");
-    await Promise.all([
-      this.#artifacts.downloadInput(request.signedJob, sourcePath),
-      this.#artifacts.downloadTestPlan(request.signedJob, planPath),
-    ]);
+    const execution = request.signedJob.payload.execution;
+    let sourcePath: string | null = null;
+    if (execution.kind === "SOURCE_ARTIFACT") {
+      sourcePath = join(inputRoot, "source.tar.zst");
+      await Promise.all([
+        this.#artifacts.downloadInput(request.signedJob, sourcePath),
+        this.#artifacts.downloadTestPlan(request.signedJob, planPath),
+      ]);
+    } else {
+      await this.#artifacts.downloadTestPlan(request.signedJob, planPath);
+    }
     const plan = parseGodotTestPlan(await readFile(planPath), request);
     requireExecutionLease(request, plan, this.#now());
     const executionRoot = join(runRoot, `execution-${randomUUID()}`);
     await mkdir(executionRoot, { recursive: false, mode: 0o700 });
-    const workspace = join(executionRoot, "workspace");
-    await extractSourceBundle(sourcePath, workspace);
-    const driver = await this.#driver.run({ request, plan, workspace, runRoot: executionRoot, planPath });
+    let driver: GodotDriverResult;
+    if (execution.kind === "SOURCE_ARTIFACT") {
+      const workspace = join(executionRoot, "workspace");
+      await extractSourceBundle(sourcePath as string, workspace);
+      driver = await this.#driver.run({ request, plan, workspace, runRoot: executionRoot, planPath });
+    } else {
+      if (!this.#steamDriver) throw new Error("Godot TestKit Steam installed-game driver is unavailable");
+      driver = await this.#steamDriver.run({ request, plan, runRoot: executionRoot, planPath });
+    }
     const createdAt = nowIso(this.#now);
     const prepared = await prepareEvidence(executionRoot, request, driver);
     return deepFreeze({
@@ -126,7 +142,9 @@ async function prepareEvidence(
   const evidenceRoot = join(root, "evidence");
   await mkdir(evidenceRoot, { recursive: false, mode: 0o700 });
   const harness = driver.harness;
-  const requiredCommands = ["import", "boot", "platform-suite", "production-export", "production-boot"] as const;
+  const requiredCommands = request.signedJob.payload.execution.kind === "SOURCE_ARTIFACT"
+    ? ["import", "boot", "platform-suite", "production-export", "production-boot"] as const
+    : ["steam-client-reset", "steam-install", "production-boot", "platform-suite"] as const;
   const commandChecks = requiredCommands.map((id) => driver.commands.find((command) => command.id === id)
     ?? Object.freeze({ id, status: "FAILED" as const, durationMs: 0, code: "NOT_EXECUTED" }));
   const harnessPassed = !!harness && harness.status === "PASSED";

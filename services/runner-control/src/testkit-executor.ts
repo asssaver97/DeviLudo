@@ -9,6 +9,10 @@ import {
   REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES,
 } from "./testkit-artifact-client";
 import {
+  OPTIONAL_TESTKIT_STEAM_ENV_NAMES,
+  REQUIRED_TESTKIT_STEAM_ENV_NAMES,
+} from "../../godot-testkit/src/steam-installed-game-driver";
+import {
   type PhysicalRunnerExecutionOutput,
   type PhysicalRunnerExecutor,
   validatePhysicalRunnerExecutionOutput,
@@ -325,7 +329,14 @@ function controlledTestKitEnvironment(
   const keys = Object.keys(value).sort();
   if (keys.length === 0) return Object.freeze({});
   const required = new Set<string>(REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES);
-  const allowed = new Set<string>([...REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES, ...OPTIONAL_TESTKIT_ARTIFACT_ENV_NAMES]);
+  const steamRequired = new Set<string>(REQUIRED_TESTKIT_STEAM_ENV_NAMES);
+  const allowed = new Set<string>([
+    ...REQUIRED_TESTKIT_ARTIFACT_ENV_NAMES,
+    ...OPTIONAL_TESTKIT_ARTIFACT_ENV_NAMES,
+    ...REQUIRED_TESTKIT_STEAM_ENV_NAMES,
+    ...OPTIONAL_TESTKIT_STEAM_ENV_NAMES,
+  ]);
+  let hasSteamConfiguration = false;
   const result: Record<string, string> = {};
   for (const name of keys) {
     const item = value[name];
@@ -334,8 +345,13 @@ function controlledTestKitEnvironment(
     }
     result[name] = item;
     required.delete(name);
+    if (steamRequired.has(name)) {
+      hasSteamConfiguration = true;
+      steamRequired.delete(name);
+    }
   }
   if (required.size !== 0) throw new Error("Physical Runner TestKit environment is incomplete");
+  if (hasSteamConfiguration && steamRequired.size !== 0) throw new Error("Physical Runner TestKit Steam environment is incomplete");
   return Object.freeze(result);
 }
 

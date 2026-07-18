@@ -6,10 +6,11 @@ executes project-provided commands, hooks, plugins, MCP servers or test code.
 
 For a server-signed Runner job it:
 
-1. downloads only the exact content-addressed `source.tar.zst` and canonical
-   frozen matrix test plan authorized by the job;
-2. extracts the fixed Zstandard/USTAR subset into a private fresh workspace,
-   rejecting traversal, links, `.git`, duplicates and resource-limit drift;
+1. downloads the canonical frozen matrix test plan and, for source gates, only
+   the exact content-addressed `source.tar.zst` authorized by the job;
+2. for source gates, extracts the fixed Zstandard/USTAR subset into a private
+   fresh workspace, rejecting traversal, links, `.git`, duplicates and
+   resource-limit drift;
 3. verifies the pinned Godot binary, then runs only the platform-owned import,
    boot, scenario harness, release export and exported-game boot commands with
    `execFile`, `shell: false` and fixed arguments;
@@ -20,6 +21,17 @@ For a server-signed Runner job it:
    production-export package, all content-addressed and bound to the signed job;
 6. writes an immutable local preparation record before upload so a restart
    uploads identical evidence without running the game a second time.
+
+For `STEAM_CLEAN_INSTALL`, the controller deliberately does not download source
+or export another build. `MtlsSteamInstalledGameDriver` sends the signed job and
+canonical plan to a platform-local, Agent-free Steam Client Connector over TLS
+1.3 mTLS. The Connector alone resolves the opaque install grant and must return
+an exact receipt for clean-client reset, the locked AppID/BuildID/private branch
+installation, production boot and the fixed platform suite. TestKit recomputes
+the receipt digest, rejects path escape/symlinks, parses the standard harness
+result, verifies screenshot/video files and packages the actual installed tree
+as production evidence. Account passwords, Steam Guard values, Beta passwords,
+`config.vdf` and Vault references are neither request nor response fields.
 
 A passing result requires all five fixed Godot commands, a complete passing
 harness and at least one non-empty production export file. The total configured
@@ -64,6 +76,13 @@ The request and result basenames and canonical parent directory are fixed.
 Production deployment remains blocked until the release pipeline has produced
 and signed the native artifacts for all selected Runner systems; the local
 `tsx` command is deliberately not presented as that release artifact.
+
+The Steam Client Connector is another required native, signed platform
+component. This repository defines and tests its strict mTLS request/receipt
+contract, but does not fabricate a Steam installation on localhost. A physical
+Windows/Linux/macOS gate remains blocked until the corresponding Connector and
+clean Steam Client sandbox are deployed and their executable/image digests are
+admitted by fleet policy.
 
 The child gets only private home/temp paths, locale/platform session variables,
 and the explicit mTLS artifact transport configuration. Provider keys, Steam

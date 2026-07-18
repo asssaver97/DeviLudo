@@ -8,7 +8,14 @@ import { parseGodotHarnessResult } from "./contracts";
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 export interface GodotCommandEvidence {
-  readonly id: "import" | "boot" | "platform-suite" | "production-export" | "production-boot";
+  readonly id:
+    | "import"
+    | "boot"
+    | "platform-suite"
+    | "production-export"
+    | "production-boot"
+    | "steam-client-reset"
+    | "steam-install";
   readonly status: "PASSED" | "FAILED";
   readonly durationMs: number;
   readonly code: string;

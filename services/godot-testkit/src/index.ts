@@ -5,3 +5,4 @@ export * from "./godot-driver";
 export * from "./run-cli";
 export * from "./source-bundle";
 export * from "./source-bundle-builder";
+export * from "./steam-installed-game-driver";

@@ -133,6 +133,7 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   const cli = readFileSync(new URL("../services/godot-testkit/src/run-cli.ts", import.meta.url), "utf8");
   const controller = readFileSync(new URL("../services/godot-testkit/src/controller.ts", import.meta.url), "utf8");
   const driver = readFileSync(new URL("../services/godot-testkit/src/godot-driver.ts", import.meta.url), "utf8");
+  const steamDriver = readFileSync(new URL("../services/godot-testkit/src/steam-installed-game-driver.ts", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/godot-testkit/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:godot-testkit/);
   assert.equal(packageJson.scripts["start:godot-testkit"], "node --import tsx services/godot-testkit/src/run-cli.ts");
@@ -142,6 +143,11 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.match(controller, /exportedFiles\.length > 0/);
   assert.match(driver, /shell: false/);
   assert.match(driver, /--write-movie/);
+  assert.match(steamDriver, /\/v1\/clean-install-executions/);
+  assert.match(steamDriver, /minVersion: "TLSv1\.3"/);
+  assert.match(steamDriver, /execution\.kind !== "STEAM_CLEAN_INSTALL"/);
+  assert.match(steamDriver, /escaped staging root/);
+  assert.doesNotMatch(steamDriver, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.doesNotMatch(driver, /dangerously|--yolo/);
   assert.match(readme, /not a production Runner artifact/);
   assert.match(readme, /signed the native artifacts for all selected Runner systems/);

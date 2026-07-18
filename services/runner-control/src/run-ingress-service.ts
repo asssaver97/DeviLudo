@@ -82,7 +82,7 @@ export async function runnerIngressServiceConfigFromEnv(
     env.DEVILUDO_RUNNER_INGRESS_MAX_BODY_BYTES, 1024 * 1024, 1_024, 4 * 1024 * 1024, "body limit",
   );
   const leaseDurationSeconds = positiveInteger(
-    env.DEVILUDO_RUNNER_LEASE_SECONDS, 300, 30, 3_600, "lease duration",
+    env.DEVILUDO_RUNNER_LEASE_SECONDS, 3_600, 30, 3_600, "lease duration",
   );
   const jobSigningKeyId = requiredEnv(env, "DEVILUDO_RUNNER_JOB_SIGNING_KEY_ID");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(jobSigningKeyId)) {

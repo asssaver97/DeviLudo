@@ -66,6 +66,85 @@ test("fixed Controller rejects local evidence tampering before replay upload", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Steam mode skips source download and packages the exact clean-installed build", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-godot-controller-steam-"));
+  try {
+    const plan = testPlan();
+    const planBytes = Buffer.from(canonicalJson(plan));
+    const sourceJob = signedJob(sha("f"), digest(planBytes));
+    const job: SignedRunnerJob = {
+      ...sourceJob,
+      payload: {
+        ...sourceJob.payload,
+        execution: {
+          kind: "STEAM_CLEAN_INSTALL", steamAppId: "2841930", buildId: "91234567",
+          betaBranch: "deviludo_private_9", installGrantId: "install-grant-9",
+        },
+      },
+    };
+    const request = runRequest(join(root, "godot"), job);
+    await writeFile(request.godot.executable, "pinned-godot");
+    const runRoot = join(root, "run");
+    await mkdir(runRoot);
+    let sourceDownloads = 0;
+    let planDownloads = 0;
+    let steamRuns = 0;
+    const uploads: string[] = [];
+    const controller = new GodotTestKitController({
+      artifacts: {
+        async downloadInput() { sourceDownloads += 1; throw new Error("Steam must not download source"); },
+        async downloadTestPlan(_job, path) { planDownloads += 1; await writeFile(path, planBytes); return { sizeBytes: planBytes.length, artifactDigest: digest(planBytes) }; },
+        async uploadEvidence(_job, kind, path) {
+          const value = await readFile(path);
+          uploads.push(kind);
+          return { objectKey: `objects/${kind}`, artifactDigest: digest(value), sizeBytes: value.length };
+        },
+      },
+      steamDriver: {
+        async run(input) {
+          steamRuns += 1;
+          const harnessRoot = join(input.runRoot, "harness-output");
+          const screenshotsRoot = join(harnessRoot, "screenshots");
+          const installRoot = join(input.runRoot, "steam-installed-build");
+          await Promise.all([mkdir(screenshotsRoot, { recursive: true }), mkdir(installRoot)]);
+          const start = Buffer.from("steam-start");
+          const win = Buffer.from("steam-win");
+          await Promise.all([
+            writeFile(join(screenshotsRoot, "start.png"), start), writeFile(join(screenshotsRoot, "win.png"), win),
+            writeFile(join(harnessRoot, "video.avi"), "steam-video"),
+            writeFile(join(installRoot, "DeviLudo.x86_64"), "installed-build-91234567"),
+          ]);
+          return {
+            commands: ["steam-client-reset", "steam-install", "production-boot", "platform-suite"].map((id) => ({
+              id: id as "steam-install", status: "PASSED" as const, durationMs: 10, code: "OK",
+            })),
+            harness: {
+              schemaVersion: "deviludo.godot-harness-result.v1", status: "PASSED",
+              checks: input.plan.scenarios.map((scenario) => ({ id: scenario.id, outcome: scenario.outcome, status: "PASSED", durationMs: 10, code: "OK" })),
+              inputTimeline: input.plan.scenarios.flatMap((scenario) => scenario.steps.map((step, stepIndex) => ({ scenarioId: scenario.id, stepIndex, kind: step.kind, frame: stepIndex + 1 }))),
+              screenshots: [
+                { name: "start", file: "screenshots/start.png", sha256: digest(start), width: 640, height: 360 },
+                { name: "win", file: "screenshots/win.png", sha256: digest(win), width: 640, height: 360 },
+              ],
+              performance: { averageFrameMs: 8, p95FrameMs: 12, sampledFrames: 120 },
+              videoFile: "video.avi", createdAt: "2030-01-01T00:00:01.000Z",
+            },
+            exportRoot: installRoot,
+            logs: "clean Steam Client installed BuildID 91234567\n",
+          };
+        },
+      },
+      now: () => new Date("2030-01-01T00:00:02.000Z"),
+    });
+    const result = await controller.run(request, runRoot);
+    assert.equal(result.status, "PASSED");
+    assert.equal(sourceDownloads, 0);
+    assert.equal(planDownloads, 1);
+    assert.equal(steamRuns, 1);
+    assert.deepEqual(uploads.sort(), ["input-timeline", "junit", "logs", "production-export", "screenshot-manifest", "video-manifest"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("test plan parser rejects noncanonical or incomplete outcome plans before Godot", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-godot-controller-"));
   try {
