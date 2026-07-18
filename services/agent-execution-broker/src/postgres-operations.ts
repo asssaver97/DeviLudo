@@ -328,6 +328,7 @@ async function selectOperation(client: PostgresWorkflowClient, tenantId: string,
 function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): LockedAgentExecution {
   const value = record(row.configuration_lock);
   const budget = record(value.budget);
+  const modelRoles = parseModelRoles(value.modelRoles);
   const authBudget = record(row.authorization_budget);
   if (row.id !== request.lockedRunConfigurationId || row.tenant_id !== request.tenantId || row.project_id !== request.projectId
     || !["QUEUED", "PREPARING", "RUNNING", "WAITING_PROVIDER", "SUCCEEDED", "FAILED", "CANCELLED"].includes(row.state)
@@ -341,7 +342,8 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     || row.authorization_provider_revision_id !== row.provider_revision_id
     || row.authorization_credential_version_id !== row.credential_version_id
     || authBudget.maxCostUsd !== budget.maxUsd || !Array.isArray(row.authorization_models)
-    || !row.authorization_models.includes(row.model)) invalid();
+    || row.model !== modelRoles.primaryModel
+    || !sameStringSet(row.authorization_models, Object.values(modelRoles))) invalid();
   const agent = value.agent;
   const protocol = value.providerProtocol;
   if ((agent !== "claude-code" && agent !== "codex-cli")
@@ -353,7 +355,7 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     exactAgentVersion: row.exact_agent_version, adapterVersion: row.adapter_version,
     agent, providerRevisionId: row.provider_revision_id, providerProtocol: protocol,
     providerBaseUrl: string(value.providerBaseUrl), credentialVersionId: row.credential_version_id,
-    model: row.model, authorizedModels: Object.freeze([...row.authorization_models]),
+    model: row.model, modelRoles, authorizedModels: Object.freeze([...row.authorization_models]),
     authorizationNonce: row.authorization_nonce, authorizationExpiresAt: row.authorization_expires_at,
     budget: Object.freeze({ maxUsd: number(budget.maxUsd), maxTurns: integer(budget.maxTurns), timeoutSeconds: integer(budget.timeoutSeconds) }),
     specRevisionId: row.spec_revision_id, specDigest: digest(value.specDigest),
@@ -433,6 +435,22 @@ function string(value: unknown): string { if (typeof value !== "string" || !valu
 function number(value: unknown): number { if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) invalid(); return value; }
 function integer(value: unknown): number { if (!Number.isSafeInteger(value) || (value as number) <= 0) invalid(); return value as number; }
 function digest(value: unknown): string { if (typeof value !== "string" || !SHA256.test(value)) invalid(); return value; }
+function parseModelRoles(value: unknown): LockedAgentExecution["modelRoles"] {
+  const body = record(value);
+  const keys = ["planningModel", "primaryModel", "smallFastModel", "subagentModel"];
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(keys)) invalid();
+  const result = Object.freeze({
+    primaryModel: string(body.primaryModel),
+    planningModel: string(body.planningModel),
+    smallFastModel: string(body.smallFastModel),
+    subagentModel: string(body.subagentModel),
+  });
+  return result;
+}
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === new Set(left).size
+    && JSON.stringify([...left].sort()) === JSON.stringify([...new Set(right)].sort());
+}
 function platforms(value: unknown): readonly ("linux" | "macos" | "windows")[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 3
     || value.some((item) => item !== "linux" && item !== "macos" && item !== "windows")

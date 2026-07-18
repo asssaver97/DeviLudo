@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import { isAbsolute, resolve } from "node:path";
+import type { SecretResolver } from "../../agent-worker/src/contracts";
 import type { EphemeralRunTokenSecretStore } from "./token-broker";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -62,10 +63,56 @@ export class MtlsEphemeralRunTokenSecretStore implements EphemeralRunTokenSecret
   }
 }
 
+/** Guest-only resolver. It exchanges an opaque reference for DLRT bytes over mTLS. */
+export class MtlsEphemeralRunTokenSecretResolver implements SecretResolver {
+  readonly #origin: URL;
+  readonly #tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>;
+  readonly #timeoutMs: number;
+  readonly #http: EphemeralSecretHttp;
+
+  constructor(options: Readonly<{ endpoint: string | URL; tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>;
+    timeoutMs?: number; http?: EphemeralSecretHttp }>) {
+    this.#origin = origin(options.endpoint); validateTls(options.tls); this.#tls = Object.freeze({ ...options.tls });
+    this.#timeoutMs = integer(options.timeoutMs ?? 30_000, 1_000, 60_000); this.#http = options.http ?? httpsSecret;
+  }
+
+  async resolve(secretRef: string, context: Parameters<SecretResolver["resolve"]>[1]): Promise<string> {
+    if (!SECRET_REF.test(secretRef) || secretRef.includes("?") || secretRef.includes("#")
+      || !UUID.test(context.runId) || !UUID.test(context.attemptId)
+      || (context.environmentVariable !== "ANTHROPIC_API_KEY" && context.environmentVariable !== "DEVILUDO_RUN_TOKEN")) invalid();
+    const body = JSON.stringify({ schemaVersion: "deviludo.ephemeral-run-token-resolution.v1", secretRef,
+      runId: context.runId, attemptId: context.attemptId, environmentVariable: context.environmentVariable });
+    const response = await this.#http(route(this.#origin, "/v1/ephemeral-run-tokens:resolve"), {
+      method: "POST", timeoutMs: this.#timeoutMs, tls: this.#tls,
+      headers: Object.freeze({ accept: "application/octet-stream", "content-type": "application/json",
+        "x-deviludo-run-id": context.runId, "x-deviludo-attempt-id": context.attemptId }), body,
+    });
+    if (response.statusCode !== 200) throw new Error(`Ephemeral secret Broker rejected resolution with status ${response.statusCode}`);
+    if (!Buffer.isBuffer(response.payload) || response.payload.byteLength < 32 || response.payload.byteLength > 16_384) invalid();
+    const token = response.payload.toString("utf8");
+    if (!token || Buffer.from(token).byteLength !== response.payload.byteLength || /[\0\r\n]/.test(token)) invalid();
+    return token;
+  }
+
+  async probe(): Promise<void> {
+    const response = await this.#http(route(this.#origin, "/healthz"), { method: "GET", timeoutMs: this.#timeoutMs,
+      tls: this.#tls, headers: Object.freeze({ accept: "application/json" }) });
+    const body = record(response.payload);
+    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-ephemeral-secret-broker") invalid();
+  }
+}
+
 export async function ephemeralRunTokenSecretStoreFromEnv(env: Readonly<Record<string, string | undefined>> = process.env) {
   const [key, certificate, ca] = await Promise.all([read(env, "DEVILUDO_EPHEMERAL_SECRET_TLS_KEY_FILE"),
     read(env, "DEVILUDO_EPHEMERAL_SECRET_TLS_CERT_FILE"), read(env, "DEVILUDO_EPHEMERAL_SECRET_CA_FILE")]);
   return new MtlsEphemeralRunTokenSecretStore({ endpoint: required(env, "DEVILUDO_EPHEMERAL_SECRET_BROKER_URL"),
+    tls: { key, certificate, ca }, timeoutMs: integerString(env.DEVILUDO_EPHEMERAL_SECRET_TIMEOUT_MS, 30_000, 1_000, 60_000) });
+}
+
+export async function ephemeralRunTokenSecretResolverFromEnv(env: Readonly<Record<string, string | undefined>> = process.env) {
+  const [key, certificate, ca] = await Promise.all([read(env, "DEVILUDO_EPHEMERAL_SECRET_TLS_KEY_FILE"),
+    read(env, "DEVILUDO_EPHEMERAL_SECRET_TLS_CERT_FILE"), read(env, "DEVILUDO_EPHEMERAL_SECRET_CA_FILE")]);
+  return new MtlsEphemeralRunTokenSecretResolver({ endpoint: required(env, "DEVILUDO_EPHEMERAL_SECRET_BROKER_URL"),
     tls: { key, certificate, ca }, timeoutMs: integerString(env.DEVILUDO_EPHEMERAL_SECRET_TIMEOUT_MS, 30_000, 1_000, 60_000) });
 }
 
@@ -79,6 +126,9 @@ async function httpsSecret(url: URL, input: Parameters<EphemeralSecretHttp>[1]):
         if (bytes > MAX_RESPONSE_BYTES) response.destroy(new Error("response too large")); else chunks.push(value); });
       response.once("error", reject); response.once("end", () => { if ((response.statusCode ?? 503) === 204 && bytes === 0) {
         resolve({ statusCode: 204, payload: {} }); return; }
+        if (String(response.headers["content-type"] ?? "").split(";", 1)[0]?.trim().toLowerCase() === "application/octet-stream") {
+          resolve({ statusCode: response.statusCode ?? 503, payload: Buffer.concat(chunks) }); return;
+        }
         try { resolve({ statusCode: response.statusCode ?? 503, payload: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown }); }
         catch { reject(new Error("Ephemeral secret Broker returned invalid JSON")); } }); });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Ephemeral secret Broker timed out")));

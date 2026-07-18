@@ -128,13 +128,15 @@ function nativeRequest(input: IsolatedAgentExecutionRequest, work: Awaited<Retur
     installationId: input.installationId, imageDigest: input.imageDigest, exactAgentVersion: input.exactAgentVersion,
     adapterVersion: input.adapterVersion, agent: input.agent, providerRevisionId: input.providerRevisionId,
     providerProtocol: input.providerProtocol, credentialVersionId: input.credentialVersionId,
-    model: input.model, authorizedModels: Object.freeze([...input.authorizedModels]), budget: input.budget,
+    model: input.model, modelRoles: input.modelRoles,
+    authorizedModels: Object.freeze([...input.authorizedModels]), budget: input.budget,
     specRevisionId: input.specRevisionId, specDigest: work.specDigest,
     testPlanRevisionId: input.testPlanRevisionId, testPlanDigest: work.testPlanDigest,
     targetMatrix: Object.freeze([...input.targetMatrix]), sourceBaselineReceiptId: input.sourceBaselineReceiptId,
     baseCommitSha: input.baseCommitSha, sourceDigest: input.sourceDigest,
     inferenceGatewayUrl, inferenceTokenSecretRef: input.inferenceTokenSecretRef,
-    inferenceTokenExpiresAt: input.inferenceTokenExpiresAt, prompt: work.prompt, promptDigest: work.promptDigest });
+    inferenceTokenExpiresAt: input.inferenceTokenExpiresAt, prompt: work.prompt,
+    promptContentDigest: createHash("sha256").update(work.prompt).digest("hex"), promptDigest: work.promptDigest });
 }
 
 export function executeNativeMicrovm(executable: string, args: readonly string[], options: Readonly<{

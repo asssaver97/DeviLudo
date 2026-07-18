@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +17,7 @@ test("source bundle builder creates deterministic extractable archives from one 
       writeFile(join(source, "project.godot"), "config_version=5\n[application]\nconfig/name=\"Fixture\"\n"),
       writeFile(join(source, "scripts", "main.gd"), "extends Node\n"),
     ]);
+    if (process.platform !== "win32") await chmod(join(source, "scripts", "main.gd"), 0o700);
     const firstPath = join(root, "first.tar.zst");
     const secondPath = join(root, "second.tar.zst");
     const first = await createSourceBundle(source, firstPath);
@@ -26,6 +27,7 @@ test("source bundle builder creates deterministic extractable archives from one 
     const destination = join(root, "extracted");
     assert.deepEqual(await extractSourceBundle(firstPath, destination), { files: 2, directories: 0, totalBytes: 66 });
     assert.equal(await readFile(join(destination, "scripts", "main.gd"), "utf8"), "extends Node\n");
+    if (process.platform !== "win32") assert.notEqual((await lstat(join(destination, "scripts", "main.gd"))).mode & 0o111, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

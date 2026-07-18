@@ -16,6 +16,7 @@ const MAX_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
 interface SourceEntry {
   readonly name: string;
   readonly path: string;
+  readonly mode: 0o644 | 0o755;
   readonly size: number;
   readonly mtimeMs: number;
   readonly ctimeMs: number;
@@ -89,6 +90,7 @@ async function scanSource(root: string): Promise<readonly SourceEntry[]> {
       entries.push(Object.freeze({
         name,
         path,
+        mode: metadata.mode & 0o111 ? 0o755 : 0o644,
         size: metadata.size,
         mtimeMs: metadata.mtimeMs,
         ctimeMs: metadata.ctimeMs,
@@ -103,7 +105,7 @@ async function scanSource(root: string): Promise<readonly SourceEntry[]> {
 
 async function* tarChunks(entries: readonly SourceEntry[]): AsyncGenerator<Buffer> {
   for (const entry of entries) {
-    yield tarHeader(entry.name, entry.size);
+    yield tarHeader(entry.name, entry.size, entry.mode);
     const flags = process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
     const file = await open(entry.path, flags);
     try {
@@ -125,11 +127,11 @@ async function* tarChunks(entries: readonly SourceEntry[]): AsyncGenerator<Buffe
   yield Buffer.alloc(TAR_BLOCK * 2);
 }
 
-function tarHeader(path: string, size: number): Buffer {
+function tarHeader(path: string, size: number, mode: SourceEntry["mode"]): Buffer {
   const { name, prefix } = splitTarPath(path);
   const header = Buffer.alloc(TAR_BLOCK);
   writeAscii(header, 0, 100, name);
-  writeOctal(header, 100, 8, 0o600);
+  writeOctal(header, 100, 8, mode);
   writeOctal(header, 108, 8, 0);
   writeOctal(header, 116, 8, 0);
   writeOctal(header, 124, 12, size);
@@ -167,13 +169,15 @@ function validateSourceName(value: string): void {
 }
 
 function assertIdentity(metadata: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>, entry: SourceEntry): void {
-  if (!metadata.isFile() || metadata.size !== entry.size || metadata.mtimeMs !== entry.mtimeMs || metadata.ctimeMs !== entry.ctimeMs) {
+  const mode = Number(metadata.mode) & 0o111 ? 0o755 : 0o644;
+  if (!metadata.isFile() || mode !== entry.mode || metadata.size !== entry.size
+    || metadata.mtimeMs !== entry.mtimeMs || metadata.ctimeMs !== entry.ctimeMs) {
     invalid("source snapshot mutation");
   }
 }
 
 function snapshotIdentity(entries: readonly SourceEntry[]): string {
-  return JSON.stringify(entries.map(({ name, size, mtimeMs, ctimeMs }) => ({ name, size, mtimeMs, ctimeMs })));
+  return JSON.stringify(entries.map(({ name, mode, size, mtimeMs, ctimeMs }) => ({ name, mode, size, mtimeMs, ctimeMs })));
 }
 
 async function hashRegularFile(path: string): Promise<Readonly<{ sizeBytes: number; artifactDigest: string }>> {

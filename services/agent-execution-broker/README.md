@@ -32,3 +32,22 @@ consumer with `npm run start:agent-execution-worker`; it deposits DLRT bytes as
 `application/octet-stream` through the configured mTLS ephemeral-secret Broker
 and receives only an opaque SecretRef. There is no in-memory production
 fallback.
+
+The immutable guest image runs `npm run start:agent-microvm-guest`. Its request
+parser rejects extra fields (including Provider Base URLs and credentials),
+reconstructs all four exact model roles from the locked Profile, and invokes the
+same hardened Claude Code/Codex Adapter supervisor used by the contract suite.
+Before execution it independently derives the locked baseline digest using Git
+blob and canonical tree rules. After execution it rejects links, Git metadata,
+oversized deltas and no-op runs, scans the tree a second time to detect a
+surviving background writer, and emits only a bounded Ed25519-attested UPSERT/
+DELETE artifact. Source snapshot archives preserve the executable bit so the
+guest and GitHub SCM Broker calculate the same final tree digest.
+
+The guest resolves its opaque DLRT reference exactly once over the ephemeral
+secret Broker's TLS 1.3 workload boundary. The response is binary, never JSON,
+and the request contains only the reference plus the bound run, attempt and
+allowed CLI environment variable. The attestation private key path in the
+example is a guest-only sealed mount; the Worker host loads only the matching
+public key. A deployment may replace that local guest signer with the same
+`CandidateArtifactSigner` interface backed by KMS.

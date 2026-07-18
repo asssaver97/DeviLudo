@@ -54,6 +54,7 @@ export async function extractSourceBundle(
       }
       seen.add(relative);
       const size = tarOctal(header.subarray(124, 136), "tar file size");
+      const mode = tarMode(header.subarray(100, 108));
       const type = header[156] ?? 0;
       const target = boundedTarget(canonicalRoot, relative);
       if (type === 53) {
@@ -78,6 +79,7 @@ export async function extractSourceBundle(
           remaining -= chunk.byteLength;
         }
         await output.sync();
+        if (process.platform !== "win32") await output.chmod(mode & 0o111 ? 0o700 : 0o600);
       } finally { await output.close(); }
       const padding = (TAR_BLOCK - (size % TAR_BLOCK)) % TAR_BLOCK;
       if (padding && !allZero(await reader.read(padding))) invalid("tar padding");
@@ -167,6 +169,12 @@ function tarOctal(value: Buffer, label: string): number {
   const parsed = Number.parseInt(text, 8);
   if (!Number.isSafeInteger(parsed)) invalid(label);
   return parsed;
+}
+
+function tarMode(value: Buffer): 0o600 | 0o644 | 0o700 | 0o755 {
+  const mode = tarOctal(value, "tar file mode");
+  if (mode !== 0o600 && mode !== 0o644 && mode !== 0o700 && mode !== 0o755) invalid("tar file mode");
+  return mode;
 }
 
 function tarString(value: Buffer): string {

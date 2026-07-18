@@ -49,6 +49,12 @@ export interface LockedAgentExecution {
   readonly providerBaseUrl: string;
   readonly credentialVersionId: string;
   readonly model: string;
+  readonly modelRoles: Readonly<{
+    readonly primaryModel: string;
+    readonly planningModel: string;
+    readonly smallFastModel: string;
+    readonly subagentModel: string;
+  }>;
   readonly authorizedModels: readonly string[];
   readonly authorizationNonce: string;
   readonly authorizationExpiresAt: string;

@@ -8,7 +8,7 @@ import { sha256Canonical } from "../../runner-control/src/canonical";
 import { contentSha256, signGitHubCandidateArtifact } from "../../scm-proxy/src/github-artifacts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import type { IsolatedAgentExecutionRequest } from "../src/contracts";
-import { MtlsEphemeralRunTokenSecretStore } from "../src/ephemeral-secret-client";
+import { MtlsEphemeralRunTokenSecretResolver, MtlsEphemeralRunTokenSecretStore } from "../src/ephemeral-secret-client";
 import { LockedNativeMicrovmAgentExecutor } from "../src/native-microvm-executor";
 import { PostgresAgentDevelopmentWorkPackage } from "../src/postgres-work-package";
 
@@ -34,7 +34,11 @@ function request(): IsolatedAgentExecutionRequest {
     exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code",
     providerRevisionId: "provider-r1", providerProtocol: "anthropic-messages",
     providerBaseUrl: "https://third-party.example.invalid/v1", credentialVersionId: "credential-v1",
-    model: "gateway/claude-sonnet-4-6-20250514", authorizedModels: ["gateway/claude-sonnet-4-6-20250514"],
+    model: "gateway/claude-sonnet-4-6-20250514",
+    modelRoles: { primaryModel: "gateway/claude-sonnet-4-6-20250514",
+      planningModel: "gateway/claude-sonnet-4-6-20250514", smallFastModel: "gateway/claude-sonnet-4-6-20250514",
+      subagentModel: "gateway/claude-sonnet-4-6-20250514" },
+    authorizedModels: ["gateway/claude-sonnet-4-6-20250514"],
     authorizationNonce: "nonce-r1", authorizationExpiresAt: "2030-01-01T00:15:00.000Z",
     budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 600 }, specRevisionId,
     specDigest: sha256Canonical(specPayload), testPlanRevisionId, testPlanDigest: sha256Canonical(planPayload),
@@ -80,6 +84,24 @@ test("mTLS ephemeral secret store deposits binary DLRT bytes and returns only an
   assert.equal(calls[2]?.path, "/healthz");
 });
 
+test("microVM guest resolves only its exact opaque DLRT reference over mTLS", async () => {
+  const token = Buffer.from("signed-internal-run-token-material-that-is-long-enough");
+  const observed: Array<{ path: string; body: Buffer | string | undefined }> = [];
+  const resolver = new MtlsEphemeralRunTokenSecretResolver({ endpoint: "https://vault-broker.internal/",
+    tls: { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) },
+    http: async (url, input) => { observed.push({ path: url.pathname, body: input.body });
+      if (url.pathname === "/healthz") return { statusCode: 200, payload: { status: "ok", service: "deviludo-ephemeral-secret-broker" } };
+      return { statusCode: 200, payload: token }; } });
+  assert.equal(await resolver.resolve(`secret://agent-runs/${runId}/${attemptId}`,
+    { runId, attemptId, environmentVariable: "ANTHROPIC_API_KEY" }), token.toString("utf8"));
+  await resolver.probe();
+  const requestBody = JSON.parse(String(observed[0]?.body)) as Record<string, unknown>;
+  assert.equal(requestBody.runId, runId); assert.equal(requestBody.attemptId, attemptId);
+  assert.equal("token" in requestBody, false); assert.equal(observed[0]?.path, "/v1/ephemeral-run-tokens:resolve");
+  await assert.rejects(resolver.resolve(`secret://agent-runs/${runId}/${attemptId}`,
+    { runId, attemptId: "not-an-attempt", environmentVariable: "ANTHROPIC_API_KEY" }), /contract is invalid/);
+});
+
 test("locked native executor provisions the baseline and accepts only an attested microVM candidate", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "deviludo-native-agent-")));
   const executable = join(root, "microvm-launcher"); const config = join(root, "launcher.json"); const workRoot = join(root, "work");
@@ -116,6 +138,7 @@ test("locked native executor provisions the baseline and accepts only an atteste
   assert.equal(result.status, "COMPLETED"); assert.equal(sourceCalls, 1); assert.equal(heartbeats, 3);
   const observedRequest = observedRequests[0]; assert.ok(observedRequest);
   assert.equal(observedRequest.inferenceGatewayUrl, "https://inference.internal/");
+  assert.deepEqual(observedRequest.modelRoles, request().modelRoles);
   assert.equal("providerBaseUrl" in observedRequest, false);
   assert.equal("apiKey" in observedRequest, false);
 });
