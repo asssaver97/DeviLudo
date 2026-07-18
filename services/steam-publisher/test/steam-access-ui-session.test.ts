@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 import type { FastifyRequest } from "fastify";
-import { SteamAccessUiSessionVerifier } from "../src/steam-access-ui-session";
+import { SteamAccessUiSessionSigner, SteamAccessUiSessionVerifier } from "../src/steam-access-ui-session";
 
 const keys = generateKeyPairSync("ed25519");
 const now = new Date("2099-01-01T00:02:00.000Z");
@@ -66,4 +66,25 @@ test("Steam secure UI sessions are short-lived Ed25519 capabilities bound to one
     resourceId: "61e826cb-0909-4b57-a01f-364d5015253e",
     action: "SUBMIT_CREDENTIALS",
   }), /invalid/);
+});
+
+test("Steam secure UI signer emits only verifier-compatible five-minute resource capabilities", () => {
+  const signer = new SteamAccessUiSessionSigner("steam-ui-key-1", keys.privateKey, () => now);
+  const verifier = new SteamAccessUiSessionVerifier("steam-ui-key-1", keys.publicKey, () => now);
+  const issued = signer.issue({
+    tenantId: "tenant-north-dock",
+    userId: "user-ada",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    resourceKind: "STEAM_RELEASE_APPROVAL",
+    resourceId: "approval-001",
+    action: "COMPLETE_RELEASE_MFA",
+  });
+  assert.deepEqual(verifier.verify(request(issued), {
+    resourceKind: "STEAM_RELEASE_APPROVAL", resourceId: "approval-001", action: "COMPLETE_RELEASE_MFA",
+  }), {
+    tenantId: "tenant-north-dock",
+    userId: "user-ada",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+  });
+  assert.doesNotMatch(issued, /tenant-north-dock|user-ada|session-binding/);
 });

@@ -74,10 +74,29 @@ Vault ingress, AAL2 verification and KMS signing. It verifies KMS signatures
 locally before persisting metadata and resuming the exact Temporal workflow.
 All required mounts and identities are listed in `.access.env.example`.
 
+The browser surface is a separate process started with `npm run
+start:steam-secure-ui`; it is not a Next.js route. The external reverse proxy
+must keep the platform browser origin unchanged and route only
+`/enrollments/*`, `/approvals/*` and `/v1/steam-ui/*` directly to this process.
+That preserves the host-only platform session cookies while ensuring password,
+Guard and WebAuthn request bodies never pass through the main Web process. Each
+request reasserts the live platform session over a dedicated Identity mTLS
+identity, validates exact Origin/Sec-Fetch-Site and carries a five-minute
+Ed25519 capability bound to the user, session, resource and action. Enrollment
+secrets use binary bodies and are cleared on every success or failure path.
+
+For release approval the UI obtains an approval/user-bound WebAuthn challenge
+from `POST /v1/steam-release-mfa/challenges`, permits only `required` user
+verification and forwards the opaque assertion to the Access Broker. Strict
+nonce CSP, no-store, no-referrer, same-origin isolation and WebAuthn permission
+headers are applied to every page. `.secure-ui.env.example` lists separate
+server, Identity, Access and MFA credentials; the UI session private key exists
+only in this process and the Access Broker mounts only its public key.
+
 For the Web deployment, both `DEVILUDO_STEAM_ENROLLMENT_BROKER_URL` and
 `DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL` point at this service's internal
-origin. Both public-origin variables point at the separately hosted isolated UI
-origin. The main Web process never receives a password, Guard code, MFA
+origin. Both public-origin variables point at the shared external platform
+origin whose selected paths are reverse-proxied to the isolated UI. The main Web process never receives a password, Guard code, MFA
 assertion, `config.vdf`, Vault key or KMS private key.
 
 Release authorization is a separate state machine. The internal Web route can

@@ -1,4 +1,4 @@
-import { verify, type KeyObject } from "node:crypto";
+import { randomUUID, sign, verify, type KeyObject } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import type { SteamEnrollmentPrincipal } from "./enrollment-contracts";
 
@@ -10,6 +10,48 @@ export type SteamAccessUiAction =
   | "SUBMIT_CREDENTIALS"
   | "SUBMIT_GUARD_CODE"
   | "COMPLETE_RELEASE_MFA";
+
+export class SteamAccessUiSessionSigner {
+  constructor(
+    private readonly keyId: string,
+    private readonly privateKey: KeyObject,
+    private readonly now: () => Date = () => new Date(),
+  ) {
+    if (!ID.test(keyId) || privateKey.type !== "private" || privateKey.asymmetricKeyType !== "ed25519") invalid();
+  }
+
+  issue(input: Readonly<{
+    tenantId: string;
+    userId: string;
+    sessionBinding: string;
+    resourceKind: "STEAM_ENROLLMENT" | "STEAM_RELEASE_APPROVAL";
+    resourceId: string;
+    action: SteamAccessUiAction;
+  }>): string {
+    if (!ID.test(input.tenantId) || !ID.test(input.userId) || !ID.test(input.resourceId)
+      || (input.resourceKind !== "STEAM_ENROLLMENT" && input.resourceKind !== "STEAM_RELEASE_APPROVAL")
+      || !["SUBMIT_CREDENTIALS", "SUBMIT_GUARD_CODE", "COMPLETE_RELEASE_MFA"].includes(input.action)
+      || input.sessionBinding.length < 32 || input.sessionBinding.length > 512
+      || /[\u0000-\u001f\u007f]/.test(input.sessionBinding)) invalid();
+    const issued = this.now();
+    if (!Number.isFinite(issued.getTime())) invalid();
+    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", kid: this.keyId, typ: "DEVILUDO-STEAM-UI" })).toString("base64url");
+    const claims = Buffer.from(JSON.stringify({
+      schemaVersion: "deviludo.steam-ui-session.v1",
+      tenantId: input.tenantId,
+      userId: input.userId,
+      sessionBinding: input.sessionBinding,
+      resourceKind: input.resourceKind,
+      resourceId: input.resourceId,
+      action: input.action,
+      issuedAt: issued.toISOString(),
+      expiresAt: new Date(issued.getTime() + MAX_SESSION_SECONDS * 1_000).toISOString(),
+      nonce: randomUUID(),
+    })).toString("base64url");
+    const signingInput = `${header}.${claims}`;
+    return `${signingInput}.${sign(null, Buffer.from(signingInput, "ascii"), this.privateKey).toString("base64url")}`;
+  }
+}
 
 export class SteamAccessUiSessionVerifier {
   constructor(
