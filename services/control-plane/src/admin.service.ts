@@ -9,6 +9,7 @@ import {
   optionalString,
   requiredString,
   type AuditRecord,
+  type AgentVersionRecord,
   type CredentialVersionRecord,
   type InstallationRecord,
   type ProfileRevisionRecord,
@@ -19,12 +20,19 @@ import {
 import { SecretVault } from "./secret-vault";
 import { ProviderProbe } from "./provider-probe";
 import { credentialResultView, credentialView } from "./admin-public";
+import {
+  AgentSupplyChain,
+  type AgentSupplyChainHealth,
+  type AgentVersionCandidateReceipt,
+  type AgentVersionValidationReceipt,
+} from "./agent-supply-chain";
 
 export class AdminService {
   constructor(
     private readonly store: AdminStore,
     private readonly vault: SecretVault,
     private readonly providerProbe: ProviderProbe,
+    private readonly supplyChain: AgentSupplyChain,
   ) {}
 
   async agents(): Promise<Readonly<Record<string, unknown>>> {
@@ -57,68 +65,128 @@ export class AdminService {
   async discoverVersions(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
     const agentInput = body.agent ?? "claude-code";
     if (!isAgentKind(agentInput)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
-    const version = optionalString(body, "version") ?? (agentInput === "claude-code" ? "2.1.15" : "0.92.0");
-    assertExactVersion(version);
-    const id = `${agentInput}@${version}`;
+    const requestedVersion = optionalString(body, "version") ?? null;
+    if (requestedVersion) assertExactVersion(requestedVersion);
+    const candidates = await this.supplyChain.discover({ ...supplyChainOperation(actor), agent: agentInput, requestedVersion });
     return this.mutate(actor, (state) => {
-      const existing = state.versions.get(id);
-      if (existing) return { candidates: [existing], activationChanged: false };
-      const record = {
-        id,
-        agent: agentInput,
-        version,
-        state: "DISCOVERED" as const,
-        source:
-          agentInput === "claude-code"
-            ? "https://code.claude.com/docs/en/installation"
-            : "https://github.com/openai/codex",
-        integrity: `sha256:${"0".repeat(64)}`,
-        signatureVerified: false,
-        sbomRef: `pending://${id}`,
-        scan: "PENDING" as const,
-        discoveredAt: new Date().toISOString(),
-      };
-      state.versions.set(id, record);
-      this.audit(state, "AGENT_VERSION_DISCOVERED", id, actor, { source: "official-catalog", activationChanged: false });
-      return { candidates: [record], activationChanged: false };
+      const records = candidates.map((candidate) => {
+        const id = `${candidate.agent}@${candidate.version}`;
+        const existing = state.versions.get(id);
+        if (existing) {
+          if (existing.sourceDigest !== candidate.sourceDigest || existing.catalogReceiptDigest !== candidate.catalogReceiptDigest) {
+            throw new ServiceProblem(409, "AGENT_CATALOG_DRIFT", "Official Agent catalog receipt changed for an existing exact version");
+          }
+          return existing;
+        }
+        const record: AgentVersionRecord = {
+          id,
+          agent: candidate.agent,
+          version: candidate.version,
+          state: "DISCOVERED",
+          source: candidate.source,
+          sourceDigest: candidate.sourceDigest,
+          releaseNotesUrl: candidate.releaseNotesUrl,
+          integrity: `sha256:${"0".repeat(64)}`,
+          signatureVerified: false,
+          sbomRef: `pending://${id}`,
+          scan: "PENDING",
+          catalogReceiptId: candidate.catalogReceiptId,
+          catalogReceiptDigest: candidate.catalogReceiptDigest,
+          validationReceiptId: null,
+          validationReceiptDigest: null,
+          supplyChainEvidenceDigest: null,
+          validatedAt: null,
+          discoveredAt: candidate.discoveredAt,
+        };
+        state.versions.set(id, record);
+        this.audit(state, "AGENT_VERSION_DISCOVERED", id, actor, {
+          source: candidate.source,
+          catalogReceiptId: candidate.catalogReceiptId,
+          catalogReceiptDigest: candidate.catalogReceiptDigest,
+          activationChanged: false,
+        });
+        return record;
+      });
+      return { candidates: records, activationChanged: false };
     });
   }
 
-  setVersionState(
+  async setVersionState(
     action: "approve" | "block",
     body: Record<string, unknown>,
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
     const id = requiredString(body, "id", 160);
-    return this.mutate(actor, (state) => {
+    if (action === "block") {
+      return this.mutate(actor, (state) => {
+        const record = state.versions.get(id);
+        if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
+        if (record.state === "DEPRECATED") {
+          throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "A deprecated version cannot be blocked in place");
+        }
+        record.state = "BLOCKED";
+        this.audit(state, "AGENT_VERSION_BLOCKED", record.id, actor, { automaticActivation: false });
+        return { version: record, automaticActivation: false };
+      });
+    }
+    if ([
+      "integrity", "signatureVerified", "scan", "sbomRef", "sourceDigest", "validationReceipt",
+      "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAt", "imageDigest",
+    ].some((field) => body[field] !== undefined)) {
+      throw new ServiceProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "Supply-chain evidence must come from the isolated Broker");
+    }
+    const candidate = await this.store.mutate((state) => {
       const record = state.versions.get(id);
       if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
-      if (action === "approve") {
       if (record.state !== "DISCOVERED" && record.state !== "VALIDATING") {
         throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered or validating version can be approved");
       }
-      const integrity = requiredString(body, "integrity", 80).toLowerCase();
-      const sbomRef = requiredString(body, "sbomRef", 1000);
-      if (!/^sha256:[a-f0-9]{64}$/.test(integrity) || body.signatureVerified !== true || body.scan !== "PASS") {
-        throw new ServiceProblem(409, "SUPPLY_CHAIN_GATES_FAILED", "Signature, integrity and scanner gates must pass before approval");
-      }
-      if (!/^oci:\/\/[a-z0-9._:/@-]+$/i.test(sbomRef)) {
-        throw new ServiceProblem(400, "INVALID_SBOM_REFERENCE", "SBOM must be mirrored to an internal OCI reference");
+      record.state = "VALIDATING";
+      this.audit(state, "AGENT_VERSION_VALIDATION_STARTED", record.id, actor, {
+        catalogReceiptId: record.catalogReceiptId,
+        automaticActivation: false,
+      });
+      return versionCandidate(record);
+    });
+    let validation: AgentVersionValidationReceipt;
+    try {
+      validation = await this.supplyChain.validateVersion({ ...supplyChainOperation(actor), candidate });
+    } catch (error) {
+      await this.store.mutate((state) => {
+        const record = state.versions.get(id);
+        if (record?.state === "VALIDATING") {
+          record.state = error instanceof ServiceProblem && error.status < 500 ? "REJECTED" : "DISCOVERED";
+          this.audit(state, record.state === "REJECTED" ? "AGENT_VERSION_REJECTED" : "AGENT_VERSION_VALIDATION_DEFERRED", id, actor, {
+            catalogReceiptId: record.catalogReceiptId,
+            automaticActivation: false,
+          });
+        }
+      });
+      throw error;
+    }
+    return this.mutate(actor, (state) => {
+      const record = state.versions.get(id);
+      if (!record || record.state !== "VALIDATING" || record.sourceDigest !== validation.sourceDigest
+        || record.agent !== validation.agent || record.version !== validation.version) {
+        throw new ServiceProblem(409, "AGENT_VERSION_VALIDATION_RACE", "Agent version changed before validation could commit");
       }
       Object.assign(record, {
         state: "APPROVED",
         signatureVerified: true,
         scan: "PASS",
-        integrity,
-        sbomRef,
+        integrity: validation.integrity,
+        sbomRef: validation.sbomRef,
+        validationReceiptId: validation.validationReceiptId,
+        validationReceiptDigest: validation.validationReceiptDigest,
+        supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
+        validatedAt: validation.validatedAt,
       });
-      } else {
-        if (record.state === "DEPRECATED") {
-          throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "A deprecated version cannot be blocked in place");
-        }
-        record.state = "BLOCKED";
-      }
-      this.audit(state, `AGENT_VERSION_${record.state}`, record.id, actor, { automaticActivation: false });
+      this.audit(state, "AGENT_VERSION_APPROVED", record.id, actor, {
+        validationReceiptId: validation.validationReceiptId,
+        validationReceiptDigest: validation.validationReceiptDigest,
+        supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
+        automaticActivation: false,
+      });
       return { version: record, automaticActivation: false };
     });
   }
@@ -128,9 +196,11 @@ export class AdminService {
     if (!isAgentKind(agent)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const version = requiredString(body, "version", 100);
     assertExactVersion(version);
-    const imageDigest = requiredString(body, "imageDigest", 80);
-    if (!/^sha256:[a-f0-9]{64}$/i.test(imageDigest)) {
-      throw new ServiceProblem(400, "INVALID_IMAGE_DIGEST", "imageDigest must be an exact sha256 OCI digest");
+    if ([
+      "imageDigest", "workerImageId", "buildReceipt", "buildReceiptId", "buildReceiptDigest",
+      "supplyChainEvidenceDigest", "selfUpdateDisabled", "stages",
+    ].some((field) => body[field] !== undefined)) {
+      throw new ServiceProblem(400, "CALLER_IMAGE_IDENTITY_FORBIDDEN", "Worker image identity must come from the isolated Broker");
     }
     const workerPool = requiredString(body, "workerPool", 120);
     if (!/^dev(?:elopment)?[-_a-z0-9]*$/i.test(workerPool)) {
@@ -138,24 +208,55 @@ export class AdminService {
     }
     const adapterVersion = requiredString(body, "adapterVersion", 100);
     assertExactVersion(adapterVersion);
+    const snapshot = await this.store.read((state) => {
+      const versionRecord = state.versions.get(`${agent}@${version}`);
+      if (!versionRecord || versionRecord.state !== "APPROVED") {
+        throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
+      }
+      const rollback = [...state.installations.values()].find((item) => item.agent === agent
+        && item.workerPool === workerPool && item.state === "ACTIVE") ?? null;
+      return { candidate: versionCandidate(versionRecord), validation: versionValidation(versionRecord), rollbackInstallationId: rollback?.id ?? null };
+    });
+    const operation = supplyChainOperation(actor);
+    const id = `${agent}-installation-${operation.operationKey.slice(0, 24)}`;
+    const built = await this.supplyChain.buildInstallation({
+      ...operation,
+      installationId: id,
+      candidate: snapshot.candidate,
+      validation: snapshot.validation,
+      workerPool,
+      adapterVersion,
+      rollbackInstallationId: snapshot.rollbackInstallationId,
+    });
     return this.mutate(actor, (state) => {
       const versionRecord = state.versions.get(`${agent}@${version}`);
       if (!versionRecord || versionRecord.state !== "APPROVED") {
         throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
       }
-      const id = `${agent}-installation-${randomUUID()}`;
+      const existing = state.installations.get(id);
+      if (existing) {
+        if (existing.buildReceiptDigest !== built.buildReceiptDigest) {
+          throw new ServiceProblem(409, "INSTALLATION_BUILD_DRIFT", "Installation build receipt conflicts with the existing immutable image");
+        }
+        return existing;
+      }
       const installation: InstallationRecord = {
         id,
         agent,
         agentVersionId: versionRecord.id,
         workerPool,
-        imageDigest: imageDigest.toLowerCase(),
+        imageDigest: built.imageDigest,
+        workerImageId: built.workerImageId,
         adapterVersion,
+        buildReceiptId: built.buildReceiptId,
+        buildReceiptDigest: built.buildReceiptDigest,
+        rollbackInstallationId: built.rollbackInstallationId,
+        health: built.health,
         state: "READY",
         rolloutPercent: 0,
         previousRolloutPercent: 0,
         selfUpdateDisabled: true,
-        createdAt: new Date().toISOString(),
+        createdAt: built.completedAt,
       };
       state.installations.set(id, installation);
       this.audit(state, "AGENT_INSTALLATION_READY", id, actor, {
@@ -163,34 +264,56 @@ export class AdminService {
         version,
         workerPool,
         imageDigest: installation.imageDigest,
+        workerImageId: installation.workerImageId,
+        buildReceiptId: installation.buildReceiptId,
+        buildReceiptDigest: installation.buildReceiptDigest,
         supplyChainGates: "signature,sbom,vulnerability,malware,adapter-smoke,sandbox-smoke",
       });
       return installation;
     });
   }
 
-  rollout(
+  async rollout(
     installationId: string,
     action: "advance" | "rollback",
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
-    return this.mutate(actor, (state) => {
+    const snapshot = await this.store.read((state) => {
       const installation = state.installations.get(installationId);
       if (!installation) throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
       if (["FAILED", "QUARANTINED", "RETIRED"].includes(installation.state)) {
         throw new ServiceProblem(409, "INSTALLATION_NOT_ROLLOUT_ELIGIBLE", "Installation cannot accept new tasks");
       }
-      installation.previousRolloutPercent = installation.rolloutPercent;
-      if (action === "rollback") {
-        installation.rolloutPercent = 0;
-        installation.state = "READY";
-      } else {
-        installation.rolloutPercent =
-          installation.rolloutPercent < 5 ? 5 : installation.rolloutPercent < 25 ? 25 : 100;
-        installation.state = installation.rolloutPercent === 100 ? "ACTIVE" : "CANARY";
+      const toPercent: InstallationRecord["rolloutPercent"] = action === "rollback" ? 0
+        : installation.rolloutPercent < 5 ? 5 : installation.rolloutPercent < 25 ? 25 : 100;
+      if (toPercent === installation.rolloutPercent) {
+        throw new ServiceProblem(409, "ROLLOUT_ALREADY_AT_TARGET", "Installation rollout is already at the requested target");
       }
+      return structuredClone({ installation, toPercent });
+    });
+    const receipt = await this.supplyChain.rollout({
+      ...supplyChainOperation(actor),
+      installationId,
+      imageDigest: snapshot.installation.imageDigest,
+      action: action === "advance" ? "ADVANCE" : "ROLLBACK",
+      fromPercent: snapshot.installation.rolloutPercent,
+      toPercent: snapshot.toPercent,
+    });
+    return this.mutate(actor, (state) => {
+      const installation = state.installations.get(installationId);
+      if (!installation || installation.imageDigest !== snapshot.installation.imageDigest
+        || installation.rolloutPercent !== snapshot.installation.rolloutPercent
+        || installation.state !== snapshot.installation.state) {
+        throw new ServiceProblem(409, "ROLLOUT_CONFIGURATION_RACE", "Installation changed before rollout receipt could commit");
+      }
+      installation.previousRolloutPercent = installation.rolloutPercent;
+      installation.rolloutPercent = receipt.toPercent;
+      installation.state = receipt.state;
+      installation.health = receipt.health;
       this.audit(state, `AGENT_ROLLOUT_${action.toUpperCase()}`, installationId, actor, {
         rolloutPercent: installation.rolloutPercent,
+        rolloutReceiptId: receipt.rolloutReceiptId,
+        rolloutReceiptDigest: receipt.rolloutReceiptDigest,
         runningTasksUnaffected: true,
       });
       return {
@@ -501,12 +624,16 @@ export class AdminService {
   }
 
   async health(): Promise<Readonly<Record<string, unknown>>> {
+    let supplyChain: AgentSupplyChainHealth | Readonly<{ service: "deviludo-agent-supply-chain"; status: "UNAVAILABLE" }>;
+    try { supplyChain = await this.supplyChain.probe(); }
+    catch { supplyChain = Object.freeze({ service: "deviludo-agent-supply-chain", status: "UNAVAILABLE" }); }
     return this.store.read((state) => {
       const installations = [...state.installations.values()];
       return {
-        status: installations.some((item) => ["FAILED", "QUARANTINED"].includes(item.state)) ? "DEGRADED" : "HEALTHY",
+        status: supplyChain.status !== "READY" || installations.some((item) => ["FAILED", "QUARANTINED"].includes(item.state)) ? "DEGRADED" : "HEALTHY",
         installations,
         providers: [...state.providers.values()].map(({ id, state: providerState, probe }) => ({ id, state: providerState, probe })),
+        supplyChain,
         isolation: { developmentWorkers: true, e2eRunnersContainAgent: false, steamPublishersContainAgent: false },
         checkedAt: new Date().toISOString(),
       };
@@ -580,12 +707,55 @@ export class AdminService {
 Inject(AdminStore)(AdminService, undefined, 0);
 Inject(SecretVault)(AdminService, undefined, 1);
 Inject(ProviderProbe)(AdminService, undefined, 2);
+Inject(AgentSupplyChain)(AdminService, undefined, 3);
 Injectable()(AdminService);
 
 function assertExactVersion(value: string): void {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value) || /latest|stable|default/i.test(value)) {
     throw new ServiceProblem(400, "FLOATING_VERSION_REJECTED", "Agent and adapter versions must be exact SemVer values");
   }
+}
+
+function supplyChainOperation(actor: RequestActor): Readonly<{ operationKey: string; requestDigest: string }> {
+  const mutation = actor.mutation;
+  if (!mutation || !/^[a-f0-9]{64}$/.test(mutation.identityDigest)
+    || !/^[a-f0-9]{64}$/.test(mutation.requestFingerprint)) {
+    throw new ServiceProblem(500, "ADMIN_MUTATION_BINDING_REQUIRED", "Agent supply-chain operation requires an owned mutation binding");
+  }
+  return Object.freeze({ operationKey: mutation.identityDigest, requestDigest: mutation.requestFingerprint });
+}
+
+function versionCandidate(record: AgentVersionRecord): AgentVersionCandidateReceipt {
+  return Object.freeze({
+    agent: record.agent,
+    version: record.version,
+    source: record.source,
+    sourceDigest: record.sourceDigest,
+    releaseNotesUrl: record.releaseNotesUrl,
+    catalogReceiptId: record.catalogReceiptId,
+    catalogReceiptDigest: record.catalogReceiptDigest,
+    discoveredAt: record.discoveredAt,
+  });
+}
+
+function versionValidation(record: AgentVersionRecord): AgentVersionValidationReceipt {
+  if (record.state !== "APPROVED" || !record.signatureVerified || record.scan !== "PASS"
+    || !record.validationReceiptId || !record.validationReceiptDigest || !record.supplyChainEvidenceDigest || !record.validatedAt) {
+    throw new ServiceProblem(409, "VERSION_NOT_ATTESTED", "Approved Agent version is missing its supply-chain validation receipt");
+  }
+  return Object.freeze({
+    agent: record.agent,
+    version: record.version,
+    sourceDigest: record.sourceDigest,
+    integrity: record.integrity,
+    signatureVerified: true,
+    sbomRef: record.sbomRef,
+    scan: "PASS",
+    supplyChainEvidenceDigest: record.supplyChainEvidenceDigest,
+    validationReceiptId: record.validationReceiptId,
+    validationReceiptDigest: record.validationReceiptDigest,
+    validatedAt: record.validatedAt,
+  });
 }
 
 function parseScope(value: unknown): ProfileScope {

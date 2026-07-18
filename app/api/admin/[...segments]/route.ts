@@ -69,6 +69,7 @@ export async function GET(request: Request, context: RouteContext) {
             const separator = id.lastIndexOf("@");
             return { id, agent: id.slice(0, separator), version: id.slice(separator + 1), state };
           }),
+          installations: store.installations,
           rollouts: store.rollouts,
           providers: store.providers,
           profiles: store.profiles,
@@ -87,6 +88,11 @@ export async function GET(request: Request, context: RouteContext) {
           providers: store.providers.map(({ id, state, probe }) => ({ id, state, probe })),
           e2eRunnersContainAgent: false,
           steamPublishersContainAgent: false,
+          supplyChain: {
+            mode: "LOCAL_DETERMINISTIC_BROKER",
+            available: true,
+            acceptsCallerAttestations: false,
+          },
         },
       });
     }
@@ -110,7 +116,7 @@ export async function POST(request: Request, context: RouteContext) {
       const role = requireRole(request, VERSION_ROLES);
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
-        store.agentVersions["claude-code@2.1.15"] = "DISCOVERED";
+        store.agentVersions["claude-code@2.1.15"] ??= "DISCOVERED";
         appendDemoAudit("AGENT_VERSION_DISCOVERED", "claude-code@2.1.15", role, { source: "official-manifest" });
         return { candidates: [{ agent: "claude-code", version: "2.1.15", state: "DISCOVERED", activated: false }] };
       });
@@ -119,20 +125,36 @@ export async function POST(request: Request, context: RouteContext) {
     if (key === "agent-versions/approve" || key === "agent-versions/block") {
       const role = requireRole(request, VERSION_ROLES);
       const id = requireString(body, "id", 120);
+      const state = key.endsWith("approve") ? "APPROVED" as const : "BLOCKED" as const;
+      const forbiddenAttestationFields = [
+        "integrity", "signatureVerified", "scan", "sbomRef", "sourceDigest", "validationReceipt",
+        "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAt", "imageDigest",
+      ];
+      if (state === "APPROVED" && forbiddenAttestationFields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
+        throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "签名、扫描、SBOM 与 digest 只能来自受信供应链 Broker，不能由管理员请求提供");
+      }
+      const receiptDigest = state === "APPROVED"
+        ? await fingerprintSecret(new TextEncoder().encode(`local-agent-validation:v1:${id}`))
+        : null;
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         if (!(id in store.agentVersions)) throw new HttpProblem(404, "VERSION_NOT_FOUND", "Agent version was not discovered");
-        const state = key.endsWith("approve") ? "APPROVED" as const : "BLOCKED" as const;
-        if (state === "APPROVED") {
-          const integrity = typeof body.integrity === "string" ? body.integrity.toLowerCase() : "";
-          const sbomRef = typeof body.sbomRef === "string" ? body.sbomRef : "";
-          if (!/^sha256:[a-f0-9]{64}$/.test(integrity) || body.signatureVerified !== true || body.scan !== "PASS" || !/^oci:\/\/[a-z0-9._:/@-]+$/i.test(sbomRef)) {
-            throw new HttpProblem(409, "SUPPLY_CHAIN_GATES_FAILED", "签名、精确哈希、内部 SBOM 与扫描必须全部通过后才能批准版本");
-          }
+        if (state === "APPROVED" && store.agentVersions[id] !== "DISCOVERED") {
+          throw new HttpProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered version can be approved");
         }
         store.agentVersions[id] = state;
-        appendDemoAudit(`AGENT_VERSION_${state}`, id, role, { automaticActivation: false });
-        return { id, state, immutable: true, activationRequired: state === "APPROVED" };
+        appendDemoAudit(`AGENT_VERSION_${state}`, id, role, {
+          automaticActivation: false,
+          trustBoundary: "LOCAL_DETERMINISTIC_BROKER",
+          ...(receiptDigest ? { validationReceiptDigest: receiptDigest } : {}),
+        });
+        return {
+          id,
+          state,
+          immutable: true,
+          activationRequired: state === "APPROVED",
+          ...(receiptDigest ? { validationReceiptId: `local-validation-${id.replaceAll("@", "-")}`, validationReceiptDigest: receiptDigest } : {}),
+        };
       });
     }
 
@@ -140,15 +162,54 @@ export async function POST(request: Request, context: RouteContext) {
       const role = requireRole(request, VERSION_ROLES);
       const version = requireString(body, "version", 120);
       const agent = requireString(body, "agent", 32);
-      const imageDigest = requireString(body, "imageDigest", 160);
-      if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/i.test(version) || !/^sha256:[a-f0-9]{64}$/i.test(imageDigest)) {
-        throw new HttpProblem(400, "INVALID_INSTALLATION", "Version and sha256 image digest must be exact");
+      const workerPool = requireString(body, "workerPool", 120);
+      const adapterVersion = requireString(body, "adapterVersion", 120);
+      if ([
+        "imageDigest", "workerImageId", "buildReceipt", "buildReceiptId", "buildReceiptDigest",
+        "supplyChainEvidenceDigest", "selfUpdateDisabled", "stages",
+      ].some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
+        throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "WorkerImage digest 与构建回执只能来自受信供应链 Broker");
       }
+      if ((agent !== "claude-code" && agent !== "codex-cli") || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/i.test(version)
+        || !/^dev(?:elopment)?[-_a-z0-9]*$/i.test(workerPool) || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(adapterVersion)) {
+        throw new HttpProblem(400, "INVALID_INSTALLATION", "Agent and version must be exact supported identifiers");
+      }
+      const agentKind = agent as "claude-code" | "codex-cli";
+      if (getDemoStore().agentVersions[`${agentKind}@${version}`] !== "APPROVED") {
+        throw new HttpProblem(409, "VERSION_NOT_APPROVED", "Only a Broker-attested approved version can build a WorkerImage");
+      }
+      const versionSlug = version.replaceAll(".", "").replaceAll("-", "");
+      const id = `${agentKind === "claude-code" ? "claude" : "codex"}-installation-${versionSlug}`;
+      const imageDigest = await fingerprintSecret(new TextEncoder().encode(`local-worker-image:v1:${agentKind}:${version}:${adapterVersion}`));
+      const buildReceiptDigest = await fingerprintSecret(new TextEncoder().encode(`local-build-receipt:v1:${id}:${imageDigest}:${workerPool}`));
       return mutate(`admin:${key}:${idempotency}`, () => {
-        const id = `${agent}-installation-${version.replaceAll(".", "")}`;
-        getDemoStore().rollouts[id] = { percent: 0, previous: 0, state: "READY" };
-        appendDemoAudit("AGENT_INSTALLATION_CREATED", id, role, { imageDigest, workerPool: "dev-linux" });
-        return { id, agent, version, imageDigest, state: "READY", rolloutPercent: 0, cliSelfUpdateDisabled: true };
+        const store = getDemoStore();
+        const installation = {
+          id,
+          agent: agentKind,
+          version,
+          workerPool,
+          adapterVersion,
+          imageDigest,
+          buildReceiptId: `local-build-${id}`,
+          buildReceiptDigest,
+          state: "READY",
+          health: "HEALTHY" as const,
+          rolloutPercent: 0 as const,
+          createdAt: new Date().toISOString(),
+        };
+        const current = store.installations.findIndex((item) => item.id === id);
+        if (current >= 0) {
+          const existing = store.installations[current];
+          if (existing?.buildReceiptDigest !== buildReceiptDigest) {
+            throw new HttpProblem(409, "INSTALLATION_BUILD_DRIFT", "The immutable local WorkerImage already has a different build receipt");
+          }
+          return { ...existing, cliSelfUpdateDisabled: true };
+        }
+        store.installations.unshift(installation);
+        store.rollouts[id] = { percent: 0, previous: 0, state: "READY" };
+        appendDemoAudit("AGENT_INSTALLATION_CREATED", id, role, { imageDigest, workerPool, buildReceiptDigest, trustBoundary: "LOCAL_DETERMINISTIC_BROKER" });
+        return { ...installation, cliSelfUpdateDisabled: true };
       });
     }
 
@@ -168,6 +229,11 @@ export async function POST(request: Request, context: RouteContext) {
           rollout.previous = rollout.percent;
           rollout.percent = rollout.percent < 5 ? 5 : rollout.percent < 25 ? 25 : 100;
           rollout.state = rollout.percent === 100 ? "ACTIVE" : "CANARY";
+        }
+        const installation = getDemoStore().installations.find((item) => item.id === installationId);
+        if (installation) {
+          installation.rolloutPercent = rollout.percent;
+          installation.state = rollout.state;
         }
         appendDemoAudit(`ROLLOUT_${action?.toUpperCase()}`, installationId, role, { percent: rollout.percent, affectsRunningTasks: false });
         return { installationId, ...rollout, affectsNewTasksOnly: true };

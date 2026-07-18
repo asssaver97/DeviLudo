@@ -11,6 +11,7 @@ import { ProblemFilter } from "./problem.filter";
 import { RbacGuard } from "./rbac.guard";
 import { InferenceGatewayProviderProbe, ProviderProbe } from "./provider-probe";
 import { createSecretVault, SecretVault } from "./secret-vault";
+import { AgentSupplyChain, createAgentSupplyChain } from "./agent-supply-chain";
 
 export class AppModule {}
 
@@ -22,6 +23,7 @@ Module({
     { provide: AdminIdempotencyStore, useFactory: createAdminIdempotencyStore },
     { provide: SecretVault, useFactory: createSecretVault },
     { provide: ProviderProbe, useClass: InferenceGatewayProviderProbe },
+    { provide: AgentSupplyChain, useFactory: createAgentSupplyChain },
     { provide: APP_GUARD, useClass: RbacGuard },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
     { provide: APP_FILTER, useClass: ProblemFilter },

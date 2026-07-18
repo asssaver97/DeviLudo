@@ -43,17 +43,9 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_BLOCKED"), true);
 });
 
-test("version approval and Provider activation fail closed without their external trust gates", async () => {
+test("version approval and installation accept only local Broker receipts, never caller attestations", async () => {
   resetDemoStore();
-  const approval = await POST(
-    request("agent-versions/approve", "POST", "PlatformAgentAdmin", { id: "claude-code@2.1.15" }),
-    context("agent-versions/approve"),
-  );
-  assert.equal(approval.status, 409);
-  assert.equal((await approval.json()).error.code, "SUPPLY_CHAIN_GATES_FAILED");
-  assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "DISCOVERED");
-
-  const approved = await POST(
+  const forged = await POST(
     request("agent-versions/approve", "POST", "PlatformAgentAdmin", {
       id: "claude-code@2.1.15",
       integrity: `sha256:${"a".repeat(64)}`,
@@ -63,8 +55,49 @@ test("version approval and Provider activation fail closed without their externa
     }),
     context("agent-versions/approve"),
   );
+  assert.equal(forged.status, 400);
+  assert.equal((await forged.json()).error.code, "CALLER_ATTESTATION_FORBIDDEN");
+  assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "DISCOVERED");
+
+  const approved = await POST(
+    request("agent-versions/approve", "POST", "PlatformAgentAdmin", { id: "claude-code@2.1.15" }),
+    context("agent-versions/approve"),
+  );
   assert.equal(approved.status, 201);
+  assert.match((await approved.clone().json()).data.validationReceiptDigest, /^sha256:[a-f0-9]{64}$/);
   assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "APPROVED");
+
+  const forgedImage = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "claude-code",
+      version: "2.1.15",
+      workerPool: "dev-linux-a",
+      adapterVersion: "1.3.0",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(forgedImage.status, 400);
+  assert.equal((await forgedImage.json()).error.code, "CALLER_ATTESTATION_FORBIDDEN");
+
+  const installation = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "claude-code",
+      version: "2.1.15",
+      workerPool: "dev-linux-a",
+      adapterVersion: "1.3.0",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(installation.status, 201);
+  const installed = (await installation.json()).data;
+  assert.match(installed.imageDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(installed.rolloutPercent, 0);
+  assert.equal(getDemoStore().installations.some((item) => item.id === installed.id), true);
+});
+
+test("Provider activation fails closed without its external trust gate", async () => {
+  resetDemoStore();
 
   const draft = await POST(
     request("agent-profiles", "POST", "SecurityAdmin", {

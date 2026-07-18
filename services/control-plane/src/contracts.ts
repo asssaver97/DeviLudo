@@ -45,10 +45,18 @@ export interface AgentVersionRecord {
   readonly version: string;
   state: AgentVersionState;
   readonly source: string;
-  readonly integrity: string;
-  readonly signatureVerified: boolean;
-  readonly sbomRef: string;
-  readonly scan: "PASS" | "FAIL" | "PENDING";
+  readonly sourceDigest: string;
+  readonly releaseNotesUrl: string;
+  integrity: string;
+  signatureVerified: boolean;
+  sbomRef: string;
+  scan: "PASS" | "FAIL" | "PENDING";
+  readonly catalogReceiptId: string;
+  readonly catalogReceiptDigest: string;
+  validationReceiptId: string | null;
+  validationReceiptDigest: string | null;
+  supplyChainEvidenceDigest: string | null;
+  validatedAt: string | null;
   readonly discoveredAt: string;
 }
 
@@ -58,7 +66,12 @@ export interface InstallationRecord {
   readonly agentVersionId: string;
   readonly workerPool: string;
   readonly imageDigest: string;
+  readonly workerImageId: string;
   readonly adapterVersion: string;
+  readonly buildReceiptId: string;
+  readonly buildReceiptDigest: string;
+  readonly rollbackInstallationId: string | null;
+  health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   state: InstallationState;
   rolloutPercent: 0 | 5 | 25 | 100;
   previousRolloutPercent: 0 | 5 | 25 | 100;

@@ -18,9 +18,22 @@ import styles from "./admin.module.css";
 
 type TabId = "overview" | "versions" | "deployments" | "providers" | "inheritance" | "audit";
 type Toast = { message: string; tone: "success" | "warning" | "neutral" } | null;
+type AgentInstallation = {
+  id: string;
+  agent: AgentKind;
+  version: string;
+  workerPool: string;
+  adapterVersion: string;
+  imageDigest: string;
+  buildReceiptId: string;
+  state: string;
+  health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
+  rolloutPercent: number;
+};
 type AdminState = {
   defaultAgent: AgentKind;
   versions: Array<{ id: string; agent: AgentKind; version: string; state: AgentVersionRow["status"] }>;
+  installations: AgentInstallation[];
   rollouts: Record<string, { percent: number; state: string; previous: number }>;
 };
 
@@ -105,8 +118,7 @@ export default function AgentAdminDashboard() {
   const [role, setRole] = useState<AdminRole>("PlatformAgentAdmin");
   const [defaultAgent, setDefaultAgent] = useState<AgentKind>("claude-code");
   const [versions, setVersions] = useState<AgentVersionRow[]>(versionRows);
-  const [claudeRollout, setClaudeRollout] = useState(25);
-  const [claudeState, setClaudeState] = useState("CANARY");
+  const [installations, setInstallations] = useState<AgentInstallation[]>([]);
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
   const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
@@ -121,11 +133,10 @@ export default function AgentAdminDashboard() {
       const live = payload.meta?.versions.find((item) => item.agent === row.agent && item.version === row.version);
       return live ? { ...row, status: live.state } : row;
     }));
-    const rollout = payload.meta.rollouts["claude-installation-214"];
-    if (rollout) {
-      setClaudeRollout(rollout.percent);
-      setClaudeState(rollout.state);
-    }
+    setInstallations(payload.meta.installations.map((installation) => {
+      const rollout = payload.meta?.rollouts[installation.id];
+      return rollout ? { ...installation, rolloutPercent: rollout.percent, state: rollout.state } : installation;
+    }));
   }, []);
 
   const refreshAudit = useCallback(async () => {
@@ -206,13 +217,41 @@ export default function AgentAdminDashboard() {
     }
   };
 
-  const advanceRollout = async () => {
+  const installVersion = async (id: string) => {
+    if (!permissions.manageInstallations) {
+      notify("当前角色不能构建 Agent WorkerImage", "warning");
+      return;
+    }
+    const row = versions.find((item) => item.id === id);
+    const catalog = row ? agents.find((item) => item.id === row.agent) : undefined;
+    if (!row || !catalog) return;
+    try {
+      await adminRequest("agent-installations", {
+        method: "POST",
+        role,
+        body: {
+          agent: row.agent,
+          version: row.version,
+          workerPool: row.agent === "claude-code" ? "dev-linux-a" : "dev-linux-b",
+          adapterVersion: catalog.adapterVersion.replace(/^adapter-[^@]+@/, ""),
+        },
+      });
+      await refreshAdminState();
+      await refreshAudit();
+      setActiveTab("deployments");
+      notify("供应链 Broker 已生成不可变 WorkerImage；等待 5% canary");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "WorkerImage 构建失败", "warning");
+    }
+  };
+
+  const advanceRollout = async (installationId: string) => {
     if (!canOperateVersions) {
       notify("切换为 PlatformAgentAdmin 后可推进灰度", "warning");
       return;
     }
     try {
-      const result = await adminRequest<{ percent: number }>("agent-rollouts/claude-installation-214/advance", { method: "POST", role });
+      const result = await adminRequest<{ percent: number }>(`agent-rollouts/${installationId}/advance`, { method: "POST", role });
       await refreshAdminState();
       await refreshAudit();
       notify(result.percent === 100 ? "新版本已切换至 100%，仅影响新任务" : `灰度已推进至 ${result.percent}%`);
@@ -221,13 +260,13 @@ export default function AgentAdminDashboard() {
     }
   };
 
-  const rollback = async () => {
+  const rollback = async (installationId: string) => {
     if (!canOperateVersions) {
       notify("当前角色不能执行回滚", "warning");
       return;
     }
     try {
-      await adminRequest("agent-rollouts/claude-installation-214/rollback", { method: "POST", role });
+      await adminRequest(`agent-rollouts/${installationId}/rollback`, { method: "POST", role });
       await refreshAdminState();
       await refreshAudit();
       notify("已停止扩散；运行中任务继续使用原锁定版本", "warning");
@@ -343,8 +382,8 @@ export default function AgentAdminDashboard() {
 
         <div className={styles.content}>
           {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
-          {activeTab === "versions" && <VersionsTab rows={versions} canOperate={canOperateVersions} onUpdate={updateVersion} />}
-          {activeTab === "deployments" && <DeploymentsTab percent={claudeRollout} state={claudeState} canOperate={permissions.manageInstallations} onAdvance={advanceRollout} onRollback={rollback} onDrain={() => { setClaudeState("DRAINING"); notify("Worker 池正在排空，不再接收新任务", "warning"); }} />}
+          {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
+          {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations} onAdvance={advanceRollout} onRollback={rollback} />}
           {activeTab === "providers" && <ProvidersTab role={role} localHealth={localHealth} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
           {activeTab === "inheritance" && <InheritanceTab defaultAgent={defaultAgent} notify={notify} />}
           {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
@@ -430,7 +469,13 @@ function OverviewTab({ defaultAgent, localAgents, localHealth, canChangeDefault,
   );
 }
 
-function VersionsTab({ rows, canOperate, onUpdate }: { rows: AgentVersionRow[]; canOperate: boolean; onUpdate: (id: string, status: AgentVersionRow["status"]) => void }) {
+function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
+  rows: AgentVersionRow[];
+  installations: AgentInstallation[];
+  canOperate: boolean;
+  onUpdate: (id: string, status: AgentVersionRow["status"]) => void;
+  onInstall: (id: string) => void;
+}) {
   return (
     <section className={styles.section}>
       <SectionHeading title="版本目录" description="候选版本来自官方源。批准前必须完成签名、完整性、SBOM、漏洞与合成任务验证。" action={<StatusPill tone="neutral">自动发现 · 手动激活</StatusPill>} />
@@ -446,7 +491,7 @@ function VersionsTab({ rows, canOperate, onUpdate }: { rows: AgentVersionRow[]; 
                 <td><span className={row.vulnerabilities.includes("1 高危") ? styles.dangerText : styles.goodText}>{row.vulnerabilities}</span></td>
                 <td><StatusPill tone={row.status === "APPROVED" ? "success" : row.status === "BLOCKED" ? "danger" : "warning"}>{row.status}</StatusPill></td>
                 <td>
-                  {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
+                  {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : row.status === "APPROVED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onInstall(row.id)} disabled={!canOperate || installations.some((item) => item.agent === row.agent && item.version === row.version)}>{installations.some((item) => item.agent === row.agent && item.version === row.version) ? "已构建" : "构建镜像"}</button></div> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
                 </td>
               </tr>
             ))}
@@ -458,35 +503,37 @@ function VersionsTab({ rows, canOperate, onUpdate }: { rows: AgentVersionRow[]; 
   );
 }
 
-function DeploymentsTab({ percent, state, canOperate, onAdvance, onRollback, onDrain }: { percent: number; state: string; canOperate: boolean; onAdvance: () => void; onRollback: () => void; onDrain: () => void }) {
+function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
+  installations: AgentInstallation[];
+  canOperate: boolean;
+  onAdvance: (installationId: string) => void;
+  onRollback: (installationId: string) => void;
+}) {
   return (
     <>
       <section className={styles.section}>
         <SectionHeading title="开发 Worker 安装" description="不可变镜像以 digest 部署；灰度只分配新任务，已运行任务继续使用锁定版本。" />
         {!canOperate && <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看部署。灰度、回滚与排空需要 PlatformAgentAdmin。</div>}
-        <div className={styles.installationRow}>
-          <AgentMark kind="claude-code" />
-          <div className={styles.installationIdentity}><h3>Claude Code 2.1.14</h3><code>registry.deviludo.internal/agent/claude@sha256:0a7c…9d21</code><span>dev-linux-a · 本地未部署 · adapter 1.3.0</span></div>
-          <div className={styles.rolloutBlock}>
-            <div><span>新任务流量</span><strong>{percent}%</strong><StatusPill tone={state === "ACTIVE" ? "success" : state === "DRAINING" ? "warning" : "info"}>{state}</StatusPill></div>
-            <div className={styles.progressTrack}><span style={{ width: `${percent}%` }} /></div>
-            <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
-          </div>
-          <div className={styles.verticalActions}>
-            <button className={styles.primaryButton} type="button" onClick={onAdvance} disabled={!canOperate || percent === 100}>推进至 {percent < 25 ? "25%" : "100%"}</button>
-            <button className={styles.secondaryButton} type="button" onClick={onRollback} disabled={!canOperate}>回滚</button>
-          </div>
-        </div>
-        <div className={styles.installationRow}>
-          <AgentMark kind="codex-cli" />
-          <div className={styles.installationIdentity}><h3>Codex CLI 0.91.0</h3><code>registry.deviludo.internal/agent/codex@sha256:812e…f19a</code><span>dev-linux-b · 本地未部署 · adapter 1.2.2</span></div>
-          <div className={styles.rolloutBlock}>
-            <div><span>新任务流量</span><strong>100%</strong><StatusPill tone="success">ACTIVE</StatusPill></div>
-            <div className={styles.progressTrack}><span style={{ width: "100%" }} /></div>
-            <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
-          </div>
-          <div className={styles.verticalActions}><button className={styles.secondaryButton} type="button" onClick={onDrain} disabled={!canOperate}>排空 Worker</button><button className={styles.secondaryButton} type="button">查看历史</button></div>
-        </div>
+        {installations.map((installation) => {
+          const percent = installation.rolloutPercent;
+          const next = percent < 5 ? "5%" : percent < 25 ? "25%" : "100%";
+          return (
+            <div className={styles.installationRow} key={installation.id}>
+              <AgentMark kind={installation.agent} />
+              <div className={styles.installationIdentity}><h3>{installation.agent === "claude-code" ? "Claude Code" : "Codex CLI"} {installation.version}</h3><code>{installation.imageDigest.slice(0, 22)}…{installation.imageDigest.slice(-8)}</code><span>{installation.workerPool} · {installation.health} · adapter {installation.adapterVersion}</span></div>
+              <div className={styles.rolloutBlock}>
+                <div><span>新任务流量</span><strong>{percent}%</strong><StatusPill tone={installation.state === "ACTIVE" ? "success" : installation.state === "DRAINING" ? "warning" : "info"}>{installation.state}</StatusPill></div>
+                <div className={styles.progressTrack}><span style={{ width: `${percent}%` }} /></div>
+                <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
+              </div>
+              <div className={styles.verticalActions}>
+                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || percent === 100}>推进至 {next}</button>
+                <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || percent === 0}>回滚</button>
+              </div>
+            </div>
+          );
+        })}
+        {installations.length === 0 && <div className={styles.emptyState}>尚无可信 WorkerImage。请先在版本目录批准并构建镜像。</div>}
       </section>
       <section className={styles.section}>
         <SectionHeading eyebrow="GATE" title="镜像晋级检查" description="所有检查均绑定精确 CLI、适配器与基础镜像 digest。" />

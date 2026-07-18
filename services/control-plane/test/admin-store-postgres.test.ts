@@ -64,10 +64,18 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
       version: "1.2.3",
       state: "DISCOVERED" as const,
       source: "https://github.com/openai/codex",
+      sourceDigest: "c".repeat(64),
+      releaseNotesUrl: "https://github.com/openai/codex/releases",
       integrity: `sha256:${"a".repeat(64)}`,
       signatureVerified: false,
       sbomRef: "pending://codex-cli@1.2.3",
       scan: "PENDING" as const,
+      catalogReceiptId: "catalog-codex-cli-1.2.3",
+      catalogReceiptDigest: "d".repeat(64),
+      validationReceiptId: null,
+      validationReceiptDigest: null,
+      supplyChainEvidenceDigest: null,
+      validatedAt: null,
       discoveredAt: "2026-07-18T00:00:00.000Z",
     };
     state.versions.set(version.id, version);

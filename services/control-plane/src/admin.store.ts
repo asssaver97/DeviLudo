@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { sha256Canonical } from "../../runner-control/src/canonical";
 import type {
   AdminMutationClaimBinding,
   AdminRole,
@@ -91,30 +92,8 @@ export function recordAdminAudit(
 function seededState(): AdminCatalogState {
   const state = emptyAdminCatalogState();
   const now = new Date().toISOString();
-  const claudeVersion: AgentVersionRecord = {
-    id: "claude-code@2.1.14",
-    agent: "claude-code",
-    version: "2.1.14",
-    state: "APPROVED",
-    source: "https://code.claude.com/docs/en/installation",
-    integrity: `sha256:${"1".repeat(64)}`,
-    signatureVerified: true,
-    sbomRef: "oci://registry.internal/sbom/claude-code-2.1.14.spdx.json",
-    scan: "PASS",
-    discoveredAt: now,
-  };
-  const codexVersion: AgentVersionRecord = {
-    id: "codex-cli@0.91.0",
-    agent: "codex-cli",
-    version: "0.91.0",
-    state: "APPROVED",
-    source: "https://github.com/openai/codex",
-    integrity: `sha256:${"2".repeat(64)}`,
-    signatureVerified: true,
-    sbomRef: "oci://registry.internal/sbom/codex-cli-0.91.0.spdx.json",
-    scan: "PASS",
-    discoveredAt: now,
-  };
+  const claudeVersion = seededAgentVersion("claude-code", "2.1.14", "https://code.claude.com/docs/en/installation", "1", now);
+  const codexVersion = seededAgentVersion("codex-cli", "0.91.0", "https://github.com/openai/codex", "2", now);
   state.versions.set(claudeVersion.id, claudeVersion);
   state.versions.set(codexVersion.id, codexVersion);
 
@@ -137,7 +116,12 @@ function seededState(): AdminCatalogState {
     agentVersionId: claudeVersion.id,
     workerPool: "development-linux-primary",
     imageDigest: `sha256:${"a".repeat(64)}`,
+    workerImageId: "worker-image-claude-code-2-1-14",
     adapterVersion: "1.0.0",
+    buildReceiptId: "build-claude-code-installation-2-1-14",
+    buildReceiptDigest: "a".repeat(64),
+    rollbackInstallationId: null,
+    health: "HEALTHY",
     state: "ACTIVE",
     rolloutPercent: 100,
     previousRolloutPercent: 25,
@@ -195,6 +179,53 @@ function seededState(): AdminCatalogState {
   state.profiles.set(profile.id, profile);
   state.defaults.set("platform", profile.id);
   return state;
+}
+
+function seededAgentVersion(
+  agent: AgentVersionRecord["agent"],
+  version: string,
+  source: string,
+  seed: string,
+  now: string,
+): AgentVersionRecord {
+  const candidate = {
+    agent,
+    version,
+    source,
+    sourceDigest: seed.repeat(64),
+    releaseNotesUrl: agent === "claude-code"
+      ? "https://github.com/anthropics/claude-code/releases"
+      : "https://github.com/openai/codex/releases",
+    catalogReceiptId: `catalog-${agent}-${version}`,
+    discoveredAt: now,
+  };
+  const catalogReceiptDigest = sha256Canonical(candidate);
+  const validation = {
+    agent,
+    version,
+    sourceDigest: candidate.sourceDigest,
+    integrity: `sha256:${seed.repeat(64)}`,
+    signatureVerified: true as const,
+    sbomRef: `oci://registry.internal/sbom/${agent}-${version}.spdx.json`,
+    scan: "PASS" as const,
+    supplyChainEvidenceDigest: sha256Canonical({ agent, version, seed }),
+    validationReceiptId: `validation-${agent}-${version}`,
+    validatedAt: now,
+  };
+  return {
+    id: `${agent}@${version}`,
+    ...candidate,
+    catalogReceiptDigest,
+    state: "APPROVED",
+    integrity: validation.integrity,
+    signatureVerified: true,
+    sbomRef: validation.sbomRef,
+    scan: "PASS",
+    validationReceiptId: validation.validationReceiptId,
+    validationReceiptDigest: sha256Canonical(validation),
+    supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
+    validatedAt: now,
+  };
 }
 
 const REDACTED_KEY = /(api[-_]?key|secret|password|token|authorization|credential)/i;

@@ -48,12 +48,28 @@ export type DemoProfile = {
   fallbackProfileId: string | null;
 };
 
+export type DemoInstallation = {
+  id: string;
+  agent: "claude-code" | "codex-cli";
+  version: string;
+  workerPool: string;
+  adapterVersion: string;
+  imageDigest: `sha256:${string}`;
+  buildReceiptId: string;
+  buildReceiptDigest: `sha256:${string}`;
+  state: string;
+  health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
+  rolloutPercent: 0 | 5 | 25 | 100;
+  createdAt: string;
+};
+
 export type DemoStoreState = {
   specRevision: number;
   specState: "DRAFT" | "APPROVED";
   feedback: Array<{ id: string; text: string; revision: number; at: string }>;
   invalidatedEvidence: string[];
   agentVersions: Record<string, "DISCOVERED" | "APPROVED" | "BLOCKED">;
+  installations: DemoInstallation[];
   rollouts: Record<string, { percent: 0 | 5 | 25 | 100; state: string; previous: number }>;
   providers: DemoProvider[];
   profiles: DemoProfile[];
@@ -76,6 +92,36 @@ const initialState = (): DemoStoreState => ({
     "claude-code@2.1.15": "DISCOVERED",
     "codex-cli@0.91.0": "APPROVED",
   },
+  installations: [
+    {
+      id: "claude-installation-214",
+      agent: "claude-code",
+      version: "2.1.14",
+      workerPool: "dev-linux-a",
+      adapterVersion: "1.3.0",
+      imageDigest: `sha256:${"0a7c".padEnd(64, "9")}`,
+      buildReceiptId: "local-build-claude-214",
+      buildReceiptDigest: `sha256:${"a214".padEnd(64, "1")}`,
+      state: "CANARY",
+      health: "HEALTHY",
+      rolloutPercent: 25,
+      createdAt: "2026-07-18T08:42:00.000Z",
+    },
+    {
+      id: "codex-installation-091",
+      agent: "codex-cli",
+      version: "0.91.0",
+      workerPool: "dev-linux-b",
+      adapterVersion: "1.2.2",
+      imageDigest: `sha256:${"812e".padEnd(64, "f")}`,
+      buildReceiptId: "local-build-codex-091",
+      buildReceiptDigest: `sha256:${"b091".padEnd(64, "2")}`,
+      state: "ACTIVE",
+      health: "HEALTHY",
+      rolloutPercent: 100,
+      createdAt: "2026-07-17T18:20:00.000Z",
+    },
+  ],
   rollouts: {
     "claude-installation-214": { percent: 25, state: "CANARY", previous: 5 },
     "codex-installation-091": { percent: 100, state: "ACTIVE", previous: 25 },

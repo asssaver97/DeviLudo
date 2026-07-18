@@ -483,6 +483,30 @@ test("production Agent administration has a versioned catalog and append-only au
   assert.match(migration, /admin_audit_append_only/);
 });
 
+test("production Agent administration trusts only pinned mTLS supply-chain Broker receipts", () => {
+  const client = readFileSync(new URL("../services/control-plane/src/agent-supply-chain.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/control-plane/src/admin.service.ts", import.meta.url), "utf8");
+  const moduleSource = readFileSync(new URL("../services/control-plane/src/app.module.ts", import.meta.url), "utf8");
+  const env = readFileSync(new URL("../services/control-plane/.env.example", import.meta.url), "utf8");
+  assert.match(moduleSource, /provide: AgentSupplyChain, useFactory: createAgentSupplyChain/);
+  assert.match(client, /DEVILUDO_AGENT_SUPPLY_CHAIN_TLS_KEY_FILE/);
+  assert.match(client, /constants\.O_RDONLY \| constants\.O_NOFOLLOW/);
+  assert.match(client, /rejectUnauthorized: true/);
+  assert.match(client, /minVersion: "TLSv1\.3"/);
+  assert.match(client, /\/v1\/agent-versions\/validate/);
+  assert.match(client, /\/v1\/agent-installations\/build/);
+  assert.match(client, /\/v1\/agent-installations\/rollout/);
+  assert.match(client, /sha256Canonical\(core\) !== body\.buildReceiptDigest/);
+  assert.match(client, /body\.binaryDigest !== this\.#binaryDigest/);
+  assert.match(service, /CALLER_ATTESTATION_FORBIDDEN/);
+  assert.match(service, /CALLER_IMAGE_IDENTITY_FORBIDDEN/);
+  assert.match(service, /AGENT_VERSION_VALIDATION_RACE/);
+  assert.match(service, /INSTALLATION_BUILD_DRIFT/);
+  assert.match(service, /ROLLOUT_CONFIGURATION_RACE/);
+  assert.match(env, /DEVILUDO_AGENT_SUPPLY_CHAIN_TIMEOUT_SECONDS=15/);
+  assert.doesNotMatch(env, /PRIVATE KEY|BEGIN CERTIFICATE|@latest/);
+});
+
 test("control-plane wait persistence uses the shared tenant RLS setting", () => {
   const adapter = readFileSync(new URL("../services/control-plane/src/workflow-action-postgres.ts", import.meta.url), "utf8");
   const migration = readFileSync(new URL("../infra/postgres/008_workflow_control_actions.sql", import.meta.url), "utf8");

@@ -108,13 +108,7 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
     url: "/admin/agent-versions/approve",
     role: "PlatformAgentAdmin",
     key: "approve-codex-092",
-    payload: {
-      id: "codex-cli@0.92.0",
-      integrity: `sha256:${"c".repeat(64)}`,
-      signatureVerified: true,
-      scan: "PASS",
-      sbomRef: "oci://registry.internal/sbom/codex-cli-0.92.0.spdx.json",
-    },
+    payload: { id: "codex-cli@0.92.0" },
   });
   assert.equal(approve.statusCode, 201);
   assert.equal(approve.json().data.version.state, "APPROVED");
@@ -127,7 +121,6 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
     payload: {
       agent: "codex-cli",
       version: "0.92.0",
-      imageDigest: `sha256:${"b".repeat(64)}`,
       workerPool: "development-linux-canary",
       adapterVersion: "1.1.0",
     },
