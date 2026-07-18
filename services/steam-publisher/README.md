@@ -62,6 +62,24 @@ from being smuggled through the Web workload. Interactive credential and Guard
 entry belong to the broker's separately hosted public UI, not this control
 plane route.
 
+The production composition for that boundary starts with `npm run
+start:steam-access`. It is a TLS 1.3 mTLS service with disjoint Web and secure-UI
+SPIFFE allow-lists. The Web identity can only begin enrollment or reserve a
+release challenge. Secure-UI calls additionally require a five-minute Ed25519
+capability bound to one enrollment/approval and one action. Password and Guard
+requests are `application/octet-stream`, are never parsed as strings or JSON,
+and are wiped after the fixed native login connector returns. The service talks
+only to fixed HTTPS mTLS origins for interactive Steam login, `config.vdf`
+Vault ingress, AAL2 verification and KMS signing. It verifies KMS signatures
+locally before persisting metadata and resuming the exact Temporal workflow.
+All required mounts and identities are listed in `.access.env.example`.
+
+For the Web deployment, both `DEVILUDO_STEAM_ENROLLMENT_BROKER_URL` and
+`DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL` point at this service's internal
+origin. Both public-origin variables point at the separately hosted isolated UI
+origin. The main Web process never receives a password, Guard code, MFA
+assertion, `config.vdf`, Vault key or KMS private key.
+
 Release authorization is a separate state machine. The internal Web route can
 only reserve an MFA challenge from an authoritative `WAITING_MFA` release
 snapshot. The isolated MFA UI completes the challenge under its own HttpOnly
