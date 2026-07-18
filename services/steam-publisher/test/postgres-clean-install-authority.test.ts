@@ -10,6 +10,11 @@ const runId = "33333333-3333-4333-8333-333333333333";
 const specRevisionId = "44444444-4444-4444-8444-444444444444";
 const toolchainRevisionId = "55555555-5555-4555-8555-555555555555";
 const buildReceiptId = "66666666-6666-4666-8666-666666666666";
+const installHandles = Object.freeze({
+  linux: "77777777-7777-4777-8777-777777777777",
+  macos: "88888888-8888-4888-8888-888888888888",
+  windows: "99999999-9999-4999-8999-999999999999",
+});
 const sha = (character: string) => character.repeat(64);
 const matrix = Object.freeze(["linux", "macos", "windows"] as const);
 const specPayload = Object.freeze({ schemaVersion: "deviludo.game-spec.v1", title: "Ember Harbor" });
@@ -46,6 +51,7 @@ test("PostgreSQL Steam authority resolves only a passed immutable main gate unde
   assert.deepEqual(calls[1]?.values, [tenantId]);
   assert.match(calls[2]?.text ?? "", /main_attempt\.mode = 'MAIN_RELEASE_GATE'/);
   assert.match(calls[2]?.text ?? "", /main_evidence\.invalidated_at IS NULL/);
+  assert.match(calls[2]?.text ?? "", /steam_clean_install_reservations/);
   assert.equal(calls.at(-1)?.text, "COMMIT");
   assert.equal(released, true);
   assert.equal(resolved.buildReceiptId, buildReceiptId);
@@ -60,6 +66,7 @@ test("PostgreSQL Steam authority rejects source, toolchain, install-attempt and 
     { main_evidence_source_digest: sha("f") },
     { toolchain_payload_digest: sha("e") },
     { install_attempts: { linux: "install-linux", windows: "install-windows" } },
+    { install_reservations: { ...installHandles, linux: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
     { main_attempt_state: "FAILED" },
   ]) {
     const authority = new PostgresSteamCleanInstallPreparationAuthority({
@@ -107,7 +114,8 @@ function row() {
     build_source_digest: sourceDigest,
     build_evidence_bundle_digest: evidenceDigest,
     beta_branch: "deviludo_private_9",
-    install_attempts: { linux: "install-linux", macos: "install-macos", windows: "install-windows" },
+    install_attempts: installHandles,
+    install_reservations: installHandles,
     build_state: "INSTALL_TESTING",
   };
 }

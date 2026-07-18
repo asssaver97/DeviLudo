@@ -117,6 +117,7 @@ function executor(options: {
       assert.equal(input.idempotencyKey, operationKey);
       return domainReceipt;
     },
+    async probe() { events.push("private-beta-probe"); },
   }, {
     async persist(input) {
       events.push("archive-build");
@@ -212,5 +213,8 @@ test("authoritative Steam executor rejects authority drift before any irreversib
 test("authoritative Steam executor readiness includes every authority and archive dependency", async () => {
   const events: string[] = [];
   await executor({ events }).probe();
-  assert.deepEqual(events.sort(), ["release-preparer-probe", "rc-preparer-probe", "authority-probe", "build-probe", "connector-probe", "publication-probe"].sort());
+  assert.deepEqual(events.sort(), [
+    "release-preparer-probe", "rc-preparer-probe", "authority-probe", "private-beta-probe",
+    "build-probe", "connector-probe", "publication-probe",
+  ].sort());
 });

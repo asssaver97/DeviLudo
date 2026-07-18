@@ -126,11 +126,17 @@ the request is re-read and claimed by a fenced Worker transaction. Retryable
 executor failures use capped exponential delay, and process loss is recovered
 from `PENDING` or an expired `RUNNING` lease rather than an in-memory message.
 
-The isolated executor image composes its audited native connector with
-`steamWorkflowWorkerFromEnv()`/`runSteamWorkflowWorker()`. Its sorted tenant
-scope is explicit, startup probes the queue, operation store and executor, and
-its logs contain only bounded lifecycle events. There is intentionally no
-generic CLI entry that accepts an arbitrary module path or shell command.
+The isolated executor image starts with `npm run start:steam-workflow-executor`.
+It composes an audited, digest-pinned native publisher, tenant-RLS PostgreSQL
+authority, checksum-verifying immutable S3 reads and an mTLS Vault/KMS RC
+signer with `steamWorkflowWorkerFromEnv()`. Its sorted tenant scope is explicit,
+startup probes every dependency before polling, and its logs contain only
+bounded lifecycle events. The native adapter has a fixed argv contract, uses
+`execFile` without a shell, and rechecks both executable and configuration
+digests before every operation. There is intentionally no generic CLI entry
+that accepts an arbitrary module path, package URL or shell command. Required
+file mounts and fixed identities are documented in
+`.workflow-executor.env.example`.
 
 Immediately before execution, `PostgresSteamWorkflowExecutionAuthority`
 re-joins the signed RC, non-invalidated main evidence, dispatched MFA

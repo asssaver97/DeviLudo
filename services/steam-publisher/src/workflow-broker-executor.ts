@@ -70,6 +70,10 @@ export interface SteamPrivateBetaReleasePreparer {
   probe(): Promise<void>;
 }
 
+export interface SteamPrivateBetaExecutor extends Pick<SteamReleaseCoordinator, "uploadPrivateBeta"> {
+  probe(): Promise<void>;
+}
+
 export interface SteamBuildReceiptArchive {
   persist(input: Readonly<{
     operationKey: string;
@@ -127,7 +131,7 @@ export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperatio
     private readonly releasePreparer: SteamPrivateBetaReleasePreparer,
     private readonly rcPreparer: SteamPrivateBetaRcPreparer,
     private readonly authority: SteamWorkflowExecutionAuthority,
-    private readonly privateBeta: Pick<SteamReleaseCoordinator, "uploadPrivateBeta">,
+    private readonly privateBeta: SteamPrivateBetaExecutor,
     private readonly builds: SteamBuildReceiptArchive,
     private readonly defaultBranch: SteamDefaultBranchConnector,
     private readonly publications: SteamDefaultBranchReceiptArchive,
@@ -146,7 +150,7 @@ export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperatio
   async probe(): Promise<void> {
     await Promise.all([
       this.releasePreparer.probe(), this.rcPreparer.probe(), this.authority.probe(), this.builds.probe(),
-      this.defaultBranch.probe(), this.publications.probe(),
+      this.privateBeta.probe(), this.defaultBranch.probe(), this.publications.probe(),
     ]);
   }
 

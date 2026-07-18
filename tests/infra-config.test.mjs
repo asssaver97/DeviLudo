@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 25 }, (_, index) => {
+  const offsets = Array.from({ length: 26 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -289,6 +289,33 @@ test("Steam Workflow Broker production host uses a recoverable RLS outbox and cr
   assert.doesNotMatch(broker, /configVdf|accountPassword|guardCode|branchPassword/);
   assert.match(worker, /new SteamWorkflowOperationWorker\(operations, executor/);
   assert.doesNotMatch(worker, /import\(|exec\(|spawn\(|shell:/);
+});
+
+test("isolated Steam execution worker pins native, PostgreSQL, S3 and KMS authority", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/026_steam_clean_install_reservations.sql", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/steam-publisher/src/run-workflow-executor-service.ts", import.meta.url), "utf8");
+  const native = readFileSync(new URL("../services/steam-publisher/src/locked-native-publisher.ts", import.meta.url), "utf8");
+  const evidence = readFileSync(new URL("../services/steam-publisher/src/postgres-release-evidence.ts", import.meta.url), "utf8");
+  const reservations = readFileSync(new URL("../services/steam-publisher/src/postgres-clean-install-dispatch.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:steam-workflow-executor"], "node --import tsx services/steam-publisher/src/run-workflow-executor-service.ts");
+  assert.match(migration, /CREATE TABLE deviludo\.steam_clean_install_reservations/);
+  assert.match(migration, /UNIQUE \(release_id, platform\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(runtime, /new LockedNativeSteamPublisherConnector/);
+  assert.match(runtime, /new MtlsSteamRcArtifactSigner/);
+  assert.match(runtime, /new S3SteamRcObjectInspector/);
+  assert.match(runtime, /new PostgresSteamWorkflowExecutionAuthority/);
+  assert.match(runtime, /steamWorkflowWorkerFromEnv\(composition\.executor, env, pool\)/);
+  assert.match(runtime, /O_NOFOLLOW/);
+  assert.doesNotMatch(runtime, /accountPassword|guardCode|configVdfBytes|curl \| sh/);
+  assert.match(native, /execFile\(executable/);
+  assert.match(native, /shell: false/);
+  assert.match(native, /verifyFile\(this\.#executable, this\.#executableDigest/);
+  assert.match(evidence, /attempt\.mode = 'MAIN_RELEASE_GATE'/);
+  assert.match(evidence, /evidence\.invalidated_at IS NULL/);
+  assert.match(reservations, /ON CONFLICT \(release_id, platform\) DO NOTHING/);
+  assert.match(reservations, /set_config\('app\.tenant_id'/);
 });
 
 test("Steam execution re-resolves signed release authority and archives the tested BuildID", () => {

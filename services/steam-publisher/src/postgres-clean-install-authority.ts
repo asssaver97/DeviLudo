@@ -44,6 +44,7 @@ type AuthorityRow = {
   build_evidence_bundle_digest: string;
   beta_branch: string;
   install_attempts: unknown;
+  install_reservations: unknown;
   build_state: string;
 };
 
@@ -87,6 +88,12 @@ export class PostgresSteamCleanInstallPreparationAuthority implements SteamClean
                 build.evidence_bundle_digest AS build_evidence_bundle_digest,
                 build.beta_branch,
                 build.install_attempts,
+                (SELECT jsonb_object_agg(reservation.platform, reservation.id::text ORDER BY reservation.platform)
+                   FROM deviludo.steam_clean_install_reservations reservation
+                  WHERE reservation.tenant_id = build.tenant_id
+                    AND reservation.project_id = build.project_id
+                    AND reservation.release_id = build.release_id
+                    AND reservation.build_id = build.build_id) AS install_reservations,
                 build.state AS build_state
            FROM deviludo.steam_build_receipts build
            JOIN deviludo.steam_releases release
@@ -161,7 +168,8 @@ export class PostgresSteamCleanInstallPreparationAuthority implements SteamClean
         || row.release_steam_app_id !== row.build_steam_app_id
         || row.build_id !== trigger.steamBuildId || row.build_state !== "INSTALL_TESTING"
         || !UUID.test(row.build_receipt_id) || !SHA256.test(row.build_source_digest)
-        || !validInstallAttempts(row.install_attempts, trigger.targetMatrix)) invalid();
+        || !validInstallAttempts(row.install_attempts, trigger.targetMatrix)
+        || !sameInstallHandles(row.install_attempts, row.install_reservations, trigger.targetMatrix)) invalid();
       const toolchain = parseRunnerToolchainRevision(row.toolchain_payload, trigger.targetMatrix);
       if (row.required_godot_version !== toolchain.requiredGodotVersion) invalid();
       return Object.freeze({
@@ -229,6 +237,14 @@ function validInstallAttempts(value: unknown, matrix: readonly string[]): boolea
   const keys = Object.keys(body).sort();
   return JSON.stringify(keys) === JSON.stringify(matrix)
     && keys.every((platform) => typeof body[platform] === "string" && SAFE_ID.test(body[platform]));
+}
+
+function sameInstallHandles(left: unknown, right: unknown, matrix: readonly string[]): boolean {
+  const attempts = record(left);
+  const reservations = record(right);
+  return JSON.stringify(Object.keys(reservations).sort()) === JSON.stringify(matrix)
+    && matrix.every((platform) => typeof reservations[platform] === "string"
+      && UUID.test(reservations[platform] as string) && attempts[platform] === reservations[platform]);
 }
 
 function record(value: unknown): Record<string, unknown> {

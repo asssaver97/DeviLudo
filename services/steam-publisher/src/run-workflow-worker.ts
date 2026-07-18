@@ -1,4 +1,7 @@
-import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
+import {
+  postgresWorkflowPoolFromEnv,
+  type ClosablePostgresWorkflowPool,
+} from "../../temporal/src/node-postgres";
 import { PostgresSteamWorkflowOperationDispatch } from "./postgres-workflow-dispatch";
 import { PostgresSteamWorkflowOperationPersistence } from "./postgres-workflow-operations";
 import {
@@ -16,9 +19,10 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-
 export function steamWorkflowWorkerFromEnv(
   executor: SteamWorkflowOperationExecutor,
   env: Readonly<Record<string, string | undefined>> = process.env,
+  suppliedPool?: ClosablePostgresWorkflowPool,
 ) {
   const serviceEnv = Object.freeze({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "steam-executor" });
-  const pool = postgresWorkflowPoolFromEnv(serviceEnv);
+  const pool = suppliedPool ?? postgresWorkflowPoolFromEnv(serviceEnv);
   const operations = new PostgresSteamWorkflowOperationPersistence(pool);
   const dispatch = new PostgresSteamWorkflowOperationDispatch(pool);
   const worker = new SteamWorkflowOperationWorker(operations, executor, {
