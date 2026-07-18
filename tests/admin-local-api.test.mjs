@@ -112,6 +112,76 @@ test("version approval and installation accept only local Broker receipts, never
   assert.equal(getDemoStore().installations.some((item) => item.id === installed.id), true);
 });
 
+test("local rollout rollback moves the default to an immutable Profile on the previous active installation", async () => {
+  const store = resetDemoStore();
+  const installationResponse = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "codex-cli",
+      version: "0.91.0",
+      workerPool: "dev-linux-b",
+      adapterVersion: "1.2.3",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(installationResponse.status, 201);
+  const installation = (await installationResponse.json()).data;
+  assert.equal(installation.rollbackInstallationId, "codex-installation-091");
+  for (const expected of [5, 25, 100]) {
+    const path = `agent-rollouts/${installation.id}/advance`;
+    const advanced = await POST(request(path, "POST", "PlatformAgentAdmin"), context(path));
+    assert.equal(advanced.status, 201);
+    assert.equal((await advanced.json()).data.percent, expected);
+  }
+  const baseProfile = store.profiles.find((profile) => profile.id === "profile-codex-platform-r2");
+  assert.ok(baseProfile);
+  const source = {
+    ...baseProfile,
+    id: "profile-codex-platform-new-r3",
+    revision: 3,
+    installationId: installation.id,
+    state: "ACTIVE",
+  };
+  store.profiles.push(source);
+  store.defaults.platform = source.id;
+
+  const path = `agent-rollouts/${installation.id}/rollback`;
+  const response = await POST(request(path, "POST", "PlatformAgentAdmin"), context(path));
+  assert.equal(response.status, 201);
+  const payload = (await response.json()).data;
+  assert.equal(payload.percent, 0);
+  assert.equal(payload.rollbackProfileRevisionIds.length, 1);
+  const successor = store.profiles.find((profile) => profile.id === payload.rollbackProfileRevisionIds[0]);
+  assert.equal(source.state, "SUPERSEDED");
+  assert.equal(successor?.state, "ACTIVE");
+  assert.equal(successor?.installationId, "codex-installation-091");
+  assert.equal(successor?.providerId, source.providerId);
+  assert.equal(store.defaults.platform, successor?.id);
+});
+
+test("local rollout without a target degrades Profiles whose fallback chain would be broken", async () => {
+  const store = resetDemoStore();
+  const source = store.profiles.find((profile) => profile.id === "profile-claude-platform-r5");
+  const dependentTemplate = store.profiles.find((profile) => profile.id === "profile-codex-platform-r2");
+  assert.ok(source);
+  assert.ok(dependentTemplate);
+  const dependent = {
+    ...dependentTemplate,
+    id: "profile-local-fallback-dependent-r1",
+    fallbackProfileId: source.id,
+  };
+  store.profiles.push(dependent);
+  store.defaults["project:local-fallback"] = dependent.id;
+
+  const path = "agent-rollouts/claude-installation-214/rollback";
+  const response = await POST(request(path, "POST", "PlatformAgentAdmin"), context(path));
+  assert.equal(response.status, 201);
+  assert.deepEqual((await response.json()).data.rollbackProfileRevisionIds, []);
+  assert.equal(source.state, "DEGRADED");
+  assert.equal(dependent.state, "DEGRADED");
+  assert.equal(store.defaults.platform, source.id);
+  assert.equal(store.defaults["project:local-fallback"], dependent.id);
+});
+
 test("Provider activation fails closed without its external trust gate", async () => {
   resetDemoStore();
 

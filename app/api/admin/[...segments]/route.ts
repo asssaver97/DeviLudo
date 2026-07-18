@@ -1,7 +1,15 @@
 import { normalizeModelRoles } from "@/lib/agent/providers";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
-import { appendDemoAudit, getDemoStore, withIdempotency, type DemoProfile, type DemoProvider } from "@/lib/control-plane/demo-store";
+import {
+  appendDemoAudit,
+  getDemoStore,
+  withIdempotency,
+  type DemoInstallation,
+  type DemoProfile,
+  type DemoProvider,
+  type DemoStoreState,
+} from "@/lib/control-plane/demo-store";
 import {
   bodyObject,
   HttpProblem,
@@ -200,6 +208,8 @@ export async function POST(request: Request, context: RouteContext) {
       const buildReceiptDigest = await fingerprintSecret(new TextEncoder().encode(`local-build-receipt:v1:${id}:${imageDigest}:${workerPool}`));
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
+        const rollbackInstallationId = store.installations.find((item) => item.agent === agentKind
+          && item.workerPool === workerPool && item.state === "ACTIVE" && item.rolloutPercent === 100)?.id ?? null;
         const installation = {
           id,
           agent: agentKind,
@@ -212,6 +222,7 @@ export async function POST(request: Request, context: RouteContext) {
           state: "READY",
           health: "HEALTHY" as const,
           rolloutPercent: 0 as const,
+          rollbackInstallationId,
           createdAt: new Date().toISOString(),
         };
         const current = store.installations.findIndex((item) => item.id === id);
@@ -237,6 +248,9 @@ export async function POST(request: Request, context: RouteContext) {
       return mutate(`admin:${key}:${idempotency}`, () => {
         const rollout = getDemoStore().rollouts[installationId];
         if (!rollout) throw new HttpProblem(404, "INSTALLATION_NOT_FOUND", "Installation does not exist");
+        if (action === "rollback" && rollout.percent === 0) {
+          throw new HttpProblem(409, "ROLLOUT_ALREADY_AT_TARGET", "Installation rollout is already at 0%");
+        }
         if (action === "rollback") {
           rollout.previous = rollout.percent;
           rollout.percent = 0;
@@ -251,8 +265,15 @@ export async function POST(request: Request, context: RouteContext) {
           installation.rolloutPercent = rollout.percent;
           installation.state = rollout.state;
         }
-        appendDemoAudit(`ROLLOUT_${action?.toUpperCase()}`, installationId, role, { percent: rollout.percent, affectsRunningTasks: false });
-        return { installationId, ...rollout, affectsNewTasksOnly: true };
+        const rollbackProfileRevisionIds = action === "rollback" && installation
+          ? rollbackDemoProfiles(getDemoStore(), installation)
+          : [];
+        appendDemoAudit(`ROLLOUT_${action?.toUpperCase()}`, installationId, role, {
+          percent: rollout.percent,
+          affectsRunningTasks: false,
+          rollbackProfileCount: rollbackProfileRevisionIds.length,
+        });
+        return { installationId, ...rollout, rollbackProfileRevisionIds, affectsNewTasksOnly: true };
       });
     }
 
@@ -500,6 +521,65 @@ export async function PUT(request: Request, context: RouteContext) {
   } catch (error) {
     return problemResponse(error);
   }
+}
+
+function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallation): readonly string[] {
+  const target = installation.rollbackInstallationId
+    ? store.installations.find((item) => item.id === installation.rollbackInstallationId
+      && item.health === "HEALTHY" && item.state === "ACTIVE" && item.rolloutPercent === 100)
+    : undefined;
+  const direct = store.profiles.filter((profile) =>
+    profile.installationId === installation.id && profile.state === "ACTIVE");
+  const affected = new Set(direct.map((profile) => profile.id));
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const profile of store.profiles) {
+      if (profile.state === "ACTIVE" && !affected.has(profile.id) && profile.fallbackProfileId
+        && affected.has(profile.fallbackProfileId)) {
+        affected.add(profile.id);
+        expanded = true;
+      }
+    }
+  }
+  if (!target) {
+    for (const profile of store.profiles) {
+      if ((profile.installationId === installation.id || affected.has(profile.id))
+        && !["SUPERSEDED", "DISABLED"].includes(profile.state)) profile.state = "DEGRADED";
+    }
+    return Object.freeze([]);
+  }
+
+  const sources = store.profiles.filter((profile) => affected.has(profile.id));
+  const successorIds = new Map(sources.map((profile) => [
+    profile.id,
+    `profile-local-rollback-${profile.id.replace(/[^a-z0-9]/gi, "-").slice(-48)}-r${profile.revision + 1}`,
+  ]));
+  const replacements: DemoProfile[] = sources.map((profile) => ({
+    ...profile,
+    id: successorIds.get(profile.id)!,
+    revision: profile.revision + 1,
+    installationId: profile.installationId === installation.id ? target.id : profile.installationId,
+    fallbackProfileId: profile.fallbackProfileId
+      ? successorIds.get(profile.fallbackProfileId) ?? profile.fallbackProfileId
+      : null,
+    state: "ACTIVE",
+  }));
+  for (const replacement of replacements) {
+    const existing = store.profiles.find((profile) => profile.id === replacement.id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(replacement)) {
+      throw new HttpProblem(409, "PROFILE_ROLLBACK_RACE", "Local Profile rollback successor conflicts with an existing revision");
+    }
+    if (!existing) store.profiles.push(replacement);
+  }
+  for (const source of sources) {
+    source.state = "SUPERSEDED";
+    const successorId = successorIds.get(source.id)!;
+    for (const [scope, profileId] of Object.entries(store.defaults)) {
+      if (profileId === source.id) store.defaults[scope] = successorId;
+    }
+  }
+  return Object.freeze(replacements.map((profile) => profile.id));
 }
 
 function mutate<T>(idempotency: string, operation: () => T): Response {

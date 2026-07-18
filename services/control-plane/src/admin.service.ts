@@ -304,7 +304,10 @@ export class AdminService {
         if (error instanceof AgentSupplyChainPolicyFailure && error.receipt.disposition === "QUARANTINED") {
           const alreadyRecorded = installation.failure?.failureReceiptDigest === error.receipt.failureReceiptDigest;
           quarantineInstallation(installation, error.receipt);
-          const rollbackProfiles = restoreProfilesToRollback(state, installation, error.receipt);
+          const rollbackProfiles = restoreProfilesToRollback(state, installation, {
+            operationDigest: error.receipt.failureReceiptDigest,
+            occurredAt: error.receipt.failedAt,
+          });
           if (!alreadyRecorded) {
             this.audit(state, "AGENT_INSTALLATION_QUARANTINED", id, actor, {
               ...failureAudit(error.receipt),
@@ -390,7 +393,10 @@ export class AdminService {
         if (error instanceof AgentSupplyChainPolicyFailure && error.receipt.disposition === "QUARANTINED") {
           const stoppedAt = installation.rolloutPercent;
           quarantineInstallation(installation, error.receipt);
-          const rollbackProfiles = restoreProfilesToRollback(state, installation, error.receipt);
+          const rollbackProfiles = restoreProfilesToRollback(state, installation, {
+            operationDigest: error.receipt.failureReceiptDigest,
+            occurredAt: error.receipt.failedAt,
+          });
           this.audit(state, "AGENT_INSTALLATION_QUARANTINED", installationId, actor, {
             ...failureAudit(error.receipt),
             rolloutStoppedAtPercent: stoppedAt,
@@ -418,14 +424,22 @@ export class AdminService {
       installation.rolloutPercent = receipt.toPercent;
       installation.state = receipt.state;
       installation.health = receipt.health;
+      const rollbackProfiles = action === "rollback"
+        ? restoreProfilesToRollback(state, installation, {
+          operationDigest: receipt.rolloutReceiptDigest,
+          occurredAt: receipt.completedAt,
+        })
+        : Object.freeze([] as string[]);
       this.audit(state, `AGENT_ROLLOUT_${action.toUpperCase()}`, installationId, actor, {
         rolloutPercent: installation.rolloutPercent,
         rolloutReceiptId: receipt.rolloutReceiptId,
         rolloutReceiptDigest: receipt.rolloutReceiptDigest,
+        rollbackProfileRevisionIds: rollbackProfiles,
         runningTasksUnaffected: true,
       });
       return {
         installation,
+        rollbackProfileRevisionIds: rollbackProfiles,
         newTasksOnly: true,
         activeRunsKeepPinnedImage: true,
         incompatibleSessionsNeverResumeAcrossVersions: true,
@@ -1122,61 +1136,104 @@ function quarantineInstallation(
 function restoreProfilesToRollback(
   state: AdminCatalogState,
   installation: InstallationRecord,
-  receipt: AgentSupplyChainTerminalFailureReceipt,
+  context: Readonly<{ operationDigest: string; occurredAt: string }>,
 ): readonly string[] {
   const rollback = installation.rollbackInstallationId
     ? state.installations.get(installation.rollbackInstallationId)
     : undefined;
   const rollbackReady = !!rollback && rollback.health === "HEALTHY" && !!rollback.imageDigest
-    && ["READY", "CANARY", "ACTIVE"].includes(rollback.state);
-  const replacements: string[] = [];
-  for (const profile of [...state.profiles.values()]) {
-    if (profile.installationId !== installation.id || ["SUPERSEDED", "DISABLED"].includes(profile.state)) continue;
-    if (profile.state !== "ACTIVE" || !rollbackReady) {
+    && rollback.state === "ACTIVE" && rollback.rolloutPercent === 100;
+  const direct = [...state.profiles.values()].filter((profile) =>
+    profile.installationId === installation.id && profile.state === "ACTIVE");
+  const affected = new Set(direct.map((profile) => profile.id));
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const profile of state.profiles.values()) {
+      if (profile.state === "ACTIVE" && !affected.has(profile.id) && profile.fallbackProfileRevisionId
+        && affected.has(profile.fallbackProfileRevisionId)) {
+        affected.add(profile.id);
+        expanded = true;
+      }
+    }
+  }
+  if (!rollbackReady) {
+    for (const profile of state.profiles.values()) {
+      if ((profile.installationId === installation.id || affected.has(profile.id))
+        && !["SUPERSEDED", "DISABLED"].includes(profile.state)) profile.state = "DEGRADED";
+    }
+    return Object.freeze([]);
+  }
+
+  const sources = [...state.profiles.values()].filter((profile) => affected.has(profile.id))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const successorIds = new Map(sources.map((profile) => [profile.id,
+    rollbackProfileRevisionId(profile, installation.id, rollback!.id, context.operationDigest)]));
+  const replacements: ProfileRevisionRecord[] = [];
+  for (const profile of sources) {
+    const id = successorIds.get(profile.id)!;
+    const directRollback = profile.installationId === installation.id;
+    const expectedFallback = profile.fallbackProfileRevisionId
+      ? successorIds.get(profile.fallbackProfileRevisionId) ?? profile.fallbackProfileRevisionId
+      : null;
+    const existing = state.profiles.get(id);
+    if (existing) {
+      if (existing.revision !== profile.revision + 1
+        || existing.installationId !== (directRollback ? rollback!.id : profile.installationId)
+        || existing.providerRevisionId !== profile.providerRevisionId
+        || existing.credentialVersionId !== profile.credentialVersionId
+        || existing.fallbackProfileRevisionId !== expectedFallback
+        || existing.state !== "ACTIVE") {
+        throw new ServiceProblem(409, "PROFILE_ROLLBACK_RACE", "Profile rollback successor conflicts with the immutable operation");
+      }
+      replacements.push(existing);
+      continue;
+    }
+    const replacement: ProfileRevisionRecord = {
+      ...profile,
+      id,
+      revision: profile.revision + 1,
+      installationId: directRollback ? rollback!.id : profile.installationId,
+      fallbackProfileRevisionId: expectedFallback,
+      state: "ACTIVE",
+      createdAt: context.occurredAt,
+    };
+    state.profiles.set(id, replacement);
+    replacements.push(replacement);
+  }
+  const replacementBySource = new Map(replacements.map((replacement) => {
+    const source = sources.find((profile) => successorIds.get(profile.id) === replacement.id)!;
+    return [source.id, replacement.id] as const;
+  }));
+  for (const profile of sources) {
+    const replacementId = replacementBySource.get(profile.id);
+    if (!replacementId) {
       profile.state = "DEGRADED";
       continue;
     }
-    const configuredFallback = profile.fallbackProfileRevisionId
-      ? state.profiles.get(profile.fallbackProfileRevisionId)
-      : undefined;
-    let replacement = configuredFallback?.state === "ACTIVE"
-      && configuredFallback.installationId === rollback!.id
-      && configuredFallback.agent === profile.agent
-      && configuredFallback.scope === profile.scope
-      && configuredFallback.scopeId === profile.scopeId
-      ? configuredFallback
-      : [...state.profiles.values()].find((candidate) => candidate.id !== profile.id
-        && candidate.state === "ACTIVE" && candidate.installationId === rollback!.id
-        && candidate.agent === profile.agent && candidate.scope === profile.scope && candidate.scopeId === profile.scopeId);
-    if (!replacement) {
-      const revision = profile.revision + 1;
-      const id = `${profile.id}-rollback-${receipt.failureReceiptDigest.slice(0, 12)}-r${revision}`;
-      const existing = state.profiles.get(id);
-      if (existing) {
-        if (existing.installationId !== rollback!.id || existing.providerRevisionId !== profile.providerRevisionId) {
-          profile.state = "DEGRADED";
-          continue;
-        }
-        replacement = existing;
-      } else {
-        replacement = {
-          ...profile,
-          id,
-          revision,
-          installationId: rollback!.id,
-          state: "ACTIVE",
-          createdAt: receipt.failedAt,
-        };
-        state.profiles.set(id, replacement);
-      }
-    }
     profile.state = "SUPERSEDED";
     for (const [scope, profileId] of state.defaults.entries()) {
-      if (profileId === profile.id) state.defaults.set(scope, replacement.id);
+      if (profileId === profile.id) state.defaults.set(scope, replacementId);
     }
-    replacements.push(replacement.id);
   }
-  return Object.freeze([...new Set(replacements)]);
+  for (const profile of state.profiles.values()) {
+    if (profile.installationId === installation.id && !affected.has(profile.id)
+      && !["SUPERSEDED", "DISABLED"].includes(profile.state)) profile.state = "DEGRADED";
+  }
+  return Object.freeze([...new Set(replacements.map((profile) => profile.id))]);
+}
+
+function rollbackProfileRevisionId(
+  profile: ProfileRevisionRecord,
+  sourceInstallationId: string,
+  rollbackInstallationId: string,
+  operationDigest: string,
+): string {
+  const digest = createHash("sha256")
+    .update(`profile-installation-rollback\0${profile.id}\0${sourceInstallationId}\0${rollbackInstallationId}\0${operationDigest}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `profile-installation-rollback-${digest}-r${profile.revision + 1}`;
 }
 
 function failureAudit(receipt: AgentSupplyChainTerminalFailureReceipt): Readonly<Record<string, unknown>> {

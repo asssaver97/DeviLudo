@@ -46,7 +46,7 @@ export type DemoProfile = {
   agent: "claude-code" | "codex-cli";
   providerId: string;
   installationId: string;
-  state: "DRAFT" | "VALIDATING" | "READY" | "ACTIVE" | "DISABLED";
+  state: "DRAFT" | "VALIDATING" | "READY" | "ACTIVE" | "SUPERSEDED" | "DEGRADED" | "DISABLED";
   budgetUsd: number;
   fallbackProfileId: string | null;
 };
@@ -63,6 +63,7 @@ export type DemoInstallation = {
   state: string;
   health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   rolloutPercent: 0 | 5 | 25 | 100;
+  rollbackInstallationId: string | null;
   createdAt: string;
 };
 
@@ -108,6 +109,7 @@ const initialState = (): DemoStoreState => ({
       state: "CANARY",
       health: "HEALTHY",
       rolloutPercent: 25,
+      rollbackInstallationId: null,
       createdAt: "2026-07-18T08:42:00.000Z",
     },
     {
@@ -122,6 +124,7 @@ const initialState = (): DemoStoreState => ({
       state: "ACTIVE",
       health: "HEALTHY",
       rolloutPercent: 100,
+      rollbackInstallationId: null,
       createdAt: "2026-07-17T18:20:00.000Z",
     },
   ],

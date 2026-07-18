@@ -36,6 +36,14 @@ re-probes the same successors, and cannot allocate a second active key. Failure
 cleanup first proves that operation owns the staged revision and that no active
 successor references it; it never revokes a key committed by a concurrent recovery.
 
+An Installation rollback is also a catalog revision operation. After the Fleet
+receipt confirms `100/25/5 → 0`, the same transaction creates immutable active
+Profile successors pinned to the previous healthy `100% ACTIVE` Installation,
+remaps fallback-dependent Profile successors, and moves every matching default.
+Provider, model, credential, permission and budget bindings do not change. If no
+fully active rollback target exists, affected Profiles become `DEGRADED` and new
+work fails closed; already locked runs retain their original image digest.
+
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
 
 ## Tenant and project configuration

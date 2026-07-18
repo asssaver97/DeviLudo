@@ -28,6 +28,6 @@ npm run build:agent-supply-chain-native
 
 ## 固定门禁
 
-验证阶段固定运行 ClamAV、Trivy 离线扫描、Syft SPDX、无网络/只读/去能力的 Adapter contract 与合成代码任务，然后把包和 SBOM 推入内部 OCI。构建阶段重新下载并核对上一验证回执的 SHA-256，使用 digest 固定基础镜像、扫描最终镜像、KMS 签名并执行无网络 smoke test。灰度只允许 `0→5→25→100`，回滚只允许回到 `0`，且 Fleet 必须确认只影响新任务。
+验证阶段固定运行 ClamAV、Trivy 离线扫描、Syft SPDX、无网络/只读/去能力的 Adapter contract 与合成代码任务，然后把包和 SBOM 推入内部 OCI。构建阶段重新下载并核对上一验证回执的 SHA-256，使用 digest 固定基础镜像、扫描最终镜像、KMS 签名并执行无网络 smoke test。灰度只允许 `0→5→25→100`，回滚只允许回到 `0`，且 Fleet 必须确认只影响新任务。回滚回执与 Agent 目录在同一事务提交：平台为所有受影响 ACTIVE Profile 建立指向上一 `100% ACTIVE` 安装的不可变后继，连同 fallback 依赖和默认选择一起迁移，但不改变 Provider、模型、凭据或预算；没有合格目标时 Profile 进入 `DEGRADED` 并停止接收新任务。
 
 策略失败以退出码 `42` 写入脱敏终态回执：版本验证为 `REJECTED`，构建/灰度为 `QUARANTINED`。网络超时、扫描器不可用、Registry/KMS/Fleet 故障不生成安全终态，而由 Broker 释放 claim 后重试。

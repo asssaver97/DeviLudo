@@ -145,6 +145,145 @@ test("canary failure stops rollout and atomically restores the default to the pr
   assert.equal(result.audit?.metadata.failureCode, "CANARY_HEALTH_FAILED");
 });
 
+test("manual rollout rollback atomically rebinds defaults and fallback dependents to immutable Profile successors", async () => {
+  const store = new InMemoryAdminStore();
+  const chain = new FailingAgentSupplyChain();
+  const service = adminService(store, chain);
+  const installation = await service.createInstallation({
+    agent: "claude-code",
+    version: "2.1.14",
+    workerPool: "development-linux-primary",
+    adapterVersion: "1.2.1",
+  }, actor("build-manual-rollback"));
+  await service.rollout(installation.id, "advance", actor("rollout-manual-5"));
+  await service.rollout(installation.id, "advance", actor("rollout-manual-25"));
+  await service.rollout(installation.id, "advance", actor("rollout-manual-100"));
+  const drafted = await service.createProfile({
+    scope: "platform",
+    scopeId: "global",
+    agent: "claude-code",
+    installationId: installation.id,
+    credentialVersionId: "credential-platform-claude-v1",
+    baseUrl: "https://rollback-gateway.anthropic.example/v1",
+    authentication: "x-api-key",
+    inputUsdPerMillionTokens: 3,
+    outputUsdPerMillionTokens: 15,
+    primaryModel: "claude-sonnet-4-6-20250514",
+    dataRegion: "vendor-managed",
+    retentionPolicy: "platform-approved",
+    trainingPolicy: "no-training",
+  }, actor("draft-manual-rollback"));
+  const sourceProfileId = (drafted.profile as { id: string }).id;
+  const sourceProviderId = (drafted.provider as { id: string }).id;
+  await service.transitionProfile(sourceProfileId, "validate", actor("validate-manual-rollback"));
+  await service.transitionProfile(sourceProfileId, "activate", actor("activate-manual-rollback", "SecurityAdmin"));
+  await service.updateDefault("platform", { profileRevisionId: sourceProfileId }, actor("select-manual-rollback"));
+
+  const dependentProfileId = "profile-platform-rollback-dependent-r1";
+  const dependentDefault = "project:22222222-2222-4222-8222-222222222222";
+  await store.mutate((state) => {
+    const source = state.profiles.get(sourceProfileId);
+    const previousInstallation = installation.rollbackInstallationId;
+    assert.ok(source); assert.ok(previousInstallation);
+    state.profiles.set(dependentProfileId, {
+      ...source,
+      id: dependentProfileId,
+      installationId: previousInstallation,
+      fallbackProfileRevisionId: source.id,
+    });
+    state.defaults.set(dependentDefault, dependentProfileId);
+  });
+
+  const rollback = await service.rollout(installation.id, "rollback", actor("rollout-manual-rollback"));
+  const successorIds = rollback.rollbackProfileRevisionIds as readonly string[];
+  assert.equal(successorIds.length, 2);
+  const result = await store.read((state) => {
+    const platformDefault = state.defaults.get("platform");
+    const projectDefault = state.defaults.get(dependentDefault);
+    return {
+      installation: structuredClone(state.installations.get(installation.id)),
+      source: structuredClone(state.profiles.get(sourceProfileId)),
+      dependent: structuredClone(state.profiles.get(dependentProfileId)),
+      platformDefault,
+      projectDefault,
+      platformSuccessor: platformDefault ? structuredClone(state.profiles.get(platformDefault)) : undefined,
+      dependentSuccessor: projectDefault ? structuredClone(state.profiles.get(projectDefault)) : undefined,
+      audit: state.audit.find((entry) => entry.action === "AGENT_ROLLOUT_ROLLBACK"),
+    };
+  });
+  assert.equal(result.installation?.state, "READY");
+  assert.equal(result.installation?.rolloutPercent, 0);
+  assert.equal(result.source?.state, "SUPERSEDED");
+  assert.equal(result.dependent?.state, "SUPERSEDED");
+  assert.equal(result.platformSuccessor?.state, "ACTIVE");
+  assert.equal(result.platformSuccessor?.installationId, installation.rollbackInstallationId);
+  assert.equal(result.platformSuccessor?.providerRevisionId, sourceProviderId);
+  assert.equal(result.platformSuccessor?.credentialVersionId, "credential-platform-claude-v1");
+  assert.equal(result.dependentSuccessor?.state, "ACTIVE");
+  assert.equal(result.dependentSuccessor?.installationId, installation.rollbackInstallationId);
+  assert.equal(result.dependentSuccessor?.fallbackProfileRevisionId, result.platformSuccessor?.id);
+  assert.deepEqual(result.audit?.metadata.rollbackProfileRevisionIds, successorIds);
+});
+
+test("rollback without a fully active target degrades the entire active fallback dependency closure", async () => {
+  const store = new InMemoryAdminStore();
+  const chain = new FailingAgentSupplyChain();
+  const service = adminService(store, chain);
+  const installation = await service.createInstallation({
+    agent: "codex-cli",
+    version: "0.91.0",
+    workerPool: "development-linux-first-codex",
+    adapterVersion: "1.2.2",
+  }, actor("build-first-codex"));
+  assert.equal(installation.rollbackInstallationId, null);
+  await service.rollout(installation.id, "advance", actor("first-codex-5"));
+  await service.rollout(installation.id, "advance", actor("first-codex-25"));
+  await service.rollout(installation.id, "advance", actor("first-codex-100"));
+
+  const sourceProfileId = "profile-first-codex-r1";
+  const dependentProfileId = "profile-first-codex-dependent-r1";
+  await store.mutate((state) => {
+    const template = state.profiles.get("profile-platform-claude-r1");
+    const current = state.installations.get(installation.id);
+    assert.ok(template); assert.ok(current);
+    const carrierInstallationId = "codex-code-installation-fallback-carrier";
+    state.installations.set(carrierInstallationId, {
+      ...current,
+      id: carrierInstallationId,
+      rollbackInstallationId: null,
+    });
+    state.profiles.set(sourceProfileId, {
+      ...template,
+      id: sourceProfileId,
+      agent: "codex-cli",
+      installationId: installation.id,
+      fallbackProfileRevisionId: null,
+    });
+    state.profiles.set(dependentProfileId, {
+      ...template,
+      id: dependentProfileId,
+      agent: "codex-cli",
+      installationId: carrierInstallationId,
+      fallbackProfileRevisionId: sourceProfileId,
+    });
+    state.defaults.set("platform", sourceProfileId);
+    state.defaults.set("project:first-codex", dependentProfileId);
+  });
+
+  const rollback = await service.rollout(installation.id, "rollback", actor("rollback-first-codex"));
+  assert.deepEqual(rollback.rollbackProfileRevisionIds, []);
+  const result = await store.read((state) => ({
+    source: structuredClone(state.profiles.get(sourceProfileId)),
+    dependent: structuredClone(state.profiles.get(dependentProfileId)),
+    platformDefault: state.defaults.get("platform"),
+    projectDefault: state.defaults.get("project:first-codex"),
+  }));
+  assert.equal(result.source?.state, "DEGRADED");
+  assert.equal(result.dependent?.state, "DEGRADED");
+  assert.equal(result.platformDefault, sourceProfileId);
+  assert.equal(result.projectDefault, dependentProfileId);
+});
+
 function adminService(store: InMemoryAdminStore, chain: AgentSupplyChain): AdminService {
   return new AdminService(
     store,
