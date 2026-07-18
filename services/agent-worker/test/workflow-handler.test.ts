@@ -11,6 +11,7 @@ import {
 const snapshot: DeliverySnapshot = Object.freeze({
   workflowId: "delivery-001", tenantId: "tenant-001", projectId: "project-001",
   state: "DEVELOPMENT_QUEUED", specRevisionId: "spec-r1", lockedRunConfigurationId: "lock-r1",
+  testPlanRevisionId: "plan-r1", specApprovalReceiptId: "spec-approval-r1",
   runId: null, candidateCommitSha: null, draftPullRequest: null, mainCommitSha: null,
   evidenceBundleId: null, candidateEvidenceBundleId: null, mainEvidenceBundleId: null,
   steamInstallEvidenceBundleId: null, mfaApprovalId: null, steamBuildId: null,

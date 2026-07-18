@@ -10,6 +10,8 @@ const baseSnapshot: DeliverySnapshot = Object.freeze({
   projectId: "project-ember",
   state: "STEAM_PRIVATE_BETA",
   specRevisionId: "spec-9",
+  testPlanRevisionId: "plan-9",
+  specApprovalReceiptId: "spec-approval-9",
   lockedRunConfigurationId: "lock-9",
   runId: "run-9",
   candidateCommitSha: "1".repeat(40),

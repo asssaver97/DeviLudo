@@ -193,7 +193,14 @@ a separate mTLS low-latency model Broker without receiving an upstream key or
 Base URL. Each turn atomically commits the message pair and immutable draft
 spec/test-plan pair. Explicit approval creates approved/frozen successors and
 the same authoritative test-plan binding consumed by Artifact Preparer and
-Runner Control.
+Runner Control. After commit it sends the exact immutable approval through the
+mTLS-only `services/spec-workflow-bridge`. That Bridge re-resolves PostgreSQL
+authority, starts or verifies the deterministic project Temporal workflow, and
+persists leased, replayable delivery events. Initial approval is ordered as
+`SPEC_READY → SPEC_APPROVED`; feedback iterations emit only the latter because
+the workflow already waits on the new draft. Approval enters
+`RESOLVING_AGENT_CONFIGURATION`; only a distinct Agent configuration workload
+may prove the queued immutable run lock and advance development.
 
 The Agent version approval API requires an exact SHA-256 integrity value,
 verified signature flag, passing scan and internal OCI SBOM reference. Agent
@@ -374,6 +381,8 @@ not become availability errors.
 ./node_modules/.bin/tsc -p services/temporal/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/inference-gateway/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/spec-dialogue/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/spec-workflow-bridge/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/runner-control/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/evidence-archive/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/steam-publisher/tsconfig.json --pretty false
@@ -383,6 +392,8 @@ node --import tsx --test services/control-plane/test/*.test.ts
 node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/*.test.ts
+node --import tsx --test services/spec-dialogue/test/*.test.ts
+node --import tsx --test services/spec-workflow-bridge/test/*.test.ts
 node --import tsx --test services/runner-control/test/coordinator.test.ts
 node --import tsx --test services/evidence-archive/test/*.test.ts
 node --import tsx --test services/steam-publisher/test/coordinator.test.ts

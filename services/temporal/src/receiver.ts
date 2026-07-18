@@ -11,6 +11,7 @@ import { deliveryCommandDestination } from "./contracts";
 const COMMAND_STATES = {
   CONTINUE_IDEA_DIALOGUE: "IDEATION",
   REQUEST_SPEC_APPROVAL: "WAITING_SPEC_APPROVAL",
+  RESOLVE_AGENT_RUN_CONFIGURATION: "RESOLVING_AGENT_CONFIGURATION",
   START_LOCKED_AGENT_RUN: "DEVELOPMENT_QUEUED",
   WAIT_FOR_PROVIDER: "WAITING_PROVIDER",
   START_TARGET_MATRIX_E2E: "CROSS_PLATFORM_E2E",
@@ -240,6 +241,8 @@ function assertSnapshotCommandBinding(
   if (!Array.isArray(snapshot.targetMatrix) || snapshot.targetMatrix.length === 0) {
     throw new Error("Workflow command target matrix is invalid");
   }
+  if (operation === "RESOLVE_AGENT_RUN_CONFIGURATION"
+    && (!snapshot.specRevisionId || !snapshot.testPlanRevisionId || !snapshot.specApprovalReceiptId)) missing(operation);
   if (operation === "START_LOCKED_AGENT_RUN" && !snapshot.lockedRunConfigurationId) missing(operation);
   if (operation === "START_TARGET_MATRIX_E2E" && (!snapshot.candidateCommitSha || !snapshot.draftPullRequest)) missing(operation);
   if (operation === "MERGE_DRAFT_PULL_REQUEST" && (!snapshot.candidateCommitSha || !snapshot.draftPullRequest || !snapshot.candidateEvidenceBundleId)) missing(operation);

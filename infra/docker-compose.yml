@@ -42,6 +42,7 @@ services:
       - ./postgres/029_inference_request_claims.sql:/docker-entrypoint-initdb.d/029_inference_request_claims.sql:ro
       - ./postgres/030_inference_reconciliation.sql:/docker-entrypoint-initdb.d/030_inference_reconciliation.sql:ro
       - ./postgres/031_spec_dialogue.sql:/docker-entrypoint-initdb.d/031_spec_dialogue.sql:ro
+      - ./postgres/032_spec_workflow_bridge.sql:/docker-entrypoint-initdb.d/032_spec_workflow_bridge.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

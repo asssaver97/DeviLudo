@@ -21,3 +21,10 @@ requires a client certificate whose SPIFFE ID is listed in
 `DEVILUDO_SPEC_DIALOGUE_WEB_SPIFFE_IDS`. The local website instead starts
 `services/local-spec-runtime`, a loopback-only deterministic implementation
 clearly identified as `deterministic-loopback`.
+
+After the approval transaction commits, the service publishes that exact
+draft/approved pair to the fixed mTLS Specification Workflow Bridge. The Bridge
+re-resolves the same PostgreSQL authority before accepting it. A failed publish
+does not roll back or create a second revision: replaying the same approval
+operation returns the committed receipt and republishes the same idempotency
+key. No Agent/Profile selection occurs at this boundary.

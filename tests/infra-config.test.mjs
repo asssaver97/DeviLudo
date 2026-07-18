@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 31 }, (_, index) => {
+  const offsets = Array.from({ length: 32 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,23 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("approved specifications enter Temporal through an ordered durable bridge", () => {
+  const migration = readFileSync(new URL("../infra/postgres/032_spec_workflow_bridge.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/spec-workflow-bridge/src/postgres-store.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/spec-workflow-bridge/src/service.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.spec_delivery_workflows/);
+  assert.match(migration, /CREATE TABLE deviludo\.spec_workflow_events/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/g);
+  assert.match(migration, /spec_workflow_event_guard/);
+  assert.match(migration, /RESOLVE_AGENT_RUN_CONFIGURATION/);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(store, /ready\.state = 'COMPLETED'/);
+  assert.match(store, /FOR UPDATE OF event SKIP LOCKED/);
+  assert.match(service, /source: "SPEC_SERVICE"/);
+  assert.match(service, /approvedSpecRevisionId/);
+  assert.doesNotMatch(service, /RUN_CONFIGURATION_LOCKED/);
 });
 
 test("specification dialogue persists tenant-isolated messages and immutable draft pairs", () => {

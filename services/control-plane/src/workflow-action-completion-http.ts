@@ -13,6 +13,7 @@ import {
 
 const SOURCES = new Set<WorkflowActionCompletionSource>([
   "SPEC_SERVICE",
+  "AGENT_CONFIGURATION_SERVICE",
   "USER_ACCEPTANCE_SERVICE",
   "PROVIDER_MONITOR",
   "MFA_BROKER",

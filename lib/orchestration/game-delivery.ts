@@ -3,6 +3,7 @@ import { deepFreeze, type DeepReadonly, type TargetPlatform } from "@/lib/domain
 export type DeliveryState =
   | "IDEATION"
   | "WAITING_SPEC_APPROVAL"
+  | "RESOLVING_AGENT_CONFIGURATION"
   | "DEVELOPMENT_QUEUED"
   | "DEVELOPING"
   | "WAITING_PROVIDER"
@@ -25,7 +26,13 @@ export type ExternalApprovalGate =
 
 export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "SPEC_READY"; specRevisionId: string }
-  | { type: "SPEC_APPROVED"; lockedRunConfigurationId: string }
+  | {
+      type: "SPEC_APPROVED";
+      approvedSpecRevisionId: string;
+      testPlanRevisionId: string;
+      approvalReceiptId: string;
+    }
+  | { type: "RUN_CONFIGURATION_LOCKED"; lockedRunConfigurationId: string }
   | { type: "AGENT_STARTED"; runId: string }
   | { type: "PROVIDER_UNAVAILABLE"; providerRevisionId: string }
   | { type: "PROVIDER_RESTORED"; providerRevisionId: string }
@@ -47,6 +54,7 @@ export type DeliverySignal = Readonly<{ signalId: string }> & (
 export type DeliveryCommand =
   | "CONTINUE_IDEA_DIALOGUE"
   | "REQUEST_SPEC_APPROVAL"
+  | "RESOLVE_AGENT_RUN_CONFIGURATION"
   | "START_LOCKED_AGENT_RUN"
   | "WAIT_FOR_PROVIDER"
   | "START_TARGET_MATRIX_E2E"
@@ -66,6 +74,8 @@ export interface DeliverySnapshot {
   readonly projectId: string;
   readonly state: DeliveryState;
   readonly specRevisionId: string | null;
+  readonly testPlanRevisionId: string | null;
+  readonly specApprovalReceiptId: string | null;
   readonly lockedRunConfigurationId: string | null;
   readonly runId: string | null;
   readonly candidateCommitSha: string | null;
@@ -111,6 +121,8 @@ export class GameDeliveryWorkflow {
       targetMatrix: [...new Set(input.targetMatrix)].sort(),
       state: "IDEATION" as const,
       specRevisionId: null,
+      testPlanRevisionId: null,
+      specApprovalReceiptId: null,
       lockedRunConfigurationId: null,
       runId: null,
       candidateCommitSha: null,
@@ -141,6 +153,7 @@ export class GameDeliveryWorkflow {
     const commands: Record<DeliveryState, DeliveryCommand> = {
       IDEATION: "CONTINUE_IDEA_DIALOGUE",
       WAITING_SPEC_APPROVAL: "REQUEST_SPEC_APPROVAL",
+      RESOLVING_AGENT_CONFIGURATION: "RESOLVE_AGENT_RUN_CONFIGURATION",
       DEVELOPMENT_QUEUED: "START_LOCKED_AGENT_RUN",
       DEVELOPING: "NONE",
       WAITING_PROVIDER: "WAIT_FOR_PROVIDER",
@@ -178,7 +191,19 @@ export class GameDeliveryWorkflow {
           : this.invalid(signal);
       case "WAITING_SPEC_APPROVAL":
         return signal.type === "SPEC_APPROVED"
-          ? this.commit(signal, { state: "DEVELOPMENT_QUEUED", lockedRunConfigurationId: signal.lockedRunConfigurationId })
+          ? this.commit(signal, {
+              state: "RESOLVING_AGENT_CONFIGURATION",
+              specRevisionId: signal.approvedSpecRevisionId,
+              testPlanRevisionId: signal.testPlanRevisionId,
+              specApprovalReceiptId: signal.approvalReceiptId,
+            })
+          : this.invalid(signal);
+      case "RESOLVING_AGENT_CONFIGURATION":
+        return signal.type === "RUN_CONFIGURATION_LOCKED"
+          ? this.commit(signal, {
+              state: "DEVELOPMENT_QUEUED",
+              lockedRunConfigurationId: signal.lockedRunConfigurationId,
+            })
           : this.invalid(signal);
       case "DEVELOPMENT_QUEUED":
         return signal.type === "AGENT_STARTED"
@@ -217,6 +242,8 @@ export class GameDeliveryWorkflow {
           return this.commit(signal, {
             state: "WAITING_SPEC_APPROVAL",
             specRevisionId: signal.nextSpecRevisionId,
+            testPlanRevisionId: null,
+            specApprovalReceiptId: null,
             lockedRunConfigurationId: null,
             runId: null,
             candidateCommitSha: null,
@@ -326,6 +353,10 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
     case "SPEC_READY":
       return assertOpaqueId(signal.specRevisionId, "Specification revision");
     case "SPEC_APPROVED":
+      assertOpaqueId(signal.approvedSpecRevisionId, "Approved specification revision");
+      assertOpaqueId(signal.testPlanRevisionId, "Test plan revision");
+      return assertOpaqueId(signal.approvalReceiptId, "Specification approval receipt");
+    case "RUN_CONFIGURATION_LOCKED":
       return assertOpaqueId(signal.lockedRunConfigurationId, "Run configuration lock");
     case "AGENT_STARTED":
       return assertOpaqueId(signal.runId, "Agent run");
@@ -364,15 +395,17 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
       if (!STEAM_BUILD_ID.test(signal.defaultBranchBuildId)) throw new Error("Default branch BuildID is invalid");
       return;
     case "CANCEL":
-      if (!signal.reason.trim() || signal.reason.length > 2_000) throw new Error("Cancellation reason is invalid");
+      if (typeof signal.reason !== "string" || !signal.reason.trim() || signal.reason.length > 2_000) {
+        throw new Error("Cancellation reason is invalid");
+      }
       return;
     default:
       throw new Error("Delivery signal type is invalid");
   }
 }
 
-function assertOpaqueId(value: string, label: string): void {
-  if (!value.trim() || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+function assertOpaqueId(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
     throw new Error(`${label} identifier is invalid`);
   }
 }

@@ -1,6 +1,7 @@
 import { parseSpecApprovalCommand, parseSpecDialogueCommand, parseSpecDialogueLookup, type SpecApprovalReceipt, type SpecDialogueSnapshot } from "./contracts";
 import type { SpecDialogueModel } from "./model";
 import type { SpecDialogueStore } from "./store";
+import type { SpecWorkflowApprovalSink } from "./workflow-bridge";
 
 export class SpecDialogueConflict extends Error {
   constructor(readonly code: "SPEC_DIALOGUE_BUSY" | "SPEC_DIALOGUE_REVISION_CONFLICT") {
@@ -9,7 +10,11 @@ export class SpecDialogueConflict extends Error {
 }
 
 export class SpecDialogueService {
-  constructor(private readonly store: SpecDialogueStore, private readonly model: SpecDialogueModel) {}
+  constructor(
+    private readonly store: SpecDialogueStore,
+    private readonly model: SpecDialogueModel,
+    private readonly workflow: SpecWorkflowApprovalSink | null = null,
+  ) {}
 
   async send(value: unknown): Promise<SpecDialogueSnapshot> {
     const command = parseSpecDialogueCommand(value);
@@ -38,7 +43,12 @@ export class SpecDialogueService {
     return this.store.read(parseSpecDialogueLookup(value));
   }
 
-  approve(value: unknown): Promise<SpecApprovalReceipt> { return this.store.approve(parseSpecApprovalCommand(value)); }
+  async approve(value: unknown): Promise<SpecApprovalReceipt> {
+    const command = parseSpecApprovalCommand(value);
+    const receipt = await this.store.approve(command);
+    if (this.workflow) await this.workflow.publish(command, receipt);
+    return receipt;
+  }
 
   probe(): Promise<void> { return this.store.probe(); }
 }

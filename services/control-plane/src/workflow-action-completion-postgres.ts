@@ -17,6 +17,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 
 export type WorkflowActionCompletionSource =
   | "SPEC_SERVICE"
+  | "AGENT_CONFIGURATION_SERVICE"
   | "USER_ACCEPTANCE_SERVICE"
   | "PROVIDER_MONITOR"
   | "MFA_BROKER"
@@ -71,6 +72,30 @@ type OutboxRow = {
   signal_digest: string;
   signal: unknown;
   state: "PENDING" | "DELIVERING" | "RETRYABLE_FAILED" | "DELIVERED";
+};
+type SpecReadyAuthorityRow = {
+  draft_spec_revision_id: string;
+  draft_state: string;
+  conversation_state: string;
+  current_spec_revision_id: string;
+  approved_previous_revision_id: string | null;
+};
+type SpecApprovalAuthorityRow = {
+  approved_spec_revision_id: string;
+  draft_spec_revision_id: string;
+  approved_spec_state: string;
+  test_plan_revision_id: string;
+  test_plan_state: string;
+  conversation_state: string;
+  current_spec_revision_id: string;
+  current_test_plan_revision_id: string;
+  operation_state: string;
+  operation_response: unknown;
+};
+type RunConfigurationAuthorityRow = {
+  run_id: string;
+  state: string;
+  configuration_lock: unknown;
 };
 
 type ExternalApprovalSignal = Extract<DeliverySignal, { type: "EXTERNAL_APPROVED" }>;
@@ -143,6 +168,15 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
         throw new WorkflowActionCompletionConflictError("Workflow control action state is invalid");
       }
 
+      if (input.source === "SPEC_SERVICE"
+        && (input.signal.type === "SPEC_READY" || input.signal.type === "SPEC_APPROVED")) {
+        await this.#assertSpecAuthority(client, action, input.signal);
+      }
+      if (input.source === "AGENT_CONFIGURATION_SERVICE"
+        && input.signal.type === "RUN_CONFIGURATION_LOCKED") {
+        await this.#assertRunConfigurationAuthority(client, action, input.signal.lockedRunConfigurationId);
+      }
+
       if (input.source === "STEAM_APPROVAL_MONITOR" && input.signal.type === "EXTERNAL_APPROVED") {
         await this.#recordExternalApproval(client, action, input, input.signal);
       }
@@ -202,6 +236,125 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  async #assertSpecAuthority(
+    client: ControlPlaneWorkflowSqlClient,
+    action: ActionRow,
+    signal: Extract<DeliverySignal, { type: "SPEC_READY" | "SPEC_APPROVED" }>,
+  ): Promise<void> {
+    if (signal.type === "SPEC_READY") {
+      if (!UUID.test(signal.specRevisionId)) invalidAuthority();
+      const selected = await client.query<SpecReadyAuthorityRow>(
+        `SELECT draft.id::text AS draft_spec_revision_id,
+                draft.state AS draft_state,
+                conversation.state AS conversation_state,
+                conversation.current_spec_revision_id::text,
+                approved.previous_revision_id::text AS approved_previous_revision_id
+           FROM deviludo.immutable_revisions draft
+           JOIN deviludo.spec_conversations conversation
+             ON conversation.tenant_id = draft.tenant_id
+            AND conversation.project_id = draft.project_id
+            AND conversation.spec_aggregate_id = draft.aggregate_id
+           LEFT JOIN deviludo.immutable_revisions approved
+             ON approved.id = conversation.current_spec_revision_id
+            AND approved.tenant_id = draft.tenant_id
+            AND approved.project_id = draft.project_id
+            AND approved.aggregate_type = 'GAME_SPEC'
+          WHERE draft.tenant_id = $1::uuid AND draft.project_id = $2::uuid
+            AND draft.id = $3::uuid AND draft.aggregate_type = 'GAME_SPEC'
+          FOR SHARE OF draft, conversation, approved`,
+        [action.tenant_id, action.project_id, signal.specRevisionId],
+      );
+      const row = selected.rows[0];
+      if (selected.rows.length !== 1 || !row || row.draft_spec_revision_id !== signal.specRevisionId
+        || row.draft_state !== "DRAFT" || (row.current_spec_revision_id !== signal.specRevisionId
+          && row.approved_previous_revision_id !== signal.specRevisionId)
+        || (row.conversation_state !== "DRAFT" && row.conversation_state !== "APPROVED")) {
+        throw new WorkflowActionCompletionConflictError("Specification-ready authority is unavailable");
+      }
+      return;
+    }
+
+    if (!UUID.test(signal.approvedSpecRevisionId) || !UUID.test(signal.testPlanRevisionId)
+      || !SHA256.test(signal.approvalReceiptId)) invalidAuthority();
+    const selected = await client.query<SpecApprovalAuthorityRow>(
+      `SELECT spec.id::text AS approved_spec_revision_id,
+              spec.previous_revision_id::text AS draft_spec_revision_id,
+              spec.state AS approved_spec_state,
+              plan.id::text AS test_plan_revision_id,
+              plan.state AS test_plan_state,
+              conversation.state AS conversation_state,
+              conversation.current_spec_revision_id::text,
+              conversation.current_test_plan_revision_id::text,
+              operation.state AS operation_state,
+              operation.response AS operation_response
+         FROM deviludo.immutable_revisions spec
+         JOIN deviludo.spec_conversations conversation
+           ON conversation.tenant_id = spec.tenant_id
+          AND conversation.project_id = spec.project_id
+          AND conversation.spec_aggregate_id = spec.aggregate_id
+          AND conversation.current_spec_revision_id = spec.id
+         JOIN deviludo.immutable_revisions plan
+           ON plan.id = $4::uuid AND plan.tenant_id = spec.tenant_id
+          AND plan.project_id = spec.project_id
+          AND plan.aggregate_id = conversation.test_plan_aggregate_id
+          AND plan.aggregate_type = 'TEST_PLAN'
+         JOIN deviludo.approved_test_plan_bindings binding
+           ON binding.tenant_id = spec.tenant_id
+          AND binding.project_id = spec.project_id
+          AND binding.spec_revision_id = spec.id
+          AND binding.test_plan_revision_id = plan.id
+         JOIN deviludo.spec_dialogue_operations operation
+           ON operation.operation_key = $5
+          AND operation.tenant_id = spec.tenant_id
+          AND operation.project_id = spec.project_id
+          AND operation.conversation_id = conversation.id
+        WHERE spec.tenant_id = $1::uuid AND spec.project_id = $2::uuid
+          AND spec.id = $3::uuid AND spec.aggregate_type = 'GAME_SPEC'
+        FOR SHARE OF spec, conversation, plan, binding, operation`,
+      [action.tenant_id, action.project_id, signal.approvedSpecRevisionId,
+        signal.testPlanRevisionId, signal.approvalReceiptId],
+    );
+    const row = selected.rows[0];
+    const response = row ? record(row.operation_response) : {};
+    if (selected.rows.length !== 1 || !row
+      || row.approved_spec_revision_id !== signal.approvedSpecRevisionId
+      || row.draft_spec_revision_id !== action.binding.specRevisionId
+      || row.approved_spec_state !== "APPROVED"
+      || row.test_plan_revision_id !== signal.testPlanRevisionId || row.test_plan_state !== "FROZEN"
+      || row.conversation_state !== "APPROVED"
+      || row.current_spec_revision_id !== signal.approvedSpecRevisionId
+      || row.current_test_plan_revision_id !== signal.testPlanRevisionId
+      || row.operation_state !== "COMPLETED"
+      || response.operationKey !== signal.approvalReceiptId
+      || response.specRevisionId !== signal.approvedSpecRevisionId
+      || response.testPlanRevisionId !== signal.testPlanRevisionId) {
+      throw new WorkflowActionCompletionConflictError("Specification approval authority is unavailable");
+    }
+  }
+
+  async #assertRunConfigurationAuthority(
+    client: ControlPlaneWorkflowSqlClient,
+    action: ActionRow,
+    lockedRunConfigurationId: string,
+  ): Promise<void> {
+    if (!UUID.test(lockedRunConfigurationId)) invalidAuthority();
+    const selected = await client.query<RunConfigurationAuthorityRow>(
+      `SELECT id::text AS run_id, state, configuration_lock
+         FROM deviludo.agent_runs
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+        FOR SHARE`,
+      [action.tenant_id, action.project_id, lockedRunConfigurationId],
+    );
+    const row = selected.rows[0];
+    const lock = row ? record(row.configuration_lock) : {};
+    if (selected.rows.length !== 1 || !row || row.run_id !== lockedRunConfigurationId
+      || row.state !== "QUEUED" || lock.specRevisionId !== action.binding.specRevisionId
+      || lock.testPlanRevisionId !== action.binding.testPlanRevisionId
+      || lock.specApprovalReceiptId !== action.binding.specApprovalReceiptId) {
+      throw new WorkflowActionCompletionConflictError("Agent run configuration authority is unavailable");
     }
   }
 
@@ -356,6 +509,7 @@ function validateSignalBinding(
   const allowedSource: Record<Exclude<ControlPlaneWorkflowAction, "CANCEL_DELIVERY">, WorkflowActionCompletionSource> = {
     CONTINUE_IDEA_DIALOGUE: "SPEC_SERVICE",
     REQUEST_SPEC_APPROVAL: "SPEC_SERVICE",
+    RESOLVE_AGENT_RUN_CONFIGURATION: "AGENT_CONFIGURATION_SERVICE",
     WAIT_FOR_PROVIDER: "PROVIDER_MONITOR",
     REQUEST_USER_ACCEPTANCE: "USER_ACCEPTANCE_SERVICE",
     REQUEST_FRESH_MFA: "MFA_BROKER",
@@ -363,7 +517,11 @@ function validateSignalBinding(
   };
   if (operation === "CANCEL_DELIVERY" || source !== allowedSource[operation]) invalidBinding();
   if (operation === "CONTINUE_IDEA_DIALOGUE" && signal.type === "SPEC_READY") return;
-  if (operation === "REQUEST_SPEC_APPROVAL" && signal.type === "SPEC_APPROVED" && binding.specRevisionId) return;
+  if (operation === "REQUEST_SPEC_APPROVAL" && signal.type === "SPEC_APPROVED"
+    && binding.specRevisionId && signal.approvedSpecRevisionId !== binding.specRevisionId
+    && signal.testPlanRevisionId && signal.approvalReceiptId) return;
+  if (operation === "RESOLVE_AGENT_RUN_CONFIGURATION" && signal.type === "RUN_CONFIGURATION_LOCKED"
+    && binding.specRevisionId && binding.testPlanRevisionId && binding.specApprovalReceiptId) return;
   if (operation === "WAIT_FOR_PROVIDER" && signal.type === "PROVIDER_RESTORED"
     && signal.providerRevisionId === binding.providerRevisionId) return;
   if (operation === "REQUEST_USER_ACCEPTANCE"
@@ -416,6 +574,19 @@ function canonicalJson(value: unknown): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
     .join(",")}}`;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try { return record(JSON.parse(value) as unknown); }
+    catch { invalidAuthority(); }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalidAuthority();
+  return value as Record<string, unknown>;
+}
+
+function invalidAuthority(): never {
+  throw new WorkflowActionCompletionValidationError("Workflow action completion authority is invalid");
 }
 
 function nextGate(gate: ExternalApprovalSignal["gate"]): Readonly<{ state: string; gate: string }> {

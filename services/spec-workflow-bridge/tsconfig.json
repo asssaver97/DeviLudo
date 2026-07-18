@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../control-plane/src/**/*.ts",
+    "../temporal/src/**/*.ts",
+    "../evidence-archive/src/contracts.ts",
+    "../evidence-archive/src/ingress-http.ts"
+  ]
+}

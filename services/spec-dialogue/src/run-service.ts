@@ -7,17 +7,25 @@ import { createSpecDialogueHandler, createSpecDialogueHttpsServer } from "./ingr
 import { MtlsSpecDialogueModel } from "./model-broker";
 import { PostgresSpecDialogueStore } from "./postgres-store";
 import { SpecDialogueService } from "./service";
+import { MtlsSpecWorkflowApprovalSink } from "./workflow-bridge";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
 export async function specDialogueRuntimeFromEnv(env: Readonly<Record<string, string | undefined>> = process.env) {
-  const [serverKey, serverCertificate, clientCa, brokerKey, brokerCertificate, brokerCa] = await Promise.all([
+  const [
+    serverKey, serverCertificate, clientCa,
+    brokerKey, brokerCertificate, brokerCa,
+    workflowKey, workflowCertificate, workflowCa,
+  ] = await Promise.all([
     secret(env, "DEVILUDO_SPEC_DIALOGUE_TLS_KEY_FILE"),
     secret(env, "DEVILUDO_SPEC_DIALOGUE_TLS_CERT_FILE"),
     secret(env, "DEVILUDO_SPEC_DIALOGUE_CLIENT_CA_FILE"),
     secret(env, "DEVILUDO_SPEC_MODEL_BROKER_TLS_KEY_FILE"),
     secret(env, "DEVILUDO_SPEC_MODEL_BROKER_TLS_CERT_FILE"),
     secret(env, "DEVILUDO_SPEC_MODEL_BROKER_CA_FILE"),
+    secret(env, "DEVILUDO_SPEC_WORKFLOW_CLIENT_TLS_KEY_FILE"),
+    secret(env, "DEVILUDO_SPEC_WORKFLOW_CLIENT_TLS_CERT_FILE"),
+    secret(env, "DEVILUDO_SPEC_WORKFLOW_CLIENT_CA_FILE"),
   ]);
   const allowedSpiffeIds = spiffeSet(required(env, "DEVILUDO_SPEC_DIALOGUE_WEB_SPIFFE_IDS"));
   const pool = postgresWorkflowPoolFromEnv({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "spec-dialogue" });
@@ -28,7 +36,12 @@ export async function specDialogueRuntimeFromEnv(env: Readonly<Record<string, st
       tls: { key: brokerKey, certificate: brokerCertificate, ca: brokerCa },
       timeoutMs: seconds(env.DEVILUDO_SPEC_MODEL_BROKER_TIMEOUT_SECONDS, 30, 1, 120) * 1_000,
     });
-    const service = new SpecDialogueService(store, model);
+    const workflow = new MtlsSpecWorkflowApprovalSink({
+      endpoint: required(env, "DEVILUDO_SPEC_WORKFLOW_BRIDGE_URL"),
+      tls: { key: workflowKey, certificate: workflowCertificate, ca: workflowCa },
+      timeoutMs: seconds(env.DEVILUDO_SPEC_WORKFLOW_BRIDGE_TIMEOUT_SECONDS, 15, 1, 60) * 1_000,
+    });
+    const service = new SpecDialogueService(store, model, workflow);
     const handler = createSpecDialogueHandler({ service, allowedSpiffeIds });
     const server = createSpecDialogueHttpsServer({ tls: { key: serverKey, cert: serverCertificate, ca: clientCa }, handler });
     return Object.freeze({ host: host(env.DEVILUDO_SPEC_DIALOGUE_HOST), port: port(env.DEVILUDO_SPEC_DIALOGUE_PORT), pool, service, server });

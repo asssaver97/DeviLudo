@@ -1,4 +1,9 @@
-import { Client, Connection, type TLSConfig, type WorkflowHandle } from "@temporalio/client";
+import {
+  Client,
+  Connection,
+  type TLSConfig,
+  type WorkflowHandleWithFirstExecutionRunId,
+} from "@temporalio/client";
 import type {
   DeliverySignal,
   DeliverySnapshot,
@@ -42,7 +47,7 @@ export async function startGameDelivery(
   client: Client,
   input: GameDeliveryWorkflowInput,
   taskQueue = process.env.DEVILUDO_TEMPORAL_TASK_QUEUE ?? DELIVERY_TASK_QUEUE,
-): Promise<WorkflowHandle<typeof gameDeliveryWorkflow>> {
+): Promise<WorkflowHandleWithFirstExecutionRunId<typeof gameDeliveryWorkflow>> {
   return client.workflow.start(gameDeliveryWorkflow, {
     workflowId: input.workflowId,
     taskQueue,

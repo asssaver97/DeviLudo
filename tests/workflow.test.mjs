@@ -9,7 +9,9 @@ test("delivery workflow requires every Steam external gate and release receipt",
   const workflow = new GameDeliveryWorkflow({ workflowId: "delivery-1", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["windows", "linux", "macos"] });
   assert.equal(workflow.nextCommand(), "CONTINUE_IDEA_DIALOGUE");
   workflow.signal({ signalId: "signal-001", type: "SPEC_READY", specRevisionId: "SPEC-001" });
-  workflow.signal({ signalId: "signal-002", type: "SPEC_APPROVED", lockedRunConfigurationId: "lock-1" });
+  workflow.signal({ signalId: "signal-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001" });
+  assert.equal(workflow.nextCommand(), "RESOLVE_AGENT_RUN_CONFIGURATION");
+  workflow.signal({ signalId: "signal-002-lock", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-1" });
   assert.equal(workflow.nextCommand(), "START_LOCKED_AGENT_RUN");
   workflow.signal({ signalId: "signal-003", type: "AGENT_STARTED", runId: "run-1" });
   workflow.signal({ signalId: "signal-004", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18 });
@@ -46,13 +48,14 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.current().state, "RELEASED");
   assert.equal(workflow.nextCommand(), "NONE");
   assert.equal(workflow.current().steamReleaseId, "release-1");
-  assert.equal(workflow.current().history.length, 15);
+  assert.equal(workflow.current().history.length, 16);
 });
 
 test("feedback invalidates evidence and provider outage resumes the locked Agent", () => {
   const workflow = new GameDeliveryWorkflow({ workflowId: "delivery-2", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"] });
   workflow.signal({ signalId: "signal-101", type: "SPEC_READY", specRevisionId: "SPEC-001" });
-  workflow.signal({ signalId: "signal-102", type: "SPEC_APPROVED", lockedRunConfigurationId: "lock-claude-r1" });
+  workflow.signal({ signalId: "signal-102", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-101" });
+  workflow.signal({ signalId: "signal-102-lock", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-claude-r1" });
   workflow.signal({ signalId: "signal-103", type: "PROVIDER_UNAVAILABLE", providerRevisionId: "provider-claude-r1" });
   assert.equal(workflow.current().state, "WAITING_PROVIDER");
   assert.equal(workflow.current().lockedRunConfigurationId, "lock-claude-r1");
@@ -66,6 +69,8 @@ test("feedback invalidates evidence and provider outage resumes the locked Agent
   assert.equal(workflow.current().candidateCommitSha, null);
   assert.equal(workflow.current().draftPullRequest, null);
   assert.equal(workflow.current().lockedRunConfigurationId, null);
+  assert.equal(workflow.current().testPlanRevisionId, null);
+  assert.equal(workflow.current().specApprovalReceiptId, null);
   assert.equal(workflow.current().iteration, 2);
 });
 
@@ -90,6 +95,10 @@ test("delivery workflow rejects an unknown runtime signal type", () => {
     () => workflow.signal({ signalId: "signal-unknown-001", type: "UNKNOWN" }),
     /Delivery signal type is invalid/,
   );
+  assert.throws(
+    () => workflow.signal({ signalId: "signal-approved-malformed", type: "SPEC_APPROVED" }),
+    /Approved specification revision identifier is invalid/,
+  );
 });
 
 test("an in-flight Provider recovery queues a fresh command for the same recorded run", () => {
@@ -97,7 +106,8 @@ test("an in-flight Provider recovery queues a fresh command for the same recorde
     workflowId: "delivery-provider-resume", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
   });
   workflow.signal({ signalId: "resume-signal-001", type: "SPEC_READY", specRevisionId: "SPEC-001" });
-  workflow.signal({ signalId: "resume-signal-002", type: "SPEC_APPROVED", lockedRunConfigurationId: "lock-001" });
+  workflow.signal({ signalId: "resume-signal-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-resume-001" });
+  workflow.signal({ signalId: "resume-signal-002-lock", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-001" });
   workflow.signal({ signalId: "resume-signal-003", type: "AGENT_STARTED", runId: "run-001" });
   workflow.signal({ signalId: "resume-signal-004", type: "PROVIDER_UNAVAILABLE", providerRevisionId: "provider-001" });
   workflow.signal({ signalId: "resume-signal-005", type: "PROVIDER_RESTORED", providerRevisionId: "provider-001" });

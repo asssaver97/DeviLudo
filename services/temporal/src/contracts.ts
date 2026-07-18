@@ -21,6 +21,7 @@ export type DeliveryCommandDestination =
 const COMMAND_DESTINATIONS = {
   CONTINUE_IDEA_DIALOGUE: "control-plane",
   REQUEST_SPEC_APPROVAL: "control-plane",
+  RESOLVE_AGENT_RUN_CONFIGURATION: "control-plane",
   START_LOCKED_AGENT_RUN: "agent-worker",
   WAIT_FOR_PROVIDER: "control-plane",
   START_TARGET_MATRIX_E2E: "runner-control",

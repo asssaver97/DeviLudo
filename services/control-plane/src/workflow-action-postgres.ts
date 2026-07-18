@@ -83,7 +83,9 @@ export class PostgresControlPlaneWorkflowActionStore implements ControlPlaneWork
       await client.query("COMMIT");
       return Object.freeze({
         receiptId: `control-receipt:${row.id}`,
-        actionId: `control-action:${row.id}`,
+        // This value is used directly as the authenticated completion route
+        // parameter and therefore must preserve the PostgreSQL UUID exactly.
+        actionId: row.id,
         operation: row.operation,
         requestDigest: row.request_digest,
         status: row.status,

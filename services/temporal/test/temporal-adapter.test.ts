@@ -51,6 +51,8 @@ const snapshot: DeliverySnapshot = {
   projectId: "project-001",
   state: "DEVELOPMENT_QUEUED",
   specRevisionId: "spec-r1",
+  testPlanRevisionId: "plan-r1",
+  specApprovalReceiptId: "spec-approval-r1",
   lockedRunConfigurationId: "lock-r1",
   runId: null,
   candidateCommitSha: null,

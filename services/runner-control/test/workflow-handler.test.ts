@@ -7,6 +7,7 @@ import { RunnerControlWorkflowHandler, type RunnerWorkflowReceipt } from "../src
 const base: DeliverySnapshot = Object.freeze({
   workflowId: "delivery-001", tenantId: "tenant-001", projectId: "project-001",
   state: "CROSS_PLATFORM_E2E", specRevisionId: "spec-r1", lockedRunConfigurationId: "lock-r1",
+  testPlanRevisionId: "plan-r1", specApprovalReceiptId: "spec-approval-r1",
   runId: "run-001", candidateCommitSha: "a".repeat(40), draftPullRequest: 91, mainCommitSha: null,
   evidenceBundleId: null, candidateEvidenceBundleId: null, mainEvidenceBundleId: null,
   steamInstallEvidenceBundleId: null, mfaApprovalId: null, steamBuildId: null,

@@ -11,6 +11,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 export type ControlPlaneWorkflowAction =
   | "CONTINUE_IDEA_DIALOGUE"
   | "REQUEST_SPEC_APPROVAL"
+  | "RESOLVE_AGENT_RUN_CONFIGURATION"
   | "WAIT_FOR_PROVIDER"
   | "REQUEST_USER_ACCEPTANCE"
   | "REQUEST_FRESH_MFA"
@@ -20,6 +21,8 @@ export type ControlPlaneWorkflowAction =
 export interface ControlPlaneWorkflowBinding {
   readonly state: string;
   readonly specRevisionId: string | null;
+  readonly testPlanRevisionId: string | null;
+  readonly specApprovalReceiptId: string | null;
   readonly lockedRunConfigurationId: string | null;
   readonly providerRevisionId: string | null;
   readonly candidateCommitSha: string | null;
@@ -110,6 +113,7 @@ function actionFor(job: ClaimedWorkflowJob): ControlPlaneWorkflowAction {
   }
   if (job.operation === "CONTINUE_IDEA_DIALOGUE"
     || job.operation === "REQUEST_SPEC_APPROVAL"
+    || job.operation === "RESOLVE_AGENT_RUN_CONFIGURATION"
     || job.operation === "WAIT_FOR_PROVIDER"
     || job.operation === "REQUEST_USER_ACCEPTANCE"
     || job.operation === "REQUEST_FRESH_MFA"
@@ -122,6 +126,7 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
   const expectedState = {
     CONTINUE_IDEA_DIALOGUE: "IDEATION",
     REQUEST_SPEC_APPROVAL: "WAITING_SPEC_APPROVAL",
+    RESOLVE_AGENT_RUN_CONFIGURATION: "RESOLVING_AGENT_CONFIGURATION",
     WAIT_FOR_PROVIDER: "WAITING_PROVIDER",
     REQUEST_USER_ACCEPTANCE: "WAITING_USER_ACCEPTANCE",
     REQUEST_FRESH_MFA: "WAITING_MFA",
@@ -131,6 +136,8 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
   if (snapshot.state !== expectedState[operation]) invalid();
 
   let specRevisionId: string | null = null;
+  let testPlanRevisionId: string | null = null;
+  let specApprovalReceiptId: string | null = null;
   let lockedRunConfigurationId: string | null = null;
   let providerRevisionId: string | null = null;
   let candidateCommitSha: string | null = null;
@@ -144,6 +151,10 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
 
   if (operation === "REQUEST_SPEC_APPROVAL") {
     specRevisionId = requiredId(snapshot.specRevisionId);
+  } else if (operation === "RESOLVE_AGENT_RUN_CONFIGURATION") {
+    specRevisionId = requiredId(snapshot.specRevisionId);
+    testPlanRevisionId = requiredId(snapshot.testPlanRevisionId);
+    specApprovalReceiptId = requiredId(snapshot.specApprovalReceiptId);
   } else if (operation === "WAIT_FOR_PROVIDER") {
     lockedRunConfigurationId = requiredId(snapshot.lockedRunConfigurationId);
     providerRevisionId = requiredId(snapshot.waitingProviderRevisionId);
@@ -169,6 +180,8 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
   return Object.freeze({
     state: snapshot.state,
     specRevisionId,
+    testPlanRevisionId,
+    specApprovalReceiptId,
     lockedRunConfigurationId,
     providerRevisionId,
     candidateCommitSha,

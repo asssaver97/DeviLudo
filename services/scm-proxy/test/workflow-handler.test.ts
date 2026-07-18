@@ -10,6 +10,7 @@ const acceptance: DeliverySignal = Object.freeze({ signalId: "acceptance-signal-
 const snapshot: DeliverySnapshot = Object.freeze({
   workflowId: "delivery-001", tenantId: "tenant-001", projectId: "project-001", state: "MERGING",
   specRevisionId: "spec-r1", lockedRunConfigurationId: "lock-r1", runId: "run-001",
+  testPlanRevisionId: "plan-r1", specApprovalReceiptId: "spec-approval-r1",
   candidateCommitSha, draftPullRequest: 91, mainCommitSha: null,
   evidenceBundleId: "candidate-evidence-1", candidateEvidenceBundleId: "candidate-evidence-1",
   mainEvidenceBundleId: null, steamInstallEvidenceBundleId: null, mfaApprovalId: null, steamBuildId: null,

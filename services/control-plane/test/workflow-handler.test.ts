@@ -31,7 +31,8 @@ const releaseId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const releaseConfigurationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const base: DeliverySnapshot = Object.freeze({
   workflowId: "delivery-001", tenantId: "tenant-001", projectId: "project-001", state: "IDEATION",
-  specRevisionId: null, lockedRunConfigurationId: null, runId: null, candidateCommitSha: null,
+  specRevisionId: null, testPlanRevisionId: null, specApprovalReceiptId: null,
+  lockedRunConfigurationId: null, runId: null, candidateCommitSha: null,
   draftPullRequest: null, mainCommitSha: null, evidenceBundleId: null, candidateEvidenceBundleId: null,
   mainEvidenceBundleId: null, steamInstallEvidenceBundleId: null, mfaApprovalId: null, steamBuildId: null,
   steamReleaseId: null, defaultBranchBuildId: null, targetMatrix: Object.freeze(["linux", "macos", "windows"] as const),
@@ -42,6 +43,10 @@ const base: DeliverySnapshot = Object.freeze({
 function snapshotFor(operation: ControlPlaneWorkflowAction): DeliverySnapshot {
   if (operation === "CONTINUE_IDEA_DIALOGUE") return base;
   if (operation === "REQUEST_SPEC_APPROVAL") return Object.freeze({ ...base, state: "WAITING_SPEC_APPROVAL", specRevisionId: "spec-r1" });
+  if (operation === "RESOLVE_AGENT_RUN_CONFIGURATION") return Object.freeze({
+    ...base, state: "RESOLVING_AGENT_CONFIGURATION", specRevisionId: "approved-spec-r2",
+    testPlanRevisionId: "approved-plan-r2", specApprovalReceiptId: "spec-approval-r2",
+  });
   if (operation === "WAIT_FOR_PROVIDER") return Object.freeze({
     ...base, state: "WAITING_PROVIDER", lockedRunConfigurationId: "lock-r1", waitingProviderRevisionId: "provider-r7",
   });
@@ -120,19 +125,21 @@ test("control-plane workflow handler registers every user or external wait with 
     return receipt(input.operation);
   } }, releases);
   const operations: ControlPlaneWorkflowAction[] = [
-    "CONTINUE_IDEA_DIALOGUE", "REQUEST_SPEC_APPROVAL", "WAIT_FOR_PROVIDER", "REQUEST_USER_ACCEPTANCE",
+    "CONTINUE_IDEA_DIALOGUE", "REQUEST_SPEC_APPROVAL", "RESOLVE_AGENT_RUN_CONFIGURATION",
+    "WAIT_FOR_PROVIDER", "REQUEST_USER_ACCEPTANCE",
     "REQUEST_FRESH_MFA", "WAIT_FOR_EXTERNAL_APPROVAL", "CANCEL_DELIVERY",
   ];
   for (const operation of operations) {
     const outcome = await handler.execute(job(operation), { async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; } });
     assert.equal(outcome.result.operation, operation);
   }
-  assert.equal(observed[2]?.binding.providerRevisionId, "provider-r7");
-  assert.equal(observed[3]?.binding.candidateCommitSha, "c".repeat(40));
-  assert.equal(observed[4]?.binding.mainCommitSha, "d".repeat(40));
-  assert.equal(observed[4]?.binding.releaseId, releaseId);
-  assert.equal(observed[5]?.binding.externalGate, "VALVE_REVIEW");
-  assert.equal(observed[6]?.binding.cancellationReason, "user cancelled");
+  assert.equal(observed[2]?.binding.testPlanRevisionId, "approved-plan-r2");
+  assert.equal(observed[3]?.binding.providerRevisionId, "provider-r7");
+  assert.equal(observed[4]?.binding.candidateCommitSha, "c".repeat(40));
+  assert.equal(observed[5]?.binding.mainCommitSha, "d".repeat(40));
+  assert.equal(observed[5]?.binding.releaseId, releaseId);
+  assert.equal(observed[6]?.binding.externalGate, "VALVE_REVIEW");
+  assert.equal(observed[7]?.binding.cancellationReason, "user cancelled");
 });
 
 test("control-plane workflow handler never emits a completion signal from a registered wait", async () => {
@@ -169,6 +176,7 @@ test("Postgres control-plane action store applies RLS and replays only an exact 
   let released = false;
   const binding = Object.freeze({
     state: "WAITING_SPEC_APPROVAL", specRevisionId: "spec-r1", lockedRunConfigurationId: null,
+    testPlanRevisionId: null, specApprovalReceiptId: null,
     providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null,
     mainCommitSha: null, releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null,
   });
@@ -193,7 +201,7 @@ test("Postgres control-plane action store applies RLS and replays only an exact 
     workflowId: row.workflow_id, operation: row.operation, binding,
     async heartbeat() { heartbeats += 1; return "renewed"; },
   });
-  assert.equal(result.actionId, `control-action:${row.id}`);
+  assert.equal(result.actionId, row.id);
   assert.equal(heartbeats, 1);
   assert.equal(sql[0], "BEGIN");
   assert.equal(sql[1], "SELECT set_config('app.tenant_id', $1, true)");
@@ -207,6 +215,7 @@ test("Postgres control-plane action store rolls back an idempotency collision", 
   const sql: string[] = [];
   const binding = Object.freeze({
     state: "IDEATION", specRevisionId: null, lockedRunConfigurationId: null, providerRevisionId: null,
+    testPlanRevisionId: null, specApprovalReceiptId: null,
     candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null, mainCommitSha: null,
     releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null,
   });
@@ -238,10 +247,16 @@ test("workflow action completion atomically binds an authoritative signal to its
   const projectId = "22222222-2222-4222-8222-222222222222";
   const actionId = "33333333-3333-4333-8333-333333333333";
   const outboxId = "44444444-4444-4444-8444-444444444444";
+  const draftSpecRevisionId = "55555555-5555-4555-8555-555555555555";
+  const approvedSpecRevisionId = "66666666-6666-4666-8666-666666666666";
+  const testPlanRevisionId = "77777777-7777-4777-8777-777777777777";
+  const approvalReceiptId = "e".repeat(64);
   const signal: DeliverySignal = Object.freeze({
     signalId: "spec-approved-signal-001",
     type: "SPEC_APPROVED",
-    lockedRunConfigurationId: "locked-run-config-r1",
+    approvedSpecRevisionId,
+    testPlanRevisionId,
+    approvalReceiptId,
   });
   const statements: string[] = [];
   let inserted: readonly unknown[] | undefined;
@@ -250,7 +265,8 @@ test("workflow action completion atomically binds an authoritative signal to its
     id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
     operation: "REQUEST_SPEC_APPROVAL", status: "WAITING",
     binding: {
-      state: "WAITING_SPEC_APPROVAL", specRevisionId: "spec-r1", lockedRunConfigurationId: null,
+      state: "WAITING_SPEC_APPROVAL", specRevisionId: draftSpecRevisionId, lockedRunConfigurationId: null,
+      testPlanRevisionId: null, specApprovalReceiptId: null,
       providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
       evidenceBundleId: null, mainCommitSha: null, releaseId: null, steamBuildId: null,
       externalGate: null, cancellationReason: null,
@@ -263,6 +279,18 @@ test("workflow action completion atomically binds an authoritative signal to its
       statements.push(statement);
       if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) inserted = values;
       if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.immutable_revisions spec")) return { rows: [{
+        approved_spec_revision_id: approvedSpecRevisionId,
+        draft_spec_revision_id: draftSpecRevisionId,
+        approved_spec_state: "APPROVED",
+        test_plan_revision_id: testPlanRevisionId,
+        test_plan_state: "FROZEN",
+        conversation_state: "APPROVED",
+        current_spec_revision_id: approvedSpecRevisionId,
+        current_test_plan_revision_id: testPlanRevisionId,
+        operation_state: "COMPLETED",
+        operation_response: { operationKey: approvalReceiptId, specRevisionId: approvedSpecRevisionId, testPlanRevisionId },
+      }] as Row[] };
       if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
         id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
         action_id: actionId, signal_id: signal.signalId, signal_digest: inserted?.[5],
@@ -301,6 +329,100 @@ test("workflow action completion atomically binds an authoritative signal to its
   assert.equal(replay.replayed, true);
 });
 
+test("spec-ready completion accepts only a persisted draft linked to its tenant conversation", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const outboxId = "44444444-4444-4444-8444-444444444444";
+  const draftId = "55555555-5555-4555-8555-555555555555";
+  const signal: DeliverySignal = { signalId: "spec-ready-signal-001", type: "SPEC_READY", specRevisionId: draftId };
+  let inserted: readonly unknown[] | undefined;
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values?: readonly unknown[]) {
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [{
+        id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        operation: "CONTINUE_IDEA_DIALOGUE", status: "WAITING",
+        binding: { state: "IDEATION", specRevisionId: null, testPlanRevisionId: null,
+          specApprovalReceiptId: null, lockedRunConfigurationId: null, providerRevisionId: null,
+          candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null,
+          mainCommitSha: null, releaseId: null, steamBuildId: null, externalGate: null,
+          cancellationReason: null }, completion_signal_id: null,
+        completion_signal_digest: null, completion_source: null, completion_receipt_id: null,
+      }] as Row[] };
+      if (statement.includes("FROM deviludo.immutable_revisions draft")) return { rows: [{
+        draft_spec_revision_id: draftId, draft_state: "DRAFT", conversation_state: "APPROVED",
+        current_spec_revision_id: "66666666-6666-4666-8666-666666666666",
+        approved_previous_revision_id: draftId,
+      }] as Row[] };
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) inserted = values;
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: signal.signalId, signal_digest: inserted?.[5],
+        signal: JSON.parse(String(inserted?.[6])), state: "PENDING",
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    }, release() {},
+  };
+  const receipt = await new PostgresWorkflowActionCompletionStore({ async connect() { return client; } }).complete({
+    tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "SPEC_SERVICE", sourceReceiptId: "spec-ready-receipt-001", signal,
+  });
+  assert.equal(receipt.outboxId, outboxId);
+});
+
+test("Agent configuration completion re-resolves the queued immutable lock before development", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const outboxId = "44444444-4444-4444-8444-444444444444";
+  const runId = "55555555-5555-4555-8555-555555555555";
+  const specId = "66666666-6666-4666-8666-666666666666";
+  const planId = "77777777-7777-4777-8777-777777777777";
+  const approvalId = "f".repeat(64);
+  const signal: DeliverySignal = { signalId: "run-configuration-locked-001", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: runId };
+  let inserted: readonly unknown[] | undefined;
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation: "RESOLVE_AGENT_RUN_CONFIGURATION", status: "WAITING",
+    binding: { state: "RESOLVING_AGENT_CONFIGURATION", specRevisionId: specId,
+      testPlanRevisionId: planId, specApprovalReceiptId: approvalId,
+      lockedRunConfigurationId: null, providerRevisionId: null, candidateCommitSha: null,
+      draftPullRequest: null, evidenceBundleId: null, mainCommitSha: null, releaseId: null,
+      steamBuildId: null, externalGate: null, cancellationReason: null },
+    completion_signal_id: null, completion_signal_digest: null,
+    completion_source: null, completion_receipt_id: null,
+  };
+  let lock = { specRevisionId: specId, testPlanRevisionId: planId, specApprovalReceiptId: approvalId };
+  const statements: string[] = [];
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values?: readonly unknown[]) {
+      statements.push(statement);
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.agent_runs")) return { rows: [{ run_id: runId, state: "QUEUED", configuration_lock: lock }] as Row[] };
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) inserted = values;
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: signal.signalId, signal_digest: inserted?.[5],
+        signal: JSON.parse(String(inserted?.[6])), state: "PENDING",
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    }, release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  assert.equal((await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "AGENT_CONFIGURATION_SERVICE", sourceReceiptId: "configuration-lock-receipt-001", signal })).outboxId, outboxId);
+
+  Object.assign(action, { status: "WAITING" });
+  lock = { ...lock, testPlanRevisionId: "88888888-8888-4888-8888-888888888888" };
+  inserted = undefined;
+  await assert.rejects(store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "AGENT_CONFIGURATION_SERVICE", sourceReceiptId: "configuration-lock-receipt-002",
+    signal: { ...signal, signalId: "run-configuration-locked-002" } }), /configuration authority is unavailable/);
+  assert.equal(statements.at(-1), "ROLLBACK");
+});
+
 test("workflow action completion rejects a signal from the wrong authority", async () => {
   const client: ControlPlaneWorkflowSqlClient = {
     async query<Row>(statement: string) {
@@ -311,6 +433,7 @@ test("workflow action completion rejects a signal from the wrong authority", asy
         workflow_id: "delivery-001", operation: "REQUEST_FRESH_MFA", status: "WAITING",
         binding: {
           state: "WAITING_MFA", specRevisionId: null, lockedRunConfigurationId: null,
+          testPlanRevisionId: null, specApprovalReceiptId: null,
           providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
           evidenceBundleId: "main-evidence-1", mainCommitSha: "d".repeat(40), releaseId, steamBuildId: null,
           externalGate: null, cancellationReason: null,
@@ -352,6 +475,7 @@ test("external approval completion appends the verified receipt and advances the
     operation: "WAIT_FOR_EXTERNAL_APPROVAL", status: "WAITING",
     binding: {
       state: "EXTERNAL_APPROVAL_REQUIRED", specRevisionId: null, lockedRunConfigurationId: null,
+      testPlanRevisionId: null, specApprovalReceiptId: null,
       providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null,
       evidenceBundleId: evidenceId, mainCommitSha: null, releaseId: null, steamBuildId: "91234567",
       externalGate: "VALVE_REVIEW", cancellationReason: null,
@@ -542,9 +666,11 @@ test("workflow completion SPIFFE source configuration accepts only fixed source 
     DEVILUDO_WORKFLOW_COMPLETION_SPIFFE_SOURCES_JSON: JSON.stringify({
       "spiffe://deviludo.internal/broker/mfa": "MFA_BROKER",
       "spiffe://deviludo.internal/service/spec": "SPEC_SERVICE",
+      "spiffe://deviludo.internal/service/agent-configuration": "AGENT_CONFIGURATION_SERVICE",
     }),
   });
   assert.equal(sources.get("spiffe://deviludo.internal/broker/mfa"), "MFA_BROKER");
+  assert.equal(sources.get("spiffe://deviludo.internal/service/agent-configuration"), "AGENT_CONFIGURATION_SERVICE");
   assert.throws(() => workflowCompletionSourceMapFromEnv({
     DEVILUDO_WORKFLOW_COMPLETION_SPIFFE_SOURCES_JSON: JSON.stringify({
       "https://not-spiffe.example": "MFA_BROKER",
