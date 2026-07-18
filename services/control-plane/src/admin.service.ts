@@ -468,22 +468,33 @@ export class AdminService {
     body: Record<string, unknown>,
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
+    const operationKey = credentialRotationOperationKey(actor, credentialId);
     const rotation = await this.store.read((state) => {
       const value = state.credentials.get(credentialId);
       if (!value) return undefined;
-      const nextVersion = Math.max(0, ...[...state.credentials.values()]
+      const recovery = recoverCredentialRotation(state, value, operationKey);
+      const otherActiveVersions = [...state.credentials.values()].filter((candidate) =>
+        candidate.familyId === value.familyId && candidate.id !== value.id && candidate.state === "ACTIVE");
+      if (!recovery && otherActiveVersions.length > 0) {
+        throw new ServiceProblem(
+          409,
+          "CREDENTIAL_ROTATION_RECOVERY_REQUIRED",
+          "Another staged credential version must be recovered or cleaned up before a new rotation can start",
+        );
+      }
+      const nextVersion = recovery?.replacement.version ?? Math.max(0, ...[...state.credentials.values()]
         .filter((candidate) => candidate.familyId === value.familyId)
         .map((candidate) => candidate.version)) + 1;
-      return { current: structuredClone(value), nextVersion };
+      return { current: structuredClone(value), nextVersion, recovery };
     });
     if (!rotation) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
     const { current } = rotation;
     if (current.state !== "ACTIVE") throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only an active credential can be rotated");
     assertCredentialActor(current, actor);
     const apiKey = requiredString(body, "apiKey", 8192);
-    let replacement: CredentialVersionRecord;
+    let ingested: CredentialVersionRecord;
     try {
-      replacement = await this.ingestCredential(
+      ingested = await this.ingestCredential(
         current.familyId,
         rotation.nextVersion,
         current.label,
@@ -494,21 +505,41 @@ export class AdminService {
     } finally {
       body.apiKey = "";
     }
+    const replacement = rotation.recovery?.replacement ?? ingested;
+    if (rotation.recovery && (ingested.id !== replacement.id
+      || ingested.secretRef !== replacement.secretRef
+      || ingested.maskedFingerprint !== replacement.maskedFingerprint)) {
+      throw new ServiceProblem(409, "CREDENTIAL_ROTATION_RECOVERY_CONFLICT", "Staged credential metadata no longer matches its immutable Vault write");
+    }
     if (replacement.maskedFingerprint === current.maskedFingerprint) {
       await this.vault.revoke(replacement.secretRef);
       throw new ServiceProblem(409, "CREDENTIAL_REUSED", "Replacement credential must contain new secret material");
     }
-    let stage: CredentialRotationStage | undefined;
+    let stage: CredentialRotationStage | undefined = rotation.recovery?.stage;
     try {
-      stage = await this.store.mutate((state) => {
-        const result = stageCredentialRotation(state, current, replacement);
-        this.audit(state, "CREDENTIAL_ROTATION_VALIDATION_STARTED", current.id, actor, {
-          replacementVersionId: replacement.id,
-          successorProfileRevisionIds: result.profiles.map((item) => item.successorProfileId),
-          activeDefaultsPreservedUntilProbePasses: true,
+      if (stage) {
+        await this.store.mutate((state) => {
+          const recovery = recoverCredentialRotation(state, current, operationKey);
+          if (!recovery || recovery.replacement.id !== replacement.id) rotationRace();
+          this.audit(state, "CREDENTIAL_ROTATION_VALIDATION_RESUMED", current.id, actor, {
+            operationKey,
+            replacementVersionId: replacement.id,
+            successorProfileRevisionIds: recovery.stage.profiles.map((item) => item.successorProfileId),
+          });
         });
-        return result;
-      });
+      } else {
+        stage = await this.store.mutate((state) => {
+          const result = stageCredentialRotation(state, current, replacement, operationKey);
+          this.audit(state, "CREDENTIAL_ROTATION_VALIDATION_STARTED", current.id, actor, {
+            operationKey,
+            replacementVersionId: replacement.id,
+            successorProfileRevisionIds: result.profiles.map((item) => item.successorProfileId),
+            rotationBindings: rotationBindingAudit(result.profiles),
+            activeDefaultsPreservedUntilProbePasses: true,
+          });
+          return result;
+        });
+      }
       const probes = new Map<string, ProviderRevisionRecord["probe"]>();
       for (const provider of stage.providersToProbe) {
         probes.set(provider.id, await this.providerProbe.run(provider));
@@ -557,6 +588,7 @@ export class AdminService {
         }
         active.state = "PREVIOUS";
         this.audit(state, "CREDENTIAL_ROTATED", active.id, actor, {
+          operationKey,
           replacementVersionId: replacement.id,
           successorProfileRevisionIds: stage!.profiles.map((item) => item.successorProfileId),
           reboundDefaultCount: [...state.defaults.values()].filter((id) => stage!.profiles.some((item) => item.successorProfileId === id)).length,
@@ -572,23 +604,56 @@ export class AdminService {
         };
       }, credentialResultView);
     } catch (error) {
-      await this.vault.revoke(replacement.secretRef).catch(() => undefined);
-      if (stage) await this.store.mutate((state) => {
-        const next = state.credentials.get(replacement.id);
-        if (next && next.state === "ACTIVE") next.state = "REVOKED";
-        for (const binding of stage!.profiles) {
-          const successor = state.profiles.get(binding.successorProfileId);
-          if (successor?.state === "VALIDATING") successor.state = "DEGRADED";
-          if (binding.rotatesCredential) {
-            const provider = state.providers.get(binding.successorProviderId);
-            if (provider?.state === "VALIDATING") provider.state = "DEGRADED";
+      let cleanup: CredentialRotationCleanup | undefined;
+      try {
+        const recoveredStage = stage ?? await this.store.read((state) =>
+          recoverCredentialRotation(state, current, operationKey)?.stage);
+        cleanup = await this.store.mutate((state) => {
+          const owned = recoveredStage;
+          if (owned) {
+            const completed = completedCredentialRotation(state, current, replacement, owned);
+            if (completed) return Object.freeze({ completed });
+            const next = state.credentials.get(replacement.id);
+            const activeUse = owned.profiles.some((binding) =>
+              state.profiles.get(binding.successorProfileId)?.state === "ACTIVE"
+              || (binding.rotatesCredential
+                && state.providers.get(binding.successorProviderId)?.state === "ACTIVE"));
+            if (activeUse) {
+              this.audit(state, "CREDENTIAL_ROTATION_CLEANUP_DEFERRED", current.id, actor, {
+                operationKey,
+                replacementVersionId: replacement.id,
+                activeSuccessorPreserved: true,
+              });
+              return Object.freeze({ revoke: false });
+            }
+            if (next && next.state === "ACTIVE") next.state = "REVOKED";
+            for (const binding of owned.profiles) {
+              const successor = state.profiles.get(binding.successorProfileId);
+              if (successor?.state === "VALIDATING") successor.state = "DEGRADED";
+              if (binding.rotatesCredential) {
+                const provider = state.providers.get(binding.successorProviderId);
+                if (provider?.state === "VALIDATING") provider.state = "DEGRADED";
+              }
+            }
+            this.audit(state, "CREDENTIAL_ROTATION_FAILED", current.id, actor, {
+              operationKey,
+              replacementVersionId: replacement.id,
+              priorActiveConfigurationPreserved: true,
+            });
+            return Object.freeze({ revoke: true });
           }
-        }
-        this.audit(state, "CREDENTIAL_ROTATION_FAILED", current.id, actor, {
-          replacementVersionId: replacement.id,
-          priorActiveConfigurationPreserved: true,
+          // A different idempotency operation may own this same immutable Vault
+          // path. Never revoke metadata already present in the catalog without
+          // this operation's staged audit binding.
+          return Object.freeze({ revoke: !state.credentials.has(replacement.id) });
         });
-      }).catch(() => undefined);
+      } catch {
+        // A catalog outage leaves the key unreachable through the authority
+        // projection. Revoking blindly here could break a concurrently committed
+        // rotation, so a later fenced recovery owns cleanup.
+      }
+      if (cleanup?.completed) return credentialResultView(cleanup.completed);
+      if (cleanup?.revoke) await this.vault.revoke(replacement.secretRef).catch(() => undefined);
       throw error;
     }
   }
@@ -1138,16 +1203,174 @@ interface CredentialRotationStage {
   readonly providersToProbe: readonly ProviderRevisionRecord[];
 }
 
+interface CredentialRotationRecovery {
+  readonly replacement: CredentialVersionRecord;
+  readonly stage: CredentialRotationStage;
+}
+
+interface CredentialRotationCleanup {
+  readonly revoke?: boolean;
+  readonly completed?: Readonly<Record<string, unknown>>;
+}
+
+interface CredentialRotationBindingMetadata {
+  readonly sourceProfileId: string;
+  readonly successorProfileId: string;
+  readonly sourceProviderId: string;
+  readonly successorProviderId: string;
+  readonly usesReplacement: boolean;
+}
+
+function credentialRotationOperationKey(actor: RequestActor, credentialId: string): string {
+  const identity = actor.mutation?.identityDigest;
+  if (identity && DIGEST_PATTERN.test(identity)) return identity;
+  return createHash("sha256")
+    .update(`credential-rotation\0${actor.requestId}\0${actor.actorId}\0${credentialId}`)
+    .digest("hex");
+}
+
+function rotationBindingAudit(bindings: readonly CredentialRotationProfileBinding[]): readonly Readonly<CredentialRotationBindingMetadata>[] {
+  return Object.freeze(bindings.map((binding) => Object.freeze({
+    sourceProfileId: binding.sourceProfileId,
+    successorProfileId: binding.successorProfileId,
+    sourceProviderId: binding.sourceProviderId,
+    successorProviderId: binding.successorProviderId,
+    usesReplacement: binding.rotatesCredential,
+  })));
+}
+
+function recoverCredentialRotation(
+  state: AdminCatalogState,
+  expected: CredentialVersionRecord,
+  operationKey: string,
+): CredentialRotationRecovery | undefined {
+  const candidates = [...state.credentials.values()]
+    .filter((replacement) => replacement.rotation?.operationKey === operationKey
+      && replacement.rotation.sourceVersionId === expected.id)
+    .sort((left, right) => right.version - left.version);
+  for (const replacement of candidates) {
+    if (replacement.state !== "ACTIVE" || replacement.familyId !== expected.familyId
+      || replacement.version <= expected.version || replacement.maskedFingerprint === expected.maskedFingerprint) continue;
+    const bindings = parseRotationBindings(replacement.rotation?.bindings ?? []);
+    if (!bindings) continue;
+    const successorBySource = new Map(bindings.map((binding) =>
+      [binding.sourceProfileId, binding.successorProfileId]));
+    const providers = new Map<string, ProviderRevisionRecord>();
+    let valid = true;
+    for (const binding of bindings) {
+      const source = state.profiles.get(binding.sourceProfileId);
+      const successor = state.profiles.get(binding.successorProfileId);
+      const sourceProvider = state.providers.get(binding.sourceProviderId);
+      const successorProvider = state.providers.get(binding.successorProviderId);
+      if (!source || source.state !== "ACTIVE" || !successor || successor.state !== "VALIDATING"
+        || successor.revision !== source.revision + 1 || successor.scope !== source.scope
+        || successor.scopeId !== source.scopeId || successor.agent !== source.agent
+        || source.providerRevisionId !== binding.sourceProviderId
+        || successor.providerRevisionId !== binding.successorProviderId
+        || successor.installationId !== source.installationId
+        || JSON.stringify(successor.budget) !== JSON.stringify(source.budget)
+        || successor.fallbackProfileRevisionId !== (source.fallbackProfileRevisionId
+          ? successorBySource.get(source.fallbackProfileRevisionId) ?? source.fallbackProfileRevisionId
+          : null)) {
+        valid = false; break;
+      }
+      if (binding.rotatesCredential) {
+        if (source.credentialVersionId !== expected.id || successor.credentialVersionId !== replacement.id
+          || !sourceProvider || sourceProvider.state !== "ACTIVE" || sourceProvider.credentialVersionId !== expected.id
+          || !successorProvider || successorProvider.state !== "VALIDATING"
+          || successorProvider.credentialVersionId !== replacement.id
+          || successorProvider.revision !== sourceProvider.revision + 1
+          || successorProvider.agent !== sourceProvider.agent
+          || successorProvider.protocol !== sourceProvider.protocol
+          || successorProvider.baseUrl !== sourceProvider.baseUrl
+          || successorProvider.authentication !== sourceProvider.authentication
+          || JSON.stringify(successorProvider.approvedPorts) !== JSON.stringify(sourceProvider.approvedPorts)
+          || JSON.stringify(successorProvider.models) !== JSON.stringify(sourceProvider.models)
+          || JSON.stringify(successorProvider.pricing) !== JSON.stringify(sourceProvider.pricing)
+          || JSON.stringify(successorProvider.governance) !== JSON.stringify(sourceProvider.governance)) {
+          valid = false; break;
+        }
+        providers.set(successorProvider.id, structuredClone(successorProvider));
+      } else if (binding.successorProviderId !== binding.sourceProviderId
+        || successor.credentialVersionId !== source.credentialVersionId
+        || !sourceProvider || sourceProvider.state !== "ACTIVE") {
+        valid = false; break;
+      }
+    }
+    if (!valid) continue;
+    return Object.freeze({
+      replacement: structuredClone(replacement),
+      stage: Object.freeze({
+        profiles: Object.freeze(bindings),
+        providersToProbe: Object.freeze([...providers.values()]),
+      }),
+    });
+  }
+  return undefined;
+}
+
+function parseRotationBindings(raw: readonly unknown[]): readonly CredentialRotationProfileBinding[] | undefined {
+  const bindings: CredentialRotationProfileBinding[] = [];
+  const sourceIds = new Set<string>();
+  const successorIds = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const value = item as Record<string, unknown>;
+    if (typeof value.sourceProfileId !== "string" || typeof value.successorProfileId !== "string"
+      || typeof value.sourceProviderId !== "string" || typeof value.successorProviderId !== "string"
+      || typeof value.usesReplacement !== "boolean" || sourceIds.has(value.sourceProfileId)
+      || successorIds.has(value.successorProfileId)) return undefined;
+    sourceIds.add(value.sourceProfileId); successorIds.add(value.successorProfileId);
+    bindings.push(Object.freeze({
+      sourceProfileId: value.sourceProfileId,
+      successorProfileId: value.successorProfileId,
+      sourceProviderId: value.sourceProviderId,
+      successorProviderId: value.successorProviderId,
+      rotatesCredential: value.usesReplacement,
+    }));
+  }
+  return Object.freeze(bindings);
+}
+
+function completedCredentialRotation(
+  state: AdminCatalogState,
+  expected: CredentialVersionRecord,
+  replacement: CredentialVersionRecord,
+  stage: CredentialRotationStage,
+): Readonly<Record<string, unknown>> | undefined {
+  const previous = state.credentials.get(expected.id);
+  const active = state.credentials.get(replacement.id);
+  if (!previous || previous.state !== "PREVIOUS" || !active || active.state !== "ACTIVE"
+    || active.maskedFingerprint !== replacement.maskedFingerprint) return undefined;
+  const sourceIds = new Set(stage.profiles.map((binding) => binding.sourceProfileId));
+  if ([...state.defaults.values()].some((profileId) => sourceIds.has(profileId))) return undefined;
+  for (const binding of stage.profiles) {
+    if (state.profiles.get(binding.sourceProfileId)?.state !== "SUPERSEDED"
+      || state.profiles.get(binding.successorProfileId)?.state !== "ACTIVE") return undefined;
+    if (binding.rotatesCredential
+      && (state.providers.get(binding.sourceProviderId)?.state !== "SUPERSEDED"
+        || state.providers.get(binding.successorProviderId)?.state !== "ACTIVE")) return undefined;
+  }
+  return Object.freeze({
+    active,
+    previous,
+    successorProfileRevisionIds: Object.freeze(stage.profiles.map((item) => item.successorProfileId)),
+    newTasksOnly: true,
+    oldVersionNoLongerIssued: true,
+  });
+}
+
 function stageCredentialRotation(
   state: AdminCatalogState,
   expected: CredentialVersionRecord,
   replacement: CredentialVersionRecord,
+  operationKey: string,
 ): CredentialRotationStage {
   const active = state.credentials.get(expected.id);
   if (!active || active.state !== "ACTIVE" || active.version !== expected.version
     || active.maskedFingerprint !== expected.maskedFingerprint || active.familyId !== replacement.familyId
-    || replacement.version <= active.version || state.credentials.has(replacement.id)) rotationRace();
-  state.credentials.set(replacement.id, structuredClone(replacement));
+    || replacement.version <= active.version || state.credentials.has(replacement.id)
+    || !DIGEST_PATTERN.test(operationKey)) rotationRace();
 
   const activeProfiles = [...state.profiles.values()].filter((profile) => profile.state === "ACTIVE");
   const directlyAffected = new Set(activeProfiles
@@ -1226,6 +1449,14 @@ function stageCredentialRotation(
       rotatesCredential,
     }));
   }
+  state.credentials.set(replacement.id, {
+    ...structuredClone(replacement),
+    rotation: Object.freeze({
+      operationKey,
+      sourceVersionId: expected.id,
+      bindings: rotationBindingAudit(bindings),
+    }),
+  });
   return Object.freeze({
     profiles: Object.freeze(bindings),
     providersToProbe: Object.freeze(providersToProbe),

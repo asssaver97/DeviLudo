@@ -143,6 +143,18 @@ export interface CredentialVersionRecord {
   state: "ACTIVE" | "PREVIOUS" | "REVOKED";
   readonly createdAt: string;
   lastUsedAt: string | null;
+  /** Internal crash-recovery binding. Public credential projectors omit it. */
+  readonly rotation?: Readonly<{
+    operationKey: string;
+    sourceVersionId: string;
+    bindings: readonly Readonly<{
+      sourceProfileId: string;
+      successorProfileId: string;
+      sourceProviderId: string;
+      successorProviderId: string;
+      usesReplacement: boolean;
+    }>[];
+  }>;
 }
 
 export interface AuditRecord {

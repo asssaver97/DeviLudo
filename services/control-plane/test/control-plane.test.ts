@@ -265,12 +265,15 @@ test("credentials never echo plaintext and Provider activation is a separate sec
   assert.equal(rotate.statusCode, 201);
   assert.equal(rotate.body.includes(rotatedPlaintext), false);
   assert.equal(rotate.body.includes("secretRef"), false);
+  assert.equal(rotate.body.includes("operationKey"), false);
+  assert.equal(rotate.body.includes("rotationBindings"), false);
   assert.equal(rotate.json().data.previous.state, "PREVIOUS");
   assert.equal(rotate.json().data.active.state, "ACTIVE");
   assert.equal(rotate.json().data.oldVersionNoLongerIssued, true);
   assert.equal(rotate.json().data.successorProfileRevisionIds.length > 0, true);
 
   const rotatedCatalog = await inject({ method: "GET", url: "/admin/agents", role: "SecurityAdmin" });
+  assert.equal(rotatedCatalog.body.includes("operationKey"), false);
   const successorProfileId = rotate.json().data.successorProfileRevisionIds[0] as string;
   assert.equal(rotatedCatalog.json().data.platformDefault, successorProfileId);
   assert.equal(rotatedCatalog.json().data.profiles.find((item: { id: string }) => item.id === profileId).state, "SUPERSEDED");

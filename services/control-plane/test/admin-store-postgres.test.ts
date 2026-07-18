@@ -79,6 +79,24 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
       discoveredAt: "2026-07-18T00:00:00.000Z",
     };
     state.versions.set(version.id, version);
+    state.credentials.set("credential-platform-recovery-v2", {
+      id: "credential-platform-recovery-v2",
+      familyId: "credential-platform-recovery",
+      version: 2,
+      label: "recovery fixture",
+      scope: "platform",
+      scopeId: "global",
+      secretRef: "vault://kv/deviludo/records/11111111-1111-4111-8111-111111111111",
+      maskedFingerprint: "sha256:12345678…abcdef",
+      state: "ACTIVE",
+      createdAt: "2026-07-18T00:00:00.000Z",
+      lastUsedAt: null,
+      rotation: {
+        operationKey: "e".repeat(64),
+        sourceVersionId: "credential-platform-recovery-v1",
+        bindings: [],
+      },
+    });
     recordAdminAudit(state, {
       action: "AGENT_VERSION_DISCOVERED",
       resource: version.id,
@@ -98,6 +116,7 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
   assert.equal(created, "codex-cli@1.2.3");
   assert.equal(revision, 1);
   assert.equal((payload as { versions: unknown[] }).versions.length, 1);
+  assert.equal((payload as { credentials: unknown[] }).credentials.length, 1);
   assert.equal(audits.length, 1);
   assert.equal(audits[0]?.[5], "tenant-1");
   assert.deepEqual(idempotencyPayload, { versionId: "codex-cli@1.2.3" });
@@ -107,8 +126,13 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
   const read = await store.read((state) => ({
     version: state.versions.get("codex-cli@1.2.3")?.version,
     audit: state.audit[0]?.action,
+    rotationOperation: state.credentials.get("credential-platform-recovery-v2")?.rotation?.operationKey,
   }));
-  assert.deepEqual(read, { version: "1.2.3", audit: "AGENT_VERSION_DISCOVERED" });
+  assert.deepEqual(read, {
+    version: "1.2.3",
+    audit: "AGENT_VERSION_DISCOVERED",
+    rotationOperation: "e".repeat(64),
+  });
   assert.equal(released, 2);
 });
 

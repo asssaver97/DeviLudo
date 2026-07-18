@@ -29,7 +29,12 @@ passes does one catalog transaction mark the old credential `PREVIOUS`, activate
 the successors and move matching platform/tenant/project defaults. Probe failure
 revokes the replacement and leaves the old active defaults untouched. Queued and
 running tasks retain their recorded revision IDs; the retired credential is not
-issued to new Gateway lease requests.
+issued to new Gateway lease requests. The staged replacement also carries an
+internal idempotency-operation binding and exact successor map (omitted from all
+public projections), so a process restart replays the same immutable Vault path,
+re-probes the same successors, and cannot allocate a second active key. Failure
+cleanup first proves that operation owns the staged revision and that no active
+successor references it; it never revokes a key committed by a concurrent recovery.
 
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
 

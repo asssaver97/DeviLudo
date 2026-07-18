@@ -22,13 +22,21 @@ export abstract class SecretVault {
 }
 
 export class ProcessIsolatedSecretVault extends SecretVault {
-  readonly #handles = new Set<string>();
+  readonly #paths = new Map<string, Readonly<{ secretRef: string; digest: string }>>();
 
   async write(path: string, plaintext: Uint8Array): Promise<SecretWriteResult> {
     if (plaintext.byteLength < 8) throw new Error("Credential must contain at least 8 bytes");
     const digest = createHash("sha256").update(plaintext).digest("hex");
+    const existing = this.#paths.get(path);
+    if (existing) {
+      if (existing.digest !== digest) throw new Error("Vault path already contains different immutable secret material");
+      return {
+        secretRef: existing.secretRef,
+        maskedFingerprint: `sha256:${digest.slice(0, 8)}…${digest.slice(-6)}`,
+      };
+    }
     const handle = `vault://kv/data/deviludo/${encodeURIComponent(path)}?version=${randomUUID()}`;
-    this.#handles.add(handle);
+    this.#paths.set(path, Object.freeze({ secretRef: handle, digest }));
     return {
       secretRef: handle,
       maskedFingerprint: `sha256:${digest.slice(0, 8)}…${digest.slice(-6)}`,
@@ -36,7 +44,10 @@ export class ProcessIsolatedSecretVault extends SecretVault {
   }
 
   async revoke(secretRef: string): Promise<void> {
-    this.#handles.delete(secretRef);
+    // Keep the immutable path reservation so a process retry receives the same
+    // reference instead of silently replacing a revoked or already staged key.
+    // The production Secret Broker follows the same write-key replay contract.
+    void secretRef;
   }
 }
 
