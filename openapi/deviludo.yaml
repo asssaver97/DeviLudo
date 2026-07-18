@@ -158,6 +158,31 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+  /projects/{projectId}/conversation:
+    get:
+      operationId: getSpecConversation
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+    post:
+      operationId: sendSpecConversationMessage
+      description: Uses the independent low-latency specification service, never the development Agent.
+      parameters:
+        - { $ref: "#/components/parameters/ProjectId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedRevision, message]
+              properties:
+                expectedRevision: { type: integer, minimum: 0 }
+                message: { type: string, minLength: 1, maxLength: 4000 }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: Expected revision changed or the command is in progress. }
   /projects/{projectId}/spec-revisions:
     post:
       operationId: approveGameSpecRevision
@@ -182,6 +207,11 @@ components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
   parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
       in: header

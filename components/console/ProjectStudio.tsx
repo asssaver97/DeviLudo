@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { LocalDeliverySnapshot } from "@/lib/local-delivery/model";
+import type { SpecDialogueMessage, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
 import { AppShell } from "./AppShell";
 import { ArrowIcon, CheckIcon, ClockIcon, FileIcon, GithubIcon, SparkIcon } from "./Icons";
 import { LocalDeliveryPanel } from "./LocalDeliveryPanel";
 
 type Message = {
-  id: number;
+  id: string;
   role: "assistant" | "user";
   text: string;
   meta?: string;
@@ -16,35 +17,29 @@ type Message = {
 
 const initialMessages: Message[] = [
   {
-    id: 1,
+    id: "history-1",
     role: "user",
     text: "我想做一款发生在漂浮群岛上的航海生存游戏。玩家驾驶一艘会成长的船，在岛屿之间收集余烬。",
     meta: "10:06",
   },
   {
-    id: 2,
+    id: "history-2",
     role: "assistant",
     text: "这个核心意象很清楚。为了让首个可玩版本能在一周内闭环，我建议先确定一次航行的目标：玩家是带着资源安全返港，还是击败守护群岛的首领？",
     meta: "构想助手 · 10:06",
   },
   {
-    id: 3,
+    id: "history-3",
     role: "user",
     text: "每局 20 分钟，找到三枚余烬核心后返港。途中会有风暴和海盗，但不想做成很硬核的生存游戏。",
     meta: "10:08",
   },
   {
-    id: 4,
+    id: "history-4",
     role: "assistant",
     text: "明白：轻量资源压力、明确的 20 分钟目标。新手局可以把失败定义为船体归零或时间耗尽，并保留少量永久材料，避免失败没有收获。你希望战斗偏即时瞄准，还是让玩家更专注航线与技能组合？",
     meta: "构想助手 · 10:08",
   },
-];
-
-const followups = [
-  "我把这个决定写入了核心循环。为了冻结测试计划，还需要确认：暂停菜单是否允许随时保存并退出？",
-  "好的，体验目标已经更具体了。首版将用键鼠和手柄两套输入；你希望所有文字和按钮都支持简体中文与英文吗？",
-  "已更新范围。最后一个关键选择：三个余烬核心是固定岛屿，还是每局从五个候选岛随机抽取？这会直接影响可重复游玩和自动测试方式。",
 ];
 
 const acceptance = [
@@ -66,27 +61,60 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
   const [notice, setNotice] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackCount, setFeedbackCount] = useState(2);
+  const [generated, setGenerated] = useState<SpecModelResult | null>(null);
+  const [dialogueAuthority, setDialogueAuthority] = useState<{
+    conversationId: string;
+    specRevisionId: string;
+    testPlanRevisionId: string;
+  } | null>(null);
   const [deliveryRefresh, setDeliveryRefresh] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const approvalCommandRef = useRef<string | null>(null);
 
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
-  const completion = useMemo(() => Math.min(92, 44 + messages.length * 6), [messages.length]);
+  const completion = useMemo(() => generated?.completeness ?? Math.min(92, 44 + messages.length * 6), [generated, messages.length]);
 
-  function sendMessage(text = draft) {
+  async function sendMessage(text = draft) {
     const clean = text.trim();
     if (!clean || busy) return;
-    const nextId = messages.length + 1;
-    setMessages((current) => [...current, { id: nextId, role: "user", text: clean, meta: "刚刚" }]);
+    const projectId = mode === "new" ? "new-project-draft" : "ember-archipelago";
+    const localId = `pending-${crypto.randomUUID()}`;
+    const commandId = crypto.randomUUID();
+    setMessages((current) => [...current, { id: localId, role: "user", text: clean, meta: "刚刚" }]);
     setDraft("");
     setBusy(true);
-    window.setTimeout(() => {
-      const response = followups[Math.min(followups.length - 1, Math.floor((messages.length - initialMessages.length) / 2))];
-      setMessages((current) => [...current, { id: nextId + 1, role: "assistant", text: response, meta: "构想助手 · 刚刚" }]);
-      setRevision((current) => current + 1);
-      setBusy(false);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/conversation`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `spec-chat-${commandId}` },
+        body: JSON.stringify({ expectedRevision: revision, message: clean }),
+      });
+      const payload = await response.json() as {
+        data?: {
+          conversationId: string;
+          revision: number;
+          specRevisionId: string;
+          testPlanRevisionId: string;
+          messages: readonly SpecDialogueMessage[];
+          result: SpecModelResult;
+        };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "构想服务未返回有效修订");
+      setMessages((current) => mergeMessages(current.filter((message) => message.id !== localId), payload.data!.messages));
+      setGenerated(payload.data.result);
+      setDialogueAuthority({
+        conversationId: payload.data.conversationId,
+        specRevisionId: payload.data.specRevisionId,
+        testPlanRevisionId: payload.data.testPlanRevisionId,
+      });
+      setRevision(payload.data.revision);
+      setApproved(false);
       window.setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
-    }, 520);
+    } catch (reason) {
+      setMessages((current) => current.filter((message) => message.id !== localId));
+      setNotice(reason instanceof Error ? `构想服务失败：${reason.message}` : "构想服务失败");
+    } finally { setBusy(false); }
   }
 
   async function approveSpec() {
@@ -97,12 +125,22 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
       const response = await fetch(`/api/projects/${projectId}/spec-revisions`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `approve-${specId}-${approvalCommandRef.current}` },
-        body: JSON.stringify({ revision: specId, action: "approve" }),
+        body: JSON.stringify({
+          revision: specId,
+          action: "approve",
+          ...(dialogueAuthority ? {
+            conversationId: dialogueAuthority.conversationId,
+            expectedRevision: revision,
+            specRevisionId: dialogueAuthority.specRevisionId,
+            testPlanRevisionId: dialogueAuthority.testPlanRevisionId,
+          } : {}),
+        }),
       });
-      const payload = await response.json() as { error?: { message?: string } };
+      const payload = await response.json() as { data?: { authority?: { revision?: number } }; error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "规格批准失败");
       approvalCommandRef.current = null;
       setApproved(true);
+      if (Number.isSafeInteger(payload.data?.authority?.revision)) setRevision(payload.data!.authority!.revision!);
       setDeliveryRefresh((value) => value + 1);
       setNotice(`${specId} 已冻结，Claude Code 开发任务已锁定并入队。`);
     } catch (reason) {
@@ -220,10 +258,10 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
           <div className="spec-section spec-facts">
             <span className="spec-section-label">范围</span>
             <dl>
-              <div><dt>引擎</dt><dd>Godot 4.5 · 2D</dd></div>
+              <div><dt>引擎</dt><dd>Godot {generated?.spec.godotVersion ?? "4.5.0"} · 2D</dd></div>
               <div><dt>玩家</dt><dd>桌面单机</dd></div>
               <div><dt>输入</dt><dd>键鼠 + 手柄</dd></div>
-              <div><dt>目标</dt><dd>Win · Linux · macOS</dd></div>
+              <div><dt>目标</dt><dd>{generated?.spec.targetPlatforms.join(" · ") ?? "Win · Linux · macOS"}</dd></div>
               <div><dt>局长</dt><dd>约 20 分钟</dd></div>
             </dl>
           </div>
@@ -231,13 +269,13 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
           <div className="spec-section">
             <span className="spec-section-label">验收标准</span>
             <ul className="acceptance-list">
-              {acceptance.map((item) => <li key={item}><CheckIcon /><span>{item}</span></li>)}
+              {(generated?.spec.acceptanceCriteria.map((item) => item.description) ?? acceptance).map((item) => <li key={item}><CheckIcon /><span>{item}</span></li>)}
             </ul>
           </div>
 
           <div className="spec-section">
             <span className="spec-section-label">冻结测试计划</span>
-            <div className="test-chip-list">{frozenTests.map((test) => <span key={test}>{test}</span>)}</div>
+            <div className="test-chip-list">{(generated?.testPlan.scenarios ?? frozenTests).map((test) => <span key={test}>{test}</span>)}</div>
           </div>
 
           <div className="spec-footer">
@@ -273,4 +311,17 @@ export function ProjectStudio({ mode = "existing" }: { mode?: "new" | "existing"
       />
     </AppShell>
   );
+}
+
+function mergeMessages(current: readonly Message[], persisted: readonly SpecDialogueMessage[]): Message[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of persisted) {
+    byId.set(message.id, {
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      meta: message.role === "assistant" ? "构想助手 · 已保存" : "已保存",
+    });
+  }
+  return [...byId.values()];
 }

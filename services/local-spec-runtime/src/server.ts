@@ -1,0 +1,112 @@
+import { createHash } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
+import { DeterministicLocalSpecModel } from "../../spec-dialogue/src/model";
+import { SpecDialogueConflict, SpecDialogueService } from "../../spec-dialogue/src/service";
+import { InMemorySpecDialogueStore } from "../../spec-dialogue/src/store";
+
+const HOST = "127.0.0.1";
+const PORT = parsePort(process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_PORT ?? "4313");
+const BODY_LIMIT = 16 * 1024;
+const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const service = new SpecDialogueService(new InMemorySpecDialogueStore(), new DeterministicLocalSpecModel());
+
+export function createLocalSpecRuntimeServer() {
+  return createServer(async (request, response) => {
+    secure(response);
+    try {
+      await dispatch(request, response);
+    } catch (error) {
+      if (error instanceof BodyLimitError) return json(response, 413, { error: { code: "LOCAL_SPEC_REQUEST_TOO_LARGE", message: "Local specification message is too large" } });
+      if (error instanceof SpecDialogueConflict) return json(response, 409, { error: { code: error.code, message: "Specification revision changed; refresh before retrying" } });
+      return json(response, 400, { error: { code: "INVALID_LOCAL_SPEC_REQUEST", message: "Local specification request is invalid" } });
+    }
+  });
+}
+
+async function dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const url = new URL(request.url ?? "/", `http://${HOST}`);
+  if (request.method === "GET" && url.pathname === "/health") {
+    await service.probe();
+    return json(response, 200, { status: "ok", service: "deviludo-local-spec-runtime", mode: "deterministic-loopback" });
+  }
+  if (request.headers["x-deviludo-local-spec-runtime"] !== "v1") {
+    return json(response, 403, { error: { code: "LOCAL_SPEC_RUNTIME_HEADER_REQUIRED", message: "Local specification runtime header is required" } });
+  }
+  const match = /^\/v1\/projects\/([^/]+)\/(conversation|spec-approval)$/.exec(url.pathname);
+  if (!match) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
+  const projectId = decodeURIComponent(match[1]!);
+  const operation = match[2]!;
+  if (!PROJECT.test(projectId)) throw new Error("project");
+  const binding = { tenantId: "tenant-local", projectId, conversationId: `local:${projectId}` };
+  if (request.method === "GET" && operation === "conversation") {
+    return json(response, 200, { data: await service.snapshot(binding) });
+  }
+  if (request.method !== "POST" || contentType(request.headers["content-type"]) !== "application/json") {
+    return json(response, 405, { error: { code: "METHOD_NOT_ALLOWED", message: "Local specification route requires JSON POST" } });
+  }
+  const idempotency = header(request, "idempotency-key");
+  if (!idempotency || !IDEMPOTENCY.test(idempotency)) throw new Error("idempotency");
+  const body = object(JSON.parse(await readBody(request)));
+  const operationKey = createHash("sha256").update(`${projectId}\0${idempotency}`).digest("hex");
+  if (operation === "spec-approval") {
+    if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "specRevisionId", "testPlanRevisionId"])) throw new Error("shape");
+    const receipt = await service.approve({ ...binding, actorId: "local-user", operationKey, ...body });
+    return json(response, 201, { data: receipt });
+  }
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "message"])) throw new Error("shape");
+  const snapshot = await service.send({ ...binding, actorId: "local-user", operationKey, expectedRevision: body.expectedRevision, message: body.message });
+  return json(response, 201, { data: snapshot });
+}
+
+function readBody(request: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    request.on("data", (chunk: Buffer | string) => {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += value.byteLength;
+      if (bytes <= BODY_LIMIT) chunks.push(value);
+    });
+    request.once("end", () => bytes > BODY_LIMIT ? reject(new BodyLimitError()) : resolve(Buffer.concat(chunks).toString("utf8")));
+    request.once("error", reject);
+    request.once("aborted", () => reject(new Error("aborted")));
+  });
+}
+
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("object");
+  return value as Record<string, unknown>;
+}
+function header(request: IncomingMessage, name: string): string | null {
+  const value = request.headers[name];
+  return typeof value === "string" ? value : null;
+}
+function contentType(value: string | string[] | undefined): string | null {
+  return typeof value === "string" ? value.toLowerCase().split(";", 1)[0]?.trim() ?? null : null;
+}
+function secure(response: ServerResponse): void {
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("x-content-type-options", "nosniff");
+}
+function json(response: ServerResponse, status: number, body: unknown): void {
+  const encoded = JSON.stringify(body);
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.setHeader("content-length", Buffer.byteLength(encoded));
+  response.end(encoded);
+}
+function parsePort(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 65_535 || String(value) !== raw) throw new Error("DEVILUDO_LOCAL_SPEC_RUNTIME_PORT is invalid");
+  return value;
+}
+class BodyLimitError extends Error {}
+
+export async function runLocalSpecRuntime(): Promise<void> {
+  const server = createLocalSpecRuntimeServer();
+  server.listen(PORT, HOST, () => console.log(`[local-spec-runtime] READY http://${HOST}:${PORT}`));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await runLocalSpecRuntime();

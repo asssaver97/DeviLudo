@@ -185,6 +185,16 @@ duplicate charge. See
 `services/inference-gateway/.env.example`; PEM and run-token key material must
 be file-mounted, never placed directly in environment variables.
 
+## Specification dialogue
+
+`services/spec-dialogue` owns the non-Agent idea conversation. It accepts only
+allow-listed mTLS Web identities, stores under PostgreSQL tenant RLS, and calls
+a separate mTLS low-latency model Broker without receiving an upstream key or
+Base URL. Each turn atomically commits the message pair and immutable draft
+spec/test-plan pair. Explicit approval creates approved/frozen successors and
+the same authoritative test-plan binding consumed by Artifact Preparer and
+Runner Control.
+
 The Agent version approval API requires an exact SHA-256 integrity value,
 verified signature flag, passing scan and internal OCI SBOM reference. Agent
 images are accepted only for development Worker pools, with exact CLI and

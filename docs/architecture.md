@@ -107,6 +107,13 @@ iteration and invalidates all prior candidate evidence. User acceptance permits
 merge, after which a full gate reruns against the actual main SHA—candidate PR
 evidence can never authorize release.
 
+The idea-chat service has its own mTLS workload boundary and no autonomous tool
+runtime. A turn is fenced by its operation key and expected conversation
+revision, then atomically appends both messages and complete `GAME_SPEC` /
+`TEST_PLAN` draft successors. Approval creates separate `APPROVED` and `FROZEN`
+successors plus the append-only `approved_test_plan_bindings` edge; it never
+updates a draft revision in place.
+
 The GitHub Connector is repository-scoped by installation ID plus numeric and
 GraphQL repository IDs. An Ed25519-attested candidate artifact drives GitHub's
 blob/tree/commit/ref APIs; the Agent never pushes. Draft PR creation and merge

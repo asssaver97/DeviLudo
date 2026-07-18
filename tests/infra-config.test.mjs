@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 30 }, (_, index) => {
+  const offsets = Array.from({ length: 31 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,28 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("specification dialogue persists tenant-isolated messages and immutable draft pairs", () => {
+  const migration = readFileSync(new URL("../infra/postgres/031_spec_dialogue.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/spec-dialogue/src/postgres-store.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/spec-dialogue/src/run-service.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.spec_conversations/);
+  assert.match(migration, /CREATE TABLE deviludo\.spec_dialogue_operations/);
+  assert.match(migration, /CREATE TABLE deviludo\.spec_conversation_messages/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /spec_conversation_messages_append_only/);
+  assert.match(store, /INSERT INTO deviludo\.immutable_revisions/);
+  assert.match(store, /aggregateType: "GAME_SPEC"/);
+  assert.match(store, /aggregateType: "TEST_PLAN"/);
+  assert.match(store, /state: "APPROVED"/);
+  assert.match(store, /state: "FROZEN"/);
+  assert.match(store, /INSERT INTO deviludo\.approved_test_plan_bindings/);
+  assert.match(store, /spec\.aggregate_id !== conversation\.specAggregateId/);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(runtime, /DEVILUDO_SPEC_DIALOGUE_WEB_SPIFFE_IDS/);
+  assert.match(runtime, /DEVILUDO_SPEC_MODEL_BROKER_TLS_KEY_FILE/);
+  assert.doesNotMatch(runtime, /ANTHROPIC_API_KEY|OPENAI_API_KEY|apiKey/);
 });
 
 test("ambiguous inference usage has one SecurityAdmin-only evidence-bound reconciliation path", () => {

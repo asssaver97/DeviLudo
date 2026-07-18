@@ -18,7 +18,9 @@ DeviLudo 的前端、预览 API、Godot 验证侧车和 Agent 就绪探针可以
 npm run local:dev
 ```
 
-测试站地址为 <http://127.0.0.1:3000>，Godot 验证侧车为 `http://127.0.0.1:4311`，Agent 就绪探针为 `http://127.0.0.1:4312`。同一命令会检查三个端口并同时启动三个进程。按一次 `Ctrl-C` 会向完整子进程树发送优雅停止信号；五秒后仍未退出会自动强制清理，再按一次 `Ctrl-C` 可立即强制停止。
+测试站地址为 <http://127.0.0.1:3000>，Godot 验证侧车为 `http://127.0.0.1:4311`，Agent 就绪探针为 `http://127.0.0.1:4312`，规格对话侧车为 `http://127.0.0.1:4313`。同一命令会检查四个端口并同时启动四个进程。按一次 `Ctrl-C` 会向完整子进程树发送优雅停止信号；五秒后仍未退出会自动强制清理，再按一次 `Ctrl-C` 可立即强制停止。
+
+项目页的构想消息会真实经过规格对话 sidecar，返回完整规格、验收标准和 TestKit 计划；批准会创建独立的已批准/已冻结后继修订。该本地模型明确报告为 `deterministic-loopback`，生产环境不会启用它或假装第三方模型已配置。
 
 Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/模型通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。默认配置没有受信 Provider 绑定探针，也没有隔离执行器，会安全地报告 `BLOCKED`；这不是测试栈故障。
 

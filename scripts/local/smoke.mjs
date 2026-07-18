@@ -4,6 +4,7 @@ const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
 const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const DEFAULT_LOCAL_AGENT_RUNTIME_PORT = 4312;
+const DEFAULT_LOCAL_SPEC_RUNTIME_PORT = 4313;
 const READY_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const RETRY_INTERVAL_MS = 250;
@@ -20,7 +21,8 @@ Options:
 Environment:
   DEVILUDO_LOCAL_PORT          Alternative way to select the Web port
   DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})
-  DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})`);
+  DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
+  DEVILUDO_LOCAL_SPEC_RUNTIME_PORT  Local specification dialogue port (default: ${DEFAULT_LOCAL_SPEC_RUNTIME_PORT})`);
 }
 
 function parseEnvironmentPort(name, fallback) {
@@ -139,37 +141,47 @@ async function checkHtmlRoute(baseUrl, route, expectedText) {
 let port;
 let localRuntimePort;
 let localAgentRuntimePort;
+let localSpecRuntimePort;
 try {
   port = parsePort(process.argv.slice(2));
   if (port !== null) {
     localRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_RUNTIME_PORT", DEFAULT_LOCAL_RUNTIME_PORT);
     localAgentRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT", DEFAULT_LOCAL_AGENT_RUNTIME_PORT);
+    localSpecRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_SPEC_RUNTIME_PORT", DEFAULT_LOCAL_SPEC_RUNTIME_PORT);
   }
 } catch (error) {
   port = undefined;
   localRuntimePort = undefined;
   localAgentRuntimePort = undefined;
+  localSpecRuntimePort = undefined;
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);
   usage();
   process.exitCode = 1;
 }
 
-if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined) {
+if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined || localSpecRuntimePort === undefined) {
   process.exit();
 }
 
 const baseUrl = `http://${HOST}:${port}`;
 const runtimeUrl = `http://${HOST}:${localRuntimePort}`;
 const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
+const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, admin, adminState, runtime, agentRuntime, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
+  const [home, admin, adminState, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     request(baseUrl, "/api/admin/agents"),
     request(runtimeUrl, "/health"),
     request(agentRuntimeUrl, "/health"),
+    request(specRuntimeUrl, "/health"),
+    request(baseUrl, "/api/projects/smoke-spec/conversation", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-spec-dialogue-1" },
+      body: JSON.stringify({ expectedRevision: 0, message: "制作一款十分钟一局的 2D 桌面单机游戏" }),
+    }),
     request(agentRuntimeUrl, "/v1/preflight", {
       method: "POST",
       headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
@@ -243,6 +255,33 @@ try {
   const agentSummary = agentHealth.agents
     .map((agent) => `${agent.agent} ${agent.observedVersion ?? "unavailable"} (${agent.state})`)
     .join(" · ");
+  const specHealth = await specRuntime.response.json();
+  if (!specRuntime.response.ok || specHealth.service !== "deviludo-local-spec-runtime" || specHealth.mode !== "deterministic-loopback") {
+    throw new Error("local specification dialogue service is not ready");
+  }
+  const specPayload = await specDialogue.response.json();
+  if (specDialogue.response.status !== 201 || specPayload.data?.revision !== 1
+    || !specPayload.data?.result?.spec || !specPayload.data?.testPlanDigest
+    || specPayload.data.result.testPlan.version !== "godot-testkit-1.0.0") {
+    throw new Error("local specification dialogue contract failed");
+  }
+  const specApproval = await request(baseUrl, "/api/projects/smoke-spec/spec-revisions", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-spec-approval-1" },
+    body: JSON.stringify({
+      action: "approve",
+      revision: "SPEC-001",
+      conversationId: specPayload.data.conversationId,
+      expectedRevision: specPayload.data.revision,
+      specRevisionId: specPayload.data.specRevisionId,
+      testPlanRevisionId: specPayload.data.testPlanRevisionId,
+    }),
+  });
+  const approvalPayload = await specApproval.response.json();
+  if (![200, 201].includes(specApproval.response.status) || approvalPayload.data?.authority?.state !== "APPROVED"
+    || approvalPayload.data.authority.revision !== 2 || approvalPayload.data.run?.state !== "QUEUED") {
+    throw new Error("local specification approval contract failed");
+  }
   const preflightPayload = await agentPreflight.response.json();
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
     throw new Error("local Agent preflight contract failed");
@@ -275,6 +314,8 @@ try {
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
+  console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
+  console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);
