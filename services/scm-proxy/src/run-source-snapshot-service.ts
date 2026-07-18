@@ -8,6 +8,8 @@ import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { MtlsGitHubAppJwtSigner } from "./github-app-signer-client";
 import { GitHubSourceMaterializer } from "./github-source-materializer";
 import { PostgresSourceSnapshotAuthority } from "./postgres-source-snapshot-authority";
+import { PostgresSourceBaselineStore } from "./source-baseline-postgres";
+import { SourceBaselineService } from "./source-baseline-service";
 import { GitHubAppInstallationTokenBroker, GitHubRestConnector } from "./github-rest";
 import { createSourceSnapshotHandler, createSourceSnapshotHttpsServer } from "./source-snapshot-http";
 import { SourceSnapshotGrantService } from "./source-snapshot-service";
@@ -90,9 +92,15 @@ export async function sourceSnapshotServiceFromEnv(
       workRoot: requiredAbsolutePath(env, "DEVILUDO_SOURCE_SNAPSHOT_WORK_ROOT"),
       transferTimeoutMs: seconds(env.DEVILUDO_SOURCE_SNAPSHOT_TRANSFER_TIMEOUT_SECONDS, 7_200, 1, 86_400) * 1_000,
     });
+    const sourceBaselines = new SourceBaselineService(new PostgresSourceBaselineStore(pool), connector);
+    const baselineSpiffeIds = requiredSpiffeIds(
+      env, "DEVILUDO_SOURCE_BASELINE_AGENT_CONFIGURATION_SPIFFE_IDS",
+    );
     const handler = createSourceSnapshotHandler({
       sourceSnapshots: service,
       allowedSpiffeIds: new Set([spiffeId]),
+      sourceBaselines,
+      baselineSpiffeIds,
     });
     const server = createSourceSnapshotHttpsServer({
       tls: { key: serverKey, cert: serverCertificate, ca: clientCa },
@@ -103,6 +111,7 @@ export async function sourceSnapshotServiceFromEnv(
       port: port(env.DEVILUDO_SOURCE_SNAPSHOT_PORT),
       pool,
       service,
+      sourceBaselines,
       server,
     });
   } catch (error) {
@@ -117,7 +126,7 @@ export async function runSourceSnapshotService(
 ): Promise<void> {
   const runtime = await sourceSnapshotServiceFromEnv(env);
   try {
-    await runtime.service.probe();
+    await Promise.all([runtime.service.probe(), runtime.sourceBaselines.probe()]);
     await new Promise<void>((resolveListen, reject) => {
       const fail = (error: Error) => reject(error);
       runtime.server.once("error", fail);
@@ -176,6 +185,15 @@ function requiredSpiffeId(env: Readonly<Record<string, string | undefined>>, nam
   if (url.protocol !== "spiffe:" || !url.hostname || url.username || url.password || url.search || url.hash
     || url.toString() !== value) throw new Error(`${name} is invalid`);
   return value;
+}
+
+function requiredSpiffeIds(env: Readonly<Record<string, string | undefined>>, name: string): ReadonlySet<string> {
+  const values = requiredEnv(env, name).split(",").map((value) => value.trim());
+  if (!values.length || values.some((value) => !value) || new Set(values).size !== values.length) {
+    throw new Error(`${name} is invalid`);
+  }
+  for (const value of values) requiredSpiffeId({ [name]: value }, name);
+  return new Set(values);
 }
 
 function strictOrigin(value: string): string {

@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 32 }, (_, index) => {
+  const offsets = Array.from({ length: 33 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -29,6 +29,34 @@ test("approved specifications enter Temporal through an ordered durable bridge",
   assert.match(service, /source: "SPEC_SERVICE"/);
   assert.match(service, /approvedSpecRevisionId/);
   assert.doesNotMatch(service, /RUN_CONFIGURATION_LOCKED/);
+});
+
+test("approved specifications lock one tenant-bound source and Agent catalog revision", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/033_agent_configuration_resolution.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/agent-configuration/src/postgres-store.ts", import.meta.url), "utf8");
+  const resolver = readFileSync(new URL("../services/agent-configuration/src/catalog.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/agent-configuration/src/service.ts", import.meta.url), "utf8");
+  const baseline = readFileSync(new URL("../services/scm-proxy/src/source-baseline-postgres.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/scm-proxy/src/source-snapshot-http.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:agent-configuration"], "node --import tsx services/agent-configuration/src/run-service.ts");
+  assert.match(migration, /CREATE TABLE deviludo\.github_source_baseline_receipts/);
+  assert.match(migration, /CREATE TABLE deviludo\.agent_configuration_resolutions/);
+  assert.match(migration, /immutable_revisions_tenant_project_id_unique/);
+  assert.match(migration, /agent_run_configuration_shape/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/g);
+  assert.match(resolver, /project:\$\{input\.projectId\}/);
+  assert.match(resolver, /tenant:\$\{input\.tenantId\}/);
+  assert.match(store, /CROSS JOIN deviludo\.admin_catalog_state catalog/);
+  assert.match(store, /INSERT INTO deviludo\.agent_runs/);
+  assert.match(store, /ON CONFLICT \(tenant_id, idempotency_key\) DO NOTHING/);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(service, /source: "AGENT_CONFIGURATION_SERVICE"/);
+  assert.match(service, /RUN_CONFIGURATION_LOCKED/);
+  assert.match(baseline, /repository\.status = 'ACTIVE'/);
+  assert.match(baseline, /spec\.state = 'APPROVED'/);
+  assert.match(ingress, /baselineSpiffeIds/);
+  assert.match(ingress, /idempotency-key/);
 });
 
 test("specification dialogue persists tenant-isolated messages and immutable draft pairs", () => {

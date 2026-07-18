@@ -67,6 +67,14 @@ deterministic zstd USTAR to immutable storage, and returns only a five-minute
 download grant to the Artifact Preparer. Git redirects, floating branch names,
 symlinks, submodules and mutable source archives are not accepted.
 
+Before the first Agent run, the same read-only Broker also exposes the isolated
+`/v1/source-baselines` route to the Agent Configuration service. It resolves
+the active repository's exact default-branch commit and canonical source digest
+and persists an append-only receipt bound to the approved specification, frozen
+test plan and approval operation. Its mTLS allow-list is distinct from the
+Artifact Preparer, and every retry must repeat the receipt operation key as the
+HTTP idempotency key.
+
 The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1

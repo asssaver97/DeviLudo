@@ -3,6 +3,8 @@ import { createServer, type Server as HttpsServer, type ServerOptions } from "no
 import type { EvidenceArchiveWorkloadIdentity } from "../../evidence-archive/src/contracts";
 import { evidenceArchiveIdentityFromTlsSocket } from "../../evidence-archive/src/ingress-http";
 import type { SourceSnapshotGrantService } from "./source-snapshot-service";
+import { parseSourceBaselineRequest, type SourceBaselineRequest } from "./source-baseline-contracts";
+import type { SourceBaselineService } from "./source-baseline-service";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -22,22 +24,49 @@ export interface SourceSnapshotHttpResponse {
 export function createSourceSnapshotHandler(options: {
   readonly sourceSnapshots: Pick<SourceSnapshotGrantService, "grant" | "probe">;
   readonly allowedSpiffeIds: ReadonlySet<string>;
+  readonly sourceBaselines?: Pick<SourceBaselineService, "resolve" | "probe">;
+  readonly baselineSpiffeIds?: ReadonlySet<string>;
   readonly extractIdentity?: (socket: unknown) => EvidenceArchiveWorkloadIdentity;
 }): (request: SourceSnapshotHttpRequest) => Promise<SourceSnapshotHttpResponse> {
   if (!options.allowedSpiffeIds.size) throw new Error("Source snapshot workload allow-list is empty");
+  if ((options.sourceBaselines === undefined) !== (options.baselineSpiffeIds === undefined)
+    || options.baselineSpiffeIds?.size === 0) {
+    throw new Error("Source baseline workload configuration is incomplete");
+  }
   const extractIdentity = options.extractIdentity ?? evidenceArchiveIdentityFromTlsSocket;
   return async (request) => {
     let identity: EvidenceArchiveWorkloadIdentity;
     try { identity = extractIdentity(request.socket); }
     catch { return failure(401, "SOURCE_SNAPSHOT_MTLS_IDENTITY_REQUIRED"); }
-    if (!options.allowedSpiffeIds.has(identity.spiffeId)) {
+    const snapshotAllowed = options.allowedSpiffeIds.has(identity.spiffeId);
+    const baselineAllowed = options.baselineSpiffeIds?.has(identity.spiffeId) ?? false;
+    if (!snapshotAllowed && !baselineAllowed) {
       return failure(403, "SOURCE_SNAPSHOT_WORKLOAD_FORBIDDEN");
     }
     if (request.method === "GET" && request.path === "/healthz") {
-      try { await options.sourceSnapshots.probe(); }
+      try {
+        if (snapshotAllowed) await options.sourceSnapshots.probe();
+        if (baselineAllowed) await options.sourceBaselines?.probe();
+      }
       catch { return failure(503, "SOURCE_SNAPSHOT_NOT_READY"); }
       return { status: 200, body: { status: "ok", service: "deviludo-source-snapshot" } };
     }
+    if (request.method === "POST" && request.path === "/v1/source-baselines") {
+      if (!baselineAllowed || !options.sourceBaselines) return failure(403, "SOURCE_BASELINE_WORKLOAD_FORBIDDEN");
+      if (contentType(request.headers["content-type"]) !== "application/json") {
+        return failure(415, "SOURCE_BASELINE_JSON_REQUIRED");
+      }
+      let body: SourceBaselineRequest;
+      try {
+        body = parseSourceBaselineRequest(parseJsonObject(request.rawBody));
+        if (singleHeader(request.headers["idempotency-key"]) !== body.operationKey) throw new Error("drift");
+      } catch { return failure(400, "SOURCE_BASELINE_REQUEST_INVALID"); }
+      try {
+        const receipt = await options.sourceBaselines.resolve(body);
+        return { status: receipt.replayed ? 200 : 201, body: { data: receipt } };
+      } catch { return failure(409, "SOURCE_BASELINE_REJECTED"); }
+    }
+    if (!snapshotAllowed) return failure(403, "SOURCE_SNAPSHOT_WORKLOAD_FORBIDDEN");
     if (request.method !== "POST" || request.path !== "/v1/source-snapshot-grants") {
       return failure(404, "SOURCE_SNAPSHOT_ROUTE_NOT_FOUND");
     }
@@ -131,6 +160,9 @@ function send(response: ServerResponse, result: SourceSnapshotHttpResponse): voi
 
 function contentType(value: string | readonly string[] | undefined): string | null {
   return typeof value === "string" ? value.toLowerCase().split(";", 1)[0]?.trim() ?? null : null;
+}
+function singleHeader(value: string | readonly string[] | undefined): string | null {
+  return typeof value === "string" && value.length <= 256 ? value : null;
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {

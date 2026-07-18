@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSourceSnapshotHandler, createSourceSnapshotHttpsServer } from "../src/source-snapshot-http";
+import { sourceBaselineOperationKey } from "../src/source-baseline-contracts";
 
 const spiffeId = "spiffe://deviludo.internal/artifact-preparer/source";
 const identity = Object.freeze({
@@ -9,6 +10,8 @@ const identity = Object.freeze({
   certificateSerial: "01",
   certificateNotAfter: "2030-01-01T01:00:00.000Z",
 });
+const baselineSpiffeId = "spiffe://deviludo.internal/agent-configuration";
+const baselineIdentity = Object.freeze({ ...identity, spiffeId: baselineSpiffeId });
 
 test("source snapshot handler delegates an mTLS-authenticated grant without weakening tenant authorization", async () => {
   let observedIdentity: unknown;
@@ -81,4 +84,71 @@ test("source snapshot HTTPS server requires TLS 1.3 client authentication and bo
     handler: async () => ({ status: 200, body: {} }),
     maxBodyBytes: 16,
   }), /body limit/);
+});
+
+test("source baseline route has a distinct mTLS role and exact idempotency binding", async () => {
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const operationKey = sourceBaselineOperationKey("55555555-5555-4555-8555-555555555555");
+  const request = {
+    schemaVersion: "deviludo.source-baseline.v1",
+    operationKey,
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    projectId,
+    workflowId: `delivery-${projectId}`,
+    specRevisionId: "33333333-3333-4333-8333-333333333333",
+    testPlanRevisionId: "44444444-4444-4444-8444-444444444444",
+    specApprovalReceiptId: "c".repeat(64),
+  } as const;
+  let baselineCalls = 0;
+  const handler = createSourceSnapshotHandler({
+    allowedSpiffeIds: new Set([spiffeId]),
+    baselineSpiffeIds: new Set([baselineSpiffeId]),
+    extractIdentity: (socket) => socket === "baseline" ? baselineIdentity : identity,
+    sourceSnapshots: { async probe() {}, async grant() { return {}; } },
+    sourceBaselines: {
+      async probe() {},
+      async resolve(body) {
+        assert.deepEqual(body, request);
+        baselineCalls += 1;
+        return {
+          schemaVersion: "deviludo.source-baseline-receipt.v1",
+          operationKey: request.operationKey,
+          tenantId: request.tenantId,
+          projectId: request.projectId,
+          workflowId: request.workflowId,
+          specRevisionId: request.specRevisionId,
+          testPlanRevisionId: request.testPlanRevisionId,
+          specApprovalReceiptId: request.specApprovalReceiptId,
+          sourceBaselineReceiptId: "66666666-6666-4666-8666-666666666666",
+          repositoryBindingId: "77777777-7777-4777-8777-777777777777",
+          defaultBranch: "main",
+          commitSha: "a".repeat(40),
+          sourceDigest: "b".repeat(64),
+          observedAt: "2030-01-01T00:00:00.000Z",
+          replayed: false,
+        };
+      },
+    },
+  });
+  const baselineRequest = {
+    method: "POST",
+    path: "/v1/source-baselines",
+    headers: { "content-type": "application/json", "idempotency-key": operationKey },
+    socket: "baseline",
+    rawBody: JSON.stringify(request),
+  } as const;
+  assert.equal((await handler(baselineRequest)).status, 201);
+  assert.equal(baselineCalls, 1);
+  assert.deepEqual(await handler({ ...baselineRequest, socket: "snapshot" }), {
+    status: 403,
+    body: { error: { code: "SOURCE_BASELINE_WORKLOAD_FORBIDDEN" } },
+  });
+  assert.equal((await handler({
+    ...baselineRequest,
+    headers: { ...baselineRequest.headers, "idempotency-key": "f".repeat(64) },
+  })).status, 400);
+  assert.deepEqual(await handler({ ...baselineRequest, path: "/v1/source-snapshot-grants" }), {
+    status: 403,
+    body: { error: { code: "SOURCE_SNAPSHOT_WORKLOAD_FORBIDDEN" } },
+  });
 });
