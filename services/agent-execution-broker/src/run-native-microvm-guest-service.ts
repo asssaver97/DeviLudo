@@ -4,6 +4,7 @@ import { open, realpath } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { canonicalJson } from "../../runner-control/src/canonical";
 import { ephemeralRunTokenSecretResolverFromEnv } from "./ephemeral-secret-client";
+import { nativeGuestInferenceRelayFromEnv } from "./native-inference-relay";
 import { Ed25519GuestCandidateArtifactSigner, NativeMicrovmAgentGuest } from "./native-microvm-guest";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -23,10 +24,11 @@ export async function runNativeMicrovmGuestService(
     readBounded(absolute(env, "DEVILUDO_MICROVM_GUEST_ATTESTATION_PRIVATE_KEY_FILE"), 1024 * 1024),
     ephemeralRunTokenSecretResolverFromEnv(env),
   ]);
+  const relay = await nativeGuestInferenceRelayFromEnv(resolver, env);
   const privateKey = createPrivateKey(privateKeyBytes);
   const signer = new Ed25519GuestCandidateArtifactSigner(privateKey,
     safeId(env, "DEVILUDO_MICROVM_GUEST_ATTESTATION_KEY_ID"));
-  const guest = new NativeMicrovmAgentGuest({ secretResolver: resolver, signer });
+  const guest = new NativeMicrovmAgentGuest({ relay, signer });
   const result = await guest.execute(parseJson(requestBytes), { runRoot, workspaceRoot });
   const bytes = Buffer.from(canonicalJson(result));
   if (bytes.byteLength < 64 || bytes.byteLength > MAX_RESPONSE_BYTES) invalid();

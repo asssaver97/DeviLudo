@@ -21,7 +21,8 @@ export interface AgentBaselineSourcePort {
 
 export interface NativeMicrovmProcessResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string }
 export type NativeMicrovmProcess = (executable: string, args: readonly string[], options: Readonly<{
-  cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxOutputBytes: number }>) => Promise<NativeMicrovmProcessResult>;
+  cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxOutputBytes: number;
+  abortSignal?: AbortSignal }>) => Promise<NativeMicrovmProcessResult>;
 
 /**
  * Fixed adapter for an audited microVM launcher. The launcher receives one
@@ -42,18 +43,20 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
   readonly #packages: AgentDevelopmentWorkPackagePort;
   readonly #process: NativeMicrovmProcess;
   readonly #now: () => Date;
+  readonly #heartbeatIntervalMs: number;
 
   constructor(options: Readonly<{ executable: string; executableDigest: string; configFile: string; configDigest: string;
     workRoot: string; inferenceGatewayUrl: string; timeoutMs?: number; attestationKeyId: string;
     attestationPublicKey: KeyObject; sources: AgentBaselineSourcePort; packages: AgentDevelopmentWorkPackagePort;
-    process?: NativeMicrovmProcess; now?: () => Date }>) {
+    process?: NativeMicrovmProcess; now?: () => Date; heartbeatIntervalMs?: number }>) {
     this.#executable = absolute(options.executable, "executable");
     this.#configFile = absolute(options.configFile, "configuration file");
     this.#workRoot = absolute(options.workRoot, "work root");
     if (!SHA256.test(options.executableDigest) || !SHA256.test(options.configDigest)) invalid("artifact digest");
     this.#executableDigest = options.executableDigest; this.#configDigest = options.configDigest;
     this.#gatewayUrl = gateway(options.inferenceGatewayUrl);
-    this.#timeoutMs = integer(options.timeoutMs ?? 15 * 60_000, 60_000, 15 * 60_000);
+    this.#timeoutMs = integer(options.timeoutMs ?? 2 * 60 * 60_000, 60_000, 24 * 60 * 60_000);
+    this.#heartbeatIntervalMs = integer(options.heartbeatIntervalMs ?? 30_000, 10, 120_000);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(options.attestationKeyId)) invalid("attestation key ID");
     const publicKey = options.attestationPublicKey;
     if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") invalid("attestation public key");
@@ -84,9 +87,11 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
     await context.heartbeat();
     await this.#verifyRuntime();
     const timeoutMs = executionTimeout(input, this.#timeoutMs, this.#now());
-    const result = await this.#process(this.#executable, ["execute", "--config-file", this.#configFile,
+    const abort = new AbortController();
+    const execution = this.#process(this.#executable, ["execute", "--config-file", this.#configFile,
       "--request-file", requestFile, "--workspace", workspace, "--response-file", responseFile],
-    processOptions(runRoot, timeoutMs));
+    processOptions(runRoot, timeoutMs, abort.signal));
+    const result = await withHeartbeats(execution, context.heartbeat, this.#heartbeatIntervalMs, abort);
     if (result.exitCode !== 0 || result.stdout || result.stderr
       || FORBIDDEN_OUTPUT.test(`${result.stdout}\n${result.stderr}`)) invalid("execution");
     await context.heartbeat();
@@ -135,14 +140,17 @@ function nativeRequest(input: IsolatedAgentExecutionRequest, work: Awaited<Retur
     targetMatrix: Object.freeze([...input.targetMatrix]), sourceBaselineReceiptId: input.sourceBaselineReceiptId,
     baseCommitSha: input.baseCommitSha, sourceDigest: input.sourceDigest,
     inferenceGatewayUrl, inferenceTokenSecretRef: input.inferenceTokenSecretRef,
-    inferenceTokenExpiresAt: input.inferenceTokenExpiresAt, prompt: work.prompt,
+    inferenceTokenExpiresAt: input.inferenceTokenExpiresAt,
+    inferenceAuthorizationExpiresAt: input.authorizationExpiresAt, prompt: work.prompt,
     promptContentDigest: createHash("sha256").update(work.prompt).digest("hex"), promptDigest: work.promptDigest });
 }
 
 export function executeNativeMicrovm(executable: string, args: readonly string[], options: Readonly<{
-  cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxOutputBytes: number }>): Promise<NativeMicrovmProcessResult> {
+  cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxOutputBytes: number;
+  abortSignal?: AbortSignal }>): Promise<NativeMicrovmProcessResult> {
   return new Promise((accept) => execFile(executable, [...args], { cwd: options.cwd, env: options.env,
-    encoding: "utf8", windowsHide: true, timeout: options.timeoutMs, maxBuffer: options.maxOutputBytes, shell: false },
+    encoding: "utf8", windowsHide: true, timeout: options.timeoutMs, maxBuffer: options.maxOutputBytes,
+    shell: false, signal: options.abortSignal },
   (error, stdout, stderr) => accept(Object.freeze({ exitCode: error ? 1 : 0,
     stdout: bounded(stdout, options.maxOutputBytes), stderr: bounded(stderr, options.maxOutputBytes) }))));
 }
@@ -176,14 +184,35 @@ async function privateRoot(path: string): Promise<string> { const metadata = awa
   if (!metadata.isDirectory() || metadata.isSymbolicLink() || canonical !== path) invalid("work root"); return canonical; }
 function boundedChild(root: string, ...parts: string[]): string { const value = resolve(root, ...parts);
   if (!value.startsWith(`${root}${sep}`) || value.includes("\0") || value.length > 4_096) invalid("run path"); return value; }
-function processOptions(root: string, timeoutMs: number) { return Object.freeze({ cwd: root,
+function processOptions(root: string, timeoutMs: number, abortSignal?: AbortSignal) { return Object.freeze({ cwd: root,
   env: Object.freeze({ NODE_ENV: "production", HOME: root, USERPROFILE: root, TMPDIR: root, TMP: root, TEMP: root, LANG: "C.UTF-8" }),
-  timeoutMs, maxOutputBytes: 256 * 1024 }); }
+  timeoutMs, maxOutputBytes: 256 * 1024, ...(abortSignal ? { abortSignal } : {}) }); }
 function executionTimeout(input: IsolatedAgentExecutionRequest, configured: number, now: Date): number {
-  const remaining = Date.parse(input.inferenceTokenExpiresAt) - now.getTime() - 30_000;
+  const remaining = Date.parse(input.authorizationExpiresAt) - now.getTime() - 30_000;
   const requested = input.budget.timeoutSeconds * 1_000;
   if (!Number.isFinite(remaining) || remaining < 60_000) invalid("DLRT lifetime");
   return Math.min(configured, requested, remaining);
+}
+function withHeartbeats<T>(execution: Promise<T>, heartbeat: () => Promise<void>, intervalMs: number,
+  abort: AbortController): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      callback();
+    };
+    const schedule = () => { timer = setTimeout(() => {
+      void heartbeat().then(() => { if (!settled) schedule(); }, (error) => {
+        abort.abort();
+        finish(() => reject(error));
+      });
+    }, intervalMs); };
+    schedule();
+    void execution.then((value) => finish(() => resolve(value)), (error) => finish(() => reject(error)));
+  });
 }
 function gateway(value: string): string { const url = new URL(value); if (url.protocol !== "https:" || url.username || url.password
   || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) invalid("inference Gateway"); return url.toString(); }

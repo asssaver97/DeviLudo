@@ -44,10 +44,25 @@ surviving background writer, and emits only a bounded Ed25519-attested UPSERT/
 DELETE artifact. Source snapshot archives preserve the executable bit so the
 guest and GitHub SCM Broker calculate the same final tree digest.
 
-The guest resolves its opaque DLRT reference exactly once over the ephemeral
-secret Broker's TLS 1.3 workload boundary. The response is binary, never JSON,
-and the request contains only the reference plus the bound run, attempt and
-allowed CLI environment variable. The attestation private key path in the
-example is a guest-only sealed mount; the Worker host loads only the matching
-public key. A deployment may replace that local guest signer with the same
-`CandidateArtifactSigner` interface backed by KMS.
+For runs longer than one token lifetime, every DLRT remains capped at 15
+minutes. The host renews its fenced database lease while the native launcher is
+active and atomically replaces token bytes behind the same SecretRef when five
+minutes remain. Authorization expiry or renewal failure aborts the launcher and
+enters `WAITING_PROVIDER`; it never stretches a token lifetime.
+
+Claude/Codex receives only a random attempt-local password for a loopback HTTPS
+relay. The relay URL must use literal `127.0.0.1`, its certificate has a
+matching IP SAN, its CA is baked into the immutable guest trust store, and its
+server key is a sealed
+guest mount. On every `/v1/messages` or `/v1/responses` request the relay
+resolves the current DLRT over the ephemeral-secret Broker's TLS 1.3 workload
+boundary, strips local authentication, and forwards with a separate mTLS
+Gateway identity. Thus a running CLI can use rotated tokens but never observes
+one. The response from the secret Broker is binary, never JSON, and its request
+contains only the reference plus the bound run, attempt and allowed CLI
+environment variable.
+
+The attestation private key path in the example is also a guest-only sealed
+mount; the Worker host loads only the matching public key. A deployment may
+replace that local guest signer with the same `CandidateArtifactSigner`
+interface backed by KMS.

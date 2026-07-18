@@ -9,6 +9,7 @@ import { contentSha256, signGitHubCandidateArtifact } from "../../scm-proxy/src/
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import type { IsolatedAgentExecutionRequest } from "../src/contracts";
 import { MtlsEphemeralRunTokenSecretResolver, MtlsEphemeralRunTokenSecretStore } from "../src/ephemeral-secret-client";
+import { authorizedLocalRequest, HttpsNativeGuestInferenceRelay } from "../src/native-inference-relay";
 import { LockedNativeMicrovmAgentExecutor } from "../src/native-microvm-executor";
 import { PostgresAgentDevelopmentWorkPackage } from "../src/postgres-work-package";
 
@@ -74,14 +75,32 @@ test("mTLS ephemeral secret store deposits binary DLRT bytes and returns only an
     http: async (url, input) => { calls.push({ path: url.pathname, method: input.method, body: input.body });
       if (url.pathname === "/healthz") return { statusCode: 200, payload: { status: "ok", service: "deviludo-ephemeral-secret-broker" } };
       if (url.pathname.endsWith(":revoke")) return { statusCode: 204, payload: {} };
+      if (url.pathname.endsWith(":replace")) return { statusCode: 200, payload: {
+        schemaVersion: "deviludo.ephemeral-run-token-replacement.v1", runId, attemptId,
+        expiresAt: "2030-01-01T00:30:00.000Z", secretRef } };
       return { statusCode: 201, payload: { schemaVersion: "deviludo.ephemeral-run-token-receipt.v1",
         runId, attemptId, expiresAt: "2030-01-01T00:15:00.000Z", secretRef } }; } });
   const token = Buffer.from("signed-internal-run-token-material-that-is-long-enough");
   assert.deepEqual(await store.put({ runId, attemptId, value: token, expiresAt: "2030-01-01T00:15:00.000Z" }), { secretRef });
+  assert.deepEqual(await store.replace({ runId, attemptId, secretRef, value: token,
+    expiresAt: "2030-01-01T00:30:00.000Z" }), { secretRef });
   await store.revoke(secretRef); await store.probe();
   assert.ok(Buffer.isBuffer(calls[0]?.body)); assert.equal((calls[0]?.body as Buffer).equals(token), true);
-  assert.equal(calls[1]?.body, JSON.stringify({ schemaVersion: "deviludo.ephemeral-run-token-revoke.v1", secretRef }));
-  assert.equal(calls[2]?.path, "/healthz");
+  assert.equal(calls[1]?.path, "/v1/ephemeral-run-tokens:replace");
+  assert.equal(calls[2]?.body, JSON.stringify({ schemaVersion: "deviludo.ephemeral-run-token-revoke.v1", secretRef }));
+  assert.equal(calls[3]?.path, "/healthz");
+});
+
+test("guest relay accepts only the attempt-local protocol credential", () => {
+  const local = Buffer.from("attempt-local-relay-password-material");
+  assert.equal(authorizedLocalRequest({ "x-api-key": local.toString() }, "anthropic-messages", local), true);
+  assert.equal(authorizedLocalRequest({ authorization: `Bearer ${local.toString()}` }, "openai-responses", local), true);
+  assert.equal(authorizedLocalRequest({ "x-api-key": local.toString(), authorization: `Bearer ${local.toString()}` },
+    "anthropic-messages", local), false);
+  assert.equal(authorizedLocalRequest({ authorization: "Bearer wrong-attempt" }, "openai-responses", local), false);
+  const tls = { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) };
+  assert.throws(() => new HttpsNativeGuestInferenceRelay({ origin: "https://relay.internal:8443/",
+    serverTls: tls, gatewayTls: tls, tokenResolver: { async resolve() { return "unused"; } } }), /relay is invalid/);
 });
 
 test("microVM guest resolves only its exact opaque DLRT reference over mTLS", async () => {
@@ -110,6 +129,7 @@ test("locked native executor provisions the baseline and accepts only an atteste
   const executor = new LockedNativeMicrovmAgentExecutor({ executable, executableDigest: digest("native-agent-v1"),
     configFile: config, configDigest: digest("{}"), workRoot, inferenceGatewayUrl: "https://inference.internal/",
     timeoutMs: 15 * 60_000, attestationKeyId: "microvm-attestation-v1", attestationPublicKey: keys.publicKey,
+    heartbeatIntervalMs: 10,
     now: () => new Date("2030-01-01T00:00:00.000Z"), packages: { async probe() {}, async resolve(lock) { return {
       prompt: "Implement the approved game", promptDigest: "c".repeat(64), specDigest: lock.specDigest, testPlanDigest: lock.testPlanDigest }; } },
     sources: { async probe() {}, async materialize(input) { sourceCalls += 1; await mkdir(input.destinationPath, { mode: 0o700 });
@@ -117,6 +137,7 @@ test("locked native executor provisions the baseline and accepts only an atteste
     process: async (_executable, args) => {
       if (args[0] === "probe") return { exitCode: 0, stdout: JSON.stringify({ schemaVersion: "deviludo.native-agent-microvm-probe.v1", status: "READY", configDigest: digest("{}") }), stderr: "" };
       const requestFile = args[args.indexOf("--request-file") + 1]!; const responseFile = args[args.indexOf("--response-file") + 1]!;
+      await new Promise((resolve) => setTimeout(resolve, 35));
       observedRequests.push(JSON.parse(await readFile(requestFile, "utf8")) as Record<string, unknown>);
       const content = Buffer.from("extends Node\n");
       const artifact = signGitHubCandidateArtifact({ schemaVersion: "deviludo.github-candidate.v1", artifactId: "artifact-r1",
@@ -135,9 +156,10 @@ test("locked native executor provisions the baseline and accepts only an atteste
     } });
   await executor.probe();
   let heartbeats = 0; const result = await executor.execute(request(), { heartbeat: async () => { heartbeats += 1; } });
-  assert.equal(result.status, "COMPLETED"); assert.equal(sourceCalls, 1); assert.equal(heartbeats, 3);
+  assert.equal(result.status, "COMPLETED"); assert.equal(sourceCalls, 1); assert.ok(heartbeats >= 5);
   const observedRequest = observedRequests[0]; assert.ok(observedRequest);
   assert.equal(observedRequest.inferenceGatewayUrl, "https://inference.internal/");
+  assert.equal(observedRequest.inferenceAuthorizationExpiresAt, request().authorizationExpiresAt);
   assert.deepEqual(observedRequest.modelRoles, request().modelRoles);
   assert.equal("providerBaseUrl" in observedRequest, false);
   assert.equal("apiKey" in observedRequest, false);

@@ -27,6 +27,25 @@ export class MtlsEphemeralRunTokenSecretStore implements EphemeralRunTokenSecret
     this.#timeoutMs = integer(options.timeoutMs ?? 30_000, 1_000, 60_000); this.#http = options.http ?? httpsSecret;
   }
 
+  async replace(input: Parameters<EphemeralRunTokenSecretStore["replace"]>[0]): Promise<Readonly<{ secretRef: string }>> {
+    if (!UUID.test(input.runId) || !UUID.test(input.attemptId) || !SECRET_REF.test(input.secretRef)
+      || input.secretRef.includes("?") || input.secretRef.includes("#") || !Number.isFinite(Date.parse(input.expiresAt))
+      || !(input.value instanceof Uint8Array) || input.value.byteLength < 32 || input.value.byteLength > 64 * 1024) invalid();
+    const response = await this.#http(route(this.#origin, "/v1/ephemeral-run-tokens:replace"), {
+      method: "POST", timeoutMs: this.#timeoutMs, tls: this.#tls,
+      headers: Object.freeze({ accept: "application/json", "content-type": "application/octet-stream",
+        "x-deviludo-run-id": input.runId, "x-deviludo-attempt-id": input.attemptId,
+        "x-deviludo-secret-ref": input.secretRef, "x-deviludo-expires-at": input.expiresAt }),
+      body: Buffer.from(input.value.buffer, input.value.byteOffset, input.value.byteLength),
+    });
+    if (response.statusCode !== 200) throw new Error(`Ephemeral secret Broker rejected replacement with status ${response.statusCode}`);
+    const body = record(response.payload);
+    exactKeys(body, ["schemaVersion", "runId", "attemptId", "expiresAt", "secretRef"]);
+    if (body.schemaVersion !== "deviludo.ephemeral-run-token-replacement.v1" || body.runId !== input.runId
+      || body.attemptId !== input.attemptId || body.expiresAt !== input.expiresAt || body.secretRef !== input.secretRef) invalid();
+    return Object.freeze({ secretRef: input.secretRef });
+  }
+
   async put(input: Parameters<EphemeralRunTokenSecretStore["put"]>[0]): Promise<Readonly<{ secretRef: string }>> {
     if (!UUID.test(input.runId) || !UUID.test(input.attemptId) || !Number.isFinite(Date.parse(input.expiresAt))
       || !(input.value instanceof Uint8Array) || input.value.byteLength < 32 || input.value.byteLength > 64 * 1024) invalid();

@@ -90,6 +90,7 @@ test("worker deposits a 15-minute bound DLRT, passes only its SecretRef, and rev
   const revoked: string[] = [];
   const secrets: EphemeralRunTokenSecretStore = {
     async put(input) { stored.push(input.value.slice()); return { secretRef: `secret://agent-runs/${input.runId}/${input.attemptId}` }; },
+    async replace(input) { stored.push(input.value.slice()); return { secretRef: input.secretRef }; },
     async revoke(ref) { revoked.push(ref); }, async probe() {},
   };
   const signingKey = new Uint8Array(32).fill(7);
@@ -130,6 +131,32 @@ test("worker deposits a 15-minute bound DLRT, passes only its SecretRef, and rev
   assert.deepEqual(claims.models, ["gateway/claude-sonnet-4-6-20250514"]);
 });
 
+test("run-token broker atomically renews the same SecretRef without creating a long-lived token", async () => {
+  let clock = new Date(now);
+  const deposited: Uint8Array[] = [];
+  const replaced: Uint8Array[] = [];
+  const secretRef = `secret://agent-runs/${runId}/${attemptId}`;
+  const signingKey = new Uint8Array(32).fill(8);
+  const prepared = await new HmacEphemeralRunTokenBroker(signingKey, {
+    async put(input) { deposited.push(input.value.slice()); return { secretRef }; },
+    async replace(input) { replaced.push(input.value.slice()); assert.equal(input.secretRef, secretRef); return { secretRef }; },
+    async revoke() {}, async probe() {},
+  }, () => clock).prepare(lock(), attemptId);
+  assert.equal((await prepared.renew()).renewed, false);
+  clock = new Date("2030-01-01T00:11:00.000Z");
+  const renewal = await prepared.renew();
+  assert.equal(renewal.renewed, true);
+  assert.equal(renewal.expiresAt, "2030-01-01T00:26:00.000Z");
+  assert.equal(replaced.length, 1);
+  assert.equal((await prepared.renew()).renewed, false);
+  for (const [tokenBytes, issuedAt] of [[deposited[0], now], [replaced[0], clock]] as const) {
+    assert.ok(tokenBytes);
+    const claims = await verifyRunToken(signingKey, new TextDecoder().decode(tokenBytes),
+      { tenantId, projectId, runId, profileRevisionId: "profile-r1" }, Math.floor(issuedAt.getTime() / 1_000));
+    assert.equal(claims.exp - claims.iat, 15 * 60);
+  }
+});
+
 test("expired authorization enters WAITING_PROVIDER before isolated execution", async () => {
   let waited = false; let executed = false;
   const persistence: AgentExecutionOperationPersistence = {
@@ -140,7 +167,8 @@ test("expired authorization enters WAITING_PROVIDER before isolated execution", 
     async release() { throw new Error("not expected"); }, async probe() {},
   };
   const tokens = new HmacEphemeralRunTokenBroker(new Uint8Array(32).fill(9), {
-    async put() { throw new Error("not expected"); }, async revoke() {}, async probe() {},
+    async put() { throw new Error("not expected"); }, async replace() { throw new Error("not expected"); },
+    async revoke() {}, async probe() {},
   }, () => now);
   const worker = new AgentExecutionOperationWorker(persistence, tokens, {
     async execute() { executed = true; return completedResult(); }, async probe() {},
@@ -148,6 +176,34 @@ test("expired authorization enters WAITING_PROVIDER before isolated execution", 
   { now: () => now, claimToken: () => claimToken });
   assert.equal(await worker.execute({ tenantId, runId }), null);
   assert.equal(waited, true); assert.equal(executed, false);
+});
+
+test("authorization expiry during a long run aborts renewal and enters WAITING_PROVIDER", async () => {
+  let clock = new Date(now);
+  let waited = false; let revoked = false; let heartbeats = 0;
+  const expiringLock = Object.freeze({ ...lock(), authorizationExpiresAt: "2030-01-01T00:10:00.000Z" });
+  const persistence: AgentExecutionOperationPersistence = {
+    async reserve() { throw new Error("not used"); }, async find() { throw new Error("not used"); },
+    async claim() { return { kind: "ACQUIRED", request: request(), lock: expiringLock, attemptId, attempt: 1 }; },
+    async heartbeat() { heartbeats += 1; }, async complete() { throw new Error("not expected"); },
+    async waitForProvider(input) { waited = input.providerRevisionId === "provider-r1"; },
+    async release() { throw new Error("not expected"); }, async probe() {},
+  };
+  const tokens = new HmacEphemeralRunTokenBroker(new Uint8Array(32).fill(4), {
+    async put(input) { return { secretRef: `secret://agent-runs/${input.runId}/${input.attemptId}` }; },
+    async replace() { throw new Error("replacement must not outlive authorization"); },
+    async revoke() { revoked = true; }, async probe() {},
+  }, () => clock);
+  const worker = new AgentExecutionOperationWorker(persistence, tokens, {
+    async execute(_input, context) {
+      clock = new Date("2030-01-01T00:11:00.000Z");
+      await context.heartbeat();
+      throw new Error("must not continue after renewal failure");
+    }, async probe() {},
+  }, { async publish() { throw new Error("not expected"); }, async probe() {} },
+  { now: () => clock, claimToken: () => claimToken });
+  assert.equal(await worker.execute({ tenantId, runId }), null);
+  assert.equal(heartbeats, 1); assert.equal(waited, true); assert.equal(revoked, true);
 });
 
 test("mTLS ingress binds tenant headers and returns the Provider wait contract", async () => {

@@ -10,13 +10,22 @@ export interface EphemeralRunTokenSecretStore {
     value: Uint8Array;
     expiresAt: string;
   }>): Promise<Readonly<{ secretRef: string }>>;
+  replace(input: Readonly<{
+    runId: string;
+    attemptId: string;
+    secretRef: string;
+    value: Uint8Array;
+    expiresAt: string;
+  }>): Promise<Readonly<{ secretRef: string }>>;
   revoke(secretRef: string): Promise<void>;
   probe(): Promise<void>;
 }
 
 export interface PreparedRunToken {
   readonly secretRef: string;
+  /** Initial token expiry. The stable SecretRef may be renewed beyond it. */
   readonly expiresAt: string;
+  renew(): Promise<Readonly<{ expiresAt: string; renewed: boolean }>>;
   revoke(): Promise<void>;
 }
 
@@ -31,6 +40,47 @@ export class HmacEphemeralRunTokenBroker {
   }
 
   async prepare(lock: LockedAgentExecution, attemptId: string): Promise<PreparedRunToken> {
+    const issued = await this.#issue(lock);
+    try {
+      const stored = await this.secrets.put({ runId: lock.runId, attemptId, value: issued.bytes,
+        expiresAt: issued.expiresAt });
+      if (!SECRET_REF.test(stored.secretRef) || stored.secretRef.includes("?") || stored.secretRef.includes("#")) invalid();
+      let revoked = false;
+      let currentExpiry = issued.expiresAt;
+      let renewal: Promise<Readonly<{ expiresAt: string; renewed: boolean }>> | null = null;
+      return Object.freeze({
+        secretRef: stored.secretRef,
+        expiresAt: issued.expiresAt,
+        renew: async () => {
+          if (revoked) throw new AgentRunAuthorizationUnavailableError(lock.providerRevisionId);
+          const remaining = Date.parse(currentExpiry) - this.now().getTime();
+          if (Number.isFinite(remaining) && remaining > 5 * 60_000) {
+            return Object.freeze({ expiresAt: currentExpiry, renewed: false });
+          }
+          renewal ??= this.#replace(lock, attemptId, stored.secretRef).then((expiresAt) => {
+            currentExpiry = expiresAt;
+            return Object.freeze({ expiresAt, renewed: true });
+          }).finally(() => { renewal = null; });
+          return renewal;
+        },
+        revoke: async () => { if (!revoked) { revoked = true; await this.secrets.revoke(stored.secretRef); } },
+      });
+    } finally {
+      issued.bytes.fill(0);
+    }
+  }
+
+  async #replace(lock: LockedAgentExecution, attemptId: string, secretRef: string): Promise<string> {
+    const issued = await this.#issue(lock);
+    try {
+      const stored = await this.secrets.replace({ runId: lock.runId, attemptId, secretRef,
+        value: issued.bytes, expiresAt: issued.expiresAt });
+      if (stored.secretRef !== secretRef) invalid();
+      return issued.expiresAt;
+    } finally { issued.bytes.fill(0); }
+  }
+
+  async #issue(lock: LockedAgentExecution): Promise<Readonly<{ bytes: Uint8Array; expiresAt: string }>> {
     const now = this.now();
     const nowSeconds = Math.floor(now.getTime() / 1_000);
     const authorizationExpiry = Math.floor(Date.parse(lock.authorizationExpiresAt) / 1_000);
@@ -52,20 +102,8 @@ export class HmacEphemeralRunTokenBroker {
       exp: expires,
       nonce: lock.authorizationNonce,
     });
-    const bytes = new TextEncoder().encode(await issueRunToken(this.signingKey, claims));
-    try {
-      const stored = await this.secrets.put({ runId: lock.runId, attemptId, value: bytes,
-        expiresAt: new Date(expires * 1_000).toISOString() });
-      if (!SECRET_REF.test(stored.secretRef) || stored.secretRef.includes("?") || stored.secretRef.includes("#")) invalid();
-      let revoked = false;
-      return Object.freeze({
-        secretRef: stored.secretRef,
-        expiresAt: new Date(expires * 1_000).toISOString(),
-        revoke: async () => { if (!revoked) { revoked = true; await this.secrets.revoke(stored.secretRef); } },
-      });
-    } finally {
-      bytes.fill(0);
-    }
+    return Object.freeze({ bytes: new TextEncoder().encode(await issueRunToken(this.signingKey, claims)),
+      expiresAt: new Date(expires * 1_000).toISOString() });
   }
 
   async probe(): Promise<void> { await this.secrets.probe(); }

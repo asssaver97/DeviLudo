@@ -33,7 +33,13 @@ test("microVM guest executes the locked adapter and emits an attested authoritat
       { path: "scripts/tool.sh", content: executableBefore, mode: "100755" }]);
     const keys = generateKeyPairSync("ed25519");
     const observedRuntimes: AgentExecutionRequest[] = [];
-    const guest = new NativeMicrovmAgentGuest({ secretResolver: { async resolve() { throw new Error("fake supervisor does not resolve"); } },
+    let relayClosed = false;
+    const guest = new NativeMicrovmAgentGuest({ relay: { async start() { return Object.freeze({
+      gatewayUrl: "https://guest-relay.internal:8443/",
+      runTokenSecretRef: `secret://guest-inference-relay/${runId}/${attemptId}`,
+      secretResolver: { async resolve() { return "attempt-local-relay-password"; } },
+      close: async () => { relayClosed = true; },
+    }); } },
       signer: { async sign(core) { return signGitHubCandidateArtifact(core, keys.privateKey, "guest-attestation-v1"); } },
       now: () => new Date("2030-01-01T00:00:00.000Z"),
       supervisor: { async start(input) {
@@ -50,7 +56,10 @@ test("microVM guest executes the locked adapter and emits an attested authoritat
             durationMs: 1, stderr: "", droppedJsonLines: 0, adapter: Object.freeze({ eventCount: 1, warningCount: 0, messages: [] }) }) })) });
       } },
     });
-    const outcome = await guest.execute(request(baselineDigest), { runRoot: root, workspaceRoot: workspace });
+    const outcome = await guest.execute({ ...request(baselineDigest),
+      // The host may rotate the stable SecretRef before a large source tree
+      // reaches the guest; the relay must resolve the current value instead.
+      inferenceTokenExpiresAt: "2029-12-31T23:59:00.000Z" }, { runRoot: root, workspaceRoot: workspace });
     assert.equal(outcome.status, "COMPLETED");
     if (outcome.status !== "COMPLETED") assert.fail("expected completed guest result");
     assert.equal(verifyGitHubCandidateArtifact(outcome.candidateArtifact,
@@ -62,8 +71,10 @@ test("microVM guest executes the locked adapter and emits an attested authoritat
     assert.equal(tool?.operation, "UPSERT");
     if (tool?.operation === "UPSERT") assert.equal(tool.mode, "100755");
     assert.equal(observedRuntimes[0]?.runtimeSpec.env.ANTHROPIC_DEFAULT_OPUS_MODEL, model);
+    assert.equal(observedRuntimes[0]?.runtimeSpec.env.ANTHROPIC_BASE_URL, "https://guest-relay.internal:8443");
     assert.equal(observedRuntimes[0]?.runtimeSpec.secretEnv.ANTHROPIC_API_KEY,
-      `secret://agent-runs/${runId}/${attemptId}`);
+      `secret://guest-inference-relay/${runId}/${attemptId}`);
+    assert.equal(relayClosed, true);
     assert.equal("providerBaseUrl" in (parseNativeMicrovmAgentRequest(request(baselineDigest)) as object), false);
     assert.equal(await readFile(join(workspace, "main.gd"), "utf8"), "extends Node\n");
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -82,7 +93,10 @@ test("microVM request rejects mutable fields and guest fails closed when the Age
     assert.throws(() => parseNativeMicrovmAgentRequest({ ...request(baselineDigest),
       modelRoles: { ...request(baselineDigest).modelRoles, smallFastModel: "gateway/unauthorized-20250101" } }), /request is invalid/);
     const keys = generateKeyPairSync("ed25519");
-    const guest = new NativeMicrovmAgentGuest({ secretResolver: { async resolve() { return "opaque-run-token"; } },
+    const guest = new NativeMicrovmAgentGuest({ relay: { async start() { return Object.freeze({
+      gatewayUrl: "https://guest-relay.internal:8443/", runTokenSecretRef: `secret://guest-inference-relay/${runId}/${attemptId}`,
+      secretResolver: { async resolve() { return "attempt-local-relay-password"; } }, close: async () => {},
+    }); } },
       signer: { async sign(core) { return signGitHubCandidateArtifact(core, keys.privateKey, "guest-attestation-v1"); } },
       now: () => new Date("2030-01-01T00:00:00.000Z"), supervisor: { async start() { return Object.freeze({ cancel: () => false,
         completion: Promise.resolve(Object.freeze({ status: "completed" as const, events: Object.freeze([]),
@@ -109,7 +123,8 @@ function request(sourceDigest: string): NativeMicrovmAgentRequest {
     targetMatrix: ["linux", "windows"] as const, sourceBaselineReceiptId: baselineId,
     baseCommitSha: "e".repeat(40), sourceDigest, inferenceGatewayUrl: "https://inference.internal/",
     inferenceTokenSecretRef: `secret://agent-runs/${runId}/${attemptId}`,
-    inferenceTokenExpiresAt: "2030-01-01T00:15:00.000Z", prompt: "Implement the approved immutable game.",
+    inferenceTokenExpiresAt: "2030-01-01T00:15:00.000Z",
+    inferenceAuthorizationExpiresAt: "2030-01-01T01:00:00.000Z", prompt: "Implement the approved immutable game.",
     promptContentDigest: createHash("sha256").update("Implement the approved immutable game.").digest("hex"),
     promptDigest: "f".repeat(64) });
 }

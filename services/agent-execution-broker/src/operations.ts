@@ -130,6 +130,7 @@ export class AgentExecutionOperationWorker {
         const heartbeatAt = validNow(now());
         await this.operations.heartbeat({ ...input, claimToken, heartbeatAt: heartbeatAt.toISOString(),
           claimExpiresAt: new Date(heartbeatAt.getTime() + leaseMs).toISOString() });
+        await prepared.renew();
       } }), claim.lock, claim.attemptId);
       let result: AuthoritativeAgentExecutionResult;
       if (isolated.status === "COMPLETED") {
@@ -142,6 +143,11 @@ export class AgentExecutionOperationWorker {
       const receipt = workflowReceipt(result, claim.lock);
       return await this.operations.complete({ ...input, claimToken, result, receipt, completedAt: validNow(now()).toISOString() });
     } catch (error) {
+      if (error instanceof AgentRunAuthorizationUnavailableError) {
+        await this.operations.waitForProvider({ ...input, claimToken,
+          providerRevisionId: error.providerRevisionId, observedAt: validNow(now()).toISOString() });
+        return null;
+      }
       await this.operations.release({ ...input, claimToken, ...retryWindow(validNow(now()), claim.attempt) });
       throw error;
     } finally {

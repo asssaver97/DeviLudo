@@ -158,11 +158,23 @@ new issuance immediately.
 
 `issueRunToken()` signs a maximum-15-minute internal token bound to tenant,
 project, run, exact profile/provider/credential revisions, model allowlist,
-expiry and budget. The inference gateway verifies signature, audience, expiry and
-all run bindings before fetching the upstream key from Vault/KMS. The CLI never
-receives a long-lived key. Protected secret environment entries contain SecretRef
-identifiers in persisted launch plans; the executor resolves them only at process
-start and redacts them from logs, errors and evidence.
+expiry and budget. The inference gateway verifies signature, audience, expiry
+and all run bindings before fetching the upstream key from Vault/KMS. The CLI
+never receives a long-lived key or the short-lived run token itself.
+
+Long tasks keep a stable SecretRef while the Worker replaces its token value
+before expiry; every replacement is another independently capped 15-minute
+token and cannot outlive the immutable run authorization. A loopback-only HTTPS
+relay inside the microVM gives the CLI a random attempt-local credential,
+resolves the current SecretRef for every inference request, then replaces that
+credential with the DLRT on a separate mTLS connection to the Gateway. The
+relay URL uses literal `127.0.0.1` with a matching certificate IP SAN, and its
+CA is fixed in the immutable image. Lease heartbeat or renewal failure aborts the native launcher,
+so a stale Worker cannot continue and later commit a result.
+
+Protected secret environment entries contain only the relay's attempt-local
+SecretRef in persisted launch plans. The executor resolves it at process start
+and redacts it from logs, errors and evidence.
 
 The service implementation also compares the token against the active run
 registry (including nonce, exact model order and budget), checks the locked

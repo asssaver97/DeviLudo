@@ -41,6 +41,7 @@ export interface NativeMicrovmAgentRequest {
   readonly inferenceGatewayUrl: string;
   readonly inferenceTokenSecretRef: string;
   readonly inferenceTokenExpiresAt: string;
+  readonly inferenceAuthorizationExpiresAt: string;
   readonly prompt: string;
   readonly promptContentDigest: string;
   readonly promptDigest: string;
@@ -53,7 +54,8 @@ export function parseNativeMicrovmAgentRequest(value: unknown): NativeMicrovmAge
     "providerRevisionId", "providerProtocol", "credentialVersionId", "model", "modelRoles", "authorizedModels",
     "budget", "specRevisionId", "specDigest", "testPlanRevisionId", "testPlanDigest", "targetMatrix",
     "sourceBaselineReceiptId", "baseCommitSha", "sourceDigest", "inferenceGatewayUrl",
-    "inferenceTokenSecretRef", "inferenceTokenExpiresAt", "prompt", "promptContentDigest", "promptDigest"]);
+    "inferenceTokenSecretRef", "inferenceTokenExpiresAt", "inferenceAuthorizationExpiresAt",
+    "prompt", "promptContentDigest", "promptDigest"]);
   const agent = body.agent;
   const protocol = body.providerProtocol;
   if (body.schemaVersion !== "deviludo.native-agent-microvm-request.v1"
@@ -85,6 +87,10 @@ export function parseNativeMicrovmAgentRequest(value: unknown): NativeMicrovmAge
   if (typeof body.inferenceTokenSecretRef !== "string" || !SECRET_REF.test(body.inferenceTokenSecretRef)
     || typeof body.inferenceTokenExpiresAt !== "string" || !Number.isFinite(Date.parse(body.inferenceTokenExpiresAt))
     || new Date(body.inferenceTokenExpiresAt).toISOString() !== body.inferenceTokenExpiresAt
+    || typeof body.inferenceAuthorizationExpiresAt !== "string"
+    || !Number.isFinite(Date.parse(body.inferenceAuthorizationExpiresAt))
+    || new Date(body.inferenceAuthorizationExpiresAt).toISOString() !== body.inferenceAuthorizationExpiresAt
+    || Date.parse(body.inferenceAuthorizationExpiresAt) < Date.parse(body.inferenceTokenExpiresAt)
     || typeof body.prompt !== "string" || !body.prompt.trim()
     || Buffer.byteLength(body.prompt) > 512 * 1024 || sha256(body.prompt) !== body.promptContentDigest) invalid();
   return deepFreeze({ ...body, agent, providerProtocol: protocol, imageDigest: body.imageDigest,

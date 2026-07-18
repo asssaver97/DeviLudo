@@ -9,7 +9,7 @@ import {
   type RunContext,
   type RunHandle,
 } from "../../../lib/agent/types";
-import type { AgentExecutionRequest, SecretResolver, SupervisedRun } from "../../agent-worker/src/contracts";
+import type { AgentExecutionRequest, SupervisedRun } from "../../agent-worker/src/contracts";
 import { AgentExecutionSupervisor } from "../../agent-worker/src/supervisor";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { contentSha256, signGitHubCandidateArtifact } from "../../scm-proxy/src/github-artifacts";
@@ -19,6 +19,7 @@ import type {
   SignedGitHubCandidateArtifact,
 } from "../../scm-proxy/src/github-contracts";
 import type { IsolatedAgentExecutionResult } from "./contracts";
+import type { NativeGuestInferenceRelay } from "./native-inference-relay";
 import { parseNativeMicrovmAgentRequest, type NativeMicrovmAgentRequest } from "./native-microvm-contracts";
 
 const MAX_FILES = 100_000;
@@ -61,17 +62,19 @@ export interface NativeGuestSupervisor {
  * delta for the host-side SCM Broker.
  */
 export class NativeMicrovmAgentGuest {
-  readonly #supervisor: NativeGuestSupervisor;
+  readonly #supervisor: NativeGuestSupervisor | null;
+  readonly #relay: NativeGuestInferenceRelay;
   readonly #signer: CandidateArtifactSigner;
   readonly #now: () => Date;
 
   constructor(options: Readonly<{
-    secretResolver: SecretResolver;
+    relay: NativeGuestInferenceRelay;
     signer: CandidateArtifactSigner;
     supervisor?: NativeGuestSupervisor;
     now?: () => Date;
   }>) {
-    this.#supervisor = options.supervisor ?? new AgentExecutionSupervisor({ secretResolver: options.secretResolver });
+    this.#supervisor = options.supervisor ?? null;
+    this.#relay = options.relay;
     this.#signer = options.signer;
     this.#now = options.now ?? (() => new Date());
   }
@@ -81,31 +84,39 @@ export class NativeMicrovmAgentGuest {
     const roots = await validateRoots(paths.runRoot, paths.workspaceRoot);
     try {
       const startedAt = validNow(this.#now());
-      const remainingSeconds = Math.floor((Date.parse(request.inferenceTokenExpiresAt) - startedAt.getTime() - 30_000) / 1_000);
+      const remainingSeconds = Math.floor((Date.parse(request.inferenceAuthorizationExpiresAt) - startedAt.getTime() - 30_000) / 1_000);
+      // The request records the initial token expiry for audit only. The host
+      // may already have rotated the stable SecretRef while materializing a
+      // large source tree, so the relay resolves the current value on demand.
       if (remainingSeconds < 60) invalid("DLRT lifetime");
       const before = await scanRepository(roots.workspaceRoot);
       if (sourceDigest(before) !== request.sourceDigest) invalid("baseline source digest");
-      const adapter = getRuntimeAdapter(request.agent);
-      const profile = profileFrom(request, Math.min(request.budget.timeoutSeconds, remainingSeconds));
-      const context: RunContext = Object.freeze({
-        tenantId: request.tenantId,
-        projectId: request.projectId,
-        runId: request.runId,
-        attemptId: request.attemptId,
-        commitSha: request.baseCommitSha,
-        specificationRevisionId: request.specRevisionId,
-        testPlanRevisionId: request.testPlanRevisionId,
-        runRoot: roots.runRoot,
-        inferenceGatewayUrl: request.inferenceGatewayUrl,
-        runTokenSecretRef: request.inferenceTokenSecretRef,
-      });
-      const runtime = adapter.prepare(context, profile);
-      const runtimeSpec = adapter.start(runtime, request.prompt, roots.workspaceRoot);
-      const runHandle: RunHandle = Object.freeze({ runId: request.runId, attemptId: request.attemptId,
-        agent: request.agent, executorHandle: `microvm-${request.attemptId}` });
-      const supervised = await this.#supervisor.start({ adapter, runHandle, installationProbe: adapter.probe(profile),
-        runtimeSpec, workerRunRoot: roots.runRoot, workspaceRoot: roots.workspaceRoot });
-      const completion = await supervised.completion;
+      const relay = await this.#relay.start(request);
+      let completion: Awaited<SupervisedRun["completion"]>;
+      try {
+        const adapter = getRuntimeAdapter(request.agent);
+        const profile = profileFrom(request, Math.min(request.budget.timeoutSeconds, remainingSeconds));
+        const context: RunContext = Object.freeze({
+          tenantId: request.tenantId,
+          projectId: request.projectId,
+          runId: request.runId,
+          attemptId: request.attemptId,
+          commitSha: request.baseCommitSha,
+          specificationRevisionId: request.specRevisionId,
+          testPlanRevisionId: request.testPlanRevisionId,
+          runRoot: roots.runRoot,
+          inferenceGatewayUrl: relay.gatewayUrl,
+          runTokenSecretRef: relay.runTokenSecretRef,
+        });
+        const runtime = adapter.prepare(context, profile);
+        const runtimeSpec = adapter.start(runtime, request.prompt, roots.workspaceRoot);
+        const runHandle: RunHandle = Object.freeze({ runId: request.runId, attemptId: request.attemptId,
+          agent: request.agent, executorHandle: `microvm-${request.attemptId}` });
+        const supervisor = this.#supervisor ?? new AgentExecutionSupervisor({ secretResolver: relay.secretResolver });
+        const supervised = await supervisor.start({ adapter, runHandle, installationProbe: adapter.probe(profile),
+          runtimeSpec, workerRunRoot: roots.runRoot, workspaceRoot: roots.workspaceRoot });
+        completion = await supervised.completion;
+      } finally { await relay.close(); }
       if (completion.status !== "completed" || completion.result.status !== "completed") invalid("Agent completion");
       if (!Number.isSafeInteger(completion.result.usage.inputTokens) || completion.result.usage.inputTokens < 0
         || !Number.isSafeInteger(completion.result.usage.outputTokens) || completion.result.usage.outputTokens < 0
