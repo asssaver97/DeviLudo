@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { SourceBaselineReceipt } from "../../scm-proxy/src/source-baseline-contracts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
-import { resolveCatalogConfiguration } from "./catalog";
+import { resolveCatalogConfiguration, type ResolvedProfileConfiguration } from "./catalog";
 import type {
   AgentConfigurationClaim,
   AgentConfigurationLock,
@@ -264,6 +264,12 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
         modelRoles: catalog.modelRoles,
         credentialVersionId: catalog.credentialVersionId,
         budget: catalog.budget,
+        fallback: catalog.fallback === null ? null : Object.freeze({
+          ...catalog.fallback,
+          inferenceAuthorizationExpiresAt: new Date(
+            resolvedAt.getTime() + catalog.fallback.budget.timeoutSeconds * 1_000,
+          ).toISOString(),
+        }),
         specRevisionId: row.spec_revision_id,
         specDigest: row.spec_digest,
         testPlanRevisionId: row.test_plan_revision_id,
@@ -280,45 +286,8 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
       });
       const resolutionDigest = sha256Canonical(lockWithoutDigest);
       const configurationLock: AgentConfigurationLock = Object.freeze({ ...lockWithoutDigest, resolutionDigest });
-      const providerModels = JSON.stringify(catalog.modelRoles);
-      const providerPricing = catalog.providerPricing;
-      await client.query(
-        `INSERT INTO deviludo.inference_provider_revisions
-          (provider_revision_id, tenant_id, project_id, source_revision_id,
-           agent, protocol, base_url, approved_ports, authentication, models,
-           credential_version_id, input_usd_per_million_tokens,
-           output_usd_per_million_tokens, state)
-         VALUES ($2, $1::uuid, NULL, $2, $3, $4, $5, $6::integer[], $7,
-                 $8::jsonb, $9, $10::numeric, $11::numeric, 'ACTIVE')
-         ON CONFLICT (tenant_id, provider_revision_id) DO NOTHING`,
-        [claim.tenantId, catalog.providerRevisionId, catalog.agent,
-          catalog.providerProtocol, catalog.providerBaseUrl,
-          catalog.providerApprovedPorts, catalog.providerAuthentication,
-          providerModels, catalog.credentialVersionId,
-          providerPricing.inputUsdPerMillionTokens,
-          providerPricing.outputUsdPerMillionTokens],
-      );
-      const providerProjection = await client.query<ProviderProjectionRow>(
-        `SELECT provider_revision_id
-           FROM deviludo.inference_provider_revisions
-          WHERE tenant_id = $1::uuid AND provider_revision_id = $2
-            AND project_id IS NULL AND source_revision_id = $2
-            AND agent = $3 AND protocol = $4 AND base_url = $5
-            AND approved_ports = $6::integer[] AND authentication = $7
-            AND models = $8::jsonb AND credential_version_id = $9
-            AND input_usd_per_million_tokens = $10::numeric
-            AND output_usd_per_million_tokens = $11::numeric
-            AND state = 'ACTIVE'
-          FOR SHARE`,
-        [claim.tenantId, catalog.providerRevisionId, catalog.agent,
-          catalog.providerProtocol, catalog.providerBaseUrl,
-          catalog.providerApprovedPorts, catalog.providerAuthentication,
-          providerModels, catalog.credentialVersionId,
-          providerPricing.inputUsdPerMillionTokens,
-          providerPricing.outputUsdPerMillionTokens],
-      );
-      if (providerProjection.rows.length !== 1
-        || providerProjection.rows[0]?.provider_revision_id !== catalog.providerRevisionId) conflict();
+      await ensureProviderProjection(client, claim.tenantId, catalog);
+      if (catalog.fallback !== null) await ensureProviderProjection(client, claim.tenantId, catalog.fallback);
       const runId = randomUUID();
       await client.query(
         `INSERT INTO deviludo.agent_runs
@@ -462,6 +431,48 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
       throw error;
     } finally { client.release(); }
   }
+}
+
+async function ensureProviderProjection(
+  client: PostgresWorkflowClient,
+  tenantId: string,
+  configuration: ResolvedProfileConfiguration,
+): Promise<void> {
+  const providerModels = JSON.stringify(configuration.modelRoles);
+  const providerPricing = configuration.providerPricing;
+  const values = [tenantId, configuration.providerRevisionId, configuration.agent,
+    configuration.providerProtocol, configuration.providerBaseUrl,
+    configuration.providerApprovedPorts, configuration.providerAuthentication,
+    providerModels, configuration.credentialVersionId,
+    providerPricing.inputUsdPerMillionTokens,
+    providerPricing.outputUsdPerMillionTokens] as const;
+  await client.query(
+    `INSERT INTO deviludo.inference_provider_revisions
+      (provider_revision_id, tenant_id, project_id, source_revision_id,
+       agent, protocol, base_url, approved_ports, authentication, models,
+       credential_version_id, input_usd_per_million_tokens,
+       output_usd_per_million_tokens, state)
+     VALUES ($2, $1::uuid, NULL, $2, $3, $4, $5, $6::integer[], $7,
+             $8::jsonb, $9, $10::numeric, $11::numeric, 'ACTIVE')
+     ON CONFLICT (tenant_id, provider_revision_id) DO NOTHING`,
+    values,
+  );
+  const projection = await client.query<ProviderProjectionRow>(
+    `SELECT provider_revision_id
+       FROM deviludo.inference_provider_revisions
+      WHERE tenant_id = $1::uuid AND provider_revision_id = $2
+        AND project_id IS NULL AND source_revision_id = $2
+        AND agent = $3 AND protocol = $4 AND base_url = $5
+        AND approved_ports = $6::integer[] AND authentication = $7
+        AND models = $8::jsonb AND credential_version_id = $9
+        AND input_usd_per_million_tokens = $10::numeric
+        AND output_usd_per_million_tokens = $11::numeric
+        AND state = 'ACTIVE'
+      FOR SHARE`,
+    values,
+  );
+  if (projection.rows.length !== 1
+    || projection.rows[0]?.provider_revision_id !== configuration.providerRevisionId) conflict();
 }
 
 export function agentConfigurationSignalId(resolutionDigest: string): string { return signalId(resolutionDigest); }

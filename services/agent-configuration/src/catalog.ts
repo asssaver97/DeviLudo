@@ -8,9 +8,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const EXACT_VERSION = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,99}$/;
 
-export interface ResolvedCatalogConfiguration {
-  readonly catalogRevision: string;
-  readonly profileSource: string;
+export interface ResolvedProfileConfiguration {
   readonly profileRevisionId: string;
   readonly agent: AgentKind;
   readonly installationId: string;
@@ -49,7 +47,13 @@ export interface ResolvedCatalogConfiguration {
   readonly budget: Readonly<{ maxUsd: number; maxTurns: number; timeoutSeconds: number }>;
 }
 
-/** Resolves one coherent administrator catalog revision without fallback on drift. */
+export interface ResolvedCatalogConfiguration extends ResolvedProfileConfiguration {
+  readonly catalogRevision: string;
+  readonly profileSource: string;
+  readonly fallback: ResolvedProfileConfiguration | null;
+}
+
+/** Resolves one coherent administrator catalog revision, including only a project-approved fallback. */
 export function resolveCatalogConfiguration(input: {
   readonly revision: string | number | bigint;
   readonly payload: unknown;
@@ -72,10 +76,58 @@ export function resolveCatalogConfiguration(input: {
   if (!selected) invalid("No active Agent default is configured");
   const profileId = defaults.get(selected);
   const profile = requireRecord(profiles, profileId, "profile");
+  const primary = resolveProfileConfiguration({
+    profile,
+    selectedDefault: selected,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    providers,
+    installations,
+    versions,
+    credentials,
+  });
+  let fallback: ResolvedProfileConfiguration | null = null;
+  const fallbackValue = profile.fallbackProfileRevisionId;
+  if (fallbackValue !== undefined && fallbackValue !== null) {
+    const fallbackProfileId = safeId(fallbackValue);
+    if (fallbackProfileId === primary.profileRevisionId) invalid("Agent fallback Profile cannot reference itself");
+    if (selected === `project:${input.projectId}`) {
+      fallback = resolveProfileConfiguration({
+        profile: requireRecord(profiles, fallbackProfileId, "fallback profile"),
+        selectedDefault: selected,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        providers,
+        installations,
+        versions,
+        credentials,
+      });
+      if (fallback.agent !== primary.agent) invalid("Agent fallback must use the same Agent kind");
+    }
+  }
+  return Object.freeze({
+    catalogRevision,
+    profileSource: selected,
+    ...primary,
+    fallback,
+  });
+}
+
+function resolveProfileConfiguration(input: {
+  readonly profile: Readonly<Record<string, unknown>>;
+  readonly selectedDefault: string;
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly providers: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  readonly installations: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  readonly versions: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  readonly credentials: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+}): ResolvedProfileConfiguration {
+  const { profile, providers, installations, versions, credentials } = input;
   if (profile.state !== "ACTIVE") {
     invalid("Selected Agent Profile is inactive or belongs to another scope");
   }
-  const profileScope = selectableProfileScope(profile, selected, input.tenantId, input.projectId);
+  const profileScope = selectableProfileScope(profile, input.selectedDefault, input.tenantId, input.projectId);
   const agent = agentKind(profile.agent);
   const installationId = safeId(profile.installationId);
   const providerRevisionId = safeId(profile.providerRevisionId);
@@ -161,8 +213,6 @@ export function resolveCatalogConfiguration(input: {
     timeoutSeconds: integer(budgetValue.timeoutSeconds, 60, 14_400),
   });
   return Object.freeze({
-    catalogRevision,
-    profileSource: selected,
     profileRevisionId: safeId(profile.id),
     agent,
     installationId,

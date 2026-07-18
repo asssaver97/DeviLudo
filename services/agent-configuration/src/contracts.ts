@@ -31,6 +31,46 @@ export interface LockedAgentConfiguration {
 
 export type AgentConfigurationWork = AgentConfigurationClaim | LockedAgentConfiguration;
 
+export interface AgentProfileConfigurationLock {
+  readonly profileRevisionId: string;
+  readonly installationId: string;
+  readonly workerPool: string;
+  readonly imageDigest: string;
+  readonly agentVersionId: string;
+  readonly exactAgentVersion: string;
+  readonly agentVersionSourceDigest: string;
+  readonly adapterVersion: string;
+  readonly workerImageId: string;
+  readonly buildReceiptId: string;
+  readonly buildReceiptDigest: string;
+  readonly agent: AgentKind;
+  readonly providerRevisionId: string;
+  readonly providerProtocol: "anthropic-messages" | "openai-responses";
+  readonly providerBaseUrl: string;
+  readonly providerApprovedPorts: readonly number[];
+  readonly providerAuthentication: "x-api-key" | "authorization-bearer" | "bearer";
+  readonly providerPricing: Readonly<{
+    inputUsdPerMillionTokens: number;
+    outputUsdPerMillionTokens: number;
+  }>;
+  readonly providerGovernance: Readonly<{
+    dataRegion: string;
+    retentionPolicy: string;
+    trainingPolicy: string;
+    confirmedBy: string;
+    confirmedAt: string;
+  }>;
+  readonly inferenceAuthorizationExpiresAt: string;
+  readonly modelRoles: Readonly<{
+    primaryModel: string;
+    planningModel: string;
+    smallFastModel: string;
+    subagentModel: string;
+  }>;
+  readonly credentialVersionId: string;
+  readonly budget: Readonly<{ maxUsd: number; maxTurns: number; timeoutSeconds: number }>;
+}
+
 export interface AgentConfigurationLock {
   readonly profileRevisionId: string;
   readonly profileSource: string;
@@ -70,6 +110,7 @@ export interface AgentConfigurationLock {
   }>;
   readonly credentialVersionId: string;
   readonly budget: Readonly<{ maxUsd: number; maxTurns: number; timeoutSeconds: number }>;
+  readonly fallback: AgentProfileConfigurationLock | null;
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanRevisionId: string;

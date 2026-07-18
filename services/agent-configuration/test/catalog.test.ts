@@ -64,6 +64,37 @@ test("Agent catalog lets tenant and project defaults select an active inherited 
   assert.equal(projectTenant.profileSource, `project:${projectId}`);
 });
 
+test("Agent catalog freezes fallback only when a project explicitly selects the Profile", () => {
+  const inherited = catalogWithFallback();
+  const platform = resolveCatalogConfiguration({ revision: 15, payload: inherited, tenantId, projectId });
+  assert.equal(platform.fallback, null);
+
+  inherited.defaults.push([`project:${projectId}`, "profile-platform-r1"]);
+  const project = resolveCatalogConfiguration({ revision: 16, payload: inherited, tenantId, projectId });
+  assert.equal(project.fallback?.profileRevisionId, "profile-fallback-r1");
+  assert.equal(project.fallback?.providerRevisionId, "provider-claude-fallback-r1");
+  assert.equal(project.fallback?.agent, project.agent);
+  assert.notEqual(project.fallback?.providerRevisionId, project.providerRevisionId);
+});
+
+test("Agent catalog fails closed on self-referencing or unhealthy project fallback", () => {
+  const self = catalog();
+  Object.assign(self.profiles[0]!, { fallbackProfileRevisionId: "profile-platform-r1" });
+  self.defaults.push([`project:${projectId}`, "profile-platform-r1"]);
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 17, payload: self, tenantId, projectId }),
+    /cannot reference itself/,
+  );
+
+  const unhealthy = catalogWithFallback();
+  unhealthy.defaults.push([`project:${projectId}`, "profile-platform-r1"]);
+  unhealthy.installations[1]!.health = "UNHEALTHY";
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 18, payload: unhealthy, tenantId, projectId }),
+    /not fully active/,
+  );
+});
+
 test("Agent catalog rejects inherited Profiles from another tenant or project", () => {
   const otherTenant = "33333333-3333-4333-8333-333333333333";
   const otherProject = "44444444-4444-4444-8444-444444444444";
@@ -208,4 +239,24 @@ function profile(id: string, scope: "platform" | "tenant" | "project", scopeId: 
     credentialVersionId: "credential-claude-v1",
     budget: { maxUsd: 25, maxTurns: 100, timeoutSeconds: 7200 },
   };
+}
+
+function catalogWithFallback() {
+  const payload = catalog();
+  payload.versions.push({ ...payload.versions[0]!, id: "claude-code@2.1.15", version: "2.1.15",
+    sourceDigest: "a".repeat(64) });
+  payload.installations.push({ ...payload.installations[0]!, id: "installation-claude-fallback-r1",
+    agentVersionId: "claude-code@2.1.15", imageDigest: `sha256:${"b".repeat(64)}`,
+    workerImageId: "worker-image-claude-fallback-r1", buildReceiptId: "build-receipt-claude-fallback-r1",
+    buildReceiptDigest: "c".repeat(64) });
+  payload.providers.push({ ...structuredClone(payload.providers[0]!), id: "provider-claude-fallback-r1",
+    baseUrl: "https://fallback.anthropic.example/v1", credentialVersionId: "credential-claude-fallback-v1" });
+  payload.credentials.push({ id: "credential-claude-fallback-v1", scope: "platform", scopeId: "global", state: "ACTIVE" });
+  const fallback = profile("profile-fallback-r1", "platform", "global");
+  fallback.installationId = "installation-claude-fallback-r1";
+  fallback.providerRevisionId = "provider-claude-fallback-r1";
+  fallback.credentialVersionId = "credential-claude-fallback-v1";
+  payload.profiles.push(fallback);
+  Object.assign(payload.profiles[0]!, { fallbackProfileRevisionId: fallback.id });
+  return payload;
 }

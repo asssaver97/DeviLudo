@@ -58,7 +58,7 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   const client = clientWith(async (statement, values) => {
     sql.push(statement);
     if (statement.includes("CROSS JOIN deviludo.admin_catalog_state catalog")) {
-      return rows([authority()]);
+      return rows([authority(catalogWithFallback())]);
     }
     if (statement.includes("INSERT INTO deviludo.agent_runs")) {
       persistedLock = JSON.parse(String(values[13])) as Record<string, unknown>;
@@ -66,7 +66,7 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
       return rows([]);
     }
     if (statement.includes("FROM deviludo.inference_provider_revisions")) {
-      return rows([{ provider_revision_id: "provider-claude-r1" }]);
+      return rows([{ provider_revision_id: String(values[1]) }]);
     }
     if (statement.includes("FROM deviludo.agent_runs")) {
       return rows([{ id: runId, state: "QUEUED", resolution_digest: persistedDigest, configuration_lock: persistedLock }]);
@@ -88,13 +88,17 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   assert.match(result.resolutionDigest, /^[a-f0-9]{64}$/);
   const observedLock = persistedLock as unknown as Record<string, unknown>;
   assert.equal(observedLock.profileRevisionId, "profile-platform-r1");
-  assert.equal(observedLock.profileSource, "platform");
+  assert.equal(observedLock.profileSource, `project:${projectId}`);
   assert.equal(observedLock.commitSha, commitSha);
   assert.deepEqual(observedLock.targetMatrix, ["linux", "windows"]);
   assert.equal(observedLock.adminCatalogRevision, "12");
+  const observedFallback = observedLock.fallback as Record<string, unknown>;
+  assert.equal(observedFallback.profileRevisionId, "profile-fallback-r1");
+  assert.equal(observedFallback.providerRevisionId, "provider-claude-fallback-r1");
+  assert.equal(observedFallback.inferenceAuthorizationExpiresAt, "2030-01-01T02:02:03.000Z");
   assert.ok(sql.some((statement) => statement.includes("FOR SHARE OF spec, plan, binding, toolchain, baseline, catalog")));
   assert.ok(sql.some((statement) => statement.includes("ON CONFLICT (tenant_id, idempotency_key) DO NOTHING")));
-  assert.ok(sql.some((statement) => statement.includes("INSERT INTO deviludo.inference_provider_revisions")));
+  assert.equal(sql.filter((statement) => statement.includes("INSERT INTO deviludo.inference_provider_revisions")).length, 2);
   assert.ok(sql.some((statement) => statement.includes("INSERT INTO deviludo.inference_run_authorizations")));
   assert.deepEqual(authorizationValues[6], ["claude-sonnet-4-6-20250514"]);
   assert.deepEqual(JSON.parse(String(authorizationValues[7])), { maxCostUsd: 25 });
@@ -163,7 +167,7 @@ function candidate(override: Readonly<Record<string, unknown>>) {
     ...override,
   };
 }
-function authority() {
+function authority(catalogPayload: unknown = catalog()) {
   return {
     ...candidate({ resolution_state: "CLAIMED", claim_token: claimToken }),
     spec_revision_id: specRevisionId,
@@ -187,7 +191,7 @@ function authority() {
     baseline_test_plan_revision_id: testPlanRevisionId,
     baseline_spec_approval_receipt_id: approvalId,
     catalog_revision: "12",
-    catalog_payload: catalog(),
+    catalog_payload: catalogPayload,
   };
 }
 function catalog() {
@@ -235,6 +239,25 @@ function catalog() {
     credentials: [{ id: "credential-claude-v1", scope: "platform", scopeId: "global", state: "ACTIVE" }],
     defaults: [["platform", "profile-platform-r1"]],
   };
+}
+
+function catalogWithFallback() {
+  const payload = catalog();
+  payload.versions.push({ ...payload.versions[0]!, id: "claude-code@2.1.15", version: "2.1.15",
+    sourceDigest: "a".repeat(64) });
+  payload.installations.push({ ...payload.installations[0]!, id: "installation-claude-fallback-r1",
+    agentVersionId: "claude-code@2.1.15", imageDigest: `sha256:${"b".repeat(64)}`,
+    workerImageId: "worker-image-claude-fallback-r1", buildReceiptId: "build-receipt-claude-fallback-r1",
+    buildReceiptDigest: "c".repeat(64) });
+  payload.providers.push({ ...structuredClone(payload.providers[0]!), id: "provider-claude-fallback-r1",
+    baseUrl: "https://fallback.anthropic.example/v1", credentialVersionId: "credential-claude-fallback-v1" });
+  payload.credentials.push({ id: "credential-claude-fallback-v1", scope: "platform", scopeId: "global", state: "ACTIVE" });
+  payload.profiles.push({ ...payload.profiles[0]!, id: "profile-fallback-r1",
+    installationId: "installation-claude-fallback-r1", providerRevisionId: "provider-claude-fallback-r1",
+    credentialVersionId: "credential-claude-fallback-v1", budget: { maxUsd: 10, maxTurns: 40, timeoutSeconds: 3600 } });
+  Object.assign(payload.profiles[0]!, { fallbackProfileRevisionId: "profile-fallback-r1" });
+  payload.defaults.push([`project:${projectId}`, "profile-platform-r1"]);
+  return payload;
 }
 
 function clientWith(
