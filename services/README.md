@@ -145,6 +145,8 @@ Routes:
 | PUT | `/admin/agent-defaults/:scope` | matching scope owner |
 | GET | `/admin/agent-health` | all admin roles |
 | GET | `/admin/audit` | all admin roles |
+| POST | `/admin/inference-requests/:id/reconcile` | SecurityAdmin |
+| GET | `/admin/inference-runs/:tenantId/:runId/reconciliation` | SecurityAdmin |
 
 The built-in platform default is an exact Claude Code profile. Selection is
 `project > tenant > platform > built-in Claude Code`. Defaults only reference
@@ -171,12 +173,15 @@ access. Without it, production validation returns 503; local development uses
 the contract probe. The control-plane probe client and Gateway listener both
 require TLS 1.3 workload certificates; the control plane sends only the exact
 Provider and credential-version identities. The production Gateway is started
-with `npm run start:inference-gateway`, uses migrations `028` and `029` for
+with `npm run start:inference-gateway`, uses migrations `028` through `030` for
 tenant-RLS run/Provider projections, append-only usage and per-run fenced
 request claims, and resolves a five-minute key lease from the fixed mTLS
 credential Broker. An expired or transport-ambiguous claim becomes
-`INDETERMINATE`; new calls fail closed until an operator reconciles upstream
-usage, rather than risking an automatic duplicate charge. See
+`INDETERMINATE`; new calls fail closed until a SecurityAdmin supplies an
+upstream evidence digest through the idempotent control-plane reconciliation
+route. The Gateway either releases a confirmed no-usage request or records
+exact token usage at the frozen price, rather than risking an automatic
+duplicate charge. See
 `services/inference-gateway/.env.example`; PEM and run-token key material must
 be file-mounted, never placed directly in environment variables.
 

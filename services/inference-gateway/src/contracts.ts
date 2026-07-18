@@ -68,6 +68,48 @@ export interface GatewayUsageClaimBinding {
   readonly leaseSeconds: number;
 }
 
+export type InferenceReconciliationAction = "CONFIRM_NO_USAGE" | "RECORD_USAGE";
+
+export interface InferenceReconciliationRequest {
+  readonly operationKey: string;
+  readonly tenantId: string;
+  readonly runId: string;
+  readonly requestId: string;
+  readonly action: InferenceReconciliationAction;
+  readonly evidenceDigest: string;
+  readonly reconciledBy: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+}
+
+export interface InferenceReconciliationReceipt {
+  readonly operationKey: string;
+  readonly tenantId: string;
+  readonly runId: string;
+  readonly requestId: string;
+  readonly action: InferenceReconciliationAction;
+  readonly evidenceDigest: string;
+  readonly state: "COMPLETED" | "RELEASED";
+  readonly usage: GatewayUsage;
+  readonly reconciledAt: string;
+}
+
+export interface InferenceReconciliationStatus {
+  readonly tenantId: string;
+  readonly runId: string;
+  readonly requestId: string;
+  readonly providerRevisionId: string;
+  readonly model: string;
+  readonly state: "ACTIVE" | "INDETERMINATE";
+  readonly claimExpiresAt: string;
+  readonly createdAt: string;
+}
+
+export interface InferenceReconciliationStore {
+  lookup(tenantId: string, runId: string): Promise<InferenceReconciliationStatus | null>;
+  reconcile(input: InferenceReconciliationRequest): Promise<InferenceReconciliationReceipt>;
+}
+
 export interface GatewayAuthorizationRequest {
   readonly token: string;
   readonly protocol: GatewayProtocol;

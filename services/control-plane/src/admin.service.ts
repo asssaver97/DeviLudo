@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
+import type { InferenceReconciliationReceipt } from "../../inference-gateway/src/contracts";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { AdminStore, recordAdminAudit, type AdminCatalogState } from "./admin.store";
@@ -30,6 +31,7 @@ import {
   type AgentVersionCandidateReceipt,
   type AgentVersionValidationReceipt,
 } from "./agent-supply-chain";
+import { InferenceRequestReconciler } from "./inference-reconciliation";
 
 export class AdminService {
   constructor(
@@ -37,6 +39,7 @@ export class AdminService {
     private readonly vault: SecretVault,
     private readonly providerProbe: ProviderProbe,
     private readonly supplyChain: AgentSupplyChain,
+    private readonly inferenceReconciler: InferenceRequestReconciler,
   ) {}
 
   async agents(): Promise<Readonly<Record<string, unknown>>> {
@@ -734,6 +737,57 @@ export class AdminService {
     return this.store.read((state) => Object.freeze(state.audit.filter((record) => auditVisibleTo(record, actor))));
   }
 
+  async reconcileInferenceRequest(
+    requestId: string,
+    body: Record<string, unknown>,
+    actor: RequestActor,
+  ): Promise<InferenceReconciliationReceipt> {
+    const mutation = actor.mutation;
+    if (!mutation) throw new ServiceProblem(500, "ADMIN_MUTATION_BINDING_REQUIRED", "Inference reconciliation requires an owned mutation binding");
+    const action = body.action;
+    const expected = action === "RECORD_USAGE"
+      ? ["action", "evidenceDigest", "inputTokens", "outputTokens", "runId", "tenantId"]
+      : ["action", "evidenceDigest", "runId", "tenantId"];
+    if ((action !== "CONFIRM_NO_USAGE" && action !== "RECORD_USAGE")
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(expected)) {
+      throw new ServiceProblem(400, "INVALID_RECONCILIATION_REQUEST", "Inference reconciliation request is invalid");
+    }
+    const tenantId = requiredUuid(body, "tenantId");
+    const runId = requiredUuid(body, "runId");
+    if (!UUID_PATTERN.test(requestId)) throw new ServiceProblem(400, "INVALID_RECONCILIATION_REQUEST", "Inference request id is invalid");
+    const evidenceDigest = requiredDigest(body, "evidenceDigest");
+    const tokens = action === "RECORD_USAGE" ? reconciliationTokens(body) : {};
+    const receipt = await this.inferenceReconciler.reconcile({
+      operationKey: mutation.identityDigest,
+      tenantId,
+      runId,
+      requestId,
+      action,
+      evidenceDigest,
+      reconciledBy: actor.actorId,
+      ...tokens,
+    });
+    return this.mutate(actor, (state) => {
+      this.audit(state, "INFERENCE_REQUEST_RECONCILED", `inference-request:${requestId}`, actor, {
+        affectedTenantId: tenantId,
+        runId,
+        action,
+        evidenceDigest,
+        state: receipt.state,
+        usage: receipt.usage,
+        reconciledAt: receipt.reconciledAt,
+      });
+      return receipt;
+    });
+  }
+
+  async lookupInferenceReconciliation(tenantId: string, runId: string) {
+    if (!UUID_PATTERN.test(tenantId) || !UUID_PATTERN.test(runId)) {
+      throw new ServiceProblem(400, "INVALID_RECONCILIATION_LOOKUP", "Inference reconciliation lookup is invalid");
+    }
+    return this.inferenceReconciler.lookup(tenantId, runId);
+  }
+
   private mutate<T>(
     actor: RequestActor,
     operation: (state: AdminCatalogState) => T,
@@ -798,7 +852,38 @@ Inject(AdminStore)(AdminService, undefined, 0);
 Inject(SecretVault)(AdminService, undefined, 1);
 Inject(ProviderProbe)(AdminService, undefined, 2);
 Inject(AgentSupplyChain)(AdminService, undefined, 3);
+Inject(InferenceRequestReconciler)(AdminService, undefined, 4);
 Injectable()(AdminService);
+
+const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+
+function requiredUuid(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new ServiceProblem(400, "INVALID_RECONCILIATION_REQUEST", `${field} is invalid`);
+  }
+  return value;
+}
+
+function requiredDigest(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string" || !DIGEST_PATTERN.test(value)) {
+    throw new ServiceProblem(400, "INVALID_RECONCILIATION_REQUEST", `${field} is invalid`);
+  }
+  return value;
+}
+
+function reconciliationTokens(body: Record<string, unknown>): Readonly<{ inputTokens: number; outputTokens: number }> {
+  const inputTokens = body.inputTokens;
+  const outputTokens = body.outputTokens;
+  if (!Number.isSafeInteger(inputTokens) || !Number.isSafeInteger(outputTokens)
+    || (inputTokens as number) < 0 || (outputTokens as number) < 0
+    || (inputTokens as number) + (outputTokens as number) < 1) {
+    throw new ServiceProblem(400, "INVALID_RECONCILIATION_REQUEST", "Recorded usage must contain non-negative token counts");
+  }
+  return Object.freeze({ inputTokens: inputTokens as number, outputTokens: outputTokens as number });
+}
 
 function assertExactVersion(value: string): void {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value) || /latest|stable|default/i.test(value)) {

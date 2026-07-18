@@ -128,6 +128,36 @@ paths:
     get:
       operationId: listAgentAudit
       responses: { "200": { $ref: "#/components/responses/Ok" } }
+  /admin/inference-requests/{id}/reconcile:
+    post:
+      operationId: reconcileInferenceRequest
+      description: SecurityAdmin-only recovery for one ambiguous upstream inference request. The evidence digest must come from the upstream request/usage record.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InferenceReconciliation" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: The request is active, terminal, or already reconciled with another outcome. }
+  /admin/inference-runs/{tenantId}/{runId}/reconciliation:
+    get:
+      operationId: getInferenceReconciliation
+      description: SecurityAdmin-only read for the unique unresolved request of one tenant run. Expired active leases are presented as effectively indeterminate without a hidden write.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
   /projects/{projectId}/spec-revisions:
     post:
       operationId: approveGameSpecRevision
@@ -198,3 +228,23 @@ components:
         scopeId: { type: string }
         budgetUsd: { type: number, minimum: 0, maximum: 100 }
         fallbackProfileId: { type: [string, "null"], description: Explicit same-Agent fallback only. }
+    InferenceReconciliation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [tenantId, runId, action, evidenceDigest]
+          properties:
+            tenantId: { type: string, format: uuid }
+            runId: { type: string, format: uuid }
+            action: { const: CONFIRM_NO_USAGE }
+            evidenceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        - type: object
+          additionalProperties: false
+          required: [tenantId, runId, action, evidenceDigest, inputTokens, outputTokens]
+          properties:
+            tenantId: { type: string, format: uuid }
+            runId: { type: string, format: uuid }
+            action: { const: RECORD_USAGE }
+            evidenceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+            inputTokens: { type: integer, minimum: 0 }
+            outputTokens: { type: integer, minimum: 0 }

@@ -3,7 +3,12 @@ import type { SecureVersion } from "node:tls";
 import { GatewayAuthorizationError, InferenceGatewayAuthorizer } from "./authorization";
 import type { GatewayConnector, GatewayProtocol, InferenceGatewayAuthorizerOptions } from "./contracts";
 import type { GatewayProviderProbeService } from "./provider-probe";
+import { InferenceReconciliationConflict } from "./postgres-store";
 import { InferenceRequestClaimError } from "./production-connector";
+import {
+  InferenceReconciliationRequestError,
+  type GatewayInferenceReconciliationService,
+} from "./reconciliation";
 
 const SAFE_RESPONSE_HEADERS = new Set(["content-type", "x-request-id", "request-id"]);
 
@@ -21,6 +26,8 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
   readonly https?: InferenceGatewayTlsOptions;
   readonly providerProbe?: GatewayProviderProbeService;
   readonly authorizeProviderProbe?: (request: FastifyRequest) => void | Promise<void>;
+  readonly reconciliation?: GatewayInferenceReconciliationService;
+  readonly authorizeReconciliation?: (request: FastifyRequest) => void | Promise<void>;
 }): FastifyInstance {
   const server = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, ...(options.https ? { https: options.https } : {}) });
   const authorizer = new InferenceGatewayAuthorizer(options);
@@ -30,6 +37,7 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
     service: "deviludo-inference-gateway",
     connector: options.connector ? "CONFIGURED" : "NOT_CONFIGURED",
     providerProbe: options.providerProbe && options.authorizeProviderProbe ? "CONFIGURED" : "NOT_CONFIGURED",
+    reconciliation: options.reconciliation && options.authorizeReconciliation ? "CONFIGURED" : "NOT_CONFIGURED",
   }));
 
   server.post("/v1/responses", async (request, reply) => {
@@ -49,6 +57,24 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
       return reply.code(200).send(await options.providerProbe.run(request.body));
     } catch { return reply.code(409).send({ error: { code: "PROVIDER_PROBE_FAILED" } }); }
   });
+  server.post("/v1/inference-reconciliations", async (request, reply) => {
+    if (!options.reconciliation || !options.authorizeReconciliation) {
+      return reply.code(503).send({ error: { code: "INFERENCE_RECONCILIATION_NOT_CONFIGURED" } });
+    }
+    try { await options.authorizeReconciliation(request); }
+    catch { return reply.code(403).send({ error: { code: "INFERENCE_RECONCILIATION_WORKLOAD_FORBIDDEN" } }); }
+    reply.header("cache-control", "no-store");
+    return reply.code(200).send(await options.reconciliation.run(request.body));
+  });
+  server.post("/v1/inference-reconciliations/lookup", async (request, reply) => {
+    if (!options.reconciliation || !options.authorizeReconciliation) {
+      return reply.code(503).send({ error: { code: "INFERENCE_RECONCILIATION_NOT_CONFIGURED" } });
+    }
+    try { await options.authorizeReconciliation(request); }
+    catch { return reply.code(403).send({ error: { code: "INFERENCE_RECONCILIATION_WORKLOAD_FORBIDDEN" } }); }
+    reply.header("cache-control", "no-store");
+    return reply.code(200).send(await options.reconciliation.lookup(request.body));
+  });
 
   server.setErrorHandler((error, _request, reply) => {
     if (error instanceof GatewayAuthorizationError) {
@@ -57,6 +83,14 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
     }
     if (error instanceof InferenceRequestClaimError) {
       void reply.code(error.statusCode).send({ error: { code: error.code, message: "Inference run is not available for another request" } });
+      return;
+    }
+    if (error instanceof InferenceReconciliationRequestError) {
+      void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      return;
+    }
+    if (error instanceof InferenceReconciliationConflict) {
+      void reply.code(409).send({ error: { code: error.code, message: "Inference reconciliation was rejected" } });
       return;
     }
     void reply.code(500).send({ error: { code: "GATEWAY_REQUEST_FAILED", message: "Inference Gateway request failed" } });

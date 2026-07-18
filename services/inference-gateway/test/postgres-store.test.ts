@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresQueryResult, PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import { inferenceGatewayRegistries, PostgresInferenceGatewayStore } from "../src/postgres-store";
 
@@ -139,6 +140,103 @@ test("PostgreSQL request claim rechecks the durable budget after taking the run 
   assert.equal(outcome, "BUDGET_EXHAUSTED");
 });
 
+test("PostgreSQL reconciliation records priced usage once and rejects changed replay evidence", async () => {
+  const operationKey = "a".repeat(64);
+  const evidenceDigest = "b".repeat(64);
+  const reconciledAt = "2026-07-18T03:00:00.000Z";
+  let terminal = false;
+  const payloadDigest = sha256Canonical({
+    tenantId, runId, requestId, action: "RECORD_USAGE", evidenceDigest,
+    reconciledBy: "security-admin", inputTokens: 120, outputTokens: 30,
+  });
+  const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
+  const pool = poolWithQuery(async <Row extends Record<string, unknown>>(text: string, values?: readonly unknown[]) => {
+    calls.push({ text, values });
+    if (text.includes("FROM deviludo.inference_run_authorizations")) return result<Row>([{ run_id: runId }]);
+    if (text.includes("JOIN deviludo.inference_provider_revisions")) return result<Row>([{
+      ...claimRow(terminal ? "COMPLETED" : "INDETERMINATE", true),
+      input_usd_per_million_tokens: "2", output_usd_per_million_tokens: "8",
+      reconciliation_operation_key: terminal ? operationKey : null,
+      reconciliation_payload_digest: terminal ? payloadDigest : null,
+      reconciliation_action: terminal ? "RECORD_USAGE" : null,
+      reconciliation_evidence_digest: terminal ? evidenceDigest : null,
+      reconciled_by: terminal ? "security-admin" : null,
+      reconciled_at: terminal ? reconciledAt : null,
+    }]);
+    if (text.includes("INSERT INTO deviludo.inference_usage_events")) return result<Row>([], 1);
+    if (text.includes("SET state = $4")) { terminal = true; return result<Row>([{ reconciled_at: reconciledAt }], 1); }
+    if (text.includes("FROM deviludo.inference_usage_events")) {
+      return result<Row>([{ input_tokens: "120", output_tokens: "30", cost_usd: "0.00048" }]);
+    }
+    return result<Row>([]);
+  });
+  const store = new PostgresInferenceGatewayStore(pool);
+  const input = {
+    operationKey, tenantId, runId, requestId, action: "RECORD_USAGE" as const,
+    evidenceDigest, reconciledBy: "security-admin", inputTokens: 120, outputTokens: 30,
+  };
+  const first = await store.reconcile(input);
+  assert.deepEqual(first.usage, { inputTokens: 120, outputTokens: 30, costUsd: 0.00048 });
+  assert.equal(first.state, "COMPLETED");
+  const usageInsert = calls.find((call) => call.text.includes("INSERT INTO deviludo.inference_usage_events"));
+  assert.deepEqual(usageInsert?.values?.slice(-3), [120, 30, 0.00048]);
+  const replay = await store.reconcile(input);
+  assert.deepEqual(replay, first);
+  assert.equal(calls.filter((call) => call.text.includes("INSERT INTO deviludo.inference_usage_events")).length, 1);
+  await assert.rejects(
+    store.reconcile({ ...input, evidenceDigest: "c".repeat(64) }),
+    /reconciliation was rejected/,
+  );
+});
+
+test("PostgreSQL reconciliation releases only an indeterminate request confirmed as unbilled", async () => {
+  const calls: string[] = [];
+  const pool = poolWithQuery(async <Row extends Record<string, unknown>>(text: string) => {
+    calls.push(text);
+    if (text.includes("FROM deviludo.inference_run_authorizations")) return result<Row>([{ run_id: runId }]);
+    if (text.includes("JOIN deviludo.inference_provider_revisions")) return result<Row>([{
+      ...claimRow("INDETERMINATE", true),
+      input_usd_per_million_tokens: "2", output_usd_per_million_tokens: "8",
+      reconciliation_operation_key: null, reconciliation_payload_digest: null,
+      reconciliation_action: null, reconciliation_evidence_digest: null,
+      reconciled_by: null, reconciled_at: null,
+    }]);
+    if (text.includes("FROM deviludo.inference_usage_events")) return result<Row>([]);
+    if (text.includes("SET state = $4")) return result<Row>([{ reconciled_at: "2026-07-18T04:00:00.000Z" }], 1);
+    return result<Row>([]);
+  });
+  const receipt = await new PostgresInferenceGatewayStore(pool).reconcile({
+    operationKey: "d".repeat(64), tenantId, runId, requestId,
+    action: "CONFIRM_NO_USAGE", evidenceDigest: "e".repeat(64), reconciledBy: "security-admin",
+  });
+  assert.equal(receipt.state, "RELEASED");
+  assert.deepEqual(receipt.usage, { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  assert.equal(calls.some((text) => text.includes("INSERT INTO deviludo.inference_usage_events")), false);
+});
+
+test("PostgreSQL reconciliation lookup presents an expired lease as indeterminate without writing", async () => {
+  const calls: string[] = [];
+  const pool = poolWithQuery(async <Row extends Record<string, unknown>>(text: string) => {
+    calls.push(text);
+    if (text.includes("FROM deviludo.inference_run_authorizations")) return result<Row>([{ run_id: runId }]);
+    if (text.includes("FROM deviludo.inference_request_claims")) return result<Row>([{
+      ...claimRow("ACTIVE", true),
+      claim_expires_at: "2026-07-18T00:00:00.000Z",
+      created_at: "2026-07-17T23:48:00.000Z",
+    }]);
+    return result<Row>([]);
+  });
+  const status = await new PostgresInferenceGatewayStore(pool).lookup(tenantId, runId);
+  assert.deepEqual(status, {
+    tenantId, runId, requestId, providerRevisionId, model, state: "INDETERMINATE",
+    claimExpiresAt: "2026-07-18T00:00:00.000Z", createdAt: "2026-07-17T23:48:00.000Z",
+  });
+  assert.equal(JSON.stringify(status).includes(credentialVersionId), false);
+  assert.equal(calls.some((text) => text.includes("UPDATE deviludo.inference_request_claims")), false);
+  assert.ok(calls.findIndex((text) => text.includes("inference_run_authorizations"))
+    < calls.findIndex((text) => text.includes("inference_request_claims")));
+});
+
 function claimBinding() {
   return { requestId, claimToken, tenantId, projectId, runId, providerRevisionId, credentialVersionId, model, leaseSeconds: 660 };
 }
@@ -151,7 +249,7 @@ function runRow() {
     nonce: "run-nonce-1", state: "ACTIVE",
   };
 }
-function claimRow(state: "ACTIVE" | "INDETERMINATE", expired: boolean) {
+function claimRow(state: "ACTIVE" | "COMPLETED" | "RELEASED" | "INDETERMINATE", expired: boolean) {
   return {
     request_id: requestId, tenant_id: tenantId, project_id: projectId, run_id: runId,
     provider_revision_id: providerRevisionId, credential_version_id: credentialVersionId,

@@ -99,6 +99,14 @@ export async function GET(request: Request, context: RouteContext) {
     if (key === "audit") {
       return json({ data: store.audit, meta: { appendOnly: true, redacted: true } });
     }
+    if (/^inference-runs\/[a-f0-9-]+\/[a-f0-9-]+\/reconciliation$/i.test(key)) {
+      requireRole(request, SECURITY_ROLES);
+      throw new HttpProblem(
+        503,
+        "INFERENCE_RECONCILIATION_GATEWAY_REQUIRED",
+        "本地测试站未连接受信 mTLS Inference Gateway，不能读取真实未决账单请求",
+      );
+    }
     throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
   } catch (error) {
     return problemResponse(error);
@@ -402,6 +410,15 @@ export async function POST(request: Request, context: RouteContext) {
         appendDemoAudit("CREDENTIAL_ROTATE", credential.id, role, { replacementVersionId: replacement.id, newTasksOnly: true });
         return { id: replacement.id, previousId: credential.id, state: replacement.state, fingerprint: replacement.masked, newTokensIssued: true, oldVersionNoLongerIssued: true, plaintextRecoverable: false };
       });
+    }
+
+    if (/^inference-requests\/[a-f0-9-]+\/reconcile$/i.test(key)) {
+      requireRole(request, SECURITY_ROLES);
+      throw new HttpProblem(
+        503,
+        "INFERENCE_RECONCILIATION_GATEWAY_REQUIRED",
+        "本地测试站不会伪造上游账单核销；请配置生产控制面与受信 mTLS Inference Gateway",
+      );
     }
 
     throw new HttpProblem(404, "NOT_FOUND", `Unknown admin action: ${key}`);

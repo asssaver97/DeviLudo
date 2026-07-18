@@ -249,3 +249,73 @@ test("HTTP boundary returns stable run-claim errors without exposing internal st
     await server.close();
   }
 });
+
+test("inference reconciliation HTTP boundary requires its dedicated workload identity", async () => {
+  const payload = {
+    operationKey: "a".repeat(64),
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    runId: "33333333-3333-4333-8333-333333333333",
+    requestId: "44444444-4444-4444-8444-444444444444",
+    action: "CONFIRM_NO_USAGE" as const,
+    evidenceDigest: "b".repeat(64),
+    reconciledBy: "security-admin@example.com",
+  };
+  let received: unknown;
+  const server = buildInferenceGateway({
+    ...options(),
+    reconciliation: {
+      async lookup() { return null; },
+      async run(value) {
+        received = value;
+        return {
+          ...payload, state: "RELEASED", usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+          reconciledAt: "2026-07-18T00:00:00.000Z",
+        };
+      },
+    },
+    authorizeReconciliation() {},
+  });
+  const response = await server.inject({ method: "POST", url: "/v1/inference-reconciliations", payload });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(received, payload);
+  assert.equal(response.headers["cache-control"], "no-store");
+  await server.close();
+
+  const forbidden = buildInferenceGateway({
+    ...options(),
+    reconciliation: { async lookup() { throw new Error("must not run"); }, async run() { throw new Error("must not run"); } },
+    authorizeReconciliation() { throw new Error("wrong workload"); },
+  });
+  const denied = await forbidden.inject({ method: "POST", url: "/v1/inference-reconciliations", payload });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().error.code, "INFERENCE_RECONCILIATION_WORKLOAD_FORBIDDEN");
+  await forbidden.close();
+});
+
+test("inference reconciliation lookup returns only the unresolved request identity", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const runId = "33333333-3333-4333-8333-333333333333";
+  const server = buildInferenceGateway({
+    ...options(),
+    reconciliation: {
+      async lookup(value) {
+        assert.deepEqual(value, { tenantId, runId });
+        return {
+          tenantId, runId, requestId: "44444444-4444-4444-8444-444444444444",
+          providerRevisionId: "provider-codex-r3", model, state: "INDETERMINATE",
+          claimExpiresAt: "2026-07-18T00:00:00.000Z", createdAt: "2026-07-17T23:48:00.000Z",
+        };
+      },
+      async run() { throw new Error("must not run"); },
+    },
+    authorizeReconciliation() {},
+  });
+  const response = await server.inject({
+    method: "POST", url: "/v1/inference-reconciliations/lookup", payload: { tenantId, runId },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().requestId, "44444444-4444-4444-8444-444444444444");
+  assert.equal("credentialVersionId" in response.json(), false);
+  assert.equal(response.headers["cache-control"], "no-store");
+  await server.close();
+});

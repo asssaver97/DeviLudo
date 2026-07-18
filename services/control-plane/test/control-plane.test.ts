@@ -355,6 +355,43 @@ test("idempotency results are isolated by the signed tenant and project scope", 
   assert.equal(alphaReplay.json().data.id, alpha.json().data.id);
 });
 
+test("local admin boundary allows only SecurityAdmin and fails closed without a reconciliation Gateway", async () => {
+  const requestId = "44444444-4444-4444-8444-444444444444";
+  const payload = {
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    runId: "33333333-3333-4333-8333-333333333333",
+    action: "RECORD_USAGE",
+    evidenceDigest: "b".repeat(64),
+    inputTokens: 120,
+    outputTokens: 30,
+  };
+  const denied = await inject({
+    method: "POST",
+    url: `/admin/inference-requests/${requestId}/reconcile`,
+    role: "PlatformAgentAdmin",
+    key: "inference-reconcile-denied",
+    payload,
+  });
+  assert.equal(denied.statusCode, 403);
+
+  const unavailable = await inject({
+    method: "POST",
+    url: `/admin/inference-requests/${requestId}/reconcile`,
+    role: "SecurityAdmin",
+    key: "inference-reconcile-recorded-usage",
+    payload,
+  });
+  assert.equal(unavailable.statusCode, 503);
+  assert.equal(unavailable.json().error.code, "INFERENCE_RECONCILIATION_UNAVAILABLE");
+
+  const lookupPath = `/admin/inference-runs/${payload.tenantId}/${payload.runId}/reconciliation`;
+  const lookupDenied = await inject({ method: "GET", url: lookupPath, role: "Auditor" });
+  assert.equal(lookupDenied.statusCode, 403);
+  const lookupUnavailable = await inject({ method: "GET", url: lookupPath, role: "SecurityAdmin" });
+  assert.equal(lookupUnavailable.statusCode, 503);
+  assert.equal(lookupUnavailable.json().error.code, "INFERENCE_RECONCILIATION_UNAVAILABLE");
+});
+
 test("unsafe Provider endpoints and floating models are rejected", async () => {
   const response = await inject({
     method: "POST",

@@ -11,6 +11,7 @@ import {
 } from "../src/agent-supply-chain";
 import type { RequestActor } from "../src/contracts";
 import { InferenceGatewayProviderProbe } from "../src/provider-probe";
+import { InferenceGatewayReconciliationClient } from "../src/inference-reconciliation";
 import { ProcessIsolatedSecretVault } from "../src/secret-vault";
 
 type FailureOperation = "VALIDATE" | "BUILD" | "ROLLOUT";
@@ -142,7 +143,13 @@ test("canary failure stops rollout and atomically restores the default to the pr
 });
 
 function adminService(store: InMemoryAdminStore, chain: AgentSupplyChain): AdminService {
-  return new AdminService(store, new ProcessIsolatedSecretVault(), new InferenceGatewayProviderProbe(), chain);
+  return new AdminService(
+    store,
+    new ProcessIsolatedSecretVault(),
+    new InferenceGatewayProviderProbe(),
+    chain,
+    new InferenceGatewayReconciliationClient(),
+  );
 }
 
 function actor(label: string, role: RequestActor["role"] = "PlatformAgentAdmin"): RequestActor {

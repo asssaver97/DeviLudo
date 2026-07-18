@@ -22,6 +22,16 @@ connector must resolve that exact version from Vault, connect only to
 usage. No HTTP request may provide an upstream key, Base URL, SecretRef or
 alternate Provider.
 
+If a dispatch becomes ambiguous, the run remains blocked until the dedicated
+mTLS reconciliation route receives one SecurityAdmin operation from the
+control plane. `CONFIRM_NO_USAGE` releases the claim only with an upstream
+evidence digest; `RECORD_USAGE` appends the exact token counts and derives cost
+from the frozen Provider pricing. The operation key, actor, evidence and
+outcome are immutable and exact retries replay the original receipt.
+The same dedicated workload identity can first look up the unique unresolved
+request by tenant and run. Lookup returns no credential identity and presents
+an expired active lease as effectively indeterminate without writing state.
+
 Run the contract suite from the repository root:
 
 ```bash

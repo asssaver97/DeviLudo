@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 29 }, (_, index) => {
+  const offsets = Array.from({ length: 30 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,26 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("ambiguous inference usage has one SecurityAdmin-only evidence-bound reconciliation path", () => {
+  const migration = readFileSync(new URL("../infra/postgres/030_inference_reconciliation.sql", import.meta.url), "utf8");
+  const controller = readFileSync(new URL("../services/control-plane/src/admin.controller.ts", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../services/control-plane/src/inference-reconciliation.ts", import.meta.url), "utf8");
+  const gateway = readFileSync(new URL("../services/inference-gateway/src/http.ts", import.meta.url), "utf8");
+  assert.match(migration, /reconciliation_operation_key/);
+  assert.match(migration, /inference_reconciliation_operation_key_unique/);
+  assert.match(migration, /DROP INDEX deviludo\.inference_one_active_request_per_run/);
+  assert.match(migration, /DROP INDEX deviludo\.inference_one_indeterminate_request_per_run/);
+  assert.match(migration, /CREATE UNIQUE INDEX inference_one_unresolved_request_per_run[\s\S]*WHERE state IN \('ACTIVE', 'INDETERMINATE'\)/);
+  assert.match(migration, /CONFIRM_NO_USAGE/);
+  assert.match(migration, /RECORD_USAGE/);
+  assert.match(controller, /inference-requests\/:id\/reconcile/);
+  assert.match(controller, /inference-runs\/:tenantId\/:runId\/reconciliation/);
+  assert.match(controller, /\["SecurityAdmin"\]/);
+  assert.match(client, /DEVILUDO_INFERENCE_RECONCILIATION_TLS_KEY_FILE/);
+  assert.match(gateway, /authorizeReconciliation/);
+  assert.match(gateway, /inference-reconciliations\/lookup/);
 });
 
 test("Inference Gateway serializes each run and fails closed on ambiguous usage", () => {

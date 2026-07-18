@@ -1,12 +1,17 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import type { ModelRoles } from "../../../lib/agent/types";
 import type { RunTokenBudget } from "../../../lib/security/credentials";
+import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import type {
   ActiveRunAuthorization,
   GatewayProviderRevision,
   GatewayUsage,
   GatewayUsageClaimBinding,
+  InferenceReconciliationReceipt,
+  InferenceReconciliationRequest,
+  InferenceReconciliationStatus,
+  InferenceReconciliationStore,
   ProviderRevisionRegistry,
   RunAuthorizationRegistry,
   UsageLedger,
@@ -14,6 +19,8 @@ import type {
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const SAFE_ACTOR = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 type RunRow = {
   tenant_id: string;
@@ -63,9 +70,29 @@ type ClaimRow = {
   state: string;
   expired: boolean;
 };
+type ReconciliationClaimRow = ClaimRow & {
+  input_usd_per_million_tokens: string | number;
+  output_usd_per_million_tokens: string | number;
+  reconciliation_operation_key: string | null;
+  reconciliation_payload_digest: string | null;
+  reconciliation_action: string | null;
+  reconciliation_evidence_digest: string | null;
+  reconciled_by: string | null;
+  reconciled_at: string | Date | null;
+};
+type UnresolvedClaimRow = ClaimRow & {
+  claim_expires_at: string | Date;
+  created_at: string | Date;
+};
+
+export class InferenceReconciliationConflict extends Error {
+  constructor(readonly code: "RECONCILIATION_NOT_READY" | "RECONCILIATION_CONFLICT") {
+    super("Inference request reconciliation was rejected");
+  }
+}
 
 /** Tenant-RLS registry and append-only usage ledger for the production Gateway. */
-export class PostgresInferenceGatewayStore {
+export class PostgresInferenceGatewayStore implements InferenceReconciliationStore {
   constructor(private readonly pool: PostgresWorkflowPool) {}
 
   async getRun(tenantId: string, runId: string): Promise<ActiveRunAuthorization | null> {
@@ -242,6 +269,148 @@ export class PostgresInferenceGatewayStore {
   async release(input: GatewayUsageClaimBinding): Promise<void> { await this.#transition(input, "RELEASED"); }
   async abandon(input: GatewayUsageClaimBinding): Promise<void> { await this.#transition(input, "INDETERMINATE"); }
 
+  async lookup(tenantId: string, runId: string): Promise<InferenceReconciliationStatus | null> {
+    validateTenantRun(tenantId, runId);
+    return this.#transaction(tenantId, async (client) => {
+      const run = await client.query<{ run_id: string }>(
+        `SELECT run_id::text
+          FROM deviludo.inference_run_authorizations
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+          FOR SHARE`,
+        [tenantId, runId],
+      );
+      if (run.rows.length === 0) return null;
+      if (run.rows.length !== 1 || run.rows[0]!.run_id !== runId) invalid();
+      const selected = await client.query<UnresolvedClaimRow>(
+        `SELECT request_id::text, tenant_id::text, project_id::text,
+                run_id::text, provider_revision_id, credential_version_id,
+                model, claim_token::text, state,
+                claim_expires_at <= now() AS expired,
+                claim_expires_at, created_at
+           FROM deviludo.inference_request_claims
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+            AND state IN ('ACTIVE', 'INDETERMINATE')
+          FOR SHARE`,
+        [tenantId, runId],
+      );
+      if (selected.rows.length === 0) return null;
+      if (selected.rows.length !== 1) invalid();
+      const claim = selected.rows[0]!;
+      validateClaimRow(claim);
+      if (claim.state !== "ACTIVE" && claim.state !== "INDETERMINATE") invalid();
+      const state: InferenceReconciliationStatus["state"] = claim.state === "ACTIVE" && claim.expired
+        ? "INDETERMINATE"
+        : claim.state;
+      return Object.freeze({
+        tenantId,
+        runId,
+        requestId: claim.request_id,
+        providerRevisionId: claim.provider_revision_id,
+        model: claim.model,
+        state,
+        claimExpiresAt: isoDate(claim.claim_expires_at),
+        createdAt: isoDate(claim.created_at),
+      });
+    });
+  }
+
+  async reconcile(input: InferenceReconciliationRequest): Promise<InferenceReconciliationReceipt> {
+    validateReconciliation(input);
+    const payloadDigest = reconciliationPayloadDigest(input);
+    return this.#transaction(input.tenantId, async (client) => {
+      const run = await client.query<{ run_id: string }>(
+        `SELECT run_id::text
+           FROM deviludo.inference_run_authorizations
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+          FOR UPDATE`,
+        [input.tenantId, input.runId],
+      );
+      if (run.rows.length !== 1 || run.rows[0]!.run_id !== input.runId) invalid();
+      const selected = await client.query<ReconciliationClaimRow>(
+        `SELECT claim.request_id::text, claim.tenant_id::text,
+                claim.project_id::text, claim.run_id::text,
+                claim.provider_revision_id, claim.credential_version_id,
+                claim.model, claim.claim_token::text, claim.state,
+                claim.claim_expires_at <= now() AS expired,
+                claim.reconciliation_operation_key,
+                claim.reconciliation_payload_digest,
+                claim.reconciliation_action,
+                claim.reconciliation_evidence_digest,
+                claim.reconciled_by, claim.reconciled_at,
+                provider.input_usd_per_million_tokens::text,
+                provider.output_usd_per_million_tokens::text
+           FROM deviludo.inference_request_claims claim
+           JOIN deviludo.inference_provider_revisions provider
+             ON provider.tenant_id = claim.tenant_id
+            AND provider.provider_revision_id = claim.provider_revision_id
+          WHERE claim.tenant_id = $1::uuid AND claim.run_id = $2::uuid
+            AND claim.request_id = $3::uuid
+          FOR UPDATE OF claim`,
+        [input.tenantId, input.runId, input.requestId],
+      );
+      if (selected.rows.length !== 1) throw new InferenceReconciliationConflict("RECONCILIATION_NOT_READY");
+      const claim = selected.rows[0]!;
+      validateReconciliationClaim(claim, input);
+      if (claim.reconciliation_operation_key !== null) {
+        return replayReconciliation(client, claim, input, payloadDigest);
+      }
+      if (claim.state === "ACTIVE") {
+        if (!claim.expired) throw new InferenceReconciliationConflict("RECONCILIATION_NOT_READY");
+        const expired = await client.query(
+          `UPDATE deviludo.inference_request_claims
+              SET state = 'INDETERMINATE'
+            WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+              AND request_id = $3::uuid AND state = 'ACTIVE'
+              AND claim_expires_at <= now()`,
+          [input.tenantId, input.runId, input.requestId],
+        );
+        if (expired.rowCount !== 1) throw new InferenceReconciliationConflict("RECONCILIATION_CONFLICT");
+      } else if (claim.state !== "INDETERMINATE") {
+        throw new InferenceReconciliationConflict("RECONCILIATION_CONFLICT");
+      }
+
+      const usage = reconciledUsage(input, claim);
+      if (input.action === "RECORD_USAGE") {
+        const inserted = await client.query(
+          `INSERT INTO deviludo.inference_usage_events
+            (request_id, tenant_id, project_id, run_id, provider_revision_id,
+             credential_version_id, model, input_tokens, output_tokens, cost_usd)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10)`,
+          [
+            input.requestId, input.tenantId, claim.project_id, input.runId,
+            claim.provider_revision_id, claim.credential_version_id, claim.model,
+            usage.inputTokens, usage.outputTokens, usage.costUsd,
+          ],
+        );
+        if (inserted.rowCount !== 1) invalid();
+      } else {
+        await assertNoUsageEvent(client, input.tenantId, input.requestId);
+      }
+      const state = input.action === "RECORD_USAGE" ? "COMPLETED" : "RELEASED";
+      const updated = await client.query<{ reconciled_at: string | Date }>(
+        `UPDATE deviludo.inference_request_claims
+            SET state = $4,
+                completed_at = CASE WHEN $4 = 'COMPLETED' THEN now() ELSE NULL END,
+                reconciliation_operation_key = $5,
+                reconciliation_payload_digest = $6,
+                reconciliation_action = $7,
+                reconciliation_evidence_digest = $8,
+                reconciled_by = $9,
+                reconciled_at = now()
+          WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+            AND request_id = $3::uuid AND state = 'INDETERMINATE'
+        RETURNING reconciled_at`,
+        [
+          input.tenantId, input.runId, input.requestId, state,
+          input.operationKey, payloadDigest, input.action,
+          input.evidenceDigest, input.reconciledBy,
+        ],
+      );
+      if (updated.rows.length !== 1) throw new InferenceReconciliationConflict("RECONCILIATION_CONFLICT");
+      return reconciliationReceipt(input, state, usage, updated.rows[0]!.reconciled_at);
+    });
+  }
+
   async #transition(input: GatewayUsageClaimBinding, target: "RELEASED" | "INDETERMINATE"): Promise<void> {
     validateClaimBinding(input);
     await this.#transaction(input.tenantId, async (client) => {
@@ -307,6 +476,123 @@ export function inferenceGatewayRegistries(store: PostgresInferenceGatewayStore)
       abandon: (input) => store.abandon(input),
     },
   });
+}
+
+function validateReconciliation(input: InferenceReconciliationRequest): void {
+  validateTenantRun(input.tenantId, input.runId);
+  if (!UUID.test(input.requestId) || !SHA256.test(input.operationKey)
+    || !SHA256.test(input.evidenceDigest) || !SAFE_ACTOR.test(input.reconciledBy)
+    || (input.action !== "CONFIRM_NO_USAGE" && input.action !== "RECORD_USAGE")) invalid();
+  if (input.action === "CONFIRM_NO_USAGE") {
+    if (input.inputTokens !== undefined || input.outputTokens !== undefined) invalid();
+    return;
+  }
+  if (!Number.isSafeInteger(input.inputTokens) || !Number.isSafeInteger(input.outputTokens)
+    || input.inputTokens! < 0 || input.outputTokens! < 0
+    || input.inputTokens! + input.outputTokens! < 1) invalid();
+}
+
+function validateReconciliationClaim(row: ReconciliationClaimRow, input: InferenceReconciliationRequest): void {
+  validateClaimRow(row);
+  if (row.tenant_id !== input.tenantId || row.run_id !== input.runId || row.request_id !== input.requestId
+    || !Number.isFinite(safeNumber(row.input_usd_per_million_tokens))
+    || !Number.isFinite(safeNumber(row.output_usd_per_million_tokens))) invalid();
+}
+
+function reconciliationPayloadDigest(input: InferenceReconciliationRequest): string {
+  return sha256Canonical({
+    tenantId: input.tenantId,
+    runId: input.runId,
+    requestId: input.requestId,
+    action: input.action,
+    evidenceDigest: input.evidenceDigest,
+    reconciledBy: input.reconciledBy,
+    inputTokens: input.inputTokens ?? null,
+    outputTokens: input.outputTokens ?? null,
+  });
+}
+
+function reconciledUsage(input: InferenceReconciliationRequest, claim: ReconciliationClaimRow): GatewayUsage {
+  if (input.action === "CONFIRM_NO_USAGE") return Object.freeze({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  const inputTokens = input.inputTokens!;
+  const outputTokens = input.outputTokens!;
+  const costUsd = (
+    inputTokens * safeNumber(claim.input_usd_per_million_tokens)
+    + outputTokens * safeNumber(claim.output_usd_per_million_tokens)
+  ) / 1_000_000;
+  return Object.freeze({ inputTokens, outputTokens, costUsd });
+}
+
+async function replayReconciliation(
+  client: PostgresWorkflowClient,
+  claim: ReconciliationClaimRow,
+  input: InferenceReconciliationRequest,
+  payloadDigest: string,
+): Promise<InferenceReconciliationReceipt> {
+  if (claim.reconciliation_operation_key !== input.operationKey
+    || claim.reconciliation_payload_digest !== payloadDigest
+    || claim.reconciliation_action !== input.action
+    || claim.reconciliation_evidence_digest !== input.evidenceDigest
+    || claim.reconciled_by !== input.reconciledBy || claim.reconciled_at === null
+    || (claim.state !== "COMPLETED" && claim.state !== "RELEASED")
+    || (input.action === "RECORD_USAGE") !== (claim.state === "COMPLETED")) {
+    throw new InferenceReconciliationConflict("RECONCILIATION_CONFLICT");
+  }
+  let usage: GatewayUsage;
+  if (claim.state === "COMPLETED") {
+    const selected = await client.query<UsageRow>(
+      `SELECT input_tokens::text, output_tokens::text, cost_usd::text
+         FROM deviludo.inference_usage_events
+        WHERE tenant_id = $1::uuid AND request_id = $2::uuid
+        FOR SHARE`,
+      [input.tenantId, input.requestId],
+    );
+    if (selected.rows.length !== 1) invalid();
+    usage = parseUsage(selected.rows[0]!);
+  } else {
+    await assertNoUsageEvent(client, input.tenantId, input.requestId);
+    usage = Object.freeze({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  }
+  return reconciliationReceipt(input, claim.state, usage, claim.reconciled_at);
+}
+
+async function assertNoUsageEvent(client: PostgresWorkflowClient, tenantId: string, requestId: string): Promise<void> {
+  const selected = await client.query<{ request_id: string }>(
+    `SELECT request_id::text
+       FROM deviludo.inference_usage_events
+      WHERE tenant_id = $1::uuid AND request_id = $2::uuid
+      FOR SHARE`,
+    [tenantId, requestId],
+  );
+  if (selected.rows.length !== 0) invalid();
+}
+
+function reconciliationReceipt(
+  input: InferenceReconciliationRequest,
+  state: "COMPLETED" | "RELEASED",
+  usage: GatewayUsage,
+  reconciledAt: string | Date,
+): InferenceReconciliationReceipt {
+  const parsedAt = new Date(reconciledAt);
+  if (!Number.isFinite(parsedAt.getTime())) invalid();
+  const at = parsedAt.toISOString();
+  return Object.freeze({
+    operationKey: input.operationKey,
+    tenantId: input.tenantId,
+    runId: input.runId,
+    requestId: input.requestId,
+    action: input.action,
+    evidenceDigest: input.evidenceDigest,
+    state,
+    usage,
+    reconciledAt: at,
+  });
+}
+
+function isoDate(value: string | Date): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) invalid();
+  return parsed.toISOString();
 }
 
 function parseRun(row: RunRow): ActiveRunAuthorization {

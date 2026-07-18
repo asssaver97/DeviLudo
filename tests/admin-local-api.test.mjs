@@ -135,3 +135,32 @@ test("simulated role headers cannot cross local admin RBAC boundaries", async ()
   assert.equal((await forbidden.json()).error.code, "FORBIDDEN");
   assert.equal(getDemoStore().rollouts["claude-installation-214"].percent, 25);
 });
+
+test("local admin never simulates an upstream inference billing reconciliation", async () => {
+  const path = "inference-requests/44444444-4444-4444-8444-444444444444/reconcile";
+  const payload = {
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    runId: "33333333-3333-4333-8333-333333333333",
+    action: "CONFIRM_NO_USAGE",
+    evidenceDigest: "b".repeat(64),
+  };
+  const forbidden = await POST(request(path, "POST", "PlatformAgentAdmin", payload), context(path));
+  assert.equal(forbidden.status, 403);
+
+  const gated = await POST(request(path, "POST", "SecurityAdmin", payload), context(path));
+  assert.equal(gated.status, 503);
+  assert.equal((await gated.json()).error.code, "INFERENCE_RECONCILIATION_GATEWAY_REQUIRED");
+
+  const lookupPath = `inference-runs/${payload.tenantId}/${payload.runId}/reconciliation`;
+  const lookupDenied = await GET(
+    new Request(`http://127.0.0.1:3000/api/admin/${lookupPath}`, { headers: { "x-deviludo-role": "Auditor" } }),
+    context(lookupPath),
+  );
+  assert.equal(lookupDenied.status, 403);
+  const lookupGated = await GET(
+    new Request(`http://127.0.0.1:3000/api/admin/${lookupPath}`, { headers: { "x-deviludo-role": "SecurityAdmin" } }),
+    context(lookupPath),
+  );
+  assert.equal(lookupGated.status, 503);
+  assert.equal((await lookupGated.json()).error.code, "INFERENCE_RECONCILIATION_GATEWAY_REQUIRED");
+});

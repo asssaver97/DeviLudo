@@ -40,6 +40,7 @@ services:
       - ./postgres/027_agent_supply_chain_operations.sql:/docker-entrypoint-initdb.d/027_agent_supply_chain_operations.sql:ro
       - ./postgres/028_inference_gateway.sql:/docker-entrypoint-initdb.d/028_inference_gateway.sql:ro
       - ./postgres/029_inference_request_claims.sql:/docker-entrypoint-initdb.d/029_inference_request_claims.sql:ro
+      - ./postgres/030_inference_reconciliation.sql:/docker-entrypoint-initdb.d/030_inference_reconciliation.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

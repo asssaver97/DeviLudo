@@ -96,6 +96,14 @@ export class AdminController {
   audit(request: FastifyRequest) {
     return this.service.auditLog(actor(request));
   }
+
+  reconcileInferenceRequest(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.reconcileInferenceRequest(id, objectBody(body), actor(request));
+  }
+
+  lookupInferenceReconciliation(tenantId: string, runId: string) {
+    return this.service.lookupInferenceReconciliation(tenantId, runId);
+  }
 }
 
 // Decorators are applied imperatively so this service remains consumable from
@@ -119,6 +127,8 @@ applyRoute("revokeCredential", Post("credentials/:id/revoke"), ["SecurityAdmin",
 applyRoute("updateDefault", Put("agent-defaults/:scope"), PROFILE_ROLES, [Param("scope"), Body(), Req()]);
 applyRoute("health", Get("agent-health"), ALL_ROLES, []);
 applyRoute("audit", Get("audit"), ALL_ROLES, [Req()]);
+applyRoute("reconcileInferenceRequest", Post("inference-requests/:id/reconcile"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("lookupInferenceReconciliation", Get("inference-runs/:tenantId/:runId/reconciliation"), ["SecurityAdmin"], [Param("tenantId"), Param("runId")]);
 Controller("admin")(AdminController);
 
 function applyRoute(

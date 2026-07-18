@@ -9,6 +9,7 @@ import { buildInferenceGateway } from "./http";
 import { inferenceGatewayRegistries, PostgresInferenceGatewayStore } from "./postgres-store";
 import { ProductionGatewayConnector } from "./production-connector";
 import { GatewayProbeSpiffeAuthorizer, StrictGatewayProviderProbe } from "./provider-probe";
+import { StrictGatewayInferenceReconciliation } from "./reconciliation";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -41,6 +42,10 @@ export async function inferenceGatewayServiceFromEnv(
     const probeAuthorizer = new GatewayProbeSpiffeAuthorizer(
       spiffeIds(required(env, "DEVILUDO_INFERENCE_GATEWAY_PROBE_SPIFFE_IDS")),
     );
+    const reconciliation = new StrictGatewayInferenceReconciliation(store);
+    const reconciliationAuthorizer = new GatewayProbeSpiffeAuthorizer(
+      spiffeIds(required(env, "DEVILUDO_INFERENCE_GATEWAY_RECONCILIATION_SPIFFE_IDS")),
+    );
     const server = buildInferenceGateway({
       signingKey,
       ...registries,
@@ -48,6 +53,8 @@ export async function inferenceGatewayServiceFromEnv(
       connector,
       providerProbe,
       authorizeProviderProbe: (request) => probeAuthorizer.authorize(request),
+      reconciliation,
+      authorizeReconciliation: (request) => reconciliationAuthorizer.authorize(request),
       https: {
         key: serverKey, cert: serverCertificate, ca: serverClientCa, minVersion: "TLSv1.3",
         requestCert: true, rejectUnauthorized: true,
@@ -62,6 +69,7 @@ export async function inferenceGatewayServiceFromEnv(
       credentials,
       connector,
       providerProbe,
+      reconciliation,
       server,
     });
   } catch (error) {
