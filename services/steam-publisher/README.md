@@ -144,6 +144,17 @@ and default-branch receipts idempotently. Migration
 append-only and enforces tenant/project/run foreign keys. Only Vault SecretRefs
 are stored for `config.vdf` and Beta passwords.
 
+RC creation is itself an authoritative pre-upload step. `SteamRcIssuer`
+re-resolves the passed `MAIN_RELEASE_GATE` evidence, verifies every immutable
+production-export object, fixes a one-hour claim window, delegates Ed25519
+signing to a Vault/KMS boundary and persists the exact signed JSON before the
+execution authority is read. `PostgresSteamRcIssuanceAuthority` derives object
+keys instead of accepting them from a request. Migration
+`023_steam_rc_issuance.sql` stores one immutable, tenant-RLS depot configuration
+revision and freezes its ID and canonical digest into the append-only RC row.
+Retries replay that byte-equivalent artifact; evidence, depot or signature
+drift fails before SteamPipe is called.
+
 `npm run start:steam-install-services` mounts two separate TLS 1.3 mTLS
 listeners with different client CAs. The preparation listener exposes only
 `POST /v1/clean-install-execution-preparations` to Runner Control and accepts

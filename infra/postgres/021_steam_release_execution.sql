@@ -25,7 +25,6 @@ CREATE TABLE deviludo.steam_rc_artifacts (
   project_id uuid NOT NULL REFERENCES deviludo.projects(id),
   run_id uuid NOT NULL,
   release_id uuid NOT NULL,
-  run_id uuid NOT NULL,
   main_evidence_bundle_id uuid NOT NULL,
   artifact_digest char(64) NOT NULL CHECK (artifact_digest ~ '^[a-f0-9]{64}$'),
   signed_artifact jsonb NOT NULL CHECK (
@@ -47,6 +46,7 @@ CREATE TABLE deviludo.steam_default_branch_receipts (
   id uuid PRIMARY KEY,
   tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
   project_id uuid NOT NULL REFERENCES deviludo.projects(id),
+  run_id uuid NOT NULL,
   release_id uuid NOT NULL,
   build_receipt_id uuid NOT NULL,
   operation_key text NOT NULL CHECK (operation_key ~ '^workflow-job:[a-f0-9-]{36}$'),

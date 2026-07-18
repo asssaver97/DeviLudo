@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 22 }, (_, index) => {
+  const offsets = Array.from({ length: 23 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -277,19 +277,39 @@ test("Steam Workflow Broker production host uses a recoverable RLS outbox and cr
 
 test("Steam execution re-resolves signed release authority and archives the tested BuildID", () => {
   const migration = readFileSync(new URL("../infra/postgres/021_steam_release_execution.sql", import.meta.url), "utf8");
+  const issuanceMigration = readFileSync(new URL("../infra/postgres/023_steam_rc_issuance.sql", import.meta.url), "utf8");
   const executor = readFileSync(new URL("../services/steam-publisher/src/workflow-broker-executor.ts", import.meta.url), "utf8");
+  const issuance = readFileSync(new URL("../services/steam-publisher/src/postgres-rc-issuance.ts", import.meta.url), "utf8");
   const postgres = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-execution.ts", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE deviludo\.steam_rc_artifacts/);
   assert.match(migration, /CREATE TABLE deviludo\.steam_default_branch_receipts/);
+  const rcTable = migration.slice(
+    migration.indexOf("CREATE TABLE deviludo.steam_rc_artifacts"),
+    migration.indexOf("CREATE TABLE deviludo.steam_default_branch_receipts"),
+  );
+  assert.equal((rcTable.match(/run_id uuid NOT NULL/g) ?? []).length, 1);
+  assert.match(migration, /CREATE TABLE deviludo\.steam_default_branch_receipts \([\s\S]*?run_id uuid NOT NULL/);
   assert.match(migration, /default_branch_build_id = beta_build_id/);
   assert.match(migration, /steam_default_branch_receipt_append_only/);
   assert.match(migration, /FOREIGN KEY \(tenant_id, project_id, run_id\)/);
+  assert.match(issuanceMigration, /CREATE TABLE deviludo\.steam_project_depot_configurations/);
+  assert.match(issuanceMigration, /CREATE UNIQUE INDEX steam_project_depot_configuration_active_idx/);
+  assert.match(issuanceMigration, /steam_project_depot_configuration_no_delete/);
+  assert.match(issuanceMigration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(issuanceMigration, /ADD COLUMN depot_configuration_id uuid/);
+  assert.match(issuance, /runnerArtifactObjectKey/);
+  assert.match(issuance, /depot\.state = 'ACTIVE'/);
+  assert.match(issuance, /ON CONFLICT \(tenant_id, release_id\) DO NOTHING/);
+  assert.match(issuance, /set_config\('app\.tenant_id'/);
   assert.match(postgres, /authorization\.state = 'DISPATCHED'/);
   assert.match(postgres, /build\.state = 'EXTERNAL_APPROVAL_REQUIRED'/);
   assert.match(postgres, /workflow_external_approval_receipts/);
   assert.match(postgres, /set_config\('app\.tenant_id'/);
-  assert.ok(executor.indexOf("resolvePrivateBeta") < executor.indexOf("uploadPrivateBeta"));
-  assert.ok(executor.indexOf("resolveDefaultBranch") < executor.indexOf("defaultBranch.promote"));
+  const uploadMethod = executor.slice(executor.indexOf("async #upload"), executor.indexOf("async #publish"));
+  const publishMethod = executor.slice(executor.indexOf("async #publish"));
+  assert.ok(uploadMethod.indexOf("rcPreparer.ensure") < uploadMethod.indexOf("resolvePrivateBeta"));
+  assert.ok(uploadMethod.indexOf("resolvePrivateBeta") < uploadMethod.indexOf("uploadPrivateBeta"));
+  assert.ok(publishMethod.indexOf("resolveDefaultBranch") < publishMethod.indexOf("defaultBranch.promote"));
   assert.match(executor, /defaultBranchBuildId !== request\.betaBuildId/);
   assert.doesNotMatch(executor, /accountPassword|guardCode|configVdfBytes/);
 });

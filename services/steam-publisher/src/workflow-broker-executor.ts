@@ -5,6 +5,7 @@ import type {
   SteamPrivateBetaReceipt,
   SteamTargetPlatform,
 } from "./contracts";
+import { steamCanonicalDigest } from "./artifacts";
 import type { SteamReleaseCoordinator } from "./coordinator";
 import type {
   SteamDefaultBranchWorkflowReceipt,
@@ -56,6 +57,11 @@ export interface SteamDefaultBranchExecutionAuthority {
 export interface SteamWorkflowExecutionAuthority {
   resolvePrivateBeta(request: SteamPrivateBetaOperationRequest): Promise<SteamPrivateBetaExecutionAuthority>;
   resolveDefaultBranch(request: SteamDefaultBranchOperationRequest): Promise<SteamDefaultBranchExecutionAuthority>;
+  probe(): Promise<void>;
+}
+
+export interface SteamPrivateBetaRcPreparer {
+  ensure(request: SteamPrivateBetaOperationRequest): Promise<SignedSteamRcArtifact>;
   probe(): Promise<void>;
 }
 
@@ -113,6 +119,7 @@ export interface SteamDefaultBranchReceiptArchive {
 /** Resolves server authority immediately before each irreversible Steam action. */
 export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperationExecutor {
   constructor(
+    private readonly rcPreparer: SteamPrivateBetaRcPreparer,
     private readonly authority: SteamWorkflowExecutionAuthority,
     private readonly privateBeta: Pick<SteamReleaseCoordinator, "uploadPrivateBeta">,
     private readonly builds: SteamBuildReceiptArchive,
@@ -132,7 +139,8 @@ export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperatio
 
   async probe(): Promise<void> {
     await Promise.all([
-      this.authority.probe(), this.builds.probe(), this.defaultBranch.probe(), this.publications.probe(),
+      this.rcPreparer.probe(), this.authority.probe(), this.builds.probe(),
+      this.defaultBranch.probe(), this.publications.probe(),
     ]);
   }
 
@@ -140,8 +148,11 @@ export class AuthoritativeSteamWorkflowExecutor implements SteamWorkflowOperatio
     request: SteamPrivateBetaOperationRequest,
     context: Readonly<{ heartbeat: () => Promise<void> }>,
   ): Promise<SteamPrivateBetaWorkflowReceipt> {
+    const preparedRc = await this.rcPreparer.ensure(request);
+    await context.heartbeat();
     const authority = await this.authority.resolvePrivateBeta(request);
     validatePrivateBetaAuthority(authority, request);
+    if (steamCanonicalDigest(preparedRc) !== steamCanonicalDigest(authority.rc)) invalid();
     await context.heartbeat();
     const receipt = await this.privateBeta.uploadPrivateBeta({
       rc: authority.rc,

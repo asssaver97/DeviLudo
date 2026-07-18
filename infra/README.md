@@ -44,8 +44,9 @@ then add expiring, once-per-platform Steam install grants. Migration `019`
 persists fenced private-Beta upload claims. Migrations `020`–`021` add durable
 Steam workflow operations, signed RC authority and append-only private-Beta and
 default-branch receipts. Migration `022` turns each operation into a recoverable
-tenant-RLS dispatch outbox with bounded retry scheduling. All twenty-two
-migrations are
+tenant-RLS dispatch outbox with bounded retry scheduling. Migration `023` adds
+immutable project Steam depot revisions and freezes their ID and canonical
+digest into every newly issued signed release candidate. All twenty-three migrations are
 mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
