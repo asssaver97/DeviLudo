@@ -8,6 +8,9 @@ that a localhost process is a real Windows/Linux/macOS fleet.
 - Registration fixes OS, architecture, Godot binary, export-template image,
   GPU/display/audio and runner-image digests. Any installed autonomous Agent is
   rejected.
+- Steam-capable machines additionally bind an exact Connector version and
+  native binary digest into the immutable capability digest. A machine without
+  that declaration can run source E2E but cannot lease `STEAM_CLEAN_INSTALL`.
 - A matrix attempt creates a separate lease and monotonically increasing
   fencing token for every selected platform. Re-leasing one platform makes all
   late events from its previous runner stale.
@@ -177,12 +180,15 @@ receipt and bounded local evidence paths under that staging root. TestKit
 requires clean-client reset, exact installation, production boot and platform
 suite receipts, then packages the installed tree instead of downloading source
 or creating a second export. Partial Connector configuration is rejected before
-the child starts.
+the child starts. The physical Runner matches the declared Connector
+version/digest to its machine lock and authenticates the exact Connector
+`/healthz` service over mTLS before advertising READY. Source-only Runners must
+omit the entire Connector environment group.
 
 Run the machine daemon with `npm run start:physical-runner`. Startup verifies
 that the configured platform/architecture match the actual Node host, loads
-all TLS/HMAC/public-key material from files, probes both executable digests and
-the authenticated ingress `/health`, then polls serially with bounded
+all TLS/HMAC/public-key material from files, probes both executable digests,
+the authenticated ingress `/health` and the optional Steam Connector, then polls serially with bounded
 exponential backoff. Diagnostics contain only stable codes. Configuration
 templates are `.physical-runner.env.example` and
 `physical-runner.config.example.json`; they intentionally contain no private

@@ -31,6 +31,7 @@ function capabilities(platform: RunnerCapabilities["platform"], architecture: Ru
     display: "virtual" as const,
     audio: "virtual" as const,
     installedAutonomousAgents: [] as readonly string[],
+    steamClientConnector: null,
   };
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
 }
@@ -124,6 +125,7 @@ test("physical Runner production composition loads only file-backed keys and exa
     const lockedCap = {
       ...cap,
       godotBinaryDigest: digest(godotBytes),
+      steamClientConnector: { version: "1.0.0", binaryDigest: sha("9") },
     };
     const { capabilityDigest: _oldDigest, ...lockedCore } = lockedCap;
     assert.match(_oldDigest, /^[a-f0-9]{64}$/);
@@ -164,9 +166,12 @@ test("physical Runner production composition loads only file-backed keys and exa
       DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: tlsCert,
       DEVILUDO_TESTKIT_STEAM_CA_FILE: ca,
       DEVILUDO_TESTKIT_STEAM_STAGING_ROOT: steamStagingRoot,
+      DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION: "1.0.0",
+      DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST: sha("9"),
     }, { platform: process.platform, arch: process.arch });
     assert.equal(service.config.capabilities.capabilityDigest, finalCap.capabilityDigest);
     assert.equal(service.jobPublicKey.asymmetricKeyType, "ed25519");
+    assert.ok(service.steamConnector);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

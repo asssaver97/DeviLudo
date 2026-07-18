@@ -43,6 +43,7 @@ function capabilities(overrides: Partial<RunnerCapabilities> = {}): RunnerCapabi
     display: "virtual" as const,
     audio: "virtual" as const,
     installedAutonomousAgents: [] as readonly string[],
+    steamClientConnector: null,
     ...overrides,
   };
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
@@ -313,6 +314,11 @@ test("PostgreSQL Runner ingress signs a BuildID-bound Steam clean-install job wi
   const client = new IngressClient();
   client.registered = true;
   client.steam = true;
+  assert.equal(await store(client).leaseNext(identity(), capabilities().runnerId, tenantId, at), null);
+  assert.equal(client.leaseInserts, 0);
+  client.runner = capabilities({
+    steamClientConnector: { version: "1.0.0", binaryDigest: sha("0") },
+  });
   const job = await store(client).leaseNext(identity(), capabilities().runnerId, tenantId, at);
   assert.ok(job);
   assert.deepEqual(job.payload.execution, steamExecutionLock().execution);

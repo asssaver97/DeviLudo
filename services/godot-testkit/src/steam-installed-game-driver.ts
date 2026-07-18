@@ -42,6 +42,7 @@ export interface SteamInstalledGameConnectorTls {
 
 export type SteamInstalledGameConnectorHttp = (input: {
   readonly url: URL;
+  readonly method: "GET" | "POST";
   readonly body: string;
   readonly tls: SteamInstalledGameConnectorTls;
   readonly timeoutMs: number;
@@ -80,6 +81,7 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
     const jobDigest = sha256Canonical(input.request.signedJob.payload);
     const response = await this.#http({
       url: new URL("/v1/clean-install-executions", this.#endpoint),
+      method: "POST",
       tls: this.#tls,
       timeoutMs: this.#timeoutMs,
       body: JSON.stringify({
@@ -111,6 +113,21 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
       exportRoot: installRoot,
       logs: `${logs.endsWith("\n") ? logs : `${logs}\n`}[steam-install-receipt] ${receipt.receiptDigest}\n`,
     });
+  }
+
+  async probe(): Promise<void> {
+    const response = await this.#http({
+      url: new URL("/healthz", this.#endpoint),
+      method: "GET",
+      tls: this.#tls,
+      timeoutMs: Math.min(this.#timeoutMs, 30_000),
+      body: "",
+    });
+    const body = record(response.payload);
+    exactKeys(body, ["status", "service"]);
+    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-steam-client-connector") {
+      throw new Error("Steam installed-game Connector is not ready");
+    }
   }
 }
 
@@ -153,18 +170,20 @@ export function testKitSteamProcessEnvironmentFromEnv(
 
 export function steamInstalledGameConnectorHttpsJson(input: {
   readonly url: URL;
+  readonly method: "GET" | "POST";
   readonly body: string;
   readonly tls: SteamInstalledGameConnectorTls;
   readonly timeoutMs: number;
 }): Promise<Readonly<{ statusCode: number; payload: unknown }>> {
   return new Promise((resolve, reject) => {
-    const options: RequestOptions = {
-      method: "POST",
-      headers: {
+    const headers = input.method === "POST" ? {
         accept: "application/json",
         "content-type": "application/json",
         "content-length": String(Buffer.byteLength(input.body)),
-      },
+      } : { accept: "application/json" };
+    const options: RequestOptions = {
+      method: input.method,
+      headers,
       key: input.tls.key,
       cert: input.tls.certificate,
       ca: input.tls.ca,
@@ -192,7 +211,7 @@ export function steamInstalledGameConnectorHttpsJson(input: {
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Steam installed-game Connector timed out")));
     request.once("error", reject);
-    request.end(input.body);
+    request.end(input.method === "POST" ? input.body : undefined);
   });
 }
 

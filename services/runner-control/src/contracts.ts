@@ -31,6 +31,10 @@ export interface RunnerCapabilities {
   readonly display: "physical" | "virtual" | "headless";
   readonly audio: "physical" | "virtual" | "none";
   readonly installedAutonomousAgents: readonly string[];
+  readonly steamClientConnector: Readonly<{
+    readonly version: string;
+    readonly binaryDigest: string;
+  }> | null;
   readonly capabilityDigest: string;
 }
 

@@ -72,6 +72,8 @@ test("Runner ingress persists replayable signed jobs and immutable lease/event b
   assert.match(migration, /platform lease binding and signed job are immutable/);
   assert.match(migration, /platform_runner_events_append_only/);
   assert.match(adapter, /FOR UPDATE OF attempt SKIP LOCKED/);
+  assert.match(adapter, /attempt\.mode <> 'STEAM_CLEAN_INSTALL' OR \$4::boolean/);
+  assert.match(adapter, /runner\.steamClientConnector !== null/);
   assert.match(adapter, /COALESCE\(MAX\(fencing_token\), 0\) \+ 1/);
   assert.match(adapter, /Runner is not assigned to this tenant/);
   assert.match(adapter, /signCanonical/);
@@ -125,7 +127,8 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   assert.match(artifacts, /x-amz-checksum-sha256/);
   assert.match(artifacts, /allowedTransferOrigins/);
   assert.match(daemon, /config\.capabilities\.platform !== expectedPlatform/);
-  assert.match(daemon, /Promise\.all\(\[service\.ingress\.probe\(\), service\.executor\.probe\(\)\]\)/);
+  assert.match(daemon, /service\.steamConnector\?\.probe\(\)/);
+  assert.match(daemon, /STEAM_CONNECTOR_BINARY_DIGEST/);
 });
 
 test("Godot TestKit is a fixed signed-job CLI and part of the full service gate", () => {
@@ -146,6 +149,7 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.match(steamDriver, /\/v1\/clean-install-executions/);
   assert.match(steamDriver, /minVersion: "TLSv1\.3"/);
   assert.match(steamDriver, /execution\.kind !== "STEAM_CLEAN_INSTALL"/);
+  assert.match(steamDriver, /deviludo-steam-client-connector/);
   assert.match(steamDriver, /escaped staging root/);
   assert.doesNotMatch(steamDriver, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.doesNotMatch(driver, /dangerously|--yolo/);

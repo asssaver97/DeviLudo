@@ -9,7 +9,12 @@ import { FilePhysicalRunnerJournal } from "./physical-runner-journal";
 import { physicalRunnerIngressClientFromEnv } from "./runner-ingress-client";
 import { testKitArtifactProcessEnvironmentFromEnv } from "./testkit-artifact-client";
 import { LockedTestKitExecutor } from "./testkit-executor";
-import { testKitSteamProcessEnvironmentFromEnv } from "../../godot-testkit/src/steam-installed-game-driver";
+import {
+  OPTIONAL_TESTKIT_STEAM_ENV_NAMES,
+  REQUIRED_TESTKIT_STEAM_ENV_NAMES,
+  steamInstalledGameDriverFromEnv,
+  testKitSteamProcessEnvironmentFromEnv,
+} from "../../godot-testkit/src/steam-installed-game-driver";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -82,7 +87,7 @@ export async function runPhysicalRunnerService(options: {
 } = {}): Promise<void> {
   const env = options.env ?? process.env;
   const service = await physicalRunnerServiceFromEnv(env);
-  await Promise.all([service.ingress.probe(), service.executor.probe()]);
+  await Promise.all([service.ingress.probe(), service.executor.probe(), service.steamConnector?.probe()]);
   diagnostic("READY");
   const shutdown = new AbortController();
   const requestShutdown = () => shutdown.abort();
@@ -104,6 +109,7 @@ export async function physicalRunnerServiceFromEnv(
   readonly jobPublicKey: KeyObject;
   readonly ingress: Awaited<ReturnType<typeof physicalRunnerIngressClientFromEnv>>;
   readonly executor: LockedTestKitExecutor;
+  readonly steamConnector: Awaited<ReturnType<typeof steamInstalledGameDriverFromEnv>> | null;
   readonly daemon: PhysicalRunnerDaemon;
 }> {
   const config = await loadMachineConfig(requiredEnv(env, "DEVILUDO_PHYSICAL_RUNNER_CONFIG_FILE"), runtime);
@@ -119,10 +125,25 @@ export async function physicalRunnerServiceFromEnv(
     hmacKey: journalHmacKey,
   });
   journalHmacKey.fill(0);
-  const testKitEnvironment = Object.freeze({
-    ...testKitArtifactProcessEnvironmentFromEnv(env),
-    ...testKitSteamProcessEnvironmentFromEnv(env),
-  });
+  const artifactEnvironment = testKitArtifactProcessEnvironmentFromEnv(env);
+  let steamConnector: Awaited<ReturnType<typeof steamInstalledGameDriverFromEnv>> | null = null;
+  let steamEnvironment: Readonly<Record<string, string>> = {};
+  if (config.capabilities.steamClientConnector !== null) {
+    const expectedVersion = requiredEnv(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION");
+    const expectedDigest = requiredDigest(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST");
+    if (expectedVersion !== config.capabilities.steamClientConnector.version
+      || expectedDigest !== config.capabilities.steamClientConnector.binaryDigest) {
+      throw new Error("Physical Runner Steam Connector capability does not match its machine lock");
+    }
+    steamEnvironment = testKitSteamProcessEnvironmentFromEnv(env);
+    steamConnector = await steamInstalledGameDriverFromEnv(env);
+  } else {
+    for (const name of [...REQUIRED_TESTKIT_STEAM_ENV_NAMES, ...OPTIONAL_TESTKIT_STEAM_ENV_NAMES,
+      "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION", "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST"]) {
+      if (env[name] !== undefined) throw new Error("Physical Runner Steam Connector configuration is not declared by its machine lock");
+    }
+  }
+  const testKitEnvironment = Object.freeze({ ...artifactEnvironment, ...steamEnvironment });
   const executor = new LockedTestKitExecutor({
     testKitExecutable: requiredAbsolutePath(env, "DEVILUDO_PHYSICAL_RUNNER_TESTKIT_EXECUTABLE"),
     testKitDigest: requiredDigest(env, "DEVILUDO_PHYSICAL_RUNNER_TESTKIT_DIGEST"),
@@ -148,7 +169,7 @@ export async function physicalRunnerServiceFromEnv(
     maxBackoffMs: seconds(env.DEVILUDO_PHYSICAL_RUNNER_MAX_BACKOFF_SECONDS, 60, 1, 900) * 1_000,
     diagnostic,
   });
-  return Object.freeze({ config, jobPublicKey, ingress, executor, daemon });
+  return Object.freeze({ config, jobPublicKey, ingress, executor, steamConnector, daemon });
 }
 
 export async function loadMachineConfig(

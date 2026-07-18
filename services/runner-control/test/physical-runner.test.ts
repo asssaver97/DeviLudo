@@ -41,6 +41,7 @@ function capabilities(platform: TargetPlatform): RunnerCapabilities {
     display: "virtual" as const,
     audio: "virtual" as const,
     installedAutonomousAgents: [] as readonly string[],
+    steamClientConnector: null,
   };
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
 }

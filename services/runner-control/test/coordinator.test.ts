@@ -47,6 +47,7 @@ function capabilities(runnerId: string, platform: TargetPlatform, character: str
     display: "virtual" as const,
     audio: "virtual" as const,
     installedAutonomousAgents: [] as readonly string[],
+    steamClientConnector: null,
   };
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
 }
@@ -107,6 +108,7 @@ test("Runner capability validation rejects runtime JSON outside the declared mac
     { display: "browser" },
     { audio: "network" },
     { installedAutonomousAgents: "" },
+    { steamClientConnector: { version: "latest", binaryDigest: digest("e") } },
   ]) {
     const core = { ...baselineCore, ...mutation } as unknown as Omit<RunnerCapabilities, "capabilityDigest">;
     const candidate = {

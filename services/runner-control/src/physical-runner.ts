@@ -263,6 +263,7 @@ function assertRegistration(registered: RegisteredRunner, expected: RunnerCapabi
     display: registered.display,
     audio: registered.audio,
     installedAutonomousAgents: registered.installedAutonomousAgents,
+    steamClientConnector: registered.steamClientConnector,
     capabilityDigest: registered.capabilityDigest,
   };
   if (sha256Canonical(selected) !== sha256Canonical(expected)) {

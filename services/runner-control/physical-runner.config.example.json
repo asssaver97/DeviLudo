@@ -13,6 +13,10 @@
     "display": "virtual",
     "audio": "virtual",
     "installedAutonomousAgents": [],
+    "steamClientConnector": {
+      "version": "1.0.0",
+      "binaryDigest": "<64-lowercase-hex>"
+    },
     "capabilityDigest": "<canonical-capability-sha256>"
   },
   "tenantIds": [

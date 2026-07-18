@@ -403,7 +403,7 @@ export function validateRunnerCapabilities(capabilities: RunnerCapabilities): vo
   const expectedKeys = [
     "runnerId", "platform", "architecture", "osVersion", "runnerImageDigest",
     "godotVersion", "godotBinaryDigest", "exportTemplatesDigest", "gpu",
-    "display", "audio", "installedAutonomousAgents", "capabilityDigest",
+    "display", "audio", "installedAutonomousAgents", "steamClientConnector", "capabilityDigest",
   ].sort();
   if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
     throw new Error("Runner capability fields are invalid");
@@ -433,6 +433,17 @@ export function validateRunnerCapabilities(capabilities: RunnerCapabilities): vo
   })) assertSha256(value, field);
   if (!Array.isArray(capabilities.installedAutonomousAgents) || capabilities.installedAutonomousAgents.length) {
     throw new Error("Autonomous Agents are forbidden on E2E runners");
+  }
+  if (capabilities.steamClientConnector !== null) {
+    const connector = capabilities.steamClientConnector;
+    const keys = Object.keys(connector).sort();
+    if (keys.length !== 2 || keys[0] !== "binaryDigest" || keys[1] !== "version"
+      || typeof connector.version !== "string"
+      || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(connector.version)
+      || /(?:latest|stable|default)/i.test(connector.version)) {
+      throw new Error("Steam Client Connector capability is invalid");
+    }
+    assertSha256(connector.binaryDigest, "steamClientConnector.binaryDigest");
   }
   const expected = immutableCapabilityDigest({ ...capabilities, capabilityDigest: "" });
   if (capabilities.capabilityDigest !== expected) throw new Error("Runner capability digest mismatch");
@@ -545,6 +556,7 @@ function immutableCapabilityDigest(capabilities: Omit<RunnerCapabilities, "capab
     display: capabilities.display,
     audio: capabilities.audio,
     installedAutonomousAgents: capabilities.installedAutonomousAgents,
+    steamClientConnector: capabilities.steamClientConnector,
   });
 }
 

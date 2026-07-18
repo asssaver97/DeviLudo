@@ -26,6 +26,7 @@ test("mTLS Steam installed-game driver binds a clean BuildID and returns validat
       stagingRoot: root,
       http: async (input) => {
         assert.equal(input.url.href, "https://steam-install.internal:4843/v1/clean-install-executions");
+        assert.equal(input.method, "POST");
         requests.push(JSON.parse(input.body) as Record<string, unknown>);
         return { statusCode: 200, payload: fixture.receipt };
       },
@@ -45,6 +46,28 @@ test("mTLS Steam installed-game driver binds a clean BuildID and returns validat
     assert.equal((requests[0]?.testPlan as GodotTestPlan).schemaVersion, "deviludo.godot-test-plan.v2");
     assert.doesNotMatch(JSON.stringify({ sent: requests[0], result }), /config\.vdf|steam.?guard|branch.?password|account.?password/i);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Steam installed-game driver readiness requires the exact authenticated Connector identity", async () => {
+  const calls: string[] = [];
+  const driver = new MtlsSteamInstalledGameDriver({
+    endpoint: "https://steam-install.internal:4843",
+    tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
+    stagingRoot: tmpdir(),
+    http: async (input) => {
+      calls.push(`${input.method} ${input.url.pathname}`);
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-steam-client-connector" } };
+    },
+  });
+  await driver.probe();
+  assert.deepEqual(calls, ["GET /healthz"]);
+  const drifted = new MtlsSteamInstalledGameDriver({
+    endpoint: "https://steam-install.internal:4843",
+    tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
+    stagingRoot: tmpdir(),
+    http: async () => ({ statusCode: 200, payload: { status: "ok", service: "other" } }),
+  });
+  await assert.rejects(drifted.probe(), /not ready/);
 });
 
 test("Steam installed-game driver rejects BuildID drift, escaped paths and credential logs", async () => {

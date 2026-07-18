@@ -283,6 +283,7 @@ export class PostgresRunnerIngressStore {
           WHERE attempt.tenant_id = $1::uuid
             AND attempt.state IN ('QUEUED', 'RUNNING')
             AND attempt.target_matrix @> ARRAY[$2]::text[]
+            AND (attempt.mode <> 'STEAM_CLEAN_INSTALL' OR $4::boolean)
             AND NOT EXISTS (
               SELECT 1 FROM deviludo.e2e_platform_leases occupied
                WHERE occupied.attempt_id = attempt.id
@@ -294,10 +295,11 @@ export class PostgresRunnerIngressStore {
           ORDER BY attempt.created_at, attempt.id
           LIMIT 1
           FOR UPDATE OF attempt SKIP LOCKED`,
-        [tenantId, runner.platform, at],
+        [tenantId, runner.platform, at, runner.steamClientConnector !== null],
       );
       const candidate = candidateResult.rows[0];
       if (!candidate) return null;
+      if (candidate.mode === "STEAM_CLEAN_INSTALL" && runner.steamClientConnector === null) return null;
       const lock = validateCandidateLock(candidate, tenantId);
       const templatesDigest = lock.exportTemplates[runner.platform];
       if (runner.godotVersion !== lock.requiredGodotVersion
@@ -951,6 +953,7 @@ function capabilityView(value: RunnerCapabilities): RunnerCapabilities {
     display: value.display,
     audio: value.audio,
     installedAutonomousAgents: value.installedAutonomousAgents,
+    steamClientConnector: value.steamClientConnector,
     capabilityDigest: value.capabilityDigest,
   };
 }
