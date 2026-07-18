@@ -356,7 +356,9 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     model: row.model, authorizedModels: Object.freeze([...row.authorization_models]),
     authorizationNonce: row.authorization_nonce, authorizationExpiresAt: row.authorization_expires_at,
     budget: Object.freeze({ maxUsd: number(budget.maxUsd), maxTurns: integer(budget.maxTurns), timeoutSeconds: integer(budget.timeoutSeconds) }),
-    specRevisionId: row.spec_revision_id, testPlanRevisionId: row.test_plan_revision_id,
+    specRevisionId: row.spec_revision_id, specDigest: digest(value.specDigest),
+    testPlanRevisionId: row.test_plan_revision_id, testPlanDigest: digest(value.testPlanDigest),
+    targetMatrix: platforms(value.targetMatrix),
     sourceBaselineReceiptId: row.source_baseline_receipt_id,
     baseCommitSha: string(value.commitSha), sourceDigest: string(value.sourceDigest),
   });
@@ -430,4 +432,12 @@ function withoutResolutionDigest(value: Record<string, unknown>): Record<string,
 function string(value: unknown): string { if (typeof value !== "string" || !value) invalid(); return value; }
 function number(value: unknown): number { if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) invalid(); return value; }
 function integer(value: unknown): number { if (!Number.isSafeInteger(value) || (value as number) <= 0) invalid(); return value as number; }
+function digest(value: unknown): string { if (typeof value !== "string" || !SHA256.test(value)) invalid(); return value; }
+function platforms(value: unknown): readonly ("linux" | "macos" | "windows")[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3
+    || value.some((item) => item !== "linux" && item !== "macos" && item !== "windows")
+    || new Set(value).size !== value.length
+    || JSON.stringify([...value].sort()) !== JSON.stringify(value)) invalid();
+  return Object.freeze([...(value as ("linux" | "macos" | "windows")[])]);
+}
 function invalid(): never { throw new Error("PostgreSQL Agent execution operation is invalid"); }

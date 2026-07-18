@@ -26,7 +26,7 @@ export interface SourceSnapshotAuthority {
     readonly tenantId: string;
     readonly projectId: string;
     readonly runId: string;
-    readonly mode: "CANDIDATE" | "MAIN_RELEASE_GATE";
+    readonly mode: "AGENT_BASELINE" | "CANDIDATE" | "MAIN_RELEASE_GATE";
     readonly commitSha: string;
     readonly sourceDigest: string;
   }): Promise<Readonly<{ binding: GitHubRepositoryBinding; sourceDigest: string }>>;
@@ -162,7 +162,7 @@ function parseRequest(value: unknown) {
   const body = record(value);
   exactKeys(body, ["schemaVersion", "tenantId", "projectId", "runId", "mode", "commitSha", "sourceDigest"]);
   if (body.schemaVersion !== "deviludo.source-snapshot-grant-request.v1") invalid("request schema");
-  if (body.mode !== "CANDIDATE" && body.mode !== "MAIN_RELEASE_GATE") invalid("mode");
+  if (body.mode !== "AGENT_BASELINE" && body.mode !== "CANDIDATE" && body.mode !== "MAIN_RELEASE_GATE") invalid("mode");
   return Object.freeze({
     tenantId: required(body.tenantId, UUID, "tenant"),
     projectId: required(body.projectId, UUID, "project"),

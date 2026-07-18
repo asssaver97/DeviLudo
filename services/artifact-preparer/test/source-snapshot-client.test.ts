@@ -60,6 +60,16 @@ test("SCM snapshot client refuses request and transfer digest drift", async () =
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("SCM snapshot client readiness requires the exact source Broker identity", async () => {
+  let method: string | undefined;
+  const client = new MtlsAuthoritativeSourceSnapshotClient({ endpoint: "https://scm-snapshot.internal",
+    tls: { key: Buffer.alloc(32), certificate: Buffer.alloc(32), ca: Buffer.alloc(32) }, transferCa: Buffer.alloc(32),
+    allowedTransferOrigins: ["https://s3.internal"], brokerHttp: async (request) => { method = request.method;
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-source-snapshot" } }; },
+    transferHttp: { async upload() { throw new Error("unused"); }, async download() { throw new Error("unused"); } } });
+  await client.probe(); assert.equal(method, "GET");
+});
+
 function input(destinationPath: string) {
   return {
     tenantId,

@@ -46,6 +46,7 @@ export interface TestKitArtifactBrokerHttpResponse {
 
 export type TestKitArtifactBrokerHttp = (input: {
   readonly url: URL;
+  readonly method?: "GET" | "POST";
   readonly body: string;
   readonly tls: TestKitArtifactBrokerTls;
   readonly timeoutMs: number;
@@ -329,13 +330,14 @@ export function testKitArtifactProcessEnvironmentFromEnv(
 
 export function testKitArtifactBrokerHttpsJson(input: {
   readonly url: URL;
+  readonly method?: "GET" | "POST";
   readonly body: string;
   readonly tls: TestKitArtifactBrokerTls;
   readonly timeoutMs: number;
 }): Promise<TestKitArtifactBrokerHttpResponse> {
   return new Promise((resolve, reject) => {
     const options: RequestOptions = {
-      method: "POST",
+      method: input.method ?? "POST",
       headers: {
         accept: "application/json",
         "content-type": "application/json",

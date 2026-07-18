@@ -41,6 +41,7 @@
     "start:agent-worker-workflow": "node --import tsx services/agent-worker/src/run-workflow-service.ts",
     "start:agent-configuration": "node --import tsx services/agent-configuration/src/run-service.ts",
     "start:agent-execution-broker": "node --import tsx services/agent-execution-broker/src/run-broker-service.ts",
+    "start:agent-execution-worker": "node --import tsx services/agent-execution-broker/src/run-native-worker-service.ts",
     "start:inference-gateway": "node --import tsx services/inference-gateway/src/run-service.ts",
     "start:spec-dialogue": "node --import tsx services/spec-dialogue/src/run-service.ts",
     "start:spec-workflow-bridge": "node --import tsx services/spec-workflow-bridge/src/run-service.ts",

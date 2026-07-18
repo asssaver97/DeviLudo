@@ -28,9 +28,8 @@ export class PostgresSourceSnapshotAuthority implements SourceSnapshotAuthority 
   }>> {
     validateInput(input);
     return this.#transaction(input.tenantId, async (client) => {
-      const selected = input.mode === "CANDIDATE"
-        ? await candidateReceipt(client, input)
-        : await mainReceipt(client, input);
+      const selected = input.mode === "AGENT_BASELINE" ? await baselineReceipt(client, input)
+        : input.mode === "CANDIDATE" ? await candidateReceipt(client, input) : await mainReceipt(client, input);
       if (selected.rows.length !== 1) invalid();
       const row = selected.rows[0]!;
       if (row.tenant_id !== input.tenantId || row.project_id !== input.projectId
@@ -108,6 +107,40 @@ function candidateReceipt(
   );
 }
 
+function baselineReceipt(
+  client: PostgresWorkflowClient,
+  input: Parameters<SourceSnapshotAuthority["resolve"]>[0],
+) {
+  return client.query<AuthorityRow>(
+    `SELECT repository.tenant_id::text,
+            repository.project_id::text,
+            installation.installation_id,
+            repository.repository_id,
+            repository.repository_node_id,
+            repository.owner_name,
+            repository.repository_name,
+            repository.default_branch,
+            baseline.source_digest
+       FROM deviludo.agent_runs run
+       JOIN deviludo.github_source_baseline_receipts baseline
+         ON baseline.tenant_id = run.tenant_id AND baseline.project_id = run.project_id
+        AND baseline.id = run.source_baseline_receipt_id
+       JOIN deviludo.github_repository_bindings repository
+         ON repository.id = baseline.repository_binding_id
+        AND repository.tenant_id = baseline.tenant_id
+        AND repository.project_id = baseline.project_id
+        AND repository.status = 'ACTIVE'
+       JOIN deviludo.github_installations installation
+         ON installation.id = repository.github_installation_id
+        AND installation.tenant_id = repository.tenant_id
+        AND installation.status = 'ACTIVE'
+      WHERE run.tenant_id = $1::uuid AND run.project_id = $2::uuid AND run.id = $3::uuid
+        AND baseline.commit_sha = $4 AND baseline.source_digest = $5
+      FOR SHARE OF run, baseline, repository, installation`,
+    [input.tenantId, input.projectId, input.runId, input.commitSha, input.sourceDigest],
+  );
+}
+
 function mainReceipt(
   client: PostgresWorkflowClient,
   input: Parameters<SourceSnapshotAuthority["resolve"]>[0],
@@ -148,7 +181,7 @@ function mainReceipt(
 
 function validateInput(input: Parameters<SourceSnapshotAuthority["resolve"]>[0]): void {
   if (!UUID.test(input.tenantId) || !UUID.test(input.projectId) || !UUID.test(input.runId)
-    || (input.mode !== "CANDIDATE" && input.mode !== "MAIN_RELEASE_GATE")
+    || (input.mode !== "AGENT_BASELINE" && input.mode !== "CANDIDATE" && input.mode !== "MAIN_RELEASE_GATE")
     || !SHA1.test(input.commitSha) || !SHA256.test(input.sourceDigest)) invalid();
 }
 

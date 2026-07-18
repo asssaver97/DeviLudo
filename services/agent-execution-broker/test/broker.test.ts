@@ -48,8 +48,9 @@ function lock(): LockedAgentExecution {
     authorizedModels: Object.freeze(["gateway/claude-sonnet-4-6-20250514"]),
     authorizationNonce: "nonce-r1", authorizationExpiresAt: "2030-01-01T01:00:00.000Z",
     budget: Object.freeze({ maxUsd: 10, maxTurns: 50, timeoutSeconds: 3_600 }),
-    specRevisionId: "77777777-7777-4777-8777-777777777777",
-    testPlanRevisionId: "88888888-8888-4888-8888-888888888888",
+    specRevisionId: "77777777-7777-4777-8777-777777777777", specDigest: "f".repeat(64),
+    testPlanRevisionId: "88888888-8888-4888-8888-888888888888", testPlanDigest: "1".repeat(64),
+    targetMatrix: Object.freeze(["linux", "windows"] as const),
     sourceBaselineReceiptId: "99999999-9999-4999-8999-999999999999",
     baseCommitSha: "d".repeat(40), sourceDigest: "e".repeat(64),
   });
@@ -188,8 +189,9 @@ test("PostgreSQL Provider wait commits before returning 409 semantics", async ()
     providerRevisionId: "provider-r1", providerProtocol: "anthropic-messages",
     providerBaseUrl: "https://gateway.example.invalid/v1", credentialVersionId: "credential-v1",
     budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 3_600 },
-    specRevisionId: "77777777-7777-4777-8777-777777777777",
-    testPlanRevisionId: "88888888-8888-4888-8888-888888888888",
+    specRevisionId: "77777777-7777-4777-8777-777777777777", specDigest: "f".repeat(64),
+    testPlanRevisionId: "88888888-8888-4888-8888-888888888888", testPlanDigest: "1".repeat(64),
+    targetMatrix: ["linux", "windows"],
     sourceBaselineReceiptId: "99999999-9999-4999-8999-999999999999",
     commitSha: "d".repeat(40), sourceDigest: "e".repeat(64),
   };

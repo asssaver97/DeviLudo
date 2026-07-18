@@ -54,7 +54,10 @@ export interface LockedAgentExecution {
   readonly authorizationExpiresAt: string;
   readonly budget: Readonly<{ maxUsd: number; maxTurns: number; timeoutSeconds: number }>;
   readonly specRevisionId: string;
+  readonly specDigest: string;
   readonly testPlanRevisionId: string;
+  readonly testPlanDigest: string;
+  readonly targetMatrix: readonly ("linux" | "macos" | "windows")[];
   readonly sourceBaselineReceiptId: string;
   readonly baseCommitSha: string;
   readonly sourceDigest: string;
@@ -174,6 +177,9 @@ export function validateAgentExecutionStatus(value: unknown, expected: Pick<Agen
 
 export function validateIsolatedResult(value: unknown, lock: LockedAgentExecution, attemptId: string): IsolatedAgentExecutionResult {
   const body = record(value);
+  exactKeys(body, ["status", "runId", "attemptId", "resolutionDigest", "profileRevisionId", "installationId",
+    "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "executionReceiptId",
+    "candidateArtifact", "diagnosticId"]);
   if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
     || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
@@ -201,6 +207,9 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
 
 export function validateAuthoritativeResult(value: unknown, lock: LockedAgentExecution, attemptId: string): AuthoritativeAgentExecutionResult {
   const body = record(value);
+  exactKeys(body, ["status", "runId", "attemptId", "resolutionDigest", "profileRevisionId", "installationId",
+    "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "candidateCommitSha",
+    "draftPullRequest", "diagnosticId", "receiptId"]);
   if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
     || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId

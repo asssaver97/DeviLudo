@@ -41,6 +41,15 @@ test("PostgreSQL source authority uses the fresh merged-main digest for release 
   assert.doesNotMatch(query, /candidate\.source_digest AS source_digest/);
 });
 
+test("PostgreSQL source authority materializes only the AgentRun's locked baseline", async () => {
+  const fixture = authorityFixture();
+  await fixture.authority.resolve(input("AGENT_BASELINE"));
+  const query = fixture.sql.find((statement) => statement.includes("github_source_baseline_receipts baseline")) ?? "";
+  assert.match(query, /baseline\.id = run\.source_baseline_receipt_id/);
+  assert.match(query, /baseline\.commit_sha = \$4/);
+  assert.deepEqual(fixture.queryValues, [tenantId, projectId, runId, commitSha, sourceDigest]);
+});
+
 test("PostgreSQL source authority rejects missing, cross-binding and malformed receipts", async () => {
   await assert.rejects(authorityFixture({ missing: true }).authority.resolve(input("CANDIDATE")), /authority receipt/);
   await assert.rejects(authorityFixture({ row: { project_id: "44444444-4444-4444-8444-444444444444" } })
@@ -59,7 +68,7 @@ test("PostgreSQL source authority readiness probe releases its connection", asyn
   assert.equal(fixture.releases, 1);
 });
 
-function input(mode: "CANDIDATE" | "MAIN_RELEASE_GATE") {
+function input(mode: "AGENT_BASELINE" | "CANDIDATE" | "MAIN_RELEASE_GATE") {
   return { tenantId, projectId, runId, mode, commitSha, sourceDigest };
 }
 
@@ -89,7 +98,8 @@ function authorityFixture(options: {
     ): Promise<PostgresQueryResult<Row>> {
       sql.push(statement);
       if (statement === "SELECT 1 AS ready") return { rowCount: 1, rows: [{ ready: 1 } as unknown as Row] };
-      if (statement.includes("github_candidate_receipts candidate") || statement.includes("github_merge_receipts merge")) {
+      if (statement.includes("github_candidate_receipts candidate") || statement.includes("github_merge_receipts merge")
+        || statement.includes("github_source_baseline_receipts baseline")) {
         queryValues = values;
         return { rowCount: options.missing ? 0 : 1, rows: options.missing ? [] : [row as unknown as Row] };
       }

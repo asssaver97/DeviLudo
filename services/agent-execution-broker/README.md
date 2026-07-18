@@ -19,3 +19,16 @@ Agent destination and isolated development Workers.
 The Broker process does not install Claude Code or Codex CLI. Polling Worker
 composition requires an explicitly supplied isolated executor and ephemeral
 secret store, so missing infrastructure fails closed.
+
+`LockedNativeMicrovmAgentExecutor` is the production launcher adapter. It
+re-resolves the approved specification and frozen test plan under PostgreSQL
+RLS, materializes only the AgentRun's locked GitHub baseline through the
+read-only source-snapshot Broker, and invokes one digest-pinned native launcher
+with fixed argv and an empty secret-free environment. The guest receives the
+internal inference Gateway URL and an opaque expiring SecretRef, never the
+third-party Provider URL. A completed response is accepted only when its
+candidate artifact has the configured Ed25519 attestation. Start the production
+consumer with `npm run start:agent-execution-worker`; it deposits DLRT bytes as
+`application/octet-stream` through the configured mTLS ephemeral-secret Broker
+and receives only an opaque SecretRef. There is no in-memory production
+fallback.

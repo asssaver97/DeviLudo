@@ -51,8 +51,9 @@ function lock(): LockedAgentExecution { return Object.freeze({ tenantId, project
   providerProtocol: "anthropic-messages", providerBaseUrl: "https://gateway.example.invalid/v1", credentialVersionId: "credential-v1",
   model: "gateway/claude-sonnet-4-6-20250514", authorizedModels: ["gateway/claude-sonnet-4-6-20250514"],
   authorizationNonce: "nonce-r1", authorizationExpiresAt: "2030-01-01T01:00:00.000Z",
-  budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 900 }, specRevisionId,
-  testPlanRevisionId: "77777777-7777-4777-8777-777777777777",
+  budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 900 }, specRevisionId, specDigest: "d".repeat(64),
+  testPlanRevisionId: "77777777-7777-4777-8777-777777777777", testPlanDigest: "e".repeat(64),
+  targetMatrix: ["linux", "macos", "windows"] as const,
   sourceBaselineReceiptId: "88888888-8888-4888-8888-888888888888", baseCommitSha, sourceDigest: "f".repeat(64) }); }
 
 test("candidate publication contract binds the signed artifact to one Agent attempt", () => {

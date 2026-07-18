@@ -19,7 +19,9 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_GRANT_MS = 5 * 60_000;
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024 * 1024;
 
-type MaterializeInput = Parameters<AuthoritativeSourceSnapshotPort["materialize"]>[0];
+export type SourceSnapshotMaterializationInput = Omit<Parameters<AuthoritativeSourceSnapshotPort["materialize"]>[0], "mode">
+  & Readonly<{ mode: "AGENT_BASELINE" | "CANDIDATE" | "MAIN_RELEASE_GATE" }>;
+type MaterializeInput = SourceSnapshotMaterializationInput;
 
 export const REQUIRED_SOURCE_SNAPSHOT_ENV_NAMES = Object.freeze([
   "DEVILUDO_SOURCE_SNAPSHOT_BROKER_URL",
@@ -105,6 +107,14 @@ export class MtlsAuthoritativeSourceSnapshotClient implements AuthoritativeSourc
       await rm(destination, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     } finally { await unlink(archive).catch(() => undefined); }
+  }
+
+  async probe(): Promise<void> {
+    const url = new URL(this.#endpoint.href); url.pathname = "/healthz";
+    const response = await this.#brokerHttp({ url, method: "GET", body: "", tls: this.#tls,
+      timeoutMs: this.#requestTimeoutMs });
+    const body = record(response.payload);
+    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-source-snapshot") invalidResponse();
   }
 
   async #post(body: Readonly<Record<string, unknown>>): Promise<unknown> {
@@ -195,7 +205,7 @@ function snapshotObjectKey(input: MaterializeInput, artifactDigest: string): str
 
 function validateInput(input: MaterializeInput): void {
   if (!UUID.test(input.tenantId) || !UUID.test(input.projectId) || !UUID.test(input.runId)
-    || (input.mode !== "CANDIDATE" && input.mode !== "MAIN_RELEASE_GATE")
+    || (input.mode !== "AGENT_BASELINE" && input.mode !== "CANDIDATE" && input.mode !== "MAIN_RELEASE_GATE")
     || !SHA1.test(input.commitSha) || !SHA256.test(input.expectedSourceDigest)
     || !isAbsolute(input.destinationPath) || resolve(input.destinationPath) !== input.destinationPath
     || input.destinationPath.length > 4_096 || /\0/.test(input.destinationPath)) invalidConfig();
