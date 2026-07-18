@@ -25,6 +25,8 @@ export interface GitHubAuthorizationBrokerPort {
 
 export interface GitHubBrokerRequestLedger {
   execute<T extends Readonly<Record<string, unknown>>>(input: {
+    readonly tenantId: string;
+    readonly operationName: "BEGIN" | "SETUP" | "COMPLETE";
     readonly idempotencyKey: string;
     readonly requestDigest: string;
     readonly operation: () => Promise<T>;
@@ -44,6 +46,7 @@ export function registerGitHubAuthorizationBrokerRoutes(
 ): void {
   const route = (
     path: string,
+    operation: "BEGIN" | "SETUP" | "COMPLETE",
     handler: (body: Record<string, unknown>) => Promise<Readonly<Record<string, unknown>>>,
     successStatus: number,
   ) => {
@@ -56,9 +59,12 @@ export function registerGitHubAuthorizationBrokerRoutes(
       }
       try {
         const body = requireObject(request.body);
+        const principal = requirePrincipal(body.principal);
         const idempotencyKey = requireIdempotencyKey(request);
         const requestDigest = canonicalDigest({ path, body });
         const result = await options.ledger.execute({
+          tenantId: principal.tenantId,
+          operationName: operation,
           idempotencyKey,
           requestDigest,
           operation: () => handler(body),
@@ -76,13 +82,15 @@ export function registerGitHubAuthorizationBrokerRoutes(
     });
   };
 
-  route("/v1/github/authorizations/begin", async (body) => {
+  route("/v1/github/authorizations/begin", "BEGIN", async (body) => {
+    exactKeys(body, ["principal", "returnPath"]);
     const principal = requirePrincipal(body.principal);
     if (body.returnPath !== "/settings/connections") throw new Error("GitHub authorization return path is invalid");
     return options.broker.begin(principal, body.returnPath);
   }, 201);
 
-  route("/v1/github/authorizations/setup", async (body) => {
+  route("/v1/github/authorizations/setup", "SETUP", async (body) => {
+    exactKeys(body, ["installationId", "principal", "setupAction", "state"]);
     const principal = requirePrincipal(body.principal);
     const state = requireState(body.state);
     const installationId = requireInstallationId(body.installationId);
@@ -91,7 +99,8 @@ export function registerGitHubAuthorizationBrokerRoutes(
     return options.broker.beginUserAuthorization({ principal, state, installationId, setupAction });
   }, 200);
 
-  route("/v1/github/authorizations/complete", async (body) => {
+  route("/v1/github/authorizations/complete", "COMPLETE", async (body) => {
+    exactKeys(body, ["code", "principal", "state"]);
     const principal = requirePrincipal(body.principal);
     const state = requireState(body.state);
     const code = requireCode(body.code);
@@ -111,11 +120,14 @@ export class InMemoryGitHubBrokerRequestLedger implements GitHubBrokerRequestLed
   readonly #records = new Map<string, LedgerRecord>();
 
   async execute<T extends Readonly<Record<string, unknown>>>(input: {
+    readonly tenantId: string;
+    readonly operationName: "BEGIN" | "SETUP" | "COMPLETE";
     readonly idempotencyKey: string;
     readonly requestDigest: string;
     readonly operation: () => Promise<T>;
   }): Promise<T> {
-    const existing = this.#records.get(input.idempotencyKey);
+    const ledgerKey = `${input.tenantId}:${input.operationName}:${input.idempotencyKey}`;
+    const existing = this.#records.get(ledgerKey);
     if (existing && existing.requestDigest !== input.requestDigest) {
       throw new Error("GitHub broker idempotency key was reused with another request");
     }
@@ -124,20 +136,21 @@ export class InMemoryGitHubBrokerRequestLedger implements GitHubBrokerRequestLed
     const pending = input.operation()
       .then((result) => {
         const frozen = Object.freeze({ ...result });
-        this.#records.set(input.idempotencyKey, { requestDigest: input.requestDigest, result: frozen, pending: null });
+        this.#records.set(ledgerKey, { requestDigest: input.requestDigest, result: frozen, pending: null });
         return frozen;
       })
       .catch((error) => {
-        this.#records.delete(input.idempotencyKey);
+        this.#records.delete(ledgerKey);
         throw error;
       });
-    this.#records.set(input.idempotencyKey, { requestDigest: input.requestDigest, result: null, pending });
+    this.#records.set(ledgerKey, { requestDigest: input.requestDigest, result: null, pending });
     return pending as Promise<T>;
   }
 }
 
 function requirePrincipal(value: unknown): GitHubAuthorizationPrincipal {
   const body = requireObject(value);
+  exactKeys(body, ["expectedGithubUserId", "sessionBinding", "tenantId", "userId"]);
   const tenantId = requireOpaqueId(body.tenantId, "tenant");
   const userId = requireOpaqueId(body.userId, "user");
   const sessionBinding = body.sessionBinding;
@@ -149,6 +162,12 @@ function requirePrincipal(value: unknown): GitHubAuthorizationPrincipal {
     throw new Error("GitHub authorization user binding is invalid");
   }
   return Object.freeze({ tenantId, userId, sessionBinding, expectedGithubUserId: expectedGithubUserId as number });
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expected].sort())) {
+    throw new Error("GitHub broker body contains unexpected fields");
+  }
 }
 
 function requireObject(value: unknown): Record<string, unknown> {

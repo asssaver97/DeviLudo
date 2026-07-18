@@ -128,6 +128,14 @@ ephemeral GitHub App user token only to verify the current numeric user's access
 to the exact installation. A bare setup callback never establishes a tenant
 binding.
 
+The production GitHub authorization Broker is a standalone TLS 1.3/mTLS
+workload. Authorization intents and its anti-replay request ledger use forced
+tenant RLS. The ledger stores request digests and terminal markers but no
+response body, because begin/setup redirects contain raw OAuth state. PKCE
+verifiers are deposited and consumed once through a separate mTLS Vault facade;
+the GitHub OAuth client secret is returned only as a short-lived binary-backed
+lease. OAuth codes and ephemeral user tokens never enter PostgreSQL or logs.
+
 ## Runner fencing and evidence
 
 Every selected OS receives a separate lease binding `attempt_id`, platform,

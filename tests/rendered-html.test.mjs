@@ -38,16 +38,17 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.match(await project.text(), /真实 Agent 必须先通过独立预检/);
 });
 
-test("exposes health, agent catalog and idempotent spec approval APIs", async () => {
+test("production worker exposes health but keeps local admin and specification fixtures disabled", async () => {
   const health = await request("/api/health");
   assert.equal(health.status, 200);
-  assert.equal((await health.json()).status, "ok");
+  const healthPayload = await health.json();
+  assert.equal(healthPayload.status, "ok");
+  assert.equal(healthPayload.mode, "PRODUCTION");
 
   const agents = await request("/api/admin/agents");
-  assert.equal(agents.status, 200);
+  assert.equal(agents.status, 503);
   const agentPayload = await agents.json();
-  assert.equal(agentPayload.meta.defaultAgent, "claude-code");
-  assert.deepEqual(agentPayload.data.map((agent) => agent.id), ["claude-code", "codex-cli"]);
+  assert.equal(agentPayload.error.code, "ADMIN_CONTROL_PLANE_REQUIRED");
 
   const init = {
     method: "POST",
@@ -55,17 +56,12 @@ test("exposes health, agent catalog and idempotent spec approval APIs", async ()
     body: JSON.stringify({ action: "approve", revision: "SPEC-008" }),
   };
   const first = await request("/api/projects/ember-archipelago/spec-revisions", init);
-  assert.equal(first.status, 201);
+  assert.equal(first.status, 400);
   const firstPayload = await first.json();
-  assert.equal(firstPayload.data.run.locked, true);
-  assert.equal(firstPayload.data.run.exactAgentVersion, "2.1.14");
-
-  const replay = await request("/api/projects/ember-archipelago/spec-revisions", init);
-  assert.equal(replay.status, 200);
-  assert.equal((await replay.json()).meta.idempotentReplay, true);
+  assert.equal(firstPayload.error.code, "SPEC_APPROVAL_AUTHORITY_REQUIRED");
 });
 
-test("credential ingress never echoes or stores the plaintext API key", async () => {
+test("production worker never accepts credential plaintext into the local demo store", async () => {
   const plaintext = "fixture-secret-that-must-never-be-returned";
   const response = await request("/api/admin/credentials", {
     method: "POST",
@@ -76,11 +72,10 @@ test("credential ingress never echoes or stores the plaintext API key", async ()
     },
     body: JSON.stringify({ label: "test credential", apiKey: plaintext }),
   });
-  assert.equal(response.status, 201);
+  assert.equal(response.status, 503);
   const serialized = JSON.stringify(await response.json());
   assert.doesNotMatch(serialized, new RegExp(plaintext));
-  assert.match(serialized, /vault:\/\//);
-  assert.match(serialized, /plaintextRecoverable.*false/);
+  assert.match(serialized, /ADMIN_CONTROL_PLANE_REQUIRED/);
 });
 
 test("public web worker remains fail-closed for runner event writes", async () => {

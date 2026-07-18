@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 41 }, (_, index) => {
+  const offsets = Array.from({ length: 42 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -27,6 +27,26 @@ test("Temporal projects replay-validated delivery state for production Web reads
   assert.match(workflow, /await persist\(machine\.current\(\)/);
   assert.match(projection, /machine\.signal\(signal\)/);
   assert.match(projection, /canonicalJson\(replayed\) !== canonicalJson\(candidate\)/);
+});
+
+test("GitHub authorization production host is tenant-isolated, anti-replay and secret-brokered", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/042_github_authorization_request_ledger.sql", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/scm-proxy/src/run-github-authorization-service.ts", import.meta.url), "utf8");
+  const ledger = readFileSync(new URL("../services/scm-proxy/src/github-auth-ledger-postgres.ts", import.meta.url), "utf8");
+  const secrets = readFileSync(new URL("../services/scm-proxy/src/github-auth-secret-client.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:github-authorization"], "node --import tsx services/scm-proxy/src/run-github-authorization-service.ts");
+  assert.match(migration, /CREATE TABLE deviludo\.github_authorization_request_ledger/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /stores no response body/i);
+  assert.doesNotMatch(migration, /response jsonb/);
+  assert.match(runtime, /minVersion: "TLSv1\.3"/);
+  assert.match(runtime, /workflowSpiffeIdFromAuthorizedTls/);
+  assert.match(runtime, /PostgresGitHubBrokerRequestLedger/);
+  assert.match(ledger, /SELECT set_config\('app\.tenant_id'/);
+  assert.doesNotMatch(ledger, /JSON\.stringify\(result\)[\s\S]*client\.query/);
+  assert.match(secrets, /application\/octet-stream/);
+  assert.match(secrets, /response\.payload\.fill\(0\)/);
 });
 
 test("SCM merge authority binds one delivered acceptance to GitHub and merged-main evidence", () => {

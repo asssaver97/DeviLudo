@@ -17,6 +17,8 @@ import {
   type ScmPostgresClient,
   type ScmPostgresQueryResult,
 } from "../src/github-auth-postgres";
+import { PostgresGitHubBrokerRequestLedger } from "../src/github-auth-ledger-postgres";
+import { MtlsGitHubAuthorizationSecretClient } from "../src/github-auth-secret-client";
 
 const principal: GitHubAuthorizationPrincipal = Object.freeze({
   tenantId: "tenant-north-dock",
@@ -239,6 +241,100 @@ test("Postgres GitHub authorization store applies tenant RLS and persists only d
   assert.equal(JSON.stringify(statements).includes(intent.sessionBindingDigest), true);
 });
 
+test("production GitHub request ledger fences retries without persisting OAuth state or responses", async () => {
+  const statements: { text: string; values?: readonly unknown[] }[] = [];
+  let status: "CLAIMED" | "COMPLETED" = "CLAIMED";
+  let claimToken = "";
+  const client: ScmPostgresClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      values?: readonly unknown[],
+    ): Promise<ScmPostgresQueryResult<Row>> {
+      statements.push({ text, values });
+      if (text.includes("INSERT INTO deviludo.github_authorization_request_ledger")) {
+        claimToken = String(values?.[4]);
+        return { rowCount: 1, rows: [] } as ScmPostgresQueryResult<Row>;
+      }
+      if (text.includes("SELECT operation, request_digest")) {
+        return { rowCount: 1, rows: [{
+          operation: "BEGIN",
+          request_digest: "d".repeat(64),
+          status,
+          claim_token: status === "CLAIMED" ? claimToken : null,
+          claim_active: status === "CLAIMED",
+        }] } as unknown as ScmPostgresQueryResult<Row>;
+      }
+      if (text.includes("SET status = 'COMPLETED'")) {
+        status = "COMPLETED";
+        return { rowCount: 1, rows: [] } as ScmPostgresQueryResult<Row>;
+      }
+      if (text.includes("to_regclass")) {
+        return { rowCount: 1, rows: [{ ledger: "deviludo.github_authorization_request_ledger" }] } as unknown as ScmPostgresQueryResult<Row>;
+      }
+      return { rowCount: 0, rows: [] } as ScmPostgresQueryResult<Row>;
+    },
+    release() {},
+  };
+  const ledger = new PostgresGitHubBrokerRequestLedger({ async connect() { return client; } });
+  const state = "secret-oauth-state-that-must-never-be-persisted";
+  const input = {
+    tenantId: "22222222-2222-4222-8222-222222222222",
+    operationName: "BEGIN" as const,
+    idempotencyKey: "github-begin-durable-001",
+    requestDigest: "d".repeat(64),
+    operation: async () => ({ authorizeUrl: `https://github.com/install?state=${state}` }),
+  };
+  assert.match((await ledger.execute(input)).authorizeUrl, /github\.com/);
+  await assert.rejects(ledger.execute(input), /already completed/);
+  await ledger.probe();
+  assert.equal(statements.filter((entry) => entry.text.includes("set_config('app.tenant_id'")).length, 3);
+  assert.equal(JSON.stringify(statements).includes(state), false);
+  assert.equal(JSON.stringify(statements).includes("authorizeUrl"), false);
+});
+
+test("mTLS GitHub secret client transports PKCE and client secrets only as bounded binary leases", async () => {
+  const calls: Array<{ url: string; body?: Buffer }> = [];
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const secretRef = "vault://transit/github-auth/pkce-001";
+  const pkce = "p".repeat(43);
+  const clientSecret = "github-client-secret-value";
+  const client = new MtlsGitHubAuthorizationSecretClient({
+    endpoint: "https://secret-broker.internal/",
+    tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
+    async http(url, input) {
+      calls.push({ url: String(url), body: input.body });
+      if (url.pathname === "/v1/github-authorization-secrets") {
+        assert.equal(input.body?.toString("utf8"), pkce);
+        return brokerResponse(201, "application/json", {
+          schemaVersion: "deviludo.github-authorization-secret.v1", secretRef, expiresAt,
+        });
+      }
+      if (url.pathname === "/v1/github-authorization-secrets:take") {
+        return { statusCode: 200, contentType: "application/octet-stream", payload: Buffer.from(pkce) };
+      }
+      if (url.pathname === "/v1/github-authorization-secrets:revoke") {
+        return { statusCode: 204, contentType: "", payload: Buffer.alloc(0) };
+      }
+      if (url.pathname === "/v1/static-secret-leases:resolve") {
+        return { statusCode: 200, contentType: "application/octet-stream", payload: Buffer.from(clientSecret) };
+      }
+      return brokerResponse(200, "application/json", { status: "ok", service: "deviludo-secret-broker" });
+    },
+  });
+  assert.equal(await client.put(pkce, expiresAt), secretRef);
+  assert.equal(await client.take(secretRef), pkce);
+  const lease = await client.resolve("vault://kv/github/client-secret/v3");
+  assert.equal(lease.value, clientSecret);
+  lease.destroy();
+  assert.throws(() => lease.value, /destroyed/);
+  await client.delete(secretRef);
+  await client.probe();
+  assert.equal(calls.length, 5);
+  assert.equal(calls[0]?.body?.every((byte) => byte === 0), true);
+  assert.doesNotMatch(JSON.stringify(calls), new RegExp(pkce));
+  assert.doesNotMatch(JSON.stringify(calls), new RegExp(clientSecret));
+});
+
 test("REST verifier proves the signed-in user can access the exact installation and revokes its ephemeral token", async () => {
   const requests: Array<{ url: string; init: RequestInit }> = [];
   let destroyed = 0;
@@ -335,4 +431,8 @@ function installationPayload(extraPermissions: Record<string, string> = {}) {
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+function brokerResponse(statusCode: number, contentType: string, body: unknown) {
+  return { statusCode, contentType, payload: Buffer.from(JSON.stringify(body)) };
 }

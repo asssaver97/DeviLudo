@@ -5,9 +5,14 @@
  */
 export function isLoopbackTestRequest(
   request: Request,
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
-  if (environment.NODE_ENV === "production" || environment.DEVILUDO_LOCAL_TEST_MODE !== "1") {
+  // Keep the default properties explicit so Vinext can replace the small,
+  // allow-listed values in its Cloudflare Worker build. Do not expose the
+  // whole Node process.env object to application code.
+  const nodeEnvironment = environment ? environment.NODE_ENV : process.env.NODE_ENV;
+  const localTestMode = environment ? environment.DEVILUDO_LOCAL_TEST_MODE : process.env.DEVILUDO_LOCAL_TEST_MODE;
+  if (nodeEnvironment === "production" || localTestMode !== "1") {
     return false;
   }
 
