@@ -206,15 +206,23 @@ async function requestSecretBroker(url: URL, input: Parameters<GitHubSecretBroke
       response.on("data", (chunk: Buffer | string) => {
         const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         total += value.byteLength;
-        if (total > MAX_RESPONSE_BYTES) response.destroy(new Error("GitHub secret Broker response is too large"));
+        if (total > MAX_RESPONSE_BYTES) {
+          for (const item of chunks) item.fill(0);
+          value.fill(0);
+          response.destroy(new Error("GitHub secret Broker response is too large"));
+        }
         else chunks.push(value);
       });
       response.once("error", reject);
-      response.once("end", () => resolveRequest(Object.freeze({
-        statusCode: response.statusCode ?? 503,
-        contentType: String(response.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase(),
-        payload: Buffer.concat(chunks),
-      })));
+      response.once("end", () => {
+        try {
+          resolveRequest(Object.freeze({
+            statusCode: response.statusCode ?? 503,
+            contentType: String(response.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase(),
+            payload: Buffer.concat(chunks),
+          }));
+        } finally { for (const item of chunks) item.fill(0); }
+      });
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("GitHub secret Broker timed out")));
     request.once("error", reject);

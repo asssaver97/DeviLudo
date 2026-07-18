@@ -19,6 +19,15 @@ separate `DEVILUDO_IDENTITY_ADMIN_BROKER_URL`, which must route through an admin
 egress connector presenting one of the admin SPIFFE identities. Do not point
 both variables at a connector that presents the ordinary Web identity.
 
+Apply `045_secret_broker.sql` and deploy `npm run start:secret-broker` before
+enabling production OAuth. Identity and the repository-install Broker use their
+approved GitHub-role SPIFFE identities to store the PKCE verifier as a one-time
+Vault object and to lease only the configured static OAuth client-secret
+reference. The Secret Broker consumes and destroys PKCE after the first take;
+OAuth codes, verifiers, client secrets and tokens never enter the identity or
+SCM PostgreSQL tables. See `services/secret-broker/README.md` for the Vault
+policy and mTLS boundary.
+
 The GitHub App callback URL for login is
 `https://<console>/api/auth/github/callback`. The existing repository-install
 callback remains `https://<console>/api/connections/github/callback`.

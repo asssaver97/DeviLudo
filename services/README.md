@@ -34,6 +34,11 @@ behind the web console:
   credential and remaining budget, and performs fresh DNS/SSRF validation.
   Without a trusted DNS-pinning/Vault connector it fails closed rather than
   using an unpinned HTTP client.
+- `secret-broker`: the isolated Vault KV v2 authority for Provider credentials,
+  one-time GitHub/Identity PKCE values and short inference leases. PostgreSQL
+  stores only opaque references, one-way digests, fencing state and append-only
+  access audit. Disjoint control-plane, GitHub/Identity and Gateway SPIFFE roles
+  cannot call one another's endpoints.
 - `runner-control`: registers only admitted mTLS/SPIFFE workloads, rejects E2E
   hosts containing autonomous Agents, signs exact per-platform job envelopes,
   applies independent fencing tokens and derives the final matrix result from
@@ -406,6 +411,7 @@ not become availability errors.
 ./node_modules/.bin/tsc -p services/delivery-projection/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/agent-worker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/inference-gateway/tsconfig.json --pretty false
+./node_modules/.bin/tsc -p services/secret-broker/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/spec-dialogue/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/spec-workflow-bridge/tsconfig.json --pretty false
 ./node_modules/.bin/tsc -p services/runner-control/tsconfig.json --pretty false
@@ -418,6 +424,7 @@ node --import tsx --test services/temporal/test/temporal-adapter.test.ts
 node --import tsx --test services/delivery-projection/test/*.test.ts
 node --import tsx --test services/agent-worker/test/supervisor.test.ts
 node --import tsx --test services/inference-gateway/test/*.test.ts
+node --import tsx --test services/secret-broker/test/*.test.ts
 node --import tsx --test services/spec-dialogue/test/*.test.ts
 node --import tsx --test services/spec-workflow-bridge/test/*.test.ts
 node --import tsx --test services/runner-control/test/coordinator.test.ts

@@ -133,7 +133,7 @@ test("mTLS credential resolver readiness verifies the exact workload and rejects
     tls,
     http: async (url) => {
       urls.push(url.href);
-      return { statusCode: 200, payload: { status: "ok", service: "deviludo-inference-credential-broker" } };
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-secret-broker" } };
     },
   });
   await resolver.probe();

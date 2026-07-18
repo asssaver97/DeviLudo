@@ -120,7 +120,7 @@ export class MtlsGatewayCredentialResolver implements GatewayCredentialResolver,
       headers: Object.freeze({ accept: "application/json" }),
     });
     const body = record(response.payload);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-inference-credential-broker") {
+    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-secret-broker") {
       throw new Error("Inference credential Broker readiness probe failed");
     }
   }
@@ -156,6 +156,8 @@ export async function credentialBrokerHttpsJson(
         const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         size += value.byteLength;
         if (size > MAX_RESPONSE_BYTES) {
+          for (const item of chunks) item.fill(0);
+          value.fill(0);
           response.destroy(new Error("Inference credential Broker response exceeded its bound"));
           return;
         }
@@ -163,12 +165,15 @@ export async function credentialBrokerHttpsJson(
       });
       response.once("error", reject);
       response.once("end", () => {
+        let payload: Buffer | undefined;
         try {
+          payload = Buffer.concat(chunks);
           resolve(Object.freeze({
             statusCode: response.statusCode ?? 503,
-            payload: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown,
+            payload: JSON.parse(payload.toString("utf8")) as unknown,
           }));
         } catch { reject(new Error("Inference credential Broker returned invalid JSON")); }
+        finally { payload?.fill(0); for (const item of chunks) item.fill(0); }
       });
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Inference credential Broker request timed out")));

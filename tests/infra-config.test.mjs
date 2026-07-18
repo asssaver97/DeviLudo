@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 43 }, (_, index) => {
+  const offsets = Array.from({ length: 45 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -72,6 +72,32 @@ test("GitHub authorization production host is tenant-isolated, anti-replay and s
   assert.doesNotMatch(ledger, /JSON\.stringify\(result\)[\s\S]*client\.query/);
   assert.match(secrets, /application\/octet-stream/);
   assert.match(secrets, /response\.payload\.fill\(0\)/);
+});
+
+test("Secret Broker is the isolated Vault authority for PKCE and inference credentials", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/045_secret_broker.sql", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/secret-broker/src/run-service.ts", import.meta.url), "utf8");
+  const http = readFileSync(new URL("../services/secret-broker/src/http.ts", import.meta.url), "utf8");
+  const authority = readFileSync(new URL("../services/secret-broker/src/authority.ts", import.meta.url), "utf8");
+  const vault = readFileSync(new URL("../services/secret-broker/src/vault-backend.ts", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../services/control-plane/src/secret-vault.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:secret-broker"], observedServiceCommand("secret-broker"));
+  assert.match(migration, /CREATE TABLE deviludo\.secret_broker_records/);
+  assert.match(migration, /CREATE TABLE deviludo\.secret_broker_audit/);
+  assert.match(migration, /secret_broker_record_no_delete/);
+  assert.match(migration, /secret_broker_audit_append_only/);
+  assert.doesNotMatch(migration, /plaintext\s+(?:text|bytea)/i);
+  assert.match(runtime, /DEVILUDO_SECRET_BROKER_VAULT_TOKEN_FILE/);
+  assert.match(runtime, /O_NOFOLLOW/);
+  assert.match(http, /requestCert: true, rejectUnauthorized: true, minVersion: "TLSv1\.3"/);
+  assert.match(http, /requireIdempotencyKey/);
+  assert.match(authority, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(authority, /inference_run_authorizations/);
+  assert.match(vault, /options: \{ cas: 0 \}/);
+  assert.match(vault, /metadataPath/);
+  assert.match(client, /httpsRequest/);
+  assert.doesNotMatch(client, /\bfetch\s*\(/);
 });
 
 test("SCM merge authority binds one delivered acceptance to GitHub and merged-main evidence", () => {
