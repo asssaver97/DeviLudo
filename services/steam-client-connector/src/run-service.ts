@@ -1,10 +1,12 @@
 import { createPublicKey } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TargetPlatform } from "../../../lib/domain/types";
 import { SteamClientConnectorService } from "./connector";
 import { createSteamClientConnectorHandler, createSteamClientConnectorHttpsServer } from "./ingress-http";
+import { MtlsSteamInstallGrantClient } from "./install-grant-client";
 import { LockedNativeSteamClientExecutor } from "./locked-native-executor";
 
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -15,15 +17,23 @@ export async function steamClientConnectorServiceFromEnv(
 ) {
   const platform = targetPlatform(required(env, "DEVILUDO_STEAM_CONNECTOR_PLATFORM"));
   if (platform !== targetPlatform(runtimePlatform)) throw new Error("Steam Client Connector platform does not match this host");
-  const [jobKeyPem, tlsKey, tlsCertificate, tlsCa, stagingRoot, workRoot] = await Promise.all([
+  const [jobKeyPem, tlsKey, tlsCertificate, tlsCa, grantKey, grantCertificate, grantCa, stagingRoot, workRoot] = await Promise.all([
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_JOB_PUBLIC_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_CERT_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_CA_FILE", 32, 1024 * 1024),
+    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_TLS_KEY_FILE", 32, 1024 * 1024),
+    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_TLS_CERT_FILE", 32, 1024 * 1024),
+    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_CA_FILE", 32, 1024 * 1024),
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_STAGING_ROOT"),
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_WORK_ROOT"),
   ]);
   const jobPublicKey = createPublicKey(jobKeyPem);
+  const grants = new MtlsSteamInstallGrantClient({
+    endpoint: required(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_URL"),
+    tls: { key: grantKey, certificate: grantCertificate, ca: grantCa },
+    timeoutMs: seconds(env.DEVILUDO_STEAM_CONNECTOR_GRANT_TIMEOUT_SECONDS, 30, 1, 300) * 1_000,
+  });
   const executor = new LockedNativeSteamClientExecutor({
     executable: requiredAbsolute(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE"),
     executableDigest: digest(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE_DIGEST"),
@@ -37,6 +47,7 @@ export async function steamClientConnectorServiceFromEnv(
     platform,
     stagingRoot,
     executor,
+    grants,
   });
   const handler = createSteamClientConnectorHandler({
     service,
@@ -47,7 +58,7 @@ export async function steamClientConnectorServiceFromEnv(
     handler,
     requestTimeoutMs: seconds(env.DEVILUDO_STEAM_CONNECTOR_REQUEST_TIMEOUT_SECONDS, 3_300, 30, 3_600) * 1_000,
   });
-  return Object.freeze({ service, executor, server });
+  return Object.freeze({ service, grants, executor, server });
 }
 
 export async function runSteamClientConnectorService(env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
@@ -74,9 +85,12 @@ function targetPlatform(value: string): TargetPlatform {
 
 async function safeFile(env: Readonly<Record<string, string | undefined>>, name: string, minimum: number, maximum: number): Promise<Buffer> {
   const path = requiredAbsolute(env, name);
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < minimum || metadata.size > maximum) throw new Error(`${name} file is invalid`);
-  return readFile(path);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await file.stat();
+    if (!metadata.isFile() || metadata.size < minimum || metadata.size > maximum) throw new Error(`${name} file is invalid`);
+    return await file.readFile();
+  } finally { await file.close(); }
 }
 
 async function safeDirectory(env: Readonly<Record<string, string | undefined>>, name: string): Promise<string> {

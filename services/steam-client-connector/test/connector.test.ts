@@ -15,6 +15,11 @@ import {
   type SteamClientNativeExecutor,
 } from "../src/connector";
 import { createSteamClientConnectorHandler, createSteamClientConnectorHttpsServer } from "../src/ingress-http";
+import {
+  MtlsSteamInstallGrantClient,
+  type SteamInstallGrantRedemptionPort,
+  type SteamInstallGrantRedemptionReceipt,
+} from "../src/install-grant-client";
 import { LockedNativeSteamClientExecutor } from "../src/locked-native-executor";
 
 const keys = generateKeyPairSync("ed25519");
@@ -42,6 +47,99 @@ test("Connector verifies one signed BuildID, validates native evidence and repla
     assert.equal(first.receiptDigest, sha256Canonical(core));
     assert.doesNotMatch(JSON.stringify(first), /config\.vdf|steam.?guard|password/i);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Connector redeems the exact grant before native execution and fails closed on grant drift", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-steam-connector-grant-"));
+  try {
+    const fixture = await createFixture(root);
+    const order: string[] = [];
+    let grantProbes = 0;
+    let nativeProbes = 0;
+    const grants: SteamInstallGrantRedemptionPort = {
+      async probe() { grantProbes += 1; },
+      async redeem(input) { order.push("grant"); return grantReceipt(input.signedJob, input.jobDigest); },
+    };
+    const executor: SteamClientNativeExecutor = {
+      async probe() { nativeProbes += 1; },
+      async execute() { order.push("native"); return fixture.result; },
+    };
+    const service = connector(root, executor, grants);
+    await service.probe();
+    await service.execute(fixture.request);
+    assert.deepEqual({ order, grantProbes, nativeProbes }, { order: ["grant", "native"], grantProbes: 1, nativeProbes: 1 });
+
+    let nativeCalls = 0;
+    const neverNative: SteamClientNativeExecutor = {
+      async probe() {},
+      async execute() { nativeCalls += 1; return fixture.result; },
+    };
+    const rejected: SteamInstallGrantRedemptionPort = {
+      async probe() {},
+      async redeem() { throw new Error("grant rejected"); },
+    };
+    await assert.rejects(connector(root, neverNative, rejected).execute(fixture.request), /grant rejected/);
+    const drifted: SteamInstallGrantRedemptionPort = {
+      async probe() {},
+      async redeem(input) { return { ...grantReceipt(input.signedJob, input.jobDigest), buildId: "999" }; },
+    };
+    await assert.rejects(connector(root, neverNative, drifted).execute(fixture.request), /install grant redemption/);
+    assert.equal(nativeCalls, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("mTLS grant client sends only the signed job and accepts one exact redemption receipt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-steam-grant-client-"));
+  try {
+    const fixture = await createFixture(root);
+    const tls = { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) };
+    let probes = 0;
+    let redemptions = 0;
+    const client = new MtlsSteamInstallGrantClient({
+      endpoint: "https://steam-install-grants.internal:4744",
+      tls,
+      timeoutMs: 5_000,
+      async http(input) {
+        assert.equal(input.timeoutMs, 5_000);
+        if (input.method === "GET") {
+          probes += 1;
+          assert.equal(input.url.href, "https://steam-install-grants.internal:4744/healthz");
+          return { statusCode: 200, payload: { status: "ok", service: "deviludo-steam-install-grants" } };
+        }
+        redemptions += 1;
+        assert.equal(input.url.href, "https://steam-install-grants.internal:4744/v1/steam-install-grant-redemptions");
+        const body = JSON.parse(input.body) as Record<string, unknown>;
+        assert.deepEqual(body, {
+          schemaVersion: "deviludo.steam-install-grant-redemption.v1",
+          jobDigest: fixture.request.jobDigest,
+          signedJob: fixture.request.signedJob,
+        });
+        assert.doesNotMatch(input.body, /password|config\.vdf|steam.?guard/i);
+        return { statusCode: 200, payload: grantReceipt(fixture.request.signedJob, fixture.request.jobDigest) };
+      },
+    });
+    await client.probe();
+    const receipt = await client.redeem({ jobDigest: fixture.request.jobDigest, signedJob: fixture.request.signedJob });
+    assert.equal(receipt.buildId, "91234567");
+    assert.deepEqual({ probes, redemptions }, { probes: 1, redemptions: 1 });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("mTLS grant client rejects unsafe endpoints, service errors and receipt drift", async () => {
+  const tls = { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) };
+  assert.throws(() => new MtlsSteamInstallGrantClient({ endpoint: "http://steam.internal", tls }), /URL is invalid/);
+  const payload = jobPayload(sha("4"));
+  const signedJob = signed(payload);
+  const jobDigest = sha256Canonical(payload);
+  const rejected = new MtlsSteamInstallGrantClient({
+    endpoint: "https://steam.internal", tls, async http() { return { statusCode: 409, payload: {} }; },
+  });
+  await assert.rejects(rejected.redeem({ jobDigest, signedJob }), /redemption was rejected/);
+  const drifted = new MtlsSteamInstallGrantClient({
+    endpoint: "https://steam.internal", tls,
+    async http() { return { statusCode: 200, payload: { ...grantReceipt(signedJob, jobDigest), betaBranch: "other_private" } }; },
+  });
+  await assert.rejects(drifted.redeem({ jobDigest, signedJob }), /receipt is invalid/);
 });
 
 test("Connector rejects signature, plan, mode, path and credential-log drift before receipt", async () => {
@@ -171,7 +269,11 @@ test("locked native adapter pins binary, argv, child environment and durable res
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-function connector(root: string, executor: SteamClientNativeExecutor): SteamClientConnectorService {
+function connector(
+  root: string,
+  executor: SteamClientNativeExecutor,
+  grants: SteamInstallGrantRedemptionPort = grantPort(),
+): SteamClientConnectorService {
   return new SteamClientConnectorService({
     jobPublicKey: keys.publicKey,
     jobKeyId: "runner-job-key-01",
@@ -179,7 +281,31 @@ function connector(root: string, executor: SteamClientNativeExecutor): SteamClie
     platform: "linux",
     stagingRoot: root,
     executor,
+    grants,
     now: () => new Date(now),
+  });
+}
+
+function grantPort(): SteamInstallGrantRedemptionPort {
+  return {
+    async probe() {},
+    async redeem(input) { return grantReceipt(input.signedJob, input.jobDigest); },
+  };
+}
+
+function grantReceipt(signedJob: SignedRunnerJob, jobDigest: string): SteamInstallGrantRedemptionReceipt {
+  const execution = signedJob.payload.execution;
+  assert.equal(execution.kind, "STEAM_CLEAN_INSTALL");
+  return Object.freeze({
+    schemaVersion: "deviludo.steam-install-grant-redemption-receipt.v1",
+    jobDigest,
+    executionLockDigest: signedJob.payload.executionLockDigest,
+    grantId: execution.installGrantId,
+    platform: signedJob.payload.platform,
+    steamAppId: execution.steamAppId,
+    buildId: execution.buildId,
+    betaBranch: execution.betaBranch,
+    redeemedAt: now,
   });
 }
 

@@ -12,6 +12,10 @@ import {
   type GodotTestPlan,
 } from "../../godot-testkit/src/contracts";
 import type { GodotCommandEvidence } from "../../godot-testkit/src/godot-driver";
+import type {
+  SteamInstallGrantRedemptionPort,
+  SteamInstallGrantRedemptionReceipt,
+} from "./install-grant-client";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
@@ -73,6 +77,7 @@ export class SteamClientConnectorService {
     platform: TargetPlatform;
     stagingRoot: string;
     executor: SteamClientNativeExecutor;
+    grants: SteamInstallGrantRedemptionPort;
     now?: () => Date;
   }>) {
     if (options.jobPublicKey.asymmetricKeyType !== "ed25519") throw new Error("Steam Connector job key must be Ed25519");
@@ -116,7 +121,7 @@ export class SteamClientConnectorService {
 
   async probe(): Promise<void> {
     await canonicalDirectory(this.#stagingRoot, this.#stagingRoot);
-    await this.options.executor.probe();
+    await Promise.all([this.options.grants.probe(), this.options.executor.probe()]);
   }
 
   async #executeVerified(
@@ -124,6 +129,8 @@ export class SteamClientConnectorService {
     signedJob: SignedRunnerJob,
     testPlan: GodotTestPlan,
   ): Promise<SteamCleanInstallExecutionReceipt> {
+    const grant = await this.options.grants.redeem({ jobDigest, signedJob });
+    verifyGrantReceipt(grant, jobDigest, signedJob);
     const result = await this.options.executor.execute(Object.freeze({
       schemaVersion: "deviludo.native-steam-clean-install.v1",
       executionId: jobDigest,
@@ -161,6 +168,26 @@ export class SteamClientConnectorService {
     });
     return Object.freeze({ ...core, receiptDigest: sha256Canonical(core) });
   }
+}
+
+function verifyGrantReceipt(
+  value: SteamInstallGrantRedemptionReceipt,
+  jobDigest: string,
+  signedJob: SignedRunnerJob,
+): void {
+  const body = record(value);
+  exactKeys(body, [
+    "schemaVersion", "jobDigest", "executionLockDigest", "grantId", "platform",
+    "steamAppId", "buildId", "betaBranch", "redeemedAt",
+  ]);
+  const execution = signedJob.payload.execution;
+  if (execution.kind !== "STEAM_CLEAN_INSTALL"
+    || body.schemaVersion !== "deviludo.steam-install-grant-redemption-receipt.v1"
+    || body.jobDigest !== jobDigest || body.executionLockDigest !== signedJob.payload.executionLockDigest
+    || body.grantId !== execution.installGrantId || body.platform !== signedJob.payload.platform
+    || body.steamAppId !== execution.steamAppId || body.buildId !== execution.buildId
+    || body.betaBranch !== execution.betaBranch || typeof body.redeemedAt !== "string"
+    || !Number.isFinite(Date.parse(body.redeemedAt))) invalid("install grant redemption");
 }
 
 function parseRequest(value: unknown): Readonly<{

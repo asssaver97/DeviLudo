@@ -9,9 +9,15 @@ the fixed `/v1/clean-install-executions` contract. Successful native output is
 confined to the configured staging root and is re-validated before a
 content-bound receipt is returned.
 
+Before invoking the native bridge, the Connector presents a separate mTLS
+identity to `/v1/steam-install-grant-redemptions`. The grant service verifies
+the same signed job against the fresh fleet manifest and PostgreSQL grant,
+then returns an exact lock/platform/AppID/BuildID/branch-bound receipt. A
+rejection or receipt mismatch prevents the native Steam session from running.
+
 `SteamClientNativeExecutor` is intentionally an injected port. The native,
-signed OS artifact owns the protected Steam session and redeems the opaque
-install grant; account passwords, Steam Guard answers, branch passwords and
+signed OS artifact owns the protected Steam session after the Node boundary
+has redeemed the opaque install grant; account passwords, Steam Guard answers, branch passwords and
 `config.vdf` never cross this Node service contract. The native artifact must
 implement `executionId` idempotency and perform a clean client reset before
 installing the exact BuildID.
