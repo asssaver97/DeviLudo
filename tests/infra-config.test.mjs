@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 26 }, (_, index) => {
+  const offsets = Array.from({ length: 27 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -484,6 +484,7 @@ test("production Agent administration has a versioned catalog and append-only au
 });
 
 test("production Agent administration trusts only pinned mTLS supply-chain Broker receipts", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const client = readFileSync(new URL("../services/control-plane/src/agent-supply-chain.ts", import.meta.url), "utf8");
   const service = readFileSync(new URL("../services/control-plane/src/admin.service.ts", import.meta.url), "utf8");
   const moduleSource = readFileSync(new URL("../services/control-plane/src/app.module.ts", import.meta.url), "utf8");
@@ -503,8 +504,37 @@ test("production Agent administration trusts only pinned mTLS supply-chain Broke
   assert.match(service, /AGENT_VERSION_VALIDATION_RACE/);
   assert.match(service, /INSTALLATION_BUILD_DRIFT/);
   assert.match(service, /ROLLOUT_CONFIGURATION_RACE/);
-  assert.match(env, /DEVILUDO_AGENT_SUPPLY_CHAIN_TIMEOUT_SECONDS=15/);
+  assert.match(env, /DEVILUDO_AGENT_SUPPLY_CHAIN_TIMEOUT_SECONDS=600/);
   assert.doesNotMatch(env, /PRIVATE KEY|BEGIN CERTIFICATE|@latest/);
+  assert.equal(packageJson.scripts["start:agent-supply-chain"], "node --import tsx services/agent-supply-chain/src/run-service.ts");
+  assert.match(packageJson.scripts["test:services"], /npm run test:agent-supply-chain/);
+});
+
+test("isolated Agent supply-chain Broker persists and fences fixed native execution", () => {
+  const migration = readFileSync(new URL("../infra/postgres/027_agent_supply_chain_operations.sql", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/agent-supply-chain/src/ingress-http.ts", import.meta.url), "utf8");
+  const native = readFileSync(new URL("../services/agent-supply-chain/src/locked-native-executor.ts", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/agent-supply-chain/src/postgres-operations.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/agent-supply-chain/src/run-service.ts", import.meta.url), "utf8");
+  const request = readFileSync(new URL("../services/agent-supply-chain/src/request-contract.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.agent_supply_chain_operations/);
+  assert.match(migration, /agent supply-chain operation binding is immutable/);
+  assert.match(migration, /completed agent supply-chain operation is immutable/);
+  assert.match(migration, /agent_supply_chain_operation_no_delete/);
+  assert.match(store, /FOR UPDATE/);
+  assert.match(store, /claim_token = \$2::uuid/);
+  assert.match(store, /claim_expires_at > \$5::timestamptz/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(native, /shell: false/);
+  assert.match(native, /constants\.O_RDONLY \| constants\.O_NOFOLLOW/);
+  assert.match(native, /DISABLE_UPDATES: "1"/);
+  assert.doesNotMatch(native, /curl\s*\||npm install|@latest|dangerously-skip-permissions|--yolo/);
+  assert.match(runtime, /NODE_ENV !== "production"/);
+  assert.match(runtime, /DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST/);
+  assert.match(request, /registry\.npmjs\.org\/\@anthropic-ai\/claude-code/);
+  assert.match(request, /registry\.npmjs\.org\/\@openai\/codex/);
 });
 
 test("control-plane wait persistence uses the shared tenant RLS setting", () => {

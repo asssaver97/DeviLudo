@@ -463,3 +463,28 @@ function absolute(env: Readonly<Record<string, string | undefined>>, name: strin
 async function secret(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> { const file = await open(absolute(env, name), constants.O_RDONLY | constants.O_NOFOLLOW); try { const stat = await file.stat(); if (!stat.isFile() || stat.size < 32 || stat.size > MAX_SECRET_BYTES) throw new Error(`${name} file is invalid`); return await file.readFile(); } finally { await file.close(); } }
 function invalidConfig(): never { throw new Error("Agent supply-chain configuration is invalid"); }
 function invalidReceipt(): never { throw new ServiceProblem(502, "AGENT_SUPPLY_CHAIN_RECEIPT_INVALID", "Agent supply-chain receipt is invalid"); }
+
+export function parseAgentVersionCandidateReceipt(value: unknown): AgentVersionCandidateReceipt {
+  return candidateReceipt(value);
+}
+
+export function parseAgentVersionValidationReceipt(
+  value: unknown,
+  candidate: AgentVersionCandidateReceipt,
+): AgentVersionValidationReceipt {
+  return validationReceipt(value, candidate);
+}
+
+export function parseAgentInstallationBuildReceipt(
+  value: unknown,
+  input: Parameters<AgentSupplyChain["buildInstallation"]>[0],
+): AgentInstallationBuildReceipt {
+  return buildReceipt(value, input);
+}
+
+export function parseAgentInstallationRolloutReceipt(
+  value: unknown,
+  input: Parameters<AgentSupplyChain["rollout"]>[0],
+): AgentInstallationRolloutReceipt {
+  return rolloutReceipt(value, input);
+}
