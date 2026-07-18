@@ -17,6 +17,7 @@ const attemptId = "55555555-5555-4555-8555-555555555555";
 const evidenceId = "66666666-6666-4666-8666-666666666666";
 const specRevisionId = "77777777-7777-4777-8777-777777777777";
 const executionLockId = "99999999-9999-4999-8999-999999999999";
+const runnerToolchainRevisionId = "10101010-1010-4010-8010-101010101010";
 const sha = (value: string) => value.repeat(64);
 const commitSha = "a".repeat(40);
 const sourceDigest = sha("b");
@@ -35,6 +36,8 @@ const executionLock: RunnerExecutionLock = Object.freeze({
   specRevisionId,
   specDigest,
   testPlanDigest,
+  runnerToolchainRevisionId,
+  runnerToolchainDigest: sha("0"),
   targetMatrix: Object.freeze(["linux"] as const),
   requiredGodotVersion: "4.6.2-stable",
   godotTestKitDigest: sha("8"),
@@ -80,6 +83,8 @@ function binding() {
     specRevisionId,
     specDigest,
     testPlanDigest,
+    runnerToolchainRevisionId,
+    runnerToolchainDigest: sha("0"),
     targetMatrix: ["linux"],
   };
 }
@@ -151,6 +156,8 @@ function terminalRow(status: "PASSED" | "FAILED", digestOverride?: string) {
       specRevisionId,
       specDigest,
       testPlanDigest,
+      runnerToolchainRevisionId,
+      runnerToolchainDigest: sha("0"),
       commitSha,
       sourceDigest,
       targetMatrix: ["linux"],
@@ -186,7 +193,8 @@ class ScriptedClient implements PostgresWorkflowClient {
     if (text.includes("FROM deviludo.agent_runs") && text.includes("FOR UPDATE")) {
       assert.deepEqual(values, [tenantId, projectId, runId]);
       return result([{ iteration_id: binding().iterationId, configuration_lock: {
-        specRevisionId, specDigest, testPlanDigest, targetMatrix: ["linux"],
+        specRevisionId, specDigest, testPlanDigest, runnerToolchainRevisionId,
+        runnerToolchainDigest: sha("0"), targetMatrix: ["linux"],
       } }] as unknown as Row[]);
     }
     if (text.includes("FROM deviludo.github_candidate_receipts")) {

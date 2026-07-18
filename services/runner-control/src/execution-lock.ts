@@ -22,6 +22,8 @@ export interface RunnerExecutionLock {
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
+  readonly runnerToolchainRevisionId: string;
+  readonly runnerToolchainDigest: string;
   readonly targetMatrix: readonly TargetPlatform[];
   readonly requiredGodotVersion: string;
   readonly godotTestKitDigest: string;
@@ -51,7 +53,8 @@ export function parseRunnerExecutionLock(value: unknown): Readonly<RunnerExecuti
   const body = record(value);
   exactKeys(body, [
     "schemaVersion", "tenantId", "projectId", "runId", "mode", "commitSha", "sourceDigest",
-    "steamBuildId", "specRevisionId", "specDigest", "testPlanDigest", "targetMatrix",
+    "steamBuildId", "specRevisionId", "specDigest", "testPlanDigest", "runnerToolchainRevisionId",
+    "runnerToolchainDigest", "targetMatrix",
     "requiredGodotVersion", "godotTestKitDigest", "exportTemplates", "buildManifestDigest",
     "sbomDigest", "vulnerabilityScanDigest", "assetLicenseLedgerDigest", "execution", "preparedAt",
   ], "payload");
@@ -65,6 +68,8 @@ export function parseRunnerExecutionLock(value: unknown): Readonly<RunnerExecuti
   const specRevisionId = required(body.specRevisionId, UUID, "spec revision");
   const specDigest = required(body.specDigest, SHA256, "spec digest");
   const testPlanDigest = required(body.testPlanDigest, SHA256, "test plan digest");
+  const runnerToolchainRevisionId = required(body.runnerToolchainRevisionId, UUID, "Runner toolchain revision");
+  const runnerToolchainDigest = required(body.runnerToolchainDigest, SHA256, "Runner toolchain digest");
   const targetMatrix = matrix(body.targetMatrix);
   const requiredGodotVersion = required(body.requiredGodotVersion, GODOT_VERSION, "Godot version");
   const godotTestKitDigest = required(body.godotTestKitDigest, SHA256, "Godot TestKit digest");
@@ -118,6 +123,8 @@ export function parseRunnerExecutionLock(value: unknown): Readonly<RunnerExecuti
     specRevisionId,
     specDigest,
     testPlanDigest,
+    runnerToolchainRevisionId,
+    runnerToolchainDigest,
     targetMatrix,
     requiredGodotVersion,
     godotTestKitDigest,

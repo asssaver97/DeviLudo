@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 16 }, (_, index) => {
+  const offsets = Array.from({ length: 17 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -12,6 +12,16 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("approved specifications bind one append-only Runner toolchain revision", () => {
+  const migration = readFileSync(new URL("../infra/postgres/017_runner_toolchain_revisions.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.runner_toolchain_revisions/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, id, payload_digest\)/);
+  assert.match(migration, /runner_toolchain_revisions_append_only/);
+  assert.match(migration, /ADD COLUMN runner_toolchain_revision_id uuid NOT NULL/);
+  assert.match(migration, /approved_test_plan_runner_toolchain_fk/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
 });
 
 test("approved specifications bind one append-only canonical test plan", () => {
@@ -141,14 +151,30 @@ test("artifact preparation publishes canonical source and plan objects before th
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const preparer = readFileSync(new URL("../services/artifact-preparer/src/preparer.ts", import.meta.url), "utf8");
   const postgres = readFileSync(new URL("../services/artifact-preparer/src/postgres-lock-store.ts", import.meta.url), "utf8");
+  const authority = readFileSync(new URL("../services/artifact-preparer/src/postgres-preparation-authority.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/artifact-preparer/src/ingress-http.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/artifact-preparer/src/run-service.ts", import.meta.url), "utf8");
+  const runnerClient = readFileSync(new URL("../services/runner-control/src/artifact-preparation-client.ts", import.meta.url), "utf8");
+  const runnerWorkflow = readFileSync(new URL("../services/runner-control/src/workflow-handler.ts", import.meta.url), "utf8");
   const builder = readFileSync(new URL("../services/godot-testkit/src/source-bundle-builder.ts", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:artifact-preparer/);
+  assert.equal(packageJson.scripts["start:artifact-preparer"], "node --import tsx services/artifact-preparer/src/run-service.ts");
   assert.match(preparer, /Promise\.all\(\[\s*this\.#objects\.publishFile/);
   assert.match(preparer, /exactObjectReceipt\(sourceReceipt/);
   assert.match(preparer, /this\.#locks\.persist/);
   assert.ok(preparer.indexOf("this.#locks.persist") > preparer.indexOf("exactObjectReceipt(sourceReceipt"));
   assert.match(postgres, /set_config\('app\.tenant_id'/);
   assert.match(postgres, /ON CONFLICT \(tenant_id, lock_key\) DO NOTHING/);
+  assert.match(authority, /FOR SHARE OF run, spec, binding, toolchain/);
+  assert.match(authority, /set_config\('app\.tenant_id'/);
+  assert.match(authority, /sha256Canonical\(row\.toolchain_payload\)/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(runtime, /new PostgresSourceExecutionPreparationAuthority\(pool\)/);
+  assert.match(runnerClient, /deviludo\.source-execution-preparation-trigger\.v1/);
+  assert.match(runnerWorkflow, /withLeaseHeartbeats/);
+  assert.match(runnerWorkflow, /mode === "STEAM_CLEAN_INSTALL" \? null/);
   assert.match(builder, /constants\.O_NOFOLLOW/);
   assert.match(builder, /createZstdCompress/);
   assert.match(builder, /source snapshot mutation/);

@@ -35,38 +35,65 @@ function receipt(overrides: Partial<RunnerWorkflowReceipt> = {}): RunnerWorkflow
   };
 }
 
+function preparationPort(observed: Array<Record<string, unknown>> = []) {
+  return {
+    async prepare(input: Record<string, unknown>) {
+      observed.push(input);
+      const sourceArtifactDigest = "5".repeat(64);
+      const testPlanDigest = "6".repeat(64);
+      return {
+        executionLockId: "33333333-3333-4333-8333-333333333333",
+        executionLockDigest: "3".repeat(64),
+        sourceDigest: "4".repeat(64),
+        sourceArtifactDigest,
+        sourceObjectKey: `tenants/${String(input.tenantId)}/projects/${String(input.projectId)}/sources/${sourceArtifactDigest}.tar.zst`,
+        testPlanDigest,
+        testPlanObjectKey: `tenants/${String(input.tenantId)}/projects/${String(input.projectId)}/test-plans/${testPlanDigest}.json`,
+        created: true,
+      };
+    },
+  };
+}
+
 test("Runner workflow handler turns candidate matrix evidence into pass or repair signals", async () => {
   let response = receipt();
+  const preparations: Array<Record<string, unknown>> = [];
   const handler = new RunnerControlWorkflowHandler({ async execute(input) {
     assert.equal(input.mode, "CANDIDATE");
     assert.equal(input.draftPullRequest, 91);
     assert.equal(input.runId, "run-001");
     return response;
-  } });
+  } }, preparationPort(preparations));
   const passed = await handler.execute(job(base, "START_TARGET_MATRIX_E2E"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(passed.signal, { type: "E2E_PASSED", evidenceBundleId: "evidence-bundle-1" });
   response = receipt({ status: "FAILED", evidenceBundleId: "failed-evidence-1", repairPromptId: "repair-prompt-1" });
   const failed = await handler.execute(job(base, "START_TARGET_MATRIX_E2E"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(failed.signal, { type: "E2E_FAILED", evidenceBundleId: "failed-evidence-1", repairPromptId: "repair-prompt-1" });
+  assert.equal(preparations.length, 2);
+  assert.equal(preparations[0]?.lockKey, "b".repeat(64));
+  assert.equal(preparations[0]?.mode, "CANDIDATE");
 });
 
 test("Runner workflow handler gates main SHA and Steam clean-install evidence separately", async () => {
   const main = Object.freeze({ ...base, state: "MAIN_SHA_E2E" as const, mainCommitSha: "c".repeat(40) });
   const steam = Object.freeze({ ...main, state: "STEAM_INSTALL_E2E" as const, steamBuildId: "91234567" });
+  const preparations: Array<Record<string, unknown>> = [];
   const handler = new RunnerControlWorkflowHandler({ async execute(input) {
     return receipt({
       mode: input.mode, commitSha: input.commitSha, steamBuildId: input.steamBuildId,
       targetMatrix: input.targetMatrix, evidenceBundleId: `${input.mode.toLowerCase()}-evidence`,
     });
-  } });
+  } }, preparationPort(preparations));
   const mainResult = await handler.execute(job(main, "START_MAIN_SHA_RELEASE_GATE"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(mainResult.signal, { type: "E2E_PASSED", evidenceBundleId: "main_release_gate-evidence" });
   const steamResult = await handler.execute(job(steam, "INSTALL_FROM_CLEAN_STEAM_CLIENT"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
   assert.deepEqual(steamResult.signal, { type: "STEAM_INSTALL_PASSED", evidenceBundleId: "steam_clean_install-evidence" });
+  assert.equal(preparations.length, 1);
+  assert.equal(preparations[0]?.mode, "MAIN_RELEASE_GATE");
 
   const failing = new RunnerControlWorkflowHandler({ async execute(input) {
     return receipt({ mode: input.mode, status: "FAILED", commitSha: input.commitSha, steamBuildId: input.steamBuildId,
       targetMatrix: input.targetMatrix, evidenceBundleId: "main-failed-evidence", repairPromptId: "main-failure-diagnostic" });
-  } });
+  } }, preparationPort());
   await assert.rejects(failing.execute(job(main, "START_MAIN_SHA_RELEASE_GATE"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } }), /MAIN_SHA_E2E_FAILED/);
 });

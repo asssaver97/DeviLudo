@@ -36,6 +36,7 @@
     "start:godot-testkit": "node --import tsx services/godot-testkit/src/run-cli.ts",
     "start:scm-proxy-workflow": "node --import tsx services/scm-proxy/src/run-workflow-service.ts",
     "start:source-snapshot": "node --import tsx services/scm-proxy/src/run-source-snapshot-service.ts",
+    "start:artifact-preparer": "node --import tsx services/artifact-preparer/src/run-service.ts",
     "start:steam-publisher-workflow": "node --import tsx services/steam-publisher/src/run-workflow-service.ts",
     "start:temporal-worker": "node --import tsx services/temporal/src/run-worker.ts",
     "start:local-runtime": "node --import tsx services/local-runtime/src/server.ts",

@@ -64,6 +64,8 @@ type LockedConfiguration = {
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
+  readonly runnerToolchainRevisionId: string;
+  readonly runnerToolchainDigest: string;
   readonly targetMatrix: readonly TargetPlatform[];
 };
 
@@ -234,6 +236,8 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
       || payload.specRevisionId !== configuration.specRevisionId
       || payload.specDigest !== configuration.specDigest
       || payload.testPlanDigest !== configuration.testPlanDigest
+      || payload.runnerToolchainRevisionId !== configuration.runnerToolchainRevisionId
+      || payload.runnerToolchainDigest !== configuration.runnerToolchainDigest
       || JSON.stringify(payload.targetMatrix) !== JSON.stringify(input.targetMatrix)) {
       throw new WorkflowJobError("RUNNER_EXECUTION_LOCK_BINDING_CONFLICT", true);
     }
@@ -405,8 +409,17 @@ function parseLockedConfiguration(value: unknown): LockedConfiguration {
   const specRevisionId = requiredString(body.specRevisionId, SAFE_ID, "spec revision");
   const specDigest = requiredString(body.specDigest, SHA256, "spec digest");
   const testPlanDigest = requiredString(body.testPlanDigest, SHA256, "test plan digest");
+  const runnerToolchainRevisionId = requiredString(body.runnerToolchainRevisionId, UUID, "Runner toolchain revision");
+  const runnerToolchainDigest = requiredString(body.runnerToolchainDigest, SHA256, "Runner toolchain digest");
   const targetMatrix = parseMatrix(body.targetMatrix);
-  return Object.freeze({ specRevisionId, specDigest, testPlanDigest, targetMatrix });
+  return Object.freeze({
+    specRevisionId,
+    specDigest,
+    testPlanDigest,
+    runnerToolchainRevisionId,
+    runnerToolchainDigest,
+    targetMatrix,
+  });
 }
 
 function parseAttemptBinding(value: unknown): AttemptBinding {
@@ -428,6 +441,8 @@ function parseAttemptBinding(value: unknown): AttemptBinding {
     specRevisionId: requiredString(body.specRevisionId, SAFE_ID, "spec revision"),
     specDigest: requiredString(body.specDigest, SHA256, "spec digest"),
     testPlanDigest: requiredString(body.testPlanDigest, SHA256, "test plan digest"),
+    runnerToolchainRevisionId: requiredString(body.runnerToolchainRevisionId, UUID, "Runner toolchain revision"),
+    runnerToolchainDigest: requiredString(body.runnerToolchainDigest, SHA256, "Runner toolchain digest"),
     targetMatrix: parseMatrix(body.targetMatrix),
   });
 }
@@ -502,7 +517,10 @@ function validateEvidenceBinding(value: unknown, attempt: AttemptRow, binding: A
     || body.executionLockId !== binding.executionLockId
     || body.executionLockDigest !== binding.executionLockDigest
     || body.specRevisionId !== binding.specRevisionId || body.specDigest !== binding.specDigest
-    || body.testPlanDigest !== binding.testPlanDigest || body.commitSha !== attempt.commit_sha
+    || body.testPlanDigest !== binding.testPlanDigest
+    || body.runnerToolchainRevisionId !== binding.runnerToolchainRevisionId
+    || body.runnerToolchainDigest !== binding.runnerToolchainDigest
+    || body.commitSha !== attempt.commit_sha
     || body.sourceDigest !== attempt.source_digest
     || JSON.stringify(parseMatrix(body.targetMatrix)) !== JSON.stringify(attempt.target_matrix)) {
     throw new WorkflowJobError("E2E_EVIDENCE_BINDING_INVALID", true);

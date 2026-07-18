@@ -72,6 +72,8 @@ function attempt(attemptId = "attempt-matrix-1", matrix: readonly TargetPlatform
     specRevisionId: "spec-r7",
     specDigest: digest("b"),
     testPlanDigest: digest("c"),
+    runnerToolchainRevisionId: "88888888-8888-4888-8888-888888888888",
+    runnerToolchainDigest: digest("9"),
     targetMatrix: matrix,
     requiredGodotVersion: "4.6.2.stable.official.71f334935",
     godotTestKitDigest: digest("4"),

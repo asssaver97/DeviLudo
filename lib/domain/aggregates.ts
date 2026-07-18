@@ -289,6 +289,8 @@ export interface AgentRunConfigurationLock {
   readonly specRevisionId: EntityId;
   readonly specDigest: Sha256;
   readonly testPlanDigest: Sha256;
+  readonly runnerToolchainRevisionId: EntityId;
+  readonly runnerToolchainDigest: Sha256;
   readonly commitSha: string;
   readonly sourceDigest: Sha256;
   readonly targetMatrix: readonly TargetPlatform[];

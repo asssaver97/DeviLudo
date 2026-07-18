@@ -20,6 +20,8 @@ function sourceLock(): RunnerExecutionLock {
     specRevisionId: "44444444-4444-4444-8444-444444444444",
     specDigest: sha("3"),
     testPlanDigest: sha("4"),
+    runnerToolchainRevisionId: "55555555-5555-4555-8555-555555555555",
+    runnerToolchainDigest: sha("e"),
     targetMatrix: ["linux", "macos", "windows"],
     requiredGodotVersion: "4.6.2-stable",
     godotTestKitDigest: sha("5"),

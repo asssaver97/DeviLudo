@@ -19,8 +19,10 @@ behind the web console:
 - `artifact-preparer`: freezes an authoritative SCM snapshot and approved v2
   matrix plan into content-addressed source/test-plan objects, verifies their
   exact publication receipts, then persists the append-only execution lock in
-  PostgreSQL under tenant RLS. Production broker adapters remain explicit mTLS
-  dependencies rather than implicit filesystem or public-Web access.
+  PostgreSQL under tenant RLS. Its TLS 1.3/mTLS host accepts only a minimal
+  Runner workflow trigger and re-resolves approved spec, test-plan, Runner
+  toolchain and SCM authority server-side; production broker adapters remain
+  explicit mTLS dependencies rather than implicit filesystem or public-Web access.
 - `inference-gateway`: verifies short-lived run tokens against the complete
   active immutable run registration, enforces exact protocol/model/Provider/
   credential and remaining budget, and performs fresh DNS/SSRF validation.
@@ -296,8 +298,9 @@ npm run start:steam-publisher-workflow
 They require the destination TLS, signed-assignment and database variables in
 `services/temporal/.env.example`. The Agent destination additionally requires
 the isolated execution Broker mTLS settings and remains unready if that Broker
-cannot prove its exact health identity. The Runner destination resolves an
-authoritative SCM/Steam source receipt under tenant RLS, creates a
+cannot prove its exact health identity. For source modes the Runner destination
+first invokes the isolated Artifact Preparer, then resolves the authoritative
+SCM/Steam source receipt and execution lock under tenant RLS, creates a
 request-digest-bound `e2e_attempts` row and heartbeats while the dedicated mTLS
 Runner ingress produces immutable content-addressed evidence. It never invokes
 the in-memory coordinator in production. The SCM destination sends only the

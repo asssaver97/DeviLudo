@@ -16,6 +16,13 @@ physical E2E Runners.
 5. only then persists the complete `RunnerExecutionLock` under the workflow
    request digest.
 
+`PostgresSourceExecutionPreparationAuthority` accepts only a minimal workflow
+trigger (`tenant/project/run/request digest/mode/commit/matrix`) and then
+re-resolves the approved spec, canonical test-plan binding, exact append-only
+Runner toolchain revision and authoritative candidate/main source receipt under
+tenant RLS. Caller-supplied source or toolchain fields are rejected before the
+database is touched.
+
 `PostgresRunnerExecutionLockPort` is the production RLS transaction for step 5.
 It uses `SET LOCAL app.tenant_id`, append-only table `runner_execution_locks`
 and `(tenant_id, lock_key)` idempotency. A replay is accepted only when the
@@ -41,8 +48,12 @@ Run the core contract suite with:
 npm run test:artifact-preparer
 ```
 
-All four production ports now exist. The remaining deployment boundary is the
-Artifact Preparer host and its durable trigger from the Runner workflow path;
-until that host is configured, Runner Control intentionally remains at
-`RUNNER_EXECUTION_LOCK_MISSING`. Tests use in-process transports and do not
-claim that an external GitHub repository or S3 service was contacted.
+Run the dedicated production host with `npm run start:artifact-preparer` and
+the file-mounted configuration in `.env.example`. The host forces TLS 1.3
+client authentication, reloads the short-lived certificate/tenant assignment,
+serves only `GET /healthz` and `POST /v1/source-execution-preparations`, and
+returns a bounded immutable execution-lock receipt. Runner Control calls this
+service before candidate/main scheduling and heartbeats its workflow lease
+during long snapshot/build transfers; Steam clean-install uses its separate
+publisher-owned lock path. Tests use in-process transports and do not claim
+that an external GitHub repository or S3 service was contacted.

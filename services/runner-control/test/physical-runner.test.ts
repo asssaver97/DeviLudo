@@ -74,6 +74,8 @@ function job(platform: TargetPlatform, overrides: Partial<RunnerJobPayload> = {}
     specRevisionId: "88888888-8888-4888-8888-888888888888",
     specDigest: sha("9"),
     testPlanDigest: sha("a"),
+    runnerToolchainRevisionId: "99999999-9999-4999-8999-999999999999",
+    runnerToolchainDigest: sha("0"),
     targetMatrix: ["linux", "macos", "windows"],
     requiredGodotVersion: cap.godotVersion,
     godotTestKitDigest: sha("b"),

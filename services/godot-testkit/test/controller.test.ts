@@ -208,6 +208,8 @@ function signedJob(sourceArtifactDigest: string, testPlanDigest: string): Signed
     specRevisionId: "77777777-7777-4777-8777-777777777777",
     specDigest: sha("3"),
     testPlanDigest,
+    runnerToolchainRevisionId: "88888888-8888-4888-8888-888888888888",
+    runnerToolchainDigest: sha("0"),
     targetMatrix: ["linux"],
     requiredGodotVersion: "4.6.2-stable",
     godotTestKitDigest: sha("4"),

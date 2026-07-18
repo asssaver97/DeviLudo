@@ -50,6 +50,8 @@ function payload(overrides: Partial<RunnerJobPayload> = {}): RunnerJobPayload {
     specRevisionId: "77777777-7777-4777-8777-777777777777",
     specDigest: sha("5"),
     testPlanDigest: sha("6"),
+    runnerToolchainRevisionId: "88888888-8888-4888-8888-888888888888",
+    runnerToolchainDigest: sha("0"),
     targetMatrix: ["linux"] as const,
     requiredGodotVersion: "4.6.2-stable",
     godotTestKitDigest: sha("7"),

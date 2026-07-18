@@ -216,6 +216,8 @@ export interface LockAgentRunInput {
   readonly specRevisionId: EntityId;
   readonly specDigest: Sha256;
   readonly testPlanDigest: Sha256;
+  readonly runnerToolchainRevisionId: EntityId;
+  readonly runnerToolchainDigest: Sha256;
   readonly commitSha: string;
   readonly sourceDigest: Sha256;
   readonly targetMatrix: readonly TargetPlatform[];
@@ -229,6 +231,7 @@ export function lockAgentRunConfiguration(input: LockAgentRunInput): DeepReadonl
   assertGitSha(input.commitSha);
   assertSha256(input.specDigest, "specDigest");
   assertSha256(input.testPlanDigest, "testPlanDigest");
+  assertSha256(input.runnerToolchainDigest, "runnerToolchainDigest");
   assertSha256(input.sourceDigest, "sourceDigest");
   assertSha256(input.resolutionDigest, "resolutionDigest");
   invariant(input.installation.id === profile.installationId, "Profile installation mismatch");
@@ -279,6 +282,8 @@ export function lockAgentRunConfiguration(input: LockAgentRunInput): DeepReadonl
     specRevisionId: input.specRevisionId,
     specDigest: input.specDigest,
     testPlanDigest: input.testPlanDigest,
+    runnerToolchainRevisionId: input.runnerToolchainRevisionId,
+    runnerToolchainDigest: input.runnerToolchainDigest,
     commitSha: input.commitSha,
     sourceDigest: input.sourceDigest,
     targetMatrix,

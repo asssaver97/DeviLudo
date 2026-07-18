@@ -78,6 +78,16 @@ function createFixture(root: string, options: {
 } = {}) {
   const plan = testPlan();
   const planBytes = Buffer.from(canonicalJson(plan), "utf8");
+  const toolchain = {
+    schemaVersion: "deviludo.runner-toolchain.v1" as const,
+    requiredGodotVersion: "4.6.2-stable",
+    godotTestKitDigest: sha("3"),
+    exportTemplates: { linux: sha("4"), macos: sha("5") },
+    buildManifestDigest: sha("6"),
+    sbomDigest: sha("7"),
+    vulnerabilityScanDigest: sha("8"),
+    assetLicenseLedgerDigest: sha("9"),
+  };
   const request = {
     schemaVersion: "deviludo.source-execution-preparation.v1" as const,
     tenantId,
@@ -90,16 +100,10 @@ function createFixture(root: string, options: {
     specRevisionId: "55555555-5555-4555-8555-555555555555",
     specDigest: sha("2"),
     testPlanDigest: digest(planBytes),
+    runnerToolchainRevisionId: "66666666-6666-4666-8666-666666666666",
+    runnerToolchainDigest: digest(Buffer.from(canonicalJson(toolchain), "utf8")),
     targetMatrix: ["linux", "macos"] as const,
-    toolchain: {
-      requiredGodotVersion: "4.6.2-stable",
-      godotTestKitDigest: sha("3"),
-      exportTemplates: { linux: sha("4"), macos: sha("5") },
-      buildManifestDigest: sha("6"),
-      sbomDigest: sha("7"),
-      vulnerabilityScanDigest: sha("8"),
-      assetLicenseLedgerDigest: sha("9"),
-    },
+    toolchain,
   };
   const sources: AuthoritativeSourceSnapshotPort = {
     async materialize(input) {

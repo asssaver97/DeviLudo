@@ -170,6 +170,8 @@ export class SourceExecutionPreparer {
         specRevisionId: request.specRevisionId,
         specDigest: request.specDigest,
         testPlanDigest: request.testPlanDigest,
+        runnerToolchainRevisionId: request.runnerToolchainRevisionId,
+        runnerToolchainDigest: request.runnerToolchainDigest,
         targetMatrix: request.targetMatrix,
         requiredGodotVersion: request.toolchain.requiredGodotVersion,
         godotTestKitDigest: request.toolchain.godotTestKitDigest,

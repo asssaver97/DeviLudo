@@ -61,6 +61,8 @@ function executionLock(): RunnerExecutionLock {
     specRevisionId,
     specDigest: sha("5"),
     testPlanDigest: sha("6"),
+    runnerToolchainRevisionId: "99999999-9999-4999-8999-999999999999",
+    runnerToolchainDigest: sha("f"),
     targetMatrix: ["linux"],
     requiredGodotVersion: "4.6.2-stable",
     godotTestKitDigest: sha("7"),

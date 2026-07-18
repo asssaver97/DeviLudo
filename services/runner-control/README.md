@@ -180,6 +180,12 @@ key or platform credential.
 
 `RunnerControlWorkflowHandler` maps durable workflow jobs to three distinct
 modes: candidate matrix, merged-main release gate and clean Steam install.
+Before either source mode can schedule an attempt it sends only the immutable
+workflow trigger to the isolated Artifact Preparer over mTLS, heartbeats the
+workflow lease while preparation runs, and verifies the exact execution-lock
+receipt. The Preparer re-resolves source/spec/test/toolchain authority from
+PostgreSQL; Runner Control cannot supply those executable fields. Steam mode
+does not use this path.
 Receipts must repeat the exact commit, Steam BuildID (when applicable) and
 ordered target matrix. Candidate failure emits a repair signal; main or Steam
 failure is terminal so neither can be mistaken for reusable candidate evidence.
@@ -187,6 +193,8 @@ failure is terminal so neither can be mistaken for reusable candidate evidence.
 Run the production workflow destination with `npm run
 start:runner-control-workflow`. In addition to the shared destination TLS,
 signed tenant-assignment, Temporal and PostgreSQL variables, it accepts
+the `DEVILUDO_RUNNER_ARTIFACT_PREPARER_*` file-mounted mTLS variables in
+`.env.example`, plus
 `DEVILUDO_RUNNER_ATTEMPT_POLL_SECONDS` (default 5) and
 `DEVILUDO_RUNNER_ATTEMPT_MAX_WAIT_SECONDS` (default 7200). A timeout retries the
 durable workflow job; it never changes the attempt binding.

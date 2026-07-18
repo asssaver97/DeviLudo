@@ -84,6 +84,8 @@ export interface MatrixAttemptSpec {
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
+  readonly runnerToolchainRevisionId: string;
+  readonly runnerToolchainDigest: string;
   readonly targetMatrix: readonly TargetPlatform[];
   readonly requiredGodotVersion: string;
   readonly godotTestKitDigest: string;
@@ -114,6 +116,8 @@ export interface RunnerJobPayload {
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
+  readonly runnerToolchainRevisionId: string;
+  readonly runnerToolchainDigest: string;
   readonly targetMatrix: readonly TargetPlatform[];
   readonly requiredGodotVersion: string;
   readonly godotTestKitDigest: string;

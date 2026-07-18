@@ -259,6 +259,8 @@ export class RunnerMatrixCoordinator {
       specRevisionId: spec.specRevisionId,
       specDigest: spec.specDigest,
       testPlanDigest: spec.testPlanDigest,
+      runnerToolchainRevisionId: spec.runnerToolchainRevisionId,
+      runnerToolchainDigest: spec.runnerToolchainDigest,
       targetMatrix: spec.targetMatrix,
       requiredGodotVersion: spec.requiredGodotVersion,
       godotTestKitDigest: spec.godotTestKitDigest,
@@ -359,8 +361,10 @@ export function verifyRunnerJob(
     && job.payload.platform === expected.platform
     && job.payload.targetMatrix.includes(expected.platform)
     && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(job.payload.executionLockId)
+    && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(job.payload.runnerToolchainRevisionId)
     && [
       job.payload.executionLockDigest,
+      job.payload.runnerToolchainDigest,
       job.payload.buildManifestDigest,
       job.payload.sbomDigest,
       job.payload.vulnerabilityScanDigest,
@@ -445,6 +449,7 @@ function validateAttemptSpec(spec: MatrixAttemptSpec): void {
     sourceArtifactDigest: spec.sourceArtifact.digest,
     specDigest: spec.specDigest,
     testPlanDigest: spec.testPlanDigest,
+    runnerToolchainDigest: spec.runnerToolchainDigest,
     godotTestKitDigest: spec.godotTestKitDigest,
     buildManifestDigest: spec.buildManifestDigest,
     sbomDigest: spec.sbomDigest,
@@ -453,6 +458,9 @@ function validateAttemptSpec(spec: MatrixAttemptSpec): void {
   })) assertSha256(value, field);
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(spec.executionLockId)) {
     throw new Error("Runner execution lock ID is invalid");
+  }
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(spec.runnerToolchainRevisionId)) {
+    throw new Error("Runner toolchain revision ID is invalid");
   }
   if (!spec.sourceArtifact.objectKey.trim() || spec.sourceArtifact.objectKey.startsWith("/") || spec.sourceArtifact.objectKey.includes("..")) throw new Error("Source artifact object key is invalid");
   const matrix = uniqueSorted(spec.targetMatrix);

@@ -1,10 +1,22 @@
 import type { TargetPlatform } from "../../../lib/domain/types";
+import { sha256Canonical } from "../../runner-control/src/canonical";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const GODOT_VERSION = /^4\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9]+)*$/;
 const TARGETS = new Set<TargetPlatform>(["windows", "linux", "macos"]);
+
+export interface RunnerToolchainRevisionPayload {
+  readonly schemaVersion: "deviludo.runner-toolchain.v1";
+  readonly requiredGodotVersion: string;
+  readonly godotTestKitDigest: string;
+  readonly exportTemplates: Readonly<Partial<Record<TargetPlatform, string>>>;
+  readonly buildManifestDigest: string;
+  readonly sbomDigest: string;
+  readonly vulnerabilityScanDigest: string;
+  readonly assetLicenseLedgerDigest: string;
+}
 
 export interface SourceExecutionPreparationRequest {
   readonly schemaVersion: "deviludo.source-execution-preparation.v1";
@@ -18,37 +30,54 @@ export interface SourceExecutionPreparationRequest {
   readonly specRevisionId: string;
   readonly specDigest: string;
   readonly testPlanDigest: string;
+  readonly runnerToolchainRevisionId: string;
+  readonly runnerToolchainDigest: string;
   readonly targetMatrix: readonly TargetPlatform[];
-  readonly toolchain: Readonly<{
-    requiredGodotVersion: string;
-    godotTestKitDigest: string;
-    exportTemplates: Readonly<Partial<Record<TargetPlatform, string>>>;
-    buildManifestDigest: string;
-    sbomDigest: string;
-    vulnerabilityScanDigest: string;
-    assetLicenseLedgerDigest: string;
-  }>;
+  readonly toolchain: Readonly<RunnerToolchainRevisionPayload>;
+}
+
+/** Minimal workflow-owned message. Every executable binding is re-resolved server-side. */
+export interface SourceExecutionPreparationTrigger {
+  readonly schemaVersion: "deviludo.source-execution-preparation-trigger.v1";
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly lockKey: string;
+  readonly mode: "CANDIDATE" | "MAIN_RELEASE_GATE";
+  readonly commitSha: string;
+  readonly targetMatrix: readonly TargetPlatform[];
+}
+
+export function parseSourceExecutionPreparationTrigger(value: unknown): SourceExecutionPreparationTrigger {
+  const body = record(value, "trigger");
+  exactKeys(body, [
+    "schemaVersion", "tenantId", "projectId", "runId", "lockKey", "mode", "commitSha", "targetMatrix",
+  ], "trigger");
+  if (body.schemaVersion !== "deviludo.source-execution-preparation-trigger.v1") invalid("trigger schema version");
+  return deepFreeze({
+    schemaVersion: "deviludo.source-execution-preparation-trigger.v1",
+    tenantId: required(body.tenantId, UUID, "tenant"),
+    projectId: required(body.projectId, UUID, "project"),
+    runId: required(body.runId, UUID, "run"),
+    lockKey: required(body.lockKey, SHA256, "lock key"),
+    mode: mode(body.mode),
+    commitSha: required(body.commitSha, SHA1, "commit"),
+    targetMatrix: matrix(body.targetMatrix),
+  });
 }
 
 export function parseSourceExecutionPreparationRequest(value: unknown): SourceExecutionPreparationRequest {
   const body = record(value, "request");
   exactKeys(body, [
     "schemaVersion", "tenantId", "projectId", "runId", "lockKey", "mode", "commitSha",
-    "sourceDigest", "specRevisionId", "specDigest", "testPlanDigest", "targetMatrix", "toolchain",
+    "sourceDigest", "specRevisionId", "specDigest", "testPlanDigest", "runnerToolchainRevisionId",
+    "runnerToolchainDigest", "targetMatrix", "toolchain",
   ], "request");
   if (body.schemaVersion !== "deviludo.source-execution-preparation.v1") invalid("schema version");
   const targetMatrix = matrix(body.targetMatrix);
-  const toolchain = record(body.toolchain, "toolchain");
-  exactKeys(toolchain, [
-    "requiredGodotVersion", "godotTestKitDigest", "exportTemplates", "buildManifestDigest",
-    "sbomDigest", "vulnerabilityScanDigest", "assetLicenseLedgerDigest",
-  ], "toolchain");
-  const exportTemplatesBody = record(toolchain.exportTemplates, "export templates");
-  const exportTemplates = Object.fromEntries(targetMatrix.map((platform) => [
-    platform,
-    required(exportTemplatesBody[platform], SHA256, `${platform} export template`),
-  ])) as Partial<Record<TargetPlatform, string>>;
-  if (Object.keys(exportTemplatesBody).length !== targetMatrix.length) invalid("export template matrix");
+  const toolchain = parseRunnerToolchainRevision(body.toolchain, targetMatrix);
+  const runnerToolchainDigest = required(body.runnerToolchainDigest, SHA256, "Runner toolchain digest");
+  if (sha256Canonical(toolchain) !== runnerToolchainDigest) invalid("Runner toolchain payload digest");
   return deepFreeze({
     schemaVersion: "deviludo.source-execution-preparation.v1",
     tenantId: required(body.tenantId, UUID, "tenant"),
@@ -61,16 +90,39 @@ export function parseSourceExecutionPreparationRequest(value: unknown): SourceEx
     specRevisionId: required(body.specRevisionId, UUID, "spec revision"),
     specDigest: required(body.specDigest, SHA256, "spec digest"),
     testPlanDigest: required(body.testPlanDigest, SHA256, "test plan digest"),
+    runnerToolchainRevisionId: required(body.runnerToolchainRevisionId, UUID, "Runner toolchain revision"),
+    runnerToolchainDigest,
     targetMatrix,
-    toolchain: {
-      requiredGodotVersion: required(toolchain.requiredGodotVersion, GODOT_VERSION, "Godot version"),
-      godotTestKitDigest: required(toolchain.godotTestKitDigest, SHA256, "TestKit digest"),
-      exportTemplates,
-      buildManifestDigest: required(toolchain.buildManifestDigest, SHA256, "build manifest"),
-      sbomDigest: required(toolchain.sbomDigest, SHA256, "SBOM"),
-      vulnerabilityScanDigest: required(toolchain.vulnerabilityScanDigest, SHA256, "vulnerability scan"),
-      assetLicenseLedgerDigest: required(toolchain.assetLicenseLedgerDigest, SHA256, "asset license ledger"),
-    },
+    toolchain,
+  });
+}
+
+export function parseRunnerToolchainRevision(
+  value: unknown,
+  expectedTargetMatrix: readonly TargetPlatform[],
+): Readonly<RunnerToolchainRevisionPayload> {
+  const targetMatrix = matrix(expectedTargetMatrix);
+  const toolchain = record(value, "toolchain");
+  exactKeys(toolchain, [
+    "schemaVersion", "requiredGodotVersion", "godotTestKitDigest", "exportTemplates", "buildManifestDigest",
+    "sbomDigest", "vulnerabilityScanDigest", "assetLicenseLedgerDigest",
+  ], "toolchain");
+  if (toolchain.schemaVersion !== "deviludo.runner-toolchain.v1") invalid("toolchain schema version");
+  const exportTemplatesBody = record(toolchain.exportTemplates, "export templates");
+  const exportTemplates = Object.fromEntries(targetMatrix.map((platform) => [
+    platform,
+    required(exportTemplatesBody[platform], SHA256, `${platform} export template`),
+  ])) as Partial<Record<TargetPlatform, string>>;
+  if (Object.keys(exportTemplatesBody).length !== targetMatrix.length) invalid("export template matrix");
+  return deepFreeze({
+    schemaVersion: "deviludo.runner-toolchain.v1",
+    requiredGodotVersion: required(toolchain.requiredGodotVersion, GODOT_VERSION, "Godot version"),
+    godotTestKitDigest: required(toolchain.godotTestKitDigest, SHA256, "TestKit digest"),
+    exportTemplates,
+    buildManifestDigest: required(toolchain.buildManifestDigest, SHA256, "build manifest"),
+    sbomDigest: required(toolchain.sbomDigest, SHA256, "SBOM"),
+    vulnerabilityScanDigest: required(toolchain.vulnerabilityScanDigest, SHA256, "vulnerability scan"),
+    assetLicenseLedgerDigest: required(toolchain.assetLicenseLedgerDigest, SHA256, "asset license ledger"),
   });
 }
 
