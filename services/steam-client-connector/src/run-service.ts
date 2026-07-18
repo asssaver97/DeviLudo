@@ -8,8 +8,7 @@ import { SteamClientConnectorService } from "./connector";
 import { createSteamClientConnectorHandler, createSteamClientConnectorHttpsServer } from "./ingress-http";
 import { MtlsSteamInstallGrantClient } from "./install-grant-client";
 import { LockedNativeSteamClientExecutor } from "./locked-native-executor";
-
-const SHA256 = /^[a-f0-9]{64}$/;
+import { verifySignedSteamNativeBridgeManifest } from "./native-bridge-manifest";
 
 export async function steamClientConnectorServiceFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -17,7 +16,8 @@ export async function steamClientConnectorServiceFromEnv(
 ) {
   const platform = targetPlatform(required(env, "DEVILUDO_STEAM_CONNECTOR_PLATFORM"));
   if (platform !== targetPlatform(runtimePlatform)) throw new Error("Steam Client Connector platform does not match this host");
-  const [jobKeyPem, tlsKey, tlsCertificate, tlsCa, grantKey, grantCertificate, grantCa, stagingRoot, workRoot] = await Promise.all([
+  const [jobKeyPem, tlsKey, tlsCertificate, tlsCa, grantKey, grantCertificate, grantCa,
+    nativeManifestBytes, nativeManifestKeyPem, stagingRoot, workRoot] = await Promise.all([
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_JOB_PUBLIC_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_CERT_FILE", 32, 1024 * 1024),
@@ -25,13 +25,25 @@ export async function steamClientConnectorServiceFromEnv(
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_TLS_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_TLS_CERT_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_CA_FILE", 32, 1024 * 1024),
+    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_MANIFEST_FILE", 32, 1024 * 1024),
+    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_MANIFEST_PUBLIC_KEY_FILE", 32, 1024 * 1024),
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_STAGING_ROOT"),
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_WORK_ROOT"),
   ]);
   const jobPublicKey = createPublicKey(jobKeyPem);
   const runnerId = safeId(env, "DEVILUDO_STEAM_CONNECTOR_RUNNER_ID");
   const connectorVersion = version(env, "DEVILUDO_STEAM_CONNECTOR_VERSION");
-  const nativeBridgeDigest = digest(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE_DIGEST");
+  const nativeManifestKey = createPublicKey(nativeManifestKeyPem);
+  let nativeManifest: unknown;
+  try { nativeManifest = JSON.parse(nativeManifestBytes.toString("utf8")) as unknown; }
+  catch { throw new Error("Steam native bridge manifest JSON is invalid"); }
+  const nativeBridge = verifySignedSteamNativeBridgeManifest(nativeManifest, {
+    keyId: safeId(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_MANIFEST_KEY_ID"),
+    publicKey: nativeManifestKey,
+    runnerId,
+    platform,
+    connectorVersion,
+  });
   const grants = new MtlsSteamInstallGrantClient({
     endpoint: required(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_URL"),
     tls: { key: grantKey, certificate: grantCertificate, ca: grantCa },
@@ -39,7 +51,7 @@ export async function steamClientConnectorServiceFromEnv(
   });
   const executor = new LockedNativeSteamClientExecutor({
     executable: requiredAbsolute(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_EXECUTABLE"),
-    executableDigest: nativeBridgeDigest,
+    executableDigest: nativeBridge.binaryDigest,
     workRoot,
     timeoutMs: seconds(env.DEVILUDO_STEAM_CONNECTOR_EXECUTION_TIMEOUT_SECONDS, 3_000, 30, 3_600) * 1_000,
   });
@@ -55,14 +67,23 @@ export async function steamClientConnectorServiceFromEnv(
   const handler = createSteamClientConnectorHandler({
     service,
     allowedSpiffeIds: spiffeIds(required(env, "DEVILUDO_STEAM_CONNECTOR_ALLOWED_SPIFFE_IDS")),
-    healthIdentity: { runnerId, platform, version: connectorVersion, binaryDigest: nativeBridgeDigest },
+    healthIdentity: {
+      runnerId,
+      platform,
+      version: connectorVersion,
+      bridgeVersion: nativeBridge.bridgeVersion,
+      controllerContractVersion: nativeBridge.controllerContractVersion,
+      binaryDigest: nativeBridge.binaryDigest,
+      automationPolicyDigest: nativeBridge.automationPolicyDigest,
+      supplyChainEvidenceDigest: nativeBridge.supplyChainEvidenceDigest,
+    },
   });
   const server = createSteamClientConnectorHttpsServer({
     tls: { key: tlsKey, cert: tlsCertificate, ca: tlsCa },
     handler,
     requestTimeoutMs: seconds(env.DEVILUDO_STEAM_CONNECTOR_REQUEST_TIMEOUT_SECONDS, 3_300, 30, 3_600) * 1_000,
   });
-  return Object.freeze({ service, grants, executor, server });
+  return Object.freeze({ service, grants, executor, nativeBridge, server });
 }
 
 export async function runSteamClientConnectorService(env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
@@ -113,12 +134,6 @@ function requiredAbsolute(env: Readonly<Record<string, string | undefined>>, nam
 function required(env: Readonly<Record<string, string | undefined>>, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
-  return value;
-}
-
-function digest(env: Readonly<Record<string, string | undefined>>, name: string): string {
-  const value = required(env, name);
-  if (!SHA256.test(value)) throw new Error(`${name} is invalid`);
   return value;
 }
 

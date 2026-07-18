@@ -130,14 +130,15 @@ async function readResponseIfPresent(path: string, root: string): Promise<SteamC
 
 function parseResponse(value: unknown): SteamClientNativeExecutionResult {
   const body = record(value);
-  exactKeys(body, ["schemaVersion", "installRoot", "harnessRoot", "harnessResultPath", "logsPath", "commands"]);
-  if (body.schemaVersion !== "deviludo.native-steam-clean-install-result.v1") invalid("response");
-  for (const key of ["installRoot", "harnessRoot", "harnessResultPath", "logsPath"] as const) {
+  exactKeys(body, ["schemaVersion", "installRoot", "appManifestPath", "harnessRoot", "harnessResultPath", "logsPath", "commands"]);
+  if (body.schemaVersion !== "deviludo.native-steam-clean-install-result.v2") invalid("response");
+  for (const key of ["installRoot", "appManifestPath", "harnessRoot", "harnessResultPath", "logsPath"] as const) {
     if (typeof body[key] !== "string" || !isAbsolute(body[key] as string) || resolve(body[key] as string) !== body[key]) invalid("response");
   }
   if (!Array.isArray(body.commands)) invalid("response");
   return Object.freeze({
     installRoot: body.installRoot as string,
+    appManifestPath: body.appManifestPath as string,
     harnessRoot: body.harnessRoot as string,
     harnessResultPath: body.harnessResultPath as string,
     logsPath: body.logsPath as string,

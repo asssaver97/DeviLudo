@@ -18,7 +18,11 @@ export const REQUIRED_TESTKIT_STEAM_ENV_NAMES = Object.freeze([
   "DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID",
   "DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM",
   "DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION",
+  "DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION",
+  "DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION",
   "DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST",
+  "DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST",
+  "DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST",
   "DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE",
   "DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE",
   "DEVILUDO_TESTKIT_STEAM_CA_FILE",
@@ -48,7 +52,11 @@ export interface SteamInstalledGameConnectorIdentity {
   readonly runnerId: string;
   readonly platform: "windows" | "linux" | "macos";
   readonly version: string;
+  readonly bridgeVersion: string;
+  readonly controllerContractVersion: 1;
   readonly binaryDigest: string;
+  readonly automationPolicyDigest: string;
+  readonly supplyChainEvidenceDigest: string;
 }
 
 export type SteamInstalledGameConnectorHttp = (input: {
@@ -109,6 +117,10 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
     const receipt = parseReceipt(response.payload, input.request.signedJob, jobDigest);
     const stagingRoot = await canonicalDirectory(this.#stagingRoot, this.#stagingRoot);
     const installRoot = await canonicalDirectory(receipt.installRoot, stagingRoot);
+    const appManifestPath = await canonicalFile(receipt.appManifestPath, stagingRoot, 2 * 1024 * 1024);
+    if (createHash("sha256").update(await readFile(appManifestPath)).digest("hex") !== receipt.appManifestDigest) {
+      throw new Error("Steam installed-game appmanifest digest is invalid");
+    }
     const harnessRoot = await canonicalDirectory(receipt.harnessRoot, stagingRoot);
     const harnessResultPath = await canonicalFile(receipt.harnessResultPath, harnessRoot, MAX_RESULT_BYTES);
     const logsPath = await canonicalFile(receipt.logsPath, harnessRoot, MAX_LOG_BYTES);
@@ -138,14 +150,21 @@ export class MtlsSteamInstalledGameDriver implements SteamInstalledGameDriver {
       body: "",
     });
     const body = record(response.payload);
-    exactKeys(body, ["schemaVersion", "status", "service", "runnerId", "platform", "version", "binaryDigest"]);
+    exactKeys(body, [
+      "schemaVersion", "status", "service", "runnerId", "platform", "version", "bridgeVersion",
+      "controllerContractVersion", "binaryDigest", "automationPolicyDigest", "supplyChainEvidenceDigest",
+    ]);
     if (response.statusCode !== 200
-      || body.schemaVersion !== "deviludo.steam-client-connector-health.v1"
+      || body.schemaVersion !== "deviludo.steam-client-connector-health.v2"
       || body.status !== "ok" || body.service !== "deviludo-steam-client-connector"
       || body.runnerId !== this.#expectedConnector.runnerId
       || body.platform !== this.#expectedConnector.platform
       || body.version !== this.#expectedConnector.version
-      || body.binaryDigest !== this.#expectedConnector.binaryDigest) {
+      || body.bridgeVersion !== this.#expectedConnector.bridgeVersion
+      || body.controllerContractVersion !== this.#expectedConnector.controllerContractVersion
+      || body.binaryDigest !== this.#expectedConnector.binaryDigest
+      || body.automationPolicyDigest !== this.#expectedConnector.automationPolicyDigest
+      || body.supplyChainEvidenceDigest !== this.#expectedConnector.supplyChainEvidenceDigest) {
       throw new Error("Steam installed-game Connector is not ready");
     }
   }
@@ -169,7 +188,11 @@ export async function steamInstalledGameDriverFromEnv(
       runnerId: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID!,
       platform: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM! as SteamInstalledGameConnectorIdentity["platform"],
       version: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION!,
+      bridgeVersion: controlled.DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION!,
+      controllerContractVersion: Number(controlled.DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION) as 1,
       binaryDigest: controlled.DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST!,
+      automationPolicyDigest: controlled.DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST!,
+      supplyChainEvidenceDigest: controlled.DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST!,
     },
     timeoutMs: seconds(controlled.DEVILUDO_TESTKIT_STEAM_TIMEOUT_SECONDS, 3_000, 30, 3_600) * 1_000,
   });
@@ -184,7 +207,11 @@ export function testKitSteamProcessEnvironmentFromEnv(
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: runnerId(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID")),
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: platform(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM")),
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: fixedVersion(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION")),
+    DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION: fixedVersion(required(env, "DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION")),
+    DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION: contractVersion(required(env, "DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION")),
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: requiredDigest(required(env, "DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST")),
+    DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST: requiredDigest(required(env, "DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST")),
+    DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST: requiredDigest(required(env, "DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST")),
     DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE: absolutePath(required(env, "DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE"), "Steam TLS key"),
     DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: absolutePath(required(env, "DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE"), "Steam TLS certificate"),
     DEVILUDO_TESTKIT_STEAM_CA_FILE: absolutePath(required(env, "DEVILUDO_TESTKIT_STEAM_CA_FILE"), "Steam CA"),
@@ -248,6 +275,8 @@ export function steamInstalledGameConnectorHttpsJson(input: {
 type Receipt = Readonly<{
   receiptDigest: string;
   installRoot: string;
+  appManifestPath: string;
+  appManifestDigest: string;
   harnessRoot: string;
   harnessResultPath: string;
   logsPath: string;
@@ -258,10 +287,11 @@ function parseReceipt(value: unknown, job: SignedRunnerJob, jobDigest: string): 
   const body = record(value);
   exactKeys(body, [
     "schemaVersion", "receiptDigest", "jobDigest", "executionLockDigest", "platform", "steamAppId", "buildId",
-    "betaBranch", "installGrantId", "cleanClient", "installRoot", "harnessRoot", "harnessResultPath", "logsPath", "commands",
+    "betaBranch", "installGrantId", "cleanClient", "installRoot", "appManifestPath", "appManifestDigest",
+    "harnessRoot", "harnessResultPath", "logsPath", "commands",
   ]);
   const execution = job.payload.execution;
-  if (execution.kind !== "STEAM_CLEAN_INSTALL" || body.schemaVersion !== "deviludo.steam-clean-install-execution-receipt.v1"
+  if (execution.kind !== "STEAM_CLEAN_INSTALL" || body.schemaVersion !== "deviludo.steam-clean-install-execution-receipt.v2"
     || body.jobDigest !== jobDigest || body.executionLockDigest !== job.payload.executionLockDigest
     || body.platform !== job.payload.platform || body.steamAppId !== execution.steamAppId
     || body.buildId !== execution.buildId || body.betaBranch !== execution.betaBranch
@@ -274,6 +304,8 @@ function parseReceipt(value: unknown, job: SignedRunnerJob, jobDigest: string): 
   return Object.freeze({
     receiptDigest: body.receiptDigest,
     installRoot: absoluteReceiptPath(body.installRoot),
+    appManifestPath: absoluteReceiptPath(body.appManifestPath),
+    appManifestDigest: requiredDigest(String(body.appManifestDigest)),
     harnessRoot: absoluteReceiptPath(body.harnessRoot),
     harnessResultPath: absoluteReceiptPath(body.harnessResultPath),
     logsPath: absoluteReceiptPath(body.logsPath),
@@ -344,12 +376,17 @@ function validateTls(value: SteamInstalledGameConnectorTls): void {
 
 function connectorIdentity(value: SteamInstalledGameConnectorIdentity): SteamInstalledGameConnectorIdentity {
   const body = record(value);
-  exactKeys(body, ["runnerId", "platform", "version", "binaryDigest"]);
+  exactKeys(body, ["runnerId", "platform", "version", "bridgeVersion", "controllerContractVersion",
+    "binaryDigest", "automationPolicyDigest", "supplyChainEvidenceDigest"]);
   return Object.freeze({
     runnerId: runnerId(value.runnerId),
     platform: platform(value.platform),
     version: fixedVersion(value.version),
+    bridgeVersion: fixedVersion(value.bridgeVersion),
+    controllerContractVersion: Number(contractVersion(String(value.controllerContractVersion))) as 1,
     binaryDigest: requiredDigest(value.binaryDigest),
+    automationPolicyDigest: requiredDigest(value.automationPolicyDigest),
+    supplyChainEvidenceDigest: requiredDigest(value.supplyChainEvidenceDigest),
   });
 }
 
@@ -366,6 +403,11 @@ function platform(value: string): SteamInstalledGameConnectorIdentity["platform"
 function fixedVersion(value: string): string {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value)
     || /(?:latest|stable|default)/i.test(value)) throw new Error("Steam Connector version is invalid");
+  return value;
+}
+
+function contractVersion(value: string): string {
+  if (value !== "1") throw new Error("Steam Connector controller contract version is invalid");
   return value;
 }
 

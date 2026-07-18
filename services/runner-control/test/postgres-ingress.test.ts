@@ -317,7 +317,10 @@ test("PostgreSQL Runner ingress signs a BuildID-bound Steam clean-install job wi
   assert.equal(await store(client).leaseNext(identity(), capabilities().runnerId, tenantId, at), null);
   assert.equal(client.leaseInserts, 0);
   client.runner = capabilities({
-    steamClientConnector: { version: "1.0.0", binaryDigest: sha("0") },
+    steamClientConnector: {
+      version: "1.0.0", bridgeVersion: "1.0.3", controllerContractVersion: 1,
+      binaryDigest: sha("0"), automationPolicyDigest: sha("7"), supplyChainEvidenceDigest: sha("8"),
+    },
   });
   const job = await store(client).leaseNext(identity(), capabilities().runnerId, tenantId, at);
   assert.ok(job);

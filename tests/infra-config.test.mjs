@@ -146,6 +146,7 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   assert.match(daemon, /config\.capabilities\.platform !== expectedPlatform/);
   assert.match(daemon, /service\.steamConnector\?\.probe\(\)/);
   assert.match(daemon, /STEAM_CONNECTOR_BINARY_DIGEST/);
+  assert.match(daemon, /STEAM_AUTOMATION_POLICY_DIGEST/);
 });
 
 test("Godot TestKit is a fixed signed-job CLI and part of the full service gate", () => {
@@ -179,6 +180,9 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   const connector = readFileSync(new URL("../services/steam-client-connector/src/connector.ts", import.meta.url), "utf8");
   const ingress = readFileSync(new URL("../services/steam-client-connector/src/ingress-http.ts", import.meta.url), "utf8");
   const native = readFileSync(new URL("../services/steam-client-connector/src/locked-native-executor.ts", import.meta.url), "utf8");
+  const nativeController = readFileSync(new URL("../services/steam-client-connector/src/native-bridge-controller.ts", import.meta.url), "utf8");
+  const manifest = readFileSync(new URL("../services/steam-client-connector/src/native-bridge-manifest.ts", import.meta.url), "utf8");
+  const appManifest = readFileSync(new URL("../services/steam-client-connector/src/steam-appmanifest.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/steam-client-connector/src/run-service.ts", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/steam-client-connector/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:steam-client-connector/);
@@ -191,16 +195,30 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   assert.match(ingress, /rejectUnauthorized: true/);
   assert.match(ingress, /minVersion: "TLSv1\.3"/);
   assert.match(ingress, /allowedSpiffeIds\.has/);
-  assert.match(ingress, /deviludo\.steam-client-connector-health\.v1/);
+  assert.match(ingress, /deviludo\.steam-client-connector-health\.v2/);
   assert.match(ingress, /\.\.\.options\.healthIdentity/);
   assert.match(connector, /options\.grants\.redeem/);
   assert.ok(connector.indexOf("options.grants.redeem") < connector.indexOf("options.executor.execute"));
   assert.match(native, /shell: false/);
   assert.match(native, /"execute", "--request-file"/);
   assert.match(native, /verifyExecutable/);
+  assert.match(manifest, /verifyCanonical/);
+  assert.match(manifest, /automationPolicyDigest/);
+  assert.match(manifest, /supplyChainEvidenceDigest/);
+  assert.match(nativeController, /resetClient/);
+  assert.match(nativeController, /installBuild/);
+  assert.match(nativeController, /bootProduction/);
+  assert.match(nativeController, /runPlatformSuite/);
+  assert.match(nativeController, /verifyRunnerJob/);
+  assert.match(nativeController, /verifySteamAppManifest/);
+  assert.match(appManifest, /StateFlags/);
+  assert.match(appManifest, /buildId !== expected\.buildId/);
+  assert.match(connector, /appManifest\.manifestDigest/);
   assert.doesNotMatch(native, /process\.env/);
   assert.match(runtime, /platform does not match this host/);
-  assert.match(runtime, /healthIdentity: \{ runnerId, platform, version: connectorVersion, binaryDigest: nativeBridgeDigest \}/);
+  assert.match(runtime, /automationPolicyDigest: nativeBridge\.automationPolicyDigest/);
+  assert.match(runtime, /supplyChainEvidenceDigest: nativeBridge\.supplyChainEvidenceDigest/);
+  assert.doesNotMatch(runtime, /NATIVE_EXECUTABLE_DIGEST/);
   assert.doesNotMatch(connector, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.match(readme, /does not ship\s+Valve credentials/);
 });

@@ -14,9 +14,12 @@ import {
 
 const sha = (character: string) => character.repeat(64);
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
-const connectorIdentity = Object.freeze({ runnerId: "runner-linux-1", platform: "linux" as const, version: "1.0.0", binaryDigest: sha("9") });
+const connectorIdentity = Object.freeze({
+  runnerId: "runner-linux-1", platform: "linux" as const, version: "1.0.0", bridgeVersion: "1.0.3",
+  controllerContractVersion: 1 as const, binaryDigest: sha("9"), automationPolicyDigest: sha("7"), supplyChainEvidenceDigest: sha("8"),
+});
 const connectorHealth = Object.freeze({
-  schemaVersion: "deviludo.steam-client-connector-health.v1",
+  schemaVersion: "deviludo.steam-client-connector-health.v2",
   status: "ok",
   service: "deviludo-steam-client-connector",
   ...connectorIdentity,
@@ -109,7 +112,11 @@ test("Steam installed-game child environment is complete, pinned and secret-free
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: "runner-linux-1",
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: "linux",
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: "1.0.0",
+    DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION: "1.0.3",
+    DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION: "1",
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: sha("9"),
+    DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST: sha("7"),
+    DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST: sha("8"),
     DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE: "/run/secrets/steam/client.key",
     DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: "/run/secrets/steam/client.crt",
     DEVILUDO_TESTKIT_STEAM_CA_FILE: "/run/secrets/steam/ca.crt",
@@ -119,6 +126,7 @@ test("Steam installed-game child environment is complete, pinned and secret-free
   });
   assert.equal(env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL, "https://steam-install.internal:4843");
   assert.equal(env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST, sha("9"));
+  assert.equal(env.DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST, sha("7"));
   assert.equal(env.DEVILUDO_TESTKIT_STEAM_TIMEOUT_SECONDS, "3000");
   assert.equal(env.STEAM_PASSWORD, undefined);
   assert.throws(() => testKitSteamProcessEnvironmentFromEnv({
@@ -127,10 +135,12 @@ test("Steam installed-game child environment is complete, pinned and secret-free
 });
 
 async function installedFixture(root: string) {
-  const installRoot = join(root, "install");
+  const steamAppsRoot = join(root, "steamapps");
+  const installRoot = join(steamAppsRoot, "common", "DeviLudo");
+  const appManifestPath = join(steamAppsRoot, "appmanifest_2841930.acf");
   const harnessRoot = join(root, "harness");
   const screenshotsRoot = join(harnessRoot, "screenshots");
-  await Promise.all([mkdir(installRoot), mkdir(screenshotsRoot, { recursive: true })]);
+  await Promise.all([mkdir(installRoot, { recursive: true }), mkdir(screenshotsRoot, { recursive: true })]);
   const plan = testPlan();
   const request = runRequest(steamJob());
   const start = Buffer.from("png-start");
@@ -140,6 +150,7 @@ async function installedFixture(root: string) {
   const logsPath = join(harnessRoot, "connector.log");
   await Promise.all([
     writeFile(join(installRoot, "DeviLudo.x86_64"), "installed-build-91234567"),
+    writeFile(appManifestPath, "\"AppState\"\n{\n\t\"appid\" \"2841930\"\n\t\"StateFlags\" \"4\"\n\t\"installdir\" \"DeviLudo\"\n\t\"buildid\" \"91234567\"\n}\n"),
     writeFile(join(screenshotsRoot, "start.png"), start),
     writeFile(join(screenshotsRoot, "win.png"), win),
     writeFile(join(harnessRoot, "video.avi"), "installed-game-video"),
@@ -150,7 +161,7 @@ async function installedFixture(root: string) {
     id, status: "PASSED", durationMs: 10, code: "OK",
   }));
   const core = {
-    schemaVersion: "deviludo.steam-clean-install-execution-receipt.v1",
+    schemaVersion: "deviludo.steam-clean-install-execution-receipt.v2",
     jobDigest: request.jobDigest,
     executionLockDigest: request.signedJob.payload.executionLockDigest,
     platform: "linux",
@@ -160,6 +171,8 @@ async function installedFixture(root: string) {
     installGrantId: "install-grant-9",
     cleanClient: true,
     installRoot,
+    appManifestPath,
+    appManifestDigest: createHash("sha256").update("\"AppState\"\n{\n\t\"appid\" \"2841930\"\n\t\"StateFlags\" \"4\"\n\t\"installdir\" \"DeviLudo\"\n\t\"buildid\" \"91234567\"\n}\n").digest("hex"),
     harnessRoot,
     harnessResultPath,
     logsPath,

@@ -110,6 +110,7 @@ test("locked TestKit executor verifies binaries, fixed argv and reuses one conte
       assert.equal(options.env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_URL, "https://steam-install.internal");
       assert.equal(options.env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID, "runner-linux-1");
       assert.equal(options.env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST, "9".repeat(64));
+      assert.equal(options.env.DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST, "7".repeat(64));
       assert.equal(options.env.STEAM_PASSWORD, undefined);
       const request = JSON.parse(await readFile(args[2]!, "utf8")) as {
         schemaVersion: string;
@@ -189,7 +190,11 @@ function artifactEnvironment(): Readonly<Record<string, string>> {
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: "runner-linux-1",
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: "linux",
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: "1.0.0",
+    DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION: "1.0.3",
+    DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION: "1",
     DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: "9".repeat(64),
+    DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST: "7".repeat(64),
+    DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST: "8".repeat(64),
     DEVILUDO_TESTKIT_STEAM_TLS_KEY_FILE: "/run/secrets/testkit-steam/tls.key",
     DEVILUDO_TESTKIT_STEAM_TLS_CERT_FILE: "/run/secrets/testkit-steam/tls.crt",
     DEVILUDO_TESTKIT_STEAM_CA_FILE: "/run/secrets/testkit-steam/ca.crt",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -21,6 +21,15 @@ import {
   type SteamInstallGrantRedemptionReceipt,
 } from "../src/install-grant-client";
 import { LockedNativeSteamClientExecutor } from "../src/locked-native-executor";
+import {
+  NativeSteamBridgeController,
+  type NativeSteamDesktopAutomationPort,
+} from "../src/native-bridge-controller";
+import {
+  verifySignedSteamNativeBridgeManifest,
+  type SteamNativeBridgeClaims,
+} from "../src/native-bridge-manifest";
+import { verifySteamAppManifest } from "../src/steam-appmanifest";
 
 const keys = generateKeyPairSync("ed25519");
 const sha = (character: string) => character.repeat(64);
@@ -30,7 +39,10 @@ const identity = {
   spiffeId: "spiffe://deviludo.test/testkit/runner-linux-1",
   certificateFingerprint: sha("f"), certificateSerial: "01", certificateNotAfter: "2031-01-01T00:00:00.000Z",
 };
-const healthIdentity = Object.freeze({ runnerId: "runner-linux-1", platform: "linux" as const, version: "1.0.0", binaryDigest: sha("9") });
+const healthIdentity = Object.freeze({
+  runnerId: "runner-linux-1", platform: "linux" as const, version: "1.0.0", bridgeVersion: "1.0.3",
+  controllerContractVersion: 1 as const, binaryDigest: sha("9"), automationPolicyDigest: sha("7"), supplyChainEvidenceDigest: sha("8"),
+});
 
 test("Connector verifies one signed BuildID, validates native evidence and replays idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-steam-connector-"));
@@ -48,6 +60,35 @@ test("Connector verifies one signed BuildID, validates native evidence and repla
     assert.equal(first.receiptDigest, sha256Canonical(core));
     assert.doesNotMatch(JSON.stringify(first), /config\.vdf|steam.?guard|password/i);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Connector proves the installed appmanifest BuildID and install directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-steam-appmanifest-"));
+  try {
+    const fixture = await createFixture(root);
+    const verified = verifySteamAppManifest(Buffer.from(steamAppManifest()), { appId: "2841930", buildId: "91234567" });
+    assert.deepEqual({
+      appId: verified.appId,
+      buildId: verified.buildId,
+      stateFlags: verified.stateFlags,
+      installDirectoryName: verified.installDirectoryName,
+    }, { appId: "2841930", buildId: "91234567", stateFlags: 4, installDirectoryName: "DeviLudo" });
+    const receipt = await connector(root, fixture.executor).execute(fixture.request);
+    assert.equal(receipt.appManifestDigest, digest(steamAppManifest()));
+
+    await writeFile(fixture.result.appManifestPath, steamAppManifest("91234568"));
+    await assert.rejects(connector(root, fixture.executor).execute(fixture.request), /appmanifest/);
+    await writeFile(fixture.result.appManifestPath, steamAppManifest("91234567", "OtherInstall"));
+    await assert.rejects(connector(root, fixture.executor).execute(fixture.request), /native directory|appmanifest/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("appmanifest parser rejects shadow keys, incomplete state and unsafe install paths", () => {
+  const verify = (value: string) => verifySteamAppManifest(Buffer.from(value), { appId: "2841930", buildId: "91234567" });
+  assert.throws(() => verify(steamAppManifest().replace("\t\"buildid\"", "\t\"BUILDID\" \"91234567\"\n\t\"buildid\"")), /appmanifest/);
+  assert.throws(() => verify(steamAppManifest().replace("\"4\"", "\"2\"")), /appmanifest/);
+  assert.throws(() => verify(steamAppManifest("91234567", "../escaped")), /appmanifest/);
+  assert.throws(() => verify(`${steamAppManifest()}\"Injected\" {}`), /appmanifest/);
 });
 
 test("Connector redeems the exact grant before native execution and fails closed on grant drift", async () => {
@@ -192,7 +233,7 @@ test("mTLS handler admits one TestKit identity and fails closed on route, conten
   const health = await handler({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" });
   assert.equal(health.status, 200);
   assert.deepEqual(health.body, {
-    schemaVersion: "deviludo.steam-client-connector-health.v1",
+    schemaVersion: "deviludo.steam-client-connector-health.v2",
     status: "ok", service: "deviludo-steam-client-connector", ...healthIdentity,
   });
   const accepted = await handler({ method: "POST", path: "/v1/clean-install-executions", headers: { "content-type": "application/json" }, socket: {}, rawBody: "{}" });
@@ -255,7 +296,7 @@ test("locked native adapter pins binary, argv, child environment and durable res
         const responsePath = args[4]!;
         const stored = JSON.parse(await readFile(requestPath, "utf8")) as { executionId: string };
         assert.equal(stored.executionId, fixture.request.jobDigest);
-        await writeFile(responsePath, JSON.stringify({ schemaVersion: "deviludo.native-steam-clean-install-result.v1", ...fixture.result }));
+        await writeFile(responsePath, JSON.stringify({ schemaVersion: "deviludo.native-steam-clean-install-result.v2", ...fixture.result }));
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     });
@@ -275,6 +316,133 @@ test("locked native adapter pins binary, argv, child environment and durable res
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("native bridge controller fixes desktop stage order and independently verifies the signed build", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-native-steam-controller-"));
+  try {
+    const fixture = await createFixture(root);
+    const calls: string[] = [];
+    const automation: NativeSteamDesktopAutomationPort = {
+      async probe(input) {
+        calls.push("probe");
+        return {
+          schemaVersion: "deviludo.native-steam-desktop-probe.v1", status: "READY",
+          ...input, interactiveSession: true, steamSession: "ENROLLED",
+        };
+      },
+      async resetClient() {
+        calls.push("reset");
+        return { id: "steam-client-reset", status: "PASSED", durationMs: 11, code: "CLIENT_RESET" };
+      },
+      async installBuild(input) {
+        calls.push(`install:${input.buildId}`);
+        return {
+          id: "steam-install", status: "PASSED", durationMs: 12, code: "BUILD_INSTALLED",
+          installRoot: fixture.result.installRoot, appManifestPath: fixture.result.appManifestPath,
+        };
+      },
+      async bootProduction() {
+        calls.push("boot");
+        return { id: "production-boot", status: "PASSED", durationMs: 13, code: "BOOT_OK" };
+      },
+      async runPlatformSuite(input) {
+        calls.push(`suite:${input.testPlan.scenarios.length}`);
+        return {
+          id: "platform-suite", status: "PASSED", durationMs: 14, code: "SUITE_OK",
+          harnessRoot: fixture.result.harnessRoot,
+          harnessResultPath: fixture.result.harnessResultPath,
+          logsPath: fixture.result.logsPath,
+        };
+      },
+    };
+    const controller = new NativeSteamBridgeController({
+      jobPublicKey: keys.publicKey, jobKeyId: "runner-job-key-01", runnerId: "runner-linux-1",
+      platform: "linux", stagingRoot: root, automation, now: () => new Date(now),
+    });
+    assert.deepEqual(await controller.probe(), { schemaVersion: "deviludo.native-steam-client-probe.v1", status: "READY" });
+    const result = await controller.execute({
+      schemaVersion: "deviludo.native-steam-clean-install.v1",
+      executionId: fixture.request.jobDigest,
+      stagingRoot: root,
+      signedJob: fixture.request.signedJob,
+      testPlan: fixture.request.testPlan,
+    });
+    assert.deepEqual({
+      installRoot: result.installRoot,
+      appManifestPath: result.appManifestPath,
+      harnessRoot: result.harnessRoot,
+      harnessResultPath: result.harnessResultPath,
+      logsPath: result.logsPath,
+      commandIds: result.commands.map((command) => command.id),
+    }, {
+      installRoot: await realpath(fixture.result.installRoot),
+      appManifestPath: await realpath(fixture.result.appManifestPath),
+      harnessRoot: await realpath(fixture.result.harnessRoot),
+      harnessResultPath: await realpath(fixture.result.harnessResultPath),
+      logsPath: await realpath(fixture.result.logsPath),
+      commandIds: ["steam-client-reset", "steam-install", "production-boot", "platform-suite"],
+    });
+    assert.deepEqual(calls, ["probe", "reset", "install:91234567", "boot", "suite:5"]);
+
+    await writeFile(fixture.result.appManifestPath, steamAppManifest("91234568"));
+    await assert.rejects(controller.execute({
+      schemaVersion: "deviludo.native-steam-clean-install.v1",
+      executionId: fixture.request.jobDigest,
+      stagingRoot: root,
+      signedJob: fixture.request.signedJob,
+      testPlan: fixture.request.testPlan,
+    }), /appmanifest/);
+    assert.equal(calls.at(-1), "install:91234567");
+    const callCount = calls.length;
+    await assert.rejects(controller.execute({
+      schemaVersion: "deviludo.native-steam-clean-install.v1",
+      executionId: fixture.request.jobDigest,
+      stagingRoot: root,
+      signedJob: { payload: {}, signature: fixture.request.signedJob.signature },
+      testPlan: fixture.request.testPlan,
+    }), /Native Steam bridge/);
+    assert.equal(calls.length, callCount);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("signed native bridge manifest binds one immutable platform artifact and supply-chain evidence", () => {
+  const claims = nativeBridgeClaims();
+  const manifest = {
+    keyId: "steam-native-release-key-01",
+    claims,
+    signature: signCanonical(keys.privateKey, claims),
+  };
+  const verified = verifySignedSteamNativeBridgeManifest(manifest, {
+    keyId: manifest.keyId,
+    publicKey: keys.publicKey,
+    runnerId: claims.runnerId,
+    platform: claims.platform,
+    connectorVersion: claims.connectorVersion,
+    now: new Date("2030-01-02T00:00:00.000Z"),
+  });
+  assert.deepEqual(verified, claims);
+  assert.equal(Object.isFrozen(verified), true);
+});
+
+test("native bridge manifest rejects signature, platform, policy, contract and evidence drift", () => {
+  const claims = nativeBridgeClaims();
+  const verify = (changed: SteamNativeBridgeClaims, signature = signCanonical(keys.privateKey, changed)) =>
+    verifySignedSteamNativeBridgeManifest({ keyId: "steam-native-release-key-01", claims: changed, signature }, {
+      keyId: "steam-native-release-key-01",
+      publicKey: keys.publicKey,
+      runnerId: claims.runnerId,
+      platform: claims.platform,
+      connectorVersion: claims.connectorVersion,
+      now: new Date("2030-01-02T00:00:00.000Z"),
+    });
+  assert.throws(() => verify(claims, "bad"), /manifest is invalid/);
+  assert.throws(() => verify({ ...claims, platform: "windows" }), /manifest is invalid/);
+  assert.throws(() => verify({ ...claims, bridgeVersion: "latest" }), /manifest is invalid/);
+  assert.throws(() => verify({ ...claims, controllerContractVersion: 2 as never }), /manifest is invalid/);
+  assert.throws(() => verify({ ...claims, automationPolicyDigest: "not-a-digest" }), /manifest is invalid/);
+  assert.throws(() => verify({ ...claims, supplyChainEvidenceDigest: "not-a-digest" }), /manifest is invalid/);
+  assert.throws(() => verify({ ...claims, builtAt: "2031-01-01T00:00:00.000Z" }), /manifest is invalid/);
+});
+
 function connector(
   root: string,
   executor: SteamClientNativeExecutor,
@@ -289,6 +457,23 @@ function connector(
     executor,
     grants,
     now: () => new Date(now),
+  });
+}
+
+function nativeBridgeClaims(): SteamNativeBridgeClaims {
+  return Object.freeze({
+    kind: "deviludo-steam-native-bridge",
+    version: 1,
+    revision: 7,
+    runnerId: "runner-linux-1",
+    platform: "linux",
+    connectorVersion: "1.0.0",
+    bridgeVersion: "1.0.3",
+    controllerContractVersion: 1,
+    binaryDigest: sha("9"),
+    automationPolicyDigest: sha("7"),
+    supplyChainEvidenceDigest: sha("8"),
+    builtAt: "2030-01-01T00:00:00.000Z",
   });
 }
 
@@ -316,9 +501,11 @@ function grantReceipt(signedJob: SignedRunnerJob, jobDigest: string): SteamInsta
 }
 
 async function createFixture(root: string) {
-  const installRoot = join(root, "install");
+  const steamAppsRoot = join(root, "steamapps");
+  const installRoot = join(steamAppsRoot, "common", "DeviLudo");
+  const appManifestPath = join(steamAppsRoot, "appmanifest_2841930.acf");
   const harnessRoot = join(root, "harness");
-  await Promise.all([mkdir(installRoot), mkdir(join(harnessRoot, "screenshots"), { recursive: true })]);
+  await Promise.all([mkdir(installRoot, { recursive: true }), mkdir(join(harnessRoot, "screenshots"), { recursive: true })]);
   const plan = testPlan();
   const payload = jobPayload(digest(Buffer.from(canonicalJson(plan))));
   const signedJob = signed(payload);
@@ -329,6 +516,7 @@ async function createFixture(root: string) {
   const logsPath = join(harnessRoot, "connector.log");
   await Promise.all([
     writeFile(join(installRoot, "DeviLudo.x86_64"), "build-91234567"),
+    writeFile(appManifestPath, steamAppManifest()),
     writeFile(join(harnessRoot, "screenshots", "start.png"), start),
     writeFile(join(harnessRoot, "screenshots", "win.png"), win),
     writeFile(join(harnessRoot, "video.avi"), "video"),
@@ -338,7 +526,7 @@ async function createFixture(root: string) {
   const commands = ["steam-client-reset", "steam-install", "production-boot", "platform-suite"].map((id) => ({
     id, status: "PASSED", durationMs: 10, code: "OK",
   })) as GodotCommandEvidence[];
-  const result: SteamClientNativeExecutionResult = { installRoot, harnessRoot, harnessResultPath, logsPath, commands };
+  const result: SteamClientNativeExecutionResult = { installRoot, appManifestPath, harnessRoot, harnessResultPath, logsPath, commands };
   const calls = { count: 0 };
   const executor: SteamClientNativeExecutor = {
     async probe() {},
@@ -353,6 +541,10 @@ async function createFixture(root: string) {
     result, executor, calls,
     request: { schemaVersion: "deviludo.steam-clean-install-execution.v1", jobDigest: sha256Canonical(payload), signedJob, testPlan: plan },
   };
+}
+
+function steamAppManifest(buildId = "91234567", installDirectoryName = "DeviLudo"): string {
+  return `"AppState"\n{\n\t"appid"\t\t"2841930"\n\t"StateFlags"\t\t"4"\n\t"installdir"\t\t"${installDirectoryName}"\n\t"buildid"\t\t"${buildId}"\n}\n`;
 }
 
 function jobPayload(testPlanDigest: string): RunnerJobPayload {

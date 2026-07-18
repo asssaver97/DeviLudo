@@ -130,9 +130,17 @@ export async function physicalRunnerServiceFromEnv(
   let steamEnvironment: Readonly<Record<string, string>> = {};
   if (config.capabilities.steamClientConnector !== null) {
     const expectedVersion = requiredEnv(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION");
+    const expectedBridgeVersion = requiredEnv(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_BRIDGE_VERSION");
+    const expectedContractVersion = requiredEnv(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONTROLLER_CONTRACT_VERSION");
     const expectedDigest = requiredDigest(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST");
+    const expectedPolicyDigest = requiredDigest(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_AUTOMATION_POLICY_DIGEST");
+    const expectedSupplyChainDigest = requiredDigest(env, "DEVILUDO_PHYSICAL_RUNNER_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST");
     if (expectedVersion !== config.capabilities.steamClientConnector.version
-      || expectedDigest !== config.capabilities.steamClientConnector.binaryDigest) {
+      || expectedBridgeVersion !== config.capabilities.steamClientConnector.bridgeVersion
+      || expectedContractVersion !== String(config.capabilities.steamClientConnector.controllerContractVersion)
+      || expectedDigest !== config.capabilities.steamClientConnector.binaryDigest
+      || expectedPolicyDigest !== config.capabilities.steamClientConnector.automationPolicyDigest
+      || expectedSupplyChainDigest !== config.capabilities.steamClientConnector.supplyChainEvidenceDigest) {
       throw new Error("Physical Runner Steam Connector capability does not match its machine lock");
     }
     const lockedSteamEnv = {
@@ -140,13 +148,19 @@ export async function physicalRunnerServiceFromEnv(
       DEVILUDO_TESTKIT_STEAM_CONNECTOR_RUNNER_ID: config.capabilities.runnerId,
       DEVILUDO_TESTKIT_STEAM_CONNECTOR_PLATFORM: config.capabilities.platform,
       DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION: expectedVersion,
+      DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION: expectedBridgeVersion,
+      DEVILUDO_TESTKIT_STEAM_CONTROLLER_CONTRACT_VERSION: expectedContractVersion,
       DEVILUDO_TESTKIT_STEAM_CONNECTOR_BINARY_DIGEST: expectedDigest,
+      DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST: expectedPolicyDigest,
+      DEVILUDO_TESTKIT_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST: expectedSupplyChainDigest,
     };
     steamEnvironment = testKitSteamProcessEnvironmentFromEnv(lockedSteamEnv);
     steamConnector = await steamInstalledGameDriverFromEnv(lockedSteamEnv);
   } else {
     for (const name of [...REQUIRED_TESTKIT_STEAM_ENV_NAMES, ...OPTIONAL_TESTKIT_STEAM_ENV_NAMES,
-      "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION", "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST"]) {
+      "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION", "DEVILUDO_PHYSICAL_RUNNER_STEAM_BRIDGE_VERSION",
+      "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONTROLLER_CONTRACT_VERSION", "DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST",
+      "DEVILUDO_PHYSICAL_RUNNER_STEAM_AUTOMATION_POLICY_DIGEST", "DEVILUDO_PHYSICAL_RUNNER_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST"]) {
       if (env[name] !== undefined) throw new Error("Physical Runner Steam Connector configuration is not declared by its machine lock");
     }
   }

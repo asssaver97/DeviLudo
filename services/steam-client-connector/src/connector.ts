@@ -1,7 +1,7 @@
 import type { KeyObject } from "node:crypto";
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { TargetPlatform } from "../../../lib/domain/types";
 import { canonicalJson, sha256Canonical } from "../../runner-control/src/canonical";
 import type { SignedRunnerJob } from "../../runner-control/src/contracts";
@@ -16,6 +16,7 @@ import type {
   SteamInstallGrantRedemptionPort,
   SteamInstallGrantRedemptionReceipt,
 } from "./install-grant-client";
+import { verifySteamAppManifest } from "./steam-appmanifest";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
@@ -40,6 +41,7 @@ export interface SteamClientNativeExecutor {
  */
 export interface SteamClientNativeExecutionResult {
   readonly installRoot: string;
+  readonly appManifestPath: string;
   readonly harnessRoot: string;
   readonly harnessResultPath: string;
   readonly logsPath: string;
@@ -47,7 +49,7 @@ export interface SteamClientNativeExecutionResult {
 }
 
 export interface SteamCleanInstallExecutionReceipt {
-  readonly schemaVersion: "deviludo.steam-clean-install-execution-receipt.v1";
+  readonly schemaVersion: "deviludo.steam-clean-install-execution-receipt.v2";
   readonly receiptDigest: string;
   readonly jobDigest: string;
   readonly executionLockDigest: string;
@@ -58,6 +60,8 @@ export interface SteamCleanInstallExecutionReceipt {
   readonly installGrantId: string;
   readonly cleanClient: true;
   readonly installRoot: string;
+  readonly appManifestPath: string;
+  readonly appManifestDigest: string;
   readonly harnessRoot: string;
   readonly harnessResultPath: string;
   readonly logsPath: string;
@@ -131,6 +135,8 @@ export class SteamClientConnectorService {
   ): Promise<SteamCleanInstallExecutionReceipt> {
     const grant = await this.options.grants.redeem({ jobDigest, signedJob });
     verifyGrantReceipt(grant, jobDigest, signedJob);
+    const execution = signedJob.payload.execution;
+    if (execution.kind !== "STEAM_CLEAN_INSTALL") invalid("execution mode");
     const result = await this.options.executor.execute(Object.freeze({
       schemaVersion: "deviludo.native-steam-clean-install.v1",
       executionId: jobDigest,
@@ -140,6 +146,17 @@ export class SteamClientConnectorService {
     }));
     const stagingRoot = await canonicalDirectory(this.#stagingRoot, this.#stagingRoot);
     const installRoot = await canonicalDirectory(result.installRoot, stagingRoot);
+    const appManifestPath = await canonicalFile(result.appManifestPath, stagingRoot, 2 * 1024 * 1024);
+    if (basename(appManifestPath) !== `appmanifest_${execution.steamAppId}.acf`) invalid("appmanifest path");
+    const appManifest = verifySteamAppManifest(await readFile(appManifestPath), {
+      appId: execution.steamAppId,
+      buildId: execution.buildId,
+    });
+    const manifestInstallRoot = await canonicalDirectory(
+      join(dirname(appManifestPath), "common", appManifest.installDirectoryName),
+      stagingRoot,
+    );
+    if (manifestInstallRoot !== installRoot) invalid("appmanifest install root");
     const harnessRoot = await canonicalDirectory(result.harnessRoot, stagingRoot);
     const harnessResultPath = await canonicalFile(result.harnessResultPath, harnessRoot, MAX_RESULT_BYTES);
     const logsPath = await canonicalFile(result.logsPath, harnessRoot, MAX_LOG_BYTES);
@@ -148,10 +165,8 @@ export class SteamClientConnectorService {
     const logs = await readFile(logsPath, "utf8");
     if (FORBIDDEN_LOG.test(logs)) invalid("credential-free logs");
     const commands = parseCommands(result.commands);
-    const execution = signedJob.payload.execution;
-    if (execution.kind !== "STEAM_CLEAN_INSTALL") invalid("execution mode");
     const core = Object.freeze({
-      schemaVersion: "deviludo.steam-clean-install-execution-receipt.v1" as const,
+      schemaVersion: "deviludo.steam-clean-install-execution-receipt.v2" as const,
       jobDigest,
       executionLockDigest: signedJob.payload.executionLockDigest,
       platform: signedJob.payload.platform,
@@ -161,6 +176,8 @@ export class SteamClientConnectorService {
       installGrantId: execution.installGrantId,
       cleanClient: true as const,
       installRoot,
+      appManifestPath,
+      appManifestDigest: appManifest.manifestDigest,
       harnessRoot,
       harnessResultPath,
       logsPath,

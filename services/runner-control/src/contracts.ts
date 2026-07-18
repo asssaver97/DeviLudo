@@ -33,7 +33,11 @@ export interface RunnerCapabilities {
   readonly installedAutonomousAgents: readonly string[];
   readonly steamClientConnector: Readonly<{
     readonly version: string;
+    readonly bridgeVersion: string;
+    readonly controllerContractVersion: 1;
     readonly binaryDigest: string;
+    readonly automationPolicyDigest: string;
+    readonly supplyChainEvidenceDigest: string;
   }> | null;
   readonly capabilityDigest: string;
 }

@@ -23,10 +23,29 @@ implement `executionId` idempotency and perform a clean client reset before
 installing the exact BuildID.
 
 The authenticated health receipt includes the exact Runner ID, target platform,
-Connector version and native bridge digest. Runner Control derives the expected
-values from the immutable machine capability lock and forwards them into the
-locked TestKit environment; registration fails before job leasing if any field
-does not match the live Connector.
+Connector/bridge versions, controller contract version, native bridge digest,
+automation-policy digest and supply-chain evidence digest. Runner Control
+derives every expected value from the immutable machine capability lock and
+forwards them into the locked TestKit environment; registration fails before
+job leasing if any field does not match the live Connector.
+
+The bridge digest is not accepted as an administrator-entered environment
+value. Startup verifies an Ed25519-signed `deviludo-steam-native-bridge`
+manifest containing the exact Runner, platform, Connector/bridge versions,
+controller contract, binary digest, automation-policy digest, build time and
+supply-chain evidence digest. The executable is
+then hashed again before every probe and execution. Build systems must produce
+one signed manifest per Windows/Linux/macOS artifact after platform signing,
+malware scanning and notarization where applicable.
+
+The bridge artifact compiles `NativeSteamBridgeController` with one platform
+accessibility implementation. The controller fixes the only allowed stage order
+to clean-client reset, exact private-build install, production boot and platform
+suite. It independently re-verifies the signed Runner job and frozen plan. Both
+the bridge and Connector parse the bounded Steam
+`steamapps/appmanifest_<appid>.acf`; AppID, BuildID, fully-installed state and
+the manifest-derived install directory must all match. The manifest digest is
+included in the Connector receipt and checked again by TestKit.
 
 This repository tests the service and native adapter contract. It does not ship
 Valve credentials or pretend that the local developer machine is an enrolled
@@ -35,5 +54,6 @@ and enrolled Steam Client machines for every selected target platform.
 
 `npm run start:steam-client-connector` starts the production mTLS service after
 checking the pinned native executable digest and its fixed `probe --json`
-contract. See `.env.example`; all paths must be absolute, and the configured
+contract. See `.env.example`; manifest, key and executable paths must be
+absolute, and the configured
 platform must match the host OS.

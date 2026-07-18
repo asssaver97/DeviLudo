@@ -24,7 +24,11 @@ export interface SteamClientConnectorHealthIdentity {
   readonly runnerId: string;
   readonly platform: TargetPlatform;
   readonly version: string;
+  readonly bridgeVersion: string;
+  readonly controllerContractVersion: 1;
   readonly binaryDigest: string;
+  readonly automationPolicyDigest: string;
+  readonly supplyChainEvidenceDigest: string;
 }
 
 export function createSteamClientConnectorHandler(options: Readonly<{
@@ -47,7 +51,7 @@ export function createSteamClientConnectorHandler(options: Readonly<{
       return {
         status: 200,
         body: {
-          schemaVersion: "deviludo.steam-client-connector-health.v1",
+          schemaVersion: "deviludo.steam-client-connector-health.v2",
           status: "ok",
           service: "deviludo-steam-client-connector",
           ...options.healthIdentity,
@@ -71,13 +75,17 @@ export function createSteamClientConnectorHandler(options: Readonly<{
 
 function validateHealthIdentity(value: SteamClientConnectorHealthIdentity): void {
   const keys = Object.keys(value).sort();
-  if (keys.length !== 4 || keys[0] !== "binaryDigest" || keys[1] !== "platform"
-    || keys[2] !== "runnerId" || keys[3] !== "version"
+  const expected = ["runnerId", "platform", "version", "bridgeVersion", "controllerContractVersion",
+    "binaryDigest", "automationPolicyDigest", "supplyChainEvidenceDigest"].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])
     || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(value.runnerId)
     || !["windows", "linux", "macos"].includes(value.platform)
     || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value.version)
     || /(?:latest|stable|default)/i.test(value.version)
-    || !/^[a-f0-9]{64}$/.test(value.binaryDigest)) {
+    || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value.bridgeVersion)
+    || /(?:latest|stable|default)/i.test(value.bridgeVersion) || value.controllerContractVersion !== 1
+    || ![value.binaryDigest, value.automationPolicyDigest, value.supplyChainEvidenceDigest]
+      .every((digest) => /^[a-f0-9]{64}$/.test(digest))) {
     throw new Error("Steam Client Connector health identity is invalid");
   }
 }

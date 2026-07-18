@@ -437,13 +437,21 @@ export function validateRunnerCapabilities(capabilities: RunnerCapabilities): vo
   if (capabilities.steamClientConnector !== null) {
     const connector = capabilities.steamClientConnector;
     const keys = Object.keys(connector).sort();
-    if (keys.length !== 2 || keys[0] !== "binaryDigest" || keys[1] !== "version"
+    const expected = ["version", "bridgeVersion", "controllerContractVersion", "binaryDigest",
+      "automationPolicyDigest", "supplyChainEvidenceDigest"].sort();
+    if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])
       || typeof connector.version !== "string"
       || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(connector.version)
-      || /(?:latest|stable|default)/i.test(connector.version)) {
+      || /(?:latest|stable|default)/i.test(connector.version)
+      || typeof connector.bridgeVersion !== "string"
+      || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(connector.bridgeVersion)
+      || /(?:latest|stable|default)/i.test(connector.bridgeVersion)
+      || connector.controllerContractVersion !== 1) {
       throw new Error("Steam Client Connector capability is invalid");
     }
     assertSha256(connector.binaryDigest, "steamClientConnector.binaryDigest");
+    assertSha256(connector.automationPolicyDigest, "steamClientConnector.automationPolicyDigest");
+    assertSha256(connector.supplyChainEvidenceDigest, "steamClientConnector.supplyChainEvidenceDigest");
   }
   const expected = immutableCapabilityDigest({ ...capabilities, capabilityDigest: "" });
   if (capabilities.capabilityDigest !== expected) throw new Error("Runner capability digest mismatch");

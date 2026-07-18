@@ -125,7 +125,10 @@ test("physical Runner production composition loads only file-backed keys and exa
     const lockedCap = {
       ...cap,
       godotBinaryDigest: digest(godotBytes),
-      steamClientConnector: { version: "1.0.0", binaryDigest: sha("9") },
+      steamClientConnector: {
+        version: "1.0.0", bridgeVersion: "1.0.3", controllerContractVersion: 1 as const,
+        binaryDigest: sha("9"), automationPolicyDigest: sha("7"), supplyChainEvidenceDigest: sha("8"),
+      },
     };
     const { capabilityDigest: _oldDigest, ...lockedCore } = lockedCap;
     assert.match(_oldDigest, /^[a-f0-9]{64}$/);
@@ -167,7 +170,11 @@ test("physical Runner production composition loads only file-backed keys and exa
       DEVILUDO_TESTKIT_STEAM_CA_FILE: ca,
       DEVILUDO_TESTKIT_STEAM_STAGING_ROOT: steamStagingRoot,
       DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_VERSION: "1.0.0",
+      DEVILUDO_PHYSICAL_RUNNER_STEAM_BRIDGE_VERSION: "1.0.3",
+      DEVILUDO_PHYSICAL_RUNNER_STEAM_CONTROLLER_CONTRACT_VERSION: "1",
       DEVILUDO_PHYSICAL_RUNNER_STEAM_CONNECTOR_BINARY_DIGEST: sha("9"),
+      DEVILUDO_PHYSICAL_RUNNER_STEAM_AUTOMATION_POLICY_DIGEST: sha("7"),
+      DEVILUDO_PHYSICAL_RUNNER_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST: sha("8"),
     }, { platform: process.platform, arch: process.arch });
     assert.equal(service.config.capabilities.capabilityDigest, finalCap.capabilityDigest);
     assert.equal(service.jobPublicKey.asymmetricKeyType, "ed25519");

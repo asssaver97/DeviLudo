@@ -8,9 +8,10 @@ that a localhost process is a real Windows/Linux/macOS fleet.
 - Registration fixes OS, architecture, Godot binary, export-template image,
   GPU/display/audio and runner-image digests. Any installed autonomous Agent is
   rejected.
-- Steam-capable machines additionally bind an exact Connector version and
-  native binary digest into the immutable capability digest. A machine without
-  that declaration can run source E2E but cannot lease `STEAM_CLEAN_INSTALL`.
+- Steam-capable machines additionally bind exact Connector/bridge versions,
+  controller contract, native binary, automation policy and supply-chain
+  evidence digests into the immutable capability digest. A machine without that
+  declaration can run source E2E but cannot lease `STEAM_CLEAN_INSTALL`.
 - A matrix attempt creates a separate lease and monotonically increasing
   fencing token for every selected platform. Re-leasing one platform makes all
   late events from its previous runner stale.
@@ -188,8 +189,9 @@ receipt and bounded local evidence paths under that staging root. TestKit
 requires clean-client reset, exact installation, production boot and platform
 suite receipts, then packages the installed tree instead of downloading source
 or creating a second export. Partial Connector configuration is rejected before
-the child starts. The physical Runner matches the declared Connector
-version/digest to its machine lock and authenticates the exact Connector
+the child starts. The physical Runner matches the declared Connector/bridge
+versions, controller contract and artifact/policy/evidence digests to its
+machine lock and authenticates the exact Connector
 `/healthz` service over mTLS before advertising READY. Source-only Runners must
 omit the entire Connector environment group.
 

@@ -15,7 +15,11 @@
     "installedAutonomousAgents": [],
     "steamClientConnector": {
       "version": "1.0.0",
-      "binaryDigest": "<64-lowercase-hex>"
+      "bridgeVersion": "1.0.3",
+      "controllerContractVersion": 1,
+      "binaryDigest": "<64-lowercase-hex>",
+      "automationPolicyDigest": "<64-lowercase-hex>",
+      "supplyChainEvidenceDigest": "<64-lowercase-hex>"
     },
     "capabilityDigest": "<canonical-capability-sha256>"
   },
