@@ -67,7 +67,7 @@ export class ReleaseAuthorizationCoordinator {
       releaseId,
       requestedBy: principal.userId,
     });
-    validateSnapshot(snapshot, principal.tenantId, releaseId);
+    validateSnapshot(snapshot, principal.tenantId, releaseId, principal.userId);
     const createdAt = validNow(this.#now()).toISOString();
     const sessionBindingDigest = digest(principal.sessionBinding);
     const requestDigest = steamCanonicalDigest({
@@ -255,8 +255,9 @@ function validatePrincipal(principal: ReleaseAuthorizationPrincipal): void {
   }
 }
 
-function validateSnapshot(snapshot: AuthoritativeReleaseSnapshot, tenantId: string, releaseId: string): void {
+function validateSnapshot(snapshot: AuthoritativeReleaseSnapshot, tenantId: string, releaseId: string, acceptedBy: string): void {
   if (snapshot.tenantId !== tenantId || snapshot.releaseId !== releaseId || snapshot.state !== "WAITING_MFA"
+    || snapshot.acceptedBy !== acceptedBy || !ID.test(snapshot.acceptedBy)
     || !ID.test(snapshot.projectId) || !ID.test(snapshot.workflowId)
     || !SHA1.test(snapshot.mainCommitSha) || !SHA256.test(snapshot.evidenceBundleDigest)) {
     throw new Error("Authoritative release snapshot is invalid");

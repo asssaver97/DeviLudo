@@ -43,6 +43,26 @@ test("project Steam release configuration is one-time, tenant-isolated and secre
   assert.doesNotMatch(webRoute, /branchPassword|branch_password|password/i);
 });
 
+test("user feedback, acceptance and Steam MFA remain bound to an active accepting project actor", () => {
+  const resolver = readFileSync(new URL("../services/steam-publisher/src/postgres-release-lifecycle.ts", import.meta.url), "utf8");
+  const coordinator = readFileSync(new URL("../services/steam-publisher/src/release-authorization.ts", import.meta.url), "utf8");
+  const contracts = readFileSync(new URL("../services/steam-publisher/src/release-authorization-contracts.ts", import.meta.url), "utf8");
+  const acceptance = readFileSync(new URL("../services/user-acceptance/src/candidate-acceptance.ts", import.meta.url), "utf8");
+  const feedback = readFileSync(new URL("../services/user-acceptance/src/postgres-store.ts", import.meta.url), "utf8");
+  assert.match(resolver, /requester\.id::text = \$3 AND requester\.status = 'ACTIVE'/);
+  assert.match(resolver, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\) AND membership\.status = 'ACTIVE'/);
+  assert.match(resolver, /acceptance\.workflow_id = release\.workflow_id/);
+  assert.match(resolver, /acceptance\.actor_id = requester\.id::text/);
+  assert.match(resolver, /acceptance\.state = 'COMPLETED'/);
+  assert.match(contracts, /readonly acceptedBy: string/);
+  assert.match(coordinator, /snapshot\.acceptedBy !== acceptedBy/);
+  for (const source of [acceptance, feedback]) {
+    assert.match(source, /actor\.id::text = \$3 AND actor\.status = 'ACTIVE'/);
+    assert.match(source, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\)/);
+    assert.match(source, /membership\.status = 'ACTIVE'/);
+  }
+});
+
 test("Provider recovery probes only the exact immutable waiting Run binding", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/052_provider_recovery_checks.sql", import.meta.url), "utf8");

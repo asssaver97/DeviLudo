@@ -105,7 +105,7 @@ export class PostgresUserFeedbackStore implements UserFeedbackStore {
         if (reclaimed.rows.length !== 1) return Object.freeze({ kind: "BUSY" as const });
         row = Object.freeze({ ...row, claim_token: reclaimed.rows[0]!.claim_token, claim_active: true });
       } else {
-        const authorities = await selectAuthority(client, command.tenantId, command.projectId, null);
+        const authorities = await selectAuthority(client, command.tenantId, command.projectId, command.actorId, null);
         if (authorities.length !== 1) return Object.freeze({ kind: "CONFLICT" as const });
         const authority = parseAuthority(authorities[0]!);
         const evidenceInvalidationId = randomUUID();
@@ -132,7 +132,7 @@ export class PostgresUserFeedbackStore implements UserFeedbackStore {
       }
 
       if (!row.claim_token || !UUID.test(row.claim_token)) invalid();
-      const authorities = await selectAuthority(client, command.tenantId, command.projectId, row.action_id);
+      const authorities = await selectAuthority(client, command.tenantId, command.projectId, command.actorId, row.action_id);
       if (authorities.length !== 1) return Object.freeze({ kind: "CONFLICT" as const });
       const authority = parseAuthority(authorities[0]!);
       if (authority.workflowId !== row.workflow_id || authority.actionId !== row.action_id
@@ -170,7 +170,7 @@ export class PostgresUserFeedbackStore implements UserFeedbackStore {
       if (!row || !sameClaim(row, claim)) invalid();
       if (row.state === "COMPLETED" || row.state === "DRAFT_READY") return parseDraft(row.draft_snapshot, claim.command);
       if (row.state !== "GENERATING" || row.claim_token !== claim.claimToken || !row.claim_active) invalid();
-      const authorities = await selectAuthority(client, claim.command.tenantId, claim.command.projectId, claim.actionId);
+      const authorities = await selectAuthority(client, claim.command.tenantId, claim.command.projectId, claim.command.actorId, claim.actionId);
       if (authorities.length !== 1) invalid();
       const authority = parseAuthority(authorities[0]!);
       if (!sameAuthority(authority, claim)) invalid();
@@ -378,7 +378,13 @@ async function selectOperation(client: PostgresWorkflowClient, tenantId: string,
   return selected.rows[0] ?? null;
 }
 
-async function selectAuthority(client: PostgresWorkflowClient, tenantId: string, projectId: string, actionId: string | null): Promise<readonly AuthorityRow[]> {
+async function selectAuthority(
+  client: PostgresWorkflowClient,
+  tenantId: string,
+  projectId: string,
+  actorId: string,
+  actionId: string | null,
+): Promise<readonly AuthorityRow[]> {
   const selected = await client.query<AuthorityRow>(
     `SELECT action.workflow_id, action.id::text AS action_id,
             action.operation AS action_operation, action.binding,
@@ -395,6 +401,14 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
             plan.payload_digest AS test_plan_payload_digest,
             conversation.current_metadata
        FROM deviludo.workflow_control_actions action
+       JOIN deviludo.users actor
+         ON actor.tenant_id = action.tenant_id
+        AND actor.id::text = $3 AND actor.status = 'ACTIVE'
+       JOIN deviludo.tenant_memberships membership
+         ON membership.tenant_id = actor.tenant_id
+        AND membership.user_id = actor.id
+        AND membership.status = 'ACTIVE'
+        AND membership.role IN ('TenantAdmin', 'ProjectOwner')
        JOIN deviludo.immutable_revisions spec
          ON spec.tenant_id = action.tenant_id
         AND spec.project_id = action.project_id
@@ -422,7 +436,7 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
           )
         ))
         AND action.status = 'WAITING'
-        AND ($3::text IS NULL OR action.id::text = $3)
+        AND ($4::text IS NULL OR action.id::text = $4)
         AND conversation.state = 'APPROVED'
         AND spec.state = 'APPROVED' AND plan.state = 'FROZEN'
         AND spec.revision = plan.revision
@@ -433,8 +447,8 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
         )
       ORDER BY action.created_at DESC
       LIMIT 2
-      FOR SHARE OF action, spec, conversation, plan`,
-    [tenantId, projectId, actionId],
+      FOR SHARE OF action, actor, membership, spec, conversation, plan`,
+    [tenantId, projectId, actorId, actionId],
   );
   return selected.rows;
 }

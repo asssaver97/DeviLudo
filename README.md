@@ -39,7 +39,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `services/artifact-preparer` 与 `services/godot-testkit`：前者从权威 SCM 快照确定性生成 `source.tar.zst`、验证 canonical v2 矩阵测试计划，通过 mTLS 获取五分钟 S3 grant 并在签名租户/证书授权和两个输入对象回执通过后才写入租户 RLS 下的不可变执行锁；后者在物理 Runner 上以固定 Godot 命令执行核心循环/胜负/暂停设置/保存读取与性能门禁，并生成六类内容寻址证据。
 - `services/runner-control` 的独立 Toolchain Publisher：只接受供应链专用 mTLS/SPIFFE 身份，把 TestKit、构建清单、SBOM、漏洞扫描和许可台账与当前 `ONLINE`、租户已分配的物理 Runner 能力原子组合成项目级不可变 Revision。导出模板摘要只能从 Runner 注册记录派生，发布请求、规格模型和浏览器均不能提供或覆盖。
 - 规格批准会在同一 PostgreSQL RLS 事务中解析与 Godot 版本、目标矩阵完全兼容的最新项目 Runner Toolchain，并把其不可变 revision/digest 写入冻结测试计划；缺少兼容版本时整笔审批回滚，数据库触发器也拒绝任何旁路写入的不兼容绑定。
-- “接受并发布”生产路由只接受空 POST、幂等键和绑定方法/路径的短期平台会话；它不会接受客户端 main SHA、证据状态或 `x-mfa-proof`，而是跳转到固定 HTTPS MFA broker，由 broker 查询权威发布快照并续跑 Temporal。
+- “接受并发布”生产路由只接受空 POST、幂等键和绑定方法/路径的短期平台会话；它不会接受客户端 main SHA、证据状态或 `x-mfa-proof`，而是跳转到固定 HTTPS MFA broker。Broker 在租户 RLS 下重新确认请求者仍是活跃 `ProjectOwner`/`TenantAdmin` 且就是该工作流已完成不可变候选验收的 actor，再查询权威发布快照并续跑 Temporal；审计员或另一账号不能复用已知 Release ID。反馈、验收服务本身也在数据库内复核同一写权限，不依赖 Web 进程代传的 actor。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
 - `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`/v1/runs` 必须复用预检，默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
 - `lib/observability`：所有 Web、控制面、工作流、Agent、Runner、SCM、证据与 Steam 生产启动入口在应用模块加载前注册固定服务身份的 OpenTelemetry SDK，通过 OTLP/protobuf 导出追踪并自动传播 W3C `tracecontext`。生产不能关闭追踪；URL query、Cookie、认证头、提示词、源码和凭据不会进入 span，静态 OTLP Header 凭据也被禁止。

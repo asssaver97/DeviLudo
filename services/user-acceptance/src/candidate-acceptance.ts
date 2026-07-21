@@ -90,6 +90,14 @@ export class PostgresCandidateAcceptanceStore implements CandidateAcceptanceStor
                 candidate.pull_request_number,
                 evidence.id::text AS evidence_bundle_id
            FROM deviludo.workflow_control_actions action
+           JOIN deviludo.users actor
+             ON actor.tenant_id = action.tenant_id
+            AND actor.id::text = $3 AND actor.status = 'ACTIVE'
+           JOIN deviludo.tenant_memberships membership
+             ON membership.tenant_id = actor.tenant_id
+            AND membership.user_id = actor.id
+            AND membership.status = 'ACTIVE'
+            AND membership.role IN ('TenantAdmin', 'ProjectOwner')
            JOIN deviludo.immutable_revisions spec
              ON spec.tenant_id = action.tenant_id
             AND spec.project_id = action.project_id
@@ -125,8 +133,8 @@ export class PostgresCandidateAcceptanceStore implements CandidateAcceptanceStor
             AND action.status = 'WAITING'
           ORDER BY action.created_at DESC
           LIMIT 2
-          FOR SHARE OF action, spec, candidate, attempt, evidence`,
-        [command.tenantId, command.projectId],
+          FOR SHARE OF action, actor, membership, spec, candidate, attempt, evidence`,
+        [command.tenantId, command.projectId, command.actorId],
       );
       if (authorities.rows.length !== 1) return Object.freeze({ kind: "CONFLICT" as const });
       const authority = parseAuthority(authorities.rows[0]!);

@@ -14,6 +14,8 @@ export interface AuthoritativeReleaseSnapshot {
   readonly projectId: string;
   readonly releaseId: string;
   readonly workflowId: string;
+  /** The active ProjectOwner who recorded the immutable candidate acceptance. */
+  readonly acceptedBy: string;
   readonly state: "WAITING_MFA";
   readonly mainCommitSha: string;
   readonly evidenceBundleDigest: string;

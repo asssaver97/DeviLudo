@@ -24,6 +24,7 @@ const snapshot = Object.freeze({
   projectId: "project-ember",
   releaseId: "release-9",
   workflowId: "delivery-project-ember-9",
+  acceptedBy: principal.userId,
   state: "WAITING_MFA" as const,
   mainCommitSha: "a".repeat(40),
   evidenceBundleDigest: "b".repeat(64),
@@ -129,6 +130,7 @@ test("release authorization rejects snapshot drift, wrong MFA user and unapprove
     });
   }
   await assert.rejects(build({ wrongSnapshot: true }).begin(principal, snapshot.releaseId, "bad-snapshot"), /snapshot is invalid/);
+  await assert.rejects(build({ wrongSnapshot: false }).begin({ ...principal, userId: "user-mallory" }, snapshot.releaseId, "wrong-acceptor"), /snapshot is invalid/);
   await assert.rejects(build({ evilUrl: true }).begin(principal, snapshot.releaseId, "bad-url"), /URL is invalid/);
   const wrongUser = build({ wrongUser: true });
   const started = await wrongUser.begin(principal, snapshot.releaseId, "bad-user");

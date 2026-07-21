@@ -233,13 +233,26 @@ export class PostgresReleaseSnapshotResolver implements ReleaseSnapshotResolver 
             AND action.project_id = release.project_id
             AND action.workflow_id = release.workflow_id
             AND action.operation = 'REQUEST_FRESH_MFA'
+           JOIN deviludo.users requester
+             ON requester.tenant_id = release.tenant_id
+            AND requester.id::text = $3 AND requester.status = 'ACTIVE'
+           JOIN deviludo.tenant_memberships membership
+             ON membership.tenant_id = requester.tenant_id
+            AND membership.user_id = requester.id
+            AND membership.role IN ('TenantAdmin', 'ProjectOwner') AND membership.status = 'ACTIVE'
+           JOIN deviludo.user_candidate_acceptances acceptance
+             ON acceptance.tenant_id = release.tenant_id
+            AND acceptance.project_id = release.project_id
+            AND acceptance.workflow_id = release.workflow_id
+            AND acceptance.actor_id = requester.id::text
+            AND acceptance.state = 'COMPLETED'
           WHERE release.tenant_id = $1::uuid AND release.id = $2::uuid
             AND release.state = 'WAITING_MFA' AND release.mfa_approval_id IS NULL
             AND evidence.status = 'PASSED' AND evidence.invalidated_at IS NULL
             AND attempt.mode = 'MAIN_RELEASE_GATE' AND attempt.state = 'PASSED'
             AND action.status = 'WAITING'
           FOR SHARE OF release, evidence, attempt, action`,
-        [input.tenantId, input.releaseId],
+        [input.tenantId, input.releaseId, input.requestedBy],
       );
       if (result.rows.length !== 1) invalid();
       const row = result.rows[0]!;
@@ -259,6 +272,7 @@ export class PostgresReleaseSnapshotResolver implements ReleaseSnapshotResolver 
         projectId: row.project_id,
         releaseId: row.id,
         workflowId: row.workflow_id,
+        acceptedBy: input.requestedBy,
         state: "WAITING_MFA" as const,
         mainCommitSha: row.main_commit_sha,
         evidenceBundleDigest: row.evidence_bundle_digest,

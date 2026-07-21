@@ -179,6 +179,7 @@ function parseRecord(row: AuthorizationRow): ReleaseAuthorizationRecord {
       projectId: row.project_id,
       releaseId: row.release_id,
       workflowId: row.workflow_id,
+      acceptedBy: row.user_subject,
       state: "WAITING_MFA" as const,
       mainCommitSha: row.main_commit_sha,
       evidenceBundleDigest: row.evidence_bundle_digest,

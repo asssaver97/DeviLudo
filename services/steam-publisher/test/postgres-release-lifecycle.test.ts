@@ -90,6 +90,7 @@ class Client implements PostgresWorkflowClient {
   readonly calls: Array<{ text: string; values: readonly unknown[] }> = [];
   preparationAuthority: Record<string, unknown> = preparationAuthorityRow;
   releaseRow: Record<string, unknown> | null = null;
+  releaseAuthorizationAllowed = true;
   releases = 0;
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -106,7 +107,7 @@ class Client implements PostgresWorkflowClient {
       return result([], 1);
     }
     if (text.includes("JOIN deviludo.workflow_control_actions action")) {
-      return this.releaseRow ? result([{
+      return this.releaseRow && this.releaseAuthorizationAllowed ? result([{
         ...this.releaseRow,
         evidence_bundle_digest: evidenceBundleDigest,
         evidence_status: "PASSED",
@@ -197,6 +198,7 @@ test("PostgreSQL release snapshot resolver admits only the exact still-waiting M
     projectId,
     releaseId,
     workflowId,
+    acceptedBy: "user-ada",
     state: "WAITING_MFA",
     mainCommitSha,
     evidenceBundleDigest,
@@ -204,6 +206,15 @@ test("PostgreSQL release snapshot resolver admits only the exact still-waiting M
   const query = client.calls.find((call) => call.text.includes("workflow_control_actions action"))!;
   assert.match(query.text, /action\.operation = 'REQUEST_FRESH_MFA'/);
   assert.match(query.text, /action\.status = 'WAITING'/);
+  assert.match(query.text, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\)/);
+  assert.match(query.text, /membership\.status = 'ACTIVE'/);
+  assert.match(query.text, /acceptance\.actor_id = requester\.id::text/);
+  assert.match(query.text, /acceptance\.state = 'COMPLETED'/);
+  assert.deepEqual(query.values, [tenantId, releaseId, "user-ada"]);
+
+  client.releaseAuthorizationAllowed = false;
+  await assert.rejects(resolver.resolveForMfa({ tenantId, releaseId, requestedBy: "user-auditor" }), /release lifecycle is invalid/);
+  client.releaseAuthorizationAllowed = true;
 
   client.releaseRow = { ...client.releaseRow, state: "STEAM_PRIVATE_BETA", mfa_approval_id: mfaId };
   await assert.rejects(resolver.resolveForMfa({ tenantId, releaseId, requestedBy: "user-ada" }), /release lifecycle is invalid/);

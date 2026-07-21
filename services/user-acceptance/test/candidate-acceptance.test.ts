@@ -58,6 +58,7 @@ test("candidate acceptance mTLS ingress dispatches the empty authority-free comm
 
 test("PostgreSQL candidate acceptance derives candidate, PR and evidence under tenant RLS", async () => {
   let inserted: readonly unknown[] | undefined;
+  let authorityValues: readonly unknown[] | undefined;
   const statements: string[] = [];
   const client: PostgresWorkflowClient = {
     async query<Row extends Record<string, unknown>>(sql: string, values?: readonly unknown[]) {
@@ -83,15 +84,18 @@ test("PostgreSQL candidate acceptance derives candidate, PR and evidence under t
           completion_receipt: null,
         }]);
       }
-      if (sql.includes("FROM deviludo.workflow_control_actions action")) return rows<Row>([{
-        workflow_id: decision.workflowId,
-        action_id: decision.actionId,
-        spec_revision_id: decision.specRevisionId,
-        candidate_receipt_id: decision.candidateReceiptId,
-        candidate_commit_sha: decision.candidateCommitSha,
-        pull_request_number: decision.draftPullRequest,
-        evidence_bundle_id: decision.evidenceBundleId,
-      }]);
+      if (sql.includes("FROM deviludo.workflow_control_actions action")) {
+        authorityValues = values;
+        return rows<Row>([{
+          workflow_id: decision.workflowId,
+          action_id: decision.actionId,
+          spec_revision_id: decision.specRevisionId,
+          candidate_receipt_id: decision.candidateReceiptId,
+          candidate_commit_sha: decision.candidateCommitSha,
+          pull_request_number: decision.draftPullRequest,
+          evidence_bundle_id: decision.evidenceBundleId,
+        }]);
+      }
       if (sql.includes("INSERT INTO deviludo.user_candidate_acceptances")) {
         inserted = values;
         return result<Row>(1);
@@ -107,6 +111,10 @@ test("PostgreSQL candidate acceptance derives candidate, PR and evidence under t
   assert.equal(outcome.decision.evidenceBundleId, decision.evidenceBundleId);
   assert.equal(inserted?.[6], decision.actionId);
   assert.match(statements[1] ?? "", /set_config\('app\.tenant_id'/);
+  const authority = statements.find((statement) => statement.includes("FROM deviludo.workflow_control_actions action")) ?? "";
+  assert.match(authority, /actor\.id::text = \$3 AND actor\.status = 'ACTIVE'/);
+  assert.match(authority, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\)/);
+  assert.deepEqual(authorityValues, [command.tenantId, command.projectId, command.actorId]);
 });
 
 const command = Object.freeze({

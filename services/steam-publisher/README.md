@@ -119,7 +119,10 @@ parallel browser-side session flag.
 
 Release authorization is a separate state machine. The internal Web route can
 only reserve an MFA challenge from an authoritative `WAITING_MFA` release
-snapshot. The isolated MFA UI completes the challenge under its own HttpOnly
+snapshot. Its PostgreSQL resolver revalidates that the requesting user is an
+active `ProjectOwner`/`TenantAdmin` recorded on the workflow's completed
+immutable candidate acceptance; tenant auditors and a different account cannot
+reuse a known release ID. The isolated MFA UI completes the challenge under its own HttpOnly
 session/Origin/CSRF gate; an injected verifier must return a fresh AAL2 receipt
 for the same tenant user. The coordinator then asks Vault/KMS to sign an
 authorization bound to the exact release, main SHA and evidence digest,

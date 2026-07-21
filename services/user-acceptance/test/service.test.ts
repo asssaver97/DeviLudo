@@ -186,6 +186,10 @@ test("PostgreSQL begin derives action and previous revisions under tenant RLS", 
       if (sql.includes("FROM deviludo.workflow_control_actions action")) {
         assert.equal(values?.[0], tenantId);
         assert.equal(values?.[1], projectId);
+        assert.equal(values?.[2], command.actorId);
+        assert.ok(values?.[3] === null || values?.[3] === actionId);
+        assert.match(sql, /actor\.id::text = \$3 AND actor\.status = 'ACTIVE'/);
+        assert.match(sql, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\)/);
         return rows<Row>([authority]);
       }
       if (sql.includes("INSERT INTO deviludo.user_feedback_operations")) {
