@@ -167,7 +167,7 @@ API Key 只允许写入或替换。Web 与公共控制面响应只返回不可�
 1. GitHub App 的 App/Client ID、私钥与 Client Secret 的 Vault 引用、登录与 Setup/PKCE Callback 域名、Identity Broker mTLS 身份和允许安装的组织；用户只通过一次性邀请登录，不保存 GitHub 密码。
 2. Claude/Codex Provider 的 SecurityAdmin 审批、数据政策确认、Vault Key 与全套探针结果。
 3. 内部镜像库、签名密钥、SBOM/漏洞/恶意软件扫描器和隔离 microVM Worker 池。
-4. 按 [Runner 原生发布流程](docs/runner-native-release.md) 在 Windows、Linux、macOS 各自构建 Physical Runner/TestKit，自带平台签名证据并通过专用 Ed25519 安装验签后，再通过出站 mTLS 注册固定 Godot/export-template/Runner/TestKit digest；供应链身份通过 `start:runner-toolchain-publisher` 发布项目级不可变 Toolchain 后，规格才允许批准。
+4. 按 [Runner 原生发布流程](docs/runner-native-release.md) 在 Windows、Linux、macOS 各自构建 Physical Runner/TestKit/Steam Connector，自带平台签名证据并通过专用 Ed25519 安装验签后，再通过出站 mTLS 注册固定 Godot/export-template/Runner/TestKit digest；Steam Connector 仅安装到声明独立 Connector 身份的 Steam 回装节点，供应链身份通过 `start:runner-toolchain-publisher` 发布项目级不可变 Toolchain 后，规格才允许批准。
 5. Steamworks 最小权限 build account；首次人工完成 Steam Guard 后只保存加密 `config.vdf` 会话。
 6. 代码签名、公证、素材许可台账、MFA 和 Valve/手机确认的外部 approval signal。
 

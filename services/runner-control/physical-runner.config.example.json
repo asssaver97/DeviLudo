@@ -14,7 +14,7 @@
     "audio": "virtual",
     "installedAutonomousAgents": [],
     "steamClientConnector": {
-      "version": "1.0.0",
+      "version": "0.1.0-beta.1",
       "bridgeVersion": "1.0.3",
       "controllerContractVersion": 1,
       "binaryDigest": "<64-lowercase-hex>",

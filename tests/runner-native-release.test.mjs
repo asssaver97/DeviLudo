@@ -49,7 +49,7 @@ const sourceRevision = "a".repeat(40);
 const platform = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
 const architecture = process.arch === "x64" ? "x86_64" : process.arch;
 
-test("native builder accepts only pinned absolute inputs and atomically emits two host candidates", async () => {
+test("native builder accepts only pinned absolute inputs and atomically emits all host candidates", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-native-builder-"));
   const outputDirectory = resolve(root, "out", "release");
   const nodeBinary = resolve(root, "node");
@@ -104,7 +104,8 @@ test("native builder accepts only pinned absolute inputs and atomically emits tw
       return "";
     }
     if (invocation.args[0] === "--identity") {
-      const component = invocation.command.includes("testkit") ? "godot-testkit" : "physical-runner";
+      const component = invocation.command.includes("testkit") ? "godot-testkit"
+        : invocation.command.includes("steam-client-connector") ? "steam-client-connector" : "physical-runner";
       return JSON.stringify(identity(component));
     }
     return "";
@@ -114,7 +115,8 @@ test("native builder accepts only pinned absolute inputs and atomically emits tw
     execute,
     bundle: async ({ descriptor, outfile }) => {
       await writeFile(outfile, `bundle:${descriptor.component}\n`);
-      return { inputCount: descriptor.component === "godot-testkit" ? 10 : 20 };
+      return { inputCount: descriptor.component === "godot-testkit" ? 10
+        : descriptor.component === "physical-runner" ? 20 : 30 };
     },
     now: () => new Date("2026-07-22T00:00:00.000Z"),
     uuid: () => "11111111-1111-4111-8111-111111111111",
@@ -122,7 +124,9 @@ test("native builder accepts only pinned absolute inputs and atomically emits tw
   assert.equal(receipt.status, "CANDIDATE");
   assert.equal(receipt.platform, platform);
   assert.equal(receipt.architecture, architecture);
-  assert.deepEqual(receipt.artifacts.map(({ component }) => component), ["godot-testkit", "physical-runner"]);
+  assert.deepEqual(receipt.artifacts.map(({ component }) => component), [
+    "godot-testkit", "physical-runner", "steam-client-connector",
+  ]);
   const { outputDirectory: publishedDirectory, ...persistedReceipt } = receipt;
   assert.equal(publishedDirectory, outputDirectory);
   assert.deepEqual(JSON.parse(await readFile(resolve(outputDirectory, "runner-native-build-receipt.json"), "utf8")), persistedReceipt);
@@ -174,6 +178,7 @@ test("target host accepts only a signed release bound to final files, candidate 
   const bodies = new Map([
     ["godot-testkit", Buffer.from("signed-testkit-binary\n")],
     ["physical-runner", Buffer.from("signed-runner-binary\n")],
+    ["steam-client-connector", Buffer.from("signed-steam-connector-binary\n")],
   ]);
   for (const [component, body] of bodies) await writeFile(resolve(artifactDirectory, fileName(component)), body);
   const buildReceipt = buildReceiptFor(bodies);
@@ -191,7 +196,7 @@ test("target host accepts only a signed release bound to final files, candidate 
   assert.equal(authorization.status, "VERIFIED");
   assert.equal(authorization.releaseId, release.claims.releaseId);
   assert.equal(authorization.releaseDigest, sha256Canonical(release));
-  assert.deepEqual(inspected, ["godot-testkit", "physical-runner"]);
+  assert.deepEqual(inspected, ["godot-testkit", "physical-runner", "steam-client-connector"]);
 
   for (const invalid of [
     { ...release, claims: { ...release.claims, sourceRevision: "b".repeat(40) } },
@@ -216,12 +221,31 @@ test("target host accepts only a signed release bound to final files, candidate 
   }), /trust policy is invalid/);
 });
 
+test("target verifier preserves read-only support for an admitted v1 two-component release", async () => {
+  const artifactDirectory = await mkdtemp(join(tmpdir(), "deviludo-native-release-v1-"));
+  const bodies = new Map([
+    ["godot-testkit", Buffer.from("legacy-signed-testkit\n")],
+    ["physical-runner", Buffer.from("legacy-signed-runner\n")],
+  ]);
+  for (const [component, body] of bodies) await writeFile(resolve(artifactDirectory, fileName(component)), body);
+  const buildReceipt = buildReceiptFor(bodies, 1);
+  const release = signedRelease(buildReceipt, bodies);
+  const authorization = await verifyRunnerNativeRelease(release, buildReceipt, policy, policyDigest, {
+    artifactDirectory,
+    now: new Date("2026-07-22T00:10:00.000Z"),
+    inspectIdentity: async ({ artifact }) => identity(artifact.component),
+  });
+  assert.equal(authorization.schemaVersion, "deviludo.runner-native-install-authorization.v1");
+  assert.deepEqual(authorization.artifacts.map(({ component }) => component), ["godot-testkit", "physical-runner"]);
+});
+
 test("finalizer hashes native-signed files, verifies identities and obtains one locally verified KMS envelope", async () => {
   const artifactDirectory = await mkdtemp(join(tmpdir(), "deviludo-native-final-artifacts-"));
   const evidenceDirectory = await mkdtemp(join(tmpdir(), "deviludo-native-final-evidence-"));
   const bodies = new Map([
     ["godot-testkit", Buffer.from("native-signed-testkit\n")],
     ["physical-runner", Buffer.from("native-signed-runner\n")],
+    ["steam-client-connector", Buffer.from("native-signed-steam-connector\n")],
   ]);
   const buildReceipt = buildReceiptFor(bodies);
   for (const candidate of buildReceipt.artifacts) {
@@ -256,7 +280,7 @@ test("finalizer hashes native-signed files, verifies identities and obtains one 
       return {
         statusCode: 200,
         body: {
-          schemaVersion: "deviludo.runner-native-release-signing-response.v1",
+          schemaVersion: "deviludo.runner-native-release-signing-response.v2",
           algorithm: "Ed25519",
           keyId,
           claimsDigest: body.claimsDigest,
@@ -330,7 +354,7 @@ test("verification CLI requires all absolute files and the reviewed policy diges
   });
 });
 
-function buildReceiptFor(bodies) {
+function buildReceiptFor(bodies, contractVersion = 2) {
   const artifacts = [...bodies].map(([component, body], index) => Object.freeze({
     component,
     fileName: fileName(component),
@@ -341,7 +365,7 @@ function buildReceiptFor(bodies) {
     identityDigest: sha256Canonical(identity(component)),
   }));
   return Object.freeze({
-    schemaVersion: "deviludo.runner-native-build-receipt.v1",
+    schemaVersion: `deviludo.runner-native-build-receipt.v${contractVersion}`,
     status: "CANDIDATE",
     platformVersion: "0.1.0-beta.1",
     sourceRevision,
@@ -363,8 +387,9 @@ function buildReceiptFor(bodies) {
 }
 
 function signedRelease(buildReceipt, bodies) {
+  const contractVersion = buildReceipt.schemaVersion.endsWith(".v2") ? 2 : 1;
   const claims = Object.freeze({
-    schemaVersion: "deviludo.runner-native-release-claims.v1",
+    schemaVersion: `deviludo.runner-native-release-claims.v${contractVersion}`,
     releaseId: "22222222-2222-4222-8222-222222222222",
     buildReceiptDigest: sha256Canonical(buildReceipt),
     platformVersion: buildReceipt.platformVersion,
@@ -386,7 +411,7 @@ function signedRelease(buildReceipt, bodies) {
     })),
   });
   return Object.freeze({
-    schemaVersion: "deviludo.runner-native-release.v1",
+    schemaVersion: `deviludo.runner-native-release.v${contractVersion}`,
     claims,
     signature: Object.freeze({
       algorithm: "Ed25519",
@@ -431,7 +456,8 @@ function identity(component) {
 }
 
 function fileName(component) {
-  const base = component === "godot-testkit" ? "deviludo-testkit" : "deviludo-physical-runner";
+  const base = component === "godot-testkit" ? "deviludo-testkit"
+    : component === "physical-runner" ? "deviludo-physical-runner" : "deviludo-steam-client-connector";
   return `${base}${platform === "windows" ? ".exe" : ""}`;
 }
 

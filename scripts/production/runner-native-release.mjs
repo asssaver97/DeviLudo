@@ -13,7 +13,13 @@ const BASE64URL_SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const MAX_IDENTITY_BYTES = 16 * 1024;
 const CLOCK_SKEW_MS = 60_000;
-const COMPONENTS = Object.freeze(["godot-testkit", "physical-runner"]);
+const COMPONENTS_V1 = Object.freeze(["godot-testkit", "physical-runner"]);
+const COMPONENTS_V2 = Object.freeze([...COMPONENTS_V1, "steam-client-connector"]);
+const FILE_NAMES = Object.freeze({
+  "godot-testkit": "deviludo-testkit",
+  "physical-runner": "deviludo-physical-runner",
+  "steam-client-connector": "deviludo-steam-client-connector",
+});
 const BUILD_KEYS = Object.freeze([
   "architecture", "artifacts", "completedAt", "esbuildBinaryDigest", "esbuildLibraryDigest", "esbuildVersion", "nodeBinaryDigest", "nodeVersion",
   "packageLockDigest", "platform", "platformVersion", "postjectCliDigest", "postjectVersion", "schemaVersion",
@@ -84,8 +90,9 @@ export function validateRunnerNativeTrustPolicy(policy, expectedDigest) {
 }
 
 export function validateRunnerNativeBuildReceipt(receipt) {
+  const components = buildComponents(receipt?.schemaVersion);
   if (!plainRecord(receipt) || !exactKeys(receipt, BUILD_KEYS)
-    || receipt.schemaVersion !== "deviludo.runner-native-build-receipt.v1" || receipt.status !== "CANDIDATE"
+    || receipt.status !== "CANDIDATE"
     || typeof receipt.platformVersion !== "string" || !VERSION.test(receipt.platformVersion)
     || typeof receipt.sourceRevision !== "string" || !SOURCE_REVISION.test(receipt.sourceRevision)
     || !new Set(["windows", "linux", "macos"]).has(receipt.platform)
@@ -96,9 +103,9 @@ export function validateRunnerNativeBuildReceipt(receipt) {
     || !SHA256.test(receipt.esbuildBinaryDigest) || receipt.postjectVersion !== "1.0.0-alpha.6"
     || !SHA256.test(receipt.postjectCliDigest) || !canonicalTimestamp(receipt.completedAt)
     || receipt.signatureState !== expectedCandidateSignatureState(receipt.platform)
-    || !Array.isArray(receipt.artifacts) || receipt.artifacts.length !== COMPONENTS.length) invalidReceipt();
+    || !Array.isArray(receipt.artifacts) || receipt.artifacts.length !== components.length) invalidReceipt();
   const artifacts = receipt.artifacts.map((artifact) => validateBuildArtifact(artifact, receipt.platform));
-  if (JSON.stringify(artifacts.map(({ component }) => component)) !== JSON.stringify(COMPONENTS)) invalidReceipt();
+  if (JSON.stringify(artifacts.map(({ component }) => component)) !== JSON.stringify(components)) invalidReceipt();
   return Object.freeze({ ...receipt, artifacts: Object.freeze(artifacts) });
 }
 
@@ -108,8 +115,9 @@ export function createRunnerNativeReleaseClaims(buildReceipt, {
   artifacts,
 } = {}) {
   const build = validateRunnerNativeBuildReceipt(buildReceipt);
+  const version = contractVersion(build);
   const claims = {
-    schemaVersion: "deviludo.runner-native-release-claims.v1",
+    schemaVersion: `deviludo.runner-native-release-claims.v${version}`,
     releaseId,
     buildReceiptDigest: sha256Canonical(build),
     platformVersion: build.platformVersion,
@@ -128,8 +136,9 @@ export function runnerNativeReleaseSigningRequest(claims, buildReceipt) {
   const build = validateRunnerNativeBuildReceipt(buildReceipt);
   const published = canonicalTimestamp(claims?.publishedAt) ? new Date(claims.publishedAt) : new Date(Number.NaN);
   const validated = validateReleaseClaims(claims, build, published);
+  const version = contractVersion(build);
   return Object.freeze({
-    schemaVersion: "deviludo.runner-native-release-signing-request.v1",
+    schemaVersion: `deviludo.runner-native-release-signing-request.v${version}`,
     releaseId: validated.releaseId,
     claimsDigest: sha256Canonical(validated),
     signingInput: Buffer.from(canonicalJson(validated), "utf8").toString("base64url"),
@@ -138,13 +147,14 @@ export function runnerNativeReleaseSigningRequest(claims, buildReceipt) {
 
 export function runnerNativeReleaseFromSigner(claims, response, buildReceipt, policy, expectedPolicyDigest, now = new Date()) {
   const request = runnerNativeReleaseSigningRequest(claims, buildReceipt);
+  const version = contractVersion(buildReceipt);
   if (!plainRecord(response) || !exactKeys(response, SIGNER_RESPONSE_KEYS)
-    || response.schemaVersion !== "deviludo.runner-native-release-signing-response.v1"
+    || response.schemaVersion !== `deviludo.runner-native-release-signing-response.v${version}`
     || response.algorithm !== "Ed25519" || response.claimsDigest !== request.claimsDigest
     || typeof response.keyId !== "string" || !SAFE_ID.test(response.keyId)
     || typeof response.signature !== "string") invalidRelease();
   const release = Object.freeze({
-    schemaVersion: "deviludo.runner-native-release.v1",
+    schemaVersion: `deviludo.runner-native-release.v${version}`,
     claims,
     signature: Object.freeze({ algorithm: "Ed25519", keyId: response.keyId, value: response.signature }),
   });
@@ -215,7 +225,7 @@ export async function verifyRunnerNativeRelease(release, buildReceipt, policy, e
     }));
   }
   return Object.freeze({
-    schemaVersion: "deviludo.runner-native-install-authorization.v1",
+    schemaVersion: `deviludo.runner-native-install-authorization.v${contractVersion(envelope.build)}`,
     status: "VERIFIED",
     releaseId: claims.releaseId,
     releaseDigest: sha256Canonical(release),
@@ -232,8 +242,9 @@ export async function verifyRunnerNativeRelease(release, buildReceipt, policy, e
 }
 
 function validateReleaseEnvelope(release, build, now) {
+  const version = contractVersion(build);
   if (!plainRecord(release) || !exactKeys(release, RELEASE_KEYS)
-    || release.schemaVersion !== "deviludo.runner-native-release.v1"
+    || release.schemaVersion !== `deviludo.runner-native-release.v${version}`
     || !plainRecord(release.signature) || !exactKeys(release.signature, RELEASE_SIGNATURE_KEYS)
     || release.signature.algorithm !== "Ed25519" || typeof release.signature.keyId !== "string"
     || !SAFE_ID.test(release.signature.keyId) || typeof release.signature.value !== "string"
@@ -244,8 +255,10 @@ function validateReleaseEnvelope(release, build, now) {
 }
 
 function validateReleaseClaims(claims, build, now) {
+  const version = contractVersion(build);
+  const components = buildComponents(build.schemaVersion);
   if (!plainRecord(claims) || !exactKeys(claims, CLAIM_KEYS)
-    || claims.schemaVersion !== "deviludo.runner-native-release-claims.v1"
+    || claims.schemaVersion !== `deviludo.runner-native-release-claims.v${version}`
     || typeof claims.releaseId !== "string" || !UUID.test(claims.releaseId)
     || claims.buildReceiptDigest !== sha256Canonical(build) || claims.platformVersion !== build.platformVersion
     || claims.sourceRevision !== build.sourceRevision || claims.platform !== build.platform
@@ -253,7 +266,7 @@ function validateReleaseClaims(claims, build, now) {
     || !(now instanceof Date) || !Number.isFinite(now.valueOf())
     || !canonicalTimestamp(claims.publishedAt) || Date.parse(claims.publishedAt) > now.valueOf() + CLOCK_SKEW_MS
     || Date.parse(claims.publishedAt) < Date.parse(build.completedAt)
-    || !Array.isArray(claims.artifacts) || claims.artifacts.length !== COMPONENTS.length) invalidRelease();
+    || !Array.isArray(claims.artifacts) || claims.artifacts.length !== components.length) invalidRelease();
   const artifacts = claims.artifacts.map((artifact, index) => validateReleaseArtifact(
     artifact, build.artifacts[index], build.platform,
   ));
@@ -262,12 +275,25 @@ function validateReleaseClaims(claims, build, now) {
 
 function validateBuildArtifact(artifact, platform) {
   if (!plainRecord(artifact) || !exactKeys(artifact, BUILD_ARTIFACT_KEYS)
-    || !COMPONENTS.includes(artifact.component) || artifact.fileName !== expectedFileName(artifact.component, platform)
+    || !COMPONENTS_V2.includes(artifact.component) || artifact.fileName !== expectedFileName(artifact.component, platform)
     || !SHA256.test(artifact.candidateDigest) || !SHA256.test(artifact.bundleDigest)
     || !SHA256.test(artifact.identityDigest) || !Number.isSafeInteger(artifact.bundleInputCount)
     || artifact.bundleInputCount < 1 || !Number.isSafeInteger(artifact.sizeBytes)
     || artifact.sizeBytes < 1 || artifact.sizeBytes > MAX_ARTIFACT_BYTES) invalidReceipt();
   return Object.freeze({ ...artifact });
+}
+
+function buildComponents(schemaVersion) {
+  if (schemaVersion === "deviludo.runner-native-build-receipt.v1") return COMPONENTS_V1;
+  if (schemaVersion === "deviludo.runner-native-build-receipt.v2") return COMPONENTS_V2;
+  invalidReceipt();
+}
+
+function contractVersion(buildReceipt) {
+  const schemaVersion = buildReceipt?.schemaVersion;
+  if (schemaVersion === "deviludo.runner-native-build-receipt.v1") return 1;
+  if (schemaVersion === "deviludo.runner-native-build-receipt.v2") return 2;
+  invalidReceipt();
 }
 
 function validateReleaseArtifact(artifact, candidate, platform) {
@@ -375,7 +401,8 @@ function hostArchitectureName(architecture) {
 }
 
 function expectedFileName(component, platform) {
-  const base = component === "godot-testkit" ? "deviludo-testkit" : "deviludo-physical-runner";
+  const base = FILE_NAMES[component];
+  if (!base) invalidRelease();
   return `${base}${platform === "windows" ? ".exe" : ""}`;
 }
 

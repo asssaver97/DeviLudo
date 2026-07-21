@@ -26,7 +26,14 @@ const POSTJECT_INTEGRITY = "sha512-b9Eb8h2eVqNE8edvKdwqkrY6O7kAwmI8kcnBv1NScolYJ
 const COMPONENTS = Object.freeze([
   Object.freeze({ component: "godot-testkit", entry: "services/godot-testkit/src/native-main.ts" }),
   Object.freeze({ component: "physical-runner", entry: "services/runner-control/src/native-main.ts" }),
+  Object.freeze({ component: "steam-client-connector", entry: "services/steam-client-connector/src/native-main.ts" }),
 ]);
+
+const FILE_NAMES = Object.freeze({
+  "godot-testkit": "deviludo-testkit",
+  "physical-runner": "deviludo-physical-runner",
+  "steam-client-connector": "deviludo-steam-client-connector",
+});
 
 export function parseRunnerNativeBuildArguments(argv) {
   if (!Array.isArray(argv) || argv.length % 2 !== 0) invalidInput();
@@ -101,7 +108,7 @@ export async function buildRunnerNativeCandidates(options, dependencies = {}) {
     const artifacts = [];
     for (const descriptor of COMPONENTS) {
       const extension = runtime.platform === "win32" ? ".exe" : "";
-      const fileName = `${descriptor.component === "godot-testkit" ? "deviludo-testkit" : "deviludo-physical-runner"}${extension}`;
+      const fileName = `${FILE_NAMES[descriptor.component]}${extension}`;
       const bundlePath = resolve(temporaryDirectory, `${descriptor.component}.cjs`);
       const blobPath = resolve(temporaryDirectory, `${descriptor.component}.blob`);
       const configPath = resolve(temporaryDirectory, `${descriptor.component}.sea.json`);
@@ -166,7 +173,7 @@ export async function buildRunnerNativeCandidates(options, dependencies = {}) {
       }));
     }
     const receipt = Object.freeze({
-      schemaVersion: "deviludo.runner-native-build-receipt.v1",
+      schemaVersion: "deviludo.runner-native-build-receipt.v2",
       status: "CANDIDATE",
       platformVersion: packageJson.version,
       sourceRevision: options.sourceRevision,

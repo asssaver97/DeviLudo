@@ -219,7 +219,7 @@ machine lock and authenticates the exact Connector
 omit the entire Connector environment group.
 
 `npm run start:physical-runner` is a source-tree development entry. Production
-builds both machine components with `npm run build:runner-native`, completes
+builds all three machine components with `npm run build:runner-native`, completes
 the platform-native signing boundary, and admits them with `npm run
 verify:runner-native`; the exact host-local procedure and release schemas are
 documented in `docs/runner-native-release.md`. The installed

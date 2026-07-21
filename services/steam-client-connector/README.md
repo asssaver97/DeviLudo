@@ -47,12 +47,23 @@ the bridge and Connector parse the bounded Steam
 the manifest-derived install directory must all match. The manifest digest is
 included in the Connector receipt and checked again by TestKit.
 
+The Node service itself is compiled into
+`deviludo-steam-client-connector[.exe]` by `npm run build:runner-native`. Its
+embedded identity is included in the same platform-native build receipt and
+Ed25519 release envelope as the Physical Runner and TestKit, while installation
+remains optional and restricted to fleet entries that declare the separate
+Connector SPIFFE identity. Production startup rejects a
+`DEVILUDO_STEAM_CONNECTOR_VERSION` that differs from the embedded platform
+version. Source checkout/`tsx` startup remains development-only.
+
 This repository tests the service and native adapter contract. It does not ship
 Valve credentials or pretend that the local developer machine is an enrolled
-Steam build account. Release readiness still requires signed native artifacts
-and enrolled Steam Client machines for every selected target platform.
+Steam build account. Release readiness still requires the verified Connector
+release, a separately platform-signed Steam UI bridge and enrolled Steam Client
+machines for every selected target platform.
 
-`npm run start:steam-client-connector` starts the production mTLS service after
+`npm run start:steam-client-connector` starts the source-tree mTLS service for
+integration development after
 checking the pinned native executable digest and its fixed `probe --json`
 contract. See `.env.example`; manifest, key and executable paths must be
 absolute, and the configured

@@ -78,7 +78,8 @@ behind the web console:
   consumes only a signed Runner job, exact source/test-plan grants and pinned
   Godot executable, runs a fixed scenario DSL without a shell, and uploads six
   immutable evidence categories. The repository `tsx` entry is local-only.
-  `build:runner-native` emits host-native Physical Runner and TestKit SEA
+  `build:runner-native` emits host-native Physical Runner, TestKit and optional
+  Steam Client Connector SEA
   candidates plus an immutable receipt; only artifacts accepted by the
   Ed25519/native-signature `verify:runner-native` gate may be installed. See
   `docs/runner-native-release.md`.

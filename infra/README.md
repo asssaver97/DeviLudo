@@ -26,7 +26,8 @@ E2E runners, inference connectors, non-Agent specification model Brokers, Steam
 publishers and release-signing depot finalizers live in separate network
 segments and service accounts.
 
-Physical Runner and Godot TestKit are not shipped in the control-plane image.
+Physical Runner, Godot TestKit and Steam Client Connector are not shipped in
+the control-plane image. The Connector is installed only on Steam-capable hosts.
 Each target host uses the fixed SEA candidate builder and dedicated native
 release trust policy described in `docs/runner-native-release.md`. The checked-in
 Runner trust template is revoked; production distributes an independently

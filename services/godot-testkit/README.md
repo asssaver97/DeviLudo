@@ -59,8 +59,9 @@ uses `tsx`. It is not a production Runner artifact.
 
 Each target OS installs a platform-native, read-only
 `/opt/deviludo-testkit/bin/deviludo-testkit` equivalent built together with the
-Physical Runner by `npm run build:runner-native`. The command pins Node,
-esbuild, postject and the package lock, executes both SEA identities, and emits
+Physical Runner and Steam Client Connector by `npm run build:runner-native`.
+The command pins Node, esbuild, postject and the package lock, executes all
+three SEA identities, and emits
 an immutable candidate receipt. The isolated native-signing pipeline must add
 Developer ID plus notarization, Authenticode or Sigstore evidence as appropriate;
 `npm run verify:runner-native` then verifies the dedicated Ed25519 release
@@ -82,12 +83,13 @@ Production deployment remains blocked until every selected Runner system has a
 verified final native release; the local `tsx` command and a raw build candidate
 are deliberately not presented as release artifacts.
 
-The Steam Client Connector is another required native, signed platform
-component. This repository defines and tests its strict mTLS request/receipt
-contract, but does not fabricate a Steam installation on localhost. A physical
-Windows/Linux/macOS gate remains blocked until the corresponding Connector and
-clean Steam Client sandbox are deployed and their executable/image digests are
-admitted by fleet policy.
+The Steam Client Connector is the third signed component in that release, but
+is installed only on Steam-capable hosts under a separate OS account and mTLS
+identity. Its platform-specific UI bridge remains separately signed and
+Runner-bound. This repository does not fabricate a Steam installation on
+localhost. A physical Windows/Linux/macOS gate remains blocked until the
+Connector, UI bridge and clean Steam Client sandbox are deployed and their
+digests are admitted by fleet policy.
 
 The child gets only private home/temp paths, locale/platform session variables,
 and the explicit mTLS artifact transport configuration. Provider keys, Steam

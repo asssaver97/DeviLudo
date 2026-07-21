@@ -174,5 +174,8 @@ function integer(value: string | undefined, fallback: number, minimum: number, m
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runSteamClientConnectorService();
+  void runSteamClientConnectorService().catch(() => {
+    process.stderr.write('{"service":"deviludo-steam-client-connector","code":"FAILED"}\n');
+    process.exitCode = 1;
+  });
 }
