@@ -66,6 +66,8 @@ export type DemoInstallation = {
   rollbackInstallationId: string | null;
   createdAt: string;
   activatedAt: string | null;
+  drainingAt: string | null;
+  retiredAt: string | null;
 };
 
 export type DemoAgentVersionState = "DISCOVERED" | "VALIDATING" | "APPROVED" | "DEPRECATED" | "BLOCKED" | "REJECTED";
@@ -136,6 +138,8 @@ const initialState = (): DemoStoreState => ({
       rollbackInstallationId: null,
       createdAt: "2026-07-18T08:42:00.000Z",
       activatedAt: "2026-07-18T08:50:00.000Z",
+      drainingAt: null,
+      retiredAt: null,
     },
     {
       id: "codex-installation-091",
@@ -152,6 +156,8 @@ const initialState = (): DemoStoreState => ({
       rollbackInstallationId: null,
       createdAt: "2026-07-17T18:20:00.000Z",
       activatedAt: "2026-07-17T18:25:00.000Z",
+      drainingAt: null,
+      retiredAt: null,
     },
   ],
   rollouts: {

@@ -78,6 +78,8 @@ export interface InstallationRecord {
   readonly selfUpdateDisabled: true;
   readonly createdAt: string;
   activatedAt: string | null;
+  drainingAt: string | null;
+  retiredAt: string | null;
   failure?: Readonly<{
     failureCode: string;
     evidenceDigest: string;

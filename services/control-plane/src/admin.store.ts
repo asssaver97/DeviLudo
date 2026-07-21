@@ -28,6 +28,8 @@ export interface AdminMutationCompletion<T> extends AdminMutationClaimBinding {
 
 export abstract class AdminStore {
   abstract read<T>(operation: (state: AdminCatalogState) => T): Promise<T>;
+  /** Global, fail-closed retirement guard for immutable AgentRun bindings. */
+  abstract countNonTerminalRuns(installationId: string): Promise<number>;
   abstract mutate<T>(
     operation: (state: AdminCatalogState) => T,
     completion?: AdminMutationCompletion<T>,
@@ -40,6 +42,8 @@ export class InMemoryAdminStore extends AdminStore {
   async read<T>(operation: (state: AdminCatalogState) => T): Promise<T> {
     return operation(this.#state);
   }
+
+  async countNonTerminalRuns(): Promise<number> { return 0; }
 
   async mutate<T>(
     operation: (state: AdminCatalogState) => T,
@@ -128,6 +132,8 @@ function seededState(): AdminCatalogState {
     selfUpdateDisabled: true,
     createdAt: now,
     activatedAt: now,
+    drainingAt: null,
+    retiredAt: null,
   };
   const provider: ProviderRevisionRecord = {
     id: "provider-platform-claude-r1",

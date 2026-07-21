@@ -309,6 +309,8 @@ export async function POST(request: Request, context: RouteContext) {
           rollbackInstallationId,
           createdAt: new Date().toISOString(),
           activatedAt: null,
+          drainingAt: null,
+          retiredAt: null,
         };
         const current = store.installations.findIndex((item) => item.id === id);
         if (current >= 0) {
@@ -362,6 +364,53 @@ export async function POST(request: Request, context: RouteContext) {
           rollbackProfileCount: rollbackProfileRevisionIds.length,
         });
         return { installationId, ...rollout, rollbackProfileRevisionIds, affectsNewTasksOnly: true };
+      });
+    }
+
+    const lifecycleMatch = /^agent-installations\/([^/]+)\/(drain|retire)$/.exec(key);
+    if (lifecycleMatch) {
+      const role = requireRole(request, VERSION_ROLES);
+      assertAllowedBodyFields(body, []);
+      const installationId = lifecycleMatch[1] ?? "";
+      const action = lifecycleMatch[2] as "drain" | "retire";
+      return mutate(`admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const installation = store.installations.find((item) => item.id === installationId);
+        const rollout = store.rollouts[installationId];
+        if (!installation || !rollout) throw new HttpProblem(404, "INSTALLATION_NOT_FOUND", "Installation does not exist");
+        if (action === "drain") {
+          if (installation.state !== "ACTIVE" || rollout.percent !== 100) {
+            throw new HttpProblem(409, "INSTALLATION_NOT_DRAINABLE", "Only a fully active installation can begin draining");
+          }
+          const at = new Date().toISOString();
+          rollout.previous = rollout.percent;
+          rollout.percent = 0;
+          rollout.state = "DRAINING";
+          installation.rolloutPercent = 0;
+          installation.state = "DRAINING";
+          installation.drainingAt = at;
+          const rollbackProfileRevisionIds = rollbackDemoProfiles(store, installation);
+          appendDemoAudit("AGENT_INSTALLATION_DRAINING", installationId, role, {
+            affectsRunningTasks: false,
+            rollbackProfileCount: rollbackProfileRevisionIds.length,
+            drainingAt: at,
+          });
+          return { installation, rollbackProfileRevisionIds, affectsNewTasksOnly: true };
+        }
+        if (installation.state !== "DRAINING" || rollout.percent !== 0 || !installation.drainingAt) {
+          throw new HttpProblem(409, "INSTALLATION_NOT_RETIRABLE", "Installation must finish draining before retirement");
+        }
+        const defaultScopes = Object.entries(store.defaults).filter(([, profileId]) =>
+          demoProfileReferencesInstallation(store, profileId, installationId)).map(([scope]) => scope);
+        if (defaultScopes.length > 0) {
+          throw new HttpProblem(409, "INSTALLATION_DEFAULT_STILL_REFERENCED", "Move every effective default away from this installation before retirement");
+        }
+        const at = new Date().toISOString();
+        rollout.state = "RETIRED";
+        installation.state = "RETIRED";
+        installation.retiredAt = at;
+        appendDemoAudit("AGENT_INSTALLATION_RETIRED", installationId, role, { activeRuns: 0, retiredAt: at });
+        return { installation, nonTerminalRuns: 0 };
       });
     }
 
@@ -712,6 +761,23 @@ function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallat
     }
   }
   return Object.freeze(replacements.map((profile) => profile.id));
+}
+
+function demoProfileReferencesInstallation(
+  store: DemoStoreState,
+  profileId: string,
+  installationId: string,
+): boolean {
+  const visited = new Set<string>();
+  let current: string | null = profileId;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const profile = store.profiles.find((item) => item.id === current);
+    if (!profile) return false;
+    if (profile.installationId === installationId) return true;
+    current = profile.fallbackProfileId;
+  }
+  return false;
 }
 
 function selectDemoRollbackInstallation(

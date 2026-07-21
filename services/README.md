@@ -224,6 +224,8 @@ Routes:
 | POST | `/admin/agent-installations` | PlatformAgentAdmin |
 | POST | `/admin/agent-rollouts/:id/advance` | PlatformAgentAdmin |
 | POST | `/admin/agent-rollouts/:id/rollback` | PlatformAgentAdmin |
+| POST | `/admin/agent-installations/:id/drain` | PlatformAgentAdmin |
+| POST | `/admin/agent-installations/:id/retire` | PlatformAgentAdmin |
 | POST | `/admin/agent-profiles` | scope owner |
 | POST | `/admin/agent-profiles/:id/validate` | scope owner |
 | POST | `/admin/agent-profiles/:id/activate` | SecurityAdmin |

@@ -152,6 +152,25 @@ test("Postgres admin catalog rolls back a failed mutation without writing state 
   assert.equal(statements.some((text) => text.includes("UPDATE deviludo.admin_catalog_state")), false);
 });
 
+test("Postgres admin retirement guard counts every non-terminal run with RLS fail-closed", async () => {
+  const statements: string[] = [];
+  const client = {
+    async query(text: string, values?: unknown[]) {
+      statements.push(text);
+      if (text.includes("FROM deviludo.agent_runs")) {
+        assert.deepEqual(values, ["claude-code-installation-test"]);
+        return result([{ active_count: "2" }]);
+      }
+      return result([]);
+    },
+    release() {},
+  } as unknown as PoolClient;
+  const store = new PostgresAdminStore({ async connect() { return client; }, async end() {} } as unknown as Pool);
+  assert.equal(await store.countNonTerminalRuns("claude-code-installation-test"), 2);
+  assert.equal(statements.includes("SET LOCAL row_security = off"), true);
+  assert.match(statements.find((text) => text.includes("FROM deviludo.agent_runs")) ?? "", /state NOT IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
+});
+
 test("Postgres admin catalog backfills legacy active Installation activation time deterministically", async () => {
   const createdAt = "2026-07-17T08:00:00.000Z";
   const legacyPayload = {

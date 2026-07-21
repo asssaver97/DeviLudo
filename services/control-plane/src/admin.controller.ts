@@ -51,6 +51,16 @@ export class AdminController {
     return this.service.rollout(id, "rollback", actor(request));
   }
 
+  drainInstallation(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
+    return this.service.transitionInstallation(id, "drain", actor(request));
+  }
+
+  retireInstallation(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
+    return this.service.transitionInstallation(id, "retire", actor(request));
+  }
+
   createProfile(body: Record<string, unknown>, request: FastifyRequest) {
     return this.service.createProfile(objectBody(body), actor(request));
   }
@@ -131,6 +141,8 @@ applyRoute("blockVersion", Post("agent-versions/block"), ["PlatformAgentAdmin"],
 applyRoute("createInstallation", Post("agent-installations"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("advanceRollout", Post("agent-rollouts/:id/advance"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("drainInstallation", Post("agent-installations/:id/drain"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("retireInstallation", Post("agent-installations/:id/retire"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("createProfile", Post("agent-profiles"), PROFILE_ROLES, [Body(), Req()]);
 applyRoute("validateProfile", Post("agent-profiles/:id/validate"), PROFILE_ROLES, [Param("id"), Body(), Req()]);
 applyRoute("activateProfile", Post("agent-profiles/:id/activate"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);

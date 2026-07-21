@@ -200,6 +200,7 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
   assert.equal(replay.statusCode, 200);
   assert.equal(replay.headers["idempotent-replayed"], "true");
   assert.equal(replay.json().meta.idempotentReplay, true);
+
 });
 
 test("credentials never echo plaintext and Provider activation is a separate security gate", async () => {
@@ -644,6 +645,45 @@ test("Provider pricing and authentication must be explicit and protocol compatib
   });
   assert.equal(missingPricing.statusCode, 400);
   assert.equal(missingPricing.json().error.code, "PROVIDER_PRICING_REJECTED");
+});
+
+test("Agent Installation drain and retirement preserve pinned runs while fencing new work", async () => {
+  for (const [url, key, payload] of [
+    ["/admin/agent-versions/discover", "discover-claude-lifecycle", { agent: "claude-code", version: "2.1.18" }],
+    ["/admin/agent-versions/approve", "approve-claude-lifecycle", { id: "claude-code@2.1.18" }],
+  ] as const) {
+    const response = await inject({ method: "POST", url, role: "PlatformAgentAdmin", key, payload });
+    assert.equal(response.statusCode, 201);
+  }
+  const created = await inject({
+    method: "POST", url: "/admin/agent-installations", role: "PlatformAgentAdmin", key: "install-claude-lifecycle",
+    payload: { agent: "claude-code", version: "2.1.18", workerPool: "development-linux-lifecycle", adapterVersion: "1.3.1" },
+  });
+  assert.equal(created.statusCode, 201);
+  const installationId = created.json().data.id as string;
+  for (const [index, expected] of [5, 25, 100].entries()) {
+    const advanced = await inject({
+      method: "POST", url: `/admin/agent-rollouts/${installationId}/advance`, role: "PlatformAgentAdmin",
+      key: `advance-claude-lifecycle-${index}`, payload: {},
+    });
+    assert.equal(advanced.statusCode, 201);
+    assert.equal(advanced.json().data.installation.rolloutPercent, expected);
+  }
+  const draining = await inject({
+    method: "POST", url: `/admin/agent-installations/${installationId}/drain`, role: "PlatformAgentAdmin",
+    key: "drain-claude-lifecycle", payload: {},
+  });
+  assert.equal(draining.statusCode, 201);
+  assert.equal(draining.json().data.installation.state, "DRAINING");
+  assert.equal(draining.json().data.installation.rolloutPercent, 0);
+  assert.ok(draining.json().data.installation.drainingAt);
+  const retired = await inject({
+    method: "POST", url: `/admin/agent-installations/${installationId}/retire`, role: "PlatformAgentAdmin",
+    key: "retire-claude-lifecycle", payload: {},
+  });
+  assert.equal(retired.statusCode, 201);
+  assert.equal(retired.json().data.installation.state, "RETIRED");
+  assert.ok(retired.json().data.installation.retiredAt);
 });
 
 interface InjectInput {

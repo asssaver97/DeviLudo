@@ -159,7 +159,8 @@ export class NativeAgentSupplyChainController {
       action: request.action,
       fromPercent: request.fromPercent,
       toPercent: request.toPercent,
-      state: (request.toPercent === 0 ? "READY" : request.toPercent === 100 ? "ACTIVE" : "CANARY") as "READY" | "CANARY" | "ACTIVE",
+      state: request.action === "DRAIN" ? "DRAINING" : request.action === "RETIRE" ? "RETIRED"
+        : request.toPercent === 0 ? "READY" : request.toPercent === 100 ? "ACTIVE" : "CANARY",
       health: "HEALTHY" as const,
       newTasksOnly: true as const,
       runningTasksUnaffected: true as const,

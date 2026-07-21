@@ -52,6 +52,17 @@ test("development supply-chain executes discovery, validation, immutable image b
     fromPercent: 5,
     toPercent: 100,
   }), /receipt is invalid/);
+  await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
+    action: "ADVANCE", fromPercent: 5, toPercent: 25 });
+  await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
+    action: "ADVANCE", fromPercent: 25, toPercent: 100 });
+  const draining = await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
+    action: "DRAIN", fromPercent: 100, toPercent: 0 });
+  assert.equal(draining.state, "DRAINING");
+  assert.equal(draining.runningTasksUnaffected, true);
+  const retired = await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
+    action: "RETIRE", fromPercent: 0, toPercent: 0 });
+  assert.equal(retired.state, "RETIRED");
 });
 
 test("mTLS supply-chain client pins routes, health identity and exact receipt digests", async () => {

@@ -189,7 +189,7 @@ function rolloutRequest(body: Record<string, unknown>): AgentInstallationRollout
   binding(body);
   if (typeof body.installationId !== "string" || !SAFE_ID.test(body.installationId)
     || typeof body.imageDigest !== "string" || !DIGEST.test(body.imageDigest)
-    || body.action !== "ADVANCE" && body.action !== "ROLLBACK"
+    || body.action !== "ADVANCE" && body.action !== "ROLLBACK" && body.action !== "DRAIN" && body.action !== "RETIRE"
     || !rolloutTransition(body.action, body.fromPercent, body.toPercent)) invalid();
   return Object.freeze({
     schemaVersion: "deviludo.agent-installation-rollout-request.v1",
@@ -223,8 +223,10 @@ function officialCandidate(candidate: ReturnType<typeof parseAgentVersionCandida
 }
 
 function rolloutTransition(action: unknown, from: unknown, to: unknown): boolean {
-  return action === "ROLLBACK" ? to === 0 && (from === 5 || from === 25 || from === 100)
-    : action === "ADVANCE" && ((from === 0 && to === 5) || (from === 5 && to === 25) || (from === 25 && to === 100));
+  return action === "ROLLBACK" || action === "DRAIN"
+    ? to === 0 && (from === 5 || from === 25 || from === 100)
+    : action === "RETIRE" ? from === 0 && to === 0
+      : action === "ADVANCE" && ((from === 0 && to === 5) || (from === 5 && to === 25) || (from === 25 && to === 100));
 }
 
 function isTerminalFailureShape(value: unknown): boolean {

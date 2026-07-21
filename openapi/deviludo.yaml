@@ -263,6 +263,32 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-installations/{id}/drain:
+    post:
+      operationId: drainAgentInstallation
+      description: Stops assigning new tasks while immutable in-flight AgentRun bindings continue on the pinned image.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-installations/{id}/retire:
+    post:
+      operationId: retireAgentInstallation
+      description: Retires a drained installation only after the control plane proves that no non-terminal AgentRun remains pinned to it.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-profiles:
     post:
       operationId: createAgentProfileRevision

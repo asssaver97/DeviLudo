@@ -185,7 +185,7 @@ export class LockedNativeSupplyChainTools implements NativeSupplyChainTools {
 
   async rollout(request: AgentInstallationRolloutRequest): Promise<void> {
     await this.probe();
-    const command = request.action === "ROLLBACK" ? "rollback" : "advance";
+    const command = request.action.toLowerCase();
     const result = await this.#run("fleetctl", [
       "--config", this.policy.fleetConfigFile, "installation", command,
       "--installation-id", request.installationId, "--image-digest", request.imageDigest,

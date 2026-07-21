@@ -66,10 +66,10 @@ export interface AgentInstallationBuildReceipt {
 export interface AgentInstallationRolloutReceipt {
   readonly installationId: string;
   readonly imageDigest: string;
-  readonly action: "ADVANCE" | "ROLLBACK";
+  readonly action: "ADVANCE" | "ROLLBACK" | "DRAIN" | "RETIRE";
   readonly fromPercent: 0 | 5 | 25 | 100;
   readonly toPercent: 0 | 5 | 25 | 100;
-  readonly state: "READY" | "CANARY" | "ACTIVE";
+  readonly state: "READY" | "CANARY" | "ACTIVE" | "DRAINING" | "RETIRED";
   readonly health: "HEALTHY";
   readonly newTasksOnly: true;
   readonly runningTasksUnaffected: true;
@@ -147,7 +147,7 @@ export abstract class AgentSupplyChain {
   abstract rollout(input: AgentSupplyChainOperation & Readonly<{
     installationId: string;
     imageDigest: string;
-    action: "ADVANCE" | "ROLLBACK";
+    action: "ADVANCE" | "ROLLBACK" | "DRAIN" | "RETIRE";
     fromPercent: 0 | 5 | 25 | 100;
     toPercent: 0 | 5 | 25 | 100;
   }>): Promise<AgentInstallationRolloutReceipt>;
@@ -240,7 +240,7 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
       action: input.action,
       fromPercent: input.fromPercent,
       toPercent: input.toPercent,
-      state: (input.toPercent === 0 ? "READY" : input.toPercent === 100 ? "ACTIVE" : "CANARY") as "READY" | "CANARY" | "ACTIVE",
+      state: rolloutState(input.action, input.toPercent),
       health: "HEALTHY" as const,
       newTasksOnly: true as const,
       runningTasksUnaffected: true as const,
@@ -475,7 +475,7 @@ function rolloutReceipt(value: unknown, input: Parameters<AgentSupplyChain["roll
   const body = record(value);
   exactKeys(body, ["installationId", "imageDigest", "action", "fromPercent", "toPercent", "state", "health",
     "newTasksOnly", "runningTasksUnaffected", "rolloutReceiptId", "rolloutReceiptDigest", "completedAt"]);
-  const state = input.toPercent === 0 ? "READY" : input.toPercent === 100 ? "ACTIVE" : "CANARY";
+  const state = rolloutState(input.action, input.toPercent);
   if (body.installationId !== input.installationId || body.imageDigest !== input.imageDigest || body.action !== input.action
     || body.fromPercent !== input.fromPercent || body.toPercent !== input.toPercent || body.state !== state
     || body.health !== "HEALTHY" || body.newTasksOnly !== true || body.runningTasksUnaffected !== true
@@ -543,9 +543,18 @@ function validateOperation(input: AgentSupplyChainOperation): void {
   if (!SHA256.test(input.operationKey) || !SHA256.test(input.requestDigest)) invalidReceipt();
 }
 function validateRollout(action: string, from: number, to: number): void {
-  const valid = action === "ROLLBACK" ? to === 0 && from !== 0
-    : action === "ADVANCE" && ((from === 0 && to === 5) || (from === 5 && to === 25) || (from === 25 && to === 100));
+  const valid = action === "ROLLBACK" || action === "DRAIN" ? to === 0 && from !== 0
+    : action === "RETIRE" ? from === 0 && to === 0
+      : action === "ADVANCE" && ((from === 0 && to === 5) || (from === 5 && to === 25) || (from === 25 && to === 100));
   if (!valid) invalidReceipt();
+}
+function rolloutState(
+  action: "ADVANCE" | "ROLLBACK" | "DRAIN" | "RETIRE",
+  percent: 0 | 5 | 25 | 100,
+): AgentInstallationRolloutReceipt["state"] {
+  if (action === "DRAIN") return "DRAINING";
+  if (action === "RETIRE") return "RETIRED";
+  return percent === 0 ? "READY" : percent === 100 ? "ACTIVE" : "CANARY";
 }
 function agent(value: unknown): value is AgentKind { return value === "claude-code" || value === "codex-cli"; }
 function workerPool(value: string): boolean { return /^dev(?:elopment)?[-_a-z0-9]{0,100}$/i.test(value); }

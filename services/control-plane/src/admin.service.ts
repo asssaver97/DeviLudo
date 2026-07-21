@@ -289,6 +289,8 @@ export class AdminService {
           selfUpdateDisabled: true,
           createdAt: new Date().toISOString(),
           activatedAt: null,
+          drainingAt: null,
+          retiredAt: null,
         });
         this.audit(state, "AGENT_INSTALLATION_BUILDING", id, actor, {
           agent, version, workerPool, adapterVersion, rollbackInstallationId,
@@ -462,6 +464,104 @@ export class AdminService {
         activeRunsKeepPinnedImage: true,
         incompatibleSessionsNeverResumeAcrossVersions: true,
       };
+    });
+  }
+
+  async transitionInstallation(
+    installationId: string,
+    action: "drain" | "retire",
+    actor: RequestActor,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const snapshot = await this.store.read((state) => {
+      const installation = state.installations.get(installationId);
+      if (!installation || !installation.imageDigest) {
+        throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
+      }
+      if (action === "drain") {
+        if (installation.state !== "ACTIVE" || installation.rolloutPercent !== 100) {
+          throw new ServiceProblem(409, "INSTALLATION_NOT_DRAINABLE", "Only a fully active installation can begin draining");
+        }
+      } else {
+        if (installation.state !== "DRAINING" || installation.rolloutPercent !== 0 || !installation.drainingAt) {
+          throw new ServiceProblem(409, "INSTALLATION_NOT_RETIRABLE", "Installation must finish draining before retirement");
+        }
+        const defaultScopes = [...state.defaults.entries()].filter(([, profileId]) =>
+          profileReferencesInstallation(state, profileId, installationId)).map(([scope]) => scope);
+        if (defaultScopes.length > 0) {
+          throw new ServiceProblem(409, "INSTALLATION_DEFAULT_STILL_REFERENCED", "Move every effective default away from this installation before retirement", {
+            defaultScopes: Object.freeze(defaultScopes),
+          });
+        }
+      }
+      return structuredClone(installation);
+    });
+    if (action === "retire") {
+      let activeRuns: number;
+      try {
+        activeRuns = await this.store.countNonTerminalRuns(installationId);
+      } catch {
+        throw new ServiceProblem(503, "INSTALLATION_RUN_GUARD_UNAVAILABLE", "Cannot prove that every pinned Agent run is terminal");
+      }
+      if (activeRuns > 0) {
+        throw new ServiceProblem(409, "INSTALLATION_RUNS_STILL_ACTIVE", "Installation still has pinned non-terminal Agent runs", { activeRuns });
+      }
+    }
+
+    let receipt: AgentInstallationRolloutReceipt;
+    try {
+      receipt = await this.supplyChain.rollout({
+        ...supplyChainOperation(actor),
+        installationId,
+        imageDigest: snapshot.imageDigest!,
+        action: action === "drain" ? "DRAIN" : "RETIRE",
+        fromPercent: snapshot.rolloutPercent,
+        toPercent: 0,
+      });
+    } catch (error) {
+      await this.store.mutate((state) => {
+        const current = state.installations.get(installationId);
+        if (!current || current.state !== snapshot.state || current.rolloutPercent !== snapshot.rolloutPercent) return;
+        this.audit(state, `AGENT_INSTALLATION_${action.toUpperCase()}_DEFERRED`, installationId, actor, {
+          state: current.state,
+          rolloutPercent: current.rolloutPercent,
+          retryable: !(error instanceof AgentSupplyChainPolicyFailure),
+        });
+      });
+      throw error;
+    }
+
+    return this.mutate(actor, (state) => {
+      const installation = state.installations.get(installationId);
+      if (!installation || installation.imageDigest !== snapshot.imageDigest
+        || installation.rolloutPercent !== snapshot.rolloutPercent || installation.state !== snapshot.state) {
+        throw new ServiceProblem(409, "INSTALLATION_LIFECYCLE_RACE", "Installation changed before lifecycle receipt could commit");
+      }
+      installation.previousRolloutPercent = installation.rolloutPercent;
+      installation.rolloutPercent = receipt.toPercent;
+      installation.state = receipt.state;
+      installation.health = receipt.health;
+      let rollbackProfiles: readonly string[] = Object.freeze([]);
+      if (action === "drain") {
+        installation.drainingAt = receipt.completedAt;
+        rollbackProfiles = restoreProfilesToRollback(state, installation, {
+          operationDigest: receipt.rolloutReceiptDigest,
+          occurredAt: receipt.completedAt,
+        });
+      } else {
+        installation.retiredAt = receipt.completedAt;
+      }
+      this.audit(state, action === "drain" ? "AGENT_INSTALLATION_DRAINING" : "AGENT_INSTALLATION_RETIRED", installationId, actor, {
+        rolloutReceiptId: receipt.rolloutReceiptId,
+        rolloutReceiptDigest: receipt.rolloutReceiptDigest,
+        rollbackProfileRevisionIds: rollbackProfiles,
+        ...(action === "drain" ? { activeRunsKeepPinnedImage: true } : { nonTerminalRuns: 0 }),
+      });
+      return Object.freeze({
+        installation,
+        rollbackProfileRevisionIds: rollbackProfiles,
+        newTasksOnly: true,
+        activeRunsKeepPinnedImage: action === "drain",
+      });
     });
   }
 
@@ -1305,6 +1405,23 @@ function restoreProfilesToRollback(
       && !["SUPERSEDED", "DISABLED"].includes(profile.state)) profile.state = "DEGRADED";
   }
   return Object.freeze([...new Set(replacements.map((profile) => profile.id))]);
+}
+
+function profileReferencesInstallation(
+  state: AdminCatalogState,
+  profileId: string,
+  installationId: string,
+): boolean {
+  const visited = new Set<string>();
+  let current: string | null = profileId;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const profile = state.profiles.get(current);
+    if (!profile) return false;
+    if (profile.installationId === installationId) return true;
+    current = profile.fallbackProfileRevisionId;
+  }
+  return false;
 }
 
 function rollbackProfileRevisionId(

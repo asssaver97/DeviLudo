@@ -69,6 +69,8 @@ test("Agent administration mutations publish exact request-body contracts", () =
   for (const path of [
     "/admin/agent-rollouts/{id}/advance",
     "/admin/agent-rollouts/{id}/rollback",
+    "/admin/agent-installations/{id}/drain",
+    "/admin/agent-installations/{id}/retire",
     "/admin/agent-profiles/{id}/validate",
     "/admin/agent-profiles/{id}/activate",
     "/admin/agent-profiles/{id}/disable",

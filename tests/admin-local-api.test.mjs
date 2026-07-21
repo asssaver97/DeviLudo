@@ -346,6 +346,39 @@ test("local installation lineage selects the most recently activated healthy gen
   assert.equal(second.rollbackInstallationId, first.id);
 });
 
+test("local Installation drains new work and retires only after defaults move away", async () => {
+  const store = resetDemoStore();
+  const drainPath = "agent-installations/codex-installation-091/drain";
+  const draining = await POST(request(drainPath, "POST", "PlatformAgentAdmin"), context(drainPath));
+  assert.equal(draining.status, 201);
+  assert.equal(store.installations.find((item) => item.id === "codex-installation-091")?.state, "DRAINING");
+  assert.equal(store.rollouts["codex-installation-091"]?.percent, 0);
+  assert.ok(store.installations.find((item) => item.id === "codex-installation-091")?.drainingAt);
+
+  const moveDefaultPath = "agent-defaults/project:ember-archipelago";
+  const moved = await PUT(
+    request(moveDefaultPath, "PUT", "PlatformAgentAdmin", { profileRevisionId: "profile-claude-platform-r5" }),
+    context(moveDefaultPath),
+  );
+  assert.equal(moved.status, 200);
+
+  const retirePath = "agent-installations/codex-installation-091/retire";
+  const retired = await POST(request(retirePath, "POST", "PlatformAgentAdmin"), context(retirePath));
+  assert.equal(retired.status, 201);
+  assert.equal(store.installations.find((item) => item.id === "codex-installation-091")?.state, "RETIRED");
+  assert.ok(store.installations.find((item) => item.id === "codex-installation-091")?.retiredAt);
+
+  resetDemoStore();
+  const defaultDrainPath = "agent-installations/claude-installation-214/drain";
+  assert.equal((await POST(request(defaultDrainPath, "POST", "PlatformAgentAdmin"), context(defaultDrainPath))).status, 201);
+  const blocked = await POST(
+    request("agent-installations/claude-installation-214/retire", "POST", "PlatformAgentAdmin"),
+    context("agent-installations/claude-installation-214/retire"),
+  );
+  assert.equal(blocked.status, 409);
+  assert.equal((await blocked.json()).error.code, "INSTALLATION_DEFAULT_STILL_REFERENCED");
+});
+
 test("local default selection rejects an active Profile whose Installation has not reached 100%", async () => {
   const store = resetDemoStore();
   const profile = store.profiles.find((item) => item.id === "profile-claude-platform-r5");

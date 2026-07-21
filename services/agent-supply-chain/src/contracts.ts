@@ -38,7 +38,7 @@ export interface AgentInstallationRolloutRequest extends AgentSupplyChainOperati
   readonly schemaVersion: "deviludo.agent-installation-rollout-request.v1";
   readonly installationId: string;
   readonly imageDigest: string;
-  readonly action: "ADVANCE" | "ROLLBACK";
+  readonly action: "ADVANCE" | "ROLLBACK" | "DRAIN" | "RETIRE";
   readonly fromPercent: 0 | 5 | 25 | 100;
   readonly toPercent: 0 | 5 | 25 | 100;
 }

@@ -69,6 +69,35 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
     }
   }
 
+  async countNonTerminalRuns(installationId: string): Promise<number> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{2,199}$/.test(installationId)) {
+      throw new Error("Agent installation identifier is invalid");
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      // PlatformAgentAdmin retirement is intentionally global. A role without
+      // BYPASSRLS fails here instead of observing an unsafe partial count.
+      await client.query("SET LOCAL row_security = off");
+      const selected = await client.query<{ active_count: string | number }>(
+        `SELECT count(*) AS active_count
+           FROM deviludo.agent_runs
+          WHERE installation_id = $1
+            AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')`,
+        [installationId],
+      );
+      const count = Number(selected.rows[0]?.active_count);
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error("Agent run retirement guard is unavailable");
+      await client.query("COMMIT");
+      return count;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* preserve original error */ }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async mutate<T>(
     operation: (state: AdminCatalogState) => T,
     completion?: AdminMutationCompletion<T>,
@@ -188,7 +217,7 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
 }
 
 function normalizeInstallationActivation(installation: InstallationRecord): void {
-  const mutable = installation as unknown as { activatedAt?: unknown };
+  const mutable = installation as unknown as { activatedAt?: unknown; drainingAt?: unknown; retiredAt?: unknown };
   if (mutable.activatedAt === undefined) {
     mutable.activatedAt = installation.state === "ACTIVE" && installation.health === "HEALTHY"
       && installation.rolloutPercent === 100
@@ -198,6 +227,13 @@ function normalizeInstallationActivation(installation: InstallationRecord): void
   if (mutable.activatedAt !== null
     && (typeof mutable.activatedAt !== "string" || !Number.isFinite(Date.parse(mutable.activatedAt)))) {
     throw new Error("Administrator catalog installation activation timestamp is invalid");
+  }
+  for (const field of ["drainingAt", "retiredAt"] as const) {
+    if (mutable[field] === undefined) mutable[field] = null;
+    if (mutable[field] !== null
+      && (typeof mutable[field] !== "string" || !Number.isFinite(Date.parse(mutable[field] as string)))) {
+      throw new Error(`Administrator catalog installation ${field} timestamp is invalid`);
+    }
   }
 }
 

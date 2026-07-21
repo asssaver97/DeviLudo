@@ -36,6 +36,10 @@ class FailingAgentSupplyChain extends AgentSupplyChain {
   async probe() { return this.delegate.probe(); }
 }
 
+class BusyRunAdminStore extends InMemoryAdminStore {
+  override async countNonTerminalRuns(): Promise<number> { return 1; }
+}
+
 test("trusted validation failure rejects the exact version while transient errors remain retryable", async () => {
   const store = new InMemoryAdminStore();
   const chain = new FailingAgentSupplyChain();
@@ -64,6 +68,25 @@ test("trusted validation failure rejects the exact version while transient error
     /temporary scanner outage/,
   );
   assert.equal(await transientStore.read((state) => state.versions.get("codex-cli@0.92.2")?.state), "DISCOVERED");
+});
+
+test("retirement fails closed while an immutable AgentRun remains pinned to the drained image", async () => {
+  const store = new BusyRunAdminStore();
+  const service = adminService(store, new FailingAgentSupplyChain());
+  const installation = await service.createInstallation({
+    agent: "codex-cli", version: "0.91.0", workerPool: "development-linux-retirement", adapterVersion: "1.2.2",
+  }, actor("build-retirement-guard"));
+  await service.rollout(installation.id, "advance", actor("retirement-guard-5"));
+  await service.rollout(installation.id, "advance", actor("retirement-guard-25"));
+  await service.rollout(installation.id, "advance", actor("retirement-guard-100"));
+  await service.transitionInstallation(installation.id, "drain", actor("retirement-guard-drain"));
+  await assert.rejects(
+    service.transitionInstallation(installation.id, "retire", actor("retirement-guard-retire")),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "INSTALLATION_RUNS_STILL_ACTIVE",
+  );
+  const retained = await store.read((state) => structuredClone(state.installations.get(installation.id)));
+  assert.equal(retained?.state, "DRAINING");
+  assert.equal(retained?.retiredAt, null);
 });
 
 test("Profile activation rejects an incomplete Provider probe even when every stored result is PASS", async () => {

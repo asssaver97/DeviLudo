@@ -31,6 +31,10 @@ type AgentInstallation = {
   health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   rolloutPercent: number;
   rollbackInstallationId?: string | null;
+  createdAt?: string;
+  activatedAt?: string | null;
+  drainingAt?: string | null;
+  retiredAt?: string | null;
   failure?: {
     failureCode: string;
     evidenceDigest: string;
@@ -334,6 +338,23 @@ export default function AgentAdminDashboard() {
     }
   };
 
+  const transitionInstallation = async (installationId: string, action: "drain" | "retire") => {
+    if (!canOperateVersions) {
+      notify("当前角色不能变更 Installation 生命周期", "warning");
+      return;
+    }
+    try {
+      await adminRequest(`agent-installations/${installationId}/${action}`, { method: "POST", role });
+      await refreshAdminState();
+      await refreshAudit();
+      notify(action === "drain"
+        ? "已停止分配新任务；运行中任务继续使用锁定镜像"
+        : "Installation 已退役并保留为不可变历史记录", action === "drain" ? "warning" : "success");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : action === "drain" ? "排空失败" : "退役失败", "warning");
+    }
+  };
+
   const changeDefaultAgent = async (agent: AgentKind) => {
     if (!canOperateVersions) {
       notify("仅 PlatformAgentAdmin 可修改全局默认", "warning");
@@ -469,7 +490,7 @@ export default function AgentAdminDashboard() {
         <div className={styles.content}>
           {activeTab === "overview" && <OverviewTab catalog={catalog} versions={versions} installations={installations} defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
-          {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations && !adminLoading && !adminError} onAdvance={advanceRollout} onRollback={rollback} />}
+          {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations && !adminLoading && !adminError} onAdvance={advanceRollout} onRollback={rollback} onLifecycle={transitionInstallation} />}
           {activeTab === "providers" && <ProvidersTab key={providerEditorKey} role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
             providers={providers} credentials={credentials}
             production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }}
@@ -609,11 +630,12 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
   );
 }
 
-function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
+function DeploymentsTab({ installations, canOperate, onAdvance, onRollback, onLifecycle }: {
   installations: AgentInstallation[];
   canOperate: boolean;
   onAdvance: (installationId: string) => void;
   onRollback: (installationId: string) => void;
+  onLifecycle: (installationId: string, action: "drain" | "retire") => void;
 }) {
   const trustedImageAvailable = installations.some((installation) => Boolean(installation.imageDigest && installation.buildReceiptId)
     && installation.health === "HEALTHY" && ["READY", "CANARY", "ACTIVE"].includes(installation.state));
@@ -632,6 +654,8 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
                 <h3>{installation.agent === "claude-code" ? "Claude Code" : "Codex CLI"} {installation.version}</h3>
                 <code>{installation.imageDigest ? `${installation.imageDigest.slice(0, 22)}…${installation.imageDigest.slice(-8)}` : "镜像未生成"}</code>
                 <span>{installation.workerPool} · {installation.health} · adapter {installation.adapterVersion}</span>
+                <span>创建 {formatLifecycleTime(installation.createdAt)} · 激活 {formatLifecycleTime(installation.activatedAt)}</span>
+                {(installation.drainingAt || installation.retiredAt) && <span>排空 {formatLifecycleTime(installation.drainingAt)} · 退役 {formatLifecycleTime(installation.retiredAt)}</span>}
                 {installation.failure && (
                   <div className={styles.failureEvidence}>
                     <strong>{installation.failure.failureCode}</strong>
@@ -646,8 +670,10 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
                 <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
               </div>
               <div className={styles.verticalActions}>
-                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || percent === 100 || installation.state === "QUARANTINED" || installation.state === "FAILED" || !installation.imageDigest}>推进至 {next}</button>
-                <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || percent === 0 || installation.state === "QUARANTINED" || installation.state === "FAILED"}>回滚</button>
+                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || !["READY", "CANARY"].includes(installation.state) || percent === 100 || !installation.imageDigest}>推进至 {next}</button>
+                <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || !["CANARY", "ACTIVE"].includes(installation.state) || percent === 0}>回滚</button>
+                {installation.state === "ACTIVE" && <button className={styles.secondaryButton} type="button" onClick={() => onLifecycle(installation.id, "drain")} disabled={!canOperate}>排空</button>}
+                {installation.state === "DRAINING" && <button className={styles.secondaryButton} type="button" onClick={() => onLifecycle(installation.id, "retire")} disabled={!canOperate}>确认退役</button>}
               </div>
             </div>
           );
@@ -662,6 +688,14 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
       </section>
     </>
   );
+}
+
+function formatLifecycleTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime())
+    ? parsed.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "—";
 }
 
 function ProvidersTab({ role, localHealth, installations, profiles, providers, credentials, production, notify, onChanged,
