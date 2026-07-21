@@ -17,5 +17,13 @@ run without creating a second run. A pre-existing Provider projection is reused
 only when every serving field still matches; drift fails closed before AgentRun
 creation.
 
+Repair actions do not ask GitHub for a new moving default-branch receipt and do
+not reuse a terminal Run. The worker re-resolves the predecessor Run, execution
+receipt and original source lineage under tenant RLS. Candidate E2E failures
+must also match one non-invalidated failed evidence bundle and Draft PR. It then
+creates a successor Run from the exact predecessor catalog lock; E2E repairs use
+the tested candidate commit/source digest as their workspace base, while Agent
+process failures retain the original baseline.
+
 Run tests from the repository root with `npm run test:agent-configuration` and
 start the production worker with `npm run start:agent-configuration`.

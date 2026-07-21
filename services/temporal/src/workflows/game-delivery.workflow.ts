@@ -2,6 +2,7 @@ import {
   condition,
   defineQuery,
   defineSignal,
+  patched,
   proxyActivities,
   setHandler,
 } from "@temporalio/workflow";
@@ -22,6 +23,7 @@ import {
 export const deliverySignal = defineSignal<[DeliverySignal]>("deliverySignal");
 export const deliverySnapshotQuery = defineQuery<DeliverySnapshot>("deliverySnapshot");
 export const deliveryNextCommandQuery = defineQuery<DeliveryCommand>("deliveryNextCommand");
+export const AUTOMATIC_REPAIR_SUCCESSOR_RUNS_PATCH = "automatic-repair-successor-runs-v1";
 
 const activities = proxyActivities<DeliveryActivities>({
   startToCloseTimeout: "10 minutes",
@@ -42,7 +44,10 @@ const activities = proxyActivities<DeliveryActivities>({
 export async function gameDeliveryWorkflow(
   input: GameDeliveryWorkflowInput,
 ): Promise<DeliverySnapshot> {
-  const machine = new GameDeliveryWorkflow(input);
+  const machine = new GameDeliveryWorkflow({
+    ...input,
+    automaticRepairSuccessorRuns: patched(AUTOMATIC_REPAIR_SUCCESSOR_RUNS_PATCH),
+  });
   const queue: DeliverySignal[] = [];
   let lastDispatchedKey: string | null = null;
   let lastProjectedKey: string | null = null;

@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { sha256Canonical } from "../../runner-control/src/canonical";
+import { parseEvidenceBundle } from "../../evidence-archive/src/archive";
 import type { SourceBaselineReceipt } from "../../scm-proxy/src/source-baseline-contracts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
-import { resolveCatalogConfiguration, type ResolvedProfileConfiguration } from "./catalog";
+import {
+  resolveCatalogConfiguration,
+  type ResolvedCatalogConfiguration,
+  type ResolvedProfileConfiguration,
+} from "./catalog";
 import type {
   AgentConfigurationClaim,
   AgentConfigurationLock,
@@ -15,6 +22,10 @@ import type {
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
+const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/;
+const EXACT_VERSION = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,99}$/;
 
 type CandidateRow = {
   action_id: string;
@@ -63,6 +74,39 @@ type RunRow = {
 };
 type ProviderProjectionRow = { provider_revision_id: string };
 type RunAuthorizationRow = { run_id: string };
+type PreviousRunRow = {
+  id: string;
+  state: string;
+  resolution_digest: string;
+  configuration_lock: unknown;
+  execution_state: string;
+  diagnostic_id: string | null;
+  source_baseline_receipt_id: string;
+  baseline_operation_key: string;
+  baseline_repository_binding_id: string;
+  baseline_workflow_id: string;
+  baseline_spec_revision_id: string;
+  baseline_test_plan_revision_id: string;
+  baseline_spec_approval_receipt_id: string;
+  baseline_default_branch: string;
+  baseline_commit_sha: string;
+  baseline_source_digest: string;
+  baseline_observed_at: string | Date;
+};
+type RepairEvidenceRow = {
+  attempt_id: string;
+  attempt_run_id: string;
+  attempt_mode: string;
+  attempt_commit_sha: string;
+  attempt_draft_pull_request: string | number | bigint | null;
+  attempt_state: string;
+  attempt_repair_prompt_id: string | null;
+  evidence_id: string;
+  evidence_bundle_digest: string;
+  evidence_status: string;
+  evidence_invalidated_at: string | null;
+  evidence_manifest: unknown;
+};
 
 /** RLS authority that atomically snapshots moving administrator defaults into one AgentRun. */
 export class PostgresAgentConfigurationStore implements AgentConfigurationStore {
@@ -154,10 +198,16 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
     });
   }
 
-  async lock(claim: AgentConfigurationClaim, baseline: SourceBaselineReceipt): Promise<LockedAgentConfiguration> {
+  async lock(claim: AgentConfigurationClaim, baseline: SourceBaselineReceipt | null): Promise<LockedAgentConfiguration> {
     validateClaim(claim);
-    assertBaselineClaim(baseline, claim);
+    if (claim.repairContext === null) {
+      if (!baseline) invalid();
+      assertBaselineClaim(baseline, claim);
+    } else if (baseline !== null) invalid();
     return this.#transaction(claim.tenantId, async (client) => {
+      const repairSeed = claim.repairContext ? await resolveRepairSeed(client, claim) : null;
+      const effectiveBaseline = baseline ?? repairSeed?.baseline;
+      if (!effectiveBaseline) invalid();
       const selected = await client.query<AuthorityRow>(
         `SELECT action.id::text AS action_id, action.tenant_id::text,
                 action.project_id::text, action.workflow_id,
@@ -222,21 +272,23 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
             AND resolution.claim_expires_at > now()
           FOR UPDATE OF resolution, action
           FOR SHARE OF spec, plan, binding, toolchain, baseline, catalog`,
-        [claim.tenantId, claim.actionId, claim.claimToken, baseline.sourceBaselineReceiptId],
+        [claim.tenantId, claim.actionId, claim.claimToken, effectiveBaseline.sourceBaselineReceiptId],
       );
       const row = selected.rows[0];
       if (selected.rows.length !== 1 || !row) conflict();
       const authority = actionBinding(row);
       assertSameAuthority(claim, authority);
-      assertAuthority(row, baseline);
-      const catalog = resolveCatalogConfiguration({
-        revision: row.catalog_revision,
-        payload: row.catalog_payload,
-        tenantId: claim.tenantId,
-        projectId: claim.projectId,
-      });
+      assertAuthority(row, effectiveBaseline);
       const resolvedAt = this.now();
       if (!Number.isFinite(resolvedAt.getTime())) invalid();
+      const catalog = repairSeed
+        ? cloneLockedCatalog(repairSeed.previousConfigurationLock, repairSeed.previousResolutionDigest)
+        : resolveCatalogConfiguration({
+            revision: row.catalog_revision,
+            payload: row.catalog_payload,
+            tenantId: claim.tenantId,
+            projectId: claim.projectId,
+          });
       const authorizationExpiresAt = new Date(resolvedAt.getTime() + catalog.budget.timeoutSeconds * 1_000);
       const targetMatrix = targetPlatforms(row.target_matrix);
       const lockWithoutDigest = Object.freeze({
@@ -277,11 +329,12 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
         specApprovalReceiptId: claim.specApprovalReceiptId,
         runnerToolchainRevisionId: row.runner_toolchain_revision_id,
         runnerToolchainDigest: row.runner_toolchain_digest,
-        sourceBaselineReceiptId: baseline.sourceBaselineReceiptId,
-        commitSha: row.baseline_commit_sha,
-        sourceDigest: row.baseline_source_digest,
+        sourceBaselineReceiptId: effectiveBaseline.sourceBaselineReceiptId,
+        commitSha: repairSeed?.sourceCommitSha ?? row.baseline_commit_sha,
+        sourceDigest: repairSeed?.sourceDigest ?? row.baseline_source_digest,
         targetMatrix,
         adminCatalogRevision: catalog.catalogRevision,
+        repairContext: repairSeed?.context ?? null,
         resolvedAt: resolvedAt.toISOString(),
       });
       const resolutionDigest = sha256Canonical(lockWithoutDigest);
@@ -307,7 +360,7 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
           catalog.exactAgentVersion, catalog.providerRevisionId,
           catalog.modelRoles.primaryModel, catalog.credentialVersionId,
           JSON.stringify(configurationLock), resolutionDigest, claim.specRevisionId,
-          claim.testPlanRevisionId, claim.specApprovalReceiptId, baseline.sourceBaselineReceiptId],
+          claim.testPlanRevisionId, claim.specApprovalReceiptId, effectiveBaseline.sourceBaselineReceiptId],
       );
       const runResult = await client.query<RunRow>(
         `SELECT id::text, state, resolution_digest, configuration_lock
@@ -360,12 +413,12 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
             AND state = 'CLAIMED' AND claim_token = $3::uuid
         RETURNING action_id`,
         [claim.tenantId, claim.actionId, claim.claimToken,
-          baseline.sourceBaselineReceiptId, run.id, resolutionDigest],
+          effectiveBaseline.sourceBaselineReceiptId, run.id, resolutionDigest],
       );
       if (updated.rowCount !== 1) conflict();
       return Object.freeze({
         kind: "LOCKED", ...authority,
-        sourceBaselineReceiptId: baseline.sourceBaselineReceiptId,
+        sourceBaselineReceiptId: effectiveBaseline.sourceBaselineReceiptId,
         runId: run.id,
         resolutionDigest,
       });
@@ -433,6 +486,237 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
   }
 }
 
+async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentConfigurationClaim) {
+  const repair = claim.repairContext;
+  if (!repair) invalid();
+  const previous = await client.query<PreviousRunRow>(
+    `SELECT run.id::text, run.state, run.resolution_digest,
+            run.configuration_lock,
+            execution.state AS execution_state,
+            execution.receipt_payload->>'diagnosticId' AS diagnostic_id,
+            baseline.id::text AS source_baseline_receipt_id,
+            baseline.operation_key AS baseline_operation_key,
+            baseline.repository_binding_id::text AS baseline_repository_binding_id,
+            baseline.workflow_id AS baseline_workflow_id,
+            baseline.spec_revision_id::text AS baseline_spec_revision_id,
+            baseline.test_plan_revision_id::text AS baseline_test_plan_revision_id,
+            baseline.spec_approval_receipt_id AS baseline_spec_approval_receipt_id,
+            baseline.default_branch AS baseline_default_branch,
+            baseline.commit_sha AS baseline_commit_sha,
+            baseline.source_digest AS baseline_source_digest,
+            baseline.observed_at AS baseline_observed_at
+       FROM deviludo.agent_runs run
+       JOIN deviludo.agent_execution_operations execution
+         ON execution.tenant_id = run.tenant_id AND execution.project_id = run.project_id
+        AND execution.run_id = run.id
+       JOIN deviludo.github_source_baseline_receipts baseline
+         ON baseline.tenant_id = run.tenant_id AND baseline.project_id = run.project_id
+        AND baseline.id = run.source_baseline_receipt_id
+      WHERE run.tenant_id = $1::uuid AND run.project_id = $2::uuid
+        AND run.id = $3::uuid
+      FOR SHARE OF run, execution, baseline`,
+    [claim.tenantId, claim.projectId, repair.fromRunConfigurationId],
+  );
+  const row = previous.rows[0];
+  if (previous.rows.length !== 1 || !row || row.id !== repair.fromRunConfigurationId
+    || !SHA256.test(row.resolution_digest) || row.baseline_workflow_id !== claim.workflowId
+    || row.baseline_spec_revision_id !== claim.specRevisionId
+    || row.baseline_test_plan_revision_id !== claim.testPlanRevisionId
+    || row.baseline_spec_approval_receipt_id !== claim.specApprovalReceiptId
+    || !UUID.test(row.source_baseline_receipt_id) || !UUID.test(row.baseline_repository_binding_id)
+    || !SHA1.test(row.baseline_commit_sha) || !SHA256.test(row.baseline_source_digest)
+    || !Number.isFinite(Date.parse(String(row.baseline_observed_at)))) conflict();
+  const previousConfigurationLock = record(row.configuration_lock);
+  if (previousConfigurationLock.resolutionDigest !== row.resolution_digest
+    || sha256Canonical(withoutResolutionDigest(previousConfigurationLock)) !== row.resolution_digest
+    || previousConfigurationLock.specRevisionId !== claim.specRevisionId
+    || previousConfigurationLock.testPlanRevisionId !== claim.testPlanRevisionId
+    || previousConfigurationLock.specApprovalReceiptId !== claim.specApprovalReceiptId
+    || previousConfigurationLock.sourceBaselineReceiptId !== row.source_baseline_receipt_id) conflict();
+  if (repair.reason === "AGENT_FAILURE") {
+    if (row.state !== "FAILED" || row.execution_state !== "FAILED" || row.diagnostic_id !== repair.diagnosticId) conflict();
+  } else if (row.state !== "SUCCEEDED" || row.execution_state !== "SUCCEEDED") conflict();
+
+  const baseline = Object.freeze({
+    schemaVersion: "deviludo.source-baseline-receipt.v1" as const,
+    operationKey: match(row.baseline_operation_key, SHA256),
+    tenantId: claim.tenantId,
+    projectId: claim.projectId,
+    workflowId: claim.workflowId,
+    specRevisionId: claim.specRevisionId,
+    testPlanRevisionId: claim.testPlanRevisionId,
+    specApprovalReceiptId: claim.specApprovalReceiptId,
+    sourceBaselineReceiptId: row.source_baseline_receipt_id,
+    repositoryBindingId: row.baseline_repository_binding_id,
+    defaultBranch: boundedText(row.baseline_default_branch, 255),
+    commitSha: row.baseline_commit_sha,
+    sourceDigest: row.baseline_source_digest,
+    observedAt: new Date(row.baseline_observed_at).toISOString(),
+    replayed: true,
+  }) satisfies SourceBaselineReceipt;
+
+  let context: AgentConfigurationLock["repairContext"];
+  let sourceCommitSha = baseline.commitSha;
+  let repairSourceDigest = baseline.sourceDigest;
+  if (repair.reason === "AGENT_FAILURE") {
+    context = Object.freeze({ ...repair, evidenceBundleDigest: null, failedPlatforms: Object.freeze([]) });
+  } else {
+    const evidence = await client.query<RepairEvidenceRow>(
+      `SELECT attempt.id::text AS attempt_id, attempt.run_id::text AS attempt_run_id,
+              attempt.mode AS attempt_mode, attempt.commit_sha AS attempt_commit_sha,
+              attempt.draft_pull_request AS attempt_draft_pull_request,
+              attempt.state AS attempt_state,
+              attempt.repair_prompt_id AS attempt_repair_prompt_id,
+              evidence.id::text AS evidence_id,
+              evidence.bundle_digest AS evidence_bundle_digest,
+              evidence.status AS evidence_status,
+              evidence.invalidated_at::text AS evidence_invalidated_at,
+              evidence.manifest AS evidence_manifest
+         FROM deviludo.evidence_bundles evidence
+         JOIN deviludo.e2e_attempts attempt
+           ON attempt.tenant_id = evidence.tenant_id
+          AND attempt.project_id = evidence.project_id
+          AND attempt.id = evidence.attempt_id
+        WHERE evidence.tenant_id = $1::uuid AND evidence.project_id = $2::uuid
+          AND evidence.id = $3::uuid AND attempt.run_id = $4::uuid
+        FOR SHARE OF evidence, attempt`,
+      [claim.tenantId, claim.projectId, repair.evidenceBundleId, repair.fromRunConfigurationId],
+    );
+    const evidenceRow = evidence.rows[0];
+    if (evidence.rows.length !== 1 || !evidenceRow || evidenceRow.evidence_id !== repair.evidenceBundleId
+      || evidenceRow.attempt_run_id !== repair.fromRunConfigurationId
+      || evidenceRow.attempt_mode !== "CANDIDATE" || evidenceRow.attempt_state !== "FAILED"
+      || evidenceRow.evidence_status !== "FAILED" || evidenceRow.evidence_invalidated_at !== null
+      || evidenceRow.attempt_commit_sha !== repair.candidateCommitSha
+      || positiveInteger(evidenceRow.attempt_draft_pull_request) !== repair.draftPullRequest
+      || evidenceRow.attempt_repair_prompt_id !== repair.repairPromptId
+      || repair.repairPromptId !== `repair:${evidenceRow.evidence_bundle_digest}`) conflict();
+    const manifestValue = record(evidenceRow.evidence_manifest);
+    const createdAt = boundedText(manifestValue.createdAt, 80);
+    const bundle = parseEvidenceBundle(manifestValue, new Date(Date.parse(createdAt) + 1_000));
+    if (bundle.id !== evidenceRow.attempt_id || bundle.commitSha !== repair.candidateCommitSha
+      || bundle.bundleDigest !== evidenceRow.evidence_bundle_digest || bundle.status !== "FAILED"
+      || bundle.specRevisionId !== claim.specRevisionId
+      || bundle.specDigest !== previousConfigurationLock.specDigest
+      || bundle.testPlanDigest !== previousConfigurationLock.testPlanDigest
+      || JSON.stringify(bundle.targetMatrix) !== JSON.stringify(previousConfigurationLock.targetMatrix)) conflict();
+    const failedPlatforms = bundle.platformEvidence
+      .filter((item) => item.status === "FAILED")
+      .map((item) => Object.freeze({
+        platform: item.platform,
+        runnerId: item.runnerId,
+        logsDigest: item.logsDigest,
+        junitDigest: item.junitDigest,
+        screenshotManifestDigest: item.screenshotManifestDigest,
+        videoManifestDigest: item.videoManifestDigest,
+      }));
+    if (!failedPlatforms.length) conflict();
+    sourceCommitSha = bundle.commitSha;
+    repairSourceDigest = bundle.sourceDigest;
+    context = Object.freeze({
+      ...repair,
+      evidenceBundleDigest: evidenceRow.evidence_bundle_digest,
+      failedPlatforms: Object.freeze(failedPlatforms),
+    });
+  }
+  return Object.freeze({
+    baseline,
+    previousConfigurationLock,
+    previousResolutionDigest: row.resolution_digest,
+    context,
+    sourceCommitSha,
+    sourceDigest: repairSourceDigest,
+  });
+}
+
+function cloneLockedCatalog(
+  value: Readonly<Record<string, unknown>>,
+  expectedDigest: string,
+): ResolvedCatalogConfiguration {
+  if (value.resolutionDigest !== expectedDigest
+    || sha256Canonical(withoutResolutionDigest(value)) !== expectedDigest) conflict();
+  const primary = cloneLockedProfile(value);
+  const fallback = value.fallback === null ? null : cloneLockedProfile(record(value.fallback));
+  if (fallback && fallback.agent !== primary.agent) conflict();
+  const profileSource = boundedText(value.profileSource, 240);
+  if (profileSource !== "platform" && !/^tenant:[a-f0-9-]{36}$/i.test(profileSource)
+    && !/^project:[a-f0-9-]{36}$/i.test(profileSource)) conflict();
+  return Object.freeze({
+    ...primary,
+    profileSource,
+    catalogRevision: integerText(value.adminCatalogRevision),
+    fallback,
+  });
+}
+
+function cloneLockedProfile(value: Readonly<Record<string, unknown>>): ResolvedProfileConfiguration {
+  const agent = value.agent;
+  if (agent !== "claude-code" && agent !== "codex-cli") conflict();
+  const providerProtocol: ResolvedProfileConfiguration["providerProtocol"] = agent === "claude-code"
+    ? "anthropic-messages" : "openai-responses";
+  if (value.providerProtocol !== providerProtocol) conflict();
+  const providerApprovedPorts = integerArray(value.providerApprovedPorts, 1, 65_535, 16);
+  const providerBaseUrl = boundedText(value.providerBaseUrl, 1_000);
+  validateProviderBaseUrl(providerBaseUrl, { approvedPorts: providerApprovedPorts });
+  if (new URL(providerBaseUrl).toString() !== providerBaseUrl) conflict();
+  const providerAuthentication = value.providerAuthentication;
+  if (providerAuthentication !== "x-api-key" && providerAuthentication !== "authorization-bearer"
+    && providerAuthentication !== "bearer") conflict();
+  const modelRolesValue = record(value.modelRoles);
+  const modelRoles = Object.freeze({
+    primaryModel: pinnedModel(modelRolesValue.primaryModel),
+    planningModel: pinnedModel(modelRolesValue.planningModel),
+    smallFastModel: pinnedModel(modelRolesValue.smallFastModel),
+    subagentModel: pinnedModel(modelRolesValue.subagentModel),
+  });
+  const pricing = record(value.providerPricing);
+  const governance = record(value.providerGovernance);
+  const confirmedAt = boundedText(governance.confirmedAt, 80);
+  if (!Number.isFinite(Date.parse(confirmedAt)) || new Date(confirmedAt).toISOString() !== confirmedAt) conflict();
+  const budgetValue = record(value.budget);
+  const exactAgentVersion = exactVersion(value.exactAgentVersion);
+  if (/(^|[-_.])(latest|stable|default)(?:$|[-_.])/i.test(exactAgentVersion)) conflict();
+  const workerPool = boundedText(value.workerPool, 200);
+  if (!workerPool.startsWith("development-")) conflict();
+  return Object.freeze({
+    profileRevisionId: safeId(value.profileRevisionId),
+    agent,
+    installationId: safeId(value.installationId),
+    workerPool,
+    imageDigest: match(value.imageDigest, IMAGE_DIGEST),
+    workerImageId: safeId(value.workerImageId),
+    adapterVersion: exactVersion(value.adapterVersion),
+    buildReceiptId: safeId(value.buildReceiptId),
+    buildReceiptDigest: match(value.buildReceiptDigest, SHA256),
+    agentVersionId: catalogId(value.agentVersionId),
+    exactAgentVersion,
+    agentVersionSourceDigest: match(value.agentVersionSourceDigest, SHA256),
+    providerRevisionId: safeId(value.providerRevisionId),
+    providerProtocol,
+    providerBaseUrl,
+    providerApprovedPorts,
+    providerAuthentication,
+    providerPricing: Object.freeze({
+      inputUsdPerMillionTokens: decimal(pricing.inputUsdPerMillionTokens, 0, 1_000_000),
+      outputUsdPerMillionTokens: decimal(pricing.outputUsdPerMillionTokens, 0, 1_000_000),
+    }),
+    providerGovernance: Object.freeze({
+      dataRegion: boundedText(governance.dataRegion, 120),
+      retentionPolicy: boundedText(governance.retentionPolicy, 500),
+      trainingPolicy: boundedText(governance.trainingPolicy, 500),
+      confirmedBy: boundedText(governance.confirmedBy, 160),
+      confirmedAt,
+    }),
+    modelRoles,
+    credentialVersionId: safeId(value.credentialVersionId),
+    budget: Object.freeze({
+      maxUsd: decimal(budgetValue.maxUsd, 0, 100),
+      maxTurns: boundedInteger(budgetValue.maxTurns, 1, 200),
+      timeoutSeconds: boundedInteger(budgetValue.timeoutSeconds, 60, 14_400),
+    }),
+  });
+}
+
 async function ensureProviderProjection(
   client: PostgresWorkflowClient,
   tenantId: string,
@@ -484,6 +768,7 @@ function actionBinding(row: CandidateRow) {
   const specRevisionId = uuid(binding.specRevisionId);
   const testPlanRevisionId = uuid(binding.testPlanRevisionId);
   const specApprovalReceiptId = match(binding.specApprovalReceiptId, SHA256);
+  const repairContext = repairActionContext(binding.repairContext);
   return Object.freeze({
     tenantId: row.tenant_id,
     projectId: row.project_id,
@@ -492,7 +777,37 @@ function actionBinding(row: CandidateRow) {
     specRevisionId,
     testPlanRevisionId,
     specApprovalReceiptId,
+    repairContext,
   });
+}
+function repairActionContext(value: unknown): AgentConfigurationClaim["repairContext"] {
+  if (value === null || value === undefined) return null;
+  const body = record(value);
+  const expected = ["attempt", "reason", "fromRunConfigurationId", "diagnosticId", "evidenceBundleId",
+    "repairPromptId", "candidateCommitSha", "draftPullRequest"];
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(expected.sort())
+    || !Number.isSafeInteger(body.attempt) || (body.attempt as number) < 1
+    || !UUID.test(String(body.fromRunConfigurationId ?? ""))) invalid();
+  if (body.reason === "AGENT_FAILURE") {
+    if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
+      || body.evidenceBundleId !== null || body.repairPromptId !== null
+      || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
+  } else if (body.reason === "E2E_FAILURE") {
+    if (body.diagnosticId !== null || typeof body.evidenceBundleId !== "string" || !UUID.test(body.evidenceBundleId)
+      || typeof body.repairPromptId !== "string" || !SAFE_ID.test(body.repairPromptId)
+      || typeof body.candidateCommitSha !== "string" || !SHA1.test(body.candidateCommitSha)
+      || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1) invalid();
+  } else invalid();
+  return Object.freeze({
+    attempt: body.attempt as number,
+    reason: body.reason,
+    fromRunConfigurationId: body.fromRunConfigurationId,
+    diagnosticId: body.diagnosticId,
+    evidenceBundleId: body.evidenceBundleId,
+    repairPromptId: body.repairPromptId,
+    candidateCommitSha: body.candidateCommitSha,
+    draftPullRequest: body.draftPullRequest,
+  }) as AgentConfigurationClaim["repairContext"];
 }
 function lockedFromRow(row: CandidateRow, authority: ReturnType<typeof actionBinding>): LockedAgentConfiguration {
   if (!row.source_baseline_receipt_id || !row.run_id || !row.resolution_digest) conflict();
@@ -536,7 +851,8 @@ function assertSameAuthority(left: ReturnType<typeof actionBinding> | AgentConfi
   if (left.tenantId !== right.tenantId || left.projectId !== right.projectId
     || left.workflowId !== right.workflowId || left.actionId !== right.actionId
     || left.specRevisionId !== right.specRevisionId || left.testPlanRevisionId !== right.testPlanRevisionId
-    || left.specApprovalReceiptId !== right.specApprovalReceiptId) conflict();
+    || left.specApprovalReceiptId !== right.specApprovalReceiptId
+    || sha256Canonical(left.repairContext) !== sha256Canonical(right.repairContext)) conflict();
 }
 function targetPlatforms(value: string[]): readonly TargetPlatform[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 3 || new Set(value).size !== value.length
@@ -557,6 +873,7 @@ function validateAuthority(value: Omit<AgentConfigurationClaim, "kind" | "claimT
   if (!UUID.test(value.tenantId) || !UUID.test(value.projectId) || !UUID.test(value.actionId)
     || value.workflowId !== `delivery-${value.projectId}` || !UUID.test(value.specRevisionId)
     || !UUID.test(value.testPlanRevisionId) || !SHA256.test(value.specApprovalReceiptId)) invalid();
+  repairActionContext(value.repairContext);
 }
 function signalId(digest: string): string {
   if (!SHA256.test(digest)) invalid();
@@ -570,6 +887,44 @@ function uuid(value: unknown): string { return match(value, UUID); }
 function match(value: unknown, pattern: RegExp): string {
   if (typeof value !== "string" || !pattern.test(value)) invalid();
   return value;
+}
+function safeId(value: unknown): string { return match(value, SAFE_ID); }
+function catalogId(value: unknown): string { return match(value, CATALOG_ID); }
+function exactVersion(value: unknown): string { return match(value, EXACT_VERSION); }
+function boundedText(value: unknown, maximum: number): string {
+  if (typeof value !== "string" || !value || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) invalid();
+  return value;
+}
+function positiveInteger(value: string | number | bigint | null): number {
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || result < 1) conflict();
+  return result;
+}
+function boundedInteger(value: unknown, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) conflict();
+  return value as number;
+}
+function decimal(value: unknown, minimum: number, maximum: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) conflict();
+  return value;
+}
+function integerArray(value: unknown, minimum: number, maximum: number, maxItems: number): readonly number[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxItems || new Set(value).size !== value.length
+    || value.some((item) => !Number.isSafeInteger(item) || item < minimum || item > maximum)) conflict();
+  return Object.freeze([...(value as number[])]);
+}
+function integerText(value: unknown): string {
+  const result = String(value);
+  if (!/^[1-9][0-9]{0,19}$/.test(result)) conflict();
+  return result;
+}
+function pinnedModel(value: unknown): string {
+  const model = boundedText(value, 512);
+  try { assertPinnedModelId(model); } catch { conflict(); }
+  return model;
+}
+function withoutResolutionDigest(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "resolutionDigest"));
 }
 function invalid(): never { throw new Error("Agent configuration binding is invalid"); }
 function conflict(): never { throw new Error("Agent configuration authority conflicts with persisted state"); }

@@ -46,6 +46,7 @@ export class AgentConfigurationService {
   async probe(): Promise<void> { await Promise.all([this.store.probe(), this.baselines.probe()]); }
 
   async #lock(claim: AgentConfigurationClaim): Promise<LockedAgentConfiguration> {
+    if (claim.repairContext) return this.store.lock(claim, null);
     const baseline = await this.baselines.resolve(Object.freeze({
       schemaVersion: "deviludo.source-baseline.v1",
       operationKey: sourceBaselineOperationKey(claim.actionId),

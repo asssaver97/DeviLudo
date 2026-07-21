@@ -78,6 +78,7 @@ const snapshot: DeliverySnapshot = {
   targetMatrix: ["linux", "macos", "windows"],
   iteration: 1,
   repairAttempts: 0,
+  repairContext: null,
   waitingProviderRevisionId: null,
   externalGate: null,
   externalApprovals: [],

@@ -1,4 +1,5 @@
 import type { SourceBaselineReceipt, SourceBaselineRequest } from "../../scm-proxy/src/source-baseline-contracts";
+import type { DeliveryRepairContext } from "../../../lib/orchestration/game-delivery";
 
 export type TargetPlatform = "linux" | "macos" | "windows";
 export type AgentKind = "claude-code" | "codex-cli";
@@ -12,6 +13,7 @@ export interface AgentConfigurationClaim {
   readonly specRevisionId: string;
   readonly testPlanRevisionId: string;
   readonly specApprovalReceiptId: string;
+  readonly repairContext: DeliveryRepairContext | null;
   readonly claimToken: string;
 }
 
@@ -24,6 +26,7 @@ export interface LockedAgentConfiguration {
   readonly specRevisionId: string;
   readonly testPlanRevisionId: string;
   readonly specApprovalReceiptId: string;
+  readonly repairContext: DeliveryRepairContext | null;
   readonly sourceBaselineReceiptId: string;
   readonly runId: string;
   readonly resolutionDigest: string;
@@ -123,13 +126,32 @@ export interface AgentConfigurationLock {
   readonly sourceDigest: string;
   readonly targetMatrix: readonly TargetPlatform[];
   readonly adminCatalogRevision: string;
+  readonly repairContext: Readonly<{
+    readonly attempt: number;
+    readonly reason: "AGENT_FAILURE" | "E2E_FAILURE";
+    readonly fromRunConfigurationId: string;
+    readonly diagnosticId: string | null;
+    readonly evidenceBundleId: string | null;
+    readonly evidenceBundleDigest: string | null;
+    readonly repairPromptId: string | null;
+    readonly candidateCommitSha: string | null;
+    readonly draftPullRequest: number | null;
+    readonly failedPlatforms: readonly Readonly<{
+      readonly platform: TargetPlatform;
+      readonly runnerId: string;
+      readonly logsDigest: string;
+      readonly junitDigest: string;
+      readonly screenshotManifestDigest: string;
+      readonly videoManifestDigest: string;
+    }>[];
+  }> | null;
   readonly resolvedAt: string;
   readonly resolutionDigest: string;
 }
 
 export interface AgentConfigurationStore {
   claimNext(tenantId: string): Promise<AgentConfigurationWork | null>;
-  lock(claim: AgentConfigurationClaim, baseline: SourceBaselineReceipt): Promise<LockedAgentConfiguration>;
+  lock(claim: AgentConfigurationClaim, baseline: SourceBaselineReceipt | null): Promise<LockedAgentConfiguration>;
   complete(work: LockedAgentConfiguration, outboxId: string): Promise<void>;
   release(claim: AgentConfigurationClaim): Promise<void>;
   probe(): Promise<void>;

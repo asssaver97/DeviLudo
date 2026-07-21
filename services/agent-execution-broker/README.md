@@ -15,6 +15,10 @@ Agent destination and isolated development Workers.
 - Completed receipts are bound to the locked image, adapter, Provider, model,
   authoritative candidate commit and Draft PR.
 - Provider loss enters `WAITING_PROVIDER`; replay may resume only the same Run.
+- A terminal failure is repaired only through a new Run. Its work package
+  contains the immutable predecessor/evidence binding and bounded artifact
+  digests; an E2E repair source snapshot is authorized against the predecessor
+  GitHub candidate receipt before the microVM receives it.
 
 The Broker process does not install Claude Code or Codex CLI. Polling Worker
 composition requires an explicitly supplied isolated executor and ephemeral

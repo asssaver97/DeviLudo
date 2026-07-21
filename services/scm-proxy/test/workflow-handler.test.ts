@@ -17,6 +17,7 @@ const snapshot: DeliverySnapshot = Object.freeze({
   steamReleaseId: null, defaultBranchBuildId: null,
   targetMatrix: Object.freeze(["linux", "macos", "windows"] as const), iteration: 1, repairAttempts: 0,
   waitingProviderRevisionId: null, externalGate: null, externalApprovals: Object.freeze([]),
+  repairContext: null,
   history: Object.freeze([{ sequence: 1, signal: acceptance, resultingState: "MERGING" as const }]),
 });
 

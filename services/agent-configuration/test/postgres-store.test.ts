@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PostgresQueryResult, PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { sha256Canonical } from "../../runner-control/src/canonical";
 import { sourceBaselineOperationKey, type SourceBaselineReceipt } from "../../scm-proxy/src/source-baseline-contracts";
 import type { AgentConfigurationClaim } from "../src/contracts";
 import { PostgresAgentConfigurationStore } from "../src/postgres-store";
@@ -24,6 +25,7 @@ const binding = Object.freeze({
   specRevisionId,
   testPlanRevisionId,
   specApprovalReceiptId: approvalId,
+  repairContext: null,
 });
 
 test("PostgreSQL Agent configuration claim is tenant-RLS scoped and lease fenced", async () => {
@@ -92,6 +94,7 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   assert.equal(observedLock.commitSha, commitSha);
   assert.deepEqual(observedLock.targetMatrix, ["linux", "windows"]);
   assert.equal(observedLock.adminCatalogRevision, "12");
+  assert.equal(observedLock.repairContext, null);
   const observedFallback = observedLock.fallback as Record<string, unknown>;
   assert.equal(observedFallback.profileRevisionId, "profile-fallback-r1");
   assert.equal(observedFallback.providerRevisionId, "provider-claude-fallback-r1");
@@ -103,6 +106,135 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   assert.deepEqual(authorizationValues[6], ["claude-sonnet-4-6-20250514"]);
   assert.deepEqual(JSON.parse(String(authorizationValues[7])), { maxCostUsd: 25 });
   assert.equal(authorizationValues[9], "2030-01-01T03:02:03.000Z");
+});
+
+test("PostgreSQL Agent configuration creates a successor repair run from the failed candidate without resolving moving defaults", async () => {
+  const repairActionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const repairClaimToken = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const evidenceId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const candidateCommitSha = "a".repeat(40);
+  const candidateSourceDigest = "b".repeat(64);
+  const createdAt = "2030-01-01T00:30:00.000Z";
+  const evidenceCore = {
+    id: evidenceId,
+    attemptId: evidenceId,
+    specRevisionId,
+    specDigest: "1".repeat(64),
+    testPlanDigest: "2".repeat(64),
+    commitSha: candidateCommitSha,
+    sourceDigest: candidateSourceDigest,
+    targetMatrix: ["linux", "windows"],
+    godotTestKitDigest: "c".repeat(64),
+    buildManifestDigest: "d".repeat(64),
+    sbomDigest: "e".repeat(64),
+    vulnerabilityScanDigest: "f".repeat(64),
+    assetLicenseLedgerDigest: "0".repeat(64),
+    platformEvidence: [
+      { platform: "linux", runnerId: "runner-linux-1", runnerCapabilityDigest: "1".repeat(64),
+        exportDigest: "2".repeat(64), logsDigest: "3".repeat(64), junitDigest: "4".repeat(64),
+        inputTimelineDigest: "5".repeat(64), screenshotManifestDigest: "6".repeat(64),
+        videoManifestDigest: "7".repeat(64), status: "PASSED" },
+      { platform: "windows", runnerId: "runner-windows-1", runnerCapabilityDigest: "8".repeat(64),
+        exportDigest: "9".repeat(64), logsDigest: "a".repeat(64), junitDigest: "b".repeat(64),
+        inputTimelineDigest: "c".repeat(64), screenshotManifestDigest: "d".repeat(64),
+        videoManifestDigest: "e".repeat(64), status: "FAILED" },
+    ],
+    status: "FAILED",
+    valid: true,
+    createdAt,
+  } as const;
+  const evidence = Object.freeze({ ...evidenceCore, bundleDigest: sha256Canonical(evidenceCore) });
+  let previousRunId = "";
+  let previousLock: Record<string, unknown> | null = null;
+  let previousDigest = "";
+  let latestRunId = "";
+  let latestLock: Record<string, unknown> | null = null;
+  let latestDigest = "";
+  const locks = new Map<string, { lock: Record<string, unknown>; digest: string }>();
+  const client = clientWith(async (statement, values) => {
+    if (statement.includes("JOIN deviludo.agent_execution_operations execution")) {
+      assert.ok(previousLock);
+      return rows([{
+        id: previousRunId, state: "SUCCEEDED", resolution_digest: previousDigest,
+        configuration_lock: previousLock, execution_state: "SUCCEEDED", diagnostic_id: null,
+        source_baseline_receipt_id: baselineId, baseline_operation_key: sourceBaselineOperationKey(actionId),
+        baseline_repository_binding_id: repositoryBindingId, baseline_workflow_id: `delivery-${projectId}`,
+        baseline_spec_revision_id: specRevisionId, baseline_test_plan_revision_id: testPlanRevisionId,
+        baseline_spec_approval_receipt_id: approvalId, baseline_default_branch: "main",
+        baseline_commit_sha: commitSha, baseline_source_digest: sourceDigest,
+        baseline_observed_at: "2030-01-01T00:00:00.000Z",
+      }]);
+    }
+    if (statement.includes("FROM deviludo.evidence_bundles evidence")) return rows([{
+      attempt_id: evidenceId, attempt_run_id: previousRunId, attempt_mode: "CANDIDATE",
+      attempt_commit_sha: candidateCommitSha, attempt_draft_pull_request: 73, attempt_state: "FAILED",
+      attempt_repair_prompt_id: `repair:${evidence.bundleDigest}`, evidence_id: evidenceId,
+      evidence_bundle_digest: evidence.bundleDigest, evidence_status: "FAILED",
+      evidence_invalidated_at: null, evidence_manifest: evidence,
+    }]);
+    if (statement.includes("CROSS JOIN deviludo.admin_catalog_state catalog")) {
+      const isRepair = values[1] === repairActionId;
+      return rows([{ ...authority(isRepair ? catalog() : catalogWithFallback()),
+        ...(isRepair ? {
+          action_id: repairActionId,
+          binding: { ...binding, repairContext: {
+            attempt: 1, reason: "E2E_FAILURE", fromRunConfigurationId: previousRunId,
+            diagnosticId: null, evidenceBundleId: evidenceId,
+            repairPromptId: `repair:${evidence.bundleDigest}`, candidateCommitSha, draftPullRequest: 73,
+          } },
+          claim_token: repairClaimToken,
+        } : {}),
+      }]);
+    }
+    if (statement.includes("INSERT INTO deviludo.agent_runs")) {
+      const id = String(values[0]);
+      const lock = JSON.parse(String(values[13])) as Record<string, unknown>;
+      const digest = String(values[14]);
+      locks.set(id, { lock, digest });
+      if (!previousRunId) {
+        previousRunId = id; previousLock = lock; previousDigest = digest;
+      } else {
+        latestRunId = id; latestLock = lock; latestDigest = digest;
+      }
+      return rows([]);
+    }
+    if (statement.includes("FROM deviludo.inference_provider_revisions")) {
+      return rows([{ provider_revision_id: String(values[1]) }]);
+    }
+    if (statement.includes("FROM deviludo.agent_runs") && statement.includes("idempotency_key")) {
+      const id = values[1] === `agent-config:${repairActionId}` ? latestRunId : previousRunId;
+      const selected = locks.get(id)!;
+      return rows([{ id, state: "QUEUED", resolution_digest: selected.digest, configuration_lock: selected.lock }]);
+    }
+    if (statement.includes("FROM deviludo.inference_run_authorizations")) {
+      return rows([{ run_id: String(values[0]) }]);
+    }
+    if (statement.includes("SET state = 'LOCKED'")) return rows([{ action_id: String(values[1]) }]);
+    return rows([]);
+  });
+  const store = new PostgresAgentConfigurationStore(pool(client), () => new Date("2030-01-01T01:02:03.000Z"));
+  const original = await store.lock(claim(), baseline());
+  assert.equal(original.runId, previousRunId);
+  const repairContext = Object.freeze({
+    attempt: 1, reason: "E2E_FAILURE" as const, fromRunConfigurationId: previousRunId,
+    diagnosticId: null, evidenceBundleId: evidenceId, repairPromptId: `repair:${evidence.bundleDigest}`,
+    candidateCommitSha, draftPullRequest: 73,
+  });
+  const repaired = await store.lock(Object.freeze({
+    ...claim(), actionId: repairActionId, claimToken: repairClaimToken, repairContext,
+  }), null);
+  assert.equal(repaired.runId, latestRunId);
+  assert.notEqual(repaired.runId, original.runId);
+  const observedLatestLock = latestLock as unknown as Record<string, unknown>;
+  assert.equal(observedLatestLock.commitSha, candidateCommitSha);
+  assert.equal(observedLatestLock.sourceDigest, candidateSourceDigest);
+  assert.equal(observedLatestLock.sourceBaselineReceiptId, baselineId);
+  assert.equal((observedLatestLock.fallback as Record<string, unknown>).profileRevisionId, "profile-fallback-r1");
+  assert.equal((observedLatestLock.repairContext as Record<string, unknown>).evidenceBundleDigest, evidence.bundleDigest);
+  const failed = (observedLatestLock.repairContext as { failedPlatforms: Array<Record<string, unknown>> }).failedPlatforms;
+  assert.deepEqual(failed.map((item) => item.platform), ["windows"]);
+  assert.equal(failed[0]?.logsDigest, "a".repeat(64));
+  assert.match(latestDigest, /^[a-f0-9]{64}$/);
 });
 
 test("PostgreSQL Agent configuration refuses a drifted serving projection without creating a run", async () => {
@@ -129,6 +261,7 @@ function claim(): AgentConfigurationClaim {
     specRevisionId,
     testPlanRevisionId,
     specApprovalReceiptId: approvalId,
+    repairContext: null,
     claimToken,
   });
 }

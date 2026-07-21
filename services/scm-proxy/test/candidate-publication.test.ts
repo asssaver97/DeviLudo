@@ -10,6 +10,7 @@ import { AuthoritativeCandidatePublicationService } from "../src/candidate-publi
 import { contentSha256, signGitHubCandidateArtifact } from "../src/github-artifacts";
 import type { GitHubCandidateReceipt, GitHubRepositoryBinding } from "../src/github-contracts";
 import { PostgresScmOperationStore } from "../src/postgres-operation-store";
+import { PostgresCandidatePublicationStore } from "../src/postgres-candidate-publication";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -58,6 +59,7 @@ function lock(): LockedAgentExecution { return Object.freeze({ tenantId, project
   budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 900 }, specRevisionId, specDigest: "d".repeat(64),
   testPlanRevisionId: "77777777-7777-4777-8777-777777777777", testPlanDigest: "e".repeat(64),
   targetMatrix: ["linux", "macos", "windows"] as const,
+  repairContext: null,
   sourceBaselineReceiptId: "88888888-8888-4888-8888-888888888888", baseCommitSha, sourceDigest: "f".repeat(64) }); }
 
 test("candidate publication contract binds the signed artifact to one Agent attempt", () => {
@@ -80,6 +82,50 @@ test("authoritative service resolves repository authority, publishes a Draft PR 
   const receipt = await service.publish(request());
   assert.equal(receipt.candidateCommitSha, candidateCommitSha); assert.equal(receipt.draftPullRequest, 42);
   assert.deepEqual(calls, [`authority:${runId}`, "github:R_repo", "archive:42"]);
+});
+
+test("PostgreSQL publication authority accepts only the exact predecessor candidate as a repair base", async () => {
+  const predecessorRunId = "77777777-7777-4777-8777-777777777777";
+  const baselineReceiptId = "88888888-8888-4888-8888-888888888888";
+  const predecessorSourceDigest = "9".repeat(64);
+  const configurationLock = {
+    resolutionDigest,
+    specRevisionId,
+    sourceBaselineReceiptId: baselineReceiptId,
+    commitSha: baseCommitSha,
+    sourceDigest: predecessorSourceDigest,
+    repairContext: {
+      attempt: 1, reason: "E2E_FAILURE", fromRunConfigurationId: predecessorRunId,
+      diagnosticId: null, evidenceBundleId: "99999999-9999-4999-8999-999999999999",
+      evidenceBundleDigest: "1".repeat(64), repairPromptId: `repair:${"1".repeat(64)}`,
+      candidateCommitSha: baseCommitSha, draftPullRequest: 64, failedPlatforms: [],
+    },
+  };
+  const sql: string[] = [];
+  const client = {
+    async query<Row extends Record<string, unknown>>(statement: string) {
+      sql.push(statement);
+      if (statement.includes("FROM deviludo.agent_runs run")) return { rowCount: 1, rows: [{
+        tenant_id: tenantId, project_id: projectId, run_id: runId, run_state: "RUNNING",
+        resolution_digest: resolutionDigest, configuration_lock: configurationLock,
+        spec_revision_id: specRevisionId, source_baseline_receipt_id: baselineReceiptId,
+        baseline_commit_sha: "0".repeat(40), baseline_source_digest: "2".repeat(64),
+        predecessor_run_id: predecessorRunId, predecessor_commit_sha: baseCommitSha,
+        predecessor_source_digest: predecessorSourceDigest, predecessor_pull_request: 64,
+        repository_binding_id: receiptId, installation_id: "12345", repository_id: 98_765,
+        repository_node_id: "R_repo", owner_name: "deviludo", repository_name: "game", default_branch: "main",
+      } as unknown as Row] };
+      return { rowCount: null, rows: [] as Row[] };
+    },
+    release() {},
+  };
+  const store = new PostgresCandidatePublicationStore({ async connect() { return client; } });
+  const authority = await store.resolve(request());
+  assert.equal(authority.repositoryBindingId, receiptId);
+  assert.ok(sql.some((statement) => statement.includes("LEFT JOIN deviludo.github_candidate_receipts predecessor")));
+
+  configurationLock.repairContext.fromRunConfigurationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  await assert.rejects(store.resolve(request()), /publication authority is invalid/);
 });
 
 test("Agent Worker mTLS client accepts only the exact authoritative candidate receipt", async () => {

@@ -10,6 +10,7 @@ import {
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
+type RepairPlatform = NonNullable<LockedAgentExecution["repairContext"]>["failedPlatforms"][number];
 
 type AuthorityRow = {
   id: string;
@@ -418,6 +419,9 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
   const protocol = runtime.providerProtocol;
   if ((agent !== "claude-code" && agent !== "codex-cli")
     || (protocol !== "anthropic-messages" && protocol !== "openai-responses")) invalid();
+  const repairContext = parseRepairContext(value.repairContext, row.id);
+  if ((repairContext === null && request.repairAttempts !== 0)
+    || (repairContext !== null && request.repairAttempts !== repairContext.attempt)) invalid();
   return Object.freeze({
     tenantId: row.tenant_id, projectId: row.project_id, runId: row.id,
     resolutionDigest: row.resolution_digest, profileRevisionId: string(runtime.profileRevisionId),
@@ -433,6 +437,7 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     targetMatrix: platforms(value.targetMatrix),
     sourceBaselineReceiptId: row.source_baseline_receipt_id,
     baseCommitSha: string(value.commitSha), sourceDigest: string(value.sourceDigest),
+    repairContext,
   });
 }
 
@@ -577,5 +582,39 @@ function platforms(value: unknown): readonly ("linux" | "macos" | "windows")[] {
     || new Set(value).size !== value.length
     || JSON.stringify([...value].sort()) !== JSON.stringify(value)) invalid();
   return Object.freeze([...(value as ("linux" | "macos" | "windows")[])]);
+}
+function parseRepairContext(value: unknown, runId: string): LockedAgentExecution["repairContext"] {
+  if (value === null) return null;
+  const body = record(value);
+  const expected = ["attempt", "reason", "fromRunConfigurationId", "diagnosticId", "evidenceBundleId",
+    "evidenceBundleDigest", "repairPromptId", "candidateCommitSha", "draftPullRequest", "failedPlatforms"];
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(expected.sort())
+    || !Number.isSafeInteger(body.attempt) || (body.attempt as number) < 1
+    || typeof body.fromRunConfigurationId !== "string" || !UUID.test(body.fromRunConfigurationId)
+    || body.fromRunConfigurationId === runId || !Array.isArray(body.failedPlatforms)) invalid();
+  if (body.reason === "AGENT_FAILURE") {
+    if (typeof body.diagnosticId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(body.diagnosticId)
+      || body.evidenceBundleId !== null || body.evidenceBundleDigest !== null || body.repairPromptId !== null
+      || body.candidateCommitSha !== null || body.draftPullRequest !== null || body.failedPlatforms.length !== 0) invalid();
+  } else if (body.reason === "E2E_FAILURE") {
+    if (body.diagnosticId !== null || typeof body.evidenceBundleId !== "string" || !UUID.test(body.evidenceBundleId)
+      || typeof body.evidenceBundleDigest !== "string" || !SHA256.test(body.evidenceBundleDigest)
+      || body.repairPromptId !== `repair:${body.evidenceBundleDigest}`
+      || typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
+      || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
+      || body.failedPlatforms.length < 1 || body.failedPlatforms.length > 3) invalid();
+  } else invalid();
+  const failedPlatforms = body.failedPlatforms.map((value) => {
+    const item = record(value);
+    const keys = ["platform", "runnerId", "logsDigest", "junitDigest", "screenshotManifestDigest", "videoManifestDigest"];
+    if (JSON.stringify(Object.keys(item).sort()) !== JSON.stringify(keys.sort())
+      || (item.platform !== "linux" && item.platform !== "macos" && item.platform !== "windows")
+      || typeof item.runnerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(item.runnerId)
+      || ![item.logsDigest, item.junitDigest, item.screenshotManifestDigest, item.videoManifestDigest]
+        .every((entry) => typeof entry === "string" && SHA256.test(entry))) invalid();
+    return Object.freeze({ ...item }) as RepairPlatform;
+  });
+  if (new Set(failedPlatforms.map((item) => item.platform)).size !== failedPlatforms.length) invalid();
+  return Object.freeze({ ...body, failedPlatforms: Object.freeze(failedPlatforms) }) as LockedAgentExecution["repairContext"];
 }
 function invalid(): never { throw new Error("PostgreSQL Agent execution operation is invalid"); }

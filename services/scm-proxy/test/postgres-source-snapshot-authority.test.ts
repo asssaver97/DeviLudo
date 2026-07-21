@@ -47,6 +47,8 @@ test("PostgreSQL source authority materializes only the AgentRun's locked baseli
   const query = fixture.sql.find((statement) => statement.includes("github_source_baseline_receipts baseline")) ?? "";
   assert.match(query, /baseline\.id = run\.source_baseline_receipt_id/);
   assert.match(query, /baseline\.commit_sha = \$4/);
+  assert.match(query, /repairContext,fromRunConfigurationId/);
+  assert.match(query, /predecessor\.candidate_commit_sha = \$4/);
   assert.deepEqual(fixture.queryValues, [tenantId, projectId, runId, commitSha, sourceDigest]);
 });
 

@@ -120,7 +120,11 @@ function baselineReceipt(
             repository.owner_name,
             repository.repository_name,
             repository.default_branch,
-            baseline.source_digest
+            CASE
+              WHEN run.configuration_lock #>> '{repairContext,reason}' = 'E2E_FAILURE'
+                THEN predecessor.source_digest
+              ELSE baseline.source_digest
+            END AS source_digest
        FROM deviludo.agent_runs run
        JOIN deviludo.github_source_baseline_receipts baseline
          ON baseline.tenant_id = run.tenant_id AND baseline.project_id = run.project_id
@@ -134,8 +138,21 @@ function baselineReceipt(
          ON installation.id = repository.github_installation_id
         AND installation.tenant_id = repository.tenant_id
         AND installation.status = 'ACTIVE'
+       LEFT JOIN deviludo.github_candidate_receipts predecessor
+         ON predecessor.tenant_id = run.tenant_id
+        AND predecessor.project_id = run.project_id
+        AND predecessor.run_id::text = run.configuration_lock #>> '{repairContext,fromRunConfigurationId}'
+        AND predecessor.candidate_commit_sha = run.configuration_lock->>'commitSha'
+        AND predecessor.source_digest = run.configuration_lock->>'sourceDigest'
+        AND predecessor.pull_request_number::text = run.configuration_lock #>> '{repairContext,draftPullRequest}'
       WHERE run.tenant_id = $1::uuid AND run.project_id = $2::uuid AND run.id = $3::uuid
-        AND baseline.commit_sha = $4 AND baseline.source_digest = $5
+        AND (
+          (run.configuration_lock #>> '{repairContext,reason}' IS DISTINCT FROM 'E2E_FAILURE'
+            AND baseline.commit_sha = $4 AND baseline.source_digest = $5)
+          OR
+          (run.configuration_lock #>> '{repairContext,reason}' = 'E2E_FAILURE'
+            AND predecessor.candidate_commit_sha = $4 AND predecessor.source_digest = $5)
+        )
       FOR SHARE OF run, baseline, repository, installation`,
     [input.tenantId, input.projectId, input.runId, input.commitSha, input.sourceDigest],
   );

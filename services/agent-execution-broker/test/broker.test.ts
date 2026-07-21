@@ -54,6 +54,7 @@ function lock(): LockedAgentExecution {
     specRevisionId: "77777777-7777-4777-8777-777777777777", specDigest: "f".repeat(64),
     testPlanRevisionId: "88888888-8888-4888-8888-888888888888", testPlanDigest: "1".repeat(64),
     targetMatrix: Object.freeze(["linux", "windows"] as const),
+    repairContext: null,
     sourceBaselineReceiptId: "99999999-9999-4999-8999-999999999999",
     baseCommitSha: "d".repeat(40), sourceDigest: "e".repeat(64),
   });

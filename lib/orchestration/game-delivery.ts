@@ -69,6 +69,17 @@ export type DeliveryCommand =
   | "PUBLISH_STEAM_DEFAULT_BRANCH"
   | "NONE";
 
+export type DeliveryRepairContext = Readonly<{
+  attempt: number;
+  reason: "AGENT_FAILURE" | "E2E_FAILURE";
+  fromRunConfigurationId: string;
+  diagnosticId: string | null;
+  evidenceBundleId: string | null;
+  repairPromptId: string | null;
+  candidateCommitSha: string | null;
+  draftPullRequest: number | null;
+}>;
+
 export interface DeliverySnapshot {
   readonly workflowId: string;
   readonly tenantId: string;
@@ -93,6 +104,7 @@ export interface DeliverySnapshot {
   readonly targetMatrix: readonly TargetPlatform[];
   readonly iteration: number;
   readonly repairAttempts: number;
+  readonly repairContext: DeliveryRepairContext | null;
   readonly waitingProviderRevisionId: string | null;
   readonly externalGate: ExternalApprovalGate | null;
   readonly externalApprovals: readonly Readonly<{
@@ -109,16 +121,25 @@ export interface DeliverySnapshot {
  */
 export class GameDeliveryWorkflow {
   private snapshot: DeliverySnapshot;
+  private readonly automaticRepairSuccessorRuns: boolean;
 
   constructor(input: {
     workflowId: string;
     tenantId: string;
     projectId: string;
     targetMatrix: readonly TargetPlatform[];
+    automaticRepairSuccessorRuns?: boolean;
   }) {
     if (!input.targetMatrix.length) throw new Error("A delivery needs at least one target platform");
+    this.automaticRepairSuccessorRuns = input.automaticRepairSuccessorRuns ?? true;
+    const identity = {
+      workflowId: input.workflowId,
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      targetMatrix: input.targetMatrix,
+    };
     this.snapshot = deepFreeze({
-      ...input,
+      ...identity,
       targetMatrix: [...new Set(input.targetMatrix)].sort(),
       state: "IDEATION" as const,
       specRevisionId: null,
@@ -139,6 +160,7 @@ export class GameDeliveryWorkflow {
       defaultBranchBuildId: null,
       iteration: 1,
       repairAttempts: 0,
+      repairContext: null,
       waitingProviderRevisionId: null,
       externalGate: null,
       externalApprovals: [],
@@ -204,6 +226,7 @@ export class GameDeliveryWorkflow {
           ? this.commit(signal, {
               state: "DEVELOPMENT_QUEUED",
               lockedRunConfigurationId: signal.lockedRunConfigurationId,
+              runId: null,
             })
           : this.invalid(signal);
       case "DEVELOPMENT_QUEUED":
@@ -221,7 +244,32 @@ export class GameDeliveryWorkflow {
             draftPullRequest: signal.draftPullRequest,
           });
         }
-        if (signal.type === "AGENT_FAILED") return this.commit(signal, { state: "DEVELOPMENT_QUEUED", repairAttempts: this.snapshot.repairAttempts + 1 });
+        if (signal.type === "AGENT_FAILED") {
+          if (!this.automaticRepairSuccessorRuns) {
+            return this.commit(signal, {
+              state: "DEVELOPMENT_QUEUED",
+              repairAttempts: this.snapshot.repairAttempts + 1,
+            });
+          }
+          if (!this.snapshot.lockedRunConfigurationId) return this.invalid(signal);
+          const attempt = this.snapshot.repairAttempts + 1;
+          return this.commit(signal, {
+            state: "RESOLVING_AGENT_CONFIGURATION",
+            lockedRunConfigurationId: null,
+            runId: null,
+            repairAttempts: attempt,
+            repairContext: Object.freeze({
+              attempt,
+              reason: "AGENT_FAILURE",
+              fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
+              diagnosticId: signal.diagnosticId,
+              evidenceBundleId: null,
+              repairPromptId: null,
+              candidateCommitSha: null,
+              draftPullRequest: null,
+            }),
+          });
+        }
         return this.invalid(signal);
       case "WAITING_PROVIDER":
         if (signal.type !== "PROVIDER_RESTORED" || signal.providerRevisionId !== this.snapshot.waitingProviderRevisionId) return this.invalid(signal);
@@ -236,7 +284,36 @@ export class GameDeliveryWorkflow {
             candidateEvidenceBundleId: signal.evidenceBundleId,
           });
         }
-        if (signal.type === "E2E_FAILED") return this.commit(signal, { state: "DEVELOPMENT_QUEUED", evidenceBundleId: signal.evidenceBundleId, repairAttempts: this.snapshot.repairAttempts + 1 });
+        if (signal.type === "E2E_FAILED") {
+          if (!this.automaticRepairSuccessorRuns) {
+            return this.commit(signal, {
+              state: "DEVELOPMENT_QUEUED",
+              evidenceBundleId: signal.evidenceBundleId,
+              repairAttempts: this.snapshot.repairAttempts + 1,
+            });
+          }
+          if (!this.snapshot.lockedRunConfigurationId || !this.snapshot.candidateCommitSha || !this.snapshot.draftPullRequest) {
+            return this.invalid(signal);
+          }
+          const attempt = this.snapshot.repairAttempts + 1;
+          return this.commit(signal, {
+            state: "RESOLVING_AGENT_CONFIGURATION",
+            evidenceBundleId: signal.evidenceBundleId,
+            lockedRunConfigurationId: null,
+            runId: null,
+            repairAttempts: attempt,
+            repairContext: Object.freeze({
+              attempt,
+              reason: "E2E_FAILURE",
+              fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
+              diagnosticId: null,
+              evidenceBundleId: signal.evidenceBundleId,
+              repairPromptId: signal.repairPromptId,
+              candidateCommitSha: this.snapshot.candidateCommitSha,
+              draftPullRequest: this.snapshot.draftPullRequest,
+            }),
+          });
+        }
         return this.invalid(signal);
       case "WAITING_USER_ACCEPTANCE":
         if (signal.type === "USER_FEEDBACK") {
@@ -251,7 +328,9 @@ export class GameDeliveryWorkflow {
             draftPullRequest: null,
             evidenceBundleId: null,
             candidateEvidenceBundleId: null,
+            repairContext: null,
             iteration: this.snapshot.iteration + 1,
+            ...(this.automaticRepairSuccessorRuns ? { repairAttempts: 0 } : {}),
           });
         }
         return signal.type === "USER_ACCEPTED" ? this.commit(signal, { state: "MERGING" }) : this.invalid(signal);

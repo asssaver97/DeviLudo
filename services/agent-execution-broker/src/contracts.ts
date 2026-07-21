@@ -1,6 +1,7 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import type { AgentWorkflowRunReceipt } from "../../agent-worker/src/workflow-handler";
 import type { SignedGitHubCandidateArtifact } from "../../scm-proxy/src/github-contracts";
+import type { AgentConfigurationLock } from "../../agent-configuration/src/contracts";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -67,6 +68,7 @@ export interface LockedAgentExecution {
   readonly sourceBaselineReceiptId: string;
   readonly baseCommitSha: string;
   readonly sourceDigest: string;
+  readonly repairContext: AgentConfigurationLock["repairContext"];
 }
 
 export interface IsolatedAgentExecutionRequest extends LockedAgentExecution {

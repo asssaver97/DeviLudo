@@ -37,6 +37,7 @@ const base: DeliverySnapshot = Object.freeze({
   mainEvidenceBundleId: null, steamInstallEvidenceBundleId: null, mfaApprovalId: null, steamBuildId: null,
   steamReleaseId: null, defaultBranchBuildId: null, targetMatrix: Object.freeze(["linux", "macos", "windows"] as const),
   iteration: 1, repairAttempts: 0, waitingProviderRevisionId: null, externalGate: null,
+  repairContext: null,
   externalApprovals: Object.freeze([]), history: Object.freeze([]),
 });
 
@@ -156,6 +157,30 @@ test("control-plane workflow handler never emits an approval signal from a regis
   assert.equal(outcome.result.status, "WAITING");
 });
 
+test("control-plane binds an automatic E2E repair to the exact predecessor and evidence", async () => {
+  const repairContext = Object.freeze({
+    attempt: 2,
+    reason: "E2E_FAILURE" as const,
+    fromRunConfigurationId: "33333333-3333-4333-8333-333333333333",
+    diagnosticId: null,
+    evidenceBundleId: "44444444-4444-4444-8444-444444444444",
+    repairPromptId: `repair:${"a".repeat(64)}`,
+    candidateCommitSha: "c".repeat(40),
+    draftPullRequest: 91,
+  });
+  const repairSnapshot = Object.freeze({
+    ...snapshotFor("RESOLVE_AGENT_RUN_CONFIGURATION"), repairAttempts: 2, repairContext,
+  });
+  const observed: Parameters<ControlPlaneWorkflowPort["ensureAction"]>[0][] = [];
+  const handler = new ControlPlaneWorkflowHandler({
+    async ensureAction(input) { observed.push(input); return receipt(input.operation); },
+  }, releases);
+  await handler.execute(job("RESOLVE_AGENT_RUN_CONFIGURATION", repairSnapshot), {
+    async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; },
+  });
+  assert.deepEqual(observed[0]?.binding.repairContext, repairContext);
+});
+
 test("control-plane workflow handler rejects state, receipt and cancellation drift terminally", async () => {
   const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } }, releases);
   await assert.rejects(handler.execute(job("REQUEST_SPEC_APPROVAL", base), {
@@ -184,6 +209,7 @@ test("Postgres control-plane action store applies RLS and replays only an exact 
     testPlanRevisionId: null, specApprovalReceiptId: null,
     providerRevisionId: null, candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null,
     mainCommitSha: null, releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null,
+    repairContext: null,
   });
   const row = {
     id: "33333333-3333-4333-8333-333333333333", tenant_id: "11111111-1111-4111-8111-111111111111",
@@ -223,6 +249,7 @@ test("Postgres control-plane action store rolls back an idempotency collision", 
     testPlanRevisionId: null, specApprovalReceiptId: null,
     candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null, mainCommitSha: null,
     releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null,
+    repairContext: null,
   });
   const client: ControlPlaneWorkflowSqlClient = {
     async query<Row>(statement: string) {

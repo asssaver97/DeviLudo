@@ -17,6 +17,7 @@ const snapshot: DeliverySnapshot = Object.freeze({
   steamInstallEvidenceBundleId: null, mfaApprovalId: null, steamBuildId: null,
   steamReleaseId: null, defaultBranchBuildId: null, targetMatrix: Object.freeze(["linux"] as const),
   iteration: 1, repairAttempts: 0, waitingProviderRevisionId: null, externalGate: null,
+  repairContext: null,
   externalApprovals: Object.freeze([]), history: Object.freeze([]),
 });
 

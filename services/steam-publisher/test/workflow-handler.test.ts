@@ -28,6 +28,7 @@ const baseSnapshot: DeliverySnapshot = Object.freeze({
   targetMatrix: Object.freeze(["windows", "linux", "macos"] as const),
   iteration: 1,
   repairAttempts: 0,
+  repairContext: null,
   waitingProviderRevisionId: null,
   externalGate: null,
   externalApprovals: Object.freeze([]),

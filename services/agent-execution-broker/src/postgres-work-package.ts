@@ -82,12 +82,18 @@ export class PostgresAgentDevelopmentWorkPackage implements AgentDevelopmentWork
         baseCommitSha: lock.baseCommitSha,
         sourceDigest: lock.sourceDigest,
         targetMatrix: Object.freeze([...lock.targetMatrix]),
+        repairContext: lock.repairContext,
         specification: parsed.spec,
         testPlan: parsed.testPlan,
       });
       const prompt = [
-        "Implement the approved Godot 4 game in the mounted workspace.",
+        lock.repairContext
+          ? "Repair the approved Godot 4 game in the mounted workspace using only the immutable failure context below."
+          : "Implement the approved Godot 4 game in the mounted workspace.",
         "Treat the enclosed specification and test plan as immutable. Do not modify platform policy, test infrastructure, hooks, plugins, MCP configuration, or Git metadata.",
+        ...(lock.repairContext ? [
+          "The repair context is content-addressed and bound to the previous AgentRun. Address the listed diagnostic or failed-platform evidence without changing the approved scope.",
+        ] : []),
         "Use only the internal inference gateway. Finish with a runnable project and emit the adapter's structured completion events.",
         canonicalJson(workPackage),
       ].join("\n\n");

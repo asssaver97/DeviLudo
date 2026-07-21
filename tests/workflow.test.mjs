@@ -144,3 +144,62 @@ test("an in-flight Provider recovery queues a fresh command for the same recorde
   assert.equal(workflow.current().runId, "run-001");
   assert.equal(workflow.nextCommand(), "START_LOCKED_AGENT_RUN");
 });
+
+test("failed candidate E2E creates a new immutable repair run bound to the failed evidence", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-e2e-repair", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux", "windows"],
+  });
+  workflow.signal({ signalId: "repair-001", type: "SPEC_READY", specRevisionId: "SPEC-001" });
+  workflow.signal({ signalId: "repair-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001" });
+  workflow.signal({ signalId: "repair-003", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-original" });
+  workflow.signal({ signalId: "repair-004", type: "AGENT_STARTED", runId: "run-original" });
+  workflow.signal({ signalId: "repair-005", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41 });
+  workflow.signal({ signalId: "repair-006", type: "E2E_FAILED", evidenceBundleId: "evidence-failed-001", repairPromptId: "repair:failed-bundle-001" });
+
+  assert.equal(workflow.current().state, "RESOLVING_AGENT_CONFIGURATION");
+  assert.equal(workflow.nextCommand(), "RESOLVE_AGENT_RUN_CONFIGURATION");
+  assert.equal(workflow.current().lockedRunConfigurationId, null);
+  assert.equal(workflow.current().runId, null);
+  assert.equal(workflow.current().repairAttempts, 1);
+  assert.deepEqual(workflow.current().repairContext, {
+    attempt: 1,
+    reason: "E2E_FAILURE",
+    fromRunConfigurationId: "run-config-original",
+    diagnosticId: null,
+    evidenceBundleId: "evidence-failed-001",
+    repairPromptId: "repair:failed-bundle-001",
+    candidateCommitSha: candidateSha,
+    draftPullRequest: 41,
+  });
+
+  workflow.signal({ signalId: "repair-007", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-repair-001" });
+  assert.equal(workflow.current().lockedRunConfigurationId, "run-config-repair-001");
+  assert.equal(workflow.nextCommand(), "START_LOCKED_AGENT_RUN");
+  workflow.signal({ signalId: "repair-008", type: "AGENT_STARTED", runId: "run-repair-001" });
+  assert.equal(workflow.current().state, "DEVELOPING");
+});
+
+test("terminal Agent failure also resolves a fresh run instead of reusing the failed operation", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-agent-repair", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
+  });
+  workflow.signal({ signalId: "agent-repair-001", type: "SPEC_READY", specRevisionId: "SPEC-001" });
+  workflow.signal({ signalId: "agent-repair-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001" });
+  workflow.signal({ signalId: "agent-repair-003", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-failed" });
+  workflow.signal({ signalId: "agent-repair-004", type: "AGENT_STARTED", runId: "run-failed" });
+  workflow.signal({ signalId: "agent-repair-005", type: "AGENT_FAILED", diagnosticId: "diagnostic-failed-001" });
+
+  assert.equal(workflow.current().state, "RESOLVING_AGENT_CONFIGURATION");
+  assert.equal(workflow.current().lockedRunConfigurationId, null);
+  assert.equal(workflow.current().runId, null);
+  assert.deepEqual(workflow.current().repairContext, {
+    attempt: 1,
+    reason: "AGENT_FAILURE",
+    fromRunConfigurationId: "run-config-failed",
+    diagnosticId: "diagnostic-failed-001",
+    evidenceBundleId: null,
+    repairPromptId: null,
+    candidateCommitSha: null,
+    draftPullRequest: null,
+  });
+});

@@ -51,6 +51,21 @@ test("projection parser accepts only the exact deterministic replay", () => {
   assert.throws(() => parseDeliveryProjectionRequest({ ...request(waiting), projectionKey: "wrong" }), /binding is invalid/);
 });
 
+test("projection replay remains compatible with pre-patch terminal-run repair histories", () => {
+  const machine = new GameDeliveryWorkflow({
+    workflowId, tenantId, projectId, targetMatrix: ["linux"], automaticRepairSuccessorRuns: false,
+  });
+  machine.signal({ signalId: "legacy-001", type: "SPEC_READY", specRevisionId: "spec-r1" });
+  machine.signal({ signalId: "legacy-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "spec-r1", testPlanRevisionId: "plan-r1", approvalReceiptId: "approval-r1" });
+  machine.signal({ signalId: "legacy-003", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-r1" });
+  machine.signal({ signalId: "legacy-004", type: "AGENT_STARTED", runId: "run-r1" });
+  machine.signal({ signalId: "legacy-005", type: "AGENT_COMPLETED", candidateCommitSha: "a".repeat(40), draftPullRequest: 17 });
+  const legacy = machine.signal({ signalId: "legacy-006", type: "E2E_FAILED", evidenceBundleId: "evidence-r1", repairPromptId: "repair:r1" }) as DeliverySnapshot;
+  assert.equal(legacy.state, "DEVELOPMENT_QUEUED");
+  assert.equal(legacy.repairContext, null);
+  assert.deepEqual(parseDeliverySnapshot(legacy), legacy);
+});
+
 class MemoryStore implements DeliveryProjectionStore {
   current: DeliveryProjectionView | null = null;
   async persist(input: DeliveryProjectionRequest) {

@@ -17,6 +17,20 @@ its immutable ID. A Provider outage moves the run to `WAITING_PROVIDER` and a
 recovery signal resumes the same locked Agent. A different Profile can only be
 selected by a new approved iteration.
 
+A terminal Agent operation is never restarted. `AGENT_FAILED` and candidate
+`E2E_FAILED` transition back through `RESOLVING_AGENT_CONFIGURATION`, carrying
+an immutable repair binding to the predecessor Run. The configuration service
+creates a new Run, inference authorization and resolution digest while cloning
+the predecessor's exact Agent/Profile/installation/Provider/model/budget lock.
+For E2E failures it also revalidates the non-invalidated failed evidence bundle,
+Draft PR, candidate SHA and content-addressed per-platform artifacts, then uses
+that candidate—not the original default-branch checkout—as the next workspace
+baseline. The source-snapshot and candidate-publication authorities independently
+join the predecessor GitHub receipt, so a repair lock cannot name an arbitrary
+commit. A Temporal patch marker preserves replay behavior for histories created
+before successor repair runs, and delivery projection schema v2 can validate
+both history modes.
+
 Activity boundaries are:
 
 1. `startLockedAgentRun` in an ephemeral Linux microVM.

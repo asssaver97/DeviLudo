@@ -22,6 +22,7 @@ const claim: AgentConfigurationClaim = Object.freeze({
   specRevisionId: "44444444-4444-4444-8444-444444444444",
   testPlanRevisionId: "55555555-5555-4555-8555-555555555555",
   specApprovalReceiptId: "a".repeat(64),
+  repairContext: null,
   claimToken: "66666666-6666-4666-8666-666666666666",
 });
 const locked: LockedAgentConfiguration = Object.freeze({
@@ -34,6 +35,7 @@ const locked: LockedAgentConfiguration = Object.freeze({
   testPlanRevisionId: claim.testPlanRevisionId,
   specApprovalReceiptId: claim.specApprovalReceiptId,
   sourceBaselineReceiptId: "77777777-7777-4777-8777-777777777777",
+  repairContext: null,
   runId: "88888888-8888-4888-8888-888888888888",
   resolutionDigest: "b".repeat(64),
 });
@@ -66,6 +68,26 @@ test("Agent configuration service resumes a locked run without re-reading GitHub
   assert.equal(fixture.completed, 1);
 });
 
+test("Agent configuration service derives a repair baseline from immutable predecessor evidence", async () => {
+  const repairClaim: AgentConfigurationClaim = Object.freeze({
+    ...claim,
+    repairContext: Object.freeze({
+      attempt: 1,
+      reason: "E2E_FAILURE",
+      fromRunConfigurationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      diagnosticId: null,
+      evidenceBundleId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      repairPromptId: `repair:${"c".repeat(64)}`,
+      candidateCommitSha: "d".repeat(40),
+      draftPullRequest: 27,
+    }),
+  });
+  const fixture = serviceFixture(repairClaim);
+  assert.equal(await fixture.service.processTenantOnce(tenantId), "COMPLETED");
+  assert.equal(fixture.baselineRequests.length, 0);
+  assert.deepEqual(fixture.lockReceipts, [null]);
+});
+
 test("Agent configuration service releases only pre-lock failures", async () => {
   const beforeLock = serviceFixture(claim, { baselineFailure: true });
   await assert.rejects(beforeLock.service.processTenantOnce(tenantId), /baseline unavailable/);
@@ -84,16 +106,24 @@ function serviceFixture(work: AgentConfigurationClaim | LockedAgentConfiguration
   let completed = 0;
   let released = 0;
   const baselineRequests: unknown[] = [];
+  const lockReceipts: Array<Parameters<AgentConfigurationStore["lock"]>[1]> = [];
   const completions: Parameters<WorkflowActionCompletionPort["complete"]>[0][] = [];
+  const expectedLocked = work.kind === "CLAIMED"
+    ? Object.freeze({ ...locked, repairContext: work.repairContext })
+    : work;
   const store: AgentConfigurationStore = {
     async claimNext() { if (!pending) return null; pending = false; return work; },
     async lock(selected, receipt) {
-      assert.equal(selected, claim);
-      assert.equal(receipt.sourceBaselineReceiptId, locked.sourceBaselineReceiptId);
-      return locked;
+      assert.equal(selected, work);
+      lockReceipts.push(receipt);
+      if (selected.repairContext === null) {
+        assert.ok(receipt);
+        assert.equal(receipt.sourceBaselineReceiptId, locked.sourceBaselineReceiptId);
+      } else assert.equal(receipt, null);
+      return expectedLocked;
     },
     async complete(selected, outboxId) {
-      assert.equal(selected, locked);
+      assert.equal(selected, expectedLocked);
       assert.equal(outboxId, "99999999-9999-4999-8999-999999999999");
       completed += 1;
     },
@@ -142,6 +172,7 @@ function serviceFixture(work: AgentConfigurationClaim | LockedAgentConfiguration
   return {
     service: new AgentConfigurationService(store, baselines, completionPort),
     baselineRequests,
+    lockReceipts,
     completions,
     get completed() { return completed; },
     get released() { return released; },

@@ -14,6 +14,7 @@ const base: DeliverySnapshot = Object.freeze({
   steamReleaseId: null, defaultBranchBuildId: null,
   targetMatrix: Object.freeze(["linux", "macos", "windows"] as const), iteration: 1, repairAttempts: 0,
   waitingProviderRevisionId: null, externalGate: null, externalApprovals: Object.freeze([]), history: Object.freeze([]),
+  repairContext: null,
 });
 
 function job(snapshot: DeliverySnapshot, operation: "START_TARGET_MATRIX_E2E" | "START_MAIN_SHA_RELEASE_GATE" | "INSTALL_FROM_CLEAN_STEAM_CLIENT"): ClaimedWorkflowJob {

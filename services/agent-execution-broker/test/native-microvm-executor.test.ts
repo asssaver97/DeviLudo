@@ -29,7 +29,7 @@ const specPayload = Object.freeze({ schemaVersion: "deviludo.game-spec.v1", conv
 const planPayload = Object.freeze({ schemaVersion: "deviludo.test-plan.v1", conversationId: "conversation-r1", revision: 2,
   testPlan: Object.freeze({ version: "godot-testkit-1.0.0", scenarios: Object.freeze(["Complete one match"]), minimumFps: 60, maxCrashCount: 0 }) });
 
-function request(): IsolatedAgentExecutionRequest {
+function request(overrides: Partial<IsolatedAgentExecutionRequest> = {}): IsolatedAgentExecutionRequest {
   return Object.freeze({ tenantId, projectId, runId, attemptId, resolutionDigest: "a".repeat(64),
     profileRevisionId: "profile-r1", installationId: "installation-r1", imageDigest: `sha256:${"b".repeat(64)}`,
     exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code",
@@ -44,9 +44,10 @@ function request(): IsolatedAgentExecutionRequest {
     budget: { maxUsd: 10, maxTurns: 50, timeoutSeconds: 600 }, specRevisionId,
     specDigest: sha256Canonical(specPayload), testPlanRevisionId, testPlanDigest: sha256Canonical(planPayload),
     targetMatrix: ["linux", "windows"] as const, sourceBaselineReceiptId: baselineId,
+    repairContext: null,
     baseCommitSha, sourceDigest: baselineSourceDigest,
     inferenceTokenSecretRef: `secret://agent-runs/${runId}/${attemptId}`,
-    inferenceTokenExpiresAt: "2030-01-01T00:15:00.000Z" });
+    inferenceTokenExpiresAt: "2030-01-01T00:15:00.000Z", ...overrides });
 }
 
 test("PostgreSQL work package re-resolves the approved spec pair under tenant RLS", async () => {
@@ -65,6 +66,39 @@ test("PostgreSQL work package re-resolves the approved spec pair under tenant RL
   assert.match(work.prompt, /Signal Orchard/);
   assert.ok(sql.some((statement) => statement.includes("set_config('app.tenant_id'")));
   assert.equal(sql.at(-1), "COMMIT");
+});
+
+test("repair work package exposes only the bound predecessor diagnostics and artifact digests", async () => {
+  const repairContext = Object.freeze({
+    attempt: 1,
+    reason: "E2E_FAILURE" as const,
+    fromRunConfigurationId: "77777777-7777-4777-8777-777777777777",
+    diagnosticId: null,
+    evidenceBundleId: "88888888-8888-4888-8888-888888888888",
+    evidenceBundleDigest: "3".repeat(64),
+    repairPromptId: `repair:${"3".repeat(64)}`,
+    candidateCommitSha: "4".repeat(40),
+    draftPullRequest: 44,
+    failedPlatforms: Object.freeze([Object.freeze({
+      platform: "windows" as const,
+      runnerId: "runner-windows-001",
+      logsDigest: "5".repeat(64),
+      junitDigest: "6".repeat(64),
+      screenshotManifestDigest: "7".repeat(64),
+      videoManifestDigest: "8".repeat(64),
+    })]),
+  });
+  const client = fakeClient(async (statement) => statement.includes("FROM deviludo.immutable_revisions spec")
+    ? rows([{ spec_revision_id: specRevisionId, spec_state: "APPROVED", spec_payload: specPayload,
+      spec_digest: sha256Canonical(specPayload), test_plan_revision_id: testPlanRevisionId,
+      test_plan_state: "FROZEN", test_plan_payload: planPayload, test_plan_digest: sha256Canonical(planPayload),
+      bound_test_plan_digest: sha256Canonical(planPayload), bound_target_matrix: ["linux", "windows"] }])
+    : rows([]));
+  const work = await new PostgresAgentDevelopmentWorkPackage(pool(client)).resolve(request({ repairContext }));
+  assert.match(work.prompt, /content-addressed and bound to the previous AgentRun/);
+  assert.match(work.prompt, new RegExp(repairContext.evidenceBundleDigest));
+  assert.match(work.prompt, new RegExp(repairContext.failedPlatforms[0]!.logsDigest));
+  assert.doesNotMatch(work.prompt, /api[_-]?key|password/i);
 });
 
 test("mTLS ephemeral secret store deposits binary DLRT bytes and returns only an opaque SecretRef", async () => {

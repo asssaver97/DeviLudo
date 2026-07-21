@@ -7,7 +7,7 @@ import {
 } from "./game-delivery";
 import type { TargetPlatform } from "../domain/types";
 
-export const DELIVERY_PROJECTION_SCHEMA_VERSION = 1 as const;
+export const DELIVERY_PROJECTION_SCHEMA_VERSION = 2 as const;
 
 export const DELIVERY_STATES = Object.freeze([
   "IDEATION",
@@ -95,7 +95,7 @@ export function parseDeliverySnapshot(value: unknown): DeliverySnapshot {
     "evidenceBundleId", "candidateEvidenceBundleId", "mainEvidenceBundleId",
     "steamInstallEvidenceBundleId", "mfaApprovalId", "steamBuildId",
     "steamReleaseId", "defaultBranchBuildId", "targetMatrix", "iteration",
-    "repairAttempts", "waitingProviderRevisionId", "externalGate",
+    "repairAttempts", "repairContext", "waitingProviderRevisionId", "externalGate",
     "externalApprovals", "history",
   ], "Delivery snapshot");
   if (typeof candidate.workflowId !== "string" || !SAFE_WORKFLOW_ID.test(candidate.workflowId)
@@ -112,26 +112,54 @@ export function parseDeliverySnapshot(value: unknown): DeliverySnapshot {
   if (canonicalJson(targetMatrix) !== canonicalJson([...targetMatrix].sort())) {
     invalid("Delivery target matrix is not canonical");
   }
+  const history = parseHistory(candidate.history as unknown[]);
+  const replayed = replaySnapshot(candidate, targetMatrix, history, true)
+    ?? replaySnapshot(candidate, targetMatrix, history, false);
+  if (!replayed) invalid("Delivery snapshot does not match deterministic workflow replay");
+  return replayed;
+}
+
+function replaySnapshot(
+  candidate: Readonly<Record<string, unknown>>,
+  targetMatrix: readonly TargetPlatform[],
+  history: readonly Readonly<{ signal: DeliverySignal; resultingState: DeliveryState }>[],
+  automaticRepairSuccessorRuns: boolean,
+): DeliverySnapshot | null {
   const machine = new GameDeliveryWorkflow({
-    workflowId: candidate.workflowId,
-    tenantId: candidate.tenantId,
-    projectId: candidate.projectId,
+    workflowId: candidate.workflowId as string,
+    tenantId: candidate.tenantId as string,
+    projectId: candidate.projectId as string,
     targetMatrix,
+    automaticRepairSuccessorRuns,
   });
-  for (let index = 0; index < candidate.history.length; index += 1) {
-    const entry = object(candidate.history[index], "Delivery history entry");
+  try {
+    for (const entry of history) {
+      const signal = entry.signal;
+      const result = machine.signal(signal);
+      if (result.state !== entry.resultingState) invalid("Delivery history resulting state is invalid");
+    }
+    const replayed = machine.current() as DeliverySnapshot;
+    if (canonicalJson(replayed) !== canonicalJson(candidate)) return null;
+    return replayed;
+  } catch {
+    return null;
+  }
+}
+
+function parseHistory(value: readonly unknown[]): readonly Readonly<{
+  signal: DeliverySignal;
+  resultingState: DeliveryState;
+}>[] {
+  return value.map((item, index) => {
+    const entry = object(item, "Delivery history entry");
     exactKeys(entry, ["sequence", "signal", "resultingState"], "Delivery history entry");
     if (entry.sequence !== index + 1 || typeof entry.resultingState !== "string"
       || !STATES.has(entry.resultingState as DeliveryState)) invalid("Delivery history sequence is invalid");
-    const signal = exactDeliverySignal(entry.signal);
-    const result = machine.signal(signal);
-    if (result.state !== entry.resultingState) invalid("Delivery history resulting state is invalid");
-  }
-  const replayed = machine.current() as DeliverySnapshot;
-  if (canonicalJson(replayed) !== canonicalJson(candidate)) {
-    invalid("Delivery snapshot does not match deterministic workflow replay");
-  }
-  return replayed;
+    return Object.freeze({
+      signal: exactDeliverySignal(entry.signal),
+      resultingState: entry.resultingState as DeliveryState,
+    });
+  });
 }
 
 export function parseDeliveryProjectionRequest(value: unknown): DeliveryProjectionRequest {

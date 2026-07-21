@@ -1,4 +1,4 @@
-import type { ExternalApprovalGate } from "../../../lib/orchestration/game-delivery";
+import type { DeliveryRepairContext, ExternalApprovalGate } from "../../../lib/orchestration/game-delivery";
 import {
   WorkflowJobError,
   type DeliverySignalWithoutId,
@@ -38,6 +38,7 @@ export interface ControlPlaneWorkflowBinding {
   readonly steamBuildId: string | null;
   readonly externalGate: ExternalApprovalGate | null;
   readonly cancellationReason: string | null;
+  readonly repairContext: DeliveryRepairContext | null;
 }
 
 export interface ControlPlaneWorkflowActionReceipt {
@@ -161,6 +162,7 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
   let steamBuildId: string | null = null;
   let externalGate: ExternalApprovalGate | null = null;
   let cancellationReason: string | null = null;
+  let repairContext: DeliveryRepairContext | null = null;
 
   if (operation === "REQUEST_SPEC_APPROVAL") {
     specRevisionId = requiredId(snapshot.specRevisionId);
@@ -168,6 +170,7 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
     specRevisionId = requiredId(snapshot.specRevisionId);
     testPlanRevisionId = requiredId(snapshot.testPlanRevisionId);
     specApprovalReceiptId = requiredId(snapshot.specApprovalReceiptId);
+    repairContext = validateRepairContext(snapshot.repairContext, snapshot.repairAttempts);
   } else if (operation === "WAIT_FOR_PROVIDER") {
     lockedRunConfigurationId = requiredId(snapshot.lockedRunConfigurationId);
     providerRevisionId = requiredId(snapshot.waitingProviderRevisionId);
@@ -205,7 +208,29 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
     steamBuildId,
     externalGate,
     cancellationReason,
+    repairContext,
   });
+}
+
+function validateRepairContext(value: DeliveryRepairContext | null, repairAttempts: number): DeliveryRepairContext | null {
+  if (value === null) {
+    if (repairAttempts !== 0) invalid();
+    return null;
+  }
+  if (!Number.isSafeInteger(value.attempt) || value.attempt < 1 || value.attempt !== repairAttempts) invalid();
+  requiredId(value.fromRunConfigurationId);
+  if (value.reason === "AGENT_FAILURE") {
+    requiredId(value.diagnosticId);
+    if (value.evidenceBundleId !== null || value.repairPromptId !== null
+      || value.candidateCommitSha !== null || value.draftPullRequest !== null) invalid();
+  } else if (value.reason === "E2E_FAILURE") {
+    requiredId(value.evidenceBundleId);
+    requiredId(value.repairPromptId);
+    requiredSha(value.candidateCommitSha);
+    requiredPullRequest(value.draftPullRequest);
+    if (value.diagnosticId !== null) invalid();
+  } else invalid();
+  return Object.freeze({ ...value });
 }
 
 function validateReleasePreparation(
