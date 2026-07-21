@@ -18,6 +18,16 @@ after(async () => {
   await app.close();
 });
 
+test("mesh readiness verifies the administrator store and supply chain without an administrator session", async () => {
+  const response = await app.inject({ method: "GET", url: "/healthz" });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), {
+    status: "ok",
+    service: "deviludo-admin-control-plane",
+  });
+  assert.equal(response.headers["cache-control"], "no-store");
+});
+
 test("agent catalog is readable by an Auditor and defaults to Claude Code", async () => {
   const response = await inject({ method: "GET", url: "/admin/agents", role: "Auditor" });
   assert.equal(response.statusCode, 200);

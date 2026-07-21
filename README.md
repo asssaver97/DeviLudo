@@ -105,7 +105,7 @@ npm run local:dev
 
 管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。每次成功写入同时向 D1 追加不可修改、带唯一命令键的管理状态修订；进程重启从最新修订恢复，单进程请求队列与数据库 revision CAS 共同阻止并发覆盖，API Key 等敏感字段在序列化边界再次失败关闭。状态快照 v3 保存与生产一致的完整 Provider/Profile schema及凭据 `platform/tenant` 所有权，并可显式升级 v1/v2 快照；无法证明归属的旧凭据按平台范围失败关闭。租户与项目页面只得到当前认证作用域可见的 Profile、Provider、默认值和凭据公开元数据，项目成员永远得不到凭据目录；缺失治理确认、模型角色、预算或凭据一致性的 Profile 不得成为新任务默认。版本发现可填写精确稳定版或预发布版本；本地页面留空时复用只读探针观察到的实际 CLI 版本，但不会自动批准或激活。版本目录保留官方包来源、发行说明和供应链回执，链接必须同时匹配固定官方域名、Agent 和精确版本；已批准版本可进入 `DEPRECATED`，立即禁止新 WorkerImage 构建，但不会中断已有安装或已锁定任务。租户 Provider 表单会提交全部四类模型、预算、turn、超时和同作用域 fallback；项目选择页展示最终锁定的 Installation、Provider、模型角色及预算。凭据目录分别展示创建时间、原子轮换完成时间，并把追加式推理用量投影为各不可变凭据版本的最后使用时间；明文与 `SecretRef` 仍不会进入响应。任务预检直接核对不可变 Run 锁、四类模型角色与实际 CLI。本地版本/镜像晋级使用明确标记且不接受调用方证明的 `LOCAL_DETERMINISTIC_BROKER` 夹具回执，不能作为生产供应链证据；生产仍必须取得真实签名、hash、SBOM 和扫描回执。没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
 
-生产部署应把 `GET /api/health` 配置为 Web 流量就绪探针。它会用与业务路由相同的客户端契约校验构想、验收、GitHub、身份、管理、投影与 Steam 发布所需的全部 Broker；任何缺失或无效配置都会返回 `503`，且不会在响应中暴露内部 URL 或凭据。
+生产部署应把 `GET /api/health` 配置为 Web 流量就绪探针。它会先用与业务路由相同的客户端契约校验构想、验收、GitHub、身份、管理、投影与 Steam 发布所需的全部 Broker，再并发请求各唯一 Origin 的 `/healthz`；两秒超时、重定向、非 JSON、超限正文、非 2xx 或精确服务/schema 身份不匹配都会返回 `503`。响应只公开 `READY`、`NOT_CONFIGURED`、`INVALID_CONFIGURATION`、`UNAVAILABLE` 或 `IDENTITY_MISMATCH`，不会暴露内部 URL、凭据或上游正文。Agent 管理控制面的 `/healthz` 会实际探测权威目录存储和 Agent 供应链。
 
 若缺少与 Godot 版本匹配的 export templates，本机脚本检查即使全部通过，聚合状态仍为 `WAITING_DEPENDENCY`，发布门禁停在 `WAITING_EXPORT_TEMPLATES`，目标矩阵不能启动；安装模板后可重新验证同一锁定运行。Windows/Linux 保持未连接，直到真实 mTLS Runner 可用。
 

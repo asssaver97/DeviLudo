@@ -14,11 +14,12 @@ import { createSecretVault, SecretVault } from "./secret-vault";
 import { AgentSupplyChain, createAgentSupplyChain } from "./agent-supply-chain";
 import { createInferenceRequestReconciler, InferenceRequestReconciler } from "./inference-reconciliation";
 import { createSpecModelGenerationReconciler, SpecModelGenerationReconciler } from "./spec-model-reconciliation";
+import { HealthController } from "./health.controller";
 
 export class AppModule {}
 
 Module({
-  controllers: [AdminController],
+  controllers: [AdminController, HealthController],
   providers: [
     AdminService,
     { provide: AdminStore, useFactory: createAdminStore },

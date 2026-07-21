@@ -20,6 +20,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
     if (context.getType() !== "http") return next.handle();
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     const reply = context.switchToHttp().getResponse<FastifyReply>();
+    // Readiness has a stable machine contract and is not an administrator API envelope.
+    if (request.method === "GET" && request.routeOptions.url === "/healthz") return next.handle();
     const mutation = request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS";
     if (!mutation) {
       return next.handle().pipe(map((data) => ({ data, meta: { requestId: request.id } })));

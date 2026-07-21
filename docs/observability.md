@@ -41,14 +41,18 @@ mTLS 或平台的 workload identity 向最终后端导出。
 
 ## Web 就绪门禁
 
-生产 Web 的 `GET /api/health` 是流量就绪探针，不是无条件存活回执。只有身份、
-GitHub、项目仓库、规格对话、用户验收、交付投影、Agent 管理、Steam Guard 和
-发布授权这十个 Broker 的完整配置都通过各自客户端的 HTTPS/凭据契约校验时，
-才返回 `200`、`status=ok` 和 `ready=true`。缺失依赖返回 `503` 与
-`NOT_CONFIGURED`；不安全 Origin、残缺的 HMAC Key 或发布公共 Origin 返回
-`INVALID_CONFIGURATION`。响应不包含 URL、Key 或解析错误文本，避免健康端点
-泄露内部拓扑和凭据。编排器必须使用该端点控制流量接入，进程存活由容器运行时
-单独判断。
+生产 Web 的 `GET /api/health` 是流量就绪探针，不是无条件存活回执。它先用业务
+客户端校验身份、GitHub、项目仓库、规格对话、用户验收、交付投影、Agent 管理、
+Steam Guard 和发布授权的 HTTPS/凭据配置，再并发访问每个唯一 Broker Origin 的
+`GET /healthz`。请求最多等待两秒、禁止重定向且把响应限制为 16 KiB；只有媒体类型、
+精确字段和服务或 schema 身份全部匹配才返回 `200`、`status=ok` 和 `ready=true`。
+Steam 注册与项目配置共享同一个 Access Broker 时只发一次探针。缺失依赖返回
+`NOT_CONFIGURED`，不安全 Origin 或残缺凭据返回 `INVALID_CONFIGURATION`，网络或
+非 2xx 响应返回 `UNAVAILABLE`，错误服务、字段、媒体类型或超限正文返回
+`IDENTITY_MISMATCH`；任一状态都让总响应返回 `503`。响应不包含 URL、Key、响应正文
+或解析错误文本，避免健康端点泄露内部拓扑和凭据。Agent 管理控制面的独立
+`GET /healthz` 会实际探测权威目录存储和 Agent 供应链。编排器必须使用 Web 端点
+控制流量接入，进程存活由容器运行时单独判断。
 
 ## 本地验证
 
