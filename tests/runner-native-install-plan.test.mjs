@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -25,6 +25,10 @@ import {
   createRunnerNativeServiceTransaction,
   parseRunnerNativeServiceTransactionArguments,
 } from "../scripts/production/compile-runner-native-service-transaction.mjs";
+import {
+  applyRunnerNativeServiceTransaction,
+  parseRunnerNativeServiceActuationArguments,
+} from "../scripts/production/apply-runner-native-service-transaction.mjs";
 
 const hex = (character) => character.repeat(64);
 const prefixed = (character) => `sha256:${hex(character)}`;
@@ -443,6 +447,174 @@ test("service transaction CLI requires exact absolute create-only bindings", () 
   ]), /service transaction is invalid/);
 });
 
+test("privileged POSIX actuator consumes one signed zero-lease grant and atomically rolls back a failed switch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-runner-native-actuator-"));
+  try {
+    const activationGrantPath = resolve(root, "activation-grant.json");
+    const runnerEnvironmentPath = resolve(root, "physical-runner.env");
+    const planPath = resolve(root, "install-plan.json");
+    const transactionPath = resolve(root, "service-transaction.json");
+    const successOutputPath = resolve(root, "success-receipt.json");
+    const rollbackOutputPath = resolve(root, "rollback-receipt.json");
+    const firstAuthorization = installAuthorization();
+    const machineConfig = config(false);
+    const firstEnvironment = runnerEnvironment(machineConfig, firstAuthorization);
+    const firstEnvironmentBytes = environmentBytes(firstEnvironment);
+    const first = createRunnerNativeInstallPlan({
+      ...baseInput(firstAuthorization, machineConfig),
+      runnerEnv: firstEnvironment,
+      runnerEnvFile: runnerEnvironmentPath,
+      runnerEnvFileDigest: digest(firstEnvironmentBytes),
+      connectorEnv: null,
+      connectorEnvFile: null,
+      connectorEnvFileDigest: null,
+      bridgeObservedDigest: null,
+      previousPlan: null,
+      now: new Date("2026-07-22T06:00:00.000Z"),
+    });
+    const nextAuthorization = {
+      ...firstAuthorization,
+      releaseId: "22222222-2222-4222-8222-222222222222",
+      releaseDigest: prefixed("e"),
+    };
+    const nextEnvironment = {
+      ...runnerEnvironment(machineConfig, nextAuthorization),
+      DEVILUDO_PHYSICAL_RUNNER_ACTIVATION_GRANT_FILE: activationGrantPath,
+    };
+    const nextEnvironmentBytes = environmentBytes(nextEnvironment);
+    const next = createRunnerNativeInstallPlan({
+      ...baseInput(nextAuthorization, machineConfig),
+      runnerEnv: nextEnvironment,
+      runnerEnvFile: runnerEnvironmentPath,
+      runnerEnvFileDigest: digest(nextEnvironmentBytes),
+      connectorEnv: null,
+      connectorEnvFile: null,
+      connectorEnvFileDigest: null,
+      bridgeObservedDigest: null,
+      previousPlan: first,
+      now: new Date("2026-07-22T06:01:00.000Z"),
+    });
+    const receipt = stagingReceipt(next);
+    const transaction = createRunnerNativeServiceTransaction({
+      plan: next,
+      planDigest: next.planDigest,
+      stagingReceipt: receipt,
+      physicalRunnerEnvironment: nextEnvironmentBytes,
+      steamClientConnectorEnvironment: null,
+    });
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const payload = {
+      schemaVersion: "deviludo.runner-native-install-activation-grant.v1",
+      operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      grantSequence: 1,
+      currentRunnerId: first.machine.runnerId,
+      currentSpiffeId: first.machine.runnerSpiffeId,
+      currentCapabilityDigest: first.machine.capabilityDigest,
+      targetRunnerId: next.machine.runnerId,
+      targetSpiffeId: next.machine.runnerSpiffeId,
+      targetCapabilityDigest: next.machine.capabilityDigest,
+      platform: next.platform,
+      architecture: next.architecture,
+      planDigest: next.planDigest,
+      stagingReceiptDigest: receipt.receiptDigest,
+      releaseId: next.releaseId,
+      releaseDigest: next.releaseDigest,
+      requiredRunnerState: "DRAINING",
+      activeLeaseCount: 0,
+      issuedAt: "2026-07-22T06:02:00.000Z",
+      expiresAt: "2026-07-22T06:12:00.000Z",
+    };
+    const grant = { payload, signature: {
+      algorithm: "Ed25519", keyId: "runner-jobs-01", value: signCanonical(privateKey, payload),
+    } };
+    await Promise.all([
+      writeFile(activationGrantPath, JSON.stringify(grant)),
+      writeFile(runnerEnvironmentPath, nextEnvironmentBytes),
+      writeFile(planPath, JSON.stringify(next)),
+      writeFile(transactionPath, JSON.stringify(transaction)),
+    ]);
+    const options = {
+      activationGrantPath,
+      outputPath: successOutputPath,
+      planPath,
+      planDigest: next.planDigest,
+      transactionPath,
+      transactionDigest: transaction.transactionDigest,
+      windowsBridgePath: null,
+      windowsBridgeManifestPath: null,
+      windowsBridgeTrustPolicyPath: null,
+      windowsBridgeTrustPolicyDigest: null,
+      publicKey,
+      keyId: "runner-jobs-01",
+    };
+    const oldDefinition = Buffer.from("old hardened systemd unit\n");
+    const successHost = fakeActuatorHost(transaction, oldDefinition);
+    const activated = await applyRunnerNativeServiceTransaction(options, {
+      host: successHost,
+      reportRollback: async () => { throw new Error("successful activation must not report rollback"); },
+      prepareTransaction: async () => transaction,
+      now: new Date("2026-07-22T06:03:00.000Z"),
+    });
+    assert.equal(activated.state, "SERVICES_STARTED");
+    assert.equal(successHost.definitions.get(transaction.definitions[0].destination).toString(),
+      transaction.definitions[0].rendered);
+    assert.deepEqual(successHost.commands.slice(0, 3), [
+      ["/usr/bin/systemctl", "daemon-reload"],
+      ["/usr/bin/systemctl", "enable", "deviludo-physical-runner.service"],
+      ["/usr/bin/systemctl", "restart", "deviludo-physical-runner.service"],
+    ]);
+    const replay = await applyRunnerNativeServiceTransaction(options, {
+      host: { ...successHost, async run() { throw new Error("receipt replay must not mutate the host"); } },
+      reportRollback: async () => { throw new Error("receipt replay must not report rollback"); },
+      prepareTransaction: async () => transaction,
+      now: new Date("2026-07-22T07:00:00.000Z"),
+    });
+    assert.equal(replay.receiptDigest, activated.receiptDigest);
+
+    const rollbackHost = fakeActuatorHost(transaction, oldDefinition, { failFirstRestart: true });
+    const reportedRollbacks = [];
+    await assert.rejects(applyRunnerNativeServiceTransaction({ ...options, outputPath: rollbackOutputPath }, {
+      host: rollbackHost,
+      reportRollback: async () => {
+        throw new Error("simulated mTLS interruption after local rollback");
+      },
+      prepareTransaction: async () => transaction,
+      now: new Date("2026-07-22T06:04:00.000Z"),
+    }), /simulated mTLS interruption/);
+    const persistedFailure = JSON.parse(await readFile(`${rollbackOutputPath}.failure`, "utf8"));
+    assert.deepEqual(rollbackHost.definitions.get(transaction.definitions[0].destination), oldDefinition);
+    const rolledBack = await applyRunnerNativeServiceTransaction({ ...options, outputPath: rollbackOutputPath }, {
+      host: rollbackHost,
+      reportRollback: async (observedGrant, failureDigest) => {
+        reportedRollbacks.push({ observedGrant, failureDigest });
+        return { state: "ROLLED_BACK", failureEvidenceDigest: failureDigest };
+      },
+      prepareTransaction: async () => transaction,
+      now: new Date("2026-07-22T06:05:00.000Z"),
+    });
+    assert.equal(rolledBack.state, "ROLLED_BACK");
+    assert.match(rolledBack.failureDigest, /^[a-f0-9]{64}$/);
+    assert.equal(rolledBack.failureDigest, persistedFailure.failureDigest);
+    assert.equal(reportedRollbacks.length, 1);
+    assert.equal(reportedRollbacks[0].observedGrant.payload.operationId, payload.operationId);
+    assert.equal(reportedRollbacks[0].failureDigest, rolledBack.failureDigest);
+    assert.deepEqual(rollbackHost.definitions.get(transaction.definitions[0].destination), oldDefinition);
+    assert.equal(await readFile(`${rollbackOutputPath}.journal`, "utf8").catch((error) => error.code), "ENOENT");
+
+    const parsed = parseRunnerNativeServiceActuationArguments([
+      "--activation-grant", activationGrantPath,
+      "--output", successOutputPath,
+      "--plan", planPath,
+      "--plan-digest", next.planDigest,
+      "--transaction", transactionPath,
+      "--transaction-digest", transaction.transactionDigest,
+    ]);
+    assert.equal(parsed.transactionDigest, transaction.transactionDigest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("stager rehashes signed bytes into a new read-only revision and replays only the exact receipt", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-runner-native-stage-"));
   try {
@@ -689,4 +861,35 @@ function retargetPlan(plan, platform) {
   };
   delete core.planDigest;
   return Object.freeze({ ...core, planDigest: sha256Canonical(core) });
+}
+
+function fakeActuatorHost(transaction, previousDefinition, { failFirstRestart = false } = {}) {
+  let restartFailed = false;
+  const definitions = new Map(transaction.definitions.map(({ destination }) =>
+    [destination, Buffer.from(previousDefinition)]));
+  const commands = [];
+  return {
+    platform: transaction.platform,
+    architecture: transaction.architecture,
+    definitions,
+    commands,
+    async readDefinition(path) { return definitions.has(path) ? Buffer.from(definitions.get(path)) : null; },
+    async writeDefinition(path, body) { definitions.set(path, Buffer.from(body)); },
+    async removeDefinition(path) { definitions.delete(path); },
+    async digestFile(path) {
+      const definition = transaction.definitions.find((candidate) =>
+        candidate.executable === path || candidate.environmentSourcePath === path);
+      if (!definition) throw new Error("unexpected digest path");
+      return definition.executable === path ? definition.executableDigest.slice(7) : definition.environmentSourceDigest;
+    },
+    async run(command, args) {
+      commands.push([command, ...args]);
+      if (failFirstRestart && !restartFailed && args[0] === "restart") {
+        restartFailed = true;
+        throw new Error("simulated activation failure");
+      }
+      return { exitCode: 0, output: "" };
+    },
+    async sleep() {},
+  };
 }

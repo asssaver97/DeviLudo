@@ -128,6 +128,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/authorize-control-plane-release.mjs",
     "scripts/production/build-control-plane-image.mjs",
     "scripts/production/build-runner-native.mjs",
+    "scripts/production/apply-runner-native-service-transaction.mjs",
     "scripts/production/compile-runner-native-service-transaction.mjs",
     "scripts/production/finalize-runner-native-release.mjs",
     "scripts/production/finalize-steam-native-bridge.mjs",

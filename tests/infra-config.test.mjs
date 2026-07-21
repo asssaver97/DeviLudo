@@ -809,10 +809,18 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.equal(packageJson.scripts["verify:runner-native"], "node scripts/production/verify-runner-native-release.mjs");
   assert.equal(packageJson.scripts["compile:runner-native-service-transaction"],
     "node --import tsx scripts/production/compile-runner-native-service-transaction.mjs");
+  assert.equal(packageJson.scripts["apply:runner-native-service-transaction"],
+    "node --import tsx scripts/production/apply-runner-native-service-transaction.mjs");
+  const serviceActuator = readFileSync(new URL("../scripts/production/apply-runner-native-service-transaction.mjs", import.meta.url), "utf8");
   assert.match(serviceTransaction, /WAITING_NATIVE_BRIDGE/);
   assert.match(serviceTransaction, /SIGNED_WINDOWS_SCM_BRIDGE_REQUIRED/);
   assert.match(serviceTransaction, /NoNewPrivileges=true/);
   assert.doesNotMatch(serviceTransaction, /shell:\s*true|curl \| sh|dangerously-skip-permissions/);
+  assert.match(serviceActuator, /verifyRunnerNativeInstallActivationGrant/);
+  assert.match(serviceActuator, /prepareRunnerNativeServiceTransaction/);
+  assert.match(serviceActuator, /service-actuation-journal\.v1/);
+  assert.match(serviceActuator, /A separately signed Windows native host actuator is required/);
+  assert.doesNotMatch(serviceActuator, /shell:\s*true|execSync|powershell|reg\.exe|sc\.exe/i);
   assert.match(nativeEntry, /isSea\(\)/);
   assert.match(nativeBuilder, /--experimental-sea-config/);
   assert.match(nativeBuilder, /status", "--porcelain=v1"/);

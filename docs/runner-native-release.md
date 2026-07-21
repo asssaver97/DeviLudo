@@ -276,6 +276,39 @@ platform-specific service manager to atomically install the declarative service
 definitions and start the target revision. Floating paths, shell fragments and
 in-place binary replacement are outside the plan contract.
 
+On Linux and macOS, the root-owned host actuator consumes that exact Grant and
+the create-only service transaction:
+
+```bash
+NODE_ENV=production npm run apply:runner-native-service-transaction -- \
+  --activation-grant /etc/deviludo/runner-native-activation-grant.json \
+  --plan /absolute/staging/install-plan.json \
+  --plan-digest <64-lowercase-hex> \
+  --transaction /absolute/staging/service-transaction.json \
+  --transaction-digest <64-lowercase-hex> \
+  --output /var/lib/deviludo-native-actuator/<operation-id>.json
+```
+
+The actuator obtains its Ed25519 key ID and public-key file only from the
+root-owned mounts in `services/runner-control/.native-actuator.env.example`.
+Before changing the host it re-runs transaction compilation, byte-compares the
+result, rehashes every executable/environment lock, verifies the unexpired
+zero-lease Grant and checks the real OS/architecture. It never executes an
+action or argv supplied by the transaction: systemd and launchd commands are
+re-derived from fixed component IDs. Existing definitions are captured in a
+create-only recovery journal before atomic replacement. A process crash causes
+the next invocation to restore that journal; a start or manager-health failure
+restores both service definitions and emits a content-bound `ROLLED_BACK`
+receipt only after the old Runner mTLS identity has committed the same failure
+digest to ingress. A separate failure sidecar makes an interrupted report replay
+the identical digest. Exact completed receipt replay is allowed after Grant
+expiry and does not touch the host.
+
+This POSIX actuator intentionally refuses Windows. Windows activation requires
+a separately signed native SCM actuator that applies the already verified
+bridge descriptor through Win32 APIs; invoking `sc.exe`, `reg.exe`, PowerShell
+or a high-privilege Node process is not accepted as that missing trust boundary.
+
 The target `deviludo-physical-runner` probes ingress, TestKit and the optional
 Steam Connector before advertising readiness. When an activation-grant file is
 present it then registers the exact target capability and calls the authenticated

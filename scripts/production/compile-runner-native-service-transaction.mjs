@@ -144,7 +144,7 @@ export function createRunnerNativeServiceDefinition({ plan, service, environment
   });
 }
 
-export async function compileRunnerNativeServiceTransaction(options) {
+export async function prepareRunnerNativeServiceTransaction(options) {
   const plan = validateRunnerNativeInstallPlan(await readBoundedJson(options.planPath), options.planDigest);
   const hasWindowsBridge = options.windowsBridgePath != null;
   if ((plan.platform === "windows") !== hasWindowsBridge) invalid();
@@ -191,6 +191,11 @@ export async function compileRunnerNativeServiceTransaction(options) {
     steamClientConnectorEnvironment,
     windowsBridgeAuthorization,
   });
+  return transaction;
+}
+
+export async function compileRunnerNativeServiceTransaction(options) {
+  const transaction = await prepareRunnerNativeServiceTransaction(options);
   await createOnlyJson(options.outputPath, transaction);
   return transaction;
 }

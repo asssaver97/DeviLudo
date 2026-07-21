@@ -246,6 +246,16 @@ shell. Authenticode/scan evidence is bound into an Ed25519 release manifest by
 stays `WAITING_NATIVE_BRIDGE` unless the exact architecture, binary, manifest
 and trust policy verify together.
 
+Linux/macOS upgrades are applied by the separate root-owned
+`apply:runner-native-service-transaction` utility. It re-verifies the staged
+transaction and short-lived zero-lease activation Grant, rehashes locked files,
+uses fixed systemd/launchd argv only, and persists an exact recovery journal
+before replacing any service definition. Failed starts restore the previous
+definitions, then report the exact failure digest through the existing Runner
+mTLS identity before producing an immutable rollback receipt. Its Ed25519 trust
+mounts are listed in `.native-actuator.env.example`; it deliberately refuses
+Windows, which requires the independently signed native SCM actuator.
+
 Native upgrades are fenced by the same registration row used by lease issuance.
 Ingress changes the current identity to `DRAINING` under an exclusive row lock,
 waits for an authoritative zero count of unexpired leases and only then signs a
