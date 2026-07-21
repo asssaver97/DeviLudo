@@ -45,6 +45,24 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
     assert.match(result.artifactDigests["junit.xml"], /^[a-f0-9]{64}$/);
     assert.match(result.artifactDigests["godot.log"], /^[a-f0-9]{64}$/);
 
+    const successor = await runner.run({
+      projectId: request.projectId,
+      runId: "RUN-INTEGRATION-002",
+      specRevisionId: "SPEC-TEST-002",
+    });
+    assert.equal(
+      successor.status,
+      successor.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "WAITING_DEPENDENCY" : "TESTS_PASSED",
+    );
+    assert.notEqual(successor.runId, result.runId);
+    assert.notEqual(successor.candidateSha, result.candidateSha);
+    assert.notEqual(successor.bundleDigest, result.bundleDigest);
+    const successorLog = await readFile(path.join(
+      runner.evidenceDirectory({ projectId: request.projectId, runId: successor.runId }),
+      "godot.log",
+    ), "utf8");
+    assert.doesNotMatch(successorLog, new RegExp(temporary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
     const replay = await runner.run(request);
     if (result.releaseGate === "WAITING_EXPORT_TEMPLATES") {
       assert.equal(replay.status, "WAITING_DEPENDENCY");

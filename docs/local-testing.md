@@ -53,7 +53,7 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 3. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
 4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml` 和 `godot.log`。
 
-证据包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本和逐项检查结果。`.deviludo/` 已被 Git 忽略。
+每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。证据包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本和逐项检查结果。`.deviludo/` 已被 Git 忽略。
 
 如果本机没有通过上述固定安装器安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 

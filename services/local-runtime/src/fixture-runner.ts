@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
@@ -91,9 +90,11 @@ export class LocalFixtureRunner {
     const workspace = path.join(runRoot, "workspace");
     const evidence = path.join(runRoot, "evidence");
     const runtimeHome = path.join(runRoot, "home");
+    const runtimeTemp = path.join(runRoot, "tmp");
     await archivePartialRun(runRoot, path.join(this.#storageRoot, ".scm", request.projectId, request.runId));
     await mkdir(evidence, { recursive: true });
     await mkdir(runtimeHome, { recursive: true });
+    await mkdir(runtimeTemp, { recursive: true });
     await mkdir(workspace, { recursive: true });
 
     const scmBinding = {
@@ -117,7 +118,7 @@ export class LocalFixtureRunner {
       PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
       LANG: "C.UTF-8",
       HOME: runtimeHome,
-      TMPDIR: os.tmpdir(),
+      TMPDIR: runtimeTemp,
     };
     const log: string[] = [`[scm-proxy] base=${base.baseCommitSha} candidate=${candidate.commitSha} source=${candidate.sourceDigest}`];
     const candidateSha = candidate.commitSha;
@@ -169,7 +170,7 @@ export class LocalFixtureRunner {
       workspace,
       environment,
     );
-    log.push(formatCommand(this.#godotBinary, ["--headless", "--path", "<workspace>", "--export-debug", "macOS", "<artifact>"]), sanitize(exported, workspace, runtimeHome));
+    log.push(formatCommand(this.#godotBinary, ["--headless", "--path", "<workspace>", "--export-debug", "macOS", "<artifact>"]), sanitize(exported, workspace, runtimeHome, runtimeTemp));
     const exportPassed = exported.exitCode === 0;
     const exportDiagnostics = `${exported.stdout}\n${exported.stderr}`;
     const exportTemplatesMissing = !exportPassed && /(export_templates|export templates?|导出模板)/i.test(exportDiagnostics);
@@ -239,7 +240,12 @@ export class LocalFixtureRunner {
     log: string[],
   ) {
     const result = await this.#command(executable, args, cwd, environment);
-    log.push(formatCommand(executable, args.map((arg) => arg === cwd ? "<workspace>" : arg)), sanitize(result, cwd, environment.HOME ?? ""));
+    log.push(formatCommand(executable, args.map((arg) => arg === cwd ? "<workspace>" : arg)), sanitize(
+      result,
+      cwd,
+      environment.HOME ?? "",
+      environment.TMPDIR ?? "",
+    ));
     if (result.exitCode !== 0) throw new Error(`${path.basename(executable)} exited with code ${result.exitCode}`);
     return result;
   }
@@ -318,10 +324,11 @@ function formatCommand(executable: string, args: string[]) {
   return `$ ${path.basename(executable)} ${args.join(" ")}`;
 }
 
-function sanitize(result: CommandResult, workspace: string, runtimeHome: string) {
+function sanitize(result: CommandResult, workspace: string, runtimeHome: string, runtimeTemp: string) {
   return `${result.stdout}${result.stderr}`
     .replaceAll(workspace, "<workspace>")
     .replaceAll(runtimeHome, "<runtime-home>")
+    .replaceAll(runtimeTemp, "<runtime-tmp>")
     .slice(0, OUTPUT_LIMIT);
 }
 
