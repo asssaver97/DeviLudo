@@ -90,7 +90,11 @@ test("feedback invalidates all local evidence and requires a new immutable appro
   });
   assert.equal(state.stage, "CANDIDATE_READY");
   assert.equal(state.localValidation.valid, true);
-  state = { ...state, evidenceValid: true, targetResults: { linux: "PASSED", windows: "PASSED", macos: "PASSED" } };
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.equal(state.stage, "AWAITING_ACCEPTANCE");
   state = invalidateLocalDelivery(state, "SPEC-009");
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
   assert.equal(state.evidenceValid, false);
@@ -242,6 +246,24 @@ test("a completed Agent receipt must match every immutable lock before becoming 
   assert.equal(state.candidateSha, receipt.candidate.commitSha);
   assert.equal(state.agentExecution.valid, true);
   assert.equal(state.events[0].type, "AGENT_CANDIDATE_RECORDED");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
   state = invalidateLocalDelivery(state, "SPEC-013");
   assert.equal(state.agentExecution.valid, false);
+});
+
+test("feedback cannot bypass candidate E2E or invent an early revision", () => {
+  const queued = approveLocalSpec(createLocalDelivery("project-feedback-gate"), "SPEC-001", "RUN-FEEDBACK-GATE");
+  assert.throws(
+    () => invalidateLocalDelivery(queued, "SPEC-002"),
+    /等待用户验收.*人工修复接管/,
+  );
+  const candidate = applyLocalDeliveryAction(applyLocalDeliveryAction(queued, "advance"), "advance");
+  assert.equal(candidate.stage, "CANDIDATE_READY");
+  assert.throws(
+    () => invalidateLocalDelivery(candidate, "SPEC-002"),
+    /等待用户验收.*人工修复接管/,
+  );
 });

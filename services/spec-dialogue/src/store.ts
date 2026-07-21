@@ -58,6 +58,49 @@ export class InMemorySpecDialogueStore extends SpecDialogueStore {
   readonly #operations = new Map<string, Operation>();
   readonly #approvals = new Map<string, { readonly digest: string; readonly receipt: SpecApprovalReceipt }>();
 
+  /**
+   * Local/test-only immutable successor creation. Production feedback uses the
+   * user-acceptance PostgreSQL transaction, which creates a distinct
+   * conversation and preserves the approved ancestor in the same way.
+   */
+  async forkApproved(input: {
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly conversationId: string;
+    readonly nextConversationId: string;
+  }): Promise<SpecDialogueSnapshot> {
+    if (input.conversationId === input.nextConversationId) {
+      throw new Error("Specification feedback successor must use a new conversation");
+    }
+    const nextKey = conversationKey({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      conversationId: input.nextConversationId,
+    });
+    const existing = this.#conversations.get(nextKey);
+    if (existing) return cloneSnapshot(snapshotOf(existing));
+    const source = this.#conversations.get(conversationKey(input));
+    if (!source || source.state !== "APPROVED" || !source.result
+      || !source.specRevisionId || !source.testPlanRevisionId) {
+      throw new Error("Specification feedback ancestor is not an approved revision");
+    }
+    const successor: Conversation = {
+      tenantId: source.tenantId,
+      projectId: source.projectId,
+      conversationId: input.nextConversationId,
+      revision: source.revision,
+      messages: source.messages.map((message) => Object.freeze({ ...message })),
+      result: parseSpecModelResult(source.result),
+      specRevisionId: null,
+      specDigest: null,
+      testPlanRevisionId: null,
+      testPlanDigest: null,
+      state: "DRAFT",
+    };
+    this.#conversations.set(nextKey, successor);
+    return cloneSnapshot(snapshotOf(successor));
+  }
+
   async begin(command: SpecDialogueCommand): Promise<SpecDialogueClaimResult> {
     const requestDigest = digest({
       tenantId: command.tenantId,

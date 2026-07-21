@@ -122,7 +122,9 @@ behind the web console:
   directly from the Web process.
 - `local-spec-runtime`: a loopback-only deterministic specification sidecar.
   Conversation reads, writes and approvals require a fresh request signature
-  bound to the `spec-runtime` audience.
+  bound to the `spec-runtime` audience. Candidate feedback forks a distinct
+  draft conversation from the approved ancestor; it never reopens or mutates
+  the approved conversation, and exact retries replay the same successor.
 
 The local launcher generates separate 256-bit keys for all three sidecars on
 every deployment. Every signature covers audience, method, path, body digest,

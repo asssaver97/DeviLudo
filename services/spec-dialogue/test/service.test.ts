@@ -52,6 +52,63 @@ test("explicit approval creates an immutable approved spec and frozen plan succe
   await assert.rejects(service.send({ ...command, operationKey: "e".repeat(64), expectedRevision: 2 }), SpecDialogueConflict);
 });
 
+test("local feedback forks an approved conversation without reopening or mutating its authority", async () => {
+  const store = new InMemorySpecDialogueStore();
+  const service = new SpecDialogueService(store, new DeterministicLocalSpecModel());
+  const draft = await service.send(command);
+  await assert.rejects(
+    store.forkApproved({
+      tenantId: command.tenantId, projectId: command.projectId,
+      conversationId: command.conversationId, nextConversationId: "conversation-feedback-too-early",
+    }),
+    /not an approved revision/,
+  );
+  await service.approve({
+    operationKey: "d".repeat(64), tenantId: command.tenantId, projectId: command.projectId,
+    conversationId: command.conversationId, actorId: command.actorId,
+    expectedRevision: draft.revision, specRevisionId: draft.specRevisionId!, testPlanRevisionId: draft.testPlanRevisionId!,
+  });
+  const ancestor = await service.snapshot({
+    tenantId: command.tenantId, projectId: command.projectId, conversationId: command.conversationId,
+  });
+  assert.equal(ancestor?.state, "APPROVED");
+  const fork = {
+    tenantId: command.tenantId, projectId: command.projectId,
+    conversationId: command.conversationId, nextConversationId: "conversation-feedback-1",
+  };
+  const successorBase = await store.forkApproved(fork);
+  assert.equal(successorBase.state, "DRAFT");
+  assert.equal(successorBase.revision, 2);
+  assert.equal(successorBase.messages.length, ancestor?.messages.length);
+  assert.equal(successorBase.specRevisionId, null);
+  assert.deepEqual(await store.forkApproved(fork), successorBase);
+
+  const successor = await service.send({
+    ...command,
+    operationKey: "f".repeat(64),
+    conversationId: fork.nextConversationId,
+    expectedRevision: successorBase.revision,
+    message: "降低前五分钟的风暴频率，并保持其余已批准规则",
+  });
+  assert.equal(successor.state, "DRAFT");
+  assert.equal(successor.revision, 3);
+  assert.equal(successor.messages.length, (ancestor?.messages.length ?? 0) + 2);
+  assert.notEqual(successor.specRevisionId, ancestor?.specRevisionId);
+  assert.deepEqual(await service.snapshot({
+    tenantId: command.tenantId, projectId: command.projectId, conversationId: command.conversationId,
+  }), ancestor);
+
+  const approvedSuccessor = await service.approve({
+    operationKey: "9".repeat(64), tenantId: command.tenantId, projectId: command.projectId,
+    conversationId: successor.conversationId, actorId: command.actorId,
+    expectedRevision: successor.revision, specRevisionId: successor.specRevisionId!, testPlanRevisionId: successor.testPlanRevisionId!,
+  });
+  assert.equal(approvedSuccessor.revision, 4);
+  assert.deepEqual(await service.snapshot({
+    tenantId: command.tenantId, projectId: command.projectId, conversationId: command.conversationId,
+  }), ancestor);
+});
+
 test("a pending model call fences concurrent duplicates", async () => {
   let release!: (value: ReturnType<typeof parseSpecModelResult>) => void;
   const pending = new Promise<ReturnType<typeof parseSpecModelResult>>((resolve) => { release = resolve; });

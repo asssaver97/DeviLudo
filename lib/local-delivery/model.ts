@@ -254,6 +254,9 @@ export function invalidateLocalDelivery(
   current: LocalDeliverySnapshot,
   nextSpecRevisionId: string,
 ): LocalDeliverySnapshot {
+  if (!canCreateLocalFeedback(current)) {
+    throw new Error("只有等待用户验收的候选版本或失败后的人工修复接管可以创建反馈修订");
+  }
   return event(
     {
       ...current,
@@ -281,6 +284,11 @@ export function invalidateLocalDelivery(
     "FEEDBACK_CREATED",
     "用户反馈已创建新规格修订，旧候选证据立即失效。",
   );
+}
+
+export function canCreateLocalFeedback(current: LocalDeliverySnapshot): boolean {
+  return current.stage === "AWAITING_ACCEPTANCE"
+    || (current.stage === "AWAITING_SPEC_APPROVAL" && current.repairHandoff !== null);
 }
 
 export function recordLocalAgentExecution(

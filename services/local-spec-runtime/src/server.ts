@@ -15,7 +15,14 @@ const PORT = parsePort(process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_PORT ?? "4313");
 const BODY_LIMIT = 16 * 1024;
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
-const service = new SpecDialogueService(new InMemorySpecDialogueStore(), new DeterministicLocalSpecModel());
+
+type FeedbackClaim = Readonly<{ conversationId: string; expectedRevision: number }>;
+type LocalSpecRuntime = Readonly<{
+  service: SpecDialogueService;
+  store: InMemorySpecDialogueStore;
+  currentConversationIds: Map<string, string>;
+  feedbackClaims: Map<string, FeedbackClaim>;
+}>;
 
 export function createLocalSpecRuntimeServer(
   options: Readonly<{ authenticationKey?: Uint8Array }> = {},
@@ -23,10 +30,17 @@ export function createLocalSpecRuntimeServer(
   const requestVerifier = new LocalSpecRuntimeRequestVerifier(
     options.authenticationKey ?? localSpecRuntimeKeyFromEnvironment(),
   );
+  const store = new InMemorySpecDialogueStore();
+  const runtime: LocalSpecRuntime = {
+    store,
+    service: new SpecDialogueService(store, new DeterministicLocalSpecModel()),
+    currentConversationIds: new Map(),
+    feedbackClaims: new Map(),
+  };
   return createServer(async (request, response) => {
     secure(response);
     try {
-      await dispatch(request, response, requestVerifier);
+      await dispatch(request, response, requestVerifier, runtime);
     } catch (error) {
       if (error instanceof LocalSpecRuntimeAuthenticationError) return json(response, 403, { error: { code: "LOCAL_SPEC_RUNTIME_AUTH_REQUIRED", message: "Authenticated local specification runtime request is required" } });
       if (error instanceof BodyLimitError) return json(response, 413, { error: { code: "LOCAL_SPEC_REQUEST_TOO_LARGE", message: "Local specification message is too large" } });
@@ -40,22 +54,24 @@ async function dispatch(
   request: IncomingMessage,
   response: ServerResponse,
   requestVerifier: LocalSpecRuntimeRequestVerifier,
+  runtime: LocalSpecRuntime,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${HOST}`);
   if (request.method === "GET" && url.pathname === "/health") {
-    await service.probe();
+    await runtime.service.probe();
     return json(response, 200, { status: "ok", service: "deviludo-local-spec-runtime", mode: "deterministic-loopback" });
   }
   if (url.search) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
-  const match = /^\/v1\/projects\/([^/]+)\/(conversation|spec-approval)$/.exec(url.pathname);
+  const match = /^\/v1\/projects\/([^/]+)\/(conversation|feedback|spec-approval)$/.exec(url.pathname);
   if (!match) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
   const projectId = decodeURIComponent(match[1]!);
   const operation = match[2]!;
   if (!PROJECT.test(projectId)) throw new Error("project");
-  const binding = { tenantId: "tenant-local", projectId, conversationId: `local:${projectId}` };
+  const conversationId = runtime.currentConversationIds.get(projectId) ?? `local:${projectId}`;
+  const binding = { tenantId: "tenant-local", projectId, conversationId };
   if (request.method === "GET" && operation === "conversation") {
     requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
-    return json(response, 200, { data: await service.snapshot(binding) });
+    return json(response, 200, { data: await runtime.service.snapshot(binding) });
   }
   if (request.method !== "POST" || contentType(request.headers["content-type"]) !== "application/json") {
     return json(response, 405, { error: { code: "METHOD_NOT_ALLOWED", message: "Local specification route requires JSON POST" } });
@@ -65,14 +81,34 @@ async function dispatch(
   const idempotency = header(request, "idempotency-key");
   if (!idempotency || !IDEMPOTENCY.test(idempotency)) throw new Error("idempotency");
   const body = object(JSON.parse(rawBody));
-  const operationKey = createHash("sha256").update(`${projectId}\0${idempotency}`).digest("hex");
+  const operationKey = createHash("sha256").update(`${projectId}\0${operation}\0${idempotency}`).digest("hex");
   if (operation === "spec-approval") {
     if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "specRevisionId", "testPlanRevisionId"])) throw new Error("shape");
-    const receipt = await service.approve({ ...binding, actorId: "local-user", operationKey, ...body });
+    const receipt = await runtime.service.approve({ ...binding, actorId: "local-user", operationKey, ...body });
     return json(response, 201, { data: receipt });
   }
+  if (operation === "feedback") {
+    if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["feedback"]) || typeof body.feedback !== "string") throw new Error("shape");
+    let claim = runtime.feedbackClaims.get(operationKey);
+    if (!claim) {
+      const source = await runtime.service.snapshot(binding);
+      if (!source || source.state !== "APPROVED" || !source.result) throw new Error("feedback ancestor");
+      const nextConversationId = `local:${projectId}:feedback:${operationKey.slice(0, 32)}`;
+      await runtime.store.forkApproved({ ...binding, nextConversationId });
+      claim = Object.freeze({ conversationId: nextConversationId, expectedRevision: source.revision });
+      runtime.feedbackClaims.set(operationKey, claim);
+      runtime.currentConversationIds.set(projectId, nextConversationId);
+    }
+    const snapshot = await runtime.service.send({
+      tenantId: "tenant-local", projectId, conversationId: claim.conversationId,
+      actorId: "local-user", operationKey, expectedRevision: claim.expectedRevision, message: body.feedback,
+    });
+    runtime.currentConversationIds.set(projectId, claim.conversationId);
+    return json(response, 201, { data: snapshot });
+  }
   if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "message"])) throw new Error("shape");
-  const snapshot = await service.send({ ...binding, actorId: "local-user", operationKey, expectedRevision: body.expectedRevision, message: body.message });
+  const snapshot = await runtime.service.send({ ...binding, actorId: "local-user", operationKey, expectedRevision: body.expectedRevision, message: body.message });
+  runtime.currentConversationIds.set(projectId, conversationId);
   return json(response, 201, { data: snapshot });
 }
 

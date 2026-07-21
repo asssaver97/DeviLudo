@@ -1,6 +1,7 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
-import { invalidateLocalEvidence } from "@/lib/local-delivery/store";
+import { canCreateLocalFeedback } from "@/lib/local-delivery/model";
+import { invalidateLocalEvidence, readLocalDelivery } from "@/lib/local-delivery/store";
 import {
   authorizeProjectAccess,
   ProjectAccessError,
@@ -8,9 +9,20 @@ import {
 } from "@/lib/projects/project-read-access";
 import { userAcceptanceBrokerFromEnvironment, userFeedbackOperationKey } from "@/lib/user-acceptance/broker";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { createLocalSpecRuntimeHeaders } from "@/services/local-spec-runtime/src/request-auth";
+import type { SpecDialogueSnapshot } from "@/services/spec-dialogue/src/contracts";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+
+type LocalFeedbackResult = Readonly<{
+  iteration: Readonly<{ id: string; text: string; revision: number; at: string }>;
+  specRevisionId: string;
+  invalidatedEvidence: readonly string[];
+  candidatePullRequest: number;
+  state: "AWAITING_SPEC_APPROVAL";
+  snapshot: SpecDialogueSnapshot;
+}>;
 
 export async function GET(
   request: Request,
@@ -56,14 +68,31 @@ export async function POST(
       });
       return json({ data: receipt, meta: { idempotentReplay: receipt.delivery.replayed } }, { status: 201 });
     }
-    const result = withIdempotency(`feedback:${projectId}:${requestKey}`, () => {
+    const operationKey = `feedback:${projectId}:${requestKey}`;
+    const store = getDemoStore();
+    const cached = Object.prototype.hasOwnProperty.call(store.idempotency, operationKey)
+      ? store.idempotency[operationKey] as LocalFeedbackResult
+      : null;
+    if (!cached) {
+      const current = await readLocalDelivery(projectId);
+      if (!canCreateLocalFeedback(current)) {
+        return json({
+          error: {
+            code: "LOCAL_FEEDBACK_NOT_ALLOWED",
+            message: "只有等待用户验收的候选版本或失败后的人工修复接管可以创建反馈修订。",
+          },
+        }, { status: 409 });
+      }
+    }
+    const snapshot = cached?.snapshot ?? await createLocalFeedbackDraft(request, projectId, requestKey, feedback);
+    const result = withIdempotency<LocalFeedbackResult>(operationKey, () => {
       const store = getDemoStore();
-      store.specRevision += 1;
+      store.specRevision = snapshot.revision;
       store.specState = "DRAFT";
       const iteration = {
         id: `ITER-${String(store.feedback.length + 8).padStart(3, "0")}`,
         text: feedback,
-        revision: store.specRevision,
+        revision: snapshot.revision,
         at: new Date().toISOString(),
       };
       store.feedback.push(iteration);
@@ -75,10 +104,11 @@ export async function POST(
       });
       return {
         iteration,
-        specRevisionId: `SPEC-${String(store.specRevision).padStart(3, "0")}`,
-        invalidatedEvidence: ["EV-007-LNX"],
+        specRevisionId: `SPEC-${String(snapshot.revision).padStart(3, "0")}`,
+        invalidatedEvidence: Object.freeze(["EV-007-LNX"]),
         candidatePullRequest: 18,
-        state: "AWAITING_SPEC_APPROVAL",
+        state: "AWAITING_SPEC_APPROVAL" as const,
+        snapshot,
       };
     });
     const delivery = await invalidateLocalEvidence(
@@ -93,6 +123,50 @@ export async function POST(
   } catch (error) {
     return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error);
   }
+}
+
+async function createLocalFeedbackDraft(
+  request: Request,
+  projectId: string,
+  requestKey: string,
+  feedback: string,
+): Promise<SpecDialogueSnapshot> {
+  const endpoint = localSpecRuntimeUrl(request);
+  const path = `/v1/projects/${encodeURIComponent(projectId)}/feedback`;
+  const command = JSON.stringify({ feedback });
+  const upstream = await fetch(new URL(path, endpoint), {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "idempotency-key": requestKey,
+      ...createLocalSpecRuntimeHeaders({ method: "POST", path, body: command }),
+    },
+    body: command,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (upstream.status >= 300 && upstream.status < 400) throw new Error("Local specification feedback redirected the request");
+  const payload = await upstream.json() as { data?: SpecDialogueSnapshot; error?: { message?: string } };
+  const snapshot = payload.data;
+  if (upstream.status !== 201 || !snapshot || snapshot.tenantId !== "tenant-local"
+    || snapshot.projectId !== projectId || snapshot.state !== "DRAFT"
+    || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 1
+    || !snapshot.conversationId || !snapshot.specRevisionId || !snapshot.testPlanRevisionId
+    || !snapshot.result) {
+    throw new Error(payload.error?.message ?? "Local specification feedback failed");
+  }
+  return snapshot;
+}
+
+function localSpecRuntimeUrl(request: Request): URL {
+  if (!isLoopbackTestRequest(request)) throw new Error("Local specification runtime is unavailable");
+  const url = new URL(process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_URL ?? "http://127.0.0.1:4313");
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/"
+    || url.username || url.password || url.search || url.hash) {
+    throw new Error("Local specification runtime URL is invalid");
+  }
+  return url;
 }
 
 function invalidProject(): Response {
