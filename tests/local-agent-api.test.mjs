@@ -2,6 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { POST } from "../app/api/projects/[projectId]/agent-run/route.ts";
 import { readLocalDelivery, startLocalDelivery } from "../lib/local-delivery/store.ts";
+import { LocalAgentRuntimeRequestVerifier } from "../services/local-agent-runtime/src/request-auth.ts";
+
+const sidecarKey = new Uint8Array(Buffer.alloc(32, 11));
+process.env.DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY = Buffer.from(sidecarKey).toString("base64url");
+const sidecarVerifier = new LocalAgentRuntimeRequestVerifier(sidecarKey);
+
+function authenticateSidecar(init) {
+  const headers = Object.fromEntries(new Headers(init?.headers).entries());
+  sidecarVerifier.verify({ method: "POST", path: "/v1/runs", body: String(init?.body ?? ""), headers });
+}
 
 function receipt(delivery, overrides = {}) {
   return {
@@ -52,7 +62,10 @@ test("project Agent route persists only a sidecar receipt bound to the locked ru
   const projectId = "agent-api-success";
   const started = await startLocalDelivery(projectId, "SPEC-020", "RUN-AGENT-API-1", "start-agent-api-success");
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ data: receipt(started.snapshot) }, { status: 201 });
+  globalThis.fetch = async (_input, init) => {
+    authenticateSidecar(init);
+    return Response.json({ data: receipt(started.snapshot) }, { status: 201 });
+  };
   try {
     const response = await POST(request(projectId, "execute-agent-api-success"), { params: Promise.resolve({ projectId }) });
     assert.equal(response.status, 201);
@@ -69,7 +82,10 @@ test("project Agent route rejects a drifted receipt and does not advance deliver
   const projectId = "agent-api-drift";
   const started = await startLocalDelivery(projectId, "SPEC-021", "RUN-AGENT-API-2", "start-agent-api-drift");
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ data: receipt(started.snapshot, { model: "claude-unapproved-model-20260718" }) }, { status: 201 });
+  globalThis.fetch = async (_input, init) => {
+    authenticateSidecar(init);
+    return Response.json({ data: receipt(started.snapshot, { model: "claude-unapproved-model-20260718" }) }, { status: 201 });
+  };
   try {
     const response = await POST(request(projectId, "execute-agent-api-drift"), { params: Promise.resolve({ projectId }) });
     assert.equal(response.status, 502);
@@ -84,10 +100,13 @@ test("project Agent route preserves the exact sidecar gate code", async () => {
   const projectId = "agent-api-blocked";
   await startLocalDelivery(projectId, "SPEC-022", "RUN-AGENT-API-3", "start-agent-api-blocked");
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({
-    error: { code: "WAITING_PROVIDER", message: "Locked Provider is unavailable" },
-    data: { preflight: { status: "BLOCKED", code: "WAITING_PROVIDER" } },
-  }, { status: 409 });
+  globalThis.fetch = async (_input, init) => {
+    authenticateSidecar(init);
+    return Response.json({
+      error: { code: "WAITING_PROVIDER", message: "Locked Provider is unavailable" },
+      data: { preflight: { status: "BLOCKED", code: "WAITING_PROVIDER" } },
+    }, { status: 409 });
+  };
   try {
     const response = await POST(request(projectId, "execute-agent-api-blocked"), { params: Promise.resolve({ projectId }) });
     assert.equal(response.status, 409);

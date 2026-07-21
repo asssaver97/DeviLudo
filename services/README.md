@@ -110,12 +110,17 @@ behind the web console:
   for import/boot/TestKit/export checks, and writes content-bound manifest,
   JUnit and log evidence below the ignored `.deviludo/` directory. Missing
   export templates remain an explicit release gate.
-- `local-agent-runtime`: a loopback-only readiness sidecar. It executes only
-  fixed `--version` probes and reports the observed Claude Code/Codex CLI
-  versions. Execution stays blocked unless an exact approved version, verified
-  WorkerImage identity matching a separately pinned expected digest, a safe
-  HTTPS internal inference gateway and explicit opt-in all
-  exist; the sidecar has no Agent execution endpoint.
+- `local-agent-runtime`: a loopback-only readiness and execution sidecar. It
+  executes fixed `--version` probes and reports the observed Claude Code/Codex
+  CLI versions. The local launcher generates a fresh 256-bit HMAC session for
+  each deployment; preflight and run requests bind method, path, body digest,
+  timestamp and a single-use nonce, so loopback plus a predictable header is
+  never treated as execution authority. Execution stays blocked unless an exact
+  approved version, verified WorkerImage identity matching a separately pinned
+  expected digest, a safe HTTPS internal inference gateway, a verified Provider
+  binding and explicit opt-in all exist. `/v1/runs` also returns 503 until a
+  trusted isolated executor is injected; it never falls back to spawning a CLI
+  directly from the Web process.
 
 The root application can keep using its lightweight route handlers for the
 Sites preview. Production traffic should route `/admin/*` to the control-plane

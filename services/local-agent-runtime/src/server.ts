@@ -2,9 +2,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { LocalAgentExecutionRequest, LocalAgentPreflightRequest } from "./contracts";
 import { LocalAgentExecutionRequestError, LocalAgentExecutionService } from "./execution";
 import { LocalAgentReadinessService } from "./readiness";
+import {
+  LocalAgentRuntimeAuthenticationError,
+  LocalAgentRuntimeRequestVerifier,
+  localAgentRuntimeKeyFromEnvironment,
+} from "./request-auth";
 
 const HOST = "127.0.0.1";
 const PORT = Number.parseInt(process.env.DEVILUDO_LOCAL_AGENT_RUNTIME_PORT ?? "4312", 10);
+const requestVerifier = new LocalAgentRuntimeRequestVerifier(localAgentRuntimeKeyFromEnvironment());
 const service = new LocalAgentReadinessService({
   claudeVersion: process.env.DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION,
   codexVersion: process.env.DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION,
@@ -23,26 +29,19 @@ const server = createServer(async (request, response) => {
       json(response, 200, health);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/v1/preflight") {
-      if (request.headers["x-deviludo-local-agent-runtime"] !== "v1") {
-        json(response, 403, { error: { code: "LOCAL_RUNTIME_HEADER_REQUIRED", message: "Local Agent runtime header is required" } });
-        return;
-      }
+    if (request.method === "POST" && url.pathname === "/v1/preflight" && !url.search) {
+      const command = await readPreflightRequest(request, "/v1/preflight");
       let preflight;
       try {
-        preflight = await service.preflight(await readPreflightRequest(request));
+        preflight = await service.preflight(command);
       } catch {
         throw new LocalRequestError("Local Agent preflight validation failed");
       }
       json(response, 200, { data: preflight });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/v1/runs") {
-      if (request.headers["x-deviludo-local-agent-runtime"] !== "v1") {
-        json(response, 403, { error: { code: "LOCAL_RUNTIME_HEADER_REQUIRED", message: "Local Agent runtime header is required" } });
-        return;
-      }
-      const outcome = await executionService.execute(await readExecutionRequest(request));
+    if (request.method === "POST" && url.pathname === "/v1/runs" && !url.search) {
+      const outcome = await executionService.execute(await readExecutionRequest(request, "/v1/runs"));
       if (outcome.state === "BLOCKED") {
         json(response, 409, { error: { code: outcome.preflight.code, message: outcome.preflight.message }, data: { preflight: outcome.preflight } });
         return;
@@ -56,6 +55,10 @@ const server = createServer(async (request, response) => {
     }
     json(response, 404, { error: { code: "NOT_FOUND", message: "Local Agent runtime route not found" } });
   } catch (error) {
+    if (error instanceof LocalAgentRuntimeAuthenticationError) {
+      json(response, 403, { error: { code: "LOCAL_AGENT_RUNTIME_AUTH_REQUIRED", message: "Authenticated local Agent runtime request is required" } });
+      return;
+    }
     const invalidRequest = error instanceof LocalRequestError || error instanceof LocalAgentExecutionRequestError;
     json(response, invalidRequest ? 400 : 500, { error: { code: invalidRequest ? "INVALID_LOCAL_AGENT_REQUEST" : "LOCAL_AGENT_RUNTIME_FAILED", message: invalidRequest ? "Local Agent request is invalid" : "Local Agent runtime request failed" } });
   }
@@ -63,12 +66,18 @@ const server = createServer(async (request, response) => {
 
 class LocalRequestError extends Error {}
 
-async function readPreflightRequest(request: IncomingMessage): Promise<LocalAgentPreflightRequest> {
-  return preflightFrom(await readObject(request));
+async function readPreflightRequest(
+  request: IncomingMessage,
+  path: LocalAgentRuntimeAssertionPath,
+): Promise<LocalAgentPreflightRequest> {
+  return preflightFrom(await readObject(request, path));
 }
 
-async function readExecutionRequest(request: IncomingMessage): Promise<LocalAgentExecutionRequest> {
-  const item = await readObject(request);
+async function readExecutionRequest(
+  request: IncomingMessage,
+  path: LocalAgentRuntimeAssertionPath,
+): Promise<LocalAgentExecutionRequest> {
+  const item = await readObject(request, path);
   return {
     ...preflightFrom(item),
     tenantId: requireString(item.tenantId),
@@ -84,7 +93,9 @@ async function readExecutionRequest(request: IncomingMessage): Promise<LocalAgen
   };
 }
 
-async function readObject(request: IncomingMessage): Promise<Record<string, unknown>> {
+type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs";
+
+async function readObject(request: IncomingMessage, path: LocalAgentRuntimeAssertionPath): Promise<Record<string, unknown>> {
   if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
     throw new LocalRequestError("Local Agent request requires JSON");
   }
@@ -96,9 +107,11 @@ async function readObject(request: IncomingMessage): Promise<Record<string, unkn
     if (size > 128 * 1024) throw new LocalRequestError("Local Agent request body is too large");
     chunks.push(buffer);
   }
+  const body = Buffer.concat(chunks);
+  requestVerifier.verify({ method: "POST", path, body, headers: request.headers });
   let value: unknown;
   try {
-    value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    value = JSON.parse(body.toString("utf8"));
   } catch {
     throw new LocalRequestError("Local Agent request body is invalid");
   }

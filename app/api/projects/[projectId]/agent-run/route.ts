@@ -1,6 +1,7 @@
 import { idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery, saveLocalAgentExecution } from "@/lib/local-delivery/store";
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
+import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const AGENT_RUNTIME_URL = loopbackAgentRuntimeUrl();
@@ -43,13 +44,16 @@ export async function POST(
       timeoutSeconds: locked.timeoutSeconds,
       prompt: `Implement the approved immutable game specification ${delivery.specRevisionId}. Do not modify platform test policy, credentials, hooks, plugins, MCP configuration, or files outside the workspace.`,
     };
+    const command = JSON.stringify(executionRequest);
 
     let runtimeResponse: Response;
     try {
       runtimeResponse = await fetch(`${AGENT_RUNTIME_URL}/v1/runs`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
-        body: JSON.stringify(executionRequest),
+        headers: { "content-type": "application/json", ...createLocalAgentRuntimeHeaders({
+          method: "POST", path: "/v1/runs", body: command,
+        }) },
+        body: command,
         signal: AbortSignal.timeout(15 * 60_000),
       });
     } catch {

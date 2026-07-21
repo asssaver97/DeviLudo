@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
 const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
@@ -138,6 +141,32 @@ async function checkHtmlRoute(baseUrl, route, expectedText) {
   return result;
 }
 
+async function localAgentRuntimeKey() {
+  const encoded = (await readFile(new URL("../../.deviludo/local-agent-runtime.hmac", import.meta.url), "utf8")).trim();
+  if (!/^[A-Za-z0-9_-]{43,86}$/.test(encoded)) throw new Error("local Agent sidecar key is invalid");
+  const key = Buffer.from(encoded, "base64url");
+  if (key.byteLength < 32 || key.byteLength > 64 || key.toString("base64url") !== encoded) {
+    throw new Error("local Agent sidecar key is invalid");
+  }
+  return key;
+}
+
+function localAgentRuntimeHeaders(route, body, key) {
+  const issuedAt = new Date().toISOString();
+  const nonce = randomBytes(18).toString("base64url");
+  const bodyDigest = createHash("sha256").update(body).digest("hex");
+  const signature = createHmac("sha256", key)
+    .update(["deviludo.local-agent-runtime.v1", "POST", route, bodyDigest, issuedAt, nonce].join("\n"))
+    .digest("base64url");
+  return {
+    "x-deviludo-local-agent-runtime": "v1",
+    "x-deviludo-local-agent-issued-at": issuedAt,
+    "x-deviludo-local-agent-nonce": nonce,
+    "x-deviludo-local-agent-body-sha256": bodyDigest,
+    "x-deviludo-local-agent-signature": signature,
+  };
+}
+
 let port;
 let localRuntimePort;
 let localAgentRuntimePort;
@@ -174,6 +203,7 @@ const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
 
 try {
   const health = await waitForHealth(baseUrl);
+  const sidecarKey = await localAgentRuntimeKey();
   const [claudeSelection, codexSelection] = await Promise.all([
     request(baseUrl, `/api/projects/${smokeReleaseProject}/agent-settings`, {
       method: "PUT",
@@ -189,7 +219,40 @@ try {
   if (!claudeSelection.response.ok || !codexSelection.response.ok) {
     throw new Error("local project Agent selection did not persist both approved Profiles");
   }
-  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
+  const preflightCommand = JSON.stringify({
+    projectId: "smoke-project",
+    tenantId: "tenant-local",
+    runId: "smoke-run",
+    profileRevisionId: "profile-claude-platform-r5",
+    agent: "claude-code",
+    expectedVersion: "2.1.14",
+    imageDigest: `sha256:${"a".repeat(64)}`,
+    providerRevisionId: "provider-platform-claude-r1",
+    credentialVersionId: "credential-platform-claude-v1",
+    model: "claude-sonnet-4-6-20250514",
+  });
+  const executionCommand = JSON.stringify({
+    tenantId: "tenant-local",
+    projectId: "smoke-project",
+    runId: "smoke-run",
+    attemptId: "smoke-attempt",
+    specRevisionId: "SPEC-001",
+    testPlanRevisionId: "godot-testkit-1.0.0",
+    profileRevisionId: "profile-claude-platform-r5",
+    installationId: "claude-installation-214",
+    agent: "claude-code",
+    expectedVersion: "2.1.14",
+    imageDigest: `sha256:${"a".repeat(64)}`,
+    adapterVersion: "1.0.0",
+    providerRevisionId: "provider-platform-claude-r1",
+    providerProtocol: "anthropic-messages",
+    credentialVersionId: "credential-platform-claude-v1",
+    model: "claude-sonnet-4-6-20250514",
+    budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200000, maxOutputTokens: 50000 },
+    timeoutSeconds: 7200,
+    prompt: "Smoke contract only; execution must remain gated.",
+  });
+  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
@@ -215,44 +278,18 @@ try {
     }),
     request(agentRuntimeUrl, "/v1/preflight", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
-      body: JSON.stringify({
-        projectId: "smoke-project",
-        tenantId: "tenant-local",
-        runId: "smoke-run",
-        profileRevisionId: "profile-claude-platform-r5",
-        agent: "claude-code",
-        expectedVersion: "2.1.14",
-        imageDigest: `sha256:${"a".repeat(64)}`,
-        providerRevisionId: "provider-platform-claude-r1",
-        credentialVersionId: "credential-platform-claude-v1",
-        model: "claude-sonnet-4-6-20250514",
-      }),
+      headers: { "content-type": "application/json", ...localAgentRuntimeHeaders("/v1/preflight", preflightCommand, sidecarKey) },
+      body: preflightCommand,
     }),
     request(agentRuntimeUrl, "/v1/runs", {
       method: "POST",
+      headers: { "content-type": "application/json", ...localAgentRuntimeHeaders("/v1/runs", executionCommand, sidecarKey) },
+      body: executionCommand,
+    }),
+    request(agentRuntimeUrl, "/v1/preflight", {
+      method: "POST",
       headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
-      body: JSON.stringify({
-        tenantId: "tenant-local",
-        projectId: "smoke-project",
-        runId: "smoke-run",
-        attemptId: "smoke-attempt",
-        specRevisionId: "SPEC-001",
-        testPlanRevisionId: "godot-testkit-1.0.0",
-        profileRevisionId: "profile-claude-platform-r5",
-        installationId: "claude-installation-214",
-        agent: "claude-code",
-        expectedVersion: "2.1.14",
-        imageDigest: `sha256:${"a".repeat(64)}`,
-        adapterVersion: "1.0.0",
-        providerRevisionId: "provider-platform-claude-r1",
-        providerProtocol: "anthropic-messages",
-        credentialVersionId: "credential-platform-claude-v1",
-        model: "claude-sonnet-4-6-20250514",
-        budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200000, maxOutputTokens: 50000 },
-        timeoutSeconds: 7200,
-        prompt: "Smoke contract only; execution must remain gated.",
-      }),
+      body: preflightCommand,
     }),
     request(baseUrl, "/api/runner/events", {
       method: "POST",
@@ -509,6 +546,11 @@ try {
     || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"].includes(executionGatePayload.error?.code)) {
     throw new Error("local Agent execution gate did not fail closed");
   }
+  const forgedAgentRequestPayload = await forgedAgentRequest.response.json();
+  if (forgedAgentRequest.response.status !== 403
+    || forgedAgentRequestPayload.error?.code !== "LOCAL_AGENT_RUNTIME_AUTH_REQUIRED") {
+    throw new Error("local Agent runtime accepted the legacy static header without a signed assertion");
+  }
   const runnerIngressPayload = await runnerIngress.response.json();
   if (runnerIngress.response.status !== 503 || runnerIngressPayload.error?.code !== "RUNNER_MTLS_INGRESS_REQUIRED") {
     throw new Error("public Web process unexpectedly accepted a Runner event write");
@@ -560,6 +602,7 @@ try {
   console.log(`✓ Dual Agent release ${completedCodexRelease.response.status} (${completedCodexRelease.elapsedMs}ms) · Claude Code + Codex CLI locked end-to-end`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
+  console.log(`✓ Agent auth gate   ${forgedAgentRequest.response.status} (${forgedAgentRequest.elapsedMs}ms) · ${forgedAgentRequestPayload.error.code}`);
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);
   console.log(`✓ GitHub auth       ${githubAuthorization.response.status} (${githubAuthorization.elapsedMs}ms) · ${githubAuthorizationPayload.error.code}`);
   console.log(`✓ Steam enrollment  ${steamEnrollment.response.status} (${steamEnrollment.elapsedMs}ms) · ${steamEnrollmentPayload.error.code}`);

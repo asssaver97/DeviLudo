@@ -1,6 +1,7 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
+import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const AGENT_RUNTIME_URL = loopbackAgentRuntimeUrl();
@@ -18,22 +19,25 @@ export async function POST(
     }
 
     const locked = delivery.lockedProfile;
+    const command = JSON.stringify({
+      projectId,
+      runId: delivery.runId,
+      profileRevisionId: locked.profileRevisionId,
+      agent: locked.agent,
+      expectedVersion: locked.exactAgentVersion,
+      imageDigest: locked.imageDigest,
+      providerRevisionId: locked.providerRevisionId,
+      credentialVersionId: locked.credentialVersionId,
+      model: locked.model,
+    });
     let response: Response;
     try {
       response = await fetch(`${AGENT_RUNTIME_URL}/v1/preflight`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
-        body: JSON.stringify({
-          projectId,
-          runId: delivery.runId,
-          profileRevisionId: locked.profileRevisionId,
-          agent: locked.agent,
-          expectedVersion: locked.exactAgentVersion,
-          imageDigest: locked.imageDigest,
-          providerRevisionId: locked.providerRevisionId,
-          credentialVersionId: locked.credentialVersionId,
-          model: locked.model,
-        }),
+        headers: { "content-type": "application/json", ...createLocalAgentRuntimeHeaders({
+          method: "POST", path: "/v1/preflight", body: command,
+        }) },
+        body: command,
         signal: AbortSignal.timeout(15_000),
       });
     } catch {

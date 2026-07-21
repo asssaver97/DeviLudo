@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { constants as osSignals } from "node:os";
-import { access, mkdir } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { access, chmod, mkdir, writeFile } from "node:fs/promises";
+import { unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -133,6 +135,8 @@ if (port === null || port === undefined || localRuntimePort === undefined || loc
   process.exit();
 }
 
+const localAgentRuntimeHmacKey = randomBytes(32).toString("base64url");
+const localAgentRuntimeHmacKeyFile = path.join(workspaceRoot, ".deviludo", "local-agent-runtime.hmac");
 const vinextCli = path.join(workspaceRoot, "node_modules", "vinext", "dist", "cli.js");
 const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
 const localAgentRuntimeEntry = path.join(workspaceRoot, "services", "local-agent-runtime", "src", "server.ts");
@@ -147,6 +151,9 @@ try {
   await assertPortAvailable(localAgentRuntimePort);
   await assertPortAvailable(localSpecRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
+  await mkdir(path.dirname(localAgentRuntimeHmacKeyFile), { recursive: true, mode: 0o700 });
+  await writeFile(localAgentRuntimeHmacKeyFile, `${localAgentRuntimeHmacKey}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(localAgentRuntimeHmacKeyFile, 0o600);
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
   if (error?.code === "ENOENT") {
@@ -188,6 +195,7 @@ const localAgentRuntimeChild = spawn(
       NODE_ENV: "development",
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: String(localAgentRuntimePort),
+      DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: localAgentRuntimeHmacKey,
     },
     stdio: "inherit",
   },
@@ -221,6 +229,7 @@ const siteChild = spawn(
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_RUNTIME_URL: `http://${HOST}:${localRuntimePort}`,
       DEVILUDO_LOCAL_AGENT_RUNTIME_URL: `http://${HOST}:${localAgentRuntimePort}`,
+      DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: localAgentRuntimeHmacKey,
       DEVILUDO_LOCAL_SPEC_RUNTIME_URL: `http://${HOST}:${localSpecRuntimePort}`,
       WRANGLER_LOG_PATH: path.join(workspaceRoot, ".wrangler", "wrangler-local.log"),
     },
@@ -365,4 +374,8 @@ siteChild.once("exit", (code, signal) => {
   process.exitCode = code ?? 1;
 });
 
-process.once("exit", () => killAll("SIGKILL"));
+process.once("exit", () => {
+  killAll("SIGKILL");
+  try { unlinkSync(localAgentRuntimeHmacKeyFile); }
+  catch (error) { if (error?.code !== "ENOENT") console.error("[local:dev] Could not remove the Agent sidecar key."); }
+});
