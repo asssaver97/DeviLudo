@@ -62,8 +62,10 @@ Web process.
 `createRunnerIngressHttpsServer` provides that dedicated boundary. It forces
 TLS 1.3, `requestCert` and `rejectUnauthorized`, bounds headers/body/timeouts and
 derives the Runner identity exclusively from the authorized peer certificate.
-Its authenticated API is `POST /v1/register`, `/v1/lease`, `/v1/evidence` and
-`/v1/events`; `GET /health` also requires a client certificate. Identity-like
+Its authenticated API is `POST /v1/register`, `/v1/lease`, `/v1/evidence`,
+`/v1/events`, `/v1/native-install/authorize`,
+`/v1/native-install/complete` and `/v1/native-install/rollback`; `GET /health`
+also requires a client certificate. Identity-like
 HTTP headers are ignored and internal rejection details are reduced to bounded
 error codes. `SignedRunnerFleetPolicy` reloads an at-most-15-minute Ed25519
 manifest for every admission and lease decision. Each sorted entry fixes one
@@ -163,7 +165,8 @@ contract suite; a deployment must provide an OS-local durable implementation.
 `MtlsPhysicalRunnerIngressClient` is the corresponding Runner-side transport.
 It pins one HTTPS origin, uses TLS 1.3 with the machine workload certificate,
 follows no redirects and calls only `/v1/register`, `/v1/lease`,
-`/v1/evidence` and `/v1/events`. It never sends SPIFFE or Runner identity in an
+`/v1/evidence`, `/v1/events` and the three native-install operations. It never
+sends SPIFFE or Runner identity in an
 HTTP header; the server derives both from the certificate. Its certificate
 paths use the operating system's absolute-path rules so the same client can be
 configured on all three target systems. The portable contract suite exercises
@@ -232,6 +235,16 @@ exponential backoff. Diagnostics contain only stable codes. Configuration
 templates are `.physical-runner.env.example` and
 `physical-runner.config.example.json`; they intentionally contain no private
 key or platform credential.
+
+Native upgrades are fenced by the same registration row used by lease issuance.
+Ingress changes the current identity to `DRAINING` under an exclusive row lock,
+waits for an authoritative zero count of unexpired leases and only then signs a
+short-lived grant bound to the reviewed plan and staging receipt. The target
+daemon consumes that grant before its normal loop, re-registers the exact target
+capability and completes the operation. Failed target health can instead append
+a failure-evidence-bound rollback: the old identity becomes `ONLINE` and a
+separate target becomes `QUARANTINED`. Migration `062` makes operation bindings,
+grants and rollback receipts immutable.
 
 `RunnerControlWorkflowHandler` maps durable workflow jobs to three distinct
 modes: candidate matrix, merged-main release gate and clean Steam install.

@@ -18,6 +18,11 @@ import type {
   RunnerJobSignerOptions,
   RunnerEventReceipt,
   PlatformEvidenceManifest,
+  RunnerNativeInstallAuthorizationRequest,
+  RunnerNativeInstallAuthorizationResult,
+  RunnerNativeInstallCompletionReceipt,
+  RunnerNativeInstallRollbackReceipt,
+  SignedRunnerNativeInstallActivationGrant,
   SignedRunnerJob,
   TlsRunnerIdentity,
 } from "./contracts";
@@ -29,6 +34,12 @@ import {
   validateRunnerIdentity,
 } from "./coordinator";
 import { parseRunnerExecutionLock, runnerExecutionLockDigest, type RunnerExecutionLock } from "./execution-lock";
+import {
+  createRunnerNativeInstallDrainReceipt,
+  runnerNativeInstallRequestDigest,
+  validateRunnerNativeInstallAuthorizationRequest,
+  verifyRunnerNativeInstallActivationGrant,
+} from "./native-install";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -119,6 +130,38 @@ type EventRow = {
   occurred_at: string;
 };
 
+type NativeInstallOperationRow = {
+  id: string;
+  current_runner_id: string;
+  current_spiffe_id: string;
+  current_certificate_fingerprint: string;
+  current_capability_digest: string;
+  target_runner_id: string;
+  target_spiffe_id: string;
+  target_capability_digest: string;
+  platform: string;
+  architecture: string;
+  plan_digest: string;
+  staging_receipt_digest: string;
+  release_id: string;
+  release_digest: string;
+  request: unknown;
+  request_digest: string;
+  state: string;
+  completed_at: string | null;
+};
+
+type NativeInstallGrantRow = {
+  grant: unknown;
+  grant_digest?: string;
+};
+
+type NativeInstallRollbackRow = {
+  failure_evidence_digest: string;
+  receipt: unknown;
+  receipt_digest: string;
+};
+
 /**
  * PostgreSQL half of the physical Runner ingress. The HTTP/mTLS listener is a
  * separate adapter; this class accepts only an identity already extracted from
@@ -131,6 +174,7 @@ export class PostgresRunnerIngressStore {
   readonly #signer: RunnerJobSignerOptions;
   readonly #publicKey: KeyObject;
   readonly #leaseDurationSeconds: number;
+  readonly #nativeInstallGrantDurationSeconds: number;
   readonly #evidenceArchive: RunnerEvidenceArchive;
 
   constructor(options: {
@@ -140,6 +184,7 @@ export class PostgresRunnerIngressStore {
     readonly signer: RunnerJobSignerOptions;
     readonly evidenceArchive: RunnerEvidenceArchive;
     readonly leaseDurationSeconds?: number;
+    readonly nativeInstallGrantDurationSeconds?: number;
   }) {
     this.#pool = options.pool;
     this.#admission = options.admission;
@@ -154,6 +199,11 @@ export class PostgresRunnerIngressStore {
     if (!Number.isInteger(this.#leaseDurationSeconds)
       || this.#leaseDurationSeconds < 30 || this.#leaseDurationSeconds > 3_600) {
       throw new Error("Runner lease duration must be between 30 and 3600 seconds");
+    }
+    this.#nativeInstallGrantDurationSeconds = options.nativeInstallGrantDurationSeconds ?? 600;
+    if (!Number.isInteger(this.#nativeInstallGrantDurationSeconds)
+      || this.#nativeInstallGrantDurationSeconds < 60 || this.#nativeInstallGrantDurationSeconds > 900) {
+      throw new Error("Runner native install grant duration must be between 60 and 900 seconds");
     }
   }
 
@@ -186,19 +236,35 @@ export class PostgresRunnerIngressStore {
         await client.query(
           `UPDATE deviludo.runner_registrations
               SET last_seen_at = $2::timestamptz,
-                  state = CASE WHEN state IN ('DRAINING', 'QUARANTINED') THEN state ELSE 'ONLINE' END
+                  state = CASE WHEN state IN ('DRAINING', 'OFFLINE', 'QUARANTINED') THEN state ELSE 'ONLINE' END
             WHERE id = $1`,
           [capabilities.runnerId, at],
         );
-        return Object.freeze({ ...runner, state: runner.state === "DRAINING" || runner.state === "QUARANTINED" ? runner.state : "ONLINE", lastSeenAt: at });
+        return Object.freeze({
+          ...runner,
+          state: runner.state === "DRAINING" || runner.state === "OFFLINE" || runner.state === "QUARANTINED"
+            ? runner.state : "ONLINE",
+          lastSeenAt: at,
+        });
       }
+      const pendingActivation = await client.query<{ state: string }>(
+        `SELECT state
+           FROM deviludo.runner_native_install_operations
+          WHERE target_runner_id = $1 AND target_spiffe_id = $2
+            AND target_capability_digest = $3
+            AND state IN ('DRAINING', 'ACTIVATION_AUTHORIZED')
+          FOR SHARE`,
+        [capabilities.runnerId, identity.spiffeId, capabilities.capabilityDigest],
+      );
+      if (pendingActivation.rows.length > 1) throw new Error("Runner target has ambiguous native install operations");
+      const initialState = pendingActivation.rows.length === 1 ? "DRAINING" : "ONLINE";
       await client.query(
         `INSERT INTO deviludo.runner_registrations
           (id, spiffe_id, certificate_fingerprint, certificate_serial,
            certificate_not_after, platform, architecture, capability_digest,
            capabilities, state, registered_at, last_seen_at)
          VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8,
-                 $9::jsonb, 'ONLINE', $10::timestamptz, $10::timestamptz)`,
+                 $9::jsonb, $10, $11::timestamptz, $11::timestamptz)`,
         [
           capabilities.runnerId,
           identity.spiffeId,
@@ -209,13 +275,14 @@ export class PostgresRunnerIngressStore {
           capabilities.architecture,
           capabilities.capabilityDigest,
           JSON.stringify(capabilities),
+          initialState,
           at,
         ],
       );
       return Object.freeze({
         ...capabilities,
         ...identity,
-        state: "ONLINE",
+        state: initialState,
         registeredAt: at,
         lastSeenAt: at,
       });
@@ -385,6 +452,369 @@ export class PostgresRunnerIngressStore {
       );
       if (advanced.rowCount !== 1) throw new Error("Runner attempt was no longer leasable");
       return job;
+    });
+  }
+
+  /**
+   * Serializes host draining with lease issuance on the immutable Runner row.
+   * A signed activation grant is emitted only after the database observes no
+   * unexpired LEASED/RUNNING slot for that exact workload identity.
+   */
+  async authorizeNativeInstall(
+    identity: TlsRunnerIdentity,
+    requestValue: RunnerNativeInstallAuthorizationRequest,
+    at = new Date().toISOString(),
+  ): Promise<RunnerNativeInstallAuthorizationResult> {
+    validateRunnerIdentity(identity, at);
+    const request = validateRunnerNativeInstallAuthorizationRequest(requestValue);
+    const requestDigest = runnerNativeInstallRequestDigest(request);
+    return this.#transaction(null, async (client) => {
+      const runner = await registeredRunner(client, identity, request.currentRunnerId, "UPDATE");
+      if (runner.state === "OFFLINE" || runner.state === "QUARANTINED"
+        || runner.capabilityDigest !== request.currentCapabilityDigest
+        || runner.platform !== request.platform || runner.architecture !== request.architecture) {
+        throw new Error("Runner is not eligible for native installation");
+      }
+      if (request.currentRunnerId === request.targetRunnerId
+        ? request.targetSpiffeId !== identity.spiffeId
+        : request.targetSpiffeId === identity.spiffeId) {
+        throw new Error("Runner native install target identity is invalid");
+      }
+      if (request.currentRunnerId !== request.targetRunnerId) {
+        const targetRegistration = await client.query<{ id: string }>(
+          `SELECT id
+             FROM deviludo.runner_registrations
+            WHERE id = $1 OR spiffe_id = $2
+            FOR SHARE`,
+          [request.targetRunnerId, request.targetSpiffeId],
+        );
+        if (targetRegistration.rows.length !== 0) {
+          throw new Error("Runner native install target identity is already registered");
+        }
+      }
+
+      const selected = await client.query<NativeInstallOperationRow>(
+        `SELECT id::text, current_runner_id, current_spiffe_id,
+                current_certificate_fingerprint, current_capability_digest,
+                target_runner_id, target_spiffe_id, target_capability_digest,
+                platform, architecture, plan_digest, staging_receipt_digest,
+                release_id::text, release_digest, request, request_digest, state,
+                completed_at::text
+           FROM deviludo.runner_native_install_operations
+          WHERE id = $1::uuid
+             OR (current_runner_id = $2 AND state IN ('DRAINING', 'ACTIVATION_AUTHORIZED'))
+             OR (target_runner_id = $3 AND target_spiffe_id = $4)
+          FOR UPDATE`,
+        [request.operationId, request.currentRunnerId, request.targetRunnerId, request.targetSpiffeId],
+      );
+      if (selected.rows.length > 1) throw new Error("Runner native install operation collides with another binding");
+      const existing = selected.rows[0];
+      if (existing) assertNativeInstallOperation(existing, request, identity, requestDigest);
+      else {
+        await client.query(
+          `INSERT INTO deviludo.runner_native_install_operations
+            (id, current_runner_id, current_spiffe_id, current_certificate_fingerprint,
+             current_capability_digest, target_runner_id, target_spiffe_id,
+             target_capability_digest, platform, architecture, plan_digest,
+             staging_receipt_digest, release_id, release_digest, request,
+             request_digest, state, requested_at)
+           VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                   $12, $13::uuid, $14, $15::jsonb, $16, 'DRAINING', $17::timestamptz)`,
+          [
+            request.operationId, request.currentRunnerId, identity.spiffeId, identity.certificateFingerprint,
+            request.currentCapabilityDigest, request.targetRunnerId, request.targetSpiffeId,
+            request.targetCapabilityDigest, request.platform, request.architecture, request.planDigest,
+            request.stagingReceiptDigest, request.releaseId, request.releaseDigest, JSON.stringify(request),
+            requestDigest, at,
+          ],
+        );
+      }
+      if (existing && !new Set(["DRAINING", "ACTIVATION_AUTHORIZED"]).has(existing.state)) {
+        throw new Error("Runner native install operation is terminal");
+      }
+      await client.query(
+        `UPDATE deviludo.runner_registrations
+            SET state = 'DRAINING', last_seen_at = $2::timestamptz
+          WHERE id = $1 AND state IN ('ONLINE', 'DRAINING')`,
+        [request.currentRunnerId, at],
+      );
+      const active = await client.query<{ active_lease_count: string | number }>(
+        `SELECT COUNT(*) AS active_lease_count
+           FROM deviludo.e2e_platform_leases
+          WHERE runner_id = $1
+            AND state IN ('LEASED', 'RUNNING')
+            AND lease_expires_at >= $2::timestamptz`,
+        [request.currentRunnerId, at],
+      );
+      const activeLeaseCount = Number(active.rows[0]?.active_lease_count);
+      if (!Number.isSafeInteger(activeLeaseCount) || activeLeaseCount < 0) {
+        throw new Error("Runner native install lease count is invalid");
+      }
+      if (activeLeaseCount > 0) {
+        return createRunnerNativeInstallDrainReceipt({
+          request, activeLeaseCount, observedAt: at, retryAfterSeconds: 5,
+        });
+      }
+
+      const replay = await client.query<NativeInstallGrantRow>(
+        `SELECT grant
+           FROM deviludo.runner_native_install_grants
+          WHERE operation_id = $1::uuid AND expires_at > $2::timestamptz
+          ORDER BY grant_sequence DESC
+          LIMIT 1
+          FOR SHARE`,
+        [request.operationId, at],
+      );
+      if (replay.rows[0]) {
+        return verifyRunnerNativeInstallActivationGrant(parseJsonValue(replay.rows[0].grant), {
+          publicKey: this.#publicKey, keyId: this.#signer.keyId, request, now: at,
+        });
+      }
+      const sequenceResult = await client.query<{ next_sequence: string | number }>(
+        `SELECT COALESCE(MAX(grant_sequence), 0) + 1 AS next_sequence
+           FROM deviludo.runner_native_install_grants
+          WHERE operation_id = $1::uuid`,
+        [request.operationId],
+      );
+      const grantSequence = Number(sequenceResult.rows[0]?.next_sequence);
+      if (!Number.isSafeInteger(grantSequence) || grantSequence < 1) {
+        throw new Error("Runner native install grant sequence is invalid");
+      }
+      const payload = Object.freeze({
+        schemaVersion: "deviludo.runner-native-install-activation-grant.v1" as const,
+        operationId: request.operationId,
+        grantSequence,
+        currentRunnerId: request.currentRunnerId,
+        currentSpiffeId: identity.spiffeId,
+        currentCapabilityDigest: request.currentCapabilityDigest,
+        targetRunnerId: request.targetRunnerId,
+        targetSpiffeId: request.targetSpiffeId,
+        targetCapabilityDigest: request.targetCapabilityDigest,
+        platform: request.platform,
+        architecture: request.architecture,
+        planDigest: request.planDigest,
+        stagingReceiptDigest: request.stagingReceiptDigest,
+        releaseId: request.releaseId,
+        releaseDigest: request.releaseDigest,
+        requiredRunnerState: "DRAINING" as const,
+        activeLeaseCount: 0 as const,
+        issuedAt: at,
+        expiresAt: new Date(Date.parse(at) + this.#nativeInstallGrantDurationSeconds * 1_000).toISOString(),
+      });
+      const signature = signCanonical(this.#signer.privateKey, payload);
+      const grant = Object.freeze({
+        payload,
+        signature: Object.freeze({ algorithm: "Ed25519" as const, keyId: this.#signer.keyId, value: signature }),
+      });
+      await client.query(
+        `INSERT INTO deviludo.runner_native_install_grants
+          (operation_id, grant_sequence, grant, grant_digest, signing_key_id,
+           signature, issued_at, expires_at)
+         VALUES ($1::uuid, $2, $3::jsonb, $4, $5, $6, $7::timestamptz, $8::timestamptz)`,
+        [
+          request.operationId, grantSequence, JSON.stringify(grant), sha256Canonical(grant),
+          this.#signer.keyId, signature, payload.issuedAt, payload.expiresAt,
+        ],
+      );
+      await client.query(
+        `UPDATE deviludo.runner_native_install_operations
+            SET state = 'ACTIVATION_AUTHORIZED', authorized_at = COALESCE(authorized_at, $2::timestamptz)
+          WHERE id = $1::uuid AND state IN ('DRAINING', 'ACTIVATION_AUTHORIZED')`,
+        [request.operationId, at],
+      );
+      return grant;
+    });
+  }
+
+  async completeNativeInstall(
+    identity: TlsRunnerIdentity,
+    grantValue: SignedRunnerNativeInstallActivationGrant,
+    at = new Date().toISOString(),
+  ): Promise<RunnerNativeInstallCompletionReceipt> {
+    validateRunnerIdentity(identity, at);
+    const grant = verifyRunnerNativeInstallActivationGrant(grantValue, {
+      publicKey: this.#publicKey,
+      keyId: this.#signer.keyId,
+      now: at,
+      allowExpired: true,
+    });
+    return this.#transaction(null, async (client) => {
+      const current = await registeredRunnerWithoutIdentity(client, grant.payload.currentRunnerId, "UPDATE");
+      const operationResult = await client.query<NativeInstallOperationRow>(
+        `SELECT id::text, current_runner_id, current_spiffe_id,
+                current_certificate_fingerprint, current_capability_digest,
+                target_runner_id, target_spiffe_id, target_capability_digest,
+                platform, architecture, plan_digest, staging_receipt_digest,
+                release_id::text, release_digest, request, request_digest, state,
+                completed_at::text
+           FROM deviludo.runner_native_install_operations
+          WHERE id = $1::uuid
+          FOR UPDATE`,
+        [grant.payload.operationId],
+      );
+      if (operationResult.rows.length !== 1) throw new Error("Runner native install operation is unavailable");
+      const operation = operationResult.rows[0] as NativeInstallOperationRow;
+      const request = validateRunnerNativeInstallAuthorizationRequest(parseJsonValue(operation.request));
+      assertNativeInstallOperation(operation, request, {
+        spiffeId: current.spiffeId,
+        certificateFingerprint: current.certificateFingerprint,
+        certificateSerial: current.certificateSerial,
+        certificateNotAfter: current.certificateNotAfter,
+      }, runnerNativeInstallRequestDigest(request));
+      assertNativeInstallGrantBinding(grant, request, current.spiffeId);
+      if (operation.state === "ACTIVATED") {
+        if (operation.completed_at === null) throw new Error("Runner native install completion is inconsistent");
+        return nativeInstallCompletionReceipt(grant, operation.completed_at);
+      }
+      if (operation.state !== "ACTIVATION_AUTHORIZED" || Date.parse(at) >= Date.parse(grant.payload.expiresAt)
+        || current.state !== "DRAINING") {
+        throw new Error("Runner native install activation grant is no longer usable");
+      }
+      const storedGrant = await client.query<NativeInstallGrantRow>(
+        `SELECT grant, grant_digest
+           FROM deviludo.runner_native_install_grants
+          WHERE operation_id = $1::uuid AND grant_sequence = $2
+          FOR SHARE`,
+        [grant.payload.operationId, grant.payload.grantSequence],
+      );
+      if (storedGrant.rows.length !== 1
+        || storedGrant.rows[0]?.grant_digest !== sha256Canonical(grant)
+        || sha256Canonical(parseJsonValue(storedGrant.rows[0]?.grant)) !== sha256Canonical(grant)) {
+        throw new Error("Runner native install activation grant is not authoritative");
+      }
+      const target = await registeredRunner(client, identity, grant.payload.targetRunnerId, "UPDATE");
+      if (target.capabilityDigest !== grant.payload.targetCapabilityDigest
+        || target.spiffeId !== grant.payload.targetSpiffeId || target.platform !== grant.payload.platform
+        || target.architecture !== grant.payload.architecture
+        || target.state !== "DRAINING") {
+        throw new Error("Activated Runner does not match the authorized target");
+      }
+      const sameIdentity = target.runnerId === current.runnerId;
+      await client.query(
+        `UPDATE deviludo.runner_registrations
+            SET state = $2, last_seen_at = $3::timestamptz
+          WHERE id = $1 AND state = $4`,
+        [current.runnerId, sameIdentity ? "ONLINE" : "OFFLINE", at, "DRAINING"],
+      );
+      if (!sameIdentity) {
+        await client.query(
+          `UPDATE deviludo.runner_registrations
+              SET state = 'ONLINE', last_seen_at = $2::timestamptz
+            WHERE id = $1 AND state = 'DRAINING'`,
+          [target.runnerId, at],
+        );
+      }
+      await client.query(
+        `UPDATE deviludo.runner_native_install_operations
+            SET state = 'ACTIVATED', completed_at = $2::timestamptz
+          WHERE id = $1::uuid AND state = 'ACTIVATION_AUTHORIZED'`,
+        [grant.payload.operationId, at],
+      );
+      return nativeInstallCompletionReceipt(grant, at);
+    });
+  }
+
+  async rollbackNativeInstall(
+    identity: TlsRunnerIdentity,
+    grantValue: SignedRunnerNativeInstallActivationGrant,
+    failureEvidenceDigest: string,
+    at = new Date().toISOString(),
+  ): Promise<RunnerNativeInstallRollbackReceipt> {
+    validateRunnerIdentity(identity, at);
+    if (!SHA256.test(failureEvidenceDigest)) throw new Error("Runner native install failure evidence is invalid");
+    const grant = verifyRunnerNativeInstallActivationGrant(grantValue, {
+      publicKey: this.#publicKey,
+      keyId: this.#signer.keyId,
+      now: at,
+      allowExpired: true,
+    });
+    return this.#transaction(null, async (client) => {
+      const current = await registeredRunner(client, identity, grant.payload.currentRunnerId, "UPDATE");
+      const operationResult = await client.query<NativeInstallOperationRow>(
+        `SELECT id::text, current_runner_id, current_spiffe_id,
+                current_certificate_fingerprint, current_capability_digest,
+                target_runner_id, target_spiffe_id, target_capability_digest,
+                platform, architecture, plan_digest, staging_receipt_digest,
+                release_id::text, release_digest, request, request_digest, state,
+                completed_at::text
+           FROM deviludo.runner_native_install_operations
+          WHERE id = $1::uuid
+          FOR UPDATE`,
+        [grant.payload.operationId],
+      );
+      if (operationResult.rows.length !== 1) throw new Error("Runner native install operation is unavailable");
+      const operation = operationResult.rows[0] as NativeInstallOperationRow;
+      const request = validateRunnerNativeInstallAuthorizationRequest(parseJsonValue(operation.request));
+      assertNativeInstallOperation(operation, request, identity, runnerNativeInstallRequestDigest(request));
+      assertNativeInstallGrantBinding(grant, request, current.spiffeId);
+      const replay = await client.query<NativeInstallRollbackRow>(
+        `SELECT failure_evidence_digest, receipt, receipt_digest
+           FROM deviludo.runner_native_install_rollbacks
+          WHERE operation_id = $1::uuid
+          FOR SHARE`,
+        [grant.payload.operationId],
+      );
+      if (replay.rows[0]) {
+        const receipt = validateNativeInstallRollbackReceipt(parseJsonValue(replay.rows[0].receipt), grant);
+        if (operation.state !== "ROLLED_BACK" || replay.rows[0].failure_evidence_digest !== failureEvidenceDigest
+          || receipt.failureEvidenceDigest !== failureEvidenceDigest
+          || replay.rows[0].receipt_digest !== sha256Canonical(receipt)) {
+          throw new Error("Runner native install rollback conflicts with its immutable receipt");
+        }
+        return receipt;
+      }
+      if (operation.state !== "ACTIVATION_AUTHORIZED" || current.state !== "DRAINING") {
+        throw new Error("Runner native install operation cannot be rolled back");
+      }
+      const storedGrant = await client.query<NativeInstallGrantRow>(
+        `SELECT grant, grant_digest
+           FROM deviludo.runner_native_install_grants
+          WHERE operation_id = $1::uuid AND grant_sequence = $2
+          FOR SHARE`,
+        [grant.payload.operationId, grant.payload.grantSequence],
+      );
+      if (storedGrant.rows.length !== 1 || storedGrant.rows[0]?.grant_digest !== sha256Canonical(grant)
+        || sha256Canonical(parseJsonValue(storedGrant.rows[0]?.grant)) !== sha256Canonical(grant)) {
+        throw new Error("Runner native install activation grant is not authoritative");
+      }
+      if (grant.payload.targetRunnerId !== current.runnerId) {
+        const target = await optionalRegisteredRunnerWithoutIdentity(client, grant.payload.targetRunnerId, "UPDATE");
+        if (target) {
+          if (target.spiffeId !== grant.payload.targetSpiffeId
+            || target.capabilityDigest !== grant.payload.targetCapabilityDigest) {
+            throw new Error("Runner native install rollback target conflicts with its registration");
+          }
+          await client.query(
+            `UPDATE deviludo.runner_registrations
+                SET state = 'QUARANTINED', last_seen_at = $2::timestamptz
+              WHERE id = $1 AND state IN ('ONLINE', 'DRAINING')`,
+            [target.runnerId, at],
+          );
+        }
+      }
+      await client.query(
+        `UPDATE deviludo.runner_registrations
+            SET state = 'ONLINE', last_seen_at = $2::timestamptz
+          WHERE id = $1 AND state = 'DRAINING'`,
+        [current.runnerId, at],
+      );
+      await client.query(
+        `UPDATE deviludo.runner_native_install_operations
+            SET state = 'ROLLED_BACK', completed_at = $2::timestamptz
+          WHERE id = $1::uuid AND state = 'ACTIVATION_AUTHORIZED'`,
+        [grant.payload.operationId, at],
+      );
+      const receipt = nativeInstallRollbackReceipt(grant, failureEvidenceDigest, at);
+      await client.query(
+        `INSERT INTO deviludo.runner_native_install_rollbacks
+          (operation_id, grant_sequence, failure_evidence_digest, receipt, receipt_digest, rolled_back_at)
+         VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6::timestamptz)`,
+        [
+          grant.payload.operationId, grant.payload.grantSequence, failureEvidenceDigest,
+          JSON.stringify(receipt), sha256Canonical(receipt), at,
+        ],
+      );
+      return receipt;
     });
   }
 
@@ -703,19 +1133,9 @@ async function registeredRunner(
   client: PostgresWorkflowClient,
   identity: TlsRunnerIdentity,
   runnerId: string,
+  lock: "SHARE" | "UPDATE" = "SHARE",
 ): Promise<RegisteredRunner> {
-  const selected = await client.query<RunnerRow>(
-    `SELECT id, spiffe_id, certificate_fingerprint, certificate_serial,
-            certificate_not_after::text, platform, architecture,
-            capability_digest, capabilities, state,
-            registered_at::text, last_seen_at::text
-       FROM deviludo.runner_registrations
-      WHERE id = $1
-      FOR SHARE`,
-    [runnerId],
-  );
-  if (selected.rows.length !== 1) throw new Error("Runner is not registered");
-  const runner = parseRegisteredRunner(selected.rows[0] as RunnerRow);
+  const runner = await registeredRunnerWithoutIdentity(client, runnerId, lock);
   if (runner.spiffeId !== identity.spiffeId
     || runner.certificateFingerprint !== identity.certificateFingerprint
     || runner.certificateSerial !== identity.certificateSerial
@@ -723,6 +1143,150 @@ async function registeredRunner(
     throw new Error("Runner workload identity does not match its registration");
   }
   return runner;
+}
+
+async function registeredRunnerWithoutIdentity(
+  client: PostgresWorkflowClient,
+  runnerId: string,
+  lock: "SHARE" | "UPDATE" = "SHARE",
+): Promise<RegisteredRunner> {
+  const selected = await client.query<RunnerRow>(
+    `SELECT id, spiffe_id, certificate_fingerprint, certificate_serial,
+            certificate_not_after::text, platform, architecture,
+            capability_digest, capabilities, state,
+            registered_at::text, last_seen_at::text
+      FROM deviludo.runner_registrations
+      WHERE id = $1
+      ${lock === "UPDATE" ? "FOR UPDATE" : "FOR SHARE"}`,
+    [runnerId],
+  );
+  if (selected.rows.length !== 1) throw new Error("Runner is not registered");
+  return parseRegisteredRunner(selected.rows[0] as RunnerRow);
+}
+
+async function optionalRegisteredRunnerWithoutIdentity(
+  client: PostgresWorkflowClient,
+  runnerId: string,
+  lock: "SHARE" | "UPDATE" = "SHARE",
+): Promise<RegisteredRunner | null> {
+  const selected = await client.query<RunnerRow>(
+    `SELECT id, spiffe_id, certificate_fingerprint, certificate_serial,
+            certificate_not_after::text, platform, architecture,
+            capability_digest, capabilities, state,
+            registered_at::text, last_seen_at::text
+       FROM deviludo.runner_registrations
+      WHERE id = $1
+      ${lock === "UPDATE" ? "FOR UPDATE" : "FOR SHARE"}`,
+    [runnerId],
+  );
+  if (selected.rows.length > 1) throw new Error("Runner registration is ambiguous");
+  return selected.rows[0] ? parseRegisteredRunner(selected.rows[0]) : null;
+}
+
+function assertNativeInstallOperation(
+  row: NativeInstallOperationRow,
+  request: RunnerNativeInstallAuthorizationRequest,
+  identity: TlsRunnerIdentity,
+  requestDigest: string,
+): void {
+  const stored = validateRunnerNativeInstallAuthorizationRequest(parseJsonValue(row.request));
+  if (row.id !== request.operationId || row.current_runner_id !== request.currentRunnerId
+    || row.current_spiffe_id !== identity.spiffeId
+    || row.current_certificate_fingerprint !== identity.certificateFingerprint
+    || row.current_capability_digest !== request.currentCapabilityDigest
+    || row.target_runner_id !== request.targetRunnerId || row.target_spiffe_id !== request.targetSpiffeId
+    || row.target_capability_digest !== request.targetCapabilityDigest || row.platform !== request.platform
+    || row.architecture !== request.architecture || row.plan_digest !== request.planDigest
+    || row.staging_receipt_digest !== request.stagingReceiptDigest || row.release_id !== request.releaseId
+    || row.release_digest !== request.releaseDigest || row.request_digest !== requestDigest
+    || runnerNativeInstallRequestDigest(stored) !== requestDigest) {
+    throw new Error("Runner native install operation conflicts with its immutable binding");
+  }
+}
+
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value) as unknown; }
+  catch { throw new Error("Stored Runner native install JSON is invalid"); }
+}
+
+function assertNativeInstallGrantBinding(
+  grant: SignedRunnerNativeInstallActivationGrant,
+  request: RunnerNativeInstallAuthorizationRequest,
+  currentSpiffeId: string,
+): void {
+  const payload = grant.payload;
+  if (payload.operationId !== request.operationId || payload.currentRunnerId !== request.currentRunnerId
+    || payload.currentSpiffeId !== currentSpiffeId || payload.currentCapabilityDigest !== request.currentCapabilityDigest
+    || payload.targetRunnerId !== request.targetRunnerId || payload.targetSpiffeId !== request.targetSpiffeId
+    || payload.targetCapabilityDigest !== request.targetCapabilityDigest || payload.platform !== request.platform
+    || payload.architecture !== request.architecture || payload.planDigest !== request.planDigest
+    || payload.stagingReceiptDigest !== request.stagingReceiptDigest || payload.releaseId !== request.releaseId
+    || payload.releaseDigest !== request.releaseDigest || payload.activeLeaseCount !== 0
+    || payload.requiredRunnerState !== "DRAINING") {
+    throw new Error("Runner native install activation grant binding is invalid");
+  }
+}
+
+function nativeInstallCompletionReceipt(
+  grant: SignedRunnerNativeInstallActivationGrant,
+  completedAt: string,
+): RunnerNativeInstallCompletionReceipt {
+  return Object.freeze({
+    schemaVersion: "deviludo.runner-native-install-completion-receipt.v1",
+    operationId: grant.payload.operationId,
+    state: "ACTIVATED",
+    currentRunnerId: grant.payload.currentRunnerId,
+    targetRunnerId: grant.payload.targetRunnerId,
+    targetCapabilityDigest: grant.payload.targetCapabilityDigest,
+    planDigest: grant.payload.planDigest,
+    releaseId: grant.payload.releaseId,
+    releaseDigest: grant.payload.releaseDigest,
+    completedAt: requiredDate(completedAt),
+  });
+}
+
+function nativeInstallRollbackReceipt(
+  grant: SignedRunnerNativeInstallActivationGrant,
+  failureEvidenceDigest: string,
+  rolledBackAt: string,
+): RunnerNativeInstallRollbackReceipt {
+  return Object.freeze({
+    schemaVersion: "deviludo.runner-native-install-rollback-receipt.v1",
+    operationId: grant.payload.operationId,
+    state: "ROLLED_BACK",
+    currentRunnerId: grant.payload.currentRunnerId,
+    rejectedTargetRunnerId: grant.payload.targetRunnerId,
+    planDigest: grant.payload.planDigest,
+    releaseId: grant.payload.releaseId,
+    failureEvidenceDigest,
+    rolledBackAt: requiredDate(rolledBackAt),
+  });
+}
+
+function validateNativeInstallRollbackReceipt(
+  value: unknown,
+  grant: SignedRunnerNativeInstallActivationGrant,
+): RunnerNativeInstallRollbackReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Stored Runner native install rollback receipt is invalid");
+  }
+  const receipt = value as Record<string, unknown>;
+  const keys = [
+    "currentRunnerId", "failureEvidenceDigest", "operationId", "planDigest", "rejectedTargetRunnerId",
+    "releaseId", "rolledBackAt", "schemaVersion", "state",
+  ];
+  if (JSON.stringify(Object.keys(receipt).sort()) !== JSON.stringify(keys.sort())
+    || receipt.schemaVersion !== "deviludo.runner-native-install-rollback-receipt.v1"
+    || receipt.operationId !== grant.payload.operationId || receipt.state !== "ROLLED_BACK"
+    || receipt.currentRunnerId !== grant.payload.currentRunnerId
+    || receipt.rejectedTargetRunnerId !== grant.payload.targetRunnerId
+    || receipt.planDigest !== grant.payload.planDigest || receipt.releaseId !== grant.payload.releaseId
+    || typeof receipt.failureEvidenceDigest !== "string" || !SHA256.test(receipt.failureEvidenceDigest)
+    || typeof receipt.rolledBackAt !== "string") {
+    throw new Error("Stored Runner native install rollback receipt is invalid");
+  }
+  return nativeInstallRollbackReceipt(grant, receipt.failureEvidenceDigest, receipt.rolledBackAt);
 }
 
 async function loadLease(

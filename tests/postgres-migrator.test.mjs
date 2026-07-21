@@ -16,10 +16,10 @@ import {
 
 test("PostgreSQL migrations are contiguous and migration 061 baselines exact repository digests", async () => {
   const migrations = await loadPostgresMigrations();
-  assert.equal(migrations.length, 61);
-  assert.equal(migrations.at(-1)?.filename, "061_schema_migration_ledger.sql");
-  const baseline = migrations.at(-1)?.source ?? "";
-  for (const migration of migrations.slice(0, -1)) {
+  assert.equal(migrations.length, 62);
+  assert.equal(migrations.at(-1)?.filename, "062_runner_native_install_authorizations.sql");
+  const baseline = migrations.find(({ filename }) => filename === "061_schema_migration_ledger.sql")?.source ?? "";
+  for (const migration of migrations.slice(0, 60)) {
     assert.ok(
       baseline.includes(`(${migration.version}, '${migration.filename}', '${migration.digest}')`),
       `migration 061 is missing the exact digest for ${migration.filename}`,
@@ -114,12 +114,12 @@ test("migration runner rejects concurrent, untracked and failed upgrades without
   assert.ok(failed.sql.some((statement) => statement.includes("pg_advisory_unlock")));
 });
 
-test("explicit local adoption verifies schema 060 before recording and then applies migration 061", async () => {
+test("explicit local adoption verifies schema 060 before recording and then reaches repository head", async () => {
   const migrations = await loadPostgresMigrations();
   const database = fakeMigrationDatabase({ schemaPresent: true, baselineMigrations: migrations.slice(0, 60) });
   const result = await runPostgresMigrations({ client: database.client, migrations, adoptExisting: true });
-  assert.deepEqual(result, { applied: 1, currentVersion: 61 });
-  assert.equal(database.rows.length, 61);
+  assert.deepEqual(result, { applied: 2, currentVersion: 62 });
+  assert.equal(database.rows.length, 62);
   assert.equal(database.sql.filter((statement) => statement.includes("CREATE TEMP TABLE deviludo_expected_migration_baseline")).length, 2);
 });
 

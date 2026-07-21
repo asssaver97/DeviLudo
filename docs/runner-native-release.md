@@ -130,6 +130,97 @@ Runner/TestKit envelope so an already admitted host can be drained safely. New
 builds always emit v2 and cannot omit the Connector candidate; no v1 release can
 be created by the current builder.
 
+## Plan and stage one host revision
+
+The host does not translate a release envelope into ad-hoc administrator shell
+commands. Prepare the target machine JSON and root-owned environment files
+first. Every executable path in those files must point into the new release
+directory. An upgrade environment also fixes
+`DEVILUDO_PHYSICAL_RUNNER_ACTIVATION_GRANT_FILE`; a first enrollment must omit
+it because there is no prior Runner identity to drain. Such a plan is marked
+`INITIAL_ENROLLMENT`; only a plan with a previous revision is marked
+`DRAINED_UPGRADE` and may request an activation grant.
+
+Compile the verified release, machine lock, environment locks and optional
+previous plan into one immutable OS-specific plan:
+
+```bash
+NODE_ENV=production npm run plan:runner-native-install -- \
+  --artifacts /absolute/staging/final-artifacts \
+  --build-receipt /absolute/staging/runner-native-build-receipt.json \
+  --release /absolute/staging/runner-native-release.json \
+  --trust-policy /absolute/policy/runner-native-trust-policy.json \
+  --trust-policy-digest sha256:<64-lowercase-hex> \
+  --machine-config /etc/deviludo/physical-runner.json \
+  --install-root /opt/deviludo/native \
+  --runner-env-file /etc/deviludo/physical-runner.env \
+  --output /absolute/staging/install-plan.json \
+  --previous-plan /opt/deviludo/native/releases/<old-release-id>/install-plan.json
+```
+
+Add `--connector-env-file /etc/deviludo/steam-client-connector.env` only on a
+Steam-capable machine. A source-only host selects the signed TestKit and Runner
+from a v2 release but deliberately omits the Connector. A Steam host selects
+all three and independently rehashes the separate UI bridge named by the
+Connector environment. The plan emits one fixed SYSTEMD, LAUNCHD or Windows SCM
+service identity with no arguments, binds every environment-file digest and
+allows no autonomous Agent.
+
+Deliver the canonical `planDigest` out of band, then copy the signed bytes into
+a new create-only revision:
+
+```bash
+NODE_ENV=production npm run stage:runner-native-install -- \
+  --plan /absolute/staging/install-plan.json \
+  --plan-digest <64-lowercase-hex>
+```
+
+The stager rehashes source and destination, uses exclusive copies, makes every
+binary read-only, persists the exact plan and a content-addressed staging
+receipt, then atomically renames its private staging directory. An exact retry
+replays the receipt; a changed file fails. `STAGED` is not permission to stop a
+service or switch a pointer.
+
+## Drain, activate, re-register or roll back
+
+For an upgrade, repeatedly request a short-lived activation grant. The output
+path must be the same path locked into the target Runner environment:
+
+```bash
+NODE_ENV=production npm run request:runner-native-activation -- \
+  --plan /absolute/staging/install-plan.json \
+  --plan-digest <64-lowercase-hex> \
+  --current-plan /opt/deviludo/native/releases/<old-release-id>/install-plan.json \
+  --operation-id <uuid-v4> \
+  --output /etc/deviludo/runner-native-activation-grant.json
+```
+
+The updater uses the current machine certificate over TLS 1.3 mTLS. Ingress
+locks the immutable registration row against concurrent lease issuance, moves
+it to `DRAINING`, and counts all unexpired `LEASED/RUNNING` rows. While that
+count is nonzero the command returns only a drain receipt. At zero it returns a
+ten-minute Ed25519 grant binding the current and target identities,
+capabilities, release, plan and staging receipt. The host verifies that grant
+with its fixed Runner-job public key before allowing its privileged,
+platform-specific service manager to atomically install the declarative service
+definitions and start the target revision. Floating paths, shell fragments and
+in-place binary replacement are outside the plan contract.
+
+The target `deviludo-physical-runner` probes ingress, TestKit and the optional
+Steam Connector before advertising readiness. When an activation-grant file is
+present it then registers the exact target capability and calls the authenticated
+completion operation before entering its lease loop. Ingress marks the old
+identity `OFFLINE` only after that registration matches; an unchanged identity
+is returned from `DRAINING` to `ONLINE`. Exact completion retries are safe even
+after the short grant expires.
+
+If any platform service or readiness probe fails, the privileged host
+integration restores the previous service definitions and calls the mTLS
+rollback operation with the content-addressed failure evidence. Ingress returns
+the old identity to `ONLINE`, quarantines a separately registered target, and
+stores an append-only rollback receipt. A different failure digest cannot reuse
+the operation. The database operation/grant/rollback ledger is migration `062`.
+
 The installer places artifacts in a revision-addressed read-only directory,
 points the OS service definition at `deviludo-physical-runner`, and configures
 the existing machine JSON, journal/HMAC, mTLS and signed fleet-policy files.

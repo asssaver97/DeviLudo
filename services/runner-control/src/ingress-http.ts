@@ -1,7 +1,13 @@
 import { createServer, type Server as HttpsServer, type ServerOptions } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { RunnerEvent } from "../../../lib/domain/e2e";
-import type { PlatformEvidenceManifest, RunnerCapabilities, TlsRunnerIdentity } from "./contracts";
+import type {
+  PlatformEvidenceManifest,
+  RunnerCapabilities,
+  RunnerNativeInstallAuthorizationRequest,
+  SignedRunnerNativeInstallActivationGrant,
+  TlsRunnerIdentity,
+} from "./contracts";
 import type { PostgresRunnerIngressStore } from "./postgres-ingress";
 import { identityFromTlsSocket } from "./tls-identity";
 
@@ -25,6 +31,9 @@ export interface RunnerIngressOperations {
   leaseNext(identity: TlsRunnerIdentity, runnerId: string, tenantId: string, at: string): ReturnType<PostgresRunnerIngressStore["leaseNext"]>;
   submitEvidence(identity: TlsRunnerIdentity, tenantId: string, manifest: PlatformEvidenceManifest, at: string): ReturnType<PostgresRunnerIngressStore["submitEvidence"]>;
   acceptEvent(identity: TlsRunnerIdentity, tenantId: string, event: RunnerEvent, at: string): ReturnType<PostgresRunnerIngressStore["acceptEvent"]>;
+  authorizeNativeInstall(identity: TlsRunnerIdentity, request: RunnerNativeInstallAuthorizationRequest, at: string): ReturnType<PostgresRunnerIngressStore["authorizeNativeInstall"]>;
+  completeNativeInstall(identity: TlsRunnerIdentity, grant: SignedRunnerNativeInstallActivationGrant, at: string): ReturnType<PostgresRunnerIngressStore["completeNativeInstall"]>;
+  rollbackNativeInstall(identity: TlsRunnerIdentity, grant: SignedRunnerNativeInstallActivationGrant, failureEvidenceDigest: string, at: string): ReturnType<PostgresRunnerIngressStore["rollbackNativeInstall"]>;
 }
 
 export function createRunnerIngressHandler(options: {
@@ -76,6 +85,30 @@ export function createRunnerIngressHandler(options: {
         exactKeys(body, ["tenantId", "event"]);
         const receipt = await options.operations.acceptEvent(
           identity, string(body.tenantId), object(body.event) as unknown as RunnerEvent, at,
+        );
+        return { status: 200, body: { data: receipt } };
+      }
+      if (request.path === "/v1/native-install/authorize") {
+        exactKeys(body, ["request"]);
+        const result = await options.operations.authorizeNativeInstall(
+          identity, object(body.request) as unknown as RunnerNativeInstallAuthorizationRequest, at,
+        );
+        return { status: 200, body: { data: result } };
+      }
+      if (request.path === "/v1/native-install/complete") {
+        exactKeys(body, ["grant"]);
+        const receipt = await options.operations.completeNativeInstall(
+          identity, object(body.grant) as unknown as SignedRunnerNativeInstallActivationGrant, at,
+        );
+        return { status: 200, body: { data: receipt } };
+      }
+      if (request.path === "/v1/native-install/rollback") {
+        exactKeys(body, ["failureEvidenceDigest", "grant"]);
+        const receipt = await options.operations.rollbackNativeInstall(
+          identity,
+          object(body.grant) as unknown as SignedRunnerNativeInstallActivationGrant,
+          string(body.failureEvidenceDigest),
+          at,
         );
         return { status: 200, body: { data: receipt } };
       }

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RunnerEvent } from "../../../lib/domain/e2e";
-import type { PlatformEvidenceManifest, RegisteredRunner, RunnerCapabilities, TlsRunnerIdentity } from "../src/contracts";
+import type {
+  PlatformEvidenceManifest,
+  RegisteredRunner,
+  RunnerCapabilities,
+  RunnerNativeInstallAuthorizationRequest,
+  SignedRunnerNativeInstallActivationGrant,
+  TlsRunnerIdentity,
+} from "../src/contracts";
 import { createRunnerIngressHandler, createRunnerIngressHttpsServer, type RunnerIngressOperations } from "../src/ingress-http";
 
 const identity: TlsRunnerIdentity = {
@@ -27,6 +34,45 @@ const manifest = {
   platform: event.platform,
   fencingToken: 1,
 } as unknown as PlatformEvidenceManifest;
+const nativeInstallRequest = {
+  schemaVersion: "deviludo.runner-native-install-authorization-request.v1",
+  operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  currentRunnerId: "runner-linux-1",
+  currentCapabilityDigest: "1".repeat(64),
+  targetRunnerId: "runner-linux-2",
+  targetSpiffeId: "spiffe://deviludo.test/e2e-runner/runner-linux-2",
+  targetCapabilityDigest: "2".repeat(64),
+  platform: "linux",
+  architecture: "x86_64",
+  planDigest: "3".repeat(64),
+  stagingReceiptDigest: "4".repeat(64),
+  releaseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  releaseDigest: `sha256:${"5".repeat(64)}`,
+} as const satisfies RunnerNativeInstallAuthorizationRequest;
+const nativeInstallGrant = {
+  payload: {
+    schemaVersion: "deviludo.runner-native-install-activation-grant.v1",
+    operationId: nativeInstallRequest.operationId,
+    grantSequence: 1,
+    currentRunnerId: nativeInstallRequest.currentRunnerId,
+    currentSpiffeId: identity.spiffeId,
+    currentCapabilityDigest: nativeInstallRequest.currentCapabilityDigest,
+    targetRunnerId: nativeInstallRequest.targetRunnerId,
+    targetSpiffeId: nativeInstallRequest.targetSpiffeId,
+    targetCapabilityDigest: nativeInstallRequest.targetCapabilityDigest,
+    platform: nativeInstallRequest.platform,
+    architecture: nativeInstallRequest.architecture,
+    planDigest: nativeInstallRequest.planDigest,
+    stagingReceiptDigest: nativeInstallRequest.stagingReceiptDigest,
+    releaseId: nativeInstallRequest.releaseId,
+    releaseDigest: nativeInstallRequest.releaseDigest,
+    requiredRunnerState: "DRAINING",
+    activeLeaseCount: 0,
+    issuedAt: "2030-01-01T00:00:00.000Z",
+    expiresAt: "2030-01-01T00:10:00.000Z",
+  },
+  signature: { algorithm: "Ed25519", keyId: "runner-jobs-01", value: "a".repeat(86) },
+} as const satisfies SignedRunnerNativeInstallActivationGrant;
 
 function operations(calls: string[]): RunnerIngressOperations {
   return {
@@ -50,6 +96,48 @@ function operations(calls: string[]): RunnerIngressOperations {
         cursor: { lastAcceptedSeqNo: submitted.seqNo, completedPlatforms: {}, terminal: false },
         event: submitted,
         evidenceBundle: null,
+      };
+    },
+    async authorizeNativeInstall(authoritativeIdentity, request, at) {
+      calls.push(`native-install:${authoritativeIdentity.spiffeId}:${request.operationId}:${at}`);
+      return {
+        schemaVersion: "deviludo.runner-native-install-drain-receipt.v1",
+        operationId: request.operationId,
+        currentRunnerId: request.currentRunnerId,
+        planDigest: request.planDigest,
+        state: "DRAINING",
+        activeLeaseCount: 1,
+        observedAt: at,
+        retryAfterSeconds: 5,
+      };
+    },
+    async completeNativeInstall(authoritativeIdentity, grant, at) {
+      calls.push(`native-complete:${authoritativeIdentity.spiffeId}:${grant.payload.operationId}:${at}`);
+      return {
+        schemaVersion: "deviludo.runner-native-install-completion-receipt.v1",
+        operationId: grant.payload.operationId,
+        state: "ACTIVATED",
+        currentRunnerId: grant.payload.currentRunnerId,
+        targetRunnerId: grant.payload.targetRunnerId,
+        targetCapabilityDigest: grant.payload.targetCapabilityDigest,
+        planDigest: grant.payload.planDigest,
+        releaseId: grant.payload.releaseId,
+        releaseDigest: grant.payload.releaseDigest,
+        completedAt: at,
+      };
+    },
+    async rollbackNativeInstall(authoritativeIdentity, grant, failureEvidenceDigest, at) {
+      calls.push(`native-rollback:${authoritativeIdentity.spiffeId}:${grant.payload.operationId}:${at}`);
+      return {
+        schemaVersion: "deviludo.runner-native-install-rollback-receipt.v1",
+        operationId: grant.payload.operationId,
+        state: "ROLLED_BACK",
+        currentRunnerId: grant.payload.currentRunnerId,
+        rejectedTargetRunnerId: grant.payload.targetRunnerId,
+        planDigest: grant.payload.planDigest,
+        releaseId: grant.payload.releaseId,
+        failureEvidenceDigest,
+        rolledBackAt: at,
       };
     },
   };
@@ -79,7 +167,12 @@ test("dedicated Runner handler derives identity from the TLS socket for every op
   assert.equal((await handler(request("/v1/lease", { tenantId: "tenant-1", runnerId: capabilities.runnerId }))).status, 200);
   assert.equal((await handler(request("/v1/evidence", { tenantId: "tenant-1", manifest }))).status, 200);
   assert.equal((await handler(request("/v1/events", { tenantId: "tenant-1", event }))).status, 200);
-  assert.equal(calls.length, 4);
+  assert.equal((await handler(request("/v1/native-install/authorize", { request: nativeInstallRequest }))).status, 200);
+  assert.equal((await handler(request("/v1/native-install/complete", { grant: nativeInstallGrant }))).status, 200);
+  assert.equal((await handler(request("/v1/native-install/rollback", {
+    grant: nativeInstallGrant, failureEvidenceDigest: "f".repeat(64),
+  }))).status, 200);
+  assert.equal(calls.length, 7);
   assert.ok(calls.every((call) => call.includes(identity.spiffeId)));
   assert.equal(calls.some((call) => call.includes("forged-runner")), false);
 });

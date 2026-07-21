@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RunnerEvent } from "../../../lib/domain/e2e";
-import type { PlatformEvidenceManifest, RunnerCapabilities } from "../src/contracts";
+import type {
+  PlatformEvidenceManifest,
+  RunnerCapabilities,
+  RunnerNativeInstallAuthorizationRequest,
+} from "../src/contracts";
 import { createRunnerCapabilityDigest } from "../src/coordinator";
 import {
   MtlsPhysicalRunnerIngressClient,
@@ -36,7 +40,7 @@ function capabilities(): RunnerCapabilities {
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
 }
 
-test("physical Runner client uses the four fixed mTLS API paths and carries no identity headers", async () => {
+test("physical Runner client uses the fixed mTLS API paths and carries no identity headers", async () => {
   const calls: { path: string; input: PhysicalRunnerIngressHttpRequest }[] = [];
   const client = new MtlsPhysicalRunnerIngressClient({
     origin: "https://runner-control.internal",
@@ -59,6 +63,19 @@ test("physical Runner client uses the four fixed mTLS API paths and carries no i
       if (url.pathname === "/v1/lease") return { statusCode: 200, payload: { data: null } };
       const request = JSON.parse(input.body) as Record<string, unknown>;
       if (url.pathname === "/v1/evidence") return { statusCode: 200, payload: { data: request.manifest } };
+      if (url.pathname === "/v1/native-install/authorize") {
+        const authorization = request.request as RunnerNativeInstallAuthorizationRequest;
+        return { statusCode: 200, payload: { data: {
+          schemaVersion: "deviludo.runner-native-install-drain-receipt.v1",
+          operationId: authorization.operationId,
+          currentRunnerId: authorization.currentRunnerId,
+          planDigest: authorization.planDigest,
+          state: "DRAINING",
+          activeLeaseCount: 1,
+          observedAt: now,
+          retryAfterSeconds: 5,
+        } } };
+      }
       return { statusCode: 200, payload: { data: request.event } };
     },
   });
@@ -70,7 +87,26 @@ test("physical Runner client uses the four fixed mTLS API paths and carries no i
   assert.equal((await client.submitEvidence(tenantId, manifest)).attemptId, "attempt-1");
   const event = { attemptId: "attempt-1" } as unknown as RunnerEvent;
   assert.equal((await client.acceptEvent(tenantId, event) as unknown as { attemptId: string }).attemptId, "attempt-1");
-  assert.deepEqual(calls.map((call) => call.path), ["/v1/register", "/v1/lease", "/v1/evidence", "/v1/events"]);
+  const nativeRequest: RunnerNativeInstallAuthorizationRequest = {
+    schemaVersion: "deviludo.runner-native-install-authorization-request.v1",
+    operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    currentRunnerId: "runner-linux-1",
+    currentCapabilityDigest: capabilities().capabilityDigest,
+    targetRunnerId: "runner-linux-2",
+    targetSpiffeId: "spiffe://deviludo.test/e2e/runner-linux-2",
+    targetCapabilityDigest: sha("b"),
+    platform: "linux",
+    architecture: "x86_64",
+    planDigest: sha("c"),
+    stagingReceiptDigest: sha("d"),
+    releaseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    releaseDigest: `sha256:${sha("e")}`,
+  };
+  const draining = await client.authorizeNativeInstall(nativeRequest);
+  assert.equal("state" in draining ? draining.state : null, "DRAINING");
+  assert.deepEqual(calls.map((call) => call.path), [
+    "/v1/register", "/v1/lease", "/v1/evidence", "/v1/events", "/v1/native-install/authorize",
+  ]);
   assert.ok(calls.every((call) => call.input.method === "POST"
     && call.input.tls.key === tls.key && call.input.tls.certificate === tls.certificate && call.input.tls.ca === tls.ca));
   assert.ok(calls.every((call) => !Object.keys(call.input.headers).some((name) => /runner|spiffe|identity/i.test(name))));

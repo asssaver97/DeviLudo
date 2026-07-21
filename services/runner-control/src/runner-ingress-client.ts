@@ -7,9 +7,15 @@ import type {
   RegisteredRunner,
   RunnerCapabilities,
   RunnerEventReceipt,
+  RunnerNativeInstallAuthorizationRequest,
+  RunnerNativeInstallAuthorizationResult,
+  RunnerNativeInstallCompletionReceipt,
+  RunnerNativeInstallRollbackReceipt,
+  SignedRunnerNativeInstallActivationGrant,
   SignedRunnerJob,
 } from "./contracts";
 import { validateRunnerCapabilities, validateRunnerIdentity } from "./coordinator";
+import { validateRunnerNativeInstallAuthorizationRequest } from "./native-install";
 import type { PhysicalRunnerIngress } from "./physical-runner";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -95,6 +101,72 @@ export class MtlsPhysicalRunnerIngressClient implements PhysicalRunnerIngress {
 
   async acceptEvent(tenantId: string, event: RunnerEvent): Promise<RunnerEventReceipt> {
     return Object.freeze(record(await this.#post("/v1/events", { tenantId, event })) as unknown as RunnerEventReceipt);
+  }
+
+  async authorizeNativeInstall(
+    request: RunnerNativeInstallAuthorizationRequest,
+  ): Promise<RunnerNativeInstallAuthorizationResult> {
+    const validated = validateRunnerNativeInstallAuthorizationRequest(request);
+    const result = record(await this.#post("/v1/native-install/authorize", { request: validated }));
+    if (result.schemaVersion === "deviludo.runner-native-install-drain-receipt.v1") {
+      exactKeys(result, [
+        "activeLeaseCount", "currentRunnerId", "observedAt", "operationId", "planDigest", "retryAfterSeconds",
+        "schemaVersion", "state",
+      ]);
+      if (result.operationId !== validated.operationId || result.currentRunnerId !== validated.currentRunnerId
+        || result.planDigest !== validated.planDigest || result.state !== "DRAINING"
+        || !Number.isSafeInteger(result.activeLeaseCount) || Number(result.activeLeaseCount) < 1
+        || !Number.isSafeInteger(result.retryAfterSeconds) || Number(result.retryAfterSeconds) < 1
+        || typeof result.observedAt !== "string" || !Number.isFinite(Date.parse(result.observedAt))) {
+        throw new Error("Physical Runner ingress returned an invalid native install drain receipt");
+      }
+      return Object.freeze(result) as unknown as RunnerNativeInstallAuthorizationResult;
+    }
+    exactKeys(result, ["payload", "signature"]);
+    return Object.freeze(result) as unknown as RunnerNativeInstallAuthorizationResult;
+  }
+
+  async completeNativeInstall(
+    grant: SignedRunnerNativeInstallActivationGrant,
+  ): Promise<RunnerNativeInstallCompletionReceipt> {
+    const result = record(await this.#post("/v1/native-install/complete", { grant }));
+    exactKeys(result, [
+      "completedAt", "currentRunnerId", "operationId", "planDigest", "releaseDigest", "releaseId",
+      "schemaVersion", "state", "targetCapabilityDigest", "targetRunnerId",
+    ]);
+    if (result.schemaVersion !== "deviludo.runner-native-install-completion-receipt.v1"
+      || result.state !== "ACTIVATED" || result.operationId !== grant.payload.operationId
+      || result.currentRunnerId !== grant.payload.currentRunnerId || result.targetRunnerId !== grant.payload.targetRunnerId
+      || result.targetCapabilityDigest !== grant.payload.targetCapabilityDigest || result.planDigest !== grant.payload.planDigest
+      || result.releaseId !== grant.payload.releaseId || result.releaseDigest !== grant.payload.releaseDigest
+      || typeof result.completedAt !== "string" || !Number.isFinite(Date.parse(result.completedAt))) {
+      throw new Error("Physical Runner ingress returned an invalid native install completion receipt");
+    }
+    return Object.freeze(result) as unknown as RunnerNativeInstallCompletionReceipt;
+  }
+
+  async rollbackNativeInstall(
+    grant: SignedRunnerNativeInstallActivationGrant,
+    failureEvidenceDigest: string,
+  ): Promise<RunnerNativeInstallRollbackReceipt> {
+    if (!/^[a-f0-9]{64}$/.test(failureEvidenceDigest)) {
+      throw new Error("Physical Runner native install failure evidence is invalid");
+    }
+    const result = record(await this.#post("/v1/native-install/rollback", { grant, failureEvidenceDigest }));
+    exactKeys(result, [
+      "currentRunnerId", "failureEvidenceDigest", "operationId", "planDigest", "rejectedTargetRunnerId",
+      "releaseId", "rolledBackAt", "schemaVersion", "state",
+    ]);
+    if (result.schemaVersion !== "deviludo.runner-native-install-rollback-receipt.v1"
+      || result.state !== "ROLLED_BACK" || result.operationId !== grant.payload.operationId
+      || result.currentRunnerId !== grant.payload.currentRunnerId
+      || result.rejectedTargetRunnerId !== grant.payload.targetRunnerId
+      || result.planDigest !== grant.payload.planDigest || result.releaseId !== grant.payload.releaseId
+      || result.failureEvidenceDigest !== failureEvidenceDigest
+      || typeof result.rolledBackAt !== "string" || !Number.isFinite(Date.parse(result.rolledBackAt))) {
+      throw new Error("Physical Runner ingress returned an invalid native install rollback receipt");
+    }
+    return Object.freeze(result) as unknown as RunnerNativeInstallRollbackReceipt;
   }
 
   async probe(): Promise<void> {

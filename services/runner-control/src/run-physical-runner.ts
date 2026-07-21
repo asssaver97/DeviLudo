@@ -2,12 +2,17 @@ import { createPublicKey, type KeyObject } from "node:crypto";
 import { lstat, open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { RunnerCapabilities } from "./contracts";
+import type {
+  RunnerCapabilities,
+  RunnerNativeInstallCompletionReceipt,
+  SignedRunnerNativeInstallActivationGrant,
+} from "./contracts";
 import { validateRunnerCapabilities } from "./coordinator";
 import { PhysicalRunnerAgent, type PhysicalRunnerCycleResult } from "./physical-runner";
 import { runnerFleetPolicyFromEnv } from "./fleet-manifest";
 import { FilePhysicalRunnerJournal } from "./physical-runner-journal";
 import { physicalRunnerIngressClientFromEnv } from "./runner-ingress-client";
+import { verifyRunnerNativeInstallActivationGrant } from "./native-install";
 import { testKitArtifactProcessEnvironmentFromEnv } from "./testkit-artifact-client";
 import { LockedTestKitExecutor } from "./testkit-executor";
 import {
@@ -34,6 +39,7 @@ export type PhysicalRunnerDiagnosticCode =
   | "IDLE"
   | "DRAINING"
   | "COMPLETED"
+  | "ACTIVATED"
   | "CYCLE_FAILED"
   | "STOPPED";
 
@@ -94,6 +100,7 @@ export async function runPhysicalRunnerService(options: {
     service.ingress.probe(), service.executor.probe(), service.steamConnector?.probe(),
     service.tenantAssignments.listTenantIds(),
   ]);
+  if (await completePendingNativeActivation(service)) diagnostic("ACTIVATED");
   diagnostic("READY");
   const shutdown = new AbortController();
   const requestShutdown = () => shutdown.abort();
@@ -114,6 +121,7 @@ export async function physicalRunnerServiceFromEnv(
   readonly config: PhysicalRunnerMachineConfig;
   readonly jobPublicKey: KeyObject;
   readonly ingress: Awaited<ReturnType<typeof physicalRunnerIngressClientFromEnv>>;
+  readonly activationGrant: SignedRunnerNativeInstallActivationGrant | null;
   readonly executor: LockedTestKitExecutor;
   readonly tenantAssignments: Readonly<{ listTenantIds(): Promise<readonly string[]> }>;
   readonly steamConnector: Awaited<ReturnType<typeof steamInstalledGameDriverFromEnv>> | null;
@@ -134,6 +142,8 @@ export async function physicalRunnerServiceFromEnv(
   ]);
   const jobPublicKey = createPublicKey(jobKeyPem);
   if (jobPublicKey.asymmetricKeyType !== "ed25519") throw new Error("Physical Runner job verification key must be Ed25519");
+  const jobKeyId = requiredSafeId(env, "DEVILUDO_RUNNER_JOB_VERIFY_KEY_ID");
+  const activationGrant = await activationGrantFromEnv(env, jobPublicKey, jobKeyId, config);
   const journal = new FilePhysicalRunnerJournal({
     root: requiredAbsolutePath(env, "DEVILUDO_PHYSICAL_RUNNER_JOURNAL_ROOT"),
     hmacKey: journalHmacKey,
@@ -193,7 +203,7 @@ export async function physicalRunnerServiceFromEnv(
     capabilities: config.capabilities,
     identity: config.identity,
     tenantAssignments,
-    jobKeyId: requiredSafeId(env, "DEVILUDO_RUNNER_JOB_VERIFY_KEY_ID"),
+    jobKeyId,
     jobPublicKey,
     ingress,
     executor,
@@ -205,7 +215,59 @@ export async function physicalRunnerServiceFromEnv(
     maxBackoffMs: seconds(env.DEVILUDO_PHYSICAL_RUNNER_MAX_BACKOFF_SECONDS, 60, 1, 900) * 1_000,
     diagnostic,
   });
-  return Object.freeze({ config, jobPublicKey, ingress, executor, tenantAssignments, steamConnector, daemon });
+  return Object.freeze({ config, jobPublicKey, ingress, activationGrant, executor, tenantAssignments, steamConnector, daemon });
+}
+
+export async function completePendingNativeActivation(service: Readonly<{
+  config: PhysicalRunnerMachineConfig;
+  activationGrant: SignedRunnerNativeInstallActivationGrant | null;
+  ingress: Pick<Awaited<ReturnType<typeof physicalRunnerIngressClientFromEnv>>, "register" | "completeNativeInstall">;
+}>): Promise<RunnerNativeInstallCompletionReceipt | null> {
+  if (service.activationGrant === null) return null;
+  const registered = await service.ingress.register(service.config.capabilities);
+  if (registered.runnerId !== service.config.capabilities.runnerId
+    || registered.capabilityDigest !== service.config.capabilities.capabilityDigest
+    || registered.spiffeId !== service.config.identity.spiffeId
+    || registered.certificateFingerprint !== service.config.identity.certificateFingerprint
+    || !new Set(["ONLINE", "DRAINING"]).has(registered.state)) {
+    throw new Error("Physical Runner activation registration is invalid");
+  }
+  const receipt = await service.ingress.completeNativeInstall(service.activationGrant);
+  if (receipt.operationId !== service.activationGrant.payload.operationId
+    || receipt.targetRunnerId !== service.config.capabilities.runnerId
+    || receipt.targetCapabilityDigest !== service.config.capabilities.capabilityDigest
+    || receipt.planDigest !== service.activationGrant.payload.planDigest
+    || receipt.state !== "ACTIVATED") {
+    throw new Error("Physical Runner activation completion is invalid");
+  }
+  return receipt;
+}
+
+async function activationGrantFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+  publicKey: KeyObject,
+  keyId: string,
+  config: PhysicalRunnerMachineConfig,
+): Promise<SignedRunnerNativeInstallActivationGrant | null> {
+  if (env.DEVILUDO_PHYSICAL_RUNNER_ACTIVATION_GRANT_FILE === undefined) return null;
+  const bytes = await readRequiredFile(env, "DEVILUDO_PHYSICAL_RUNNER_ACTIVATION_GRANT_FILE", 2, MAX_CONFIG_BYTES);
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString("utf8")) as unknown; }
+  catch { throw new Error("Physical Runner activation grant file is invalid"); }
+  const grant = verifyRunnerNativeInstallActivationGrant(value, {
+    publicKey,
+    keyId,
+    now: new Date().toISOString(),
+    allowExpired: true,
+  });
+  if (grant.payload.targetRunnerId !== config.capabilities.runnerId
+    || grant.payload.targetSpiffeId !== config.identity.spiffeId
+    || grant.payload.targetCapabilityDigest !== config.capabilities.capabilityDigest
+    || grant.payload.platform !== config.capabilities.platform
+    || grant.payload.architecture !== config.capabilities.architecture) {
+    throw new Error("Physical Runner activation grant does not match its machine lock");
+  }
+  return grant;
 }
 
 export async function loadMachineConfig(

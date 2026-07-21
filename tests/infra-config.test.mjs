@@ -5,7 +5,7 @@ import test from "node:test";
 const observedServiceCommand = (service) =>
   `node --import tsx scripts/observability/run-service.mjs ${service}`;
 
-test("local integration PostgreSQL applies every migration in order", () => {
+test("local integration PostgreSQL initializes the ledger baseline then migrates repository head", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
   const offsets = Array.from({ length: 61 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
@@ -15,6 +15,7 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+  assert.doesNotMatch(compose, /\.\/postgres\/062_/);
   assert.match(compose, /127\.0\.0\.1:\$\{DEVILUDO_POSTGRES_PORT:-5432\}:5432/);
   assert.match(compose, /127\.0\.0\.1:\$\{DEVILUDO_REDIS_PORT:-6379\}:6379/);
   assert.match(compose, /127\.0\.0\.1:13133:13133/);
@@ -44,6 +45,19 @@ test("PostgreSQL migration ledger is immutable and excludes its self-referential
   assert.match(migration, /BEFORE UPDATE OR DELETE ON public\.deviludo_schema_migrations/);
   assert.match(migration, /migration baseline requires schema 060/);
   assert.doesNotMatch(migration, /\(61, '061_schema_migration_ledger\.sql'/);
+});
+
+test("Runner native upgrades require a database-authoritative zero-lease grant and immutable rollback", () => {
+  const migration = readFileSync(new URL("../infra/postgres/062_runner_native_install_authorizations.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.runner_native_install_operations/);
+  assert.match(migration, /CREATE TABLE deviludo\.runner_native_install_grants/);
+  assert.match(migration, /CREATE TABLE deviludo\.runner_native_install_rollbacks/);
+  assert.match(migration, /e2e_platform_leases_runner_drain_lookup/);
+  assert.match(migration, /WHERE state IN \('LEASED', 'RUNNING'\)/);
+  assert.match(migration, /runner_native_install_one_active_per_runner/);
+  assert.match(migration, /runner_native_install_grants_append_only/);
+  assert.match(migration, /runner_native_install_rollbacks_append_only/);
+  assert.match(migration, /OLD\.state = 'ACTIVATION_AUTHORIZED'.*'ACTIVATED'.*'ROLLED_BACK'/s);
 });
 
 test("new AgentRun rows require database-enforced version and Adapter attestations", () => {

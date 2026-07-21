@@ -12,10 +12,10 @@ const { Client } = pg;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const LATEST_MIGRATION = Object.freeze({
-  version: 61,
-  filename: "061_schema_migration_ledger.sql",
+  version: 62,
+  filename: "062_runner_native_install_authorizations.sql",
   digest: createHash("sha256").update(readFileSync(
-    new URL("../../infra/postgres/061_schema_migration_ledger.sql", import.meta.url),
+    new URL("../../infra/postgres/062_runner_native_install_authorizations.sql", import.meta.url),
   )).digest("hex"),
 });
 
@@ -35,7 +35,7 @@ export function resolveIntegrationConfig(env = process.env) {
 export async function inspectLocalIntegration(env = process.env, probes = defaultProbes()) {
   const config = resolveIntegrationConfig(env);
   const checks = [
-    ["PostgreSQL schema 061", () => probes.postgres(config.database)],
+    ["PostgreSQL schema 062", () => probes.postgres(config.database)],
     ["Redis authenticated PING", () => probes.redis(config.redis)],
     ["Temporal transport", () => probes.tcp(config.temporal)],
     ["MinIO health", () => probes.http(new URL("/minio/health/live", config.minio))],

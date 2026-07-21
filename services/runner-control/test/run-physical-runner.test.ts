@@ -11,6 +11,7 @@ import {
   loadMachineConfig,
   PhysicalRunnerDaemon,
   physicalRunnerServiceFromEnv,
+  completePendingNativeActivation,
   type PhysicalRunnerDiagnosticCode,
 } from "../src/run-physical-runner";
 
@@ -46,7 +47,7 @@ function runnerIdentity(capability: RunnerCapabilities) {
 
 function machineConfig(capability: RunnerCapabilities) {
   return {
-    schemaVersion: "deviludo.physical-runner-config.v2",
+    schemaVersion: "deviludo.physical-runner-config.v2" as const,
     capabilities: capability,
     identity: runnerIdentity(capability),
   };
@@ -116,6 +117,73 @@ test("physical Runner daemon serializes cycles, backs off and stops without leak
   assert.deepEqual(delays, [1_000, 2_000, 1_000, 250]);
   assert.deepEqual(diagnostics, ["CYCLE_FAILED", "CYCLE_FAILED", "IDLE", "COMPLETED", "STOPPED"]);
   assert.doesNotMatch(JSON.stringify(diagnostics), /secret|tenant|attempt/);
+});
+
+test("physical Runner completes a pending native activation before entering the lease loop", async () => {
+  const cap = capabilities("linux", "x86_64");
+  const config = machineConfig(cap);
+  const payload = {
+    schemaVersion: "deviludo.runner-native-install-activation-grant.v1" as const,
+    operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    grantSequence: 1,
+    currentRunnerId: "runner-linux-0",
+    currentSpiffeId: "spiffe://deviludo.test/e2e/runner-linux-0",
+    currentCapabilityDigest: sha("9"),
+    targetRunnerId: cap.runnerId,
+    targetSpiffeId: config.identity.spiffeId,
+    targetCapabilityDigest: cap.capabilityDigest,
+    platform: cap.platform,
+    architecture: cap.architecture,
+    planDigest: sha("8"),
+    stagingReceiptDigest: sha("7"),
+    releaseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    releaseDigest: `sha256:${sha("6")}`,
+    requiredRunnerState: "DRAINING" as const,
+    activeLeaseCount: 0 as const,
+    issuedAt: "2030-01-01T00:00:00.000Z",
+    expiresAt: "2030-01-01T00:10:00.000Z",
+  };
+  const grant = {
+    payload,
+    signature: { algorithm: "Ed25519" as const, keyId: "runner-job-key-01", value: "a".repeat(86) },
+  };
+  const calls: string[] = [];
+  const completed = await completePendingNativeActivation({
+    config,
+    activationGrant: grant,
+    ingress: {
+      async register(requested) {
+        calls.push(`register:${requested.runnerId}`);
+        return {
+          ...requested,
+          spiffeId: config.identity.spiffeId,
+          certificateFingerprint: config.identity.certificateFingerprint,
+          certificateSerial: "01",
+          certificateNotAfter: "2031-01-01T00:00:00.000Z",
+          state: "ONLINE" as const,
+          registeredAt: "2030-01-01T00:00:00.000Z",
+          lastSeenAt: "2030-01-01T00:00:00.000Z",
+        };
+      },
+      async completeNativeInstall(requested) {
+        calls.push(`complete:${requested.payload.operationId}`);
+        return {
+          schemaVersion: "deviludo.runner-native-install-completion-receipt.v1",
+          operationId: requested.payload.operationId,
+          state: "ACTIVATED",
+          currentRunnerId: requested.payload.currentRunnerId,
+          targetRunnerId: requested.payload.targetRunnerId,
+          targetCapabilityDigest: requested.payload.targetCapabilityDigest,
+          planDigest: requested.payload.planDigest,
+          releaseId: requested.payload.releaseId,
+          releaseDigest: requested.payload.releaseDigest,
+          completedAt: "2030-01-01T00:00:01.000Z",
+        };
+      },
+    },
+  });
+  assert.equal(completed?.state, "ACTIVATED");
+  assert.deepEqual(calls, [`register:${cap.runnerId}`, `complete:${payload.operationId}`]);
 });
 
 test("physical Runner production composition loads only file-backed keys and exact machine locks", async () => {

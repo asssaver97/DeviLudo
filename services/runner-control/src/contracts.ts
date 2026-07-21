@@ -198,6 +198,93 @@ export interface RunnerEventReceipt {
   readonly evidenceBundle: EvidenceBundle | null;
 }
 
+export interface RunnerNativeInstallAuthorizationRequest {
+  readonly schemaVersion: "deviludo.runner-native-install-authorization-request.v1";
+  readonly operationId: string;
+  readonly currentRunnerId: string;
+  readonly currentCapabilityDigest: string;
+  readonly targetRunnerId: string;
+  readonly targetSpiffeId: string;
+  readonly targetCapabilityDigest: string;
+  readonly platform: TargetPlatform;
+  readonly architecture: RunnerArchitecture;
+  readonly planDigest: string;
+  readonly stagingReceiptDigest: string;
+  readonly releaseId: string;
+  readonly releaseDigest: string;
+}
+
+export interface RunnerNativeInstallDrainReceipt {
+  readonly schemaVersion: "deviludo.runner-native-install-drain-receipt.v1";
+  readonly operationId: string;
+  readonly currentRunnerId: string;
+  readonly planDigest: string;
+  readonly state: "DRAINING";
+  readonly activeLeaseCount: number;
+  readonly observedAt: string;
+  readonly retryAfterSeconds: number;
+}
+
+export interface RunnerNativeInstallActivationGrantPayload {
+  readonly schemaVersion: "deviludo.runner-native-install-activation-grant.v1";
+  readonly operationId: string;
+  readonly grantSequence: number;
+  readonly currentRunnerId: string;
+  readonly currentSpiffeId: string;
+  readonly currentCapabilityDigest: string;
+  readonly targetRunnerId: string;
+  readonly targetSpiffeId: string;
+  readonly targetCapabilityDigest: string;
+  readonly platform: TargetPlatform;
+  readonly architecture: RunnerArchitecture;
+  readonly planDigest: string;
+  readonly stagingReceiptDigest: string;
+  readonly releaseId: string;
+  readonly releaseDigest: string;
+  readonly requiredRunnerState: "DRAINING";
+  readonly activeLeaseCount: 0;
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+}
+
+export interface SignedRunnerNativeInstallActivationGrant {
+  readonly payload: RunnerNativeInstallActivationGrantPayload;
+  readonly signature: {
+    readonly algorithm: "Ed25519";
+    readonly keyId: string;
+    readonly value: string;
+  };
+}
+
+export type RunnerNativeInstallAuthorizationResult =
+  | RunnerNativeInstallDrainReceipt
+  | SignedRunnerNativeInstallActivationGrant;
+
+export interface RunnerNativeInstallCompletionReceipt {
+  readonly schemaVersion: "deviludo.runner-native-install-completion-receipt.v1";
+  readonly operationId: string;
+  readonly state: "ACTIVATED";
+  readonly currentRunnerId: string;
+  readonly targetRunnerId: string;
+  readonly targetCapabilityDigest: string;
+  readonly planDigest: string;
+  readonly releaseId: string;
+  readonly releaseDigest: string;
+  readonly completedAt: string;
+}
+
+export interface RunnerNativeInstallRollbackReceipt {
+  readonly schemaVersion: "deviludo.runner-native-install-rollback-receipt.v1";
+  readonly operationId: string;
+  readonly state: "ROLLED_BACK";
+  readonly currentRunnerId: string;
+  readonly rejectedTargetRunnerId: string;
+  readonly planDigest: string;
+  readonly releaseId: string;
+  readonly failureEvidenceDigest: string;
+  readonly rolledBackAt: string;
+}
+
 export interface RunnerJobVerificationContext {
   readonly keyId: string;
   readonly runnerId: string;
