@@ -43,9 +43,21 @@ type AdminState = {
   versions: AgentVersionRow[];
   installations: AgentInstallation[];
   rollouts: Record<string, { percent: number; state: string; previous: number }>;
-  profiles: Array<{ id: string; agent: AgentKind; scope: string; scopeId: string; state: string; installationId: string; providerRevisionId: string }>;
+  profiles: Array<{
+    id: string;
+    revision: number | null;
+    agent: AgentKind;
+    scope: string;
+    scopeId: string;
+    state: string;
+    installationId: string;
+    providerRevisionId: string;
+    fallbackProfileRevisionId: string | null;
+    budget: { maxUsd: number | null; maxTurns: number | null; timeoutSeconds: number | null };
+  }>;
   providers: Array<{ id: string; agent: AgentKind; protocol: string; baseUrl: string; primaryModel: string; state: string }>;
   credentials: Array<{ id: string; label: string; maskedFingerprint: string; state: string }>;
+  defaults: Record<string, string>;
 };
 
 async function adminRequest<T>(
@@ -134,6 +146,7 @@ export default function AgentAdminDashboard() {
   const [profiles, setProfiles] = useState<AdminState["profiles"]>([]);
   const [providers, setProviders] = useState<AdminState["providers"]>([]);
   const [credentials, setCredentials] = useState<AdminState["credentials"]>([]);
+  const [defaults, setDefaults] = useState<AdminState["defaults"]>({});
   const [authMode, setAuthMode] = useState<AdminAuthMode>("loading");
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
@@ -150,6 +163,7 @@ export default function AgentAdminDashboard() {
     setProfiles(state.profiles);
     setProviders(state.providers);
     setCredentials(state.credentials);
+    setDefaults(state.defaults);
     setInstallations(state.installations.map((installation) => {
       const rollout = state.rollouts[installation.id];
       return rollout ? { ...installation, rolloutPercent: rollout.percent, state: rollout.state } : installation;
@@ -414,7 +428,8 @@ export default function AgentAdminDashboard() {
           {activeTab === "providers" && <ProvidersTab role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
             providers={providers} credentials={credentials}
             production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
-          {activeTab === "inheritance" && <InheritanceTab defaultAgent={defaultAgent} notify={notify} />}
+          {activeTab === "inheritance" && <InheritanceTab defaults={defaults} installations={installations}
+            profiles={profiles} providers={providers} notify={notify} />}
           {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
         </div>
       </main>
@@ -807,27 +822,79 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
   );
 }
 
-function InheritanceTab({ defaultAgent, notify }: { defaultAgent: AgentKind; notify: (message: string, tone?: "success" | "warning" | "neutral") => void }) {
-  const [project, setProject] = useState("clockwork-island");
-  const resolved = project === "clockwork-island" ? "codex-cli" : defaultAgent;
+function InheritanceTab({ defaults, installations, profiles, providers, notify }: {
+  defaults: AdminState["defaults"];
+  installations: AgentInstallation[];
+  profiles: AdminState["profiles"];
+  providers: AdminState["providers"];
+  notify: (message: string, tone?: "success" | "warning" | "neutral") => void;
+}) {
+  const selections = useMemo(() => {
+    const rank = (key: string) => key === "platform" ? 0 : key.startsWith("tenant:") ? 1 : 2;
+    const entries = Object.entries(defaults)
+      .filter(([key, profileId]) => (key === "platform" || /^(tenant|project):[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(key)) && Boolean(profileId))
+      .sort(([left], [right]) => rank(left) - rank(right) || left.localeCompare(right));
+    if (!entries.some(([key]) => key === "platform")) entries.unshift(["platform", "built-in:claude-code"]);
+    return entries.map(([scopeKey, profileId]) => ({ scopeKey, profileId, profile: profiles.find((item) => item.id === profileId) ?? null }));
+  }, [defaults, profiles]);
+  const [scopeKey, setScopeKey] = useState("platform");
+  const selected = selections.find((item) => item.scopeKey === scopeKey) ?? selections[0] ?? null;
+  const profile = selected?.profile ?? null;
+  const installation = installations.find((item) => item.id === profile?.installationId) ?? null;
+  const provider = providers.find((item) => item.id === profile?.providerRevisionId) ?? null;
+  const fallback = profiles.find((item) => item.id === profile?.fallbackProfileRevisionId) ?? null;
+  const resolvedAgent = profile?.agent ?? (selected?.profileId === "built-in:claude-code" ? "claude-code" : null);
+  const selectedLabel = scopeLabel(selected?.scopeKey ?? "platform");
+  const resolutionSummary = JSON.stringify({
+    scope: selected?.scopeKey ?? "platform",
+    source: selected?.profileId === "built-in:claude-code" ? "built-in:claude-code" : selected?.scopeKey,
+    profileRevisionId: profile?.id ?? selected?.profileId ?? null,
+    profileRevision: profile?.revision ?? null,
+    agent: resolvedAgent,
+    installationId: installation?.id ?? null,
+    imageDigest: installation?.imageDigest ?? null,
+    providerRevisionId: provider?.id ?? null,
+    model: provider?.primaryModel ?? null,
+    fallbackProfileRevisionId: fallback?.id ?? null,
+    budget: profile?.budget ?? null,
+  }, null, 2);
+  const copySummary = async () => {
+    try {
+      await navigator.clipboard.writeText(resolutionSummary);
+      notify("已复制当前有效配置摘要", "neutral");
+    } catch {
+      notify("浏览器未授予剪贴板权限", "warning");
+    }
+  };
   return (
     <>
       <section className={styles.section}>
-        <SectionHeading title="有效配置解析" description="项目覆盖 → 租户覆盖 → 平台默认；下级只能收紧平台安全策略与允许列表。" action={<select className={styles.projectSelect} value={project} onChange={(event) => setProject(event.target.value)}><option value="clockwork-island">Clockwork Island</option><option value="paper-kingdom">Paper Kingdom</option></select>} />
-        <div className={styles.inheritanceFlow}>
-          <div className={styles.inheritanceNode}><span>平台默认</span><AgentMark kind={defaultAgent} small /><strong>{defaultAgent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong><small>profile/platform/claude-prod · rev 18</small><StatusPill tone="neutral">起点</StatusPill></div>
-          <AdminIcon name="chevron" />
-          <div className={styles.inheritanceNode}><span>Studio North · 租户</span><AgentMark kind="claude-code" small /><strong>Claude Code</strong><small>允许 Claude + Codex · 预算 $120/run</small><StatusPill tone="neutral">继承</StatusPill></div>
-          <AdminIcon name="chevron" />
-          <div className={`${styles.inheritanceNode} ${styles.inheritanceNodeEffective}`}><span>{project === "clockwork-island" ? "Clockwork Island" : "Paper Kingdom"} · 项目</span><AgentMark kind={resolved as AgentKind} small /><strong>{resolved === "codex-cli" ? "Codex CLI" : "Claude Code"}</strong><small>{project === "clockwork-island" ? "显式项目覆盖 · profile/codex-strict · rev 6" : "无项目覆盖 · 继承租户配置"}</small><StatusPill tone="info">EFFECTIVE</StatusPill></div>
+        <SectionHeading title="有效配置解析" description="以下内容直接来自当前控制面 revision：项目覆盖 → 租户覆盖 → 平台默认；不使用演示名称或推测值。" action={<select aria-label="选择配置作用域" className={styles.projectSelect} value={selected?.scopeKey ?? "platform"} onChange={(event) => setScopeKey(event.target.value)}>{selections.map((item) => <option key={item.scopeKey} value={item.scopeKey}>{scopeLabel(item.scopeKey)}</option>)}</select>} />
+        <div className={styles.tableWrap}>
+          <table className={styles.dataTable}>
+            <thead><tr><th>作用域</th><th>配置来源</th><th>有效 Agent</th><th>Profile revision</th><th>状态</th></tr></thead>
+            <tbody>{selections.map((item) => {
+              const builtIn = item.profileId === "built-in:claude-code";
+              const broken = !builtIn && !item.profile;
+              const agent = item.profile?.agent ?? (builtIn ? "claude-code" : null);
+              return <tr key={item.scopeKey}>
+                <td><button className={styles.textButton} type="button" onClick={() => setScopeKey(item.scopeKey)}>{scopeLabel(item.scopeKey)}</button></td>
+                <td>{builtIn ? "内置安全默认" : item.scopeKey === "platform" ? "平台显式默认" : `${item.scopeKey.split(":", 1)[0] === "tenant" ? "租户" : "项目"}显式覆盖`}</td>
+                <td>{agent ? <div className={styles.tableAgent}><AgentMark kind={agent} small /><strong>{agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong></div> : "不可解析"}</td>
+                <td><code>{item.profile?.id ?? item.profileId}</code>{item.profile?.revision !== null && item.profile?.revision !== undefined ? ` · rev ${item.profile.revision}` : ""}</td>
+                <td><StatusPill tone={broken ? "danger" : item.profile?.state === "ACTIVE" || builtIn ? "success" : "warning"}>{broken ? "BROKEN_REFERENCE" : item.profile?.state ?? "ACTIVE"}</StatusPill></td>
+              </tr>;
+            })}</tbody>
+          </table>
         </div>
+        {selected && selected.profileId !== "built-in:claude-code" && !profile ? <div className={styles.formError}><AdminIcon name="alert" />{selectedLabel} 默认指向不存在的 Profile：{selected.profileId}。该作用域必须停止接收新任务。</div> : null}
         <div className={styles.resolutionTable}>
-          <div><span>Installation</span><strong>{resolved === "codex-cli" ? "codex-0.91.0 / dev-linux-b" : "claude-2.1.14 / dev-linux-a"}</strong><small>来源：{project === "clockwork-island" ? "项目覆盖" : "平台默认"}</small></div>
-          <div><span>Provider / Model</span><strong>{resolved === "codex-cli" ? "OpenAI Responses" : "Anthropic Messages"}</strong><small>{resolved === "codex-cli" ? "gpt-5.2-codex-2026-02-01" : "claude-sonnet-4-5-20250929"}</small></div>
-          <div><span>权限</span><strong>workspace-write</strong><small>网络仅 SCM / inference 代理</small></div>
-          <div><span>任务预算 / 超时</span><strong>$80 · 90 min</strong><small>租户策略收紧平台上限</small></div>
+          <div><span>Installation</span><strong>{installation ? `${installation.agent} ${installation.version}` : profile ? "未找到锁定 Installation" : "内置默认尚未锁定"}</strong><small>{installation ? `${installation.workerPool} · ${installation.imageDigest ? `${installation.imageDigest.slice(0, 18)}…` : "无镜像 digest"}` : `来源：${selectedLabel}`}</small></div>
+          <div><span>Provider / Model</span><strong>{provider ? `${provider.protocol} · ${providerHost(provider.baseUrl)}` : profile ? "未找到锁定 Provider" : "等待项目入队解析"}</strong><small>{provider?.primaryModel ?? "无已锁定模型"}</small></div>
+          <div><span>Profile / Fallback</span><strong>{profile ? `${profile.id}${profile.revision === null ? "" : ` · rev ${profile.revision}`}` : selected?.profileId ?? "—"}</strong><small>{fallback ? `显式同 Agent fallback：${fallback.id}` : "无显式 fallback；Provider 故障进入 WAITING_PROVIDER"}</small></div>
+          <div><span>任务预算 / 超时</span><strong>{profile?.budget.maxUsd === null || profile?.budget.maxUsd === undefined ? "未锁定" : `$${profile.budget.maxUsd}`}{profile?.budget.maxTurns === null || profile?.budget.maxTurns === undefined ? "" : ` · ${profile.budget.maxTurns} turns`}</strong><small>{profile?.budget.timeoutSeconds === null || profile?.budget.timeoutSeconds === undefined ? "入队时由有效 Profile 固定" : `${profile.budget.timeoutSeconds} 秒`}</small></div>
         </div>
-        <div className={styles.lockNotice}><AdminIcon name="layers" /><div><strong>入队快照</strong><span>每个 AgentRun 永久记录 profile revision、installation、image digest、adapter、精确模型与 credential version。后台变更不会漂移已排队或运行中的任务。</span></div><button type="button" onClick={() => notify("已复制有效配置摘要", "neutral")}>复制摘要</button></div>
+        <div className={styles.lockNotice}><AdminIcon name="layers" /><div><strong>入队快照</strong><span>每个 AgentRun 永久记录 profile revision、installation、image digest、adapter、精确模型与 credential version。后台变更不会漂移已排队或运行中的任务。</span></div><button type="button" onClick={() => void copySummary()}>复制摘要</button></div>
       </section>
 
       <section className={styles.section}>
@@ -853,6 +920,7 @@ function normalizeAdminState(payload: Record<string, unknown>): AdminState {
       profiles: records(local.profiles).map(profileRow).filter((value): value is AdminState["profiles"][number] => Boolean(value)),
       providers: records(local.providers).map(providerRow).filter((value): value is AdminState["providers"][number] => Boolean(value)),
       credentials: records(local.credentials).map(credentialRow).filter((value): value is AdminState["credentials"][number] => Boolean(value)),
+      defaults: defaultRows(local.defaults),
     };
   }
   const data = object(payload.data);
@@ -868,6 +936,7 @@ function normalizeAdminState(payload: Record<string, unknown>): AdminState {
     profiles: records(data.profiles).map(profileRow).filter((value): value is AdminState["profiles"][number] => Boolean(value)),
     providers: records(data.providers).map(providerRow).filter((value): value is AdminState["providers"][number] => Boolean(value)),
     credentials: records(data.credentials).map(credentialRow).filter((value): value is AdminState["credentials"][number] => Boolean(value)),
+    defaults: defaultRows(data.defaults),
   };
 }
 
@@ -925,8 +994,18 @@ function profileRow(value: Record<string, unknown>): AdminState["profiles"][numb
   const agent = agentKind(value.agent); const id = text(value.id); const scope = text(value.scope); const scopeId = text(value.scopeId);
   const state = text(value.state); const installationId = text(value.installationId);
   const providerRevisionId = text(value.providerRevisionId) ?? text(value.providerId);
+  const rawBudget = object(value.budget);
+  const fallbackProfileRevisionId = text(value.fallbackProfileRevisionId) ?? text(value.fallbackProfileId);
   return agent && id && scope && scopeId && state && installationId && providerRevisionId
-    ? { id, agent, scope, scopeId, state, installationId, providerRevisionId } : null;
+    ? {
+      id, agent, scope, scopeId, state, installationId, providerRevisionId, fallbackProfileRevisionId,
+      revision: number(value.revision),
+      budget: {
+        maxUsd: number(rawBudget?.maxUsd) ?? number(value.budgetUsd),
+        maxTurns: number(rawBudget?.maxTurns),
+        timeoutSeconds: number(rawBudget?.timeoutSeconds),
+      },
+    } : null;
 }
 function providerRow(value: Record<string, unknown>): AdminState["providers"][number] | null {
   const id = text(value.id); const agent = agentKind(value.agent); const protocol = text(value.protocol); const baseUrl = text(value.baseUrl);
@@ -937,6 +1016,22 @@ function credentialRow(value: Record<string, unknown>): AdminState["credentials"
   const id = text(value.id); const label = text(value.label); const state = text(value.state);
   const maskedFingerprint = text(value.maskedFingerprint) ?? text(value.masked);
   return id && label && state && maskedFingerprint ? { id, label, state, maskedFingerprint } : null;
+}
+function defaultRows(value: unknown): Record<string, string> {
+  const source = object(value);
+  if (!source) return {};
+  const defaults: Record<string, string> = {};
+  for (const [key, profileId] of Object.entries(source)) {
+    if ((key === "platform" || /^(tenant|project):[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(key))
+      && typeof profileId === "string" && profileId) defaults[key] = profileId;
+  }
+  return defaults;
+}
+function scopeLabel(scopeKey: string): string {
+  if (scopeKey === "platform") return "平台 / global";
+  const separator = scopeKey.indexOf(":");
+  const scope = scopeKey.slice(0, separator) === "tenant" ? "租户" : "项目";
+  return `${scope} / ${scopeKey.slice(separator + 1)}`;
 }
 function object(value: unknown): Record<string, unknown> | null { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function records(value: unknown): Record<string, unknown>[] { return Array.isArray(value) ? value.map(object).filter((item): item is Record<string, unknown> => Boolean(item)) : []; }

@@ -199,6 +199,18 @@ const initialState = (): DemoStoreState => ({
       fallbackProfileId: null,
     },
     {
+      id: "profile-claude-tenant-r2",
+      revision: 2,
+      scope: "tenant",
+      scopeId: "north-dock",
+      agent: "claude-code",
+      providerId: "provider-claude-platform-r3",
+      installationId: "claude-installation-214",
+      state: "ACTIVE",
+      budgetUsd: 22,
+      fallbackProfileId: null,
+    },
+    {
       id: "profile-codex-platform-r2",
       revision: 2,
       scope: "platform",

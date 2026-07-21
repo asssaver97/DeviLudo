@@ -251,6 +251,13 @@ try {
     throw new Error("local Agent admin state contract failed");
   }
   if (JSON.stringify(adminPayload).includes("secretRef")) throw new Error("Agent admin state exposed a secret reference");
+  const adminProfileIds = new Set((adminPayload.meta?.profiles ?? []).map((profile) => profile?.id).filter(Boolean));
+  const adminDefaults = adminPayload.meta?.defaults;
+  if (!adminDefaults || typeof adminDefaults !== "object" || Array.isArray(adminDefaults)
+    || !["platform", "tenant:north-dock", "project:ember-archipelago"].every((scope) =>
+      typeof adminDefaults[scope] === "string" && adminProfileIds.has(adminDefaults[scope]))) {
+    throw new Error("local Agent inheritance contains a dangling default Profile");
+  }
   const tenantAgentPayload = await tenantAgentState.response.json();
   if (!tenantAgentState.response.ok || !Array.isArray(tenantAgentPayload.data)
     || tenantAgentPayload.meta?.defaultAgent !== "claude-code" || JSON.stringify(tenantAgentPayload).includes("secretRef")) {
@@ -336,6 +343,7 @@ try {
   console.log(`✓ GET /settings/agents ${tenantAgents.response.status} (${tenantAgents.elapsedMs}ms) · tenant Agent settings`);
   console.log(`✓ GET project Agent   ${projectAgents.response.status} (${projectAgents.elapsedMs}ms) · inherited Profile selector`);
   console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
+  console.log(`✓ Agent inheritance  ${adminState.response.status} (${adminState.elapsedMs}ms) · platform/tenant/project bound`);
   console.log(`✓ Tenant Agent state ${tenantAgentState.response.status} (${tenantAgentState.elapsedMs}ms) · scoped projection`);
   console.log(`✓ Invitation gate    ${invitationGate.response.status} (${invitationGate.elapsedMs}ms) · ${invitationGatePayload.error.code}`);
   console.log(`✓ Local session      ${localSession.response.status} (${localSession.elapsedMs}ms) · @${sessionPayload.data.githubLogin}`);

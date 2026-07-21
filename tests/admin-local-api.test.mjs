@@ -43,6 +43,26 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_BLOCKED"), true);
 });
 
+test("local Agent defaults expose only complete platform, tenant and project Profile bindings", async () => {
+  const store = resetDemoStore();
+  const response = await GET(new Request("http://127.0.0.1:3000/api/admin/agents"), context("agents"));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.deepEqual(payload.meta.defaults, {
+    platform: "profile-claude-platform-r5",
+    "tenant:north-dock": "profile-claude-tenant-r2",
+    "project:ember-archipelago": "profile-codex-project-r1",
+  });
+  const profiles = new Map(store.profiles.map((profile) => [profile.id, profile]));
+  for (const [scope, profileId] of Object.entries(payload.meta.defaults)) {
+    const profile = profiles.get(profileId);
+    assert.ok(profile, `${scope} default must reference an existing Profile`);
+    assert.equal(profile.state, "ACTIVE");
+    assert.equal(scope === "platform" ? profile.scope : scope.split(":", 1)[0], profile.scope);
+    assert.equal(scope === "platform" ? profile.scopeId : scope.slice(scope.indexOf(":") + 1), profile.scopeId);
+  }
+});
+
 test("local credential writes return only public metadata and never a SecretRef or plaintext", async () => {
   resetDemoStore();
   const plaintext = "local-test-credential-material";
