@@ -106,6 +106,20 @@ test("projection replay preserves an explicit post-merge failure handoff", () =>
   assert.deepEqual(parseDeliverySnapshot(failed), failed);
 });
 
+test("projection replay preserves a terminal cancellation history", () => {
+  const machine = new GameDeliveryWorkflow({ workflowId, tenantId, projectId, targetMatrix: ["linux"] });
+  machine.signal({ signalId: "cancel-ready-001", type: "SPEC_READY", specRevisionId: "spec-r1" });
+  const cancelled = machine.signal({
+    signalId: "cancel-terminal-001", type: "CANCEL", reason: "project owner withdrew delivery",
+  }) as DeliverySnapshot;
+  assert.equal(cancelled.state, "CANCELLED");
+  assert.deepEqual(parseDeliverySnapshot(cancelled), cancelled);
+  assert.throws(
+    () => parseDeliverySnapshot({ ...cancelled, state: "READY_TO_PUBLISH" }),
+    /does not match deterministic workflow replay/,
+  );
+});
+
 function repairHistoryMachine(automaticRepairLimit: number | null = 3) {
   const machine = new GameDeliveryWorkflow({
     workflowId, tenantId, projectId, targetMatrix: ["linux"], automaticRepairLimit,

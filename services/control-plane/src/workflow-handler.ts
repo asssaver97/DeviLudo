@@ -47,6 +47,7 @@ export interface ControlPlaneWorkflowActionReceipt {
   readonly operation: ControlPlaneWorkflowAction;
   readonly requestDigest: string;
   readonly status: "WAITING" | "ACKNOWLEDGED";
+  readonly cancellationRevocationId: string | null;
 }
 
 /**
@@ -158,7 +159,7 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
   let draftPullRequest: number | null = null;
   let evidenceBundleId: string | null = null;
   let mainCommitSha: string | null = null;
-  const releaseId: string | null = null;
+  let releaseId: string | null = null;
   let steamBuildId: string | null = null;
   let externalGate: ExternalApprovalGate | null = null;
   let cancellationReason: string | null = null;
@@ -193,6 +194,14 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
     if (job.request.kind !== "CANCEL") invalid();
     const last = snapshot.history.at(-1)?.signal;
     if (!last || last.type !== "CANCEL" || last.reason !== job.request.payload.reason) invalid();
+    const cancellationSourceState = snapshot.history.length === 1
+      ? "IDEATION"
+      : snapshot.history.at(-2)?.resultingState;
+    if (!cancellationSourceState || cancellationSourceState === "READY_TO_PUBLISH"
+      || cancellationSourceState === "RELEASED" || cancellationSourceState === "CANCELLED") invalid();
+    lockedRunConfigurationId = optionalId(snapshot.lockedRunConfigurationId);
+    releaseId = optionalId(snapshot.steamReleaseId);
+    steamBuildId = optionalBuildId(snapshot.steamBuildId);
     cancellationReason = validReason(job.request.payload.reason);
   }
 
@@ -268,7 +277,10 @@ function validateReceipt(
   const expectedStatus = operation === "CANCEL_DELIVERY" ? "ACKNOWLEDGED" : "WAITING";
   if (!SAFE_ID.test(receipt.receiptId) || !SAFE_ID.test(receipt.actionId)
     || receipt.operation !== operation || receipt.requestDigest !== requestDigest
-    || !SHA256.test(receipt.requestDigest) || receipt.status !== expectedStatus) {
+    || !SHA256.test(receipt.requestDigest) || receipt.status !== expectedStatus
+    || (operation === "CANCEL_DELIVERY"
+      ? !receipt.cancellationRevocationId || !UUID.test(receipt.cancellationRevocationId)
+      : receipt.cancellationRevocationId !== null)) {
     throw new WorkflowJobError("CONTROL_PLANE_RECEIPT_DRIFT", true);
   }
 }
@@ -276,6 +288,10 @@ function validateReceipt(
 function requiredId(value: string | null): string {
   if (!value || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) invalid();
   return value;
+}
+
+function optionalId(value: string | null): string | null {
+  return value === null ? null : requiredId(value);
 }
 
 function requiredSha(value: string | null): string {
@@ -291,6 +307,10 @@ function requiredPullRequest(value: number | null): number {
 function requiredBuildId(value: string | null): string {
   if (!value || !/^\d{1,20}$/.test(value) || value === "0") invalid();
   return value;
+}
+
+function optionalBuildId(value: string | null): string | null {
+  return value === null ? null : requiredBuildId(value);
 }
 
 function requiredExternalGate(value: ExternalApprovalGate | null): ExternalApprovalGate {

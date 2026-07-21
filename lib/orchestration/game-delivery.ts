@@ -219,7 +219,16 @@ export class GameDeliveryWorkflow {
       return this.current();
     }
     if (this.snapshot.state === "CANCELLED") throw new Error("Cancelled workflows are terminal");
-    if (signal.type === "CANCEL") return this.commit(signal, { state: "CANCELLED" });
+    if (signal.type === "CANCEL") {
+      // The default-branch publish dispatch is intentionally treated as an
+      // irreversible boundary. Cancellation after that point could make the
+      // workflow projection claim success was revoked after Steam already
+      // accepted the public release.
+      if (this.snapshot.state === "READY_TO_PUBLISH" || this.snapshot.state === "RELEASED") {
+        return this.invalid(signal);
+      }
+      return this.commit(signal, { state: "CANCELLED" });
+    }
 
     switch (this.snapshot.state) {
       case "IDEATION":

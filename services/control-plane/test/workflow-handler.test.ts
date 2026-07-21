@@ -65,7 +65,9 @@ function snapshotFor(operation: ControlPlaneWorkflowAction): DeliverySnapshot {
   });
   const cancelSignal: DeliverySignal = Object.freeze({ signalId: "cancel-signal-0001", type: "CANCEL", reason: "user cancelled" });
   return Object.freeze({
-    ...base, state: "CANCELLED", history: Object.freeze([{ sequence: 1, signal: cancelSignal, resultingState: "CANCELLED" as const }]),
+    ...base, state: "CANCELLED", lockedRunConfigurationId: runId, runId,
+    steamReleaseId: releaseId, steamBuildId: "91234567",
+    history: Object.freeze([{ sequence: 1, signal: cancelSignal, resultingState: "CANCELLED" as const }]),
   });
 }
 
@@ -95,6 +97,7 @@ function receipt(operation: ControlPlaneWorkflowAction): ControlPlaneWorkflowAct
   return {
     receiptId: `control-receipt-${operation.toLowerCase()}`, actionId: `control-action-${operation.toLowerCase()}`,
     operation, requestDigest: digest, status: operation === "CANCEL_DELIVERY" ? "ACKNOWLEDGED" : "WAITING",
+    cancellationRevocationId: operation === "CANCEL_DELIVERY" ? "33333333-3333-4333-8333-333333333333" : null,
   };
 }
 
@@ -146,6 +149,9 @@ test("control-plane workflow handler registers every user or external wait with 
   assert.equal(observed[5]?.binding.releaseId, releaseId);
   assert.equal(observed[6]?.binding.externalGate, "VALVE_REVIEW");
   assert.equal(observed[7]?.binding.cancellationReason, "user cancelled");
+  assert.equal(observed[7]?.binding.lockedRunConfigurationId, runId);
+  assert.equal(observed[7]?.binding.releaseId, releaseId);
+  assert.equal(observed[7]?.binding.steamBuildId, "91234567");
 });
 
 test("control-plane workflow handler never emits an approval signal from a registered user wait", async () => {
@@ -222,6 +228,19 @@ test("control-plane workflow handler rejects state, receipt and cancellation dri
   await assert.rejects(handler.execute(job("CANCEL_DELIVERY", invalidCancel), {
     async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; },
   }), /CONTROL_PLANE_BINDING_INVALID/);
+
+  const tooLate = snapshotFor("CANCEL_DELIVERY");
+  const tooLateCancel = Object.freeze({
+    ...tooLate,
+    history: Object.freeze([
+      { sequence: 1, signal: Object.freeze({ signalId: "publish-ready", type: "EXTERNAL_APPROVED" as const,
+        gate: "DEFAULT_BRANCH_CONFIRMATION" as const, approvalId: "approval-final" }), resultingState: "READY_TO_PUBLISH" as const },
+      { sequence: 2, signal: tooLate.history[0]!.signal, resultingState: "CANCELLED" as const },
+    ]),
+  });
+  await assert.rejects(handler.execute(job("CANCEL_DELIVERY", tooLateCancel), {
+    async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; },
+  }), /CONTROL_PLANE_BINDING_INVALID/);
 });
 
 test("Postgres control-plane action store applies RLS and replays only an exact binding", async () => {
@@ -264,6 +283,62 @@ test("Postgres control-plane action store applies RLS and replays only an exact 
   assert.match(sql[2] ?? "", /INSERT INTO deviludo\.workflow_control_actions/);
   assert.equal(sql.at(-1), "COMMIT");
   assert.equal(released, true);
+});
+
+test("Postgres cancellation acknowledgement commits only with its exact cross-service revocation", async () => {
+  const sql: string[] = [];
+  const values: (readonly unknown[] | undefined)[] = [];
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const revocationId = "44444444-4444-4444-8444-444444444444";
+  const operationKey = "workflow-job:55555555-5555-4555-8555-555555555555";
+  const reason = "user cancelled";
+  const reasonDigest = createHash("sha256").update(reason).digest("hex");
+  const binding = Object.freeze({
+    state: "CANCELLED", specRevisionId: null, testPlanRevisionId: null, specApprovalReceiptId: null,
+    lockedRunConfigurationId: runId, providerRevisionId: null, candidateCommitSha: null,
+    draftPullRequest: null, evidenceBundleId: null, mainCommitSha: null, releaseId,
+    steamBuildId: "91234567", externalGate: null, cancellationReason: reason, repairContext: null,
+  });
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation_key: operationKey, request_digest: digest, operation: "CANCEL_DELIVERY" as const,
+    status: "ACKNOWLEDGED" as const, binding,
+  };
+  const revocation = {
+    id: revocationId, tenant_id: tenantId, project_id: projectId, workflow_id: action.workflow_id,
+    action_id: actionId, operation_key: operationKey, request_digest: digest,
+    run_id: runId, release_id: releaseId, steam_build_id: "91234567", reason_digest: reasonDigest,
+  };
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, parameters?: readonly unknown[]) {
+      sql.push(statement); values.push(parameters);
+      if (statement.includes("SELECT id, tenant_id")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.delivery_cancellation_revocations")) return { rows: [revocation] as Row[] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new PostgresControlPlaneWorkflowActionStore({ async connect() { return client; } });
+  const result = await store.ensureAction({
+    operationKey, requestDigest: digest, tenantId, projectId, workflowId: action.workflow_id,
+    operation: "CANCEL_DELIVERY", binding, async heartbeat() { return "renewed"; },
+  });
+  assert.equal(result.cancellationRevocationId, revocationId);
+  const replay = await store.ensureAction({
+    operationKey, requestDigest: digest, tenantId, projectId, workflowId: action.workflow_id,
+    operation: "CANCEL_DELIVERY", binding, async heartbeat() { return "renewed"; },
+  });
+  assert.equal(replay.cancellationRevocationId, revocationId);
+  const insert = sql.findIndex((statement) => statement.includes("INSERT INTO deviludo.delivery_cancellation_revocations"));
+  const select = sql.findIndex((statement) => statement.includes("FROM deviludo.delivery_cancellation_revocations"));
+  assert.ok(insert > 0 && select > insert);
+  assert.equal(sql.at(-1), "COMMIT");
+  assert.equal(sql.filter((statement) => statement.includes("INSERT INTO deviludo.delivery_cancellation_revocations")).length, 2);
+  assert.deepEqual(values[insert]?.slice(0, 9), [
+    tenantId, projectId, action.workflow_id, actionId, operationKey, digest, runId, releaseId, "91234567",
+  ]);
 });
 
 test("Postgres control-plane action store rolls back an idempotency collision", async () => {

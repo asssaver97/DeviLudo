@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   ControlPlaneWorkflowAction,
   ControlPlaneWorkflowActionReceipt,
@@ -34,6 +35,20 @@ type ActionRow = {
   operation: ControlPlaneWorkflowAction;
   status: "WAITING" | "ACKNOWLEDGED";
   binding: ControlPlaneWorkflowBinding;
+};
+
+type CancellationRevocationRow = {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  workflow_id: string;
+  action_id: string;
+  operation_key: string;
+  request_digest: string;
+  run_id: string | null;
+  release_id: string | null;
+  steam_build_id: string | null;
+  reason_digest: string;
 };
 
 /** PostgreSQL/RLS implementation for durable, idempotent UI and approval waits. */
@@ -80,6 +95,43 @@ export class PostgresControlPlaneWorkflowActionStore implements ControlPlaneWork
         || row.status !== expectedStatus || canonicalJson(row.binding) !== canonicalJson(input.binding)) {
         throw new Error("Control-plane workflow action idempotency binding mismatch");
       }
+      let cancellationRevocationId: string | null = null;
+      if (input.operation === "CANCEL_DELIVERY") {
+        const reason = input.binding.cancellationReason;
+        if (!reason) throw new Error("Cancellation workflow action is missing its reason binding");
+        const reasonDigest = createHash("sha256").update(reason).digest("hex");
+        await client.query(
+          `INSERT INTO deviludo.delivery_cancellation_revocations
+            (tenant_id, project_id, workflow_id, action_id, operation_key,
+             request_digest, run_id, release_id, steam_build_id, reason_digest, revoked_at)
+           VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6,
+                   $7::uuid, $8::uuid, $9, $10, now())
+           ON CONFLICT (tenant_id, workflow_id) DO NOTHING`,
+          [input.tenantId, input.projectId, input.workflowId, row.id, input.operationKey,
+            input.requestDigest, input.binding.lockedRunConfigurationId,
+            input.binding.releaseId, input.binding.steamBuildId, reasonDigest],
+        );
+        const revoked = await client.query<CancellationRevocationRow>(
+          `SELECT id::text, tenant_id::text, project_id::text, workflow_id,
+                  action_id::text, operation_key, request_digest, run_id::text,
+                  release_id::text, steam_build_id, reason_digest
+             FROM deviludo.delivery_cancellation_revocations
+            WHERE tenant_id = $1::uuid AND workflow_id = $2`,
+          [input.tenantId, input.workflowId],
+        );
+        const revocation = revoked.rows[0];
+        if (!revocation || !UUID.test(revocation.id)
+          || revocation.tenant_id !== input.tenantId || revocation.project_id !== input.projectId
+          || revocation.workflow_id !== input.workflowId || revocation.action_id !== row.id
+          || revocation.operation_key !== input.operationKey || revocation.request_digest !== input.requestDigest
+          || revocation.run_id !== input.binding.lockedRunConfigurationId
+          || revocation.release_id !== input.binding.releaseId
+          || revocation.steam_build_id !== input.binding.steamBuildId
+          || revocation.reason_digest !== reasonDigest) {
+          throw new Error("Delivery cancellation revocation idempotency binding mismatch");
+        }
+        cancellationRevocationId = revocation.id;
+      }
       await client.query("COMMIT");
       return Object.freeze({
         receiptId: `control-receipt:${row.id}`,
@@ -89,6 +141,7 @@ export class PostgresControlPlaneWorkflowActionStore implements ControlPlaneWork
         operation: row.operation,
         requestDigest: row.request_digest,
         status: row.status,
+        cancellationRevocationId,
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);

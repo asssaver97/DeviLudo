@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 48 }, (_, index) => {
+  const offsets = Array.from({ length: 49 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -321,6 +321,27 @@ test("Steam release lifecycle advances only from authoritative persisted evidenc
   assert.match(completion, /ON CONFLICT \(release_id, gate\) DO NOTHING/);
   assert.match(execution, /SET state = 'INSTALL_TESTING'/);
   assert.match(execution, /SET state = 'RELEASED'/);
+});
+
+test("delivery cancellation atomically fences Agent, Runner and Steam authorities", () => {
+  const migration = readFileSync(new URL("../infra/postgres/049_delivery_cancellation_revocations.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/control-plane/src/workflow-action-postgres.ts", import.meta.url), "utf8");
+  const workflow = readFileSync(new URL("../lib/orchestration/game-delivery.ts", import.meta.url), "utf8");
+  const agentOperations = readFileSync(new URL("../services/agent-execution-broker/src/postgres-operations.ts", import.meta.url), "utf8");
+  const runnerIngress = readFileSync(new URL("../services/runner-control/src/postgres-ingress.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.delivery_cancellation_revocations/);
+  assert.match(migration, /delivery_cancellation_revocations_append_only/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /UPDATE deviludo\.agent_execution_operations[\s\S]+state = 'CANCELLED'/);
+  assert.match(migration, /UPDATE deviludo\.inference_run_authorizations[\s\S]+state = 'REVOKED'/);
+  assert.match(migration, /UPDATE deviludo\.e2e_platform_leases[\s\S]+state = 'INVALIDATED'/);
+  assert.match(migration, /UPDATE deviludo\.workflow_command_jobs[\s\S]+state = 'CANCELLED'/);
+  assert.match(migration, /UPDATE deviludo\.steam_releases[\s\S]+state = 'CANCELLED'/);
+  assert.match(migration, /cancelled Steam release cannot acquire a publish claim/);
+  assert.match(store, /Delivery cancellation revocation idempotency binding mismatch/);
+  assert.match(workflow, /READY_TO_PUBLISH" \|\| this\.snapshot\.state === "RELEASED/);
+  assert.match(agentOperations, /AND state = 'RUNNING'[\s\S]+AND claim_token = \$7::uuid/);
+  assert.match(runnerIngress, /lease\.state !== "RUNNING"/);
 });
 
 test("Steam install grants are tenant-isolated, expiring and once-per-platform", () => {

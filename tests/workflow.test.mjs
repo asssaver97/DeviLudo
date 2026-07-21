@@ -62,6 +62,10 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.nextCommand(), "PUBLISH_STEAM_DEFAULT_BRANCH");
   assert.equal(workflow.current().externalApprovals.length, 3);
   assert.throws(
+    () => workflow.signal({ signalId: "signal-too-late-cancel", type: "CANCEL", reason: "publish already authorized" }),
+    /invalid while delivery is READY_TO_PUBLISH/,
+  );
+  assert.throws(
     () => workflow.signal({ signalId: "signal-wrong-release", type: "STEAM_RELEASED", releaseId: "release-other", defaultBranchBuildId: "1001" }),
     /invalid while delivery is READY_TO_PUBLISH/,
   );
@@ -70,6 +74,24 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.nextCommand(), "NONE");
   assert.equal(workflow.current().steamReleaseId, "release-1");
   assert.equal(workflow.current().history.length, 17);
+  assert.throws(
+    () => workflow.signal({ signalId: "signal-post-release-cancel", type: "CANCEL", reason: "release already public" }),
+    /invalid while delivery is RELEASED/,
+  );
+});
+
+test("delivery cancellation is terminal before the irreversible publish boundary", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-cancel", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
+  });
+  workflow.signal({ signalId: "cancel-ready", type: "SPEC_READY", specRevisionId: "SPEC-001" });
+  workflow.signal({ signalId: "cancel-signal", type: "CANCEL", reason: "user withdrew the game" });
+  assert.equal(workflow.current().state, "CANCELLED");
+  assert.equal(workflow.nextCommand(), "NONE");
+  assert.throws(
+    () => workflow.signal({ signalId: "cancel-after-terminal", type: "SPEC_READY", specRevisionId: "SPEC-002" }),
+    /Cancelled workflows are terminal/,
+  );
 });
 
 test("feedback invalidates evidence and the approved second iteration returns through development and E2E", () => {
