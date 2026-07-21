@@ -399,7 +399,8 @@
   text-transform: uppercase;
 }
 
-.discoveryControl select {
+.discoveryControl select,
+.discoveryControl input {
   min-height: 34px;
   border: 1px solid #cfd4cf;
   border-radius: 3px;
@@ -407,6 +408,11 @@
   color: var(--ink);
   padding: 0 28px 0 10px;
   font: 600 10px var(--font-geist-sans), sans-serif;
+}
+
+.discoveryControl input {
+  min-width: 148px;
+  padding-right: 10px;
 }
 
 .primaryButton,
@@ -1970,7 +1976,7 @@
   .headerActions { width: 100%; }
   .headerActions button { flex: 1; }
   .discoveryControl { flex: 1; }
-  .discoveryControl select { width: 100%; }
+  .discoveryControl select, .discoveryControl input { width: 100%; }
   .adminStateNotice { margin-inline: 18px; }
   .securityStrip { padding-inline: 16px; }
   .securityStrip > div { flex-direction: column; gap: 1px; }

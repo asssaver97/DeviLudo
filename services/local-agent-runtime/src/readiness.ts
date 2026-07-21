@@ -74,7 +74,7 @@ export class LocalAgentReadinessService {
     if (!installation || installation.state === "UNAVAILABLE") {
       return preflightResult(request, installation?.observedVersion ?? null, "INSTALLATION_UNAVAILABLE", "锁定的 Agent CLI 在本机不可用。");
     }
-    if (installation.expectedVersion !== request.expectedVersion || installation.observedVersion !== request.expectedVersion) {
+    if (installation.observedVersion !== request.expectedVersion) {
       return preflightResult(request, installation.observedVersion, "INSTALLATION_MISMATCH", "本机 CLI 版本与任务锁定版本不一致，禁止启动。");
     }
     if (!health.workerImageVerified || health.expectedWorkerImageIdentity !== request.imageDigest) {

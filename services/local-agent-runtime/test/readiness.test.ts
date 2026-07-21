@@ -126,6 +126,21 @@ test("preflight reports exact installation mismatch before any execution work", 
   assert.equal(result.runId, preflight.runId);
 });
 
+test("preflight accepts an admin-updated exact task version when it matches the observed CLI", async () => {
+  const service = new LocalAgentReadinessService({
+    inspector: { async inspect(executable) { return executable === "claude" ? "2.1.201" : "0.91.0"; } },
+    executionEnabled: true,
+    inferenceGatewayUrl: "https://inference.internal.example/v1",
+    workerImageIdentity: digest,
+    expectedWorkerImageIdentity: digest,
+    providerBindingVerifier: { async verify() { return true; } },
+  });
+  const result = await service.preflight({ ...preflight, expectedVersion: "2.1.201" });
+  assert.equal(result.status, "READY");
+  assert.equal(result.code, "READY");
+  assert.equal(result.observedVersion, "2.1.201");
+});
+
 test("preflight distinguishes WAITING_PROVIDER, disabled execution and ready", async () => {
   const inspector = { async inspect(executable: "claude" | "codex") { return executable === "claude" ? "2.1.14" : "0.91.0"; } };
   const base = { inspector, workerImageIdentity: digest, expectedWorkerImageIdentity: digest };

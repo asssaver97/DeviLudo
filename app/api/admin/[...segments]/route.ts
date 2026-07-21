@@ -28,6 +28,7 @@ type RouteContext = { params: Promise<{ segments: string[] }> };
 const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
 const SECURITY_ROLES = ["SecurityAdmin"] as const;
 const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner"] as const;
+const EXACT_AGENT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const PROFILE_DRAFT_FIELDS = Object.freeze([
   "agent", "installationId", "credentialVersionId", "scope", "scopeId", "baseUrl", "authentication",
   "primaryModel", "planningModel", "smallFastModel", "subagentModel",
@@ -154,12 +155,17 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (key === "agent-versions/discover") {
       const role = requireRole(request, VERSION_ROLES);
-      assertAllowedBodyFields(body, ["agent"]);
+      assertAllowedBodyFields(body, ["agent", "version"]);
       const agent = body.agent ?? "claude-code";
       if (agent !== "claude-code" && agent !== "codex-cli") {
         throw new HttpProblem(400, "INVALID_AGENT", "Version discovery supports only Claude Code or Codex CLI");
       }
-      const version = agent === "claude-code" ? "2.1.15" : "0.92.0";
+      const version = body.version === undefined
+        ? agent === "claude-code" ? "2.1.15" : "0.92.0"
+        : requireString(body, "version", 120);
+      if (!EXACT_AGENT_VERSION.test(version) || /latest|stable|default/i.test(version)) {
+        throw new HttpProblem(400, "INVALID_AGENT_VERSION", "Version discovery requires an exact non-floating version");
+      }
       const id = `${agent}@${version}`;
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();

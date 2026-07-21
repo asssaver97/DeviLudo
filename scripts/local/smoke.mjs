@@ -531,6 +531,39 @@ try {
   const agentSummary = agentHealth.agents
     .map((agent) => `${agent.agent} ${agent.observedVersion ?? "unavailable"} (${agent.state})`)
     .join(" · ");
+  const installedAgent = agentHealth.agents.find((agent) => typeof agent.observedVersion === "string");
+  if (!installedAgent) throw new Error("local Agent version discovery requires at least one installed CLI");
+  const exactAgentDiscovery = await request(baseUrl, "/api/admin/agent-versions/discover", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-agent-version-${installedAgent.agent}-${installedAgent.observedVersion}`,
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ agent: installedAgent.agent, version: installedAgent.observedVersion }),
+  });
+  const exactAgentDiscoveryPayload = await exactAgentDiscovery.response.json();
+  const discoveredCandidate = exactAgentDiscoveryPayload.data?.candidates?.[0];
+  if (![200, 201].includes(exactAgentDiscovery.response.status)
+    || discoveredCandidate?.agent !== installedAgent.agent
+    || discoveredCandidate?.version !== installedAgent.observedVersion
+    || discoveredCandidate?.activated !== false) {
+    throw new Error("local Agent discovery did not preserve the observed exact CLI version");
+  }
+  const floatingAgentDiscovery = await request(baseUrl, "/api/admin/agent-versions/discover", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": "smoke-floating-agent-version-v1",
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ agent: installedAgent.agent, version: "latest" }),
+  });
+  const floatingAgentDiscoveryPayload = await floatingAgentDiscovery.response.json();
+  if (floatingAgentDiscovery.response.status !== 400
+    || floatingAgentDiscoveryPayload.error?.code !== "INVALID_AGENT_VERSION") {
+    throw new Error("local Agent discovery accepted a floating version alias");
+  }
   const specHealth = await specRuntime.response.json();
   if (!specRuntime.response.ok || specHealth.service !== "deviludo-local-spec-runtime" || specHealth.mode !== "deterministic-loopback") {
     throw new Error("local specification dialogue service is not ready");
@@ -990,6 +1023,7 @@ try {
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
   console.log(`✓ Local runtime     ${runtime.response.status} (${runtime.elapsedMs}ms) · Godot ${runtimeHealth.godotVersion}`);
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
+  console.log(`✓ Agent discovery   ${exactAgentDiscovery.response.status}/${floatingAgentDiscovery.response.status} · ${installedAgent.agent}@${installedAgent.observedVersion} exact, latest rejected`);
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
   console.log(`✓ Godot validation ${localValidation.response.status} (${localValidation.elapsedMs}ms) · ${localValidationPayload.data.releaseGate}`);

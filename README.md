@@ -102,7 +102,7 @@ npm run local:dev
 
 模板安装器只接受版本目录中固定的 Godot 官方构建，下载固定 URL 后校验归档大小、SHA-256 和全部压缩路径，再原子发布只读文件清单。验证侧车不会直接复用可变的编辑器 HOME；它会重验安装清单和 `macos.zip` 摘要，并只把精确版本目录挂载到本次运行的隔离 HOME。已有未验证目录不会被覆盖。
 
-管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。没有签名/hash/SBOM/扫描证据时版本批准返回 `SUPPLY_CHAIN_GATES_FAILED`；没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
+管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。版本发现可填写精确稳定版或预发布版本；本地页面留空时复用只读探针观察到的实际 CLI 版本，但不会自动批准或激活。任务预检直接核对不可变 Run 锁与实际 CLI，因此新任务可以安全使用管理员更新后的精确版本。没有签名/hash/SBOM/扫描证据时版本批准返回 `SUPPLY_CHAIN_GATES_FAILED`；没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
 
 生产部署应把 `GET /api/health` 配置为 Web 流量就绪探针。它会用与业务路由相同的客户端契约校验构想、验收、GitHub、身份、管理、投影与 Steam 发布所需的全部 Broker；任何缺失或无效配置都会返回 `503`，且不会在响应中暴露内部 URL 或凭据。
 

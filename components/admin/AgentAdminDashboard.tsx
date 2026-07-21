@@ -112,6 +112,7 @@ const navGroups: { label: string; items: { label: string; icon: AdminIconName; a
 
 const roleOptions = Object.keys(rolePermissions) as AdminRole[];
 type AdminAuthMode = "loading" | "local-fixture" | "trusted-control-plane";
+const EXACT_AGENT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 function AgentMark({ kind, small = false }: { kind: AgentKind; small?: boolean }) {
   return (
@@ -153,6 +154,7 @@ export default function AgentAdminDashboard() {
   const [adminLoading, setAdminLoading] = useState(true);
   const [adminError, setAdminError] = useState("");
   const [discoveryAgent, setDiscoveryAgent] = useState<AgentKind>("claude-code");
+  const [discoveryVersion, setDiscoveryVersion] = useState("");
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
   const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
@@ -354,11 +356,23 @@ export default function AgentAdminDashboard() {
       notify("仅 PlatformAgentAdmin 可发现版本", "warning");
       return;
     }
+    const observedVersion = localAgents.find((item) => item.agent === agent)?.observedVersion ?? "";
+    const requestedVersion = discoveryVersion.trim() || (authMode === "local-fixture" ? observedVersion : "");
+    if (requestedVersion && (!EXACT_AGENT_VERSION.test(requestedVersion) || /latest|stable|default/i.test(requestedVersion))) {
+      notify("请输入精确版本号，例如 2.1.201 或 0.145.0-alpha.18", "warning");
+      return;
+    }
     try {
-      await adminRequest("agent-versions/discover", { method: "POST", role, body: { agent } });
+      await adminRequest("agent-versions/discover", {
+        method: "POST",
+        role,
+        body: { agent, ...(requestedVersion ? { version: requestedVersion } : {}) },
+      });
       await refreshAdminState();
       await refreshAudit();
-      notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} 官方候选已写入版本目录；不会自动激活`, "neutral");
+      setActiveTab("versions");
+      if (requestedVersion) setDiscoveryVersion(requestedVersion);
+      notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} ${requestedVersion || "官方最新候选"}已写入版本目录；不会自动激活`, "neutral");
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "版本发现失败", "warning");
     }
@@ -419,7 +433,8 @@ export default function AgentAdminDashboard() {
             <p>治理开发 Agent 的版本、部署、Provider 与配置继承。运行时锁定配置，不受后续变更影响。</p>
           </div>
           <div className={styles.headerActions}>
-            <label className={styles.discoveryControl}><span>官方目录</span><select aria-label="选择要发现版本的 Agent" value={discoveryAgent} onChange={(event) => setDiscoveryAgent(event.target.value as AgentKind)}><option value="claude-code">Claude Code</option><option value="codex-cli">Codex CLI</option></select></label>
+            <label className={styles.discoveryControl}><span>官方目录</span><select aria-label="选择要发现版本的 Agent" value={discoveryAgent} onChange={(event) => { setDiscoveryAgent(event.target.value as AgentKind); setDiscoveryVersion(""); }}><option value="claude-code">Claude Code</option><option value="codex-cli">Codex CLI</option></select></label>
+            <label className={styles.discoveryControl}><span>精确版本（可选）</span><input aria-label="要发现的精确 Agent 版本" value={discoveryVersion} onChange={(event) => setDiscoveryVersion(event.target.value)} placeholder={localAgents.find((item) => item.agent === discoveryAgent)?.observedVersion ?? "留空发现官方最新"} autoComplete="off" maxLength={120} /></label>
             <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions(discoveryAgent)} disabled={!permissions.manageVersions || adminLoading || Boolean(adminError)} title={permissions.manageVersions ? undefined : "需要 PlatformAgentAdmin 权限"}><AdminIcon name="refresh" />发现版本</button>
             <button className={styles.primaryButton} type="button" onClick={() => {
               const requestId = crypto.randomUUID();

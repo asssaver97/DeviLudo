@@ -38,7 +38,9 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 
 `POST /v1/runs` 会先执行同一预检。预检未通过时返回原始门禁码；全部通过但没有隔离执行器时返回 `LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED`。项目 API 只接受逐项匹配锁定运行的完成回执，并保存 SCM 代理产生的完整候选 SHA、源码摘要、changed-files、usage 和警告；浏览器不能直接提交或伪造回执。
 
-`/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本阻止、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计。版本批准仍要求供应链证据；Provider 激活仍要求受信 Connector 的完整探针。默认测试栈不会伪造这两类结果，因此相关操作会以明确错误失败关闭。
+`/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本发现可以填写精确版本；在本地测试环境留空时，页面会复用只读探针实际看到的 CLI 版本，方便把已经安装的 Claude Code 或 Codex CLI 写入候选目录，但仍不会自动批准、安装、灰度或激活。版本阻止、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计。版本批准仍要求供应链证据；Provider 激活仍要求受信 Connector 的完整探针。默认测试栈不会伪造这两类结果，因此相关操作会以明确错误失败关闭。
+
+任务预检以不可变 Run 中锁定的精确版本直接核对实际 CLI。服务启动时的版本基线只用于健康投影和提示，不会把已经由管理员更新并锁入新任务的精确版本误判为旧版本；WorkerImage、Provider、凭据、预算和显式执行开关仍逐项校验。
 
 生产数据库会在 `agent_run_provider_failovers` 提交时原子物化追加式 `AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED` 管理审计事件，标明原/目标 Profile、Provider、模型、预算和授权到期时间。投影不复制一次性授权 nonce，也不暴露 SecretRef 或密钥；租户和项目管理员仍按请求身份过滤可见范围。
 
@@ -72,6 +74,7 @@ npm run local:smoke
 - `/settings/agents` 返回租户 BYOK、Provider 与默认 Agent 页面；
 - `/projects/ember-archipelago/agent-settings` 返回项目 Profile 选择页；
 - `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
+- `/api/admin/agent-versions/discover` 接受精确稳定版或预发布版本、拒绝浮动别名，且发现候选不会自动激活；
 - 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
 - 租户 BYOK 通过真实页面 API 创建新不可变版本、停止旧版本签发并撤销指定旧版本；响应和投影均不包含明文或 SecretRef；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
@@ -133,6 +136,6 @@ Compose 只把依赖端口绑定到 `127.0.0.1`。`infra:status` 不只检查端
 - `Run npm install`：当前工作区缺少固定版本的 vinext 依赖，先执行 `npm install`。
 - Smoke 等待超时：查看启动终端中的 vinext 错误，以及 `.wrangler/wrangler-local.log`。
 - `WAITING_EXPORT_TEMPLATES`：运行 `npm run local:install-export-templates` 安装并校验当前固定版本后重新验证；仅由 Godot 编辑器放入可变 HOME 的模板不会被隔离 Runner 信任。
-- `VERSION_MISMATCH`：本机 CLI 可以被发现，但不等于任务锁定的批准版本；通过新的固定版本 WorkerImage 更新，不要放宽门禁或启用 CLI 自更新。
+- `VERSION_MISMATCH`：本机 CLI 可以被发现，但不等于当前健康基线或任务锁定版本。在 `/admin/agents` 发现实际精确版本后，仍需按供应链流程批准、构建新 WorkerImage、灰度并让新任务锁定该版本；不要放宽门禁或启用 CLI 自更新。
 - 页面通过但外部动作未执行：这是本地预览的预期行为；真实开发 Agent、Windows/Linux Runner、GitHub 和 Steam 工作流需要独立配置安全凭据与基础设施。
 - `/api/runner/events` 在本地仅提供只读演示状态；任何 POST 都会以 `RUNNER_MTLS_INGRESS_REQUIRED` 拒绝。真实 Runner 必须接入独立 mTLS 服务，不能通过浏览器或伪造 Header 上报结果。

@@ -44,6 +44,15 @@ test("new Provider opens an explicit blank draft without mutating the active sna
   assert.match(source, /onNewDraftConsumed\(newDraftRequest\)/);
 });
 
+test("Agent version discovery accepts an exact version and reuses the observed local CLI", () => {
+  const source = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /const \[discoveryVersion, setDiscoveryVersion\] = useState\(""\);/);
+  assert.match(source, /localAgents\.find\(\(item\) => item\.agent === agent\)\?\.observedVersion/);
+  assert.match(source, /\{ agent, \.\.\.\(requestedVersion \? \{ version: requestedVersion \} : \{\}\) \}/);
+  assert.match(source, /aria-label="要发现的精确 Agent 版本"/);
+});
+
 test("credential lifecycle controls call the real rotate and revoke APIs", () => {
   const admin = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
   const tenant = readFileSync(new URL("../components/console/TenantAgentSettings.tsx", import.meta.url), "utf8");

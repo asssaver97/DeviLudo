@@ -56,6 +56,21 @@ test("local Agent discovery selects Claude Code and Codex CLI explicitly without
   assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "DISCOVERED");
   assert.equal(getDemoStore().audit[0]?.resource, "codex-cli@0.92.0");
 
+  const exact = await POST(
+    request("agent-versions/discover", "POST", "PlatformAgentAdmin", { agent: "codex-cli", version: "0.145.0-alpha.18" }),
+    context("agent-versions/discover"),
+  );
+  assert.equal(exact.status, 201);
+  assert.deepEqual((await exact.json()).data.candidates, [{ agent: "codex-cli", version: "0.145.0-alpha.18", state: "DISCOVERED", activated: false }]);
+  assert.equal(getDemoStore().agentVersions["codex-cli@0.145.0-alpha.18"], "DISCOVERED");
+
+  const floating = await POST(
+    request("agent-versions/discover", "POST", "PlatformAgentAdmin", { agent: "claude-code", version: "latest" }),
+    context("agent-versions/discover"),
+  );
+  assert.equal(floating.status, 400);
+  assert.equal((await floating.json()).error.code, "INVALID_AGENT_VERSION");
+
   const invalid = await POST(
     request("agent-versions/discover", "POST", "PlatformAgentAdmin", { agent: "third-party" }),
     context("agent-versions/discover"),
