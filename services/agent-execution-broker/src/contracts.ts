@@ -23,7 +23,7 @@ export interface AgentExecutionRequest {
 }
 
 export interface AgentExecutionStatus {
-  readonly status: "RUNNING" | "COMPLETED" | "FAILED";
+  readonly status: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   readonly runId: string;
   readonly providerRevisionId: string;
   readonly receipt: AgentWorkflowRunReceipt | null;
@@ -176,10 +176,10 @@ export function validateAgentExecutionStatus(value: unknown, expected: Pick<Agen
   const body = record(value);
   if (!UUID.test(String(body.runId ?? "")) || body.runId !== expected.lockedRunConfigurationId
     || typeof body.providerRevisionId !== "string" || !SAFE_ID.test(body.providerRevisionId)
-    || !["RUNNING", "COMPLETED", "FAILED"].includes(String(body.status))) invalid();
-  if (body.status === "RUNNING") {
+    || !["RUNNING", "COMPLETED", "FAILED", "CANCELLED"].includes(String(body.status))) invalid();
+  if (body.status === "RUNNING" || body.status === "CANCELLED") {
     if (body.receipt !== null) invalid();
-    return Object.freeze({ status: "RUNNING", runId: body.runId as string,
+    return Object.freeze({ status: body.status, runId: body.runId as string,
       providerRevisionId: body.providerRevisionId, receipt: null });
   }
   const receipt = validateReceipt(body.receipt, body.status as "COMPLETED" | "FAILED", body.runId as string,

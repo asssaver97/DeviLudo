@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AgentExecutionCancelledError,
   MtlsAgentExecutionBroker,
   type AgentExecutionBrokerHttpRequest,
 } from "../src/execution-broker";
@@ -43,6 +44,16 @@ function completed(runId = "run-001") {
         model: "gateway/claude-sonnet-4-6-20250514", candidateCommitSha: "c".repeat(40),
         draftPullRequest: 91, diagnosticId: null, receiptId: "agent-receipt-001",
       },
+    },
+  };
+}
+
+function cancelled(runId = "run-001") {
+  return {
+    statusCode: 200,
+    payload: {
+      status: "CANCELLED", runId, providerRevisionId: "provider-r1",
+      receipt: null,
     },
   };
 }
@@ -145,6 +156,46 @@ test("mTLS Agent Broker accepts an idempotently replayed terminal receipt withou
   const run = await broker.start(input());
   assert.equal((await run.complete()).receiptId, "agent-receipt-001");
   assert.equal(calls, 1);
+});
+
+test("mTLS Agent Broker stops immediately when the authoritative run is already cancelled", async () => {
+  let calls = 0;
+  const broker = new MtlsAgentExecutionBroker({
+    endpoint: "https://agent-broker.internal/v1/agent-runs", tls,
+    http: async () => { calls += 1; return cancelled(); },
+  });
+  await assert.rejects(broker.start(input()), (error: unknown) => {
+    assert.ok(error instanceof AgentExecutionCancelledError);
+    assert.equal(error.runId, "run-001");
+    assert.equal(error.providerRevisionId, "provider-r1");
+    return true;
+  });
+  assert.equal(calls, 1);
+});
+
+test("mTLS Agent Broker stops polling without manufacturing a failed receipt after cancellation", async () => {
+  const heartbeats: string[] = [];
+  let clock = 1_000;
+  let calls = 0;
+  const broker = new MtlsAgentExecutionBroker({
+    endpoint: "https://agent-broker.internal/v1/agent-runs", tls,
+    pollIntervalMs: 250, maxWaitMs: 30_000, now: () => clock,
+    pause: async (delay) => { clock += delay; },
+    http: async (_url, request) => {
+      calls += 1;
+      return request.method === "POST" ? running() : cancelled();
+    },
+  });
+  const run = await broker.start(input(heartbeats));
+  await assert.rejects(run.complete(), AgentExecutionCancelledError);
+  assert.deepEqual(heartbeats, ["heartbeat"]);
+  assert.equal(calls, 2);
+
+  const invalid = new MtlsAgentExecutionBroker({
+    endpoint: "https://agent-broker.internal/v1/agent-runs", tls,
+    http: async () => ({ ...cancelled(), payload: { ...cancelled().payload, receipt: completed().payload.receipt } }),
+  });
+  await assert.rejects(invalid.start(input()), /invalid bound response/);
 });
 
 test("mTLS Agent Broker readiness requires its exact workload service identity", async () => {

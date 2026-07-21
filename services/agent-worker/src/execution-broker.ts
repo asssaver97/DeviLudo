@@ -42,11 +42,21 @@ export type AgentExecutionBrokerHttp = (
 export type AgentExecutionBrokerPause = (delayMs: number) => Promise<void>;
 
 type BrokerStatus = {
-  readonly status: "RUNNING" | "COMPLETED" | "FAILED";
+  readonly status: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   readonly runId: string;
   readonly providerRevisionId: string;
   readonly receipt: AgentWorkflowRunReceipt | null;
 };
+
+export class AgentExecutionCancelledError extends Error {
+  constructor(
+    readonly runId: string,
+    readonly providerRevisionId: string,
+  ) {
+    super("Agent execution was cancelled by the authoritative delivery workflow");
+    if (!SAFE_ID.test(runId) || !SAFE_ID.test(providerRevisionId)) invalidResponse();
+  }
+}
 
 /**
  * Production connector for the isolated microVM execution broker. The
@@ -112,6 +122,9 @@ export class MtlsAgentExecutionBroker implements LockedAgentWorkflowPort {
       body,
     });
     const initial = parseStatus(response, input.lockedRunConfigurationId);
+    if (initial.status === "CANCELLED") {
+      throw new AgentExecutionCancelledError(initial.runId, initial.providerRevisionId);
+    }
     let completion: Promise<AgentWorkflowRunReceipt> | null = null;
     return Object.freeze({
       runId: initial.runId,
@@ -165,6 +178,9 @@ export class MtlsAgentExecutionBroker implements LockedAgentWorkflowPort {
       const current = parseStatus(response, input.lockedRunConfigurationId);
       if (current.runId !== initial.runId || current.providerRevisionId !== initial.providerRevisionId) {
         throw new Error("Agent execution Broker changed an immutable run binding");
+      }
+      if (current.status === "CANCELLED") {
+        throw new AgentExecutionCancelledError(current.runId, current.providerRevisionId);
       }
       if (current.receipt) return current.receipt;
     }
@@ -249,11 +265,11 @@ function parseStatus(response: AgentExecutionBrokerHttpResponse, lockedId: strin
   }
   const body = record(response.payload);
   const status = body.status;
-  if (status !== "RUNNING" && status !== "COMPLETED" && status !== "FAILED") invalidResponse();
+  if (status !== "RUNNING" && status !== "COMPLETED" && status !== "FAILED" && status !== "CANCELLED") invalidResponse();
   const runId = stringId(body.runId);
   const providerRevisionId = stringId(body.providerRevisionId);
   if ((response.statusCode === 202) !== (status === "RUNNING")) invalidResponse();
-  if (status === "RUNNING") {
+  if (status === "RUNNING" || status === "CANCELLED") {
     if (body.receipt !== null && body.receipt !== undefined) invalidResponse();
     return Object.freeze({ status, runId, providerRevisionId, receipt: null });
   }

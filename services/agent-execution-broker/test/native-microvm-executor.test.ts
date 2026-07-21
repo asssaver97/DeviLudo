@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -240,6 +240,67 @@ test("locked native executor provisions the baseline and accepts only an atteste
   assert.deepEqual(observedRequest.modelRoles, request().modelRoles);
   assert.equal("providerBaseUrl" in observedRequest, false);
   assert.equal("apiKey" in observedRequest, false);
+});
+
+test("cancelled execution lease aborts the active native microVM before it can return a candidate", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "deviludo-native-agent-cancel-")));
+  try {
+    const executable = join(root, "microvm-launcher");
+    const config = join(root, "launcher.json");
+    const workRoot = join(root, "work");
+    await Promise.all([
+      writeFile(executable, "native-agent-v1", { mode: 0o700 }),
+      writeFile(config, "{}", { mode: 0o400 }),
+      mkdir(workRoot, { mode: 0o700 }),
+    ]);
+    const keys = generateKeyPairSync("ed25519");
+    let processAborted = false;
+    const executor = new LockedNativeMicrovmAgentExecutor({
+      executable,
+      executableDigest: digest("native-agent-v1"),
+      configFile: config,
+      configDigest: digest("{}"),
+      workRoot,
+      inferenceGatewayUrl: "https://inference.internal/",
+      timeoutMs: 15 * 60_000,
+      attestationKeyId: "microvm-attestation-v1",
+      attestationPublicKey: keys.publicKey,
+      heartbeatIntervalMs: 10,
+      now: () => new Date("2030-01-01T00:00:00.000Z"),
+      packages: {
+        async probe() {},
+        async resolve(lock) {
+          return { prompt: "Implement the approved game", promptDigest: "c".repeat(64),
+            specDigest: lock.specDigest, testPlanDigest: lock.testPlanDigest };
+        },
+      },
+      sources: {
+        async probe() {},
+        async materialize(input) {
+          await mkdir(input.destinationPath, { mode: 0o700 });
+          await writeFile(join(input.destinationPath, "project.godot"), "[application]\n");
+          return { sourceDigest: input.sourceDigest };
+        },
+      },
+      process: async (_executable, _args, options) => new Promise((resolve) => {
+        options.abortSignal?.addEventListener("abort", () => {
+          processAborted = true;
+          resolve({ exitCode: 1, stdout: "", stderr: "" });
+        }, { once: true });
+      }),
+    });
+    let heartbeats = 0;
+    await assert.rejects(executor.execute(request(), {
+      async heartbeat() {
+        heartbeats += 1;
+        if (heartbeats >= 3) throw new Error("authoritative execution lease was cancelled");
+      },
+    }), /execution lease was cancelled/);
+    assert.equal(processAborted, true);
+    assert.equal(heartbeats, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }

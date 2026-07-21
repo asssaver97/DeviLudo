@@ -11,7 +11,7 @@ import type {
   IsolatedAgentExecutionResult,
   LockedAgentExecution,
 } from "../src/contracts";
-import { parseAgentExecutionRequest } from "../src/contracts";
+import { parseAgentExecutionRequest, validateAgentExecutionStatus } from "../src/contracts";
 import { createAgentExecutionBrokerHandler } from "../src/ingress-http";
 import {
   AgentExecutionOperationWorker,
@@ -84,6 +84,90 @@ test("contract rejects unbound recovery IDs and extra credential fields", () => 
   assert.deepEqual(parseAgentExecutionRequest(request()), request());
   assert.throws(() => parseAgentExecutionRequest({ ...request(), expectedRunId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }), /contract is invalid/);
   assert.throws(() => parseAgentExecutionRequest({ ...request(), apiKey: "must-not-cross" }), /contract is invalid/);
+});
+
+test("contract exposes cancellation as a terminal receipt-free state", () => {
+  assert.deepEqual(validateAgentExecutionStatus({
+    status: "CANCELLED", runId, providerRevisionId: "provider-r1", receipt: null,
+  }, request()), {
+    status: "CANCELLED", runId, providerRevisionId: "provider-r1", receipt: null,
+  });
+  assert.throws(() => validateAgentExecutionStatus({
+    status: "CANCELLED", runId, providerRevisionId: "provider-r1", receipt: { status: "FAILED" },
+  }, request()), /contract is invalid/);
+});
+
+test("PostgreSQL cancellation projection remains queryable after inference authorization revocation", async () => {
+  const locked = lock();
+  const configurationWithoutDigest = {
+    profileRevisionId: locked.profileRevisionId,
+    profileSource: "platform",
+    installationId: locked.installationId,
+    imageDigest: locked.imageDigest,
+    exactAgentVersion: locked.exactAgentVersion,
+    adapterVersion: locked.adapterVersion,
+    agent: locked.agent,
+    providerRevisionId: locked.providerRevisionId,
+    providerProtocol: locked.providerProtocol,
+    providerBaseUrl: locked.providerBaseUrl,
+    credentialVersionId: locked.credentialVersionId,
+    modelRoles: locked.modelRoles,
+    budget: locked.budget,
+    specRevisionId: locked.specRevisionId,
+    specDigest: locked.specDigest,
+    testPlanRevisionId: locked.testPlanRevisionId,
+    testPlanDigest: locked.testPlanDigest,
+    targetMatrix: locked.targetMatrix,
+    sourceBaselineReceiptId: locked.sourceBaselineReceiptId,
+    commitSha: locked.baseCommitSha,
+    sourceDigest: locked.sourceDigest,
+    repairContext: null,
+  };
+  const resolutionDigest = sha256Canonical(configurationWithoutDigest);
+  const authority = {
+    id: runId, tenant_id: tenantId, project_id: projectId, state: "CANCELLED",
+    profile_revision_id: locked.profileRevisionId, installation_id: locked.installationId,
+    image_digest: locked.imageDigest, adapter_version: locked.adapterVersion,
+    exact_agent_version: locked.exactAgentVersion, provider_revision_id: locked.providerRevisionId,
+    model: locked.model, credential_version_id: locked.credentialVersionId, resolution_digest: resolutionDigest,
+    configuration_lock: { ...configurationWithoutDigest, resolutionDigest }, spec_revision_id: locked.specRevisionId,
+    test_plan_revision_id: locked.testPlanRevisionId, source_baseline_receipt_id: locked.sourceBaselineReceiptId,
+    authorization_profile_revision_id: locked.profileRevisionId,
+    authorization_provider_revision_id: locked.providerRevisionId,
+    authorization_credential_version_id: locked.credentialVersionId,
+    authorization_models: [locked.model], authorization_budget: { maxCostUsd: locked.budget.maxUsd },
+    authorization_nonce: locked.authorizationNonce, authorization_state: "REVOKED",
+    authorization_expires_at: locked.authorizationExpiresAt, provider_state: "ACTIVE",
+    failover_from_profile_revision_id: null, failover_from_provider_revision_id: null,
+    failover_to_profile_revision_id: null, failover_to_provider_revision_id: null,
+    failover_to_credential_version_id: null, failover_to_models: null, failover_to_budget: null,
+    failover_authorization_nonce: null, failover_authorization_expires_at: null,
+  };
+  const operation = {
+    tenant_id: tenantId, project_id: projectId, run_id: runId, operation_key: request().operationKey,
+    request_digest: request().requestDigest, provider_revision_id: locked.providerRevisionId,
+    request_payload: request(), state: "CANCELLED", attempt_count: 1, claim_token: null,
+    claim_expires_at: null, attempt_id: attemptId, receipt_payload: null,
+  };
+  const client = {
+    async query<Row extends Record<string, unknown>>(statement: string) {
+      if (statement.includes("FROM deviludo.agent_execution_operations")) {
+        return { rowCount: 1, rows: [operation as unknown as Row] };
+      }
+      if (statement.includes("FROM deviludo.agent_runs run")) {
+        return { rowCount: 1, rows: [authority as unknown as Row] };
+      }
+      return { rowCount: 0, rows: [] as Row[] };
+    },
+    release() {},
+  };
+  const store = new PostgresAgentExecutionOperations({ async connect() { return client; } });
+  const status = await store.find({
+    tenantId, runId, operationKey: request().operationKey, requestDigest: request().requestDigest,
+  });
+  assert.deepEqual(status, {
+    status: "CANCELLED", runId, providerRevisionId: locked.providerRevisionId, receipt: null,
+  });
 });
 
 test("worker deposits a 15-minute bound DLRT, passes only its SecretRef, and revokes it", async () => {
@@ -227,6 +311,47 @@ test("mTLS ingress binds tenant headers and returns the Provider wait contract",
   const drift = await handler({ method: "POST", path: "/v1/agent-runs", headers: { ...headers, "x-deviludo-tenant-id": projectId },
     socket: {}, rawBody: JSON.stringify(request()) });
   assert.equal(drift.status, 400);
+});
+
+test("mTLS ingress returns one exact terminal cancellation without redispatch or a synthetic failure receipt", async () => {
+  const cancelled: AgentExecutionStatus = {
+    status: "CANCELLED", runId, providerRevisionId: "provider-r1", receipt: null,
+  };
+  let dispatches = 0;
+  const persistence: AgentExecutionOperationPersistence = {
+    async reserve() { return { created: false, status: cancelled }; },
+    async find() { return cancelled; },
+    async claim() { return { kind: "TERMINAL", status: cancelled }; },
+    async heartbeat() { throw new Error("not used"); },
+    async complete() { throw new Error("not used"); },
+    async waitForProvider() { throw new Error("not used"); },
+    async release() { throw new Error("not used"); },
+    async probe() {},
+  };
+  const service = new DurableAgentExecutionService(persistence, {
+    async enqueue() { dispatches += 1; }, async probe() {},
+  }, () => now);
+  const handler = createAgentExecutionBrokerHandler({
+    service,
+    allowedSpiffeIds: new Set(["spiffe://deviludo.internal/service/agent-worker"]),
+    healthIdentity: { version: "1.0.0", binaryDigest: "1".repeat(64) },
+    extractIdentity: () => ({ spiffeId: "spiffe://deviludo.internal/service/agent-worker" }),
+  });
+  const headers = {
+    "content-type": "application/json",
+    "x-deviludo-tenant-id": tenantId,
+    "idempotency-key": request().operationKey,
+    "x-deviludo-request-digest": request().requestDigest,
+  };
+  const submitted = await handler({
+    method: "POST", path: "/v1/agent-runs", headers, socket: {}, rawBody: JSON.stringify(request()),
+  });
+  const observed = await handler({
+    method: "GET", path: `/v1/agent-runs/${runId}`, headers, socket: {}, rawBody: "",
+  });
+  assert.deepEqual(submitted, { status: 200, body: cancelled });
+  assert.deepEqual(observed, { status: 200, body: cancelled });
+  assert.equal(dispatches, 0);
 });
 
 test("durable submit persists before idempotent dispatch and validates the locked run", async () => {

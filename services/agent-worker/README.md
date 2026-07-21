@@ -28,6 +28,11 @@ and Agent, and resumes only after the durable Provider record reports recovery;
 there is no Claude/Codex fallback. Candidate completion requires an
 authoritative commit SHA and Draft PR number.
 
+An authoritative Broker `CANCELLED` response is a distinct receipt-free
+terminal result. The connector stops immediately, does not convert cancellation
+into a failed Agent receipt or workflow signal, and relies on the revoked
+durable job lease to abort any microVM process still in flight.
+
 The production destination process is started with:
 
 ```sh
@@ -42,7 +47,8 @@ Installation, Provider and short-lived inference token in its own trust
 boundary. While a run is active, the connector polls the same Broker run and
 renews the PostgreSQL job lease before every poll. Replays must preserve the
 run ID, Provider revision and complete receipt binding; response fields outside
-the receipt allow-list are discarded.
+the receipt allow-list are discarded. Terminal cancellation must arrive as an
+HTTP 200 response with no receipt; any other shape fails closed.
 
 Provider outage is a completed outcome for the current destination job after
 it emits `PROVIDER_UNAVAILABLE`. Only the Provider monitor may later emit

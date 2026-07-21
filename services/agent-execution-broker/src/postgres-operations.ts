@@ -446,6 +446,10 @@ function statusFromRow(row: OperationRow, lock: LockedAgentExecution): AgentExec
   if (["QUEUED", "PREPARING", "RUNNING"].includes(row.state)) {
     return Object.freeze({ status: "RUNNING", runId: row.run_id, providerRevisionId: lock.providerRevisionId, receipt: null });
   }
+  if (row.state === "CANCELLED") {
+    return validateAgentExecutionStatus({ status: "CANCELLED", runId: row.run_id,
+      providerRevisionId: lock.providerRevisionId, receipt: null }, { lockedRunConfigurationId: row.run_id });
+  }
   if (row.state !== "SUCCEEDED" && row.state !== "FAILED") invalid();
   return validateAgentExecutionStatus({ status: row.state === "SUCCEEDED" ? "COMPLETED" : "FAILED",
     runId: row.run_id, providerRevisionId: lock.providerRevisionId, receipt: row.receipt_payload },

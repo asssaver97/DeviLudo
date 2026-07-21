@@ -17,6 +17,15 @@ its immutable ID. A Provider outage moves the run to `WAITING_PROVIDER` and a
 recovery signal resumes the same locked Agent. A different Profile can only be
 selected by a new approved iteration.
 
+Delivery cancellation is also authoritative rather than an Agent failure. The
+control-plane revocation transaction marks the execution operation `CANCELLED`
+and revokes its inference authorization. The execution Broker continues to
+project that exact receipt-free terminal state after revocation, never
+redispatches it, and the destination connector stops polling without emitting a
+synthetic `AGENT_FAILED` receipt. If the native microVM is still running, its
+next failed execution-lease heartbeat aborts the process before any candidate
+can be accepted.
+
 Provider recovery is issued only by `services/provider-monitor`. Its background
 Worker reloads a short-lived signed tenant assignment for every bounded scan;
 an allow-listed mTLS scheduler may also identify a tenant, project and waiting
