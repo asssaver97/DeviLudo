@@ -74,6 +74,7 @@ npm run local:smoke
 - `/settings/agents` 返回租户 BYOK、Provider 与默认 Agent 页面；
 - `/projects/ember-archipelago/agent-settings` 返回项目 Profile 选择页；
 - `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
+- 本地 Agent 管理写入追加到不可修改的 D1 修订；停止并重新启动 `local:dev` 后，版本、安装、Profile、默认选择、幂等响应与脱敏审计仍可恢复；
 - `/api/admin/agent-versions/discover` 接受精确稳定版或预发布版本、拒绝浮动别名，且发现候选不会自动激活；
 - `/api/admin/agent-versions/deprecate` 只接受已批准版本，并禁止后续 WorkerImage 构建而不改变已有安装；
 - 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
@@ -111,7 +112,7 @@ DEVILUDO_LOCAL_PORT=4310 npm run local:smoke
 
 Godot 侧车、Agent 探针和规格侧车端口默认分别是 `4311`、`4312`、`4313`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT`、`DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`、`DEVILUDO_LOCAL_SPEC_RUNTIME_PORT`。
 
-`npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。
+`npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。Agent 管理写操作使用 D1 不可变 revision log；只有缺少 D1 绑定的纯 Node 合同测试才回退到进程内存。
 
 ## 本地生产依赖
 

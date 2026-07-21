@@ -1,5 +1,6 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
+import { acquireLocalAdminState, type LocalAdminStateLease } from "@/lib/control-plane/local-admin-state";
 import { canCreateLocalFeedback } from "@/lib/local-delivery/model";
 import { invalidateLocalEvidence, readLocalDelivery } from "@/lib/local-delivery/store";
 import {
@@ -29,7 +30,11 @@ export async function GET(
   context: { params: Promise<{ projectId: string }> },
 ) {
   const { projectId } = await context.params;
-  if (isLoopbackTestRequest(request)) return json({ data: getDemoStore().feedback, meta: { projectId } });
+  if (isLoopbackTestRequest(request)) {
+    const lease = await acquireLocalAdminState();
+    try { return json({ data: getDemoStore().feedback, meta: { projectId } }); }
+    finally { lease.release(); }
+  }
   return json({ error: { code: "METHOD_NOT_ALLOWED", message: "生产反馈历史由项目迭代视图读取" } }, {
     status: 405,
     headers: { allow: "POST" },
@@ -40,6 +45,7 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
+  let lease: LocalAdminStateLease | null = null;
   try {
     const { projectId } = await context.params;
     if (!PROJECT.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效" } }, { status: 400 });
@@ -68,6 +74,7 @@ export async function POST(
       });
       return json({ data: receipt, meta: { idempotentReplay: receipt.delivery.replayed } }, { status: 201 });
     }
+    lease = await acquireLocalAdminState();
     const operationKey = `feedback:${projectId}:${requestKey}`;
     const store = getDemoStore();
     const cached = Object.prototype.hasOwnProperty.call(store.idempotency, operationKey)
@@ -111,6 +118,7 @@ export async function POST(
         snapshot,
       };
     });
+    if (!result.replayed) await lease.persist(operationKey);
     const delivery = await invalidateLocalEvidence(
       projectId,
       result.value.specRevisionId,
@@ -122,6 +130,8 @@ export async function POST(
     );
   } catch (error) {
     return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error);
+  } finally {
+    lease?.release();
   }
 }
 

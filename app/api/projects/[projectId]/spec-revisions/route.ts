@@ -1,5 +1,6 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
+import { acquireLocalAdminState, type LocalAdminStateLease } from "@/lib/control-plane/local-admin-state";
 import { startLocalDelivery } from "@/lib/local-delivery/store";
 import { resolveLocalAgentProfile } from "@/lib/local-delivery/profile-resolution";
 import {
@@ -46,24 +47,30 @@ export async function GET(
       });
     } catch (error) { return accessProblem(error); }
   }
-  const store = getDemoStore();
-  return json({
-    data: {
-      id: `SPEC-${String(store.specRevision).padStart(3, "0")}`,
-      projectId,
-      revision: store.specRevision,
-      state: store.specState,
-      immutable: true,
-      targetMatrix: ["windows", "linux", "macos"],
-      testPlan: { version: "godot-testkit-1.0.0", frozen: store.specState === "APPROVED" },
-    },
-  });
+  const lease = await acquireLocalAdminState();
+  try {
+    const store = getDemoStore();
+    return json({
+      data: {
+        id: `SPEC-${String(store.specRevision).padStart(3, "0")}`,
+        projectId,
+        revision: store.specRevision,
+        state: store.specState,
+        immutable: true,
+        targetMatrix: ["windows", "linux", "macos"],
+        testPlan: { version: "godot-testkit-1.0.0", frozen: store.specState === "APPROVED" },
+      },
+    });
+  } finally {
+    lease.release();
+  }
 }
 
 export async function POST(
   request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
+  let lease: LocalAdminStateLease | null = null;
   try {
     const { projectId } = await context.params;
     if (!PROJECT.test(projectId)) return invalidProject();
@@ -96,8 +103,10 @@ export async function POST(
     const authority = hasDialogueAuthority(body)
       ? await approveDialogue(request, projectId, requestKey, body)
       : null;
+    lease = await acquireLocalAdminState();
     const approvedRevision = authority ? `SPEC-${String(authority.revision).padStart(3, "0")}` : revision;
-    const result = withIdempotency(`spec:${projectId}:${requestKey}`, () => {
+    const commandKey = `spec:${projectId}:${requestKey}`;
+    const result = withIdempotency(commandKey, () => {
       const store = getDemoStore();
       const expected = `SPEC-${String(store.specRevision).padStart(3, "0")}`;
       const isNewProjectDraft = projectId === "new-project-draft";
@@ -139,6 +148,7 @@ export async function POST(
         },
       };
     });
+    if (!result.replayed) await lease.persist(commandKey);
     const delivery = await startLocalDelivery(
       projectId,
       approvedRevision,
@@ -152,6 +162,8 @@ export async function POST(
     );
   } catch (error) {
     return accessProblem(error);
+  } finally {
+    lease?.release();
   }
 }
 

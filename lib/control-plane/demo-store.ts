@@ -323,6 +323,18 @@ export function resetDemoStore(): DemoStoreState {
   return globalStore.__deviludoDemoStore;
 }
 
+/**
+ * Replaces the process-local projection with a previously validated durable
+ * snapshot. Validation belongs to the persistence boundary so ordinary
+ * callers cannot hydrate arbitrary data into the control-plane projection.
+ */
+export function restoreDemoStore(snapshot: DemoStoreState): DemoStoreState {
+  globalStore.__deviludoDemoStore = structuredClone(snapshot);
+  backfillVersionMetadata(globalStore.__deviludoDemoStore);
+  backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
+  return globalStore.__deviludoDemoStore;
+}
+
 function backfillVersionMetadata(store: DemoStoreState): void {
   store.agentVersionMetadata ??= {};
   for (const [id, state] of Object.entries(store.agentVersions)) {

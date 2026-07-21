@@ -761,3 +761,17 @@ export const localDeliveryCommands = sqliteTable("local_delivery_commands", {
   response: text("response", { mode: "json" }).$type<JsonRecord>().notNull(),
   createdAt: text("created_at").notNull(),
 });
+
+/**
+ * Local Agent-admin state is stored as immutable, monotonically increasing
+ * revisions. The production control plane continues to use the normalized
+ * PostgreSQL catalog; this compact log gives the localhost test deployment the
+ * same restart durability and optimistic-concurrency behavior.
+ */
+export const localAdminStateRevisions = sqliteTable("local_admin_state_revisions", {
+  revision: integer("revision").primaryKey(),
+  schemaVersion: text("schema_version").notNull(),
+  commandKey: text("command_key").unique(),
+  state: text("state_json", { mode: "json" }).$type<JsonRecord>().notNull(),
+  createdAt: text("created_at").notNull(),
+});

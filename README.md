@@ -47,7 +47,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `lib/observability`：所有 Web、控制面、工作流、Agent、Runner、SCM、证据与 Steam 生产启动入口在应用模块加载前注册固定服务身份的 OpenTelemetry SDK，通过 OTLP/protobuf 导出追踪并自动传播 W3C `tracecontext`。生产不能关闭追踪；URL query、Cookie、认证头、提示词、源码和凭据不会进入 span，静态 OTLP Header 凭据也被禁止。
 - `IsolatedLocalAgentExecutor`：把 Claude/Codex Adapter、短期 token broker、Agent Worker 监督器和 SCM 代理组合成一次尝试；完成回执固定租户、测试计划、turn/cost/token 预算、超时和 base/candidate 提交。服务端只有在注入可信 workspace provisioner 与 token broker 后才能启用它。
 - 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。完成回执必须再次绑定全部锁定字段以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态。
-- `db`、`drizzle`：38 张 D1 Beta 表、不可变绑定触发器、GitHub 安装授权/SCM 回执、Steam 会话/上传 claim/Build 回执、分平台 Runner 和本地交付事件迁移。
+- `db`、`drizzle`：39 张 D1 Beta 表、不可变绑定触发器、GitHub 安装授权/SCM 回执、Steam 会话/上传 claim/Build 回执、分平台 Runner、本地交付事件与本地 Agent 管理修订迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。
 
@@ -102,7 +102,7 @@ npm run local:dev
 
 模板安装器只接受版本目录中固定的 Godot 官方构建，下载固定 URL 后校验归档大小、SHA-256 和全部压缩路径，再原子发布只读文件清单。验证侧车不会直接复用可变的编辑器 HOME；它会重验安装清单和 `macos.zip` 摘要，并只把精确版本目录挂载到本次运行的隔离 HOME。已有未验证目录不会被覆盖。
 
-管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。版本发现可填写精确稳定版或预发布版本；本地页面留空时复用只读探针观察到的实际 CLI 版本，但不会自动批准或激活。版本目录保留官方包来源、发行说明和供应链回执，链接必须同时匹配固定官方域名、Agent 和精确版本；已批准版本可进入 `DEPRECATED`，立即禁止新 WorkerImage 构建，但不会中断已有安装或已锁定任务。凭据目录分别展示创建时间、原子轮换完成时间，并把追加式推理用量投影为各不可变凭据版本的最后使用时间；明文与 `SecretRef` 仍不会进入响应。任务预检直接核对不可变 Run 锁与实际 CLI，因此新任务可以安全使用管理员更新后的精确版本。没有签名/hash/SBOM/扫描证据时版本批准返回 `SUPPLY_CHAIN_GATES_FAILED`；没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
+管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。每次成功写入同时向 D1 追加不可修改、带唯一命令键的管理状态修订；进程重启从最新修订恢复，单进程请求队列与数据库 revision CAS 共同阻止并发覆盖，API Key 等敏感字段在序列化边界再次失败关闭。版本发现可填写精确稳定版或预发布版本；本地页面留空时复用只读探针观察到的实际 CLI 版本，但不会自动批准或激活。版本目录保留官方包来源、发行说明和供应链回执，链接必须同时匹配固定官方域名、Agent 和精确版本；已批准版本可进入 `DEPRECATED`，立即禁止新 WorkerImage 构建，但不会中断已有安装或已锁定任务。凭据目录分别展示创建时间、原子轮换完成时间，并把追加式推理用量投影为各不可变凭据版本的最后使用时间；明文与 `SecretRef` 仍不会进入响应。任务预检直接核对不可变 Run 锁与实际 CLI，因此新任务可以安全使用管理员更新后的精确版本。没有签名/hash/SBOM/扫描证据时版本批准返回 `SUPPLY_CHAIN_GATES_FAILED`；没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
 
 生产部署应把 `GET /api/health` 配置为 Web 流量就绪探针。它会用与业务路由相同的客户端契约校验构想、验收、GitHub、身份、管理、投影与 Steam 发布所需的全部 Broker；任何缺失或无效配置都会返回 `503`，且不会在响应中暴露内部 URL 或凭据。
 

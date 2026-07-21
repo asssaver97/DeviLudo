@@ -12,6 +12,10 @@ import {
   type DemoStoreState,
 } from "@/lib/control-plane/demo-store";
 import {
+  acquireLocalAdminState,
+  type LocalAdminStateLease,
+} from "@/lib/control-plane/local-admin-state";
+import {
   assertAllowedBodyFields,
   bodyObject,
   HttpProblem,
@@ -176,10 +180,12 @@ function officialReleaseNotes(agent: "claude-code" | "codex-cli"): string {
 }
 
 export async function GET(request: Request, context: RouteContext) {
+  let lease: LocalAdminStateLease | null = null;
   try {
     const { segments } = await context.params;
     if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
     requireLocalAdmin(request);
+    lease = await acquireLocalAdminState();
     const key = routeKey(segments);
     const store = getDemoStore();
     if (key === "agents") {
@@ -249,14 +255,18 @@ export async function GET(request: Request, context: RouteContext) {
     throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
   } catch (error) {
     return problemResponse(error);
+  } finally {
+    lease?.release();
   }
 }
 
 export async function POST(request: Request, context: RouteContext) {
+  let lease: LocalAdminStateLease | null = null;
   try {
     const { segments } = await context.params;
     if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
     requireLocalAdmin(request);
+    lease = await acquireLocalAdminState();
     const key = routeKey(segments);
     const body = await bodyObject(request);
     const idempotency = idempotencyKey(request);
@@ -278,7 +288,7 @@ export async function POST(request: Request, context: RouteContext) {
       const source = officialPackageSource(agent, version);
       const sourceDigest = await fingerprintSecret(new TextEncoder().encode(`local-agent-source:v1:${source}`));
       const discoveredAt = new Date().toISOString();
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         store.agentVersions[id] ??= "DISCOVERED";
         store.agentVersionMetadata[id] ??= {
@@ -324,7 +334,7 @@ export async function POST(request: Request, context: RouteContext) {
           fingerprintSecret(new TextEncoder().encode(`local-agent-evidence:v1:${id}`)),
         ])
         : [null, null, null];
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         if (!(id in store.agentVersions)) throw new HttpProblem(404, "VERSION_NOT_FOUND", "Agent version was not discovered");
         if (state === "APPROVED" && store.agentVersions[id] !== "DISCOVERED") {
@@ -399,7 +409,7 @@ export async function POST(request: Request, context: RouteContext) {
       const id = `${agentKind === "claude-code" ? "claude" : "codex"}-installation-${versionSlug}-${identityDigest.slice(7, 23)}`;
       const imageDigest = await fingerprintSecret(new TextEncoder().encode(`local-worker-image:v1:${agentKind}:${version}:${adapterVersion}`));
       const buildReceiptDigest = await fingerprintSecret(new TextEncoder().encode(`local-build-receipt:v1:${id}:${imageDigest}:${workerPool}`));
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const rollbackInstallationId = selectDemoRollbackInstallation(store, agentKind, workerPool)?.id ?? null;
         const installation = {
@@ -441,7 +451,7 @@ export async function POST(request: Request, context: RouteContext) {
       assertAllowedBodyFields(body, []);
       const installationId = rolloutMatch[1] ?? "";
       const action = rolloutMatch[2];
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const rollout = getDemoStore().rollouts[installationId];
         if (!rollout) throw new HttpProblem(404, "INSTALLATION_NOT_FOUND", "Installation does not exist");
         if (action === "rollback" && rollout.percent === 0) {
@@ -482,7 +492,7 @@ export async function POST(request: Request, context: RouteContext) {
       assertAllowedBodyFields(body, []);
       const installationId = lifecycleMatch[1] ?? "";
       const action = lifecycleMatch[2] as "drain" | "retire";
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const installation = store.installations.find((item) => item.id === installationId);
         const rollout = store.rollouts[installationId];
@@ -579,7 +589,7 @@ export async function POST(request: Request, context: RouteContext) {
         || !Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < 60 || (timeoutSeconds as number) > 14_400) {
         throw new HttpProblem(400, "BUDGET_OUT_OF_POLICY", "Profile budget or timeout exceeds platform limits");
       }
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const providerId = `provider-${agent}-${store.providers.length + 1}`;
         const profile: DemoProfile = {
@@ -633,7 +643,7 @@ export async function POST(request: Request, context: RouteContext) {
           "本地测试站尚未配置受信 Provider Connector；草稿已保留，不能伪造探针通过或覆盖当前生效配置",
         );
       }
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const profile = store.profiles.find((item) => item.id === profileId);
         if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
@@ -674,7 +684,7 @@ export async function POST(request: Request, context: RouteContext) {
         bytes.fill(0);
         body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
       }
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const id = `credential-${store.credentials.length + 1}-v1`;
         const credential = {
@@ -725,7 +735,7 @@ export async function POST(request: Request, context: RouteContext) {
           );
         }
       }
-      return mutate(`admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const credential = store.credentials.find((item) => item.id === credentialId);
         if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
@@ -788,14 +798,18 @@ export async function POST(request: Request, context: RouteContext) {
     throw new HttpProblem(404, "NOT_FOUND", `Unknown admin action: ${key}`);
   } catch (error) {
     return problemResponse(error);
+  } finally {
+    lease?.release();
   }
 }
 
 export async function PUT(request: Request, context: RouteContext) {
+  let lease: LocalAdminStateLease | null = null;
   try {
     const { segments } = await context.params;
     if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
     requireLocalAdmin(request);
+    lease = await acquireLocalAdminState();
     const key = routeKey(segments);
     const match = /^agent-defaults\/(platform|tenant:[a-z0-9-]+|project:[a-z0-9-]+)$/i.exec(key);
     if (!match) throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
@@ -803,7 +817,8 @@ export async function PUT(request: Request, context: RouteContext) {
     const body = await bodyObject(request);
     assertAllowedBodyFields(body, ["profileRevisionId"]);
     const profileRevisionId = requireString(body, "profileRevisionId", 160);
-    const result = withIdempotency(`admin:${key}:${idempotencyKey(request)}`, () => {
+    const commandKey = `admin:${key}:${idempotencyKey(request)}`;
+    const result = withIdempotency(commandKey, () => {
       const store = getDemoStore();
       const profile = store.profiles.find((item) => item.id === profileRevisionId && item.state === "ACTIVE");
       if (!profile) {
@@ -839,9 +854,12 @@ export async function PUT(request: Request, context: RouteContext) {
       });
       return { scope: match[1], profileRevisionId, precedence: "project > tenant > platform > claude-code", affectsNewTasksOnly: true };
     });
+    if (!result.replayed) await lease.persist(commandKey);
     return json({ data: result.value, meta: { idempotentReplay: result.replayed } });
   } catch (error) {
     return problemResponse(error);
+  } finally {
+    lease?.release();
   }
 }
 
@@ -938,8 +956,9 @@ function selectDemoRollbackInstallation(
   return candidates[0] ?? null;
 }
 
-function mutate<T>(idempotency: string, operation: () => T): Response {
+async function mutate<T>(lease: LocalAdminStateLease, idempotency: string, operation: () => T): Promise<Response> {
   const result = withIdempotency(idempotency, operation);
+  if (!result.replayed) await lease.persist(idempotency);
   return json({ data: result.value, meta: { idempotentReplay: result.replayed } }, { status: result.replayed ? 200 : 201 });
 }
 
