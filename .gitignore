@@ -31,7 +31,10 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
+!services/identity/.env.example
+!services/scm-proxy/.env.authorization.example
 !services/scm-proxy/.env.candidate.example
+!services/scm-proxy/.env.repository.example
 
 # vercel
 .vercel
