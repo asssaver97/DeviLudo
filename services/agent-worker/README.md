@@ -31,7 +31,11 @@ authoritative commit SHA and Draft PR number.
 An authoritative Broker `CANCELLED` response is a distinct receipt-free
 terminal result. The connector stops immediately, does not convert cancellation
 into a failed Agent receipt or workflow signal, and relies on the revoked
-durable job lease to abort any microVM process still in flight.
+durable job lease to abort any microVM process still in flight. The Agent
+handler converts only the exact run/Provider cancellation into the exact
+tenant/job cancellation binding. The destination processor then completes the
+poll cycle without retrying, recording a failure, or degrading Worker health;
+lost-lease, cross-job and drifted cancellation errors still fail closed.
 
 The production destination process is started with:
 

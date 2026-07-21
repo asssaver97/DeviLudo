@@ -32,7 +32,9 @@ behind the web console:
   exclusively with no-follow semantics, applies a minimal environment allowlist,
   resolves opaque SecretRefs only after every static/runtime gate, redacts
   JSONL/stderr, and distinguishes cancellation, timeout, signal and exit-code
-  failures.
+  failures. Authoritative cancellation is propagated through a tenant/job-bound
+  terminal result; it neither retries nor records a false failure or Worker
+  health alert, including races with lease renewal and completion.
 - `artifact-preparer`: freezes an authoritative SCM snapshot and approved v2
   matrix plan into content-addressed source/test-plan objects, verifies their
   exact publication receipts, then persists the append-only execution lock in

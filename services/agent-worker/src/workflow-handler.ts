@@ -7,6 +7,8 @@ import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
+import { WorkflowJobCancelledError } from "../../temporal/src/job-cancellation";
+import { AgentExecutionCancelledError } from "./workflow-errors";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256_IMAGE = /^sha256:[a-f0-9]{64}$/;
@@ -94,6 +96,10 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
         });
         return providerWaitResult(snapshot.lockedRunConfigurationId, error.providerRevisionId, null);
       }
+      if (error instanceof AgentExecutionCancelledError) {
+        assertCancellationBinding(error, snapshot.lockedRunConfigurationId, null);
+        throw new WorkflowJobCancelledError(job.tenantId, job.id);
+      }
       throw error;
     }
     validateOpaqueId(run.runId, "Agent run");
@@ -114,6 +120,10 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
           providerRevisionId: error.providerRevisionId,
         });
         return providerWaitResult(snapshot.lockedRunConfigurationId, error.providerRevisionId, run.runId);
+      }
+      if (error instanceof AgentExecutionCancelledError) {
+        assertCancellationBinding(error, run.runId, run.providerRevisionId);
+        throw new WorkflowJobCancelledError(job.tenantId, job.id);
       }
       throw error;
     }
@@ -148,6 +158,16 @@ function providerWaitResult(
       runId,
     }),
   });
+}
+
+function assertCancellationBinding(
+  error: AgentExecutionCancelledError,
+  runId: string,
+  providerRevisionId: string | null,
+): void {
+  if (error.runId !== runId || providerRevisionId !== null && error.providerRevisionId !== providerRevisionId) {
+    throw new Error("Agent cancellation binding is invalid");
+  }
 }
 
 function validateReceipt(receipt: AgentWorkflowRunReceipt, run: AgentWorkflowRun, lockedId: string): void {

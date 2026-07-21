@@ -1,5 +1,6 @@
 import type { DeliverySignal } from "./contracts";
 import { assertDeliverySignal, type DeliveryCommandDestination } from "./contracts";
+import { WorkflowJobCancelledError } from "./job-cancellation";
 import type { ClaimedWorkflowJob } from "./postgres-queue";
 
 export type DeliverySignalWithoutId = DeliverySignal extends infer Signal
@@ -101,6 +102,7 @@ export class WorkflowJobProcessor {
   async processOne(tenantId: string): Promise<
     | { readonly kind: "IDLE" }
     | { readonly kind: "COMPLETED"; readonly jobId: string; readonly signalId: string | null }
+    | { readonly kind: "CANCELLED"; readonly jobId: string }
     | { readonly kind: "FAILED"; readonly jobId: string; readonly terminal: boolean; readonly errorCode: string }
   > {
     const job = await this.#queue.claimNext({
@@ -141,15 +143,21 @@ export class WorkflowJobProcessor {
         await this.#signals.signal(job.workflowId, signal);
       }
     } catch (error) {
+      if (isAuthoritativeCancellation(error, job)) return cancelledResult(job);
       const classified = classify(error, job.attempt, this.#maxAttempts);
-      await this.#queue.fail({
-        tenantId: job.tenantId,
-        jobId: job.id,
-        claimToken: job.claimToken,
-        errorCode: classified.errorCode,
-        terminal: classified.terminal,
-        retryAt: classified.terminal ? undefined : retryAt(validNow(this.#now()), job.attempt),
-      });
+      try {
+        await this.#queue.fail({
+          tenantId: job.tenantId,
+          jobId: job.id,
+          claimToken: job.claimToken,
+          errorCode: classified.errorCode,
+          terminal: classified.terminal,
+          retryAt: classified.terminal ? undefined : retryAt(validNow(this.#now()), job.attempt),
+        });
+      } catch (recordingError) {
+        if (isAuthoritativeCancellation(recordingError, job)) return cancelledResult(job);
+        throw recordingError;
+      }
       return Object.freeze({ kind: "FAILED" as const, jobId: job.id, ...classified });
     }
 
@@ -165,14 +173,29 @@ export class WorkflowJobProcessor {
     });
     // A lost response here is intentionally not converted into failure: the
     // lease is reclaimed and the idempotent handler/signal are replayed.
-    await this.#queue.complete({
-      tenantId: job.tenantId,
-      jobId: job.id,
-      claimToken: job.claimToken,
-      result,
-    });
+    try {
+      await this.#queue.complete({
+        tenantId: job.tenantId,
+        jobId: job.id,
+        claimToken: job.claimToken,
+        result,
+      });
+    } catch (error) {
+      if (isAuthoritativeCancellation(error, job)) return cancelledResult(job);
+      throw error;
+    }
     return Object.freeze({ kind: "COMPLETED" as const, jobId: job.id, signalId });
   }
+}
+
+function isAuthoritativeCancellation(error: unknown, job: ClaimedWorkflowJob): error is WorkflowJobCancelledError {
+  return error instanceof WorkflowJobCancelledError
+    && error.tenantId === job.tenantId
+    && error.jobId === job.id;
+}
+
+function cancelledResult(job: ClaimedWorkflowJob): { readonly kind: "CANCELLED"; readonly jobId: string } {
+  return Object.freeze({ kind: "CANCELLED" as const, jobId: job.id });
 }
 
 function assertJobBinding(job: ClaimedWorkflowJob, tenantId: string, destination: DeliveryCommandDestination): void {

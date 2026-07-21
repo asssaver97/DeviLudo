@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { DeliverySnapshot } from "../../temporal/src/contracts";
 import type { WorkflowJobExecutionContext } from "../../temporal/src/job-processor";
+import { WorkflowJobCancelledError } from "../../temporal/src/job-cancellation";
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
+import { AgentExecutionCancelledError } from "../src/execution-broker";
 import {
   AgentProviderUnavailableError,
   AgentWorkerWorkflowHandler,
@@ -159,4 +161,43 @@ test("Agent workflow handler never starts Broker polling before AGENT_STARTED is
     async emitSignal() { throw new Error("Temporal unavailable"); },
   }), /Temporal unavailable/);
   assert.equal(completed, false);
+});
+
+test("Agent workflow handler maps an already-cancelled Broker run to the exact durable job cancellation", async () => {
+  const signals: { phase: string; value: unknown }[] = [];
+  const claimed = job();
+  const handler = new AgentWorkerWorkflowHandler({
+    async start() { throw new AgentExecutionCancelledError("lock-r1", "provider-r1"); },
+  });
+  await assert.rejects(handler.execute(claimed, context(signals)), (error: unknown) => {
+    assert.ok(error instanceof WorkflowJobCancelledError);
+    assert.equal(error.tenantId, claimed.tenantId);
+    assert.equal(error.jobId, claimed.id);
+    return true;
+  });
+  assert.deepEqual(signals, []);
+});
+
+test("Agent workflow handler stops an in-flight cancelled run without emitting AGENT_FAILED", async () => {
+  const signals: { phase: string; value: unknown }[] = [];
+  const claimed = job();
+  const handler = new AgentWorkerWorkflowHandler({
+    async start() {
+      return {
+        runId: "run-001", providerRevisionId: "provider-r1",
+        async complete() { throw new AgentExecutionCancelledError("run-001", "provider-r1"); },
+      };
+    },
+  });
+  await assert.rejects(handler.execute(claimed, context(signals)), WorkflowJobCancelledError);
+  assert.deepEqual(signals, [
+    { phase: "started", value: { type: "AGENT_STARTED", runId: "run-001" } },
+  ]);
+});
+
+test("Agent workflow handler rejects a cancellation whose immutable run binding drifted", async () => {
+  const handler = new AgentWorkerWorkflowHandler({
+    async start() { throw new AgentExecutionCancelledError("other-run", "provider-r1"); },
+  });
+  await assert.rejects(handler.execute(job(), context([])), /cancellation binding is invalid/);
 });

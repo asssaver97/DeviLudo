@@ -24,7 +24,11 @@ project that exact receipt-free terminal state after revocation, never
 redispatches it, and the destination connector stops polling without emitting a
 synthetic `AGENT_FAILED` receipt. If the native microVM is still running, its
 next failed execution-lease heartbeat aborts the process before any candidate
-can be accepted.
+can be accepted. PostgreSQL lease renewal, failure recording and completion all
+re-read a lost claim; an exact cancelled job becomes the task processor's
+`CANCELLED` result instead of a retry, terminal failure or Worker-health alert.
+The cancellation error carries the exact tenant and job binding, so a stale or
+cross-job cancellation cannot suppress a real failure.
 
 Provider recovery is issued only by `services/provider-monitor`. Its background
 Worker reloads a short-lived signed tenant assignment for every bounded scan;

@@ -23,6 +23,7 @@ import {
   type PostgresWorkflowClient,
 } from "../src/postgres-inbox";
 import { PostgresWorkflowCommandQueue } from "../src/postgres-queue";
+import { WorkflowJobCancelledError } from "../src/job-cancellation";
 import {
   WorkflowJobError,
   WorkflowJobProcessor,
@@ -420,6 +421,73 @@ test("job processor records bounded retries and makes the final attempt terminal
   assert.equal(failures[0]?.retryAt, undefined);
 });
 
+test("job processor treats an exact authoritative cancellation as productive without retry or failure recording", async () => {
+  const job = claimedJob();
+  let failures = 0;
+  const processor = new WorkflowJobProcessor({
+    queue: {
+      async claimNext() { return job; },
+      async renew() { throw new Error("must not renew"); },
+      async complete() { throw new Error("must not complete"); },
+      async fail() { failures += 1; },
+    },
+    destination: "agent-worker",
+    workerId: "agent-worker-01",
+    handler: { async execute() { throw new WorkflowJobCancelledError(job.tenantId, job.id); } },
+    signals: { async signal() { throw new Error("must not signal"); } },
+  });
+  assert.deepEqual(await processor.processOne(job.tenantId), { kind: "CANCELLED", jobId: job.id });
+  assert.equal(failures, 0);
+});
+
+test("job processor resolves failure and completion races when PostgreSQL has already cancelled the claim", async () => {
+  const job = claimedJob();
+  const cancelled = () => new WorkflowJobCancelledError(job.tenantId, job.id);
+  let claims = 0;
+  const queue: WorkflowJobQueuePort = {
+    async claimNext() { claims += 1; return job; },
+    async renew() { throw new Error("must not renew"); },
+    async complete() { throw cancelled(); },
+    async fail() { throw cancelled(); },
+  };
+  const failed = new WorkflowJobProcessor({
+    queue, destination: "agent-worker", workerId: "agent-worker-01",
+    handler: { async execute() { throw new Error("connector lost after cancellation"); } },
+    signals: { async signal() { throw new Error("must not signal"); } },
+  });
+  assert.deepEqual(await failed.processOne(job.tenantId), { kind: "CANCELLED", jobId: job.id });
+
+  const completed = new WorkflowJobProcessor({
+    queue, destination: "agent-worker", workerId: "agent-worker-01",
+    handler: { async execute() { return { result: { status: "completed-before-cancellation" } }; } },
+    signals: { async signal() { throw new Error("must not signal"); } },
+  });
+  assert.deepEqual(await completed.processOne(job.tenantId), { kind: "CANCELLED", jobId: job.id });
+  assert.equal(claims, 2);
+});
+
+test("job processor does not accept a cancellation binding from another job", async () => {
+  const job = claimedJob(2);
+  let failures = 0;
+  const processor = new WorkflowJobProcessor({
+    queue: {
+      async claimNext() { return job; },
+      async renew() { throw new Error("must not renew"); },
+      async complete() { throw new Error("must not complete"); },
+      async fail() { failures += 1; },
+    },
+    destination: "agent-worker", workerId: "agent-worker-01", maxAttempts: 2,
+    handler: { async execute() {
+      throw new WorkflowJobCancelledError(job.tenantId, "33333333-3333-4333-8333-333333333333");
+    } },
+    signals: { async signal() { throw new Error("must not signal"); } },
+  });
+  assert.deepEqual(await processor.processOne(job.tenantId), {
+    kind: "FAILED", jobId: job.id, terminal: true, errorCode: "WORKFLOW_JOB_EXECUTION_FAILED",
+  });
+  assert.equal(failures, 1);
+});
+
 test("worker host drains assigned tenants, deduplicates IDs and stops from its idle wait", async () => {
   const tenantId = "11111111-1111-4111-8111-111111111111";
   const processed: string[] = [];
@@ -451,6 +519,32 @@ test("worker host drains assigned tenants, deduplicates IDs and stops from its i
   await host.run(controller.signal);
   assert.deepEqual(processed, [tenantId, tenantId]);
   assert.deepEqual(delays, [1_000]);
+});
+
+test("worker host treats an authoritative cancellation as productive without a failure diagnostic", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const diagnostics: string[] = [];
+  const delays: number[] = [];
+  const controller = new AbortController();
+  let calls = 0;
+  const host = new WorkflowJobWorkerHost({
+    destination: "agent-worker",
+    tenants: { async listTenantIds() { return [tenantId]; } },
+    processor: {
+      async processOne() {
+        calls += 1;
+        return calls === 1
+          ? { kind: "CANCELLED", jobId: "33333333-3333-4333-8333-333333333333" }
+          : { kind: "IDLE" };
+      },
+    },
+    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+    pause: async (delayMs) => { delays.push(delayMs); controller.abort(); },
+  });
+  await host.run(controller.signal);
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [1_000]);
+  assert.deepEqual(diagnostics, []);
 });
 
 test("worker host backs off and recovers from assignment and processor infrastructure errors", async () => {
@@ -875,6 +969,32 @@ test("Postgres job queue enqueues idempotently and claims an exact destination j
   const tenantBindings = statements.filter((entry) => entry.text.includes("set_config")).length;
   assert.equal(begins, 4);
   assert.equal(tenantBindings, begins);
+});
+
+test("Postgres job queue reports a cancellation instead of a generic lost lease", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const jobId = "33333333-3333-4333-8333-333333333333";
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+    ): Promise<PostgresQueryResult<Row>> {
+      if (text.includes("RETURNING claim_expires_at")) return { rowCount: 0, rows: [] };
+      if (text.includes("SELECT state FROM deviludo.workflow_command_jobs")) {
+        return { rowCount: 1, rows: [{ state: "CANCELLED" }] } as unknown as PostgresQueryResult<Row>;
+      }
+      return { rowCount: 0, rows: [] };
+    },
+    release() {},
+  };
+  const queue = new PostgresWorkflowCommandQueue({ async connect() { return client; } });
+  await assert.rejects(queue.renew({
+    tenantId, jobId, claimToken: "22222222-2222-4222-8222-222222222222",
+  }), (error: unknown) => {
+    assert.ok(error instanceof WorkflowJobCancelledError);
+    assert.equal(error.tenantId, tenantId);
+    assert.equal(error.jobId, jobId);
+    return true;
+  });
 });
 
 test("Temporal can bundle the deterministic workflow and signal-backed waits", async () => {

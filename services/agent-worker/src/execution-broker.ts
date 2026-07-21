@@ -8,6 +8,9 @@ import {
   type AgentWorkflowRunReceipt,
   type LockedAgentWorkflowPort,
 } from "./workflow-handler";
+import { AgentExecutionCancelledError } from "./workflow-errors";
+
+export { AgentExecutionCancelledError } from "./workflow-errors";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -47,16 +50,6 @@ type BrokerStatus = {
   readonly providerRevisionId: string;
   readonly receipt: AgentWorkflowRunReceipt | null;
 };
-
-export class AgentExecutionCancelledError extends Error {
-  constructor(
-    readonly runId: string,
-    readonly providerRevisionId: string,
-  ) {
-    super("Agent execution was cancelled by the authoritative delivery workflow");
-    if (!SAFE_ID.test(runId) || !SAFE_ID.test(providerRevisionId)) invalidResponse();
-  }
-}
 
 /**
  * Production connector for the isolated microVM execution broker. The

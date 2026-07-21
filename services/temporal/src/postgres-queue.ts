@@ -10,6 +10,7 @@ import {
   deliveryDispatchRequestDigest,
   type WorkflowCommandHandler,
 } from "./receiver";
+import { WorkflowJobCancelledError } from "./job-cancellation";
 
 export type WorkflowJobState =
   | "QUEUED"
@@ -161,6 +162,7 @@ export class PostgresWorkflowCommandQueue implements WorkflowCommandHandler {
       );
       const row = existing.rows[0];
       if (row?.state === "COMPLETED" && jsonDigest(row.result) === jsonDigest(input.result)) return;
+      if (row?.state === "CANCELLED") throw new WorkflowJobCancelledError(input.tenantId, input.jobId);
       throw new Error("Workflow job claim was lost before completion");
     });
   }
@@ -186,7 +188,9 @@ export class PostgresWorkflowCommandQueue implements WorkflowCommandHandler {
         [input.tenantId, input.jobId, input.claimToken, leaseSeconds],
       );
       const value = renewed.rows[0]?.claim_expires_at;
-      if (!value || !Number.isFinite(Date.parse(String(value)))) throw new Error("Workflow job claim was lost before lease renewal");
+      if (!value || !Number.isFinite(Date.parse(String(value)))) {
+        await throwCancelledOrLost(client, input.tenantId, input.jobId, "Workflow job claim was lost before lease renewal");
+      }
       return new Date(value).toISOString();
     });
   }
@@ -223,7 +227,9 @@ export class PostgresWorkflowCommandQueue implements WorkflowCommandHandler {
           terminal ? availableAt : null,
         ],
       );
-      if (failed.rowCount !== 1) throw new Error("Workflow job claim was lost before failure recording");
+      if (failed.rowCount !== 1) {
+        await throwCancelledOrLost(client, input.tenantId, input.jobId, "Workflow job claim was lost before failure recording");
+      }
     });
   }
 
@@ -267,6 +273,21 @@ export class PostgresWorkflowCommandQueue implements WorkflowCommandHandler {
       client.release();
     }
   }
+}
+
+async function throwCancelledOrLost(
+  client: PostgresWorkflowClient,
+  tenantId: string,
+  jobId: string,
+  message: string,
+): Promise<never> {
+  const existing = await client.query<{ state: WorkflowJobState }>(
+    `SELECT state FROM deviludo.workflow_command_jobs
+      WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+    [tenantId, jobId],
+  );
+  if (existing.rows[0]?.state === "CANCELLED") throw new WorkflowJobCancelledError(tenantId, jobId);
+  throw new Error(message);
 }
 
 function parseClaimedJob(row: JobRow, expectedDestination: DeliveryCommandDestination): ClaimedWorkflowJob {
