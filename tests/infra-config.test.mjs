@@ -552,6 +552,9 @@ test("physical Runner daemon locks local recovery, TestKit execution and machine
   assert.match(artifacts, /x-amz-checksum-sha256/);
   assert.match(artifacts, /allowedTransferOrigins/);
   assert.match(daemon, /config\.capabilities\.platform !== expectedPlatform/);
+  assert.match(daemon, /runnerFleetPolicyFromEnv/);
+  assert.match(daemon, /fleet\.assignedTenantIds/);
+  assert.match(daemon, /service\.tenantAssignments\.listTenantIds\(\)/);
   assert.match(daemon, /service\.steamConnector\?\.probe\(\)/);
   assert.match(daemon, /STEAM_CONNECTOR_BINARY_DIGEST/);
   assert.match(daemon, /STEAM_AUTOMATION_POLICY_DIGEST/);

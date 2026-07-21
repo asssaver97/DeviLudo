@@ -27,6 +27,16 @@ export interface PhysicalRunnerIngress {
   acceptEvent(tenantId: string, event: RunnerEvent): Promise<RunnerEventReceipt>;
 }
 
+export interface PhysicalRunnerIdentityLock {
+  readonly spiffeId: string;
+  readonly certificateFingerprint: string;
+}
+
+export interface PhysicalRunnerTenantAssignmentSource {
+  /** Reloads and verifies the short-lived signed fleet assignment each cycle. */
+  listTenantIds(): Promise<readonly string[]>;
+}
+
 export interface PhysicalRunnerExecutionOutput {
   readonly exportDigest: string;
   readonly logsDigest: string;
@@ -74,7 +84,8 @@ export type PhysicalRunnerCycleResult = Readonly<
 /** Portable state machine executed identically by each physical OS Runner. */
 export class PhysicalRunnerAgent {
   readonly #capabilities: RunnerCapabilities;
-  readonly #tenantIds: readonly string[];
+  readonly #identity: PhysicalRunnerIdentityLock;
+  readonly #tenantAssignments: PhysicalRunnerTenantAssignmentSource;
   readonly #jobKeyId: string;
   readonly #jobPublicKey: KeyObject;
   readonly #ingress: PhysicalRunnerIngress;
@@ -84,7 +95,8 @@ export class PhysicalRunnerAgent {
 
   constructor(options: {
     readonly capabilities: RunnerCapabilities;
-    readonly tenantIds: readonly string[];
+    readonly identity: PhysicalRunnerIdentityLock;
+    readonly tenantAssignments: PhysicalRunnerTenantAssignmentSource;
     readonly jobKeyId: string;
     readonly jobPublicKey: KeyObject;
     readonly ingress: PhysicalRunnerIngress;
@@ -94,7 +106,8 @@ export class PhysicalRunnerAgent {
   }) {
     validateRunnerCapabilities(options.capabilities);
     this.#capabilities = Object.freeze({ ...options.capabilities });
-    this.#tenantIds = validateTenantIds(options.tenantIds);
+    this.#identity = validateIdentityLock(options.identity);
+    this.#tenantAssignments = options.tenantAssignments;
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(options.jobKeyId)
       || options.jobPublicKey.asymmetricKeyType !== "ed25519") {
       throw new Error("Physical Runner job verification key is invalid");
@@ -108,10 +121,11 @@ export class PhysicalRunnerAgent {
   }
 
   async runOnce(): Promise<PhysicalRunnerCycleResult> {
+    const tenantIds = validateTenantIds(await this.#tenantAssignments.listTenantIds());
     const registered = await this.#ingress.register(this.#capabilities);
-    assertRegistration(registered, this.#capabilities);
+    assertRegistration(registered, this.#capabilities, this.#identity);
     if (registered.state !== "ONLINE") return Object.freeze({ status: "DRAINING" });
-    for (const tenantId of this.#tenantIds) {
+    for (const tenantId of tenantIds) {
       const job = await this.#ingress.leaseNext(this.#capabilities.runnerId, tenantId);
       if (!job) continue;
       return this.#process(tenantId, job);
@@ -249,7 +263,11 @@ function assertJob(
   }
 }
 
-function assertRegistration(registered: RegisteredRunner, expected: RunnerCapabilities): void {
+function assertRegistration(
+  registered: RegisteredRunner,
+  expected: RunnerCapabilities,
+  identity: PhysicalRunnerIdentityLock,
+): void {
   const selected = {
     runnerId: registered.runnerId,
     platform: registered.platform,
@@ -266,7 +284,9 @@ function assertRegistration(registered: RegisteredRunner, expected: RunnerCapabi
     steamClientConnector: registered.steamClientConnector,
     capabilityDigest: registered.capabilityDigest,
   };
-  if (sha256Canonical(selected) !== sha256Canonical(expected)) {
+  if (sha256Canonical(selected) !== sha256Canonical(expected)
+    || registered.spiffeId !== identity.spiffeId
+    || registered.certificateFingerprint !== identity.certificateFingerprint) {
     throw new Error("Physical Runner registration changed immutable capabilities");
   }
 }
@@ -406,6 +426,18 @@ function validateTenantIds(values: readonly string[]): readonly string[] {
     previous = tenantId;
   }
   return Object.freeze(result);
+}
+
+function validateIdentityLock(value: PhysicalRunnerIdentityLock): PhysicalRunnerIdentityLock {
+  let url: URL;
+  try { url = new URL(value.spiffeId); }
+  catch { throw new Error("Physical Runner identity lock is invalid"); }
+  if (url.protocol !== "spiffe:" || !url.hostname || url.pathname === "/"
+    || url.username || url.password || url.search || url.hash || url.toString() !== value.spiffeId
+    || !SHA256.test(value.certificateFingerprint)) {
+    throw new Error("Physical Runner identity lock is invalid");
+  }
+  return Object.freeze({ ...value });
 }
 
 function nowIso(now: () => Date): string {

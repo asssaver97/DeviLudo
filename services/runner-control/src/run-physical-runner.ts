@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { RunnerCapabilities } from "./contracts";
 import { validateRunnerCapabilities } from "./coordinator";
 import { PhysicalRunnerAgent, type PhysicalRunnerCycleResult } from "./physical-runner";
+import { runnerFleetPolicyFromEnv } from "./fleet-manifest";
 import { FilePhysicalRunnerJournal } from "./physical-runner-journal";
 import { physicalRunnerIngressClientFromEnv } from "./runner-ingress-client";
 import { testKitArtifactProcessEnvironmentFromEnv } from "./testkit-artifact-client";
@@ -16,14 +17,16 @@ import {
   testKitSteamProcessEnvironmentFromEnv,
 } from "../../godot-testkit/src/steam-installed-game-driver";
 
-const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_CONFIG_BYTES = 256 * 1024;
 
 export interface PhysicalRunnerMachineConfig {
-  readonly schemaVersion: "deviludo.physical-runner-config.v1";
+  readonly schemaVersion: "deviludo.physical-runner-config.v2";
   readonly capabilities: RunnerCapabilities;
-  readonly tenantIds: readonly string[];
+  readonly identity: Readonly<{
+    readonly spiffeId: string;
+    readonly certificateFingerprint: string;
+  }>;
 }
 
 export type PhysicalRunnerDiagnosticCode =
@@ -87,7 +90,10 @@ export async function runPhysicalRunnerService(options: {
 } = {}): Promise<void> {
   const env = options.env ?? process.env;
   const service = await physicalRunnerServiceFromEnv(env);
-  await Promise.all([service.ingress.probe(), service.executor.probe(), service.steamConnector?.probe()]);
+  await Promise.all([
+    service.ingress.probe(), service.executor.probe(), service.steamConnector?.probe(),
+    service.tenantAssignments.listTenantIds(),
+  ]);
   diagnostic("READY");
   const shutdown = new AbortController();
   const requestShutdown = () => shutdown.abort();
@@ -109,10 +115,18 @@ export async function physicalRunnerServiceFromEnv(
   readonly jobPublicKey: KeyObject;
   readonly ingress: Awaited<ReturnType<typeof physicalRunnerIngressClientFromEnv>>;
   readonly executor: LockedTestKitExecutor;
+  readonly tenantAssignments: Readonly<{ listTenantIds(): Promise<readonly string[]> }>;
   readonly steamConnector: Awaited<ReturnType<typeof steamInstalledGameDriverFromEnv>> | null;
   readonly daemon: PhysicalRunnerDaemon;
 }> {
   const config = await loadMachineConfig(requiredEnv(env, "DEVILUDO_PHYSICAL_RUNNER_CONFIG_FILE"), runtime);
+  const fleet = runnerFleetPolicyFromEnv(env);
+  const tenantAssignments = Object.freeze({
+    listTenantIds: () => fleet.assignedTenantIds({
+      ...config.identity,
+      capabilities: config.capabilities,
+    }),
+  });
   const [jobKeyPem, journalHmacKey, ingress] = await Promise.all([
     readRequiredFile(env, "DEVILUDO_RUNNER_JOB_VERIFY_PUBLIC_KEY_FILE", 32, 1024 * 1024),
     readRequiredFile(env, "DEVILUDO_PHYSICAL_RUNNER_JOURNAL_HMAC_KEY_FILE", 32, 64),
@@ -177,7 +191,8 @@ export async function physicalRunnerServiceFromEnv(
   });
   const agent = new PhysicalRunnerAgent({
     capabilities: config.capabilities,
-    tenantIds: config.tenantIds,
+    identity: config.identity,
+    tenantAssignments,
     jobKeyId: requiredSafeId(env, "DEVILUDO_RUNNER_JOB_VERIFY_KEY_ID"),
     jobPublicKey,
     ingress,
@@ -190,7 +205,7 @@ export async function physicalRunnerServiceFromEnv(
     maxBackoffMs: seconds(env.DEVILUDO_PHYSICAL_RUNNER_MAX_BACKOFF_SECONDS, 60, 1, 900) * 1_000,
     diagnostic,
   });
-  return Object.freeze({ config, jobPublicKey, ingress, executor, steamConnector, daemon });
+  return Object.freeze({ config, jobPublicKey, ingress, executor, tenantAssignments, steamConnector, daemon });
 }
 
 export async function loadMachineConfig(
@@ -209,17 +224,17 @@ export async function loadMachineConfig(
   try { parsed = JSON.parse(await file.readFile({ encoding: "utf8" })) as unknown; }
   finally { await file.close(); }
   const body = object(parsed);
-  exactKeys(body, ["schemaVersion", "capabilities", "tenantIds"]);
+  exactKeys(body, ["schemaVersion", "capabilities", "identity"]);
   const config = body as unknown as PhysicalRunnerMachineConfig;
-  if (config.schemaVersion !== "deviludo.physical-runner-config.v1") invalidConfig();
+  if (config.schemaVersion !== "deviludo.physical-runner-config.v2") invalidConfig();
   validateRunnerCapabilities(config.capabilities);
+  validateIdentity(config.identity);
   const expectedPlatform = runtimeTargetPlatform(runtime.platform);
   const expectedArchitecture = runtimeArchitecture(runtime.arch);
   if (config.capabilities.platform !== expectedPlatform || config.capabilities.architecture !== expectedArchitecture) {
     throw new Error("Physical Runner config does not match this operating system");
   }
-  const tenants = validateTenants(config.tenantIds);
-  return deepFreeze({ ...config, tenantIds: tenants });
+  return deepFreeze({ ...config });
 }
 
 function runtimeTargetPlatform(value: NodeJS.Platform): RunnerCapabilities["platform"] {
@@ -235,14 +250,15 @@ function runtimeArchitecture(value: string): RunnerCapabilities["architecture"] 
   throw new Error("Physical Runner architecture is unsupported");
 }
 
-function validateTenants(values: readonly string[]): readonly string[] {
-  if (!Array.isArray(values) || values.length < 1 || values.length > 10_000) invalidConfig();
-  let previous = "";
-  for (const value of values) {
-    if (typeof value !== "string" || value !== value.toLowerCase() || !UUID.test(value) || value <= previous) invalidConfig();
-    previous = value;
-  }
-  return Object.freeze([...values]);
+function validateIdentity(value: PhysicalRunnerMachineConfig["identity"]): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalidConfig();
+  exactKeys(value as unknown as Record<string, unknown>, ["spiffeId", "certificateFingerprint"]);
+  if (typeof value.spiffeId !== "string" || typeof value.certificateFingerprint !== "string"
+    || !SHA256.test(value.certificateFingerprint)) invalidConfig();
+  let url: URL;
+  try { url = new URL(value.spiffeId); } catch { invalidConfig(); }
+  if (url.protocol !== "spiffe:" || !url.hostname || url.pathname === "/"
+    || url.username || url.password || url.search || url.hash || url.toString() !== value.spiffeId) invalidConfig();
 }
 
 async function readRequiredFile(

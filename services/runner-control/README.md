@@ -122,6 +122,15 @@ and the file must be atomically replaced before expiry:
 redemption requires this distinct signed identity; the Runner's primary
 certificate cannot be reused as a Connector certificate.
 
+The ingress and physical host consume this same short-lived manifest. The host
+machine config v2 contains only immutable capabilities plus its SPIFFE ID and
+certificate fingerprint; it contains no tenant list. Before every polling
+cycle the host reloads and verifies its exact signed tenant projection. It then
+requires the registration response, which ingress derives from the actual mTLS
+certificate, to match that identity lock. A stale, tampered, expired,
+unassigned or capability-drifted manifest therefore fails before any lease
+request on both sides of the connection.
+
 The separately authenticated Runner ingress remains the only owner of platform
 leases/events and terminal attempt writes; artifact bytes belong in the
 content-addressed object store. It must expose those operations only behind a
@@ -197,7 +206,8 @@ omit the entire Connector environment group.
 
 Run the machine daemon with `npm run start:physical-runner`. Startup verifies
 that the configured platform/architecture match the actual Node host, loads
-all TLS/HMAC/public-key material from files, probes both executable digests,
+all TLS/HMAC/public-key material from files, verifies the current signed fleet
+assignment, probes both executable digests,
 the authenticated ingress `/health` and the optional Steam Connector, then polls serially with bounded
 exponential backoff. Diagnostics contain only stable codes. Configuration
 templates are `.physical-runner.env.example` and

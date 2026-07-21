@@ -46,6 +46,17 @@ function capabilities(platform: TargetPlatform): RunnerCapabilities {
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
 }
 
+function identity(capability: RunnerCapabilities) {
+  return Object.freeze({
+    spiffeId: `spiffe://deviludo.test/e2e/${capability.runnerId}`,
+    certificateFingerprint: sha("0"),
+  });
+}
+
+function assignments(tenantIds: readonly string[] = [tenantId]) {
+  return { async listTenantIds() { return tenantIds; } };
+}
+
 function job(platform: TargetPlatform, overrides: Partial<RunnerJobPayload> = {}): SignedRunnerJob {
   const cap = capabilities(platform);
   const payload: RunnerJobPayload = {
@@ -103,14 +114,19 @@ class ContractIngress implements PhysicalRunnerIngress {
   readonly events = new Map<number, RunnerEvent>();
   evidence: PlatformEvidenceManifest | null = null;
   eventCalls = 0;
+  registerCalls = 0;
 
-  constructor(readonly capabilities: RunnerCapabilities, readonly signedJob: SignedRunnerJob) {}
+  constructor(
+    readonly capabilities: RunnerCapabilities,
+    readonly signedJob: SignedRunnerJob,
+    readonly registeredIdentity = identity(capabilities),
+  ) {}
 
   async register(): Promise<RegisteredRunner> {
+    this.registerCalls += 1;
     return {
       ...this.capabilities,
-      spiffeId: `spiffe://deviludo.test/e2e/${this.capabilities.runnerId}`,
-      certificateFingerprint: sha("0"),
+      ...this.registeredIdentity,
       certificateSerial: "01",
       certificateNotAfter: "2031-01-01T00:00:00.000Z",
       state: "ONLINE",
@@ -176,7 +192,8 @@ for (const platform of ["windows", "linux", "macos"] as const) {
     let executions = 0;
     const agent = new PhysicalRunnerAgent({
       capabilities: cap,
-      tenantIds: [tenantId],
+      identity: identity(cap),
+      tenantAssignments: assignments(),
       jobKeyId: "runner-job-key-01",
       jobPublicKey: keys.publicKey,
       ingress,
@@ -205,9 +222,11 @@ test("physical Runner journal replays identical events and evidence without re-e
   const ingress = new ContractIngress(cap, job("linux"));
   const journal = new MemoryPhysicalRunnerJournal();
   let executions = 0;
+  let assignmentReads = 0;
   const agent = new PhysicalRunnerAgent({
     capabilities: cap,
-    tenantIds: [tenantId],
+    identity: identity(cap),
+    tenantAssignments: { async listTenantIds() { assignmentReads += 1; return [tenantId]; } },
     jobKeyId: "runner-job-key-01",
     jobPublicKey: keys.publicKey,
     ingress,
@@ -220,6 +239,41 @@ test("physical Runner journal replays identical events and evidence without re-e
   assert.equal(executions, 1);
   assert.equal(ingress.events.size, 2);
   assert.equal(ingress.eventCalls, 4);
+  assert.equal(assignmentReads, 2);
+});
+
+test("physical Runner fails closed before leasing when its signed assignment or registered identity drifts", async () => {
+  const cap = capabilities("linux");
+  const ingress = new ContractIngress(cap, job("linux"));
+  const unassigned = new PhysicalRunnerAgent({
+    capabilities: cap,
+    identity: identity(cap),
+    tenantAssignments: assignments([]),
+    jobKeyId: "runner-job-key-01",
+    jobPublicKey: keys.publicKey,
+    ingress,
+    executor: { async execute() { throw new Error("unreachable"); } },
+    journal: new MemoryPhysicalRunnerJournal(),
+    now: () => new Date(now),
+  });
+  await assert.rejects(unassigned.runOnce(), /tenant assignment is invalid/);
+  assert.equal(ingress.registerCalls, 0);
+
+  const changedIdentity = new ContractIngress(cap, job("linux"), {
+    ...identity(cap), certificateFingerprint: sha("f"),
+  });
+  const drifted = new PhysicalRunnerAgent({
+    capabilities: cap,
+    identity: identity(cap),
+    tenantAssignments: assignments(),
+    jobKeyId: "runner-job-key-01",
+    jobPublicKey: keys.publicKey,
+    ingress: changedIdentity,
+    executor: { async execute() { throw new Error("unreachable"); } },
+    journal: new MemoryPhysicalRunnerJournal(),
+    now: () => new Date(now),
+  });
+  await assert.rejects(drifted.runOnce(), /registration changed immutable capabilities/);
 });
 
 test("physical Runner rejects signature tampering, cross-tenant jobs and capability drift before execution", async () => {
@@ -235,7 +289,8 @@ test("physical Runner rejects signature tampering, cross-tenant jobs and capabil
     const ingress = new ContractIngress(cap, signedJob);
     const agent = new PhysicalRunnerAgent({
       capabilities: cap,
-      tenantIds: [tenantId],
+      identity: identity(cap),
+      tenantAssignments: assignments(),
       jobKeyId: "runner-job-key-01",
       jobPublicKey: keys.publicKey,
       ingress,
@@ -261,7 +316,8 @@ test("physical Runner rejects locally persisted journal evidence tampering befor
   let executions = 0;
   const agent = new PhysicalRunnerAgent({
     capabilities: cap,
-    tenantIds: [tenantId],
+    identity: identity(cap),
+    tenantAssignments: assignments(),
     jobKeyId: "runner-job-key-01",
     jobPublicKey: keys.publicKey,
     ingress,

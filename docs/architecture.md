@@ -176,6 +176,12 @@ payloads are canonicalized and Ed25519-signed. Runner identity is taken only
 from an authenticated mTLS peer certificate with one SPIFFE URI SAN; public web
 headers and the localhost UI are not runner identity sources.
 
+Physical Runner machine config v2 does not carry tenant authority. Each host
+reloads the same short-lived signed Fleet Manifest used by ingress before every
+poll cycle, projects only the tenants bound to its SPIFFE ID, certificate
+fingerprint, capability digest and platform, and rejects a registration receipt
+whose server-observed mTLS identity differs from that lock.
+
 `acceptPlatformRunnerEvent` is the single platform-stream ingestion gate. It rejects:
 
 - old tokens or expired leases;

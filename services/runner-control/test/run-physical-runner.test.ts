@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { RunnerCapabilities } from "../src/contracts";
 import { createRunnerCapabilityDigest } from "../src/coordinator";
+import { signRunnerFleetManifest } from "../src/fleet-manifest";
 import {
   loadMachineConfig,
   PhysicalRunnerDaemon,
@@ -36,11 +37,18 @@ function capabilities(platform: RunnerCapabilities["platform"], architecture: Ru
   return { ...core, capabilityDigest: createRunnerCapabilityDigest(core) };
 }
 
-function machineConfig(capability: RunnerCapabilities, tenantIds: readonly string[] = [tenantId]) {
+function runnerIdentity(capability: RunnerCapabilities) {
   return {
-    schemaVersion: "deviludo.physical-runner-config.v1",
+    spiffeId: `spiffe://deviludo.test/e2e/${capability.runnerId}`,
+    certificateFingerprint: sha("0"),
+  };
+}
+
+function machineConfig(capability: RunnerCapabilities) {
+  return {
+    schemaVersion: "deviludo.physical-runner-config.v2",
     capabilities: capability,
-    tenantIds,
+    identity: runnerIdentity(capability),
   };
 }
 
@@ -62,7 +70,12 @@ test("machine config binds each supported Node platform and architecture to its 
     }
     await writeFile(file, JSON.stringify(machineConfig(capabilities("linux", "x86_64"))), "utf8");
     await assert.rejects(loadMachineConfig(file, { platform: "darwin", arch: "arm64" }), /does not match/);
-    await writeFile(file, JSON.stringify(machineConfig(capabilities("linux", "x86_64"), [tenantId, tenantId])), "utf8");
+    await writeFile(file, JSON.stringify({ ...machineConfig(capabilities("linux", "x86_64")), tenantIds: [tenantId] }), "utf8");
+    await assert.rejects(loadMachineConfig(file, { platform: "linux", arch: "x64" }), /config is invalid/);
+    await writeFile(file, JSON.stringify({
+      ...machineConfig(capabilities("linux", "x86_64")),
+      identity: { ...runnerIdentity(capabilities("linux", "x86_64")), certificateFingerprint: "A".repeat(64) },
+    }), "utf8");
     await assert.rejects(loadMachineConfig(file, { platform: "linux", arch: "x64" }), /config is invalid/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -116,12 +129,14 @@ test("physical Runner production composition loads only file-backed keys and exa
     const ca = join(root, "ca.crt");
     const journalKey = join(root, "journal.key");
     const jobPublicKey = join(root, "jobs.pub");
+    const fleetFile = join(root, "runner-fleet.json");
     const testKitExecutable = join(root, "testkit");
     const godotExecutable = join(root, "godot");
     const steamStagingRoot = join(root, "steam-installs");
     const testKitBytes = Buffer.from("pinned-testkit-controller-v1");
     const godotBytes = Buffer.from("pinned-godot-binary-v1");
     const keys = generateKeyPairSync("ed25519");
+    const fleetKeys = generateKeyPairSync("ed25519");
     const lockedCap = {
       ...cap,
       godotBinaryDigest: digest(godotBytes),
@@ -133,6 +148,22 @@ test("physical Runner production composition loads only file-backed keys and exa
     const { capabilityDigest: _oldDigest, ...lockedCore } = lockedCap;
     assert.match(_oldDigest, /^[a-f0-9]{64}$/);
     const finalCap = { ...lockedCore, capabilityDigest: createRunnerCapabilityDigest(lockedCore) };
+    const currentTime = Date.now();
+    const fleetManifest = signRunnerFleetManifest("runner-fleet-key-01", fleetKeys.privateKey, {
+      kind: "deviludo-runner-fleet",
+      version: 1,
+      revision: 1,
+      issuedAt: new Date(currentTime - 1_000).toISOString(),
+      expiresAt: new Date(currentTime + 10 * 60_000).toISOString(),
+      runners: [{
+        runnerId: finalCap.runnerId,
+        ...runnerIdentity(finalCap),
+        capabilityDigest: finalCap.capabilityDigest,
+        platform: finalCap.platform,
+        tenantIds: [tenantId],
+        steamClientConnectorIdentity: null,
+      }],
+    });
     await Promise.all([
       writeFile(configFile, JSON.stringify(machineConfig(finalCap)), "utf8"),
       writeFile(tlsKey, Buffer.alloc(64, 1)),
@@ -140,6 +171,7 @@ test("physical Runner production composition loads only file-backed keys and exa
       writeFile(ca, Buffer.alloc(64, 3)),
       writeFile(journalKey, Buffer.alloc(32, 4)),
       writeFile(jobPublicKey, keys.publicKey.export({ format: "pem", type: "spki" })),
+      writeFile(fleetFile, JSON.stringify(fleetManifest), "utf8"),
       writeFile(testKitExecutable, testKitBytes),
       writeFile(godotExecutable, godotBytes),
       mkdir(steamStagingRoot),
@@ -148,6 +180,9 @@ test("physical Runner production composition loads only file-backed keys and exa
       DEVILUDO_PHYSICAL_RUNNER_CONFIG_FILE: configFile,
       DEVILUDO_RUNNER_JOB_VERIFY_PUBLIC_KEY_FILE: jobPublicKey,
       DEVILUDO_RUNNER_JOB_VERIFY_KEY_ID: "runner-job-key-01",
+      DEVILUDO_RUNNER_FLEET_MANIFEST_FILE: fleetFile,
+      DEVILUDO_RUNNER_FLEET_KEY_ID: "runner-fleet-key-01",
+      DEVILUDO_RUNNER_FLEET_PUBLIC_KEY: fleetKeys.publicKey.export({ format: "pem", type: "spki" }).toString(),
       DEVILUDO_PHYSICAL_RUNNER_JOURNAL_HMAC_KEY_FILE: journalKey,
       DEVILUDO_PHYSICAL_RUNNER_JOURNAL_ROOT: join(root, "journal"),
       DEVILUDO_PHYSICAL_RUNNER_TESTKIT_EXECUTABLE: testKitExecutable,
@@ -177,6 +212,7 @@ test("physical Runner production composition loads only file-backed keys and exa
       DEVILUDO_PHYSICAL_RUNNER_STEAM_SUPPLY_CHAIN_EVIDENCE_DIGEST: sha("8"),
     }, { platform: process.platform, arch: process.arch });
     assert.equal(service.config.capabilities.capabilityDigest, finalCap.capabilityDigest);
+    assert.deepEqual(await service.tenantAssignments.listTenantIds(), [tenantId]);
     assert.equal(service.jobPublicKey.asymmetricKeyType, "ed25519");
     assert.ok(service.steamConnector);
   } finally {

@@ -134,6 +134,28 @@ export class SignedRunnerFleetPolicy implements RunnerAdmissionPolicy, RunnerTen
       && entry.tenantIds.includes(input.tenantId.toLowerCase());
   }
 
+  /**
+   * Gives a physical Runner only its own signed tenant projection. This is
+   * intentionally separate from authorize(): absence is a startup/cycle
+   * failure rather than a boolean permission that a host could ignore.
+   */
+  async assignedTenantIds(input: {
+    readonly spiffeId: string;
+    readonly certificateFingerprint: string;
+    readonly capabilities: RunnerCapabilities;
+  }): Promise<readonly string[]> {
+    const claims = await this.#verifiedClaims();
+    const identity = {
+      spiffeId: input.spiffeId,
+      certificateFingerprint: input.certificateFingerprint,
+    };
+    const entry = claims.runners.find((candidate) => candidate.runnerId === input.capabilities.runnerId);
+    if (!entry || !matchesFleetIdentity(entry, identity, input.capabilities)) {
+      throw new Error("Runner fleet assignment does not bind this physical Runner");
+    }
+    return Object.freeze([...entry.tenantIds]);
+  }
+
   async probe(): Promise<void> {
     await this.#verifiedClaims();
   }
@@ -215,6 +237,14 @@ function validateClaims(claims: RunnerFleetClaims, at: Date): void {
 function matchesEntry(
   entry: RunnerFleetEntry,
   identity: TlsRunnerIdentity,
+  runner: Pick<RunnerCapabilities, "runnerId" | "platform" | "capabilityDigest">,
+): boolean {
+  return matchesFleetIdentity(entry, identity, runner);
+}
+
+function matchesFleetIdentity(
+  entry: RunnerFleetEntry,
+  identity: Pick<TlsRunnerIdentity, "spiffeId" | "certificateFingerprint">,
   runner: Pick<RunnerCapabilities, "runnerId" | "platform" | "capabilityDigest">,
 ): boolean {
   return entry.runnerId === runner.runnerId

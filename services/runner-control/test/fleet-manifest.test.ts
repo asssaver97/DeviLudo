@@ -97,6 +97,16 @@ test("signed fleet policy binds TLS identity, immutable capabilities and tenant 
     identity: { ...identity(), certificateFingerprint: sha("b") },
     capabilities: capabilities(),
   }), false);
+  assert.deepEqual(await policy.assignedTenantIds({
+    spiffeId: identity().spiffeId,
+    certificateFingerprint: identity().certificateFingerprint,
+    capabilities: capabilities(),
+  }), [tenantId, otherTenantId]);
+  await assert.rejects(policy.assignedTenantIds({
+    spiffeId: identity().spiffeId,
+    certificateFingerprint: sha("b"),
+    capabilities: capabilities(),
+  }), /does not bind this physical Runner/);
   await policy.probe();
 });
 
@@ -105,9 +115,18 @@ test("fleet policy reloads each decision and rejects tampering, expiry and unkno
   const loader = new MutableLoader(valid);
   const policy = new SignedRunnerFleetPolicy(loader, new Map([["runner-fleet-key-01", keys.publicKey]]), () => at);
   assert.equal(await policy.authorize({ identity: identity(), capabilities: capabilities() }), true);
+  assert.deepEqual(await policy.assignedTenantIds({
+    spiffeId: identity().spiffeId,
+    certificateFingerprint: identity().certificateFingerprint,
+    capabilities: capabilities(),
+  }), [tenantId, otherTenantId]);
 
   loader.value = { ...valid, claims: { ...valid.claims, revision: 8 } };
-  await assert.rejects(policy.probe(), /signature is invalid/);
+  await assert.rejects(policy.assignedTenantIds({
+    spiffeId: identity().spiffeId,
+    certificateFingerprint: identity().certificateFingerprint,
+    capabilities: capabilities(),
+  }), /signature is invalid/);
 
   loader.value = signRunnerFleetManifest("runner-fleet-key-01", keys.privateKey, claims({
     issuedAt: "2030-01-01T00:00:00.000Z",

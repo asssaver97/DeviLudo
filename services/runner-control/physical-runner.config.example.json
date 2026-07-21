@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "deviludo.physical-runner-config.v1",
+  "schemaVersion": "deviludo.physical-runner-config.v2",
   "capabilities": {
     "runnerId": "runner-linux-1",
     "platform": "linux",
@@ -23,7 +23,8 @@
     },
     "capabilityDigest": "<canonical-capability-sha256>"
   },
-  "tenantIds": [
-    "11111111-1111-4111-8111-111111111111"
-  ]
+  "identity": {
+    "spiffeId": "spiffe://deviludo.internal/e2e/runner-linux-1",
+    "certificateFingerprint": "<64-lowercase-hex>"
+  }
 }
