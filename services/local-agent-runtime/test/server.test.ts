@@ -1,0 +1,124 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { LocalAgentExecutionReceipt, LocalAgentExecutionRequest } from "../src/contracts";
+import { localAgentRuntimeFromEnvironment } from "../src/server";
+
+const key = new Uint8Array(Buffer.alloc(32, 11));
+const imageDigest = `sha256:${"c".repeat(64)}`;
+const request: LocalAgentExecutionRequest = Object.freeze({
+  tenantId: "tenant-1",
+  projectId: "project-1",
+  runId: "run-1",
+  attemptId: "attempt-1",
+  specRevisionId: "SPEC-001",
+  testPlanRevisionId: "godot-testkit-1.0.0",
+  profileRevisionId: "profile-claude-r5",
+  installationId: "claude-installation-214",
+  agent: "claude-code",
+  expectedVersion: "2.1.14",
+  imageDigest,
+  adapterVersion: "1.0.0",
+  providerRevisionId: "provider-claude-r1",
+  credentialVersionId: "credential-claude-v1",
+  providerProtocol: "anthropic-messages",
+  model: "claude-sonnet-4-6-20250514",
+  budget: Object.freeze({ maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 }),
+  timeoutSeconds: 7200,
+  prompt: "Implement the approved immutable game specification.",
+});
+
+test("standalone local Agent host factory composes trusted Provider and isolated executor dependencies", async () => {
+  let providerChecks = 0;
+  let executions = 0;
+  const runtime = localAgentRuntimeFromEnvironment({
+    DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: Buffer.from(key).toString("base64url"),
+    DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: "4312",
+    DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION: "2.1.14",
+    DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION: "0.91.0",
+    DEVILUDO_LOCAL_AGENT_EXECUTION: "1",
+    DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: "https://inference.internal.example/v1",
+    DEVILUDO_WORKER_IMAGE_DIGEST: imageDigest,
+    DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST: imageDigest,
+  }, {
+    cliVersionInspector: { async inspect(executable) { return executable === "claude" ? "2.1.14" : "0.91.0"; } },
+    providerBindingVerifier: {
+      async verify(binding) {
+        providerChecks += 1;
+        return binding.providerRevisionId === request.providerRevisionId
+          && binding.credentialVersionId === request.credentialVersionId
+          && binding.model === request.model;
+      },
+    },
+    executor: {
+      async execute(command) {
+        executions += 1;
+        assert.deepEqual(command, request);
+        return receipt(command);
+      },
+    },
+  });
+
+  assert.equal(runtime.server.listening, false);
+  const health = await runtime.readiness.health();
+  assert.equal(health.status, "ok");
+  const outcome = await runtime.execution.execute(request);
+  assert.equal(outcome.state, "COMPLETED");
+  if (outcome.state !== "COMPLETED") assert.fail("expected a completed local Agent run");
+  assert.equal(outcome.receipt.candidate.commitSha, "a".repeat(40));
+  assert.equal(outcome.receipt.providerRevisionId, request.providerRevisionId);
+  assert.equal(providerChecks, 1);
+  assert.equal(executions, 1);
+});
+
+test("standalone local Agent host stays fail-closed when trusted dependencies are absent", async () => {
+  const runtime = localAgentRuntimeFromEnvironment({
+    DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: Buffer.from(key).toString("base64url"),
+    DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: "4312",
+  }, {
+    cliVersionInspector: { async inspect(executable) { return executable === "claude" ? "2.1.14" : "0.91.0"; } },
+  });
+  const health = await runtime.readiness.health();
+  assert.equal(health.status, "degraded");
+  assert.equal(health.executionEnabled, false);
+  assert.equal(health.providerBindingProbe, "NOT_CONFIGURED");
+  assert.equal(health.workerImageVerified, false);
+  const result = await runtime.execution.execute(request);
+  assert.equal(result.state, "BLOCKED");
+});
+
+function receipt(command: LocalAgentExecutionRequest): LocalAgentExecutionReceipt {
+  return Object.freeze({
+    schemaVersion: 1,
+    tenantId: command.tenantId,
+    projectId: command.projectId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    specRevisionId: command.specRevisionId,
+    testPlanRevisionId: command.testPlanRevisionId,
+    profileRevisionId: command.profileRevisionId,
+    installationId: command.installationId,
+    imageDigest: command.imageDigest,
+    adapterVersion: command.adapterVersion,
+    providerRevisionId: command.providerRevisionId,
+    credentialVersionId: command.credentialVersionId,
+    model: command.model,
+    agent: command.agent,
+    budget: command.budget,
+    timeoutSeconds: command.timeoutSeconds,
+    status: "completed",
+    sessionId: "session-1",
+    summary: "Implemented the approved fixture.",
+    usage: Object.freeze({ inputTokens: 120, outputTokens: 48, costUsd: 0.21 }),
+    warnings: Object.freeze([]),
+    candidate: Object.freeze({
+      scmProxy: "local-git-proxy-v1",
+      branch: "deviludo/run-1-attempt-1",
+      baseCommitSha: "c".repeat(40),
+      commitSha: "a".repeat(40),
+      sourceDigest: "b".repeat(64),
+      changedFiles: Object.freeze(["scripts/game_state.gd"]),
+      draftPullRequest: null,
+    }),
+    completedAt: "2026-07-21T00:00:00.000Z",
+  });
+}

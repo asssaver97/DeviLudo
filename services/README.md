@@ -119,7 +119,12 @@ behind the web console:
   expected digest, a safe HTTPS internal inference gateway, a verified Provider
   binding and explicit opt-in all exist. `/v1/runs` also returns 503 until a
   trusted isolated executor is injected; it never falls back to spawning a CLI
-  directly from the Web process.
+  directly from the Web process. The exported `localAgentRuntimeFromEnvironment`
+  factory is the only composition point for the Provider-binding verifier,
+  CLI-version inspector and isolated executor, allowing a development Worker
+  host to inject those authorities without making them environment-selected
+  plugins or Web-owned callbacks. The normal standalone launcher injects none
+  and therefore remains fail-closed.
 - `local-spec-runtime`: a loopback-only deterministic specification sidecar.
   Conversation reads, writes and approvals require a fresh request signature
   bound to the `spec-runtime` audience. Candidate feedback forks a distinct

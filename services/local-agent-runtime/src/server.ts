@@ -1,5 +1,12 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { LocalAgentExecutionRequest, LocalAgentPreflightRequest } from "./contracts";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
+import type { CliVersionInspector } from "./readiness";
+import type {
+  LocalAgentExecutionRequest,
+  LocalAgentExecutor,
+  LocalAgentPreflightRequest,
+  LocalProviderBindingVerifier,
+} from "./contracts";
 import { LocalAgentExecutionRequestError, LocalAgentExecutionService } from "./execution";
 import { LocalAgentReadinessService } from "./readiness";
 import {
@@ -9,39 +16,91 @@ import {
 } from "./request-auth";
 
 const HOST = "127.0.0.1";
-const PORT = Number.parseInt(process.env.DEVILUDO_LOCAL_AGENT_RUNTIME_PORT ?? "4312", 10);
-const requestVerifier = new LocalAgentRuntimeRequestVerifier(localAgentRuntimeKeyFromEnvironment());
-const service = new LocalAgentReadinessService({
-  claudeVersion: process.env.DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION,
-  codexVersion: process.env.DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION,
-  executionEnabled: process.env.DEVILUDO_LOCAL_AGENT_EXECUTION === "1",
-  inferenceGatewayUrl: process.env.DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL,
-  workerImageIdentity: process.env.DEVILUDO_WORKER_IMAGE_DIGEST,
-  expectedWorkerImageIdentity: process.env.DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST,
-});
-const executionService = new LocalAgentExecutionService({ readiness: service });
+type Environment = Readonly<Record<string, string | undefined>>;
 
-const server = createServer(async (request, response) => {
+export interface LocalAgentRuntimeDependencies {
+  readonly cliVersionInspector?: CliVersionInspector;
+  readonly providerBindingVerifier?: LocalProviderBindingVerifier;
+  readonly executor?: LocalAgentExecutor;
+}
+
+export interface LocalAgentRuntime {
+  readonly host: typeof HOST;
+  readonly port: number;
+  readonly readiness: LocalAgentReadinessService;
+  readonly execution: LocalAgentExecutionService;
+  readonly server: Server;
+}
+
+export function localAgentRuntimeFromEnvironment(
+  env: Environment = process.env,
+  dependencies: LocalAgentRuntimeDependencies = {},
+): LocalAgentRuntime {
+  const port = environmentPort(env.DEVILUDO_LOCAL_AGENT_RUNTIME_PORT);
+  const requestVerifier = new LocalAgentRuntimeRequestVerifier(localAgentRuntimeKeyFromEnvironment(env));
+  const readiness = new LocalAgentReadinessService({
+    inspector: dependencies.cliVersionInspector,
+    claudeVersion: env.DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION,
+    codexVersion: env.DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION,
+    executionEnabled: env.DEVILUDO_LOCAL_AGENT_EXECUTION === "1",
+    inferenceGatewayUrl: env.DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL,
+    workerImageIdentity: env.DEVILUDO_WORKER_IMAGE_DIGEST,
+    expectedWorkerImageIdentity: env.DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST,
+    providerBindingVerifier: dependencies.providerBindingVerifier,
+  });
+  const execution = new LocalAgentExecutionService({ readiness, executor: dependencies.executor });
+  const server = createServer((request, response) => route(request, response, { requestVerifier, readiness, execution }));
+  return Object.freeze({ host: HOST, port, readiness, execution, server });
+}
+
+export async function runLocalAgentRuntime(
+  env: Environment = process.env,
+  dependencies: LocalAgentRuntimeDependencies = {},
+): Promise<void> {
+  const runtime = localAgentRuntimeFromEnvironment(env, dependencies);
+  await listen(runtime.server, runtime.port, runtime.host);
+  console.log(`[local-agent-runtime] Ready at http://${runtime.host}:${runtime.port}`);
+  const shutdown = new AbortController();
+  const stop = () => shutdown.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
   try {
-    const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
-    if (request.method === "GET" && url.pathname === "/health") {
-      const health = await service.health();
-      json(response, 200, health);
+    await new Promise<void>((resolve) => {
+      shutdown.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+    await close(runtime.server);
+  }
+}
+
+async function route(
+  request: IncomingMessage,
+  response: ServerResponse,
+  runtime: Readonly<{
+    requestVerifier: LocalAgentRuntimeRequestVerifier;
+    readiness: LocalAgentReadinessService;
+    execution: LocalAgentExecutionService;
+  }>,
+): Promise<void> {
+  try {
+    const url = new URL(request.url ?? "/", `http://${HOST}`);
+    if (request.method === "GET" && url.pathname === "/health" && !url.search) {
+      json(response, 200, await runtime.readiness.health());
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/preflight" && !url.search) {
-      const command = await readPreflightRequest(request, "/v1/preflight");
+      const command = await readPreflightRequest(request, "/v1/preflight", runtime.requestVerifier);
       let preflight;
-      try {
-        preflight = await service.preflight(command);
-      } catch {
-        throw new LocalRequestError("Local Agent preflight validation failed");
-      }
+      try { preflight = await runtime.readiness.preflight(command); }
+      catch { throw new LocalRequestError("Local Agent preflight validation failed"); }
       json(response, 200, { data: preflight });
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/runs" && !url.search) {
-      const outcome = await executionService.execute(await readExecutionRequest(request, "/v1/runs"));
+      const command = await readExecutionRequest(request, "/v1/runs", runtime.requestVerifier);
+      const outcome = await runtime.execution.execute(command);
       if (outcome.state === "BLOCKED") {
         json(response, 409, { error: { code: outcome.preflight.code, message: outcome.preflight.message }, data: { preflight: outcome.preflight } });
         return;
@@ -62,22 +121,24 @@ const server = createServer(async (request, response) => {
     const invalidRequest = error instanceof LocalRequestError || error instanceof LocalAgentExecutionRequestError;
     json(response, invalidRequest ? 400 : 500, { error: { code: invalidRequest ? "INVALID_LOCAL_AGENT_REQUEST" : "LOCAL_AGENT_RUNTIME_FAILED", message: invalidRequest ? "Local Agent request is invalid" : "Local Agent runtime request failed" } });
   }
-});
+}
 
 class LocalRequestError extends Error {}
 
 async function readPreflightRequest(
   request: IncomingMessage,
   path: LocalAgentRuntimeAssertionPath,
+  verifier: LocalAgentRuntimeRequestVerifier,
 ): Promise<LocalAgentPreflightRequest> {
-  return preflightFrom(await readObject(request, path));
+  return preflightFrom(await readObject(request, path, verifier));
 }
 
 async function readExecutionRequest(
   request: IncomingMessage,
   path: LocalAgentRuntimeAssertionPath,
+  verifier: LocalAgentRuntimeRequestVerifier,
 ): Promise<LocalAgentExecutionRequest> {
-  const item = await readObject(request, path);
+  const item = await readObject(request, path, verifier);
   return {
     ...preflightFrom(item),
     tenantId: requireString(item.tenantId),
@@ -95,7 +156,11 @@ async function readExecutionRequest(
 
 type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs";
 
-async function readObject(request: IncomingMessage, path: LocalAgentRuntimeAssertionPath): Promise<Record<string, unknown>> {
+async function readObject(
+  request: IncomingMessage,
+  path: LocalAgentRuntimeAssertionPath,
+  verifier: LocalAgentRuntimeRequestVerifier,
+): Promise<Record<string, unknown>> {
   if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
     throw new LocalRequestError("Local Agent request requires JSON");
   }
@@ -108,13 +173,10 @@ async function readObject(request: IncomingMessage, path: LocalAgentRuntimeAsser
     chunks.push(buffer);
   }
   const body = Buffer.concat(chunks);
-  requestVerifier.verify({ method: "POST", path, body, headers: request.headers });
+  verifier.verify({ method: "POST", path, body, headers: request.headers });
   let value: unknown;
-  try {
-    value = JSON.parse(body.toString("utf8"));
-  } catch {
-    throw new LocalRequestError("Local Agent request body is invalid");
-  }
+  try { value = JSON.parse(body.toString("utf8")); }
+  catch { throw new LocalRequestError("Local Agent request body is invalid"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new LocalRequestError("Local Agent request body is invalid");
   return value as Record<string, unknown>;
 }
@@ -169,7 +231,15 @@ function requireNumber(value: unknown): number {
   return value;
 }
 
-function json(response: ServerResponse, status: number, body: unknown) {
+function environmentPort(value: string | undefined): number {
+  const raw = value ?? "4312";
+  if (!/^\d+$/.test(raw)) throw new Error("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT is invalid");
+  const port = Number(raw);
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65_535) throw new Error("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT is invalid");
+  return port;
+}
+
+function json(response: ServerResponse, status: number, body: unknown): void {
   response.statusCode = status;
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.setHeader("cache-control", "no-store");
@@ -177,9 +247,20 @@ function json(response: ServerResponse, status: number, body: unknown) {
   response.end(JSON.stringify(body));
 }
 
-if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65_535) throw new Error("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT is invalid");
-server.listen(PORT, HOST, () => console.log(`[local-agent-runtime] Ready at http://${HOST}:${PORT}`));
+function listen(server: Server, port: number, host: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const fail = (error: Error) => { server.off("listening", ready); reject(error); };
+    const ready = () => { server.off("error", fail); resolve(); };
+    server.once("error", fail);
+    server.once("listening", ready);
+    server.listen(port, host);
+  });
+}
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runLocalAgentRuntime();
 }
