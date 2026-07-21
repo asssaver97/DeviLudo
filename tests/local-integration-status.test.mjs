@@ -39,6 +39,7 @@ test("local integration status verifies schema, authenticated cache and every se
   });
   assert.equal(results.length, 6);
   assert.ok(results.every((result) => result.ready && result.detail === "READY"));
+  assert.equal(results[0].name, "PostgreSQL schema 061");
   assert.deepEqual(calls, [
     ["postgres", "55432"],
     ["redis", "56379"],

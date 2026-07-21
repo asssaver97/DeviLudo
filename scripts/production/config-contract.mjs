@@ -121,6 +121,15 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
       missingEntrypointFiles.push(relative(root, path));
     }
   }
+  for (const utility of ["scripts/production/migrate-postgres.mjs"]) {
+    const path = resolve(root, utility);
+    try {
+      await access(path);
+      entrypointSources.push(await readFile(path, "utf8"));
+    } catch {
+      missingEntrypointFiles.push(relative(root, path));
+    }
+  }
   return analyzeProductionConfiguration({
     entrypointSources,
     environmentExamples,

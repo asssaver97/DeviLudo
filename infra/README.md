@@ -12,8 +12,9 @@ npm run infra:status
 PostgreSQL, Redis, Temporal, MinIO, Vault and the OpenTelemetry health endpoint
 are exposed only on `127.0.0.1`. Host-started DeviLudo services therefore use
 the same loopback `DATABASE_URL`, authenticated `REDIS_URL`, `TEMPORAL_ADDRESS`,
-`S3_ENDPOINT`, `VAULT_ADDR` and telemetry values as the Compose stack. The
-status command authenticates to PostgreSQL and Redis, proves migration `060` is
+`S3_ENDPOINT`, `VAULT_ADDR` and telemetry values as the Compose stack.
+`infra:up` follows dependency startup with the repository migration runner. The
+status command authenticates to PostgreSQL and Redis, proves migration `061` is
 present, and checks every other dependency without printing credentials. Stop
 the containers with `npm run infra:down`.
 
@@ -103,11 +104,25 @@ marks pre-migration Agent runs as historical, forces every ordinary new Run to
 carry the exact AgentVersion/Adapter supply-chain proof in its primary and
 fallback lock, and permits proof-free repair descendants only when a database
 trigger verifies the same immutable runtime identity against a historical
-predecessor in the same tenant/project. All sixty
-migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
-Docker's initialization directory is not rerun for an existing volume, so an
-existing development database must be migrated explicitly before using newer
-service code. Application
+predecessor in the same tenant/project. Migration `061` creates a
+privilege-revoked, update/delete-protected ledger and baselines the exact
+SHA-256 of migrations `001`–`060`. All sixty-one migrations remain mounted in
+numeric order for a newly initialized local PostgreSQL volume; the post-start
+migrator then records `061` itself. Every later migration is executed under one
+PostgreSQL advisory lock and writes its version, filename and digest in the same
+transaction as its schema change. A gap, edited historical file, unknown future
+row, concurrent migrator or failed statement aborts startup.
+
+Docker's initialization directory is not rerun for an existing volume. An old
+local volume with schema 060 but no ledger must be backed up and explicitly
+adopted once with `npm run db:adopt-local`; this path is loopback-only and is
+rejected when `NODE_ENV=production`. Normal upgrades use `npm run db:migrate`.
+Production runs that command as a one-shot deployment job before any new service
+revision. It must receive a distinct owner/migration-role URL through
+`DEVILUDO_MIGRATION_DATABASE_URL_FILE`; application `DATABASE_URL` is rejected,
+TLS verification cannot be disabled, and optional CA/client credentials are
+file-mounted through the three `DEVILUDO_MIGRATION_POSTGRES_*_FILE` variables.
+Application
 transactions must set `app.tenant_id`
 from an already-authorized session; accepting it directly from a request header
 would defeat RLS. Credential values never enter these tables—only Vault refs,

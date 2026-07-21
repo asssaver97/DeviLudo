@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 60 }, (_, index) => {
+  const offsets = Array.from({ length: 61 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -32,7 +32,18 @@ test("local integration PostgreSQL applies every migration in order", () => {
 
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(packageJson.scripts["infra:status"], "node scripts/local/integration-status.mjs");
-  assert.match(packageJson.scripts["infra:up"], /--env-file \.env[\s\S]*--wait/);
+  assert.match(packageJson.scripts["infra:up"], /--env-file \.env[\s\S]*--wait[\s\S]*npm run db:migrate/);
+  assert.equal(packageJson.scripts["db:migrate"], "node scripts/production/migrate-postgres.mjs");
+  assert.equal(packageJson.scripts["db:adopt-local"], "node scripts/production/migrate-postgres.mjs --adopt-existing");
+});
+
+test("PostgreSQL migration ledger is immutable and excludes its self-referential digest from the baseline", () => {
+  const migration = readFileSync(new URL("../infra/postgres/061_schema_migration_ledger.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS public\.deviludo_schema_migrations/);
+  assert.match(migration, /REVOKE ALL ON TABLE public\.deviludo_schema_migrations FROM PUBLIC/);
+  assert.match(migration, /BEFORE UPDATE OR DELETE ON public\.deviludo_schema_migrations/);
+  assert.match(migration, /migration baseline requires schema 060/);
+  assert.doesNotMatch(migration, /\(61, '061_schema_migration_ledger\.sql'/);
 });
 
 test("new AgentRun rows require database-enforced version and Adapter attestations", () => {

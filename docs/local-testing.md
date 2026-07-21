@@ -129,7 +129,12 @@ npm run infra:status
 ```
 
 Compose 只把依赖端口绑定到 `127.0.0.1`。`infra:status` 不只检查端口：
-它会使用 `DATABASE_URL` 验证 PostgreSQL 已应用到 migration `060`，使用
+`infra:up` 会在容器健康后自动运行 `db:migrate`。它会使用 `DATABASE_URL`
+取得 PostgreSQL advisory lock、验证所有既有文件摘要，并把每个 schema
+变更和 migration `061` 账本记录放在同一事务。旧版本创建且还没有账本的
+本地数据卷不会被自动猜测；备份后可显式运行一次 `npm run db:adopt-local`，
+该命令仅接受 loopback 数据库并验证 schema 060 标记，生产环境强制拒绝。
+随后状态检查会验证 PostgreSQL 已应用到 migration `061`，使用
 `REDIS_URL` 完成认证 PING，并检查 Temporal、MinIO、Vault 与 OTel Collector
 的就绪端点。任何依赖缺失、密码不一致或数据库仍是旧 schema 都会返回
 非零退出码。该集成栈与上面的无凭据测试站互相独立；测试页面仍使用

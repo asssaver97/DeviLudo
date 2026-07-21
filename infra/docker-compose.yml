@@ -71,6 +71,7 @@ services:
       - ./postgres/058_runner_toolchain_publications.sql:/docker-entrypoint-initdb.d/058_runner_toolchain_publications.sql:ro
       - ./postgres/059_steam_project_configuration_intents.sql:/docker-entrypoint-initdb.d/059_steam_project_configuration_intents.sql:ro
       - ./postgres/060_agent_run_version_attestations.sql:/docker-entrypoint-initdb.d/060_agent_run_version_attestations.sql:ro
+      - ./postgres/061_schema_migration_ledger.sql:/docker-entrypoint-initdb.d/061_schema_migration_ledger.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

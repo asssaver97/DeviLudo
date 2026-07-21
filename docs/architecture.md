@@ -338,6 +338,11 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
   independently retained security sink.
 - Temporal activities are idempotent. External side effects carry the workflow
   command ID so retries cannot create duplicate PRs, uploads, or releases.
+- A one-shot migration workload must complete before a new service revision can
+  start. It owns a distinct file-mounted database credential, holds a PostgreSQL
+  advisory lock, verifies the immutable digest ledger and commits each schema
+  change together with its migration record. Production never adopts an
+  untracked schema or rewrites historical migration files.
 
 ## Repository map
 
@@ -348,9 +353,10 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
 - `services/identity`: invitation issuance, GitHub OAuth/PKCE, tenant membership,
   revocable platform sessions and route-bound trusted assertions.
 - `db/schema.ts`: D1-backed hosted demo schema.
-- `infra/postgres/001_core.sql` through `004_github_verified_identity.sql`:
+- `infra/postgres/001_core.sql` through `061_schema_migration_ledger.sql`:
   production PostgreSQL/RLS, immutable bindings, activity claims, durable jobs,
-  approval receipts and verified GitHub identities.
+  approval receipts, external authority ledgers and the digest-locked upgrade
+  history used by `npm run db:migrate`.
 - `infra/docker-compose.yml`: local PostgreSQL, Temporal, Redis, MinIO, Vault,
   and OTel integration stack.
 - `infra/vault` and `infra/otel`: least-privilege and telemetry redaction

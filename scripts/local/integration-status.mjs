@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
@@ -10,6 +11,13 @@ import pg from "pg";
 const { Client } = pg;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const LATEST_MIGRATION = Object.freeze({
+  version: 61,
+  filename: "061_schema_migration_ledger.sql",
+  digest: createHash("sha256").update(readFileSync(
+    new URL("../../infra/postgres/061_schema_migration_ledger.sql", import.meta.url),
+  )).digest("hex"),
+});
 
 export function resolveIntegrationConfig(env = process.env) {
   const database = localUrl(env.DATABASE_URL ?? "postgresql://deviludo:deviludo-local-only@127.0.0.1:5432/deviludo", ["postgres:", "postgresql:"]);
@@ -27,7 +35,7 @@ export function resolveIntegrationConfig(env = process.env) {
 export async function inspectLocalIntegration(env = process.env, probes = defaultProbes()) {
   const config = resolveIntegrationConfig(env);
   const checks = [
-    ["PostgreSQL schema 060", () => probes.postgres(config.database)],
+    ["PostgreSQL schema 061", () => probes.postgres(config.database)],
     ["Redis authenticated PING", () => probes.redis(config.redis)],
     ["Temporal transport", () => probes.tcp(config.temporal)],
     ["MinIO health", () => probes.http(new URL("/minio/health/live", config.minio))],
@@ -57,15 +65,28 @@ async function postgresProbe(url) {
   const client = new Client({ connectionString: url.href, connectionTimeoutMillis: DEFAULT_TIMEOUT_MS, ssl: false });
   try {
     await client.connect();
-    const result = await client.query(`SELECT
+    const schema = await client.query(`SELECT
       EXISTS (
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'deviludo' AND table_name = 'agent_runs'
            AND column_name = 'agent_version_attestation_required'
       ) AND to_regprocedure(
         'deviludo.agent_profile_version_attestation_is_valid(jsonb)'
-      ) IS NOT NULL AS latest_schema`);
-    if (result.rows[0]?.latest_schema !== true) {
+      ) IS NOT NULL
+      AND to_regclass('public.deviludo_schema_migrations') IS NOT NULL AS latest_schema`);
+    if (schema.rows[0]?.latest_schema !== true) throw new Error("latest migration is missing");
+    const ledger = await client.query(`SELECT
+      EXISTS (
+        SELECT 1 FROM public.deviludo_schema_migrations
+         WHERE version = $1 AND filename = $2 AND digest = $3
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_trigger
+         WHERE tgrelid = 'public.deviludo_schema_migrations'::regclass
+           AND tgname = 'deviludo_schema_migrations_immutable'
+           AND NOT tgisinternal
+      ) AS latest_schema`, [LATEST_MIGRATION.version, LATEST_MIGRATION.filename, LATEST_MIGRATION.digest]);
+    if (ledger.rows[0]?.latest_schema !== true) {
       throw new Error("latest migration is missing");
     }
   } finally {
