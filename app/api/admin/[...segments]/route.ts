@@ -1,4 +1,5 @@
 import { normalizeModelRoles } from "@/lib/agent/providers";
+import { localWorkerImageDigest } from "@/lib/agent/local-worker-identity";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
 import {
@@ -513,7 +514,7 @@ export async function POST(request: Request, context: RouteContext) {
         `local-installation-identity:v2:${agentKind}:${version}:${adapterVersion}:${workerPool}`,
       ));
       const id = `${agentKind === "claude-code" ? "claude" : "codex"}-installation-${versionSlug}-${identityDigest.slice(7, 23)}`;
-      const imageDigest = await fingerprintSecret(new TextEncoder().encode(`local-worker-image:v1:${agentKind}:${version}:${adapterVersion}`));
+      const imageDigest = await localWorkerImageDigest(agentKind, version, adapterVersion);
       const buildReceiptDigest = await fingerprintSecret(new TextEncoder().encode(`local-build-receipt:v1:${id}:${imageDigest}:${workerPool}`));
       return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();

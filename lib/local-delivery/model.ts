@@ -137,7 +137,7 @@ const profile = {
   installationId: "claude-installation-214" as const,
   imageDigest: `sha256:${"a".repeat(64)}` as const,
   exactAgentVersion: "2.1.14" as const,
-  adapterVersion: "1.0.0" as const,
+  adapterVersion: "1.3.0" as const,
   providerRevisionId: "provider-platform-claude-r1" as const,
   providerProtocol: "anthropic-messages" as const,
   credentialVersionId: "credential-platform-claude-v1" as const,

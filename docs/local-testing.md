@@ -34,7 +34,7 @@ npm run local:dev
 
 候选反馈不会重新打开已批准会话。只有候选 E2E 已进入待验收状态，或 main/Steam 失败已冻结并交给人工修订时，反馈端点才会让规格 sidecar 创建一个新的 DRAFT 会话。旧会话保持 `APPROVED`，旧本地验证与 Agent 回执仍可审计但 `valid=false`；新草稿再次批准后获得不同 Run ID，不能复用上一轮证据。
 
-Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/四类模型角色通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。Primary、Planning、Small/Fast 与 Subagent 模型会随 Profile revision 一起进入不可变运行锁；Primary 与实际 CLI `--model` 不一致时预检直接拒绝。默认配置没有受信 Provider 绑定探针，也没有隔离执行器，会安全地报告 `BLOCKED`；这不是测试栈故障。
+Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/四类模型角色通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。`npm run local:dev` 会在同时启用显式 loopback 测试模式时使用 `LOCAL_DETERMINISTIC` Worker 身份：它根据管理员本地供应链 Broker 已批准的精确 Agent 版本和 Adapter 版本重新计算逻辑 WorkerImage digest，使后台构建/灰度后的新 Profile 可以通过同一不可变镜像绑定；该模式不声称具备生产容器或 microVM 隔离，也不能在非测试部署中仅靠环境开关启用。Primary、Planning、Small/Fast 与 Subagent 模型会随 Profile revision 一起进入不可变运行锁；Primary 与实际 CLI `--model` 不一致时预检直接拒绝。默认配置仍没有受信 Provider 绑定探针，也没有隔离执行器，会安全地报告 `BLOCKED`；这不是测试栈故障。
 
 `POST /v1/runs` 会先执行同一预检。预检未通过时返回原始门禁码；全部通过但没有隔离执行器时返回 `LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED`。启用隔离执行器后，Claude Code/Codex 还必须按严格 schema 写入保留的 `.deviludo-agent-code-review.json`；执行器以禁止符号链接和限长方式读取后立即删除它，只在没有阻断项时生成绑定当前 Run、Attempt、镜像、固定模型、规格、测试计划和候选 source digest 的不可变评审回执。缺失、畸形、浮动模型或阻断评审均失败关闭，候选不能进入 E2E。项目 API 只接受逐项匹配锁定运行的完成回执，并保存 SCM 代理产生的完整候选 SHA、源码摘要、评审回执、changed-files、usage 和警告；浏览器不能直接提交或伪造回执。
 
@@ -81,7 +81,7 @@ npm run local:smoke
 - 租户 BYOK 通过真实页面 API 创建新不可变版本、停止旧版本签发并撤销指定旧版本；响应和投影均不包含明文或 SecretRef；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
 - 侧车 `/health` 返回 `deviludo-local-runtime` 和实际 Godot 版本。
-- Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`；`degraded` 是未启用执行时的预期状态。
+- Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`，并公开 `PINNED_ENV`、`LOCAL_DETERMINISTIC` 或 `NOT_CONFIGURED` 身份模式；`degraded` 是未启用执行时的预期状态。
 - Agent 探针 `/v1/preflight` 使用固定测试运行锁，验证 CLI、镜像、Provider/Gateway 与执行开关；它只返回阻塞原因或 `READY`，不会启动 Agent。
 - Agent `/v1/runs` 在默认测试栈必须以明确门禁码返回 409/503，证明没有执行器时失败关闭。
 - 通过 Web API 真实运行固定 Godot 样例并下载同一 bundle 的 `manifest.json`，覆盖签名后的执行和证据读取链路。

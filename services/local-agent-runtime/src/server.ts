@@ -46,6 +46,8 @@ export function localAgentRuntimeFromEnvironment(
     inferenceGatewayUrl: env.DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL,
     workerImageIdentity: env.DEVILUDO_WORKER_IMAGE_DIGEST,
     expectedWorkerImageIdentity: env.DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST,
+    localDeterministicWorkerAttestation: env.DEVILUDO_LOCAL_TEST_MODE === "1"
+      && env.DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION === "1",
     providerBindingVerifier: dependencies.providerBindingVerifier,
   });
   const execution = new LocalAgentExecutionService({ readiness, executor: dependencies.executor });
@@ -186,9 +188,11 @@ function preflightFrom(item: Record<string, unknown>): LocalAgentPreflightReques
     projectId: requireString(item.projectId),
     runId: requireString(item.runId),
     profileRevisionId: requireString(item.profileRevisionId),
+    installationId: requireString(item.installationId),
     agent: requireAgent(item.agent),
     expectedVersion: requireString(item.expectedVersion),
     imageDigest: requireString(item.imageDigest),
+    adapterVersion: requireString(item.adapterVersion),
     providerRevisionId: requireString(item.providerRevisionId),
     credentialVersionId: requireString(item.credentialVersionId),
     model: requireString(item.model),

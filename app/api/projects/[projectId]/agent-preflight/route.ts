@@ -24,9 +24,11 @@ export async function POST(
       projectId,
       runId: delivery.runId,
       profileRevisionId: locked.profileRevisionId,
+      installationId: locked.installationId,
       agent: locked.agent,
       expectedVersion: locked.exactAgentVersion,
       imageDigest: locked.imageDigest,
+      adapterVersion: locked.adapterVersion,
       providerRevisionId: locked.providerRevisionId,
       credentialVersionId: locked.credentialVersionId,
       model: locked.model,
@@ -66,15 +68,17 @@ function validatePreflight(
   if (item.projectId !== projectId
     || item.runId !== runId
     || item.profileRevisionId !== locked.profileRevisionId
+    || item.installationId !== locked.installationId
     || item.agent !== locked.agent
     || item.expectedVersion !== locked.exactAgentVersion
     || item.imageDigest !== locked.imageDigest
+    || item.adapterVersion !== locked.adapterVersion
     || item.model !== locked.model
     || !sameModelRoles(item.modelRoles, locked.modelRoles)) {
     throw new Error("本机 Agent 预检绑定与锁定运行不一致");
   }
   if ((item.status !== "BLOCKED" && item.status !== "READY")
-    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "READY"].includes(String(item.code))
+    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "ADAPTER_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "READY"].includes(String(item.code))
     || (item.agent !== "claude-code" && item.agent !== "codex-cli")
     || typeof item.message !== "string"
     || item.message.length > 500

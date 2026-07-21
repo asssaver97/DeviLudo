@@ -20,6 +20,7 @@ export interface LocalAgentRuntimeHealth {
   readonly workerImageIdentity: string | null;
   readonly expectedWorkerImageIdentity: string | null;
   readonly workerImageVerified: boolean;
+  readonly workerIdentityMode: "PINNED_ENV" | "LOCAL_DETERMINISTIC" | "NOT_CONFIGURED";
   readonly agents: readonly LocalAgentReadiness[];
 }
 
@@ -31,9 +32,11 @@ export interface LocalAgentPreflightRequest {
   readonly projectId: string;
   readonly runId: string;
   readonly profileRevisionId: string;
+  readonly installationId: string;
   readonly agent: AgentKind;
   readonly expectedVersion: string;
   readonly imageDigest: string;
+  readonly adapterVersion: string;
   readonly providerRevisionId: string;
   readonly credentialVersionId: string;
   readonly model: string;
@@ -43,6 +46,7 @@ export interface LocalAgentPreflightRequest {
 export type LocalAgentPreflightCode =
   | "INSTALLATION_UNAVAILABLE"
   | "INSTALLATION_MISMATCH"
+  | "ADAPTER_MISMATCH"
   | "WORKER_IMAGE_MISMATCH"
   | "WAITING_PROVIDER"
   | "EXECUTION_DISABLED"
@@ -54,10 +58,12 @@ export interface LocalAgentPreflightResult {
   readonly projectId: string;
   readonly runId: string;
   readonly profileRevisionId: string;
+  readonly installationId: string;
   readonly agent: AgentKind;
   readonly expectedVersion: string;
   readonly observedVersion: string | null;
   readonly imageDigest: string;
+  readonly adapterVersion: string;
   readonly model: string;
   readonly modelRoles: ModelRoles;
   readonly message: string;
@@ -68,8 +74,6 @@ export interface LocalAgentExecutionRequest extends LocalAgentPreflightRequest {
   readonly attemptId: string;
   readonly specRevisionId: string;
   readonly testPlanRevisionId: string;
-  readonly installationId: string;
-  readonly adapterVersion: string;
   readonly providerProtocol: "anthropic-messages" | "openai-responses";
   readonly budget: {
     readonly maxTurns: number;

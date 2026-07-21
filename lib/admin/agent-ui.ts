@@ -1,3 +1,5 @@
+import { builtInAdapterVersion } from "../agent/adapter-registry";
+
 export type AgentKind = "claude-code" | "codex-cli";
 
 export type AgentCatalogItem = {
@@ -79,7 +81,7 @@ export const builtInAgentUi = Object.freeze([
     vendor: "Anthropic",
     description: "长程编码、工具编排与仓库级任务",
     officialSource: "https://code.claude.com/docs/en/installation",
-    adapterVersion: "1.3.0",
+    adapterVersion: builtInAdapterVersion("claude-code"),
     capabilities: Object.freeze(["规划", "代码修改", "评审", "流式事件"]),
     supportedWorkers: Object.freeze(["linux/amd64", "linux/arm64"]),
   }),
@@ -89,7 +91,7 @@ export const builtInAgentUi = Object.freeze([
     vendor: "OpenAI",
     description: "结构化执行、沙箱编码与机器可读事件",
     officialSource: "https://github.com/openai/codex",
-    adapterVersion: "1.2.2",
+    adapterVersion: builtInAdapterVersion("codex-cli"),
     capabilities: Object.freeze(["规划", "代码修改", "JSONL", "输出 Schema"]),
     supportedWorkers: Object.freeze(["linux/amd64", "linux/arm64"]),
   }),

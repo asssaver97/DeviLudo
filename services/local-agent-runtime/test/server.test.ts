@@ -17,7 +17,7 @@ const request: LocalAgentExecutionRequest = Object.freeze({
   agent: "claude-code",
   expectedVersion: "2.1.14",
   imageDigest,
-  adapterVersion: "1.0.0",
+  adapterVersion: "1.3.0",
   providerRevisionId: "provider-claude-r1",
   credentialVersionId: "credential-claude-v1",
   providerProtocol: "anthropic-messages",
@@ -88,8 +88,27 @@ test("standalone local Agent host stays fail-closed when trusted dependencies ar
   assert.equal(health.executionEnabled, false);
   assert.equal(health.providerBindingProbe, "NOT_CONFIGURED");
   assert.equal(health.workerImageVerified, false);
+  assert.equal(health.workerIdentityMode, "NOT_CONFIGURED");
   const result = await runtime.execution.execute(request);
   assert.equal(result.state, "BLOCKED");
+});
+
+test("deterministic Worker attestation can only be enabled by the explicit localhost test deployment", async () => {
+  const base = {
+    DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: Buffer.from(key).toString("base64url"),
+    DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: "4312",
+    DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION: "1",
+  };
+  const dependencies = {
+    cliVersionInspector: { async inspect(executable: "claude" | "codex") { return executable === "claude" ? "2.1.14" : "0.91.0"; } },
+  };
+  const productionLike = localAgentRuntimeFromEnvironment(base, dependencies);
+  assert.equal((await productionLike.readiness.health()).workerIdentityMode, "NOT_CONFIGURED");
+
+  const localhost = localAgentRuntimeFromEnvironment({ ...base, DEVILUDO_LOCAL_TEST_MODE: "1" }, dependencies);
+  const health = await localhost.readiness.health();
+  assert.equal(health.workerIdentityMode, "LOCAL_DETERMINISTIC");
+  assert.equal(health.workerImageVerified, true);
 });
 
 function receipt(command: LocalAgentExecutionRequest): LocalAgentExecutionReceipt {

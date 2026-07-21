@@ -611,7 +611,7 @@ function OverviewTab({ catalog, versions, installations, defaultAgent, localAgen
         <div><span>本机 Agent 发现</span><strong>{localAgents.length} / 2</strong><small>只读版本探针</small></div>
         <div><span>精确版本匹配</span><strong>{exactMatches} / 2</strong><small>{exactMatches === 2 ? "均匹配锁定版本" : "不匹配时禁止启动"}</small></div>
         <div><span>Inference Gateway</span><strong>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</strong><small>长期 Key 不下发 Worker</small></div>
-        <div><span>开发 Worker</span><strong>{workerReady ? "READY" : "BLOCKED"}</strong><small>{workerReady ? "镜像与执行门禁已满足" : "等待版本、镜像与 Gateway"}</small></div>
+        <div><span>开发 Worker</span><strong>{workerReady ? "READY" : "BLOCKED"}</strong><small>{workerReady ? "镜像与执行门禁已满足" : localHealth?.dependencies?.workerIdentityMode === "LOCAL_DETERMINISTIC" ? "本机安装可校验，等待 Provider 与执行授权" : "等待版本、镜像与 Gateway"}</small></div>
       </div>
 
       <section className={styles.section}>

@@ -129,7 +129,11 @@ behind the web console:
   CLI-version inspector and isolated executor, allowing a development Worker
   host to inject those authorities without making them environment-selected
   plugins or Web-owned callbacks. The normal standalone launcher injects none
-  and therefore remains fail-closed.
+  and therefore remains fail-closed. The explicit loopback test launcher alone
+  may enable a deterministic logical Worker identity derived from the exact
+  installed CLI and Adapter versions. This keeps localhost admin upgrades bound
+  to the same immutable image digest without representing host execution as a
+  production container or microVM attestation.
 - `local-spec-runtime`: a loopback-only deterministic specification sidecar.
   Conversation reads, writes and approvals require a fresh request signature
   bound to the `spec-runtime` audience. Candidate feedback forks a distinct

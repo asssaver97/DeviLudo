@@ -1,5 +1,7 @@
 import type { AgentKind, ProbePlan } from "../../../lib/agent/types";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { localWorkerImageDigest } from "../../../lib/agent/local-worker-identity";
+import { builtInAdapterVersion } from "../../../lib/agent/adapter-registry";
 import { CliInstallationVerifier } from "../../agent-worker/src/installation-verifier";
 import type { LocalAgentPreflightRequest, LocalAgentPreflightResult, LocalAgentReadiness, LocalAgentRuntimeHealth, LocalProviderBindingVerifier } from "./contracts";
 
@@ -16,6 +18,7 @@ export class LocalAgentReadinessService {
   readonly #gatewayConfigured: boolean;
   readonly #workerImageIdentity: string | null;
   readonly #expectedWorkerImageIdentity: string | null;
+  readonly #localDeterministicWorkerAttestation: boolean;
   readonly #providerBindingVerifier: LocalProviderBindingVerifier | null;
 
   constructor(options: {
@@ -26,6 +29,7 @@ export class LocalAgentReadinessService {
     readonly inferenceGatewayUrl?: string;
     readonly workerImageIdentity?: string;
     readonly expectedWorkerImageIdentity?: string;
+    readonly localDeterministicWorkerAttestation?: boolean;
     readonly providerBindingVerifier?: LocalProviderBindingVerifier;
   } = {}) {
     const claudeVersion = options.claudeVersion ?? "2.1.14";
@@ -42,13 +46,18 @@ export class LocalAgentReadinessService {
     this.#gatewayConfigured = isSecureGatewayOrigin(options.inferenceGatewayUrl);
     this.#workerImageIdentity = exactDigest(options.workerImageIdentity);
     this.#expectedWorkerImageIdentity = exactDigest(options.expectedWorkerImageIdentity);
+    this.#localDeterministicWorkerAttestation = options.localDeterministicWorkerAttestation === true;
     this.#providerBindingVerifier = options.providerBindingVerifier ?? null;
   }
 
   async health(): Promise<LocalAgentRuntimeHealth> {
     const agents = await Promise.all(this.#catalog.map((entry) => this.#inspect(entry)));
-    const workerImageVerified = this.#workerImageIdentity !== null
+    const pinnedWorkerImageVerified = this.#workerImageIdentity !== null
       && this.#workerImageIdentity === this.#expectedWorkerImageIdentity;
+    const workerImageVerified = pinnedWorkerImageVerified || this.#localDeterministicWorkerAttestation;
+    const workerIdentityMode = this.#localDeterministicWorkerAttestation
+      ? "LOCAL_DETERMINISTIC" as const
+      : pinnedWorkerImageVerified ? "PINNED_ENV" as const : "NOT_CONFIGURED" as const;
     const ready = agents.some((entry) => entry.state === "READY")
       && this.#executionEnabled
       && this.#gatewayConfigured
@@ -63,6 +72,7 @@ export class LocalAgentReadinessService {
       workerImageIdentity: this.#workerImageIdentity,
       expectedWorkerImageIdentity: this.#expectedWorkerImageIdentity,
       workerImageVerified,
+      workerIdentityMode,
       agents: Object.freeze(agents),
     });
   }
@@ -77,7 +87,10 @@ export class LocalAgentReadinessService {
     if (installation.observedVersion !== request.expectedVersion) {
       return preflightResult(request, installation.observedVersion, "INSTALLATION_MISMATCH", "本机 CLI 版本与任务锁定版本不一致，禁止启动。");
     }
-    if (!health.workerImageVerified || health.expectedWorkerImageIdentity !== request.imageDigest) {
+    if (builtInAdapterVersion(request.agent) !== request.adapterVersion) {
+      return preflightResult(request, installation.observedVersion, "ADAPTER_MISMATCH", "本机运行服务编译的 Adapter 版本与任务锁定版本不一致，禁止启动。");
+    }
+    if (!await this.#workerIdentityMatches(request, health)) {
       return preflightResult(request, installation.observedVersion, "WORKER_IMAGE_MISMATCH", "本机 WorkerImage 身份未与任务锁定 digest 完成匹配。");
     }
     if (health.inferenceGateway !== "CONFIGURED") {
@@ -112,14 +125,24 @@ export class LocalAgentReadinessService {
       return false;
     }
   }
+
+  async #workerIdentityMatches(request: LocalAgentPreflightRequest, health: LocalAgentRuntimeHealth): Promise<boolean> {
+    if (health.workerIdentityMode === "LOCAL_DETERMINISTIC") {
+      return await localWorkerImageDigest(request.agent, request.expectedVersion, request.adapterVersion) === request.imageDigest;
+    }
+    return health.workerIdentityMode === "PINNED_ENV"
+      && health.expectedWorkerImageIdentity === request.imageDigest;
+  }
 }
 
 function validatePreflightRequest(request: LocalAgentPreflightRequest): void {
-  for (const value of [request.projectId, request.runId, request.profileRevisionId, request.providerRevisionId, request.credentialVersionId]) {
+  for (const value of [request.projectId, request.runId, request.profileRevisionId, request.installationId,
+    request.providerRevisionId, request.credentialVersionId]) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new Error("Local Agent preflight binding is invalid");
   }
   if ((request.agent !== "claude-code" && request.agent !== "codex-cli")
     || !EXACT_VERSION.test(request.expectedVersion)
+    || !EXACT_VERSION.test(request.adapterVersion)
     || !/^sha256:[a-f0-9]{64}$/.test(request.imageDigest)) {
     throw new Error("Local Agent preflight lock is invalid");
   }
@@ -141,10 +164,12 @@ function preflightResult(
     projectId: request.projectId,
     runId: request.runId,
     profileRevisionId: request.profileRevisionId,
+    installationId: request.installationId,
     agent: request.agent,
     expectedVersion: request.expectedVersion,
     observedVersion,
     imageDigest: request.imageDigest,
+    adapterVersion: request.adapterVersion,
     model: request.model,
     modelRoles: Object.freeze({ ...request.modelRoles }),
     message,

@@ -207,6 +207,7 @@ const localAgentRuntimeChild = spawn(
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: String(localAgentRuntimePort),
       DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: localAgentRuntimeHmacKey,
+      DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION: "1",
     },
     stdio: "inherit",
   },

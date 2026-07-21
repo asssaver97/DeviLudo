@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GET, POST, PUT } from "../app/api/admin/[...segments]/route.ts";
+import { localWorkerImageDigest } from "../lib/agent/local-worker-identity.ts";
 import { getDemoStore, resetDemoStore } from "../lib/control-plane/demo-store.ts";
 
 function context(path) {
@@ -401,6 +402,7 @@ test("version approval and installation accept only local Broker receipts, never
   assert.equal(installation.status, 201);
   const installed = (await installation.json()).data;
   assert.match(installed.imageDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(installed.imageDigest, await localWorkerImageDigest("claude-code", "2.1.15", "1.3.0"));
   assert.equal(installed.rolloutPercent, 0);
   assert.equal(getDemoStore().installations.some((item) => item.id === installed.id), true);
 });

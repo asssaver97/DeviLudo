@@ -3,15 +3,18 @@ import test from "node:test";
 import type { LocalAgentExecutionReceipt } from "../src/contracts";
 import { LocalAgentExecutionService } from "../src/execution";
 import { LocalAgentReadinessService } from "../src/readiness";
+import { localWorkerImageDigest } from "../../../lib/agent/local-worker-identity";
 
 const digest = `sha256:${"c".repeat(64)}`;
 const preflight = {
   projectId: "project-1",
   runId: "run-1",
   profileRevisionId: "profile-claude-r5",
+  installationId: "claude-installation-214",
   agent: "claude-code" as const,
   expectedVersion: "2.1.14",
   imageDigest: digest,
+  adapterVersion: "1.3.0",
   providerRevisionId: "provider-claude-r1",
   credentialVersionId: "credential-claude-v1",
   model: "claude-sonnet-4-6-20250514",
@@ -28,8 +31,6 @@ const execution = {
   attemptId: "attempt-1",
   specRevisionId: "SPEC-001",
   testPlanRevisionId: "godot-testkit-1.0.0",
-  installationId: "claude-installation-214",
-  adapterVersion: "1.0.0",
   providerProtocol: "anthropic-messages" as const,
   budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 },
   timeoutSeconds: 7200,
@@ -106,6 +107,7 @@ test("reports exact local CLI matches without claiming execution readiness", asy
   assert.equal(health.workerImageIdentity, null);
   assert.equal(health.expectedWorkerImageIdentity, null);
   assert.equal(health.workerImageVerified, false);
+  assert.equal(health.workerIdentityMode, "NOT_CONFIGURED");
   assert.deepEqual(health.agents.map(({ agent, state }) => ({ agent, state })), [
     { agent: "claude-code", state: "READY" },
     { agent: "codex-cli", state: "READY" },
@@ -126,6 +128,7 @@ test("becomes ready only with an exact CLI, image identity, gateway and explicit
   assert.equal(health.inferenceGateway, "CONFIGURED");
   assert.equal(health.providerBindingProbe, "CONFIGURED");
   assert.equal(health.workerImageVerified, true);
+  assert.equal(health.workerIdentityMode, "PINNED_ENV");
   assert.equal(health.agents[0]?.state, "READY");
   assert.equal(health.agents[1]?.state, "VERSION_MISMATCH");
 });
@@ -154,6 +157,25 @@ test("preflight accepts an admin-updated exact task version when it matches the 
   assert.equal(result.status, "READY");
   assert.equal(result.code, "READY");
   assert.equal(result.observedVersion, "2.1.201");
+});
+
+test("localhost deterministic Worker attestation matches the admin-built immutable image identity", async () => {
+  const imageDigest = await localWorkerImageDigest("claude-code", "2.1.201", "1.3.0");
+  const service = new LocalAgentReadinessService({
+    inspector: { async inspect(executable) { return executable === "claude" ? "2.1.201" : "0.91.0"; } },
+    executionEnabled: true,
+    inferenceGatewayUrl: "https://inference.internal.example/v1",
+    localDeterministicWorkerAttestation: true,
+    providerBindingVerifier: { async verify() { return true; } },
+  });
+  const request = { ...preflight, expectedVersion: "2.1.201", adapterVersion: "1.3.0", imageDigest };
+  const health = await service.health();
+  assert.equal(health.workerIdentityMode, "LOCAL_DETERMINISTIC");
+  assert.equal(health.workerImageVerified, true);
+  assert.equal((await service.preflight(request)).code, "READY");
+  assert.equal((await service.preflight({ ...request, imageDigest: digest })).code, "WORKER_IMAGE_MISMATCH");
+  const futureAdapterDigest = await localWorkerImageDigest("claude-code", "2.1.201", "1.4.0");
+  assert.equal((await service.preflight({ ...request, adapterVersion: "1.4.0", imageDigest: futureAdapterDigest })).code, "ADAPTER_MISMATCH");
 });
 
 test("preflight distinguishes WAITING_PROVIDER, disabled execution and ready", async () => {

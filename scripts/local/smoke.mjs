@@ -268,9 +268,11 @@ try {
     tenantId: "tenant-local",
     runId: "smoke-run",
     profileRevisionId: "profile-claude-platform-r5",
+    installationId: "claude-installation-214",
     agent: "claude-code",
     expectedVersion: "2.1.14",
     imageDigest: `sha256:${"a".repeat(64)}`,
+    adapterVersion: "1.3.0",
     providerRevisionId: "provider-platform-claude-r1",
     credentialVersionId: "credential-platform-claude-v1",
     model: "claude-sonnet-4-6-20250514",
@@ -288,7 +290,7 @@ try {
     agent: "claude-code",
     expectedVersion: "2.1.14",
     imageDigest: `sha256:${"a".repeat(64)}`,
-    adapterVersion: "1.0.0",
+    adapterVersion: "1.3.0",
     providerRevisionId: "provider-platform-claude-r1",
     providerProtocol: "anthropic-messages",
     credentialVersionId: "credential-platform-claude-v1",
@@ -567,7 +569,9 @@ try {
     throw new Error("local runtime or Godot is not ready");
   }
   const agentHealth = await agentRuntime.response.json();
-  if (!agentRuntime.response.ok || agentHealth.service !== "deviludo-local-agent-runtime" || !Array.isArray(agentHealth.agents)) {
+  if (!agentRuntime.response.ok || agentHealth.service !== "deviludo-local-agent-runtime"
+    || agentHealth.workerIdentityMode !== "LOCAL_DETERMINISTIC" || agentHealth.workerImageVerified !== true
+    || !Array.isArray(agentHealth.agents)) {
     throw new Error("local Agent readiness service is not ready");
   }
   const agentSummary = agentHealth.agents
@@ -1010,7 +1014,7 @@ try {
   }
   const executionGatePayload = await agentExecutionGate.response.json();
   if (![409, 503].includes(agentExecutionGate.response.status)
-    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"].includes(executionGatePayload.error?.code)) {
+    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "ADAPTER_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"].includes(executionGatePayload.error?.code)) {
     throw new Error("local Agent execution gate did not fail closed");
   }
   const forgedAgentRequestPayload = await forgedAgentRequest.response.json();

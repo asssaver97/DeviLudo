@@ -17,6 +17,7 @@ export type LocalHealth = {
     workerImageIdentity?: string | null;
     expectedWorkerImageIdentity?: string | null;
     workerImageVerified?: boolean;
+    workerIdentityMode?: "PINNED_ENV" | "LOCAL_DETERMINISTIC" | "NOT_CONFIGURED";
     windowsRunner?: string;
     linuxRunner?: string;
     macosRunner?: string;

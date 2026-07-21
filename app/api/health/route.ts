@@ -16,6 +16,7 @@ type LocalAgentHealth = {
   workerImageIdentity?: string | null;
   expectedWorkerImageIdentity?: string | null;
   workerImageVerified?: boolean;
+  workerIdentityMode?: "PINNED_ENV" | "LOCAL_DETERMINISTIC" | "NOT_CONFIGURED";
   agents?: { agent: "claude-code" | "codex-cli"; expectedVersion: string; observedVersion: string | null; state: LocalAgentState }[];
 };
 
@@ -51,6 +52,7 @@ export async function GET(request: Request) {
         workerImageIdentity: localAgentRuntime.workerImageIdentity ?? null,
         expectedWorkerImageIdentity: localAgentRuntime.expectedWorkerImageIdentity ?? null,
         workerImageVerified: localAgentRuntime.workerImageVerified === true,
+        workerIdentityMode: localAgentRuntime.workerIdentityMode ?? "NOT_CONFIGURED",
         windowsRunner: "NOT_CONNECTED",
         linuxRunner: "NOT_CONNECTED",
         macosRunner: "NOT_CONNECTED",

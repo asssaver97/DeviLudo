@@ -22,7 +22,7 @@ function request(agent: "claude-code" | "codex-cli", suffix: string): LocalAgent
     agent,
     expectedVersion: claude ? "2.1.14" : "0.91.0",
     imageDigest: `sha256:${claude ? "a".repeat(64) : "b".repeat(64)}`,
-    adapterVersion: "1.0.0",
+    adapterVersion: claude ? "1.3.0" : "1.2.2",
     providerRevisionId: `provider-${claude ? "claude" : "codex"}-r1`,
     providerProtocol: claude ? "anthropic-messages" : "openai-responses",
     credentialVersionId: `credential-${claude ? "claude" : "codex"}-v1`,
