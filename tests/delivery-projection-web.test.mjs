@@ -11,12 +11,55 @@ import { GET, POST } from "../app/api/projects/[projectId]/delivery/route.ts";
 import { GET as GET_EVIDENCE } from "../app/api/projects/[projectId]/evidence/route.ts";
 import { GET as GET_RUNNERS } from "../app/api/projects/[projectId]/runners/route.ts";
 import { signTrustedSpecSession } from "../lib/spec-dialogue/broker.ts";
+import { signTrustedGitHubSession } from "../lib/connections/github-broker.ts";
 import { RUNNER_FLEET_PROJECTION_SCHEMA_VERSION } from "../lib/runner/fleet-projection.ts";
 import { EVIDENCE_CATALOG_SCHEMA_VERSION } from "../lib/evidence/catalog-projection.ts";
 import { canonicalJson as canonicalEvidenceJson } from "../services/runner-control/src/canonical.ts";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
+const repositoryBindingId = "33333333-3333-4333-8333-333333333333";
+
+async function trustedProjectReadRequest(pathname, key, userId) {
+  const issuedAt = String(Date.now());
+  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
+  const githubUserId = "42";
+  const signature = await signTrustedGitHubSession({
+    method: "GET", pathname, tenantId, userId, sessionBinding, githubUserId, issuedAt, key,
+  });
+  return new Request(`https://app.deviludo.example${pathname}`, { headers: {
+    "x-deviludo-session-tenant": tenantId,
+    "x-deviludo-session-user": userId,
+    "x-deviludo-session-binding": sessionBinding,
+    "x-deviludo-session-github-user-id": githubUserId,
+    "x-deviludo-session-issued-at": issuedAt,
+    "x-deviludo-session-signature": signature,
+  } });
+}
+
+function projectLookup(input, init, expectedUserId) {
+  const url = new URL(String(input));
+  if (url.pathname !== "/v1/projects/lookup") return null;
+  const body = JSON.parse(String(init.body));
+  assert.deepEqual(body, {
+    principal: { tenantId, userId: expectedUserId, githubUserId: 42 },
+    projectId,
+  });
+  return new Response(JSON.stringify({
+    projectId,
+    tenantId,
+    slug: "evidence-project",
+    name: "Evidence project",
+    repositoryBindingId,
+    installationId: "9001",
+    repositoryId: 7001,
+    repositoryNodeId: "R_evidence_project",
+    owner: "north-dock",
+    repositoryName: "evidence-project",
+    defaultBranch: "main",
+    createdAt: "2026-07-18T00:00:00.000Z",
+  }), { status: 200 });
+}
 
 function projection() {
   const snapshot = new GameDeliveryWorkflow({
@@ -149,31 +192,28 @@ function evidenceCatalogProjection() {
   };
 }
 
-test("production Runner Fleet route requires a signed tenant session and exposes no write authority", async () => {
+test("production Runner Fleet route requires a project-authorized GitHub session and exposes no write authority", async () => {
   const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
   const pathname = `/api/projects/${projectId}/runners`;
-  const issuedAt = String(Date.now());
-  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
   const userId = "88888888-8888-4888-8888-888888888888";
-  const signature = await signTrustedSpecSession({ method: "GET", pathname, tenantId, userId, sessionBinding, issuedAt, key });
   const originalFetch = globalThis.fetch;
   const originalEndpoint = process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+  const originalProjectEndpoint = process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
   const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
   globalThis.fetch = async (url, init) => {
+    const lookup = projectLookup(url, init, userId);
+    if (lookup) return lookup;
     assert.equal(String(url), `https://projection.internal/v1/runner-fleet/${projectId}`);
     assert.equal(init.headers["x-deviludo-tenant-id"], tenantId);
     return new Response(JSON.stringify({ data: runnerFleetProjection() }), { status: 200 });
   };
   process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = "https://projection.internal/";
+  process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = "https://project-repository.internal/";
   process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
   try {
-    const response = await GET_RUNNERS(new Request(`https://app.deviludo.example${pathname}`, { headers: {
-      "x-deviludo-session-tenant": tenantId,
-      "x-deviludo-session-user": userId,
-      "x-deviludo-session-binding": sessionBinding,
-      "x-deviludo-session-issued-at": issuedAt,
-      "x-deviludo-session-signature": signature,
-    } }), { params: Promise.resolve({ projectId }) });
+    const response = await GET_RUNNERS(await trustedProjectReadRequest(pathname, key, userId), {
+      params: Promise.resolve({ projectId }),
+    });
     assert.equal(response.status, 200);
     assert.equal((await response.json()).data.runners[0].runnerId, "runner-linux-01");
     assert.equal((await GET_RUNNERS(new Request(`https://app.deviludo.example${pathname}`), {
@@ -183,36 +223,35 @@ test("production Runner Fleet route requires a signed tenant session and exposes
     globalThis.fetch = originalFetch;
     if (originalEndpoint === undefined) delete process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
     else process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = originalEndpoint;
+    if (originalProjectEndpoint === undefined) delete process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+    else process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = originalProjectEndpoint;
     if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
     else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
   }
 });
 
-test("production Evidence Catalog route requires a signed tenant session and exposes no object key", async () => {
+test("production Evidence Catalog route requires a project-authorized GitHub session and exposes no object key", async () => {
   const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
   const pathname = `/api/projects/${projectId}/evidence`;
-  const issuedAt = String(Date.now());
-  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
   const userId = "88888888-8888-4888-8888-888888888888";
-  const signature = await signTrustedSpecSession({ method: "GET", pathname, tenantId, userId, sessionBinding, issuedAt, key });
   const originalFetch = globalThis.fetch;
   const originalEndpoint = process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+  const originalProjectEndpoint = process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
   const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
   globalThis.fetch = async (url, init) => {
+    const lookup = projectLookup(url, init, userId);
+    if (lookup) return lookup;
     assert.equal(String(url), `https://projection.internal/v1/evidence-catalog/${projectId}`);
     assert.equal(init.headers["x-deviludo-tenant-id"], tenantId);
     return new Response(JSON.stringify({ data: evidenceCatalogProjection() }), { status: 200 });
   };
   process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = "https://projection.internal/";
+  process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = "https://project-repository.internal/";
   process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
   try {
-    const response = await GET_EVIDENCE(new Request(`https://app.deviludo.example${pathname}`, { headers: {
-      "x-deviludo-session-tenant": tenantId,
-      "x-deviludo-session-user": userId,
-      "x-deviludo-session-binding": sessionBinding,
-      "x-deviludo-session-issued-at": issuedAt,
-      "x-deviludo-session-signature": signature,
-    } }), { params: Promise.resolve({ projectId }) });
+    const response = await GET_EVIDENCE(await trustedProjectReadRequest(pathname, key, userId), {
+      params: Promise.resolve({ projectId }),
+    });
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.data.entries[0].bundle.status, "PASSED");
@@ -224,6 +263,43 @@ test("production Evidence Catalog route requires a signed tenant session and exp
     globalThis.fetch = originalFetch;
     if (originalEndpoint === undefined) delete process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
     else process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = originalEndpoint;
+    if (originalProjectEndpoint === undefined) delete process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+    else process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = originalProjectEndpoint;
+    if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
+    else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
+  }
+});
+
+test("a valid same-tenant session cannot read projections after project access is revoked", async () => {
+  const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const pathname = `/api/projects/${projectId}/evidence`;
+  const originalFetch = globalThis.fetch;
+  const originalEndpoint = process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+  const originalProjectEndpoint = process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+  const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
+  let projectionCalls = 0;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/v1/projects/lookup") return new Response("", { status: 404 });
+    projectionCalls += 1;
+    return new Response(JSON.stringify({ data: evidenceCatalogProjection() }), { status: 200 });
+  };
+  process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = "https://projection.internal/";
+  process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = "https://project-repository.internal/";
+  process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
+  try {
+    const response = await GET_EVIDENCE(await trustedProjectReadRequest(pathname, key, "revoked-user"), {
+      params: Promise.resolve({ projectId }),
+    });
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).error.code, "PROJECT_ACCESS_NOT_FOUND");
+    assert.equal(projectionCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalEndpoint === undefined) delete process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+    else process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = originalEndpoint;
+    if (originalProjectEndpoint === undefined) delete process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+    else process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = originalProjectEndpoint;
     if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
     else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
   }
@@ -319,32 +395,27 @@ test("production cancellation accepts only a signed reason and server derives wo
   }
 });
 
-test("production delivery GET requires a signed tenant session and returns only its projection", async () => {
+test("production delivery GET requires project authorization and returns only its projection", async () => {
   const expected = projection();
   const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
   const pathname = `/api/projects/${projectId}/delivery`;
-  const issuedAt = String(Date.now());
-  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
-  const signature = await signTrustedSpecSession({
-    method: "GET", pathname, tenantId, userId: "user-001", sessionBinding, issuedAt, key,
-  });
+  const userId = "user-001";
   const originalFetch = globalThis.fetch;
   const originalEndpoint = process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+  const originalProjectEndpoint = process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
   const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
-  globalThis.fetch = async (_url, init) => {
+  globalThis.fetch = async (url, init) => {
+    const lookup = projectLookup(url, init, userId);
+    if (lookup) return lookup;
+    assert.equal(String(url), `https://projection.internal/v1/delivery-projections/${projectId}`);
     assert.equal(init.headers["x-deviludo-tenant-id"], tenantId);
     return new Response(JSON.stringify({ data: expected }), { status: 200 });
   };
   process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = "https://projection.internal/";
+  process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = "https://project-repository.internal/";
   process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
   try {
-    const request = new Request(`https://app.deviludo.example${pathname}`, { headers: {
-      "x-deviludo-session-tenant": tenantId,
-      "x-deviludo-session-user": "user-001",
-      "x-deviludo-session-binding": sessionBinding,
-      "x-deviludo-session-issued-at": issuedAt,
-      "x-deviludo-session-signature": signature,
-    } });
+    const request = await trustedProjectReadRequest(pathname, key, userId);
     const response = await GET(request, { params: Promise.resolve({ projectId }) });
     assert.equal(response.status, 200);
     const body = await response.json();
@@ -359,6 +430,8 @@ test("production delivery GET requires a signed tenant session and returns only 
     globalThis.fetch = originalFetch;
     if (originalEndpoint === undefined) delete process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
     else process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = originalEndpoint;
+    if (originalProjectEndpoint === undefined) delete process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+    else process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = originalProjectEndpoint;
     if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
     else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
   }

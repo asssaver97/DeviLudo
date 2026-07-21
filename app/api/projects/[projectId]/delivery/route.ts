@@ -6,6 +6,7 @@ import {
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
 import { trustedSessionKeyFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
+import { authorizeProjectRead, projectReadAccessResponse } from "@/lib/projects/project-read-access";
 import {
   deliveryCancellationOperationKey,
   userAcceptanceBrokerFromEnvironment,
@@ -38,14 +39,9 @@ export async function GET(
     if (!UUID.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效。" } }, { status: 400 });
     const broker = deliveryProjectionBrokerFromEnvironment();
     if (!broker) return projectionRequired();
-    let sessionKey: Uint8Array;
-    try { sessionKey = trustedSessionKeyFromEnvironment(); }
-    catch { return projectionRequired(); }
-    let principal: Awaited<ReturnType<typeof verifyTrustedSpecSession>>;
-    try { principal = await verifyTrustedSpecSession(request, sessionKey); }
-    catch {
-      return json({ error: { code: "TRUSTED_SESSION_REQUIRED", message: "需要有效的平台会话。" } }, { status: 401 });
-    }
+    let principal: Awaited<ReturnType<typeof authorizeProjectRead>>;
+    try { principal = await authorizeProjectRead(request, projectId); }
+    catch (error) { return projectReadAccessResponse(error); }
     let projection: Awaited<ReturnType<typeof broker.read>>;
     try { projection = await broker.read({ tenantId: principal.tenantId, projectId }); }
     catch (error) {

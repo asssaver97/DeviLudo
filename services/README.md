@@ -21,7 +21,10 @@ behind the web console:
   present a stale registration as online. The same reader identity obtains a
   bounded project Evidence Catalog that revalidates canonical bundle digests,
   frozen authority bindings and invalidation tombstones under tenant RLS,
-  without returning archive object keys or storage grants.
+  without returning archive object keys or storage grants. Before the Web
+  workload invokes any delivery, fleet or evidence read, it revalidates the
+  signed GitHub user against the exact project through the separate Project
+  Repository Broker; tenant membership alone is not sufficient.
 - `agent-worker`: a one-run supervisor for the exact Claude Code or Codex CLI
   RuntimeSpec. It uses `shell: false`, validates all workspace/runtime paths,
   verifies the locked CLI version and WorkerImage digest, writes Adapter files

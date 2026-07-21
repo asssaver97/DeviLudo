@@ -299,7 +299,7 @@ paths:
   /projects/{projectId}/runners:
     get:
       operationId: getProjectRunnerFleet
-      description: Returns at most one latest fenced Runner lease per platform for this tenant project. Connectivity is derived from immutable registration state, heartbeat freshness, and certificate expiry; the endpoint has no Runner write authority.
+      description: Revalidates the signed GitHub user's access to the exact project, then returns at most one latest fenced Runner lease per platform. Connectivity is derived from immutable registration state, heartbeat freshness, and certificate expiry; the endpoint has no Runner write authority.
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200":
@@ -316,7 +316,7 @@ paths:
   /projects/{projectId}/evidence:
     get:
       operationId: getProjectEvidenceCatalog
-      description: Returns the latest 50 immutable evidence manifests for this tenant project after revalidating canonical bundle digests, authority bindings, platform coverage, and invalidation tombstones. Archive object keys and storage grants are never returned.
+      description: Revalidates the signed GitHub user's access to the exact project, then returns the latest 50 immutable evidence manifests after checking canonical bundle digests, authority bindings, platform coverage, and invalidation tombstones. Archive object keys and storage grants are never returned.
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200":

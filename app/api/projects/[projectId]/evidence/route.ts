@@ -3,8 +3,8 @@ import {
   DeliveryProjectionBrokerError,
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
+import { authorizeProjectRead, projectReadAccessResponse } from "@/lib/projects/project-read-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
-import { trustedSessionKeyFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
@@ -22,14 +22,9 @@ export async function GET(
     }
     const broker = deliveryProjectionBrokerFromEnvironment();
     if (!broker) return brokerRequired();
-    let sessionKey: Uint8Array;
-    try { sessionKey = trustedSessionKeyFromEnvironment(); }
-    catch { return brokerRequired(); }
-    let principal: Awaited<ReturnType<typeof verifyTrustedSpecSession>>;
-    try { principal = await verifyTrustedSpecSession(request, sessionKey); }
-    catch {
-      return json({ error: { code: "TRUSTED_SESSION_REQUIRED", message: "需要有效的平台会话。" } }, { status: 401 });
-    }
+    let principal: Awaited<ReturnType<typeof authorizeProjectRead>>;
+    try { principal = await authorizeProjectRead(request, projectId); }
+    catch (error) { return projectReadAccessResponse(error); }
     try {
       const projection = await broker.readEvidenceCatalog({ tenantId: principal.tenantId, projectId });
       return json({ data: projection, meta: { mode: "PRODUCTION" } }, { headers: { "cache-control": "no-store" } });
