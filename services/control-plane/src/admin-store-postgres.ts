@@ -61,6 +61,10 @@ type UsageEventRow = {
   cost_usd: string | number;
   recorded_at: string | Date;
 };
+type CredentialLastUsedRow = {
+  credential_version_id: string;
+  last_used_at: string | Date;
+};
 
 const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
@@ -100,11 +104,15 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const parameters: unknown[] = [windowStartedAt];
       const predicates = ["recorded_at >= $1::timestamptz"];
+      const credentialParameters: unknown[] = [];
+      const credentialPredicates: string[] = [];
       if (actor.tenantId) {
         if (!UUID_PATTERN.test(actor.tenantId)) throw new Error("Administrator usage tenant scope is invalid");
         await client.query("SELECT set_config('app.tenant_id', $1, true)", [actor.tenantId]);
         parameters.push(actor.tenantId);
         predicates.push(`tenant_id = $${parameters.length}::uuid`);
+        credentialParameters.push(actor.tenantId);
+        credentialPredicates.push(`tenant_id = $${credentialParameters.length}::uuid`);
       } else {
         // A platform-wide administrator needs a global projection. A database
         // role without BYPASSRLS fails closed here and health reports telemetry
@@ -117,6 +125,8 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
         }
         parameters.push(actor.projectId);
         predicates.push(`project_id = $${parameters.length}::uuid`);
+        credentialParameters.push(actor.projectId);
+        credentialPredicates.push(`project_id = $${credentialParameters.length}::uuid`);
       }
       const where = predicates.join(" AND ");
       const totals = await client.query<UsageTotalsRow>(
@@ -138,12 +148,28 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
           LIMIT 50`,
         parameters,
       );
+      const credentialUsage = await client.query<CredentialLastUsedRow>(
+        `SELECT credential_version_id, max(recorded_at) AS last_used_at
+           FROM deviludo.inference_usage_events
+          WHERE ${credentialPredicates.length ? credentialPredicates.join(" AND ") : "TRUE"}
+          GROUP BY credential_version_id
+          ORDER BY credential_version_id`,
+        credentialParameters,
+      );
       const total = totals.rows[0];
       if (!total) throw new Error("Administrator usage aggregate is unavailable");
       const result: AgentUsageSummary = Object.freeze({
         available: true,
         source: "inference_usage_events",
         windowStartedAt,
+        credentialLastUsedAt: Object.freeze(Object.fromEntries(credentialUsage.rows.map((row) => {
+          const lastUsedAt = new Date(row.last_used_at).toISOString();
+          if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{2,199}$/.test(row.credential_version_id)
+            || !Number.isFinite(Date.parse(lastUsedAt))) {
+            throw new Error("Administrator credential usage projection is invalid");
+          }
+          return [row.credential_version_id, lastUsedAt];
+        }))),
         totals: Object.freeze({
           requests: usageInteger(total.requests),
           inputTokens: usageInteger(total.input_tokens),

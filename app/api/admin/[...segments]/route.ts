@@ -103,6 +103,9 @@ function localOperationalProjection(store: DemoStoreState) {
     if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY") {
       addAlert("CRITICAL", "PROFILE_INSTALLATION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的精确 WorkerImage 当前不可服务");
     }
+    if (!installation || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])) {
+      addAlert("CRITICAL", "PROFILE_VERSION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Agent 版本已被阻止或缺少供应链授权");
+    }
     if (!provider || provider.state !== "ACTIVE" || Object.values(provider.probe).some((result) => result !== "PASS")) {
       addAlert("CRITICAL", "PROFILE_PROVIDER_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Provider revision 当前不可服务");
     }
@@ -112,12 +115,21 @@ function localOperationalProjection(store: DemoStoreState) {
       available: true,
       source: "inference_usage_events",
       windowStartedAt,
+      credentialLastUsedAt: localCredentialLastUsedAt(store),
       totals: { ...totals, costUsd: Number(totals.costUsd.toFixed(10)) },
       records,
     },
     configurationDiffs: store.audit.map(localConfigurationDiff).filter((item) => item !== null).slice(0, 50),
     alerts,
   };
+}
+
+function localCredentialLastUsedAt(store: DemoStoreState): Readonly<Record<string, string>> {
+  const projection: Record<string, string> = {};
+  for (const record of [...store.usage].sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))) {
+    projection[record.credentialVersionId] ??= record.recordedAt;
+  }
+  return Object.freeze(projection);
 }
 
 function localConfigurationDiff(record: DemoAuditEvent) {
@@ -171,6 +183,7 @@ export async function GET(request: Request, context: RouteContext) {
     const key = routeKey(segments);
     const store = getDemoStore();
     if (key === "agents") {
+      const credentialLastUsedAt = localCredentialLastUsedAt(store);
       return json({
         data: agentCatalog(),
         meta: {
@@ -184,7 +197,9 @@ export async function GET(request: Request, context: RouteContext) {
           rollouts: store.rollouts,
           providers: store.providers,
           profiles: store.profiles,
-          credentials: store.credentials.map(({ id, label, masked, version, state, createdAt }) => ({ id, label, masked, version, state, createdAt })),
+          credentials: store.credentials.map(({ id, label, masked, version, state, createdAt }) => ({
+            id, label, masked, version, state, createdAt, lastUsedAt: credentialLastUsedAt[id] ?? null,
+          })),
           defaults: store.defaults,
         },
       }, { headers: { "x-deviludo-effective-role": request.headers.get("x-deviludo-role") ?? "Auditor",
@@ -289,10 +304,11 @@ export async function POST(request: Request, context: RouteContext) {
       });
     }
 
-    if (key === "agent-versions/approve" || key === "agent-versions/block") {
+    if (key === "agent-versions/approve" || key === "agent-versions/block" || key === "agent-versions/deprecate") {
       const role = requireRole(request, VERSION_ROLES);
       const id = requireString(body, "id", 120);
-      const state = key.endsWith("approve") ? "APPROVED" as const : "BLOCKED" as const;
+      const state = key.endsWith("approve") ? "APPROVED" as const
+        : key.endsWith("deprecate") ? "DEPRECATED" as const : "BLOCKED" as const;
       const forbiddenAttestationFields = [
         "integrity", "signatureVerified", "scan", "sbomRef", "sourceDigest", "validationReceipt",
         "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAt", "imageDigest",
@@ -314,6 +330,12 @@ export async function POST(request: Request, context: RouteContext) {
         if (state === "APPROVED" && store.agentVersions[id] !== "DISCOVERED") {
           throw new HttpProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered version can be approved");
         }
+        if (state === "DEPRECATED" && store.agentVersions[id] !== "APPROVED") {
+          throw new HttpProblem(409, "INVALID_VERSION_TRANSITION", "Only an approved version can be deprecated");
+        }
+        if (state === "BLOCKED" && !["DISCOVERED", "VALIDATING", "APPROVED", "DEPRECATED"].includes(store.agentVersions[id])) {
+          throw new HttpProblem(409, "INVALID_VERSION_TRANSITION", "This Agent version cannot transition to blocked");
+        }
         const previousState = store.agentVersions[id];
         store.agentVersions[id] = state;
         if (state === "APPROVED" && receiptDigest && integrityDigest && evidenceDigest) {
@@ -334,6 +356,7 @@ export async function POST(request: Request, context: RouteContext) {
           previousState,
           state,
           automaticActivation: false,
+          newInstallationsAllowed: false,
           trustBoundary: "LOCAL_DETERMINISTIC_BROKER",
           ...(receiptDigest ? { validationReceiptDigest: receiptDigest } : {}),
         });
@@ -342,6 +365,7 @@ export async function POST(request: Request, context: RouteContext) {
           state,
           immutable: true,
           activationRequired: state === "APPROVED",
+          ...(state === "DEPRECATED" ? { existingInstallationsAffected: false } : {}),
           ...(receiptDigest ? { validationReceiptId: `local-validation-${id.replaceAll("@", "-")}`, validationReceiptDigest: receiptDigest } : {}),
         };
       });
@@ -788,12 +812,12 @@ export async function PUT(request: Request, context: RouteContext) {
       const provider = store.providers.find((item) => item.id === profile.providerId);
       if (!installation || installation.agent !== profile.agent || installation.state !== "ACTIVE"
         || installation.health !== "HEALTHY" || installation.rolloutPercent !== 100 || !installation.activatedAt
-        || store.agentVersions[`${installation.agent}@${installation.version}`] !== "APPROVED"
+        || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])
         || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE") {
         throw new HttpProblem(
           409,
           "PROFILE_NOT_SERVING_READY",
-          "Defaults require a fully active Installation, approved version and active Provider",
+          "Defaults require a fully active Installation, supply-chain-attested version and active Provider",
         );
       }
       const defaultScope = match[1] ?? "platform";

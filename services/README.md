@@ -221,6 +221,7 @@ Routes:
 | POST | `/admin/agent-versions/discover` | PlatformAgentAdmin |
 | POST | `/admin/agent-versions/approve` | PlatformAgentAdmin |
 | POST | `/admin/agent-versions/block` | PlatformAgentAdmin |
+| POST | `/admin/agent-versions/deprecate` | PlatformAgentAdmin |
 | POST | `/admin/agent-installations` | PlatformAgentAdmin |
 | POST | `/admin/agent-rollouts/:id/advance` | PlatformAgentAdmin |
 | POST | `/admin/agent-rollouts/:id/rollback` | PlatformAgentAdmin |

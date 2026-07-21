@@ -362,6 +362,7 @@ test("production Agent administration rebinds a trusted ingress principal to one
 test("Agent administration connector rejects cross-origin writes and credential response leakage", async () => {
   const key = Buffer.alloc(32, 61);
   assert.equal(resolveAdminControlPlanePath("POST", ["credentials"]), "/admin/credentials");
+  assert.equal(resolveAdminControlPlanePath("POST", ["agent-versions", "deprecate"]), "/admin/agent-versions/deprecate");
   assert.equal(resolveAdminControlPlanePath("POST", ["agent-installations", "claude-code-installation-2-1-18", "drain"]),
     "/admin/agent-installations/claude-code-installation-2-1-18/drain");
   assert.equal(resolveAdminControlPlanePath("POST", ["agent-installations", "claude-code-installation-2-1-18", "retire"]),

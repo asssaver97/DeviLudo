@@ -41,6 +41,24 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   assert.equal(blocked.status, 201);
   assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "BLOCKED");
   assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_BLOCKED"), true);
+
+  const existingInstallation = getDemoStore().installations.find((item) => item.agent === "claude-code" && item.version === "2.1.14");
+  const deprecated = await POST(
+    request("agent-versions/deprecate", "POST", "PlatformAgentAdmin", { id: "claude-code@2.1.14" }),
+    context("agent-versions/deprecate"),
+  );
+  assert.equal(deprecated.status, 201);
+  assert.equal(getDemoStore().agentVersions["claude-code@2.1.14"], "DEPRECATED");
+  assert.equal(existingInstallation?.state, "ACTIVE");
+  assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_DEPRECATED"), true);
+
+  const deniedInstallation = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "claude-code", version: "2.1.14", workerPool: "development-local-deprecated", adapterVersion: "1.3.0",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(deniedInstallation.status, 409);
 });
 
 test("local Agent health exposes usage, configuration differences and derived alerts with the production shape", async () => {
@@ -61,6 +79,7 @@ test("local Agent health exposes usage, configuration differences and derived al
   assert.equal(data.usage.available, true);
   assert.equal(data.usage.totals.requests, 2);
   assert.equal(data.usage.records.every((record) => record.credentialVersionId && record.runId), true);
+  assert.equal(data.usage.credentialLastUsedAt["cred-claude-platform-v4"], data.usage.records[0].recordedAt);
   const diff = data.configurationDiffs.find((item) => item.action === "AGENT_DEFAULT_UPDATED");
   assert.deepEqual(diff.changes, [{
     field: "profileRevisionId",

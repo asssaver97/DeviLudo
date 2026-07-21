@@ -140,7 +140,7 @@ export function resolveAdminControlPlanePath(methodInput: string, segments: read
   const exact = method === "GET"
     ? new Set(["agents", "agent-health", "audit"])
     : method === "POST"
-      ? new Set(["agent-versions/discover", "agent-versions/approve", "agent-versions/block", "agent-installations", "agent-profiles", "credentials"])
+      ? new Set(["agent-versions/discover", "agent-versions/approve", "agent-versions/block", "agent-versions/deprecate", "agent-installations", "agent-profiles", "credentials"])
       : new Set<string>();
   const dynamic = method === "GET"
     ? (/^inference-runs\/([a-f0-9-]+)\/([a-f0-9-]+)\/reconciliation$/i.test(key)

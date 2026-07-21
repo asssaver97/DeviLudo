@@ -62,7 +62,15 @@ type AdminState = {
     budget: { maxUsd: number | null; maxTurns: number | null; timeoutSeconds: number | null };
   }>;
   providers: Array<{ id: string; agent: AgentKind; protocol: string; baseUrl: string; primaryModel: string; credentialVersionId: string; state: string }>;
-  credentials: Array<{ id: string; label: string; maskedFingerprint: string; version: number | null; state: string; createdAt: string | null }>;
+  credentials: Array<{
+    id: string;
+    label: string;
+    maskedFingerprint: string;
+    version: number | null;
+    state: string;
+    createdAt: string | null;
+    lastUsedAt: string | null;
+  }>;
   defaults: Record<string, string>;
 };
 type AgentHealth = {
@@ -324,14 +332,17 @@ export default function AgentAdminDashboard() {
     const row = versions.find((item) => item.id === id);
     if (!row) return;
     try {
-      await adminRequest(`agent-versions/${status === "APPROVED" ? "approve" : "block"}`, {
+      const action = status === "APPROVED" ? "approve" : status === "DEPRECATED" ? "deprecate" : "block";
+      await adminRequest(`agent-versions/${action}`, {
         method: "POST",
         role,
         body: { id: `${row.agent}@${row.version}` },
       });
       await refreshAdminState();
       await refreshAudit();
-      notify(status === "APPROVED" ? "版本已批准，可用于构建 WorkerImage" : "版本已阻止并写入本地审计");
+      notify(status === "APPROVED" ? "版本已批准，可用于构建 WorkerImage"
+        : status === "DEPRECATED" ? "版本已弃用；现有安装与运行任务不受影响，新镜像构建已禁止"
+          : "版本已阻止并写入本地审计");
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "版本治理失败", "warning");
     }
@@ -676,7 +687,7 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
                 <td><span className={row.vulnerabilities.includes("1 高危") ? styles.dangerText : styles.goodText}>{row.vulnerabilities}</span></td>
                 <td><StatusPill tone={row.status === "APPROVED" ? "success" : row.status === "BLOCKED" || row.status === "REJECTED" ? "danger" : "warning"}>{row.status}</StatusPill></td>
                 <td>
-                  {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : row.status === "APPROVED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onInstall(row.id)} disabled={!canOperate || installations.some((item) => item.agent === row.agent && item.version === row.version)}>{installations.some((item) => item.agent === row.agent && item.version === row.version) ? "已构建" : "构建镜像"}</button></div> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
+                  {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : row.status === "APPROVED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onInstall(row.id)} disabled={!canOperate || installations.some((item) => item.agent === row.agent && item.version === row.version)}>{installations.some((item) => item.agent === row.agent && item.version === row.version) ? "已构建" : "构建镜像"}</button><button type="button" onClick={() => onUpdate(row.id, "DEPRECATED")} disabled={!canOperate}>弃用</button></div> : row.status === "DEPRECATED" ? <button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
                 </td>
               </tr>
             ))}
@@ -1002,7 +1013,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         </div>
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
-          <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>仅显示掩码；版本、轮换与最后使用时间由 Vault 元数据提供</small></div>
+          <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>v{matchingCredential?.version ?? "?"} · 创建 {formatLifecycleTime(matchingCredential?.createdAt ?? null)} · 最后使用 {formatLifecycleTime(matchingCredential?.lastUsedAt ?? null)}</small></div>
           <div className={styles.credentialActions}>
             <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "使用下方输入的新 Key 创建不可变版本" : "需要 SecurityAdmin 权限"} onClick={() => void rotateCredential()}>轮换</button>
             <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "立即停止该版本签发新租约" : "需要 SecurityAdmin 权限"} onClick={() => void revokeCredential()}>撤销当前</button>
@@ -1010,7 +1021,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         </div>
         {agentCredentials.length ? <div className={styles.credentialHistory}>
           {agentCredentials.map((credential) => <div key={credential.id}>
-            <span><strong>{credential.label}</strong><small>{credential.id} · v{credential.version ?? "?"} · {credential.state}</small></span>
+            <span><strong>{credential.label}</strong><small>{credential.id} · v{credential.version ?? "?"} · {credential.state} · 最后使用 {formatLifecycleTime(credential.lastUsedAt)}</small></span>
             <code>{credential.maskedFingerprint}</code>
             {credential.state !== "REVOKED" ? <button type="button" disabled={testing || !permissions.manageGlobalCredentials}
               onClick={() => void revokeCredential(credential)}>撤销此版本</button> : <StatusPill tone="danger">REVOKED</StatusPill>}
@@ -1340,7 +1351,10 @@ function credentialRow(value: Record<string, unknown>): AdminState["credentials"
   const id = text(value.id); const label = text(value.label); const state = text(value.state);
   const maskedFingerprint = text(value.maskedFingerprint) ?? text(value.masked);
   return id && label && state && maskedFingerprint
-    ? { id, label, state, maskedFingerprint, version: number(value.version), createdAt: text(value.createdAt) } : null;
+    ? {
+      id, label, state, maskedFingerprint, version: number(value.version), createdAt: text(value.createdAt),
+      lastUsedAt: text(value.lastUsedAt),
+    } : null;
 }
 function defaultRows(value: unknown): Record<string, string> {
   const source = object(value);

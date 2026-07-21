@@ -37,6 +37,10 @@ export class AdminController {
     return this.service.setVersionState("block", objectBody(body), actor(request));
   }
 
+  deprecateVersion(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.setVersionState("deprecate", objectBody(body), actor(request));
+  }
+
   createInstallation(body: Record<string, unknown>, request: FastifyRequest) {
     return this.service.createInstallation(objectBody(body), actor(request));
   }
@@ -138,6 +142,7 @@ applyRoute("agents", Get("agents"), ALL_ROLES, [Req()]);
 applyRoute("discoverVersions", Post("agent-versions/discover"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("approveVersion", Post("agent-versions/approve"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("blockVersion", Post("agent-versions/block"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("deprecateVersion", Post("agent-versions/deprecate"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("createInstallation", Post("agent-installations"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("advanceRollout", Post("agent-rollouts/:id/advance"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);

@@ -47,6 +47,9 @@ test("Agent health exposes authoritative immutable usage totals without raising 
         available: true,
         source: "inference_usage_events",
         windowStartedAt: "2026-07-21T00:00:00.000Z",
+        credentialLastUsedAt: Object.freeze({
+          "credential-platform-claude-v1": "2026-07-21T23:00:00.000Z",
+        }),
         totals: Object.freeze({ requests: 1, inputTokens: 120, outputTokens: 30, costUsd: 0.00048 }),
         records: Object.freeze([Object.freeze({
           requestId: "44444444-4444-4444-8444-444444444444",
@@ -72,7 +75,14 @@ test("Agent health exposes authoritative immutable usage totals without raising 
   assert.equal(health.status, "HEALTHY");
   assert.equal(health.usage.totals.costUsd, 0.00048);
   assert.equal(health.usage.records[0]?.credentialVersionId, "credential-platform-claude-v1");
+  assert.equal(health.usage.credentialLastUsedAt["credential-platform-claude-v1"], "2026-07-21T23:00:00.000Z");
   assert.equal(health.alerts.some((alert) => alert.code === "INFERENCE_USAGE_TELEMETRY_UNAVAILABLE"), false);
+  const catalog = await service(store).agents(actor(null)) as {
+    credentials: Array<{ id: string; lastUsedAt: string | null; secretRef?: string }>;
+  };
+  const credential = catalog.credentials.find((item) => item.id === "credential-platform-claude-v1");
+  assert.equal(credential?.lastUsedAt, "2026-07-21T23:00:00.000Z");
+  assert.equal(credential?.secretRef, undefined);
 });
 
 function actor(tenantId: string | null): RequestActor {

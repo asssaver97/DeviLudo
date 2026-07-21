@@ -135,6 +135,20 @@ test("Agent catalog rejects unhealthy installations, inactive Providers, floatin
   assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: scoped, tenantId, projectId }), /another tenant scope/);
 });
 
+test("Agent catalog keeps an attested deprecated version serving through its existing active installation", () => {
+  const deprecated = catalog();
+  deprecated.versions[0]!.state = "DEPRECATED";
+  const resolved = resolveCatalogConfiguration({ revision: 19, payload: deprecated, tenantId, projectId });
+  assert.equal(resolved.exactAgentVersion, "2.1.14");
+
+  const blocked = catalog();
+  blocked.versions[0]!.state = "BLOCKED";
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 20, payload: blocked, tenantId, projectId }),
+    /not serving-ready/,
+  );
+});
+
 test("Agent catalog rejects unprobed authentication, pricing and governance drift", () => {
   const authentication = catalog();
   authentication.providers[0]!.authentication = "bearer";

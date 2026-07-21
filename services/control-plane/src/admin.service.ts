@@ -56,6 +56,9 @@ export class AdminService {
   ) {}
 
   async agents(actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
+    let credentialLastUsedAt: Readonly<Record<string, string>> = Object.freeze({});
+    try { credentialLastUsedAt = (await this.store.readUsage(actor)).credentialLastUsedAt; }
+    catch { /* Credential catalog remains available when telemetry fails closed. */ }
     return this.store.read((state) => {
       const catalog = (["claude-code", "codex-cli"] as const).map((agent) => ({
         id: agent,
@@ -78,7 +81,10 @@ export class AdminService {
       const visibleProviderIds = new Set(profiles.map((profile) => profile.providerRevisionId));
       const credentials = [...state.credentials.values()]
         .filter((credential) => credentialVisibleTo(credential, actor))
-        .map(credentialView);
+        .map((credential) => credentialView({
+          ...credential,
+          lastUsedAt: credentialLastUsedAt[credential.id] ?? credential.lastUsedAt,
+        }));
       const defaults = Object.fromEntries([...state.defaults.entries()].filter(([scope, profileId]) =>
         scope === "platform" || visibleProfileIds.has(profileId)));
       const platformProfile = state.profiles.get(state.defaults.get("platform") ?? "");
@@ -147,25 +153,35 @@ export class AdminService {
   }
 
   async setVersionState(
-    action: "approve" | "block",
+    action: "approve" | "block" | "deprecate",
     body: Record<string, unknown>,
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
     const id = requiredString(body, "id", 160);
-    if (action === "block") {
+    if (action === "block" || action === "deprecate") {
       assertAllowedFields(body, ["id"]);
       return this.mutate(actor, (state) => {
         const record = state.versions.get(id);
         if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
-        if (record.state === "DEPRECATED") {
-          throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "A deprecated version cannot be blocked in place");
+        if (action === "deprecate" && record.state !== "APPROVED") {
+          throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "Only an approved version can be deprecated");
+        }
+        if (action === "block" && !["DISCOVERED", "VALIDATING", "APPROVED", "DEPRECATED"].includes(record.state)) {
+          throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "This Agent version cannot transition to blocked");
         }
         const previousState = record.state;
-        record.state = "BLOCKED";
-        this.audit(state, "AGENT_VERSION_BLOCKED", record.id, actor, {
-          previousState, state: record.state, automaticActivation: false,
+        record.state = action === "deprecate" ? "DEPRECATED" : "BLOCKED";
+        this.audit(state, action === "deprecate" ? "AGENT_VERSION_DEPRECATED" : "AGENT_VERSION_BLOCKED", record.id, actor, {
+          previousState,
+          state: record.state,
+          automaticActivation: false,
+          newInstallationsAllowed: false,
         });
-        return { version: record, automaticActivation: false };
+        return {
+          version: record,
+          automaticActivation: false,
+          ...(action === "deprecate" ? { existingInstallationsAffected: false } : {}),
+        };
       });
     }
     if ([
@@ -1527,7 +1543,7 @@ function assertProfileServingReady(
     && installation.health === "HEALTHY" && installation.rolloutPercent === 100
     && installation.selfUpdateDisabled === true && !!installation.imageDigest && !!installation.workerImageId
     && !!installation.buildReceiptId && !!installation.buildReceiptDigest;
-  const versionReady = version?.agent === profile.agent && version.state === "APPROVED"
+  const versionReady = version?.agent === profile.agent && ["APPROVED", "DEPRECATED"].includes(version.state)
     && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
     && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest;
   const providerReady = provider?.agent === profile.agent && provider.state === "ACTIVE"
@@ -1539,7 +1555,7 @@ function assertProfileServingReady(
     throw new ServiceProblem(
       409,
       "PROFILE_NOT_SERVING_READY",
-      "Defaults require a fully active Installation, approved version, probed Provider and active credential",
+      "Defaults require a fully active Installation, supply-chain-attested version, probed Provider and active credential",
     );
   }
 }
@@ -1976,10 +1992,14 @@ function operationalAlerts(
   }
   for (const profile of profiles.filter((item) => item.state === "ACTIVE")) {
     const installation = state.installations.get(profile.installationId);
+    const version = installation ? state.versions.get(installation.agentVersionId) : undefined;
     const provider = state.providers.get(profile.providerRevisionId);
     const credential = state.credentials.get(profile.credentialVersionId);
     if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY") {
       add("CRITICAL", "PROFILE_INSTALLATION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的精确 WorkerImage 当前不可服务");
+    }
+    if (!version || !["APPROVED", "DEPRECATED"].includes(version.state)) {
+      add("CRITICAL", "PROFILE_VERSION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Agent 版本已被阻止或缺少供应链授权");
     }
     if (!provider || provider.state !== "ACTIVE" || !providerProbePassed(provider)) {
       add("CRITICAL", "PROFILE_PROVIDER_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Provider revision 当前不可服务");

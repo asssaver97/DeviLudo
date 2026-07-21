@@ -229,6 +229,13 @@ paths:
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { $ref: "#/components/requestBodies/VersionAction" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-versions/deprecate:
+    post:
+      operationId: deprecateAgentVersion
+      description: Stops new WorkerImage builds from an approved exact version without interrupting existing installations or pinned runs.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionAction" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-installations:
     post:
       operationId: createAgentInstallation
@@ -1004,11 +1011,15 @@ components:
     AgentUsageSummary:
       type: object
       additionalProperties: false
-      required: [available, source, windowStartedAt, totals, records]
+      required: [available, source, windowStartedAt, credentialLastUsedAt, totals, records]
       properties:
         available: { type: boolean }
         source: { const: inference_usage_events }
         windowStartedAt: { type: string, format: date-time }
+        credentialLastUsedAt:
+          type: object
+          description: Actor-scoped all-time last-use projection keyed by immutable credential version ID.
+          additionalProperties: { type: string, format: date-time }
         totals:
           type: object
           additionalProperties: false

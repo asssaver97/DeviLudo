@@ -61,6 +61,7 @@ test("Agent settings contract uses immutable credential revisions and governance
 
 test("Agent administration mutations publish exact request-body contracts", () => {
   assert.match(operationBlock("/admin/agent-versions/discover", "post"), /AgentVersionDiscovery/);
+  assert.match(operationBlock("/admin/agent-versions/deprecate", "post"), /VersionAction/);
   assert.match(operationBlock("/admin/agent-installations", "post"), /AgentInstallationDraft/);
   assert.match(operationBlock("/admin/credentials/{id}/rotate", "post"), /CredentialRotation/);
   assert.match(operationBlock("/settings/agents/credentials/{id}/rotate", "post"), /CredentialRotation/);

@@ -65,6 +65,7 @@ export function emptyUsageSummary(available: boolean, now = new Date()): AgentUs
     available,
     source: "inference_usage_events",
     windowStartedAt: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+    credentialLastUsedAt: Object.freeze({}),
     totals: Object.freeze({ requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }),
     records: Object.freeze([]),
   });

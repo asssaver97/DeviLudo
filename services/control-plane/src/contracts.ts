@@ -192,6 +192,8 @@ export interface AgentUsageSummary {
   readonly available: boolean;
   readonly source: "inference_usage_events";
   readonly windowStartedAt: string;
+  /** Actor-scoped all-time projection; raw credential catalog rows remain immutable. */
+  readonly credentialLastUsedAt: Readonly<Record<string, string>>;
   readonly totals: Readonly<{
     requests: number;
     inputTokens: number;

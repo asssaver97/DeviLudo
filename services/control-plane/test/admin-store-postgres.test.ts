@@ -307,6 +307,12 @@ test("Postgres Agent usage projection applies tenant and project scope before re
           recorded_at: "2026-07-22T01:00:00.000Z",
         }]);
       }
+      if (text.includes("max(recorded_at) AS last_used_at")) {
+        return result([{
+          credential_version_id: "credential-platform-claude-v1",
+          last_used_at: "2026-07-22T01:00:00.000Z",
+        }]);
+      }
       return result([]);
     },
     release() {},
@@ -319,6 +325,9 @@ test("Postgres Agent usage projection applies tenant and project scope before re
   assert.equal(usage.available, true);
   assert.deepEqual(usage.totals, { requests: 1, inputTokens: 120, outputTokens: 30, costUsd: 0.00048 });
   assert.equal(usage.records[0]?.credentialVersionId, "credential-platform-claude-v1");
+  assert.deepEqual(usage.credentialLastUsedAt, {
+    "credential-platform-claude-v1": "2026-07-22T01:00:00.000Z",
+  });
   assert.equal(statements.some(({ text }) => text === "SET LOCAL row_security = off"), false);
   const setTenant = statements.find(({ text }) => text.includes("set_config('app.tenant_id'"));
   assert.deepEqual(setTenant?.values, [tenantId]);
@@ -327,6 +336,10 @@ test("Postgres Agent usage projection applies tenant and project scope before re
   assert.match(aggregate?.text ?? "", /project_id = \$3::uuid/);
   assert.equal(aggregate?.values?.[1], tenantId);
   assert.equal(aggregate?.values?.[2], projectId);
+  const credentialProjection = statements.find(({ text }) => text.includes("max(recorded_at) AS last_used_at"));
+  assert.match(credentialProjection?.text ?? "", /tenant_id = \$1::uuid/);
+  assert.match(credentialProjection?.text ?? "", /project_id = \$2::uuid/);
+  assert.deepEqual(credentialProjection?.values, [tenantId, projectId]);
 
   await store.readUsage({
     role: "SecurityAdmin", actorId: "security-admin", tenantId: null, projectId: null,

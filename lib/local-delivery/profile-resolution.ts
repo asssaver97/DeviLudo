@@ -49,7 +49,7 @@ export function resolveLocalAgentProfile(
     || installation.rolloutPercent !== 100 || !installation.activatedAt
     || !EXACT_VERSION.test(installation.version) || !EXACT_VERSION.test(installation.adapterVersion)
     || !IMAGE_DIGEST.test(installation.imageDigest)
-    || store.agentVersions[`${installation.agent}@${installation.version}`] !== "APPROVED"
+    || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])
     || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE"
     || provider.protocol !== expectedProtocol || !SAFE_ID.test(provider.credentialId)
     // The bundled demo catalog uses non-secret fixture bindings. Once a

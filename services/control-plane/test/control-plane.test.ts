@@ -178,6 +178,32 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
   assert.equal(installation.statusCode, 201);
   const installationId = installation.json().data.id as string;
 
+  const deprecated = await inject({
+    method: "POST",
+    url: "/admin/agent-versions/deprecate",
+    role: "PlatformAgentAdmin",
+    key: "deprecate-codex-092",
+    payload: { id: "codex-cli@0.92.0" },
+  });
+  assert.equal(deprecated.statusCode, 201);
+  assert.equal(deprecated.json().data.version.state, "DEPRECATED");
+  assert.equal(deprecated.json().data.existingInstallationsAffected, false);
+
+  const deniedNewInstallation = await inject({
+    method: "POST",
+    url: "/admin/agent-installations",
+    role: "PlatformAgentAdmin",
+    key: "install-codex-092-after-deprecation",
+    payload: {
+      agent: "codex-cli",
+      version: "0.92.0",
+      workerPool: "development-linux-next",
+      adapterVersion: "1.1.0",
+    },
+  });
+  assert.equal(deniedNewInstallation.statusCode, 409);
+  assert.equal(deniedNewInstallation.json().error.code, "VERSION_NOT_APPROVED");
+
   for (const [index, expected] of [5, 25, 100].entries()) {
     const rollout = await inject({
       method: "POST",

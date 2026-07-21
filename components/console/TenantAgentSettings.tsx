@@ -148,7 +148,7 @@ export function TenantAgentSettings() {
           <button className="button button-primary" disabled={busy || readOnly} type="submit">安全写入 Vault</button>
         </form>
         <div className="masked-list credential-version-list">{credentialRows.length ? credentialRows.map((item) => <article key={item.id}>
-          <div className="credential-version-summary"><span><b>{item.label}</b><small>{item.id} · v{item.version ?? "?"} · {item.state}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>
+          <div className="credential-version-summary"><span><b>{item.label}</b><small>{item.id} · v{item.version ?? "?"} · {item.state}</small><small>创建 {credentialTime(item.createdAt)} · 最后使用 {credentialTime(item.lastUsedAt)}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>
           <div className="credential-version-actions">
             {item.state === "ACTIVE" ? <button disabled={busy || readOnly} onClick={() => setRotatingCredentialId(item.id)} type="button">轮换</button> : null}
             {item.state !== "REVOKED" ? <button disabled={busy || readOnly} onClick={() => void revokeCredential(item)} type="button">撤销</button> : null}
@@ -191,4 +191,9 @@ export function TenantAgentSettings() {
 function normalize(data: AgentData, meta?: Record<string, unknown>): AgentData {
   if (Array.isArray(data)) return { catalog: data, ...(meta ?? {}) } as AgentData;
   return data;
+}
+
+function credentialTime(value?: string | null): string {
+  if (!value || !Number.isFinite(Date.parse(value))) return "尚无记录";
+  return new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }

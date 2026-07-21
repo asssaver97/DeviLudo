@@ -147,8 +147,8 @@ function resolveProfileConfiguration(input: {
   const buildReceiptDigest = match(installation.buildReceiptDigest, SHA256, "build receipt digest");
   const agentVersionId = catalogId(installation.agentVersionId);
   const version = requireRecord(versions, agentVersionId, "Agent version");
-  if (version.agent !== agent || version.state !== "APPROVED" || version.signatureVerified !== true
-    || version.scan !== "PASS") invalid("Agent version supply-chain authority is not approved");
+  if (version.agent !== agent || !["APPROVED", "DEPRECATED"].includes(String(version.state)) || version.signatureVerified !== true
+    || version.scan !== "PASS") invalid("Agent version supply-chain authority is not serving-ready");
   const exactAgentVersion = exactVersion(version.version);
   if (/(^|[-_.])(latest|stable|default)(?:$|[-_.])/i.test(exactAgentVersion)) {
     invalid("Floating Agent versions are not allowed");
