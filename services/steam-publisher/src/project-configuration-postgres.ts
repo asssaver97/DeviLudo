@@ -45,6 +45,25 @@ const SELECT_CONFIGURATION = `SELECT r.id, r.project_id, r.revision, r.steam_app
 export class PostgresSteamProjectConfigurationStore implements SteamProjectConfigurationStore {
   constructor(private readonly pool: SteamPostgresPool) {}
 
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{
+        intents_ready: boolean;
+        depots_ready: boolean;
+        releases_ready: boolean;
+      }>(`SELECT to_regclass('deviludo.steam_project_configuration_intents') IS NOT NULL AS intents_ready,
+                to_regclass('deviludo.steam_project_depot_configurations') IS NOT NULL AS depots_ready,
+                to_regclass('deviludo.steam_project_release_configurations') IS NOT NULL AS releases_ready`);
+      const readiness = result.rows[0];
+      if (!readiness?.intents_ready || !readiness.depots_ready || !readiness.releases_ready) {
+        throw new Error("Steam project configuration schema is unavailable");
+      }
+    } finally {
+      client.release();
+    }
+  }
+
   async findStatus(input: Parameters<SteamProjectConfigurationStore["findStatus"]>[0]) {
     return this.#transaction(input.tenantId, async (client) => {
       const [configuration, intent] = await Promise.all([
@@ -71,6 +90,12 @@ export class PostgresSteamProjectConfigurationStore implements SteamProjectConfi
          SELECT $1::uuid, $2::uuid, $3::uuid, $4, $5, s.id, $6, $7, 'CONFIGURING',
                 $8::timestamptz, $9::timestamptz
            FROM deviludo.projects p
+           JOIN deviludo.users actor
+             ON actor.tenant_id = p.tenant_id AND actor.id::text = $4
+            AND actor.status = 'ACTIVE'
+           JOIN deviludo.tenant_memberships membership
+             ON membership.tenant_id = actor.tenant_id AND membership.user_id = actor.id
+            AND membership.status = 'ACTIVE' AND membership.role = 'ProjectOwner'
            JOIN deviludo.steam_enrollments e
              ON e.tenant_id = p.tenant_id AND e.user_subject = $4 AND e.state = 'READY'
            JOIN deviludo.steam_build_sessions s
@@ -107,7 +132,16 @@ export class PostgresSteamProjectConfigurationStore implements SteamProjectConfi
     return this.#transaction(input.tenantId, async (client) => {
       const found = await client.query<IntentRow>(`${SELECT_INTENT}
         WHERE i.tenant_id = $1::uuid AND i.project_id = $2::uuid AND i.id = $3::uuid
-          AND i.user_subject = $4 AND i.session_binding_digest = $5`,
+          AND i.user_subject = $4 AND i.session_binding_digest = $5
+          AND EXISTS (
+            SELECT 1
+              FROM deviludo.users actor
+              JOIN deviludo.tenant_memberships membership
+                ON membership.tenant_id = actor.tenant_id AND membership.user_id = actor.id
+               AND membership.status = 'ACTIVE' AND membership.role = 'ProjectOwner'
+             WHERE actor.tenant_id = i.tenant_id AND actor.id::text = i.user_subject
+               AND actor.status = 'ACTIVE'
+          )`,
       [input.tenantId, input.projectId, input.intentId, input.userId, input.sessionBindingDigest]);
       if (!found.rows[0]) throw new Error("Steam project configuration intent principal does not match");
       return parseIntent(found.rows[0]);
@@ -119,8 +153,16 @@ export class PostgresSteamProjectConfigurationStore implements SteamProjectConfi
       await client.query(`SELECT id FROM deviludo.projects
         WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE`, [input.tenantId, input.projectId]);
       const locked = await client.query<IntentRow>(`${SELECT_INTENT}
+        JOIN deviludo.users actor
+          ON actor.tenant_id = i.tenant_id AND actor.id::text = i.user_subject
+         AND actor.status = 'ACTIVE'
+        JOIN deviludo.tenant_memberships membership
+          ON membership.tenant_id = actor.tenant_id AND membership.user_id = actor.id
+         AND membership.status = 'ACTIVE' AND membership.role = 'ProjectOwner'
         WHERE i.tenant_id = $1::uuid AND i.project_id = $2::uuid AND i.id = $3::uuid
-          AND i.user_subject = $4 AND i.session_binding_digest = $5 FOR UPDATE OF i`,
+          AND i.user_subject = $4 AND i.session_binding_digest = $5
+        FOR UPDATE OF i
+        FOR SHARE OF actor, membership`,
       [input.tenantId, input.projectId, input.intentId, input.userId, input.sessionBindingDigest]);
       const intent = locked.rows[0];
       if (!intent) throw new Error("Steam project configuration intent principal does not match");

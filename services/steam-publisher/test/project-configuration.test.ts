@@ -7,6 +7,8 @@ import type {
   SteamProjectConfigurationStore,
   SteamProjectReleaseConfiguration,
 } from "../src/project-configuration-contracts";
+import { PostgresSteamProjectConfigurationStore } from "../src/project-configuration-postgres";
+import type { SteamPostgresClient, SteamPostgresPool } from "../src/enrollment-postgres";
 
 const now = new Date("2099-01-01T00:00:00.000Z");
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -23,6 +25,7 @@ class MemoryStore implements SteamProjectConfigurationStore {
     permissions: Object.freeze(["EditAppMetadata", "PublishAppChanges"] as const), state: "ACTIVE",
     verifiedAt: now.toISOString(), expiresAt: "2099-03-01T00:00:00.000Z" });
 
+  async probe() {}
   async findStatus() { return Object.freeze({ activeConfiguration: this.configuration, pendingIntent: this.intent?.state === "CONFIGURING" ? this.intent : null }); }
   async createIntent(input: Parameters<SteamProjectConfigurationStore["createIntent"]>[0]) {
     if (this.intent) {
@@ -60,6 +63,40 @@ function coordinator(store = new MemoryStore()) {
       return { secretRef: "vault://steam/beta/password/v1", maskedFingerprint: "sha256:01234567…abcdef" }; },
     async revoke(secretRef) { revoked.push(secretRef); } } }) };
 }
+
+class ProbePool implements SteamPostgresPool {
+  released = 0;
+  query = "";
+
+  constructor(private readonly readiness: Readonly<{
+    intents_ready: boolean;
+    depots_ready: boolean;
+    releases_ready: boolean;
+  }>) {}
+
+  async connect(): Promise<SteamPostgresClient> {
+    return {
+      query: async <Row extends Record<string, unknown>>(query: string) => {
+        this.query = query;
+        return { rowCount: 1, rows: [this.readiness as unknown as Row] };
+      },
+      release: () => { this.released += 1; },
+    };
+  }
+}
+
+test("project Steam configuration readiness requires every immutable schema table", async () => {
+  const ready = new ProbePool({ intents_ready: true, depots_ready: true, releases_ready: true });
+  await new PostgresSteamProjectConfigurationStore(ready).probe();
+  assert.match(ready.query, /steam_project_configuration_intents/);
+  assert.match(ready.query, /steam_project_depot_configurations/);
+  assert.match(ready.query, /steam_project_release_configurations/);
+  assert.equal(ready.released, 1);
+
+  const incomplete = new ProbePool({ intents_ready: true, depots_ready: false, releases_ready: true });
+  await assert.rejects(new PostgresSteamProjectConfigurationStore(incomplete).probe(), /schema is unavailable/);
+  assert.equal(incomplete.released, 1);
+});
 
 test("project Steam configuration freezes one immutable release revision and never replays the branch secret", async () => {
   const runtime = coordinator();

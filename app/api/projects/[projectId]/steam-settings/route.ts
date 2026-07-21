@@ -40,8 +40,8 @@ export async function POST(request: Request, context: Context) {
     const runtime = runtimeOrProblem();
     if (runtime instanceof Response) return runtime;
     const principal = await projectAgentPrincipal(request, projectId);
-    if (principal.role === "Auditor") {
-      return json({ error: { code: "FORBIDDEN", message: "审计账号只能查看 Steam 发布配置。" } }, { status: 403 });
+    if (principal.role !== "ProjectOwner") {
+      return json({ error: { code: "FORBIDDEN", message: "只有项目负责人可以修改 Steam 发布配置。" } }, { status: 403 });
     }
     const idempotencyKey = request.headers.get("idempotency-key");
     if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(idempotencyKey)) {

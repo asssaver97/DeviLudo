@@ -35,6 +35,7 @@ export interface SteamProjectReleaseConfiguration {
 }
 
 export interface SteamProjectConfigurationStore {
+  probe(): Promise<void>;
   findStatus(input: {
     readonly tenantId: string;
     readonly projectId: string;

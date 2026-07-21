@@ -77,6 +77,7 @@ test("production worker fails readiness closed and keeps local admin and specifi
   assert.equal(healthPayload.mode, "PRODUCTION");
   assert.equal(healthPayload.dependencies.userAcceptanceBroker, "NOT_CONFIGURED");
   assert.equal(healthPayload.dependencies.steamEnrollmentBroker, "NOT_CONFIGURED");
+  assert.equal(healthPayload.dependencies.steamProjectConfigurationBroker, "NOT_CONFIGURED");
   assert.equal(healthPayload.dependencies.releaseAuthorizationBroker, "NOT_CONFIGURED");
 
   const agents = await request("/api/admin/agents");

@@ -78,7 +78,7 @@ function productionHealth(): Response {
     mode: "PRODUCTION",
     ready: readiness.ready,
     dependencies: readiness.dependencies,
-    capabilities: ["invited-github-login", "revocable-platform-session", "spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding", "user-acceptance", "steam-enrollment", "steam-release-authorization"],
+    capabilities: ["invited-github-login", "revocable-platform-session", "spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding", "user-acceptance", "steam-enrollment", "steam-project-configuration", "steam-release-authorization"],
     time: new Date().toISOString(),
   }, { status: readiness.ready ? 200 : 503, headers: { "cache-control": "no-store" } });
 }

@@ -67,10 +67,14 @@ may only create a five-minute `steam_project_configuration_intents` row bound
 to the exact project, user, browser-session digest and active build session.
 App ID, private branch, per-platform Depot IDs and the Beta password are entered
 only at `/projects/<project>/steam-configuration/<intent>` in the isolated UI.
-The Access Broker rechecks the App allow-list and required permissions, writes
-the password directly to Vault, and atomically creates immutable depot/release
-revisions; a database failure revokes the just-written Vault version. Migration
-`059_steam_project_configuration_intents.sql` stores no secret bytes.
+The Access Broker rechecks the active `ProjectOwner` membership before intent
+creation, before opening the isolated form and again at commit, then rechecks
+the App allow-list and required permissions, writes the password directly to
+Vault, and atomically creates immutable depot/release revisions; a database
+failure or final authorization failure revokes the just-written Vault version.
+Its startup and mTLS health probe also fail closed until all three configuration
+tables exist. Migration `059_steam_project_configuration_intents.sql` stores no
+secret bytes.
 
 The production composition for that boundary starts with `npm run
 start:steam-access`. It is a TLS 1.3 mTLS service with disjoint Web and secure-UI

@@ -204,7 +204,14 @@ export async function steamAccessRuntimeFromEnv(
         return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } });
       }
       try {
-        await Promise.all([pool.probe(), login.probe(), vault.probe(), mfa.probe(), signer.probe()]);
+        await Promise.all([
+          pool.probe(),
+          login.probe(),
+          vault.probe(),
+          mfa.probe(),
+          signer.probe(),
+          projectConfigurations.probe(),
+        ]);
         return reply.send({ schemaVersion: "deviludo.steam-access-health.v1", status: "ok" });
       } catch {
         return reply.status(503).send({ schemaVersion: "deviludo.steam-access-health.v1", status: "unavailable" });
@@ -242,6 +249,7 @@ export async function runSteamAccessService(
       runtime.vault.probe(),
       runtime.mfa.probe(),
       runtime.signer.probe(),
+      runtime.projectConfigurations.probe(),
     ]);
     await runtime.server.listen({ host: runtime.host, port: runtime.port });
     console.log(`[steam-access] READY ${runtime.host}:${runtime.port}`);

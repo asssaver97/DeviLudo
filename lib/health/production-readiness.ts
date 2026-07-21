@@ -22,6 +22,7 @@ export interface ProductionWebReadiness {
     deliveryProjectionBroker: ProductionDependencyStatus;
     adminControlPlaneBroker: ProductionDependencyStatus;
     steamEnrollmentBroker: ProductionDependencyStatus;
+    steamProjectConfigurationBroker: ProductionDependencyStatus;
     releaseAuthorizationBroker: ProductionDependencyStatus;
   }>;
 }
@@ -39,6 +40,7 @@ export function evaluateProductionWebReadiness(env: Environment = process.env): 
     deliveryProjectionBroker: configured(() => deliveryProjectionBrokerFromEnvironment(env)),
     adminControlPlaneBroker: configured(() => adminControlPlaneBrokerFromEnvironment(env)),
     steamEnrollmentBroker: configured(() => steamEnrollmentRuntimeFromEnvironment(env)),
+    steamProjectConfigurationBroker: configured(() => steamEnrollmentRuntimeFromEnvironment(env)),
     releaseAuthorizationBroker: configured(() => releaseAuthorizationRuntimeFromEnvironment(env)),
   });
   return Object.freeze({

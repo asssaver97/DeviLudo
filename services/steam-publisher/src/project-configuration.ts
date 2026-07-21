@@ -34,6 +34,10 @@ export class SteamProjectConfigurationCoordinator {
     this.#now = options.now ?? (() => new Date());
   }
 
+  probe(): Promise<void> {
+    return this.#store.probe();
+  }
+
   async status(principal: SteamEnrollmentPrincipal, projectId: string): Promise<SteamProjectConfigurationStatus> {
     validatePrincipal(principal);
     requireUuid(projectId, "project");

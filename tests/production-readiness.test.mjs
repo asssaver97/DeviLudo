@@ -45,6 +45,7 @@ test("production Web readiness rejects partial secrets and unsafe broker origins
   assert.equal(partial.ready, false);
   assert.equal(partial.dependencies.adminControlPlaneBroker, "INVALID_CONFIGURATION");
   assert.equal(partial.dependencies.steamEnrollmentBroker, "INVALID_CONFIGURATION");
+  assert.equal(partial.dependencies.steamProjectConfigurationBroker, "INVALID_CONFIGURATION");
   assert.equal(partial.dependencies.releaseAuthorizationBroker, "INVALID_CONFIGURATION");
   assert.doesNotMatch(JSON.stringify(partial), /secret|127\.0\.0\.1|operator/);
 });
