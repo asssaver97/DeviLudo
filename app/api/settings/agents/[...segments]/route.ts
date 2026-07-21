@@ -27,6 +27,13 @@ export async function POST(request: Request, context: Context) {
       assertAllowedBodyFields(body, ["label", "apiKey"]);
       downstream = "/admin/credentials";
     }
+    else if (segments.length === 3 && segments[0] === "credentials" && ID.test(segments[1] ?? "")
+      && (segments[2] === "rotate" || segments[2] === "revoke")) {
+      const action = segments[2];
+      assertAllowedBodyFields(body, action === "rotate" ? ["apiKey"] : []);
+      downstream = `/admin/credentials/${segments[1]}/${action}`;
+      forced = action === "rotate" ? { apiKey: body.apiKey } : {};
+    }
     else if (key === "profiles") {
       assertAllowedBodyFields(body, TENANT_PROFILE_DRAFT_FIELDS);
       downstream = "/admin/agent-profiles";

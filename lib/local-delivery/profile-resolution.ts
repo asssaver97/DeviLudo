@@ -40,6 +40,9 @@ export function resolveLocalAgentProfile(
   }
   const installation = store.installations.find((item) => item.id === profile.installationId);
   const provider = store.providers.find((item) => item.id === profile.providerId);
+  const credential = provider
+    ? store.credentials.find((item) => item.id === provider.credentialId)
+    : undefined;
   const expectedProtocol = profile.agent === "claude-code" ? "anthropic-messages" : "openai-responses";
   if (!installation || installation.agent !== profile.agent
     || installation.state !== "ACTIVE" || installation.health !== "HEALTHY"
@@ -49,6 +52,10 @@ export function resolveLocalAgentProfile(
     || store.agentVersions[`${installation.agent}@${installation.version}`] !== "APPROVED"
     || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE"
     || provider.protocol !== expectedProtocol || !SAFE_ID.test(provider.credentialId)
+    // The bundled demo catalog uses non-secret fixture bindings. Once a
+    // credential enters the local lifecycle catalog, its current state is
+    // authoritative and a revoked/previous version must fail closed.
+    || (credential !== undefined && credential.state !== "ACTIVE")
     || !SAFE_ID.test(profile.id) || !SAFE_ID.test(installation.id)
     || !SAFE_ID.test(provider.id) || !SAFE_ID.test(testPlanRevisionId)
     || !Number.isFinite(profile.budgetUsd) || profile.budgetUsd <= 0) {

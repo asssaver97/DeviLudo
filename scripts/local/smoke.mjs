@@ -429,13 +429,54 @@ try {
     || tenantCredentialText.includes("smoke-local-provider-key-material") || tenantCredentialText.includes("secretRef")) {
     throw new Error("tenant Agent credential ingress contract failed");
   }
+  const rotatedCredentialSecret = "smoke-local-provider-key-rotated";
+  const tenantCredentialRotation = await request(
+    baseUrl,
+    `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/rotate`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-rotate-v2" },
+      body: JSON.stringify({ apiKey: rotatedCredentialSecret }),
+    },
+  );
+  const tenantCredentialRotationText = await tenantCredentialRotation.response.text();
+  const tenantCredentialRotationPayload = JSON.parse(tenantCredentialRotationText);
+  const tenantActiveCredentialId = tenantCredentialRotationPayload.data?.id;
+  if (![200, 201].includes(tenantCredentialRotation.response.status) || !tenantActiveCredentialId
+    || tenantCredentialRotationPayload.data?.previousId !== tenantCredentialPayload.data.id
+    || tenantCredentialRotationPayload.data?.state !== "ACTIVE"
+    || tenantCredentialRotationText.includes(rotatedCredentialSecret) || tenantCredentialRotationText.includes("secretRef")) {
+    throw new Error("tenant Agent credential rotation contract failed");
+  }
+  const tenantCredentialRevocation = await request(
+    baseUrl,
+    `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/revoke`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-revoke-v1" },
+      body: "{}",
+    },
+  );
+  const tenantCredentialRevocationPayload = await tenantCredentialRevocation.response.json();
+  if (![200, 201].includes(tenantCredentialRevocation.response.status)
+    || tenantCredentialRevocationPayload.data?.state !== "REVOKED") {
+    throw new Error("tenant Agent credential revocation contract failed");
+  }
+  const tenantCredentialState = await request(baseUrl, "/api/settings/agents");
+  const tenantCredentialStatePayload = await tenantCredentialState.response.json();
+  const tenantCredentialVersions = tenantCredentialStatePayload.meta?.credentials ?? [];
+  if (!tenantCredentialState.response.ok
+    || tenantCredentialVersions.find((item) => item.id === tenantCredentialPayload.data.id)?.state !== "REVOKED"
+    || tenantCredentialVersions.find((item) => item.id === tenantActiveCredentialId)?.state !== "ACTIVE") {
+    throw new Error("tenant Agent credential lifecycle projection is inconsistent");
+  }
   const tenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-r1" },
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-r2" },
     body: JSON.stringify({
       agent: "claude-code",
       installationId: "claude-installation-214",
-      credentialVersionId: tenantCredentialPayload.data.id,
+      credentialVersionId: tenantActiveCredentialId,
       baseUrl: "https://gateway.example.com/v1",
       authentication: "x-api-key",
       primaryModel: "claude-sonnet-4-6-20250514",
@@ -941,6 +982,7 @@ try {
   console.log(`✓ Agent inheritance  ${adminState.response.status} (${adminState.elapsedMs}ms) · platform/tenant/project bound`);
   console.log(`✓ Tenant Agent state ${tenantAgentState.response.status} (${tenantAgentState.elapsedMs}ms) · scoped projection`);
   console.log(`✓ Agent body contract ${forgedTenantProfile.response.status}/${forgedCredential.response.status}/${forgedRollout.response.status} · unknown fields rejected without state drift`);
+  console.log(`✓ Credential lifecycle ${tenantCredentialRotation.response.status}/${tenantCredentialRevocation.response.status} · new version active, previous version revoked`);
   console.log(`✓ Tenant Agent write ${tenantProfile.response.status} (${tenantProfile.elapsedMs}ms) · scoped immutable draft`);
   console.log(`✓ Provider probe gate ${tenantProfileProbe.response.status} (${tenantProfileProbe.elapsedMs}ms) · external trust required`);
   console.log(`✓ Invitation gate    ${invitationGate.response.status} (${invitationGate.elapsedMs}ms) · ${invitationGatePayload.error.code}`);

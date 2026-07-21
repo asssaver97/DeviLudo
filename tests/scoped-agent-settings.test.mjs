@@ -75,6 +75,72 @@ test("TenantAdmin browser session rejects client scope injection and binds accep
   } finally { restoreEnvironment(previous); }
 });
 
+test("TenantAdmin credential lifecycle forwards only exact tenant-bound rotate and revoke commands", async () => {
+  const credentialId = "credential-tenant-v1";
+  const previous = snapshotEnvironment();
+  let controlPlaneCalls = 0;
+  let connectorFailure = null;
+  try {
+    configureEnvironment();
+    globalThis.fetch = async (input, init) => { try {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/sessions/assert") {
+        const assertion = JSON.parse(String(init.body));
+        const assertionIssuedAt = String(Date.now());
+        const signature = await signTrustedGitHubSession({
+          method: assertion.method, pathname: assertion.pathname, tenantId, userId,
+          sessionBinding, githubUserId: "4242", issuedAt: assertionIssuedAt, key: sessionKey,
+        });
+        return Response.json(sessionPrincipal("TenantAdmin", assertionIssuedAt, signature));
+      }
+      const downstream = url.pathname;
+      assert.match(downstream, /^\/admin\/credentials\/credential-tenant-v1\/(?:rotate|revoke)$/);
+      controlPlaneCalls += 1;
+      const headers = new Headers(init.headers);
+      const body = JSON.parse(new TextDecoder().decode(init.body));
+      assert.equal(headers.get("x-deviludo-role"), "TenantAdmin");
+      assert.equal(headers.get("x-deviludo-tenant-id"), tenantId);
+      assert.equal(headers.has("cookie"), false);
+      assertDownstreamSignature(headers, { method: "POST", path: downstream, role: "TenantAdmin", projectId: null });
+      if (downstream.endsWith("/rotate")) {
+        assert.deepEqual(body, { apiKey: "replacement-tenant-secret" });
+        return Response.json({ data: { active: { id: "credential-tenant-v2", state: "ACTIVE" }, previous: { id: credentialId, state: "PREVIOUS" } } }, { status: 201 });
+      }
+      assert.deepEqual(body, {});
+      return Response.json({ data: { id: credentialId, state: "REVOKED" } }, { status: 201 });
+    } catch (error) { connectorFailure = error; throw error; } };
+
+    const rotatePath = `/api/settings/agents/credentials/${credentialId}/rotate`;
+    const forgedRotate = await tenantMutation(browserRequest("POST", rotatePath, "TenantAdmin", {
+      apiKey: "replacement-tenant-secret", credentialId: "another-tenant",
+    }), { params: Promise.resolve({ segments: ["credentials", credentialId, "rotate"] }) });
+    assert.equal(forgedRotate.status, 400);
+    assert.equal((await forgedRotate.json()).error.code, "UNEXPECTED_FIELD");
+    assert.equal(controlPlaneCalls, 0);
+
+    const rotated = await tenantMutation(browserRequest("POST", rotatePath, "TenantAdmin", {
+      apiKey: "replacement-tenant-secret",
+    }), { params: Promise.resolve({ segments: ["credentials", credentialId, "rotate"] }) });
+    assert.equal(rotated.status, 201);
+    assert.equal(controlPlaneCalls, 1);
+
+    const revokePath = `/api/settings/agents/credentials/${credentialId}/revoke`;
+    const forgedRevoke = await tenantMutation(browserRequest("POST", revokePath, "TenantAdmin", { force: true }), {
+      params: Promise.resolve({ segments: ["credentials", credentialId, "revoke"] }),
+    });
+    assert.equal(forgedRevoke.status, 400);
+    assert.equal((await forgedRevoke.json()).error.code, "UNEXPECTED_FIELD");
+    assert.equal(controlPlaneCalls, 1);
+
+    const revoked = await tenantMutation(browserRequest("POST", revokePath, "TenantAdmin", {}), {
+      params: Promise.resolve({ segments: ["credentials", credentialId, "revoke"] }),
+    });
+    assert.ifError(connectorFailure);
+    assert.equal(revoked.status, 201);
+    assert.equal(controlPlaneCalls, 2);
+  } finally { restoreEnvironment(previous); }
+});
+
 test("ProjectOwner scope is issued only after authoritative project lookup and never from the URL alone", async () => {
   const pathname = `/api/projects/${projectId}/agent-settings`;
   const issuedAt = String(Date.now());

@@ -459,6 +459,48 @@ paths:
         "403": { description: Requires TenantAdmin authority. }
         "502": { description: The isolated Agent control plane or Vault ingress is unavailable. }
         "503": { description: The isolated Agent control plane is not configured. }
+  /settings/agents/credentials/{id}/rotate:
+    post:
+      operationId: rotateTenantAgentCredential
+      description: Creates a new immutable tenant credential version, probes every affected Provider successor, and atomically moves tenant defaults only after validation. The previous version stops receiving new leases.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CredentialRotation" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "400": { description: The replacement credential is invalid or contains unexpected fields. }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires TenantAdmin authority over this credential family. }
+        "404": { description: The credential version is not visible to this tenant. }
+        "409": { description: The version is inactive, reused, or another recovery operation is required. }
+        "502": { description: The isolated Agent control plane, Vault ingress, or Provider probe is unavailable. }
+        "503": { description: The isolated Agent control plane is not configured. }
+  /settings/agents/credentials/{id}/revoke:
+    post:
+      operationId: revokeTenantAgentCredential
+      description: Immediately revokes the exact tenant credential version. Revocation accepts no client authority and prevents new leases without changing already pinned Agent identities.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires TenantAdmin authority over this credential version. }
+        "404": { description: The credential version is not visible to this tenant. }
+        "502": { description: The isolated Agent control plane or Vault ingress is unavailable. }
+        "503": { description: The isolated Agent control plane is not configured. }
   /settings/agents/profiles:
     post:
       operationId: createTenantAgentProfileRevision

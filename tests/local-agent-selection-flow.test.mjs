@@ -106,6 +106,31 @@ test("an unhealthy higher-precedence override blocks enqueue instead of silently
   assert.equal((await response.json()).error.code, "AGENT_PROFILE_NOT_READY");
 });
 
+test("a locally revoked credential blocks new runs instead of reusing the active Profile", async () => {
+  const store = resetDemoStore();
+  const projectId = `revoked-credential-${crypto.randomUUID()}`;
+  store.credentials.push({
+    id: "cred-claude-platform-v4",
+    label: "Revoked Claude fixture",
+    secretRef: "vault://kv/data/deviludo/cred-claude-platform-v4#4",
+    fingerprint: `sha256:${"a".repeat(64)}`,
+    masked: `sha256:${"a".repeat(8)}…${"a".repeat(8)}`,
+    version: 4,
+    state: "REVOKED",
+    createdAt: "2026-07-18T08:42:00.000Z",
+  });
+
+  const response = await approveSpec(localRequest(
+    `/api/projects/${projectId}/spec-revisions`,
+    "POST",
+    { action: "approve", revision: "SPEC-008" },
+    "revoked-credential-approval",
+  ), { params: Promise.resolve({ projectId }) });
+
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "AGENT_PROFILE_NOT_READY");
+});
+
 async function approve(projectId, key) {
   const response = await approveSpec(localRequest(
     `/api/projects/${projectId}/spec-revisions`,

@@ -43,3 +43,18 @@ test("new Provider opens an explicit blank draft without mutating the active sna
   assert.match(source, /agent === kind && editorMode === "existing"/);
   assert.match(source, /onNewDraftConsumed\(newDraftRequest\)/);
 });
+
+test("credential lifecycle controls call the real rotate and revoke APIs", () => {
+  const admin = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
+  const tenant = readFileSync(new URL("../components/console/TenantAgentSettings.tsx", import.meta.url), "utf8");
+
+  assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(matchingCredential\.id\)\}\/rotate`/);
+  assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(credential\.id\)\}\/revoke`/);
+  assert.match(admin, /credential\.id === selectedActiveProvider\?\.credentialVersionId/);
+  assert.doesNotMatch(admin, /已创建双版本轮换草稿/);
+  assert.match(admin, /setApiKey\(""\);[\s\S]*setTesting\(false\);/);
+
+  assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credentialId\)\}\/rotate/);
+  assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credential\.id\)\}\/revoke/);
+  assert.match(tenant, /window\.confirm\(/);
+});

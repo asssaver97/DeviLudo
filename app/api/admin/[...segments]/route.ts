@@ -503,6 +503,7 @@ export async function POST(request: Request, context: RouteContext) {
           appendDemoAudit("CREDENTIAL_REVOKE", credential.id, role, { newTokensIssued: false });
           return { id: credential.id, state: credential.state, newTokensIssued: false, plaintextRecoverable: false };
         }
+        if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
         if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
         if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
         credential.state = "PREVIOUS";

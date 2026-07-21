@@ -56,8 +56,8 @@ type AdminState = {
     fallbackProfileRevisionId: string | null;
     budget: { maxUsd: number | null; maxTurns: number | null; timeoutSeconds: number | null };
   }>;
-  providers: Array<{ id: string; agent: AgentKind; protocol: string; baseUrl: string; primaryModel: string; state: string }>;
-  credentials: Array<{ id: string; label: string; maskedFingerprint: string; state: string }>;
+  providers: Array<{ id: string; agent: AgentKind; protocol: string; baseUrl: string; primaryModel: string; credentialVersionId: string; state: string }>;
+  credentials: Array<{ id: string; label: string; maskedFingerprint: string; version: number | null; state: string; createdAt: string | null }>;
   defaults: Record<string, string>;
 };
 
@@ -685,13 +685,19 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
   const [draftProfileId, setDraftProfileId] = useState("");
   const [editorMode, setEditorMode] = useState<"existing" | "new">(creatingProvider ? "new" : "existing");
   const permissions = agentAdminCapabilities(role);
-  const matchingCredential = credentials.find((credential) => credential.state === "ACTIVE" && credentialMatchesAgent(credential.label, agent));
-
-  const credentialMask = writtenCredentialMasks[agent] ?? matchingCredential?.maskedFingerprint ?? "未绑定 ACTIVE 凭据";
   const activeProviders = (["claude-code", "codex-cli"] as const).map((kind) => {
     const profile = profiles.find((item) => item.agent === kind && item.scope === "platform" && item.scopeId === "global" && item.state === "ACTIVE");
     return { kind, provider: providers.find((item) => item.id === profile?.providerRevisionId) ?? null };
   });
+  const selectedActiveProvider = activeProviders.find((item) => item.kind === agent)?.provider ?? null;
+  const matchingCredential = credentials.find((credential) => credential.state === "ACTIVE"
+    && credential.id === selectedActiveProvider?.credentialVersionId)
+    ?? credentials.find((credential) => credential.state === "ACTIVE" && credentialMatchesAgent(credential.label, agent));
+  const agentCredentialIds = new Set(providers.filter((provider) => provider.agent === agent)
+    .map((provider) => provider.credentialVersionId));
+  const agentCredentials = credentials.filter((credential) => agentCredentialIds.has(credential.id)
+    || credentialMatchesAgent(credential.label, agent));
+  const credentialMask = writtenCredentialMasks[agent] ?? matchingCredential?.maskedFingerprint ?? "未绑定 ACTIVE 凭据";
 
   const protocol = agent === "claude-code" ? "Anthropic Messages / Gateway" : "OpenAI Responses";
   useEffect(() => {
@@ -831,6 +837,47 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
     }
   };
 
+  const rotateCredential = async () => {
+    if (!permissions.manageGlobalCredentials) { setError("轮换平台凭据需要 SecurityAdmin 权限"); return; }
+    if (!matchingCredential) { setError(`当前没有 ${agent} 的 ACTIVE 平台凭据可轮换`); return; }
+    if (apiKey.length < 12) { setError("请先在“替换 API Key”中输入至少 12 个字符的新凭据"); return; }
+    setError("");
+    setTesting(true);
+    try {
+      await adminRequest(`credentials/${encodeURIComponent(matchingCredential.id)}/rotate`, {
+        method: "POST", role, body: { apiKey },
+      });
+      onChanged();
+      notify("凭据新版本已通过探针并切换；旧版本不再签发给新任务", "success");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "凭据轮换失败");
+      notify("凭据未轮换；当前 Provider 与默认 Profile 保持不变", "warning");
+    } finally {
+      setApiKey("");
+      setTesting(false);
+    }
+  };
+
+  const revokeCredential = async (credential: AdminState["credentials"][number] | undefined = matchingCredential) => {
+    if (!permissions.manageGlobalCredentials) { setError("撤销平台凭据需要 SecurityAdmin 权限"); return; }
+    if (!credential) { setError(`当前没有 ${agent} 的凭据版本可撤销`); return; }
+    if (!window.confirm(`立即撤销 ${credential.label}（${credential.id}）？撤销后不会再签发新的短期租约。`)) return;
+    setError("");
+    setTesting(true);
+    try {
+      await adminRequest(`credentials/${encodeURIComponent(credential.id)}/revoke`, {
+        method: "POST", role, body: {},
+      });
+      onChanged();
+      notify("凭据版本已撤销；新的 Agent 任务将保持 Provider 等待状态", "warning");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "凭据撤销失败");
+    } finally {
+      setApiKey("");
+      setTesting(false);
+    }
+  };
+
   return (
     <div className={styles.providerLayout}>
       <section className={styles.section}>
@@ -848,8 +895,19 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
           <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>仅显示掩码；版本、轮换与最后使用时间由 Vault 元数据提供</small></div>
-          <button type="button" disabled={!permissions.manageGlobalCredentials} title={permissions.manageGlobalCredentials ? undefined : "需要 SecurityAdmin 权限"} onClick={() => notify("已创建双版本轮换草稿；旧版本仍可回滚", "neutral")}>轮换</button>
+          <div className={styles.credentialActions}>
+            <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "使用下方输入的新 Key 创建不可变版本" : "需要 SecurityAdmin 权限"} onClick={() => void rotateCredential()}>轮换</button>
+            <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "立即停止该版本签发新租约" : "需要 SecurityAdmin 权限"} onClick={() => void revokeCredential()}>撤销当前</button>
+          </div>
         </div>
+        {agentCredentials.length ? <div className={styles.credentialHistory}>
+          {agentCredentials.map((credential) => <div key={credential.id}>
+            <span><strong>{credential.label}</strong><small>{credential.id} · v{credential.version ?? "?"} · {credential.state}</small></span>
+            <code>{credential.maskedFingerprint}</code>
+            {credential.state !== "REVOKED" ? <button type="button" disabled={testing || !permissions.manageGlobalCredentials}
+              onClick={() => void revokeCredential(credential)}>撤销此版本</button> : <StatusPill tone="danger">REVOKED</StatusPill>}
+          </div>)}
+        </div> : null}
         <div className={styles.gatewayDiagram}>
           <div><span>Agent Worker</span><small>短期 run token</small></div><i>→</i><div className={styles.gatewayCore}><span>Inference Gateway</span><small>白名单 · 配额 · 审计</small></div><i>→</i><div><span>第三方端点</span><small>上游 Key 仅在 Gateway</small></div>
         </div>
@@ -1082,12 +1140,15 @@ function profileRow(value: Record<string, unknown>): AdminState["profiles"][numb
 function providerRow(value: Record<string, unknown>): AdminState["providers"][number] | null {
   const id = text(value.id); const agent = agentKind(value.agent); const protocol = text(value.protocol); const baseUrl = text(value.baseUrl);
   const models = object(value.models); const primaryModel = text(models?.primaryModel) ?? text(value.primaryModel); const state = text(value.state);
-  return id && agent && protocol && baseUrl && primaryModel && state ? { id, agent, protocol, baseUrl, primaryModel, state } : null;
+  const credentialVersionId = text(value.credentialVersionId) ?? text(value.credentialId);
+  return id && agent && protocol && baseUrl && primaryModel && credentialVersionId && state
+    ? { id, agent, protocol, baseUrl, primaryModel, credentialVersionId, state } : null;
 }
 function credentialRow(value: Record<string, unknown>): AdminState["credentials"][number] | null {
   const id = text(value.id); const label = text(value.label); const state = text(value.state);
   const maskedFingerprint = text(value.maskedFingerprint) ?? text(value.masked);
-  return id && label && state && maskedFingerprint ? { id, label, state, maskedFingerprint } : null;
+  return id && label && state && maskedFingerprint
+    ? { id, label, state, maskedFingerprint, version: number(value.version), createdAt: text(value.createdAt) } : null;
 }
 function defaultRows(value: unknown): Record<string, string> {
   const source = object(value);

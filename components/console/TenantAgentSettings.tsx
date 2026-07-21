@@ -7,7 +7,7 @@ import { CheckIcon, GamepadIcon, ShieldIcon, SparkIcon } from "./Icons";
 
 type AgentKind = "claude-code" | "codex-cli";
 type Profile = { id: string; agent: AgentKind; scope: string; scopeId: string; state: string; installationId: string };
-type Credential = { id: string; label: string; state: string; maskedFingerprint?: string; masked?: string };
+type Credential = { id: string; label: string; state: string; version?: number; createdAt?: string; lastUsedAt?: string | null; maskedFingerprint?: string; masked?: string };
 type Installation = { id: string; agent: AgentKind; state: string; health: string };
 type AgentData = {
   catalog?: Array<{ id: AgentKind; installations?: Installation[] }>;
@@ -25,6 +25,7 @@ export function TenantAgentSettings() {
   const [notice, setNotice] = useState("正在读取租户 Agent 策略…");
   const [busy, setBusy] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState("");
+  const [rotatingCredentialId, setRotatingCredentialId] = useState("");
 
   const refresh = useCallback(async () => {
     const [agentResponse, sessionResponse] = await Promise.all([
@@ -56,7 +57,8 @@ export function TenantAgentSettings() {
     return rows.filter((entry) => ["READY", "CANARY", "ACTIVE"].includes(entry.state));
   }, [data]);
   const activeProfiles = (data?.profiles ?? []).filter((profile) => profile.state === "ACTIVE" && (profile.scope === "platform" || profile.scopeId === tenantId));
-  const credentials = (data?.credentials ?? []).filter((credential) => credential.state === "ACTIVE");
+  const credentialRows = data?.credentials ?? [];
+  const credentials = credentialRows.filter((credential) => credential.state === "ACTIVE");
   const readOnly = role !== "TenantAdmin";
 
   async function createCredential(event: FormEvent<HTMLFormElement>) {
@@ -90,6 +92,21 @@ export function TenantAgentSettings() {
     }, "Provider/Profile 草稿已创建；安全管理员批准前不会影响新任务。", event.currentTarget);
   }
 
+  async function rotateCredential(event: FormEvent<HTMLFormElement>, credentialId: string) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const replaced = await mutate(`/api/settings/agents/credentials/${encodeURIComponent(credentialId)}/rotate`, "POST", {
+      apiKey: String(form.get("apiKey") ?? ""),
+    }, "凭据新版本已通过探针并切换；旧版本不再签发给新任务。", event.currentTarget);
+    if (replaced) setRotatingCredentialId("");
+  }
+
+  async function revokeCredential(credential: Credential) {
+    if (!window.confirm(`立即撤销 ${credential.label}（${credential.id}）？撤销后该版本不能再签发新租约。`)) return;
+    await mutate(`/api/settings/agents/credentials/${encodeURIComponent(credential.id)}/revoke`, "POST", {},
+      "凭据版本已撤销；受影响的新任务会保持 Provider 等待状态。");
+  }
+
   async function selectDefault() {
     await mutate("/api/settings/agents/default", "PUT", { profileRevisionId: selectedProfile }, "租户默认已更新，只影响之后入队的任务。");
   }
@@ -98,14 +115,14 @@ export function TenantAgentSettings() {
     await mutate(`/api/settings/agents/profiles/${encodeURIComponent(profileId)}/validate`, "POST", {}, "Provider 探针已完成；Profile 正在等待 SecurityAdmin 激活。");
   }
 
-  async function mutate(path: string, method: "POST" | "PUT", body: Record<string, unknown>, success: string, form?: HTMLFormElement) {
+  async function mutate(path: string, method: "POST" | "PUT", body: Record<string, unknown>, success: string, form?: HTMLFormElement): Promise<boolean> {
     setBusy(true); setNotice("");
     try {
       const response = await fetch(path, { method, headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() }, body: JSON.stringify(body) });
       const payload = await response.json() as { error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "配置操作失败");
-      form?.reset(); await refresh(); setNotice(success);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "配置操作失败"); }
+      form?.reset(); await refresh(); setNotice(success); return true;
+    } catch (error) { setNotice(error instanceof Error ? error.message : "配置操作失败"); return false; }
     finally { setBusy(false); }
   }
 
@@ -130,7 +147,18 @@ export function TenantAgentSettings() {
           <label>API Key<input autoComplete="new-password" disabled={busy || readOnly} name="apiKey" placeholder="保存后无法查看" required type="password" /></label>
           <button className="button button-primary" disabled={busy || readOnly} type="submit">安全写入 Vault</button>
         </form>
-        <div className="masked-list">{credentials.length ? credentials.map((item) => <div key={item.id}><span><b>{item.label}</b><small>{item.id}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>) : <p>尚无租户凭据。平台凭据不会暴露给租户页面。</p>}</div>
+        <div className="masked-list credential-version-list">{credentialRows.length ? credentialRows.map((item) => <article key={item.id}>
+          <div className="credential-version-summary"><span><b>{item.label}</b><small>{item.id} · v{item.version ?? "?"} · {item.state}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>
+          <div className="credential-version-actions">
+            {item.state === "ACTIVE" ? <button disabled={busy || readOnly} onClick={() => setRotatingCredentialId(item.id)} type="button">轮换</button> : null}
+            {item.state !== "REVOKED" ? <button disabled={busy || readOnly} onClick={() => void revokeCredential(item)} type="button">撤销</button> : null}
+          </div>
+          {rotatingCredentialId === item.id ? <form className="credential-rotation-form" onSubmit={(event) => void rotateCredential(event, item.id)}>
+            <label>新的 API Key<input autoComplete="new-password" disabled={busy || readOnly} minLength={8} name="apiKey" placeholder="提交后立即清空" required type="password" /></label>
+            <button className="button button-primary" disabled={busy || readOnly} type="submit">确认轮换</button>
+            <button className="button button-secondary" disabled={busy} onClick={() => setRotatingCredentialId("")} type="button">取消</button>
+          </form> : null}
+        </article>) : <p>尚无租户凭据。平台凭据不会暴露给租户页面。</p>}</div>
       </section>
 
       <section className="settings-card settings-card-wide">

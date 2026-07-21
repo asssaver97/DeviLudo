@@ -100,6 +100,46 @@ test("local credential writes return only public metadata and never a SecretRef 
   assert.equal((await audit.text()).includes("secretRef"), false);
 });
 
+test("local credential lifecycle creates a new version and can revoke the exact previous version", async () => {
+  const store = resetDemoStore();
+  const created = await POST(
+    request("credentials", "POST", "TenantAdmin", { label: "Tenant lifecycle", apiKey: "tenant-initial-secret" }),
+    context("credentials"),
+  );
+  const credentialId = (await created.json()).data.id;
+  const replacementSecret = "tenant-replacement-secret";
+  const rotatePath = `credentials/${credentialId}/rotate`;
+  const rotated = await POST(
+    request(rotatePath, "POST", "TenantAdmin", { apiKey: replacementSecret }),
+    context(rotatePath),
+  );
+  assert.equal(rotated.status, 201);
+  const rotationText = await rotated.text();
+  assert.equal(rotationText.includes(replacementSecret), false);
+  assert.equal(rotationText.includes("secretRef"), false);
+  const rotation = JSON.parse(rotationText).data;
+  assert.equal(rotation.previousId, credentialId);
+  assert.equal(rotation.state, "ACTIVE");
+  assert.notEqual(rotation.id, credentialId);
+  assert.equal(store.credentials.find((item) => item.id === credentialId)?.state, "PREVIOUS");
+  assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "ACTIVE");
+
+  const repeatedRotation = await POST(
+    request(rotatePath, "POST", "TenantAdmin", { apiKey: "another-replacement-secret" }),
+    context(rotatePath),
+  );
+  assert.equal(repeatedRotation.status, 409);
+  assert.equal((await repeatedRotation.json()).error.code, "CREDENTIAL_NOT_ACTIVE");
+  assert.equal(store.credentials.length, 2);
+
+  const revokePath = `credentials/${credentialId}/revoke`;
+  const revoked = await POST(request(revokePath, "POST", "TenantAdmin", {}), context(revokePath));
+  assert.equal(revoked.status, 201);
+  assert.equal((await revoked.json()).data.state, "REVOKED");
+  assert.equal(store.credentials.find((item) => item.id === credentialId)?.state, "REVOKED");
+  assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "ACTIVE");
+});
+
 test("local Agent mutations reject unknown and legacy fields before changing state", async () => {
   const store = resetDemoStore();
   const secret = "must-not-appear-in-an-error";

@@ -25,6 +25,8 @@ const browserOperations = [
   ["/projects/{projectId}/acceptance", "post"],
   ["/settings/agents", "get"],
   ["/settings/agents/credentials", "post"],
+  ["/settings/agents/credentials/{id}/rotate", "post"],
+  ["/settings/agents/credentials/{id}/revoke", "post"],
   ["/settings/agents/profiles", "post"],
   ["/settings/agents/profiles/{id}/validate", "post"],
   ["/settings/agents/default", "put"],
@@ -61,6 +63,8 @@ test("Agent administration mutations publish exact request-body contracts", () =
   assert.match(operationBlock("/admin/agent-versions/discover", "post"), /AgentVersionDiscovery/);
   assert.match(operationBlock("/admin/agent-installations", "post"), /AgentInstallationDraft/);
   assert.match(operationBlock("/admin/credentials/{id}/rotate", "post"), /CredentialRotation/);
+  assert.match(operationBlock("/settings/agents/credentials/{id}/rotate", "post"), /CredentialRotation/);
+  assert.match(operationBlock("/settings/agents/credentials/{id}/revoke", "post"), /EmptyObject/);
 
   for (const path of [
     "/admin/agent-rollouts/{id}/advance",

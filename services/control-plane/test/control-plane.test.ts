@@ -315,6 +315,19 @@ test("credentials never echo plaintext and Provider activation is a separate sec
   assert.equal(successor.state, "ACTIVE");
   assert.equal(successor.credentialVersionId, rotate.json().data.active.id);
 
+  const revokePrevious = await inject({
+    method: "POST",
+    url: `/admin/credentials/${credentialId}/revoke`,
+    role: "SecurityAdmin",
+    key: "credential-codex-revoke-previous",
+    payload: {},
+  });
+  assert.equal(revokePrevious.statusCode, 201);
+  assert.equal(revokePrevious.json().data.state, "REVOKED");
+  const afterRevoke = await inject({ method: "GET", url: "/admin/agents", role: "SecurityAdmin" });
+  assert.equal(afterRevoke.json().data.credentials.find((item: { id: string }) => item.id === credentialId).state, "REVOKED");
+  assert.equal(afterRevoke.json().data.credentials.find((item: { id: string }) => item.id === rotate.json().data.active.id).state, "ACTIVE");
+
   const audit = await inject({ method: "GET", url: "/admin/audit", role: "Auditor" });
   assert.equal(audit.statusCode, 200);
   assert.equal(audit.body.includes(plaintext), false);

@@ -295,6 +295,20 @@ button {
 .masked-list b { font-size: 10px; }
 .masked-list small, .masked-list p { color: var(--muted); font-size: 9px; }
 .masked-list code { background: #f2f3ef; border-radius: 5px; color: #4d554a; font-size: 8px; max-width: 50%; overflow: hidden; padding: 5px 7px; text-overflow: ellipsis; }
+.credential-version-list > article { border-bottom: 1px solid #ecece6; padding: 10px 0; }
+.credential-version-list > article:last-child { border-bottom: 0; }
+.credential-version-summary { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
+.credential-version-summary b, .credential-version-summary small { display: block; }
+.credential-version-summary b { font-size: 10px; }
+.credential-version-summary small { color: var(--muted); font-size: 9px; }
+.credential-version-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+.credential-version-actions button { background: transparent; border: 1px solid #d7dcd2; border-radius: 6px; color: #4f664e; cursor: pointer; font-size: 9px; padding: 5px 8px; }
+.credential-version-actions button:last-child { color: #934c43; }
+.credential-version-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.credential-rotation-form { align-items: end; background: #f7f8f5; border: 1px solid #e1e4dd; border-radius: 8px; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto auto; margin-top: 10px; padding: 10px; }
+.credential-rotation-form label { color: #60645d; display: grid; font-size: 9px; gap: 5px; }
+.credential-rotation-form input { background: #fff; border: 1px solid #dcded6; border-radius: 7px; min-height: 36px; padding: 0 10px; }
+.credential-rotation-form .button { min-height: 36px; }
 .profile-selection-row { align-items: center; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; }
 .profile-table { border-top: 1px solid #ecece6; margin-top: 16px; }
 .profile-table > div { align-items: center; display: grid; font-size: 10px; gap: 10px; grid-template-columns: 82px 90px minmax(0, 1fr) 160px 76px; padding: 10px 2px; }

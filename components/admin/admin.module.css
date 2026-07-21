@@ -1288,6 +1288,61 @@
   font-size: 10px;
 }
 
+.credentialActions {
+  display: flex;
+  gap: 9px;
+}
+
+.credentialActions button:last-child {
+  color: #a34a38;
+}
+
+.credentialHistory {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.credentialHistory > div {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 220px) auto;
+  padding: 9px 12px;
+}
+
+.credentialHistory > div:last-child {
+  border-bottom: 0;
+}
+
+.credentialHistory span strong,
+.credentialHistory span small {
+  display: block;
+}
+
+.credentialHistory span small {
+  color: var(--muted);
+  font-size: 9px;
+  margin-top: 3px;
+}
+
+.credentialHistory code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.credentialHistory button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: #a34a38;
+  cursor: pointer;
+  font-size: 9px;
+  padding: 6px 8px;
+}
+
 .gatewayDiagram {
   display: grid;
   align-items: center;
@@ -1936,6 +1991,7 @@
   .checkGrid > div:last-child { border-bottom: 0; }
   .fieldPair { grid-template-columns: 1fr; gap: 0; }
   .providerLayout { grid-template-columns: minmax(0, 1fr); }
+  .credentialHistory > div { grid-template-columns: 1fr; }
   .gatewayDiagram { grid-template-columns: 1fr; }
   .gatewayDiagram i { transform: rotate(90deg); }
   .resolutionTable, .roleGrid { grid-template-columns: 1fr; }
