@@ -12,7 +12,7 @@ import type { FastifyRequest } from "fastify";
 import { AdminService } from "./admin.service";
 import { authenticatedAdminMutationActor } from "./admin-principal";
 import { credentialResultView, credentialView } from "./admin-public";
-import { ADMIN_ROLES, type AdminRole, type RequestActor } from "./contracts";
+import { ADMIN_ROLES, assertAllowedFields, type AdminRole, type RequestActor } from "./contracts";
 import { Roles } from "./roles";
 
 const ALL_ROLES = ADMIN_ROLES;
@@ -41,11 +41,13 @@ export class AdminController {
     return this.service.createInstallation(objectBody(body), actor(request));
   }
 
-  advanceRollout(id: string, request: FastifyRequest) {
+  advanceRollout(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
     return this.service.rollout(id, "advance", actor(request));
   }
 
-  rollbackRollout(id: string, request: FastifyRequest) {
+  rollbackRollout(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
     return this.service.rollout(id, "rollback", actor(request));
   }
 
@@ -53,15 +55,18 @@ export class AdminController {
     return this.service.createProfile(objectBody(body), actor(request));
   }
 
-  validateProfile(id: string, request: FastifyRequest) {
+  validateProfile(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
     return this.service.transitionProfile(id, "validate", actor(request));
   }
 
-  activateProfile(id: string, request: FastifyRequest) {
+  activateProfile(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
     return this.service.transitionProfile(id, "activate", actor(request));
   }
 
-  disableProfile(id: string, request: FastifyRequest) {
+  disableProfile(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
     return this.service.transitionProfile(id, "disable", actor(request));
   }
 
@@ -77,7 +82,8 @@ export class AdminController {
     return credentialResultView(await this.service.rotateCredential(id, objectBody(body), actor(request)));
   }
 
-  async revokeCredential(id: string, request: FastifyRequest) {
+  async revokeCredential(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
     return credentialView(await this.service.revokeCredential(id, actor(request)));
   }
 
@@ -123,15 +129,15 @@ applyRoute("discoverVersions", Post("agent-versions/discover"), ["PlatformAgentA
 applyRoute("approveVersion", Post("agent-versions/approve"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("blockVersion", Post("agent-versions/block"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("createInstallation", Post("agent-installations"), ["PlatformAgentAdmin"], [Body(), Req()]);
-applyRoute("advanceRollout", Post("agent-rollouts/:id/advance"), ["PlatformAgentAdmin"], [Param("id"), Req()]);
-applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAgentAdmin"], [Param("id"), Req()]);
+applyRoute("advanceRollout", Post("agent-rollouts/:id/advance"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("createProfile", Post("agent-profiles"), PROFILE_ROLES, [Body(), Req()]);
-applyRoute("validateProfile", Post("agent-profiles/:id/validate"), PROFILE_ROLES, [Param("id"), Req()]);
-applyRoute("activateProfile", Post("agent-profiles/:id/activate"), ["SecurityAdmin"], [Param("id"), Req()]);
-applyRoute("disableProfile", Post("agent-profiles/:id/disable"), PROFILE_ROLES, [Param("id"), Req()]);
+applyRoute("validateProfile", Post("agent-profiles/:id/validate"), PROFILE_ROLES, [Param("id"), Body(), Req()]);
+applyRoute("activateProfile", Post("agent-profiles/:id/activate"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("disableProfile", Post("agent-profiles/:id/disable"), PROFILE_ROLES, [Param("id"), Body(), Req()]);
 applyRoute("createCredential", Post("credentials"), ["SecurityAdmin", "TenantAdmin"], [Body(), Req()]);
 applyRoute("rotateCredential", Post("credentials/:id/rotate"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Body(), Req()]);
-applyRoute("revokeCredential", Post("credentials/:id/revoke"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Req()]);
+applyRoute("revokeCredential", Post("credentials/:id/revoke"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("updateDefault", Put("agent-defaults/:scope"), PROFILE_ROLES, [Param("scope"), Body(), Req()]);
 applyRoute("health", Get("agent-health"), ALL_ROLES, []);
 applyRoute("audit", Get("audit"), ALL_ROLES, [Req()]);

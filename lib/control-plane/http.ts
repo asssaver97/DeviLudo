@@ -42,6 +42,20 @@ export function requireString(body: Record<string, unknown>, field: string, max 
   return value.trim();
 }
 
+export function assertAllowedBodyFields(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  const allowList = new Set(allowed);
+  if (Object.keys(body).some((field) => !allowList.has(field))) {
+    throw new HttpProblem(
+      400,
+      "UNEXPECTED_FIELD",
+      "Request body contains a field that is not part of this operation contract",
+    );
+  }
+}
+
 export function idempotencyKey(request: Request): string {
   const value = request.headers.get("idempotency-key")?.trim();
   if (!value || value.length > 160) {

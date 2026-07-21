@@ -17,7 +17,7 @@ const browserBinding = Buffer.from(new Uint8Array(32).fill(73)).toString("base64
 const sessionToken = `${tenantId}.${Buffer.from(new Uint8Array(32).fill(74)).toString("base64url")}`;
 const sessionBinding = Buffer.from(new Uint8Array(32).fill(75)).toString("base64url");
 
-test("TenantAdmin browser session is rebound to its tenant and cannot inject another profile scope", async () => {
+test("TenantAdmin browser session rejects client scope injection and binds accepted drafts to its tenant", async () => {
   const pathname = "/api/settings/agents/profiles";
   const issuedAt = String(Date.now());
   const sessionSignature = await signTrustedGitHubSession({ method: "POST", pathname, tenantId, userId,
@@ -45,14 +45,25 @@ test("TenantAdmin browser session is rebound to its tenant and cannot inject ano
       assertDownstreamSignature(headers, { method: "POST", path: "/admin/agent-profiles", role: "TenantAdmin", projectId: null });
       return Response.json({ data: { profile: { id: "tenant-profile-r1", scope: "tenant", scopeId: tenantId, state: "DRAFT" } } }, { status: 201 });
     } catch (error) { connectorFailure = error; throw error; } };
-    const request = browserRequest("POST", pathname, "TenantAdmin", {
+    const forged = browserRequest("POST", pathname, "TenantAdmin", {
       scope: "project", scopeId: "attacker-project", agent: "claude-code",
       installationId: "claude-ready", credentialVersionId: "credential-tenant-v1",
       baseUrl: "https://provider.example/v1", authentication: "x-api-key",
       primaryModel: "claude-sonnet-4-6-20250514", inputUsdPerMillionTokens: 3,
       outputUsdPerMillionTokens: 15, dataRegion: "cn-east", retentionPolicy: "zero retention", trainingPolicy: "no training",
     });
-    const response = await tenantMutation(request, { params: Promise.resolve({ segments: ["profiles"] }) });
+    const rejected = await tenantMutation(forged, { params: Promise.resolve({ segments: ["profiles"] }) });
+    assert.equal(rejected.status, 400);
+    assert.equal((await rejected.json()).error.code, "UNEXPECTED_FIELD");
+    assert.equal(controlPlaneCalls, 0);
+
+    const legitimate = browserRequest("POST", pathname, "TenantAdmin", {
+      agent: "claude-code", installationId: "claude-ready", credentialVersionId: "credential-tenant-v1",
+      baseUrl: "https://provider.example/v1", authentication: "x-api-key",
+      primaryModel: "claude-sonnet-4-6-20250514", inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15, dataRegion: "cn-east", retentionPolicy: "zero retention", trainingPolicy: "no training",
+    });
+    const response = await tenantMutation(legitimate, { params: Promise.resolve({ segments: ["profiles"] }) });
     assert.ifError(connectorFailure);
     assert.equal(response.status, 201);
     assert.equal(controlPlaneCalls, 1);

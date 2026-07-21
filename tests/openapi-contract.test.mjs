@@ -53,7 +53,27 @@ test("Agent settings contract uses immutable credential revisions and governance
 
   const adminProfile = schemaBlock("AgentProfileDraft");
   assert.match(adminProfile, /required: \[agent, installationId, credentialVersionId, scope, scopeId,/);
+  assert.doesNotMatch(adminProfile, /required: \[[^\n]*\b(?:maxBudgetUsd|maxTurns|timeoutSeconds)\b/);
   assert.match(operationBlock("/admin/agent-defaults/{scope}", "put"), /AgentProfileSelection/);
+});
+
+test("Agent administration mutations publish exact request-body contracts", () => {
+  assert.match(operationBlock("/admin/agent-versions/discover", "post"), /AgentVersionDiscovery/);
+  assert.match(operationBlock("/admin/agent-installations", "post"), /AgentInstallationDraft/);
+  assert.match(operationBlock("/admin/credentials/{id}/rotate", "post"), /CredentialRotation/);
+
+  for (const path of [
+    "/admin/agent-rollouts/{id}/advance",
+    "/admin/agent-rollouts/{id}/rollback",
+    "/admin/agent-profiles/{id}/validate",
+    "/admin/agent-profiles/{id}/activate",
+    "/admin/agent-profiles/{id}/disable",
+    "/admin/credentials/{id}/revoke",
+  ]) assert.match(operationBlock(path, "post"), /EmptyObject/, path);
+
+  for (const schema of ["CredentialDraft", "CredentialRotation", "AgentVersionDiscovery", "AgentInstallationDraft"]) {
+    assert.match(schemaBlock(schema), /additionalProperties: false/, schema);
+  }
 });
 
 test("production OpenAPI omits localhost fixture authorities and resolves component references", () => {

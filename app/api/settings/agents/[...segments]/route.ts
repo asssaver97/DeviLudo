@@ -1,11 +1,18 @@
 import { POST as localAdminPost, PUT as localAdminPut } from "@/app/api/admin/[...segments]/route";
-import { bodyObject, json } from "@/lib/control-plane/http";
+import { assertAllowedBodyFields, bodyObject, json } from "@/lib/control-plane/http";
 import { forwardScopedAgentRequest, localAdminRequest, rewrittenJsonRequest, scopedAccessProblem } from "@/lib/admin/scoped-agent-proxy";
 import { tenantAgentPrincipal } from "@/lib/admin/scoped-agent-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 type Context = { params: Promise<{ segments: string[] }> };
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+const TENANT_PROFILE_DRAFT_FIELDS = Object.freeze([
+  "agent", "installationId", "credentialVersionId", "baseUrl", "authentication",
+  "primaryModel", "planningModel", "smallFastModel", "subagentModel",
+  "inputUsdPerMillionTokens", "outputUsdPerMillionTokens",
+  "dataRegion", "retentionPolicy", "trainingPolicy",
+  "maxBudgetUsd", "maxTurns", "timeoutSeconds", "fallbackProfileRevisionId",
+]);
 
 export async function POST(request: Request, context: Context) {
   try {
@@ -16,11 +23,16 @@ export async function POST(request: Request, context: Context) {
     const body = await bodyObject(request);
     let downstream: string;
     let forced = body;
-    if (key === "credentials") downstream = "/admin/credentials";
+    if (key === "credentials") {
+      assertAllowedBodyFields(body, ["label", "apiKey"]);
+      downstream = "/admin/credentials";
+    }
     else if (key === "profiles") {
+      assertAllowedBodyFields(body, TENANT_PROFILE_DRAFT_FIELDS);
       downstream = "/admin/agent-profiles";
       forced = { ...body, scope: "tenant", scopeId: principal.tenantId };
     } else if (segments.length === 3 && segments[0] === "profiles" && ID.test(segments[1] ?? "") && segments[2] === "validate") {
+      assertAllowedBodyFields(body, []);
       downstream = `/admin/agent-profiles/${segments[1]}/validate`;
       forced = {};
     } else return notFound();
@@ -40,6 +52,7 @@ export async function PUT(request: Request, context: Context) {
     const { segments } = await context.params;
     if (segments.length !== 1 || segments[0] !== "default") return notFound();
     const body = await bodyObject(request);
+    assertAllowedBodyFields(body, ["profileRevisionId"]);
     const forced = { profileRevisionId: body.profileRevisionId };
     const downstream = `/admin/agent-defaults/tenant:${principal.tenantId}`;
     const rewritten = rewrittenJsonRequest(request, forced);

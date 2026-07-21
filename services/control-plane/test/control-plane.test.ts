@@ -81,6 +81,40 @@ test("mutations require RBAC and Idempotency-Key", async () => {
   assert.equal(conflict.json().error.code, "IDEMPOTENCY_KEY_REUSED");
 });
 
+test("admin mutation contracts reject unknown fields without persisting or echoing them", async () => {
+  const secret = "unknown-field-secret-must-not-be-echoed";
+  const credential = await inject({
+    method: "POST",
+    url: "/admin/credentials",
+    role: "SecurityAdmin",
+    key: "strict-credential-contract",
+    payload: { label: "Strict contract", apiKey: "valid-secret-value", credentialId: secret },
+  });
+  assert.equal(credential.statusCode, 400);
+  assert.equal(credential.json().error.code, "UNEXPECTED_FIELD");
+  assert.equal(credential.body.includes(secret), false);
+
+  const legacyProfile = await inject({
+    method: "POST",
+    url: "/admin/agent-profiles",
+    role: "SecurityAdmin",
+    key: "strict-profile-contract",
+    payload: { credentialId: "legacy-id", budgetUsd: 10 },
+  });
+  assert.equal(legacyProfile.statusCode, 400);
+  assert.equal(legacyProfile.json().error.code, "UNEXPECTED_FIELD");
+
+  const rollout = await inject({
+    method: "POST",
+    url: "/admin/agent-rollouts/claude-code-installation-2-1-14/advance",
+    role: "PlatformAgentAdmin",
+    key: "strict-rollout-contract",
+    payload: { toPercent: 100 },
+  });
+  assert.equal(rollout.statusCode, 400);
+  assert.equal(rollout.json().error.code, "UNEXPECTED_FIELD");
+});
+
 test("admin API rejects unsigned, forged, expired and route-replayed principal assertions", async () => {
   const unsigned = await app.getHttpAdapter().getInstance().inject({
     method: "GET",

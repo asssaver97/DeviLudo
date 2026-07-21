@@ -211,6 +211,11 @@ paths:
     post:
       operationId: discoverAgentVersions
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentVersionDiscovery" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-versions/approve:
     post:
@@ -228,6 +233,11 @@ paths:
     post:
       operationId: createAgentInstallation
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentInstallationDraft" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-rollouts/{id}/advance:
     post:
@@ -235,6 +245,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-rollouts/{id}/rollback:
     post:
@@ -242,6 +257,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-profiles:
     post:
@@ -259,6 +279,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-profiles/{id}/activate:
     post:
@@ -266,6 +291,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-profiles/{id}/disable:
     post:
@@ -273,6 +303,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/credentials:
     post:
@@ -291,6 +326,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CredentialRotation" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/credentials/{id}/revoke:
     post:
@@ -298,6 +338,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/ResourceId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-defaults/{scope}:
     put:
@@ -813,6 +858,7 @@ components:
         application/json:
           schema:
             type: object
+            additionalProperties: false
             required: [id]
             properties: { id: { type: string } }
   responses:
@@ -882,6 +928,27 @@ components:
       properties:
         label: { type: string, minLength: 1, maxLength: 120 }
         apiKey: { type: string, format: password, writeOnly: true, minLength: 1, maxLength: 8192 }
+    CredentialRotation:
+      type: object
+      additionalProperties: false
+      required: [apiKey]
+      properties:
+        apiKey: { type: string, format: password, writeOnly: true, minLength: 1, maxLength: 8192 }
+    AgentVersionDiscovery:
+      type: object
+      additionalProperties: false
+      properties:
+        agent: { type: string, enum: [claude-code, codex-cli], default: claude-code }
+        version: { type: string, minLength: 1, maxLength: 100, description: Optional exact official version candidate; floating channels are rejected. }
+    AgentInstallationDraft:
+      type: object
+      additionalProperties: false
+      required: [agent, version, workerPool, adapterVersion]
+      properties:
+        agent: { type: string, enum: [claude-code, codex-cli] }
+        version: { type: string, minLength: 1, maxLength: 100 }
+        workerPool: { type: string, pattern: "^dev(?:elopment)?[-_A-Za-z0-9]*$", maxLength: 120 }
+        adapterVersion: { type: string, minLength: 1, maxLength: 100 }
     AgentProfileSelection:
       type: object
       additionalProperties: false
@@ -1211,7 +1278,7 @@ components:
     AgentProfileDraft:
       type: object
       additionalProperties: false
-      required: [agent, installationId, credentialVersionId, scope, scopeId, baseUrl, authentication, primaryModel, inputUsdPerMillionTokens, outputUsdPerMillionTokens, dataRegion, retentionPolicy, trainingPolicy, maxBudgetUsd, maxTurns, timeoutSeconds]
+      required: [agent, installationId, credentialVersionId, scope, scopeId, baseUrl, authentication, primaryModel, inputUsdPerMillionTokens, outputUsdPerMillionTokens, dataRegion, retentionPolicy, trainingPolicy]
       properties:
         agent: { type: string, enum: [claude-code, codex-cli] }
         installationId: { type: string, minLength: 1, maxLength: 180 }
@@ -1236,7 +1303,7 @@ components:
     TenantAgentProfileDraft:
       type: object
       additionalProperties: false
-      required: [agent, installationId, credentialVersionId, baseUrl, authentication, primaryModel, inputUsdPerMillionTokens, outputUsdPerMillionTokens, dataRegion, retentionPolicy, trainingPolicy, maxBudgetUsd, maxTurns, timeoutSeconds]
+      required: [agent, installationId, credentialVersionId, baseUrl, authentication, primaryModel, inputUsdPerMillionTokens, outputUsdPerMillionTokens, dataRegion, retentionPolicy, trainingPolicy]
       properties:
         agent: { type: string, enum: [claude-code, codex-cli] }
         installationId: { type: string, minLength: 1, maxLength: 180 }

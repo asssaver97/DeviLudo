@@ -7,6 +7,7 @@ import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { AdminStore, recordAdminAudit, type AdminCatalogState } from "./admin.store";
 import {
   ServiceProblem,
+  assertAllowedFields,
   isAgentKind,
   optionalString,
   requiredString,
@@ -35,6 +36,14 @@ import {
 } from "./agent-supply-chain";
 import { InferenceRequestReconciler } from "./inference-reconciliation";
 import { SpecModelBrokerReconciliationClient, SpecModelGenerationReconciler } from "./spec-model-reconciliation";
+
+const PROFILE_DRAFT_FIELDS = Object.freeze([
+  "agent", "installationId", "credentialVersionId", "scope", "scopeId", "baseUrl", "authentication",
+  "primaryModel", "planningModel", "smallFastModel", "subagentModel",
+  "inputUsdPerMillionTokens", "outputUsdPerMillionTokens",
+  "dataRegion", "retentionPolicy", "trainingPolicy",
+  "maxBudgetUsd", "maxTurns", "timeoutSeconds", "fallbackProfileRevisionId",
+]);
 
 export class AdminService {
   constructor(
@@ -88,6 +97,7 @@ export class AdminService {
   }
 
   async discoverVersions(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
+    assertAllowedFields(body, ["agent", "version"]);
     const agentInput = body.agent ?? "claude-code";
     if (!isAgentKind(agentInput)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const requestedVersion = optionalString(body, "version") ?? null;
@@ -143,6 +153,7 @@ export class AdminService {
   ): Promise<Readonly<Record<string, unknown>>> {
     const id = requiredString(body, "id", 160);
     if (action === "block") {
+      assertAllowedFields(body, ["id"]);
       return this.mutate(actor, (state) => {
         const record = state.versions.get(id);
         if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
@@ -160,6 +171,7 @@ export class AdminService {
     ].some((field) => body[field] !== undefined)) {
       throw new ServiceProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "Supply-chain evidence must come from the isolated Broker");
     }
+    assertAllowedFields(body, ["id"]);
     const candidate = await this.store.mutate((state) => {
       const record = state.versions.get(id);
       if (!record) throw new ServiceProblem(404, "AGENT_VERSION_NOT_FOUND", "Agent version was not discovered");
@@ -230,6 +242,7 @@ export class AdminService {
     ].some((field) => body[field] !== undefined)) {
       throw new ServiceProblem(400, "CALLER_IMAGE_IDENTITY_FORBIDDEN", "Worker image identity must come from the isolated Broker");
     }
+    assertAllowedFields(body, ["agent", "version", "workerPool", "adapterVersion"]);
     const workerPool = requiredString(body, "workerPool", 120);
     if (!/^dev(?:elopment)?[-_a-z0-9]*$/i.test(workerPool)) {
       throw new ServiceProblem(400, "UNSAFE_WORKER_POOL", "Autonomous Agents may only be installed on development Worker pools");
@@ -453,6 +466,7 @@ export class AdminService {
   }
 
   async createCredential(body: Record<string, unknown>, actor: RequestActor): Promise<CredentialVersionRecord> {
+    assertAllowedFields(body, ["label", "apiKey"]);
     const label = requiredString(body, "label", 120);
     const apiKey = requiredString(body, "apiKey", 8192);
     const familyId = `credential-${randomUUID()}`;
@@ -487,6 +501,7 @@ export class AdminService {
     body: Record<string, unknown>,
     actor: RequestActor,
   ): Promise<Readonly<Record<string, unknown>>> {
+    assertAllowedFields(body, ["apiKey"]);
     const operationKey = credentialRotationOperationKey(actor, credentialId);
     const rotation = await this.store.read((state) => {
       const value = state.credentials.get(credentialId);
@@ -700,6 +715,7 @@ export class AdminService {
   }
 
   async createProfile(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
+    assertAllowedFields(body, PROFILE_DRAFT_FIELDS);
     const agent = body.agent;
     if (!isAgentKind(agent)) throw new ServiceProblem(400, "INVALID_AGENT", "Unsupported Agent kind");
     const scope = parseScope(body.scope);
@@ -877,6 +893,7 @@ export class AdminService {
   }
 
   async updateDefault(scopeKey: string, body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
+    assertAllowedFields(body, ["profileRevisionId"]);
     const parsed = parseDefaultScope(scopeKey);
     assertScopeRole(parsed.scope, parsed.scopeId, actor);
     const profileRevisionId = requiredString(body, "profileRevisionId", 200);

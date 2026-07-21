@@ -223,3 +223,17 @@ export function optionalString(body: Record<string, unknown>, field: string): st
   }
   return value.trim();
 }
+
+export function assertAllowedFields(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  const allowList = new Set(allowed);
+  if (Object.keys(body).some((field) => !allowList.has(field))) {
+    throw new ServiceProblem(
+      400,
+      "UNEXPECTED_FIELD",
+      "Request body contains a field that is not part of this operation contract",
+    );
+  }
+}

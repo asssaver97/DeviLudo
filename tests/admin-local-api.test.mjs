@@ -100,6 +100,42 @@ test("local credential writes return only public metadata and never a SecretRef 
   assert.equal((await audit.text()).includes("secretRef"), false);
 });
 
+test("local Agent mutations reject unknown and legacy fields before changing state", async () => {
+  const store = resetDemoStore();
+  const secret = "must-not-appear-in-an-error";
+  const credentialsBefore = store.credentials.length;
+  const credential = await POST(
+    request("credentials", "POST", "SecurityAdmin", {
+      label: "Legacy payload", apiKey: "valid-local-secret", credentialId: secret,
+    }),
+    context("credentials"),
+  );
+  assert.equal(credential.status, 400);
+  const credentialText = await credential.text();
+  assert.equal(JSON.parse(credentialText).error.code, "UNEXPECTED_FIELD");
+  assert.equal(credentialText.includes(secret), false);
+  assert.equal(store.credentials.length, credentialsBefore);
+
+  const profilesBefore = store.profiles.length;
+  const profile = await POST(
+    request("agent-profiles", "POST", "SecurityAdmin", { credentialId: "legacy", budgetUsd: 10 }),
+    context("agent-profiles"),
+  );
+  assert.equal(profile.status, 400);
+  assert.equal((await profile.json()).error.code, "UNEXPECTED_FIELD");
+  assert.equal(store.profiles.length, profilesBefore);
+
+  const rolloutBefore = store.rollouts["claude-installation-214"].percent;
+  const rolloutPath = "agent-rollouts/claude-installation-214/advance";
+  const rollout = await POST(
+    request(rolloutPath, "POST", "PlatformAgentAdmin", { toPercent: 100 }),
+    context(rolloutPath),
+  );
+  assert.equal(rollout.status, 400);
+  assert.equal((await rollout.json()).error.code, "UNEXPECTED_FIELD");
+  assert.equal(store.rollouts["claude-installation-214"].percent, rolloutBefore);
+});
+
 test("version approval and installation accept only local Broker receipts, never caller attestations", async () => {
   resetDemoStore();
   const forged = await POST(

@@ -11,6 +11,7 @@ import {
   type DemoStoreState,
 } from "@/lib/control-plane/demo-store";
 import {
+  assertAllowedBodyFields,
   bodyObject,
   HttpProblem,
   idempotencyKey,
@@ -27,6 +28,13 @@ type RouteContext = { params: Promise<{ segments: string[] }> };
 const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
 const SECURITY_ROLES = ["SecurityAdmin"] as const;
 const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner"] as const;
+const PROFILE_DRAFT_FIELDS = Object.freeze([
+  "agent", "installationId", "credentialVersionId", "scope", "scopeId", "baseUrl", "authentication",
+  "primaryModel", "planningModel", "smallFastModel", "subagentModel",
+  "inputUsdPerMillionTokens", "outputUsdPerMillionTokens",
+  "dataRegion", "retentionPolicy", "trainingPolicy",
+  "maxBudgetUsd", "maxTurns", "timeoutSeconds", "fallbackProfileRevisionId",
+]);
 
 function defaultAgent() {
   const store = getDemoStore();
@@ -146,12 +154,10 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (key === "agent-versions/discover") {
       const role = requireRole(request, VERSION_ROLES);
+      assertAllowedBodyFields(body, ["agent"]);
       const agent = body.agent ?? "claude-code";
       if (agent !== "claude-code" && agent !== "codex-cli") {
         throw new HttpProblem(400, "INVALID_AGENT", "Version discovery supports only Claude Code or Codex CLI");
-      }
-      if (Object.keys(body).some((field) => field !== "agent")) {
-        throw new HttpProblem(400, "INVALID_VERSION_DISCOVERY", "Local version discovery accepts only an exact built-in Agent selection");
       }
       const version = agent === "claude-code" ? "2.1.15" : "0.92.0";
       const id = `${agent}@${version}`;
@@ -174,6 +180,7 @@ export async function POST(request: Request, context: RouteContext) {
       if (state === "APPROVED" && forbiddenAttestationFields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
         throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "签名、扫描、SBOM 与 digest 只能来自受信供应链 Broker，不能由管理员请求提供");
       }
+      assertAllowedBodyFields(body, ["id"]);
       const receiptDigest = state === "APPROVED"
         ? await fingerprintSecret(new TextEncoder().encode(`local-agent-validation:v1:${id}`))
         : null;
@@ -211,6 +218,7 @@ export async function POST(request: Request, context: RouteContext) {
       ].some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
         throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "WorkerImage digest 与构建回执只能来自受信供应链 Broker");
       }
+      assertAllowedBodyFields(body, ["agent", "version", "workerPool", "adapterVersion"]);
       if ((agent !== "claude-code" && agent !== "codex-cli") || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/i.test(version)
         || !/^dev(?:elopment)?[-_a-z0-9]*$/i.test(workerPool) || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(adapterVersion)) {
         throw new HttpProblem(400, "INVALID_INSTALLATION", "Agent and version must be exact supported identifiers");
@@ -263,6 +271,7 @@ export async function POST(request: Request, context: RouteContext) {
     const rolloutMatch = /^agent-rollouts\/([^/]+)\/(advance|rollback)$/.exec(key);
     if (rolloutMatch) {
       const role = requireRole(request, VERSION_ROLES);
+      assertAllowedBodyFields(body, []);
       const installationId = rolloutMatch[1] ?? "";
       const action = rolloutMatch[2];
       return mutate(`admin:${key}:${idempotency}`, () => {
@@ -301,6 +310,7 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (key === "agent-profiles") {
       const role = requireRole(request, PROFILE_ROLES);
+      assertAllowedBodyFields(body, PROFILE_DRAFT_FIELDS);
       const agent = requireString(body, "agent", 32);
       if (agent !== "claude-code" && agent !== "codex-cli") throw new HttpProblem(400, "INVALID_AGENT", "Only claude-code and codex-cli are supported");
       const baseUrl = requireString(body, "baseUrl", 1000);
@@ -340,9 +350,9 @@ export async function POST(request: Request, context: RouteContext) {
       const dataRegion = requireString(body, "dataRegion", 120);
       const retentionPolicy = requireString(body, "retentionPolicy", 500);
       const trainingPolicy = requireString(body, "trainingPolicy", 500);
-      const maxBudgetUsd = body.maxBudgetUsd;
-      const maxTurns = body.maxTurns;
-      const timeoutSeconds = body.timeoutSeconds;
+      const maxBudgetUsd = body.maxBudgetUsd ?? 25;
+      const maxTurns = body.maxTurns ?? 100;
+      const timeoutSeconds = body.timeoutSeconds ?? 7200;
       if (typeof maxBudgetUsd !== "number" || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 100
         || !Number.isInteger(maxTurns) || (maxTurns as number) < 1 || (maxTurns as number) > 200
         || !Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < 60 || (timeoutSeconds as number) > 14_400) {
@@ -392,6 +402,7 @@ export async function POST(request: Request, context: RouteContext) {
     const profileMatch = /^agent-profiles\/([^/]+)\/(validate|activate|disable)$/.exec(key);
     if (profileMatch) {
       const role = requireRole(request, profileMatch[2] === "activate" ? SECURITY_ROLES : PROFILE_ROLES);
+      assertAllowedBodyFields(body, []);
       const profileId = profileMatch[1] ?? "";
       const action = profileMatch[2];
       if (action === "validate") {
@@ -422,6 +433,7 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (key === "credentials") {
       const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
+      assertAllowedBodyFields(body, ["label", "apiKey"]);
       const label = requireString(body, "label", 120);
       const secret = requireString(body, "apiKey", 8192);
       if (secret.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Credential must be at least 8 characters");
@@ -458,6 +470,7 @@ export async function POST(request: Request, context: RouteContext) {
       const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
       const credentialId = credentialMatch[1] ?? "";
       const action = credentialMatch[2];
+      assertAllowedBodyFields(body, action === "rotate" ? ["apiKey"] : []);
       let replacementFingerprint: `sha256:${string}` | null = null;
       if (action === "rotate") {
         const replacement = requireString(body, "apiKey", 8192);
@@ -544,6 +557,7 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!match) throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
     const role = requireRole(request, match[1]?.startsWith("platform") ? VERSION_ROLES : PROFILE_ROLES);
     const body = await bodyObject(request);
+    assertAllowedBodyFields(body, ["profileRevisionId"]);
     const profileRevisionId = requireString(body, "profileRevisionId", 160);
     const result = withIdempotency(`admin:${key}:${idempotencyKey(request)}`, () => {
       const store = getDemoStore();
