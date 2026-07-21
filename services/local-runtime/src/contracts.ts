@@ -38,4 +38,5 @@ export type LocalRuntimeHealth = {
   godotBinary: string;
   godotVersion: string | null;
   storage: string;
+  exportTemplatesRoot: string;
 };

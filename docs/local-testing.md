@@ -8,6 +8,14 @@ DeviLudo 的前端、预览 API、Godot 验证侧车和 Agent 就绪探针可以
 - 在仓库根目录执行过 `npm install`
 - Godot 4（macOS 默认寻找 `/Applications/Godot.app/Contents/MacOS/Godot`，也可通过 `DEVILUDO_GODOT_BINARY` 指定）
 
+首次运行真实导出前安装与本机精确 Godot 构建匹配的官方模板：
+
+```bash
+npm run local:install-export-templates
+```
+
+安装器使用版本化目录中的固定下载 URL、字节数和 SHA-256，拒绝浮动版本、路径穿越、链接、重复文件和现存未验证目录。也可用 `--archive /绝对路径/官方模板.tpz` 对已经下载的归档执行相同校验。安装结果写入 Godot 标准目录并设为只读；每次验证仍会重验安装清单和 macOS 模板摘要，再把精确版本只读挂载进隔离 HOME。
+
 不要把 API Key、GitHub 私钥或 Steam 密码写入命令、脚本或 `.env`。仓库根目录的 `.env.example` 只包含本地默认值、公开 ID 和 Vault 引用示例；测试站的演示操作会停在外部服务门禁处。
 
 ## 启动
@@ -45,7 +53,7 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 
 证据包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本和逐项检查结果。`.deviludo/` 已被 Git 忽略。
 
-如果本机未安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
+如果本机没有通过上述固定安装器安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 
 Fixture 成功链走到 `main SHA 发布门禁` 或 `Steam 回装测试` 时，可以分别点击“模拟 main 门禁失败”或“模拟 Steam 回装失败”。本地 D1 会持久化失败 evidence、冻结修复指令和失败 main 基线，同时清空旧 main、MFA、Steam Build/Release 与外部批准授权。项目页随后只显示人工修改入口；创建不同的新规格草稿并再次批准后才会签发新运行。该演练完全在 loopback Fixture 内完成，不会请求 GitHub、Steam 或开发模型。
 
@@ -124,7 +132,7 @@ Compose 只把依赖端口绑定到 `127.0.0.1`。`infra:status` 不只检查端
 - `is already in use`：停止占用对应端口的旧进程，或为启动和检查命令选择相同的新端口。
 - `Run npm install`：当前工作区缺少固定版本的 vinext 依赖，先执行 `npm install`。
 - Smoke 等待超时：查看启动终端中的 vinext 错误，以及 `.wrangler/wrangler-local.log`。
-- `WAITING_EXPORT_TEMPLATES`：在 Godot 编辑器中安装与当前版本完全匹配的 export templates 后重新验证。
+- `WAITING_EXPORT_TEMPLATES`：运行 `npm run local:install-export-templates` 安装并校验当前固定版本后重新验证；仅由 Godot 编辑器放入可变 HOME 的模板不会被隔离 Runner 信任。
 - `VERSION_MISMATCH`：本机 CLI 可以被发现，但不等于任务锁定的批准版本；通过新的固定版本 WorkerImage 更新，不要放宽门禁或启用 CLI 自更新。
 - 页面通过但外部动作未执行：这是本地预览的预期行为；真实开发 Agent、Windows/Linux Runner、GitHub 和 Steam 工作流需要独立配置安全凭据与基础设施。
 - `/api/runner/events` 在本地仅提供只读演示状态；任何 POST 都会以 `RUNNER_MTLS_INGRESS_REQUIRED` 拒绝。真实 Runner 必须接入独立 mTLS 服务，不能通过浏览器或伪造 Header 上报结果。

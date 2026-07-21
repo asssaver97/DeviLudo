@@ -94,10 +94,13 @@ flowchart LR
 
 ```bash
 npm install
+npm run local:install-export-templates
 npm run local:dev
 ```
 
 打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为三个 sidecar 分别生成临时 HMAC Key；每个 Key 只进入 Web 与对应 sidecar，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时全部删除。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
+
+模板安装器只接受版本目录中固定的 Godot 官方构建，下载固定 URL 后校验归档大小、SHA-256 和全部压缩路径，再原子发布只读文件清单。验证侧车不会直接复用可变的编辑器 HOME；它会重验安装清单和 `macos.zip` 摘要，并只把精确版本目录挂载到本次运行的隔离 HOME。已有未验证目录不会被覆盖。
 
 管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。没有签名/hash/SBOM/扫描证据时版本批准返回 `SUPPLY_CHAIN_GATES_FAILED`；没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
 

@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
 import type { LocalRuntimeCheck, LocalRuntimeEvidence, LocalRuntimeRequest } from "./contracts";
+import { defaultGodotExportTemplatesRoot, mountExportTemplates } from "./export-templates";
 
 const execFileAsync = promisify(execFile);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/;
@@ -25,6 +26,7 @@ export class LocalFixtureRunner {
   readonly #storageRoot: string;
   readonly #godotBinary: string;
   readonly #gitBinary: string;
+  readonly #exportTemplatesRoot: string;
   readonly #scmProxy: LocalGitScmProxy;
 
   constructor(options: {
@@ -33,17 +35,20 @@ export class LocalFixtureRunner {
     storageRoot?: string;
     godotBinary?: string;
     gitBinary?: string;
+    exportTemplatesRoot?: string;
   }) {
     this.#repositoryRoot = path.resolve(options.repositoryRoot);
     this.#fixtureRoot = path.resolve(options.fixtureRoot ?? path.join(this.#repositoryRoot, "fixtures/godot-smoke"));
     this.#storageRoot = path.resolve(options.storageRoot ?? path.join(this.#repositoryRoot, ".deviludo/local-runtime"));
     this.#godotBinary = path.resolve(options.godotBinary ?? "/Applications/Godot.app/Contents/MacOS/Godot");
     this.#gitBinary = path.resolve(options.gitBinary ?? "/usr/bin/git");
+    this.#exportTemplatesRoot = path.resolve(options.exportTemplatesRoot ?? defaultGodotExportTemplatesRoot());
     this.#scmProxy = new LocalGitScmProxy({ storageRoot: this.#storageRoot, gitBinary: this.#gitBinary });
   }
 
   get storageRoot() { return this.#storageRoot; }
   get godotBinary() { return this.#godotBinary; }
+  get exportTemplatesRoot() { return this.#exportTemplatesRoot; }
 
   async godotVersion(): Promise<string> {
     const result = await this.#command(this.#godotBinary, ["--version"], this.#repositoryRoot, {
@@ -118,6 +123,11 @@ export class LocalFixtureRunner {
     const candidateSha = candidate.commitSha;
     const sourceDigest = candidate.sourceDigest;
     const godotVersion = await this.godotVersion();
+    const mountedTemplates = await mountExportTemplates({
+      runtimeHome,
+      templatesRoot: this.#exportTemplatesRoot,
+      godotVersion,
+    });
 
     const checks: LocalRuntimeCheck[] = [];
     const imported = await this.#checked(
@@ -168,9 +178,9 @@ export class LocalFixtureRunner {
       status: exportPassed ? "PASSED" : exportTemplatesMissing ? "WAITING_DEPENDENCY" : "FAILED",
       durationMs: exported.durationMs,
       detail: exportPassed
-        ? "Unsigned local macOS debug export created"
+        ? `Unsigned local macOS debug export created with pinned template ${mountedTemplates?.macosTemplateSha256 ?? "unverified"}`
         : exportTemplatesMissing
-          ? "Godot macOS export templates are not installed"
+          ? "Pinned Godot macOS export templates are not installed"
           : "Godot macOS export failed for a reason other than missing templates",
     });
 

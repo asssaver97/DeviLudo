@@ -109,7 +109,10 @@ behind the web console:
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,
   JUnit and log evidence below the ignored `.deviludo/` directory. Missing
-  export templates remain an explicit release gate. Run and evidence reads
+  export templates remain an explicit release gate. The version-pinned local
+  installer verifies the official archive digest and every extracted file;
+  the sidecar then rechecks the macOS template and mounts only that exact
+  read-only version into the per-run HOME. Run and evidence reads
   require a fresh request signature bound to the `godot-runtime` audience.
 - `local-agent-runtime`: a loopback-only readiness and execution sidecar. It
   executes fixed `--version` probes and reports the observed Claude Code/Codex

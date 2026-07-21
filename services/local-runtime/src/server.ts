@@ -16,6 +16,7 @@ const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const runner = new LocalFixtureRunner({
   repositoryRoot,
   godotBinary: process.env.DEVILUDO_GODOT_BINARY,
+  exportTemplatesRoot: process.env.DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT,
 });
 const requestVerifier = new LocalRuntimeRequestVerifier(localRuntimeKeyFromEnvironment());
 const running = new Map<string, Promise<unknown>>();
@@ -43,6 +44,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
       godotBinary: runner.godotBinary,
       godotVersion: version,
       storage: runner.storageRoot,
+      exportTemplatesRoot: runner.exportTemplatesRoot,
     });
     return;
   }

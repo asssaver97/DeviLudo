@@ -31,7 +31,8 @@ Environment:
   DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})
   DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
   DEVILUDO_LOCAL_SPEC_RUNTIME_PORT  Local specification dialogue port (default: ${DEFAULT_LOCAL_SPEC_RUNTIME_PORT})
-  DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable`);
+  DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable
+  DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT  Verified export_templates root`);
 }
 
 function fail(message) {
