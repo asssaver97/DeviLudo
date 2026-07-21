@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MtlsGatewayCredentialResolver } from "../../inference-gateway/src/credential-broker";
+import { MtlsSpecModelCredentialResolver } from "../../spec-model-broker/src/credential-broker";
 import { MtlsGitHubAuthorizationSecretClient } from "../../scm-proxy/src/github-auth-secret-client";
 import type { InferenceCredentialAuthority } from "../src/contracts";
 import { createSecretBrokerHandler } from "../src/http";
@@ -11,6 +12,7 @@ import { MemorySecretBackend } from "../src/vault-backend";
 const control = "spiffe://deviludo.internal/control/control-plane";
 const github = "spiffe://deviludo.internal/control/identity";
 const inference = "spiffe://deviludo.internal/inference/gateway";
+const specModel = "spiffe://deviludo.internal/inference/spec-model-broker";
 const tls = Object.freeze({
   key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3),
 });
@@ -19,6 +21,7 @@ class MutableAuthority implements InferenceCredentialAuthority {
   secretRef = "";
   async resolveRun() { return this.secretRef; }
   async resolveProbe() { return this.secretRef; }
+  async resolveSpecModel() { return this.secretRef; }
   async probe() {}
 }
 
@@ -33,6 +36,7 @@ test("existing GitHub and Inference clients compose with the shared Secret Broke
     controlPlaneSpiffeIds: new Set([control]),
     githubSpiffeIds: new Set([github]),
     inferenceGatewaySpiffeIds: new Set([inference]),
+    specModelSpiffeIds: new Set([specModel]),
     extractIdentity: (socket) => ({ spiffeId: String(socket) }),
   });
 
@@ -93,4 +97,34 @@ test("existing GitHub and Inference clients compose with the shared Secret Broke
   lease.destroy();
   assert.ok([...lease.value].every((value) => value === 0));
   await gatewayClient.probe();
+
+  const specClient = new MtlsSpecModelCredentialResolver({
+    endpoint: "https://secret-broker.internal/v1/spec-model-credentials/resolve",
+    tls,
+    http: async (url, input) => {
+      const response = await handler({
+        method: input.method, path: url.pathname, headers: input.headers,
+        socket: specModel, body: Buffer.from(input.body ?? ""),
+      });
+      try {
+        return { statusCode: response.status, payload: JSON.parse(response.body.toString("utf8")) as unknown };
+      } finally { response.body.fill(0); }
+    },
+  });
+  const specLease = await specClient.resolve({
+    profileRevisionId: "profile-spec-r1",
+    providerRevisionId: "provider-claude-r1",
+    credentialVersionId: "credential-a-v1",
+    agent: "claude-code",
+    protocol: "anthropic-messages",
+    baseUrl: "https://api.example.com/v1",
+    approvedPorts: [443],
+    authentication: "x-api-key",
+    model: "claude-haiku-4-5-20251001",
+    policyDigest: "a".repeat(64),
+  });
+  assert.equal(Buffer.from(specLease.value).toString("utf8"), "provider-key-secret-value");
+  specLease.destroy();
+  assert.ok([...specLease.value].every((value) => value === 0));
+  await specClient.probe();
 });

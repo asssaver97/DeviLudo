@@ -112,6 +112,13 @@ export interface InferenceCredentialAuthority {
     providerRevisionId: string;
     credentialVersionId: string;
   }>): Promise<string>;
+  resolveSpecModel(input: Readonly<{
+    profileRevisionId: string;
+    providerRevisionId: string;
+    credentialVersionId: string;
+    protocol: "anthropic-messages" | "openai-responses";
+    model: string;
+  }>): Promise<string>;
   probe(): Promise<void>;
 }
 

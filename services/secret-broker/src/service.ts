@@ -12,6 +12,7 @@ import { backendPathFromStaticSecretRef } from "./vault-backend";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const MODEL_ID = /^\S{1,200}$/;
 const PROVIDER_PATH = /^credential-[a-f0-9-]{36}\/[1-9][0-9]{0,8}$/;
 const RECORD_REF = /^vault:\/\/kv\/deviludo\/records\/[a-f0-9-]{36}$/;
 const PKCE = /^[A-Za-z0-9_-]{43}$/;
@@ -161,6 +162,23 @@ export class SecretBrokerService {
     if (!UUID.test(input.requestId) || !SAFE_ID.test(input.providerRevisionId) || !SAFE_ID.test(input.credentialVersionId)) invalid();
     const secretRef = await this.#authority.resolveProbe(input);
     return this.#inferenceLease(secretRef, input, "deviludo.inference-provider-probe-credential-lease.v1");
+  }
+
+  async resolveSpecModel(input: Readonly<{
+    requestId: string;
+    profileRevisionId: string;
+    providerRevisionId: string;
+    credentialVersionId: string;
+    protocol: "anthropic-messages" | "openai-responses";
+    model: string;
+    workloadSpiffeId: string;
+  }>) {
+    if (!UUID.test(input.requestId) || !SAFE_ID.test(input.profileRevisionId)
+      || !SAFE_ID.test(input.providerRevisionId) || !SAFE_ID.test(input.credentialVersionId)
+      || !MODEL_ID.test(input.model)
+      || (input.protocol !== "anthropic-messages" && input.protocol !== "openai-responses")) invalid();
+    const secretRef = await this.#authority.resolveSpecModel(input);
+    return this.#inferenceLease(secretRef, input, "deviludo.spec-model-credential-lease.v1");
   }
 
   async purgeExpiredPkce(limit = 100): Promise<number> {

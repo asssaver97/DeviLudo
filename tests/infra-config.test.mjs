@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 54 }, (_, index) => {
+  const offsets = Array.from({ length: 55 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -322,6 +322,43 @@ test("specification dialogue persists tenant-isolated messages and immutable dra
   assert.match(runtime, /DEVILUDO_SPEC_DIALOGUE_WEB_SPIFFE_IDS/);
   assert.match(runtime, /DEVILUDO_SPEC_MODEL_BROKER_TLS_KEY_FILE/);
   assert.doesNotMatch(runtime, /ANTHROPIC_API_KEY|OPENAI_API_KEY|apiKey/);
+});
+
+test("specification model Broker is a credential-isolated non-tool production boundary", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/055_spec_model_generation_operations.sql", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/spec-model-broker/src/service.ts", import.meta.url), "utf8");
+  const generator = readFileSync(new URL("../services/spec-model-broker/src/production-generator.ts", import.meta.url), "utf8");
+  const authority = readFileSync(new URL("../services/spec-model-broker/src/provider-authority.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/spec-model-broker/src/run-service.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/spec-model-broker/src/ingress-http.ts", import.meta.url), "utf8");
+  const secretIngress = readFileSync(new URL("../services/secret-broker/src/http.ts", import.meta.url), "utf8");
+  const secretAuthority = readFileSync(new URL("../services/secret-broker/src/authority.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:spec-model-broker"], observedServiceCommand("spec-model-broker"));
+  assert.match(packageJson.scripts["test:services"], /npm run test:spec-model-broker/);
+  assert.match(migration, /CREATE TABLE deviludo\.spec_model_generation_operations/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /state IN \('CLAIMED', 'COMPLETED', 'RELEASED', 'INDETERMINATE'\)/);
+  assert.match(migration, /spec_model_generation_no_delete/);
+  assert.doesNotMatch(migration, /api_key|access_token|password|user_message|prompt_history/i);
+  assert.ok(service.indexOf("store.lookup") < service.indexOf("authority.resolve"));
+  assert.match(generator, /tools: Object\.freeze\(\[\]\)/);
+  assert.match(generator, /output_config/);
+  assert.match(generator, /type: "json_schema"/);
+  assert.match(generator, /validateEndpointForConnection/);
+  assert.match(generator, /validateRedirectForConnection/);
+  assert.doesNotMatch(generator, /execFile|spawn|Claude Code|codex exec/);
+  assert.match(authority, /profile\.scope !== "platform"/);
+  assert.match(authority, /models\.smallFastModel/);
+  assert.match(runtime, /DEVILUDO_SPEC_MODEL_SECRET_BROKER_TLS_KEY_FILE/);
+  assert.doesNotMatch(runtime, /ANTHROPIC_API_KEY|OPENAI_API_KEY|apiKey/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(secretIngress, /specModelSpiffeIds/);
+  assert.match(secretIngress, /\/v1\/spec-model-credentials\/resolve/);
+  assert.match(secretAuthority, /resolveSpecModel/);
+  assert.match(secretAuthority, /profile\.scope !== "platform"/);
 });
 
 test("ambiguous inference usage has one SecurityAdmin-only evidence-bound reconciliation path", () => {

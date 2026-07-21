@@ -52,6 +52,7 @@ export async function secretBrokerRuntimeFromEnv(
       controlPlaneSpiffeIds: spiffeSet(required(env, "DEVILUDO_SECRET_BROKER_CONTROL_PLANE_SPIFFE_IDS")),
       githubSpiffeIds: spiffeSet(required(env, "DEVILUDO_SECRET_BROKER_GITHUB_SPIFFE_IDS")),
       inferenceGatewaySpiffeIds: spiffeSet(required(env, "DEVILUDO_SECRET_BROKER_INFERENCE_SPIFFE_IDS")),
+      specModelSpiffeIds: spiffeSet(required(env, "DEVILUDO_SECRET_BROKER_SPEC_MODEL_SPIFFE_IDS")),
     });
     const server = createSecretBrokerHttpsServer({
       tls: { key: serverKey, cert: serverCertificate, ca: clientCa }, handler,

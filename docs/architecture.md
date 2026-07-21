@@ -140,6 +140,17 @@ revision, then atomically appends both messages and complete `GAME_SPEC` /
 successors plus the append-only `approved_test_plan_bindings` edge; it never
 updates a draft revision in place.
 
+Its production model server is a separate non-Agent Broker. Deployment pins an
+exact ACTIVE platform Profile and the Broker derives only that Provider's
+versioned `smallFastModel`; dialogue and feedback callers cannot submit model,
+Base URL, protocol, credential, tool or Vault authority. A prompt-free
+tenant-RLS operation ledger is written before upstream dispatch. Completed
+strict JSON is replayed, pre-dispatch failures may retry, and an expired or
+post-dispatch ambiguous operation becomes `INDETERMINATE` so a potentially
+billable request is never repeated silently. The Broker obtains a five-minute
+credential lease through its own Secret Broker SPIFFE role and applies the same
+public-DNS, CNAME, redirect and TLS pinning policy as the Agent inference path.
+
 The GitHub Connector is repository-scoped by installation ID plus numeric and
 GraphQL repository IDs. An Ed25519-attested candidate artifact drives GitHub's
 blob/tree/commit/ref APIs; the Agent never pushes. Draft PR creation and merge

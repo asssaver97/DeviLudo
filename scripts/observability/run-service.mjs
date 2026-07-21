@@ -16,6 +16,7 @@ export const SERVICE_ENTRYPOINTS = Object.freeze({
   "agent-microvm-guest": Object.freeze({ entry: "services/agent-execution-broker/src/run-native-microvm-guest-service.ts" }),
   "inference-gateway": Object.freeze({ entry: "services/inference-gateway/src/run-service.ts" }),
   "secret-broker": Object.freeze({ entry: "services/secret-broker/src/run-service.ts" }),
+  "spec-model-broker": Object.freeze({ entry: "services/spec-model-broker/src/run-service.ts" }),
   "spec-dialogue": Object.freeze({ entry: "services/spec-dialogue/src/run-service.ts" }),
   "spec-workflow-bridge": Object.freeze({ entry: "services/spec-workflow-bridge/src/run-service.ts" }),
   "user-acceptance": Object.freeze({ entry: "services/user-acceptance/src/run-service.ts" }),

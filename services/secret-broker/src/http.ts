@@ -26,14 +26,22 @@ export function createSecretBrokerHandler(options: Readonly<{
   controlPlaneSpiffeIds: ReadonlySet<string>;
   githubSpiffeIds: ReadonlySet<string>;
   inferenceGatewaySpiffeIds: ReadonlySet<string>;
+  specModelSpiffeIds: ReadonlySet<string>;
   extractIdentity?: (socket: unknown) => Readonly<{ spiffeId: string }>;
 }>) {
-  const allowed = new Set([...options.controlPlaneSpiffeIds, ...options.githubSpiffeIds, ...options.inferenceGatewaySpiffeIds]);
-  if (!options.controlPlaneSpiffeIds.size || !options.githubSpiffeIds.size || !options.inferenceGatewaySpiffeIds.size) {
+  const allowed = new Set([
+    ...options.controlPlaneSpiffeIds, ...options.githubSpiffeIds,
+    ...options.inferenceGatewaySpiffeIds, ...options.specModelSpiffeIds,
+  ]);
+  if (!options.controlPlaneSpiffeIds.size || !options.githubSpiffeIds.size
+    || !options.inferenceGatewaySpiffeIds.size || !options.specModelSpiffeIds.size) {
     throw new Error("Secret Broker workload allow-lists are required");
   }
   for (const identity of allowed) {
-    const memberships = [options.controlPlaneSpiffeIds, options.githubSpiffeIds, options.inferenceGatewaySpiffeIds]
+    const memberships = [
+      options.controlPlaneSpiffeIds, options.githubSpiffeIds,
+      options.inferenceGatewaySpiffeIds, options.specModelSpiffeIds,
+    ]
       .filter((group) => group.has(identity)).length;
     if (memberships !== 1) throw new Error("Secret Broker workload roles must be disjoint");
   }
@@ -122,6 +130,25 @@ export function createSecretBrokerHandler(options: Readonly<{
           }));
         }
         invalid();
+      }
+      if (request.method === "POST" && request.path === "/v1/spec-model-credentials/resolve") {
+        requireRole(options.specModelSpiffeIds, workload);
+        requireContentType(request, "application/json");
+        const body = exactJson(request.body, [
+          "credentialVersionId", "model", "profileRevisionId", "protocol",
+          "providerRevisionId", "requestId", "schemaVersion",
+        ]);
+        if (body.schemaVersion !== "deviludo.spec-model-credential-request.v1"
+          || (body.protocol !== "anthropic-messages" && body.protocol !== "openai-responses")) invalid();
+        return json(200, await options.service.resolveSpecModel({
+          requestId: text(body.requestId),
+          profileRevisionId: text(body.profileRevisionId),
+          providerRevisionId: text(body.providerRevisionId),
+          credentialVersionId: text(body.credentialVersionId),
+          protocol: body.protocol,
+          model: text(body.model),
+          workloadSpiffeId: workload,
+        }));
       }
       return problem(404, "SECRET_BROKER_ROUTE_NOT_FOUND");
     } catch (error) { return mapped(error); }

@@ -39,6 +39,12 @@ behind the web console:
   stores only opaque references, one-way digests, fencing state and append-only
   access audit. Disjoint control-plane, GitHub/Identity and Gateway SPIFFE roles
   cannot call one another's endpoints.
+- `spec-model-broker`: the production server behind the specification
+  dialogue's fixed `/v1/spec-generations` client. It selects one exact ACTIVE
+  platform Profile `smallFastModel`, offers no tools, leases its credential
+  through a fourth disjoint Secret Broker role, pins public DNS/redirects, and
+  durably replays a strict result without a second model charge. Ambiguous
+  post-dispatch operations become `INDETERMINATE` instead of auto-retrying.
 - `runner-control`: registers only admitted mTLS/SPIFFE workloads, rejects E2E
   hosts containing autonomous Agents, signs exact per-platform job envelopes,
   applies independent fencing tokens and derives the final matrix result from
@@ -243,6 +249,14 @@ persists leased, replayable delivery events. Initial approval is ordered as
 the workflow already waits on the new draft. Approval enters
 `RESOLVING_AGENT_CONFIGURATION`; only a distinct Agent configuration workload
 may prove the queued immutable run lock and advance development.
+
+The corresponding production server is `services/spec-model-broker`. It uses
+the exact platform Profile revision configured at deployment, re-resolves the
+ACTIVE Provider/credential/`smallFastModel` from the administrator catalog,
+and accepts no authority fields from dialogue or feedback callers. Migration
+`055` keeps a prompt-free tenant-RLS request/result ledger, while Secret Broker
+independently verifies the same platform binding before returning a five-minute
+credential lease.
 
 The Agent version approval API requires an exact SHA-256 integrity value,
 verified signature flag, passing scan and internal OCI SBOM reference. Agent

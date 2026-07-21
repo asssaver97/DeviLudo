@@ -25,8 +25,9 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `services/temporal`：按控制面、Agent、Runner、SCM、Steam 固定路由活动；服务端以 mTLS/SPIFFE、PostgreSQL 租约 inbox 和全绑定回执实现幂等接收。三段外部审批逐门绑定，公开发布只有收到相同 Steam BuildID 的完成信号后才进入终态。
 - `services/agent-worker`：真实进程监督边界；无 shell spawn、路径/环境白名单、SecretRef、JSONL 事件、日志脱敏、取消和超时。测试只注入 fake spawn，不会调用本机 Agent。
 - `services/inference-gateway`：可独立启动的生产 mTLS Gateway；短期 run token、PostgreSQL RLS 不可变运行/Provider 投影、逐请求 usage 账本、mTLS 凭据 Broker 短租约、Responses/Messages 固定 Connector、DNS/CNAME 固定与重定向复检均为硬门禁。同一 run 的请求先取得数据库 fencing claim，崩溃或缺少终态 usage 的请求进入 `RECONCILIATION_REQUIRED`，不会静默重试并重复计费；仅 SecurityAdmin 可凭上游证据摘要选择“确认未计费”或“记录确切 token”，Gateway 按冻结价格原子核销并留痕。Provider 激活探针实际覆盖精确模型、认证、usage、流式输出、工具调用、取消和超时，失败不覆盖当前生效配置。
-- `services/secret-broker`：隔离的 Vault KV v2 权威边界；控制面只可写入/撤销 Provider Key，GitHub/Identity 只可存取一次性 PKCE 或租用固定 OAuth Client Secret，Inference Gateway 只有在 Broker 重新验证运行或探针绑定后才取得五分钟内的短租约。PostgreSQL 仅保存不透明引用、单向摘要、fencing 状态和追加式审计，明文不进入业务数据库、Agent 工作区或普通日志。
+- `services/secret-broker`：隔离的 Vault KV v2 权威边界；控制面只可写入/撤销 Provider Key，GitHub/Identity 只可存取一次性 PKCE 或租用固定 OAuth Client Secret，Inference Gateway 与规格模型 Broker 分别以互斥 mTLS 角色、经权威绑定重验后取得五分钟内的短租约。PostgreSQL 仅保存不透明引用、单向摘要、fencing 状态和追加式审计，明文不进入业务数据库、Agent 工作区或普通日志。
 - `services/spec-dialogue`：独立低延迟构想服务，不安装 Claude Code/Codex、不允许工具调用；每轮在同一 PostgreSQL RLS 事务中追加消息和一对 `GAME_SPEC`/`TEST_PLAN` 草稿。明确批准会另建 `APPROVED`/`FROZEN` 后继并写入 Runner 权威绑定，草稿本身永不修改。生产模型只经 mTLS Broker 调用，本服务不持有第三方 API Key 或 Base URL。
+- `services/spec-model-broker`：补齐生产构想模型服务端；只接受规格对话/反馈 workload，固定管理员目录中一个 ACTIVE 平台 Profile 的精确 `smallFastModel`，不接受客户端模型、端点或凭据。每次调用先进入租户 RLS 防重账本，再经独立 Secret Broker 角色取得五分钟 Key 租约；Responses/Messages 均强制结构化 JSON、空工具列表、DNS 固定和跳转复检。已完成结果精确重放，已发送但终态不明的调用进入 `INDETERMINATE`，不会自动重复计费。
 - `services/spec-workflow-bridge`：把已提交规格经 mTLS、租户 RLS、可回收租约和幂等事件可靠接入 Temporal；首轮严格按 `SPEC_READY → SPEC_APPROVED`，反馈迭代只投递批准事件。规格批准与 Agent 配置锁定是两个独立状态，只有后者的权威服务可进入开发队列。
 - `services/user-acceptance`：生产候选反馈/接受/取消入口只接受平台签名会话经 mTLS Web workload 转发的用户决定；服务端解析唯一等待中的验收 action、带第 3 次失败修复上下文的规格批准 action，或已撤销发布权限的 main/Steam 失败 action。反馈持久化 `GENERATING → DRAFT_READY → COMPLETED` 并创建沿用同一 aggregate 的下一对 DRAFT 规格/测试计划及新对话；候选反馈会原子失效旧证据，人工修复接管则验证失败 action 与草稿祖先而不伪造候选证据。接受操作仍须先记录不可变 actor、候选回执、commit、PR 与有效证据绑定，再发出 `USER_ACCEPTED` 供 SCM 合并。取消只接受原因，服务端重新验证活跃 ProjectOwner/TenantAdmin 资格，锁定当前 replay-validated 投影后向 Temporal 发送带状态/历史序号的幂等信号；过期信号安全失效，成功取消再由控制面同事务撤销 Agent、推理、Runner 与 Steam 权限。模型失败不失效证据，投递失败不重复生成草案或用户决定。
 - `services/scm-proxy`：本地 SCM 信任边界及 GitHub App 远端 Connector。安装使用单次 state + PKCE 用户授权，只有用户令牌证明当前用户可访问精确 installation 后才绑定；OAuth code/token/refresh token 均不入库。独立项目仓库 Broker 通过 mTLS Web workload 接收签名账号主体，签发并立即撤销 metadata-only installation token，用 GitHub 实时结果派生 owner/name/default branch，再在同一 RLS 事务中写入项目、仓库绑定和防重放回执。远端候选包和用户验收均须 Ed25519 签名；隔离合并 Broker 从 RLS 数据库重验已投递的用户决定、Draft PR 与未失效 E2E 证据，经 mTLS KMS 获取五分钟验收证明后才使用仓库级短期安装令牌合并。Git Data API 创建 blob/tree/commit/`deviludo/*` ref 和 Draft PR；外部副作用使用带租约的持久 claim，支持崩溃恢复且不会并发重复执行，并归档 GitHub 实际 main SHA 与 source digest。
@@ -56,6 +57,10 @@ flowchart LR
   API --> T["Temporal"]
   API --> SB["mTLS Secret Broker"]
   SB --> V["Vault / KMS"]
+  C --> SD["Spec Dialogue"]
+  SD --> SM["Spec Model Broker"]
+  SM --> SB
+  SM --> P
   API --> S3["S3 证据存储"]
   T --> DEV["一次性 Linux 开发 Worker"]
   DEV --> GW["Inference Gateway"]

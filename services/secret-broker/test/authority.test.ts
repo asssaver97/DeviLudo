@@ -85,3 +85,32 @@ test("run credential authority follows only the append-only Provider failover se
   assert.match(runQuery ?? "", /LEFT JOIN deviludo\.agent_run_provider_failovers/);
   assert.match(runQuery ?? "", /COALESCE\(failover\.to_credential_version_id/);
 });
+
+test("specification model authority leases only the exact ACTIVE platform Profile smallFastModel", async () => {
+  const payload = {
+    credentials: [{ id: "credential-v1", scope: "platform", scopeId: "global", secretRef, state: "ACTIVE" }],
+    providers: [{
+      id: "provider-r1", credentialVersionId: "credential-v1", state: "ACTIVE", agent: "claude-code",
+      protocol: "anthropic-messages", models: { smallFastModel: "claude-haiku-4-5-20251001" },
+    }],
+    profiles: [{
+      id: "profile-spec-r1", providerRevisionId: "provider-r1", credentialVersionId: "credential-v1",
+      scope: "platform", scopeId: "global", state: "ACTIVE", agent: "claude-code",
+    }],
+  };
+  const authority = new PostgresInferenceCredentialAuthority(poolFor(payload).pool);
+  const input = {
+    profileRevisionId: "profile-spec-r1", providerRevisionId: "provider-r1",
+    credentialVersionId: "credential-v1", protocol: "anthropic-messages" as const,
+    model: "claude-haiku-4-5-20251001",
+  };
+  assert.equal(await authority.resolveSpecModel(input), secretRef);
+  await assert.rejects(authority.resolveSpecModel({ ...input, model: "claude-sonnet-4-6-20250514" }), /rejected the binding/);
+
+  payload.profiles[0]!.scope = "tenant";
+  payload.profiles[0]!.scopeId = tenantId;
+  await assert.rejects(
+    new PostgresInferenceCredentialAuthority(poolFor(payload).pool).resolveSpecModel(input),
+    /rejected the binding/,
+  );
+});

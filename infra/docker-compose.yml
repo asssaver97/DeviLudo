@@ -65,6 +65,7 @@ services:
       - ./postgres/052_provider_recovery_checks.sql:/docker-entrypoint-initdb.d/052_provider_recovery_checks.sql:ro
       - ./postgres/053_provider_recovery_scheduling.sql:/docker-entrypoint-initdb.d/053_provider_recovery_scheduling.sql:ro
       - ./postgres/054_steam_depot_finalization_operations.sql:/docker-entrypoint-initdb.d/054_steam_depot_finalization_operations.sql:ro
+      - ./postgres/055_spec_model_generation_operations.sql:/docker-entrypoint-initdb.d/055_spec_model_generation_operations.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

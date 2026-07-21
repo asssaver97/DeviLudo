@@ -11,6 +11,7 @@ const now = new Date("2026-07-19T08:00:00.000Z");
 const control = "spiffe://deviludo.internal/control/control-plane";
 const github = "spiffe://deviludo.internal/control/identity";
 const inference = "spiffe://deviludo.internal/inference/gateway";
+const specModel = "spiffe://deviludo.internal/inference/spec-model-broker";
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
 const runId = "33333333-3333-4333-8333-333333333333";
@@ -23,6 +24,7 @@ class MutableAuthority implements InferenceCredentialAuthority {
   probeCalls = 0;
   async resolveRun() { this.runCalls += 1; return this.secretRef; }
   async resolveProbe() { this.probeCalls += 1; return this.secretRef; }
+  async resolveSpecModel() { return this.secretRef; }
   async probe() {}
 }
 
@@ -111,13 +113,14 @@ test("expired unused PKCE is fenced, physically destroyed and audited by the swe
   assert.equal(await service.takePkce({ secretRef: written.secretRef, workloadSpiffeId: github }), null);
 });
 
-test("HTTP boundary separates control-plane, GitHub and inference workload roles", async () => {
+test("HTTP boundary separates control-plane, GitHub, inference and spec-model workload roles", async () => {
   const f = fixture();
   const handler = createSecretBrokerHandler({
     service: f.service,
     controlPlaneSpiffeIds: new Set([control]),
     githubSpiffeIds: new Set([github]),
     inferenceGatewaySpiffeIds: new Set([inference]),
+    specModelSpiffeIds: new Set([specModel]),
     extractIdentity: (socket) => ({ spiffeId: String(socket) }),
   });
   const forbidden = await handler({

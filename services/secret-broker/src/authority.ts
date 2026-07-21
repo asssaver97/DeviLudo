@@ -3,6 +3,7 @@ import { SecretBrokerConflictError, SecretBrokerValidationError, type InferenceC
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const MODEL_ID = /^\S{1,200}$/;
 const SECRET_REF = /^vault:\/\/kv\/deviludo\/records\/[a-f0-9-]{36}$/;
 
 type CatalogCredential = {
@@ -109,6 +110,39 @@ export class PostgresInferenceCredentialAuthority implements InferenceCredential
     } finally { client.release(); }
   }
 
+  async resolveSpecModel(input: Parameters<InferenceCredentialAuthority["resolveSpecModel"]>[0]): Promise<string> {
+    if (!SAFE_ID.test(input.profileRevisionId) || !SAFE_ID.test(input.providerRevisionId)
+      || !SAFE_ID.test(input.credentialVersionId) || !MODEL_ID.test(input.model)
+      || (input.protocol !== "anthropic-messages" && input.protocol !== "openai-responses")) invalid();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const selected = await client.query<{ payload: unknown }>(
+        "SELECT payload FROM deviludo.admin_catalog_state WHERE singleton = true FOR SHARE",
+      );
+      if (selected.rows.length !== 1) conflict();
+      const catalog = record(selected.rows[0]!.payload);
+      if (!Array.isArray(catalog.credentials) || !Array.isArray(catalog.providers) || !Array.isArray(catalog.profiles)) conflict();
+      const profile = catalog.profiles.map(record).find((value) => value.id === input.profileRevisionId);
+      if (!profile || profile.state !== "ACTIVE" || profile.scope !== "platform" || profile.scopeId !== "global"
+        || profile.providerRevisionId !== input.providerRevisionId
+        || profile.credentialVersionId !== input.credentialVersionId
+        || (profile.agent !== "claude-code" && profile.agent !== "codex-cli")) conflict();
+      const provider = catalog.providers.map(record).find((value) => value.id === input.providerRevisionId);
+      if (!provider || provider.state !== "ACTIVE" || provider.agent !== profile.agent
+        || provider.credentialVersionId !== input.credentialVersionId || provider.protocol !== input.protocol
+        || record(provider.models).smallFastModel !== input.model) conflict();
+      const credential = catalog.credentials.map(parseCredential)
+        .find((value) => value.id === input.credentialVersionId);
+      if (!credential || credential.state !== "ACTIVE" || credential.scope !== "platform" || credential.scopeId !== "global") conflict();
+      await client.query("COMMIT");
+      return credential.secretRef;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* preserve */ }
+      throw error;
+    } finally { client.release(); }
+  }
+
   async probe(): Promise<void> {
     const client = await this.pool.connect();
     try { const result = await client.query<{ ready: number }>("SELECT 1 AS ready"); if (result.rows[0]?.ready !== 1) conflict(); }
@@ -137,6 +171,7 @@ export class MemoryInferenceCredentialAuthority implements InferenceCredentialAu
   ) {}
   async resolveRun(): Promise<string> { return this.runSecretRef; }
   async resolveProbe(): Promise<string> { return this.probeSecretRef; }
+  async resolveSpecModel(): Promise<string> { return this.probeSecretRef; }
   async probe(): Promise<void> {}
 }
 

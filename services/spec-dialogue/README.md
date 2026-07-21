@@ -15,6 +15,8 @@ The model boundary is an isolated mTLS Broker at the exact
 or third-party Base URL. The Broker must implement idempotent operation keys and
 return the exact strict result schema; malformed, floating Godot/TestKit or
 unknown-field output is rejected before persistence.
+The production implementation lives in `services/spec-model-broker`; local
+development continues to use the visibly identified deterministic sidecar.
 
 The public Web process never calls this service anonymously. Production ingress
 requires a client certificate whose SPIFFE ID is listed in

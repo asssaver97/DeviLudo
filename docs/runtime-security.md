@@ -46,6 +46,33 @@ expiry and revocation, then emits a fresh HMAC assertion bound to the exact HTTP
 method and path. The Web verifies that assertion before using the tenant ID.
 Logout revokes the server-side digest first and then clears both cookies.
 
+## Specification model boundary
+
+Idea refinement and feedback drafting never run Claude Code or Codex CLI. The
+production specification model Broker exposes one mTLS route to the dialogue
+and user-acceptance workloads, offers an empty tool list, and has no repository
+or SCM capability. It pins one exact ACTIVE platform Profile revision and
+always derives its version-bearing `smallFastModel`, protocol, Base URL,
+authentication and credential version from the administrator catalog. Caller
+JSON cannot override those fields.
+
+Each generation first claims a tenant-RLS row containing only the request
+digest and public immutable Provider binding. The full prompt remains in the
+owning dialogue transaction, while the Broker stores only the strict generated
+result needed for idempotent replay plus token usage. A failure before network
+dispatch releases the claim; once a request may have reached the Provider, any
+ambiguous outcome is permanently `INDETERMINATE` and cannot be automatically
+retried. This prevents duplicate model charges after a process or network loss.
+
+The Broker's separate SPIFFE role requests a five-minute credential lease from
+Secret Broker. Secret Broker independently re-resolves the same ACTIVE platform
+Profile/Provider/credential/model relationship and rejects tenant or project
+credentials. The upstream connector permits HTTPS only, rechecks every DNS and
+CNAME answer and redirect, pins the validated public address, requires TLS 1.3,
+and never serializes the key into a prompt, database row, environment variable,
+log or error response. Both Responses and Messages requests use structured JSON
+output and no tools; DeviLudo validates the returned object again before commit.
+
 ## Runtime adapter contract
 
 `RuntimeAdapter` exposes the planned six operations:

@@ -6,7 +6,7 @@ append-only access audit in PostgreSQL while storing bytes only in Vault KV v2.
 The public Web, control-plane database, Agent workspace and ordinary logs never
 receive a readable Provider credential.
 
-Three disjoint mTLS/SPIFFE roles are enforced:
+Four disjoint mTLS/SPIFFE roles are enforced:
 
 - control-plane workloads may create or revoke immutable Provider credentials;
 - GitHub/Identity workloads may create, take once and destroy OAuth PKCE values,
@@ -15,6 +15,9 @@ Three disjoint mTLS/SPIFFE roles are enforced:
 - the Inference Gateway may lease a credential for at most five minutes only
   after the Broker re-resolves the active run or Provider probe binding in
   PostgreSQL. It cannot submit an arbitrary Vault path.
+- the specification model Broker may lease only the exact credential of its
+  ACTIVE platform Profile and exact `smallFastModel`; it cannot borrow a
+  tenant/project credential or select a model, Provider or Vault path.
 
 Provider writes require a binding-derived idempotency key. Vault creation uses
 KV v2 CAS 0, so a retry can replay metadata but cannot overwrite an existing
