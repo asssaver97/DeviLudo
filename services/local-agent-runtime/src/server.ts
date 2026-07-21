@@ -192,7 +192,22 @@ function preflightFrom(item: Record<string, unknown>): LocalAgentPreflightReques
     providerRevisionId: requireString(item.providerRevisionId),
     credentialVersionId: requireString(item.credentialVersionId),
     model: requireString(item.model),
+    modelRoles: requireModelRoles(item.modelRoles),
   };
+}
+
+function requireModelRoles(value: unknown): LocalAgentPreflightRequest["modelRoles"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new LocalRequestError("Local Agent model roles are invalid");
+  const roles = value as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(roles).sort()) !== JSON.stringify([
+    "planningModel", "primaryModel", "smallFastModel", "subagentModel",
+  ])) throw new LocalRequestError("Local Agent model roles are invalid");
+  return Object.freeze({
+    primaryModel: requireString(roles.primaryModel, 200),
+    planningModel: requireString(roles.planningModel, 200),
+    smallFastModel: requireString(roles.smallFastModel, 200),
+    subagentModel: requireString(roles.subagentModel, 200),
+  });
 }
 
 function requireString(value: unknown, max = 512): string {

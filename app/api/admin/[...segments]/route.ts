@@ -103,14 +103,16 @@ function localOperationalProjection(store: DemoStoreState) {
   }
   for (const profile of store.profiles.filter((item) => item.state === "ACTIVE")) {
     const installation = store.installations.find((item) => item.id === profile.installationId);
-    const provider = store.providers.find((item) => item.id === profile.providerId);
+    const provider = store.providers.find((item) => item.id === profile.providerRevisionId);
     if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY") {
       addAlert("CRITICAL", "PROFILE_INSTALLATION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的精确 WorkerImage 当前不可服务");
     }
     if (!installation || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])) {
       addAlert("CRITICAL", "PROFILE_VERSION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Agent 版本已被阻止或缺少供应链授权");
     }
-    if (!provider || provider.state !== "ACTIVE" || Object.values(provider.probe).some((result) => result !== "PASS")) {
+    if (!provider || provider.state !== "ACTIVE" || profile.credentialVersionId !== provider.credentialVersionId
+      || !providerConfigurationComplete(provider)
+      || Object.values(provider.probe).some((result) => result !== "PASS")) {
       addAlert("CRITICAL", "PROFILE_PROVIDER_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Provider revision 当前不可服务");
     }
   }
@@ -589,20 +591,47 @@ export async function POST(request: Request, context: RouteContext) {
         || !Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < 60 || (timeoutSeconds as number) > 14_400) {
         throw new HttpProblem(400, "BUDGET_OUT_OF_POLICY", "Profile budget or timeout exceeds platform limits");
       }
+      const scope = body.scope === undefined ? "platform" : body.scope;
+      if (scope !== "platform" && scope !== "tenant" && scope !== "project") {
+        throw new HttpProblem(400, "PROFILE_SCOPE_REJECTED", "Profile scope must be platform, tenant or project");
+      }
+      const scopeId = body.scopeId === undefined ? scope === "platform" ? "global" : "" : requireString(body, "scopeId", 160);
+      if ((scope === "platform" && scopeId !== "global")
+        || (scope !== "platform" && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(scopeId))) {
+        throw new HttpProblem(400, "PROFILE_SCOPE_REJECTED", "Profile scope identifier is invalid");
+      }
+      const installationId = requireString(body, "installationId", 160);
+      const installation = getDemoStore().installations.find((item) => item.id === installationId);
+      if (!installation || installation.agent !== agent || !["READY", "CANARY", "ACTIVE"].includes(installation.state)
+        || !installation.imageDigest || !["APPROVED", "DEPRECATED"].includes(getDemoStore().agentVersions[`${agent}@${installation.version}`])) {
+        throw new HttpProblem(409, "INSTALLATION_NOT_SELECTABLE", "Profile requires a supply-chain-attested Installation for the selected Agent");
+      }
+      const credentialKnown = getDemoStore().credentials.some((item) => item.id === credentialVersionId && item.state === "ACTIVE")
+        || getDemoStore().providers.some((item) => item.agent === agent && item.credentialVersionId === credentialVersionId && item.state === "ACTIVE");
+      if (!credentialKnown) throw new HttpProblem(409, "CREDENTIAL_NOT_SELECTABLE", "Profile requires an active credential version for the selected Agent");
+      const fallbackProfileRevisionId = typeof body.fallbackProfileRevisionId === "string" ? body.fallbackProfileRevisionId : null;
+      if (fallbackProfileRevisionId) {
+        const fallback = getDemoStore().profiles.find((item) => item.id === fallbackProfileRevisionId);
+        if (!fallback || fallback.agent !== agent || fallback.state !== "ACTIVE") {
+          throw new HttpProblem(409, "FALLBACK_NOT_SELECTABLE", "Fallback must be an active immutable Profile for the same Agent");
+        }
+      }
       return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const providerId = `provider-${agent}-${store.providers.length + 1}`;
         const profile: DemoProfile = {
           id: `profile-${agent}-${store.profiles.length + 1}-r1`,
           revision: 1,
-          scope: body.scope === "tenant" || body.scope === "project" ? body.scope : "platform",
-          scopeId: typeof body.scopeId === "string" ? body.scopeId : "global",
+          scope,
+          scopeId,
           agent,
-          providerId,
-          installationId: requireString(body, "installationId", 160),
+          providerRevisionId: providerId,
+          installationId,
+          credentialVersionId,
           state: "DRAFT",
-          budgetUsd: maxBudgetUsd,
-          fallbackProfileId: typeof body.fallbackProfileRevisionId === "string" ? body.fallbackProfileRevisionId : null,
+          budget: { maxUsd: maxBudgetUsd, maxTurns: maxTurns as number, timeoutSeconds: timeoutSeconds as number },
+          fallbackProfileRevisionId,
+          createdAt: new Date().toISOString(),
         };
         store.providers.push({
           id: providerId,
@@ -610,11 +639,18 @@ export async function POST(request: Request, context: RouteContext) {
           agent,
           protocol,
           baseUrl,
+          approvedPorts: [443],
           authentication,
-          inputUsdPerMillionTokens,
-          outputUsdPerMillionTokens,
-          primaryModel: models.primaryModel,
-          credentialId: credentialVersionId,
+          models,
+          pricing: { inputUsdPerMillionTokens, outputUsdPerMillionTokens },
+          credentialVersionId,
+          governance: {
+            dataRegion,
+            retentionPolicy,
+            trainingPolicy,
+            confirmedBy: role,
+            confirmedAt: new Date().toISOString(),
+          },
           state: "DRAFT",
           probe: {},
         });
@@ -625,8 +661,7 @@ export async function POST(request: Request, context: RouteContext) {
           maxTurns: maxTurns as number,
           timeoutSeconds: timeoutSeconds as number,
         });
-        return { profile, provider: { id: providerId, protocol, baseUrl, authentication,
-          pricing: { inputUsdPerMillionTokens, outputUsdPerMillionTokens }, models, state: "DRAFT" } };
+        return { profile, provider: store.providers.at(-1) };
       });
     }
 
@@ -647,7 +682,7 @@ export async function POST(request: Request, context: RouteContext) {
         const store = getDemoStore();
         const profile = store.profiles.find((item) => item.id === profileId);
         if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
-        const provider = store.providers.find((item) => item.id === profile.providerId);
+        const provider = store.providers.find((item) => item.id === profile.providerRevisionId);
         if (!provider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
         const previousState = profile.state;
         const previousProviderState = provider.state;
@@ -725,9 +760,9 @@ export async function POST(request: Request, context: RouteContext) {
         }
         const localStore = getDemoStore();
         const activeProviderIds = new Set(localStore.providers
-          .filter((provider) => provider.credentialId === credentialId && provider.state === "ACTIVE")
+          .filter((provider) => provider.credentialVersionId === credentialId && provider.state === "ACTIVE")
           .map((provider) => provider.id));
-        if (localStore.profiles.some((profile) => profile.state === "ACTIVE" && activeProviderIds.has(profile.providerId))) {
+        if (localStore.profiles.some((profile) => profile.state === "ACTIVE" && activeProviderIds.has(profile.providerRevisionId))) {
           throw new HttpProblem(
             503,
             "PROVIDER_PROBE_NOT_CONFIGURED",
@@ -835,11 +870,12 @@ export async function PUT(request: Request, context: RouteContext) {
         throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
       const installation = store.installations.find((item) => item.id === profile.installationId);
-      const provider = store.providers.find((item) => item.id === profile.providerId);
+      const provider = store.providers.find((item) => item.id === profile.providerRevisionId);
       if (!installation || installation.agent !== profile.agent || installation.state !== "ACTIVE"
         || installation.health !== "HEALTHY" || installation.rolloutPercent !== 100 || !installation.activatedAt
         || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])
-        || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE") {
+        || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE"
+        || profile.credentialVersionId !== provider.credentialVersionId || !providerConfigurationComplete(provider)) {
         throw new HttpProblem(
           409,
           "PROFILE_NOT_SERVING_READY",
@@ -863,6 +899,20 @@ export async function PUT(request: Request, context: RouteContext) {
   }
 }
 
+function providerConfigurationComplete(provider: DemoProvider): boolean {
+  try {
+    const roles = normalizeModelRoles(provider.models);
+    return roles.primaryModel === provider.models.primaryModel
+      && provider.approvedPorts.length > 0
+      && provider.approvedPorts.every((port) => Number.isInteger(port) && port === 443)
+      && Boolean(provider.governance.dataRegion && provider.governance.retentionPolicy && provider.governance.trainingPolicy)
+      && Boolean(provider.governance.confirmedBy && provider.governance.confirmedAt)
+      && Number.isFinite(Date.parse(provider.governance.confirmedAt ?? ""));
+  } catch {
+    return false;
+  }
+}
+
 function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallation): readonly string[] {
   const target = installation.rollbackInstallationId
     ? store.installations.find((item) => item.id === installation.rollbackInstallationId
@@ -875,8 +925,8 @@ function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallat
   while (expanded) {
     expanded = false;
     for (const profile of store.profiles) {
-      if (profile.state === "ACTIVE" && !affected.has(profile.id) && profile.fallbackProfileId
-        && affected.has(profile.fallbackProfileId)) {
+      if (profile.state === "ACTIVE" && !affected.has(profile.id) && profile.fallbackProfileRevisionId
+        && affected.has(profile.fallbackProfileRevisionId)) {
         affected.add(profile.id);
         expanded = true;
       }
@@ -900,9 +950,10 @@ function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallat
     id: successorIds.get(profile.id)!,
     revision: profile.revision + 1,
     installationId: profile.installationId === installation.id ? target.id : profile.installationId,
-    fallbackProfileId: profile.fallbackProfileId
-      ? successorIds.get(profile.fallbackProfileId) ?? profile.fallbackProfileId
+    fallbackProfileRevisionId: profile.fallbackProfileRevisionId
+      ? successorIds.get(profile.fallbackProfileRevisionId) ?? profile.fallbackProfileRevisionId
       : null,
+    createdAt: new Date().toISOString(),
     state: "ACTIVE",
   }));
   for (const replacement of replacements) {
@@ -934,7 +985,7 @@ function demoProfileReferencesInstallation(
     const profile = store.profiles.find((item) => item.id === current);
     if (!profile) return false;
     if (profile.installationId === installationId) return true;
-    current = profile.fallbackProfileId;
+    current = profile.fallbackProfileRevisionId;
   }
   return false;
 }

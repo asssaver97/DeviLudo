@@ -44,11 +44,26 @@ export type DemoProvider = {
   agent: "claude-code" | "codex-cli";
   protocol: "anthropic-messages" | "openai-responses";
   baseUrl: string;
+  approvedPorts: readonly number[];
   authentication: "bearer" | "x-api-key" | "authorization-bearer";
-  inputUsdPerMillionTokens: number;
-  outputUsdPerMillionTokens: number;
-  primaryModel: string;
-  credentialId: string;
+  models: {
+    primaryModel: string;
+    planningModel: string;
+    smallFastModel: string;
+    subagentModel: string;
+  };
+  pricing: {
+    inputUsdPerMillionTokens: number;
+    outputUsdPerMillionTokens: number;
+  };
+  credentialVersionId: string;
+  governance: {
+    dataRegion: string;
+    retentionPolicy: string;
+    trainingPolicy: string;
+    confirmedBy: string | null;
+    confirmedAt: string | null;
+  };
   state: "DRAFT" | "VALIDATING" | "READY" | "ACTIVE" | "DISABLED";
   probe: Record<string, "PASS" | "FAIL">;
 };
@@ -59,11 +74,17 @@ export type DemoProfile = {
   scope: "platform" | "tenant" | "project";
   scopeId: string;
   agent: "claude-code" | "codex-cli";
-  providerId: string;
+  providerRevisionId: string;
   installationId: string;
+  credentialVersionId: string;
   state: "DRAFT" | "VALIDATING" | "READY" | "ACTIVE" | "SUPERSEDED" | "DEGRADED" | "DISABLED";
-  budgetUsd: number;
-  fallbackProfileId: string | null;
+  budget: {
+    maxUsd: number;
+    maxTurns: number;
+    timeoutSeconds: number;
+  };
+  fallbackProfileRevisionId: string | null;
+  createdAt: string;
 };
 
 export type DemoInstallation = {
@@ -189,11 +210,23 @@ const initialState = (): DemoStoreState => {
       agent: "claude-code",
       protocol: "anthropic-messages",
       baseUrl: "https://gateway.anthropic.example/v1",
+      approvedPorts: [443],
       authentication: "x-api-key",
-      inputUsdPerMillionTokens: 3,
-      outputUsdPerMillionTokens: 15,
-      primaryModel: "claude-sonnet-4-6-20250514",
-      credentialId: "cred-claude-platform-v4",
+      models: {
+        primaryModel: "claude-sonnet-4-6-20250514",
+        planningModel: "claude-sonnet-4-6-20250514",
+        smallFastModel: "claude-haiku-4-5-20251001",
+        subagentModel: "claude-sonnet-4-6-20250514",
+      },
+      pricing: { inputUsdPerMillionTokens: 3, outputUsdPerMillionTokens: 15 },
+      credentialVersionId: "cred-claude-platform-v4",
+      governance: {
+        dataRegion: "Singapore",
+        retentionPolicy: "Enterprise retention, maximum 30 days",
+        trainingPolicy: "Source and prompts are not used for model training",
+        confirmedBy: "SecurityAdmin",
+        confirmedAt: "2026-07-18T08:30:00.000Z",
+      },
       state: "ACTIVE",
       probe: {
         authentication: "PASS", modelExistence: "PASS", streaming: "PASS", toolCalling: "PASS",
@@ -207,11 +240,23 @@ const initialState = (): DemoStoreState => {
       agent: "codex-cli",
       protocol: "openai-responses",
       baseUrl: "https://responses.openai.example/v1",
+      approvedPorts: [443],
       authentication: "bearer",
-      inputUsdPerMillionTokens: 2.5,
-      outputUsdPerMillionTokens: 10,
-      primaryModel: "gpt-5.3-codex-2026-06-12",
-      credentialId: "cred-codex-platform-v2",
+      models: {
+        primaryModel: "gpt-5.3-codex-2026-06-12",
+        planningModel: "gpt-5.3-codex-2026-06-12",
+        smallFastModel: "gpt-5.3-mini-2026-06-12",
+        subagentModel: "gpt-5.3-codex-2026-06-12",
+      },
+      pricing: { inputUsdPerMillionTokens: 2.5, outputUsdPerMillionTokens: 10 },
+      credentialVersionId: "cred-codex-platform-v2",
+      governance: {
+        dataRegion: "United States",
+        retentionPolicy: "Zero data retention provider policy",
+        trainingPolicy: "Source and prompts are not used for model training",
+        confirmedBy: "SecurityAdmin",
+        confirmedAt: "2026-07-17T18:05:00.000Z",
+      },
       state: "ACTIVE",
       probe: {
         authentication: "PASS", modelExistence: "PASS", streaming: "PASS", toolCalling: "PASS",
@@ -227,11 +272,13 @@ const initialState = (): DemoStoreState => {
       scope: "platform",
       scopeId: "global",
       agent: "claude-code",
-      providerId: "provider-claude-platform-r3",
+      providerRevisionId: "provider-claude-platform-r3",
       installationId: "claude-installation-214",
+      credentialVersionId: "cred-claude-platform-v4",
       state: "ACTIVE",
-      budgetUsd: 25,
-      fallbackProfileId: null,
+      budget: { maxUsd: 25, maxTurns: 64, timeoutSeconds: 7_200 },
+      fallbackProfileRevisionId: null,
+      createdAt: "2026-07-18T08:35:00.000Z",
     },
     {
       id: "profile-codex-project-r1",
@@ -239,11 +286,13 @@ const initialState = (): DemoStoreState => {
       scope: "project",
       scopeId: "ember-archipelago",
       agent: "codex-cli",
-      providerId: "provider-codex-platform-r2",
+      providerRevisionId: "provider-codex-platform-r2",
       installationId: "codex-installation-091",
+      credentialVersionId: "cred-codex-platform-v2",
       state: "ACTIVE",
-      budgetUsd: 20,
-      fallbackProfileId: null,
+      budget: { maxUsd: 20, maxTurns: 64, timeoutSeconds: 7_200 },
+      fallbackProfileRevisionId: null,
+      createdAt: "2026-07-17T18:30:00.000Z",
     },
     {
       id: "profile-claude-tenant-r2",
@@ -251,11 +300,13 @@ const initialState = (): DemoStoreState => {
       scope: "tenant",
       scopeId: "north-dock",
       agent: "claude-code",
-      providerId: "provider-claude-platform-r3",
+      providerRevisionId: "provider-claude-platform-r3",
       installationId: "claude-installation-214",
+      credentialVersionId: "cred-claude-platform-v4",
       state: "ACTIVE",
-      budgetUsd: 22,
-      fallbackProfileId: null,
+      budget: { maxUsd: 22, maxTurns: 64, timeoutSeconds: 7_200 },
+      fallbackProfileRevisionId: null,
+      createdAt: "2026-07-18T08:36:00.000Z",
     },
     {
       id: "profile-codex-platform-r2",
@@ -263,11 +314,13 @@ const initialState = (): DemoStoreState => {
       scope: "platform",
       scopeId: "global",
       agent: "codex-cli",
-      providerId: "provider-codex-platform-r2",
+      providerRevisionId: "provider-codex-platform-r2",
       installationId: "codex-installation-091",
+      credentialVersionId: "cred-codex-platform-v2",
       state: "ACTIVE",
-      budgetUsd: 20,
-      fallbackProfileId: null,
+      budget: { maxUsd: 20, maxTurns: 64, timeoutSeconds: 7_200 },
+      fallbackProfileRevisionId: null,
+      createdAt: "2026-07-17T18:28:00.000Z",
     },
   ],
   credentials: [],
@@ -313,6 +366,7 @@ const globalStore = globalThis as typeof globalThis & { __deviludoDemoStore?: De
 
 export function getDemoStore(): DemoStoreState {
   globalStore.__deviludoDemoStore ??= initialState();
+  backfillProviderProfileShapes(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
@@ -330,9 +384,86 @@ export function resetDemoStore(): DemoStoreState {
  */
 export function restoreDemoStore(snapshot: DemoStoreState): DemoStoreState {
   globalStore.__deviludoDemoStore = structuredClone(snapshot);
+  backfillProviderProfileShapes(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
+}
+
+/** Upgrade v1 localhost snapshots without inventing a user confirmation. */
+export function migrateDemoStoreState(snapshot: unknown): DemoStoreState {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("本地 Agent 管理状态结构无效");
+  }
+  const migrated = structuredClone(snapshot) as DemoStoreState;
+  backfillProviderProfileShapes(migrated);
+  backfillVersionMetadata(migrated);
+  backfillCredentialTimestamps(migrated);
+  return migrated;
+}
+
+function backfillProviderProfileShapes(store: DemoStoreState): void {
+  if (!Array.isArray(store.providers) || !Array.isArray(store.profiles)) return;
+  for (const providerValue of store.providers as unknown as Record<string, unknown>[]) {
+    const primaryModel = typeof providerValue.primaryModel === "string"
+      ? providerValue.primaryModel
+      : recordString(providerValue.models, "primaryModel");
+    if (!providerValue.models && primaryModel) {
+      providerValue.models = {
+        primaryModel,
+        planningModel: primaryModel,
+        smallFastModel: primaryModel,
+        subagentModel: primaryModel,
+      };
+    }
+    if (!providerValue.pricing) {
+      providerValue.pricing = {
+        inputUsdPerMillionTokens: providerValue.inputUsdPerMillionTokens,
+        outputUsdPerMillionTokens: providerValue.outputUsdPerMillionTokens,
+      };
+    }
+    providerValue.approvedPorts ??= [443];
+    providerValue.credentialVersionId ??= providerValue.credentialId;
+    if (!providerValue.governance) {
+      const knownFixture = providerValue.id === "provider-claude-platform-r3"
+        || providerValue.id === "provider-codex-platform-r2";
+      providerValue.governance = {
+        dataRegion: knownFixture ? "fixture-provider-region" : "legacy-unrecorded",
+        retentionPolicy: knownFixture ? "fixture enterprise retention policy" : "legacy-unrecorded",
+        trainingPolicy: knownFixture ? "fixture no-training policy" : "legacy-unrecorded",
+        confirmedBy: knownFixture ? "SecurityAdmin" : null,
+        confirmedAt: knownFixture ? "2026-07-17T00:00:00.000Z" : null,
+      };
+    }
+    delete providerValue.primaryModel;
+    delete providerValue.inputUsdPerMillionTokens;
+    delete providerValue.outputUsdPerMillionTokens;
+    delete providerValue.credentialId;
+  }
+  for (const profileValue of store.profiles as unknown as Record<string, unknown>[]) {
+    profileValue.providerRevisionId ??= profileValue.providerId;
+    const provider = (store.providers as unknown as Record<string, unknown>[])
+      .find((item) => item.id === profileValue.providerRevisionId);
+    profileValue.credentialVersionId ??= provider?.credentialVersionId;
+    if (!profileValue.budget) {
+      profileValue.budget = {
+        maxUsd: profileValue.budgetUsd,
+        maxTurns: 64,
+        timeoutSeconds: 7_200,
+      };
+    }
+    profileValue.fallbackProfileRevisionId ??= profileValue.fallbackProfileId ?? null;
+    profileValue.createdAt ??= "2026-07-17T00:00:00.000Z";
+    delete profileValue.providerId;
+    delete profileValue.budgetUsd;
+    delete profileValue.fallbackProfileId;
+  }
+}
+
+function recordString(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = (value as Record<string, unknown>)[key];
+  return typeof candidate === "string" ? candidate : undefined;
 }
 
 function backfillVersionMetadata(store: DemoStoreState): void {

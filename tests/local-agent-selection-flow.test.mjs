@@ -24,6 +24,14 @@ test("new local runs lock the inherited Claude Profile while later configuration
   assert.equal(approved.run.credentialVersionId, "cred-claude-platform-v4");
   assert.equal(approved.run.exactAgentVersion, "2.1.14");
   assert.equal(approved.run.adapterVersion, "1.3.0");
+  assert.deepEqual(approved.run.modelRoles, {
+    primaryModel: "claude-sonnet-4-6-20250514",
+    planningModel: "claude-sonnet-4-6-20250514",
+    smallFastModel: "claude-haiku-4-5-20251001",
+    subagentModel: "claude-sonnet-4-6-20250514",
+  });
+  assert.equal(approved.run.budget.maxTurns, 64);
+  assert.equal(approved.run.timeoutSeconds, 7200);
   assert.equal(approved.run.locked, true);
 
   const originalLock = structuredClone(approved.delivery.lockedProfile);
@@ -55,6 +63,7 @@ test("an explicit project Codex selection is frozen into the same complete local
   assert.equal(approved.run.providerProtocol, "openai-responses");
   assert.equal(approved.run.credentialVersionId, "cred-codex-platform-v2");
   assert.equal(approved.run.model, "gpt-5.3-codex-2026-06-12");
+  assert.equal(approved.run.modelRoles.smallFastModel, "gpt-5.3-mini-2026-06-12");
   assert.equal(approved.delivery.events[0].message.includes("Codex CLI"), true);
 
   const released = await finish(projectId, "codex", releaseActions);

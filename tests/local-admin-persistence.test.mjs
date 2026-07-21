@@ -114,6 +114,36 @@ test("local Agent administrator snapshots fail closed on corruption and plaintex
   resetDemoStore();
 });
 
+test("local Agent administrator upgrades v1 Provider/Profile projections and writes v2 snapshots", () => {
+  const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v2");
+  envelope.schemaVersion = "deviludo.local-admin-state.v1";
+  const provider = envelope.state.providers[0];
+  provider.primaryModel = provider.models.primaryModel;
+  provider.inputUsdPerMillionTokens = provider.pricing.inputUsdPerMillionTokens;
+  provider.outputUsdPerMillionTokens = provider.pricing.outputUsdPerMillionTokens;
+  provider.credentialId = provider.credentialVersionId;
+  delete provider.models; delete provider.pricing; delete provider.approvedPorts;
+  delete provider.credentialVersionId; delete provider.governance;
+  const profile = envelope.state.profiles[0];
+  profile.providerId = profile.providerRevisionId;
+  profile.budgetUsd = profile.budget.maxUsd;
+  profile.fallbackProfileId = profile.fallbackProfileRevisionId;
+  delete profile.providerRevisionId; delete profile.credentialVersionId;
+  delete profile.budget; delete profile.fallbackProfileRevisionId; delete profile.createdAt;
+
+  const migrated = parseLocalAdminState(JSON.stringify(envelope));
+  assert.deepEqual(migrated.providers[0].models, {
+    primaryModel: provider.primaryModel,
+    planningModel: provider.primaryModel,
+    smallFastModel: provider.primaryModel,
+    subagentModel: provider.primaryModel,
+  });
+  assert.equal(migrated.providers[0].credentialVersionId, provider.credentialId);
+  assert.deepEqual(migrated.profiles[0].budget, { maxUsd: profile.budgetUsd, maxTurns: 64, timeoutSeconds: 7200 });
+  assert.equal(migrated.profiles[0].providerRevisionId, profile.providerId);
+});
+
 test("local Agent administrator migration makes every persisted revision immutable", async () => {
   const migration = await readFile(new URL("../drizzle/0007_wakeful_freak.sql", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE `local_admin_state_revisions`/);

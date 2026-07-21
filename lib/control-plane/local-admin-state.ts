@@ -1,10 +1,12 @@
 import {
   getDemoStore,
+  migrateDemoStoreState,
   restoreDemoStore,
   type DemoStoreState,
 } from "./demo-store";
 
-const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v1";
+const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v2";
+const LEGACY_SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v1";
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const COMMAND_KEY = /^[A-Za-z0-9][A-Za-z0-9:._@/-]{0,511}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -104,12 +106,15 @@ export function parseLocalAdminState(serialized: string): DemoStoreState {
   let envelope: unknown;
   try { envelope = JSON.parse(serialized); }
   catch { throw new Error("本地 Agent 管理状态快照无法解析"); }
-  if (!record(envelope) || envelope.schemaVersion !== SNAPSHOT_SCHEMA || !record(envelope.state)) {
+  if (!record(envelope)
+    || (envelope.schemaVersion !== SNAPSHOT_SCHEMA && envelope.schemaVersion !== LEGACY_SNAPSHOT_SCHEMA)
+    || !record(envelope.state)) {
     throw new Error("本地 Agent 管理状态快照版本无效");
   }
-  assertDemoStoreState(envelope.state);
-  if (hasForbiddenPersistedKey(envelope.state)) throw new Error("本地 Agent 管理状态包含禁止持久化的敏感字段");
-  return structuredClone(envelope.state);
+  const state = migrateDemoStoreState(envelope.state);
+  assertDemoStoreState(state);
+  if (hasForbiddenPersistedKey(state)) throw new Error("本地 Agent 管理状态包含禁止持久化的敏感字段");
+  return state;
 }
 
 /**
@@ -207,6 +212,29 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
       || !credential.secretRef.startsWith("vault://") || typeof credential.fingerprint !== "string"
       || !DIGEST.test(credential.fingerprint)) {
       throw new Error("本地 Agent 凭据投影无效");
+    }
+  }
+  for (const provider of value.providers) {
+    if (!record(provider) || typeof provider.id !== "string"
+      || (provider.agent !== "claude-code" && provider.agent !== "codex-cli")
+      || (provider.protocol !== "anthropic-messages" && provider.protocol !== "openai-responses")
+      || !record(provider.models) || !record(provider.pricing) || !record(provider.governance)
+      || !Array.isArray(provider.approvedPorts)
+      || typeof provider.credentialVersionId !== "string") {
+      throw new Error("本地 Agent Provider 投影无效");
+    }
+    for (const role of ["primaryModel", "planningModel", "smallFastModel", "subagentModel"] as const) {
+      if (typeof provider.models[role] !== "string" || !provider.models[role]) {
+        throw new Error("本地 Agent Provider 模型角色无效");
+      }
+    }
+  }
+  for (const profile of value.profiles) {
+    if (!record(profile) || typeof profile.id !== "string" || typeof profile.providerRevisionId !== "string"
+      || typeof profile.credentialVersionId !== "string" || !record(profile.budget)
+      || typeof profile.budget.maxUsd !== "number" || typeof profile.budget.maxTurns !== "number"
+      || typeof profile.budget.timeoutSeconds !== "number" || typeof profile.createdAt !== "string") {
+      throw new Error("本地 Agent Profile 投影无效");
     }
   }
 }

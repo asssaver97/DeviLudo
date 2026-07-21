@@ -40,6 +40,7 @@ export async function POST(
       providerProtocol: locked.providerProtocol,
       credentialVersionId: locked.credentialVersionId,
       model: locked.model,
+      modelRoles: locked.modelRoles,
       budget: locked.budget,
       timeoutSeconds: locked.timeoutSeconds,
       prompt: `Implement the approved immutable game specification ${delivery.specRevisionId}. Do not modify platform test policy, credentials, hooks, plugins, MCP configuration, or files outside the workspace.`,
@@ -96,6 +97,7 @@ function validateReceipt(
     providerRevisionId: string;
     credentialVersionId: string;
     model: string;
+    modelRoles: { primaryModel: string; planningModel: string; smallFastModel: string; subagentModel: string };
     agent: string;
     budget: { maxTurns: number; maxCostUsd: number; maxInputTokens: number; maxOutputTokens: number };
     timeoutSeconds: number;
@@ -109,6 +111,7 @@ function validateReceipt(
   const candidate = object(receipt.candidate);
   const usage = object(receipt.usage);
   const budget = object(receipt.budget);
+  const modelRoles = object(receipt.modelRoles);
   if (receipt.schemaVersion !== 1 || receipt.status !== "completed"
     || typeof receipt.summary !== "string" || !receipt.summary || receipt.summary.length > 4_000
     || (receipt.sessionId !== undefined && (typeof receipt.sessionId !== "string" || receipt.sessionId.length > 256))
@@ -129,6 +132,10 @@ function validateReceipt(
     || budget.maxCostUsd !== expected.budget.maxCostUsd
     || budget.maxInputTokens !== expected.budget.maxInputTokens
     || budget.maxOutputTokens !== expected.budget.maxOutputTokens
+    || modelRoles.primaryModel !== expected.modelRoles.primaryModel
+    || modelRoles.planningModel !== expected.modelRoles.planningModel
+    || modelRoles.smallFastModel !== expected.modelRoles.smallFastModel
+    || modelRoles.subagentModel !== expected.modelRoles.subagentModel
     || !validChangedFiles(candidate.changedFiles)
     || !validStrings(receipt.warnings, 100, 1_000)
     || typeof receipt.completedAt !== "string" || !Number.isFinite(Date.parse(receipt.completedAt))) {

@@ -1,4 +1,4 @@
-import { assertPinnedModelId } from "@/lib/agent/providers";
+import { assertPinnedModelId, normalizeModelRoles } from "@/lib/agent/providers";
 import {
   getDemoStore,
   type DemoProfile,
@@ -39,9 +39,9 @@ export function resolveLocalAgentProfile(
     notReady("最高优先级的 Agent Profile 已失效或超出配置作用域。");
   }
   const installation = store.installations.find((item) => item.id === profile.installationId);
-  const provider = store.providers.find((item) => item.id === profile.providerId);
+  const provider = store.providers.find((item) => item.id === profile.providerRevisionId);
   const credential = provider
-    ? store.credentials.find((item) => item.id === provider.credentialId)
+    ? store.credentials.find((item) => item.id === provider.credentialVersionId)
     : undefined;
   const expectedProtocol = profile.agent === "claude-code" ? "anthropic-messages" : "openai-responses";
   if (!installation || installation.agent !== profile.agent
@@ -51,17 +51,24 @@ export function resolveLocalAgentProfile(
     || !IMAGE_DIGEST.test(installation.imageDigest)
     || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])
     || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE"
-    || provider.protocol !== expectedProtocol || !SAFE_ID.test(provider.credentialId)
+    || provider.protocol !== expectedProtocol || !SAFE_ID.test(provider.credentialVersionId)
+    || profile.credentialVersionId !== provider.credentialVersionId
+    || !provider.governance.confirmedBy || !provider.governance.confirmedAt
+    || !Number.isFinite(Date.parse(provider.governance.confirmedAt))
     // The bundled demo catalog uses non-secret fixture bindings. Once a
     // credential enters the local lifecycle catalog, its current state is
     // authoritative and a revoked/previous version must fail closed.
     || (credential !== undefined && credential.state !== "ACTIVE")
     || !SAFE_ID.test(profile.id) || !SAFE_ID.test(installation.id)
     || !SAFE_ID.test(provider.id) || !SAFE_ID.test(testPlanRevisionId)
-    || !Number.isFinite(profile.budgetUsd) || profile.budgetUsd <= 0) {
+    || !Number.isFinite(profile.budget.maxUsd) || profile.budget.maxUsd <= 0
+    || !Number.isSafeInteger(profile.budget.maxTurns) || profile.budget.maxTurns < 1 || profile.budget.maxTurns > 200
+    || !Number.isSafeInteger(profile.budget.timeoutSeconds) || profile.budget.timeoutSeconds < 60
+    || profile.budget.timeoutSeconds > 14_400) {
     notReady("最高优先级的 Agent Profile 未通过版本、安装、Provider 或凭据绑定门禁。");
   }
-  const model = assertPinnedModelId(provider.primaryModel);
+  const modelRoles = normalizeModelRoles(provider.models);
+  const model = assertPinnedModelId(modelRoles.primaryModel);
   return Object.freeze({
     agent: profile.agent,
     profileRevisionId: profile.id,
@@ -72,16 +79,17 @@ export function resolveLocalAgentProfile(
     adapterVersion: installation.adapterVersion,
     providerRevisionId: provider.id,
     providerProtocol: provider.protocol,
-    credentialVersionId: provider.credentialId,
+    credentialVersionId: provider.credentialVersionId,
     model,
+    modelRoles,
     testPlanRevisionId,
     budget: Object.freeze({
-      maxTurns: 64,
-      maxCostUsd: profile.budgetUsd,
+      maxTurns: profile.budget.maxTurns,
+      maxCostUsd: profile.budget.maxUsd,
       maxInputTokens: 200_000,
       maxOutputTokens: 50_000,
     }),
-    timeoutSeconds: 7_200,
+    timeoutSeconds: profile.budget.timeoutSeconds,
   });
 }
 

@@ -1,5 +1,6 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
+import type { LocalLockedAgentProfile } from "@/lib/local-delivery/model";
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
 import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -29,6 +30,7 @@ export async function POST(
       providerRevisionId: locked.providerRevisionId,
       credentialVersionId: locked.credentialVersionId,
       model: locked.model,
+      modelRoles: locked.modelRoles,
     });
     let response: Response;
     try {
@@ -67,7 +69,8 @@ function validatePreflight(
     || item.agent !== locked.agent
     || item.expectedVersion !== locked.exactAgentVersion
     || item.imageDigest !== locked.imageDigest
-    || item.model !== locked.model) {
+    || item.model !== locked.model
+    || !sameModelRoles(item.modelRoles, locked.modelRoles)) {
     throw new Error("本机 Agent 预检绑定与锁定运行不一致");
   }
   if ((item.status !== "BLOCKED" && item.status !== "READY")
@@ -80,6 +83,15 @@ function validatePreflight(
   }
   if ((item.status === "READY") !== (item.code === "READY")) throw new Error("本机 Agent 预检状态矛盾");
   return item as unknown as LocalAgentPreflightResult;
+}
+
+function sameModelRoles(value: unknown, expected: LocalLockedAgentProfile["modelRoles"]): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const roles = value as Record<string, unknown>;
+  return roles.primaryModel === expected.primaryModel
+    && roles.planningModel === expected.planningModel
+    && roles.smallFastModel === expected.smallFastModel
+    && roles.subagentModel === expected.subagentModel;
 }
 
 function loopbackAgentRuntimeUrl() {

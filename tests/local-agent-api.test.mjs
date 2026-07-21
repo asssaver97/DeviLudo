@@ -29,6 +29,7 @@ function receipt(delivery, overrides = {}) {
     providerRevisionId: delivery.lockedProfile.providerRevisionId,
     credentialVersionId: delivery.lockedProfile.credentialVersionId,
     model: delivery.lockedProfile.model,
+    modelRoles: delivery.lockedProfile.modelRoles,
     agent: delivery.lockedProfile.agent,
     budget: delivery.lockedProfile.budget,
     timeoutSeconds: delivery.lockedProfile.timeoutSeconds,

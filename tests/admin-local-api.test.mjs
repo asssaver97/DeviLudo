@@ -362,7 +362,7 @@ test("local rollout rollback moves the default to an immutable Profile on the pr
   assert.equal(source.state, "SUPERSEDED");
   assert.equal(successor?.state, "ACTIVE");
   assert.equal(successor?.installationId, "codex-installation-091");
-  assert.equal(successor?.providerId, source.providerId);
+  assert.equal(successor?.providerRevisionId, source.providerRevisionId);
   assert.equal(store.defaults.platform, successor?.id);
 });
 
@@ -464,7 +464,7 @@ test("local rollout without a target degrades Profiles whose fallback chain woul
   const dependent = {
     ...dependentTemplate,
     id: "profile-local-fallback-dependent-r1",
-    fallbackProfileId: source.id,
+    fallbackProfileRevisionId: source.id,
   };
   store.profiles.push(dependent);
   store.defaults["project:local-fallback"] = dependent.id;
@@ -490,6 +490,9 @@ test("Provider activation fails closed without its external trust gate", async (
       inputUsdPerMillionTokens: 3,
       outputUsdPerMillionTokens: 15,
       primaryModel: "claude-sonnet-4-6-20250514",
+      planningModel: "claude-opus-4-6-20250514",
+      smallFastModel: "claude-haiku-4-5-20251001",
+      subagentModel: "claude-sonnet-4-6-20250514",
       installationId: "claude-installation-214",
       credentialVersionId: "cred-claude-platform-v4",
       scope: "platform",
@@ -504,7 +507,20 @@ test("Provider activation fails closed without its external trust gate", async (
     context("agent-profiles"),
   );
   assert.equal(draft.status, 201);
-  const profileId = (await draft.json()).data.profile.id;
+  const draftData = (await draft.json()).data;
+  const profileId = draftData.profile.id;
+  assert.deepEqual(draftData.provider.models, {
+    primaryModel: "claude-sonnet-4-6-20250514",
+    planningModel: "claude-opus-4-6-20250514",
+    smallFastModel: "claude-haiku-4-5-20251001",
+    subagentModel: "claude-sonnet-4-6-20250514",
+  });
+  assert.deepEqual(draftData.profile.budget, { maxUsd: 25, maxTurns: 100, timeoutSeconds: 7200 });
+  assert.equal(draftData.provider.governance.dataRegion, "us-east");
+  assert.equal(draftData.provider.governance.retentionPolicy, "zero application retention");
+  assert.equal(draftData.provider.governance.trainingPolicy, "no training");
+  assert.equal(draftData.provider.governance.confirmedBy, "SecurityAdmin");
+  assert.ok(Number.isFinite(Date.parse(draftData.provider.governance.confirmedAt)));
 
   const validation = await POST(
     request(`agent-profiles/${profileId}/validate`, "POST", "SecurityAdmin"),

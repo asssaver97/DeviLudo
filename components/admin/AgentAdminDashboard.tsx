@@ -61,7 +61,18 @@ type AdminState = {
     fallbackProfileRevisionId: string | null;
     budget: { maxUsd: number | null; maxTurns: number | null; timeoutSeconds: number | null };
   }>;
-  providers: Array<{ id: string; agent: AgentKind; protocol: string; baseUrl: string; primaryModel: string; credentialVersionId: string; state: string }>;
+  providers: Array<{
+    id: string;
+    agent: AgentKind;
+    protocol: string;
+    baseUrl: string;
+    primaryModel: string;
+    models: { primaryModel: string; planningModel: string; smallFastModel: string; subagentModel: string };
+    pricing: { inputUsdPerMillionTokens: number | null; outputUsdPerMillionTokens: number | null };
+    governance: { dataRegion: string | null; retentionPolicy: string | null; trainingPolicy: string | null; confirmedBy: string | null; confirmedAt: string | null };
+    credentialVersionId: string;
+    state: string;
+  }>;
   credentials: Array<{
     id: string;
     label: string;
@@ -789,15 +800,19 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
   const [agent, setAgent] = useState<AgentKind>("claude-code");
   const [baseUrl, setBaseUrl] = useState(creatingProvider ? "" : initialProvider?.baseUrl ?? "https://gateway.example.com");
   const [primaryModel, setPrimaryModel] = useState(creatingProvider ? "" : initialProvider?.primaryModel ?? "claude-sonnet-4-5-20250929");
-  const [planningModel, setPlanningModel] = useState("");
-  const [fastModel, setFastModel] = useState("");
+  const [planningModel, setPlanningModel] = useState(creatingProvider ? "" : initialProvider?.models.planningModel ?? "");
+  const [fastModel, setFastModel] = useState(creatingProvider ? "" : initialProvider?.models.smallFastModel ?? "");
+  const [subagentModel, setSubagentModel] = useState(creatingProvider ? "" : initialProvider?.models.subagentModel ?? "");
   const [authentication, setAuthentication] = useState<"bearer" | "x-api-key" | "authorization-bearer">("x-api-key");
-  const [inputPrice, setInputPrice] = useState(creatingProvider ? "" : "3");
-  const [outputPrice, setOutputPrice] = useState(creatingProvider ? "" : "15");
+  const [inputPrice, setInputPrice] = useState(creatingProvider ? "" : String(initialProvider?.pricing.inputUsdPerMillionTokens ?? 3));
+  const [outputPrice, setOutputPrice] = useState(creatingProvider ? "" : String(initialProvider?.pricing.outputUsdPerMillionTokens ?? 15));
   const [apiKey, setApiKey] = useState("");
-  const [dataRegion, setDataRegion] = useState(creatingProvider ? "" : "新加坡");
-  const [retentionPolicy, setRetentionPolicy] = useState(creatingProvider ? "" : "最长保留 30 天，按供应商企业协议删除");
-  const [trainingPolicy, setTrainingPolicy] = useState(creatingProvider ? "" : "源码与提示词不用于模型训练");
+  const [dataRegion, setDataRegion] = useState(creatingProvider ? "" : initialProvider?.governance.dataRegion ?? "新加坡");
+  const [retentionPolicy, setRetentionPolicy] = useState(creatingProvider ? "" : initialProvider?.governance.retentionPolicy ?? "最长保留 30 天，按供应商企业协议删除");
+  const [trainingPolicy, setTrainingPolicy] = useState(creatingProvider ? "" : initialProvider?.governance.trainingPolicy ?? "源码与提示词不用于模型训练");
+  const [maxBudgetUsd, setMaxBudgetUsd] = useState(String(initialProfile?.budget.maxUsd ?? 25));
+  const [maxTurns, setMaxTurns] = useState(String(initialProfile?.budget.maxTurns ?? 100));
+  const [timeoutSeconds, setTimeoutSeconds] = useState(String(initialProfile?.budget.timeoutSeconds ?? 7_200));
   const [regionAcknowledged, setRegionAcknowledged] = useState(false);
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
@@ -832,15 +847,20 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
     setPrimaryModel(current?.primaryModel ?? (loadExisting
       ? kind === "claude-code" ? "claude-sonnet-4-5-20250929" : "gpt-5.2-codex-2026-02-01"
       : ""));
-    setPlanningModel("");
-    setFastModel("");
+    setPlanningModel(loadExisting ? current?.models.planningModel ?? "" : "");
+    setFastModel(loadExisting ? current?.models.smallFastModel ?? "" : "");
+    setSubagentModel(loadExisting ? current?.models.subagentModel ?? "" : "");
     setAuthentication(kind === "claude-code" ? "x-api-key" : "bearer");
-    setInputPrice(loadExisting ? kind === "claude-code" ? "3" : "2.5" : "");
-    setOutputPrice(loadExisting ? kind === "claude-code" ? "15" : "10" : "");
+    setInputPrice(loadExisting ? String(current?.pricing.inputUsdPerMillionTokens ?? (kind === "claude-code" ? 3 : 2.5)) : "");
+    setOutputPrice(loadExisting ? String(current?.pricing.outputUsdPerMillionTokens ?? (kind === "claude-code" ? 15 : 10)) : "");
     setApiKey("");
-    setDataRegion(loadExisting ? "新加坡" : "");
-    setRetentionPolicy(loadExisting ? "最长保留 30 天，按供应商企业协议删除" : "");
-    setTrainingPolicy(loadExisting ? "源码与提示词不用于模型训练" : "");
+    setDataRegion(loadExisting ? current?.governance.dataRegion ?? "新加坡" : "");
+    setRetentionPolicy(loadExisting ? current?.governance.retentionPolicy ?? "最长保留 30 天，按供应商企业协议删除" : "");
+    setTrainingPolicy(loadExisting ? current?.governance.trainingPolicy ?? "源码与提示词不用于模型训练" : "");
+    const currentProfile = profiles.find((item) => item.providerRevisionId === current?.id && item.state === "ACTIVE");
+    setMaxBudgetUsd(String(currentProfile?.budget.maxUsd ?? 25));
+    setMaxTurns(String(currentProfile?.budget.maxTurns ?? 100));
+    setTimeoutSeconds(String(currentProfile?.budget.timeoutSeconds ?? 7_200));
     setRegionAcknowledged(false);
     setError("");
     setDraftProfileId("");
@@ -852,7 +872,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
       const url = new URL(baseUrl);
       if (url.protocol !== "https:") return "Base URL 仅允许 HTTPS";
       if (url.username || url.password || url.search || url.hash) return "URL 不得包含凭据、query 或 fragment";
-      if (url.port && !["443", "8443"].includes(url.port)) return "端口必须为 443 或经批准的 8443";
+      if (url.port && url.port !== "443") return "平台默认仅允许 443；私有 Connector 端口须由 SecurityAdmin 在隔离部署中批准";
       const host = url.hostname.toLowerCase();
       if (host === "localhost" || host.endsWith(".local") || host === "0.0.0.0" || host === "127.0.0.1" || /^10\.|^192\.168\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\./.test(host)) return "端点不能指向 loopback、私网或 link-local 地址";
     } catch {
@@ -866,6 +886,10 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
       const parsed = Number(value);
       if (!value.trim() || !Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) return `${label} Token 单价必须是非负数`;
     }
+    const budget = Number(maxBudgetUsd); const turns = Number(maxTurns); const timeout = Number(timeoutSeconds);
+    if (!Number.isFinite(budget) || budget <= 0 || budget > 100) return "任务预算必须大于 0 且不超过 100 USD";
+    if (!Number.isInteger(turns) || turns < 1 || turns > 200) return "最大 turns 必须是 1–200 的整数";
+    if (!Number.isInteger(timeout) || timeout < 60 || timeout > 14_400) return "超时必须是 60–14400 秒的整数";
     if (apiKey && apiKey.length < 12) return "凭据格式过短；请使用测试凭据或留空沿用当前版本";
     if (!dataRegion.trim() || !retentionPolicy.trim() || !trainingPolicy.trim()) return "数据地域、保留和训练政策均为必填";
     if (!regionAcknowledged) return "请确认第三方端点的数据处理信息";
@@ -899,6 +923,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         primaryModel,
         planningModel,
         smallFastModel: fastModel,
+        subagentModel,
         authentication,
         inputUsdPerMillionTokens: Number(inputPrice),
         outputUsdPerMillionTokens: Number(outputPrice),
@@ -909,9 +934,9 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         dataRegion: dataRegion.trim(),
         retentionPolicy: retentionPolicy.trim(),
         trainingPolicy: trainingPolicy.trim(),
-        maxBudgetUsd: 25,
-        maxTurns: 100,
-        timeoutSeconds: 7200,
+        maxBudgetUsd: Number(maxBudgetUsd),
+        maxTurns: Number(maxTurns),
+        timeoutSeconds: Number(timeoutSeconds),
       },
     });
     setDraftProfileId(created.profile.id);
@@ -1050,6 +1075,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
           <div className={styles.formGroup}><label htmlFor="planningModel">Planning Model</label><input id="planningModel" value={planningModel} onChange={(event) => setPlanningModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
           <div className={styles.formGroup}><label htmlFor="fastModel">Small / Fast Model</label><input id="fastModel" value={fastModel} onChange={(event) => setFastModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /></div>
         </div>
+        <div className={styles.formGroup}><label htmlFor="subagentModel">Subagent Model</label><input id="subagentModel" value={subagentModel} onChange={(event) => setSubagentModel(event.target.value)} placeholder="留空则固定到 Primary" disabled={!permissions.editPlatformProvider} /><small>规划、快速与子 Agent 模型都会解析为精确 ID 并随 Profile revision 冻结。</small></div>
         <div className={styles.formGroup}><label htmlFor="dataRegion">数据地域</label><input id="dataRegion" value={dataRegion} onChange={(event) => setDataRegion(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         <div className={styles.formGroup}><label htmlFor="retentionPolicy">保留政策</label><input id="retentionPolicy" value={retentionPolicy} onChange={(event) => setRetentionPolicy(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         <div className={styles.formGroup}><label htmlFor="trainingPolicy">训练政策</label><input id="trainingPolicy" value={trainingPolicy} onChange={(event) => setTrainingPolicy(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
@@ -1057,6 +1083,11 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
           <div className={styles.formGroup}><label htmlFor="inputPrice">输入单价（USD / 1M Token）</label><input id="inputPrice" type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
           <div className={styles.formGroup}><label htmlFor="outputPrice">输出单价（USD / 1M Token）</label><input id="outputPrice" type="number" min="0" step="0.000001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         </div>
+        <div className={styles.fieldPair}>
+          <div className={styles.formGroup}><label htmlFor="maxBudgetUsd">单任务预算（USD）</label><input id="maxBudgetUsd" type="number" min="0.01" max="100" step="0.01" value={maxBudgetUsd} onChange={(event) => setMaxBudgetUsd(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
+          <div className={styles.formGroup}><label htmlFor="maxTurns">最大 Turns</label><input id="maxTurns" type="number" min="1" max="200" step="1" value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
+        </div>
+        <div className={styles.formGroup}><label htmlFor="timeoutSeconds">任务超时（秒）</label><input id="timeoutSeconds" type="number" min="60" max="14400" step="60" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         <div className={styles.formGroup}><label htmlFor="apiKey">替换 API Key</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="留空以沿用当前凭据版本" autoComplete="new-password" disabled={!permissions.manageGlobalCredentials} /></div><small>写入后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。平台凭据仅由 SecurityAdmin 替换。</small></div>
         <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} disabled={!permissions.editPlatformProvider} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>
         {error && <div className={styles.formError}><AdminIcon name="alert" />{error}</div>}
@@ -1099,7 +1130,7 @@ function InheritanceTab({ defaults, installations, profiles, providers, notify }
     installationId: installation?.id ?? null,
     imageDigest: installation?.imageDigest ?? null,
     providerRevisionId: provider?.id ?? null,
-    model: provider?.primaryModel ?? null,
+    models: provider?.models ?? null,
     fallbackProfileRevisionId: fallback?.id ?? null,
     budget: profile?.budget ?? null,
   }, null, 2);
@@ -1135,7 +1166,7 @@ function InheritanceTab({ defaults, installations, profiles, providers, notify }
         {selected && selected.profileId !== "built-in:claude-code" && !profile ? <div className={styles.formError}><AdminIcon name="alert" />{selectedLabel} 默认指向不存在的 Profile：{selected.profileId}。该作用域必须停止接收新任务。</div> : null}
         <div className={styles.resolutionTable}>
           <div><span>Installation</span><strong>{installation ? `${installation.agent} ${installation.version}` : profile ? "未找到锁定 Installation" : "内置默认尚未锁定"}</strong><small>{installation ? `${installation.workerPool} · ${installation.imageDigest ? `${installation.imageDigest.slice(0, 18)}…` : "无镜像 digest"}` : `来源：${selectedLabel}`}</small></div>
-          <div><span>Provider / Model</span><strong>{provider ? `${provider.protocol} · ${providerHost(provider.baseUrl)}` : profile ? "未找到锁定 Provider" : "等待项目入队解析"}</strong><small>{provider?.primaryModel ?? "无已锁定模型"}</small></div>
+          <div><span>Provider / Model Roles</span><strong>{provider ? `${provider.protocol} · ${providerHost(provider.baseUrl)}` : profile ? "未找到锁定 Provider" : "等待项目入队解析"}</strong><small>{provider ? `primary ${provider.models.primaryModel} · planning ${provider.models.planningModel} · fast ${provider.models.smallFastModel} · subagent ${provider.models.subagentModel}` : "无已锁定模型"}</small></div>
           <div><span>Profile / Fallback</span><strong>{profile ? `${profile.id}${profile.revision === null ? "" : ` · rev ${profile.revision}`}` : selected?.profileId ?? "—"}</strong><small>{fallback ? `显式同 Agent fallback：${fallback.id}` : "无显式 fallback；Provider 故障进入 WAITING_PROVIDER"}</small></div>
           <div><span>任务预算 / 超时</span><strong>{profile?.budget.maxUsd === null || profile?.budget.maxUsd === undefined ? "未锁定" : `$${profile.budget.maxUsd}`}{profile?.budget.maxTurns === null || profile?.budget.maxTurns === undefined ? "" : ` · ${profile.budget.maxTurns} turns`}</strong><small>{profile?.budget.timeoutSeconds === null || profile?.budget.timeoutSeconds === undefined ? "入队时由有效 Profile 固定" : `${profile.budget.timeoutSeconds} 秒`}</small></div>
         </div>
@@ -1345,8 +1376,25 @@ function providerRow(value: Record<string, unknown>): AdminState["providers"][nu
   const id = text(value.id); const agent = agentKind(value.agent); const protocol = text(value.protocol); const baseUrl = text(value.baseUrl);
   const models = object(value.models); const primaryModel = text(models?.primaryModel) ?? text(value.primaryModel); const state = text(value.state);
   const credentialVersionId = text(value.credentialVersionId) ?? text(value.credentialId);
-  return id && agent && protocol && baseUrl && primaryModel && credentialVersionId && state
-    ? { id, agent, protocol, baseUrl, primaryModel, credentialVersionId, state } : null;
+  const planningModel = text(models?.planningModel) ?? primaryModel;
+  const smallFastModel = text(models?.smallFastModel) ?? primaryModel;
+  const subagentModel = text(models?.subagentModel) ?? primaryModel;
+  const pricing = object(value.pricing); const governance = object(value.governance);
+  return id && agent && protocol && baseUrl && primaryModel && planningModel && smallFastModel && subagentModel && credentialVersionId && state
+    ? {
+      id, agent, protocol, baseUrl, primaryModel,
+      models: { primaryModel, planningModel, smallFastModel, subagentModel },
+      pricing: {
+        inputUsdPerMillionTokens: number(pricing?.inputUsdPerMillionTokens) ?? number(value.inputUsdPerMillionTokens),
+        outputUsdPerMillionTokens: number(pricing?.outputUsdPerMillionTokens) ?? number(value.outputUsdPerMillionTokens),
+      },
+      governance: {
+        dataRegion: text(governance?.dataRegion), retentionPolicy: text(governance?.retentionPolicy),
+        trainingPolicy: text(governance?.trainingPolicy), confirmedBy: text(governance?.confirmedBy),
+        confirmedAt: text(governance?.confirmedAt),
+      },
+      credentialVersionId, state,
+    } : null;
 }
 function credentialRow(value: Record<string, unknown>): AdminState["credentials"][number] | null {
   const id = text(value.id); const label = text(value.label); const state = text(value.state);

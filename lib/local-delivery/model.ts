@@ -54,6 +54,12 @@ export type LocalLockedAgentProfile = {
   providerProtocol: "anthropic-messages" | "openai-responses";
   credentialVersionId: string;
   model: string;
+  modelRoles: {
+    primaryModel: string;
+    planningModel: string;
+    smallFastModel: string;
+    subagentModel: string;
+  };
   testPlanRevisionId: string;
   budget: {
     maxTurns: number;
@@ -136,6 +142,12 @@ const profile = {
   providerProtocol: "anthropic-messages" as const,
   credentialVersionId: "credential-platform-claude-v1" as const,
   model: "claude-sonnet-4-6-20250514" as const,
+  modelRoles: {
+    primaryModel: "claude-sonnet-4-6-20250514" as const,
+    planningModel: "claude-sonnet-4-6-20250514" as const,
+    smallFastModel: "claude-sonnet-4-6-20250514" as const,
+    subagentModel: "claude-sonnet-4-6-20250514" as const,
+  },
   testPlanRevisionId: "godot-testkit-1.0.0" as const,
   budget: {
     maxTurns: 64 as const,
@@ -148,9 +160,28 @@ const profile = {
 
 /** Add newly locked fields when reading an older localhost JSON snapshot. */
 export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
+  const lockedProfile: LocalLockedAgentProfile = {
+    ...profile,
+    ...snapshot.lockedProfile,
+    modelRoles: { ...profile.modelRoles, ...snapshot.lockedProfile?.modelRoles },
+    budget: { ...profile.budget, ...snapshot.lockedProfile?.budget },
+  };
+  const historicalExecution = snapshot.agentExecution as (LocalAgentExecutionSnapshot & {
+    modelRoles?: LocalLockedAgentProfile["modelRoles"];
+  }) | null | undefined;
+  const agentExecution = historicalExecution
+    ? {
+      ...historicalExecution,
+      // Old localhost evidence did not bind every model role. Keep it readable,
+      // but fail it closed so it can never satisfy a current delivery gate.
+      modelRoles: historicalExecution.modelRoles ?? lockedProfile.modelRoles,
+      valid: historicalExecution.modelRoles ? historicalExecution.valid : false,
+    }
+    : null;
+
   return {
     ...snapshot,
-    agentExecution: snapshot.agentExecution ?? null,
+    agentExecution,
     repairHandoff: snapshot.repairHandoff ?? null,
     mfaApprovalId: snapshot.mfaApprovalId ?? null,
     steamBuildId: snapshot.steamBuildId ?? null,
@@ -167,11 +198,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
           : snapshot.localValidation.status,
       }
       : null,
-    lockedProfile: {
-      ...profile,
-      ...snapshot.lockedProfile,
-      budget: { ...profile.budget, ...snapshot.lockedProfile?.budget },
-    },
+    lockedProfile,
   };
 }
 
@@ -257,7 +284,7 @@ export function approveLocalSpec(
 }
 
 function cloneLockedProfile(value: LocalLockedAgentProfile): LocalLockedAgentProfile {
-  return { ...value, budget: { ...value.budget } };
+  return { ...value, modelRoles: { ...value.modelRoles }, budget: { ...value.budget } };
 }
 
 function agentLabel(agent: LocalLockedAgentProfile["agent"]): string {
@@ -325,6 +352,7 @@ export function recordLocalAgentExecution(
     || receipt.providerRevisionId !== locked.providerRevisionId
     || receipt.credentialVersionId !== locked.credentialVersionId
     || receipt.model !== locked.model
+    || !sameModelRoles(receipt.modelRoles, locked.modelRoles)
     || receipt.agent !== locked.agent) {
     throw new Error("Agent 运行回执与不可变任务锁不一致");
   }
@@ -349,6 +377,17 @@ export function recordLocalAgentExecution(
     "AGENT_CANDIDATE_RECORDED",
     `${receipt.agent} 已完成；SCM 代理冻结候选提交 ${receipt.candidate.commitSha.slice(0, 7)}，等待 E2E。`,
   );
+}
+
+function sameModelRoles(
+  left: LocalLockedAgentProfile["modelRoles"] | null | undefined,
+  right: LocalLockedAgentProfile["modelRoles"],
+): boolean {
+  if (!left) return false;
+  return left.primaryModel === right.primaryModel
+    && left.planningModel === right.planningModel
+    && left.smallFastModel === right.smallFastModel
+    && left.subagentModel === right.subagentModel;
 }
 
 export function recordLocalValidation(

@@ -124,6 +124,8 @@ function validatePreflightRequest(request: LocalAgentPreflightRequest): void {
     throw new Error("Local Agent preflight lock is invalid");
   }
   assertPinnedModelId(request.model);
+  for (const model of Object.values(request.modelRoles)) assertPinnedModelId(model);
+  if (request.model !== request.modelRoles.primaryModel) throw new Error("Local Agent primary model binding is inconsistent");
 }
 
 function preflightResult(
@@ -144,6 +146,7 @@ function preflightResult(
     observedVersion,
     imageDigest: request.imageDigest,
     model: request.model,
+    modelRoles: Object.freeze({ ...request.modelRoles }),
     message,
   });
 }

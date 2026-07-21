@@ -1,4 +1,4 @@
-import type { AgentKind } from "../../../lib/agent/types";
+import type { AgentKind, ModelRoles } from "../../../lib/agent/types";
 import type { AgentCodeReviewReceipt } from "../../../lib/agent/code-review";
 
 export type LocalAgentReadinessState = "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
@@ -37,6 +37,7 @@ export interface LocalAgentPreflightRequest {
   readonly providerRevisionId: string;
   readonly credentialVersionId: string;
   readonly model: string;
+  readonly modelRoles: ModelRoles;
 }
 
 export type LocalAgentPreflightCode =
@@ -58,6 +59,7 @@ export interface LocalAgentPreflightResult {
   readonly observedVersion: string | null;
   readonly imageDigest: string;
   readonly model: string;
+  readonly modelRoles: ModelRoles;
   readonly message: string;
 }
 
@@ -94,6 +96,7 @@ export interface LocalAgentExecutionReceipt {
   readonly providerRevisionId: string;
   readonly credentialVersionId: string;
   readonly model: string;
+  readonly modelRoles: ModelRoles;
   readonly agent: AgentKind;
   readonly budget: LocalAgentExecutionRequest["budget"];
   readonly timeoutSeconds: number;

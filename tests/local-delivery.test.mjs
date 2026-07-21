@@ -5,6 +5,7 @@ import {
   approveLocalSpec,
   createLocalDelivery,
   invalidateLocalDelivery,
+  normalizeLocalDeliverySnapshot,
   recordLocalAgentExecution,
   recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
@@ -244,6 +245,7 @@ test("a completed Agent receipt must match every immutable lock before becoming 
     providerRevisionId: state.lockedProfile.providerRevisionId,
     credentialVersionId: state.lockedProfile.credentialVersionId,
     model: state.lockedProfile.model,
+    modelRoles: state.lockedProfile.modelRoles,
     agent: state.lockedProfile.agent,
     budget: state.lockedProfile.budget,
     timeoutSeconds: state.lockedProfile.timeoutSeconds,
@@ -277,6 +279,25 @@ test("a completed Agent receipt must match every immutable lock before becoming 
   state = applyLocalDeliveryAction(state, "advance");
   state = invalidateLocalDelivery(state, "SPEC-013");
   assert.equal(state.agentExecution.valid, false);
+});
+
+test("legacy Agent evidence without a complete model-role lock fails closed", () => {
+  const state = approveLocalSpec(createLocalDelivery("project-legacy-agent"), "SPEC-LEGACY-001", "RUN-LEGACY-001");
+  const legacy = {
+    ...state,
+    agentExecution: {
+      schemaVersion: 1,
+      valid: true,
+      tenantId: "tenant-local",
+      projectId: state.projectId,
+      runId: state.runId,
+      model: state.lockedProfile.model,
+    },
+  };
+
+  const normalized = normalizeLocalDeliverySnapshot(legacy);
+  assert.equal(normalized.agentExecution.valid, false);
+  assert.deepEqual(normalized.agentExecution.modelRoles, state.lockedProfile.modelRoles);
 });
 
 test("feedback cannot bypass candidate E2E or invent an early revision", () => {

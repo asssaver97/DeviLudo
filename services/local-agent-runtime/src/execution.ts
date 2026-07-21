@@ -72,6 +72,7 @@ function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgen
     || receipt.providerRevisionId !== request.providerRevisionId
     || receipt.credentialVersionId !== request.credentialVersionId
     || receipt.model !== request.model
+    || !sameModelRoles(receipt.modelRoles, request.modelRoles)
     || receipt.agent !== request.agent
     || receipt.timeoutSeconds !== request.timeoutSeconds
     || !sameBudget(receipt.budget, request.budget)) {
@@ -142,6 +143,13 @@ function sameBudget(left: LocalAgentExecutionRequest["budget"], right: LocalAgen
     && left.maxOutputTokens === right.maxOutputTokens;
 }
 
+function sameModelRoles(left: LocalAgentExecutionRequest["modelRoles"], right: LocalAgentExecutionRequest["modelRoles"]): boolean {
+  return left.primaryModel === right.primaryModel
+    && left.planningModel === right.planningModel
+    && left.smallFastModel === right.smallFastModel
+    && left.subagentModel === right.subagentModel;
+}
+
 function validChangedFiles(files: readonly string[]): boolean {
   return Array.isArray(files)
     && files.length > 0
@@ -158,6 +166,7 @@ function validChangedFiles(files: readonly string[]): boolean {
 function freezeReceipt(receipt: LocalAgentExecutionReceipt): LocalAgentExecutionReceipt {
   return Object.freeze({
     ...receipt,
+    modelRoles: Object.freeze({ ...receipt.modelRoles }),
     usage: Object.freeze({ ...receipt.usage }),
     warnings: Object.freeze([...receipt.warnings]),
     codeReviewReceipt: Object.freeze({ ...receipt.codeReviewReceipt }),

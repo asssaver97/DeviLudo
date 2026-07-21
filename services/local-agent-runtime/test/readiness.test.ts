@@ -15,6 +15,12 @@ const preflight = {
   providerRevisionId: "provider-claude-r1",
   credentialVersionId: "credential-claude-v1",
   model: "claude-sonnet-4-6-20250514",
+  modelRoles: {
+    primaryModel: "claude-sonnet-4-6-20250514",
+    planningModel: "claude-opus-4-6-20250514",
+    smallFastModel: "claude-haiku-4-5-20251001",
+    subagentModel: "claude-sonnet-4-6-20250514",
+  },
 };
 const execution = {
   ...preflight,
@@ -57,6 +63,7 @@ function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgen
     providerRevisionId: execution.providerRevisionId,
     credentialVersionId: execution.credentialVersionId,
     model: execution.model,
+    modelRoles: execution.modelRoles,
     agent: execution.agent,
     budget: execution.budget,
     timeoutSeconds: execution.timeoutSeconds,
@@ -84,7 +91,7 @@ function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgen
     },
     completedAt: "2026-07-18T00:00:00.000Z",
     ...overrides,
-  };
+  } as LocalAgentExecutionReceipt;
 }
 
 test("reports exact local CLI matches without claiming execution readiness", async () => {
@@ -221,4 +228,17 @@ test("execution accepts only a complete receipt bound to the immutable lock", as
     executor: { async execute() { return receipt({ credentialVersionId: "credential-other-v2" }); } },
   });
   await assert.rejects(drifted.execute(execution), /immutable run lock/);
+
+  const roleDrift = new LocalAgentExecutionService({
+    readiness: readyService(),
+    executor: { async execute() { return receipt({ modelRoles: { ...execution.modelRoles, smallFastModel: "claude-haiku-other-20260101" } }); } },
+  });
+  await assert.rejects(roleDrift.execute(execution), /immutable run lock/);
+});
+
+test("preflight rejects a primary/model-role mismatch before Provider verification", async () => {
+  await assert.rejects(
+    readyService().preflight({ ...preflight, modelRoles: { ...preflight.modelRoles, primaryModel: "claude-opus-4-6-20250514" } }),
+    /primary model binding/,
+  );
 });

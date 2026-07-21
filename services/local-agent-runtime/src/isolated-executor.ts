@@ -169,12 +169,7 @@ function profileFrom(request: LocalAgentExecutionRequest): AgentProfileRevision 
       workerPoolId: "local-isolated-development",
     }),
     providerRevisionId: request.providerRevisionId,
-    models: Object.freeze({
-      primaryModel: request.model,
-      planningModel: request.model,
-      smallFastModel: request.model,
-      subagentModel: request.model,
-    }),
+    models: Object.freeze({ ...request.modelRoles }),
     credential: Object.freeze({
       bindingId: `binding-${hash(`${request.tenantId}:${request.credentialVersionId}`).slice(0, 20)}`,
       credentialVersionId: request.credentialVersionId,
@@ -218,6 +213,7 @@ function buildReceipt(
     providerRevisionId: request.providerRevisionId,
     credentialVersionId: request.credentialVersionId,
     model: request.model,
+    modelRoles: Object.freeze({ ...request.modelRoles }),
     agent: request.agent,
     budget: Object.freeze({ ...request.budget }),
     timeoutSeconds: request.timeoutSeconds,

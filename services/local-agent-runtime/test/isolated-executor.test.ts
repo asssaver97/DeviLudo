@@ -27,6 +27,17 @@ function request(agent: "claude-code" | "codex-cli", suffix: string): LocalAgent
     providerProtocol: claude ? "anthropic-messages" : "openai-responses",
     credentialVersionId: `credential-${claude ? "claude" : "codex"}-v1`,
     model: claude ? "claude-sonnet-4-6-20250514" : "gpt-5.3-codex-2026-06-12",
+    modelRoles: claude ? {
+      primaryModel: "claude-sonnet-4-6-20250514",
+      planningModel: "claude-opus-4-6-20250514",
+      smallFastModel: "claude-haiku-4-5-20251001",
+      subagentModel: "claude-sonnet-4-6-20250514",
+    } : {
+      primaryModel: "gpt-5.3-codex-2026-06-12",
+      planningModel: "gpt-5.3-codex-2026-06-12",
+      smallFastModel: "gpt-5.3-mini-2026-06-12",
+      subagentModel: "gpt-5.3-codex-2026-06-12",
+    },
     budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 },
     timeoutSeconds: 7200,
     prompt: "Implement the immutable test specification.",

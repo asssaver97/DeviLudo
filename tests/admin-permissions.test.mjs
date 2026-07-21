@@ -40,7 +40,11 @@ test("new Provider opens an explicit blank draft without mutating the active sna
   assert.match(source, /const creatingProvider = Boolean\(newDraftRequest\);/);
   assert.match(source, /useState\(creatingProvider \? "" : initialProvider\?\.baseUrl/);
   assert.match(source, /useState\(creatingProvider \? "" : initialProvider\?\.primaryModel/);
-  assert.match(source, /setDataRegion\(loadExisting \? "新加坡" : ""\);/);
+  assert.match(source, /useState\(creatingProvider \? "" : initialProvider\?\.models\.subagentModel/);
+  assert.match(source, /useState\(creatingProvider \? "" : initialProvider\?\.governance\.dataRegion/);
+  assert.match(source, /setDataRegion\(loadExisting \? current\?\.governance\.dataRegion \?\? "新加坡" : ""\);/);
+  assert.match(source, /setSubagentModel\(loadExisting \? current\?\.models\.subagentModel \?\? "" : ""\);/);
+  assert.match(source, /setMaxBudgetUsd\(String\(currentProfile\?\.budget\.maxUsd \?\? 25\)\);/);
   assert.match(source, /agent === kind && editorMode === "existing"/);
   assert.match(source, /onNewDraftConsumed\(newDraftRequest\)/);
 });
