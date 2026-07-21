@@ -117,7 +117,16 @@ test("Runner workflow handler gates main SHA and Steam clean-install evidence se
 
   const failing = new RunnerControlWorkflowHandler({ async execute(input) {
     return receipt({ mode: input.mode, status: "FAILED", commitSha: input.commitSha, steamBuildId: input.steamBuildId,
-      targetMatrix: input.targetMatrix, evidenceBundleId: "main-failed-evidence", repairPromptId: "main-failure-diagnostic" });
+      targetMatrix: input.targetMatrix, evidenceBundleId: `${input.mode.toLowerCase()}-failed-evidence`, repairPromptId: `${input.mode.toLowerCase()}-repair-prompt` });
   } }, preparationPort(), steamPreparationPort());
-  await assert.rejects(failing.execute(job(main, "START_MAIN_SHA_RELEASE_GATE"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } }), /MAIN_SHA_E2E_FAILED/);
+  const mainFailure = await failing.execute(job(main, "START_MAIN_SHA_RELEASE_GATE"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
+  assert.deepEqual(mainFailure.signal, {
+    type: "MAIN_E2E_FAILED", evidenceBundleId: "main_release_gate-failed-evidence",
+    repairPromptId: "main_release_gate-repair-prompt",
+  });
+  const steamFailure = await failing.execute(job(steam, "INSTALL_FROM_CLEAN_STEAM_CLIENT"), { async heartbeat() { return "ok"; }, async emitSignal() { return "unused"; } });
+  assert.deepEqual(steamFailure.signal, {
+    type: "STEAM_INSTALL_FAILED", evidenceBundleId: "steam_clean_install-failed-evidence",
+    repairPromptId: "steam_clean_install-repair-prompt",
+  });
 });

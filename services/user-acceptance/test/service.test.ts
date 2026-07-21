@@ -207,18 +207,9 @@ test("PostgreSQL begin derives action and previous revisions under tenant RLS", 
   assert.equal(statements.at(-2), "COMMIT");
 });
 
-test("PostgreSQL begin permits feedback from an exhausted repair wait without candidate evidence", async () => {
-  let insertedValues: readonly unknown[] | undefined;
-  const authority = {
-    ...authorityRow(),
-    action_operation: "REQUEST_SPEC_APPROVAL",
-    binding: {
-      state: "WAITING_SPEC_APPROVAL",
-      specRevisionId: previousSpecRevisionId,
-      candidateCommitSha: null,
-      draftPullRequest: null,
-      evidenceBundleId: null,
-      repairContext: {
+test("PostgreSQL begin permits exhausted and immediate post-merge human revision feedback", async () => {
+  const repairContexts = [
+    {
         attempt: 3,
         reason: "AGENT_FAILURE",
         fromRunConfigurationId: "run-configuration-failed-003",
@@ -227,10 +218,33 @@ test("PostgreSQL begin permits feedback from an exhausted repair wait without ca
         repairPromptId: null,
         candidateCommitSha: null,
         draftPullRequest: null,
-      },
     },
-  };
-  const client: PostgresWorkflowClient = {
+    {
+      attempt: 1,
+      reason: "STEAM_INSTALL_FAILURE",
+      fromRunConfigurationId: "run-configuration-steam-install-001",
+      diagnosticId: null,
+      evidenceBundleId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+      repairPromptId: `repair:${"f".repeat(64)}`,
+      candidateCommitSha: "d".repeat(40),
+      draftPullRequest: null,
+    },
+  ];
+  for (const repairContext of repairContexts) {
+    let insertedValues: readonly unknown[] | undefined;
+    const authority = {
+      ...authorityRow(),
+      action_operation: "REQUEST_SPEC_APPROVAL",
+      binding: {
+        state: "WAITING_SPEC_APPROVAL",
+        specRevisionId: previousSpecRevisionId,
+        candidateCommitSha: null,
+        draftPullRequest: null,
+        evidenceBundleId: null,
+        repairContext,
+      },
+    };
+    const client: PostgresWorkflowClient = {
     async query<Row extends Record<string, unknown>>(sql: string, values?: readonly unknown[]) {
       if (sql.includes("FROM deviludo.user_feedback_operations")) {
         if (!insertedValues) return rows<Row>([]);
@@ -255,11 +269,12 @@ test("PostgreSQL begin permits feedback from an exhausted repair wait without ca
     },
     release() {},
   };
-  const outcome = await new PostgresUserFeedbackStore({ async connect() { return client; } }).begin(command);
-  assert.equal(outcome.kind, "ACQUIRED");
-  if (outcome.kind !== "ACQUIRED") throw new Error("claim missing");
-  assert.equal(outcome.claim.actionId, actionId);
-  assert.equal(outcome.claim.previousSpecRevisionId, previousSpecRevisionId);
+    const outcome = await new PostgresUserFeedbackStore({ async connect() { return client; } }).begin(command);
+    assert.equal(outcome.kind, "ACQUIRED");
+    if (outcome.kind !== "ACQUIRED") throw new Error("claim missing");
+    assert.equal(outcome.claim.actionId, actionId);
+    assert.equal(outcome.claim.previousSpecRevisionId, previousSpecRevisionId);
+  }
 });
 
 function buildFixture(options: {

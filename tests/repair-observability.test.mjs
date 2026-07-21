@@ -6,6 +6,7 @@ import { DeliveryRepairNotice } from "../components/console/DeliveryRepairNotice
 import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 
 const candidateSha = "a".repeat(40);
+const mainSha = "b".repeat(40);
 
 function approvedWorkflow(id) {
   const workflow = new GameDeliveryWorkflow({
@@ -79,4 +80,26 @@ test("repair notice exposes budget exhaustion and a human specification takeover
   assert.match(html, /三次自动修复额度已耗尽/);
   assert.match(html, /等待新规格/);
   assert.doesNotMatch(html, /后继运行中/);
+});
+
+test("repair notice makes a post-merge release revocation and main baseline visible", () => {
+  const workflow = approvedWorkflow("delivery-repair-ui-main");
+  workflow.signal({ signalId: "repair-ui-main-05", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41 });
+  workflow.signal({ signalId: "repair-ui-main-06", type: "E2E_PASSED", evidenceBundleId: "candidate-evidence-main-001" });
+  workflow.signal({ signalId: "repair-ui-main-07", type: "USER_ACCEPTED" });
+  workflow.signal({ signalId: "repair-ui-main-08", type: "MAIN_MERGED", mainCommitSha: mainSha });
+  workflow.signal({
+    signalId: "repair-ui-main-09", type: "MAIN_E2E_FAILED", evidenceBundleId: "main-evidence-failed-001",
+    repairPromptId: "repair:main-evidence-failed-001",
+  });
+
+  const html = render(workflow.current());
+  assert.match(html, /data-repair-attempt="1"/);
+  assert.match(html, /data-repair-reason="MAIN_GATE_FAILURE"/);
+  assert.match(html, /main SHA 发布门禁失败/);
+  assert.match(html, /main-evidence-failed-001/);
+  assert.match(html, /已撤销旧发布授权/);
+  assert.match(html, /bbbbbbbbbbbb/);
+  assert.match(html, /等待新规格/);
+  assert.doesNotMatch(html, /PR #41/);
 });

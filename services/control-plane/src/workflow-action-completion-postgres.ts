@@ -901,8 +901,10 @@ function isHumanRepairBinding(binding: ControlPlaneWorkflowBinding): boolean {
   return binding.state === "WAITING_SPEC_APPROVAL"
     && repair !== null
     && Number.isSafeInteger(repair.attempt)
-    && repair.attempt >= DEFAULT_AUTOMATIC_REPAIR_LIMIT
-    && (repair.reason === "AGENT_FAILURE" || repair.reason === "E2E_FAILURE")
+    && (repair.reason === "MAIN_GATE_FAILURE"
+      || repair.reason === "STEAM_INSTALL_FAILURE"
+      || repair.attempt >= DEFAULT_AUTOMATIC_REPAIR_LIMIT
+        && (repair.reason === "AGENT_FAILURE" || repair.reason === "E2E_FAILURE"))
     && Boolean(repair.fromRunConfigurationId);
 }
 

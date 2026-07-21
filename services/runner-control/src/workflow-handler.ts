@@ -145,7 +145,14 @@ export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
           }),
         });
       }
-      throw new WorkflowJobError(mode === "MAIN_RELEASE_GATE" ? "MAIN_SHA_E2E_FAILED" : "STEAM_INSTALL_E2E_FAILED", true);
+      return Object.freeze({
+        result,
+        signal: Object.freeze({
+          type: mode === "MAIN_RELEASE_GATE" ? "MAIN_E2E_FAILED" as const : "STEAM_INSTALL_FAILED" as const,
+          evidenceBundleId: receipt.evidenceBundleId,
+          repairPromptId: receipt.repairPromptId as string,
+        }),
+      });
     }
     return Object.freeze({
       result,

@@ -232,6 +232,11 @@ function validateRepairContext(value: DeliveryRepairContext | null, repairAttemp
     requiredSha(value.candidateCommitSha);
     requiredPullRequest(value.draftPullRequest);
     if (value.diagnosticId !== null) invalid();
+  } else if (value.reason === "MAIN_GATE_FAILURE" || value.reason === "STEAM_INSTALL_FAILURE") {
+    requiredId(value.evidenceBundleId);
+    requiredId(value.repairPromptId);
+    requiredSha(value.candidateCommitSha);
+    if (value.diagnosticId !== null || value.draftPullRequest !== null) invalid();
   } else invalid();
   return Object.freeze({ ...value });
 }

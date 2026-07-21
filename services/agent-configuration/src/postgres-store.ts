@@ -491,6 +491,10 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
 async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentConfigurationClaim) {
   const repair = claim.repairContext;
   if (!repair) invalid();
+  // Post-merge release-gate failures always require a new specification
+  // revision first. They must never be consumed as an automatic successor
+  // Agent run, even if a malformed control action reaches this boundary.
+  if (repair.reason !== "AGENT_FAILURE" && repair.reason !== "E2E_FAILURE") invalid();
   const previous = await client.query<PreviousRunRow>(
     `SELECT run.id::text, run.state, run.resolution_digest,
             run.configuration_lock,
@@ -572,7 +576,13 @@ async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentCon
     // snapshot and losing the candidate fixes already under repair.
     sourceCommitSha = match(previousConfigurationLock.commitSha, SHA1);
     repairSourceDigest = match(previousConfigurationLock.sourceDigest, SHA256);
-    context = Object.freeze({ ...repair, agentDiagnostic, evidenceBundleDigest: null, failedPlatforms: Object.freeze([]) });
+    context = Object.freeze({
+      ...repair,
+      reason: "AGENT_FAILURE" as const,
+      agentDiagnostic,
+      evidenceBundleDigest: null,
+      failedPlatforms: Object.freeze([]),
+    });
   } else {
     const evidence = await client.query<RepairEvidenceRow>(
       `SELECT attempt.id::text AS attempt_id, attempt.run_id::text AS attempt_run_id,
@@ -628,6 +638,7 @@ async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentCon
     repairSourceDigest = bundle.sourceDigest;
     context = Object.freeze({
       ...repair,
+      reason: "E2E_FAILURE" as const,
       agentDiagnostic: null,
       evidenceBundleDigest: evidenceRow.evidence_bundle_digest,
       failedPlatforms: Object.freeze(failedPlatforms),

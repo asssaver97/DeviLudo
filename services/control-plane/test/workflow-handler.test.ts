@@ -181,6 +181,30 @@ test("control-plane binds an automatic E2E repair to the exact predecessor and e
   assert.deepEqual(observed[0]?.binding.repairContext, repairContext);
 });
 
+test("control-plane registers post-merge failure as an immediate human revision wait", async () => {
+  const repairContext = Object.freeze({
+    attempt: 1,
+    reason: "MAIN_GATE_FAILURE" as const,
+    fromRunConfigurationId: "33333333-3333-4333-8333-333333333333",
+    diagnosticId: null,
+    evidenceBundleId: "44444444-4444-4444-8444-444444444444",
+    repairPromptId: `repair:${"a".repeat(64)}`,
+    candidateCommitSha: "d".repeat(40),
+    draftPullRequest: null,
+  });
+  const snapshot = Object.freeze({
+    ...snapshotFor("REQUEST_SPEC_APPROVAL"), repairAttempts: 1, repairContext,
+  });
+  const observed: Parameters<ControlPlaneWorkflowPort["ensureAction"]>[0][] = [];
+  const handler = new ControlPlaneWorkflowHandler({
+    async ensureAction(input) { observed.push(input); return receipt(input.operation); },
+  }, releases);
+  await handler.execute(job("REQUEST_SPEC_APPROVAL", snapshot), {
+    async heartbeat() { return "renewed"; }, async emitSignal() { return "unused"; },
+  });
+  assert.deepEqual(observed[0]?.binding.repairContext, repairContext);
+});
+
 test("control-plane workflow handler rejects state, receipt and cancellation drift terminally", async () => {
   const handler = new ControlPlaneWorkflowHandler({ async ensureAction(input) { return receipt(input.operation); } }, releases);
   await assert.rejects(handler.execute(job("REQUEST_SPEC_APPROVAL", base), {
@@ -563,7 +587,7 @@ test("user feedback atomically tombstones exact candidate evidence before signal
   assert.equal(evidenceUpdates, 1);
 });
 
-test("repair-budget takeover accepts only the feedback service draft bound to the exhausted action", async () => {
+test("human repair takeover accepts exhausted and immediate post-merge failure authorities", async () => {
   const tenantId = "11111111-1111-4111-8111-111111111111";
   const projectId = "22222222-2222-4222-8222-222222222222";
   const actionId = "33333333-3333-4333-8333-333333333333";
@@ -577,13 +601,22 @@ test("repair-budget takeover accepts only the feedback service draft bound to th
     signalId: "human-repair-feedback-001", type: "USER_FEEDBACK",
     nextSpecRevisionId: nextSpecId, evidenceInvalidationId: revisionReceiptId,
   });
-  const repairContext = Object.freeze({
-    attempt: 3, reason: "AGENT_FAILURE" as const,
-    fromRunConfigurationId: "run-configuration-failed-003",
-    diagnosticId: "diagnostic-failed-003", evidenceBundleId: null,
-    repairPromptId: null, candidateCommitSha: null, draftPullRequest: null,
-  });
-  const action = {
+  const repairContexts = Object.freeze([
+    Object.freeze({
+      attempt: 3, reason: "AGENT_FAILURE" as const,
+      fromRunConfigurationId: "run-configuration-failed-003",
+      diagnosticId: "diagnostic-failed-003", evidenceBundleId: null,
+      repairPromptId: null, candidateCommitSha: null, draftPullRequest: null,
+    }),
+    Object.freeze({
+      attempt: 1, reason: "MAIN_GATE_FAILURE" as const,
+      fromRunConfigurationId: "run-configuration-main-gate-001",
+      diagnosticId: null, evidenceBundleId: "99999999-9999-4999-8999-999999999999",
+      repairPromptId: `repair:${"b".repeat(64)}`, candidateCommitSha: "d".repeat(40), draftPullRequest: null,
+    }),
+  ]);
+  for (const repairContext of repairContexts) {
+    const action = {
     id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
     operation: "REQUEST_SPEC_APPROVAL", status: "WAITING",
     binding: {
@@ -597,9 +630,9 @@ test("repair-budget takeover accepts only the feedback service draft bound to th
     completion_signal_id: null, completion_signal_digest: null,
     completion_source: null, completion_receipt_id: null,
   };
-  let outboxInsert: readonly unknown[] | undefined;
-  const statements: string[] = [];
-  const client: ControlPlaneWorkflowSqlClient = {
+    let outboxInsert: readonly unknown[] | undefined;
+    const statements: string[] = [];
+    const client: ControlPlaneWorkflowSqlClient = {
     async query<Row>(statement: string, values?: readonly unknown[]) {
       statements.push(statement);
       if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
@@ -630,13 +663,14 @@ test("repair-budget takeover accepts only the feedback service draft bound to th
       return { rows: [] };
     }, release() {},
   };
-  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
-  const receipt = await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
-    source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: operationKey, signal });
-  assert.equal(receipt.outboxId, outboxId);
-  assert.equal(statements.some((statement) => statement.includes("github_candidate_receipts")), false);
-  assert.ok(statements.findIndex((statement) => statement.includes("user_feedback_operations"))
-    < statements.findIndex((statement) => statement.includes("workflow_signal_outbox")));
+    const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+    const completion = await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+      source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: operationKey, signal });
+    assert.equal(completion.outboxId, outboxId);
+    assert.equal(statements.some((statement) => statement.includes("github_candidate_receipts")), false);
+    assert.ok(statements.findIndex((statement) => statement.includes("user_feedback_operations"))
+      < statements.findIndex((statement) => statement.includes("workflow_signal_outbox")));
+  }
 });
 
 test("user acceptance cannot merge evidence that feedback already invalidated", async () => {

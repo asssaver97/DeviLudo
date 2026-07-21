@@ -81,6 +81,31 @@ test("projection replay accepts bounded repair takeover and pre-budget successor
   assert.deepEqual(parseDeliverySnapshot(legacy), legacy);
 });
 
+test("projection replay preserves an explicit post-merge failure handoff", () => {
+  const machine = new GameDeliveryWorkflow({ workflowId, tenantId, projectId, targetMatrix: ["linux"] });
+  machine.signal({ signalId: "postmerge-ready-001", type: "SPEC_READY", specRevisionId: "spec-r1" });
+  machine.signal({
+    signalId: "postmerge-approved-001", type: "SPEC_APPROVED", approvedSpecRevisionId: "spec-r1",
+    testPlanRevisionId: "plan-r1", approvalReceiptId: "approval-r1",
+  });
+  machine.signal({ signalId: "postmerge-lock-001", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-r1" });
+  machine.signal({ signalId: "postmerge-start-001", type: "AGENT_STARTED", runId: "run-r1" });
+  machine.signal({ signalId: "postmerge-complete-001", type: "AGENT_COMPLETED", candidateCommitSha: "a".repeat(40), draftPullRequest: 17 });
+  machine.signal({ signalId: "postmerge-candidate-pass-001", type: "E2E_PASSED", evidenceBundleId: "candidate-evidence-r1" });
+  machine.signal({ signalId: "postmerge-accepted-001", type: "USER_ACCEPTED" });
+  machine.signal({ signalId: "postmerge-merged-001", type: "MAIN_MERGED", mainCommitSha: "b".repeat(40) });
+  const failed = machine.signal({
+    signalId: "postmerge-main-failed-001", type: "MAIN_E2E_FAILED",
+    evidenceBundleId: "main-failed-evidence-r1", repairPromptId: "repair:main-failed-r1",
+  }) as DeliverySnapshot;
+
+  assert.equal(failed.state, "WAITING_SPEC_APPROVAL");
+  assert.equal(failed.mainCommitSha, null);
+  assert.equal(failed.repairContext?.reason, "MAIN_GATE_FAILURE");
+  assert.equal(failed.repairContext?.candidateCommitSha, "b".repeat(40));
+  assert.deepEqual(parseDeliverySnapshot(failed), failed);
+});
+
 function repairHistoryMachine(automaticRepairLimit: number | null = 3) {
   const machine = new GameDeliveryWorkflow({
     workflowId, tenantId, projectId, targetMatrix: ["linux"], automaticRepairLimit,

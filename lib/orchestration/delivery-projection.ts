@@ -46,6 +46,8 @@ const SIGNAL_FIELDS = Object.freeze({
   AGENT_FAILED: ["signalId", "type", "diagnosticId"],
   E2E_PASSED: ["signalId", "type", "evidenceBundleId"],
   E2E_FAILED: ["signalId", "type", "evidenceBundleId", "repairPromptId"],
+  MAIN_E2E_FAILED: ["signalId", "type", "evidenceBundleId", "repairPromptId"],
+  STEAM_INSTALL_FAILED: ["signalId", "type", "evidenceBundleId", "repairPromptId"],
   USER_FEEDBACK: ["signalId", "type", "nextSpecRevisionId", "evidenceInvalidationId"],
   USER_ACCEPTED: ["signalId", "type"],
   MAIN_MERGED: ["signalId", "type", "mainCommitSha"],

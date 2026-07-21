@@ -42,6 +42,8 @@ export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "AGENT_FAILED"; diagnosticId: string }
   | { type: "E2E_PASSED"; evidenceBundleId: string }
   | { type: "E2E_FAILED"; evidenceBundleId: string; repairPromptId: string }
+  | { type: "MAIN_E2E_FAILED"; evidenceBundleId: string; repairPromptId: string }
+  | { type: "STEAM_INSTALL_FAILED"; evidenceBundleId: string; repairPromptId: string }
   | { type: "USER_FEEDBACK"; nextSpecRevisionId: string; evidenceInvalidationId: string }
   | { type: "USER_ACCEPTED" }
   | { type: "MAIN_MERGED"; mainCommitSha: string }
@@ -73,7 +75,7 @@ export type DeliveryCommand =
 
 export type DeliveryRepairContext = Readonly<{
   attempt: number;
-  reason: "AGENT_FAILURE" | "E2E_FAILURE";
+  reason: "AGENT_FAILURE" | "E2E_FAILURE" | "MAIN_GATE_FAILURE" | "STEAM_INSTALL_FAILURE";
   fromRunConfigurationId: string;
   diagnosticId: string | null;
   evidenceBundleId: string | null;
@@ -228,7 +230,7 @@ export class GameDeliveryWorkflow {
         if (this.snapshot.repairContext) {
           if (signal.type !== "USER_FEEDBACK"
             || signal.nextSpecRevisionId === this.snapshot.specRevisionId
-            || !this.repairBudgetExhausted(this.snapshot.repairContext.attempt)) return this.invalid(signal);
+            || !this.requiresHumanRevision(this.snapshot.repairContext)) return this.invalid(signal);
           return this.commit(signal, {
             specRevisionId: signal.nextSpecRevisionId,
             testPlanRevisionId: null,
@@ -237,6 +239,15 @@ export class GameDeliveryWorkflow {
             draftPullRequest: null,
             evidenceBundleId: null,
             candidateEvidenceBundleId: null,
+            mainCommitSha: null,
+            mainEvidenceBundleId: null,
+            steamInstallEvidenceBundleId: null,
+            mfaApprovalId: null,
+            steamBuildId: null,
+            steamReleaseId: null,
+            defaultBranchBuildId: null,
+            externalGate: null,
+            externalApprovals: [],
             lockedRunConfigurationId: null,
             runId: null,
             repairAttempts: 0,
@@ -384,13 +395,17 @@ export class GameDeliveryWorkflow {
       case "MERGING":
         return signal.type === "MAIN_MERGED" ? this.commit(signal, { state: "MAIN_SHA_E2E", mainCommitSha: signal.mainCommitSha, evidenceBundleId: null }) : this.invalid(signal);
       case "MAIN_SHA_E2E":
-        return signal.type === "E2E_PASSED"
-          ? this.commit(signal, {
-              state: "WAITING_MFA",
-              evidenceBundleId: signal.evidenceBundleId,
-              mainEvidenceBundleId: signal.evidenceBundleId,
-            })
-          : this.invalid(signal);
+        if (signal.type === "E2E_PASSED") {
+          return this.commit(signal, {
+            state: "WAITING_MFA",
+            evidenceBundleId: signal.evidenceBundleId,
+            mainEvidenceBundleId: signal.evidenceBundleId,
+          });
+        }
+        if (signal.type === "MAIN_E2E_FAILED") {
+          return this.handoffPostMergeFailure(signal, "MAIN_GATE_FAILURE", this.snapshot.mainCommitSha);
+        }
+        return this.invalid(signal);
       case "WAITING_MFA":
         if (signal.type === "RELEASE_PREPARED" && !this.snapshot.steamReleaseId) {
           return this.commit(signal, { steamReleaseId: signal.releaseId });
@@ -413,6 +428,9 @@ export class GameDeliveryWorkflow {
             steamInstallEvidenceBundleId: signal.evidenceBundleId,
             externalGate: "VALVE_REVIEW",
           });
+        }
+        if (signal.type === "STEAM_INSTALL_FAILED") {
+          return this.handoffPostMergeFailure(signal, "STEAM_INSTALL_FAILURE", this.snapshot.mainCommitSha);
         }
         return this.invalid(signal);
       case "EXTERNAL_APPROVAL_REQUIRED": {
@@ -476,6 +494,50 @@ export class GameDeliveryWorkflow {
     return this.automaticRepairLimit !== null && attempt >= this.automaticRepairLimit;
   }
 
+  private requiresHumanRevision(repair: DeliveryRepairContext): boolean {
+    return repair.reason === "MAIN_GATE_FAILURE"
+      || repair.reason === "STEAM_INSTALL_FAILURE"
+      || this.repairBudgetExhausted(repair.attempt);
+  }
+
+  private handoffPostMergeFailure(
+    signal: Extract<DeliverySignal, { type: "MAIN_E2E_FAILED" | "STEAM_INSTALL_FAILED" }>,
+    reason: "MAIN_GATE_FAILURE" | "STEAM_INSTALL_FAILURE",
+    baselineCommitSha: string | null,
+  ): DeepReadonly<DeliverySnapshot> {
+    if (!this.snapshot.lockedRunConfigurationId || !baselineCommitSha) return this.invalid(signal);
+    const attempt = this.snapshot.repairAttempts + 1;
+    return this.commit(signal, {
+      state: "WAITING_SPEC_APPROVAL",
+      lockedRunConfigurationId: null,
+      runId: null,
+      candidateCommitSha: null,
+      draftPullRequest: null,
+      mainCommitSha: null,
+      evidenceBundleId: signal.evidenceBundleId,
+      candidateEvidenceBundleId: null,
+      mainEvidenceBundleId: null,
+      steamInstallEvidenceBundleId: null,
+      mfaApprovalId: null,
+      steamBuildId: null,
+      steamReleaseId: null,
+      defaultBranchBuildId: null,
+      externalGate: null,
+      externalApprovals: [],
+      repairAttempts: attempt,
+      repairContext: Object.freeze({
+        attempt,
+        reason,
+        fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
+        diagnosticId: null,
+        evidenceBundleId: signal.evidenceBundleId,
+        repairPromptId: signal.repairPromptId,
+        candidateCommitSha: baselineCommitSha,
+        draftPullRequest: null,
+      }),
+    });
+  }
+
   private invalid(signal: DeliverySignal): never {
     throw new Error(`Signal ${signal.type} is invalid while delivery is ${this.snapshot.state}`);
   }
@@ -513,6 +575,8 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
     case "STEAM_INSTALL_PASSED":
       return assertOpaqueId(signal.evidenceBundleId, "Evidence bundle");
     case "E2E_FAILED":
+    case "MAIN_E2E_FAILED":
+    case "STEAM_INSTALL_FAILED":
       assertOpaqueId(signal.evidenceBundleId, "Evidence bundle");
       return assertOpaqueId(signal.repairPromptId, "Repair prompt");
     case "USER_FEEDBACK":

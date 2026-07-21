@@ -43,6 +43,17 @@ signal, and the new revision still requires the normal explicit
 `SPEC_APPROVED` gate. A separate Temporal patch marker preserves unbounded
 replay for histories created before repair budgets existed.
 
+Failures after merge are a separate human-revision boundary. A failed actual
+main-SHA gate emits `MAIN_E2E_FAILED`; a failed clean Steam install emits
+`STEAM_INSTALL_FAILED`. Both signals retain the failed evidence and main SHA in
+an immutable repair context, but immediately clear the old main, MFA, Steam
+BuildID/release and external-approval authority. The workflow enters
+`WAITING_SPEC_APPROVAL` and accepts only a distinct `USER_FEEDBACK` draft before
+normal approval can resume development from the repository's current main.
+These post-merge contexts are rejected by the automatic Agent-configuration
+boundary, so they cannot silently consume another model run or bypass user
+approval.
+
 Agent failures persist a bounded, secret-redacted and content-addressed
 diagnostic containing the failed runtime stage, exit/timeout classification and
 safe messages. The successor configuration service re-resolves that diagnostic

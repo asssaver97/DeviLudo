@@ -415,8 +415,11 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
         AND (action.operation = 'REQUEST_USER_ACCEPTANCE' OR (
           action.operation = 'REQUEST_SPEC_APPROVAL'
           AND action.binding->>'state' = 'WAITING_SPEC_APPROVAL'
-          AND action.binding->'repairContext'->>'attempt' ~ '^[0-9]+$'
-          AND (action.binding->'repairContext'->>'attempt')::integer >= ${DEFAULT_AUTOMATIC_REPAIR_LIMIT}
+          AND (
+            action.binding->'repairContext'->>'reason' IN ('MAIN_GATE_FAILURE', 'STEAM_INSTALL_FAILURE')
+            OR (action.binding->'repairContext'->>'attempt' ~ '^[0-9]+$'
+              AND (action.binding->'repairContext'->>'attempt')::integer >= ${DEFAULT_AUTOMATIC_REPAIR_LIMIT})
+          )
         ))
         AND action.status = 'WAITING'
         AND ($3::text IS NULL OR action.id::text = $3)
@@ -484,8 +487,10 @@ function isHumanRepairAuthority(
   if (operation === "REQUEST_USER_ACCEPTANCE") return false;
   if (operation !== "REQUEST_SPEC_APPROVAL" || binding.state !== "WAITING_SPEC_APPROVAL") invalid();
   const repair = object(binding.repairContext) as Partial<DeliveryRepairContext>;
-  if (!Number.isSafeInteger(repair.attempt) || (repair.attempt as number) < DEFAULT_AUTOMATIC_REPAIR_LIMIT
-    || (repair.reason !== "AGENT_FAILURE" && repair.reason !== "E2E_FAILURE")
+  const immediate = repair.reason === "MAIN_GATE_FAILURE" || repair.reason === "STEAM_INSTALL_FAILURE";
+  if (!Number.isSafeInteger(repair.attempt) || (repair.attempt as number) < 1
+    || (!immediate && (repair.attempt as number) < DEFAULT_AUTOMATIC_REPAIR_LIMIT)
+    || (!immediate && repair.reason !== "AGENT_FAILURE" && repair.reason !== "E2E_FAILURE")
     || typeof repair.fromRunConfigurationId !== "string" || !repair.fromRunConfigurationId) invalid();
   return true;
 }

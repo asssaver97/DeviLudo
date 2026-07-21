@@ -383,7 +383,7 @@ export function ProjectStudio({
         <section className="iteration-section">
           <div className="iteration-heading">
             <div>
-              <span className="eyebrow">{humanRepairTakeover ? "自动修复预算已耗尽" : "候选版本反馈"}</span>
+              <span className="eyebrow">{humanRepairTakeover ? "交付流程需要人工修订" : "候选版本反馈"}</span>
               <h2>{humanRepairTakeover ? "提交人工修改说明" : "继续迭代"}</h2>
               <p>{humanRepairTakeover
                 ? "平台已暂停自动重试。修改说明会生成新的不可变规格草稿，批准后才会恢复开发。"

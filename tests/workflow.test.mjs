@@ -5,6 +5,19 @@ import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 const candidateSha = "a".repeat(40);
 const mainSha = "b".repeat(40);
 
+function workflowAtMainGate(id) {
+  const workflow = new GameDeliveryWorkflow({ workflowId: id, tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"] });
+  workflow.signal({ signalId: `${id}-ready`, type: "SPEC_READY", specRevisionId: "SPEC-DRAFT-001" });
+  workflow.signal({ signalId: `${id}-approved`, type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001" });
+  workflow.signal({ signalId: `${id}-locked`, type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-001" });
+  workflow.signal({ signalId: `${id}-started`, type: "AGENT_STARTED", runId: "run-001" });
+  workflow.signal({ signalId: `${id}-completed`, type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18 });
+  workflow.signal({ signalId: `${id}-candidate-e2e`, type: "E2E_PASSED", evidenceBundleId: "candidate-evidence-001" });
+  workflow.signal({ signalId: `${id}-accepted`, type: "USER_ACCEPTED" });
+  workflow.signal({ signalId: `${id}-merged`, type: "MAIN_MERGED", mainCommitSha: mainSha });
+  return workflow;
+}
+
 test("delivery workflow requires every Steam external gate and release receipt", () => {
   const workflow = new GameDeliveryWorkflow({ workflowId: "delivery-1", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["windows", "linux", "macos"] });
   assert.equal(workflow.nextCommand(), "CONTINUE_IDEA_DIALOGUE");
@@ -290,4 +303,41 @@ test("an exhausted E2E repair budget preserves failed lineage but clears stale c
   assert.equal(workflow.current().repairContext.candidateCommitSha, candidateSha);
   assert.equal(workflow.current().repairContext.draftPullRequest, 71);
   assert.equal(workflow.current().repairContext.evidenceBundleId, "evidence-e2e-budget");
+});
+
+test("main and Steam reinstall failures revoke release authority and require a new human-approved revision", () => {
+  const mainFailure = workflowAtMainGate("delivery-main-gate-failure");
+  mainFailure.signal({
+    signalId: "main-gate-failure-signal", type: "MAIN_E2E_FAILED",
+    evidenceBundleId: "main-failed-evidence", repairPromptId: "repair-main-failed-evidence",
+  });
+  assert.equal(mainFailure.current().state, "WAITING_SPEC_APPROVAL");
+  assert.equal(mainFailure.current().mainCommitSha, null);
+  assert.equal(mainFailure.current().mainEvidenceBundleId, null);
+  assert.equal(mainFailure.current().repairContext.reason, "MAIN_GATE_FAILURE");
+  assert.equal(mainFailure.current().repairContext.candidateCommitSha, mainSha);
+  assert.equal(mainFailure.current().repairContext.draftPullRequest, null);
+  mainFailure.signal({
+    signalId: "main-gate-human-draft", type: "USER_FEEDBACK", nextSpecRevisionId: "SPEC-DRAFT-002",
+    evidenceInvalidationId: "main-gate-revision-receipt",
+  });
+  assert.equal(mainFailure.current().repairContext, null);
+  assert.equal(mainFailure.current().repairAttempts, 0);
+  assert.equal(mainFailure.current().iteration, 2);
+
+  const steamFailure = workflowAtMainGate("delivery-steam-install-failure");
+  steamFailure.signal({ signalId: "steam-main-e2e-pass", type: "E2E_PASSED", evidenceBundleId: "main-evidence-001" });
+  steamFailure.signal({ signalId: "steam-release-prepared", type: "RELEASE_PREPARED", releaseId: "release-001" });
+  steamFailure.signal({ signalId: "steam-mfa-approved", type: "MFA_APPROVED", approvalId: "mfa-001" });
+  steamFailure.signal({ signalId: "steam-beta-active", type: "BETA_ACTIVATED", buildId: "91234567" });
+  steamFailure.signal({
+    signalId: "steam-install-failure-signal", type: "STEAM_INSTALL_FAILED",
+    evidenceBundleId: "steam-failed-evidence", repairPromptId: "repair-steam-failed-evidence",
+  });
+  assert.equal(steamFailure.current().state, "WAITING_SPEC_APPROVAL");
+  assert.equal(steamFailure.current().repairContext.reason, "STEAM_INSTALL_FAILURE");
+  assert.equal(steamFailure.current().steamBuildId, null);
+  assert.equal(steamFailure.current().steamReleaseId, null);
+  assert.equal(steamFailure.current().mfaApprovalId, null);
+  assert.deepEqual(steamFailure.current().externalApprovals, []);
 });
