@@ -64,6 +64,7 @@ npm run local:smoke
 - `/settings/agents` 返回租户 BYOK、Provider 与默认 Agent 页面；
 - `/projects/ember-archipelago/agent-settings` 返回项目 Profile 选择页；
 - `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
+- 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
 - 侧车 `/health` 返回 `deviludo-local-runtime` 和实际 Godot 版本。
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`；`degraded` 是未启用执行时的预期状态。

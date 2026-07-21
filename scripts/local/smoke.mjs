@@ -371,6 +371,53 @@ try {
     || tenantAgentPayload.meta?.defaultAgent !== "claude-code" || JSON.stringify(tenantAgentPayload).includes("secretRef")) {
     throw new Error("tenant Agent settings projection contract failed");
   }
+  const unknownFieldMarker = "unknown-agent-field-must-not-be-echoed";
+  const forgedTenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-forged-tenant-profile" },
+    body: JSON.stringify({ scope: "project", scopeId: unknownFieldMarker, credentialId: unknownFieldMarker }),
+  });
+  const forgedTenantProfileText = await forgedTenantProfile.response.text();
+  if (forgedTenantProfile.response.status !== 400
+    || JSON.parse(forgedTenantProfileText).error?.code !== "UNEXPECTED_FIELD"
+    || forgedTenantProfileText.includes(unknownFieldMarker)) {
+    throw new Error("tenant Agent Profile endpoint did not reject a forged scope without echoing it");
+  }
+  const rejectedApiKey = "valid-but-rejected-key";
+  const forgedCredential = await request(baseUrl, "/api/settings/agents/credentials", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-forged-tenant-credential" },
+    body: JSON.stringify({ label: "Forged legacy credential", apiKey: rejectedApiKey, credentialId: unknownFieldMarker }),
+  });
+  const forgedCredentialText = await forgedCredential.response.text();
+  if (forgedCredential.response.status !== 400
+    || JSON.parse(forgedCredentialText).error?.code !== "UNEXPECTED_FIELD"
+    || forgedCredentialText.includes(unknownFieldMarker) || forgedCredentialText.includes(rejectedApiKey)) {
+    throw new Error("tenant credential endpoint did not reject a legacy field without echoing it");
+  }
+  const forgedRollout = await request(baseUrl, "/api/admin/agent-rollouts/claude-installation-214/rollback", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": "smoke-forged-agent-rollout",
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ toPercent: 0 }),
+  });
+  const forgedRolloutPayload = await forgedRollout.response.json();
+  if (forgedRollout.response.status !== 400 || forgedRolloutPayload.error?.code !== "UNEXPECTED_FIELD") {
+    throw new Error("Agent rollout endpoint accepted a caller-supplied rollout target");
+  }
+  const stateAfterRejectedMutations = await request(baseUrl, "/api/admin/agents");
+  const stateAfterRejectedPayload = await stateAfterRejectedMutations.response.json();
+  const credentialsBefore = adminPayload.meta?.credentials?.length;
+  const credentialsAfter = stateAfterRejectedPayload.meta?.credentials?.length;
+  const rolloutBefore = adminPayload.meta?.rollouts?.["claude-installation-214"]?.percent;
+  const rolloutAfter = stateAfterRejectedPayload.meta?.rollouts?.["claude-installation-214"]?.percent;
+  if (!stateAfterRejectedMutations.response.ok || credentialsAfter !== credentialsBefore || rolloutAfter !== rolloutBefore
+    || stateAfterRejectedPayload.meta?.profiles?.length !== adminPayload.meta?.profiles?.length) {
+    throw new Error("rejected Agent mutations changed the deployed local control-plane projection");
+  }
   const tenantCredential = await request(baseUrl, "/api/settings/agents/credentials", {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-v1" },
@@ -893,6 +940,7 @@ try {
   console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
   console.log(`✓ Agent inheritance  ${adminState.response.status} (${adminState.elapsedMs}ms) · platform/tenant/project bound`);
   console.log(`✓ Tenant Agent state ${tenantAgentState.response.status} (${tenantAgentState.elapsedMs}ms) · scoped projection`);
+  console.log(`✓ Agent body contract ${forgedTenantProfile.response.status}/${forgedCredential.response.status}/${forgedRollout.response.status} · unknown fields rejected without state drift`);
   console.log(`✓ Tenant Agent write ${tenantProfile.response.status} (${tenantProfile.elapsedMs}ms) · scoped immutable draft`);
   console.log(`✓ Provider probe gate ${tenantProfileProbe.response.status} (${tenantProfileProbe.elapsedMs}ms) · external trust required`);
   console.log(`✓ Invitation gate    ${invitationGate.response.status} (${invitationGate.elapsedMs}ms) · ${invitationGatePayload.error.code}`);
