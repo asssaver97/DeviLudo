@@ -14,7 +14,11 @@ behind the web console:
   must exactly equal a deterministic replay of its complete signal history.
   An append-only event stream and a monotonic current row retain initial,
   intermediate and terminal state without giving the Web process Temporal or
-  database write authority.
+  database write authority. Its project Runner Fleet read joins only the
+  tenant/project's latest fenced platform leases to immutable Runner
+  registrations; heartbeat freshness and certificate expiry are re-derived in
+  the strict response contract, so the Web cannot enumerate global machines or
+  present a stale registration as online.
 - `agent-worker`: a one-run supervisor for the exact Claude Code or Codex CLI
   RuntimeSpec. It uses `shell: false`, validates all workspace/runtime paths,
   verifies the locked CLI version and WorkerImage digest, writes Adapter files

@@ -10,6 +10,7 @@ import { ArrowIcon, CheckIcon, ClockIcon, PlusIcon, ServerIcon, SparkIcon } from
 import { ProjectScopeSelector } from "./ProjectScopeSelector";
 import { useLocalPlatform } from "./useLocalPlatform";
 import { useProjectSelection } from "./useProjectCatalog";
+import { useRunnerFleet } from "./useRunnerFleet";
 
 const stageNames: Record<LocalDeliveryStage, string> = {
   AWAITING_SPEC_APPROVAL: "等待规格批准", AGENT_QUEUED: "Agent 已入队", AGENT_RUNNING: "Agent 开发中",
@@ -83,6 +84,7 @@ export function Dashboard() {
   const [activityFilter, setActivityFilter] = useState<"全部" | "运行" | "测试">("全部");
   const { projects, project, selectedProjectId, selectProject, mode, loading: projectsLoading, error: projectError } = useProjectSelection();
   const { delivery, productionDelivery, projectionMeta, health, error: deliveryError } = useLocalPlatform(selectedProjectId);
+  const { fleet, error: fleetError } = useRunnerFleet(selectedProjectId, mode === "PRODUCTION");
   const error = projectError || deliveryError;
   const localActivity = delivery?.events.map((event) => ({
     id: event.id,
@@ -120,6 +122,17 @@ export function Dashboard() {
       id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS",
       state: productionDelivery.candidateEvidenceBundleId ? "PASSED" : productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED",
     })) : [];
+  const fleetRows = mode === "PRODUCTION"
+    ? (["macos", "windows", "linux"] as const).map((platform) => {
+      const runner = fleet?.runners.find((candidate) => candidate.platform === platform);
+      return {
+        os: platform === "macos" ? "macOS" : platform === "windows" ? "Windows" : "Linux",
+        online: runner?.connectivity === "READY",
+        detail: runner ? `${runner.runnerId} · ${runner.architecture} · ${runner.connectivity}` : fleetError || "尚无项目 Runner 租约",
+        load: runner?.leaseState === "RUNNING" ? 100 : runner ? 35 : 0,
+      };
+    })
+    : [{ os: "macOS 本机", online: health?.dependencies?.fixtureExecutor === "READY", detail: health?.dependencies?.localGodot ?? "Godot 未连接", load: delivery?.localValidation ? 100 : 10 }, { os: "Windows", online: false, detail: "等待 mTLS Runner", load: 0 }, { os: "Linux", online: false, detail: "等待 mTLS Runner", load: 0 }];
 
   if (!project) {
     return (
@@ -253,7 +266,7 @@ export function Dashboard() {
             <div><span className="eyebrow">mTLS 节点</span><h2>Runner 集群</h2></div>
             <ServerIcon />
           </div>
-          {[{ os: "macOS 本机", online: health?.dependencies?.fixtureExecutor === "READY", detail: health?.dependencies?.localGodot ?? "Godot 未连接", load: delivery?.localValidation ? 100 : 10 }, { os: "Windows", online: false, detail: "等待 mTLS Runner", load: 0 }, { os: "Linux", online: false, detail: "等待 mTLS Runner", load: 0 }].map((runner) => (
+          {fleetRows.map((runner) => (
             <div className="fleet-row" key={runner.os}>
               <div className="fleet-row-head"><span><i className={runner.online ? "" : "offline"} /> <b>{runner.os}</b></span><small>{runner.online ? "1/1 在线" : "未连接"}</small></div>
               <p>{runner.detail}</p>

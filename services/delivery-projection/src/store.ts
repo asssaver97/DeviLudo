@@ -7,6 +7,13 @@ import {
   type DeliveryProjectionRequest,
 } from "../../../lib/orchestration/delivery-projection";
 import type { DeliverySnapshot } from "../../../lib/orchestration/game-delivery";
+import {
+  RUNNER_FLEET_PROJECTION_SCHEMA_VERSION,
+  parseRunnerFleetProjection,
+  runnerConnectivity,
+  type RunnerFleetProjection,
+  type RunnerRegistrationState,
+} from "../../../lib/runner/fleet-projection";
 import type {
   PostgresWorkflowClient,
   PostgresWorkflowPool,
@@ -38,9 +45,25 @@ type EventRow = {
 
 type CurrentRow = Omit<EventRow, "id" | "recorded_at"> & { updated_at: string | Date };
 
+type RunnerRow = {
+  runner_id: string;
+  platform: string;
+  architecture: string;
+  capability_digest: string;
+  registration_state: RunnerRegistrationState;
+  last_seen_at: string | Date;
+  certificate_not_after: string | Date;
+  attempt_id: string;
+  lease_state: string;
+  fencing_token: string | number;
+  lease_expires_at: string | Date;
+  updated_at: string | Date;
+};
+
 export interface DeliveryProjectionStore {
   persist(input: DeliveryProjectionRequest): Promise<DeliveryProjectionReceipt>;
   read(tenantId: string, projectId: string): Promise<DeliveryProjectionView | null>;
+  readRunnerFleet(tenantId: string, projectId: string): Promise<RunnerFleetProjection | null>;
   probe(): Promise<void>;
 }
 
@@ -172,6 +195,68 @@ export class PostgresDeliveryProjectionStore implements DeliveryProjectionStore 
         || row.projection_key !== `${snapshot.workflowId}:${snapshot.history.length}:${snapshot.state}:PROJECT_DELIVERY_SNAPSHOT`
         || row.state !== snapshot.state || row.snapshot_digest !== digest) conflict();
       return Object.freeze({ snapshot, snapshotDigest: digest, projectedAt: iso(row.updated_at) });
+    });
+  }
+
+  async readRunnerFleet(tenantId: string, projectId: string): Promise<RunnerFleetProjection | null> {
+    validateUuid(tenantId, "Tenant");
+    validateUuid(projectId, "Project");
+    return this.#transaction(tenantId, async (client) => {
+      const authority = await client.query<{ project_exists: boolean; observed_at: string | Date }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM deviludo.projects
+            WHERE tenant_id = $1::uuid AND id = $2::uuid
+         ) AS project_exists,
+         current_timestamp AS observed_at`,
+        [tenantId, projectId],
+      );
+      const observedAt = iso(authority.rows[0]?.observed_at ?? "");
+      if (authority.rows[0]?.project_exists !== true) return null;
+      const result = await client.query<RunnerRow>(
+        `SELECT DISTINCT ON (lease.platform)
+                registration.id AS runner_id,
+                registration.platform,
+                registration.architecture,
+                registration.capability_digest,
+                registration.state AS registration_state,
+                registration.last_seen_at,
+                registration.certificate_not_after,
+                lease.attempt_id,
+                lease.state AS lease_state,
+                lease.fencing_token,
+                lease.lease_expires_at,
+                lease.updated_at
+           FROM deviludo.e2e_platform_leases lease
+           JOIN deviludo.runner_registrations registration ON registration.id = lease.runner_id
+          WHERE lease.tenant_id = $1::uuid AND lease.project_id = $2::uuid
+          ORDER BY lease.platform, lease.created_at DESC, lease.fencing_token DESC`,
+        [tenantId, projectId],
+      );
+      return parseRunnerFleetProjection({
+        schemaVersion: RUNNER_FLEET_PROJECTION_SCHEMA_VERSION,
+        tenantId,
+        projectId,
+        observedAt,
+        runners: result.rows.map((row) => {
+          const lastSeenAt = iso(row.last_seen_at);
+          const certificateNotAfter = iso(row.certificate_not_after);
+          return {
+            runnerId: row.runner_id,
+            platform: row.platform,
+            architecture: row.architecture,
+            capabilityDigest: row.capability_digest,
+            registrationState: row.registration_state,
+            connectivity: runnerConnectivity({ registrationState: row.registration_state, lastSeenAt, certificateNotAfter }, observedAt),
+            lastSeenAt,
+            certificateNotAfter,
+            attemptId: row.attempt_id,
+            leaseState: row.lease_state,
+            fencingToken: String(row.fencing_token),
+            leaseExpiresAt: iso(row.lease_expires_at),
+            updatedAt: iso(row.updated_at),
+          };
+        }),
+      }, { tenantId, projectId });
     });
   }
 

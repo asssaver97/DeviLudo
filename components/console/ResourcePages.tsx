@@ -7,6 +7,7 @@ import { CheckIcon, FileIcon, ServerIcon, ShieldIcon } from "./Icons";
 import { ProjectScopeSelector } from "./ProjectScopeSelector";
 import { useLocalPlatform } from "./useLocalPlatform";
 import { useProjectSelection } from "./useProjectCatalog";
+import { useRunnerFleet } from "./useRunnerFleet";
 
 type RunnerView = {
   os: "macOS" | "Windows" | "Linux";
@@ -19,22 +20,31 @@ export function RunnersPage() {
   const [selected, setSelected] = useState<RunnerView["os"]>("macOS");
   const { projects, project, selectedProjectId, selectProject, mode, loading: projectsLoading, error: projectError } = useProjectSelection();
   const { delivery, productionDelivery, health, error: deliveryError } = useLocalPlatform(selectedProjectId);
-  const error = projectError || deliveryError;
+  const { fleet, error: fleetError } = useRunnerFleet(selectedProjectId, mode === "PRODUCTION");
+  const error = projectError || deliveryError || fleetError;
   const productionTargetState = (platform: "linux" | "windows" | "macos") => {
     if (!productionDelivery?.targetMatrix.includes(platform)) return "NOT_SELECTED";
     if (productionDelivery.candidateEvidenceBundleId) return "PASSED";
     return productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED";
   };
-  const runners: RunnerView[] = [
-    {
-      os: "macOS",
-      online: health?.dependencies?.fixtureExecutor === "READY",
-      detail: health?.dependencies?.localGodot ?? "本机 Godot 未连接",
-      targetState: delivery?.targetResults.macos ?? productionTargetState("macos"),
-    },
-    { os: "Windows", online: false, detail: "等待出站 mTLS Runner 注册", targetState: delivery?.targetResults.windows ?? productionTargetState("windows") },
-    { os: "Linux", online: false, detail: "等待出站 mTLS Runner 注册", targetState: delivery?.targetResults.linux ?? productionTargetState("linux") },
-  ];
+  const runnerView = (os: RunnerView["os"], platform: "linux" | "macos" | "windows"): RunnerView => {
+    const projected = fleet?.runners.find((runner) => runner.platform === platform);
+    if (mode === "PRODUCTION") return {
+      os,
+      online: projected?.connectivity === "READY",
+      detail: projected
+        ? `${projected.runnerId} · ${projected.architecture} · ${projected.connectivity}`
+        : "尚无该项目的 Runner 租约",
+      targetState: productionTargetState(platform),
+    };
+    return {
+      os,
+      online: platform === "macos" && health?.dependencies?.fixtureExecutor === "READY",
+      detail: platform === "macos" ? health?.dependencies?.localGodot ?? "本机 Godot 未连接" : "等待出站 mTLS Runner 注册",
+      targetState: delivery?.targetResults[platform] ?? "NOT_SELECTED",
+    };
+  };
+  const runners: RunnerView[] = [runnerView("macOS", "macos"), runnerView("Windows", "windows"), runnerView("Linux", "linux")];
   const selectedRunner = runners.find((runner) => runner.os === selected) ?? runners[0];
   const onlineCount = runners.filter((runner) => runner.online).length;
   return (
@@ -56,7 +66,7 @@ export function RunnersPage() {
         </section>
         <aside className="resource-detail">
           <span className="detail-icon"><ServerIcon /></span><span className="eyebrow">节点详情</span><h2>{selectedRunner.os} {selectedRunner.online ? "本机节点" : "目标集群"}</h2>
-          <dl><div><dt>连接状态</dt><dd>{selectedRunner.online ? "READY" : "NOT_CONNECTED"}</dd></div><div><dt>运行时</dt><dd>{selectedRunner.detail}</dd></div><div><dt>目标门禁</dt><dd>{selectedRunner.targetState}</dd></div><div><dt>注册模式</dt><dd>{selectedRunner.os === "macOS" ? "loopback 侧车" : "出站 mTLS"}</dd></div></dl>
+          <dl><div><dt>连接状态</dt><dd>{selectedRunner.online ? "READY" : "NOT_CONNECTED"}</dd></div><div><dt>运行时</dt><dd>{selectedRunner.detail}</dd></div><div><dt>目标门禁</dt><dd>{selectedRunner.targetState}</dd></div><div><dt>注册模式</dt><dd>{mode === "LOCAL_FIXTURE" && selectedRunner.os === "macOS" ? "loopback 侧车" : "出站 mTLS"}</dd></div></dl>
           <div className="fencing-note"><ShieldIcon /><span><b>防迟到结果</b><small>attempt_id、fencing_token 和 seq_no 不匹配的结果会被丢弃。</small></span></div>
         </aside>
       </div>

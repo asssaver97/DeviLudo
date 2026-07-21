@@ -18,6 +18,7 @@ import {
   type DeliveryProjectionView,
 } from "../src/store";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
+import { RUNNER_FLEET_PROJECTION_SCHEMA_VERSION } from "../../../lib/runner/fleet-projection";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -158,6 +159,16 @@ class MemoryStore implements DeliveryProjectionStore {
   async read(readTenantId: string, readProjectId: string) {
     return readTenantId === tenantId && readProjectId === projectId ? this.current : null;
   }
+  async readRunnerFleet(readTenantId: string, readProjectId: string) {
+    if (readTenantId !== tenantId || readProjectId !== projectId) return null;
+    return {
+      schemaVersion: RUNNER_FLEET_PROJECTION_SCHEMA_VERSION,
+      tenantId,
+      projectId,
+      observedAt: "2026-07-18T00:00:00.000Z",
+      runners: [],
+    } as const;
+  }
   async probe() {}
 }
 
@@ -194,6 +205,12 @@ test("mTLS projection ingress separates Temporal writes from Web reads", async (
   const result = await handler({ ...read, socket: readerId });
   assert.equal(result.status, 200);
   assert.deepEqual((result.body.data as DeliveryProjectionView).snapshot, projection.snapshot);
+
+  const fleetRead = { ...read, path: `/v1/runner-fleet/${projectId}` };
+  assert.equal((await handler({ ...fleetRead, socket: writerId })).status, 403);
+  const fleet = await handler({ ...fleetRead, socket: readerId });
+  assert.equal(fleet.status, 200);
+  assert.deepEqual((fleet.body.data as { runners: unknown[] }).runners, []);
 });
 
 test("projection ingress rejects identity overlap and transport drift", async () => {
@@ -247,6 +264,43 @@ test("PostgreSQL projection store sets tenant RLS and advances without gaps", as
   const firstTableStatement = database.statements.findIndex((statement) => statement.includes("deviludo.delivery_state_"));
   const firstTenantStatement = database.statements.findIndex((statement) => statement.includes("set_config('app.tenant_id'"));
   assert.ok(firstTenantStatement >= 0 && firstTenantStatement < firstTableStatement);
+});
+
+test("PostgreSQL Runner Fleet projection exposes only the latest project-bound lease per platform", async () => {
+  const statements: string[] = [];
+  const rows = [
+    {
+      runner_id: "runner-linux-01", platform: "linux", architecture: "x86_64", capability_digest: "a".repeat(64),
+      registration_state: "ONLINE", last_seen_at: "2026-07-18T00:04:30.000Z", certificate_not_after: "2027-07-18T00:00:00.000Z",
+      attempt_id: "66666666-6666-4666-8666-666666666666", lease_state: "RUNNING", fencing_token: "19",
+      lease_expires_at: "2026-07-18T00:10:00.000Z", updated_at: "2026-07-18T00:04:31.000Z",
+    },
+    {
+      runner_id: "runner-macos-01", platform: "macos", architecture: "arm64", capability_digest: "b".repeat(64),
+      registration_state: "ONLINE", last_seen_at: "2026-07-17T23:50:00.000Z", certificate_not_after: "2027-07-18T00:00:00.000Z",
+      attempt_id: "77777777-7777-4777-8777-777777777777", lease_state: "PASSED", fencing_token: "21",
+      lease_expires_at: "2026-07-18T00:03:00.000Z", updated_at: "2026-07-18T00:02:00.000Z",
+    },
+  ];
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string) {
+      statements.push(text);
+      const result = text.includes("AS project_exists")
+        ? [{ project_exists: true, observed_at: "2026-07-18T00:05:00.000Z" }]
+        : text.includes("DISTINCT ON (lease.platform)") ? rows : [];
+      return { rowCount: result.length, rows: result as unknown as readonly Row[] };
+    },
+    release() {},
+  };
+  const store = new PostgresDeliveryProjectionStore({ async connect() { return client; } });
+  const fleet = await store.readRunnerFleet(tenantId, projectId);
+  assert.equal(fleet?.runners[0]?.runnerId, "runner-linux-01");
+  assert.equal(fleet?.runners[0]?.connectivity, "READY");
+  assert.equal(fleet?.runners[1]?.connectivity, "STALE");
+  assert.equal(fleet?.runners[0]?.fencingToken, "19");
+  assert.match(statements.find((statement) => statement.includes("DISTINCT ON")) ?? "", /lease\.tenant_id = \$1::uuid AND lease\.project_id = \$2::uuid/);
+  assert.ok(statements.findIndex((statement) => statement.includes("set_config('app.tenant_id'"))
+    < statements.findIndex((statement) => statement.includes("DISTINCT ON")));
 });
 
 class ProjectionDatabase {

@@ -296,6 +296,23 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { description: The project is missing or inaccessible to the current account. }
+  /projects/{projectId}/runners:
+    get:
+      operationId: getProjectRunnerFleet
+      description: Returns at most one latest fenced Runner lease per platform for this tenant project. Connectivity is derived from immutable registration state, heartbeat freshness, and certificate expiry; the endpoint has no Runner write authority.
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200":
+          description: Tenant-isolated project Runner Fleet projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/RunnerFleetProjection" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "503": { description: The isolated delivery/Runner projection Broker is unavailable. }
   /projects/{projectId}/conversation:
     get:
       operationId: getSpecConversation
@@ -417,6 +434,36 @@ components:
               data: {}
               meta: { type: object, additionalProperties: true }
   schemas:
+    RunnerFleetProjection:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, tenantId, projectId, observedAt, runners]
+      properties:
+        schemaVersion: { const: deviludo.runner-fleet-projection.v1 }
+        tenantId: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        observedAt: { type: string, format: date-time }
+        runners:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: false
+            required: [runnerId, platform, architecture, capabilityDigest, registrationState, connectivity, lastSeenAt, certificateNotAfter, attemptId, leaseState, fencingToken, leaseExpiresAt, updatedAt]
+            properties:
+              runnerId: { type: string, pattern: "^[a-z0-9][a-z0-9-]{2,63}$" }
+              platform: { type: string, enum: [linux, macos, windows] }
+              architecture: { type: string, enum: [arm64, x86_64] }
+              capabilityDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+              registrationState: { type: string, enum: [DRAINING, OFFLINE, ONLINE, QUARANTINED] }
+              connectivity: { type: string, enum: [DRAINING, OFFLINE, QUARANTINED, READY, STALE] }
+              lastSeenAt: { type: string, format: date-time }
+              certificateNotAfter: { type: string, format: date-time }
+              attemptId: { type: string, format: uuid }
+              leaseState: { type: string, enum: [EXPIRED, FAILED, INVALIDATED, LEASED, PASSED, RUNNING] }
+              fencingToken: { type: string, pattern: "^[1-9][0-9]{0,19}$" }
+              leaseExpiresAt: { type: string, format: date-time }
+              updatedAt: { type: string, format: date-time }
     CreateRepositoryBoundProject:
       type: object
       additionalProperties: false

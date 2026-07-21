@@ -105,8 +105,8 @@ test("production worker never accepts credential plaintext into the local demo s
 
 test("public web worker remains fail-closed for runner event writes", async () => {
   const readOnly = await request("/api/runner/events");
-  assert.equal(readOnly.status, 200);
-  assert.equal((await readOnly.json()).meta.readOnly, true);
+  assert.equal(readOnly.status, 503);
+  assert.equal((await readOnly.json()).error.code, "RUNNER_FLEET_PROJECTION_REQUIRED");
 
   const write = await request("/api/runner/events", {
     method: "POST",

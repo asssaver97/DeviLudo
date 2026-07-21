@@ -1,7 +1,16 @@
 import { getRunnerDemoState } from "@/lib/control-plane/runner-demo";
 import { json } from "@/lib/control-plane/http";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
-export async function GET() {
+export async function GET(request: Request) {
+  if (!isLoopbackTestRequest(request)) {
+    return json({
+      error: {
+        code: "RUNNER_FLEET_PROJECTION_REQUIRED",
+        message: "生产 Runner 状态只能通过项目级只读投影读取。",
+      },
+    }, { status: 503 });
+  }
   const state = getRunnerDemoState();
   return json({
     data: { lease: state.lease, cursor: state.cursor },
