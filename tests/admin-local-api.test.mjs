@@ -379,3 +379,27 @@ test("local admin never simulates an upstream inference billing reconciliation",
   assert.equal(lookupGated.status, 503);
   assert.equal((await lookupGated.json()).error.code, "INFERENCE_RECONCILIATION_GATEWAY_REQUIRED");
 });
+
+test("local admin never simulates specification model billing reconciliation", async () => {
+  const generationOperationKey = "a".repeat(64);
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const path = `spec-model-generations/${generationOperationKey}/reconcile`;
+  const payload = { tenantId, action: "CONFIRM_NO_USAGE", evidenceDigest: "b".repeat(64) };
+  assert.equal((await POST(request(path, "POST", "PlatformAgentAdmin", payload), context(path))).status, 403);
+  const gated = await POST(request(path, "POST", "SecurityAdmin", payload), context(path));
+  assert.equal(gated.status, 503);
+  assert.equal((await gated.json()).error.code, "SPEC_MODEL_RECONCILIATION_BROKER_REQUIRED");
+
+  const lookupPath = `spec-model-generations/${tenantId}/${generationOperationKey}/reconciliation`;
+  const lookupDenied = await GET(
+    new Request(`http://127.0.0.1:3000/api/admin/${lookupPath}`, { headers: { "x-deviludo-role": "Auditor" } }),
+    context(lookupPath),
+  );
+  assert.equal(lookupDenied.status, 403);
+  const lookupGated = await GET(
+    new Request(`http://127.0.0.1:3000/api/admin/${lookupPath}`, { headers: { "x-deviludo-role": "SecurityAdmin" } }),
+    context(lookupPath),
+  );
+  assert.equal(lookupGated.status, 503);
+  assert.equal((await lookupGated.json()).error.code, "SPEC_MODEL_RECONCILIATION_BROKER_REQUIRED");
+});

@@ -104,6 +104,50 @@ export interface SpecModelOperationStore {
   probe(): Promise<void>;
 }
 
+export type SpecModelReconciliationAction = "CONFIRM_NO_USAGE" | "RECORD_USAGE";
+
+export interface SpecModelReconciliationRequest {
+  /** Idempotency identity of the SecurityAdmin mutation, not the model call. */
+  readonly operationKey: string;
+  readonly tenantId: string;
+  readonly generationOperationKey: string;
+  readonly action: SpecModelReconciliationAction;
+  readonly evidenceDigest: string;
+  readonly reconciledBy: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+}
+
+export interface SpecModelReconciliationStatus {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly conversationId: string;
+  readonly generationOperationKey: string;
+  readonly dispatchGeneration: number;
+  readonly profileRevisionId: string;
+  readonly providerRevisionId: string;
+  readonly model: string;
+  readonly state: "INDETERMINATE";
+  readonly createdAt: string;
+}
+
+export interface SpecModelReconciliationReceipt {
+  readonly operationKey: string;
+  readonly tenantId: string;
+  readonly generationOperationKey: string;
+  readonly dispatchGeneration: number;
+  readonly action: SpecModelReconciliationAction;
+  readonly evidenceDigest: string;
+  readonly state: "RELEASED";
+  readonly usage: SpecModelUsage;
+  readonly reconciledAt: string;
+}
+
+export interface SpecModelReconciliationStore {
+  lookupReconciliation(tenantId: string, generationOperationKey: string): Promise<SpecModelReconciliationStatus | null>;
+  reconcile(input: SpecModelReconciliationRequest): Promise<SpecModelReconciliationReceipt>;
+}
+
 export interface SpecModelRuntimeDependencies {
   readonly pool: PostgresWorkflowPool;
   readonly dns: DnsResolver;
@@ -113,6 +157,7 @@ export class SpecModelRequestError extends Error {}
 export class SpecModelBusyError extends Error {}
 export class SpecModelIndeterminateError extends Error {}
 export class SpecModelProviderUnavailableError extends Error {}
+export class SpecModelReconciliationConflictError extends Error {}
 
 export class SpecModelUpstreamError extends Error {
   constructor(readonly dispatched: boolean) {

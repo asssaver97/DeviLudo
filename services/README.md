@@ -44,7 +44,9 @@ behind the web console:
   platform Profile `smallFastModel`, offers no tools, leases its credential
   through a fourth disjoint Secret Broker role, pins public DNS/redirects, and
   durably replays a strict result without a second model charge. Ambiguous
-  post-dispatch operations become `INDETERMINATE` instead of auto-retrying.
+  post-dispatch operations become `INDETERMINATE` instead of auto-retrying;
+  only a separate SecurityAdmin mTLS role can append no-usage or exact-token
+  evidence for that dispatch generation and release it for an explicit retry.
 - `runner-control`: registers only admitted mTLS/SPIFFE workloads, rejects E2E
   hosts containing autonomous Agents, signs exact per-platform job envelopes,
   applies independent fencing tokens and derives the final matrix result from
@@ -256,7 +258,9 @@ ACTIVE Provider/credential/`smallFastModel` from the administrator catalog,
 and accepts no authority fields from dialogue or feedback callers. Migration
 `055` keeps a prompt-free tenant-RLS request/result ledger, while Secret Broker
 independently verifies the same platform binding before returning a five-minute
-credential lease.
+credential lease. Migration `056` adds monotonic dispatch generations and
+append-only SecurityAdmin reconciliation receipts; ordinary dialogue callers
+cannot release an indeterminate operation or reuse evidence from an older send.
 
 The Agent version approval API requires an exact SHA-256 integrity value,
 verified signature flag, passing scan and internal OCI SBOM reference. Agent

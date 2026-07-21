@@ -104,6 +104,14 @@ export class AdminController {
   lookupInferenceReconciliation(tenantId: string, runId: string) {
     return this.service.lookupInferenceReconciliation(tenantId, runId);
   }
+
+  reconcileSpecModelGeneration(operationKey: string, body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.reconcileSpecModelGeneration(operationKey, objectBody(body), actor(request));
+  }
+
+  lookupSpecModelReconciliation(tenantId: string, operationKey: string) {
+    return this.service.lookupSpecModelReconciliation(tenantId, operationKey);
+  }
 }
 
 // Decorators are applied imperatively so this service remains consumable from
@@ -129,6 +137,8 @@ applyRoute("health", Get("agent-health"), ALL_ROLES, []);
 applyRoute("audit", Get("audit"), ALL_ROLES, [Req()]);
 applyRoute("reconcileInferenceRequest", Post("inference-requests/:id/reconcile"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("lookupInferenceReconciliation", Get("inference-runs/:tenantId/:runId/reconciliation"), ["SecurityAdmin"], [Param("tenantId"), Param("runId")]);
+applyRoute("reconcileSpecModelGeneration", Post("spec-model-generations/:operationKey/reconcile"), ["SecurityAdmin"], [Param("operationKey"), Body(), Req()]);
+applyRoute("lookupSpecModelReconciliation", Get("spec-model-generations/:tenantId/:operationKey/reconciliation"), ["SecurityAdmin"], [Param("tenantId"), Param("operationKey")]);
 Controller("admin")(AdminController);
 
 function applyRoute(

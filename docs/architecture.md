@@ -150,6 +150,10 @@ post-dispatch ambiguous operation becomes `INDETERMINATE` so a potentially
 billable request is never repeated silently. The Broker obtains a five-minute
 credential lease through its own Secret Broker SPIFFE role and applies the same
 public-DNS, CNAME, redirect and TLS pinning policy as the Agent inference path.
+Each send has a monotonic dispatch generation. A mutually exclusive
+SecurityAdmin reconciliation route may append upstream no-usage or exact-token
+evidence for one indeterminate generation; the database trigger releases the
+operation only after that matching receipt exists.
 
 The GitHub Connector is repository-scoped by installation ID plus numeric and
 GraphQL repository IDs. An Ed25519-attested candidate artifact drives GitHub's

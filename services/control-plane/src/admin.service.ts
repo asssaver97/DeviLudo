@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import type { InferenceReconciliationReceipt } from "../../inference-gateway/src/contracts";
+import type { SpecModelReconciliationReceipt } from "../../spec-model-broker/src/contracts";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { AdminStore, recordAdminAudit, type AdminCatalogState } from "./admin.store";
@@ -33,6 +34,7 @@ import {
   type AgentVersionValidationReceipt,
 } from "./agent-supply-chain";
 import { InferenceRequestReconciler } from "./inference-reconciliation";
+import { SpecModelBrokerReconciliationClient, SpecModelGenerationReconciler } from "./spec-model-reconciliation";
 
 export class AdminService {
   constructor(
@@ -41,6 +43,7 @@ export class AdminService {
     private readonly providerProbe: ProviderProbe,
     private readonly supplyChain: AgentSupplyChain,
     private readonly inferenceReconciler: InferenceRequestReconciler,
+    private readonly specModelReconciler: SpecModelGenerationReconciler = new SpecModelBrokerReconciliationClient(),
   ) {}
 
   async agents(actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
@@ -969,6 +972,55 @@ export class AdminService {
     return this.inferenceReconciler.lookup(tenantId, runId);
   }
 
+  async reconcileSpecModelGeneration(
+    generationOperationKey: string,
+    body: Record<string, unknown>,
+    actor: RequestActor,
+  ): Promise<SpecModelReconciliationReceipt> {
+    const mutation = actor.mutation;
+    if (!mutation) throw new ServiceProblem(500, "ADMIN_MUTATION_BINDING_REQUIRED", "Specification model reconciliation requires an owned mutation binding");
+    const action = body.action;
+    const expected = action === "RECORD_USAGE"
+      ? ["action", "evidenceDigest", "inputTokens", "outputTokens", "tenantId"]
+      : ["action", "evidenceDigest", "tenantId"];
+    if ((action !== "CONFIRM_NO_USAGE" && action !== "RECORD_USAGE")
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(expected)
+      || !DIGEST_PATTERN.test(generationOperationKey)) {
+      throw new ServiceProblem(400, "INVALID_SPEC_MODEL_RECONCILIATION_REQUEST", "Specification model reconciliation request is invalid");
+    }
+    const tenantId = requiredUuid(body, "tenantId");
+    const evidenceDigest = requiredDigest(body, "evidenceDigest");
+    const tokens = action === "RECORD_USAGE" ? specReconciliationTokens(body) : {};
+    const receipt = await this.specModelReconciler.reconcile({
+      operationKey: mutation.identityDigest,
+      tenantId,
+      generationOperationKey,
+      action,
+      evidenceDigest,
+      reconciledBy: actor.actorId,
+      ...tokens,
+    });
+    return this.mutate(actor, (state) => {
+      this.audit(state, "SPEC_MODEL_GENERATION_RECONCILED", `spec-model-generation:${generationOperationKey}`, actor, {
+        affectedTenantId: tenantId,
+        dispatchGeneration: receipt.dispatchGeneration,
+        action,
+        evidenceDigest,
+        state: receipt.state,
+        usage: receipt.usage,
+        reconciledAt: receipt.reconciledAt,
+      });
+      return receipt;
+    });
+  }
+
+  async lookupSpecModelReconciliation(tenantId: string, generationOperationKey: string) {
+    if (!UUID_PATTERN.test(tenantId) || !DIGEST_PATTERN.test(generationOperationKey)) {
+      throw new ServiceProblem(400, "INVALID_SPEC_MODEL_RECONCILIATION_LOOKUP", "Specification model reconciliation lookup is invalid");
+    }
+    return this.specModelReconciler.lookup(tenantId, generationOperationKey);
+  }
+
   private mutate<T>(
     actor: RequestActor,
     operation: (state: AdminCatalogState) => T,
@@ -1034,6 +1086,7 @@ Inject(SecretVault)(AdminService, undefined, 1);
 Inject(ProviderProbe)(AdminService, undefined, 2);
 Inject(AgentSupplyChain)(AdminService, undefined, 3);
 Inject(InferenceRequestReconciler)(AdminService, undefined, 4);
+Inject(SpecModelGenerationReconciler)(AdminService, undefined, 5);
 Injectable()(AdminService);
 
 const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -1062,6 +1115,17 @@ function reconciliationTokens(body: Record<string, unknown>): Readonly<{ inputTo
     || (inputTokens as number) < 0 || (outputTokens as number) < 0
     || (inputTokens as number) + (outputTokens as number) < 1) {
     throw new ServiceProblem(400, "INVALID_RECONCILIATION_REQUEST", "Recorded usage must contain non-negative token counts");
+  }
+  return Object.freeze({ inputTokens: inputTokens as number, outputTokens: outputTokens as number });
+}
+
+function specReconciliationTokens(body: Record<string, unknown>): Readonly<{ inputTokens: number; outputTokens: number }> {
+  const inputTokens = body.inputTokens;
+  const outputTokens = body.outputTokens;
+  if (!Number.isSafeInteger(inputTokens) || !Number.isSafeInteger(outputTokens)
+    || (inputTokens as number) < 0 || (outputTokens as number) < 1
+    || (inputTokens as number) + (outputTokens as number) > 10_000_000) {
+    throw new ServiceProblem(400, "INVALID_SPEC_MODEL_RECONCILIATION_REQUEST", "Recorded specification usage must contain bounded token counts");
   }
   return Object.freeze({ inputTokens: inputTokens as number, outputTokens: outputTokens as number });
 }

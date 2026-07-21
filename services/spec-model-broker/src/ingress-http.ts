@@ -5,10 +5,12 @@ import {
   SpecModelBusyError,
   SpecModelIndeterminateError,
   SpecModelProviderUnavailableError,
+  SpecModelReconciliationConflictError,
   SpecModelRequestError,
   SpecModelUpstreamError,
 } from "./contracts";
 import type { SpecModelBrokerService } from "./service";
+import { SpecModelReconciliationRequestError, type StrictSpecModelReconciliationService } from "./reconciliation";
 
 const MAX_BODY_BYTES = 512 * 1024;
 
@@ -28,30 +30,68 @@ export interface SpecModelHttpResponse {
 export function createSpecModelBrokerHandler(options: Readonly<{
   service: SpecModelBrokerService;
   allowedSpiffeIds: ReadonlySet<string>;
+  reconciliation?: StrictSpecModelReconciliationService;
+  reconciliationSpiffeIds?: ReadonlySet<string>;
   extractIdentity?: (socket: unknown) => Readonly<{ spiffeId: string }>;
 }>) {
   if (!options.allowedSpiffeIds.size) throw new Error("Specification model Broker workload allow-list is empty");
+  const reconciliationIds = options.reconciliationSpiffeIds ?? new Set<string>();
+  if (Boolean(options.reconciliation) !== Boolean(reconciliationIds.size)) {
+    throw new Error("Specification model reconciliation service and workload role must be configured together");
+  }
+  if ([...reconciliationIds].some((identity) => options.allowedSpiffeIds.has(identity))) {
+    throw new Error("Specification model generation and reconciliation workload roles must be disjoint");
+  }
   const extract = options.extractIdentity ?? evidenceArchiveIdentityFromTlsSocket;
   return async (request: SpecModelHttpRequest): Promise<SpecModelHttpResponse> => {
     let workload: string;
     try { workload = extract(request.socket).spiffeId; }
     catch { return failure(401, "SPEC_MODEL_MTLS_IDENTITY_REQUIRED"); }
-    if (!options.allowedSpiffeIds.has(workload)) return failure(403, "SPEC_MODEL_WORKLOAD_FORBIDDEN");
     if (request.method === "GET" && request.path === "/healthz") {
+      if (!options.allowedSpiffeIds.has(workload) && !reconciliationIds.has(workload)) {
+        return failure(403, "SPEC_MODEL_WORKLOAD_FORBIDDEN");
+      }
       if (request.rawBody) return failure(400, "SPEC_MODEL_BODY_FORBIDDEN");
       try {
         await options.service.probe();
         return { status: 200, body: { schemaVersion: "deviludo.spec-model-health.v1", status: "ok", service: "deviludo-spec-model-broker" } };
       } catch { return failure(503, "SPEC_MODEL_NOT_READY"); }
     }
+    if (request.method === "POST" && (request.path === "/v1/spec-generation-reconciliations"
+      || request.path === "/v1/spec-generation-reconciliations/lookup")) {
+      if (!reconciliationIds.has(workload) || !options.reconciliation) {
+        return failure(403, "SPEC_MODEL_RECONCILIATION_WORKLOAD_FORBIDDEN");
+      }
+      if (contentType(request.headers["content-type"]) !== "application/json") {
+        return failure(415, "SPEC_MODEL_JSON_REQUIRED");
+      }
+      if (credentialHeadersPresent(request.headers)) return failure(400, "SPEC_MODEL_CREDENTIAL_FIELDS_FORBIDDEN");
+      let body: unknown;
+      try { body = JSON.parse(request.rawBody) as unknown; }
+      catch { return failure(400, "SPEC_MODEL_RECONCILIATION_INVALID"); }
+      try {
+        const result = request.path.endsWith("/lookup")
+          ? await options.reconciliation.lookup(body)
+          : await options.reconciliation.run(body);
+        return { status: 200, body: result, headers: { "cache-control": "no-store" } };
+      } catch (error) {
+        if (error instanceof SpecModelReconciliationRequestError) {
+          return failure(400, "SPEC_MODEL_RECONCILIATION_INVALID");
+        }
+        if (error instanceof SpecModelReconciliationConflictError) {
+          return failure(409, "SPEC_MODEL_RECONCILIATION_CONFLICT");
+        }
+        return failure(503, "SPEC_MODEL_RECONCILIATION_UNAVAILABLE");
+      }
+    }
+    if (!options.allowedSpiffeIds.has(workload)) return failure(403, "SPEC_MODEL_WORKLOAD_FORBIDDEN");
     if (request.method !== "POST" || request.path !== "/v1/spec-generations") {
       return failure(404, "SPEC_MODEL_ROUTE_NOT_FOUND");
     }
     if (contentType(request.headers["content-type"]) !== "application/json") {
       return failure(415, "SPEC_MODEL_JSON_REQUIRED");
     }
-    if (request.headers.authorization !== undefined || request.headers["x-api-key"] !== undefined
-      || request.headers["anthropic-api-key"] !== undefined) {
+    if (credentialHeadersPresent(request.headers)) {
       return failure(400, "SPEC_MODEL_CREDENTIAL_FIELDS_FORBIDDEN");
     }
     const operationKey = single(request.headers["idempotency-key"]);
@@ -139,4 +179,8 @@ function contentType(value: string | readonly string[] | undefined): string {
 }
 function single(value: string | readonly string[] | undefined): string | undefined {
   return typeof value === "string" ? value : Array.isArray(value) && value.length === 1 ? value[0] : undefined;
+}
+function credentialHeadersPresent(headers: SpecModelHttpRequest["headers"]): boolean {
+  return headers.authorization !== undefined || headers["x-api-key"] !== undefined
+    || headers["anthropic-api-key"] !== undefined;
 }

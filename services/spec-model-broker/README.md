@@ -19,6 +19,12 @@ an expired or post-dispatch ambiguous claim becomes `INDETERMINATE` and is never
 silently retried. The ledger stores request/result digests, the strict result,
 usage and public configuration only—never prompt history or credential bytes.
 
+A separate SecurityAdmin mTLS role can inspect only that prompt-free binding
+and submit `CONFIRM_NO_USAGE` or exact `RECORD_USAGE` evidence. PostgreSQL binds
+the append-only receipt to the current monotonic `dispatchGeneration` before a
+trigger permits the operation to become retryable. A later ambiguous dispatch
+requires a new generation and cannot reuse old evidence.
+
 The Broker receives a five-minute credential lease from Secret Broker over a
 dedicated, disjoint mTLS role. Every upstream connection revalidates HTTPS,
 approved ports, DNS/CNAME answers and redirects, pins the validated public IP,
@@ -30,7 +36,7 @@ specification contract.
 Protocol references: [OpenAI Responses structured output](https://platform.openai.com/docs/api-reference/responses)
 and [Claude structured output](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 
-Apply PostgreSQL migration `055`, add this workload to the Secret Broker
+Apply PostgreSQL migrations `055` and `056`, add this workload to the Secret Broker
 configuration, and start with:
 
 ```bash

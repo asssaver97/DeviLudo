@@ -143,13 +143,16 @@ export function resolveAdminControlPlanePath(methodInput: string, segments: read
       ? new Set(["agent-versions/discover", "agent-versions/approve", "agent-versions/block", "agent-installations", "agent-profiles", "credentials"])
       : new Set<string>();
   const dynamic = method === "GET"
-    ? /^inference-runs\/([a-f0-9-]+)\/([a-f0-9-]+)\/reconciliation$/i.test(key)
-      && UUID.test(segments[1] ?? "") && UUID.test(segments[2] ?? "")
+    ? (/^inference-runs\/([a-f0-9-]+)\/([a-f0-9-]+)\/reconciliation$/i.test(key)
+      && UUID.test(segments[1] ?? "") && UUID.test(segments[2] ?? ""))
+      || (/^spec-model-generations\/([a-f0-9-]+)\/([a-f0-9]{64})\/reconciliation$/i.test(key)
+        && UUID.test(segments[1] ?? "") && /^[a-f0-9]{64}$/.test(segments[2] ?? ""))
     : method === "POST"
       ? /^agent-rollouts\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:advance|rollback)$/.test(key)
         || /^agent-profiles\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:validate|activate|disable)$/.test(key)
         || /^credentials\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:rotate|revoke)$/.test(key)
         || /^inference-requests\/[a-f0-9-]{36}\/reconcile$/i.test(key)
+        || /^spec-model-generations\/[a-f0-9]{64}\/reconcile$/i.test(key)
       : method === "PUT" && /^agent-defaults\/(?:platform|(?:tenant|project):[A-Za-z0-9][A-Za-z0-9_-]{0,159})$/.test(key);
   if (!exact.has(key) && !dynamic) invalid("route");
   return `/admin/${key}`;

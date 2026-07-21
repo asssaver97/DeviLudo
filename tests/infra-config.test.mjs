@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 55 }, (_, index) => {
+  const offsets = Array.from({ length: 56 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -359,6 +359,24 @@ test("specification model Broker is a credential-isolated non-tool production bo
   assert.match(secretIngress, /\/v1\/spec-model-credentials\/resolve/);
   assert.match(secretAuthority, /resolveSpecModel/);
   assert.match(secretAuthority, /profile\.scope !== "platform"/);
+});
+
+test("specification model ambiguity has a SecurityAdmin-only append-only reconciliation path", () => {
+  const migration = readFileSync(new URL("../infra/postgres/056_spec_model_generation_reconciliation.sql", import.meta.url), "utf8");
+  const controller = readFileSync(new URL("../services/control-plane/src/admin.controller.ts", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../services/control-plane/src/spec-model-reconciliation.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/spec-model-broker/src/ingress-http.ts", import.meta.url), "utf8");
+  assert.match(migration, /dispatch_generation/);
+  assert.match(migration, /spec_model_generation_reconciliations/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /CONFIRM_NO_USAGE/);
+  assert.match(migration, /RECORD_USAGE/);
+  assert.match(migration, /reconciliation receipt is required/);
+  assert.match(controller, /spec-model-generations\/:operationKey\/reconcile/);
+  assert.match(controller, /spec-model-generations\/:tenantId\/:operationKey\/reconciliation/);
+  assert.match(client, /DEVILUDO_SPEC_MODEL_RECONCILIATION_TLS_KEY_FILE/);
+  assert.match(ingress, /reconciliationSpiffeIds/);
+  assert.match(ingress, /must be disjoint/);
 });
 
 test("ambiguous inference usage has one SecurityAdmin-only evidence-bound reconciliation path", () => {

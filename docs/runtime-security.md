@@ -64,6 +64,13 @@ dispatch releases the claim; once a request may have reached the Provider, any
 ambiguous outcome is permanently `INDETERMINATE` and cannot be automatically
 retried. This prevents duplicate model charges after a process or network loss.
 
+Recovery uses a disjoint SecurityAdmin mTLS identity. Its request contains only
+the generation operation key, upstream evidence digest, and either a no-usage
+decision or exact token usage. PostgreSQL appends that receipt for the current
+monotonic `dispatchGeneration` before its trigger permits
+`INDETERMINATE → RELEASED`; prompt text and model output are not exposed. A
+later ambiguous send has a new generation and cannot reuse the earlier receipt.
+
 The Broker's separate SPIFFE role requests a five-minute credential lease from
 Secret Broker. Secret Broker independently re-resolves the same ACTIVE platform
 Profile/Provider/credential/model relationship and rejects tenant or project

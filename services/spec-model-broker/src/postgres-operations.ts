@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
 import { parseSpecModelResult } from "../../spec-dialogue/src/contracts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import { canonical, resultDigest, validateProviderBinding, validateUsage } from "./contract";
-import type { SpecModelOperationClaim, SpecModelOperationLookup, SpecModelOperationStore } from "./contracts";
-import { SpecModelRequestError } from "./contracts";
+import type {
+  SpecModelOperationClaim,
+  SpecModelOperationLookup,
+  SpecModelOperationStore,
+  SpecModelReconciliationReceipt,
+  SpecModelReconciliationStore,
+} from "./contracts";
+import { SpecModelReconciliationConflictError, SpecModelRequestError } from "./contracts";
+import { parseSpecModelReconciliationRequest } from "./reconciliation";
+
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 type OperationRow = {
   tenant_id: string;
@@ -26,9 +37,24 @@ type OperationRow = {
   result: unknown | null;
   result_digest: string | null;
   usage: unknown | null;
+  dispatch_generation: string | number;
+  created_at: string | Date;
 };
 
-export class PostgresSpecModelOperationStore implements SpecModelOperationStore {
+type ReconciliationRow = {
+  tenant_id: string;
+  reconciliation_operation_key: string;
+  generation_operation_key: string;
+  dispatch_generation: string | number;
+  payload_digest: string;
+  action: string;
+  evidence_digest: string;
+  reconciled_by: string;
+  usage: unknown;
+  reconciled_at: string | Date;
+};
+
+export class PostgresSpecModelOperationStore implements SpecModelOperationStore, SpecModelReconciliationStore {
   constructor(private readonly pool: PostgresWorkflowPool) {}
 
   async lookup(input: Parameters<SpecModelOperationStore["lookup"]>[0]): Promise<SpecModelOperationLookup> {
@@ -101,7 +127,8 @@ export class PostgresSpecModelOperationStore implements SpecModelOperationStore 
       const reclaimed = await client.query(
         `UPDATE deviludo.spec_model_generation_operations
             SET state = 'CLAIMED', claim_token = $3::uuid,
-                claim_expires_at = now() + make_interval(secs => $4::double precision)
+                claim_expires_at = now() + make_interval(secs => $4::double precision),
+                dispatch_generation = dispatch_generation + 1
           WHERE tenant_id = $1::uuid AND operation_key = $2 AND state = 'RELEASED'`,
         [input.tenantId, input.operationKey, input.claimToken, input.leaseSeconds],
       );
@@ -151,6 +178,61 @@ export class PostgresSpecModelOperationStore implements SpecModelOperationStore 
     } finally { client.release(); }
   }
 
+  async lookupReconciliation(tenantId: string, generationOperationKey: string) {
+    validateReconciliationLookup(tenantId, generationOperationKey);
+    return this.transaction(tenantId, async (client) => {
+      let operation = await selectOperation(client, tenantId, generationOperationKey);
+      if (!operation) return null;
+      if (operation.state === "CLAIMED" && operation.expired) {
+        await markIndeterminate(client, tenantId, generationOperationKey, operation.claim_token);
+        operation = { ...operation, state: "INDETERMINATE", claim_token: null, expired: false };
+      }
+      if (operation.state !== "INDETERMINATE") return null;
+      return reconciliationStatus(operation);
+    });
+  }
+
+  async reconcile(value: Parameters<SpecModelReconciliationStore["reconcile"]>[0]): Promise<SpecModelReconciliationReceipt> {
+    const input = parseSpecModelReconciliationRequest(value);
+    const payloadDigest = sha256(canonical(input));
+    return this.transaction(input.tenantId, async (client) => {
+      const replay = await selectReconciliation(client, input.tenantId, input.operationKey);
+      if (replay) return parseReconciliationReceipt(replay, input, payloadDigest);
+
+      let operation = await selectOperation(client, input.tenantId, input.generationOperationKey);
+      if (!operation) reconciliationConflict();
+      if (operation.state === "CLAIMED" && operation.expired) {
+        await markIndeterminate(client, input.tenantId, input.generationOperationKey, operation.claim_token);
+        operation = { ...operation, state: "INDETERMINATE", claim_token: null, expired: false };
+      }
+      if (operation.state !== "INDETERMINATE") reconciliationConflict();
+      const generation = positiveInteger(operation.dispatch_generation);
+      const usage = Object.freeze({ inputTokens: input.inputTokens ?? 0, outputTokens: input.outputTokens ?? 0 });
+      const inserted = await client.query(
+        `INSERT INTO deviludo.spec_model_generation_reconciliations
+          (tenant_id, reconciliation_operation_key, generation_operation_key,
+           dispatch_generation, payload_digest, action, evidence_digest,
+           reconciled_by, usage, reconciled_at)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
+         ON CONFLICT DO NOTHING`,
+        [input.tenantId, input.operationKey, input.generationOperationKey, generation,
+          payloadDigest, input.action, input.evidenceDigest, input.reconciledBy, JSON.stringify(usage)],
+      );
+      if (inserted.rowCount !== 1) reconciliationConflict();
+      const updated = await client.query(
+        `UPDATE deviludo.spec_model_generation_operations
+            SET state = 'RELEASED', claim_token = NULL, claim_expires_at = NULL
+          WHERE tenant_id = $1::uuid AND operation_key = $2
+            AND dispatch_generation = $3 AND state = 'INDETERMINATE'`,
+        [input.tenantId, input.generationOperationKey, generation],
+      );
+      if (updated.rowCount !== 1) reconciliationConflict();
+      const stored = await selectReconciliation(client, input.tenantId, input.operationKey);
+      if (!stored) reconciliationConflict();
+      return parseReconciliationReceipt(stored, input, payloadDigest);
+    });
+  }
+
   private async transition(
     input: { tenantId: string; operationKey: string; claimToken: string },
     state: "RELEASED" | "INDETERMINATE",
@@ -193,7 +275,7 @@ async function selectOperation(client: PostgresWorkflowClient, tenantId: string,
             provider_revision_id, credential_version_id, agent, protocol,
             base_url, approved_ports, authentication, model, policy_digest,
             state, claim_token::text, claim_expires_at <= now() AS expired,
-            result, result_digest, usage
+            result, result_digest, usage, dispatch_generation, created_at
        FROM deviludo.spec_model_generation_operations
       WHERE tenant_id = $1::uuid AND operation_key = $2
       FOR UPDATE`,
@@ -201,6 +283,69 @@ async function selectOperation(client: PostgresWorkflowClient, tenantId: string,
   );
   if (selected.rows.length > 1) invalid();
   return selected.rows[0] ?? null;
+}
+
+async function selectReconciliation(
+  client: PostgresWorkflowClient,
+  tenantId: string,
+  operationKey: string,
+): Promise<ReconciliationRow | null> {
+  const selected = await client.query<ReconciliationRow>(
+    `SELECT tenant_id::text, reconciliation_operation_key,
+            generation_operation_key, dispatch_generation, payload_digest,
+            action, evidence_digest, reconciled_by, usage, reconciled_at
+       FROM deviludo.spec_model_generation_reconciliations
+      WHERE tenant_id = $1::uuid AND reconciliation_operation_key = $2
+      FOR SHARE`,
+    [tenantId, operationKey],
+  );
+  if (selected.rows.length > 1) reconciliationConflict();
+  return selected.rows[0] ?? null;
+}
+
+function reconciliationStatus(row: OperationRow) {
+  const createdAt = new Date(row.created_at);
+  if (!Number.isFinite(createdAt.getTime())) invalid();
+  return Object.freeze({
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    conversationId: row.conversation_id,
+    generationOperationKey: row.operation_key,
+    dispatchGeneration: positiveInteger(row.dispatch_generation),
+    profileRevisionId: row.profile_revision_id,
+    providerRevisionId: row.provider_revision_id,
+    model: row.model,
+    state: "INDETERMINATE" as const,
+    createdAt: createdAt.toISOString(),
+  });
+}
+
+function parseReconciliationReceipt(
+  row: ReconciliationRow,
+  input: ReturnType<typeof parseSpecModelReconciliationRequest>,
+  payloadDigest: string,
+): SpecModelReconciliationReceipt {
+  const generation = positiveInteger(row.dispatch_generation);
+  const usage = reconciliationUsage(row.usage);
+  const reconciledAt = new Date(row.reconciled_at);
+  if (row.tenant_id !== input.tenantId || row.reconciliation_operation_key !== input.operationKey
+    || row.generation_operation_key !== input.generationOperationKey
+    || row.payload_digest !== payloadDigest || row.action !== input.action
+    || row.evidence_digest !== input.evidenceDigest || row.reconciled_by !== input.reconciledBy
+    || !Number.isFinite(reconciledAt.getTime())
+    || usage.inputTokens !== (input.inputTokens ?? 0)
+    || usage.outputTokens !== (input.outputTokens ?? 0)) reconciliationConflict();
+  return Object.freeze({
+    operationKey: row.reconciliation_operation_key,
+    tenantId: row.tenant_id,
+    generationOperationKey: row.generation_operation_key,
+    dispatchGeneration: generation,
+    action: input.action,
+    evidenceDigest: row.evidence_digest,
+    state: "RELEASED" as const,
+    usage,
+    reconciledAt: reconciledAt.toISOString(),
+  });
 }
 
 function completed(row: OperationRow): Readonly<{ kind: "COMPLETED"; result: ReturnType<typeof parseSpecModelResult> }> {
@@ -258,4 +403,27 @@ function recordUsage(value: unknown): { inputTokens: number; outputTokens: numbe
   if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["inputTokens", "outputTokens"])) invalid();
   return { inputTokens: Number(body.inputTokens), outputTokens: Number(body.outputTokens) };
 }
+function reconciliationUsage(value: unknown): Readonly<{ inputTokens: number; outputTokens: number }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) reconciliationConflict();
+  const body = value as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["inputTokens", "outputTokens"])) reconciliationConflict();
+  const inputTokens = Number(body.inputTokens);
+  const outputTokens = Number(body.outputTokens);
+  if (!Number.isSafeInteger(inputTokens) || inputTokens < 0
+    || !Number.isSafeInteger(outputTokens) || outputTokens < 0
+    || inputTokens + outputTokens > 10_000_000) reconciliationConflict();
+  return Object.freeze({ inputTokens, outputTokens });
+}
+function validateReconciliationLookup(tenantId: string, generationOperationKey: string): void {
+  if (!UUID.test(tenantId) || !SHA256.test(generationOperationKey)) reconciliationConflict();
+}
+function positiveInteger(value: string | number): number {
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || result < 1 || result > 1_000_000) reconciliationConflict();
+  return result;
+}
+function sha256(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function invalid(): never { throw new SpecModelRequestError("Specification model PostgreSQL operation is invalid"); }
+function reconciliationConflict(): never {
+  throw new SpecModelReconciliationConflictError("Specification model reconciliation conflicts with durable state");
+}

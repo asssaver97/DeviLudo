@@ -211,6 +211,39 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+  /admin/spec-model-generations/{operationKey}/reconcile:
+    post:
+      operationId: reconcileSpecModelGeneration
+      description: SecurityAdmin-only release of one indeterminate specification-model dispatch. Retrying remains forbidden until an upstream evidence digest confirms no usage or records the exact charged token usage.
+      parameters:
+        - name: operationKey
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-f0-9]{64}$" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpecModelReconciliation" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: The dispatch is active, completed, already released, or reconciled with different evidence. }
+  /admin/spec-model-generations/{tenantId}/{operationKey}/reconciliation:
+    get:
+      operationId: getSpecModelGenerationReconciliation
+      description: SecurityAdmin-only lookup of one unresolved specification-model dispatch. Prompt text and model output are never returned.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: operationKey
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-f0-9]{64}$" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
   /projects/repositories:
     get:
       operationId: listAuthorizedProjectRepositories
@@ -460,3 +493,21 @@ components:
             evidenceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
             inputTokens: { type: integer, minimum: 0 }
             outputTokens: { type: integer, minimum: 0 }
+    SpecModelReconciliation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [tenantId, action, evidenceDigest]
+          properties:
+            tenantId: { type: string, format: uuid }
+            action: { const: CONFIRM_NO_USAGE }
+            evidenceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        - type: object
+          additionalProperties: false
+          required: [tenantId, action, evidenceDigest, inputTokens, outputTokens]
+          properties:
+            tenantId: { type: string, format: uuid }
+            action: { const: RECORD_USAGE }
+            evidenceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+            inputTokens: { type: integer, minimum: 0, maximum: 10000000 }
+            outputTokens: { type: integer, minimum: 1, maximum: 10000000 }

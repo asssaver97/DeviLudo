@@ -510,6 +510,31 @@ test("local admin boundary allows only SecurityAdmin and fails closed without a 
   assert.equal(lookupUnavailable.json().error.code, "INFERENCE_RECONCILIATION_UNAVAILABLE");
 });
 
+test("specification model reconciliation is SecurityAdmin-only and fails closed without its Broker", async () => {
+  const generationOperationKey = "a".repeat(64);
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const payload = {
+    tenantId, action: "CONFIRM_NO_USAGE", evidenceDigest: "b".repeat(64),
+  };
+  const denied = await inject({
+    method: "POST", url: `/admin/spec-model-generations/${generationOperationKey}/reconcile`,
+    role: "PlatformAgentAdmin", key: "spec-model-reconcile-denied", payload,
+  });
+  assert.equal(denied.statusCode, 403);
+  const unavailable = await inject({
+    method: "POST", url: `/admin/spec-model-generations/${generationOperationKey}/reconcile`,
+    role: "SecurityAdmin", key: "spec-model-reconcile-unavailable", payload,
+  });
+  assert.equal(unavailable.statusCode, 503);
+  assert.equal(unavailable.json().error.code, "SPEC_MODEL_RECONCILIATION_UNAVAILABLE");
+
+  const lookup = `/admin/spec-model-generations/${tenantId}/${generationOperationKey}/reconciliation`;
+  assert.equal((await inject({ method: "GET", url: lookup, role: "Auditor" })).statusCode, 403);
+  const lookupUnavailable = await inject({ method: "GET", url: lookup, role: "SecurityAdmin" });
+  assert.equal(lookupUnavailable.statusCode, 503);
+  assert.equal(lookupUnavailable.json().error.code, "SPEC_MODEL_RECONCILIATION_UNAVAILABLE");
+});
+
 test("unsafe Provider endpoints and floating models are rejected", async () => {
   const response = await inject({
     method: "POST",

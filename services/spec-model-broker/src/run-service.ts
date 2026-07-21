@@ -9,6 +9,7 @@ import { createSpecModelBrokerHandler, createSpecModelBrokerHttpsServer } from "
 import { PostgresSpecModelOperationStore } from "./postgres-operations";
 import { PostgresSpecModelProviderAuthority } from "./provider-authority";
 import { ProductionSpecModelGenerator } from "./production-generator";
+import { StrictSpecModelReconciliationService } from "./reconciliation";
 import { SpecModelBrokerService } from "./service";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
@@ -48,9 +49,17 @@ export async function specModelBrokerRuntimeFromEnv(
       profileRevisionId,
       leaseSeconds: integer(env.DEVILUDO_SPEC_MODEL_OPERATION_LEASE_SECONDS, 180, 30, 600),
     });
+    const generationSpiffeIds = spiffeSet(required(env, "DEVILUDO_SPEC_MODEL_CLIENT_SPIFFE_IDS"));
+    const reconciliationSpiffeIds = spiffeSet(required(env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_SPIFFE_IDS"));
+    if ([...reconciliationSpiffeIds].some((identity) => generationSpiffeIds.has(identity))) {
+      throw new Error("Specification model generation and reconciliation identities must be disjoint");
+    }
+    const reconciliation = new StrictSpecModelReconciliationService(store);
     const handler = createSpecModelBrokerHandler({
       service,
-      allowedSpiffeIds: spiffeSet(required(env, "DEVILUDO_SPEC_MODEL_CLIENT_SPIFFE_IDS")),
+      allowedSpiffeIds: generationSpiffeIds,
+      reconciliation,
+      reconciliationSpiffeIds,
     });
     const server = createSpecModelBrokerHttpsServer({
       tls: { key: serverKey, cert: serverCertificate, ca: clientCa },
@@ -66,6 +75,7 @@ export async function specModelBrokerRuntimeFromEnv(
       credentials,
       generator,
       service,
+      reconciliation,
       server,
     });
   } catch (error) {

@@ -13,6 +13,7 @@ import { InferenceGatewayProviderProbe, ProviderProbe } from "./provider-probe";
 import { createSecretVault, SecretVault } from "./secret-vault";
 import { AgentSupplyChain, createAgentSupplyChain } from "./agent-supply-chain";
 import { createInferenceRequestReconciler, InferenceRequestReconciler } from "./inference-reconciliation";
+import { createSpecModelGenerationReconciler, SpecModelGenerationReconciler } from "./spec-model-reconciliation";
 
 export class AppModule {}
 
@@ -26,6 +27,7 @@ Module({
     { provide: ProviderProbe, useClass: InferenceGatewayProviderProbe },
     { provide: AgentSupplyChain, useFactory: createAgentSupplyChain },
     { provide: InferenceRequestReconciler, useFactory: createInferenceRequestReconciler },
+    { provide: SpecModelGenerationReconciler, useFactory: createSpecModelGenerationReconciler },
     { provide: APP_GUARD, useClass: RbacGuard },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
     { provide: APP_FILTER, useClass: ProblemFilter },

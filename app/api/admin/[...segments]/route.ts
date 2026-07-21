@@ -121,6 +121,14 @@ export async function GET(request: Request, context: RouteContext) {
         "本地测试站未连接受信 mTLS Inference Gateway，不能读取真实未决账单请求",
       );
     }
+    if (/^spec-model-generations\/[a-f0-9-]+\/[a-f0-9]{64}\/reconciliation$/i.test(key)) {
+      requireRole(request, SECURITY_ROLES);
+      throw new HttpProblem(
+        503,
+        "SPEC_MODEL_RECONCILIATION_BROKER_REQUIRED",
+        "本地测试站不会伪造规格模型上游账单状态；请配置生产控制面与独立 mTLS 对账角色",
+      );
+    }
     throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
   } catch (error) {
     return problemResponse(error);
@@ -491,6 +499,15 @@ export async function POST(request: Request, context: RouteContext) {
         503,
         "INFERENCE_RECONCILIATION_GATEWAY_REQUIRED",
         "本地测试站不会伪造上游账单核销；请配置生产控制面与受信 mTLS Inference Gateway",
+      );
+    }
+
+    if (/^spec-model-generations\/[a-f0-9]{64}\/reconcile$/i.test(key)) {
+      requireRole(request, SECURITY_ROLES);
+      throw new HttpProblem(
+        503,
+        "SPEC_MODEL_RECONCILIATION_BROKER_REQUIRED",
+        "本地测试站不会伪造规格模型账单核销；请配置生产控制面与受信 mTLS 规格模型 Broker",
       );
     }
 

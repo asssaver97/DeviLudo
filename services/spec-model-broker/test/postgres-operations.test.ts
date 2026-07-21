@@ -53,9 +53,33 @@ test("PostgreSQL generation store rejects request drift and makes expired claims
   assert.equal(client.row?.state, "INDETERMINATE");
 });
 
+test("PostgreSQL reconciliation records exact usage, releases one generation and replays idempotently", async () => {
+  const client = new FixtureClient();
+  const store = new PostgresSpecModelOperationStore(pool(client));
+  await store.claim(claimInput());
+  await store.abandon({ tenantId, operationKey, claimToken });
+  const status = await store.lookupReconciliation(tenantId, operationKey);
+  assert.equal(status?.dispatchGeneration, 1);
+  const input = {
+    operationKey: "d".repeat(64), tenantId, generationOperationKey: operationKey,
+    action: "RECORD_USAGE" as const, evidenceDigest: "e".repeat(64),
+    reconciledBy: "security-admin@example.com", inputTokens: 123, outputTokens: 45,
+  };
+  const receipt = await store.reconcile(input);
+  assert.deepEqual(receipt.usage, { inputTokens: 123, outputTokens: 45 });
+  assert.equal(receipt.state, "RELEASED");
+  assert.deepEqual(await store.reconcile(input), receipt);
+  assert.equal(client.row?.state, "RELEASED");
+  assert.ok(client.statements.some((statement) => statement.includes("spec_model_generation_reconciliations")));
+  await assert.rejects(store.reconcile({ ...input, evidenceDigest: "f".repeat(64) }), /conflicts with durable state/);
+  assert.equal((await store.claim({ ...claimInput(), claimToken: "55555555-5555-4555-8555-555555555555" })).kind, "CLAIMED");
+  assert.equal(client.row?.dispatch_generation, 2);
+});
+
 class FixtureClient implements PostgresWorkflowClient {
   statements: string[] = [];
   row: Record<string, unknown> | null = null;
+  reconciliation: Record<string, unknown> | null = null;
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
@@ -74,13 +98,28 @@ class FixtureClient implements PostgresWorkflowClient {
           credential_version_id: values[7], agent: values[8], protocol: values[9], base_url: values[10],
           approved_ports: values[11], authentication: values[12], model: values[13], policy_digest: values[14],
           state: "CLAIMED", claim_token: values[15], expired: false,
-          result: null, result_digest: null, usage: null,
+          result: null, result_digest: null, usage: null, dispatch_generation: 1,
+          created_at: "2026-07-21T10:00:00.000Z",
         };
       }
       return result(1, []);
     }
     if (text.includes("FROM deviludo.spec_model_generation_operations") && text.includes("FOR UPDATE")) {
       return result(this.row ? 1 : 0, this.row ? [this.row as Row] : []);
+    }
+    if (text.includes("FROM deviludo.spec_model_generation_reconciliations")) {
+      const matches = this.reconciliation?.reconciliation_operation_key === values[1];
+      return result(matches ? 1 : 0, matches ? [this.reconciliation as Row] : []);
+    }
+    if (text.includes("INSERT INTO deviludo.spec_model_generation_reconciliations")) {
+      if (this.reconciliation) return result(0, []);
+      this.reconciliation = {
+        tenant_id: values[0], reconciliation_operation_key: values[1], generation_operation_key: values[2],
+        dispatch_generation: values[3], payload_digest: values[4], action: values[5], evidence_digest: values[6],
+        reconciled_by: values[7], usage: JSON.parse(values[8] as string) as unknown,
+        reconciled_at: "2026-07-21T10:01:00.000Z",
+      };
+      return result(1, []);
     }
     if (text.includes("SET state = 'COMPLETED'")) {
       if (!this.row || this.row.claim_token !== values[2]) return result(0, []);
@@ -99,6 +138,11 @@ class FixtureClient implements PostgresWorkflowClient {
       this.row.expired = false;
       return result(1, []);
     }
+    if (text.includes("SET state = 'RELEASED'")) {
+      if (!this.row || this.row.dispatch_generation !== values[2] || this.row.state !== "INDETERMINATE") return result(0, []);
+      this.row.state = "RELEASED";
+      return result(1, []);
+    }
     if (text.includes("SET state = $4")) {
       if (!this.row || this.row.claim_token !== values[2]) return result(0, []);
       this.row.state = values[3];
@@ -110,6 +154,7 @@ class FixtureClient implements PostgresWorkflowClient {
       this.row.state = "CLAIMED";
       this.row.claim_token = values[2];
       this.row.expired = false;
+      this.row.dispatch_generation = Number(this.row.dispatch_generation) + 1;
       return result(1, []);
     }
     if (text === "SELECT 1 AS ready") return result(1, [{ ready: 1 }] as unknown as Row[]);

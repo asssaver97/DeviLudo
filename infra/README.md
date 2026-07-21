@@ -75,7 +75,10 @@ Provider recovery checks and durable bounded retry scheduling. Migration `054`
 adds the tenant-RLS, append-only Steam depot finalization ledger, with one fenced
 content-addressed operation per release/platform and no signing credentials.
 Migration `055` adds the prompt-free, tenant-RLS specification model generation
-ledger with replay, released and indeterminate charging states. All fifty-five
+ledger with replay, released and indeterminate charging states. Migration `056`
+adds monotonic dispatch generations and append-only SecurityAdmin no-usage or
+exact-usage reconciliation receipts; a trigger rejects release without the
+matching generation receipt. All fifty-six
 migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

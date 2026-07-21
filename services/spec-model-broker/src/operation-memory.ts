@@ -5,9 +5,12 @@ import type {
   SpecModelOperationLookup,
   SpecModelOperationStore,
   SpecModelProviderBinding,
+  SpecModelReconciliationReceipt,
+  SpecModelReconciliationStore,
   SpecModelUsage,
 } from "./contracts";
-import { SpecModelRequestError } from "./contracts";
+import { SpecModelReconciliationConflictError, SpecModelRequestError } from "./contracts";
+import { parseSpecModelReconciliationRequest } from "./reconciliation";
 
 type State = "CLAIMED" | "COMPLETED" | "RELEASED" | "INDETERMINATE";
 type Record = {
@@ -17,6 +20,8 @@ type Record = {
   readonly operationKey: string;
   readonly requestDigest: string;
   readonly provider: SpecModelProviderBinding;
+  readonly createdAt: number;
+  dispatchGeneration: number;
   state: State;
   claimToken: string | null;
   claimExpiresAt: number | null;
@@ -24,24 +29,14 @@ type Record = {
   usage: SpecModelUsage | null;
 };
 
-export class MemorySpecModelOperationStore implements SpecModelOperationStore {
+export class MemorySpecModelOperationStore implements SpecModelOperationStore, SpecModelReconciliationStore {
   readonly records = new Map<string, Record>();
+  readonly reconciliations = new Map<string, SpecModelReconciliationReceipt>();
+  readonly reconciliationRequests = new Map<string, string>();
   constructor(private readonly now: () => number = Date.now) {}
 
-  async lookup(input: Parameters<SpecModelOperationStore["lookup"]>[0]): Promise<SpecModelOperationLookup> {
-    const record = this.records.get(key(input.tenantId, input.operationKey));
-    if (!record) return null;
-    assertRequest(record, input);
-    if (record.state === "COMPLETED") return Object.freeze({ kind: "COMPLETED", result: record.result! });
-    if (record.state === "INDETERMINATE") return Object.freeze({ kind: "INDETERMINATE" });
-    if (record.state === "RELEASED") return Object.freeze({ kind: "RETRY" });
-    if (record.claimExpiresAt !== null && record.claimExpiresAt <= this.now()) {
-      record.state = "INDETERMINATE";
-      record.claimToken = null;
-      record.claimExpiresAt = null;
-      return Object.freeze({ kind: "INDETERMINATE" });
-    }
-    return Object.freeze({ kind: "BUSY" });
+  lookup(input: Parameters<SpecModelOperationStore["lookup"]>[0]): Promise<SpecModelOperationLookup> {
+    return this.lookupOperation(input);
   }
 
   async claim(input: Parameters<SpecModelOperationStore["claim"]>[0]): Promise<SpecModelOperationClaim> {
@@ -59,6 +54,7 @@ export class MemorySpecModelOperationStore implements SpecModelOperationStore {
       }
       if (existing.state === "CLAIMED") return Object.freeze({ kind: "BUSY" });
       existing.state = "CLAIMED";
+      existing.dispatchGeneration += 1;
       existing.claimToken = input.claimToken;
       existing.claimExpiresAt = this.now() + input.leaseSeconds * 1_000;
       return Object.freeze({ kind: "CLAIMED", claimToken: input.claimToken });
@@ -70,6 +66,8 @@ export class MemorySpecModelOperationStore implements SpecModelOperationStore {
       operationKey: input.operationKey,
       requestDigest: input.requestDigest,
       provider: input.provider,
+      createdAt: this.now(),
+      dispatchGeneration: 1,
       state: "CLAIMED",
       claimToken: input.claimToken,
       claimExpiresAt: this.now() + input.leaseSeconds * 1_000,
@@ -104,6 +102,53 @@ export class MemorySpecModelOperationStore implements SpecModelOperationStore {
   }
   async probe(): Promise<void> {}
 
+  async lookupReconciliation(tenantId: string, generationOperationKey: string) {
+    const record = this.records.get(key(tenantId, generationOperationKey));
+    if (!record) return null;
+    if (record.state === "CLAIMED" && record.claimExpiresAt !== null && record.claimExpiresAt <= this.now()) {
+      record.state = "INDETERMINATE"; record.claimToken = null; record.claimExpiresAt = null;
+    }
+    if (record.state !== "INDETERMINATE") return null;
+    return Object.freeze({
+      tenantId: record.tenantId, projectId: record.projectId, conversationId: record.conversationId,
+      generationOperationKey: record.operationKey, dispatchGeneration: record.dispatchGeneration,
+      profileRevisionId: record.provider.profileRevisionId, providerRevisionId: record.provider.providerRevisionId,
+      model: record.provider.model, state: "INDETERMINATE" as const,
+      createdAt: new Date(record.createdAt).toISOString(),
+    });
+  }
+
+  async reconcile(value: Parameters<SpecModelReconciliationStore["reconcile"]>[0]): Promise<SpecModelReconciliationReceipt> {
+    const input = parseSpecModelReconciliationRequest(value);
+    const reconciliationKey = key(input.tenantId, input.operationKey);
+    const replay = this.reconciliations.get(reconciliationKey);
+    if (replay) {
+      if (this.reconciliationRequests.get(reconciliationKey) !== canonical(input)) conflict();
+      return replay;
+    }
+    const record = this.records.get(key(input.tenantId, input.generationOperationKey));
+    if (!record) conflict();
+    if (record.state === "CLAIMED" && record.claimExpiresAt !== null && record.claimExpiresAt <= this.now()) {
+      record.state = "INDETERMINATE"; record.claimToken = null; record.claimExpiresAt = null;
+    }
+    if (record.state !== "INDETERMINATE") conflict();
+    if ([...this.reconciliations.values()].some((item) => item.tenantId === input.tenantId
+      && item.generationOperationKey === input.generationOperationKey
+      && item.dispatchGeneration === record.dispatchGeneration)) conflict();
+    const receipt = Object.freeze({
+      operationKey: input.operationKey, tenantId: input.tenantId,
+      generationOperationKey: input.generationOperationKey,
+      dispatchGeneration: record.dispatchGeneration, action: input.action,
+      evidenceDigest: input.evidenceDigest, state: "RELEASED" as const,
+      usage: Object.freeze({ inputTokens: input.inputTokens ?? 0, outputTokens: input.outputTokens ?? 0 }),
+      reconciledAt: new Date(this.now()).toISOString(),
+    });
+    this.reconciliations.set(reconciliationKey, receipt);
+    this.reconciliationRequests.set(reconciliationKey, canonical(input));
+    record.state = "RELEASED";
+    return receipt;
+  }
+
   private transition(input: { tenantId: string; operationKey: string; claimToken: string }, state: State): void {
     const record = this.require(input.tenantId, input.operationKey);
     if (record.state === state) return;
@@ -117,6 +162,22 @@ export class MemorySpecModelOperationStore implements SpecModelOperationStore {
     if (!record) invalid();
     return record;
   }
+
+  private async lookupOperation(input: Parameters<SpecModelOperationStore["lookup"]>[0]): Promise<SpecModelOperationLookup> {
+    const record = this.records.get(key(input.tenantId, input.operationKey));
+    if (!record) return null;
+    assertRequest(record, input);
+    if (record.state === "COMPLETED") return Object.freeze({ kind: "COMPLETED", result: record.result! });
+    if (record.state === "INDETERMINATE") return Object.freeze({ kind: "INDETERMINATE" });
+    if (record.state === "RELEASED") return Object.freeze({ kind: "RETRY" });
+    if (record.claimExpiresAt !== null && record.claimExpiresAt <= this.now()) {
+      record.state = "INDETERMINATE";
+      record.claimToken = null;
+      record.claimExpiresAt = null;
+      return Object.freeze({ kind: "INDETERMINATE" });
+    }
+    return Object.freeze({ kind: "BUSY" });
+  }
 }
 
 function assertRequest(record: Record, input: {
@@ -128,3 +189,4 @@ function assertRequest(record: Record, input: {
 }
 function key(tenantId: string, operationKey: string): string { return `${tenantId}\0${operationKey}`; }
 function invalid(): never { throw new SpecModelRequestError("Specification model operation binding is invalid"); }
+function conflict(): never { throw new SpecModelReconciliationConflictError("Specification model reconciliation conflicts with durable state"); }

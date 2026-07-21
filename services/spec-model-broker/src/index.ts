@@ -6,4 +6,5 @@ export * from "./operation-memory";
 export * from "./postgres-operations";
 export * from "./production-generator";
 export * from "./provider-authority";
+export * from "./reconciliation";
 export * from "./service";
