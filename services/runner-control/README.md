@@ -218,7 +218,12 @@ machine lock and authenticates the exact Connector
 `/healthz` service over mTLS before advertising READY. Source-only Runners must
 omit the entire Connector environment group.
 
-Run the machine daemon with `npm run start:physical-runner`. Startup verifies
+`npm run start:physical-runner` is a source-tree development entry. Production
+builds both machine components with `npm run build:runner-native`, completes
+the platform-native signing boundary, and admits them with `npm run
+verify:runner-native`; the exact host-local procedure and release schemas are
+documented in `docs/runner-native-release.md`. The installed
+`deviludo-physical-runner[.exe]` daemon verifies
 that the configured platform/architecture match the actual Node host, loads
 all TLS/HMAC/public-key material from files, verifies the current signed fleet
 assignment, probes both executable digests,

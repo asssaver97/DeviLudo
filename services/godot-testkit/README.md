@@ -57,13 +57,18 @@ uses `tsx`. It is not a production Runner artifact.
 
 ## Production packaging boundary
 
-Each target OS must install a platform-native, read-only
-`/opt/deviludo-testkit/bin/deviludo-testkit` equivalent built from this service
-as one self-contained artifact. The build pipeline must pin Node and all
-dependencies, generate SBOM and vulnerability/malware results, sign the
-artifact, and publish its SHA-256 in the `RunnerExecutionLock` and machine
-configuration. The physical Runner hashes the complete executable before every
-attempt. A launcher that imports mutable repository files is not acceptable.
+Each target OS installs a platform-native, read-only
+`/opt/deviludo-testkit/bin/deviludo-testkit` equivalent built together with the
+Physical Runner by `npm run build:runner-native`. The command pins Node,
+esbuild, postject and the package lock, executes both SEA identities, and emits
+an immutable candidate receipt. The isolated native-signing pipeline must add
+Developer ID plus notarization, Authenticode or Sigstore evidence as appropriate;
+`npm run verify:runner-native` then verifies the dedicated Ed25519 release
+envelope, final files and embedded identities on the target host. Full commands
+and schemas are in `docs/runner-native-release.md`. The verified SHA-256 is
+published in the `RunnerExecutionLock` and machine configuration, and the
+physical Runner hashes the complete executable before every attempt. A launcher
+that imports mutable repository files is not acceptable.
 
 The production executable accepts exactly:
 
@@ -73,9 +78,9 @@ deviludo-testkit run --request-file <private-run-dir>/request.json \
 ```
 
 The request and result basenames and canonical parent directory are fixed.
-Production deployment remains blocked until the release pipeline has produced
-and signed the native artifacts for all selected Runner systems; the local
-`tsx` command is deliberately not presented as that release artifact.
+Production deployment remains blocked until every selected Runner system has a
+verified final native release; the local `tsx` command and a raw build candidate
+are deliberately not presented as release artifacts.
 
 The Steam Client Connector is another required native, signed platform
 component. This repository defines and tests its strict mTLS request/receipt

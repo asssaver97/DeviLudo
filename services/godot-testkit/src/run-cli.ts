@@ -78,6 +78,8 @@ function absolute(value: string): string {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try { await runGodotTestKitCli(); }
-  catch { process.stderr.write('{"service":"deviludo-godot-testkit","code":"FAILED"}\n'); process.exitCode = 1; }
+  void runGodotTestKitCli().catch(() => {
+    process.stderr.write('{"service":"deviludo-godot-testkit","code":"FAILED"}\n');
+    process.exitCode = 1;
+  });
 }

@@ -127,6 +127,10 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
   for (const utility of [
     "scripts/production/authorize-control-plane-release.mjs",
     "scripts/production/build-control-plane-image.mjs",
+    "scripts/production/build-runner-native.mjs",
+    "scripts/production/inspect-runner-native-trust-policy.mjs",
+    "scripts/production/runner-native-release.mjs",
+    "scripts/production/verify-runner-native-release.mjs",
     "scripts/production/control-release-authorization.mjs",
     "scripts/production/deploy-control-plane.mjs",
     "scripts/production/inspect-control-release-trust-policy.mjs",

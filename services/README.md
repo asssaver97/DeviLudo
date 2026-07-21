@@ -77,8 +77,11 @@ behind the web console:
 - `godot-testkit`: the Agent-free, platform-owned physical-game controller. It
   consumes only a signed Runner job, exact source/test-plan grants and pinned
   Godot executable, runs a fixed scenario DSL without a shell, and uploads six
-  immutable evidence categories. The repository `tsx` entry is local-only;
-  production requires a signed self-contained binary per target OS.
+  immutable evidence categories. The repository `tsx` entry is local-only.
+  `build:runner-native` emits host-native Physical Runner and TestKit SEA
+  candidates plus an immutable receipt; only artifacts accepted by the
+  Ed25519/native-signature `verify:runner-native` gate may be installed. See
+  `docs/runner-native-release.md`.
 - `scm-proxy`: finalizes a local authoritative candidate and provides the
   production GitHub App core. Signed candidate/acceptance payloads, exact
   repository binding, repository-scoped installation tokens, Git Data/Draft PR

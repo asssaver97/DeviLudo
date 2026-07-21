@@ -771,6 +771,8 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   const controller = readFileSync(new URL("../services/godot-testkit/src/controller.ts", import.meta.url), "utf8");
   const driver = readFileSync(new URL("../services/godot-testkit/src/godot-driver.ts", import.meta.url), "utf8");
   const steamDriver = readFileSync(new URL("../services/godot-testkit/src/steam-installed-game-driver.ts", import.meta.url), "utf8");
+  const nativeEntry = readFileSync(new URL("../services/godot-testkit/src/native-main.ts", import.meta.url), "utf8");
+  const nativeBuilder = readFileSync(new URL("../scripts/production/build-runner-native.mjs", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/godot-testkit/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:godot-testkit/);
   assert.equal(packageJson.scripts["start:godot-testkit"], observedServiceCommand("godot-testkit"));
@@ -787,8 +789,13 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.match(steamDriver, /escaped staging root/);
   assert.doesNotMatch(steamDriver, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.doesNotMatch(driver, /dangerously|--yolo/);
+  assert.equal(packageJson.scripts["build:runner-native"], "node scripts/production/build-runner-native.mjs");
+  assert.equal(packageJson.scripts["verify:runner-native"], "node scripts/production/verify-runner-native-release.mjs");
+  assert.match(nativeEntry, /isSea\(\)/);
+  assert.match(nativeBuilder, /--experimental-sea-config/);
+  assert.match(nativeBuilder, /status", "--porcelain=v1"/);
   assert.match(readme, /not a production Runner artifact/);
-  assert.match(readme, /signed the native artifacts for all selected Runner systems/);
+  assert.match(readme, /every selected Runner system has a\s+verified final native release/);
 });
 
 test("Steam Client Connector independently verifies signed clean-install jobs behind mTLS", () => {
