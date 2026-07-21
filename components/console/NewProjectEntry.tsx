@@ -100,7 +100,7 @@ function RepositoryOnboarding() {
     <AppShell>
       <section className="project-page-header">
         <div>
-          <div className="breadcrumb"><Link href="/">游戏项目</Link><span>/</span><b>创建项目</b></div>
+          <div className="breadcrumb"><Link href="/projects">游戏项目</Link><span>/</span><b>创建项目</b></div>
           <h1>绑定代码仓库</h1>
           <p>项目只可绑定当前账号已验证、且仍对 GitHub App 可见的仓库。</p>
         </div>

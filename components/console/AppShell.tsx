@@ -16,7 +16,7 @@ import {
 
 const navigation = [
   { href: "/", label: "工作台", icon: GridIcon },
-  { href: "/projects/ember-archipelago", label: "游戏项目", icon: GamepadIcon },
+  { href: "/projects", label: "游戏项目", icon: GamepadIcon },
   { href: "/runners", label: "运行节点", icon: ServerIcon },
   { href: "/evidence", label: "证据中心", icon: FileIcon },
 ];

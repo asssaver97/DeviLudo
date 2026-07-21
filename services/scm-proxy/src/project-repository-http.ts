@@ -30,6 +30,18 @@ export function registerProjectRepositoryRoutes(server: FastifyInstance, options
     }
   });
 
+  server.post("/v1/projects/list", { bodyLimit: 32 * 1024 }, async (request, reply) => {
+    secure(reply);
+    try { await options.authorize(request); }
+    catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
+    try {
+      const body = exactObject(request.body, ["principal"]);
+      return reply.send(await options.service.projects(body.principal));
+    } catch {
+      return reply.status(400).send({ error: { code: "PROJECT_CATALOG_REJECTED", message: "Project catalog request was rejected" } });
+    }
+  });
+
   server.post("/v1/projects", { bodyLimit: 32 * 1024 }, async (request, reply) => {
     secure(reply);
     try { await options.authorize(request); }

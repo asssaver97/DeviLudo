@@ -170,13 +170,15 @@ const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, login, admin, invitations, tenantAgents, projectAgents, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
+  const [home, login, projects, admin, invitations, tenantAgents, projectAgents, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
+    checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     checkHtmlRoute(baseUrl, "/admin/invitations", "受邀账号管理"),
     checkHtmlRoute(baseUrl, "/settings/agents", "开发 Agent"),
     checkHtmlRoute(baseUrl, "/projects/ember-archipelago/agent-settings", "项目 Agent 选择"),
+    request(baseUrl, "/api/projects"),
     request(baseUrl, "/api/admin/agents"),
     request(baseUrl, "/api/settings/agents"),
     request(baseUrl, "/api/admin/invitations", { method: "POST" }),
@@ -246,6 +248,13 @@ try {
       body: JSON.stringify({ mainCommitSha: "a".repeat(40), evidenceStatus: "PASSED" }),
     }),
   ]);
+  const projectCatalogPayload = await projectCatalog.response.json();
+  if (!projectCatalog.response.ok || projectCatalogPayload.meta?.mode !== "LOCAL_FIXTURE"
+    || !Array.isArray(projectCatalogPayload.data) || projectCatalogPayload.data.length !== 1
+    || projectCatalogPayload.data[0]?.projectId !== "ember-archipelago"
+    || projectCatalogPayload.data[0]?.owner !== "north-dock") {
+    throw new Error("local project catalog contract failed");
+  }
   const adminPayload = await adminState.response.json();
   if (!adminState.response.ok || !Array.isArray(adminPayload.data) || !["claude-code", "codex-cli"].includes(adminPayload.meta?.defaultAgent) || !Array.isArray(adminPayload.meta?.versions)) {
     throw new Error("local Agent admin state contract failed");
@@ -338,6 +347,8 @@ try {
 
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /login         ${login.response.status} (${login.elapsedMs}ms) · invite-only login`);
+  console.log(`✓ GET /projects      ${projects.response.status} (${projects.elapsedMs}ms) · project catalog`);
+  console.log(`✓ Project catalog    ${projectCatalog.response.status} (${projectCatalog.elapsedMs}ms) · ${projectCatalogPayload.data.length} accessible`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
   console.log(`✓ GET /admin/invitations ${invitations.response.status} (${invitations.elapsedMs}ms) · invite console`);
   console.log(`✓ GET /settings/agents ${tenantAgents.response.status} (${tenantAgents.elapsedMs}ms) · tenant Agent settings`);

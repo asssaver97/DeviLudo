@@ -42,6 +42,19 @@ export class ProjectRepositoryOnboardingService {
     return Object.freeze({ installations: Object.freeze(result) });
   }
 
+  async projects(value: unknown): Promise<Readonly<{ projects: readonly BoundProjectReceipt[] }>> {
+    const principal = parsePrincipal(value);
+    const projects = await this.store.projects(principal);
+    if (projects.length > 500) throw new Error("Project catalog exceeds the supported limit");
+    const ids = new Set<string>();
+    for (const project of projects) {
+      if (project.tenantId !== principal.tenantId || !UUID.test(project.projectId)
+        || ids.has(project.projectId)) invalid();
+      ids.add(project.projectId);
+    }
+    return Object.freeze({ projects: Object.freeze([...projects]) });
+  }
+
   project(value: unknown): Promise<BoundProjectReceipt | null> {
     const body = exactObject(value, ["principal", "projectId"]);
     const principal = parsePrincipal(body.principal);

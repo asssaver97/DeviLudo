@@ -70,6 +70,37 @@ export class PostgresProjectRepositoryOnboardingStore implements ProjectReposito
     });
   }
 
+  async projects(principal: ProjectRepositoryPrincipal): Promise<readonly BoundProjectReceipt[]> {
+    return this.#transaction(principal.tenantId, async (client) => {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT project.id::text AS project_id, project.tenant_id::text AS tenant_id,
+                project.slug, project.name, project.created_at,
+                binding.id::text AS repository_binding_id,
+                installation.installation_id, binding.repository_id,
+                binding.repository_node_id, binding.owner_name,
+                binding.repository_name, binding.default_branch
+           FROM deviludo.projects project
+           JOIN deviludo.github_repository_bindings binding
+             ON binding.tenant_id = project.tenant_id AND binding.project_id = project.id
+           JOIN deviludo.github_installations installation
+             ON installation.tenant_id = project.tenant_id
+            AND installation.id = binding.github_installation_id
+          WHERE project.tenant_id = $1::uuid
+            AND binding.status = 'ACTIVE' AND installation.status = 'ACTIVE'
+            AND (project.created_by = $2
+              OR installation.verified_by_github_user_id = $3::bigint)
+          ORDER BY project.created_at DESC, project.id
+          LIMIT 501`,
+        [principal.tenantId, principal.userId, principal.githubUserId],
+      );
+      if (result.rows.length > 500) throw new Error("Project catalog exceeds the supported limit");
+      return Object.freeze(result.rows.map((row) => {
+        const projectId = uuid(row.project_id);
+        return receiptFromProjectRow(row, principal.tenantId, projectId);
+      }));
+    });
+  }
+
   async claim(command: CreateBoundProjectCommand, requestDigest: string, claimToken: string): Promise<
     | { readonly kind: "ACQUIRED" }
     | { readonly kind: "BUSY" }

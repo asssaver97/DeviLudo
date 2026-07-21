@@ -226,6 +226,23 @@ paths:
                 properties: { data: { $ref: "#/components/schemas/ProjectRepositoryCatalog" } }
         "401": { description: A fresh trusted platform session is required. }
   /projects:
+    get:
+      operationId: listRepositoryBoundProjects
+      description: Lists at most 500 active projects visible to the signed-in tenant user through project creator authority or a still-active verified GitHub App installation.
+      responses:
+        "200":
+          description: Tenant-isolated project catalog derived by the Project Repository Broker.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    maxItems: 500
+                    items: { $ref: "#/components/schemas/RepositoryBoundProject" }
+        "401": { description: A fresh trusted platform session is required. }
     post:
       operationId: createRepositoryBoundProject
       description: The server derives owner, repository name, node ID, and default branch from a fresh GitHub response and atomically persists the project and repository binding.
@@ -358,6 +375,23 @@ components:
         name: { type: string, minLength: 1, maxLength: 120 }
         installationId: { type: string, pattern: "^[0-9]{1,20}$" }
         repositoryId: { type: integer, minimum: 1 }
+    RepositoryBoundProject:
+      type: object
+      additionalProperties: false
+      required: [projectId, tenantId, slug, name, repositoryBindingId, installationId, repositoryId, repositoryNodeId, owner, repositoryName, defaultBranch, createdAt]
+      properties:
+        projectId: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        repositoryBindingId: { type: string, format: uuid }
+        installationId: { type: string, pattern: "^[0-9]{1,20}$" }
+        repositoryId: { type: integer, minimum: 1 }
+        repositoryNodeId: { type: string }
+        owner: { type: string }
+        repositoryName: { type: string }
+        defaultBranch: { type: string }
+        createdAt: { type: string, format: date-time }
     ProjectRepositoryCatalog:
       type: object
       additionalProperties: false

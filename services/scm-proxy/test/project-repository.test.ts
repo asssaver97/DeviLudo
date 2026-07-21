@@ -43,6 +43,11 @@ class MemoryStore implements ProjectRepositoryOnboardingStore {
     return [...this.receipts.values()].find((receipt) => receipt.projectId === projectId) ?? null;
   }
 
+  async projects(value: ProjectRepositoryPrincipal) {
+    assert.deepEqual(value, principal);
+    return [...this.receipts.values()];
+  }
+
   async claim(command: CreateBoundProjectCommand) {
     const replay = this.receipts.get(command.idempotencyKey);
     return replay ? { kind: "REPLAY" as const, receipt: replay } : { kind: "ACQUIRED" as const };
@@ -87,6 +92,7 @@ test("project onboarding derives the repository binding from live GitHub data an
   const replay = await service.create(command);
   assert.deepEqual(replay, first);
   assert.deepEqual(await service.project({ principal, projectId: first.projectId }), first);
+  assert.deepEqual(await service.projects(principal), { projects: [first] });
   assert.equal(first.owner, "north-dock");
   assert.equal(first.repositoryName, "ember-archipelago");
   assert.equal(first.defaultBranch, "main");
@@ -154,6 +160,9 @@ test("project repository HTTP surface requires workload identity and exact reque
   const lookup = await server.inject({ method: "POST", url: "/v1/projects/lookup", payload: { principal, projectId: created.json().projectId } });
   assert.equal(lookup.statusCode, 200);
   assert.equal(lookup.json().name, "余烬群岛");
+  const projects = await server.inject({ method: "POST", url: "/v1/projects/list", payload: { principal } });
+  assert.equal(projects.statusCode, 200);
+  assert.deepEqual(projects.json().projects, [created.json()]);
   assert.equal((await server.inject({ method: "POST", url: "/v1/projects/lookup", payload: { principal, projectId: "44444444-4444-4444-8444-444444444444" } })).statusCode, 404);
   assert.equal((await server.inject({
     method: "POST", url: "/v1/projects", headers: { "idempotency-key": "http-create-002" },

@@ -27,6 +27,10 @@ export class ProjectRepositoryBrokerClient {
     return parseCatalog(await this.#call("/v1/project-repositories/catalog", { principal }));
   }
 
+  async projects(principal: ProjectRepositoryPrincipal): Promise<readonly BoundProjectReceipt[]> {
+    return parseProjectCatalog(await this.#call("/v1/projects/list", { principal }), principal.tenantId);
+  }
+
   async project(principal: ProjectRepositoryPrincipal, projectId: string): Promise<BoundProjectReceipt | null> {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(projectId)) invalid();
     try {
@@ -98,6 +102,14 @@ function parseCatalog(value: unknown): ProjectRepositoryCatalogView {
   });
   if (new Set(installations.map((installation) => installation.installationId)).size !== installations.length) invalid();
   return Object.freeze({ installations: Object.freeze(installations) });
+}
+function parseProjectCatalog(value: unknown, tenantId: string): readonly BoundProjectReceipt[] {
+  const body = exact(value, ["projects"]);
+  if (!Array.isArray(body.projects) || body.projects.length > 500) invalid();
+  const projects = body.projects.map(parseReceipt);
+  if (projects.some((project) => project.tenantId !== tenantId)
+    || new Set(projects.map((project) => project.projectId)).size !== projects.length) invalid();
+  return Object.freeze(projects);
 }
 function parseRepository(value: unknown) {
   const body = exact(value, ["archived", "defaultBranch", "disabled", "installationId", "name", "owner", "private", "repositoryId", "repositoryNodeId"]);

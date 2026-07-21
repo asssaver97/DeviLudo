@@ -269,7 +269,7 @@ export function ProjectStudio({
 
       <section className="project-page-header">
         <div>
-          <div className="breadcrumb"><Link href="/">游戏项目</Link><span>/</span><b>{mode === "new" ? "新构想" : projectName}</b></div>
+          <div className="breadcrumb"><Link href="/projects">游戏项目</Link><span>/</span><b>{mode === "new" ? "新构想" : projectName}</b></div>
           <h1>{mode === "new" ? "把想法聊成可开发的游戏" : projectName}</h1>
           <p>{mode === "new" ? "构想助手会追问关键细节，并把每个决定实时写入规格。" : localFixture ? "本地隔离项目 · Fixture 交付链" : repositoryLabel ? `${repositoryLabel} · GitHub App 已绑定` : "正在读取权威项目资料…"}</p>
         </div>

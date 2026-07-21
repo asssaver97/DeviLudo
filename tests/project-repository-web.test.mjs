@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { GET as GET_CATALOG } from "../app/api/projects/repositories/route.ts";
 import { GET as GET_PROJECT } from "../app/api/projects/[projectId]/route.ts";
-import { POST } from "../app/api/projects/route.ts";
+import { GET as GET_PROJECTS, POST } from "../app/api/projects/route.ts";
 import { signTrustedGitHubSession } from "../lib/connections/github-broker.ts";
 import { ProjectRepositoryBrokerClient } from "../lib/projects/repository-broker.ts";
 
@@ -62,6 +62,14 @@ test("production Web lists only broker-derived repositories and creates an atomi
         defaultBranch: "main", createdAt: "2030-01-01T00:00:00.000Z",
       }), { status: 200 });
     }
+    if (url.pathname === "/v1/projects/list") {
+      return new Response(JSON.stringify({ projects: [{
+        projectId, tenantId, slug: "ember-archipelago", name: "余烬群岛",
+        repositoryBindingId: bindingId, installationId: "9001", repositoryId: 7001,
+        repositoryNodeId: "R_repo_node", owner: "north-dock", repositoryName: "ember-archipelago",
+        defaultBranch: "main", createdAt: "2030-01-01T00:00:00.000Z",
+      }] }), { status: 200 });
+    }
     assert.equal(url.pathname, "/v1/projects");
     assert.deepEqual(body, {
       principal: { tenantId, userId: "user-ada", githubUserId: 42 },
@@ -82,30 +90,38 @@ test("production Web lists only broker-derived repositories and creates an atomi
     assert.equal(catalog.status, 200);
     assert.equal((await catalog.json()).data.installations[0].repositories[0].repositoryId, 7001);
 
+    const projectCatalog = await GET_PROJECTS(await trustedRequest("GET", "/api/projects"));
+    assert.equal(projectCatalog.status, 200);
+    assert.equal((await projectCatalog.json()).data[0].projectId, projectId);
+
     const created = await POST(await trustedRequest("POST", "/api/projects", {
       slug: "ember-archipelago", name: "余烬群岛", installationId: "9001", repositoryId: 7001,
     }));
     assert.equal(created.status, 201);
     assert.equal((await created.json()).data.projectId, projectId);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 3);
 
     const project = await GET_PROJECT(await trustedRequest("GET", `/api/projects/${projectId}`), {
       params: Promise.resolve({ projectId }),
     });
     assert.equal(project.status, 200);
     assert.equal((await project.json()).data.name, "余烬群岛");
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
 
     const unauthorized = await GET_CATALOG(new Request("https://app.deviludo.example/api/projects/repositories"));
     assert.equal(unauthorized.status, 401);
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
+
+    const unauthorizedProjects = await GET_PROJECTS(new Request("https://app.deviludo.example/api/projects"));
+    assert.equal(unauthorizedProjects.status, 401);
+    assert.equal(calls.length, 4);
 
     const extraAuthority = await POST(await trustedRequest("POST", "/api/projects", {
       slug: "ember-archipelago", name: "余烬群岛", installationId: "9001", repositoryId: 7001,
       owner: "attacker-controlled",
     }));
     assert.equal(extraAuthority.status, 400);
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalEndpoint === undefined) delete process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;

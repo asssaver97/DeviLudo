@@ -60,6 +60,7 @@ export interface GitHubInstallationRepositoryCatalog {
 
 export interface ProjectRepositoryOnboardingStore {
   authorizedInstallations(principal: ProjectRepositoryPrincipal): Promise<readonly AuthorizedGitHubInstallation[]>;
+  projects(principal: ProjectRepositoryPrincipal): Promise<readonly BoundProjectReceipt[]>;
   project(principal: ProjectRepositoryPrincipal, projectId: string): Promise<BoundProjectReceipt | null>;
   claim(command: CreateBoundProjectCommand, requestDigest: string, claimToken: string): Promise<
     | { readonly kind: "ACQUIRED" }

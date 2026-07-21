@@ -121,7 +121,7 @@ export function TenantAgentSettings() {
     <section className="agent-settings-summary">
       <article><span><SparkIcon /></span><div><small>有效默认</small><strong>{activeProfiles.find((profile) => profile.id === selectedProfile)?.agent === "codex-cli" ? "Codex CLI" : "Claude Code"}</strong><p>项目覆盖 → 租户覆盖 → 平台 Claude Code</p></div></article>
       <article><span><ShieldIcon /></span><div><small>凭据边界</small><strong>{credentials.length} 个 ACTIVE 版本</strong><p>明文只进入 Vault，CLI 仅取得短期 Gateway token</p></div></article>
-      <article><span><GamepadIcon /></span><div><small>项目覆盖</small><strong>按项目选择</strong><p><Link href="/projects/ember-archipelago/agent-settings">打开示例项目设置 →</Link></p></div></article>
+      <article><span><GamepadIcon /></span><div><small>项目覆盖</small><strong>按项目选择</strong><p><Link href="/projects">从项目目录选择 →</Link></p></div></article>
     </section>
 
     <div className="agent-settings-grid">
