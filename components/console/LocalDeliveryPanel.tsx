@@ -358,12 +358,17 @@ export function LocalDeliveryPanel({
             {snapshot.localValidation?.valid ? (
               <div className="local-real-validation-result">
                 <span className={snapshot.localValidation.status === "FAILED" ? "failed" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "passed" : "waiting"}>
-                  {snapshot.localValidation.status === "FAILED" ? "本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "本机门禁通过" : "测试通过 · 等待导出模板"}
+                  {snapshot.localValidation.status === "FAILED" ? "本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "本机门禁通过" : "等待依赖 · 导出模板"}
                 </span>
                 <div>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/junit.xml`} rel="noreferrer" target="_blank">JUnit</a>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/godot.log`} rel="noreferrer" target="_blank">日志</a>
+                  {snapshot.localValidation.releaseGate === "WAITING_EXPORT_TEMPLATES" ? (
+                    <button className="button button-secondary" disabled={busy} onClick={runLocalValidation} type="button">
+                      {busy ? "正在重试…" : "安装模板后重试"}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : snapshot.runId && snapshot.stage !== "RELEASED" ? (

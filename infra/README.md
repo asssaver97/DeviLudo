@@ -83,7 +83,9 @@ binding to reference a canonical Runner toolchain whose Godot version and exact
 export-template matrix match the approval. Migration `058` adds the isolated,
 tenant-RLS Runner Toolchain Publisher ledger. The service revalidates signed
 tenant assignment, while insert guards bind every new revision to current
-ONLINE Runner capabilities and the exact supply-chain evidence. All fifty-eight
+ONLINE Runner capabilities and the exact supply-chain evidence. Migration `059`
+adds one-time, actor-bound Steam project configuration intents and immutable
+Depot/Release revisions without storing Beta branch passwords. All fifty-nine
 migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

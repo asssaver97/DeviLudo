@@ -29,7 +29,7 @@ export type LocalDeliveryEvent = {
 
 export type LocalValidationSnapshot = {
   evidenceId: string;
-  status: "TESTS_PASSED" | "FAILED";
+  status: "TESTS_PASSED" | "WAITING_DEPENDENCY" | "FAILED";
   releaseGate: "WAITING_EXPORT_TEMPLATES" | "LOCAL_VALIDATION_PASSED" | "TESTS_FAILED";
   candidateSha: string;
   sourceDigest: string;
@@ -118,6 +118,12 @@ export type LocalDeliveryAction =
   | "cancel"
   | "reset";
 
+export class LocalDeliveryGateError extends Error {
+  constructor(readonly code: "LOCAL_EXPORT_TEMPLATES_REQUIRED" | "LOCAL_VALIDATION_FAILED" | "LOCAL_VALIDATION_INVALIDATED", message: string) {
+    super(message);
+  }
+}
+
 const profile = {
   agent: "claude-code" as const,
   profileRevisionId: "profile-claude-platform-r5" as const,
@@ -153,6 +159,14 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     externalGate: snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
       ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
       : null),
+    localValidation: snapshot.localValidation
+      ? {
+        ...snapshot.localValidation,
+        status: snapshot.localValidation.releaseGate === "WAITING_EXPORT_TEMPLATES"
+          ? "WAITING_DEPENDENCY"
+          : snapshot.localValidation.status,
+      }
+      : null,
     lockedProfile: {
       ...profile,
       ...snapshot.lockedProfile,
@@ -342,25 +356,34 @@ export function recordLocalValidation(
   validation: Omit<LocalValidationSnapshot, "valid">,
 ): LocalDeliverySnapshot {
   if (!current.runId) throw new Error("本地验证缺少锁定运行");
-  if (current.stage === "AWAITING_SPEC_APPROVAL" || current.stage === "RELEASED") {
+  if (!["AGENT_QUEUED", "AGENT_RUNNING", "CANDIDATE_READY", "E2E_RUNNING", "AWAITING_ACCEPTANCE"].includes(current.stage)) {
     throw new Error("当前交付阶段不能写入本地验证证据");
   }
-  const stage = validation.status === "TESTS_PASSED" && (current.stage === "AGENT_QUEUED" || current.stage === "AGENT_RUNNING")
-    ? "CANDIDATE_READY"
-    : current.stage;
+  const gatePassed = validation.status === "TESTS_PASSED" && validation.releaseGate === "LOCAL_VALIDATION_PASSED";
+  const waitingForTemplates = validation.status === "WAITING_DEPENDENCY"
+    && validation.releaseGate === "WAITING_EXPORT_TEMPLATES";
+  const failed = validation.status === "FAILED" && validation.releaseGate === "TESTS_FAILED";
+  if (!gatePassed && !waitingForTemplates && !failed) throw new Error("本机验证状态与发布门禁不一致");
+  const targetResults = gatePassed
+    ? current.targetResults
+    : Object.fromEntries(Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"])) as LocalDeliverySnapshot["targetResults"];
   return event(
     {
       ...current,
-      stage,
+      stage: "CANDIDATE_READY",
       candidateSha: validation.candidateSha.slice(0, 7),
+      evidenceValid: gatePassed ? current.evidenceValid : false,
+      targetResults,
       localValidation: { ...validation, valid: true },
     },
-    validation.status === "TESTS_PASSED" ? "LOCAL_GODOT_EVIDENCE_CREATED" : "LOCAL_GODOT_VALIDATION_FAILED",
-    validation.status === "FAILED"
+    gatePassed ? "LOCAL_GODOT_EVIDENCE_CREATED"
+      : waitingForTemplates ? "LOCAL_GODOT_DEPENDENCY_WAIT"
+        : "LOCAL_GODOT_VALIDATION_FAILED",
+    failed
       ? "本机 Git 候选提交已生成，但 Godot 验证失败；交付阶段保持阻塞。"
-      : validation.releaseGate === "LOCAL_VALIDATION_PASSED"
+      : gatePassed
       ? "本机 Git 候选提交与 macOS Godot 测试、导出证据已生成。"
-      : "本机 Git 候选提交与 macOS Godot 测试证据已生成；生产导出等待模板。",
+      : "本机 Git 候选提交与 macOS Godot 测试证据已生成；生产导出等待模板，目标矩阵保持阻塞。",
   );
 }
 
@@ -503,6 +526,17 @@ export function applyLocalDeliveryAction(
         "Fixture Executor 产出候选提交与 Draft PR；未调用真实第三方 Agent。",
       );
     case "CANDIDATE_READY":
+      if (current.localValidation?.valid
+        && (current.localValidation.status !== "TESTS_PASSED"
+          || current.localValidation.releaseGate !== "LOCAL_VALIDATION_PASSED")) {
+        if (current.localValidation.releaseGate === "WAITING_EXPORT_TEMPLATES") {
+          throw new LocalDeliveryGateError("LOCAL_EXPORT_TEMPLATES_REQUIRED", "Godot 导出模板尚未安装，不能启动目标矩阵 E2E");
+        }
+        if (current.localValidation.status === "FAILED") {
+          throw new LocalDeliveryGateError("LOCAL_VALIDATION_FAILED", "本机 Godot 验证失败，修复后才能启动目标矩阵 E2E");
+        }
+        throw new LocalDeliveryGateError("LOCAL_VALIDATION_INVALIDATED", "本机验证证据已失效，不能启动目标矩阵 E2E");
+      }
       return event(
         { ...current, stage: "E2E_RUNNING", targetResults: { linux: "RUNNING", windows: "QUEUED", macos: "QUEUED" } },
         "E2E_STARTED",

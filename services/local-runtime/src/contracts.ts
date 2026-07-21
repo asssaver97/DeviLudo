@@ -18,7 +18,7 @@ export type LocalRuntimeEvidence = {
   runId: string;
   specRevisionId: string;
   platform: "macos";
-  status: "TESTS_PASSED" | "FAILED";
+  status: "TESTS_PASSED" | "WAITING_DEPENDENCY" | "FAILED";
   releaseGate: "WAITING_EXPORT_TEMPLATES" | "LOCAL_VALIDATION_PASSED" | "TESTS_FAILED";
   candidateSha: string;
   sourceDigest: string;

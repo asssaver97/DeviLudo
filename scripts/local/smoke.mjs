@@ -218,6 +218,7 @@ const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 const smokeNonce = `${process.pid}-${Date.now().toString(36)}`;
 const smokeSpecProject = `smoke-spec-${smokeNonce}`;
 const smokeValidationProject = `smoke-validation-${smokeNonce}`;
+const smokeFeedbackProject = `smoke-feedback-${smokeNonce}`;
 const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
 const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
 
@@ -447,8 +448,11 @@ try {
     headers: { "idempotency-key": "smoke-local-validation-1" },
   }, 90_000);
   const localValidationPayload = await localValidation.response.json();
+  const expectedLocalValidationStatus = localValidationPayload.data?.releaseGate === "WAITING_EXPORT_TEMPLATES"
+    ? "WAITING_DEPENDENCY"
+    : "TESTS_PASSED";
   if (![200, 201].includes(localValidation.response.status)
-    || localValidationPayload.data?.status !== "TESTS_PASSED"
+    || localValidationPayload.data?.status !== expectedLocalValidationStatus
     || !/^[a-f0-9]{64}$/.test(String(localValidationPayload.data?.bundleDigest))) {
     throw new Error("authenticated local Godot validation did not produce bound evidence");
   }
@@ -469,14 +473,62 @@ try {
   if (earlyFeedback.response.status !== 409 || earlyFeedbackPayload.error?.code !== "LOCAL_FEEDBACK_NOT_ALLOWED") {
     throw new Error("local feedback bypassed the candidate E2E acceptance gate");
   }
+  let feedbackProject = smokeValidationProject;
+  let feedbackDialoguePayload = validationDialoguePayload.data;
+  let validationGateBlock = null;
   let validationAcceptance;
-  for (let index = 0; index < 4; index += 1) {
-    validationAcceptance = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery`, {
+  if (localValidationPayload.data?.releaseGate === "WAITING_EXPORT_TEMPLATES") {
+    validationGateBlock = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery`, {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-validation-e2e-${index + 1}` },
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-validation-export-gate" },
       body: JSON.stringify({ action: "advance" }),
     });
-    if (!validationAcceptance.response.ok) throw new Error("local validation candidate could not reach user acceptance");
+    const gatePayload = await validationGateBlock.response.json();
+    if (validationGateBlock.response.status !== 409
+      || gatePayload.error?.code !== "LOCAL_EXPORT_TEMPLATES_REQUIRED") {
+      throw new Error("missing Godot export templates did not block target-matrix E2E");
+    }
+
+    feedbackProject = smokeFeedbackProject;
+    const fixtureDialogue = await request(baseUrl, `/api/projects/${feedbackProject}/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-feedback-dialogue-1" },
+      body: JSON.stringify({ expectedRevision: 0, message: "制作一个用于反馈迭代门禁演练的桌面单机样例" }),
+    });
+    feedbackDialoguePayload = await fixtureDialogue.response.json().then((payload) => payload.data);
+    if (fixtureDialogue.response.status !== 201 || feedbackDialoguePayload?.revision !== 1) {
+      throw new Error("local feedback fixture dialogue failed");
+    }
+    const fixtureApproval = await request(baseUrl, `/api/projects/${feedbackProject}/spec-revisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-feedback-fixture-approval-1" },
+      body: JSON.stringify({
+        action: "approve",
+        revision: "SPEC-001",
+        conversationId: feedbackDialoguePayload.conversationId,
+        expectedRevision: feedbackDialoguePayload.revision,
+        specRevisionId: feedbackDialoguePayload.specRevisionId,
+        testPlanRevisionId: feedbackDialoguePayload.testPlanRevisionId,
+      }),
+    });
+    if (fixtureApproval.response.status !== 201) throw new Error("local feedback fixture approval failed");
+    for (let index = 0; index < 6; index += 1) {
+      validationAcceptance = await request(baseUrl, `/api/projects/${feedbackProject}/delivery`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `smoke-feedback-fixture-e2e-${index + 1}` },
+        body: JSON.stringify({ action: "advance" }),
+      });
+      if (!validationAcceptance.response.ok) throw new Error("local feedback fixture could not reach user acceptance");
+    }
+  } else {
+    for (let index = 0; index < 4; index += 1) {
+      validationAcceptance = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `smoke-validation-e2e-${index + 1}` },
+        body: JSON.stringify({ action: "advance" }),
+      });
+      if (!validationAcceptance.response.ok) throw new Error("local validation candidate could not reach user acceptance");
+    }
   }
   const validationAcceptancePayload = await validationAcceptance.response.json();
   if (validationAcceptancePayload.data?.stage !== "AWAITING_ACCEPTANCE"
@@ -488,28 +540,30 @@ try {
     headers: { "content-type": "application/json", "idempotency-key": "smoke-feedback-iteration-1" },
     body: JSON.stringify({ feedback: "新手前五分钟最多出现一次风暴，并保持其余验收标准" }),
   };
-  const feedbackIteration = await request(baseUrl, `/api/projects/${smokeValidationProject}/feedback`, feedbackRequest);
+  const feedbackIteration = await request(baseUrl, `/api/projects/${feedbackProject}/feedback`, feedbackRequest);
   const feedbackIterationPayload = await feedbackIteration.response.json();
   const feedbackSnapshot = feedbackIterationPayload.data?.snapshot;
   if (feedbackIteration.response.status !== 201
     || feedbackSnapshot?.state !== "DRAFT" || feedbackSnapshot.revision !== 3
-    || feedbackSnapshot.conversationId === validationDialoguePayload.data.conversationId
+    || feedbackSnapshot.conversationId === feedbackDialoguePayload.conversationId
     || feedbackIterationPayload.data?.delivery?.stage !== "AWAITING_SPEC_APPROVAL"
-    || feedbackIterationPayload.data?.delivery?.localValidation?.valid !== false
+    || (feedbackProject === smokeValidationProject
+      ? feedbackIterationPayload.data?.delivery?.localValidation?.valid !== false
+      : feedbackIterationPayload.data?.delivery?.localValidation !== null)
     || feedbackIterationPayload.data?.delivery?.evidenceValid !== false
     || JSON.stringify(feedbackIterationPayload.data?.delivery?.targetResults) !== JSON.stringify({
       linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED",
     })) {
     throw new Error("local feedback did not create a distinct immutable draft and invalidate old evidence");
   }
-  const feedbackReplay = await request(baseUrl, `/api/projects/${smokeValidationProject}/feedback`, feedbackRequest);
+  const feedbackReplay = await request(baseUrl, `/api/projects/${feedbackProject}/feedback`, feedbackRequest);
   const feedbackReplayPayload = await feedbackReplay.response.json();
   if (feedbackReplay.response.status !== 200
     || feedbackReplayPayload.meta?.idempotentReplay !== true
     || JSON.stringify(feedbackReplayPayload.data?.snapshot) !== JSON.stringify(feedbackSnapshot)) {
     throw new Error("local feedback idempotency did not replay the exact successor draft");
   }
-  const iterationApproval = await request(baseUrl, `/api/projects/${smokeValidationProject}/spec-revisions`, {
+  const iterationApproval = await request(baseUrl, `/api/projects/${feedbackProject}/spec-revisions`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-feedback-approval-1" },
     body: JSON.stringify({
@@ -528,17 +582,20 @@ try {
     || iterationApprovalPayload.data?.run?.id === validationApprovalPayload.data.run.id) {
     throw new Error("local feedback successor could not be approved into a new immutable run");
   }
-  const iterationValidation = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation`, {
+  const iterationValidation = await request(baseUrl, `/api/projects/${feedbackProject}/local-validation`, {
     method: "POST",
     headers: { "idempotency-key": "smoke-feedback-validation-1" },
   }, 90_000);
   const iterationValidationPayload = await iterationValidation.response.json();
+  const expectedIterationStatus = iterationValidationPayload.data?.releaseGate === "WAITING_EXPORT_TEMPLATES"
+    ? "WAITING_DEPENDENCY"
+    : "TESTS_PASSED";
   if (iterationValidation.response.status !== 201
-    || iterationValidationPayload.data?.status !== "TESTS_PASSED"
+    || iterationValidationPayload.data?.status !== expectedIterationStatus
     || iterationValidationPayload.data?.bundleDigest === localValidationPayload.data.bundleDigest) {
     throw new Error("local feedback successor did not produce a distinct Godot evidence bundle");
   }
-  const iterationManifest = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation/evidence/manifest.json`);
+  const iterationManifest = await request(baseUrl, `/api/projects/${feedbackProject}/local-validation/evidence/manifest.json`);
   const iterationManifestPayload = await iterationManifest.response.json();
   if (!iterationManifest.response.ok
     || iterationManifestPayload.runId !== iterationApprovalPayload.data.run.id
@@ -792,6 +849,9 @@ try {
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
   console.log(`✓ Godot validation ${localValidation.response.status} (${localValidation.elapsedMs}ms) · ${localValidationPayload.data.releaseGate}`);
+  console.log(validationGateBlock
+    ? `✓ Export dependency ${validationGateBlock.response.status} (${validationGateBlock.elapsedMs}ms) · target E2E blocked`
+    : "✓ Export dependency ready · production export authorized target E2E");
   console.log(`✓ Evidence download ${localManifest.response.status} (${localManifest.elapsedMs}ms) · signed sidecar request`);
   console.log(`✓ Feedback gate     ${earlyFeedback.response.status} (${earlyFeedback.elapsedMs}ms) · ${earlyFeedbackPayload.error.code}`);
   console.log(`✓ Feedback draft    ${feedbackIteration.response.status} (${feedbackIteration.elapsedMs}ms) · revision ${feedbackSnapshot.revision} → approved ${iterationApprovalPayload.data.authority.revision}`);

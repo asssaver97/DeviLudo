@@ -8,6 +8,7 @@ import {
 } from "../lib/orchestration/delivery-projection.ts";
 import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 import { GET, POST } from "../app/api/projects/[projectId]/delivery/route.ts";
+import { saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
 import { GET as GET_EVIDENCE } from "../app/api/projects/[projectId]/evidence/route.ts";
 import { GET as GET_RUNNERS } from "../app/api/projects/[projectId]/runners/route.ts";
 import { signTrustedGitHubSession } from "../lib/connections/github-broker.ts";
@@ -342,6 +343,30 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   assert.match(routeSource, /"main-gate-fail"/);
   assert.match(routeSource, /"steam-reinstall-fail"/);
   assert.doesNotMatch(routeSource.slice(routeSource.indexOf("const actions"), routeSource.indexOf("const UUID")), /"accept"/);
+});
+
+test("local delivery route exposes a stable conflict when real export evidence is dependency-blocked", async () => {
+  const localProjectId = `export-gate-${crypto.randomUUID()}`;
+  await startLocalDelivery(localProjectId, "SPEC-EXPORT-001", "RUN-EXPORT-001", `start:${localProjectId}`);
+  await saveLocalValidation(localProjectId, {
+    evidenceId: "EV-LOCAL-EXPORT-WAIT",
+    status: "WAITING_DEPENDENCY",
+    releaseGate: "WAITING_EXPORT_TEMPLATES",
+    candidateSha: "1".repeat(40), sourceDigest: "2".repeat(64), bundleDigest: "3".repeat(64),
+    godotVersion: "4.6.2.stable",
+    checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 4, detail: "templates missing" }],
+    createdAt: "2026-07-21T00:00:00.000Z",
+  }, `validation:${localProjectId}`);
+
+  const response = await POST(new Request(`http://127.0.0.1:3000/api/projects/${localProjectId}/delivery`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "blocked-e2e" },
+    body: JSON.stringify({ action: "advance" }),
+  }), { params: Promise.resolve({ projectId: localProjectId }) });
+  const payload = await response.json();
+  assert.equal(response.status, 409);
+  assert.equal(payload.error.code, "LOCAL_EXPORT_TEMPLATES_REQUIRED");
+  assert.match(payload.error.message, /不能启动目标矩阵/);
 });
 
 test("production cancellation accepts only a signed reason and server derives workflow authority", async () => {

@@ -1,6 +1,6 @@
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { commandLocalDelivery, readLocalDelivery } from "@/lib/local-delivery/store";
-import type { LocalDeliveryAction } from "@/lib/local-delivery/model";
+import { LocalDeliveryGateError, type LocalDeliveryAction } from "@/lib/local-delivery/model";
 import {
   DeliveryProjectionBrokerError,
   deliveryProjectionBrokerFromEnvironment,
@@ -119,6 +119,9 @@ export async function POST(
       { status: result.replayed ? 200 : 201 },
     );
   } catch (error) {
+    if (error instanceof LocalDeliveryGateError) {
+      return json({ error: { code: error.code, message: error.message } }, { status: 409 });
+    }
     return problemResponse(error);
   }
 }

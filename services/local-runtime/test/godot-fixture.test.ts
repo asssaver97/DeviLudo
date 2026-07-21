@@ -9,7 +9,7 @@ import { LocalFixtureRunner } from "../src/fixture-runner";
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const godotBinary = "/Applications/Godot.app/Contents/MacOS/Godot";
 
-test("creates an idempotent Git commit and real macOS Godot evidence bundle", async (context) => {
+test("creates a real macOS Godot evidence bundle and retries dependency waits", async (context) => {
   try {
     await access(godotBinary);
   } catch {
@@ -22,7 +22,10 @@ test("creates an idempotent Git commit and real macOS Godot evidence bundle", as
     const runner = new LocalFixtureRunner({ repositoryRoot, storageRoot: temporary, godotBinary });
     const request = { projectId: "test-project", runId: "RUN-INTEGRATION-001", specRevisionId: "SPEC-TEST-001" };
     const result = await runner.run(request);
-    assert.equal(result.status, "TESTS_PASSED");
+    assert.equal(
+      result.status,
+      result.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "WAITING_DEPENDENCY" : "TESTS_PASSED",
+    );
     assert.equal(result.platform, "macos");
     assert.equal(result.candidateSha.length, 40);
     assert.equal(result.sourceDigest.length, 64);
@@ -43,8 +46,14 @@ test("creates an idempotent Git commit and real macOS Godot evidence bundle", as
     assert.match(result.artifactDigests["godot.log"], /^[a-f0-9]{64}$/);
 
     const replay = await runner.run(request);
-    assert.equal(replay.evidenceId, result.evidenceId);
-    assert.equal(replay.candidateSha, result.candidateSha);
+    if (result.releaseGate === "WAITING_EXPORT_TEMPLATES") {
+      assert.equal(replay.status, "WAITING_DEPENDENCY");
+      assert.equal(replay.releaseGate, "WAITING_EXPORT_TEMPLATES");
+      assert.equal(replay.runId, result.runId);
+    } else {
+      assert.equal(replay.evidenceId, result.evidenceId);
+      assert.equal(replay.candidateSha, result.candidateSha);
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

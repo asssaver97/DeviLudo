@@ -80,7 +80,7 @@ test("feedback invalidates all local evidence and requires a new immutable appro
   state = recordLocalValidation(state, {
     evidenceId: "EV-LOCAL-TEST",
     status: "TESTS_PASSED",
-    releaseGate: "WAITING_EXPORT_TEMPLATES",
+    releaseGate: "LOCAL_VALIDATION_PASSED",
     candidateSha: "a".repeat(40),
     sourceDigest: "b".repeat(64),
     bundleDigest: "c".repeat(64),
@@ -172,9 +172,34 @@ test("failed local validation is auditable but cannot advance the candidate gate
     checks: [{ name: "macos-export", status: "FAILED", durationMs: 3, detail: "configuration error" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
-  assert.equal(state.stage, "AGENT_QUEUED");
+  assert.equal(state.stage, "CANDIDATE_READY");
   assert.equal(state.localValidation.valid, true);
   assert.equal(state.events[0].type, "LOCAL_GODOT_VALIDATION_FAILED");
+  assert.throws(() => applyLocalDeliveryAction(state, "advance"), /验证失败/);
+});
+
+test("missing export templates remain auditable but cannot authorize target E2E", () => {
+  let state = approveLocalSpec(createLocalDelivery("project-export-wait"), "SPEC-EXPORT-001", "RUN-EXPORT-WAIT");
+  state = recordLocalValidation(state, {
+    evidenceId: "EV-LOCAL-WAITING",
+    status: "WAITING_DEPENDENCY",
+    releaseGate: "WAITING_EXPORT_TEMPLATES",
+    candidateSha: "1".repeat(40),
+    sourceDigest: "2".repeat(64),
+    bundleDigest: "3".repeat(64),
+    godotVersion: "4.6.2.stable",
+    checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 3, detail: "templates missing" }],
+    createdAt: "2026-07-18T00:00:00.000Z",
+  });
+  assert.equal(state.stage, "CANDIDATE_READY");
+  assert.equal(state.localValidation.valid, true);
+  assert.equal(state.evidenceValid, false);
+  assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
+  assert.equal(state.events[0].type, "LOCAL_GODOT_DEPENDENCY_WAIT");
+  assert.throws(
+    () => applyLocalDeliveryAction(state, "advance"),
+    (error) => error?.code === "LOCAL_EXPORT_TEMPLATES_REQUIRED" && /不能启动目标矩阵/.test(error.message),
+  );
 });
 
 test("reset keeps event revisions monotonic for the persistent D1 audit log", () => {

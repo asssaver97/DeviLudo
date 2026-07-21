@@ -87,8 +87,10 @@ function validateEvidence(
   if (item.projectId !== projectId || item.runId !== runId || item.specRevisionId !== specRevisionId) {
     throw new Error("本机证据绑定与锁定运行不一致");
   }
-  if (item.status !== "TESTS_PASSED" && item.status !== "FAILED") throw new Error("本机证据状态无效");
-  if (!["WAITING_EXPORT_TEMPLATES", "LOCAL_VALIDATION_PASSED", "TESTS_FAILED"].includes(String(item.releaseGate))) {
+  if (!validEvidenceStatus(item.status)) {
+    throw new Error("本机证据状态无效");
+  }
+  if (!validReleaseGate(item.releaseGate)) {
     throw new Error("本机证据发布门禁无效");
   }
   if (!/^[a-f0-9]{40}$/.test(String(item.candidateSha)) || !/^[a-f0-9]{64}$/.test(String(item.bundleDigest))) {
@@ -104,13 +106,17 @@ function validateEvidence(
   }
   if (!validArtifactDigests(item.artifactDigests)) throw new Error("本机证据制品摘要无效");
   const failed = item.checks.some((check) => (check as Record<string, unknown>).status === "FAILED");
-  if ((item.status === "FAILED") !== failed || (item.releaseGate === "TESTS_FAILED") !== failed) {
+  const waiting = item.checks.some((check) => (check as Record<string, unknown>).status === "WAITING_DEPENDENCY");
+  const validTerminal = item.status === "TESTS_PASSED" && item.releaseGate === "LOCAL_VALIDATION_PASSED" && !failed && !waiting;
+  const validWait = item.status === "WAITING_DEPENDENCY" && item.releaseGate === "WAITING_EXPORT_TEMPLATES" && !failed && waiting;
+  const validFailure = item.status === "FAILED" && item.releaseGate === "TESTS_FAILED" && failed;
+  if (!validTerminal && !validWait && !validFailure) {
     throw new Error("本机证据状态与检查结果不一致");
   }
   return {
     evidenceId: String(item.evidenceId),
     status: item.status,
-    releaseGate: item.releaseGate as LocalValidationSnapshot["releaseGate"],
+    releaseGate: item.releaseGate,
     candidateSha: String(item.candidateSha),
     sourceDigest: String(item.sourceDigest),
     bundleDigest: String(item.bundleDigest),
@@ -118,6 +124,14 @@ function validateEvidence(
     checks: item.checks as LocalValidationSnapshot["checks"],
     createdAt: String(item.createdAt),
   };
+}
+
+function validEvidenceStatus(value: unknown): value is LocalValidationSnapshot["status"] {
+  return value === "TESTS_PASSED" || value === "WAITING_DEPENDENCY" || value === "FAILED";
+}
+
+function validReleaseGate(value: unknown): value is LocalValidationSnapshot["releaseGate"] {
+  return value === "WAITING_EXPORT_TEMPLATES" || value === "LOCAL_VALIDATION_PASSED" || value === "TESTS_FAILED";
 }
 
 function validCheck(value: unknown) {

@@ -69,7 +69,10 @@ export class LocalFixtureRunner {
   async run(request: LocalRuntimeRequest): Promise<LocalRuntimeEvidence> {
     validateRequest(request);
     try {
-      return await this.readEvidence(request);
+      const existing = await this.readEvidence(request);
+      if (existing.releaseGate !== "WAITING_EXPORT_TEMPLATES") return existing;
+      // Dependency waits are not terminal and may be retried after the exact
+      // matching export templates are installed.
     } catch {
       // A missing manifest means the exact run has not completed yet.
     }
@@ -178,7 +181,11 @@ export class LocalFixtureRunner {
       "junit.xml": sha256(junit),
       "godot.log": sha256(godotLog),
     };
-    const status = exportPassed || exportTemplatesMissing ? "TESTS_PASSED" as const : "FAILED" as const;
+    const status = exportPassed
+      ? "TESTS_PASSED" as const
+      : exportTemplatesMissing
+        ? "WAITING_DEPENDENCY" as const
+        : "FAILED" as const;
     const releaseGate = exportPassed
       ? "LOCAL_VALIDATION_PASSED" as const
       : exportTemplatesMissing
