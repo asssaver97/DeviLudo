@@ -8,8 +8,8 @@ Production replaces each container with an HA managed service: PostgreSQL with
 PITR and separate owner/migration/application roles, a three-node Temporal
 cluster, TLS Redis, versioned/locked S3 buckets, auto-unseal Vault/KMS, and an
 OTel collector exporting to the operator's telemetry backend. Worker pools,
-E2E runners, inference connectors, and Steam publishers live in separate network
-segments and service accounts.
+E2E runners, inference connectors, Steam publishers and release-signing depot
+finalizers live in separate network segments and service accounts.
 
 Every Node service start command registers the platform-owned OpenTelemetry SDK
 before application imports. Production processes fail closed without a fixed
@@ -67,7 +67,13 @@ make explicit same-Agent Provider failover both immutable and auditable.
 Migration `048` atomically binds a failed clean-Steam-client evidence bundle to
 an append-only release revocation before the Build and Release may enter
 `FAILED`.
-All fifty-three migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
+Migrations `049`–`050` add cross-service delivery cancellation revocation and
+the projection-bound user request ledger. Migration `051` persists ordered,
+fresh Steam external-approval observations. Migrations `052`–`053` add exact
+Provider recovery checks and durable bounded retry scheduling. Migration `054`
+adds the tenant-RLS, append-only Steam depot finalization ledger, with one fenced
+content-addressed operation per release/platform and no signing credentials.
+All fifty-four migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
 service code. Application

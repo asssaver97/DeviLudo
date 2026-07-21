@@ -267,6 +267,17 @@ records the BuildID and every depot manifest, then dispatches clean Steam Client
 installs for the exact target matrix. Only authoritative reinstall evidence may
 advance to Valve review, first-release and default-branch confirmation gates.
 
+The publisher does not hold OS release-signing credentials. Its mTLS client
+sends only the tenant/project/release binding and raw Runner content address to
+`steam-depot-finalizer`. That production-only service authenticates the exact
+workflow-executor SPIFFE identity, claims one operation under tenant RLS, and
+invokes a SHA-256-pinned native controller using fixed argv and a minimal
+credential-free environment. The immutable policy selects a host keystore/HSM
+identity; secrets, certificate bytes, Apple credentials and Sigstore tokens are
+forbidden from requests, PostgreSQL and receipts. A failed invocation releases
+the fenced lease for exact retry, while completion becomes append-only. macOS
+cannot complete without a content-addressed notarization receipt.
+
 ## Failure behavior and audit requirements
 
 `selectRunnableProfile()` returns `WAITING_PROVIDER` when the primary provider is

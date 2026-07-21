@@ -64,6 +64,13 @@ behind the web console:
   and fresh MFA publish authorizations, consumes only an exact-App encrypted `config.vdf` SecretRef,
   plans a shell-free SteamCMD private-Beta upload, and dispatches clean Steam
   Client reinstall E2E across the selected matrix before external release gates.
+- `steam-depot-finalizer`: the separate TLS 1.3/mTLS, tenant-RLS release-signing
+  boundary. It durably fences each release/platform request and invokes only a
+  digest-pinned, shell-free native controller whose immutable policy selects
+  Authenticode, Sigstore or Developer ID plus notarization from the host
+  keystore/HSM. Requests, PostgreSQL rows and receipts contain content addresses
+  and public evidence only; the publisher independently verifies the resulting
+  S3 objects before RC v2 issuance.
 - `steam-approval-monitor`: accepts only allow-listed mTLS Steam verifier
   observations for the current release gate, re-resolves the exact App, tested
   BuildID and clean-install evidence under tenant RLS, and durably advances the

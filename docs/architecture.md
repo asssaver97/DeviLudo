@@ -12,7 +12,7 @@ propagates W3C trace context across service HTTP calls. Platform code may attach
 already-authorized opaque tenant/project/workflow/run identifiers, but never
 prompts, source text, URL queries, cookies, authorization headers or credentials.
 
-There are four isolated execution identities:
+There are five isolated execution identities:
 
 1. **Development worker** — an ephemeral Linux microVM containing exactly one
    fixed Claude Code or Codex CLI version. It receives a read-only source
@@ -24,10 +24,14 @@ There are four isolated execution identities:
 3. **E2E runner** — Windows, Linux, or macOS with no autonomous Agent installed.
    It accepts signed, fenced jobs and uploads evidence through outbound mTLS.
 4. **Steam publisher** — a narrow release identity with no Agent or source-write
-   access. It decrypts a build-account Steam session only for a bound release and
-   finalizes every depot through platform-native signing (and macOS
-   notarization), then uploads a signed RC v2 to a password-protected Beta
-   branch.
+   access. It decrypts a build-account Steam session only for a bound release,
+   accepts only an independently verified signed RC v2, and uploads it to a
+   password-protected Beta branch.
+5. **Steam depot finalizer** — a separate mTLS release-signing identity. A
+   tenant-RLS ledger fences one raw-export operation per release/platform before
+   a digest-pinned native controller uses the host keystore/HSM for Authenticode,
+   Sigstore or Developer ID plus notarization. It receives and returns content
+   addresses only and never exposes a signing credential to the publisher.
 
 ```mermaid
 flowchart LR
@@ -45,6 +49,8 @@ flowchart LR
   T --> R["mTLS E2E runners"]
   R --> O[("Signed evidence in S3")]
   T --> SP["Steam publisher"]
+  SP --> DF["mTLS depot finalizer"]
+  DF --> O
   SP --> ST["Steam private Beta"]
   ST --> R
 ```
@@ -206,6 +212,11 @@ commit, source digest, and exact matrix.
 signed RC v2 from the verified main SHA. Each depot binds the original Runner
 export to a separately verified Linux Sigstore, Windows Authenticode or macOS
 Developer ID artifact; macOS also binds mandatory notarization evidence. The
+separate finalizer durably claims the tenant/release/platform operation and
+invokes only an executable and non-secret signing policy with fixed SHA-256
+digests. Signing authority remains in the host keystore/HSM, and its receipt is
+insufficient by itself: the publisher independently verifies the finalized
+artifact and evidence objects in S3 before RC signing. The
 publisher uploads it with a least-privilege Steam
 build account to a password-protected Beta, then clean Steam clients install and
 run the same platform gate. The platform stores only encrypted `config.vdf`

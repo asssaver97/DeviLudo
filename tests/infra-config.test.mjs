@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 53 }, (_, index) => {
+  const offsets = Array.from({ length: 54 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -720,6 +720,37 @@ test("isolated Steam execution worker pins native signing, PostgreSQL, S3 and KM
   assert.match(evidence, /evidence\.invalidated_at IS NULL/);
   assert.match(reservations, /ON CONFLICT \(release_id, platform\) DO NOTHING/);
   assert.match(reservations, /set_config\('app\.tenant_id'/);
+});
+
+test("Steam depot finalization is a durable credential-isolated mTLS service", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/054_steam_depot_finalization_operations.sql", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/steam-depot-finalizer/src/ingress-http.ts", import.meta.url), "utf8");
+  const native = readFileSync(new URL("../services/steam-depot-finalizer/src/locked-native-finalizer.ts", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/steam-depot-finalizer/src/postgres-operations.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/steam-depot-finalizer/src/run-service.ts", import.meta.url), "utf8");
+  const contract = readFileSync(new URL("../services/steam-depot-finalizer/src/contract.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:steam-depot-finalizer"], observedServiceCommand("steam-depot-finalizer"));
+  assert.match(packageJson.scripts["test:services"], /npm run test:steam-depot-finalizer/);
+  assert.match(migration, /CREATE TABLE deviludo\.steam_depot_finalization_operations/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, release_id, platform\)/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /steam_depot_finalization_operation_no_delete/);
+  assert.doesNotMatch(migration, /password|private_key|access_token|certificate_bytes|config_vdf/i);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(native, /execFile\(executable/);
+  assert.match(native, /shell: false/);
+  assert.match(native, /verifyFile\(this\.#executable, this\.#executableDigest/);
+  assert.match(native, /--policy-file/);
+  assert.doesNotMatch(native, /curl \| sh|accountPassword|guardCode|configVdf/);
+  assert.match(store, /set_config\('app\.tenant_id'/);
+  assert.match(runtime, /O_NOFOLLOW/);
+  assert.match(runtime, /new LockedNativeSteamDepotFinalizer/);
+  assert.match(contract, /MACOS_DEVELOPER_ID/);
+  assert.match(contract, /macOS notarization/);
+  assert.match(contract, /production-export/);
 });
 
 test("Steam execution re-resolves signed release authority and archives the tested BuildID", () => {

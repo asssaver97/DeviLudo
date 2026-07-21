@@ -208,6 +208,13 @@ revision and freezes its ID and canonical digest into the append-only RC row.
 Retries replay that byte-equivalent artifact; evidence, depot or signature
 drift fails before SteamPipe is called.
 
+The server side of that mTLS contract is the separately deployed
+`services/steam-depot-finalizer` process (`npm run start:steam-depot-finalizer`).
+It uses migration `054_steam_depot_finalization_operations.sql` for tenant-RLS,
+lease-fenced exact replay and a digest-pinned native controller. The publisher
+and finalizer must have disjoint certificates and deployment identities; the
+native signing host is not part of the Steam executor, Agent or Runner pools.
+
 The control-plane `REQUEST_FRESH_MFA` action now first calls
 `PostgresSteamReleasePreparation`. It accepts no App ID, session or branch from
 the browser: passed merged-main evidence selects one active immutable project
