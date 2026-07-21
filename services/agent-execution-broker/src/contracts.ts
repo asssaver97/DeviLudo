@@ -1,4 +1,6 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
+import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
 import type { AgentWorkflowRunReceipt } from "../../agent-worker/src/workflow-handler";
 import type { SignedGitHubCandidateArtifact } from "../../scm-proxy/src/github-contracts";
 import type { AgentConfigurationLock } from "../../agent-configuration/src/contracts";
@@ -97,11 +99,13 @@ export type IsolatedAgentExecutionResult =
       status: "COMPLETED";
       candidateArtifact: SignedGitHubCandidateArtifact;
       diagnosticId: null;
+      diagnostic: null;
     }>
   | IsolatedAgentExecutionResultBinding & Readonly<{
       status: "FAILED";
       candidateArtifact: null;
       diagnosticId: string;
+      diagnostic: AgentFailureDiagnostic;
     }>;
 
 export interface PublishedAgentCandidateReceipt {
@@ -131,6 +135,7 @@ export interface AuthoritativeAgentExecutionResult {
   readonly candidateCommitSha: string | null;
   readonly draftPullRequest: number | null;
   readonly diagnosticId: string | null;
+  readonly diagnostic: AgentFailureDiagnostic | null;
   readonly receiptId: string;
 }
 
@@ -187,7 +192,7 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
   const body = record(value);
   exactKeys(body, ["status", "runId", "attemptId", "resolutionDigest", "profileRevisionId", "installationId",
     "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "executionReceiptId",
-    "candidateArtifact", "diagnosticId"]);
+    "candidateArtifact", "diagnosticId", "diagnostic"]);
   if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
     || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
@@ -198,7 +203,7 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
     const artifact = record(body.candidateArtifact);
     const payload = record(artifact.payload);
     const attestation = record(artifact.attestation);
-    if (body.diagnosticId !== null || payload.schemaVersion !== "deviludo.github-candidate.v1"
+    if (body.diagnosticId !== null || body.diagnostic !== null || payload.schemaVersion !== "deviludo.github-candidate.v1"
       || payload.tenantId !== lock.tenantId || payload.projectId !== lock.projectId
       || payload.runId !== lock.runId || payload.attemptId !== attemptId
       || payload.specRevisionId !== lock.specRevisionId || payload.expectedBaseCommitSha !== lock.baseCommitSha
@@ -210,6 +215,12 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
       || typeof attestation.signature !== "string" || attestation.signature.length < 32) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
     || body.candidateArtifact !== null) invalid();
+  if (body.status === "FAILED") {
+    const diagnostic = validateAgentFailureDiagnostic(body.diagnostic);
+    if (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== lock.runId
+      || diagnostic.attemptId !== attemptId) invalid();
+    return Object.freeze({ ...body, diagnostic }) as unknown as IsolatedAgentExecutionResult;
+  }
   return Object.freeze({ ...body }) as unknown as IsolatedAgentExecutionResult;
 }
 
@@ -217,7 +228,7 @@ export function validateAuthoritativeResult(value: unknown, lock: LockedAgentExe
   const body = record(value);
   exactKeys(body, ["status", "runId", "attemptId", "resolutionDigest", "profileRevisionId", "installationId",
     "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "candidateCommitSha",
-    "draftPullRequest", "diagnosticId", "receiptId"]);
+    "draftPullRequest", "diagnosticId", "diagnostic", "receiptId"]);
   if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
     || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
@@ -227,9 +238,15 @@ export function validateAuthoritativeResult(value: unknown, lock: LockedAgentExe
   if (body.status === "COMPLETED") {
     if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
       || body.candidateCommitSha === lock.baseCommitSha || !Number.isSafeInteger(body.draftPullRequest)
-      || (body.draftPullRequest as number) < 1 || body.diagnosticId !== null) invalid();
+      || (body.draftPullRequest as number) < 1 || body.diagnosticId !== null || body.diagnostic !== null) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
     || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
+  if (body.status === "FAILED") {
+    const diagnostic = validateAgentFailureDiagnostic(body.diagnostic);
+    if (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== lock.runId
+      || diagnostic.attemptId !== attemptId) invalid();
+    return Object.freeze({ ...body, diagnostic }) as unknown as AuthoritativeAgentExecutionResult;
+  }
   return Object.freeze({ ...body }) as unknown as AuthoritativeAgentExecutionResult;
 }
 
@@ -256,10 +273,14 @@ function validateReceipt(value: unknown, status: "COMPLETED" | "FAILED", runId: 
   if (status === "COMPLETED") {
     if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
       || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
-      || body.diagnosticId !== null) invalid();
+      || body.diagnosticId !== null || body.diagnostic !== null && body.diagnostic !== undefined) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
     || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
-  return Object.freeze({ ...body }) as unknown as AgentWorkflowRunReceipt;
+  const diagnostic = status === "COMPLETED" || body.diagnostic === null || body.diagnostic === undefined
+    ? null
+    : validateAgentFailureDiagnostic(body.diagnostic);
+  if (diagnostic && (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== runId)) invalid();
+  return Object.freeze({ ...body, diagnostic }) as unknown as AgentWorkflowRunReceipt;
 }
 
 function validModel(value: string): boolean { try { assertPinnedModelId(value); return true; } catch { return false; } }

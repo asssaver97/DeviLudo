@@ -207,6 +207,61 @@ test("PostgreSQL begin derives action and previous revisions under tenant RLS", 
   assert.equal(statements.at(-2), "COMMIT");
 });
 
+test("PostgreSQL begin permits feedback from an exhausted repair wait without candidate evidence", async () => {
+  let insertedValues: readonly unknown[] | undefined;
+  const authority = {
+    ...authorityRow(),
+    action_operation: "REQUEST_SPEC_APPROVAL",
+    binding: {
+      state: "WAITING_SPEC_APPROVAL",
+      specRevisionId: previousSpecRevisionId,
+      candidateCommitSha: null,
+      draftPullRequest: null,
+      evidenceBundleId: null,
+      repairContext: {
+        attempt: 3,
+        reason: "AGENT_FAILURE",
+        fromRunConfigurationId: "run-configuration-failed-003",
+        diagnosticId: "diagnostic-failed-003",
+        evidenceBundleId: null,
+        repairPromptId: null,
+        candidateCommitSha: null,
+        draftPullRequest: null,
+      },
+    },
+  };
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(sql: string, values?: readonly unknown[]) {
+      if (sql.includes("FROM deviludo.user_feedback_operations")) {
+        if (!insertedValues) return rows<Row>([]);
+        return rows<Row>([{
+          operation_key: command.operationKey, tenant_id: tenantId, project_id: projectId,
+          actor_id: command.actorId, request_digest: specDigest(command), feedback: command.feedback,
+          feedback_digest: specDigest(command.feedback), workflow_id: "delivery-001", action_id: actionId,
+          previous_conversation_id: previousConversationId, previous_spec_revision_id: previousSpecRevisionId,
+          previous_test_plan_revision_id: previousTestPlanRevisionId,
+          evidence_invalidation_id: insertedValues[12], signal_id: insertedValues[13],
+          state: "GENERATING", claim_token: insertedValues[14], claim_active: true,
+          draft_snapshot: null, completion_receipt: null,
+        }]);
+      }
+      if (sql.includes("FROM deviludo.workflow_control_actions action")) return rows<Row>([authority]);
+      if (sql.includes("INSERT INTO deviludo.user_feedback_operations")) {
+        insertedValues = values;
+        return result<Row>(1);
+      }
+      if (sql.includes("FROM deviludo.spec_conversation_messages")) return rows<Row>([]);
+      return result<Row>(0);
+    },
+    release() {},
+  };
+  const outcome = await new PostgresUserFeedbackStore({ async connect() { return client; } }).begin(command);
+  assert.equal(outcome.kind, "ACQUIRED");
+  if (outcome.kind !== "ACQUIRED") throw new Error("claim missing");
+  assert.equal(outcome.claim.actionId, actionId);
+  assert.equal(outcome.claim.previousSpecRevisionId, previousSpecRevisionId);
+});
+
 function buildFixture(options: {
   readonly modelFailure?: boolean;
   readonly beginWithDraft?: boolean;
@@ -351,6 +406,7 @@ function authorityRow() {
   return {
     workflow_id: "delivery-001",
     action_id: actionId,
+    action_operation: "REQUEST_USER_ACCEPTANCE",
     binding: {
       specRevisionId: previousSpecRevisionId,
       candidateCommitSha: "a".repeat(40),

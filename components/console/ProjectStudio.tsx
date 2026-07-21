@@ -51,6 +51,7 @@ export function ProjectStudio({
   } | null>(null);
   const [deliveryRefresh, setDeliveryRefresh] = useState(0);
   const [candidateAcceptanceReady, setCandidateAcceptanceReady] = useState(false);
+  const [humanRepairTakeover, setHumanRepairTakeover] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const approvalCommandRef = useRef<string | null>(null);
   const acceptanceCommandRef = useRef<string | null>(null);
@@ -217,8 +218,11 @@ export function ProjectStudio({
         setRevision((current) => current + 1);
       }
       setApproved(false);
+      setHumanRepairTakeover(false);
       setDeliveryRefresh((value) => value + 1);
-      setNotice("反馈已创建为新的不可变迭代；旧候选版本的测试证据已失效。");
+      setNotice(humanRepairTakeover
+        ? "人工修订草稿已创建；请检查并批准新规格后恢复自动开发。"
+        : "反馈已创建为新的不可变迭代；旧候选版本的测试证据已失效。");
     } catch (reason) {
       setNotice(reason instanceof Error ? `反馈失败：${reason.message}` : "创建反馈迭代失败");
     } finally {
@@ -253,6 +257,7 @@ export function ProjectStudio({
       : status.stage === "WAITING_USER_ACCEPTANCE";
     if (!ready) acceptanceCommandRef.current = null;
     setCandidateAcceptanceReady(ready);
+    setHumanRepairTakeover(status.mode === "PRODUCTION" && status.humanRepairTakeover);
     const awaitingApproval = status.mode === "LOCAL_D1"
       ? status.stage === "AWAITING_SPEC_APPROVAL"
       : status.stage === "IDEATION" || status.stage === "WAITING_SPEC_APPROVAL";
@@ -374,18 +379,24 @@ export function ProjectStudio({
         </aside>
       </div>
 
-      {mode === "existing" && candidateAcceptanceReady ? (
+      {mode === "existing" && (candidateAcceptanceReady || humanRepairTakeover) ? (
         <section className="iteration-section">
           <div className="iteration-heading">
-            <div><span className="eyebrow">候选版本反馈</span><h2>继续迭代</h2><p>反馈会进入同一 Draft PR，并让旧证据立即失效。</p></div>
+            <div>
+              <span className="eyebrow">{humanRepairTakeover ? "自动修复预算已耗尽" : "候选版本反馈"}</span>
+              <h2>{humanRepairTakeover ? "提交人工修改说明" : "继续迭代"}</h2>
+              <p>{humanRepairTakeover
+                ? "平台已暂停自动重试。修改说明会生成新的不可变规格草稿，批准后才会恢复开发。"
+                : "反馈会进入同一 Draft PR，并让旧证据立即失效。"}</p>
+            </div>
             <span>{feedbackCount} 次历史迭代</span>
           </div>
           <div className="feedback-box">
             <span className="feedback-icon"><FileIcon /></span>
-            <textarea aria-label="候选版本反馈" onChange={(event) => setFeedback(event.target.value)} placeholder="例如：风暴出现得太频繁，希望新手前五分钟最多出现一次……" rows={3} value={feedback} />
-            <button className="button button-primary" disabled={!feedback.trim() || busy} onClick={submitFeedback} type="button">创建新迭代 <ArrowIcon /></button>
+            <textarea aria-label={humanRepairTakeover ? "人工修复修改说明" : "候选版本反馈"} onChange={(event) => setFeedback(event.target.value)} placeholder={humanRepairTakeover ? "说明需要调整的玩法、范围或验收标准……" : "例如：风暴出现得太频繁，希望新手前五分钟最多出现一次……"} rows={3} value={feedback} />
+            <button className="button button-primary" disabled={!feedback.trim() || busy} onClick={submitFeedback} type="button">{humanRepairTakeover ? "生成新规格草稿" : "创建新迭代"} <ArrowIcon /></button>
           </div>
-          <button className="button button-acid" disabled={busy} onClick={acceptCandidate} type="button"><CheckIcon /> 接受候选版本并合并</button>
+          {candidateAcceptanceReady ? <button className="button button-acid" disabled={busy} onClick={acceptCandidate} type="button"><CheckIcon /> 接受候选版本并合并</button> : null}
         </section>
       ) : null}
 

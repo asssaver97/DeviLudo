@@ -62,3 +62,21 @@ test("repair notice distinguishes Agent diagnostics and renders nothing before a
   assert.match(html, /正在解析新配置/);
   assert.doesNotMatch(html, /失败证据包/);
 });
+
+test("repair notice exposes budget exhaustion and a human specification takeover", () => {
+  const workflow = approvedWorkflow("delivery-repair-ui-budget");
+  workflow.signal({ signalId: "repair-ui-budget-failed-1", type: "AGENT_FAILED", diagnosticId: "diagnostic-budget-1" });
+  for (let attempt = 2; attempt <= 3; attempt += 1) {
+    workflow.signal({ signalId: `repair-ui-budget-lock-${attempt}`, type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: `run-config-budget-${attempt}` });
+    workflow.signal({ signalId: `repair-ui-budget-start-${attempt}`, type: "AGENT_STARTED", runId: `run-budget-${attempt}` });
+    workflow.signal({ signalId: `repair-ui-budget-failed-${attempt}`, type: "AGENT_FAILED", diagnosticId: `diagnostic-budget-${attempt}` });
+  }
+
+  const html = render(workflow.current());
+  assert.equal(workflow.current().state, "WAITING_SPEC_APPROVAL");
+  assert.match(html, /data-repair-attempt="3"/);
+  assert.match(html, /等待人工修订/);
+  assert.match(html, /三次自动修复额度已耗尽/);
+  assert.match(html, /等待新规格/);
+  assert.doesNotMatch(html, /后继运行中/);
+});

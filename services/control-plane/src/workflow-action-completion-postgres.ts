@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DEFAULT_AUTOMATIC_REPAIR_LIMIT } from "../../../lib/orchestration/game-delivery";
 import type { DeliverySignal } from "../../temporal/src/contracts";
 import { assertDeliverySignal } from "../../temporal/src/contracts";
 import type {
@@ -143,6 +144,18 @@ type FeedbackInvalidationRow = {
   receipt: unknown;
   invalidated_at: string;
 };
+type HumanRepairOperationRow = {
+  operation_key: string;
+  project_id: string;
+  workflow_id: string;
+  action_id: string;
+  previous_spec_revision_id: string;
+  evidence_invalidation_id: string;
+  signal_id: string;
+  state: string;
+  next_spec_revision_id: string;
+  draft_snapshot: unknown;
+};
 
 type ExternalApprovalSignal = Extract<DeliverySignal, { type: "EXTERNAL_APPROVED" }>;
 type ExternalApprovalAuthorityRow = {
@@ -225,7 +238,11 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
 
       if (input.source === "USER_ACCEPTANCE_SERVICE"
         && (input.signal.type === "USER_ACCEPTED" || input.signal.type === "USER_FEEDBACK")) {
-        await this.#recordUserAcceptance(client, action, input, input.signal);
+        if (action.operation === "REQUEST_SPEC_APPROVAL" && input.signal.type === "USER_FEEDBACK") {
+          await this.#assertHumanRepairRevision(client, action, input, input.signal);
+        } else {
+          await this.#recordUserAcceptance(client, action, input, input.signal);
+        }
       }
 
       if (input.source === "STEAM_APPROVAL_MONITOR" && input.signal.type === "EXTERNAL_APPROVED") {
@@ -492,6 +509,82 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
       return;
     }
     await this.#recordFeedbackInvalidation(client, action, input, signal, authority);
+  }
+
+  async #assertHumanRepairRevision(
+    client: ControlPlaneWorkflowSqlClient,
+    action: ActionRow,
+    input: Parameters<WorkflowActionCompletionPort["complete"]>[0],
+    signal: Extract<DeliverySignal, { type: "USER_FEEDBACK" }>,
+  ): Promise<void> {
+    if (!isHumanRepairBinding(action.binding)
+      || !UUID.test(signal.nextSpecRevisionId) || !UUID.test(signal.evidenceInvalidationId)) invalidAuthority();
+    const operationResult = await client.query<HumanRepairOperationRow>(
+      `SELECT operation_key, project_id::text, workflow_id, action_id::text,
+              previous_spec_revision_id::text, evidence_invalidation_id::text,
+              signal_id, state, next_spec_revision_id::text, draft_snapshot
+         FROM deviludo.user_feedback_operations
+        WHERE tenant_id = $1::uuid AND operation_key = $2
+        FOR SHARE`,
+      [action.tenant_id, input.sourceReceiptId],
+    );
+    const operation = operationResult.rows[0];
+    const draft = operation ? record(operation.draft_snapshot) : {};
+    if (operationResult.rows.length !== 1 || !operation
+      || operation.operation_key !== input.sourceReceiptId
+      || operation.project_id !== action.project_id || operation.workflow_id !== action.workflow_id
+      || operation.action_id !== action.id
+      || operation.previous_spec_revision_id !== action.binding.specRevisionId
+      || operation.evidence_invalidation_id !== signal.evidenceInvalidationId
+      || operation.signal_id !== signal.signalId
+      || (operation.state !== "DRAFT_READY" && operation.state !== "COMPLETED")
+      || operation.next_spec_revision_id !== signal.nextSpecRevisionId
+      || draft.specRevisionId !== signal.nextSpecRevisionId) {
+      throw new WorkflowActionCompletionConflictError("Human repair revision authority is unavailable");
+    }
+
+    const specResult = await client.query<FeedbackSpecAuthorityRow>(
+      `SELECT next.id::text AS next_spec_revision_id,
+              next.state AS next_spec_state,
+              next.revision AS next_spec_revision,
+              next.previous_revision_id::text AS next_previous_revision_id,
+              previous.id::text AS previous_spec_revision_id,
+              previous.state AS previous_spec_state,
+              previous.revision AS previous_spec_revision,
+              conversation.state AS conversation_state,
+              conversation.current_spec_revision_id::text,
+              conversation.current_test_plan_revision_id::text
+         FROM deviludo.immutable_revisions next
+         JOIN deviludo.immutable_revisions previous
+           ON previous.tenant_id = next.tenant_id
+          AND previous.project_id = next.project_id
+          AND previous.id = next.previous_revision_id
+          AND previous.aggregate_type = 'GAME_SPEC'
+          AND previous.aggregate_id = next.aggregate_id
+         JOIN deviludo.spec_conversations conversation
+           ON conversation.tenant_id = next.tenant_id
+          AND conversation.project_id = next.project_id
+          AND conversation.spec_aggregate_id = next.aggregate_id
+          AND conversation.current_spec_revision_id = next.id
+        WHERE next.tenant_id = $1::uuid AND next.project_id = $2::uuid
+          AND next.id = $3::uuid AND next.aggregate_type = 'GAME_SPEC'
+          AND next.previous_revision_id = $4::uuid
+        FOR SHARE OF next, previous, conversation`,
+      [action.tenant_id, action.project_id, signal.nextSpecRevisionId, action.binding.specRevisionId],
+    );
+    const spec = specResult.rows[0];
+    if (specResult.rows.length !== 1 || !spec
+      || spec.next_spec_revision_id !== signal.nextSpecRevisionId
+      || spec.next_spec_state !== "DRAFT"
+      || spec.next_previous_revision_id !== action.binding.specRevisionId
+      || spec.previous_spec_revision_id !== action.binding.specRevisionId
+      || spec.previous_spec_state !== "APPROVED"
+      || spec.next_spec_revision !== spec.previous_spec_revision + 1
+      || spec.conversation_state !== "DRAFT"
+      || spec.current_spec_revision_id !== signal.nextSpecRevisionId
+      || !spec.current_test_plan_revision_id) {
+      throw new WorkflowActionCompletionConflictError("Human repair specification revision authority is unavailable");
+    }
   }
 
   async #recordFeedbackInvalidation(
@@ -768,6 +861,12 @@ function validateSignalBinding(
   source: WorkflowActionCompletionSource,
   signal: DeliverySignal,
 ): void {
+  if (operation === "REQUEST_SPEC_APPROVAL"
+    && source === "USER_ACCEPTANCE_SERVICE"
+    && signal.type === "USER_FEEDBACK"
+    && binding.specRevisionId
+    && signal.nextSpecRevisionId !== binding.specRevisionId
+    && isHumanRepairBinding(binding)) return;
   const allowedSource: Record<Exclude<ControlPlaneWorkflowAction, "CANCEL_DELIVERY">, WorkflowActionCompletionSource> = {
     CONTINUE_IDEA_DIALOGUE: "SPEC_SERVICE",
     REQUEST_SPEC_APPROVAL: "SPEC_SERVICE",
@@ -795,6 +894,16 @@ function validateSignalBinding(
   if (operation === "WAIT_FOR_EXTERNAL_APPROVAL" && signal.type === "EXTERNAL_APPROVED"
     && signal.gate === binding.externalGate && binding.steamBuildId && binding.evidenceBundleId) return;
   invalidBinding();
+}
+
+function isHumanRepairBinding(binding: ControlPlaneWorkflowBinding): boolean {
+  const repair = binding.repairContext;
+  return binding.state === "WAITING_SPEC_APPROVAL"
+    && repair !== null
+    && Number.isSafeInteger(repair.attempt)
+    && repair.attempt >= DEFAULT_AUTOMATIC_REPAIR_LIMIT
+    && (repair.reason === "AGENT_FAILURE" || repair.reason === "E2E_FAILURE")
+    && Boolean(repair.fromRunConfigurationId);
 }
 
 function assertReplay(

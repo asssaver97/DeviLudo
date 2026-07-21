@@ -68,7 +68,7 @@ function completedResult(): IsolatedAgentExecutionResult {
     profileRevisionId: locked.profileRevisionId, installationId: locked.installationId,
     imageDigest: locked.imageDigest, adapterVersion: locked.adapterVersion,
     providerRevisionId: locked.providerRevisionId, credentialVersionId: locked.credentialVersionId,
-    model: locked.model, diagnosticId: null, executionReceiptId: "execution-receipt-r1",
+    model: locked.model, diagnosticId: null, diagnostic: null, executionReceiptId: "execution-receipt-r1",
     candidateArtifact: signGitHubCandidateArtifact({
       schemaVersion: "deviludo.github-candidate.v1", artifactId: "artifact-r1", tenantId, projectId,
       runId, attemptId, specRevisionId: locked.specRevisionId, expectedBaseCommitSha: locked.baseCommitSha,

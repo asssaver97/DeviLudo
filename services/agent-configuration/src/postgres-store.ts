@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { parseEvidenceBundle } from "../../evidence-archive/src/archive";
@@ -81,6 +82,7 @@ type PreviousRunRow = {
   configuration_lock: unknown;
   execution_state: string;
   diagnostic_id: string | null;
+  diagnostic: unknown | null;
   source_baseline_receipt_id: string;
   baseline_operation_key: string;
   baseline_repository_binding_id: string;
@@ -494,6 +496,7 @@ async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentCon
             run.configuration_lock,
             execution.state AS execution_state,
             execution.receipt_payload->>'diagnosticId' AS diagnostic_id,
+            execution.receipt_payload->'diagnostic' AS diagnostic,
             baseline.id::text AS source_baseline_receipt_id,
             baseline.operation_key AS baseline_operation_key,
             baseline.repository_binding_id::text AS baseline_repository_binding_id,
@@ -559,7 +562,17 @@ async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentCon
   let sourceCommitSha = baseline.commitSha;
   let repairSourceDigest = baseline.sourceDigest;
   if (repair.reason === "AGENT_FAILURE") {
-    context = Object.freeze({ ...repair, evidenceBundleDigest: null, failedPlatforms: Object.freeze([]) });
+    const agentDiagnostic = row.diagnostic === null || row.diagnostic === undefined
+      ? null
+      : validateAgentFailureDiagnostic(row.diagnostic);
+    if (agentDiagnostic && (agentDiagnostic.diagnosticId !== repair.diagnosticId
+      || agentDiagnostic.runId !== repair.fromRunConfigurationId)) conflict();
+    // A repair run may itself fail. Continue from that run's immutable source
+    // baseline instead of silently falling back to the original default-branch
+    // snapshot and losing the candidate fixes already under repair.
+    sourceCommitSha = match(previousConfigurationLock.commitSha, SHA1);
+    repairSourceDigest = match(previousConfigurationLock.sourceDigest, SHA256);
+    context = Object.freeze({ ...repair, agentDiagnostic, evidenceBundleDigest: null, failedPlatforms: Object.freeze([]) });
   } else {
     const evidence = await client.query<RepairEvidenceRow>(
       `SELECT attempt.id::text AS attempt_id, attempt.run_id::text AS attempt_run_id,
@@ -615,6 +628,7 @@ async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentCon
     repairSourceDigest = bundle.sourceDigest;
     context = Object.freeze({
       ...repair,
+      agentDiagnostic: null,
       evidenceBundleDigest: evidenceRow.evidence_bundle_digest,
       failedPlatforms: Object.freeze(failedPlatforms),
     });

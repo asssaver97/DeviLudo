@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises"
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { createAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { contentSha256, signGitHubCandidateArtifact } from "../../scm-proxy/src/github-artifacts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
@@ -74,6 +75,7 @@ test("repair work package exposes only the bound predecessor diagnostics and art
     reason: "E2E_FAILURE" as const,
     fromRunConfigurationId: "77777777-7777-4777-8777-777777777777",
     diagnosticId: null,
+    agentDiagnostic: null,
     evidenceBundleId: "88888888-8888-4888-8888-888888888888",
     evidenceBundleDigest: "3".repeat(64),
     repairPromptId: `repair:${"3".repeat(64)}`,
@@ -99,6 +101,46 @@ test("repair work package exposes only the bound predecessor diagnostics and art
   assert.match(work.prompt, new RegExp(repairContext.evidenceBundleDigest));
   assert.match(work.prompt, new RegExp(repairContext.failedPlatforms[0]!.logsDigest));
   assert.doesNotMatch(work.prompt, /api[_-]?key|password/i);
+});
+
+test("Agent failure repair prompt carries the content-addressed structured diagnostic without raw stderr", async () => {
+  const predecessorRunId = "77777777-7777-4777-8777-777777777777";
+  const predecessorAttemptId = "88888888-8888-4888-8888-888888888888";
+  const agentDiagnostic = createAgentFailureDiagnostic({
+    runId: predecessorRunId,
+    attemptId: predecessorAttemptId,
+    stage: "RUNNING_AGENT",
+    error: new Error("Agent completion failed"),
+    process: {
+      exitCode: 1, signal: null, timedOut: false, cancelled: false, durationMs: 42_000,
+      stderr: "raw stderr must not cross the trust boundary", droppedJsonLines: 2,
+      adapter: { eventCount: 18, warningCount: 1, lastEventType: "failed", messages: ["Godot parse error at main.gd:12"] },
+    },
+  });
+  const repairContext = Object.freeze({
+    attempt: 1,
+    reason: "AGENT_FAILURE" as const,
+    fromRunConfigurationId: predecessorRunId,
+    diagnosticId: agentDiagnostic.diagnosticId,
+    agentDiagnostic,
+    evidenceBundleId: null,
+    evidenceBundleDigest: null,
+    repairPromptId: null,
+    candidateCommitSha: null,
+    draftPullRequest: null,
+    failedPlatforms: Object.freeze([]),
+  });
+  const client = fakeClient(async (statement) => statement.includes("FROM deviludo.immutable_revisions spec")
+    ? rows([{ spec_revision_id: specRevisionId, spec_state: "APPROVED", spec_payload: specPayload,
+      spec_digest: sha256Canonical(specPayload), test_plan_revision_id: testPlanRevisionId,
+      test_plan_state: "FROZEN", test_plan_payload: planPayload, test_plan_digest: sha256Canonical(planPayload),
+      bound_test_plan_digest: sha256Canonical(planPayload), bound_target_matrix: ["linux", "windows"] }])
+    : rows([]));
+  const work = await new PostgresAgentDevelopmentWorkPackage(pool(client)).resolve(request({ repairContext }));
+  assert.match(work.prompt, new RegExp(agentDiagnostic.diagnosticId));
+  assert.match(work.prompt, /Godot parse error at main\.gd:12/);
+  assert.match(work.prompt, /AGENT_REPORTED_FAILURE/);
+  assert.doesNotMatch(work.prompt, /raw stderr must not cross/);
 });
 
 test("mTLS ephemeral secret store deposits binary DLRT bytes and returns only an opaque SecretRef", async () => {
@@ -185,7 +227,8 @@ test("locked native executor provisions the baseline and accepts only an atteste
         resolutionDigest: locked.resolutionDigest, profileRevisionId: locked.profileRevisionId,
         installationId: locked.installationId, imageDigest: locked.imageDigest, adapterVersion: locked.adapterVersion,
         providerRevisionId: locked.providerRevisionId, credentialVersionId: locked.credentialVersionId,
-        model: locked.model, executionReceiptId: "microvm-receipt-r1", candidateArtifact: artifact, diagnosticId: null }));
+        model: locked.model, executionReceiptId: "microvm-receipt-r1", candidateArtifact: artifact,
+        diagnosticId: null, diagnostic: null }));
       return { exitCode: 0, stdout: "", stderr: "" };
     } });
   await executor.probe();

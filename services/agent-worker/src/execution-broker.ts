@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import {
   AgentProviderUnavailableError,
   type AgentWorkflowRun,
@@ -278,9 +279,13 @@ function parseReceipt(
   const completed = status === "COMPLETED";
   if (completed && (!SHA1.test(String(body.candidateCommitSha ?? ""))
     || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
-    || body.diagnosticId !== null)) invalidResponse();
+    || body.diagnosticId !== null || body.diagnostic !== null && body.diagnostic !== undefined)) invalidResponse();
   if (!completed && (!SAFE_ID.test(String(body.diagnosticId ?? ""))
     || body.candidateCommitSha !== null || body.draftPullRequest !== null)) invalidResponse();
+  const diagnostic = completed || body.diagnostic === null || body.diagnostic === undefined
+    ? null
+    : validateAgentFailureDiagnostic(body.diagnostic);
+  if (diagnostic && (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== runId)) invalidResponse();
   return Object.freeze({
     status,
     runId,
@@ -294,6 +299,7 @@ function parseReceipt(
     candidateCommitSha: body.candidateCommitSha,
     draftPullRequest: body.draftPullRequest,
     diagnosticId: body.diagnosticId,
+    diagnostic,
     receiptId: body.receiptId,
   }) as AgentWorkflowRunReceipt;
 }

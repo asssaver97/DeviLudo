@@ -1,5 +1,6 @@
 import type { SourceBaselineReceipt, SourceBaselineRequest } from "../../scm-proxy/src/source-baseline-contracts";
 import type { DeliveryRepairContext } from "../../../lib/orchestration/game-delivery";
+import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
 
 export type TargetPlatform = "linux" | "macos" | "windows";
 export type AgentKind = "claude-code" | "codex-cli";
@@ -131,6 +132,7 @@ export interface AgentConfigurationLock {
     readonly reason: "AGENT_FAILURE" | "E2E_FAILURE";
     readonly fromRunConfigurationId: string;
     readonly diagnosticId: string | null;
+    readonly agentDiagnostic: AgentFailureDiagnostic | null;
     readonly evidenceBundleId: string | null;
     readonly evidenceBundleDigest: string | null;
     readonly repairPromptId: string | null;

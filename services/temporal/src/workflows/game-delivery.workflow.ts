@@ -6,7 +6,10 @@ import {
   proxyActivities,
   setHandler,
 } from "@temporalio/workflow";
-import { GameDeliveryWorkflow } from "../../../../lib/orchestration/game-delivery";
+import {
+  DEFAULT_AUTOMATIC_REPAIR_LIMIT,
+  GameDeliveryWorkflow,
+} from "../../../../lib/orchestration/game-delivery";
 import type {
   DeliveryActivities,
   DeliveryCommand,
@@ -24,6 +27,7 @@ export const deliverySignal = defineSignal<[DeliverySignal]>("deliverySignal");
 export const deliverySnapshotQuery = defineQuery<DeliverySnapshot>("deliverySnapshot");
 export const deliveryNextCommandQuery = defineQuery<DeliveryCommand>("deliveryNextCommand");
 export const AUTOMATIC_REPAIR_SUCCESSOR_RUNS_PATCH = "automatic-repair-successor-runs-v1";
+export const BOUNDED_AUTOMATIC_REPAIRS_PATCH = "bounded-automatic-repairs-v1";
 
 const activities = proxyActivities<DeliveryActivities>({
   startToCloseTimeout: "10 minutes",
@@ -47,6 +51,9 @@ export async function gameDeliveryWorkflow(
   const machine = new GameDeliveryWorkflow({
     ...input,
     automaticRepairSuccessorRuns: patched(AUTOMATIC_REPAIR_SUCCESSOR_RUNS_PATCH),
+    automaticRepairLimit: patched(BOUNDED_AUTOMATIC_REPAIRS_PATCH)
+      ? DEFAULT_AUTOMATIC_REPAIR_LIMIT
+      : null,
   });
   const queue: DeliverySignal[] = [];
   let lastDispatchedKey: string | null = null;

@@ -66,6 +66,39 @@ test("projection replay remains compatible with pre-patch terminal-run repair hi
   assert.deepEqual(parseDeliverySnapshot(legacy), legacy);
 });
 
+test("projection replay accepts bounded repair takeover and pre-budget successor histories", () => {
+  const bounded = repairHistoryMachine();
+  for (let attempt = 1; attempt <= 3; attempt += 1) failAgentAttempt(bounded, "bounded", attempt);
+  const takeover = bounded.current() as DeliverySnapshot;
+  assert.equal(takeover.state, "WAITING_SPEC_APPROVAL");
+  assert.deepEqual(parseDeliverySnapshot(takeover), takeover);
+
+  const unbounded = repairHistoryMachine(null);
+  for (let attempt = 1; attempt <= 4; attempt += 1) failAgentAttempt(unbounded, "unbounded", attempt);
+  const legacy = unbounded.current() as DeliverySnapshot;
+  assert.equal(legacy.state, "RESOLVING_AGENT_CONFIGURATION");
+  assert.equal(legacy.repairAttempts, 4);
+  assert.deepEqual(parseDeliverySnapshot(legacy), legacy);
+});
+
+function repairHistoryMachine(automaticRepairLimit: number | null = 3) {
+  const machine = new GameDeliveryWorkflow({
+    workflowId, tenantId, projectId, targetMatrix: ["linux"], automaticRepairLimit,
+  });
+  machine.signal({ signalId: `repair-${automaticRepairLimit ?? "legacy"}-ready`, type: "SPEC_READY", specRevisionId: "spec-r1" });
+  machine.signal({
+    signalId: `repair-${automaticRepairLimit ?? "legacy"}-approved`, type: "SPEC_APPROVED",
+    approvedSpecRevisionId: "spec-r1", testPlanRevisionId: "plan-r1", approvalReceiptId: "approval-r1",
+  });
+  return machine;
+}
+
+function failAgentAttempt(machine: GameDeliveryWorkflow, prefix: string, attempt: number) {
+  machine.signal({ signalId: `${prefix}-lock-${attempt}`, type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: `${prefix}-lock-${attempt}` });
+  machine.signal({ signalId: `${prefix}-start-${attempt}`, type: "AGENT_STARTED", runId: `${prefix}-run-${attempt}` });
+  machine.signal({ signalId: `${prefix}-failed-${attempt}`, type: "AGENT_FAILED", diagnosticId: `${prefix}-diagnostic-${attempt}` });
+}
+
 class MemoryStore implements DeliveryProjectionStore {
   current: DeliveryProjectionView | null = null;
   async persist(input: DeliveryProjectionRequest) {

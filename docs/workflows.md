@@ -31,6 +31,24 @@ commit. A Temporal patch marker preserves replay behavior for histories created
 before successor repair runs, and delivery projection schema v2 can validate
 both history modes.
 
+New workflow histories cap this automatic successor chain at three failed
+attempts. The third failure retains its immutable diagnostic/evidence lineage,
+clears any stale candidate authority and moves to `WAITING_SPEC_APPROVAL`
+instead of resolving a fourth Run. In that state an old approval cannot resume
+development. The user-acceptance service must first commit a new DRAFT spec and
+test plan descended from the currently approved revision; the control plane
+revalidates that draft against the exact exhausted wait before delivering
+`USER_FEEDBACK`. The repair context and counter are cleared only after that
+signal, and the new revision still requires the normal explicit
+`SPEC_APPROVED` gate. A separate Temporal patch marker preserves unbounded
+replay for histories created before repair budgets existed.
+
+Agent failures persist a bounded, secret-redacted and content-addressed
+diagnostic containing the failed runtime stage, exit/timeout classification and
+safe messages. The successor configuration service re-resolves that diagnostic
+from the authoritative failed receipt. Raw stderr, API keys and workspace data
+are never embedded in the workflow signal or repair prompt.
+
 Activity boundaries are:
 
 1. `startLockedAgentRun` in an ephemeral Linux microVM.

@@ -5,6 +5,8 @@ import {
 } from "../../temporal/src/job-processor";
 import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
+import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256_IMAGE = /^sha256:[a-f0-9]{64}$/;
@@ -23,6 +25,7 @@ export interface AgentWorkflowRunReceipt {
   readonly candidateCommitSha: string | null;
   readonly draftPullRequest: number | null;
   readonly diagnosticId: string | null;
+  readonly diagnostic?: AgentFailureDiagnostic | null;
   readonly receiptId: string;
 }
 
@@ -159,10 +162,17 @@ function validateReceipt(receipt: AgentWorkflowRunReceipt, run: AgentWorkflowRun
   if (receipt.status === "COMPLETED") {
     if (!receipt.candidateCommitSha || !SHA1.test(receipt.candidateCommitSha)
       || !Number.isSafeInteger(receipt.draftPullRequest) || (receipt.draftPullRequest as number) < 1
-      || receipt.diagnosticId !== null) throw new Error("Completed Agent workflow receipt is invalid");
+      || receipt.diagnosticId !== null || receipt.diagnostic !== null && receipt.diagnostic !== undefined) {
+      throw new Error("Completed Agent workflow receipt is invalid");
+    }
   } else if (!receipt.diagnosticId || !ID.test(receipt.diagnosticId)
     || receipt.candidateCommitSha !== null || receipt.draftPullRequest !== null) {
     throw new Error("Failed Agent workflow receipt is invalid");
+  } else if (receipt.diagnostic !== null && receipt.diagnostic !== undefined) {
+    const diagnostic = validateAgentFailureDiagnostic(receipt.diagnostic);
+    if (diagnostic.diagnosticId !== receipt.diagnosticId || diagnostic.runId !== receipt.runId) {
+      throw new Error("Failed Agent workflow diagnostic binding is invalid");
+    }
   }
 }
 
@@ -190,6 +200,7 @@ function publicReceipt(receipt: AgentWorkflowRunReceipt): Readonly<Record<string
     candidateCommitSha: receipt.candidateCommitSha,
     draftPullRequest: receipt.draftPullRequest,
     diagnosticId: receipt.diagnosticId,
+    diagnostic: receipt.diagnostic ?? null,
   });
 }
 

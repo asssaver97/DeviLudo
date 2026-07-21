@@ -770,6 +770,7 @@ button {
 }
 
 .repair-state.active { background: #ffe0a0; color: #754500; }
+.repair-state.waiting { background: #ffd6cf; color: #862f20; }
 .repair-state.complete { background: #dff6a5; color: #385700; }
 
 .delivery-repair-notice > p {

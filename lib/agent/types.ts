@@ -180,6 +180,44 @@ export interface AgentDiagnostics {
   readonly messages: readonly string[];
 }
 
+export type AgentFailureStage =
+  | "PREPARING_WORKSPACE"
+  | "STARTING_RELAY"
+  | "STARTING_AGENT"
+  | "RUNNING_AGENT"
+  | "VALIDATING_RESULT"
+  | "BUILDING_CANDIDATE";
+
+export type AgentFailureKind =
+  | "AGENT_REPORTED_FAILURE"
+  | "TIMEOUT"
+  | "CANCELLED"
+  | "RUNTIME_SETUP_FAILURE"
+  | "GUEST_VALIDATION_FAILURE";
+
+/**
+ * Secret-free, content-addressed failure data that may be shown to a successor
+ * Agent. Raw stderr and process environment are intentionally excluded.
+ */
+export interface AgentFailureDiagnostic {
+  readonly schemaVersion: "deviludo.agent-failure-diagnostic.v1";
+  readonly diagnosticId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly kind: AgentFailureKind;
+  readonly stage: AgentFailureStage;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly timedOut: boolean;
+  readonly cancelled: boolean;
+  readonly durationMs: number;
+  readonly droppedJsonLines: number;
+  readonly eventCount: number;
+  readonly warningCount: number;
+  readonly lastEventType: AgentEventType | null;
+  readonly messages: readonly string[];
+}
+
 export interface RuntimeAdapter {
   readonly agent: AgentKind;
   probe(target: InstallationRef | AgentProfileRevision): ProbePlan;

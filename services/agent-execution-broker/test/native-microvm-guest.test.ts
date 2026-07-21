@@ -106,7 +106,14 @@ test("microVM request rejects mutable fields and guest fails closed when the Age
             adapter: Object.freeze({ eventCount: 1, warningCount: 0, messages: [] }) }) })) }); } } });
     const outcome = await guest.execute(request(baselineDigest), { runRoot: root, workspaceRoot: workspace });
     assert.equal(outcome.status, "FAILED");
-    assert.match(outcome.diagnosticId ?? "", /^diag-[a-f0-9]{48}$/);
+    assert.match(outcome.diagnosticId ?? "", /^diag-[a-f0-9]{64}$/);
+    assert.equal(outcome.diagnostic.diagnosticId, outcome.diagnosticId);
+    assert.equal(outcome.diagnostic.runId, runId);
+    assert.equal(outcome.diagnostic.attemptId, attemptId);
+    assert.equal(outcome.diagnostic.kind, "GUEST_VALIDATION_FAILURE");
+    assert.equal(outcome.diagnostic.stage, "BUILDING_CANDIDATE");
+    assert.deepEqual(outcome.diagnostic.messages, ["Native Agent microVM guest changed file count is invalid"]);
+    assert.equal("stderr" in outcome.diagnostic, false);
     assert.equal(outcome.candidateArtifact, null);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

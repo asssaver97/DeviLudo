@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import type { PostgresQueryResult, PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { sourceBaselineOperationKey, type SourceBaselineReceipt } from "../../scm-proxy/src/source-baseline-contracts";
@@ -111,6 +112,8 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
 test("PostgreSQL Agent configuration creates a successor repair run from the failed candidate without resolving moving defaults", async () => {
   const repairActionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const repairClaimToken = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const agentRepairActionId = "12121212-1212-4212-8212-121212121212";
+  const agentRepairClaimToken = "13131313-1313-4313-8313-131313131313";
   const evidenceId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
   const candidateCommitSha = "a".repeat(40);
   const candidateSourceDigest = "b".repeat(64);
@@ -150,13 +153,23 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
   let latestRunId = "";
   let latestLock: Record<string, unknown> | null = null;
   let latestDigest = "";
+  let agentRepairRunId = "";
+  let agentRepairLock: Record<string, unknown> | null = null;
+  let agentRepairDigest = "";
+  let failedDiagnostic: ReturnType<typeof createAgentFailureDiagnostic> | null = null;
   const locks = new Map<string, { lock: Record<string, unknown>; digest: string }>();
   const client = clientWith(async (statement, values) => {
     if (statement.includes("JOIN deviludo.agent_execution_operations execution")) {
-      assert.ok(previousLock);
+      const agentFailure = values[2] === latestRunId;
+      const selectedLock = agentFailure ? latestLock : previousLock;
+      const selectedDigest = agentFailure ? latestDigest : previousDigest;
+      const selectedRunId = agentFailure ? latestRunId : previousRunId;
+      assert.ok(selectedLock);
       return rows([{
-        id: previousRunId, state: "SUCCEEDED", resolution_digest: previousDigest,
-        configuration_lock: previousLock, execution_state: "SUCCEEDED", diagnostic_id: null,
+        id: selectedRunId, state: agentFailure ? "FAILED" : "SUCCEEDED", resolution_digest: selectedDigest,
+        configuration_lock: selectedLock, execution_state: agentFailure ? "FAILED" : "SUCCEEDED",
+        diagnostic_id: agentFailure ? failedDiagnostic?.diagnosticId : null,
+        diagnostic: agentFailure ? failedDiagnostic : null,
         source_baseline_receipt_id: baselineId, baseline_operation_key: sourceBaselineOperationKey(actionId),
         baseline_repository_binding_id: repositoryBindingId, baseline_workflow_id: `delivery-${projectId}`,
         baseline_spec_revision_id: specRevisionId, baseline_test_plan_revision_id: testPlanRevisionId,
@@ -173,9 +186,10 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
       evidence_invalidated_at: null, evidence_manifest: evidence,
     }]);
     if (statement.includes("CROSS JOIN deviludo.admin_catalog_state catalog")) {
-      const isRepair = values[1] === repairActionId;
-      return rows([{ ...authority(isRepair ? catalog() : catalogWithFallback()),
-        ...(isRepair ? {
+      const isE2eRepair = values[1] === repairActionId;
+      const isAgentRepair = values[1] === agentRepairActionId;
+      return rows([{ ...authority(isE2eRepair || isAgentRepair ? catalog() : catalogWithFallback()),
+        ...(isE2eRepair ? {
           action_id: repairActionId,
           binding: { ...binding, repairContext: {
             attempt: 1, reason: "E2E_FAILURE", fromRunConfigurationId: previousRunId,
@@ -183,6 +197,14 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
             repairPromptId: `repair:${evidence.bundleDigest}`, candidateCommitSha, draftPullRequest: 73,
           } },
           claim_token: repairClaimToken,
+        } : isAgentRepair ? {
+          action_id: agentRepairActionId,
+          binding: { ...binding, repairContext: {
+            attempt: 2, reason: "AGENT_FAILURE", fromRunConfigurationId: latestRunId,
+            diagnosticId: failedDiagnostic?.diagnosticId, evidenceBundleId: null,
+            repairPromptId: null, candidateCommitSha: null, draftPullRequest: null,
+          } },
+          claim_token: agentRepairClaimToken,
         } : {}),
       }]);
     }
@@ -193,8 +215,10 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
       locks.set(id, { lock, digest });
       if (!previousRunId) {
         previousRunId = id; previousLock = lock; previousDigest = digest;
-      } else {
+      } else if (!latestRunId) {
         latestRunId = id; latestLock = lock; latestDigest = digest;
+      } else {
+        agentRepairRunId = id; agentRepairLock = lock; agentRepairDigest = digest;
       }
       return rows([]);
     }
@@ -202,7 +226,8 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
       return rows([{ provider_revision_id: String(values[1]) }]);
     }
     if (statement.includes("FROM deviludo.agent_runs") && statement.includes("idempotency_key")) {
-      const id = values[1] === `agent-config:${repairActionId}` ? latestRunId : previousRunId;
+      const id = values[1] === `agent-config:${agentRepairActionId}` ? agentRepairRunId
+        : values[1] === `agent-config:${repairActionId}` ? latestRunId : previousRunId;
       const selected = locks.get(id)!;
       return rows([{ id, state: "QUEUED", resolution_digest: selected.digest, configuration_lock: selected.lock }]);
     }
@@ -235,6 +260,34 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
   assert.deepEqual(failed.map((item) => item.platform), ["windows"]);
   assert.equal(failed[0]?.logsDigest, "a".repeat(64));
   assert.match(latestDigest, /^[a-f0-9]{64}$/);
+
+  failedDiagnostic = createAgentFailureDiagnostic({
+    runId: latestRunId,
+    attemptId: "14141414-1414-4414-8414-141414141414",
+    stage: "RUNNING_AGENT",
+    error: new Error("Agent failed while repairing the Windows export"),
+    process: {
+      exitCode: 1, signal: null, timedOut: false, cancelled: false, durationMs: 12_000,
+      stderr: "must not be persisted", droppedJsonLines: 0,
+      adapter: { eventCount: 9, warningCount: 1, lastEventType: "failed", messages: ["Windows export preset is invalid"] },
+    },
+  });
+  const agentRepaired = await store.lock(Object.freeze({
+    ...claim(), actionId: agentRepairActionId, claimToken: agentRepairClaimToken,
+    repairContext: Object.freeze({
+      attempt: 2, reason: "AGENT_FAILURE" as const, fromRunConfigurationId: latestRunId,
+      diagnosticId: failedDiagnostic.diagnosticId, evidenceBundleId: null, repairPromptId: null,
+      candidateCommitSha: null, draftPullRequest: null,
+    }),
+  }), null);
+  assert.equal(agentRepaired.runId, agentRepairRunId);
+  const observedAgentRepairLock = agentRepairLock as unknown as Record<string, unknown>;
+  assert.equal(observedAgentRepairLock.commitSha, candidateCommitSha);
+  assert.equal(observedAgentRepairLock.sourceDigest, candidateSourceDigest);
+  const agentContext = observedAgentRepairLock.repairContext as Record<string, unknown>;
+  assert.deepEqual(agentContext.agentDiagnostic, failedDiagnostic);
+  assert.equal(agentContext.evidenceBundleDigest, null);
+  assert.match(agentRepairDigest, /^[a-f0-9]{64}$/);
 });
 
 test("PostgreSQL Agent configuration refuses a drifted serving projection without creating a run", async () => {

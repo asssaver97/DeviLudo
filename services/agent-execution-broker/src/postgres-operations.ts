@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
+import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import type { AgentExecutionRequest, AgentExecutionStatus, LockedAgentExecution } from "./contracts";
 import { parseAgentExecutionRequest, validateAgentExecutionStatus, validateAuthoritativeResult } from "./contracts";
@@ -589,18 +590,26 @@ function parseRepairContext(value: unknown, runId: string): LockedAgentExecution
   // immutable in-flight runs remain resumable after the schema rollout.
   if (value === null || value === undefined) return null;
   const body = record(value);
-  const expected = ["attempt", "reason", "fromRunConfigurationId", "diagnosticId", "evidenceBundleId",
+  const expected = ["attempt", "reason", "fromRunConfigurationId", "diagnosticId", "agentDiagnostic", "evidenceBundleId",
     "evidenceBundleDigest", "repairPromptId", "candidateCommitSha", "draftPullRequest", "failedPlatforms"];
-  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(expected.sort())
-    || !Number.isSafeInteger(body.attempt) || (body.attempt as number) < 1
+  const legacyExpected = expected.filter((key) => key !== "agentDiagnostic");
+  const actualKeys = JSON.stringify(Object.keys(body).sort());
+  if (actualKeys !== JSON.stringify(expected.sort()) && actualKeys !== JSON.stringify(legacyExpected.sort())) invalid();
+  const agentDiagnostic = body.agentDiagnostic ?? null;
+  if (!Number.isSafeInteger(body.attempt) || (body.attempt as number) < 1
     || typeof body.fromRunConfigurationId !== "string" || !UUID.test(body.fromRunConfigurationId)
     || body.fromRunConfigurationId === runId || !Array.isArray(body.failedPlatforms)) invalid();
   if (body.reason === "AGENT_FAILURE") {
     if (typeof body.diagnosticId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(body.diagnosticId)
       || body.evidenceBundleId !== null || body.evidenceBundleDigest !== null || body.repairPromptId !== null
       || body.candidateCommitSha !== null || body.draftPullRequest !== null || body.failedPlatforms.length !== 0) invalid();
+    if (agentDiagnostic !== null) {
+      const diagnostic = validateAgentFailureDiagnostic(agentDiagnostic);
+      if (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== body.fromRunConfigurationId) invalid();
+    }
   } else if (body.reason === "E2E_FAILURE") {
-    if (body.diagnosticId !== null || typeof body.evidenceBundleId !== "string" || !UUID.test(body.evidenceBundleId)
+    if (body.diagnosticId !== null || agentDiagnostic !== null
+      || typeof body.evidenceBundleId !== "string" || !UUID.test(body.evidenceBundleId)
       || typeof body.evidenceBundleDigest !== "string" || !SHA256.test(body.evidenceBundleDigest)
       || body.repairPromptId !== `repair:${body.evidenceBundleDigest}`
       || typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
@@ -618,6 +627,6 @@ function parseRepairContext(value: unknown, runId: string): LockedAgentExecution
     return Object.freeze({ ...item }) as RepairPlatform;
   });
   if (new Set(failedPlatforms.map((item) => item.platform)).size !== failedPlatforms.length) invalid();
-  return Object.freeze({ ...body, failedPlatforms: Object.freeze(failedPlatforms) }) as LockedAgentExecution["repairContext"];
+  return Object.freeze({ ...body, agentDiagnostic, failedPlatforms: Object.freeze(failedPlatforms) }) as LockedAgentExecution["repairContext"];
 }
 function invalid(): never { throw new Error("PostgreSQL Agent execution operation is invalid"); }

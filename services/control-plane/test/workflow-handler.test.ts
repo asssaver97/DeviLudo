@@ -563,6 +563,82 @@ test("user feedback atomically tombstones exact candidate evidence before signal
   assert.equal(evidenceUpdates, 1);
 });
 
+test("repair-budget takeover accepts only the feedback service draft bound to the exhausted action", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const outboxId = "44444444-4444-4444-8444-444444444444";
+  const currentSpecId = "55555555-5555-4555-8555-555555555555";
+  const nextSpecId = "66666666-6666-4666-8666-666666666666";
+  const planId = "77777777-7777-4777-8777-777777777777";
+  const revisionReceiptId = "88888888-8888-4888-8888-888888888888";
+  const operationKey = "a".repeat(64);
+  const signal: DeliverySignal = Object.freeze({
+    signalId: "human-repair-feedback-001", type: "USER_FEEDBACK",
+    nextSpecRevisionId: nextSpecId, evidenceInvalidationId: revisionReceiptId,
+  });
+  const repairContext = Object.freeze({
+    attempt: 3, reason: "AGENT_FAILURE" as const,
+    fromRunConfigurationId: "run-configuration-failed-003",
+    diagnosticId: "diagnostic-failed-003", evidenceBundleId: null,
+    repairPromptId: null, candidateCommitSha: null, draftPullRequest: null,
+  });
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation: "REQUEST_SPEC_APPROVAL", status: "WAITING",
+    binding: {
+      state: "WAITING_SPEC_APPROVAL", specRevisionId: currentSpecId,
+      testPlanRevisionId: null, specApprovalReceiptId: null,
+      lockedRunConfigurationId: null, providerRevisionId: null,
+      candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null,
+      mainCommitSha: null, releaseId: null, steamBuildId: null, externalGate: null,
+      cancellationReason: null, repairContext,
+    },
+    completion_signal_id: null, completion_signal_digest: null,
+    completion_source: null, completion_receipt_id: null,
+  };
+  let outboxInsert: readonly unknown[] | undefined;
+  const statements: string[] = [];
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values?: readonly unknown[]) {
+      statements.push(statement);
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("FROM deviludo.user_feedback_operations")) return { rows: [{
+        operation_key: operationKey, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, previous_spec_revision_id: currentSpecId,
+        evidence_invalidation_id: revisionReceiptId, signal_id: signal.signalId,
+        state: "DRAFT_READY", next_spec_revision_id: nextSpecId,
+        draft_snapshot: { specRevisionId: nextSpecId },
+      }] as Row[] };
+      if (statement.includes("FROM deviludo.immutable_revisions next")) return { rows: [{
+        next_spec_revision_id: nextSpecId, next_spec_state: "DRAFT", next_spec_revision: 8,
+        next_previous_revision_id: currentSpecId, previous_spec_revision_id: currentSpecId,
+        previous_spec_state: "APPROVED", previous_spec_revision: 7,
+        conversation_state: "DRAFT", current_spec_revision_id: nextSpecId,
+        current_test_plan_revision_id: planId,
+      }] as Row[] };
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) {
+        outboxInsert = values;
+        return { rows: [], rowCount: 1 };
+      }
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: signal.signalId, signal_digest: outboxInsert?.[5],
+        signal: JSON.parse(String(outboxInsert?.[6])), state: "PENDING",
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    }, release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  const receipt = await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "USER_ACCEPTANCE_SERVICE", sourceReceiptId: operationKey, signal });
+  assert.equal(receipt.outboxId, outboxId);
+  assert.equal(statements.some((statement) => statement.includes("github_candidate_receipts")), false);
+  assert.ok(statements.findIndex((statement) => statement.includes("user_feedback_operations"))
+    < statements.findIndex((statement) => statement.includes("workflow_signal_outbox")));
+});
+
 test("user acceptance cannot merge evidence that feedback already invalidated", async () => {
   const tenantId = "11111111-1111-4111-8111-111111111111";
   const projectId = "22222222-2222-4222-8222-222222222222";

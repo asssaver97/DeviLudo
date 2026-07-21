@@ -24,6 +24,8 @@ export type ExternalApprovalGate =
   | "FIRST_RELEASE"
   | "DEFAULT_BRANCH_CONFIRMATION";
 
+export const DEFAULT_AUTOMATIC_REPAIR_LIMIT = 3;
+
 export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "SPEC_READY"; specRevisionId: string }
   | {
@@ -122,6 +124,7 @@ export interface DeliverySnapshot {
 export class GameDeliveryWorkflow {
   private snapshot: DeliverySnapshot;
   private readonly automaticRepairSuccessorRuns: boolean;
+  private readonly automaticRepairLimit: number | null;
 
   constructor(input: {
     workflowId: string;
@@ -129,9 +132,18 @@ export class GameDeliveryWorkflow {
     projectId: string;
     targetMatrix: readonly TargetPlatform[];
     automaticRepairSuccessorRuns?: boolean;
+    /** null preserves Temporal histories created before repair budgets existed. */
+    automaticRepairLimit?: number | null;
   }) {
     if (!input.targetMatrix.length) throw new Error("A delivery needs at least one target platform");
     this.automaticRepairSuccessorRuns = input.automaticRepairSuccessorRuns ?? true;
+    this.automaticRepairLimit = input.automaticRepairLimit === undefined
+      ? DEFAULT_AUTOMATIC_REPAIR_LIMIT
+      : input.automaticRepairLimit;
+    if (this.automaticRepairLimit !== null
+      && (!Number.isSafeInteger(this.automaticRepairLimit) || this.automaticRepairLimit < 1 || this.automaticRepairLimit > 100)) {
+      throw new Error("Automatic repair limit is invalid");
+    }
     const identity = {
       workflowId: input.workflowId,
       tenantId: input.tenantId,
@@ -213,6 +225,25 @@ export class GameDeliveryWorkflow {
           ? this.commit(signal, { state: "WAITING_SPEC_APPROVAL", specRevisionId: signal.specRevisionId })
           : this.invalid(signal);
       case "WAITING_SPEC_APPROVAL":
+        if (this.snapshot.repairContext) {
+          if (signal.type !== "USER_FEEDBACK"
+            || signal.nextSpecRevisionId === this.snapshot.specRevisionId
+            || !this.repairBudgetExhausted(this.snapshot.repairContext.attempt)) return this.invalid(signal);
+          return this.commit(signal, {
+            specRevisionId: signal.nextSpecRevisionId,
+            testPlanRevisionId: null,
+            specApprovalReceiptId: null,
+            candidateCommitSha: null,
+            draftPullRequest: null,
+            evidenceBundleId: null,
+            candidateEvidenceBundleId: null,
+            lockedRunConfigurationId: null,
+            runId: null,
+            repairAttempts: 0,
+            repairContext: null,
+            iteration: this.snapshot.iteration + 1,
+          });
+        }
         return signal.type === "SPEC_APPROVED"
           ? this.commit(signal, {
               state: "RESOLVING_AGENT_CONFIGURATION",
@@ -253,21 +284,30 @@ export class GameDeliveryWorkflow {
           }
           if (!this.snapshot.lockedRunConfigurationId) return this.invalid(signal);
           const attempt = this.snapshot.repairAttempts + 1;
+          const repairContext = Object.freeze({
+            attempt,
+            reason: "AGENT_FAILURE" as const,
+            fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
+            diagnosticId: signal.diagnosticId,
+            evidenceBundleId: null,
+            repairPromptId: null,
+            candidateCommitSha: null,
+            draftPullRequest: null,
+          });
           return this.commit(signal, {
-            state: "RESOLVING_AGENT_CONFIGURATION",
+            state: this.repairBudgetExhausted(attempt)
+              ? "WAITING_SPEC_APPROVAL"
+              : "RESOLVING_AGENT_CONFIGURATION",
             lockedRunConfigurationId: null,
             runId: null,
-            repairAttempts: attempt,
-            repairContext: Object.freeze({
-              attempt,
-              reason: "AGENT_FAILURE",
-              fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
-              diagnosticId: signal.diagnosticId,
-              evidenceBundleId: null,
-              repairPromptId: null,
+            ...(this.automaticRepairLimit !== null ? {
               candidateCommitSha: null,
               draftPullRequest: null,
-            }),
+              evidenceBundleId: null,
+              candidateEvidenceBundleId: null,
+            } : {}),
+            repairAttempts: attempt,
+            repairContext,
           });
         }
         return this.invalid(signal);
@@ -296,22 +336,29 @@ export class GameDeliveryWorkflow {
             return this.invalid(signal);
           }
           const attempt = this.snapshot.repairAttempts + 1;
+          const repairContext = Object.freeze({
+            attempt,
+            reason: "E2E_FAILURE" as const,
+            fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
+            diagnosticId: null,
+            evidenceBundleId: signal.evidenceBundleId,
+            repairPromptId: signal.repairPromptId,
+            candidateCommitSha: this.snapshot.candidateCommitSha,
+            draftPullRequest: this.snapshot.draftPullRequest,
+          });
+          const exhausted = this.repairBudgetExhausted(attempt);
           return this.commit(signal, {
-            state: "RESOLVING_AGENT_CONFIGURATION",
+            state: exhausted ? "WAITING_SPEC_APPROVAL" : "RESOLVING_AGENT_CONFIGURATION",
             evidenceBundleId: signal.evidenceBundleId,
             lockedRunConfigurationId: null,
             runId: null,
+            ...(exhausted ? {
+              candidateCommitSha: null,
+              draftPullRequest: null,
+              candidateEvidenceBundleId: null,
+            } : {}),
             repairAttempts: attempt,
-            repairContext: Object.freeze({
-              attempt,
-              reason: "E2E_FAILURE",
-              fromRunConfigurationId: this.snapshot.lockedRunConfigurationId,
-              diagnosticId: null,
-              evidenceBundleId: signal.evidenceBundleId,
-              repairPromptId: signal.repairPromptId,
-              candidateCommitSha: this.snapshot.candidateCommitSha,
-              draftPullRequest: this.snapshot.draftPullRequest,
-            }),
+            repairContext,
           });
         }
         return this.invalid(signal);
@@ -423,6 +470,10 @@ export class GameDeliveryWorkflow {
     ];
     this.snapshot = deepFreeze({ ...this.snapshot, ...changes, history });
     return this.current();
+  }
+
+  private repairBudgetExhausted(attempt: number): boolean {
+    return this.automaticRepairLimit !== null && attempt >= this.automaticRepairLimit;
   }
 
   private invalid(signal: DeliverySignal): never {

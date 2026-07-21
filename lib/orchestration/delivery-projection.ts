@@ -1,5 +1,6 @@
 import {
   assertDeliverySignal,
+  DEFAULT_AUTOMATIC_REPAIR_LIMIT,
   GameDeliveryWorkflow,
   type DeliverySignal,
   type DeliverySnapshot,
@@ -113,8 +114,9 @@ export function parseDeliverySnapshot(value: unknown): DeliverySnapshot {
     invalid("Delivery target matrix is not canonical");
   }
   const history = parseHistory(candidate.history as unknown[]);
-  const replayed = replaySnapshot(candidate, targetMatrix, history, true)
-    ?? replaySnapshot(candidate, targetMatrix, history, false);
+  const replayed = replaySnapshot(candidate, targetMatrix, history, true, DEFAULT_AUTOMATIC_REPAIR_LIMIT)
+    ?? replaySnapshot(candidate, targetMatrix, history, true, null)
+    ?? replaySnapshot(candidate, targetMatrix, history, false, null);
   if (!replayed) invalid("Delivery snapshot does not match deterministic workflow replay");
   return replayed;
 }
@@ -124,6 +126,7 @@ function replaySnapshot(
   targetMatrix: readonly TargetPlatform[],
   history: readonly Readonly<{ signal: DeliverySignal; resultingState: DeliveryState }>[],
   automaticRepairSuccessorRuns: boolean,
+  automaticRepairLimit: number | null,
 ): DeliverySnapshot | null {
   const machine = new GameDeliveryWorkflow({
     workflowId: candidate.workflowId as string,
@@ -131,6 +134,7 @@ function replaySnapshot(
     projectId: candidate.projectId as string,
     targetMatrix,
     automaticRepairSuccessorRuns,
+    automaticRepairLimit,
   });
   try {
     for (const entry of history) {

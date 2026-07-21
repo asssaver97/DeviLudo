@@ -203,3 +203,91 @@ test("terminal Agent failure also resolves a fresh run instead of reusing the fa
     draftPullRequest: null,
   });
 });
+
+test("automatic repair budget stops after three failures and requires a human specification revision", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-repair-budget", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
+  });
+  workflow.signal({ signalId: "budget-signal-001", type: "SPEC_READY", specRevisionId: "SPEC-DRAFT-001" });
+  workflow.signal({
+    signalId: "budget-signal-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001",
+    testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-budget-001",
+  });
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    workflow.signal({
+      signalId: `budget-lock-${attempt.toString().padStart(3, "0")}`,
+      type: "RUN_CONFIGURATION_LOCKED",
+      lockedRunConfigurationId: `run-config-budget-${attempt}`,
+    });
+    workflow.signal({
+      signalId: `budget-start-${attempt.toString().padStart(3, "0")}`,
+      type: "AGENT_STARTED",
+      runId: `run-budget-${attempt}`,
+    });
+    workflow.signal({
+      signalId: `budget-failed-${attempt.toString().padStart(3, "0")}`,
+      type: "AGENT_FAILED",
+      diagnosticId: `diagnostic-budget-${attempt}`,
+    });
+    assert.equal(workflow.current().repairAttempts, attempt);
+    assert.equal(workflow.current().state, attempt < 3 ? "RESOLVING_AGENT_CONFIGURATION" : "WAITING_SPEC_APPROVAL");
+  }
+
+  assert.equal(workflow.nextCommand(), "REQUEST_SPEC_APPROVAL");
+  assert.equal(workflow.current().repairContext.attempt, 3);
+  assert.equal(workflow.current().lockedRunConfigurationId, null);
+  assert.equal(workflow.current().runId, null);
+  assert.throws(() => workflow.signal({
+    signalId: "budget-reapprove-old", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001",
+    testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-budget-old",
+  }), /invalid while delivery is WAITING_SPEC_APPROVAL/);
+  assert.throws(() => workflow.signal({
+    signalId: "budget-same-draft", type: "USER_FEEDBACK", nextSpecRevisionId: "SPEC-APPROVED-001",
+    evidenceInvalidationId: "human-revision-receipt-001",
+  }), /invalid while delivery is WAITING_SPEC_APPROVAL/);
+
+  workflow.signal({
+    signalId: "budget-human-draft", type: "USER_FEEDBACK", nextSpecRevisionId: "SPEC-DRAFT-002",
+    evidenceInvalidationId: "human-revision-receipt-002",
+  });
+  assert.equal(workflow.current().state, "WAITING_SPEC_APPROVAL");
+  assert.equal(workflow.current().specRevisionId, "SPEC-DRAFT-002");
+  assert.equal(workflow.current().repairAttempts, 0);
+  assert.equal(workflow.current().repairContext, null);
+  assert.equal(workflow.current().iteration, 2);
+
+  workflow.signal({
+    signalId: "budget-approve-new", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-002",
+    testPlanRevisionId: "PLAN-002", approvalReceiptId: "approval-budget-002",
+  });
+  assert.equal(workflow.current().state, "RESOLVING_AGENT_CONFIGURATION");
+  assert.equal(workflow.current().specRevisionId, "SPEC-APPROVED-002");
+});
+
+test("an exhausted E2E repair budget preserves failed lineage but clears stale candidate authority", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-e2e-budget", tenantId: "tenant-1", projectId: "project-1",
+    targetMatrix: ["linux"], automaticRepairLimit: 1,
+  });
+  workflow.signal({ signalId: "e2e-budget-ready", type: "SPEC_READY", specRevisionId: "SPEC-DRAFT-001" });
+  workflow.signal({
+    signalId: "e2e-budget-approved", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001",
+    testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-e2e-budget",
+  });
+  workflow.signal({ signalId: "e2e-budget-locked", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-e2e-budget" });
+  workflow.signal({ signalId: "e2e-budget-started", type: "AGENT_STARTED", runId: "run-e2e-budget" });
+  workflow.signal({ signalId: "e2e-budget-complete", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 71 });
+  workflow.signal({
+    signalId: "e2e-budget-failed", type: "E2E_FAILED", evidenceBundleId: "evidence-e2e-budget",
+    repairPromptId: "repair-prompt-e2e-budget",
+  });
+
+  assert.equal(workflow.current().state, "WAITING_SPEC_APPROVAL");
+  assert.equal(workflow.current().candidateCommitSha, null);
+  assert.equal(workflow.current().draftPullRequest, null);
+  assert.equal(workflow.current().candidateEvidenceBundleId, null);
+  assert.equal(workflow.current().repairContext.candidateCommitSha, candidateSha);
+  assert.equal(workflow.current().repairContext.draftPullRequest, 71);
+  assert.equal(workflow.current().repairContext.evidenceBundleId, "evidence-e2e-budget");
+});

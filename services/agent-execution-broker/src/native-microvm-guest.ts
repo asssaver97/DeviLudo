@@ -5,10 +5,12 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getRuntimeAdapter } from "../../../adapters";
 import {
   DEFAULT_RUNTIME_PERMISSIONS,
+  type AgentFailureStage,
   type AgentProfileRevision,
   type RunContext,
   type RunHandle,
 } from "../../../lib/agent/types";
+import { createAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import type { AgentExecutionRequest, SupervisedRun } from "../../agent-worker/src/contracts";
 import { AgentExecutionSupervisor } from "../../agent-worker/src/supervisor";
 import { sha256Canonical } from "../../runner-control/src/canonical";
@@ -82,6 +84,8 @@ export class NativeMicrovmAgentGuest {
   async execute(value: unknown, paths: Readonly<{ runRoot: string; workspaceRoot: string }>): Promise<IsolatedAgentExecutionResult> {
     const request = parseNativeMicrovmAgentRequest(value);
     const roots = await validateRoots(paths.runRoot, paths.workspaceRoot);
+    let stage: AgentFailureStage = "PREPARING_WORKSPACE";
+    let completion: Awaited<SupervisedRun["completion"]> | null = null;
     try {
       const startedAt = validNow(this.#now());
       const remainingSeconds = Math.floor((Date.parse(request.inferenceAuthorizationExpiresAt) - startedAt.getTime() - 30_000) / 1_000);
@@ -91,8 +95,8 @@ export class NativeMicrovmAgentGuest {
       if (remainingSeconds < 60) invalid("DLRT lifetime");
       const before = await scanRepository(roots.workspaceRoot);
       if (sourceDigest(before) !== request.sourceDigest) invalid("baseline source digest");
+      stage = "STARTING_RELAY";
       const relay = await this.#relay.start(request);
-      let completion: Awaited<SupervisedRun["completion"]>;
       try {
         const adapter = getRuntimeAdapter(request.agent);
         const profile = profileFrom(request, Math.min(request.budget.timeoutSeconds, remainingSeconds));
@@ -113,15 +117,19 @@ export class NativeMicrovmAgentGuest {
         const runHandle: RunHandle = Object.freeze({ runId: request.runId, attemptId: request.attemptId,
           agent: request.agent, executorHandle: `microvm-${request.attemptId}` });
         const supervisor = this.#supervisor ?? new AgentExecutionSupervisor({ secretResolver: relay.secretResolver });
+        stage = "STARTING_AGENT";
         const supervised = await supervisor.start({ adapter, runHandle, installationProbe: adapter.probe(profile),
           runtimeSpec, workerRunRoot: roots.runRoot, workspaceRoot: roots.workspaceRoot });
+        stage = "RUNNING_AGENT";
         completion = await supervised.completion;
       } finally { await relay.close(); }
+      stage = "VALIDATING_RESULT";
       if (completion.status !== "completed" || completion.result.status !== "completed") invalid("Agent completion");
       if (!Number.isSafeInteger(completion.result.usage.inputTokens) || completion.result.usage.inputTokens < 0
         || !Number.isSafeInteger(completion.result.usage.outputTokens) || completion.result.usage.outputTokens < 0
         || !Number.isFinite(completion.result.usage.costUsd) || completion.result.usage.costUsd < 0
         || completion.result.usage.costUsd > request.budget.maxUsd) invalid("Agent usage");
+      stage = "BUILDING_CANDIDATE";
       const after = await scanRepository(roots.workspaceRoot);
       const changes = await buildChanges(before, after);
       const verifiedAfter = await scanRepository(roots.workspaceRoot);
@@ -149,13 +157,22 @@ export class NativeMicrovmAgentGuest {
         executionReceiptId: `microvm-${request.attemptId}`,
         candidateArtifact: artifact,
         diagnosticId: null,
+        diagnostic: null,
       });
     } catch (error) {
+      const diagnostic = createAgentFailureDiagnostic({
+        runId: request.runId,
+        attemptId: request.attemptId,
+        stage,
+        error,
+        process: completion?.diagnostics ?? null,
+      });
       return result(request, {
         status: "FAILED",
         executionReceiptId: `microvm-${request.attemptId}`,
         candidateArtifact: null,
-        diagnosticId: diagnosticId(request, error),
+        diagnosticId: diagnostic.diagnosticId,
+        diagnostic,
       });
     }
   }
@@ -280,13 +297,14 @@ function validateSignedArtifact(artifact: SignedGitHubCandidateArtifact, core: G
 }
 
 function result(request: NativeMicrovmAgentRequest, outcome: Pick<IsolatedAgentExecutionResult,
-  "status" | "executionReceiptId" | "candidateArtifact" | "diagnosticId">): IsolatedAgentExecutionResult {
+  "status" | "executionReceiptId" | "candidateArtifact" | "diagnosticId" | "diagnostic">): IsolatedAgentExecutionResult {
   return Object.freeze({ status: outcome.status, runId: request.runId, attemptId: request.attemptId,
     resolutionDigest: request.resolutionDigest, profileRevisionId: request.profileRevisionId,
     installationId: request.installationId, imageDigest: request.imageDigest, adapterVersion: request.adapterVersion,
     providerRevisionId: request.providerRevisionId, credentialVersionId: request.credentialVersionId,
     model: request.model, executionReceiptId: outcome.executionReceiptId,
-    candidateArtifact: outcome.candidateArtifact, diagnosticId: outcome.diagnosticId }) as IsolatedAgentExecutionResult;
+    candidateArtifact: outcome.candidateArtifact, diagnosticId: outcome.diagnosticId,
+    diagnostic: outcome.diagnostic }) as IsolatedAgentExecutionResult;
 }
 
 async function validateRoots(runRootValue: string, workspaceRootValue: string): Promise<Readonly<{ runRoot: string; workspaceRoot: string }>> {
@@ -309,11 +327,6 @@ function assertIdentity(actual: Awaited<ReturnType<Awaited<ReturnType<typeof ope
   if (!actual.isFile() || actual.size !== expected.size || actual.mtimeMs !== expected.mtimeMs || actual.ctimeMs !== expected.ctimeMs) {
     invalid("repository mutation");
   }
-}
-function diagnosticId(request: NativeMicrovmAgentRequest, error: unknown): string {
-  const kind = error instanceof Error ? error.name : typeof error;
-  const detail = error instanceof Error ? error.message : String(error);
-  return `diag-${createHash("sha256").update(`${request.runId}:${request.attemptId}:${kind}:${detail}`).digest("hex").slice(0, 48)}`;
 }
 function validNow(value: Date): Date { if (!(value instanceof Date) || !Number.isFinite(value.getTime())) invalid("clock"); return value; }
 function invalid(label: string): never { throw new Error(`Native Agent microVM guest ${label} is invalid`); }

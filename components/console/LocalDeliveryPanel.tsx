@@ -45,7 +45,12 @@ const productionStageLabels: Record<DeliveryState, string> = {
 
 export type DeliveryPanelStatus =
   | { readonly mode: "LOCAL_D1"; readonly stage: LocalDeliveryStage; readonly specRevisionId: string }
-  | { readonly mode: "PRODUCTION"; readonly stage: DeliveryState; readonly specRevisionId: string | null };
+  | {
+      readonly mode: "PRODUCTION";
+      readonly stage: DeliveryState;
+      readonly specRevisionId: string | null;
+      readonly humanRepairTakeover: boolean;
+    };
 
 type ProductionProjection = {
   readonly snapshot: DeliverySnapshot;
@@ -106,7 +111,12 @@ export function LocalDeliveryPanel({
             setSnapshot(null);
             setAgentPreflight(null);
             setProduction({ snapshot: value, projectedAt: payload.meta.projectedAt, snapshotDigest: payload.meta.snapshotDigest });
-            onStatus?.({ mode: "PRODUCTION", stage: value.state, specRevisionId: value.specRevisionId });
+            onStatus?.({
+              mode: "PRODUCTION",
+              stage: value.state,
+              specRevisionId: value.specRevisionId,
+              humanRepairTakeover: value.state === "WAITING_SPEC_APPROVAL" && value.repairContext !== null,
+            });
           } else {
             publish(payload.data as LocalDeliverySnapshot);
           }

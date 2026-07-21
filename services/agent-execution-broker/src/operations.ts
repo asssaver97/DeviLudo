@@ -168,6 +168,7 @@ function authoritativeResult(isolated: IsolatedAgentExecutionResult, lock: Locke
     candidateCommitSha: candidate?.candidateCommitSha ?? null,
     draftPullRequest: candidate?.draftPullRequest ?? null,
     diagnosticId: isolated.diagnosticId,
+    diagnostic: isolated.diagnostic,
     receiptId: candidate?.receiptId ?? isolated.executionReceiptId,
   });
 }
@@ -186,6 +187,7 @@ function workflowReceipt(result: AuthoritativeAgentExecutionResult, lock: Locked
     candidateCommitSha: result.candidateCommitSha,
     draftPullRequest: result.draftPullRequest,
     diagnosticId: result.diagnosticId,
+    diagnostic: result.diagnostic,
     receiptId: result.receiptId,
   });
 }

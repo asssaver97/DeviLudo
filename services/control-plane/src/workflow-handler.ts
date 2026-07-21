@@ -166,6 +166,9 @@ function bindingFor(job: ClaimedWorkflowJob, operation: ControlPlaneWorkflowActi
 
   if (operation === "REQUEST_SPEC_APPROVAL") {
     specRevisionId = requiredId(snapshot.specRevisionId);
+    repairContext = snapshot.repairContext
+      ? validateRepairContext(snapshot.repairContext, snapshot.repairAttempts)
+      : null;
   } else if (operation === "RESOLVE_AGENT_RUN_CONFIGURATION") {
     specRevisionId = requiredId(snapshot.specRevisionId);
     testPlanRevisionId = requiredId(snapshot.testPlanRevisionId);

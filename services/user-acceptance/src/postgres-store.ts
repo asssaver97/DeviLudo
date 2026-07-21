@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  DEFAULT_AUTOMATIC_REPAIR_LIMIT,
+  type DeliveryRepairContext,
+} from "../../../lib/orchestration/game-delivery";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import {
   parseSpecModelResult,
@@ -46,6 +50,7 @@ type OperationRow = {
 type AuthorityRow = {
   workflow_id: string;
   action_id: string;
+  action_operation: "REQUEST_USER_ACCEPTANCE" | "REQUEST_SPEC_APPROVAL";
   binding: unknown;
   conversation_id: string;
   conversation_state: string;
@@ -375,7 +380,8 @@ async function selectOperation(client: PostgresWorkflowClient, tenantId: string,
 
 async function selectAuthority(client: PostgresWorkflowClient, tenantId: string, projectId: string, actionId: string | null): Promise<readonly AuthorityRow[]> {
   const selected = await client.query<AuthorityRow>(
-    `SELECT action.workflow_id, action.id::text AS action_id, action.binding,
+    `SELECT action.workflow_id, action.id::text AS action_id,
+            action.operation AS action_operation, action.binding,
             conversation.id::text AS conversation_id,
             conversation.state AS conversation_state,
             conversation.spec_aggregate_id::text,
@@ -406,7 +412,12 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
         AND plan.aggregate_type = 'TEST_PLAN'
         AND plan.aggregate_id = conversation.test_plan_aggregate_id
       WHERE action.tenant_id = $1::uuid AND action.project_id = $2::uuid
-        AND action.operation = 'REQUEST_USER_ACCEPTANCE'
+        AND (action.operation = 'REQUEST_USER_ACCEPTANCE' OR (
+          action.operation = 'REQUEST_SPEC_APPROVAL'
+          AND action.binding->>'state' = 'WAITING_SPEC_APPROVAL'
+          AND action.binding->'repairContext'->>'attempt' ~ '^[0-9]+$'
+          AND (action.binding->'repairContext'->>'attempt')::integer >= ${DEFAULT_AUTOMATIC_REPAIR_LIMIT}
+        ))
         AND action.status = 'WAITING'
         AND ($3::text IS NULL OR action.id::text = $3)
         AND conversation.state = 'APPROVED'
@@ -429,6 +440,7 @@ function parseAuthority(row: AuthorityRow) {
   const revision = Number(row.spec_revision);
   const planRevision = Number(row.test_plan_revision);
   const binding = object(row.binding);
+  const humanRepair = isHumanRepairAuthority(row.action_operation, binding);
   if (!UUID.test(row.action_id) || !UUID.test(row.conversation_id)
     || !UUID.test(row.spec_aggregate_id) || !UUID.test(row.test_plan_aggregate_id)
     || !UUID.test(row.spec_revision_id) || !UUID.test(row.test_plan_revision_id)
@@ -436,9 +448,9 @@ function parseAuthority(row: AuthorityRow) {
     || row.test_plan_state !== "FROZEN" || !Number.isSafeInteger(revision)
     || revision < 1 || planRevision !== revision
     || binding.specRevisionId !== row.spec_revision_id
-    || typeof binding.candidateCommitSha !== "string" || !SHA1.test(binding.candidateCommitSha)
-    || !Number.isSafeInteger(binding.draftPullRequest) || (binding.draftPullRequest as number) < 1
-    || typeof binding.evidenceBundleId !== "string" || !UUID.test(binding.evidenceBundleId)
+    || (!humanRepair && (typeof binding.candidateCommitSha !== "string" || !SHA1.test(binding.candidateCommitSha)))
+    || (!humanRepair && (!Number.isSafeInteger(binding.draftPullRequest) || (binding.draftPullRequest as number) < 1))
+    || (!humanRepair && (typeof binding.evidenceBundleId !== "string" || !UUID.test(binding.evidenceBundleId)))
     || !SHA256.test(row.spec_payload_digest) || !SHA256.test(row.test_plan_payload_digest)
     || specDigest(row.spec_payload) !== row.spec_payload_digest
     || specDigest(row.test_plan_payload) !== row.test_plan_payload_digest) invalid();
@@ -463,6 +475,19 @@ function parseAuthority(row: AuthorityRow) {
     revision,
     current,
   });
+}
+
+function isHumanRepairAuthority(
+  operation: AuthorityRow["action_operation"],
+  binding: Record<string, unknown>,
+): boolean {
+  if (operation === "REQUEST_USER_ACCEPTANCE") return false;
+  if (operation !== "REQUEST_SPEC_APPROVAL" || binding.state !== "WAITING_SPEC_APPROVAL") invalid();
+  const repair = object(binding.repairContext) as Partial<DeliveryRepairContext>;
+  if (!Number.isSafeInteger(repair.attempt) || (repair.attempt as number) < DEFAULT_AUTOMATIC_REPAIR_LIMIT
+    || (repair.reason !== "AGENT_FAILURE" && repair.reason !== "E2E_FAILURE")
+    || typeof repair.fromRunConfigurationId !== "string" || !repair.fromRunConfigurationId) invalid();
+  return true;
 }
 
 async function readMessages(client: PostgresWorkflowClient, tenantId: string, conversationId: string): Promise<readonly SpecDialogueMessage[]> {

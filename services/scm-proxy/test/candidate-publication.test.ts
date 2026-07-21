@@ -96,7 +96,7 @@ test("PostgreSQL publication authority accepts only the exact predecessor candid
     sourceDigest: predecessorSourceDigest,
     repairContext: {
       attempt: 1, reason: "E2E_FAILURE", fromRunConfigurationId: predecessorRunId,
-      diagnosticId: null, evidenceBundleId: "99999999-9999-4999-8999-999999999999",
+      diagnosticId: null, agentDiagnostic: null, evidenceBundleId: "99999999-9999-4999-8999-999999999999",
       evidenceBundleDigest: "1".repeat(64), repairPromptId: `repair:${"1".repeat(64)}`,
       candidateCommitSha: baseCommitSha, draftPullRequest: 64, failedPlatforms: [],
     },
