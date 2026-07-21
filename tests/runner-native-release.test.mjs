@@ -9,6 +9,7 @@ import {
   buildRunnerNativeCandidates,
   parseRunnerNativeBuildArguments,
 } from "../scripts/production/build-runner-native.mjs";
+import { parseRunnerNativeFinalizationArguments } from "../scripts/production/finalize-runner-native-release.mjs";
 import {
   canonicalJson,
   runnerNativeTrustPolicyDigest,
@@ -16,7 +17,12 @@ import {
   validateRunnerNativeBuildReceipt,
   validateRunnerNativeTrustPolicy,
   verifyRunnerNativeRelease,
+  verifyRunnerNativeReleaseEnvelope,
 } from "../scripts/production/runner-native-release.mjs";
+import {
+  MtlsRunnerNativeReleaseSigner,
+  prepareRunnerNativeReleaseClaims,
+} from "../scripts/production/runner-native-finalizer.mjs";
 import {
   inspectRunnerNativeTrustPolicy,
   parseRunnerNativeTrustInspectionArguments,
@@ -210,6 +216,78 @@ test("target host accepts only a signed release bound to final files, candidate 
   }), /trust policy is invalid/);
 });
 
+test("finalizer hashes native-signed files, verifies identities and obtains one locally verified KMS envelope", async () => {
+  const artifactDirectory = await mkdtemp(join(tmpdir(), "deviludo-native-final-artifacts-"));
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), "deviludo-native-final-evidence-"));
+  const bodies = new Map([
+    ["godot-testkit", Buffer.from("native-signed-testkit\n")],
+    ["physical-runner", Buffer.from("native-signed-runner\n")],
+  ]);
+  const buildReceipt = buildReceiptFor(bodies);
+  for (const candidate of buildReceipt.artifacts) {
+    const body = bodies.get(candidate.component);
+    await Promise.all([
+      writeFile(resolve(artifactDirectory, candidate.fileName), body),
+      writeFile(resolve(evidenceDirectory, `${candidate.component}.signing-evidence.json`), JSON.stringify({
+        schemaVersion: "deviludo.runner-native-signing-evidence.v1",
+        component: candidate.component,
+        candidateDigest: candidate.candidateDigest,
+        releasedDigest: digest(body),
+        sizeBytes: body.length,
+        nativeSignature: nativeSignature(candidate.component),
+      })),
+    ]);
+  }
+  const claims = await prepareRunnerNativeReleaseClaims(buildReceipt, {
+    artifactDirectory,
+    evidenceDirectory,
+    releaseId: "33333333-3333-4333-8333-333333333333",
+    publishedAt: "2026-07-22T00:05:00.000Z",
+    inspectIdentity: async ({ component }) => identity(component),
+  });
+  const calls = [];
+  const signer = new MtlsRunnerNativeReleaseSigner({
+    endpoint: "https://runner-kms.internal:8443",
+    keyId,
+    tls: { key: Buffer.alloc(64, 1), cert: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
+    request: async (input) => {
+      calls.push(input);
+      const body = JSON.parse(input.body);
+      return {
+        statusCode: 200,
+        body: {
+          schemaVersion: "deviludo.runner-native-release-signing-response.v1",
+          algorithm: "Ed25519",
+          keyId,
+          claimsDigest: body.claimsDigest,
+          signature: sign(null, Buffer.from(body.signingInput, "base64url"), keyPair.privateKey).toString("base64url"),
+        },
+      };
+    },
+  });
+  const release = await signer.sign(claims, buildReceipt, policy, policyDigest, new Date("2026-07-22T00:10:00.000Z"));
+  const verified = verifyRunnerNativeReleaseEnvelope(release, buildReceipt, policy, policyDigest, {
+    now: new Date("2026-07-22T00:10:00.000Z"),
+  });
+  assert.deepEqual(verified.claims, claims);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url.href, "https://runner-kms.internal:8443/v1/runner-native-releases/sign-ed25519");
+  assert.equal(calls[0].headers["idempotency-key"], claims.releaseId);
+  assert.ok(!calls[0].body.includes("privateKey"));
+  await assert.rejects(prepareRunnerNativeReleaseClaims(buildReceipt, {
+    artifactDirectory,
+    evidenceDirectory,
+    releaseId: claims.releaseId,
+    publishedAt: claims.publishedAt,
+    inspectIdentity: async () => ({ ...identity("godot-testkit"), sourceRevision: "b".repeat(40) }),
+  }), /finalization is invalid/);
+  assert.throws(() => new MtlsRunnerNativeReleaseSigner({
+    endpoint: "http://runner-kms.internal",
+    keyId,
+    tls: { key: Buffer.alloc(64), cert: Buffer.alloc(64), ca: Buffer.alloc(64) },
+  }), /finalization is invalid/);
+});
+
 test("verification CLI requires all absolute files and the reviewed policy digest", () => {
   assert.deepEqual(parseRunnerNativeVerificationArguments([
     "--release", "/private/reviewed/release.json",
@@ -231,6 +309,25 @@ test("verification CLI requires all absolute files and the reviewed policy diges
     "--build-receipt", "/private/reviewed/build.json",
     "--trust-policy", "/private/reviewed/policy.json",
   ]), /input is invalid/);
+  assert.deepEqual(parseRunnerNativeFinalizationArguments([
+    "--output", "/private/reviewed/release.json",
+    "--evidence", "/private/reviewed/evidence",
+    "--artifacts", "/private/reviewed/artifacts",
+    "--release-id", "33333333-3333-4333-8333-333333333333",
+    "--published-at", "2026-07-22T00:05:00.000Z",
+    "--trust-policy-digest", policyDigest,
+    "--build-receipt", "/private/reviewed/build.json",
+    "--trust-policy", "/private/reviewed/policy.json",
+  ]), {
+    artifactDirectory: "/private/reviewed/artifacts",
+    buildReceiptPath: "/private/reviewed/build.json",
+    evidenceDirectory: "/private/reviewed/evidence",
+    outputPath: "/private/reviewed/release.json",
+    publishedAt: "2026-07-22T00:05:00.000Z",
+    releaseId: "33333333-3333-4333-8333-333333333333",
+    trustPolicyPath: "/private/reviewed/policy.json",
+    trustPolicyDigest: policyDigest,
+  });
 });
 
 function buildReceiptFor(bodies) {
@@ -277,25 +374,6 @@ function signedRelease(buildReceipt, bodies) {
     nodeVersion: buildReceipt.nodeVersion,
     publishedAt: "2026-07-22T00:05:00.000Z",
     artifacts: Object.freeze(buildReceipt.artifacts.map((candidate) => {
-      const nativeSignature = platform === "macos" ? {
-        scheme: "DEVELOPER_ID_NOTARIZED",
-        signerIdentity: "Developer-ID:DeviLudo",
-        evidenceDigest: digest(Buffer.from(`codesign:${candidate.component}`)),
-        transparencyLogDigest: null,
-        notarizationDigest: digest(Buffer.from(`notary:${candidate.component}`)),
-      } : platform === "windows" ? {
-        scheme: "AUTHENTICODE",
-        signerIdentity: "CN:DeviLudo",
-        evidenceDigest: digest(Buffer.from(`authenticode:${candidate.component}`)),
-        transparencyLogDigest: null,
-        notarizationDigest: null,
-      } : {
-        scheme: "SIGSTORE_BUNDLE",
-        signerIdentity: "https://github.com/deviludo/runner-release",
-        evidenceDigest: digest(Buffer.from(`sigstore:${candidate.component}`)),
-        transparencyLogDigest: digest(Buffer.from(`rekor:${candidate.component}`)),
-        notarizationDigest: null,
-      };
       const body = bodies.get(candidate.component);
       return Object.freeze({
         component: candidate.component,
@@ -303,7 +381,7 @@ function signedRelease(buildReceipt, bodies) {
         candidateDigest: candidate.candidateDigest,
         releasedDigest: digest(body),
         sizeBytes: body.length,
-        nativeSignature: Object.freeze(nativeSignature),
+        nativeSignature: Object.freeze(nativeSignature(candidate.component)),
       });
     })),
   });
@@ -316,6 +394,28 @@ function signedRelease(buildReceipt, bodies) {
       value: sign(null, Buffer.from(canonicalJson(claims)), keyPair.privateKey).toString("base64url"),
     }),
   });
+}
+
+function nativeSignature(component) {
+  return platform === "macos" ? {
+    scheme: "DEVELOPER_ID_NOTARIZED",
+    signerIdentity: "Developer-ID:DeviLudo",
+    evidenceDigest: digest(Buffer.from(`codesign:${component}`)),
+    transparencyLogDigest: null,
+    notarizationDigest: digest(Buffer.from(`notary:${component}`)),
+  } : platform === "windows" ? {
+    scheme: "AUTHENTICODE",
+    signerIdentity: "CN:DeviLudo",
+    evidenceDigest: digest(Buffer.from(`authenticode:${component}`)),
+    transparencyLogDigest: null,
+    notarizationDigest: null,
+  } : {
+    scheme: "SIGSTORE_BUNDLE",
+    signerIdentity: "https://github.com/deviludo/runner-release",
+    evidenceDigest: digest(Buffer.from(`sigstore:${component}`)),
+    transparencyLogDigest: digest(Buffer.from(`rekor:${component}`)),
+    notarizationDigest: null,
+  };
 }
 
 function identity(component) {

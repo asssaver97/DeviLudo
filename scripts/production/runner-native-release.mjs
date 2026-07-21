@@ -38,6 +38,7 @@ const RELEASE_ARTIFACT_KEYS = Object.freeze([
 const NATIVE_SIGNATURE_KEYS = Object.freeze([
   "evidenceDigest", "notarizationDigest", "scheme", "signerIdentity", "transparencyLogDigest",
 ]);
+const SIGNER_RESPONSE_KEYS = Object.freeze(["algorithm", "claimsDigest", "keyId", "schemaVersion", "signature"]);
 
 export function canonicalJson(value) {
   return JSON.stringify(canonicalize(value));
@@ -101,13 +102,59 @@ export function validateRunnerNativeBuildReceipt(receipt) {
   return Object.freeze({ ...receipt, artifacts: Object.freeze(artifacts) });
 }
 
-export async function verifyRunnerNativeRelease(release, buildReceipt, policy, expectedPolicyDigest, {
-  artifactDirectory,
-  now = new Date(),
-  inspectIdentity = executeIdentity,
+export function createRunnerNativeReleaseClaims(buildReceipt, {
+  releaseId,
+  publishedAt,
+  artifacts,
 } = {}) {
-  if (!absolute(artifactDirectory) || !(now instanceof Date) || !Number.isFinite(now.valueOf())
-    || typeof inspectIdentity !== "function" || typeof expectedPolicyDigest !== "string"
+  const build = validateRunnerNativeBuildReceipt(buildReceipt);
+  const claims = {
+    schemaVersion: "deviludo.runner-native-release-claims.v1",
+    releaseId,
+    buildReceiptDigest: sha256Canonical(build),
+    platformVersion: build.platformVersion,
+    sourceRevision: build.sourceRevision,
+    platform: build.platform,
+    architecture: build.architecture,
+    nodeVersion: build.nodeVersion,
+    publishedAt,
+    artifacts,
+  };
+  const published = canonicalTimestamp(publishedAt) ? new Date(publishedAt) : new Date(Number.NaN);
+  return validateReleaseClaims(claims, build, published);
+}
+
+export function runnerNativeReleaseSigningRequest(claims, buildReceipt) {
+  const build = validateRunnerNativeBuildReceipt(buildReceipt);
+  const published = canonicalTimestamp(claims?.publishedAt) ? new Date(claims.publishedAt) : new Date(Number.NaN);
+  const validated = validateReleaseClaims(claims, build, published);
+  return Object.freeze({
+    schemaVersion: "deviludo.runner-native-release-signing-request.v1",
+    releaseId: validated.releaseId,
+    claimsDigest: sha256Canonical(validated),
+    signingInput: Buffer.from(canonicalJson(validated), "utf8").toString("base64url"),
+  });
+}
+
+export function runnerNativeReleaseFromSigner(claims, response, buildReceipt, policy, expectedPolicyDigest, now = new Date()) {
+  const request = runnerNativeReleaseSigningRequest(claims, buildReceipt);
+  if (!plainRecord(response) || !exactKeys(response, SIGNER_RESPONSE_KEYS)
+    || response.schemaVersion !== "deviludo.runner-native-release-signing-response.v1"
+    || response.algorithm !== "Ed25519" || response.claimsDigest !== request.claimsDigest
+    || typeof response.keyId !== "string" || !SAFE_ID.test(response.keyId)
+    || typeof response.signature !== "string") invalidRelease();
+  const release = Object.freeze({
+    schemaVersion: "deviludo.runner-native-release.v1",
+    claims,
+    signature: Object.freeze({ algorithm: "Ed25519", keyId: response.keyId, value: response.signature }),
+  });
+  return verifyRunnerNativeReleaseEnvelope(release, buildReceipt, policy, expectedPolicyDigest, { now }).release;
+}
+
+export function verifyRunnerNativeReleaseEnvelope(release, buildReceipt, policy, expectedPolicyDigest, {
+  now = new Date(),
+} = {}) {
+  if (!(now instanceof Date) || !Number.isFinite(now.valueOf()) || typeof expectedPolicyDigest !== "string"
     || !SHA256.test(expectedPolicyDigest)) invalidRelease();
   const build = validateRunnerNativeBuildReceipt(buildReceipt);
   const trusted = validateRunnerNativeTrustPolicy(policy, expectedPolicyDigest);
@@ -123,6 +170,30 @@ export async function verifyRunnerNativeRelease(release, buildReceipt, policy, e
   });
   if (!verify(null, Buffer.from(canonicalJson(claims), "utf8"), publicKey,
     Buffer.from(release.signature.value, "base64url"))) invalidRelease();
+  return Object.freeze({
+    release: Object.freeze({
+      schemaVersion: release.schemaVersion,
+      claims,
+      signature: Object.freeze({ ...release.signature }),
+    }),
+    claims,
+    build,
+    signingKeyId: key.keyId,
+    releaseDigest: sha256Canonical(release),
+    trustPolicyDigest: expectedPolicyDigest,
+  });
+}
+
+export async function verifyRunnerNativeRelease(release, buildReceipt, policy, expectedPolicyDigest, {
+  artifactDirectory,
+  now = new Date(),
+  inspectIdentity = executeIdentity,
+} = {}) {
+  if (!absolute(artifactDirectory) || !(now instanceof Date) || !Number.isFinite(now.valueOf())
+    || typeof inspectIdentity !== "function" || typeof expectedPolicyDigest !== "string"
+    || !SHA256.test(expectedPolicyDigest)) invalidRelease();
+  const envelope = verifyRunnerNativeReleaseEnvelope(release, buildReceipt, policy, expectedPolicyDigest, { now });
+  const claims = envelope.claims;
   const target = nativeHostTarget();
   if (claims.platform !== target.platform || claims.architecture !== target.architecture) invalidRelease();
 
@@ -150,7 +221,7 @@ export async function verifyRunnerNativeRelease(release, buildReceipt, policy, e
     releaseDigest: sha256Canonical(release),
     buildReceiptDigest: claims.buildReceiptDigest,
     trustPolicyDigest: expectedPolicyDigest,
-    signingKeyId: key.keyId,
+    signingKeyId: envelope.signingKeyId,
     platform: claims.platform,
     architecture: claims.architecture,
     platformVersion: claims.platformVersion,
@@ -169,13 +240,17 @@ function validateReleaseEnvelope(release, build, now) {
     || !BASE64URL_SIGNATURE.test(release.signature.value)
     || Buffer.from(release.signature.value, "base64url").length !== 64
     || Buffer.from(release.signature.value, "base64url").toString("base64url") !== release.signature.value) invalidRelease();
-  const claims = release.claims;
+  return validateReleaseClaims(release.claims, build, now);
+}
+
+function validateReleaseClaims(claims, build, now) {
   if (!plainRecord(claims) || !exactKeys(claims, CLAIM_KEYS)
     || claims.schemaVersion !== "deviludo.runner-native-release-claims.v1"
     || typeof claims.releaseId !== "string" || !UUID.test(claims.releaseId)
     || claims.buildReceiptDigest !== sha256Canonical(build) || claims.platformVersion !== build.platformVersion
     || claims.sourceRevision !== build.sourceRevision || claims.platform !== build.platform
     || claims.architecture !== build.architecture || claims.nodeVersion !== build.nodeVersion
+    || !(now instanceof Date) || !Number.isFinite(now.valueOf())
     || !canonicalTimestamp(claims.publishedAt) || Date.parse(claims.publishedAt) > now.valueOf() + CLOCK_SKEW_MS
     || Date.parse(claims.publishedAt) < Date.parse(build.completedAt)
     || !Array.isArray(claims.artifacts) || claims.artifacts.length !== COMPONENTS.length) invalidRelease();

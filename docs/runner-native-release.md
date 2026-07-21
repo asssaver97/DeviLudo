@@ -53,13 +53,35 @@ receipt, then produce final artifacts under the same fixed filenames:
 | Windows | Authenticode signature |
 | Linux | Sigstore bundle plus transparency-log evidence |
 
-That pipeline submits only public content addresses and native-signature
-evidence to the dedicated Runner-native KMS boundary. The KMS returns a
-`deviludo.runner-native-release.v1` envelope with an Ed25519 signature over the
-canonical claims. Claims bind the candidate receipt digest, final artifact
-digests and sizes, embedded version/source/platform identity, signature scheme,
-signer identity and evidence digests. Runner-native keys are separate from
-control-plane deployment, job, Steam RC and Agent supply-chain keys.
+For each component it writes
+`<component>.signing-evidence.json` with schema
+`deviludo.runner-native-signing-evidence.v1`. The record binds the component,
+candidate digest, final digest/size and exact native-signature evidence. The
+finalizer independently hashes and executes the final artifact before it sends
+only canonical public claims to the dedicated Runner-native KMS boundary:
+
+```bash
+NODE_ENV=production npm run finalize:runner-native -- \
+  --artifacts /absolute/staging/final-artifacts \
+  --evidence /absolute/staging/native-signing-evidence \
+  --build-receipt /absolute/staging/runner-native-build-receipt.json \
+  --release-id <uuid-v4> \
+  --published-at <canonical-utc-timestamp> \
+  --trust-policy /absolute/policy/runner-native-trust-policy.json \
+  --trust-policy-digest sha256:<reviewed-policy-digest> \
+  --output /absolute/staging/runner-native-release.json
+```
+
+The process reads its fixed KMS origin, key ID and TLS 1.3 client key/certificate/CA
+file paths from the five `DEVILUDO_RUNNER_NATIVE_SIGNER_*` variables. It calls
+only `/v1/runner-native-releases/sign-ed25519`, uses the release UUID as the
+idempotency key, locally verifies the returned signature and writes the envelope
+with create-only semantics. An exact valid output is replayed without another
+KMS call. The resulting `deviludo.runner-native-release.v1` claims bind the
+candidate receipt digest, final artifact digests and sizes, embedded
+version/source/platform identity, signature scheme, signer identity and evidence
+digests. Runner-native keys are separate from control-plane deployment, job,
+Steam RC and Agent supply-chain keys.
 
 Production replaces
 [`infra/runner-native-trust-policy.example.json`](../infra/runner-native-trust-policy.example.json)

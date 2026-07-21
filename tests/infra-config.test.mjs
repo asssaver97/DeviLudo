@@ -790,6 +790,7 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.doesNotMatch(steamDriver, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.doesNotMatch(driver, /dangerously|--yolo/);
   assert.equal(packageJson.scripts["build:runner-native"], "node scripts/production/build-runner-native.mjs");
+  assert.equal(packageJson.scripts["finalize:runner-native"], "node scripts/production/finalize-runner-native-release.mjs");
   assert.equal(packageJson.scripts["verify:runner-native"], "node scripts/production/verify-runner-native-release.mjs");
   assert.match(nativeEntry, /isSea\(\)/);
   assert.match(nativeBuilder, /--experimental-sea-config/);

@@ -57,6 +57,7 @@
     "start:agent-supply-chain": "node --import tsx scripts/observability/run-service.mjs agent-supply-chain",
     "build:agent-supply-chain-native": "node scripts/build-agent-supply-chain-native.mjs",
     "build:runner-native": "node scripts/production/build-runner-native.mjs",
+    "finalize:runner-native": "node scripts/production/finalize-runner-native-release.mjs",
     "inspect:runner-native-trust": "node scripts/production/inspect-runner-native-trust-policy.mjs",
     "verify:runner-native": "node scripts/production/verify-runner-native-release.mjs",
     "start:agent-supply-chain-native": "node --import tsx scripts/observability/run-service.mjs agent-supply-chain-native",
