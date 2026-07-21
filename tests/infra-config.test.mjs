@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 57 }, (_, index) => {
+  const offsets = Array.from({ length: 58 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -496,10 +496,16 @@ test("Steam install grants are tenant-isolated, expiring and once-per-platform",
 });
 
 test("approved specifications bind one append-only Runner toolchain revision", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/017_runner_toolchain_revisions.sql", import.meta.url), "utf8");
   const guard = readFileSync(new URL("../infra/postgres/057_runner_toolchain_approval_guard.sql", import.meta.url), "utf8");
+  const publications = readFileSync(new URL("../infra/postgres/058_runner_toolchain_publications.sql", import.meta.url), "utf8");
   const store = readFileSync(new URL("../services/spec-dialogue/src/postgres-store.ts", import.meta.url), "utf8");
   const parser = readFileSync(new URL("../lib/domain/runner-toolchain.ts", import.meta.url), "utf8");
+  const publisher = readFileSync(new URL("../services/runner-control/src/toolchain-publication.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/runner-control/src/toolchain-publication-http.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/runner-control/src/run-toolchain-publication-service.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:runner-toolchain-publisher"], observedServiceCommand("runner-toolchain-publisher"));
   assert.match(migration, /CREATE TABLE deviludo\.runner_toolchain_revisions/);
   assert.match(migration, /UNIQUE \(tenant_id, project_id, id, payload_digest\)/);
   assert.match(migration, /runner_toolchain_revisions_append_only/);
@@ -515,6 +521,21 @@ test("approved specifications bind one append-only Runner toolchain revision", (
   assert.match(store, /runner_toolchain_revision_id, runner_toolchain_digest/);
   assert.match(store, /toolchain\.id, toolchain\.digest/);
   assert.match(parser, /Object\.keys\(exportTemplatesBody\)\.length !== targetMatrix\.length/);
+  assert.match(publications, /CREATE TABLE deviludo\.runner_toolchain_publications/);
+  assert.match(publications, /runner_toolchain_revision_insert_guard/);
+  assert.match(publications, /runner_toolchain_publication_insert_guard/);
+  assert.match(publications, /runner_toolchain_revision_requires_publication/);
+  assert.match(publications, /registration\.capabilities->>'exportTemplatesDigest'/);
+  assert.match(publications, /FORCE ROW LEVEL SECURITY/);
+  assert.match(publisher, /FROM deviludo\.runner_registrations/);
+  assert.match(publisher, /this\.assignments\.authorize/);
+  assert.match(publisher, /INSERT INTO deviludo\.runner_toolchain_revisions/);
+  assert.doesNotMatch(publisher, /exportTemplates:\s*publication\./);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
+  assert.match(runtime, /O_NOFOLLOW/);
+  assert.match(runtime, /runnerFleetPolicyFromEnv/);
 });
 
 test("approved specifications bind one append-only canonical test plan", () => {

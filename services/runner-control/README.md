@@ -82,6 +82,20 @@ route repeats those probes and returns 503 on drift. See
 `services/runner-control/.env.example`. The public Web route remains a
 deliberate 503.
 
+`npm run start:runner-toolchain-publisher` is a second TLS 1.3/mTLS boundary
+with a different client CA and SPIFFE allow-list. A platform TestKit/toolchain
+build workload submits a short-lived, idempotent project publication containing
+the exact Godot version, selected Runner IDs/capability digests, and the
+content-addressed TestKit, build manifest, SBOM, vulnerability scan and asset
+license ledger. Inside one tenant-RLS transaction the service locks the project,
+revalidates the current signed Fleet Manifest, requires every selected Runner
+to remain ONLINE and assigned to that tenant, and derives each platform's
+export-template digest from the immutable Runner registration. It then appends
+the canonical `runner_toolchain_revisions` row and its publication receipt.
+Physical Runner credentials, browsers, models and the specification service are
+not admitted to this listener. Migration `058` repeats the Runner/template and
+supply-chain binding at insert time, so a direct or parser-drifted write fails.
+
 The matching archive server is implemented in `services/evidence-archive` and
 starts with `npm run start:evidence-archive`. It admits only the configured
 Runner-ingress SPIFFE identity, revalidates the complete canonical bundle and

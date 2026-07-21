@@ -50,8 +50,12 @@ behind the web console:
 - `runner-control`: registers only admitted mTLS/SPIFFE workloads, rejects E2E
   hosts containing autonomous Agents, signs exact per-platform job envelopes,
   applies independent fencing tokens and derives the final matrix result from
-  content-addressed evidence manifests. The public Web process is deliberately
-  not a Runner ingress.
+  content-addressed evidence manifests. Its separate Toolchain Publisher lets
+  only an allow-listed supply-chain SPIFFE workload combine current ONLINE,
+  tenant-assigned Runner capabilities with TestKit/build/SBOM/scan/license
+  evidence. Export-template digests are derived from registration authority,
+  never accepted from the publication request. The public Web process is
+  deliberately neither a Runner ingress nor a toolchain publisher.
 - `evidence-archive`: an Agent-free mTLS service that issues at-most-five-minute
   source/evidence grants only after signed-job and signed-fleet authorization,
   verifies S3 checksums at upload commit, independently validates completed
@@ -257,7 +261,11 @@ toolchain compatible with the exact Godot version and target matrix, then writes
 its revision ID and canonical digest into the test-plan binding. Missing
 toolchain authority returns `RUNNER_TOOLCHAIN_UNAVAILABLE` before any approved
 revision is created. Migration `057` enforces the same exact payload, export
-template and Godot compatibility at the PostgreSQL boundary.
+template and Godot compatibility at the PostgreSQL boundary. The authority is
+created through `npm run start:runner-toolchain-publisher`: migration `058`
+records an idempotent publication receipt, repeats every Runner capability and
+supply-chain binding in a database insert trigger, and rejects direct
+non-SPIFFE revision writers.
 
 The corresponding production server is `services/spec-model-broker`. It uses
 the exact platform Profile revision configured at deployment, re-resolves the

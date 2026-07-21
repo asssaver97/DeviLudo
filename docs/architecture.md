@@ -229,6 +229,15 @@ its ID and digest beside the test plan. Missing authority rolls back before the
 approved revisions are written. A database trigger repeats the compatibility
 check, closing alternate-writer and parser-drift paths.
 
+Those project revisions are produced only by a separate TLS 1.3/mTLS Runner
+Toolchain Publisher. Its supply-chain workload is distinct from every physical
+Runner and from Web. A publication names exact Runner capability digests and
+the TestKit/build/SBOM/scan/license evidence, while the Publisher reloads the
+signed Fleet Manifest and derives each export-template digest from the current
+immutable Runner registration. PostgreSQL serializes project revisions and
+keeps the publication receipt append-only; an insert trigger independently
+joins every declared platform back to the ONLINE Runner registration.
+
 ## Steam boundary and external approvals
 
 “Accept and publish” requires a fresh MFA assertion. The publisher creates a

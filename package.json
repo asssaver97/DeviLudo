@@ -59,6 +59,7 @@
     "start:user-acceptance": "node --import tsx scripts/observability/run-service.mjs user-acceptance",
     "start:runner-control-workflow": "node --import tsx scripts/observability/run-service.mjs runner-control-workflow",
     "start:runner-ingress": "node --import tsx scripts/observability/run-service.mjs runner-ingress",
+    "start:runner-toolchain-publisher": "node --import tsx scripts/observability/run-service.mjs runner-toolchain-publisher",
     "start:evidence-archive": "node --import tsx scripts/observability/run-service.mjs evidence-archive",
     "start:physical-runner": "node --import tsx scripts/observability/run-service.mjs physical-runner",
     "start:godot-testkit": "node --import tsx scripts/observability/run-service.mjs godot-testkit",

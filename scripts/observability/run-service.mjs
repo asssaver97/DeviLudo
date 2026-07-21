@@ -22,6 +22,7 @@ export const SERVICE_ENTRYPOINTS = Object.freeze({
   "user-acceptance": Object.freeze({ entry: "services/user-acceptance/src/run-service.ts" }),
   "runner-control-workflow": Object.freeze({ entry: "services/runner-control/src/run-workflow-service.ts" }),
   "runner-ingress": Object.freeze({ entry: "services/runner-control/src/run-ingress-service.ts" }),
+  "runner-toolchain-publisher": Object.freeze({ entry: "services/runner-control/src/run-toolchain-publication-service.ts" }),
   "evidence-archive": Object.freeze({ entry: "services/evidence-archive/src/run-service.ts" }),
   "physical-runner": Object.freeze({ entry: "services/runner-control/src/run-physical-runner.ts" }),
   "godot-testkit": Object.freeze({ entry: "services/godot-testkit/src/run-cli.ts" }),

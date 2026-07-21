@@ -18,3 +18,6 @@ export * from "./physical-runner-journal";
 export * from "./testkit-executor";
 export * from "./testkit-artifact-client";
 export * from "./run-physical-runner";
+export * from "./toolchain-publication";
+export * from "./toolchain-publication-http";
+export * from "./run-toolchain-publication-service";
