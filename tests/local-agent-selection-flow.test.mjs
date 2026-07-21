@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PUT as selectProjectAgent } from "../app/api/projects/[projectId]/agent-settings/route.ts";
+import { POST as acceptCandidate } from "../app/api/projects/[projectId]/acceptance/route.ts";
 import { POST as mutateDelivery } from "../app/api/projects/[projectId]/delivery/route.ts";
 import { POST as approveSpec } from "../app/api/projects/[projectId]/spec-revisions/route.ts";
 import { getDemoStore, resetDemoStore } from "../lib/control-plane/demo-store.ts";
@@ -125,12 +126,19 @@ async function finish(projectId, prefix, actions) {
 }
 
 async function action(projectId, next, key) {
-  const response = await mutateDelivery(localRequest(
-    `/api/projects/${projectId}/delivery`,
-    "POST",
-    { action: next },
-    key,
-  ), { params: Promise.resolve({ projectId }) });
+  const response = next === "accept"
+    ? await acceptCandidate(localRequest(
+      `/api/projects/${projectId}/acceptance`,
+      "POST",
+      {},
+      key,
+    ), { params: Promise.resolve({ projectId }) })
+    : await mutateDelivery(localRequest(
+      `/api/projects/${projectId}/delivery`,
+      "POST",
+      { action: next },
+      key,
+    ), { params: Promise.resolve({ projectId }) });
   assert.equal(response.status, 201, `${next} should advance ${projectId}`);
   return (await response.json()).data;
 }

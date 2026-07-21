@@ -427,7 +427,13 @@ export function applyLocalDeliveryAction(
   }
 
   if (action === "accept") {
-    if (current.stage !== "AWAITING_ACCEPTANCE") throw new Error("当前候选版本尚不可验收");
+    if (current.stage !== "AWAITING_ACCEPTANCE"
+      || current.evidenceValid !== true
+      || !Number.isSafeInteger(current.candidatePr) || (current.candidatePr ?? 0) < 1
+      || !current.candidateSha
+      || Object.values(current.targetResults).some((status) => status !== "PASSED")) {
+      throw new Error("当前候选版本缺少可验收的提交、PR 或完整目标矩阵证据");
+    }
     return event({ ...current, stage: "MERGING" }, "CANDIDATE_ACCEPTED", "用户已接受候选版本，开始合并 Draft PR。 ");
   }
 

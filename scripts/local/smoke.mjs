@@ -95,6 +95,21 @@ async function request(baseUrl, route, init = {}, timeoutMs = REQUEST_TIMEOUT_MS
   };
 }
 
+async function localWorkflowAction(baseUrl, projectId, operationKey, action) {
+  if (action === "accept") {
+    return request(baseUrl, `/api/projects/${projectId}/acceptance`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": operationKey },
+      body: "{}",
+    });
+  }
+  return request(baseUrl, `/api/projects/${projectId}/delivery`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": operationKey },
+    body: JSON.stringify({ action }),
+  });
+}
+
 async function waitForHealth(baseUrl) {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   let lastError;
@@ -558,15 +573,38 @@ try {
   const failureActions = [
     "advance", "advance", "advance", "advance", "advance", "advance", "accept", "advance", "main-gate-fail",
   ];
+  let acceptanceBypass;
+  let acceptanceReplay;
   let postMergeFailure;
   for (const [index, action] of failureActions.entries()) {
-    postMergeFailure = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-post-merge-${index + 1}` },
-      body: JSON.stringify({ action }),
-    });
+    if (action === "accept") {
+      acceptanceBypass = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "smoke-acceptance-bypass" },
+        body: JSON.stringify({ action }),
+      });
+      const bypassPayload = await acceptanceBypass.response.json();
+      if (acceptanceBypass.response.status !== 400 || bypassPayload.error?.code !== "UNSUPPORTED_ACTION") {
+        throw new Error("generic local delivery endpoint accepted candidate authority");
+      }
+    }
+    const operationKey = `smoke-post-merge-${index + 1}`;
+    postMergeFailure = await localWorkflowAction(baseUrl, smokeSpecProject, operationKey, action);
     if (!postMergeFailure.response.ok) {
       throw new Error(`local post-merge failure action ${action} was rejected`);
+    }
+    if (action === "accept") {
+      const acceptancePayload = await postMergeFailure.response.clone().json();
+      if (postMergeFailure.response.status !== 201 || acceptancePayload.data?.stage !== "MERGING"
+        || acceptancePayload.meta?.idempotentReplay !== false) {
+        throw new Error("formal candidate acceptance did not enter the merge gate");
+      }
+      acceptanceReplay = await localWorkflowAction(baseUrl, smokeSpecProject, operationKey, action);
+      const replayPayload = await acceptanceReplay.response.json();
+      if (acceptanceReplay.response.status !== 200 || replayPayload.data?.stage !== "MERGING"
+        || replayPayload.meta?.idempotentReplay !== true) {
+        throw new Error("formal candidate acceptance did not replay the exact decision");
+      }
     }
   }
   const postMergeFailurePayload = await postMergeFailure.response.json();
@@ -629,11 +667,9 @@ try {
   ];
   let completedRelease;
   for (const [index, action] of releaseActions.entries()) {
-    completedRelease = await request(baseUrl, `/api/projects/${smokeReleaseProject}/delivery`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-release-gate-${index + 1}` },
-      body: JSON.stringify({ action }),
-    });
+    completedRelease = await localWorkflowAction(
+      baseUrl, smokeReleaseProject, `smoke-release-gate-${index + 1}`, action,
+    );
     if (!completedRelease.response.ok) throw new Error(`local release-gate action ${action} was rejected`);
   }
   const completedReleasePayload = await completedRelease.response.json();
@@ -675,11 +711,9 @@ try {
   }
   let completedCodexRelease;
   for (const [index, action] of releaseActions.entries()) {
-    completedCodexRelease = await request(baseUrl, `/api/projects/${smokeCodexProject}/delivery`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-codex-release-${index + 1}` },
-      body: JSON.stringify({ action }),
-    });
+    completedCodexRelease = await localWorkflowAction(
+      baseUrl, smokeCodexProject, `smoke-codex-release-${index + 1}`, action,
+    );
     if (!completedCodexRelease.response.ok) throw new Error(`local Codex release action ${action} was rejected`);
   }
   const completedCodexPayload = await completedCodexRelease.response.json();
@@ -763,6 +797,8 @@ try {
   console.log(`✓ Feedback draft    ${feedbackIteration.response.status} (${feedbackIteration.elapsedMs}ms) · revision ${feedbackSnapshot.revision} → approved ${iterationApprovalPayload.data.authority.revision}`);
   console.log(`✓ Iteration E2E     ${iterationValidation.response.status} (${iterationValidation.elapsedMs}ms) · distinct signed Godot evidence`);
   console.log(`✓ Provider recovery ${providerResume.response.status} (${providerResume.elapsedMs}ms) · same immutable Profile`);
+  console.log(`✓ Acceptance bypass ${acceptanceBypass.response.status} (${acceptanceBypass.elapsedMs}ms) · generic delivery rejected`);
+  console.log(`✓ Acceptance replay 201/${acceptanceReplay.response.status} (${acceptanceReplay.elapsedMs}ms) · formal empty-body decision`);
   console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
   console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);

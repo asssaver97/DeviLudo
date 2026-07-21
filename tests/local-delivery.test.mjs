@@ -267,3 +267,29 @@ test("feedback cannot bypass candidate E2E or invent an early revision", () => {
     /等待用户验收.*人工修复接管/,
   );
 });
+
+test("candidate acceptance revalidates the PR, commit and complete target evidence", () => {
+  let candidate = approveLocalSpec(createLocalDelivery("project-acceptance-gate"), "SPEC-001", "RUN-ACCEPTANCE-GATE");
+  for (let index = 0; index < 6; index += 1) candidate = applyLocalDeliveryAction(candidate, "advance");
+  assert.equal(candidate.stage, "AWAITING_ACCEPTANCE");
+  assert.equal(applyLocalDeliveryAction(candidate, "accept").stage, "MERGING");
+  assert.throws(
+    () => applyLocalDeliveryAction({ ...candidate, evidenceValid: false }, "accept"),
+    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+  );
+  assert.throws(
+    () => applyLocalDeliveryAction({ ...candidate, candidatePr: null }, "accept"),
+    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+  );
+  assert.throws(
+    () => applyLocalDeliveryAction({ ...candidate, candidateSha: null }, "accept"),
+    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+  );
+  assert.throws(
+    () => applyLocalDeliveryAction({
+      ...candidate,
+      targetResults: { ...candidate.targetResults, windows: "INVALIDATED" },
+    }, "accept"),
+    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+  );
+});

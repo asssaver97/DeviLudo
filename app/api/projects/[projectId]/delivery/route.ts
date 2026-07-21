@@ -16,7 +16,6 @@ const actions = new Set<LocalDeliveryAction>([
   "advance",
   "provider-fail",
   "provider-resume",
-  "accept",
   "confirm-mfa",
   "main-gate-fail",
   "steam-reinstall-fail",

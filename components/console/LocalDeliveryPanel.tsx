@@ -82,7 +82,7 @@ type ProductionProjection = {
 function primaryAction(stage: LocalDeliveryStage, externalApprovalCount = 0): { action: LocalDeliveryAction; label: string } | null {
   if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED" || stage === "CANCELLED") return null;
   if (stage === "WAITING_PROVIDER") return { action: "provider-resume", label: "恢复原 Provider" };
-  if (stage === "AWAITING_ACCEPTANCE") return { action: "accept", label: "接受候选版本" };
+  if (stage === "AWAITING_ACCEPTANCE") return null;
   if (stage === "MFA_REQUIRED") return { action: "confirm-mfa", label: "本地确认 MFA" };
   if (stage === "EXTERNAL_APPROVAL_REQUIRED") return {
     action: "external-approve",
