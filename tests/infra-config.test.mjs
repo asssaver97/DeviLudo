@@ -788,6 +788,7 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   const nativeEntry = readFileSync(new URL("../services/godot-testkit/src/native-main.ts", import.meta.url), "utf8");
   const nativeBuilder = readFileSync(new URL("../scripts/production/build-runner-native.mjs", import.meta.url), "utf8");
   const serviceTransaction = readFileSync(new URL("../scripts/production/compile-runner-native-service-transaction.mjs", import.meta.url), "utf8");
+  const windowsActuationRequest = readFileSync(new URL("../scripts/production/compile-windows-scm-actuation-request.mjs", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/godot-testkit/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:godot-testkit/);
   assert.equal(packageJson.scripts["start:godot-testkit"], observedServiceCommand("godot-testkit"));
@@ -811,9 +812,14 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
     "node --import tsx scripts/production/compile-runner-native-service-transaction.mjs");
   assert.equal(packageJson.scripts["apply:runner-native-service-transaction"],
     "node --import tsx scripts/production/apply-runner-native-service-transaction.mjs");
+  assert.equal(packageJson.scripts["compile:windows-scm-actuation-request"],
+    "node --import tsx scripts/production/compile-windows-scm-actuation-request.mjs");
   const serviceActuator = readFileSync(new URL("../scripts/production/apply-runner-native-service-transaction.mjs", import.meta.url), "utf8");
   assert.match(serviceTransaction, /WAITING_NATIVE_BRIDGE/);
   assert.match(serviceTransaction, /SIGNED_WINDOWS_SCM_BRIDGE_REQUIRED/);
+  assert.match(serviceTransaction, /WAITING_NATIVE_ACTUATOR/);
+  assert.match(serviceTransaction, /SIGNED_WINDOWS_SCM_ACTUATOR_REQUIRED/);
+  assert.doesNotMatch(serviceTransaction, /C:\\Windows\\System32\\sc\.exe/);
   assert.match(serviceTransaction, /NoNewPrivileges=true/);
   assert.doesNotMatch(serviceTransaction, /shell:\s*true|curl \| sh|dangerously-skip-permissions/);
   assert.match(serviceActuator, /verifyRunnerNativeInstallActivationGrant/);
@@ -821,6 +827,9 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.match(serviceActuator, /service-actuation-journal\.v1/);
   assert.match(serviceActuator, /A separately signed Windows native host actuator is required/);
   assert.doesNotMatch(serviceActuator, /shell:\s*true|execSync|powershell|reg\.exe|sc\.exe/i);
+  assert.match(windowsActuationRequest, /createWindowsScmActuationRequest/);
+  assert.match(windowsActuationRequest, /createOnlyBytes/);
+  assert.doesNotMatch(windowsActuationRequest, /spawn|exec|shell:\s*true|powershell|reg\.exe|sc\.exe/i);
   assert.match(nativeEntry, /isSea\(\)/);
   assert.match(nativeBuilder, /--experimental-sea-config/);
   assert.match(nativeBuilder, /status", "--porcelain=v1"/);

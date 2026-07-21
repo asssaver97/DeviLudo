@@ -403,8 +403,36 @@ test("service definitions render launchd safely and keep Windows blocked on the 
       trustPolicyDigest: hex("5"),
     },
   });
+  assert.equal(authorized.status, "WAITING_NATIVE_ACTUATOR");
+  assert.equal(authorized.windowsActuator.reasonCode, "SIGNED_WINDOWS_SCM_ACTUATOR_REQUIRED");
+  const actuatorPath = "C:\\Program Files\\DeviLudo\\deviludo-windows-scm-native-actuator.exe";
+  const reusableBridgeAuthorization = Object.fromEntries(
+    Object.entries(authorized.windowsBridge).filter(([name]) => name !== "required"),
+  );
+  const ready = createRunnerNativeServiceTransaction({
+    plan: windowsPlan,
+    planDigest: windowsPlan.planDigest,
+    stagingReceipt: windowsReceipt,
+    physicalRunnerEnvironment: environmentBody,
+    steamClientConnectorEnvironment: null,
+    windowsBridgeAuthorization: reusableBridgeAuthorization,
+    windowsActuatorAuthorization: {
+      verified: true,
+      component: "deviludo-windows-scm-native-actuator",
+      path: actuatorPath,
+      architecture: windowsPlan.architecture,
+      actuatorVersion: "1.0.0",
+      requestContractVersion: 1,
+      binaryDigest: hex("6"),
+      sourceDigest: hex("7"),
+      supplyChainEvidenceDigest: hex("8"),
+      manifestDigest: hex("9"),
+      trustPolicyDigest: hex("a"),
+    },
+  });
   const descriptor = JSON.parse(authorized.definitions[0].rendered);
-  assert.equal(authorized.status, "READY");
+  assert.equal(ready.status, "READY");
+  assert.equal(ready.managerTool, actuatorPath);
   assert.equal(authorized.windowsBridge.verified, true);
   assert.equal(authorized.definitions[0].executable, bridgePath);
   assert.equal(authorized.definitions[0].targetExecutable, windowsPlan.services.physicalRunner.executable);
@@ -420,6 +448,15 @@ test("service definitions render launchd safely and keep Windows blocked on the 
     physicalRunnerEnvironment: environmentBody,
     steamClientConnectorEnvironment: null,
     windowsBridgeAuthorization: { ...authorized.windowsBridge, binaryDigest: hex("6"), unexpected: true },
+  }), /service transaction is invalid/);
+  assert.throws(() => createRunnerNativeServiceTransaction({
+    plan: windowsPlan,
+    planDigest: windowsPlan.planDigest,
+    stagingReceipt: windowsReceipt,
+    physicalRunnerEnvironment: environmentBody,
+    steamClientConnectorEnvironment: null,
+    windowsBridgeAuthorization: reusableBridgeAuthorization,
+    windowsActuatorAuthorization: { ...ready.windowsActuator, path: "C:\\Windows\\System32\\sc.exe" },
   }), /service transaction is invalid/);
 });
 
@@ -440,6 +477,20 @@ test("service transaction CLI requires exact absolute create-only bindings", () 
     "--windows-bridge-trust-policy-digest", hex("b"),
   ]);
   assert.equal(withBridge.windowsBridgeTrustPolicyDigest, hex("b"));
+  const withActuator = parseRunnerNativeServiceTransactionArguments([
+    "--plan", "/private/staging/install-plan.json",
+    "--plan-digest", hex("a"),
+    "--output", "/private/staging/service-transaction.json",
+    "--windows-bridge", "/private/staging/deviludo-windows-scm-service-bridge.exe",
+    "--windows-bridge-manifest", "/private/staging/windows-bridge-manifest.json",
+    "--windows-bridge-trust-policy", "/private/staging/windows-bridge-trust-policy.json",
+    "--windows-bridge-trust-policy-digest", hex("b"),
+    "--windows-actuator", "/private/staging/deviludo-windows-scm-native-actuator.exe",
+    "--windows-actuator-manifest", "/private/staging/windows-actuator-manifest.json",
+    "--windows-actuator-trust-policy", "/private/staging/windows-actuator-trust-policy.json",
+    "--windows-actuator-trust-policy-digest", hex("c"),
+  ]);
+  assert.equal(withActuator.windowsActuatorTrustPolicyDigest, hex("c"));
   assert.throws(() => parseRunnerNativeServiceTransactionArguments([
     "--plan", "relative.json",
     "--plan-digest", hex("a"),

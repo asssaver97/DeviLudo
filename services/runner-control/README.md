@@ -236,7 +236,8 @@ templates are `.physical-runner.env.example` and
 `physical-runner.config.example.json`; they intentionally contain no private
 key or platform credential.
 
-Windows additionally uses the native SCM host in `native/`. It is a fixed C17
+Windows additionally uses two native C17 MSVC components in `native/`. The SCM
+bridge is a fixed service host
 MSVC target rather than an Agent-installed package: it accepts only the Physical
 Runner and Steam Connector service names, verifies the revision-addressed SEA
 digest while holding the file against replacement, and starts it without a
@@ -244,7 +245,14 @@ shell. Authenticode/scan evidence is bound into an Ed25519 release manifest by
 `npm run finalize:windows-scm-service-bridge`; signer mounts are documented in
 `.windows-scm-bridge-finalizer.env.example`. Service transaction compilation
 stays `WAITING_NATIVE_BRIDGE` unless the exact architecture, binary, manifest
-and trust policy verify together.
+and trust policy verify together. The independent SCM actuator owns the
+privileged Win32 SCM/Registry calls and stays `WAITING_NATIVE_ACTUATOR` until
+its separately signed binary and trust policy also verify. It reads a fixed
+bounded binary request under ProgramData, supports only apply/restore/probe,
+and maintains pending/active crash-recovery files. It never invokes `sc.exe`,
+`reg.exe`, PowerShell or privileged Node code. Build-control produces that
+request with `compile:windows-scm-actuation-request`; only the protected Windows
+delivery identity may place the exact bytes into the fixed inbox.
 
 Linux/macOS upgrades are applied by the separate root-owned
 `apply:runner-native-service-transaction` utility. It re-verifies the staged
@@ -254,7 +262,8 @@ before replacing any service definition. Failed starts restore the previous
 definitions, then report the exact failure digest through the existing Runner
 mTLS identity before producing an immutable rollback receipt. Its Ed25519 trust
 mounts are listed in `.native-actuator.env.example`; it deliberately refuses
-Windows, which requires the independently signed native SCM actuator.
+Windows, which requires the independently signed native SCM actuator and its
+separate Authenticode, scan, Ed25519 manifest and fixed request-contract gate.
 
 Native upgrades are fenced by the same registration row used by lease issuance.
 Ingress changes the current identity to `DRAINING` under an exclusive row lock,

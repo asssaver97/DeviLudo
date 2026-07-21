@@ -6,6 +6,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { canonicalJson, sha256Canonical } from "../../services/runner-control/src/canonical.ts";
+import { verifySignedWindowsScmNativeActuatorManifest } from "../../services/runner-control/src/windows-scm-native-actuator.ts";
 import { verifySignedWindowsScmServiceBridgeManifest } from "../../services/runner-control/src/windows-scm-service-bridge.ts";
 import { validateRunnerNativeInstallPlan } from "./plan-runner-native-install.mjs";
 import { validateStagingReceipt, verifyStagedRunnerNativeInstallation } from "./stage-runner-native-install.mjs";
@@ -18,10 +19,12 @@ const INLINE_CREDENTIAL_NAME = /(?:API_KEY|PASSWORD|TOKEN|SECRET|SESSION|PRIVATE
 const SAFE_CREDENTIAL_REFERENCE = /(?:_FILE|_KEY_ID|_PUBLIC_KEY|_DIGEST)$/;
 
 export function parseRunnerNativeServiceTransactionArguments(argv) {
-  if (!Array.isArray(argv) || !new Set([6, 14]).has(argv.length)) invalid();
+  if (!Array.isArray(argv) || !new Set([6, 14, 22]).has(argv.length)) invalid();
   const allowed = new Set([
     "--output", "--plan", "--plan-digest", "--windows-bridge", "--windows-bridge-manifest",
     "--windows-bridge-trust-policy", "--windows-bridge-trust-policy-digest",
+    "--windows-actuator", "--windows-actuator-manifest", "--windows-actuator-trust-policy",
+    "--windows-actuator-trust-policy-digest",
   ]);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
@@ -35,6 +38,10 @@ export function parseRunnerNativeServiceTransactionArguments(argv) {
   if (["--windows-bridge-manifest", "--windows-bridge-trust-policy", "--windows-bridge-trust-policy-digest"]
     .some((name) => values.has(name) !== hasWindowsBridge)) invalid();
   if (hasWindowsBridge && !SHA256.test(values.get("--windows-bridge-trust-policy-digest"))) invalid();
+  const hasWindowsActuator = values.has("--windows-actuator");
+  if (["--windows-actuator-manifest", "--windows-actuator-trust-policy", "--windows-actuator-trust-policy-digest"]
+    .some((name) => values.has(name) !== hasWindowsActuator) || hasWindowsActuator && !hasWindowsBridge) invalid();
+  if (hasWindowsActuator && !SHA256.test(values.get("--windows-actuator-trust-policy-digest"))) invalid();
   return Object.freeze({
     outputPath: absolute(values.get("--output")),
     planPath: absolute(values.get("--plan")),
@@ -43,6 +50,10 @@ export function parseRunnerNativeServiceTransactionArguments(argv) {
     windowsBridgeManifestPath: hasWindowsBridge ? absolute(values.get("--windows-bridge-manifest")) : null,
     windowsBridgeTrustPolicyPath: hasWindowsBridge ? absolute(values.get("--windows-bridge-trust-policy")) : null,
     windowsBridgeTrustPolicyDigest: hasWindowsBridge ? values.get("--windows-bridge-trust-policy-digest") : null,
+    windowsActuatorPath: hasWindowsActuator ? absolute(values.get("--windows-actuator")) : null,
+    windowsActuatorManifestPath: hasWindowsActuator ? absolute(values.get("--windows-actuator-manifest")) : null,
+    windowsActuatorTrustPolicyPath: hasWindowsActuator ? absolute(values.get("--windows-actuator-trust-policy")) : null,
+    windowsActuatorTrustPolicyDigest: hasWindowsActuator ? values.get("--windows-actuator-trust-policy-digest") : null,
   });
 }
 
@@ -61,6 +72,7 @@ export function createRunnerNativeServiceTransaction(input) {
   });
   if (!plan.machine.steamCapable && input.steamClientConnectorEnvironment !== null) invalid();
   const windowsBridge = validateWindowsBridgeAuthorization(plan, input.windowsBridgeAuthorization ?? null);
+  const windowsActuator = validateWindowsActuatorAuthorization(plan, input.windowsActuatorAuthorization ?? null);
   const orderedServices = plan.machine.steamCapable
     ? [plan.services.steamClientConnector, plan.services.physicalRunner]
     : [plan.services.physicalRunner];
@@ -72,13 +84,14 @@ export function createRunnerNativeServiceTransaction(input) {
     windowsBridge,
   }));
   const managerTool = plan.platform === "linux" ? "/usr/bin/systemctl"
-    : plan.platform === "macos" ? "/bin/launchctl" : "C:\\Windows\\System32\\sc.exe";
+    : plan.platform === "macos" ? "/bin/launchctl" : windowsActuator?.verified === true ? windowsActuator.path : null;
   const activationActions = compileActivationActions(plan.platform, managerTool, definitions);
   const rollbackActions = plan.rollback === null ? Object.freeze([])
     : compileRollbackActions(plan.platform, managerTool, definitions);
   const core = Object.freeze({
     schemaVersion: "deviludo.runner-native-service-transaction.v1",
-    status: plan.platform !== "windows" || windowsBridge?.verified === true ? "READY" : "WAITING_NATIVE_BRIDGE",
+    status: plan.platform !== "windows" ? "READY" : windowsBridge?.verified !== true ? "WAITING_NATIVE_BRIDGE"
+      : windowsActuator?.verified !== true ? "WAITING_NATIVE_ACTUATOR" : "READY",
     planDigest: plan.planDigest,
     stagingReceiptDigest: receipt.receiptDigest,
     releaseId: plan.releaseId,
@@ -88,6 +101,7 @@ export function createRunnerNativeServiceTransaction(input) {
     manager: plan.services.physicalRunner.manager,
     managerTool,
     windowsBridge,
+    windowsActuator,
     definitions: Object.freeze(definitions),
     activation: Object.freeze({
       mode: plan.activation.mode,
@@ -147,7 +161,9 @@ export function createRunnerNativeServiceDefinition({ plan, service, environment
 export async function prepareRunnerNativeServiceTransaction(options) {
   const plan = validateRunnerNativeInstallPlan(await readBoundedJson(options.planPath), options.planDigest);
   const hasWindowsBridge = options.windowsBridgePath != null;
-  if ((plan.platform === "windows") !== hasWindowsBridge) invalid();
+  const hasWindowsActuator = options.windowsActuatorPath != null;
+  if ((plan.platform === "windows") !== hasWindowsBridge || hasWindowsActuator && !hasWindowsBridge
+    || plan.platform !== "windows" && hasWindowsActuator) invalid();
   const stagingReceipt = await verifyStagedRunnerNativeInstallation(plan, plan.releaseDirectory);
   const [physicalRunnerEnvironment, steamClientConnectorEnvironment] = await Promise.all([
     readBoundedFile(plan.environmentLocks.physicalRunner.path, MAX_ENV_BYTES),
@@ -157,6 +173,7 @@ export async function prepareRunnerNativeServiceTransaction(options) {
     && await digestLargeFile(plan.environmentLocks.steamClientConnector.bridgeExecutable)
       !== plan.environmentLocks.steamClientConnector.bridgeDigest) invalid();
   let windowsBridgeAuthorization = null;
+  let windowsActuatorAuthorization = null;
   if (plan.platform === "windows") {
     const [manifest, trustPolicy, observedDigest] = await Promise.all([
       readBoundedJson(options.windowsBridgeManifestPath),
@@ -182,6 +199,32 @@ export async function prepareRunnerNativeServiceTransaction(options) {
       manifestDigest: sha256Canonical(manifest),
       trustPolicyDigest: options.windowsBridgeTrustPolicyDigest,
     });
+    if (hasWindowsActuator) {
+      const [actuatorManifest, actuatorTrustPolicy, actuatorObservedDigest] = await Promise.all([
+        readBoundedJson(options.windowsActuatorManifestPath),
+        readBoundedJson(options.windowsActuatorTrustPolicyPath),
+        digestLargeFile(options.windowsActuatorPath),
+      ]);
+      const actuatorClaims = verifySignedWindowsScmNativeActuatorManifest(actuatorManifest, {
+        trustPolicy: actuatorTrustPolicy,
+        trustPolicyDigest: options.windowsActuatorTrustPolicyDigest,
+        architecture: plan.architecture,
+      });
+      if (actuatorObservedDigest !== actuatorClaims.binaryDigest) invalid();
+      windowsActuatorAuthorization = Object.freeze({
+        verified: true,
+        component: "deviludo-windows-scm-native-actuator",
+        path: options.windowsActuatorPath,
+        architecture: actuatorClaims.architecture,
+        actuatorVersion: actuatorClaims.actuatorVersion,
+        requestContractVersion: actuatorClaims.requestContractVersion,
+        binaryDigest: actuatorClaims.binaryDigest,
+        sourceDigest: actuatorClaims.sourceDigest,
+        supplyChainEvidenceDigest: actuatorClaims.supplyChainEvidenceDigest,
+        manifestDigest: sha256Canonical(actuatorManifest),
+        trustPolicyDigest: options.windowsActuatorTrustPolicyDigest,
+      });
+    }
   }
   const transaction = createRunnerNativeServiceTransaction({
     plan,
@@ -190,6 +233,7 @@ export async function prepareRunnerNativeServiceTransaction(options) {
     physicalRunnerEnvironment,
     steamClientConnectorEnvironment,
     windowsBridgeAuthorization,
+    windowsActuatorAuthorization,
   });
   return transaction;
 }
@@ -359,6 +403,44 @@ function validateWindowsBridgeAuthorization(plan, value) {
   });
 }
 
+function validateWindowsActuatorAuthorization(plan, value) {
+  if (plan.platform !== "windows") {
+    if (value !== null) invalid();
+    return null;
+  }
+  if (value === null) return Object.freeze({
+    required: true,
+    verified: false,
+    component: "deviludo-windows-scm-native-actuator",
+    requestContractVersion: 1,
+    reasonCode: "SIGNED_WINDOWS_SCM_ACTUATOR_REQUIRED",
+  });
+  const expectedKeys = [
+    "actuatorVersion", "architecture", "binaryDigest", "component", "manifestDigest", "path",
+    "requestContractVersion", "sourceDigest", "supplyChainEvidenceDigest", "trustPolicyDigest", "verified",
+  ];
+  if (!plainRecord(value) || !exactKeys(value, expectedKeys) || value.verified !== true
+    || value.component !== "deviludo-windows-scm-native-actuator" || value.architecture !== plan.architecture
+    || value.requestContractVersion !== 1 || !fixedVersion(value.actuatorVersion)
+    || !canonicalWindowsActuatorPath(value.path) || !SHA256.test(value.binaryDigest)
+    || !SHA256.test(value.sourceDigest) || !SHA256.test(value.supplyChainEvidenceDigest)
+    || !SHA256.test(value.manifestDigest) || !SHA256.test(value.trustPolicyDigest)) invalid();
+  return deepFreeze({
+    required: true,
+    verified: true,
+    component: value.component,
+    path: value.path,
+    architecture: value.architecture,
+    actuatorVersion: value.actuatorVersion,
+    requestContractVersion: value.requestContractVersion,
+    binaryDigest: value.binaryDigest,
+    sourceDigest: value.sourceDigest,
+    supplyChainEvidenceDigest: value.supplyChainEvidenceDigest,
+    manifestDigest: value.manifestDigest,
+    trustPolicyDigest: value.trustPolicyDigest,
+  });
+}
+
 function parseBoundEnvironment(bytes, expectedDigest) {
   if (!Buffer.isBuffer(bytes) || !SHA256.test(expectedDigest)
     || createHash("sha256").update(bytes).digest("hex") !== expectedDigest) invalid();
@@ -432,6 +514,11 @@ function canonicalWindowsBridgePath(value) {
   if (typeof value !== "string" || value.length < 4 || value.length > 4_096 || /[\0\r\n/]/.test(value)
     || !/^[A-Za-z]:\\[^:*?"<>|]+$/.test(value) || /(?:^|\\)\.\.?(?:\\|$)/.test(value)) return false;
   return value.slice(value.lastIndexOf("\\") + 1).toLowerCase() === "deviludo-windows-scm-service-bridge.exe";
+}
+function canonicalWindowsActuatorPath(value) {
+  if (typeof value !== "string" || value.length < 4 || value.length > 4_096 || /[\0\r\n/]/.test(value)
+    || !/^[A-Za-z]:\\[^:*?"<>|]+$/.test(value) || /(?:^|\\)\.\.?(?:\\|$)/.test(value)) return false;
+  return value.slice(value.lastIndexOf("\\") + 1).toLowerCase() === "deviludo-windows-scm-native-actuator.exe";
 }
 function exactKeys(value, expected) { const actual = Object.keys(value).sort(); const sorted = [...expected].sort(); return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]); }
 function absolute(value) { if (typeof value !== "string" || !isAbsolute(value) || resolve(value) !== value || value.length > 4_096) invalid(); return value; }

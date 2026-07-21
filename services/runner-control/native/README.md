@@ -1,4 +1,4 @@
-# Windows SCM service bridge
+# Windows SCM native components
 
 The Physical Runner and Steam Client Connector are Node single-executable
 applications, not native Windows services. Windows hosts therefore run them
@@ -28,3 +28,30 @@ The privileged host actuator writes these fixed values below
 
 No administrator-supplied script, executable name, service name or argument is
 accepted by the bridge.
+
+`deviludo-windows-scm-native-actuator.exe` is the separate privileged boundary
+that installs those fixed services. It accepts only `--identity`, `--apply`,
+`--restore` and `--probe`; it never invokes `sc.exe`, `reg.exe`, PowerShell or a
+shell. The actuator reads only
+`%ProgramData%\DeviLudo\NativeActuator\actuation-request.v1.bin`, whose bounded
+little-endian v1 format contains the exact transaction, bridge, target,
+descriptor and sorted environment digests. It rehashes each PE while holding a
+non-delete/non-write shared handle, then calls SCM and Registry APIs directly.
+
+Actuation is crash recoverable. Before mutation the actuator creates
+`pending-request.v1.bin`; the last successful request remains
+`active-request.v1.bin`. A subsequent `--apply` or explicit `--restore`
+restores the active request before accepting another transition. Successful
+configuration writes a replacement active request with `MoveFileExW(...,
+MOVEFILE_WRITE_THROUGH)` and removes the pending marker. The ProgramData
+directory and inbox ACL are provisioned by the Windows machine image. Request
+files must be owned by LocalSystem or Built-in Administrators and grant no
+effective write/delete/ACL-owner rights to Everyone, Authenticated Users or
+Built-in Users; the actuator rechecks this before parsing. The platform
+delivery step therefore runs under the machine's dedicated LocalSystem broker.
+
+The bridge and actuator are separate Authenticode-signed PE files with separate
+Ed25519 trust policies and KMS keys. CMake builds both only under an approved
+64-bit MSVC Windows builder. The actuator release manifest binds request
+contract version 1; a service transaction cannot become `READY` until both
+independent manifests and exact binaries verify.

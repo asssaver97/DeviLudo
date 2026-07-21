@@ -193,7 +193,7 @@ NODE_ENV=production npm run compile:runner-native-service-transaction -- \
 ```
 
 On Windows the compiler additionally requires the independently signed SCM
-host and its fixed trust input:
+host, the separately signed native SCM actuator, and both fixed trust inputs:
 
 ```powershell
 $env:NODE_ENV = "production"
@@ -204,7 +204,11 @@ npm run compile:runner-native-service-transaction -- `
   --windows-bridge "C:\Program Files\DeviLudo\deviludo-windows-scm-service-bridge.exe" `
   --windows-bridge-manifest C:\DeviLudo\staging\windows-scm-bridge-manifest.json `
   --windows-bridge-trust-policy C:\DeviLudo\policy\windows-scm-bridge-trust-policy.json `
-  --windows-bridge-trust-policy-digest <64-lowercase-hex>
+  --windows-bridge-trust-policy-digest <64-lowercase-hex> `
+  --windows-actuator "C:\Program Files\DeviLudo\deviludo-windows-scm-native-actuator.exe" `
+  --windows-actuator-manifest C:\DeviLudo\staging\windows-scm-actuator-manifest.json `
+  --windows-actuator-trust-policy C:\DeviLudo\policy\windows-scm-actuator-trust-policy.json `
+  --windows-actuator-trust-policy-digest <64-lowercase-hex>
 ```
 
 The compiler re-verifies every staged binary and environment-file digest. It
@@ -216,15 +220,17 @@ systemd units enable `NoNewPrivileges`, strict filesystem protection and
 dedicated accounts; launchd environment values are XML-escaped.
 
 A Windows transaction deliberately remains `WAITING_NATIVE_BRIDGE` until the
-signed `deviludo-windows-scm-service-bridge` contract v1 is present. A Node SEA
+signed `deviludo-windows-scm-service-bridge` contract v1 is present, then
+remains `WAITING_NATIVE_ACTUATOR` until the independent actuator request
+contract v1 verifies. A Node SEA
 console executable is not by itself a Windows Service Control Manager binary.
 The bridge source and hardened MSVC build contract live under
 `services/runner-control/native`; it hosts only the two fixed DeviLudo services,
 rehashes the target while holding a non-replaceable file handle, then launches
 without a shell inside a kill-on-close Job Object. The compiler verifies its
-Ed25519 manifest, architecture, trust-policy digest and exact PE bytes before
+Ed25519 manifests, architecture, trust-policy digests and exact PE bytes before
 emitting a `READY` transaction. Linux and macOS transactions do not accept
-Windows bridge inputs.
+either Windows-native input.
 
 The approved Windows builder must compile with MSVC, create SBOM/malware/
 vulnerability evidence, apply Authenticode, and finalize the independent
@@ -243,13 +249,43 @@ npm run finalize:windows-scm-service-bridge -- `
   --source-digest <64-lowercase-hex> `
   --trust-policy C:\DeviLudo\policy\windows-scm-bridge-trust-policy.json `
   --trust-policy-digest <64-lowercase-hex>
+
+npm run finalize:windows-scm-native-actuator -- `
+  --architecture x86_64 `
+  --binary C:\DeviLudo\release\deviludo-windows-scm-native-actuator.exe `
+  --actuator-version 1.0.0 `
+  --built-at 2026-07-22T05:00:00.000Z `
+  --evidence C:\DeviLudo\release\windows-scm-actuator-evidence.json `
+  --output C:\DeviLudo\release\windows-scm-actuator-manifest.json `
+  --revision 1 `
+  --source-digest <64-lowercase-hex> `
+  --trust-policy C:\DeviLudo\policy\windows-scm-actuator-trust-policy.json `
+  --trust-policy-digest <64-lowercase-hex>
 ```
 
 Signer mTLS mounts are listed in
-`services/runner-control/.windows-scm-bridge-finalizer.env.example`; the
-private Ed25519 key never leaves KMS. The privileged Windows actuator must
-rehash both bridge and target, apply the canonical descriptor through Win32
-SCM/registry APIs, and write its `renderedDigest` as `DescriptorDigest`.
+`services/runner-control/.windows-scm-bridge-finalizer.env.example` and
+`.windows-scm-actuator-finalizer.env.example`; the two private Ed25519 keys
+never leave KMS and cannot authorize each other's component. Build-control then
+compiles the immutable transaction into the actuator's bounded binary format:
+
+```powershell
+$env:NODE_ENV = "production"
+npm run compile:windows-scm-actuation-request -- `
+  --transaction C:\DeviLudo\staging\service-transaction.json `
+  --transaction-digest <64-lowercase-hex> `
+  --output C:\DeviLudo\staging\actuation-request.v1.bin
+```
+
+The protected Windows delivery identity copies those exact bytes to
+`%ProgramData%\DeviLudo\NativeActuator\actuation-request.v1.bin`; its ACL is
+fixed by the machine image. The signed actuator is then invoked only with
+`--apply`. It rehashes bridge and targets while holding their handles, writes
+the transaction `renderedDigest` as `DescriptorDigest`, calls Win32 SCM and
+Registry APIs directly, and records fixed pending/active files for rollback.
+`--probe` checks the active services and `--restore` reapplies the last active
+request. `sc.exe`, `reg.exe`, PowerShell, arbitrary paths and a privileged Node
+runtime are not part of this boundary.
 
 ## Drain, activate, re-register or roll back
 
@@ -304,10 +340,10 @@ digest to ingress. A separate failure sidecar makes an interrupted report replay
 the identical digest. Exact completed receipt replay is allowed after Grant
 expiry and does not touch the host.
 
-This POSIX actuator intentionally refuses Windows. Windows activation requires
-a separately signed native SCM actuator that applies the already verified
-bridge descriptor through Win32 APIs; invoking `sc.exe`, `reg.exe`, PowerShell
-or a high-privilege Node process is not accepted as that missing trust boundary.
+This POSIX actuator intentionally refuses Windows. Windows activation uses the
+separately signed native SCM actuator and fixed request protocol described
+above; invoking `sc.exe`, `reg.exe`, PowerShell or a high-privilege Node process
+is not accepted as that trust boundary.
 
 The target `deviludo-physical-runner` probes ingress, TestKit and the optional
 Steam Connector before advertising readiness. When an activation-grant file is
