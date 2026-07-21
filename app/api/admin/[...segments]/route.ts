@@ -138,11 +138,20 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (key === "agent-versions/discover") {
       const role = requireRole(request, VERSION_ROLES);
+      const agent = body.agent ?? "claude-code";
+      if (agent !== "claude-code" && agent !== "codex-cli") {
+        throw new HttpProblem(400, "INVALID_AGENT", "Version discovery supports only Claude Code or Codex CLI");
+      }
+      if (Object.keys(body).some((field) => field !== "agent")) {
+        throw new HttpProblem(400, "INVALID_VERSION_DISCOVERY", "Local version discovery accepts only an exact built-in Agent selection");
+      }
+      const version = agent === "claude-code" ? "2.1.15" : "0.92.0";
+      const id = `${agent}@${version}`;
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
-        store.agentVersions["claude-code@2.1.15"] ??= "DISCOVERED";
-        appendDemoAudit("AGENT_VERSION_DISCOVERED", "claude-code@2.1.15", role, { source: "official-manifest" });
-        return { candidates: [{ agent: "claude-code", version: "2.1.15", state: "DISCOVERED", activated: false }] };
+        store.agentVersions[id] ??= "DISCOVERED";
+        appendDemoAudit("AGENT_VERSION_DISCOVERED", id, role, { source: "official-manifest", automaticActivation: false });
+        return { candidates: [{ agent, version, state: store.agentVersions[id], activated: false }] };
       });
     }
 

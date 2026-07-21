@@ -386,6 +386,29 @@
   gap: 8px;
 }
 
+.discoveryControl {
+  display: grid;
+  gap: 3px;
+}
+
+.discoveryControl > span {
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.discoveryControl select {
+  min-height: 34px;
+  border: 1px solid #cfd4cf;
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 28px 0 10px;
+  font: 600 10px var(--font-geist-sans), sans-serif;
+}
+
 .primaryButton,
 .secondaryButton,
 .selectedButton {
@@ -894,6 +917,24 @@
   color: #785b20;
   font-size: 10px;
 }
+
+.adminStateNotice {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 9px;
+  margin: 14px 32px 0;
+  border: 1px solid #d9ded9;
+  background: #f5f7f3;
+  color: #59635e;
+  padding: 9px 13px;
+  font-size: 10px;
+}
+
+.adminStateNotice svg { width: 15px; }
+.adminStateNotice span { flex: 1; }
+.adminStateNotice button { border: 1px solid #c6ccc7; background: #fff; cursor: pointer; padding: 5px 9px; font-size: 9px; }
+.adminStateError { border-color: #e4bdb7; background: #fff0ed; color: #872e22; }
 
 .permissionNotice svg,
 .formError svg {
@@ -1873,6 +1914,9 @@
   .pageHeader h1 { font-size: 23px; }
   .headerActions { width: 100%; }
   .headerActions button { flex: 1; }
+  .discoveryControl { flex: 1; }
+  .discoveryControl select { width: 100%; }
+  .adminStateNotice { margin-inline: 18px; }
   .securityStrip { padding-inline: 16px; }
   .securityStrip > div { flex-direction: column; gap: 1px; }
   .securityStrip button { display: none; }

@@ -43,6 +43,27 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_BLOCKED"), true);
 });
 
+test("local Agent discovery selects Claude Code and Codex CLI explicitly without activating candidates", async () => {
+  resetDemoStore();
+  const codex = await POST(
+    request("agent-versions/discover", "POST", "PlatformAgentAdmin", { agent: "codex-cli" }),
+    context("agent-versions/discover"),
+  );
+  assert.equal(codex.status, 201);
+  const payload = await codex.json();
+  assert.deepEqual(payload.data.candidates, [{ agent: "codex-cli", version: "0.92.0", state: "DISCOVERED", activated: false }]);
+  assert.equal(getDemoStore().agentVersions["codex-cli@0.92.0"], "DISCOVERED");
+  assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "DISCOVERED");
+  assert.equal(getDemoStore().audit[0]?.resource, "codex-cli@0.92.0");
+
+  const invalid = await POST(
+    request("agent-versions/discover", "POST", "PlatformAgentAdmin", { agent: "third-party" }),
+    context("agent-versions/discover"),
+  );
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error.code, "INVALID_AGENT");
+});
+
 test("local Agent defaults expose only complete platform, tenant and project Profile bindings", async () => {
   const store = resetDemoStore();
   const response = await GET(new Request("http://127.0.0.1:3000/api/admin/agents"), context("agents"));

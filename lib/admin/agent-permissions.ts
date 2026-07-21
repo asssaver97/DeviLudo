@@ -1,4 +1,4 @@
-import type { AdminRole } from "../demo/admin-data";
+import type { AdminRole } from "./agent-ui";
 
 export interface AgentAdminCapabilities {
   readonly manageVersions: boolean;

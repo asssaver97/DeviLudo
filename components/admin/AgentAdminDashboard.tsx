@@ -5,14 +5,14 @@ import type { FormEvent } from "react";
 import type { LocalAgentReadiness, LocalHealth } from "@/components/console/useLocalPlatform";
 import { agentAdminCapabilities } from "@/lib/admin/agent-permissions";
 import {
-  agents,
+  builtInAgentUi,
   rolePermissions,
-  versionRows,
   type AdminRole,
+  type AgentCatalogItem,
   type AgentKind,
   type AgentVersionRow,
   type AuditEvent,
-} from "@/lib/demo/admin-data";
+} from "@/lib/admin/agent-ui";
 import { AdminIcon, type AdminIconName } from "./AdminIcons";
 import styles from "./admin.module.css";
 
@@ -39,6 +39,7 @@ type AgentInstallation = {
   };
 };
 type AdminState = {
+  catalog: AgentCatalogItem[];
   defaultAgent: AgentKind;
   versions: AgentVersionRow[];
   installations: AgentInstallation[];
@@ -79,11 +80,11 @@ async function adminRequest<T>(
   return (payload.data ?? payload.meta) as T;
 }
 
-const tabs: { id: TabId; label: string; count?: string }[] = [
+const tabs: { id: TabId; label: string }[] = [
   { id: "overview", label: "总览" },
-  { id: "versions", label: "版本", count: "4" },
-  { id: "deployments", label: "安装部署", count: "2" },
-  { id: "providers", label: "Provider", count: "2" },
+  { id: "versions", label: "版本" },
+  { id: "deployments", label: "安装部署" },
+  { id: "providers", label: "Provider" },
   { id: "inheritance", label: "选择与继承" },
   { id: "audit", label: "健康与审计" },
 ];
@@ -94,7 +95,7 @@ const navGroups: { label: string; items: { label: string; icon: AdminIconName; a
     items: [
       { label: "运行概览", icon: "activity" },
       { label: "项目", icon: "projects" },
-      { label: "构建与测试", icon: "runners", badge: "12" },
+      { label: "构建与测试", icon: "runners" },
       { label: "发行", icon: "releases" },
     ],
   },
@@ -141,37 +142,50 @@ export default function AgentAdminDashboard() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [role, setRole] = useState<AdminRole>("PlatformAgentAdmin");
   const [defaultAgent, setDefaultAgent] = useState<AgentKind>("claude-code");
-  const [versions, setVersions] = useState<AgentVersionRow[]>(versionRows);
+  const [catalog, setCatalog] = useState<AgentCatalogItem[]>([]);
+  const [versions, setVersions] = useState<AgentVersionRow[]>([]);
   const [installations, setInstallations] = useState<AgentInstallation[]>([]);
   const [profiles, setProfiles] = useState<AdminState["profiles"]>([]);
   const [providers, setProviders] = useState<AdminState["providers"]>([]);
   const [credentials, setCredentials] = useState<AdminState["credentials"]>([]);
   const [defaults, setDefaults] = useState<AdminState["defaults"]>({});
   const [authMode, setAuthMode] = useState<AdminAuthMode>("loading");
+  const [adminLoading, setAdminLoading] = useState(true);
+  const [adminError, setAdminError] = useState("");
+  const [discoveryAgent, setDiscoveryAgent] = useState<AgentKind>("claude-code");
   const [toast, setToast] = useState<Toast>(null);
   const [auditFilter, setAuditFilter] = useState("全部事件");
   const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
   const [localHealth, setLocalHealth] = useState<LocalHealth | null>(null);
 
   const refreshAdminState = useCallback(async () => {
-    const response = await fetch("/api/admin/agents", { cache: "no-store" });
-    const payload = await response.json() as Record<string, unknown> & { error?: { message?: string } };
-    if (!response.ok) throw new Error(payload.error?.message ?? "读取 Agent 管理状态失败");
-    const state = normalizeAdminState(payload);
-    setDefaultAgent(state.defaultAgent);
-    setVersions(state.versions);
-    setProfiles(state.profiles);
-    setProviders(state.providers);
-    setCredentials(state.credentials);
-    setDefaults(state.defaults);
-    setInstallations(state.installations.map((installation) => {
-      const rollout = state.rollouts[installation.id];
-      return rollout ? { ...installation, rolloutPercent: rollout.percent, state: rollout.state } : installation;
-    }));
-    const mode = response.headers.get("x-deviludo-admin-auth-mode");
-    if (mode === "local-fixture" || mode === "trusted-control-plane") setAuthMode(mode);
-    const effectiveRole = response.headers.get("x-deviludo-effective-role");
-    if (mode === "trusted-control-plane" && isAdminRole(effectiveRole)) setRole(effectiveRole);
+    try {
+      const response = await fetch("/api/admin/agents", { cache: "no-store" });
+      const payload = await response.json() as Record<string, unknown> & { error?: { message?: string } };
+      if (!response.ok) throw new Error(payload.error?.message ?? "读取 Agent 管理状态失败");
+      const state = normalizeAdminState(payload);
+      setCatalog(state.catalog);
+      setDefaultAgent(state.defaultAgent);
+      setVersions(state.versions);
+      setProfiles(state.profiles);
+      setProviders(state.providers);
+      setCredentials(state.credentials);
+      setDefaults(state.defaults);
+      setInstallations(state.installations.map((installation) => {
+        const rollout = state.rollouts[installation.id];
+        return rollout ? { ...installation, rolloutPercent: rollout.percent, state: rollout.state } : installation;
+      }));
+      const mode = response.headers.get("x-deviludo-admin-auth-mode");
+      if (mode === "local-fixture" || mode === "trusted-control-plane") setAuthMode(mode);
+      const effectiveRole = response.headers.get("x-deviludo-effective-role");
+      if (mode === "trusted-control-plane" && isAdminRole(effectiveRole)) setRole(effectiveRole);
+      setAdminError("");
+    } catch (reason) {
+      setAdminError(reason instanceof Error ? reason.message : "读取 Agent 管理状态失败");
+      throw reason;
+    } finally {
+      setAdminLoading(false);
+    }
   }, []);
 
   const refreshAudit = useCallback(async () => {
@@ -230,7 +244,7 @@ export default function AgentAdminDashboard() {
 
   const effectivePermissionRole: AdminRole = authMode === "loading" ? "Auditor" : role;
   const permissions = agentAdminCapabilities(effectivePermissionRole);
-  const canOperateVersions = permissions.manageVersions;
+  const canOperateVersions = permissions.manageVersions && !adminLoading && !adminError;
 
   const updateVersion = async (id: string, status: AgentVersionRow["status"]) => {
     if (!canOperateVersions) {
@@ -259,8 +273,8 @@ export default function AgentAdminDashboard() {
       return;
     }
     const row = versions.find((item) => item.id === id);
-    const catalog = row ? agents.find((item) => item.id === row.agent) : undefined;
-    if (!row || !catalog) return;
+    const registry = row ? catalog.find((item) => item.id === row.agent) : undefined;
+    if (!row || !registry) return;
     try {
       await adminRequest("agent-installations", {
         method: "POST",
@@ -269,7 +283,7 @@ export default function AgentAdminDashboard() {
           agent: row.agent,
           version: row.version,
           workerPool: row.agent === "claude-code" ? "dev-linux-a" : "dev-linux-b",
-          adapterVersion: catalog.adapterVersion.replace(/^adapter-[^@]+@/, ""),
+          adapterVersion: registry.adapterVersion,
         },
       });
       await refreshAdminState();
@@ -330,16 +344,16 @@ export default function AgentAdminDashboard() {
     }
   };
 
-  const discoverVersions = async () => {
+  const discoverVersions = async (agent: AgentKind) => {
     if (!canOperateVersions) {
       notify("仅 PlatformAgentAdmin 可发现版本", "warning");
       return;
     }
     try {
-      await adminRequest("agent-versions/discover", { method: "POST", role });
+      await adminRequest("agent-versions/discover", { method: "POST", role, body: { agent } });
       await refreshAdminState();
       await refreshAudit();
-      notify("官方候选已写入版本目录；不会自动激活", "neutral");
+      notify(`${agent === "claude-code" ? "Claude Code" : "Codex CLI"} 官方候选已写入版本目录；不会自动激活`, "neutral");
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "版本发现失败", "warning");
     }
@@ -400,7 +414,8 @@ export default function AgentAdminDashboard() {
             <p>治理开发 Agent 的版本、部署、Provider 与配置继承。运行时锁定配置，不受后续变更影响。</p>
           </div>
           <div className={styles.headerActions}>
-            <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions()} disabled={!permissions.manageVersions} title={permissions.manageVersions ? undefined : "需要 PlatformAgentAdmin 权限"}><AdminIcon name="refresh" />发现版本</button>
+            <label className={styles.discoveryControl}><span>官方目录</span><select aria-label="选择要发现版本的 Agent" value={discoveryAgent} onChange={(event) => setDiscoveryAgent(event.target.value as AgentKind)}><option value="claude-code">Claude Code</option><option value="codex-cli">Codex CLI</option></select></label>
+            <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions(discoveryAgent)} disabled={!permissions.manageVersions || adminLoading || Boolean(adminError)} title={permissions.manageVersions ? undefined : "需要 PlatformAgentAdmin 权限"}><AdminIcon name="refresh" />发现版本</button>
             <button className={styles.primaryButton} type="button" onClick={() => { setActiveTab("providers"); notify("已打开 Provider 草稿编辑器", "neutral"); }} disabled={!permissions.editPlatformProvider} title={permissions.editPlatformProvider ? undefined : "当前角色不能编辑平台级 Provider"}>新建 Provider</button>
           </div>
         </div>
@@ -411,10 +426,13 @@ export default function AgentAdminDashboard() {
           <button type="button" onClick={() => setActiveTab("inheritance")}>查看策略 <AdminIcon name="chevron" /></button>
         </div>
 
+        {adminLoading ? <div className={styles.adminStateNotice}><AdminIcon name="refresh" />正在读取权威 Agent 目录、版本与安装投影…</div> : null}
+        {adminError ? <div className={`${styles.adminStateNotice} ${styles.adminStateError}`} role="alert"><AdminIcon name="alert" /><span>{adminError}。页面不会以演示版本或扫描结果回退。</span><button type="button" onClick={() => { setAdminLoading(true); void refreshAdminState().catch(() => undefined); }}>重试</button></div> : null}
+
         <div className={styles.tabs} role="tablist" aria-label="Agent 管理分区">
           {tabs.map((tab) => {
             const count = tab.id === "versions" ? String(versions.length) : tab.id === "deployments" ? String(installations.length)
-              : tab.id === "providers" ? String(profiles.length) : tab.count;
+              : tab.id === "providers" ? String(providers.length) : undefined;
             return <button key={tab.id} className={activeTab === tab.id ? styles.tabActive : ""} onClick={() => setActiveTab(tab.id)} type="button" role="tab" aria-selected={activeTab === tab.id}>
               {tab.label}{count && <span>{count}</span>}
             </button>;
@@ -422,9 +440,9 @@ export default function AgentAdminDashboard() {
         </div>
 
         <div className={styles.content}>
-          {activeTab === "overview" && <OverviewTab defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
+          {activeTab === "overview" && <OverviewTab catalog={catalog} versions={versions} installations={installations} defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
-          {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations} onAdvance={advanceRollout} onRollback={rollback} />}
+          {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations && !adminLoading && !adminError} onAdvance={advanceRollout} onRollback={rollback} />}
           {activeTab === "providers" && <ProvidersTab role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
             providers={providers} credentials={credentials}
             production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
@@ -444,7 +462,17 @@ export default function AgentAdminDashboard() {
   );
 }
 
-function OverviewTab({ defaultAgent, localAgents, localHealth, canChangeDefault, onDefaultChange, onNavigate }: { defaultAgent: AgentKind; localAgents: LocalAgentReadiness[]; localHealth: LocalHealth | null; canChangeDefault: boolean; onDefaultChange: (agent: AgentKind) => void; onNavigate: (tab: TabId) => void }) {
+function OverviewTab({ catalog, versions, installations, defaultAgent, localAgents, localHealth, canChangeDefault, onDefaultChange, onNavigate }: {
+  catalog: AgentCatalogItem[];
+  versions: AgentVersionRow[];
+  installations: AgentInstallation[];
+  defaultAgent: AgentKind;
+  localAgents: LocalAgentReadiness[];
+  localHealth: LocalHealth | null;
+  canChangeDefault: boolean;
+  onDefaultChange: (agent: AgentKind) => void;
+  onNavigate: (tab: TabId) => void;
+}) {
   const exactMatches = localAgents.filter((agent) => agent.state === "READY").length;
   const workerReady = localHealth?.dependencies?.developmentWorker === "READY";
   return (
@@ -459,27 +487,33 @@ function OverviewTab({ defaultAgent, localAgents, localHealth, canChangeDefault,
       <section className={styles.section}>
         <SectionHeading title="Agent 目录" description="首版仅支持经平台签名的两种内置 Agent；每个 WorkerImage 只包含一种 Agent。" action={<button className={styles.textButton} type="button" onClick={() => onNavigate("versions")}>管理版本 <AdminIcon name="chevron" /></button>} />
         <div className={styles.agentCatalog}>
-          {agents.map((agent) => (
+          {catalog.map((agent) => {
+            const approvedVersions = versions.filter((version) => version.agent === agent.id && version.status === "APPROVED").map((version) => version.version);
+            const installation = installations.find((item) => item.agent === agent.id && item.state === "ACTIVE")
+              ?? installations.find((item) => item.agent === agent.id && item.state === "READY");
+            return (
             <article className={`${styles.agentRow} ${defaultAgent === agent.id ? styles.agentRowDefault : ""}`} key={agent.id}>
               <AgentMark kind={agent.id} />
               <div className={styles.agentIdentity}>
                 <div><h3>{agent.name}</h3><span>{agent.vendor}</span>{defaultAgent === agent.id && <StatusPill tone="info">平台默认</StatusPill>}</div>
                 <p>{agent.description}</p>
-                <a href={`https://${agent.source}`} target="_blank" rel="noreferrer">{agent.source}<AdminIcon name="external" /></a>
+                <a href={agent.officialSource} target="_blank" rel="noreferrer">{new URL(agent.officialSource).host}<AdminIcon name="external" /></a>
               </div>
               <div className={styles.agentMeta}>
-                <span>已批准版本</span><strong>{agent.version}</strong><small>{agent.adapterVersion}</small>
+                <span>已批准版本</span><strong>{approvedVersions.join(" · ") || "尚无"}</strong><small>{installation ? `adapter ${installation.adapterVersion}` : "等待可信安装"}</small>
               </div>
               <div className={styles.capabilities}>
                 {agent.capabilities.map((capability) => <span key={capability}>{capability}</span>)}
-                <small>{agent.platforms.join(" · ")}</small>
+                <small>{agent.supportedWorkers.join(" · ")}</small>
               </div>
               <div className={styles.agentActions}>
                 {defaultAgent === agent.id ? <button className={styles.selectedButton} type="button" disabled><AdminIcon name="check" />已选择</button> : <button className={styles.secondaryButton} type="button" onClick={() => onDefaultChange(agent.id)} disabled={!canChangeDefault} title={canChangeDefault ? undefined : "需要 PlatformAgentAdmin 权限"}>设为默认</button>}
                 <button className={styles.moreButton} type="button" aria-label={`${agent.name} 更多操作`}><AdminIcon name="more" /></button>
               </div>
             </article>
-          ))}
+            );
+          })}
+          {catalog.length === 0 ? <div className={styles.emptyState}>正在读取权威 Agent Registry；不会展示预置版本或安装状态。</div> : null}
         </div>
       </section>
 
@@ -542,7 +576,7 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
           </tbody>
         </table>
       </div>
-      <div className={styles.tableFooter}><span>显示 4 个精确版本 · 无浮动通道</span><span>最后发现：2 分钟前</span></div>
+      <div className={styles.tableFooter}><span>显示 {rows.length} 个精确版本 · 无浮动通道</span><span>动态信息来自当前控制面投影</span></div>
     </section>
   );
 }
@@ -553,6 +587,8 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
   onAdvance: (installationId: string) => void;
   onRollback: (installationId: string) => void;
 }) {
+  const trustedImageAvailable = installations.some((installation) => Boolean(installation.imageDigest && installation.buildReceiptId)
+    && installation.health === "HEALTHY" && ["READY", "CANARY", "ACTIVE"].includes(installation.state));
   return (
     <>
       <section className={styles.section}>
@@ -593,7 +629,7 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
       <section className={styles.section}>
         <SectionHeading eyebrow="GATE" title="镜像晋级检查" description="所有检查均绑定精确 CLI、适配器与基础镜像 digest。" />
         <div className={styles.checkGrid}>
-          {["官方签名与哈希", "SBOM 与许可证", "恶意软件扫描", "漏洞策略", "CLI / Adapter Contract", "沙箱逃逸测试", "合成代码任务", "无租户数据验证"].map((item, index) => <div key={item}><span className={index === 7 ? styles.checkRunning : styles.checkDone}>{index === 7 ? "···" : "✓"}</span><strong>{item}</strong><small>{index === 7 ? "持续监测" : "通过"}</small></div>)}
+          {["官方签名与哈希", "SBOM 与许可证", "恶意软件扫描", "漏洞策略", "CLI / Adapter Contract", "沙箱逃逸测试", "合成代码任务", "无租户数据验证"].map((item) => <div key={item}><span className={trustedImageAvailable ? styles.checkDone : styles.checkRunning}>{trustedImageAvailable ? "✓" : "—"}</span><strong>{item}</strong><small>{trustedImageAvailable ? "供应链回执已绑定" : "等待可信 WorkerImage"}</small></div>)}
         </div>
       </section>
     </>
@@ -910,9 +946,11 @@ function InheritanceTab({ defaults, installations, profiles, providers, notify }
 function normalizeAdminState(payload: Record<string, unknown>): AdminState {
   const local = object(payload.meta);
   if (local) {
+    const catalog = catalogRows(payload.data);
     const versions = records(local.versions).map(versionRow);
     const installations = records(local.installations).map((value) => installationRow(value));
     return {
+      catalog,
       defaultAgent: agentKind(local.defaultAgent) ?? "claude-code",
       versions,
       installations,
@@ -926,9 +964,11 @@ function normalizeAdminState(payload: Record<string, unknown>): AdminState {
   const data = object(payload.data);
   if (!data) throw new Error("Agent 管理状态响应无效");
   const catalog = records(data.catalog);
+  const parsedCatalog = catalogRows(catalog);
   const versions = catalog.flatMap((entry) => records(entry.versions).map(versionRow));
   const installations = catalog.flatMap((entry) => records(entry.installations).map((value) => installationRow(value, agentKind(entry.id) ?? undefined)));
   return {
+    catalog: parsedCatalog,
     defaultAgent: agentKind(data.effectivePlatformDefaultAgent) ?? "claude-code",
     versions,
     installations,
@@ -945,17 +985,18 @@ function versionRow(value: Record<string, unknown>): AgentVersionRow {
   const version = text(value.version);
   const status = versionStatus(value.state);
   if (!agent || !version || !status) throw new Error("Agent 版本目录响应无效");
-  const baseline = versionRows.find((item) => item.agent === agent && item.version === version);
   const discoveredAt = text(value.discoveredAt);
+  const sourceDigest = text(value.sourceDigest);
+  const validationDigest = text(value.validationReceiptDigest);
   return {
     id: text(value.id) ?? `${agent}@${version}`,
     agent,
     version,
     releasedAt: discoveredAt && Number.isFinite(Date.parse(discoveredAt))
-      ? new Date(discoveredAt).toLocaleString("zh-CN", { hour12: false }) : baseline?.releasedAt ?? "目录记录",
-    integrity: text(value.integrity) ?? baseline?.integrity ?? "等待供应链验证",
-    sbom: text(value.sbomRef) ?? baseline?.sbom ?? "等待 SBOM",
-    vulnerabilities: value.scan === "PASS" ? "扫描通过" : value.scan === "FAIL" ? "扫描失败" : baseline?.vulnerabilities ?? "扫描排队中",
+      ? new Date(discoveredAt).toLocaleString("zh-CN", { hour12: false }) : "时间未投影",
+    integrity: text(value.integrity) ?? (validationDigest ? `验证回执 ${shortDigest(validationDigest)}` : sourceDigest ? `来源 ${shortDigest(sourceDigest)}` : "等待供应链回执"),
+    sbom: text(value.sbomRef) ?? "SBOM 未投影",
+    vulnerabilities: value.scan === "PASS" ? "扫描通过" : value.scan === "FAIL" ? "扫描失败" : "扫描状态未投影",
     status,
   };
 }
@@ -1042,6 +1083,43 @@ function versionStatus(value: unknown): AgentVersionRow["status"] | null {
   return value === "APPROVED" || value === "DISCOVERED" || value === "VALIDATING" || value === "DEPRECATED"
     || value === "BLOCKED" || value === "REJECTED" ? value : null;
 }
+function catalogRows(value: unknown): AgentCatalogItem[] {
+  const result = records(value).map((row) => {
+    const kind = agentKind(row.id);
+    const builtIn = builtInAgentUi.find((item) => item.id === kind);
+    if (!kind || !builtIn) throw new Error("Agent Registry 响应包含不受支持的 Agent");
+    const officialSource = text(row.officialSource) ?? builtIn.officialSource;
+    let source: URL;
+    try { source = new URL(officialSource); } catch { throw new Error("Agent Registry 官方来源无效"); }
+    if (source.protocol !== "https:" || source.username || source.password || source.search || source.hash) {
+      throw new Error("Agent Registry 官方来源无效");
+    }
+    return {
+      id: kind,
+      name: text(row.name) ?? builtIn.name,
+      vendor: text(row.vendor) ?? builtIn.vendor,
+      description: builtIn.description,
+      officialSource: source.toString(),
+      adapterVersion: builtIn.adapterVersion,
+      capabilities: catalogStringList(row.capabilities, builtIn.capabilities),
+      supportedWorkers: catalogStringList(row.supportedWorkers, builtIn.supportedWorkers),
+    };
+  });
+  if (result.length !== 2 || new Set(result.map((item) => item.id)).size !== 2
+    || !(["claude-code", "codex-cli"] as const).every((kind) => result.some((item) => item.id === kind))) {
+    throw new Error("Agent Registry 必须精确包含 Claude Code 与 Codex CLI");
+  }
+  return result;
+}
+function catalogStringList(value: unknown, fallback: readonly string[]): string[] {
+  if (value === undefined) return [...fallback];
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32
+    || value.some((item) => typeof item !== "string" || !item || item.length > 120)) {
+    throw new Error("Agent Registry 能力或平台列表无效");
+  }
+  return [...value] as string[];
+}
+function shortDigest(value: string): string { return value.length > 22 ? `${value.slice(0, 14)}…${value.slice(-7)}` : value; }
 function isAdminRole(value: unknown): value is AdminRole { return typeof value === "string" && value in rolePermissions; }
 function isLoopbackBrowser(): boolean { return typeof window !== "undefined" && ["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname); }
 function credentialMatchesAgent(label: string, agent: AgentKind): boolean {
@@ -1066,7 +1144,7 @@ function AuditTab({ events, filter, localHealth, setFilter }: { events: AuditEve
           {filtered.map((event) => <div className={styles.auditEvent} key={event.id}><time>{event.at}</time><span className={`${styles.auditDot} ${styles[`audit_${event.tone}`]}`} /><div><div><strong>{event.action}</strong><span>{event.target}</span></div><p>{event.detail}</p><small>{event.actor} · {event.role}</small></div><button className={styles.moreButton} type="button"><AdminIcon name="more" /></button></div>)}
           {filtered.length === 0 && <div className={styles.emptyState}>当前筛选条件下没有事件</div>}
         </div>
-        <div className={styles.tableFooter}><span>审计保留 365 天 · WORM 存储</span><button type="button">导出 NDJSON</button></div>
+        <div className={styles.tableFooter}><span>当前投影 {filtered.length} 条 · 保留与 WORM 策略由审计存储执行</span></div>
       </section>
     </>
   );
