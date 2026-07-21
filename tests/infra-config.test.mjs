@@ -787,6 +787,7 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   const steamDriver = readFileSync(new URL("../services/godot-testkit/src/steam-installed-game-driver.ts", import.meta.url), "utf8");
   const nativeEntry = readFileSync(new URL("../services/godot-testkit/src/native-main.ts", import.meta.url), "utf8");
   const nativeBuilder = readFileSync(new URL("../scripts/production/build-runner-native.mjs", import.meta.url), "utf8");
+  const serviceTransaction = readFileSync(new URL("../scripts/production/compile-runner-native-service-transaction.mjs", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../services/godot-testkit/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:godot-testkit/);
   assert.equal(packageJson.scripts["start:godot-testkit"], observedServiceCommand("godot-testkit"));
@@ -806,6 +807,12 @@ test("Godot TestKit is a fixed signed-job CLI and part of the full service gate"
   assert.equal(packageJson.scripts["build:runner-native"], "node scripts/production/build-runner-native.mjs");
   assert.equal(packageJson.scripts["finalize:runner-native"], "node scripts/production/finalize-runner-native-release.mjs");
   assert.equal(packageJson.scripts["verify:runner-native"], "node scripts/production/verify-runner-native-release.mjs");
+  assert.equal(packageJson.scripts["compile:runner-native-service-transaction"],
+    "node --import tsx scripts/production/compile-runner-native-service-transaction.mjs");
+  assert.match(serviceTransaction, /WAITING_NATIVE_BRIDGE/);
+  assert.match(serviceTransaction, /SIGNED_WINDOWS_SCM_BRIDGE_REQUIRED/);
+  assert.match(serviceTransaction, /NoNewPrivileges=true/);
+  assert.doesNotMatch(serviceTransaction, /shell:\s*true|curl \| sh|dangerously-skip-permissions/);
   assert.match(nativeEntry, /isSea\(\)/);
   assert.match(nativeBuilder, /--experimental-sea-config/);
   assert.match(nativeBuilder, /status", "--porcelain=v1"/);

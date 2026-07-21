@@ -181,6 +181,33 @@ receipt, then atomically renames its private staging directory. An exact retry
 replays the receipt; a changed file fails. `STAGED` is not permission to stop a
 service or switch a pointer.
 
+Before any privileged host integration is allowed to act, compile the staged
+receipt and the still-exact environment locks into one create-only service
+transaction:
+
+```bash
+NODE_ENV=production npm run compile:runner-native-service-transaction -- \
+  --plan /absolute/staging/install-plan.json \
+  --plan-digest <64-lowercase-hex> \
+  --output /absolute/staging/service-transaction.json
+```
+
+The compiler re-verifies every staged binary and environment-file digest. It
+emits content-addressed systemd units, launchd plists or a Windows SCM
+descriptor together with a fixed action enum, manager executable, Connector-
+before-Runner start order, reverse stop order and previous-plan rollback
+binding. No shell string or caller-supplied argv exists in the transaction.
+systemd units enable `NoNewPrivileges`, strict filesystem protection and
+dedicated accounts; launchd environment values are XML-escaped.
+
+A Windows transaction deliberately remains `WAITING_NATIVE_BRIDGE` until the
+signed `deviludo-windows-scm-service-bridge` contract v1 is present. A Node SEA
+console executable is not by itself a Windows Service Control Manager binary;
+the platform must not report that target activatable or invoke `sc.exe` against
+it directly. Linux and macOS transactions are `READY`. The later native bridge
+release is independently signed and digest-pinned in the same way as the Steam
+UI bridge.
+
 ## Drain, activate, re-register or roll back
 
 For an upgrade, repeatedly request a short-lived activation grant. The output

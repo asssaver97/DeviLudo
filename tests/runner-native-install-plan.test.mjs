@@ -20,6 +20,11 @@ import {
   createRunnerNativeActivationAuthorizationRequest,
   requestRunnerNativeActivation,
 } from "../scripts/production/request-runner-native-activation.mjs";
+import {
+  createRunnerNativeServiceDefinition,
+  createRunnerNativeServiceTransaction,
+  parseRunnerNativeServiceTransactionArguments,
+} from "../scripts/production/compile-runner-native-service-transaction.mjs";
 
 const hex = (character) => character.repeat(64);
 const prefixed = (character) => `sha256:${hex(character)}`;
@@ -260,6 +265,134 @@ test("native activation request binds the staged receipt and waits for a signed 
   }), /activation request|staging input/);
 });
 
+test("service transaction compiles a digest-bound hardened systemd switch with no shell command", () => {
+  const authorization = installAuthorization();
+  const machineConfig = config(true);
+  const runnerEnvironmentBytes = environmentBytes(runnerEnvironment(machineConfig, authorization));
+  const connectorEnvironmentBytes = environmentBytes(connectorEnvironment(machineConfig, authorization));
+  const plan = createRunnerNativeInstallPlan({
+    ...baseInput(authorization, machineConfig),
+    runnerEnv: runnerEnvironment(machineConfig, authorization),
+    runnerEnvFileDigest: digest(runnerEnvironmentBytes),
+    connectorEnv: connectorEnvironment(machineConfig, authorization),
+    connectorEnvFile,
+    connectorEnvFileDigest: digest(connectorEnvironmentBytes),
+    bridgeObservedDigest: machineConfig.capabilities.steamClientConnector.binaryDigest,
+    previousPlan: null,
+    now: new Date("2026-07-22T04:00:00.000Z"),
+  });
+  const receipt = stagingReceipt(plan);
+  const transaction = createRunnerNativeServiceTransaction({
+    plan,
+    planDigest: plan.planDigest,
+    stagingReceipt: receipt,
+    physicalRunnerEnvironment: runnerEnvironmentBytes,
+    steamClientConnectorEnvironment: connectorEnvironmentBytes,
+  });
+  assert.equal(transaction.status, "READY");
+  assert.equal(transaction.managerTool, "/usr/bin/systemctl");
+  assert.deepEqual(transaction.activation.startOrder, ["steam-client-connector", "physical-runner"]);
+  assert.match(transaction.definitions[1].rendered, /NoNewPrivileges=true/);
+  assert.match(transaction.definitions[1].rendered, /ProtectSystem=strict/);
+  assert.equal(transaction.definitions[1].environmentSourceDigest, digest(runnerEnvironmentBytes));
+  assert.ok(transaction.activation.actions.every((action) => !Object.hasOwn(action, "command") && !Object.hasOwn(action, "argv")));
+  assert.equal(transaction.windowsBridge, null);
+  assert.equal(transaction.transactionDigest, sha256Canonical(Object.fromEntries(
+    Object.entries(transaction).filter(([key]) => key !== "transactionDigest"),
+  )));
+  assert.throws(() => createRunnerNativeServiceTransaction({
+    plan,
+    planDigest: plan.planDigest,
+    stagingReceipt: receipt,
+    physicalRunnerEnvironment: Buffer.from("NODE_ENV=production\nDEVILUDO_API_KEY=plaintext\n"),
+    steamClientConnectorEnvironment: connectorEnvironmentBytes,
+  }), /service transaction is invalid/);
+  const unsafeEnvironment = {
+    ...runnerEnvironment(machineConfig, authorization),
+    DEVILUDO_API_KEY: "plaintext",
+  };
+  const unsafeBytes = environmentBytes(unsafeEnvironment);
+  const unsafePlan = createRunnerNativeInstallPlan({
+    ...baseInput(authorization, machineConfig),
+    runnerEnv: unsafeEnvironment,
+    runnerEnvFileDigest: digest(unsafeBytes),
+    connectorEnv: connectorEnvironment(machineConfig, authorization),
+    connectorEnvFile,
+    connectorEnvFileDigest: digest(connectorEnvironmentBytes),
+    bridgeObservedDigest: machineConfig.capabilities.steamClientConnector.binaryDigest,
+    previousPlan: null,
+    now: new Date("2026-07-22T04:05:00.000Z"),
+  });
+  assert.throws(() => createRunnerNativeServiceTransaction({
+    plan: unsafePlan,
+    planDigest: unsafePlan.planDigest,
+    stagingReceipt: stagingReceipt(unsafePlan),
+    physicalRunnerEnvironment: unsafeBytes,
+    steamClientConnectorEnvironment: connectorEnvironmentBytes,
+  }), /service transaction is invalid/);
+});
+
+test("service definitions render launchd safely and keep Windows blocked on the signed SCM bridge", () => {
+  const authorization = installAuthorization();
+  const machineConfig = config(false);
+  const environment = {
+    ...runnerEnvironment(machineConfig, authorization),
+    DEVILUDO_RENDER_TEST: "<&>\"'",
+  };
+  const environmentBody = environmentBytes(environment);
+  const linux = createRunnerNativeInstallPlan({
+    ...baseInput(authorization, machineConfig),
+    runnerEnv: environment,
+    runnerEnvFileDigest: digest(environmentBody),
+    connectorEnv: null,
+    connectorEnvFile: null,
+    connectorEnvFileDigest: null,
+    bridgeObservedDigest: null,
+    previousPlan: null,
+    now: new Date("2026-07-22T04:10:00.000Z"),
+  });
+  const macPlan = retargetPlan(linux, "macos");
+  const macDefinition = createRunnerNativeServiceDefinition({
+    plan: macPlan,
+    service: macPlan.services.physicalRunner,
+    environment,
+    startOrder: 1,
+  });
+  assert.equal(macDefinition.format, "LAUNCHD_PLIST");
+  assert.equal(macDefinition.destination, "/Library/LaunchDaemons/com.deviludo.physical-runner.plist");
+  assert.match(macDefinition.rendered, /&lt;&amp;&gt;&quot;&apos;/);
+  assert.doesNotMatch(macDefinition.rendered, /<string><&>/);
+
+  const windowsPlan = retargetPlan(linux, "windows");
+  const windowsReceipt = stagingReceipt(windowsPlan);
+  const transaction = createRunnerNativeServiceTransaction({
+    plan: windowsPlan,
+    planDigest: windowsPlan.planDigest,
+    stagingReceipt: windowsReceipt,
+    physicalRunnerEnvironment: environmentBody,
+    steamClientConnectorEnvironment: null,
+  });
+  assert.equal(transaction.status, "WAITING_NATIVE_BRIDGE");
+  assert.equal(transaction.windowsBridge.reasonCode, "SIGNED_WINDOWS_SCM_BRIDGE_REQUIRED");
+  assert.equal(transaction.definitions[0].format, "WINDOWS_SCM_DESCRIPTOR");
+  assert.match(transaction.definitions[0].rendered, /requiresServiceBridgeContractVersion/);
+  assert.ok(transaction.activation.actions.some(({ kind }) => kind === "APPLY_SCM_DESCRIPTOR"));
+});
+
+test("service transaction CLI requires exact absolute create-only bindings", () => {
+  const parsed = parseRunnerNativeServiceTransactionArguments([
+    "--plan", "/private/staging/install-plan.json",
+    "--plan-digest", hex("a"),
+    "--output", "/private/staging/service-transaction.json",
+  ]);
+  assert.equal(parsed.planDigest, hex("a"));
+  assert.throws(() => parseRunnerNativeServiceTransactionArguments([
+    "--plan", "relative.json",
+    "--plan-digest", hex("a"),
+    "--output", "/private/staging/service-transaction.json",
+  ]), /service transaction is invalid/);
+});
+
 test("stager rehashes signed bytes into a new read-only revision and replays only the exact receipt", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-runner-native-stage-"));
   try {
@@ -452,4 +585,58 @@ function connectorEnvironment(machineConfig, authorization) {
     DEVILUDO_STEAM_CONNECTOR_NATIVE_TRUST_POLICY_FILE: "/opt/deviludo/policies/steam-native-bridge-trust-policy.json",
     DEVILUDO_STEAM_CONNECTOR_NATIVE_TRUST_POLICY_DIGEST: hex("9"),
   });
+}
+
+function environmentBytes(environment) {
+  return Buffer.from(`${Object.entries(environment).map(([name, value]) => `${name}=${value}`).join("\n")}\n`, "utf8");
+}
+
+function digest(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function stagingReceipt(plan) {
+  const planBytes = Buffer.from(`${canonicalJson(plan)}\n`, "utf8");
+  const core = {
+    schemaVersion: "deviludo.runner-native-staging-receipt.v1",
+    status: "STAGED",
+    planDigest: plan.planDigest,
+    planFileDigest: digest(planBytes),
+    releaseId: plan.releaseId,
+    releaseDigest: plan.releaseDigest,
+    platform: plan.platform,
+    architecture: plan.architecture,
+    releaseDirectory: plan.releaseDirectory,
+    stagedAt: "2026-07-22T04:01:00.000Z",
+    artifacts: plan.artifacts.map((artifact) => ({
+      component: artifact.component,
+      path: artifact.destinationPath,
+      digest: artifact.digest,
+      sizeBytes: 32,
+      readOnly: true,
+    })),
+  };
+  return Object.freeze({ ...core, receiptDigest: sha256Canonical(core) });
+}
+
+function retargetPlan(plan, platform) {
+  const manager = platform === "macos" ? "LAUNCHD" : "WINDOWS_SCM";
+  const service = plan.services.physicalRunner;
+  const physicalRunner = {
+    ...service,
+    manager,
+    serviceId: platform === "macos" ? "com.deviludo.physical-runner" : "DeviLudoPhysicalRunner",
+    account: platform === "macos" ? "_deviludo_runner" : "NT SERVICE\\DeviLudoPhysicalRunner",
+    environmentSource: {
+      ...service.environmentSource,
+      kind: platform === "macos" ? "LAUNCHD_ENVIRONMENT_DICTIONARY" : "SCM_ENVIRONMENT_BLOCK",
+    },
+  };
+  const core = {
+    ...plan,
+    platform,
+    services: { physicalRunner, steamClientConnector: null },
+  };
+  delete core.planDigest;
+  return Object.freeze({ ...core, planDigest: sha256Canonical(core) });
 }
