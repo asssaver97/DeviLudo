@@ -1,4 +1,5 @@
 import { builtInAdapterVersion } from "../agent/adapter-registry";
+import { AGENT_REGISTRY } from "../agent/registry";
 
 export type AgentKind = "claude-code" | "codex-cli";
 
@@ -8,7 +9,10 @@ export type AgentCatalogItem = {
   vendor: string;
   description: string;
   officialSource: string;
+  adapterId: string;
   adapterVersion: string;
+  providerProtocol: "anthropic-messages" | "openai-responses";
+  configurationSchemaId: string;
   capabilities: readonly string[];
   supportedWorkers: readonly string[];
 };
@@ -81,7 +85,10 @@ export const builtInAgentUi = Object.freeze([
     vendor: "Anthropic",
     description: "长程编码、工具编排与仓库级任务",
     officialSource: "https://code.claude.com/docs/en/installation",
+    adapterId: AGENT_REGISTRY["claude-code"].adapterId,
     adapterVersion: builtInAdapterVersion("claude-code"),
+    providerProtocol: AGENT_REGISTRY["claude-code"].providerProtocol,
+    configurationSchemaId: AGENT_REGISTRY["claude-code"].configurationSchema.schemaId,
     capabilities: Object.freeze(["规划", "代码修改", "评审", "流式事件"]),
     supportedWorkers: Object.freeze(["linux/amd64", "linux/arm64"]),
   }),
@@ -91,7 +98,10 @@ export const builtInAgentUi = Object.freeze([
     vendor: "OpenAI",
     description: "结构化执行、沙箱编码与机器可读事件",
     officialSource: "https://github.com/openai/codex",
+    adapterId: AGENT_REGISTRY["codex-cli"].adapterId,
     adapterVersion: builtInAdapterVersion("codex-cli"),
+    providerProtocol: AGENT_REGISTRY["codex-cli"].providerProtocol,
+    configurationSchemaId: AGENT_REGISTRY["codex-cli"].configurationSchema.schemaId,
     capabilities: Object.freeze(["规划", "代码修改", "JSONL", "输出 Schema"]),
     supportedWorkers: Object.freeze(["linux/amd64", "linux/arm64"]),
   }),

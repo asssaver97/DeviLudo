@@ -695,6 +695,7 @@ function OverviewTab({ catalog, versions, installations, defaultAgent, localAgen
               </div>
               <div className={styles.agentMeta}>
                 <span>已批准版本</span><strong>{approvedVersions.join(" · ") || "尚无"}</strong><small>{installation ? `adapter ${installation.adapterVersion}` : "等待可信安装"}</small>
+                <small>{agent.adapterId}@{agent.adapterVersion} · {agent.providerProtocol}</small>
               </div>
               <div className={styles.capabilities}>
                 {agent.capabilities.map((capability) => <span key={capability}>{capability}</span>)}
@@ -1522,6 +1523,14 @@ function catalogRows(value: unknown): AgentCatalogItem[] {
     const kind = agentKind(row.id);
     const builtIn = builtInAgentUi.find((item) => item.id === kind);
     if (!kind || !builtIn) throw new Error("Agent Registry 响应包含不受支持的 Agent");
+    const adapterId = text(row.adapterId);
+    const adapterVersion = text(row.adapterVersion);
+    const providerProtocol = text(row.providerProtocol);
+    const configurationSchemaId = text(object(row.configurationSchema)?.schemaId);
+    if (adapterId !== builtIn.adapterId || adapterVersion !== builtIn.adapterVersion
+      || providerProtocol !== builtIn.providerProtocol || configurationSchemaId !== builtIn.configurationSchemaId) {
+      throw new Error("Agent Registry 的 Adapter 或 Provider Schema 与当前平台版本不匹配");
+    }
     const officialSource = text(row.officialSource) ?? builtIn.officialSource;
     let source: URL;
     try { source = new URL(officialSource); } catch { throw new Error("Agent Registry 官方来源无效"); }
@@ -1534,7 +1543,10 @@ function catalogRows(value: unknown): AgentCatalogItem[] {
       vendor: text(row.vendor) ?? builtIn.vendor,
       description: builtIn.description,
       officialSource: source.toString(),
-      adapterVersion: builtIn.adapterVersion,
+      adapterId,
+      adapterVersion,
+      providerProtocol: builtIn.providerProtocol,
+      configurationSchemaId,
       capabilities: catalogStringList(row.capabilities, builtIn.capabilities),
       supportedWorkers: catalogStringList(row.supportedWorkers, builtIn.supportedWorkers),
     };

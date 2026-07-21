@@ -26,6 +26,38 @@ test("agent catalog is readable by an Auditor and defaults to Claude Code", asyn
   assert.equal(body.data.catalog[0].platformDefault, true);
   assert.equal(body.data.catalog[1].id, "codex-cli");
   assert.equal(body.data.catalog[0].forbiddenOn.includes("e2e-runner"), true);
+  assert.deepEqual(body.data.catalog.map((entry: { adapterId: string; adapterVersion: string; providerProtocol: string }) => ({
+    adapterId: entry.adapterId,
+    adapterVersion: entry.adapterVersion,
+    providerProtocol: entry.providerProtocol,
+  })), [
+    { adapterId: "claude-code-v1", adapterVersion: "1.3.0", providerProtocol: "anthropic-messages" },
+    { adapterId: "codex-cli-v1", adapterVersion: "1.2.2", providerProtocol: "openai-responses" },
+  ]);
+  assert.equal(body.data.catalog.every((entry: { registrySchemaVersion: string }) =>
+    entry.registrySchemaVersion === "deviludo.agent-registry.v1"), true);
+});
+
+test("installation rejects an exact but unapproved Adapter before reserving a WorkerImage", async () => {
+  const before = await inject({ method: "GET", url: "/admin/agents", role: "PlatformAgentAdmin" });
+  const installationCount = before.json().data.catalog
+    .flatMap((entry: { installations: unknown[] }) => entry.installations).length;
+  const response = await inject({
+    method: "POST",
+    url: "/admin/agent-installations",
+    role: "PlatformAgentAdmin",
+    key: "reject-unregistered-adapter",
+    payload: {
+      agent: "codex-cli",
+      version: "0.91.0",
+      workerPool: "development-linux-unregistered-adapter",
+      adapterVersion: "9.9.9",
+    },
+  });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.json().error.code, "ADAPTER_NOT_APPROVED");
+  const after = await inject({ method: "GET", url: "/admin/agents", role: "PlatformAgentAdmin" });
+  assert.equal(after.json().data.catalog.flatMap((entry: { installations: unknown[] }) => entry.installations).length, installationCount);
 });
 
 test("Agent console projection exposes usable public configuration without Vault references across scopes", async () => {
@@ -207,7 +239,7 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
       agent: "codex-cli",
       version: "0.92.0",
       workerPool: "development-linux-canary",
-      adapterVersion: "1.1.0",
+      adapterVersion: "1.2.2",
     },
   });
   assert.equal(installation.statusCode, 201);
@@ -233,7 +265,7 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
       agent: "codex-cli",
       version: "0.92.0",
       workerPool: "development-linux-next",
-      adapterVersion: "1.1.0",
+      adapterVersion: "1.2.2",
     },
   });
   assert.equal(deniedNewInstallation.statusCode, 409);
@@ -281,7 +313,7 @@ test("an active Profile can reuse its approved Provider while rebinding to an up
       agent: "claude-code",
       version: "2.1.19",
       workerPool: "development-linux-profile-rebind",
-      adapterVersion: "1.1.0",
+      adapterVersion: "1.3.0",
     },
   });
   assert.equal(installation.statusCode, 201, installation.body);
@@ -831,7 +863,7 @@ test("Agent Installation drain and retirement preserve pinned runs while fencing
   }
   const created = await inject({
     method: "POST", url: "/admin/agent-installations", role: "PlatformAgentAdmin", key: "install-claude-lifecycle",
-    payload: { agent: "claude-code", version: "2.1.18", workerPool: "development-linux-lifecycle", adapterVersion: "1.3.1" },
+    payload: { agent: "claude-code", version: "2.1.18", workerPool: "development-linux-lifecycle", adapterVersion: "1.3.0" },
   });
   assert.equal(created.statusCode, 201);
   const installationId = created.json().data.id as string;

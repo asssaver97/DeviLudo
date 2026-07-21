@@ -34,7 +34,7 @@
       "packageName": "@openai/codex",
       "workerBaseImage": "registry.deviludo.internal/base/agent-worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "validationHarnessImage": "registry.deviludo.internal/harness/agent-contract@sha256:2222222222222222222222222222222222222222222222222222222222222222",
-      "adapterVersion": "1.3.0"
+      "adapterVersion": "1.2.2"
     }
   },
   "workerPools": [

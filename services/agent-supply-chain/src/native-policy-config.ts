@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import type { AgentKind } from "../../control-plane/src/contracts";
+import { isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -136,7 +137,8 @@ function agentSet(value: unknown): Readonly<Record<AgentKind, NativePolicyAgent>
     const packageName = agent === "claude-code" ? "@anthropic-ai/claude-code" : "@openai/codex";
     if (item.packageName !== packageName || typeof item.workerBaseImage !== "string" || !OCI_DIGEST_REF.test(item.workerBaseImage)
       || typeof item.validationHarnessImage !== "string" || !OCI_DIGEST_REF.test(item.validationHarnessImage)
-      || typeof item.adapterVersion !== "string" || !exactVersion(item.adapterVersion)) invalid();
+      || typeof item.adapterVersion !== "string" || !exactVersion(item.adapterVersion)
+      || !isBuiltInAdapterVersion(agent, item.adapterVersion)) invalid();
     return [agent, Object.freeze({
       packageName,
       workerBaseImage: item.workerBaseImage,

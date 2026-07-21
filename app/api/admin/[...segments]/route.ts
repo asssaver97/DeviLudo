@@ -1,4 +1,6 @@
 import { normalizeModelRoles } from "@/lib/agent/providers";
+import { isBuiltInAdapterVersion } from "@/lib/agent/adapter-registry";
+import { AGENT_REGISTRY, AGENT_REGISTRY_SCHEMA_VERSION } from "@/lib/agent/registry";
 import { localWorkerImageDigest } from "@/lib/agent/local-worker-identity";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
@@ -61,28 +63,25 @@ function defaultAgent() {
 function agentCatalog() {
   const store = getDemoStore();
   const selected = defaultAgent();
-  return [
-    {
-      id: "claude-code",
-      name: "Claude Code",
-      vendor: "Anthropic",
-      officialSource: "https://code.claude.com/docs/en/installation",
-      capabilities: ["plan", "code", "repair", "review"],
-      supportedWorkers: ["linux/amd64", "linux/arm64"],
-      default: selected === "claude-code",
-      approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("claude-code@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
-    },
-    {
-      id: "codex-cli",
-      name: "Codex CLI",
-      vendor: "OpenAI",
-      officialSource: "https://developers.openai.com/codex/cli",
-      capabilities: ["plan", "code", "repair", "review"],
-      supportedWorkers: ["linux/amd64", "linux/arm64"],
-      default: selected === "codex-cli",
-      approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("codex-cli@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
-    },
-  ];
+  return (["claude-code", "codex-cli"] as const).map((agent) => ({
+    registrySchemaVersion: AGENT_REGISTRY_SCHEMA_VERSION,
+    id: agent,
+    name: AGENT_REGISTRY[agent].displayName,
+    vendor: AGENT_REGISTRY[agent].vendor,
+    officialSource: AGENT_REGISTRY[agent].officialSource,
+    adapterId: AGENT_REGISTRY[agent].adapterId,
+    adapterVersion: AGENT_REGISTRY[agent].adapterVersion,
+    providerProtocol: AGENT_REGISTRY[agent].providerProtocol,
+    configurationSchema: AGENT_REGISTRY[agent].configurationSchema,
+    capabilities: AGENT_REGISTRY[agent].capabilities,
+    supportedWorkers: AGENT_REGISTRY[agent].supportedWorkerPlatforms,
+    installedOn: AGENT_REGISTRY[agent].installedOn,
+    forbiddenOn: AGENT_REGISTRY[agent].forbiddenOn,
+    default: selected === agent,
+    approvedVersions: Object.entries(store.agentVersions)
+      .filter(([key, state]) => key.startsWith(`${agent}@`) && state === "APPROVED")
+      .map(([key]) => key.split("@")[1]),
+  }));
 }
 
 function localActor(request: Request, expectedRole?: string): LocalActor {
@@ -510,12 +509,15 @@ export async function POST(request: Request, context: RouteContext) {
         throw new HttpProblem(400, "INVALID_INSTALLATION", "Agent and version must be exact supported identifiers");
       }
       const agentKind = agent as "claude-code" | "codex-cli";
+      if (!isBuiltInAdapterVersion(agentKind, adapterVersion)) {
+        throw new HttpProblem(409, "ADAPTER_NOT_APPROVED", "Adapter 版本未被不可变 Agent Registry 批准");
+      }
       if (getDemoStore().agentVersions[`${agentKind}@${version}`] !== "APPROVED") {
         throw new HttpProblem(409, "VERSION_NOT_APPROVED", "Only a Broker-attested approved version can build a WorkerImage");
       }
       const versionSlug = version.replaceAll(".", "").replaceAll("-", "");
       const identityDigest = await fingerprintSecret(new TextEncoder().encode(
-        `local-installation-identity:v2:${agentKind}:${version}:${adapterVersion}:${workerPool}`,
+        `local-installation-identity:v3:${agentKind}:${version}:${adapterVersion}:${workerPool}:${idempotency}`,
       ));
       const id = `${agentKind === "claude-code" ? "claude" : "codex"}-installation-${versionSlug}-${identityDigest.slice(7, 23)}`;
       const imageDigest = await localWorkerImageDigest(agentKind, version, adapterVersion);

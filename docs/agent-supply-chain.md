@@ -24,6 +24,8 @@ npm run build:agent-supply-chain-native
 - `dev`/`development` 开发池，不能指向 E2E 或发布节点；
 - HTTPS 内部 Registry、KMS signing ref、只读 Docker registry config、离线 scanner 数据和 Fleet config。
 
+Adapter 不是管理员可上传的插件。当前平台发布内置不可变 `deviludo.agent-registry.v1`，分别锁定 Claude Code `claude-code-v1@1.3.0` 与 Codex CLI `codex-cli-v1@1.2.2`，并声明各自 Provider 协议和配置 Schema。控制面、本地测试管理 API 与原生策略解析器都会在构建预留前校验这一绑定；即使请求给出格式正确的其他 SemVer，也以 `ADAPTER_NOT_APPROVED` 拒绝且不创建 WorkerImage 记录。升级 Adapter 必须随新的平台/策略制品发布，不能只修改管理请求或策略 JSON。
+
 官方包下载会对每次 DNS 解析做公网地址校验、固定 TLS 连接、拒绝 redirect，并验证 NPM ECDSA 签名、SHA-512 integrity 和本地 SHA-256。tar 解包只接受 `package/` 下的 USTAR 普通文件/目录，拒绝链接、设备、PAX、重复路径、穿越和 `.git`。
 
 ## 固定门禁

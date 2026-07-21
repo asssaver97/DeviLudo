@@ -3,6 +3,8 @@ import { Inject, Injectable } from "@nestjs/common";
 import type { InferenceReconciliationReceipt } from "../../inference-gateway/src/contracts";
 import type { SpecModelReconciliationReceipt } from "../../spec-model-broker/src/contracts";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
+import { isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
+import { AGENT_REGISTRY, AGENT_REGISTRY_SCHEMA_VERSION } from "../../../lib/agent/registry";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { AdminStore, emptyUsageSummary, recordAdminAudit, type AdminCatalogState } from "./admin.store";
 import {
@@ -61,17 +63,19 @@ export class AdminService {
     catch { /* Credential catalog remains available when telemetry fails closed. */ }
     return this.store.read((state) => {
       const catalog = (["claude-code", "codex-cli"] as const).map((agent) => ({
+        registrySchemaVersion: AGENT_REGISTRY_SCHEMA_VERSION,
         id: agent,
-        name: agent === "claude-code" ? "Claude Code" : "Codex CLI",
-        vendor: agent === "claude-code" ? "Anthropic" : "OpenAI",
-        officialSource:
-          agent === "claude-code"
-            ? "https://code.claude.com/docs/en/installation"
-            : "https://github.com/openai/codex",
-        capabilities: ["plan", "code", "repair", "review"],
-        supportedWorkers: ["linux/amd64", "linux/arm64"],
-        installedOn: ["development-worker"],
-        forbiddenOn: ["e2e-runner", "steam-publisher"],
+        name: AGENT_REGISTRY[agent].displayName,
+        vendor: AGENT_REGISTRY[agent].vendor,
+        officialSource: AGENT_REGISTRY[agent].officialSource,
+        adapterId: AGENT_REGISTRY[agent].adapterId,
+        adapterVersion: AGENT_REGISTRY[agent].adapterVersion,
+        providerProtocol: AGENT_REGISTRY[agent].providerProtocol,
+        configurationSchema: AGENT_REGISTRY[agent].configurationSchema,
+        capabilities: AGENT_REGISTRY[agent].capabilities,
+        supportedWorkers: AGENT_REGISTRY[agent].supportedWorkerPlatforms,
+        installedOn: AGENT_REGISTRY[agent].installedOn,
+        forbiddenOn: AGENT_REGISTRY[agent].forbiddenOn,
         platformDefault: agent === "claude-code",
         versions: [...state.versions.values()].filter((value) => value.agent === agent),
         installations: [...state.installations.values()].filter((value) => value.agent === agent),
@@ -273,6 +277,9 @@ export class AdminService {
     }
     const adapterVersion = requiredString(body, "adapterVersion", 100);
     assertExactVersion(adapterVersion);
+    if (!isBuiltInAdapterVersion(agent, adapterVersion)) {
+      throw new ServiceProblem(409, "ADAPTER_NOT_APPROVED", "Adapter version is not approved by the immutable Agent Registry");
+    }
     const operation = supplyChainOperation(actor);
     const id = `${agent}-installation-${operation.operationKey.slice(0, 24)}`;
     const snapshot = await this.store.mutate((state) => {

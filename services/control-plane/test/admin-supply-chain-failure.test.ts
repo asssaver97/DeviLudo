@@ -123,7 +123,7 @@ test("terminal image build failure leaves an auditable quarantined reservation w
     agent: "claude-code",
     version: "2.1.14",
     workerPool: "development-linux-primary",
-    adapterVersion: "1.2.0",
+    adapterVersion: "1.3.0",
   };
   await assert.rejects(service.createInstallation(request, requestActor), AgentSupplyChainPolicyFailure);
   await assert.rejects(service.createInstallation(request, requestActor), AgentSupplyChainPolicyFailure);
@@ -149,7 +149,7 @@ test("canary failure stops rollout and restores the active candidate Profile wit
     agent: "claude-code",
     version: "2.1.14",
     workerPool: "development-linux-primary",
-    adapterVersion: "1.2.0",
+    adapterVersion: "1.3.0",
   }, actor("build-canary"));
   const drafted = await service.createProfile({
     scope: "platform",
@@ -220,7 +220,7 @@ test("a new Installation selects the most recently activated healthy rollback ta
     agent: "claude-code",
     version: "2.1.14",
     workerPool: "development-linux-primary",
-    adapterVersion: "1.4.0",
+    adapterVersion: "1.3.0",
   }, actor("build-after-recent-target"));
   assert.equal(first.activatedAt, "2026-07-18T08:00:00.000Z");
   assert.equal(second.rollbackInstallationId, first.id);
@@ -234,7 +234,7 @@ test("manual rollout rollback atomically rebinds defaults and fallback dependent
     agent: "claude-code",
     version: "2.1.14",
     workerPool: "development-linux-primary",
-    adapterVersion: "1.2.1",
+    adapterVersion: "1.3.0",
   }, actor("build-manual-rollback"));
   await service.rollout(installation.id, "advance", actor("rollout-manual-5"));
   await service.rollout(installation.id, "advance", actor("rollout-manual-25"));

@@ -36,7 +36,30 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   resetDemoStore();
   const initial = await GET(new Request("http://127.0.0.1:3000/api/admin/agents"), context("agents"));
   assert.equal(initial.status, 200);
-  assert.equal((await initial.json()).meta.defaultAgent, "claude-code");
+  const initialPayload = await initial.json();
+  assert.equal(initialPayload.meta.defaultAgent, "claude-code");
+  assert.deepEqual(initialPayload.data.map((entry) => ({
+    registrySchemaVersion: entry.registrySchemaVersion,
+    adapterId: entry.adapterId,
+    adapterVersion: entry.adapterVersion,
+    providerProtocol: entry.providerProtocol,
+    configurationSchemaId: entry.configurationSchema.schemaId,
+  })), [
+    {
+      registrySchemaVersion: "deviludo.agent-registry.v1",
+      adapterId: "claude-code-v1",
+      adapterVersion: "1.3.0",
+      providerProtocol: "anthropic-messages",
+      configurationSchemaId: "deviludo.agent-provider.claude-code.v1",
+    },
+    {
+      registrySchemaVersion: "deviludo.agent-registry.v1",
+      adapterId: "codex-cli-v1",
+      adapterVersion: "1.2.2",
+      providerProtocol: "openai-responses",
+      configurationSchemaId: "deviludo.agent-provider.codex-cli.v1",
+    },
+  ]);
 
   const changed = await PUT(
     request("agent-defaults/platform", "PUT", "PlatformAgentAdmin", { profileRevisionId: "profile-codex-platform-r2" }),
@@ -72,6 +95,23 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
     context("agent-installations"),
   );
   assert.equal(deniedInstallation.status, 409);
+});
+
+test("local installation rejects an exact SemVer outside the immutable Agent Registry", async () => {
+  const store = resetDemoStore();
+  const count = store.installations.length;
+  const response = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "codex-cli",
+      version: "0.91.0",
+      workerPool: "development-local-unregistered-adapter",
+      adapterVersion: "9.9.9",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "ADAPTER_NOT_APPROVED");
+  assert.equal(store.installations.length, count);
 });
 
 test("local Agent health exposes usage, configuration differences and derived alerts with the production shape", async () => {
@@ -414,7 +454,7 @@ test("local rollout rollback moves the default to an immutable Profile on the pr
       agent: "codex-cli",
       version: "0.91.0",
       workerPool: "dev-linux-b",
-      adapterVersion: "1.2.3",
+      adapterVersion: "1.2.2",
     }),
     context("agent-installations"),
   );
@@ -460,7 +500,7 @@ test("local installation lineage selects the most recently activated healthy gen
       agent: "codex-cli",
       version: "0.91.0",
       workerPool: "dev-linux-b",
-      adapterVersion: "1.3.0",
+      adapterVersion: "1.2.2",
     }),
     context("agent-installations"),
   );
@@ -480,7 +520,7 @@ test("local installation lineage selects the most recently activated healthy gen
       agent: "codex-cli",
       version: "0.91.0",
       workerPool: "dev-linux-b",
-      adapterVersion: "1.4.0",
+      adapterVersion: "1.2.2",
     }),
     context("agent-installations"),
   );
@@ -560,7 +600,7 @@ test("local upgrade workflow reuses an active Provider without changing defaults
   assert.equal(approved.status, 201);
   const installed = await POST(
     request("agent-installations", "POST", "PlatformAgentAdmin", {
-      agent: "claude-code", version, workerPool: "development-local-upgrade", adapterVersion: "1.3.1",
+      agent: "claude-code", version, workerPool: "development-local-upgrade", adapterVersion: "1.3.0",
     }),
     context("agent-installations"),
   );

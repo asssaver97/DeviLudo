@@ -95,6 +95,10 @@ test("Agent administration mutations publish exact request-body contracts", () =
   for (const schema of ["CredentialDraft", "CredentialRotation", "AgentVersionDiscovery", "AgentInstallationDraft", "AgentProfileInstallationRebind"]) {
     assert.match(schemaBlock(schema), /additionalProperties: false/, schema);
   }
+  assert.match(schemaBlock("AgentInstallationDraft"), /adapterVersion: \{ type: string, enum: \["1\.3\.0", "1\.2\.2"\] \}/);
+  for (const field of ["registrySchemaVersion", "adapterId", "adapterVersion", "providerProtocol", "configurationSchema"]) {
+    assert.match(schemaBlock("AgentSettingsProjection"), new RegExp(`\\b${field}\\b`));
+  }
 });
 
 test("production OpenAPI omits localhost fixture authorities and resolves component references", () => {

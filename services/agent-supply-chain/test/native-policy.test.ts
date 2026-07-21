@@ -55,6 +55,9 @@ test("native policy accepts only exact official tools, agents, models and develo
   const wrongTools = policyFixture();
   (wrongTools.tools as Record<string, unknown>).curl = { path: "/usr/bin/curl", digest: "a".repeat(64), version: "1.0.0" };
   assert.throws(() => parseNativeAgentSupplyChainPolicy(wrongTools), /policy is invalid/);
+  const unknownAdapter = policyFixture();
+  (unknownAdapter.agents as Record<string, Record<string, unknown>>)["codex-cli"]!.adapterVersion = "9.9.9";
+  assert.throws(() => parseNativeAgentSupplyChainPolicy(unknownAdapter), /policy is invalid/);
 });
 
 test("official npm registry verifies its pinned ECDSA signature and package integrity", async () => {
@@ -243,7 +246,7 @@ function policyFixture(): Record<string, unknown> {
         packageName: "@openai/codex",
         workerBaseImage: `registry.deviludo.test/base/agent-worker@sha256:${"1".repeat(64)}`,
         validationHarnessImage: `registry.deviludo.test/harness/agent-contract@sha256:${"2".repeat(64)}`,
-        adapterVersion: "1.3.0",
+        adapterVersion: "1.2.2",
       },
     },
     workerPools: [{ id: "development-linux", rolloutTarget: "dev-linux-workers" }],
