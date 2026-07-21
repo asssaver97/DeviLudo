@@ -9,7 +9,13 @@ const MAX_SESSION_SECONDS = 5 * 60;
 export type SteamAccessUiAction =
   | "SUBMIT_CREDENTIALS"
   | "SUBMIT_GUARD_CODE"
-  | "COMPLETE_RELEASE_MFA";
+  | "COMPLETE_RELEASE_MFA"
+  | "SUBMIT_PROJECT_CONFIGURATION";
+
+export type SteamAccessUiResourceKind =
+  | "STEAM_ENROLLMENT"
+  | "STEAM_RELEASE_APPROVAL"
+  | "STEAM_PROJECT_CONFIGURATION";
 
 export class SteamAccessUiSessionSigner {
   constructor(
@@ -24,13 +30,13 @@ export class SteamAccessUiSessionSigner {
     tenantId: string;
     userId: string;
     sessionBinding: string;
-    resourceKind: "STEAM_ENROLLMENT" | "STEAM_RELEASE_APPROVAL";
+    resourceKind: SteamAccessUiResourceKind;
     resourceId: string;
     action: SteamAccessUiAction;
   }>): string {
     if (!ID.test(input.tenantId) || !ID.test(input.userId) || !ID.test(input.resourceId)
-      || (input.resourceKind !== "STEAM_ENROLLMENT" && input.resourceKind !== "STEAM_RELEASE_APPROVAL")
-      || !["SUBMIT_CREDENTIALS", "SUBMIT_GUARD_CODE", "COMPLETE_RELEASE_MFA"].includes(input.action)
+      || !["STEAM_ENROLLMENT", "STEAM_RELEASE_APPROVAL", "STEAM_PROJECT_CONFIGURATION"].includes(input.resourceKind)
+      || !["SUBMIT_CREDENTIALS", "SUBMIT_GUARD_CODE", "COMPLETE_RELEASE_MFA", "SUBMIT_PROJECT_CONFIGURATION"].includes(input.action)
       || input.sessionBinding.length < 32 || input.sessionBinding.length > 512
       || /[\u0000-\u001f\u007f]/.test(input.sessionBinding)) invalid();
     const issued = this.now();
@@ -65,7 +71,7 @@ export class SteamAccessUiSessionVerifier {
   verify(
     request: FastifyRequest,
     expected: Readonly<{
-      resourceKind: "STEAM_ENROLLMENT" | "STEAM_RELEASE_APPROVAL";
+      resourceKind: SteamAccessUiResourceKind;
       resourceId: string;
       action: SteamAccessUiAction;
     }>,

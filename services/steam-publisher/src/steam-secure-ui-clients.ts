@@ -2,6 +2,7 @@ import type { TestKitArtifactBrokerHttp, TestKitArtifactBrokerTls } from "../../
 import { testKitArtifactBrokerHttpsJson } from "../../runner-control/src/testkit-artifact-client";
 import type { SteamEnrollmentView } from "./enrollment-contracts";
 import type { ReleaseAuthorizationView } from "./release-authorization-contracts";
+import type { SteamPlatformDepots, SteamProjectConfigurationView } from "./project-configuration-contracts";
 import { steamAccessBinaryHttps, type SteamAccessBinaryHttp } from "./steam-access-dependencies";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -166,6 +167,31 @@ export class MtlsSteamSecureUiAccessClient {
       return releaseView(json(response.body), input.approvalId);
     } finally { requestBody.fill(0); }
   }
+  async completeProjectConfiguration(input: Readonly<{ intentId: string; projectId: string; steamAppId: string;
+    betaBranch: string; platformDepots: SteamPlatformDepots; branchPassword: Uint8Array; uiSession: string }>): Promise<SteamProjectConfigurationView> {
+    requireUuid(input.intentId); requireUuid(input.projectId); requireToken(input.uiSession);
+    if (!/^[1-9][0-9]{0,19}$/.test(input.steamAppId)
+      || !/^[a-z0-9][a-z0-9_-]{2,39}$/.test(input.betaBranch) || ["default", "public"].includes(input.betaBranch)
+      || !(input.branchPassword instanceof Uint8Array) || input.branchPassword.byteLength < 8 || input.branchPassword.byteLength > 64) {
+      invalid("project configuration request");
+    }
+    const depotHeaders: Record<string, string> = {};
+    const entries = Object.entries(input.platformDepots);
+    if (entries.length < 1 || entries.length > 3) invalid("project depots");
+    for (const [platform, depotId] of entries) {
+      if (!["windows", "linux", "macos"].includes(platform) || typeof depotId !== "string" || !/^[1-9][0-9]{0,19}$/.test(depotId)) invalid("project depots");
+      depotHeaders[`x-steam-depot-${platform}`] = depotId;
+    }
+    const response = await this.#http({
+      url: route(this.#origin, `/v1/steam/project-configurations/${encodeURIComponent(input.intentId)}/complete`),
+      method: "POST", headers: { "x-deviludo-steam-ui-session": input.uiSession,
+        "x-deviludo-project-id": input.projectId, "x-steam-app-id": input.steamAppId,
+        "x-steam-beta-branch": input.betaBranch, ...depotHeaders }, body: input.branchPassword,
+      tls: this.#tls, timeoutMs: this.#timeoutMs, maxResponseBytes: 64 * 1024,
+    });
+    if (response.statusCode !== 200) invalid("project configuration response");
+    return projectConfigurationView(json(response.body), input.intentId, input.projectId);
+  }
   async probe(): Promise<void> {
     const response = await this.#http({ url: route(this.#origin, "/healthz"), method: "GET", tls: this.#tls,
       timeoutMs: this.#timeoutMs, maxResponseBytes: 8 * 1024 });
@@ -219,6 +245,13 @@ function releaseView(body: Record<string, unknown>, approvalId: string): Release
   return Object.freeze({ releaseId: body.releaseId, state: "DISPATCHED", approvalId, authorizationUrl: null,
     workflowId: body.workflowId, expiresAt: iso(body.expiresAt) });
 }
+function projectConfigurationView(body: Record<string, unknown>, intentId: string, projectId: string): SteamProjectConfigurationView {
+  exact(body, ["intentId", "projectId", "state", "configurationUrl", "expiresAt", "revision"]);
+  if (body.intentId !== intentId || body.projectId !== projectId || body.state !== "READY" || body.configurationUrl !== null
+    || (body.revision !== null && (!Number.isSafeInteger(body.revision) || (body.revision as number) < 1))) invalid("project configuration receipt");
+  return Object.freeze({ intentId, projectId, state: "READY", configurationUrl: null, expiresAt: iso(body.expiresAt),
+    revision: body.revision as number | null });
+}
 function strictOrigin(value: string | URL): URL { const result = new URL(value); if (result.protocol !== "https:" || !result.hostname
   || result.username || result.password || result.pathname !== "/" || result.search || result.hash) invalid("origin"); return result; }
 function route(origin: URL, pathname: string): URL { const result = new URL(origin); result.pathname = pathname; return result; }
@@ -230,6 +263,7 @@ function json(value: Buffer): Record<string, unknown> { if (value.byteLength < 2
 function iso(value: unknown): string { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) invalid("timestamp"); const result = new Date(value).toISOString(); if (result !== value) invalid("timestamp"); return result; }
 function requireId(value: string): void { if (!ID.test(value)) invalid("ID"); }
 function requireEnrollmentId(value: string): void { if (!/^[a-f0-9-]{36}$/.test(value)) invalid("enrollment ID"); }
+function requireUuid(value: string): void { if (!UUID.test(value)) invalid("UUID"); }
 function requireToken(value: string): void { if (typeof value !== "string" || value.length < 100 || value.length > 4_096 || !/^[A-Za-z0-9_.-]+$/.test(value)) invalid("UI session"); }
 function integer(value: number, min: number, max: number): number { if (!Number.isSafeInteger(value) || value < min || value > max) invalid("bound"); return value; }
 function invalid(label: string): never { throw new Error(`Steam Secure UI ${label} is invalid`); }

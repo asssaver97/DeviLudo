@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 58 }, (_, index) => {
+  const offsets = Array.from({ length: 59 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -15,6 +15,32 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("project Steam release configuration is one-time, tenant-isolated and secret-UI-only", () => {
+  const migration = readFileSync(new URL("../infra/postgres/059_steam_project_configuration_intents.sql", import.meta.url), "utf8");
+  const coordinator = readFileSync(new URL("../services/steam-publisher/src/project-configuration.ts", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/steam-publisher/src/project-configuration-postgres.ts", import.meta.url), "utf8");
+  const secureUi = readFileSync(new URL("../services/steam-publisher/src/steam-secure-ui.ts", import.meta.url), "utf8");
+  const webRoute = readFileSync(new URL("../app/api/projects/[projectId]/steam-settings/route.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.steam_project_configuration_intents/);
+  assert.match(migration, /steam_build_session_id uuid NOT NULL/);
+  assert.match(migration, /expires_at <= created_at \+ interval '10 minutes'/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /OLD\.state = 'CONFIGURING' AND NEW\.state IN \('COMPLETED', 'EXPIRED'\)/);
+  assert.doesNotMatch(migration, /branch_password\s+(?:text|bytea)/i);
+  assert.match(coordinator, /steam\/beta-branch-password/);
+  assert.match(coordinator, /input\.branchPassword\.fill\(0\)/);
+  assert.match(coordinator, /this\.#vault\.revoke/);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(store, /INSERT INTO deviludo\.steam_project_depot_configurations/);
+  assert.match(store, /INSERT INTO deviludo\.steam_project_release_configurations/);
+  assert.match(secureUi, /SUBMIT_PROJECT_CONFIGURATION/);
+  assert.match(secureUi, /application\/octet-stream/);
+  assert.match(webRoute, /projectAgentPrincipal\(request, projectId\)/);
+  assert.match(webRoute, /principal\.role === "Auditor"/);
+  assert.match(webRoute, /CROSS_ORIGIN_MUTATION_REJECTED/);
+  assert.doesNotMatch(webRoute, /branchPassword|branch_password|password/i);
 });
 
 test("Provider recovery probes only the exact immutable waiting Run binding", () => {
@@ -1099,9 +1125,11 @@ test("public API contract covers authoritative account connection and MFA releas
   const connections = readFileSync(new URL("../components/console/ConnectionsPanel.tsx", import.meta.url), "utf8");
   assert.match(contract, /^  \/connections\/github:$/m);
   assert.match(contract, /^  \/connections\/steam:$/m);
+  assert.match(contract, /^  \/projects\/\{projectId\}\/steam-settings:$/m);
   assert.match(contract, /^  \/releases\/\{releaseId\}\/accept-and-publish:$/m);
   assert.match(contract, /OAuth return query parameters are never treated as connection state/);
   assert.match(contract, /Client-provided MFA proofs, commit SHAs, evidence status, and request bodies are rejected/);
+  assert.match(contract, /This operation accepts no request body/);
   assert.match(connections, /loadGitHubStatus\(\)/);
   assert.match(connections, /loadSteamStatus\(\)/);
   assert.doesNotMatch(connections, /initialGitHubConnected|useState\(initialGitHubConnected\)/);

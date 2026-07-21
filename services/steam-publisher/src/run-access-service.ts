@@ -12,6 +12,9 @@ import { SteamEnrollmentCoordinator } from "./enrollment";
 import { registerSteamEnrollmentBrokerRoutes } from "./enrollment-http";
 import { PostgresSteamEnrollmentStore } from "./enrollment-postgres";
 import { PostgresReleaseSnapshotResolver } from "./postgres-release-lifecycle";
+import { SteamProjectConfigurationCoordinator } from "./project-configuration";
+import { registerSteamProjectConfigurationRoutes } from "./project-configuration-http";
+import { PostgresSteamProjectConfigurationStore } from "./project-configuration-postgres";
 import { ReleaseAuthorizationCoordinator } from "./release-authorization";
 import { registerReleaseAuthorizationBrokerRoutes } from "./release-authorization-http";
 import { PostgresReleaseAuthorizationStore } from "./release-authorization-postgres";
@@ -24,7 +27,7 @@ import {
   PostgresSteamPublishAuthorizationArchive,
   TemporalReleaseMfaWorkflowSignal,
 } from "./steam-access-dependencies";
-import { SteamAccessUiSessionVerifier, type SteamAccessUiAction } from "./steam-access-ui-session";
+import { SteamAccessUiSessionVerifier, type SteamAccessUiAction, type SteamAccessUiResourceKind } from "./steam-access-ui-session";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -112,6 +115,11 @@ export async function steamAccessRuntimeFromEnv(
       vault,
       publicOrigin,
     });
+    const projectConfigurations = new SteamProjectConfigurationCoordinator({
+      store: new PostgresSteamProjectConfigurationStore(pool),
+      vault,
+      publicOrigin,
+    });
     const releaseStore = new PostgresReleaseAuthorizationStore(pool);
     const releases = new ReleaseAuthorizationCoordinator({
       snapshots: new PostgresReleaseSnapshotResolver(pool),
@@ -134,7 +142,7 @@ export async function steamAccessRuntimeFromEnv(
     };
     const authorizeUi = (
       request: FastifyRequest,
-      resourceKind: "STEAM_ENROLLMENT" | "STEAM_RELEASE_APPROVAL",
+      resourceKind: SteamAccessUiResourceKind,
       resourceId: string,
       action: SteamAccessUiAction,
     ) => {
@@ -175,6 +183,17 @@ export async function steamAccessRuntimeFromEnv(
         "COMPLETE_RELEASE_MFA",
       ),
     });
+    registerSteamProjectConfigurationRoutes(server, {
+      broker: projectConfigurations,
+      authorize: (request) => { authorizeSpiffe(webSpiffeIds, request); },
+      interactive: projectConfigurations,
+      authorizeInteractive: (request, intentId) => authorizeUi(
+        request,
+        "STEAM_PROJECT_CONFIGURATION",
+        intentId,
+        "SUBMIT_PROJECT_CONFIGURATION",
+      ),
+    });
     server.get("/healthz", async (request, reply) => {
       reply.header("cache-control", "no-store");
       reply.header("x-content-type-options", "nosniff");
@@ -201,6 +220,7 @@ export async function steamAccessRuntimeFromEnv(
       mfa,
       signer,
       enrollment,
+      projectConfigurations,
       releases,
       server,
     });

@@ -5,6 +5,8 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 
 type FetchLike = typeof fetch;
 
+export type SteamBrokerPrincipal = Pick<TrustedPlatformSession, "tenantId" | "userId" | "sessionBinding">;
+
 export type SteamEnrollmentState = "WAITING_CREDENTIALS" | "WAITING_STEAM_GUARD" | "READY";
 
 export interface SteamEnrollmentResult {
@@ -28,6 +30,29 @@ export interface SteamConnectionStatus {
   readonly permissions: readonly ("EditAppMetadata" | "PublishAppChanges")[];
   readonly verifiedAt: string | null;
   readonly expiresAt: string | null;
+}
+
+export type SteamProjectConfigurationState = "UNCONFIGURED" | "CONFIGURING" | "READY" | "STALE_SESSION";
+export interface SteamProjectConfigurationStatus {
+  readonly state: SteamProjectConfigurationState;
+  readonly projectId: string;
+  readonly configurationUrl: string | null;
+  readonly intentExpiresAt: string | null;
+  readonly revision: number | null;
+  readonly steamAppId: string | null;
+  readonly betaBranch: string | null;
+  readonly platformDepots: Readonly<Partial<Record<"windows" | "linux" | "macos", string>>>;
+  readonly accountName: string | null;
+  readonly sessionExpiresAt: string | null;
+}
+
+export interface SteamProjectConfigurationResult {
+  readonly intentId: string;
+  readonly projectId: string;
+  readonly state: "CONFIGURING" | "READY";
+  readonly configurationUrl: string | null;
+  readonly expiresAt: string;
+  readonly revision: number | null;
 }
 
 export class SteamEnrollmentBrokerClient {
@@ -132,6 +157,75 @@ export class SteamEnrollmentBrokerClient {
     return Object.freeze({ enrollmentId, state, enrollmentUrl, expiresAt });
   }
 
+  async projectConfigurationStatus(session: SteamBrokerPrincipal, projectId: string): Promise<SteamProjectConfigurationStatus> {
+    validateSession(session); requireUuid(projectId, "project");
+    const body = await this.#post("/v1/steam/project-configurations/status", {
+      principal: { tenantId: session.tenantId, userId: session.userId, sessionBinding: session.sessionBinding }, projectId,
+    });
+    exactResponse(body, ["state", "projectId", "configurationUrl", "intentExpiresAt", "revision", "steamAppId", "betaBranch",
+      "platformDepots", "accountName", "sessionExpiresAt"]);
+    if (body.projectId !== projectId || !["UNCONFIGURED", "CONFIGURING", "READY", "STALE_SESSION"].includes(String(body.state))) {
+      throw new Error("Steam project configuration status is invalid");
+    }
+    const state = body.state as SteamProjectConfigurationState;
+    const platformDepots = requireDepots(body.platformDepots);
+    if (state === "UNCONFIGURED") {
+      if (body.configurationUrl !== null || body.intentExpiresAt !== null || body.revision !== null || body.steamAppId !== null
+        || body.betaBranch !== null || body.accountName !== null || body.sessionExpiresAt !== null || Object.keys(platformDepots).length) {
+        throw new Error("Steam unconfigured project projection is invalid");
+      }
+      return Object.freeze({ state, projectId, configurationUrl: null, intentExpiresAt: null, revision: null,
+        steamAppId: null, betaBranch: null, platformDepots, accountName: null, sessionExpiresAt: null });
+    }
+    if (state === "CONFIGURING") {
+      const intentExpiresAt = requireFutureIso(body.intentExpiresAt, 10 * 60_000, "Steam configuration intent expiry", this.#now);
+      if (typeof body.configurationUrl !== "string" || body.revision !== null || body.steamAppId !== null || body.betaBranch !== null
+        || typeof body.accountName !== "string" || !/^[A-Za-z0-9_-]{3,64}$/.test(body.accountName)
+        || typeof body.sessionExpiresAt !== "string" || Object.keys(platformDepots).length) {
+        throw new Error("Steam configuring project projection is invalid");
+      }
+      const configurationUrl = validateProjectConfigurationUrl(body.configurationUrl, this.#publicOrigin, projectId);
+      return Object.freeze({ state, projectId, configurationUrl, intentExpiresAt, revision: null, steamAppId: null,
+        betaBranch: null, platformDepots, accountName: body.accountName, sessionExpiresAt: requireIso(body.sessionExpiresAt, "Steam session expiry") });
+    }
+    const revision = body.revision;
+    if (!Number.isSafeInteger(revision) || (revision as number) < 1 || typeof body.steamAppId !== "string"
+      || !/^[1-9][0-9]{0,19}$/.test(body.steamAppId) || typeof body.betaBranch !== "string"
+      || !/^[a-z0-9][a-z0-9_-]{2,39}$/.test(body.betaBranch) || ["default", "public"].includes(body.betaBranch)
+      || typeof body.accountName !== "string" || !/^[A-Za-z0-9_-]{3,64}$/.test(body.accountName)
+      || body.configurationUrl !== null || body.intentExpiresAt !== null || Object.keys(platformDepots).length < 1) {
+      throw new Error("Steam ready project projection is invalid");
+    }
+    return Object.freeze({ state, projectId, configurationUrl: null, intentExpiresAt: null, revision: revision as number,
+      steamAppId: body.steamAppId, betaBranch: body.betaBranch, platformDepots, accountName: body.accountName,
+      sessionExpiresAt: requireIso(body.sessionExpiresAt, "Steam session expiry") });
+  }
+
+  async beginProjectConfiguration(session: SteamBrokerPrincipal, projectId: string, idempotencyKey: string): Promise<SteamProjectConfigurationResult> {
+    validateSession(session); requireUuid(projectId, "project");
+    if (!OPAQUE_ID.test(idempotencyKey)) throw new Error("Steam project configuration idempotency key is invalid");
+    const body = await this.#post("/v1/steam/project-configurations", {
+      principal: { tenantId: session.tenantId, userId: session.userId, sessionBinding: session.sessionBinding }, projectId,
+    }, idempotencyKey);
+    exactResponse(body, ["intentId", "projectId", "state", "configurationUrl", "expiresAt", "revision"]);
+    const intentId = requireUuid(body.intentId, "configuration intent");
+    if (body.projectId !== projectId || (body.state !== "CONFIGURING" && body.state !== "READY")) {
+      throw new Error("Steam project configuration result is invalid");
+    }
+    const expiresAt = requireFutureIso(body.expiresAt, 10 * 60_000, "Steam configuration intent expiry", this.#now);
+    if (body.state === "CONFIGURING") {
+      if (typeof body.configurationUrl !== "string" || body.revision !== null) throw new Error("Steam project configuration URL is missing");
+      return Object.freeze({ intentId, projectId, state: "CONFIGURING",
+        configurationUrl: validateProjectConfigurationUrl(body.configurationUrl, this.#publicOrigin, projectId, intentId),
+        expiresAt, revision: null });
+    }
+    if (body.configurationUrl !== null || (body.revision !== null && (!Number.isSafeInteger(body.revision) || (body.revision as number) < 1))) {
+      throw new Error("Steam completed project configuration result is invalid");
+    }
+    return Object.freeze({ intentId, projectId, state: "READY", configurationUrl: null, expiresAt,
+      revision: body.revision as number | null });
+  }
+
   async #post(path: string, body: Readonly<Record<string, unknown>>, idempotencyKey?: string): Promise<Record<string, unknown>> {
     const url = new URL(path, this.#origin);
     if (url.origin !== this.#origin.origin) throw new Error("Steam enrollment broker request origin is invalid");
@@ -206,8 +300,23 @@ function validateEnrollmentUrl(value: string, publicOrigin: URL, enrollmentId: s
   return url.href;
 }
 
+function validateProjectConfigurationUrl(value: string, publicOrigin: URL, projectId: string, expectedIntentId?: string): string {
+  const url = new URL(value);
+  const match = /^\/projects\/([a-f0-9-]{36})\/steam-configuration\/([a-f0-9-]{36})$/.exec(url.pathname);
+  if (url.origin !== publicOrigin.origin || !match || match[1] !== projectId || (expectedIntentId && match[2] !== expectedIntentId)
+    || url.username || url.password || url.search || url.hash) throw new Error("Steam project configuration URL is invalid");
+  return url.href;
+}
+
 function requireOpaqueId(value: unknown, label: string): string {
   if (typeof value !== "string" || !OPAQUE_ID.test(value)) throw new Error(`${label} ID is invalid`);
+  return value;
+}
+
+function requireUuid(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)) {
+    throw new Error(`Steam ${label} ID is invalid`);
+  }
   return value;
 }
 
@@ -216,7 +325,30 @@ function requireIso(value: unknown, label: string): string {
   return new Date(value).toISOString();
 }
 
-function validateSession(session: TrustedPlatformSession): void {
+function requireFutureIso(value: unknown, maximumMs: number, label: string, now: () => Date): string {
+  const result = requireIso(value, label);
+  const current = now().getTime();
+  if (!Number.isFinite(current) || Date.parse(result) <= current || Date.parse(result) > current + maximumMs) throw new Error(`${label} is invalid`);
+  return result;
+}
+
+function requireDepots(value: unknown): SteamProjectConfigurationStatus["platformDepots"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Steam platform depots are invalid");
+  const body = value as Record<string, unknown>;
+  const keys = Object.keys(body);
+  if (keys.length > 3 || keys.some((key) => !["windows", "linux", "macos"].includes(key))
+    || Object.values(body).some((entry) => typeof entry !== "string" || !/^[1-9][0-9]{0,19}$/.test(entry))) {
+    throw new Error("Steam platform depots are invalid");
+  }
+  if (new Set(Object.values(body)).size !== keys.length) throw new Error("Steam platform depots contain duplicates");
+  return Object.freeze({ ...body }) as SteamProjectConfigurationStatus["platformDepots"];
+}
+
+function exactResponse(body: Record<string, unknown>, keys: readonly string[]): void {
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify([...keys].sort())) throw new Error("Steam Broker response fields are invalid");
+}
+
+function validateSession(session: SteamBrokerPrincipal): void {
   if (!OPAQUE_ID.test(session.tenantId) || !OPAQUE_ID.test(session.userId)
     || session.sessionBinding.length < 32 || session.sessionBinding.length > 512
     || /[\u0000-\u001f\u007f]/.test(session.sessionBinding)) {

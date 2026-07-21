@@ -421,6 +421,42 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { description: The project is missing or inaccessible to the current account. }
+  /projects/{projectId}/steam-settings:
+    get:
+      operationId: getProjectSteamSettings
+      description: Revalidates exact GitHub project access, then reads the active immutable Steam release/depot revision and its build-session readiness. Passwords and SecretRefs are never returned.
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200":
+          description: Authoritative project Steam release configuration projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/SteamProjectConfigurationStatus" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "503": { description: The isolated Steam Access Broker is not configured. }
+    post:
+      operationId: beginProjectSteamSettings
+      description: Creates a five-minute, user/session/build-account-bound intent. This operation accepts no request body; App, Depot, branch and branch-password fields are accepted only by the separately hosted Steam Secure UI.
+      parameters:
+        - { $ref: "#/components/parameters/ProjectId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "201":
+          description: Continue release configuration at the fixed-origin isolated Secure UI.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/SteamProjectConfigurationResult" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "409": { description: The idempotency key is already bound to another intent. }
+        "503": { description: The isolated Steam Access Broker is not configured. }
   /projects/{projectId}/runners:
     get:
       operationId: getProjectRunnerFleet
@@ -679,6 +715,40 @@ components:
         state: { type: string, enum: [WAITING_CREDENTIALS, WAITING_STEAM_GUARD, READY] }
         enrollmentUrl: { type: [string, "null"], format: uri }
         expiresAt: { type: string, format: date-time }
+    SteamProjectConfigurationStatus:
+      type: object
+      additionalProperties: false
+      required: [state, projectId, configurationUrl, intentExpiresAt, revision, steamAppId, betaBranch, platformDepots, accountName, sessionExpiresAt]
+      properties:
+        state: { type: string, enum: [UNCONFIGURED, CONFIGURING, READY, STALE_SESSION] }
+        projectId: { type: string, format: uuid }
+        configurationUrl: { type: [string, "null"], format: uri }
+        intentExpiresAt: { type: [string, "null"], format: date-time }
+        revision: { type: [integer, "null"], minimum: 1 }
+        steamAppId: { type: [string, "null"], pattern: "^[1-9][0-9]{0,19}$" }
+        betaBranch: { type: [string, "null"], pattern: "^[a-z0-9][a-z0-9_-]{2,39}$" }
+        platformDepots:
+          type: object
+          additionalProperties: false
+          minProperties: 0
+          maxProperties: 3
+          properties:
+            windows: { type: string, pattern: "^[1-9][0-9]{0,19}$" }
+            linux: { type: string, pattern: "^[1-9][0-9]{0,19}$" }
+            macos: { type: string, pattern: "^[1-9][0-9]{0,19}$" }
+        accountName: { type: [string, "null"], maxLength: 64 }
+        sessionExpiresAt: { type: [string, "null"], format: date-time }
+    SteamProjectConfigurationResult:
+      type: object
+      additionalProperties: false
+      required: [intentId, projectId, state, configurationUrl, expiresAt, revision]
+      properties:
+        intentId: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        state: { type: string, enum: [CONFIGURING, READY] }
+        configurationUrl: { type: [string, "null"], format: uri }
+        expiresAt: { type: string, format: date-time }
+        revision: { type: [integer, "null"], minimum: 1 }
     ReleaseAuthorization:
       type: object
       additionalProperties: false

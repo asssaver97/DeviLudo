@@ -516,6 +516,42 @@ test("Steam enrollment client sends no password and accepts only the configured 
   );
 });
 
+test("Steam project configuration client sends only identity and pins the isolated one-time configuration URL", async () => {
+  const calls = [];
+  const projectId = "11111111-1111-4111-8111-111111111111";
+  const intentId = "22222222-2222-4222-8222-222222222222";
+  const principal = { tenantId: "tenant-001", userId: "user-001", sessionBinding: "x".repeat(43), githubUserId: 424242 };
+  const broker = new SteamEnrollmentBrokerClient({ endpoint: "https://steam-enrollment.internal/",
+    publicOrigin: "https://steam-enroll.deviludo.example/", now: () => new Date("2026-07-17T00:00:00.000Z"),
+    async fetch(url, init) {
+      calls.push({ url: String(url), init });
+      if (String(url).endsWith("/status")) return Response.json({ state: "READY", projectId, configurationUrl: null,
+        intentExpiresAt: null, revision: 3, steamAppId: "2841930", betaBranch: "deviludo_beta",
+        platformDepots: { windows: "2841931", linux: "2841932" }, accountName: "deviludo_build_bot",
+        sessionExpiresAt: "2026-08-17T00:00:00.000Z" });
+      return Response.json({ intentId, projectId, state: "CONFIGURING",
+        configurationUrl: `https://steam-enroll.deviludo.example/projects/${projectId}/steam-configuration/${intentId}`,
+        expiresAt: "2026-07-17T00:05:00.000Z", revision: null });
+    } });
+  const started = await broker.beginProjectConfiguration(principal, projectId, "steam-project-config-001");
+  assert.equal(started.configurationUrl,
+    `https://steam-enroll.deviludo.example/projects/${projectId}/steam-configuration/${intentId}`);
+  const status = await broker.projectConfigurationStatus(principal, projectId);
+  assert.equal(status.state, "READY");
+  assert.deepEqual(status.platformDepots, { windows: "2841931", linux: "2841932" });
+  const serialized = JSON.stringify(calls);
+  assert.doesNotMatch(serialized, /branch.?password|depot-windows|deviludo_beta|2841931/i);
+  assert.equal(calls.every((call) => call.init.redirect === "error"), true);
+
+  const malicious = new SteamEnrollmentBrokerClient({ endpoint: "https://steam-enrollment.internal/",
+    publicOrigin: "https://steam-enroll.deviludo.example/", now: () => new Date("2026-07-17T00:00:00.000Z"),
+    fetch: async () => Response.json({ intentId, projectId, state: "CONFIGURING",
+      configurationUrl: `https://evil.example/projects/${projectId}/steam-configuration/${intentId}`,
+      expiresAt: "2026-07-17T00:05:00.000Z", revision: null }) });
+  await assert.rejects(malicious.beginProjectConfiguration(principal, projectId, "steam-project-config-evil"),
+    /configuration URL is invalid/);
+});
+
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;

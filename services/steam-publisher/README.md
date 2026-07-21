@@ -62,6 +62,16 @@ from being smuggled through the Web workload. Interactive credential and Guard
 entry belong to the broker's separately hosted public UI, not this control
 plane route.
 
+Project release configuration uses the same split boundary. The Web workload
+may only create a five-minute `steam_project_configuration_intents` row bound
+to the exact project, user, browser-session digest and active build session.
+App ID, private branch, per-platform Depot IDs and the Beta password are entered
+only at `/projects/<project>/steam-configuration/<intent>` in the isolated UI.
+The Access Broker rechecks the App allow-list and required permissions, writes
+the password directly to Vault, and atomically creates immutable depot/release
+revisions; a database failure revokes the just-written Vault version. Migration
+`059_steam_project_configuration_intents.sql` stores no secret bytes.
+
 The production composition for that boundary starts with `npm run
 start:steam-access`. It is a TLS 1.3 mTLS service with disjoint Web and secure-UI
 SPIFFE allow-lists. The Web identity can only begin enrollment or reserve a
@@ -77,7 +87,8 @@ All required mounts and identities are listed in `.access.env.example`.
 The browser surface is a separate process started with `npm run
 start:steam-secure-ui`; it is not a Next.js route. The external reverse proxy
 must keep the platform browser origin unchanged and route only
-`/enrollments/*`, `/approvals/*` and `/v1/steam-ui/*` directly to this process.
+`/enrollments/*`, `/approvals/*`, `/projects/*/steam-configuration/*` and
+`/v1/steam-ui/*` directly to this process.
 That preserves the host-only platform session cookies while ensuring password,
 Guard and WebAuthn request bodies never pass through the main Web process. Each
 request reasserts the live platform session over a dedicated Identity mTLS

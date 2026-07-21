@@ -38,7 +38,16 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
 
   const project = await request("/projects/ember-archipelago", { headers: { accept: "text/html" } });
   assert.equal(project.status, 200);
-  assert.match(await project.text(), /Production · Temporal 权威投影/);
+  const projectHtml = await project.text();
+  assert.match(projectHtml, /Production · Temporal 权威投影/);
+  assert.match(projectHtml, /Steam 设置/);
+
+  const steamSettings = await request("/projects/ember-archipelago/steam-settings", { headers: { accept: "text/html" } });
+  assert.equal(steamSettings.status, 200);
+  const steamSettingsHtml = await steamSettings.text();
+  assert.match(steamSettingsHtml, /Steam 私有 Beta 设置/);
+  assert.match(steamSettingsHtml, /分支密码只通过隔离 Secure UI/);
+  assert.doesNotMatch(steamSettingsHtml, /type="password"|branchPassword|branch_password/);
 
   const projects = await request("/projects", { headers: { accept: "text/html" } });
   assert.equal(projects.status, 200);
@@ -151,6 +160,14 @@ test("localhost never fabricates a Steam Guard or build-account session", async 
   assert.equal(payload.error.code, "STEAM_GUARD_ENROLLMENT_BROKER_REQUIRED");
   assert.equal(payload.error.details.storesPrimaryPassword, false);
   assert.doesNotMatch(JSON.stringify(payload), /steam-bootstrap|DeviLudo Build Bot|2841930/);
+
+  for (const init of [{}, { method: "POST", headers: { "idempotency-key": "local-steam-project" } }]) {
+    const projectConfiguration = await request("/api/projects/ember-archipelago/steam-settings", init);
+    assert.equal(projectConfiguration.status, 503);
+    const configurationPayload = await projectConfiguration.json();
+    assert.equal(configurationPayload.error.code, "STEAM_PROJECT_CONFIGURATION_BROKER_REQUIRED");
+    assert.doesNotMatch(JSON.stringify(configurationPayload), /SecretRef|privateBeta|2841930/);
+  }
 
   const publish = await request("/api/releases/release-forged/accept-and-publish", {
     method: "POST",

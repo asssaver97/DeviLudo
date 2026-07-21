@@ -189,7 +189,7 @@ try {
   if (!claudeSelection.response.ok || !codexSelection.response.ok) {
     throw new Error("local project Agent selection did not persist both approved Profiles");
   }
-  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
+  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
@@ -199,6 +199,7 @@ try {
     checkHtmlRoute(baseUrl, "/admin/invitations", "受邀账号管理"),
     checkHtmlRoute(baseUrl, "/settings/agents", "开发 Agent"),
     checkHtmlRoute(baseUrl, "/projects/ember-archipelago/agent-settings", "项目 Agent 选择"),
+    checkHtmlRoute(baseUrl, "/projects/ember-archipelago/steam-settings", "Steam 私有 Beta 设置"),
     request(baseUrl, "/api/projects"),
     request(baseUrl, "/api/admin/agents"),
     request(baseUrl, "/api/settings/agents"),
@@ -263,6 +264,7 @@ try {
       headers: { "idempotency-key": "smoke-github-authorization" },
     }),
     request(baseUrl, "/api/connections/steam", { method: "POST" }),
+    request(baseUrl, "/api/projects/ember-archipelago/steam-settings"),
     request(baseUrl, "/api/releases/smoke-release/accept-and-publish", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "smoke-release", "x-mfa-proof": "forged-local-proof" },
@@ -519,6 +521,12 @@ try {
   if (steamEnrollment.response.status !== 503 || steamEnrollmentPayload.error?.code !== "STEAM_GUARD_ENROLLMENT_BROKER_REQUIRED") {
     throw new Error("public Web process fabricated a Steam Guard session");
   }
+  const steamProjectConfigurationPayload = await steamProjectConfiguration.response.json();
+  if (steamProjectConfiguration.response.status !== 503
+    || steamProjectConfigurationPayload.error?.code !== "STEAM_PROJECT_CONFIGURATION_BROKER_REQUIRED"
+    || /SecretRef|branchPassword|branch_password|privateBeta/.test(JSON.stringify(steamProjectConfigurationPayload))) {
+    throw new Error("local Web process fabricated or exposed a Steam project release configuration");
+  }
   const steamPublishPayload = await steamPublish.response.json();
   if (steamPublish.response.status !== 503 || steamPublishPayload.error?.code !== "STEAM_PUBLISH_DISPATCH_REQUIRED") {
     throw new Error("public Web process accepted client-asserted Steam release gates");
@@ -534,6 +542,7 @@ try {
   console.log(`✓ GET /admin/invitations ${invitations.response.status} (${invitations.elapsedMs}ms) · invite console`);
   console.log(`✓ GET /settings/agents ${tenantAgents.response.status} (${tenantAgents.elapsedMs}ms) · tenant Agent settings`);
   console.log(`✓ GET project Agent   ${projectAgents.response.status} (${projectAgents.elapsedMs}ms) · inherited Profile selector`);
+  console.log(`✓ GET project Steam   ${steamSettingsPage.response.status} (${steamSettingsPage.elapsedMs}ms) · isolated release settings`);
   console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
   console.log(`✓ Agent inheritance  ${adminState.response.status} (${adminState.elapsedMs}ms) · platform/tenant/project bound`);
   console.log(`✓ Tenant Agent state ${tenantAgentState.response.status} (${tenantAgentState.elapsedMs}ms) · scoped projection`);
@@ -554,6 +563,7 @@ try {
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);
   console.log(`✓ GitHub auth       ${githubAuthorization.response.status} (${githubAuthorization.elapsedMs}ms) · ${githubAuthorizationPayload.error.code}`);
   console.log(`✓ Steam enrollment  ${steamEnrollment.response.status} (${steamEnrollment.elapsedMs}ms) · ${steamEnrollmentPayload.error.code}`);
+  console.log(`✓ Steam config      ${steamProjectConfiguration.response.status} (${steamProjectConfiguration.elapsedMs}ms) · ${steamProjectConfigurationPayload.error.code}`);
   console.log(`✓ Steam publish     ${steamPublish.response.status} (${steamPublish.elapsedMs}ms) · ${steamPublishPayload.error.code}`);
   console.log("[local:smoke] All local smoke checks passed.");
 } catch (error) {

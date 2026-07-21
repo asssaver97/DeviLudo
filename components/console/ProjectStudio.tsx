@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SpecDialogueMessage, SpecDialogueSnapshot, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
 import { AppShell } from "./AppShell";
-import { ArrowIcon, CheckIcon, FileIcon, GithubIcon, SparkIcon } from "./Icons";
+import { ArrowIcon, CheckIcon, FileIcon, GithubIcon, SparkIcon, SteamIcon } from "./Icons";
 import { LocalDeliveryPanel, type DeliveryPanelStatus } from "./LocalDeliveryPanel";
 
 type Message = {
@@ -280,6 +280,7 @@ export function ProjectStudio({
         </div>
         <div className="project-header-actions">
           <span className={`spec-state ${approved ? "approved" : "draft"}`}><i /> {approved ? `${specId} 已批准` : `${specId} 草稿`}</span>
+          {mode === "existing" ? <Link className="button button-secondary" href={`/projects/${encodeURIComponent(projectId)}/steam-settings`}><SteamIcon /> Steam 设置</Link> : null}
           {mode === "existing" && localFixture ? <a className="button button-secondary" href="https://github.com" rel="noreferrer" target="_blank"><GithubIcon /> Draft PR #18</a> : null}
         </div>
       </section>

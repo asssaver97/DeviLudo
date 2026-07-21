@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { SteamEnrollmentView } from "./enrollment-contracts";
 import type { ReleaseAuthorizationView } from "./release-authorization-contracts";
-import { SteamAccessUiSessionSigner, SteamAccessUiSessionVerifier, type SteamAccessUiAction } from "./steam-access-ui-session";
+import type { SteamPlatformDepots, SteamProjectConfigurationView } from "./project-configuration-contracts";
+import { SteamAccessUiSessionSigner, SteamAccessUiSessionVerifier, type SteamAccessUiAction, type SteamAccessUiResourceKind } from "./steam-access-ui-session";
 import type {
   SteamReleaseWebAuthnOptions,
   SteamSecureUiBrowserSession,
@@ -21,6 +22,8 @@ export interface SteamSecureUiAccessPort {
   submitCredentials(input: Readonly<{ enrollmentId: string; accountName: string; password: Uint8Array; uiSession: string }>): Promise<SteamEnrollmentView>;
   submitGuard(input: Readonly<{ enrollmentId: string; guardCode: Uint8Array; uiSession: string }>): Promise<SteamEnrollmentView>;
   completeApproval(input: Readonly<{ approvalId: string; assertion: unknown; uiSession: string }>): Promise<ReleaseAuthorizationView>;
+  completeProjectConfiguration(input: Readonly<{ intentId: string; projectId: string; steamAppId: string;
+    betaBranch: string; platformDepots: SteamPlatformDepots; branchPassword: Uint8Array; uiSession: string }>): Promise<SteamProjectConfigurationView>;
 }
 
 export interface SteamSecureUiWebAuthnPort {
@@ -125,16 +128,52 @@ export function registerSteamSecureUiRoutes(server: FastifyInstance, options: Re
     try { return reply.send(await options.access.completeApproval({ approvalId, assertion: body.assertion, uiSession })); }
     catch { return apiError(reply, 400, "STEAM_MFA_REJECTED"); }
   });
+
+  server.get("/projects/:projectId/steam-configuration/:intentId", async (request, reply) => {
+    const projectId = projectIdFrom(request);
+    const intentId = intentIdFrom(request);
+    if (!projectId || !intentId) return htmlError(reply, 404, "Steam 配置链接无效", "请返回项目设置重新发起配置。");
+    const principal = await browserPrincipal(options.identity, request, projectConfigurationIdentityPath(projectId, intentId), "GET");
+    if (!principal) return htmlError(reply, 401, "请先登录 DeviLudo", "当前项目配置链接需要原平台会话确认。");
+    const uiSession = issue(options.sessions, principal, "STEAM_PROJECT_CONFIGURATION", intentId, "SUBMIT_PROJECT_CONFIGURATION");
+    return html(reply, projectConfigurationPage({ projectId, intentId, displayName: principal.displayName, uiSession }), false);
+  });
+
+  server.post("/v1/steam-ui/project-configurations/:intentId/complete", {
+    bodyLimit: 64,
+    onRequest: binaryOnly,
+  }, async (request, reply) => {
+    secureApi(reply);
+    const intentId = intentIdFrom(request);
+    const projectId = headerUuid(request.headers["x-deviludo-project-id"]);
+    const branchPassword = rawBytes(request.body);
+    try {
+      if (!intentId || !projectId || !sameOrigin(request, origin)) return apiError(reply, 403, "STEAM_UI_REQUEST_REJECTED");
+      const principal = await browserPrincipal(options.identity, request, projectConfigurationIdentityPath(projectId, intentId), "POST");
+      if (!principal) return apiError(reply, 401, "STEAM_UI_SESSION_REQUIRED");
+      const uiSession = request.headers["x-deviludo-steam-ui-session"];
+      if (typeof uiSession !== "string" || !matchesSession(options.sessionVerifier, request, principal,
+        "STEAM_PROJECT_CONFIGURATION", intentId, "SUBMIT_PROJECT_CONFIGURATION")) return apiError(reply, 401, "STEAM_UI_CAPABILITY_REQUIRED");
+      if (!branchPassword || branchPassword.byteLength < 8 || branchPassword.byteLength > 64) return apiError(reply, 400, "STEAM_PROJECT_CONFIGURATION_REJECTED");
+      try {
+        const result = await options.access.completeProjectConfiguration({ intentId, projectId,
+          steamAppId: numericHeader(request.headers["x-steam-app-id"]),
+          betaBranch: betaBranchHeader(request.headers["x-steam-beta-branch"]),
+          platformDepots: projectDepotHeaders(request), branchPassword, uiSession });
+        return reply.send(result);
+      } catch { return apiError(reply, 400, "STEAM_PROJECT_CONFIGURATION_REJECTED"); }
+    } finally { branchPassword?.fill(0); }
+  });
 }
 
 function issue(signer: SteamAccessUiSessionSigner, principal: SteamSecureUiPrincipal,
-  resourceKind: "STEAM_ENROLLMENT" | "STEAM_RELEASE_APPROVAL", resourceId: string, action: SteamAccessUiAction): string {
+  resourceKind: SteamAccessUiResourceKind, resourceId: string, action: SteamAccessUiAction): string {
   return signer.issue({ tenantId: principal.tenantId, userId: principal.userId, sessionBinding: principal.sessionBinding,
     resourceKind, resourceId, action });
 }
 
 function matchesSession(verifier: SteamAccessUiSessionVerifier, request: FastifyRequest, principal: SteamSecureUiPrincipal,
-  resourceKind: "STEAM_ENROLLMENT" | "STEAM_RELEASE_APPROVAL", resourceId: string, action: SteamAccessUiAction): boolean {
+  resourceKind: SteamAccessUiResourceKind, resourceId: string, action: SteamAccessUiAction): boolean {
   try {
     const session = verifier.verify(request, { resourceKind, resourceId, action });
     return session.tenantId === principal.tenantId && session.userId === principal.userId
@@ -161,7 +200,17 @@ function sameOrigin(request: FastifyRequest, origin: URL): boolean {
 }
 function enrollmentIdFrom(request: FastifyRequest): string | null { const value = (request.params as Record<string, unknown>).enrollmentId; return typeof value === "string" && ENROLLMENT_ID.test(value) ? value : null; }
 function approvalIdFrom(request: FastifyRequest): string | null { const value = (request.params as Record<string, unknown>).approvalId; return typeof value === "string" && ID.test(value) ? value : null; }
+function intentIdFrom(request: FastifyRequest): string | null { const value = (request.params as Record<string, unknown>).intentId; return typeof value === "string" && ENROLLMENT_ID.test(value) ? value : null; }
+function projectIdFrom(request: FastifyRequest): string | null { const value = (request.params as Record<string, unknown>).projectId; return typeof value === "string" && ENROLLMENT_ID.test(value) ? value : null; }
+function headerUuid(value: unknown): string | null { return typeof value === "string" && ENROLLMENT_ID.test(value) ? value : null; }
 function identityPath(kind: "enrollments" | "approvals", id: string): string { return `/api/steam-access-ui/${kind}/${id}`; }
+function projectConfigurationIdentityPath(projectId: string, intentId: string): string { return `/api/steam-access-ui/projects/${projectId}/steam-configuration/${intentId}`; }
+function numericHeader(value: unknown): string { if (typeof value !== "string" || !/^[1-9][0-9]{0,19}$/.test(value)) throw new Error("numeric header invalid"); return value; }
+function betaBranchHeader(value: unknown): string { if (typeof value !== "string" || !/^[a-z0-9][a-z0-9_-]{2,39}$/.test(value)
+  || value === "default" || value === "public") throw new Error("beta branch invalid"); return value; }
+function projectDepotHeaders(request: FastifyRequest): SteamPlatformDepots { const result: Partial<Record<"windows" | "linux" | "macos", string>> = {};
+  for (const platform of ["windows", "linux", "macos"] as const) { const value = request.headers[`x-steam-depot-${platform}`]; if (value !== undefined) result[platform] = numericHeader(value); }
+  if (!Object.keys(result).length) throw new Error("depot headers invalid"); return Object.freeze(result); }
 function rawBytes(value: unknown): Uint8Array | null { return Buffer.isBuffer(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : null; }
 function exactObject(value: unknown, keys: readonly string[]): Record<string, unknown> | null { if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const result = value as Record<string, unknown>; return JSON.stringify(Object.keys(result).sort()) === JSON.stringify([...keys].sort()) ? result : null; }
@@ -209,6 +258,24 @@ function approvalPage(input: Readonly<{ approvalId: string; displayName: string;
   const script = `const c=${config};const n=document.querySelector('#notice');const b=document.querySelector('#approve');const d=s=>{const p='='.repeat((4-s.length%4)%4);return Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+p),x=>x.charCodeAt(0))};const e=x=>{const v=new Uint8Array(x);let s='';for(const b of v)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
 b.addEventListener('click',async()=>{b.disabled=true;n.textContent='等待通行密钥验证…';try{const o=c.challenge.publicKey;const publicKey={challenge:d(o.challenge),rpId:o.rpId,timeout:o.timeout,userVerification:'required',allowCredentials:o.allowCredentials.map(x=>({id:d(x.id),type:'public-key',transports:x.transports}))};const cred=await navigator.credentials.get({publicKey});if(!cred)throw new Error();const assertion={challengeId:c.challenge.challengeId,id:cred.id,rawId:e(cred.rawId),type:cred.type,response:{clientDataJSON:e(cred.response.clientDataJSON),authenticatorData:e(cred.response.authenticatorData),signature:e(cred.response.signature),userHandle:cred.response.userHandle?e(cred.response.userHandle):null}};const r=await fetch('/v1/steam-ui/approvals/'+encodeURIComponent(c.approvalId)+'/complete',{method:'POST',headers:{'content-type':'application/json','x-deviludo-steam-ui-session':c.uiSession},body:JSON.stringify({assertion})});if(!r.ok)throw new Error();location.assign('/');}catch{n.textContent='MFA 验证未完成，未签发发布授权。';b.disabled=false}});`;
   return securedDocument(nonce, "Steam 发布授权", body, script);
+}
+
+function projectConfigurationPage(input: Readonly<{ projectId: string; intentId: string; displayName: string; uiSession: string }>): Readonly<{ markup: string; nonce: string }> {
+  const nonce = randomBytes(18).toString("base64url");
+  const config = scriptJson({ projectId: input.projectId, intentId: input.intentId, uiSession: input.uiSession });
+  const body = `<main class="card wide"><span class="mark">DL</span><p class="eyebrow">Steam 私有 Beta</p><h1>配置项目发布目标</h1>
+    <p>已验证为 <strong>${escapeHtml(input.displayName)}</strong>。App、Depot 与分支信息会冻结为不可变 revision；分支密码只进入隔离进程与 Vault。</p>
+    <div id="notice" class="notice" role="status">至少选择一个与项目测试矩阵一致的平台 Depot。</div>
+    <form id="project-configuration"><label>Steam App ID<input id="app-id" inputmode="numeric" maxlength="20" required></label>
+      <label>密码保护 Beta 分支<input id="beta-branch" maxlength="40" pattern="[a-z0-9][a-z0-9_-]{2,39}" placeholder="deviludo_beta" required></label>
+      <label>Windows Depot ID（可选）<input id="depot-windows" inputmode="numeric" maxlength="20"></label>
+      <label>Linux Depot ID（可选）<input id="depot-linux" inputmode="numeric" maxlength="20"></label>
+      <label>macOS Depot ID（可选）<input id="depot-macos" inputmode="numeric" maxlength="20"></label>
+      <label>Beta 分支密码<input id="branch-password" type="password" autocomplete="new-password" minlength="8" maxlength="64" required></label>
+      <button>测试权限并冻结配置</button></form>
+    <p class="fine">主站、项目源码、Agent、命令行和日志均无法读取该密码；配置完成后任务只引用 Vault SecretRef。</p></main>`;
+  const script = `const c=${config};const f=document.querySelector('#project-configuration');const n=document.querySelector('#notice');f.addEventListener('submit',async e=>{e.preventDefault();const p=document.querySelector('#branch-password');const value=p.value;p.value='';const bytes=new TextEncoder().encode(value);const headers={'content-type':'application/octet-stream','x-deviludo-steam-ui-session':c.uiSession,'x-deviludo-project-id':c.projectId,'x-steam-app-id':document.querySelector('#app-id').value,'x-steam-beta-branch':document.querySelector('#beta-branch').value};for(const platform of ['windows','linux','macos']){const value=document.querySelector('#depot-'+platform).value;if(value)headers['x-steam-depot-'+platform]=value}n.textContent='正在验证 App 权限并冻结 revision…';try{const r=await fetch('/v1/steam-ui/project-configurations/'+encodeURIComponent(c.intentId)+'/complete',{method:'POST',headers,body:bytes});if(!r.ok)throw new Error();const j=await r.json();if(j.state!=='READY')throw new Error();location.assign('/projects/'+encodeURIComponent(c.projectId)+'/steam-settings?configured=1')}catch{n.textContent='配置未保存。请确认 App 权限、Depot ID、分支名称及密码格式。'}finally{bytes.fill(0)}});`;
+  return securedDocument(nonce, "Steam 项目发布配置", body, script);
 }
 
 function securedDocument(nonce: string, title: string, body: string, script: string): Readonly<{ markup: string; nonce: string }> {
