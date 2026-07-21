@@ -127,3 +127,31 @@ transactions must set `app.tenant_id`
 from an already-authorized session; accepting it directly from a request header
 would defeat RLS. Credential values never enter these tables—only Vault refs,
 fingerprints, and version IDs do.
+
+## Production control-plane image
+
+The repository root `Dockerfile.control-plane` is built only through
+`npm run image:build-control`. The builder refuses a floating base, a Node
+release older than 22.13, a non-Debian-slim base, credentials embedded in an
+image name, `latest`, or a destination tag not exactly derived from the package
+version and 40-character source revision. It always uses `docker buildx` with
+fresh base resolution, no cache, maximum provenance, an SBOM and registry push;
+success returns the immutable registry digest together with Dockerfile and
+package-lock digests.
+
+The image installs production dependencies from the lockfile with lifecycle
+scripts disabled, runs as the base image's unprivileged `node` user and accepts
+no runtime arguments. `DEVILUDO_SERVICE` selects one explicitly classified
+control workload. The entrypoint fails closed when local-test authority is
+present and never admits Agent execution workers or guests, native supply-chain
+policy, Artifact Preparer, physical Runner, Godot TestKit, Steam executor,
+signing finalizer, Steam Client connector, install services, hosted Web, or
+localhost sidecars. These external workloads require separately signed images
+and node pools. Overriding this entrypoint is therefore a deployment-policy
+violation, not a supported way to run them.
+
+The same image contains the migration files so a one-shot deployment Job can
+override the command to run `node scripts/production/migrate-postgres.mjs`
+before control workloads are released. Only that Job receives the migration
+credential files. A normal control container receives application credentials
+for its own role and never receives the migration role.

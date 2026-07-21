@@ -137,6 +137,12 @@ npm run infra:status
 
 依赖服务只绑定到 `127.0.0.1`。`infra:up` 会在依赖就绪后运行带 advisory lock 和文件摘要校验的增量迁移器；状态检查会认证 PostgreSQL/Redis、确认数据库账本已应用到 migration `061`，并验证 Temporal、MinIO、Vault 与 OTel Collector。旧的无账本本地数据卷必须先备份并显式执行 `npm run db:adopt-local`，生产数据库禁止采用无账本基线。使用 `npm run infra:down` 停止。该 Compose 仅用于开发；生产应使用高可用 PostgreSQL/PITR、Temporal 集群、TLS Redis、版本化并锁定的 S3、自动解封 Vault/KMS，以及独立网络分区的开发 Worker、E2E Runner、Inference Connector 和 Steam Publisher。
 
+## 生产控制面镜像
+
+`Dockerfile.control-plane` 是无 Agent CLI、无 Godot/Steam 原生工具的共享控制面载体。容器必须设置 `NODE_ENV=production` 和一个受允许列表约束的 `DEVILUDO_SERVICE`；命令行参数、本地测试权限、Agent microVM、物理 Runner、TestKit、Steam 原生执行器与本地 sidecar 都会在入口处被拒绝。每个新启动入口必须先明确归类，不能随着代码增加而静默获得该镜像的运行权限。
+
+`npm run image:build-control` 只接受内部镜像库中的 Node 22.13+ Debian slim 摘要引用、当前 40 位源码 revision，以及严格等于 `平台版本-源码前12位` 的目标 tag。构建固定启用无缓存拉取、BuildKit 最大 provenance、SBOM 和 registry push，并输出绑定最终 image digest、基础镜像、Dockerfile 与 lockfile 摘要的 JSON 回执。迁移 Job 可使用同一只读代码载体覆盖入口运行 `db:migrate`，但其独立数据库凭据不进入普通服务容器。物理和原生节点仍必须使用各自的专用签名镜像。
+
 ## API
 
 生产 API 使用独立域名，因此 UI 的 `GET /admin/agents` 与 API 的 `GET /admin/agents` 不冲突。本地单进程预览将 API 映射到 `/api/admin/agents`。

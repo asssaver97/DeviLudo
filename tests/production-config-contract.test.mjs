@@ -21,6 +21,8 @@ test("optional commented assignments count as documentation but process-owned ch
   ])], ["DEVILUDO_OPTIONAL_PATH", "DEVILUDO_REQUIRED"]);
   assert.deepEqual([...environmentNamesFromSource(`
     env.DEVILUDO_REQUIRED;
+    env.DEVILUDO_PLATFORM_VERSION;
+    env.DEVILUDO_SOURCE_REVISION;
     env.DEVILUDO_WORKFLOW_DESTINATION;
     env.DEVILUDO_TESTKIT_STEAM_CONNECTOR_VERSION;
   `)], ["DEVILUDO_REQUIRED"]);

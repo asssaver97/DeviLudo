@@ -343,6 +343,12 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
   advisory lock, verifies the immutable digest ledger and commits each schema
   change together with its migration record. Production never adopts an
   untracked schema or rewrites historical migration files.
+- The shared Linux control-plane image has an exhaustive service classification.
+  Its fixed entrypoint admits only non-native control workloads selected through
+  `DEVILUDO_SERVICE`; Agent execution, physical E2E, signing, Steam client and
+  localhost services remain external workloads. The build requires a
+  digest-pinned Node base and source-derived immutable tag, pushes BuildKit
+  provenance plus an SBOM, and returns the final registry digest as authority.
 
 ## Repository map
 
@@ -359,5 +365,8 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
   history used by `npm run db:migrate`.
 - `infra/docker-compose.yml`: local PostgreSQL, Temporal, Redis, MinIO, Vault,
   and OTel integration stack.
+- `Dockerfile.control-plane`, `.dockerignore` and `scripts/production/`: the
+  least-authority shared control image, digest-bound build receipt, immutable
+  migration runner and exhaustive production configuration contracts.
 - `infra/vault` and `infra/otel`: least-privilege and telemetry redaction
   starting points.

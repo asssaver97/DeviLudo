@@ -15,9 +15,12 @@ const EXACT_PLATFORM_ENVIRONMENT_NAMES = new Set([
   "VAULT_ADDR",
 ]);
 
-// These values are created inside a trusted parent process. Operators must not
-// inject them into a service deployment or copy them into an environment file.
+// These values are created inside a trusted parent process or passed as fixed
+// image build arguments. Operators must not inject them into a service
+// deployment or copy them into an environment file.
 const PROCESS_OWNED_ENVIRONMENT_NAMES = new Set([
+  "DEVILUDO_PLATFORM_VERSION",
+  "DEVILUDO_SOURCE_REVISION",
   "DEVILUDO_WORKFLOW_DESTINATION",
   "DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST",
   "DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION",
@@ -121,7 +124,11 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
       missingEntrypointFiles.push(relative(root, path));
     }
   }
-  for (const utility of ["scripts/production/migrate-postgres.mjs"]) {
+  for (const utility of [
+    "scripts/production/build-control-plane-image.mjs",
+    "scripts/production/migrate-postgres.mjs",
+    "scripts/production/run-control-service.mjs",
+  ]) {
     const path = resolve(root, utility);
     try {
       await access(path);
