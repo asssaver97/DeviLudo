@@ -540,7 +540,7 @@ export async function PUT(request: Request, context: RouteContext) {
         ? profile.scope === "platform" && profile.scopeId === "global"
         : profile.scope === "platform" && profile.scopeId === "global"
           || profile.scope === scopeKind && profile.scopeId === scopeId
-          || scopeKind === "project" && profile.scope === "tenant" && profile.scopeId === "tenant-local";
+          || scopeKind === "project" && profile.scope === "tenant" && profile.scopeId === "north-dock";
       if (!selectable) {
         throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }

@@ -10,6 +10,7 @@ type Profile = { id: string; agent: "claude-code" | "codex-cli"; scope: string; 
 export function ProjectAgentSettings({ projectId }: { projectId: string }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selected, setSelected] = useState("");
+  const [configurationSource, setConfigurationSource] = useState("等待解析");
   const [notice, setNotice] = useState("正在校验项目权限…");
   const [busy, setBusy] = useState(false);
 
@@ -18,9 +19,19 @@ export function ProjectAgentSettings({ projectId }: { projectId: string }) {
     const payload = await response.json() as { data?: { profiles?: Profile[]; defaults?: Record<string, string> } | Array<unknown>; meta?: { profiles?: Profile[]; defaults?: Record<string, string> }; error?: { message?: string } };
     if (!response.ok) throw new Error(payload.error?.message ?? "无法读取项目 Agent 设置");
     const data = Array.isArray(payload.data) ? payload.meta ?? {} : payload.data ?? {};
-    const active = (data.profiles ?? []).filter((profile) => profile.state === "ACTIVE");
+    const active = (data.profiles ?? []).filter((profile) => profile.state === "ACTIVE"
+      && (profile.scope === "platform" || profile.scope === "tenant"
+        || profile.scope === "project" && profile.scopeId === projectId));
+    const projectSource = `project:${projectId}`;
+    const tenantSource = Object.keys(data.defaults ?? {}).find((scope) => scope.startsWith("tenant:"));
+    const source = data.defaults?.[projectSource]
+      ? projectSource
+      : tenantSource && data.defaults?.[tenantSource]
+        ? tenantSource
+        : "platform";
     setProfiles(active);
-    setSelected(data.defaults?.[`project:${projectId}`] ?? data.defaults?.platform ?? active[0]?.id ?? "");
+    setSelected(data.defaults?.[source] ?? active[0]?.id ?? "");
+    setConfigurationSource(source);
     setNotice("");
   }, [projectId]);
   useEffect(() => {
@@ -36,6 +47,7 @@ export function ProjectAgentSettings({ projectId }: { projectId: string }) {
       });
       const payload = await response.json() as { error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "项目 Agent 选择失败");
+      setConfigurationSource(`project:${projectId}`);
       setNotice("项目默认 Profile 已锁定；运行中的任务保持原 revision，新任务使用该选择。");
     } catch (error) { setNotice(error instanceof Error ? error.message : "项目 Agent 选择失败"); }
     finally { setBusy(false); }
@@ -49,7 +61,7 @@ export function ProjectAgentSettings({ projectId }: { projectId: string }) {
       <section className="settings-card">
         <div className="settings-card-title"><div><span className="step-number">A</span><h2>有效配置</h2></div><span>项目最高优先级</span></div>
         <div className="effective-agent"><span>{current?.agent === "codex-cli" ? "CX" : "CL"}</span><div><small>当前选择</small><h3>{current?.agent === "codex-cli" ? "Codex CLI" : "Claude Code"}</h3><code>{current?.id ?? "等待配置"}</code></div></div>
-        <dl className="scope-chain"><div><dt>1</dt><dd><b>项目覆盖</b><small>{selected || "未设置"}</small></dd></div><div><dt>2</dt><dd><b>租户允许列表</b><small>只展示 ACTIVE Profile</small></dd></div><div><dt>3</dt><dd><b>平台兜底</b><small>Claude Code</small></dd></div></dl>
+        <dl className="scope-chain"><div><dt>1</dt><dd><b>有效来源</b><small>{configurationSource}</small></dd></div><div><dt>2</dt><dd><b>租户允许列表</b><small>只展示 ACTIVE Profile</small></dd></div><div><dt>3</dt><dd><b>平台兜底</b><small>Claude Code</small></dd></div></dl>
       </section>
       <section className="settings-card">
         <div className="settings-card-title"><div><span className="step-number">B</span><h2>选择 Profile</h2></div><span>{profiles.length} 项可用</span></div>

@@ -1,6 +1,7 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { startLocalDelivery } from "@/lib/local-delivery/store";
+import { resolveLocalAgentProfile } from "@/lib/local-delivery/profile-resolution";
 import {
   authorizeProjectAccess,
   ProjectAccessError,
@@ -111,20 +112,27 @@ export async function POST(
       }
       store.specState = "APPROVED";
       const runId = stableRunId(`${projectId}:${approvedRevision}:${requestKey}`);
-      appendDemoAudit("SPEC_APPROVED", approvedRevision, "ProjectOwner", { projectId, runId, agent: "claude-code" });
+      const lockedProfile = resolveLocalAgentProfile(
+        projectId,
+        authority?.testPlanRevisionId ?? "godot-testkit-1.0.0",
+        store,
+      );
+      appendDemoAudit("SPEC_APPROVED", approvedRevision, "ProjectOwner", {
+        projectId,
+        runId,
+        agent: lockedProfile.agent,
+        profileRevisionId: lockedProfile.profileRevisionId,
+        configurationSource: lockedProfile.configurationSource,
+      });
       return {
         specRevisionId: approvedRevision,
         state: "APPROVED",
         authority,
+        lockedProfile,
         run: {
           id: runId,
           state: "QUEUED",
-          profileRevisionId: "profile-claude-platform-r5",
-          installationId: "claude-installation-214",
-          exactAgentVersion: "2.1.14",
-          adapterVersion: "1.0.0",
-          model: "claude-sonnet-4-6-20250514",
-          credentialVersionId: "cred-claude-platform-v4",
+          ...lockedProfile,
           targetMatrix: authority?.targetMatrix ?? ["windows", "linux", "macos"],
           locked: true,
         },
@@ -135,6 +143,7 @@ export async function POST(
       approvedRevision,
       result.value.run.id,
       `spec-delivery:${projectId}:${requestKey}`,
+      result.value.lockedProfile,
     );
     return json(
       { data: { ...result.value, delivery: delivery.snapshot }, meta: { idempotentReplay: result.replayed || delivery.replayed } },

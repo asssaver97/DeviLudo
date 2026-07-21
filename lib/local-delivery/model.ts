@@ -42,6 +42,28 @@ export type LocalValidationSnapshot = {
 
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
+export type LocalLockedAgentProfile = {
+  agent: "claude-code" | "codex-cli";
+  profileRevisionId: string;
+  configurationSource: `project:${string}` | `tenant:${string}` | "platform";
+  installationId: string;
+  imageDigest: `sha256:${string}`;
+  exactAgentVersion: string;
+  adapterVersion: string;
+  providerRevisionId: string;
+  providerProtocol: "anthropic-messages" | "openai-responses";
+  credentialVersionId: string;
+  model: string;
+  testPlanRevisionId: string;
+  budget: {
+    maxTurns: number;
+    maxCostUsd: number;
+    maxInputTokens: number;
+    maxOutputTokens: number;
+  };
+  timeoutSeconds: number;
+};
+
 export type LocalPostMergeFailure = {
   readonly reason: "MAIN_GATE_FAILURE" | "STEAM_INSTALL_FAILURE";
   readonly attempt: 1;
@@ -65,26 +87,7 @@ export type LocalDeliverySnapshot = {
   runId: string | null;
   stage: LocalDeliveryStage;
   resumeStage: LocalDeliveryStage | null;
-  lockedProfile: {
-    agent: "claude-code";
-    profileRevisionId: "profile-claude-platform-r5";
-    installationId: "claude-installation-214";
-    imageDigest: `sha256:${string}`;
-    exactAgentVersion: "2.1.14";
-    adapterVersion: "1.0.0";
-    providerRevisionId: "provider-platform-claude-r1";
-    providerProtocol: "anthropic-messages";
-    credentialVersionId: "credential-platform-claude-v1";
-    model: "claude-sonnet-4-6-20250514";
-    testPlanRevisionId: "godot-testkit-1.0.0";
-    budget: {
-      maxTurns: 64;
-      maxCostUsd: 25;
-      maxInputTokens: 200000;
-      maxOutputTokens: 50000;
-    };
-    timeoutSeconds: 7200;
-  };
+  lockedProfile: LocalLockedAgentProfile;
   candidatePr: number | null;
   candidateSha: string | null;
   mainSha: string | null;
@@ -118,6 +121,7 @@ export type LocalDeliveryAction =
 const profile = {
   agent: "claude-code" as const,
   profileRevisionId: "profile-claude-platform-r5" as const,
+  configurationSource: "platform" as const,
   installationId: "claude-installation-214" as const,
   imageDigest: `sha256:${"a".repeat(64)}` as const,
   exactAgentVersion: "2.1.14" as const,
@@ -134,7 +138,7 @@ const profile = {
     maxOutputTokens: 50000 as const,
   },
   timeoutSeconds: 7200 as const,
-};
+} satisfies LocalLockedAgentProfile;
 
 /** Add newly locked fields when reading an older localhost JSON snapshot. */
 export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
@@ -207,12 +211,14 @@ export function approveLocalSpec(
   current: LocalDeliverySnapshot,
   specRevisionId: string,
   runId: string,
+  lockedProfile: LocalLockedAgentProfile = current.lockedProfile,
 ): LocalDeliverySnapshot {
   const started = event(
     {
       ...current,
       specRevisionId,
       runId,
+      lockedProfile: cloneLockedProfile(lockedProfile),
       stage: "AGENT_QUEUED",
       resumeStage: null,
       candidatePr: null,
@@ -231,9 +237,17 @@ export function approveLocalSpec(
       localValidation: null,
     },
     "SPEC_APPROVED",
-    `${specRevisionId} 已冻结；Claude Code Profile 与目标矩阵已锁定。`,
+    `${specRevisionId} 已冻结；${agentLabel(lockedProfile.agent)} Profile、配置来源与目标矩阵已锁定。`,
   );
   return started;
+}
+
+function cloneLockedProfile(value: LocalLockedAgentProfile): LocalLockedAgentProfile {
+  return { ...value, budget: { ...value.budget } };
+}
+
+function agentLabel(agent: LocalLockedAgentProfile["agent"]): string {
+  return agent === "claude-code" ? "Claude Code" : "Codex CLI";
 }
 
 export function invalidateLocalDelivery(

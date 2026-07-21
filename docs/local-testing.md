@@ -30,7 +30,7 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 
 生产数据库会在 `agent_run_provider_failovers` 提交时原子物化追加式 `AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED` 管理审计事件，标明原/目标 Profile、Provider、模型、预算和授权到期时间。投影不复制一次性授权 nonce，也不暴露 SecretRef 或密钥；租户和项目管理员仍按请求身份过滤可见范围。
 
-`/settings/agents` 使用租户作用域的本地代理验证 BYOK 只写响应、Provider 草稿和默认 Profile；`/projects/ember-archipelago/agent-settings` 验证项目从 ACTIVE 继承 Profile 中选择。两条本地路径与生产页面相同，但只对真实 loopback URL 且显式 `DEVILUDO_LOCAL_TEST_MODE=1` 生效，不会联系第三方 Provider。
+`/settings/agents` 使用租户作用域的本地代理验证 BYOK 只写响应、Provider 草稿和默认 Profile；`/projects/ember-archipelago/agent-settings` 验证项目从 ACTIVE 继承 Profile 中选择。规格批准会按项目、租户、平台顺序解析最高优先级配置，并把 Profile 来源与全部精确运行字段复制到不可变 D1 快照；若该覆盖的 Installation 或 Provider 已失效，审批返回 `AGENT_PROFILE_NOT_READY`，不会静默回退或在 Claude/Codex 间切换。两条本地路径与生产页面相同，但只对真实 loopback URL 且显式 `DEVILUDO_LOCAL_TEST_MODE=1` 生效，不会联系第三方 Provider。
 
 在项目页批准规格后，点击“运行真实本机验证”。侧车会：
 
@@ -65,6 +65,7 @@ npm run local:smoke
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`；`degraded` 是未启用执行时的预期状态。
 - Agent 探针 `/v1/preflight` 使用固定测试运行锁，验证 CLI、镜像、Provider/Gateway 与执行开关；它只返回阻塞原因或 `READY`，不会启动 Agent。
 - Agent `/v1/runs` 在默认测试栈必须以明确门禁码返回 409/503，证明没有执行器时失败关闭。
+- 两个隔离项目分别选择 Claude Code 与 Codex CLI Profile，从规格批准一直推进到三平台通过和 `RELEASED`，并确认整个链路保持最初的不可变 Agent 锁。
 
 任何路由超时、非 2xx、错误内容类型或内容标记缺失都会以非零状态退出，适合本地脚本和 CI 调用。
 

@@ -90,7 +90,7 @@ export function Dashboard() {
     id: event.id,
     title: event.message,
     kind: event.type.includes("E2E") || event.type.includes("GODOT") ? "测试" : "运行",
-    agent: event.type.includes("GODOT") ? "Godot TestKit" : delivery.lockedProfile.agent === "claude-code" ? "Claude Code" : "平台",
+    agent: event.type.includes("GODOT") ? "Godot TestKit" : delivery.lockedProfile.agent === "claude-code" ? "Claude Code" : "Codex CLI",
     status: event.type.includes("FAILED") ? "失败" : "已记录",
     tone: event.type.includes("FAILED") ? "danger" : event.type.includes("E2E") || event.type.includes("GODOT") ? "green" : "blue",
     time: new Date(event.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),

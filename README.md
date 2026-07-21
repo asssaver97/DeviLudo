@@ -12,7 +12,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `/projects`：经 PostgreSQL RLS 与独立 Project Repository Broker 列出当前账号仍可访问的项目；项目创建者或仍控制对应 GitHub App installation 的用户才能看到条目，侧栏不再固定到示例项目。本地测试模式展示明确标记的隔离 fixture。
 - `/projects/new`：生产环境先从当前已验证 GitHub App installation 实时列出可见仓库，并以数值 installation/repository ID 原子创建项目和仓库绑定；浏览器不能指定 owner、仓库名或默认分支。绑定后进入可交互多轮构想、实时 `GameSpecRevision`、验收标准、冻结测试计划和明确批准动作。本地测试模式继续使用隔离草稿夹具。
 - `/projects/{projectId}`：按签名租户会话读取权威项目/仓库资料和当前规格快照；空项目从 revision 0 冷启动，不复用演示规格。候选验收门禁显示反馈与合并动作；自动修复预算耗尽时只显示人工修改入口，新反馈创建不可变规格，必须重新批准后才恢复开发。
-- 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件，可完整验证 Provider 暂停/恢复、Fixture Agent、三平台矩阵、验收、main SHA、MFA、Steam Beta 回装和外部批准门禁；main 发布门禁与 Steam 回装阶段还可演练失败证据冻结、旧发布授权撤销、人工修改说明和新规格批准。页面刷新和服务重启后状态仍保留。
+- 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件，可完整验证 Provider 暂停/恢复、Fixture Agent、三平台矩阵、验收、main SHA、MFA、Steam Beta 回装和外部批准门禁；项目选择按“项目→租户→平台”解析，规格批准时冻结 Claude Code 或 Codex CLI 的精确 Profile、配置来源、安装、镜像、CLI/Adapter、Provider、凭据版本、模型、预算与测试计划，随后管理配置变化不会改写运行中任务。main 发布门禁与 Steam 回装阶段还可演练失败证据冻结、旧发布授权撤销、人工修改说明和新规格批准。页面刷新和服务重启后状态仍保留。
 - `/admin/agents`：Claude Code（初始全局默认）与 Codex CLI 可分别发现官方候选，并管理版本、安装、灰度、回滚、Provider、凭据、三级继承、健康和审计；版本、SBOM、漏洞与安装状态只显示当前控制面投影，加载或失败时不会回退到预置结果。本地测试使用隔离 D1 夹具，生产 Web 则验证路由绑定的管理员断言并经独立 HTTPS/mTLS Connector 转发到 NestJS 控制面。生产角色由可信入口注入，浏览器不能模拟或覆盖。
 - `/settings/agents`：TenantAdmin 写入租户 BYOK、创建第三方 Provider/Profile 草稿并选择租户默认；API Key 明文仅进入 Vault，第三方端点通过探针且由 SecurityAdmin 激活前不会生效。
 - `/projects/{projectId}/agent-settings`：ProjectOwner 从租户/平台已经批准的 ACTIVE Profile 中选择项目 Agent。服务端先通过项目仓库 Broker 校验精确项目归属，再签发项目作用域控制面身份；项目层不读取或复制 Provider 凭据。

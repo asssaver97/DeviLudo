@@ -266,7 +266,11 @@ export function LocalDeliveryPanel({
           <div className="local-delivery-grid">
             <div className="local-delivery-lock">
               <span><SparkIcon /></span>
-              <div><small>不可变运行锁</small><b>Claude Code {snapshot.lockedProfile.exactAgentVersion}</b><p>{snapshot.lockedProfile.model}</p></div>
+              <div>
+                <small>不可变运行锁 · {snapshot.lockedProfile.configurationSource}</small>
+                <b>{snapshot.lockedProfile.agent === "claude-code" ? "Claude Code" : "Codex CLI"} {snapshot.lockedProfile.exactAgentVersion}</b>
+                <p>{snapshot.lockedProfile.model}</p>
+              </div>
               <code>{snapshot.runId ?? "等待规格批准"}</code>
             </div>
             <div className="local-delivery-metric"><small>规格</small><b>{snapshot.specRevisionId}</b><span>rev {snapshot.revision}</span></div>

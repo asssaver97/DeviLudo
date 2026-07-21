@@ -8,6 +8,7 @@ import {
   recordLocalValidation,
   type LocalDeliveryAction,
   type LocalDeliverySnapshot,
+  type LocalLockedAgentProfile,
   type LocalValidationSnapshot,
 } from "./model";
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
@@ -215,11 +216,12 @@ export async function startLocalDelivery(
   specRevisionId: string,
   runId: string,
   commandKey: string,
+  lockedProfile?: LocalLockedAgentProfile,
 ): Promise<MutationResult> {
   return mutate(
     projectId,
     commandKey,
-    (current) => approveLocalSpec(current, specRevisionId, runId),
+    (current) => approveLocalSpec(current, specRevisionId, runId, lockedProfile ?? current.lockedProfile),
     specRevisionId,
   );
 }
