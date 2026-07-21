@@ -5,6 +5,15 @@ import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
 export type TargetPlatform = "linux" | "macos" | "windows";
 export type AgentKind = "claude-code" | "codex-cli";
 
+export interface AgentVersionAttestationLock {
+  readonly catalogReceiptDigest: string;
+  readonly validationReceiptId: string;
+  readonly validationReceiptDigest: string;
+  readonly supplyChainEvidenceDigest: string;
+  readonly validatedAdapterVersion: string;
+  readonly adapterCompatibility: Readonly<{ min: string; maxExclusive: string }>;
+}
+
 export interface AgentConfigurationClaim {
   readonly kind: "CLAIMED";
   readonly tenantId: string;
@@ -43,6 +52,8 @@ export interface AgentProfileConfigurationLock {
   readonly agentVersionId: string;
   readonly exactAgentVersion: string;
   readonly agentVersionSourceDigest: string;
+  /** Null only when replaying a pre-attestation lock for an already-started repair chain. */
+  readonly agentVersionAttestation: AgentVersionAttestationLock | null;
   readonly adapterVersion: string;
   readonly workerImageId: string;
   readonly buildReceiptId: string;
@@ -84,6 +95,8 @@ export interface AgentConfigurationLock {
   readonly agentVersionId: string;
   readonly exactAgentVersion: string;
   readonly agentVersionSourceDigest: string;
+  /** Null only when replaying a pre-attestation lock for an already-started repair chain. */
+  readonly agentVersionAttestation: AgentVersionAttestationLock | null;
   readonly adapterVersion: string;
   readonly workerImageId: string;
   readonly buildReceiptId: string;

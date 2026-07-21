@@ -268,6 +268,26 @@ test("a completed Agent receipt must match every immutable lock before becoming 
     () => recordLocalAgentExecution(state, { ...receipt, credentialVersionId: "credential-other-v2" }),
     /不可变任务锁/,
   );
+  assert.throws(
+    () => recordLocalAgentExecution({
+      ...state,
+      lockedProfile: { ...state.lockedProfile, agentVersionAttestation: null },
+    }, receipt),
+    /不可变任务锁/,
+  );
+  assert.throws(
+    () => recordLocalAgentExecution({
+      ...state,
+      lockedProfile: {
+        ...state.lockedProfile,
+        agentVersionAttestation: {
+          ...state.lockedProfile.agentVersionAttestation,
+          validationReceiptDigest: "sha256:truncated",
+        },
+      },
+    }, receipt),
+    /不可变任务锁/,
+  );
   state = recordLocalAgentExecution(state, receipt);
   assert.equal(state.stage, "CANDIDATE_READY");
   assert.equal(state.candidateSha, receipt.candidate.commitSha);

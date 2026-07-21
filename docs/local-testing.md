@@ -38,7 +38,7 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 
 `POST /v1/runs` 会先执行同一预检。预检未通过时返回原始门禁码；全部通过但没有隔离执行器时返回 `LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED`。启用隔离执行器后，Claude Code/Codex 还必须按严格 schema 写入保留的 `.deviludo-agent-code-review.json`；执行器以禁止符号链接和限长方式读取后立即删除它，只在没有阻断项时生成绑定当前 Run、Attempt、镜像、固定模型、规格、测试计划和候选 source digest 的不可变评审回执。缺失、畸形、浮动模型或阻断评审均失败关闭，候选不能进入 E2E。项目 API 只接受逐项匹配锁定运行的完成回执，并保存 SCM 代理产生的完整候选 SHA、源码摘要、评审回执、changed-files、usage 和警告；浏览器不能直接提交或伪造回执。
 
-`/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本发现可以填写精确版本；在本地测试环境留空时，页面会复用只读探针实际看到的 CLI 版本，方便把已经安装的 Claude Code 或 Codex CLI 写入候选目录，但仍不会自动批准、安装、灰度或激活。版本目录同时显示精确官方包来源、发现时间、发行说明、完整性、SBOM 和扫描状态；可点击链接必须与 Agent、精确版本和固定官方域名/路径一致。版本阻止、弃用、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计；Provider 草稿会完整保存四类模型、计价、数据地域/保留/训练政策和确认时间，Profile 保存预算、turn、超时、凭据及同作用域 fallback，刷新或重启后不会回落到 UI 默认值。旧 v1/v2 D1 快照会升级到 v3；凭据新增不可变的 platform/tenant 所有权，无法证明归属的旧凭据按平台范围失败关闭。租户/项目代理把认证 tenant/project 绑定传入本地控制面，因此响应、轮换、撤销和默认选择都不能跨作用域；项目页面不返回任何凭据版本目录。弃用只阻止新镜像构建，已有安装与运行任务保持锁定。凭据列表显示创建时间和原子轮换完成时间，并从本地追加式用量记录计算最后使用时间。本地供应链按钮只消费明确标记为 `LOCAL_DETERMINISTIC_BROKER`、且不接受管理员自报签名/hash 的隔离夹具回执；它不等于生产扫描证据。Provider 激活仍要求受信 Connector 的完整真实探针，默认测试栈不会伪造上游通过。
+`/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本发现可以填写精确版本；在本地测试环境留空时，页面会复用只读探针实际看到的 CLI 版本，方便把已经安装的 Claude Code 或 Codex CLI 写入候选目录，但仍不会自动批准、安装、灰度或激活。版本目录同时显示精确官方包来源、发现时间、发行说明、完整性、SBOM 和扫描状态；可点击链接必须与 Agent、精确版本和固定官方域名/路径一致。版本阻止、弃用、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计；Provider 草稿会完整保存四类模型、计价、数据地域/保留/训练政策和确认时间，Profile 保存预算、turn、超时、凭据及同作用域 fallback，刷新或重启后不会回落到 UI 默认值。旧 v1/v2/v3 D1 快照会升级到 v4；凭据新增不可变的 platform/tenant 所有权，无法证明归属的旧凭据按平台范围失败关闭。v3 中缺少 Adapter 证明的已批准版本会降回 `DISCOVERED`，必须由管理员重新触发受信批准，迁移不会根据当前 Registry 补造证明。租户/项目代理把认证 tenant/project 绑定传入本地控制面，因此响应、轮换、撤销和默认选择都不能跨作用域；项目页面不返回任何凭据版本目录。弃用只阻止新镜像构建，已有安装与运行任务保持锁定。凭据列表显示创建时间和原子轮换完成时间，并从本地追加式用量记录计算最后使用时间。本地供应链按钮只消费明确标记为 `LOCAL_DETERMINISTIC_BROKER`、且不接受管理员自报签名/hash 的隔离夹具回执；它不等于生产扫描证据。Provider 激活仍要求受信 Connector 的完整真实探针，默认测试栈不会伪造上游通过。
 
 任务预检以不可变 Run 中锁定的精确版本直接核对实际 CLI。服务启动时的版本基线只用于健康投影和提示，不会把已经由管理员更新并锁入新任务的精确版本误判为旧版本；WorkerImage、Provider、凭据、预算和显式执行开关仍逐项校验。
 
@@ -78,6 +78,7 @@ npm run local:smoke
 - `/api/admin/agent-versions/discover` 接受精确稳定版或预发布版本、拒绝浮动别名，且发现候选不会自动激活；
 - `/api/admin/agent-versions/deprecate` 只接受已批准版本，并禁止后续 WorkerImage 构建而不改变已有安装；
 - 版本批准回执固定 `validatedAdapterVersion` 与半开 `adapterCompatibility`；旧快照缺少证明时不会自动补签，新安装返回 `VERSION_ADAPTER_COMPATIBILITY_UNATTESTED`，管理员页面提示重新验证；
+- 本地规格批准会把同一版本/Adapter 证明复制进运行锁；证明缺失或漂移时，在预检或 Agent 进程启动前返回门禁错误，旧 D1 快照只保留显式 `null`，不会从当前目录推断证明；
 - 新 WorkerImage 到达健康 `100% ACTIVE` 后，可从当前 ACTIVE Profile 生成只更换 Installation 的 `READY` 升级 Profile；Provider 与凭据不复制，SecurityAdmin 激活和 PlatformAgentAdmin 精确切换默认保持为两个独立步骤，旧默认与已锁定任务在切换前后均不漂移；
 - 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
 - 租户 BYOK 通过真实页面 API 创建新不可变版本、停止旧版本签发并撤销指定旧版本；响应和投影均不包含明文或 SecretRef；

@@ -9,13 +9,22 @@ in the same PostgreSQL transaction.
 
 A configured higher-precedence default never silently falls back when it is
 invalid. The worker rechecks the active Profile, healthy 100% installation,
-approved signed Agent version, fixed model IDs, Provider probes, credential
-scope, exact authentication, approved ports, token pricing, governance,
+approved signed Agent version, Broker-bound Adapter compatibility receipt,
+fixed model IDs, Provider probes, credential scope, exact authentication,
+approved ports, token pricing, governance,
 budgets, frozen test plan, Runner toolchain and source receipt before it
 signals Temporal. Retries replay the same source operation and resume a locked
 run without creating a second run. A pre-existing Provider projection is reused
 only when every serving field still matches; drift fails closed before AgentRun
 creation.
+
+Every new lock embeds the Agent version catalog receipt digest, validation
+receipt identity/digest, supply-chain evidence digest, validated Adapter and
+its exact half-open compatibility interval. A fresh resolution fails before
+Run creation when any field is missing or disagrees with the installed Adapter.
+Digest-valid locks created before this contract remain replayable only inside
+their already-started repair chain and carry an explicit `null` attestation;
+the service never manufactures evidence from the current catalog.
 
 Repair actions do not ask GitHub for a new moving default-branch receipt and do
 not reuse a terminal Run. The worker re-resolves the predecessor Run, execution

@@ -1,5 +1,6 @@
 import { idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery, saveLocalAgentExecution } from "@/lib/local-delivery/store";
+import { isLocalAgentProfileAttested } from "@/lib/local-delivery/model";
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
 import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -22,6 +23,9 @@ export async function POST(
     }
     const commandKey = idempotencyKey(request);
     const locked = delivery.lockedProfile;
+    if (!isLocalAgentProfileAttested(locked)) {
+      return json({ error: { code: "AGENT_VERSION_ATTESTATION_REQUIRED", message: "锁定运行缺少当前 Agent Adapter 供应链证明，不能启动 Agent" } }, { status: 409 });
+    }
     const attemptId = `ATT-${delivery.runId}`;
     const executionRequest = {
       tenantId: "tenant-local",

@@ -5,10 +5,11 @@ import {
   type DemoStoreState,
 } from "./demo-store";
 
-const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v3";
+const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v4";
 const LEGACY_SNAPSHOT_SCHEMAS = new Set([
   "deviludo.local-admin-state.v1",
   "deviludo.local-admin-state.v2",
+  "deviludo.local-admin-state.v3",
 ]);
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const COMMAND_KEY = /^[A-Za-z0-9][A-Za-z0-9:._@/-]{0,511}$/;

@@ -105,6 +105,14 @@ self-updates. Promotion is `READY → 5% CANARY → 25% rollout checkpoint → 1
 ACTIVE`; failures quarantine the candidate and redirect new tasks to the prior
 READY installation. Existing locks continue on their original image.
 
+Fresh `AgentRun` resolution also revalidates the selected AgentVersion's
+catalog/validation receipts and exact half-open Adapter compatibility interval,
+then embeds that evidence in the immutable configuration lock for both the
+primary Profile and an explicitly approved fallback. A digest-valid historical
+lock without this field can continue only through its existing repair lineage;
+it is marked with a null attestation and never upgraded from moving catalog
+state.
+
 ## Credential and provider boundary
 
 The UI accepts a key only as a write/replace operation. The API writes plaintext

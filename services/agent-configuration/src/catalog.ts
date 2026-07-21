@@ -1,6 +1,7 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
-import type { AgentKind } from "./contracts";
+import type { AgentKind, AgentVersionAttestationLock } from "./contracts";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
@@ -21,6 +22,7 @@ export interface ResolvedProfileConfiguration {
   readonly agentVersionId: string;
   readonly exactAgentVersion: string;
   readonly agentVersionSourceDigest: string;
+  readonly agentVersionAttestation: AgentVersionAttestationLock | null;
   readonly providerRevisionId: string;
   readonly providerProtocol: "anthropic-messages" | "openai-responses";
   readonly providerBaseUrl: string;
@@ -143,6 +145,9 @@ function resolveProfileConfiguration(input: {
   const imageDigest = match(installation.imageDigest, IMAGE_DIGEST, "image digest");
   const workerImageId = safeId(installation.workerImageId);
   const adapterVersion = exactVersion(installation.adapterVersion);
+  if (!isBuiltInAdapterVersion(agent, adapterVersion)) {
+    invalid("Agent installation Adapter is not approved by the immutable registry");
+  }
   const buildReceiptId = safeId(installation.buildReceiptId);
   const buildReceiptDigest = match(installation.buildReceiptDigest, SHA256, "build receipt digest");
   const agentVersionId = catalogId(installation.agentVersionId);
@@ -154,9 +159,23 @@ function resolveProfileConfiguration(input: {
     invalid("Floating Agent versions are not allowed");
   }
   const agentVersionSourceDigest = match(version.sourceDigest, SHA256, "Agent source digest");
-  match(version.catalogReceiptDigest, SHA256, "catalog receipt digest");
-  match(version.validationReceiptDigest, SHA256, "validation receipt digest");
-  match(version.supplyChainEvidenceDigest, SHA256, "supply-chain evidence digest");
+  const adapterCompatibilityValue = object(version.adapterCompatibility, "Adapter compatibility");
+  const validatedAdapterVersion = exactVersion(version.validatedAdapterVersion);
+  const adapterCompatibility = Object.freeze({
+    min: exactVersion(adapterCompatibilityValue.min),
+    maxExclusive: exactVersion(adapterCompatibilityValue.maxExclusive),
+  });
+  if (!isAdapterVersionAttested(adapterVersion, validatedAdapterVersion, adapterCompatibility)) {
+    invalid("Agent version validation receipt does not attest the installation Adapter");
+  }
+  const agentVersionAttestation = Object.freeze({
+    catalogReceiptDigest: match(version.catalogReceiptDigest, SHA256, "catalog receipt digest"),
+    validationReceiptId: safeId(version.validationReceiptId),
+    validationReceiptDigest: match(version.validationReceiptDigest, SHA256, "validation receipt digest"),
+    supplyChainEvidenceDigest: match(version.supplyChainEvidenceDigest, SHA256, "supply-chain evidence digest"),
+    validatedAdapterVersion,
+    adapterCompatibility,
+  });
 
   const provider = requireRecord(providers, providerRevisionId, "provider");
   if (provider.agent !== agent || provider.state !== "ACTIVE"
@@ -225,6 +244,7 @@ function resolveProfileConfiguration(input: {
     agentVersionId,
     exactAgentVersion,
     agentVersionSourceDigest,
+    agentVersionAttestation,
     providerRevisionId,
     providerProtocol,
     providerBaseUrl: canonicalProviderBaseUrl,

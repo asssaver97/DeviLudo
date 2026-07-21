@@ -1,6 +1,6 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
-import type { LocalLockedAgentProfile } from "@/lib/local-delivery/model";
+import { isLocalAgentProfileAttested, type LocalLockedAgentProfile } from "@/lib/local-delivery/model";
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
 import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -20,6 +20,9 @@ export async function POST(
     }
 
     const locked = delivery.lockedProfile;
+    if (!isLocalAgentProfileAttested(locked)) {
+      return json({ error: { code: "AGENT_VERSION_ATTESTATION_REQUIRED", message: "锁定运行缺少当前 Agent Adapter 供应链证明，不能执行预检" } }, { status: 409 });
+    }
     const command = JSON.stringify({
       projectId,
       runId: delivery.runId,

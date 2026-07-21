@@ -1,4 +1,5 @@
 import { assertPinnedModelId, normalizeModelRoles } from "@/lib/agent/providers";
+import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "@/lib/agent/adapter-registry";
 import {
   getDemoStore,
   type DemoProfile,
@@ -44,12 +45,27 @@ export function resolveLocalAgentProfile(
     ? store.credentials.find((item) => item.id === provider.credentialVersionId)
     : undefined;
   const expectedProtocol = profile.agent === "claude-code" ? "anthropic-messages" : "openai-responses";
+  const versionMetadata = installation
+    ? store.agentVersionMetadata[`${installation.agent}@${installation.version}`]
+    : undefined;
   if (!installation || installation.agent !== profile.agent
     || installation.state !== "ACTIVE" || installation.health !== "HEALTHY"
     || installation.rolloutPercent !== 100 || !installation.activatedAt
     || !EXACT_VERSION.test(installation.version) || !EXACT_VERSION.test(installation.adapterVersion)
     || !IMAGE_DIGEST.test(installation.imageDigest)
+    || !isBuiltInAdapterVersion(profile.agent, installation.adapterVersion)
     || !["APPROVED", "DEPRECATED"].includes(store.agentVersions[`${installation.agent}@${installation.version}`])
+    || !versionMetadata?.signatureVerified || versionMetadata.scan !== "PASS"
+    || !versionMetadata.validationReceiptId || !SAFE_ID.test(versionMetadata.validationReceiptId)
+    || !versionMetadata.validationReceiptDigest || !IMAGE_DIGEST.test(versionMetadata.validationReceiptDigest)
+    || !versionMetadata.supplyChainEvidenceDigest || !IMAGE_DIGEST.test(versionMetadata.supplyChainEvidenceDigest)
+    || !versionMetadata.validatedAdapterVersion
+    || !versionMetadata.adapterCompatibility
+    || !isAdapterVersionAttested(
+      installation.adapterVersion,
+      versionMetadata.validatedAdapterVersion,
+      versionMetadata.adapterCompatibility,
+    )
     || !provider || provider.agent !== profile.agent || provider.state !== "ACTIVE"
     || provider.protocol !== expectedProtocol || !SAFE_ID.test(provider.credentialVersionId)
     || profile.credentialVersionId !== provider.credentialVersionId
@@ -77,6 +93,13 @@ export function resolveLocalAgentProfile(
     imageDigest: installation.imageDigest,
     exactAgentVersion: installation.version,
     adapterVersion: installation.adapterVersion,
+    agentVersionAttestation: Object.freeze({
+      validationReceiptId: versionMetadata.validationReceiptId,
+      validationReceiptDigest: versionMetadata.validationReceiptDigest,
+      supplyChainEvidenceDigest: versionMetadata.supplyChainEvidenceDigest,
+      validatedAdapterVersion: versionMetadata.validatedAdapterVersion,
+      adapterCompatibility: Object.freeze({ ...versionMetadata.adapterCompatibility }),
+    }),
     providerRevisionId: provider.id,
     providerProtocol: provider.protocol,
     credentialVersionId: provider.credentialVersionId,

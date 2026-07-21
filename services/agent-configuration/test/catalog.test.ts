@@ -11,6 +11,8 @@ test("Agent catalog resolves project, tenant and platform defaults in strict pre
   assert.equal(platform.profileSource, "platform");
   assert.equal(platform.agent, "claude-code");
   assert.equal(platform.providerProtocol, "anthropic-messages");
+  assert.equal(platform.agentVersionAttestation?.validatedAdapterVersion, "1.3.0");
+  assert.deepEqual(platform.agentVersionAttestation?.adapterCompatibility, { min: "1.3.0", maxExclusive: "1.3.1" });
 
   const tenantPayload = catalog();
   tenantPayload.profiles.push(profile("profile-tenant-r1", "tenant", tenantId));
@@ -149,6 +151,31 @@ test("Agent catalog keeps an attested deprecated version serving through its exi
   );
 });
 
+test("Agent catalog rejects missing, drifted or unregistered Adapter attestations before locking a Run", () => {
+  const missing = catalog();
+  delete (missing.versions[0] as Record<string, unknown>).adapterCompatibility;
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 21, payload: missing, tenantId, projectId }),
+    /Adapter compatibility/,
+  );
+
+  const drifted = catalog();
+  drifted.versions[0]!.adapterCompatibility.maxExclusive = "1.3.2";
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 22, payload: drifted, tenantId, projectId }),
+    /does not attest/,
+  );
+
+  const unregistered = catalog();
+  unregistered.installations[0]!.adapterVersion = "9.9.9";
+  unregistered.versions[0]!.validatedAdapterVersion = "9.9.9";
+  unregistered.versions[0]!.adapterCompatibility = { min: "9.9.9", maxExclusive: "9.9.10" };
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 23, payload: unregistered, tenantId, projectId }),
+    /not approved by the immutable registry/,
+  );
+});
+
 test("Agent catalog rejects unprobed authentication, pricing and governance drift", () => {
   const authentication = catalog();
   authentication.providers[0]!.authentication = "bearer";
@@ -178,8 +205,11 @@ function catalog() {
       scan: "PASS",
       sourceDigest: "1".repeat(64),
       catalogReceiptDigest: "2".repeat(64),
+      validationReceiptId: "validation-claude-code-2.1.14",
       validationReceiptDigest: "3".repeat(64),
       supplyChainEvidenceDigest: "4".repeat(64),
+      validatedAdapterVersion: "1.3.0",
+      adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.1" },
     }],
     installations: [{
       id: "installation-claude-r1",
@@ -188,7 +218,7 @@ function catalog() {
       workerPool: "development-linux-primary",
       imageDigest: `sha256:${"5".repeat(64)}`,
       workerImageId: "worker-image-claude-r1",
-      adapterVersion: "1.0.0",
+      adapterVersion: "1.3.0",
       buildReceiptId: "build-receipt-claude-r1",
       buildReceiptDigest: "6".repeat(64),
       state: "ACTIVE",

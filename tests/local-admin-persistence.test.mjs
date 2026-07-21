@@ -114,9 +114,9 @@ test("local Agent administrator snapshots fail closed on corruption and plaintex
   resetDemoStore();
 });
 
-test("local Agent administrator upgrades legacy Provider/Profile and credential ownership into v3 snapshots", () => {
+test("local Agent administrator upgrades legacy Provider/Profile and credential ownership into v4 snapshots", () => {
   const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
-  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v3");
+  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v4");
   envelope.schemaVersion = "deviludo.local-admin-state.v1";
   const provider = envelope.state.providers[0];
   provider.primaryModel = provider.models.primaryModel;
@@ -164,6 +164,24 @@ test("local Agent administrator upgrades legacy Provider/Profile and credential 
   const v2Envelope = JSON.parse(serializeLocalAdminState(migrated));
   v2Envelope.schemaVersion = "deviludo.local-admin-state.v2";
   assert.equal(parseLocalAdminState(JSON.stringify(v2Envelope)).credentials[0].scope, "platform");
+});
+
+test("v3 AgentVersion snapshots require trusted Adapter revalidation without inventing proof", () => {
+  const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+  envelope.schemaVersion = "deviludo.local-admin-state.v3";
+  const metadata = envelope.state.agentVersionMetadata["claude-code@2.1.14"];
+  delete metadata.validatedAdapterVersion;
+  delete metadata.adapterCompatibility;
+
+  const migrated = parseLocalAdminState(JSON.stringify(envelope));
+  assert.equal(migrated.agentVersions["claude-code@2.1.14"], "DISCOVERED");
+  assert.equal(migrated.agentVersionMetadata["claude-code@2.1.14"].validatedAdapterVersion, null);
+  assert.equal(migrated.agentVersionMetadata["claude-code@2.1.14"].adapterCompatibility, null);
+  assert.equal(migrated.agentVersionMetadata["claude-code@2.1.14"].validationReceiptId, "local-validation-claude-code-2.1.14");
+
+  const incomplete = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+  incomplete.state.agentVersionMetadata["codex-cli@0.91.0"].validationReceiptDigest = null;
+  assert.equal(parseLocalAdminState(JSON.stringify(incomplete)).agentVersions["codex-cli@0.91.0"], "DISCOVERED");
 });
 
 test("local Agent administrator migration makes every persisted revision immutable", async () => {

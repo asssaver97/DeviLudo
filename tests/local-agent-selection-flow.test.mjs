@@ -24,6 +24,8 @@ test("new local runs lock the inherited Claude Profile while later configuration
   assert.equal(approved.run.credentialVersionId, "cred-claude-platform-v4");
   assert.equal(approved.run.exactAgentVersion, "2.1.14");
   assert.equal(approved.run.adapterVersion, "1.3.0");
+  assert.equal(approved.run.agentVersionAttestation.validatedAdapterVersion, "1.3.0");
+  assert.deepEqual(approved.run.agentVersionAttestation.adapterCompatibility, { min: "1.3.0", maxExclusive: "1.3.1" });
   assert.deepEqual(approved.run.modelRoles, {
     primaryModel: "claude-sonnet-4-6-20250514",
     planningModel: "claude-sonnet-4-6-20250514",
@@ -138,6 +140,40 @@ test("a locally revoked credential blocks new runs instead of reusing the active
 
   assert.equal(response.status, 409);
   assert.equal((await response.json()).error.code, "AGENT_PROFILE_NOT_READY");
+});
+
+test("a missing or incompatible local AgentVersion attestation blocks enqueue", async () => {
+  const missingStore = resetDemoStore();
+  const projectId = `unattested-agent-${crypto.randomUUID()}`;
+  missingStore.agentVersionMetadata["claude-code@2.1.14"].validatedAdapterVersion = null;
+  missingStore.agentVersionMetadata["claude-code@2.1.14"].adapterCompatibility = null;
+  const missing = await approveSpec(localRequest(
+    `/api/projects/${projectId}/spec-revisions`, "POST",
+    { action: "approve", revision: "SPEC-008" }, "unattested-agent-approval",
+  ), { params: Promise.resolve({ projectId }) });
+  assert.equal(missing.status, 409);
+  assert.equal((await missing.json()).error.code, "AGENT_PROFILE_NOT_READY");
+
+  const incompatibleStore = resetDemoStore();
+  incompatibleStore.agentVersionMetadata["claude-code@2.1.14"].validatedAdapterVersion = "1.2.9";
+  incompatibleStore.agentVersionMetadata["claude-code@2.1.14"].adapterCompatibility = {
+    min: "1.2.9", maxExclusive: "1.2.10",
+  };
+  const incompatible = await approveSpec(localRequest(
+    `/api/projects/${projectId}/spec-revisions`, "POST",
+    { action: "approve", revision: "SPEC-008" }, "incompatible-agent-approval",
+  ), { params: Promise.resolve({ projectId }) });
+  assert.equal(incompatible.status, 409);
+  assert.equal((await incompatible.json()).error.code, "AGENT_PROFILE_NOT_READY");
+
+  const malformedStore = resetDemoStore();
+  malformedStore.agentVersionMetadata["claude-code@2.1.14"].validationReceiptDigest = "sha256:truncated";
+  const malformed = await approveSpec(localRequest(
+    `/api/projects/${projectId}/spec-revisions`, "POST",
+    { action: "approve", revision: "SPEC-008" }, "malformed-agent-attestation-approval",
+  ), { params: Promise.resolve({ projectId }) });
+  assert.equal(malformed.status, 409);
+  assert.equal((await malformed.json()).error.code, "AGENT_PROFILE_NOT_READY");
 });
 
 async function approve(projectId, key) {

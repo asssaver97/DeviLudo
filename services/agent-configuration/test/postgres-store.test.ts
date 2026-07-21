@@ -96,10 +96,19 @@ test("PostgreSQL Agent configuration locks one coherent catalog/source/toolchain
   assert.deepEqual(observedLock.targetMatrix, ["linux", "windows"]);
   assert.equal(observedLock.adminCatalogRevision, "12");
   assert.equal(observedLock.repairContext, null);
+  assert.deepEqual(observedLock.agentVersionAttestation, {
+    catalogReceiptDigest: "5".repeat(64),
+    validationReceiptId: "validation-claude-code-2.1.14",
+    validationReceiptDigest: "6".repeat(64),
+    supplyChainEvidenceDigest: "7".repeat(64),
+    validatedAdapterVersion: "1.3.0",
+    adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.1" },
+  });
   const observedFallback = observedLock.fallback as Record<string, unknown>;
   assert.equal(observedFallback.profileRevisionId, "profile-fallback-r1");
   assert.equal(observedFallback.providerRevisionId, "provider-claude-fallback-r1");
   assert.equal(observedFallback.inferenceAuthorizationExpiresAt, "2030-01-01T02:02:03.000Z");
+  assert.deepEqual(observedFallback.agentVersionAttestation, observedLock.agentVersionAttestation);
   assert.ok(sql.some((statement) => statement.includes("FOR SHARE OF spec, plan, binding, toolchain, baseline, catalog")));
   assert.ok(sql.some((statement) => statement.includes("ON CONFLICT (tenant_id, idempotency_key) DO NOTHING")));
   assert.equal(sql.filter((statement) => statement.includes("INSERT INTO deviludo.inference_provider_revisions")).length, 2);
@@ -240,6 +249,18 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
   const store = new PostgresAgentConfigurationStore(pool(client), () => new Date("2030-01-01T01:02:03.000Z"));
   const original = await store.lock(claim(), baseline());
   assert.equal(original.runId, previousRunId);
+  // Simulate a digest-valid lock created before Adapter attestations became a
+  // required field. Repair replay must preserve its explicit legacy status
+  // instead of consulting moving defaults or inventing evidence.
+  const historical = structuredClone(previousLock!) as Record<string, unknown>;
+  delete historical.agentVersionAttestation;
+  const historicalFallback = historical.fallback as Record<string, unknown>;
+  delete historicalFallback.agentVersionAttestation;
+  delete historical.resolutionDigest;
+  const historicalDigest = sha256Canonical(historical);
+  previousLock = { ...historical, resolutionDigest: historicalDigest };
+  previousDigest = historicalDigest;
+  locks.set(previousRunId, { lock: previousLock, digest: previousDigest });
   const repairContext = Object.freeze({
     attempt: 1, reason: "E2E_FAILURE" as const, fromRunConfigurationId: previousRunId,
     diagnosticId: null, evidenceBundleId: evidenceId, repairPromptId: `repair:${evidence.bundleDigest}`,
@@ -255,6 +276,8 @@ test("PostgreSQL Agent configuration creates a successor repair run from the fai
   assert.equal(observedLatestLock.sourceDigest, candidateSourceDigest);
   assert.equal(observedLatestLock.sourceBaselineReceiptId, baselineId);
   assert.equal((observedLatestLock.fallback as Record<string, unknown>).profileRevisionId, "profile-fallback-r1");
+  assert.equal(observedLatestLock.agentVersionAttestation, null);
+  assert.equal((observedLatestLock.fallback as Record<string, unknown>).agentVersionAttestation, null);
   assert.equal((observedLatestLock.repairContext as Record<string, unknown>).evidenceBundleDigest, evidence.bundleDigest);
   const failed = (observedLatestLock.repairContext as { failedPlatforms: Array<Record<string, unknown>> }).failedPlatforms;
   assert.deepEqual(failed.map((item) => item.platform), ["windows"]);
@@ -300,6 +323,22 @@ test("PostgreSQL Agent configuration refuses a drifted serving projection withou
   });
   const store = new PostgresAgentConfigurationStore(pool(client), () => new Date("2030-01-01T01:02:03.000Z"));
   await assert.rejects(store.lock(claim(), baseline()), /authority conflicts/);
+  assert.equal(sql.some((statement) => statement.includes("INSERT INTO deviludo.agent_runs")), false);
+  assert.equal(sql.at(-1), "ROLLBACK");
+});
+
+test("PostgreSQL Agent configuration rejects an unattested catalog version before creating a Run", async () => {
+  const sql: string[] = [];
+  const unattested = catalog();
+  delete (unattested.versions[0] as Record<string, unknown>).validatedAdapterVersion;
+  delete (unattested.versions[0] as Record<string, unknown>).adapterCompatibility;
+  const client = clientWith(async (statement) => {
+    sql.push(statement);
+    if (statement.includes("CROSS JOIN deviludo.admin_catalog_state catalog")) return rows([authority(unattested)]);
+    return rows([]);
+  });
+  const store = new PostgresAgentConfigurationStore(pool(client), () => new Date("2030-01-01T01:02:03.000Z"));
+  await assert.rejects(store.lock(claim(), baseline()), /Adapter compatibility|exact version/);
   assert.equal(sql.some((statement) => statement.includes("INSERT INTO deviludo.agent_runs")), false);
   assert.equal(sql.at(-1), "ROLLBACK");
 });
@@ -385,13 +424,16 @@ function catalog() {
     versions: [{
       id: "claude-code@2.1.14", agent: "claude-code", version: "2.1.14", state: "APPROVED",
       signatureVerified: true, scan: "PASS", sourceDigest: "4".repeat(64),
-      catalogReceiptDigest: "5".repeat(64), validationReceiptDigest: "6".repeat(64),
+      catalogReceiptDigest: "5".repeat(64), validationReceiptId: "validation-claude-code-2.1.14",
+      validationReceiptDigest: "6".repeat(64),
       supplyChainEvidenceDigest: "7".repeat(64),
+      validatedAdapterVersion: "1.3.0",
+      adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.1" },
     }],
     installations: [{
       id: "installation-claude-r1", agent: "claude-code", agentVersionId: "claude-code@2.1.14",
       workerPool: "development-linux-primary", imageDigest: `sha256:${"8".repeat(64)}`,
-      workerImageId: "worker-image-claude-r1", adapterVersion: "1.0.0",
+      workerImageId: "worker-image-claude-r1", adapterVersion: "1.3.0",
       buildReceiptId: "build-receipt-claude-r1", buildReceiptDigest: "9".repeat(64),
       state: "ACTIVE", health: "HEALTHY", rolloutPercent: 100, selfUpdateDisabled: true,
     }],

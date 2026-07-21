@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
+import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
 import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { sha256Canonical } from "../../runner-control/src/canonical";
@@ -302,6 +303,7 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
         agentVersionId: catalog.agentVersionId,
         exactAgentVersion: catalog.exactAgentVersion,
         agentVersionSourceDigest: catalog.agentVersionSourceDigest,
+        agentVersionAttestation: catalog.agentVersionAttestation,
         adapterVersion: catalog.adapterVersion,
         workerImageId: catalog.workerImageId,
         buildReceiptId: catalog.buildReceiptId,
@@ -703,6 +705,8 @@ function cloneLockedProfile(value: Readonly<Record<string, unknown>>): ResolvedP
   if (/(^|[-_.])(latest|stable|default)(?:$|[-_.])/i.test(exactAgentVersion)) conflict();
   const workerPool = boundedText(value.workerPool, 200);
   if (!workerPool.startsWith("development-")) conflict();
+  const adapterVersion = exactVersion(value.adapterVersion);
+  const agentVersionAttestation = cloneLockedAgentVersionAttestation(value.agentVersionAttestation, agent, adapterVersion);
   return Object.freeze({
     profileRevisionId: safeId(value.profileRevisionId),
     agent,
@@ -710,12 +714,13 @@ function cloneLockedProfile(value: Readonly<Record<string, unknown>>): ResolvedP
     workerPool,
     imageDigest: match(value.imageDigest, IMAGE_DIGEST),
     workerImageId: safeId(value.workerImageId),
-    adapterVersion: exactVersion(value.adapterVersion),
+    adapterVersion,
     buildReceiptId: safeId(value.buildReceiptId),
     buildReceiptDigest: match(value.buildReceiptDigest, SHA256),
     agentVersionId: catalogId(value.agentVersionId),
     exactAgentVersion,
     agentVersionSourceDigest: match(value.agentVersionSourceDigest, SHA256),
+    agentVersionAttestation,
     providerRevisionId: safeId(value.providerRevisionId),
     providerProtocol,
     providerBaseUrl,
@@ -739,6 +744,34 @@ function cloneLockedProfile(value: Readonly<Record<string, unknown>>): ResolvedP
       maxTurns: boundedInteger(budgetValue.maxTurns, 1, 200),
       timeoutSeconds: boundedInteger(budgetValue.timeoutSeconds, 60, 14_400),
     }),
+  });
+}
+
+function cloneLockedAgentVersionAttestation(
+  value: unknown,
+  agent: "claude-code" | "codex-cli",
+  adapterVersion: string,
+): ResolvedProfileConfiguration["agentVersionAttestation"] {
+  // A digest-verified historical lock may predate this field. It remains
+  // explicit null only for repair replay; fresh catalog resolution never uses
+  // this compatibility branch.
+  if (value === undefined || value === null) return null;
+  const attestation = record(value);
+  const compatibilityValue = record(attestation.adapterCompatibility);
+  const validatedAdapterVersion = exactVersion(attestation.validatedAdapterVersion);
+  const adapterCompatibility = Object.freeze({
+    min: exactVersion(compatibilityValue.min),
+    maxExclusive: exactVersion(compatibilityValue.maxExclusive),
+  });
+  if (!isBuiltInAdapterVersion(agent, adapterVersion)
+    || !isAdapterVersionAttested(adapterVersion, validatedAdapterVersion, adapterCompatibility)) conflict();
+  return Object.freeze({
+    catalogReceiptDigest: match(attestation.catalogReceiptDigest, SHA256),
+    validationReceiptId: safeId(attestation.validationReceiptId),
+    validationReceiptDigest: match(attestation.validationReceiptDigest, SHA256),
+    supplyChainEvidenceDigest: match(attestation.supplyChainEvidenceDigest, SHA256),
+    validatedAdapterVersion,
+    adapterCompatibility,
   });
 }
 

@@ -1,4 +1,8 @@
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
+import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "@/lib/agent/adapter-registry";
+
+const SAFE_ATTESTATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 export type LocalDeliveryStage =
   | "AWAITING_SPEC_APPROVAL"
@@ -42,6 +46,14 @@ export type LocalValidationSnapshot = {
 
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
+export type LocalAgentVersionAttestation = {
+  validationReceiptId: string;
+  validationReceiptDigest: string;
+  supplyChainEvidenceDigest: string;
+  validatedAdapterVersion: string;
+  adapterCompatibility: Readonly<{ min: string; maxExclusive: string }>;
+};
+
 export type LocalLockedAgentProfile = {
   agent: "claude-code" | "codex-cli";
   profileRevisionId: string;
@@ -50,6 +62,8 @@ export type LocalLockedAgentProfile = {
   imageDigest: `sha256:${string}`;
   exactAgentVersion: string;
   adapterVersion: string;
+  /** Null only when rendering a localhost snapshot created before this proof was locked. */
+  agentVersionAttestation: LocalAgentVersionAttestation | null;
   providerRevisionId: string;
   providerProtocol: "anthropic-messages" | "openai-responses";
   credentialVersionId: string;
@@ -138,6 +152,13 @@ const profile = {
   imageDigest: `sha256:${"a".repeat(64)}` as const,
   exactAgentVersion: "2.1.14" as const,
   adapterVersion: "1.3.0" as const,
+  agentVersionAttestation: {
+    validationReceiptId: "local-validation-claude-code-2.1.14",
+    validationReceiptDigest: `sha256:${"b".repeat(64)}`,
+    supplyChainEvidenceDigest: `sha256:${"c".repeat(64)}`,
+    validatedAdapterVersion: "1.3.0",
+    adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.1" },
+  },
   providerRevisionId: "provider-platform-claude-r1" as const,
   providerProtocol: "anthropic-messages" as const,
   credentialVersionId: "credential-platform-claude-v1" as const,
@@ -163,6 +184,8 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   const lockedProfile: LocalLockedAgentProfile = {
     ...profile,
     ...snapshot.lockedProfile,
+    // Never infer a supply-chain proof for a snapshot that predates it.
+    agentVersionAttestation: snapshot.lockedProfile?.agentVersionAttestation ?? null,
     modelRoles: { ...profile.modelRoles, ...snapshot.lockedProfile?.modelRoles },
     budget: { ...profile.budget, ...snapshot.lockedProfile?.budget },
   };
@@ -284,7 +307,15 @@ export function approveLocalSpec(
 }
 
 function cloneLockedProfile(value: LocalLockedAgentProfile): LocalLockedAgentProfile {
-  return { ...value, modelRoles: { ...value.modelRoles }, budget: { ...value.budget } };
+  return {
+    ...value,
+    agentVersionAttestation: value.agentVersionAttestation ? {
+      ...value.agentVersionAttestation,
+      adapterCompatibility: { ...value.agentVersionAttestation.adapterCompatibility },
+    } : null,
+    modelRoles: { ...value.modelRoles },
+    budget: { ...value.budget },
+  };
 }
 
 function agentLabel(agent: LocalLockedAgentProfile["agent"]): string {
@@ -340,7 +371,8 @@ export function recordLocalAgentExecution(
     throw new Error("当前交付阶段不能接收 Agent 运行回执");
   }
   const locked = current.lockedProfile;
-  if (receipt.tenantId !== "tenant-local"
+  if (!isLocalAgentProfileAttested(locked)
+    || receipt.tenantId !== "tenant-local"
     || receipt.projectId !== current.projectId
     || receipt.runId !== current.runId
     || receipt.specRevisionId !== current.specRevisionId
@@ -377,6 +409,20 @@ export function recordLocalAgentExecution(
     "AGENT_CANDIDATE_RECORDED",
     `${receipt.agent} 已完成；SCM 代理冻结候选提交 ${receipt.candidate.commitSha.slice(0, 7)}，等待 E2E。`,
   );
+}
+
+export function isLocalAgentProfileAttested(locked: LocalLockedAgentProfile): boolean {
+  const attestation = locked.agentVersionAttestation;
+  return !!attestation
+    && SAFE_ATTESTATION_ID.test(attestation.validationReceiptId)
+    && SHA256_DIGEST.test(attestation.validationReceiptDigest)
+    && SHA256_DIGEST.test(attestation.supplyChainEvidenceDigest)
+    && isBuiltInAdapterVersion(locked.agent, locked.adapterVersion)
+    && isAdapterVersionAttested(
+      locked.adapterVersion,
+      attestation.validatedAdapterVersion,
+      attestation.adapterCompatibility,
+    );
 }
 
 function sameModelRoles(

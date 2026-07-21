@@ -248,21 +248,6 @@ try {
     || agentSidecarKey.equals(specSidecarKey)) {
     throw new Error("local sidecars unexpectedly share an authentication key");
   }
-  const [claudeSelection, codexSelection] = await Promise.all([
-    request(baseUrl, `/api/projects/${smokeReleaseProject}/agent-settings`, {
-      method: "PUT",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-select-claude" },
-      body: JSON.stringify({ profileRevisionId: "profile-claude-platform-r5" }),
-    }),
-    request(baseUrl, `/api/projects/${smokeCodexProject}/agent-settings`, {
-      method: "PUT",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-select-codex" },
-      body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
-    }),
-  ]);
-  if (!claudeSelection.response.ok || !codexSelection.response.ok) {
-    throw new Error("local project Agent selection did not persist both approved Profiles");
-  }
   const preflightCommand = JSON.stringify({
     projectId: "smoke-project",
     tenantId: "tenant-local",
@@ -385,6 +370,50 @@ try {
     || !["platform", "tenant:tenant-local", "project:ember-archipelago"].every((scope) =>
       typeof adminDefaults[scope] === "string" && adminProfileIds.has(adminDefaults[scope]))) {
     throw new Error("local Agent inheritance contains a dangling default Profile");
+  }
+  const activeInstallations = (adminPayload.meta?.installations ?? [])
+    .filter((installation) => installation.state === "ACTIVE");
+  for (const installation of activeInstallations) {
+    const versionId = `${installation.agent}@${installation.version}`;
+    const version = adminPayload.meta.versions.find((candidate) => candidate.id === versionId);
+    const attested = version?.state === "APPROVED"
+      && version.validatedAdapterVersion === installation.adapterVersion
+      && version.adapterCompatibility?.min === installation.adapterVersion
+      && typeof version.adapterCompatibility?.maxExclusive === "string";
+    if (attested) continue;
+    if (version?.state !== "DISCOVERED") {
+      throw new Error(`active Agent version ${versionId} requires revalidation but is not discoverable`);
+    }
+    const revalidation = await request(baseUrl, "/api/admin/agent-versions/approve", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `smoke-revalidate-${versionId}-${smokeNonce}`,
+        "x-deviludo-role": "PlatformAgentAdmin",
+      },
+      body: JSON.stringify({ id: versionId }),
+    });
+    const revalidationPayload = await revalidation.response.json();
+    if (revalidation.response.status !== 201
+      || revalidationPayload.data?.state !== "APPROVED"
+      || !/^sha256:[a-f0-9]{64}$/.test(String(revalidationPayload.data?.validationReceiptDigest))) {
+      throw new Error(`active Agent version ${versionId} did not complete trusted Adapter revalidation`);
+    }
+  }
+  const [claudeSelection, codexSelection] = await Promise.all([
+    request(baseUrl, `/api/projects/${smokeReleaseProject}/agent-settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-select-claude-${smokeNonce}` },
+      body: JSON.stringify({ profileRevisionId: "profile-claude-platform-r5" }),
+    }),
+    request(baseUrl, `/api/projects/${smokeCodexProject}/agent-settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-select-codex-${smokeNonce}` },
+      body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
+    }),
+  ]);
+  if (!claudeSelection.response.ok || !codexSelection.response.ok) {
+    throw new Error("local project Agent selection did not persist both approved Profiles");
   }
   const tenantAgentPayload = await tenantAgentState.response.json();
   if (!tenantAgentState.response.ok || !Array.isArray(tenantAgentPayload.data)

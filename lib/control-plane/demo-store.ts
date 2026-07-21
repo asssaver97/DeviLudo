@@ -3,7 +3,7 @@
  * Production implementations persist the same immutable revisions in Postgres
  * (see infra/postgres/001_core.sql) and use Temporal for durable execution.
  */
-import { builtInAdapterVersion, exactAdapterCompatibility } from "../agent/adapter-registry";
+import { builtInAdapterVersion, exactAdapterCompatibility, isAdapterVersionAttested } from "../agent/adapter-registry";
 
 export type DemoAuditEvent = {
   id: string;
@@ -408,6 +408,7 @@ export function migrateDemoStoreState(snapshot: unknown): DemoStoreState {
   backfillProviderProfileShapes(migrated);
   backfillLocalFixtureTenantScope(migrated);
   backfillVersionMetadata(migrated);
+  requireLegacyVersionRevalidation(migrated);
   backfillCredentialTimestamps(migrated);
   return migrated;
 }
@@ -496,6 +497,36 @@ function backfillVersionMetadata(store: DemoStoreState): void {
     const version = id.slice(separator + 1);
     if ((agent === "claude-code" || agent === "codex-cli") && version) {
       store.agentVersionMetadata[id] = fixtureVersionMetadata(agent, version, state === "APPROVED", new Date().toISOString());
+    }
+  }
+}
+
+/**
+ * v3 snapshots predate the immutable AgentVersion-to-Adapter proof. Never
+ * synthesize that proof from the current registry: make the absence explicit
+ * and return the version to discovery so an administrator must run the
+ * trusted approval pipeline again before a new run can be locked.
+ */
+function requireLegacyVersionRevalidation(store: DemoStoreState): void {
+  for (const [id, metadata] of Object.entries(store.agentVersionMetadata)) {
+    if (metadata.validatedAdapterVersion === undefined) metadata.validatedAdapterVersion = null;
+    if (metadata.adapterCompatibility === undefined) metadata.adapterCompatibility = null;
+    const agent = id.startsWith("claude-code@") ? "claude-code"
+      : id.startsWith("codex-cli@") ? "codex-cli" : null;
+    const complete = agent !== null
+      && typeof metadata.validationReceiptId === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(metadata.validationReceiptId)
+      && /^sha256:[a-f0-9]{64}$/.test(metadata.validationReceiptDigest ?? "")
+      && /^sha256:[a-f0-9]{64}$/.test(metadata.supplyChainEvidenceDigest ?? "")
+      && typeof metadata.validatedAdapterVersion === "string"
+      && metadata.adapterCompatibility !== null
+      && isAdapterVersionAttested(
+        builtInAdapterVersion(agent),
+        metadata.validatedAdapterVersion,
+        metadata.adapterCompatibility,
+      );
+    if (!complete && ["APPROVED", "DEPRECATED"].includes(store.agentVersions[id])) {
+      store.agentVersions[id] = "DISCOVERED";
     }
   }
 }
