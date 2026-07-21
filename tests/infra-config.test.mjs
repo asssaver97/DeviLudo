@@ -15,6 +15,24 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+  assert.match(compose, /127\.0\.0\.1:\$\{DEVILUDO_POSTGRES_PORT:-5432\}:5432/);
+  assert.match(compose, /127\.0\.0\.1:\$\{DEVILUDO_REDIS_PORT:-6379\}:6379/);
+  assert.match(compose, /127\.0\.0\.1:13133:13133/);
+  assert.doesNotMatch(compose, /(?:^|["'])0\.0\.0\.0:(?:5432|6379|13133):/m);
+
+  const environment = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+  assert.match(environment, /DEVILUDO_POSTGRES_PASSWORD=deviludo-local-only/);
+  assert.match(environment, /DATABASE_URL=postgresql:\/\/deviludo:deviludo-local-only@127\.0\.0\.1:5432\/deviludo/);
+  assert.match(environment, /DEVILUDO_REDIS_PASSWORD=deviludo-local-only/);
+  assert.match(environment, /REDIS_URL=redis:\/\/:deviludo-local-only@127\.0\.0\.1:6379/);
+
+  const collector = readFileSync(new URL("../infra/otel/collector.yaml", import.meta.url), "utf8");
+  assert.match(collector, /health_check:\n\s+endpoint: 0\.0\.0\.0:13133/);
+  assert.match(collector, /extensions: \[health_check\]/);
+
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(packageJson.scripts["infra:status"], "node scripts/local/integration-status.mjs");
+  assert.match(packageJson.scripts["infra:up"], /--env-file \.env[\s\S]*--wait/);
 });
 
 test("project Steam release configuration is one-time, tenant-isolated and secret-UI-only", () => {

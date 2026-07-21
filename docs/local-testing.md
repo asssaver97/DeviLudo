@@ -101,6 +101,24 @@ Godot 侧车、Agent 探针和规格侧车端口默认分别是 `4311`、`4312`�
 
 `npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。
 
+## 本地生产依赖
+
+需要启动 PostgreSQL RLS、Temporal、Redis、MinIO、Vault 和 OpenTelemetry
+来联调生产服务时，先把 `.env.example` 复制为被 Git 忽略的 `.env`，替换
+其中所有 `deviludo-local-only` 值，然后执行：
+
+```bash
+npm run infra:up
+npm run infra:status
+```
+
+Compose 只把依赖端口绑定到 `127.0.0.1`。`infra:status` 不只检查端口：
+它会使用 `DATABASE_URL` 验证 PostgreSQL 已应用到 migration `059`，使用
+`REDIS_URL` 完成认证 PING，并检查 Temporal、MinIO、Vault 与 OTel Collector
+的就绪端点。任何依赖缺失、密码不一致或数据库仍是旧 schema 都会返回
+非零退出码。该集成栈与上面的无凭据测试站互相独立；测试页面仍使用
+`npm run local:dev`。
+
 ## 常见问题
 
 - `is already in use`：停止占用对应端口的旧进程，或为启动和检查命令选择相同的新端口。

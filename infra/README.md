@@ -1,8 +1,21 @@
 # DeviLudo infrastructure reference
 
 `docker-compose.yml` is a local integration environment, not a production
-deployment. Set the four `DEVILUDO_*` secrets in a private `.env`, then start it
-with `docker compose -f infra/docker-compose.yml up`.
+deployment. Copy `.env.example` to a private `.env`, replace its disposable
+localhost passwords, then start and verify the stack from the repository root:
+
+```bash
+npm run infra:up
+npm run infra:status
+```
+
+PostgreSQL, Redis, Temporal, MinIO, Vault and the OpenTelemetry health endpoint
+are exposed only on `127.0.0.1`. Host-started DeviLudo services therefore use
+the same loopback `DATABASE_URL`, authenticated `REDIS_URL`, `TEMPORAL_ADDRESS`,
+`S3_ENDPOINT`, `VAULT_ADDR` and telemetry values as the Compose stack. The
+status command authenticates to PostgreSQL and Redis, proves migration `059` is
+present, and checks every other dependency without printing credentials. Stop
+the containers with `npm run infra:down`.
 
 Production replaces each container with an HA managed service: PostgreSQL with
 PITR and separate owner/migration/application roles, a three-node Temporal

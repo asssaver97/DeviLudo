@@ -75,6 +75,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    ports: ["127.0.0.1:${DEVILUDO_POSTGRES_PORT:-5432}:5432"]
     networks: [control]
 
   temporal:
@@ -112,6 +113,7 @@ services:
       retries: 20
     environment:
       DEVILUDO_REDIS_PASSWORD: ${DEVILUDO_REDIS_PASSWORD:?set DEVILUDO_REDIS_PASSWORD}
+    ports: ["127.0.0.1:${DEVILUDO_REDIS_PORT:-6379}:6379"]
     networks: [control]
 
   minio:
@@ -145,6 +147,7 @@ services:
     ports:
       - "127.0.0.1:4317:4317"
       - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
     networks: [control]
 
 networks:
