@@ -12,6 +12,20 @@ export type DemoAuditEvent = {
   metadata: Record<string, string | number | boolean>;
 };
 
+export type DemoUsageRecord = {
+  requestId: string;
+  tenantId: string;
+  projectId: string;
+  runId: string;
+  providerRevisionId: string;
+  credentialVersionId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  recordedAt: string;
+};
+
 export type DemoCredential = {
   id: string;
   label: string;
@@ -101,10 +115,13 @@ export type DemoStoreState = {
   credentials: DemoCredential[];
   defaults: Record<string, string>;
   audit: DemoAuditEvent[];
+  usage: DemoUsageRecord[];
   idempotency: Record<string, unknown>;
 };
 
-const initialState = (): DemoStoreState => ({
+const initialState = (): DemoStoreState => {
+  const now = Date.now();
+  return ({
   specRevision: 8,
   specState: "APPROVED",
   feedback: [
@@ -259,8 +276,37 @@ const initialState = (): DemoStoreState => ({
     "project:ember-archipelago": "profile-codex-project-r1",
   },
   audit: [],
+  usage: [
+    {
+      requestId: "44444444-4444-4444-8444-444444444441",
+      tenantId: "11111111-1111-4111-8111-111111111111",
+      projectId: "22222222-2222-4222-8222-222222222222",
+      runId: "33333333-3333-4333-8333-333333333331",
+      providerRevisionId: "provider-claude-platform-r3",
+      credentialVersionId: "cred-claude-platform-v4",
+      model: "claude-sonnet-4-6-20250514",
+      inputTokens: 18420,
+      outputTokens: 6320,
+      costUsd: 0.1491,
+      recordedAt: new Date(now - 8 * 60_000).toISOString(),
+    },
+    {
+      requestId: "44444444-4444-4444-8444-444444444442",
+      tenantId: "11111111-1111-4111-8111-111111111111",
+      projectId: "22222222-2222-4222-8222-222222222222",
+      runId: "33333333-3333-4333-8333-333333333332",
+      providerRevisionId: "provider-codex-tenant-r2",
+      credentialVersionId: "cred-codex-tenant-v2",
+      model: "gpt-5.4-2026-06-18",
+      inputTokens: 9200,
+      outputTokens: 2840,
+      costUsd: 0.0714,
+      recordedAt: new Date(now - 41 * 60_000).toISOString(),
+    },
+  ],
   idempotency: {},
-});
+  });
+};
 
 const globalStore = globalThis as typeof globalThis & { __deviludoDemoStore?: DemoStoreState };
 

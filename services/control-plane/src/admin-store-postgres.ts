@@ -1,12 +1,15 @@
 import type { OnApplicationShutdown } from "@nestjs/common";
 import { Pool, type PoolClient } from "pg";
 import type {
+  AgentUsageRecord,
+  AgentUsageSummary,
   AgentVersionRecord,
   AuditRecord,
   CredentialVersionRecord,
   InstallationRecord,
   ProfileRevisionRecord,
   ProviderRevisionRecord,
+  RequestActor,
 } from "./contracts";
 import {
   AdminStore,
@@ -39,6 +42,27 @@ type AuditRow = {
   occurred_at: string | Date;
   metadata: unknown;
 };
+type UsageTotalsRow = {
+  requests: string | number;
+  input_tokens: string | number;
+  output_tokens: string | number;
+  cost_usd: string | number;
+};
+type UsageEventRow = {
+  request_id: string;
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  provider_revision_id: string;
+  credential_version_id: string;
+  model: string;
+  input_tokens: string | number;
+  output_tokens: string | number;
+  cost_usd: string | number;
+  recorded_at: string | Date;
+};
+
+const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 export class PostgresAdminStore extends AdminStore implements OnApplicationShutdown {
   constructor(private readonly pool: Pool) {
@@ -59,6 +83,75 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
       );
       const state = deserializeCatalog(catalog.payload, audit.rows.map(parseAudit));
       const result = operation(state);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* preserve original error */ }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async readUsage(actor: RequestActor): Promise<AgentUsageSummary> {
+    const client = await this.pool.connect();
+    const windowStartedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const parameters: unknown[] = [windowStartedAt];
+      const predicates = ["recorded_at >= $1::timestamptz"];
+      if (actor.tenantId) {
+        if (!UUID_PATTERN.test(actor.tenantId)) throw new Error("Administrator usage tenant scope is invalid");
+        await client.query("SELECT set_config('app.tenant_id', $1, true)", [actor.tenantId]);
+        parameters.push(actor.tenantId);
+        predicates.push(`tenant_id = $${parameters.length}::uuid`);
+      } else {
+        // A platform-wide administrator needs a global projection. A database
+        // role without BYPASSRLS fails closed here and health reports telemetry
+        // as unavailable instead of returning a partial aggregate.
+        await client.query("SET LOCAL row_security = off");
+      }
+      if (actor.projectId) {
+        if (!UUID_PATTERN.test(actor.projectId) || !actor.tenantId) {
+          throw new Error("Administrator usage project scope is invalid");
+        }
+        parameters.push(actor.projectId);
+        predicates.push(`project_id = $${parameters.length}::uuid`);
+      }
+      const where = predicates.join(" AND ");
+      const totals = await client.query<UsageTotalsRow>(
+        `SELECT count(*)::text AS requests,
+                COALESCE(sum(input_tokens), 0)::text AS input_tokens,
+                COALESCE(sum(output_tokens), 0)::text AS output_tokens,
+                COALESCE(sum(cost_usd), 0)::text AS cost_usd
+           FROM deviludo.inference_usage_events
+          WHERE ${where}`,
+        parameters,
+      );
+      const records = await client.query<UsageEventRow>(
+        `SELECT request_id::text, tenant_id::text, project_id::text, run_id::text,
+                provider_revision_id, credential_version_id, model,
+                input_tokens::text, output_tokens::text, cost_usd::text, recorded_at
+           FROM deviludo.inference_usage_events
+          WHERE ${where}
+          ORDER BY recorded_at DESC, request_id DESC
+          LIMIT 50`,
+        parameters,
+      );
+      const total = totals.rows[0];
+      if (!total) throw new Error("Administrator usage aggregate is unavailable");
+      const result: AgentUsageSummary = Object.freeze({
+        available: true,
+        source: "inference_usage_events",
+        windowStartedAt,
+        totals: Object.freeze({
+          requests: usageInteger(total.requests),
+          inputTokens: usageInteger(total.input_tokens),
+          outputTokens: usageInteger(total.output_tokens),
+          costUsd: usageCost(total.cost_usd),
+        }),
+        records: Object.freeze(records.rows.map(parseUsageRecord)),
+      });
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -288,4 +381,38 @@ function parseAudit(row: AuditRow): AuditRecord {
     at,
     metadata: Object.freeze(structuredClone(row.metadata) as Record<string, unknown>),
   });
+}
+
+function parseUsageRecord(row: UsageEventRow): AgentUsageRecord {
+  const recordedAt = new Date(row.recorded_at).toISOString();
+  if (![row.request_id, row.tenant_id, row.project_id, row.run_id].every((value) => UUID_PATTERN.test(value))
+    || !row.provider_revision_id || !row.credential_version_id || !row.model
+    || !Number.isFinite(Date.parse(recordedAt))) {
+    throw new Error("Administrator usage record is invalid");
+  }
+  return Object.freeze({
+    requestId: row.request_id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    runId: row.run_id,
+    providerRevisionId: row.provider_revision_id,
+    credentialVersionId: row.credential_version_id,
+    model: row.model,
+    inputTokens: usageInteger(row.input_tokens),
+    outputTokens: usageInteger(row.output_tokens),
+    costUsd: usageCost(row.cost_usd),
+    recordedAt,
+  });
+}
+
+function usageInteger(value: string | number): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Administrator usage token total is invalid");
+  return parsed;
+}
+
+function usageCost(value: string | number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error("Administrator usage cost total is invalid");
+  return parsed;
 }

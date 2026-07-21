@@ -51,6 +51,16 @@ than relying on catalog insertion order.
 
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
 
+## Operational health and usage
+
+`GET /admin/agent-health` is authenticated with the same route-bound administrator assertion as the rest of the catalog. It combines the supply-chain probe and immutable catalog with three read-only operational projections:
+
+- the last 24 hours of append-only `inference_usage_events`, including the exact run, Provider revision, credential version, model, token counts, and priced cost;
+- configuration changes extracted from visible append-only audit records as explicit `before → after` fields;
+- actionable alerts derived from failed or quarantined Installations, unhealthy active images, failed Provider probes, broken active Profile bindings, and unavailable usage telemetry.
+
+Tenant and project administrators read usage only after the control plane sets the PostgreSQL tenant RLS context and adds the exact project predicate when present. Platform-wide roles require a database identity with `BYPASSRLS`; if that proof is unavailable, the endpoint reports `usage.available=false` and raises `INFERENCE_USAGE_TELEMETRY_UNAVAILABLE` instead of returning a partial or estimated total. The local-only website exposes the same response shape with explicitly local immutable fixtures.
+
 ## Tenant and project configuration
 
 The platform administrator console is not reused as browser authorization for lower scopes. Two dedicated Web boundaries exchange the invited GitHub browser session for a freshly signed control-plane assertion:

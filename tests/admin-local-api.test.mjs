@@ -43,6 +43,33 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
   assert.equal(getDemoStore().audit.some((entry) => entry.action === "AGENT_VERSION_BLOCKED"), true);
 });
 
+test("local Agent health exposes usage, configuration differences and derived alerts with the production shape", async () => {
+  resetDemoStore();
+  const changed = await PUT(
+    request("agent-defaults/platform", "PUT", "PlatformAgentAdmin", { profileRevisionId: "profile-codex-platform-r2" }),
+    context("agent-defaults/platform"),
+  );
+  assert.equal(changed.status, 200);
+  const response = await GET(new Request("http://127.0.0.1:3000/api/admin/agent-health"), context("agent-health"));
+  assert.equal(response.status, 200);
+  const { data } = await response.json();
+  assert.equal(data.status, "HEALTHY");
+  assert.equal(data.supplyChain.status, "READY");
+  assert.deepEqual(data.isolation, {
+    developmentWorkers: true, e2eRunnersContainAgent: false, steamPublishersContainAgent: false,
+  });
+  assert.equal(data.usage.available, true);
+  assert.equal(data.usage.totals.requests, 2);
+  assert.equal(data.usage.records.every((record) => record.credentialVersionId && record.runId), true);
+  const diff = data.configurationDiffs.find((item) => item.action === "AGENT_DEFAULT_UPDATED");
+  assert.deepEqual(diff.changes, [{
+    field: "profileRevisionId",
+    before: "profile-claude-platform-r5",
+    after: "profile-codex-platform-r2",
+  }]);
+  assert.deepEqual(data.alerts, []);
+});
+
 test("local Agent discovery selects Claude Code and Codex CLI explicitly without activating candidates", async () => {
   resetDemoStore();
   const codex = await POST(

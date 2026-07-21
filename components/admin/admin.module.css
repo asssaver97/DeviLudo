@@ -1793,6 +1793,15 @@
   box-shadow: 0 0 0 5px rgba(78, 148, 107, .12);
 }
 
+.pulseRingWarning {
+  border-color: #d3ad74;
+}
+
+.pulseRingWarning i {
+  background: #c17e2f;
+  box-shadow: 0 0 0 5px rgba(193, 126, 47, .13);
+}
+
 .healthBanner dl {
   display: flex;
   margin: 0;

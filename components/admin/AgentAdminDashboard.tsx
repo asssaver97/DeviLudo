@@ -65,6 +65,44 @@ type AdminState = {
   credentials: Array<{ id: string; label: string; maskedFingerprint: string; version: number | null; state: string; createdAt: string | null }>;
   defaults: Record<string, string>;
 };
+type AgentHealth = {
+  status: "HEALTHY" | "DEGRADED";
+  usage: {
+    available: boolean;
+    source: "inference_usage_events";
+    windowStartedAt: string;
+    totals: { requests: number; inputTokens: number; outputTokens: number; costUsd: number };
+    records: Array<{
+      requestId: string;
+      tenantId: string;
+      projectId: string;
+      runId: string;
+      providerRevisionId: string;
+      credentialVersionId: string;
+      model: string;
+      inputTokens: number;
+      outputTokens: number;
+      costUsd: number;
+      recordedAt: string;
+    }>;
+  };
+  configurationDiffs: Array<{
+    id: string;
+    action: string;
+    resource: string;
+    actorId: string;
+    at: string;
+    changes: Array<{ field: string; before: unknown; after: unknown }>;
+  }>;
+  alerts: Array<{
+    id: string;
+    severity: "WARNING" | "CRITICAL";
+    code: string;
+    resource: string;
+    message: string;
+  }>;
+  checkedAt: string;
+};
 
 async function adminRequest<T>(
   path: string,
@@ -164,6 +202,7 @@ export default function AgentAdminDashboard() {
   const [auditFilter, setAuditFilter] = useState("全部事件");
   const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
   const [localHealth, setLocalHealth] = useState<LocalHealth | null>(null);
+  const [agentHealth, setAgentHealth] = useState<AgentHealth | null>(null);
   const [newProviderRequest, setNewProviderRequest] = useState("");
   const [providerEditorKey, setProviderEditorKey] = useState("provider-editor");
 
@@ -199,9 +238,10 @@ export default function AgentAdminDashboard() {
 
   const refreshAudit = useCallback(async () => {
     const response = await fetch("/api/admin/audit", { cache: "no-store" });
-    const payload = await response.json() as { data?: Array<{ id: string; action: string; resource: string; actor?: string; actorId?: string; actorRole?: string; at: string; metadata: Record<string, unknown> }> };
-    if (!response.ok || !payload.data) return;
-    const live = payload.data.map<AuditEvent>((entry) => ({
+    const payload = await response.json() as { data?: unknown } | unknown[];
+    const records = Array.isArray(payload) ? payload : payload.data;
+    if (!response.ok || !Array.isArray(records)) return;
+    const live = records.map((value) => value as { id: string; action: string; resource: string; actor?: string; actorId?: string; actorRole?: string; at: string; metadata: Record<string, unknown> }).map<AuditEvent>((entry) => ({
       id: entry.id,
       at: new Date(entry.at).toLocaleTimeString("zh-CN", { hour12: false }),
       actor: entry.actor ?? entry.actorId ?? "trusted/session",
@@ -212,6 +252,18 @@ export default function AgentAdminDashboard() {
       tone: /BLOCK|ROLLBACK|REVOKE|FAIL/i.test(entry.action) ? "warning" : /APPROVE|ACTIVE|CREATED|UPDATED/i.test(entry.action) ? "success" : "neutral",
     }));
     setAuditRecords(live);
+  }, []);
+
+  const refreshAgentHealth = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await fetch("/api/admin/agent-health", { cache: "no-store", signal });
+      const payload = await response.json() as { data?: unknown } | AgentHealth;
+      if (!response.ok) return;
+      const value = "data" in payload && payload.data ? payload.data : payload;
+      setAgentHealth(normalizeAgentHealth(value));
+    } catch {
+      // The last authoritative projection remains visible during a transient poll failure.
+    }
   }, []);
 
   const refreshLocalHealth = useCallback(async (signal?: AbortSignal) => {
@@ -226,14 +278,20 @@ export default function AgentAdminDashboard() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const initial = window.setTimeout(() => void refreshLocalHealth(controller.signal), 0);
-    const timer = window.setInterval(() => void refreshLocalHealth(controller.signal), 4_000);
+    const initial = window.setTimeout(() => {
+      void refreshLocalHealth(controller.signal);
+      void refreshAgentHealth(controller.signal);
+    }, 0);
+    const timer = window.setInterval(() => {
+      void refreshLocalHealth(controller.signal);
+      void refreshAgentHealth(controller.signal);
+    }, 4_000);
     return () => {
       controller.abort();
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [refreshLocalHealth]);
+  }, [refreshAgentHealth, refreshLocalHealth]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => {
@@ -497,7 +555,7 @@ export default function AgentAdminDashboard() {
             newDraftRequest={newProviderRequest} onNewDraftConsumed={consumeNewProviderRequest} />}
           {activeTab === "inheritance" && <InheritanceTab defaults={defaults} installations={installations}
             profiles={profiles} providers={providers} notify={notify} />}
-          {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
+          {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} agentHealth={agentHealth} setFilter={setAuditFilter} />}
         </div>
       </main>
 
@@ -1082,6 +1140,81 @@ function InheritanceTab({ defaults, installations, profiles, providers, notify }
   );
 }
 
+function normalizeAgentHealth(value: unknown): AgentHealth {
+  const root = object(value);
+  const usage = object(root?.usage);
+  const totals = object(usage?.totals);
+  if (!root || (root.status !== "HEALTHY" && root.status !== "DEGRADED") || !usage || !totals) {
+    throw new Error("Agent 健康投影响应无效");
+  }
+  const usageRecords = records(usage.records).map((record) => ({
+    requestId: requiredText(record.requestId, "usage request"),
+    tenantId: requiredText(record.tenantId, "usage tenant"),
+    projectId: requiredText(record.projectId, "usage project"),
+    runId: requiredText(record.runId, "usage run"),
+    providerRevisionId: requiredText(record.providerRevisionId, "usage provider"),
+    credentialVersionId: requiredText(record.credentialVersionId, "usage credential"),
+    model: requiredText(record.model, "usage model"),
+    inputTokens: requiredNumber(record.inputTokens, "usage input tokens"),
+    outputTokens: requiredNumber(record.outputTokens, "usage output tokens"),
+    costUsd: requiredNumber(record.costUsd, "usage cost"),
+    recordedAt: requiredText(record.recordedAt, "usage timestamp"),
+  }));
+  const diffs = records(root.configurationDiffs).map((record) => ({
+    id: requiredText(record.id, "configuration diff"),
+    action: requiredText(record.action, "configuration action"),
+    resource: requiredText(record.resource, "configuration resource"),
+    actorId: requiredText(record.actorId, "configuration actor"),
+    at: requiredText(record.at, "configuration timestamp"),
+    changes: records(record.changes).map((change) => ({
+      field: requiredText(change.field, "configuration field"),
+      before: change.before,
+      after: change.after,
+    })),
+  }));
+  const alerts = records(root.alerts).map((record) => {
+    if (record.severity !== "WARNING" && record.severity !== "CRITICAL") throw new Error("Agent 告警级别无效");
+    const severity: "WARNING" | "CRITICAL" = record.severity;
+    return {
+      id: requiredText(record.id, "alert"),
+      severity,
+      code: requiredText(record.code, "alert code"),
+      resource: requiredText(record.resource, "alert resource"),
+      message: requiredText(record.message, "alert message"),
+    };
+  });
+  return {
+    status: root.status,
+    usage: {
+      available: usage.available === true,
+      source: "inference_usage_events",
+      windowStartedAt: requiredText(usage.windowStartedAt, "usage window"),
+      totals: {
+        requests: requiredNumber(totals.requests, "usage requests"),
+        inputTokens: requiredNumber(totals.inputTokens, "usage input total"),
+        outputTokens: requiredNumber(totals.outputTokens, "usage output total"),
+        costUsd: requiredNumber(totals.costUsd, "usage cost total"),
+      },
+      records: usageRecords,
+    },
+    configurationDiffs: diffs,
+    alerts,
+    checkedAt: requiredText(root.checkedAt, "health timestamp"),
+  };
+}
+
+function requiredText(value: unknown, label: string): string {
+  const parsed = text(value);
+  if (!parsed) throw new Error(`${label} 响应无效`);
+  return parsed;
+}
+
+function requiredNumber(value: unknown, label: string): number {
+  const parsed = number(value);
+  if (parsed === null || parsed < 0) throw new Error(`${label} 响应无效`);
+  return parsed;
+}
+
 function normalizeAdminState(payload: Record<string, unknown>): AdminState {
   const local = object(payload.meta);
   if (local) {
@@ -1279,16 +1412,57 @@ function credentialMatchesAgent(label: string, agent: AgentKind): boolean {
 }
 function providerHost(value: string): string { try { return new URL(value).host; } catch { return "无效端点"; } }
 
-function AuditTab({ events, filter, localHealth, setFilter }: { events: AuditEvent[]; filter: string; localHealth: LocalHealth | null; setFilter: (value: string) => void }) {
+function AuditTab({ events, filter, localHealth, agentHealth, setFilter }: { events: AuditEvent[]; filter: string; localHealth: LocalHealth | null; agentHealth: AgentHealth | null; setFilter: (value: string) => void }) {
   const filtered = useMemo(() => filter === "全部事件" ? events : events.filter((event) => filter === "仅告警" ? event.tone === "warning" : event.action.includes("PROVIDER") || event.action.includes("CREDENTIAL") || event.action.includes("Provider") || event.action.includes("凭据")), [events, filter]);
   const readyAgents = localHealth?.dependencies?.localAgents?.filter((agent) => agent.state === "READY").length ?? 0;
   const workerReady = localHealth?.dependencies?.developmentWorker === "READY";
+  const usage = agentHealth?.usage;
+  const alerts = agentHealth?.alerts ?? [];
+  const diffs = agentHealth?.configurationDiffs ?? [];
+  const operationalHealthy = agentHealth?.status === "HEALTHY";
   return (
     <>
       <div className={styles.healthBanner}>
-        <div><span className={styles.pulseRing}><i /></span><div><strong>{workerReady ? "本机 Agent Worker 就绪" : "本机 Agent 执行受门禁保护"}</strong><small>数据来自当前 `/api/health`，不使用模拟在线数</small></div></div>
-        <dl><div><dt>精确 CLI</dt><dd>{readyAgents} / 2</dd></div><div><dt>Inference Gateway</dt><dd>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</dd></div><div><dt>Provider 绑定</dt><dd>{localHealth?.dependencies?.providerBindingProbe === "CONFIGURED" ? "已验证" : "未配置"}</dd></div><div><dt>开发 Worker</dt><dd>{workerReady ? "READY" : "BLOCKED"}</dd></div></dl>
+        <div><span className={`${styles.pulseRing} ${operationalHealthy ? "" : styles.pulseRingWarning}`}><i /></span><div><strong>{operationalHealthy ? "Agent 控制面健康" : agentHealth ? "Agent 控制面存在门禁告警" : "正在读取 Agent 控制面健康"}</strong><small>运营数据来自 `/api/admin/agent-health`；本机执行状态独立来自 `/api/health`</small></div></div>
+        <dl><div><dt>精确 CLI</dt><dd>{readyAgents} / 2</dd></div><div><dt>Inference Gateway</dt><dd>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</dd></div><div><dt>运营告警</dt><dd>{alerts.length}</dd></div><div><dt>开发 Worker</dt><dd>{workerReady ? "READY" : "BLOCKED"}</dd></div></dl>
       </div>
+      <div className={styles.metricRail}>
+        <div><span>24h 推理请求</span><strong>{usage?.available ? usage.totals.requests.toLocaleString("zh-CN") : "—"}</strong><small>append-only</small></div>
+        <div><span>24h 输入 / 输出</span><strong>{usage?.available ? `${compactNumber(usage.totals.inputTokens)} / ${compactNumber(usage.totals.outputTokens)}` : "—"}</strong><small>tokens</small></div>
+        <div><span>24h 计量成本</span><strong>{usage?.available ? `$${usage.totals.costUsd.toFixed(4)}` : "—"}</strong><small>USD</small></div>
+        <div><span>配置差异</span><strong>{diffs.length}</strong><small>最近 50 条</small></div>
+      </div>
+      <div className={styles.twoColumn}>
+        <section className={styles.section}>
+          <SectionHeading eyebrow="ALERTS" title="当前告警" description="由 Installation、Provider、Profile 绑定和账本可用性实时推导。" />
+          <div className={styles.tableWrap}>
+            <table className={styles.dataTable}><thead><tr><th>级别</th><th>资源</th><th>说明</th></tr></thead><tbody>
+              {alerts.map((alert) => <tr key={alert.id}><td><StatusPill tone={alert.severity === "CRITICAL" ? "danger" : "warning"}>{alert.severity}</StatusPill></td><td><code>{alert.resource}</code></td><td>{alert.message}</td></tr>)}
+            </tbody></table>
+            {alerts.length === 0 && <div className={styles.emptyState}>当前没有 Agent 运营告警</div>}
+          </div>
+        </section>
+        <section className={styles.section}>
+          <SectionHeading eyebrow="CONFIG DIFF" title="配置变更差异" description="从可见的不可变审计记录提取 before / after，不回推或覆盖历史 revision。" />
+          <div className={styles.tableWrap}>
+            <table className={styles.dataTable}><thead><tr><th>时间</th><th>资源</th><th>差异</th></tr></thead><tbody>
+              {diffs.slice(0, 8).map((diff) => <tr key={diff.id}><td>{formatHealthTime(diff.at)}</td><td><code>{diff.resource}</code></td><td>{diff.changes.map((change) => `${change.field}: ${formatDiffValue(change.before)} → ${formatDiffValue(change.after)}`).join(" · ")}</td></tr>)}
+            </tbody></table>
+            {diffs.length === 0 && <div className={styles.emptyState}>尚无带 before / after 的配置变更</div>}
+          </div>
+        </section>
+      </div>
+      <section className={styles.section}>
+        <SectionHeading eyebrow="USAGE" title="不可变推理使用记录" description="最近 24 小时、最多 50 条；每条记录绑定 tenant、project、run、Provider、模型和 credential version。" />
+        <div className={styles.tableWrap}>
+          <table className={styles.dataTable}><thead><tr><th>记录时间</th><th>Run</th><th>Provider / Model</th><th>输入</th><th>输出</th><th>成本</th></tr></thead><tbody>
+            {(usage?.records ?? []).slice(0, 12).map((record) => <tr key={record.requestId}><td>{formatHealthTime(record.recordedAt)}</td><td><code>{shortDigest(record.runId)}</code></td><td><div className={styles.tableAgent}><div><strong>{record.model}</strong><code>{record.providerRevisionId} · {record.credentialVersionId}</code></div></div></td><td>{record.inputTokens.toLocaleString("zh-CN")}</td><td>{record.outputTokens.toLocaleString("zh-CN")}</td><td>${record.costUsd.toFixed(6)}</td></tr>)}
+          </tbody></table>
+          {usage && !usage.available && <div className={styles.emptyState}>使用账本当前不可读取；不会以估算值替代</div>}
+          {usage?.available && usage.records.length === 0 && <div className={styles.emptyState}>最近 24 小时没有推理使用记录</div>}
+          {!usage && <div className={styles.emptyState}>正在读取推理使用账本</div>}
+        </div>
+      </section>
       <section className={styles.section}>
         <SectionHeading title="不可变审计记录" description="配置 revision、探针、版本治理和凭据使用均记录 actor、差异与幂等键。" action={<select className={styles.projectSelect} value={filter} onChange={(event) => setFilter(event.target.value)}><option>全部事件</option><option>仅告警</option><option>Provider / 凭据</option></select>} />
         <div className={styles.auditTimeline}>
@@ -1299,4 +1473,20 @@ function AuditTab({ events, filter, localHealth, setFilter }: { events: AuditEve
       </section>
     </>
   );
+}
+
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatHealthTime(value: string): string {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toLocaleString("zh-CN", { hour12: false }) : "无效时间";
+}
+
+function formatDiffValue(value: unknown): string {
+  if (value === null || value === undefined) return "∅";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  const serialized = JSON.stringify(value);
+  return serialized.length > 64 ? `${serialized.slice(0, 61)}…` : serialized;
 }

@@ -4,7 +4,7 @@ import type { InferenceReconciliationReceipt } from "../../inference-gateway/src
 import type { SpecModelReconciliationReceipt } from "../../spec-model-broker/src/contracts";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
-import { AdminStore, recordAdminAudit, type AdminCatalogState } from "./admin.store";
+import { AdminStore, emptyUsageSummary, recordAdminAudit, type AdminCatalogState } from "./admin.store";
 import {
   ServiceProblem,
   assertAllowedFields,
@@ -160,8 +160,11 @@ export class AdminService {
         if (record.state === "DEPRECATED") {
           throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "A deprecated version cannot be blocked in place");
         }
+        const previousState = record.state;
         record.state = "BLOCKED";
-        this.audit(state, "AGENT_VERSION_BLOCKED", record.id, actor, { automaticActivation: false });
+        this.audit(state, "AGENT_VERSION_BLOCKED", record.id, actor, {
+          previousState, state: record.state, automaticActivation: false,
+        });
         return { version: record, automaticActivation: false };
       });
     }
@@ -178,8 +181,11 @@ export class AdminService {
       if (record.state !== "DISCOVERED" && record.state !== "VALIDATING") {
         throw new ServiceProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered or validating version can be approved");
       }
+      const previousState = record.state;
       record.state = "VALIDATING";
       this.audit(state, "AGENT_VERSION_VALIDATION_STARTED", record.id, actor, {
+        previousState,
+        state: record.state,
         catalogReceiptId: record.catalogReceiptId,
         automaticActivation: false,
       });
@@ -222,6 +228,8 @@ export class AdminService {
         validatedAt: validation.validatedAt,
       });
       this.audit(state, "AGENT_VERSION_APPROVED", record.id, actor, {
+        previousState: "VALIDATING",
+        state: record.state,
         validationReceiptId: validation.validationReceiptId,
         validationReceiptDigest: validation.validationReceiptDigest,
         supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
@@ -450,6 +458,7 @@ export class AdminService {
         })
         : Object.freeze([] as string[]);
       this.audit(state, `AGENT_ROLLOUT_${action.toUpperCase()}`, installationId, actor, {
+        previousRolloutPercent: installation.previousRolloutPercent,
         rolloutPercent: installation.rolloutPercent,
         rolloutReceiptId: receipt.rolloutReceiptId,
         rolloutReceiptDigest: receipt.rolloutReceiptDigest,
@@ -536,6 +545,7 @@ export class AdminService {
         || installation.rolloutPercent !== snapshot.rolloutPercent || installation.state !== snapshot.state) {
         throw new ServiceProblem(409, "INSTALLATION_LIFECYCLE_RACE", "Installation changed before lifecycle receipt could commit");
       }
+      const previousState = installation.state;
       installation.previousRolloutPercent = installation.rolloutPercent;
       installation.rolloutPercent = receipt.toPercent;
       installation.state = receipt.state;
@@ -551,6 +561,8 @@ export class AdminService {
         installation.retiredAt = receipt.completedAt;
       }
       this.audit(state, action === "drain" ? "AGENT_INSTALLATION_DRAINING" : "AGENT_INSTALLATION_RETIRED", installationId, actor, {
+        previousState,
+        state: installation.state,
         rolloutReceiptId: receipt.rolloutReceiptId,
         rolloutReceiptDigest: receipt.rolloutReceiptDigest,
         rollbackProfileRevisionIds: rollbackProfiles,
@@ -807,8 +819,11 @@ export class AdminService {
       if (!value) throw new ServiceProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
       assertCredentialActor(value, actor);
       if (value.state !== "REVOKED") {
+        const previousState = value.state;
         value.state = "REVOKED";
-        this.audit(state, "CREDENTIAL_REVOKED", value.id, actor, { newTokensIssued: false });
+        this.audit(state, "CREDENTIAL_REVOKED", value.id, actor, {
+          previousState, state: value.state, newTokensIssued: false,
+        });
       }
       return structuredClone(value);
     }, credentialView);
@@ -920,9 +935,15 @@ export class AdminService {
         if (profile.state !== "DRAFT" && profile.state !== "DEGRADED") {
           throw new ServiceProblem(409, "INVALID_PROFILE_TRANSITION", "Only a draft or degraded Profile can be validated");
         }
+        const previousState = profile.state;
+        const previousProviderState = provider.state;
         profile.state = "VALIDATING";
         provider.state = "VALIDATING";
         this.audit(state, "AGENT_PROFILE_VALIDATION_STARTED", profile.id, actor, {
+          previousState,
+          state: profile.state,
+          previousProviderState,
+          providerState: provider.state,
           providerRevisionId: provider.id,
           priorActiveConfigurationPreserved: true,
         });
@@ -936,9 +957,15 @@ export class AdminService {
           const profile = requireProfile(state, pending.profileId);
           const provider = requireProvider(state, pending.provider.id);
           if (profile.state === "VALIDATING" && provider.state === "VALIDATING") {
+            const previousState = profile.state;
+            const previousProviderState = provider.state;
             profile.state = "DEGRADED";
             provider.state = "DEGRADED";
             this.audit(state, "AGENT_PROFILE_VALIDATION_FAILED", profile.id, actor, {
+              previousState,
+              state: profile.state,
+              previousProviderState,
+              providerState: provider.state,
               providerRevisionId: provider.id,
               priorActiveConfigurationPreserved: true,
             });
@@ -953,10 +980,15 @@ export class AdminService {
           throw new ServiceProblem(409, "PROFILE_VALIDATION_RACE", "Profile changed before validation could commit");
         }
         provider.probe = probe;
+        const previousState = profile.state;
+        const previousProviderState = provider.state;
         profile.state = "READY";
         provider.state = "READY";
         this.audit(state, "AGENT_PROFILE_VALIDATE", profile.id, actor, {
+          previousState,
           state: profile.state,
+          previousProviderState,
+          providerState: provider.state,
           providerRevisionId: provider.id,
           priorActiveConfigurationPreserved: true,
         });
@@ -967,6 +999,8 @@ export class AdminService {
       const profile = requireProfile(state, profileId);
       assertScopeRole(profile.scope, profile.scopeId, actor);
       const provider = requireProvider(state, profile.providerRevisionId);
+      const previousState = profile.state;
+      const previousProviderState = provider.state;
       if (action === "activate") {
         if (actor.role !== "SecurityAdmin") {
           throw new ServiceProblem(403, "SECURITY_APPROVAL_REQUIRED", "SecurityAdmin must activate a third-party Provider endpoint");
@@ -984,7 +1018,10 @@ export class AdminService {
         provider.state = "DISABLED";
       }
       this.audit(state, `AGENT_PROFILE_${action.toUpperCase()}`, profile.id, actor, {
+        previousState,
         state: profile.state,
+        previousProviderState,
+        providerState: provider.state,
         providerRevisionId: provider.id,
         priorActiveConfigurationPreserved: false,
       });
@@ -1006,8 +1043,13 @@ export class AdminService {
         throw new ServiceProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
       assertProfileServingReady(state, profile, actor);
+      const previousProfileRevisionId = state.defaults.get(scopeKey) ?? null;
       state.defaults.set(scopeKey, profileRevisionId);
-      this.audit(state, "AGENT_DEFAULT_UPDATED", scopeKey, actor, { profileRevisionId, runningTasksUnaffected: true });
+      this.audit(state, "AGENT_DEFAULT_UPDATED", scopeKey, actor, {
+        previousProfileRevisionId,
+        profileRevisionId,
+        runningTasksUnaffected: true,
+      });
       return {
         scope: scopeKey,
         profileRevisionId,
@@ -1017,18 +1059,29 @@ export class AdminService {
     });
   }
 
-  async health(): Promise<Readonly<Record<string, unknown>>> {
+  async health(actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
     let supplyChain: AgentSupplyChainHealth | Readonly<{ service: "deviludo-agent-supply-chain"; status: "UNAVAILABLE" }>;
     try { supplyChain = await this.supplyChain.probe(); }
     catch { supplyChain = Object.freeze({ service: "deviludo-agent-supply-chain", status: "UNAVAILABLE" }); }
+    let usage;
+    try { usage = await this.store.readUsage(actor); }
+    catch { usage = emptyUsageSummary(false); }
     return this.store.read((state) => {
       const installations = [...state.installations.values()];
+      const visibleAudit = state.audit.filter((record) => auditVisibleTo(record, actor));
+      const profiles = [...state.profiles.values()].filter((profile) => profileVisibleTo(profile, actor));
+      const visibleProviderIds = new Set(profiles.map((profile) => profile.providerRevisionId));
+      const providers = [...state.providers.values()].filter((provider) => visibleProviderIds.has(provider.id));
+      const alerts = operationalAlerts(state, supplyChain, usage.available, profiles, providers);
       return {
-        status: supplyChain.status !== "READY" || installations.some((item) => ["FAILED", "QUARANTINED"].includes(item.state)) ? "DEGRADED" : "HEALTHY",
+        status: alerts.length > 0 ? "DEGRADED" : "HEALTHY",
         installations,
-        providers: [...state.providers.values()].map(({ id, state: providerState, probe }) => ({ id, state: providerState, probe })),
+        providers: providers.map(({ id, state: providerState, probe }) => ({ id, state: providerState, probe })),
         supplyChain,
         isolation: { developmentWorkers: true, e2eRunnersContainAgent: false, steamPublishersContainAgent: false },
+        usage,
+        configurationDiffs: configurationDiffs(visibleAudit),
+        alerts,
         checkedAt: new Date().toISOString(),
       };
     });
@@ -1870,6 +1923,113 @@ function auditVisibleTo(record: AuditRecord, actor: RequestActor): boolean {
   if (record.tenantId !== actor.tenantId) return false;
   if (actor.projectId && record.projectId !== actor.projectId) return false;
   return true;
+}
+
+type OperationalAlert = Readonly<{
+  id: string;
+  severity: "WARNING" | "CRITICAL";
+  code: string;
+  resource: string;
+  message: string;
+}>;
+
+type ConfigurationDiff = Readonly<{
+  id: string;
+  action: string;
+  resource: string;
+  actorId: string;
+  at: string;
+  changes: readonly Readonly<{ field: string; before: unknown; after: unknown }>[];
+}>;
+
+function operationalAlerts(
+  state: AdminCatalogState,
+  supplyChain: Readonly<{ status: string }>,
+  usageAvailable: boolean,
+  profiles: readonly ProfileRevisionRecord[],
+  providers: readonly ProviderRevisionRecord[],
+): readonly OperationalAlert[] {
+  const alerts: OperationalAlert[] = [];
+  const add = (severity: OperationalAlert["severity"], code: string, resource: string, message: string) => {
+    alerts.push(Object.freeze({ id: `${code}:${resource}`, severity, code, resource, message }));
+  };
+  if (supplyChain.status !== "READY") {
+    add("CRITICAL", "AGENT_SUPPLY_CHAIN_UNAVAILABLE", "agent-supply-chain", "Agent 制品供应链不可用，新版本安装与灰度已停止");
+  }
+  if (!usageAvailable) {
+    add("WARNING", "INFERENCE_USAGE_TELEMETRY_UNAVAILABLE", "inference-usage", "推理使用账本当前不可读取，预算记录保持故障关闭");
+  }
+  for (const installation of state.installations.values()) {
+    if (["FAILED", "QUARANTINED"].includes(installation.state)) {
+      add("CRITICAL", "AGENT_INSTALLATION_UNSERVABLE", installation.id, `安装处于 ${installation.state}，新任务不会分配`);
+    } else if (installation.state === "ACTIVE" && installation.health !== "HEALTHY") {
+      add("CRITICAL", "ACTIVE_INSTALLATION_UNHEALTHY", installation.id, `活跃安装健康状态为 ${installation.health}`);
+    }
+  }
+  for (const provider of providers) {
+    if (provider.state === "DEGRADED") {
+      add("WARNING", "PROVIDER_DEGRADED", provider.id, "Provider revision 已降级，未授权静默切换 Agent");
+    }
+    if (Object.values(provider.probe).some((result) => result === "FAIL")) {
+      add("CRITICAL", "PROVIDER_PROBE_FAILED", provider.id, "Provider 的认证、模型或网络安全探针未全部通过");
+    }
+  }
+  for (const profile of profiles.filter((item) => item.state === "ACTIVE")) {
+    const installation = state.installations.get(profile.installationId);
+    const provider = state.providers.get(profile.providerRevisionId);
+    const credential = state.credentials.get(profile.credentialVersionId);
+    if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY") {
+      add("CRITICAL", "PROFILE_INSTALLATION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的精确 WorkerImage 当前不可服务");
+    }
+    if (!provider || provider.state !== "ACTIVE" || !providerProbePassed(provider)) {
+      add("CRITICAL", "PROFILE_PROVIDER_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Provider revision 当前不可服务");
+    }
+    if (!credential || credential.state !== "ACTIVE") {
+      add("CRITICAL", "PROFILE_CREDENTIAL_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的凭据版本已不可签发新任务 token");
+    }
+  }
+  return Object.freeze(alerts);
+}
+
+function configurationDiffs(records: readonly AuditRecord[]): readonly ConfigurationDiff[] {
+  const result: ConfigurationDiff[] = [];
+  for (const record of records) {
+    if (!/^(AGENT_(VERSION|INSTALLATION|ROLLOUT|PROFILE|DEFAULT)|CREDENTIAL_)/.test(record.action)) continue;
+    const changes: Array<Readonly<{ field: string; before: unknown; after: unknown }>> = [];
+    appendDiff(changes, record.metadata, "state", "previousState", "state");
+    appendDiff(changes, record.metadata, "providerState", "previousProviderState", "providerState");
+    appendDiff(changes, record.metadata, "rolloutPercent", "previousRolloutPercent", "rolloutPercent");
+    appendDiff(changes, record.metadata, "profileRevisionId", "previousProfileRevisionId", "profileRevisionId");
+    if (record.action === "CREDENTIAL_ROTATED" && typeof record.metadata.replacementVersionId === "string") {
+      changes.push(Object.freeze({ field: "credentialVersionId", before: record.resource, after: record.metadata.replacementVersionId }));
+    }
+    if (changes.length === 0 && /(CREATED|DRAFTED|DISCOVERED|READY)$/.test(record.action)) {
+      changes.push(Object.freeze({ field: "resource", before: null, after: record.resource }));
+    }
+    if (changes.length === 0) continue;
+    result.push(Object.freeze({
+      id: record.id,
+      action: record.action,
+      resource: record.resource,
+      actorId: record.actorId,
+      at: record.at,
+      changes: Object.freeze(changes),
+    }));
+    if (result.length === 50) break;
+  }
+  return Object.freeze(result);
+}
+
+function appendDiff(
+  target: Array<Readonly<{ field: string; before: unknown; after: unknown }>>,
+  metadata: Readonly<Record<string, unknown>>,
+  field: string,
+  beforeKey: string,
+  afterKey: string,
+): void {
+  if (!(beforeKey in metadata) || !(afterKey in metadata)) return;
+  if (JSON.stringify(metadata[beforeKey]) === JSON.stringify(metadata[afterKey])) return;
+  target.push(Object.freeze({ field, before: metadata[beforeKey], after: metadata[afterKey] }));
 }
 
 function profileVisibleTo(profile: ProfileRevisionRecord, actor: RequestActor): boolean {

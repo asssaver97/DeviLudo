@@ -5,6 +5,7 @@ import {
   appendDemoAudit,
   getDemoStore,
   withIdempotency,
+  type DemoAuditEvent,
   type DemoInstallation,
   type DemoProfile,
   type DemoProvider,
@@ -70,6 +71,82 @@ function agentCatalog() {
   ];
 }
 
+function localOperationalProjection(store: DemoStoreState) {
+  const windowStartedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const records = store.usage.filter((record) => record.recordedAt >= windowStartedAt).slice(0, 50);
+  const totals = records.reduce((summary, record) => ({
+    requests: summary.requests + 1,
+    inputTokens: summary.inputTokens + record.inputTokens,
+    outputTokens: summary.outputTokens + record.outputTokens,
+    costUsd: summary.costUsd + record.costUsd,
+  }), { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  const alerts: Array<{ id: string; severity: "WARNING" | "CRITICAL"; code: string; resource: string; message: string }> = [];
+  const addAlert = (severity: "WARNING" | "CRITICAL", code: string, resource: string, message: string) => {
+    alerts.push({ id: `${code}:${resource}`, severity, code, resource, message });
+  };
+  for (const installation of store.installations) {
+    if (["FAILED", "QUARANTINED"].includes(installation.state)) {
+      addAlert("CRITICAL", "AGENT_INSTALLATION_UNSERVABLE", installation.id, `安装处于 ${installation.state}，新任务不会分配`);
+    } else if (installation.state === "ACTIVE" && installation.health !== "HEALTHY") {
+      addAlert("CRITICAL", "ACTIVE_INSTALLATION_UNHEALTHY", installation.id, `活跃安装健康状态为 ${installation.health}`);
+    }
+  }
+  for (const provider of store.providers) {
+    if (provider.state === "DISABLED") continue;
+    if (Object.values(provider.probe).some((result) => result === "FAIL")) {
+      addAlert("CRITICAL", "PROVIDER_PROBE_FAILED", provider.id, "Provider 的认证、模型或网络安全探针未全部通过");
+    }
+  }
+  for (const profile of store.profiles.filter((item) => item.state === "ACTIVE")) {
+    const installation = store.installations.find((item) => item.id === profile.installationId);
+    const provider = store.providers.find((item) => item.id === profile.providerId);
+    if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY") {
+      addAlert("CRITICAL", "PROFILE_INSTALLATION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的精确 WorkerImage 当前不可服务");
+    }
+    if (!provider || provider.state !== "ACTIVE" || Object.values(provider.probe).some((result) => result !== "PASS")) {
+      addAlert("CRITICAL", "PROFILE_PROVIDER_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的 Provider revision 当前不可服务");
+    }
+  }
+  return {
+    usage: {
+      available: true,
+      source: "inference_usage_events",
+      windowStartedAt,
+      totals: { ...totals, costUsd: Number(totals.costUsd.toFixed(10)) },
+      records,
+    },
+    configurationDiffs: store.audit.map(localConfigurationDiff).filter((item) => item !== null).slice(0, 50),
+    alerts,
+  };
+}
+
+function localConfigurationDiff(record: DemoAuditEvent) {
+  if (!/^(AGENT_(VERSION|INSTALLATION|PROFILE|DEFAULT)|ROLLOUT_|CREDENTIAL_)/.test(record.action)) return null;
+  const changes: Array<{ field: string; before: unknown; after: unknown }> = [];
+  appendLocalDiff(changes, record.metadata, "state", "previousState", "state");
+  appendLocalDiff(changes, record.metadata, "providerState", "previousProviderState", "providerState");
+  appendLocalDiff(changes, record.metadata, "rolloutPercent", "previousRolloutPercent", "rolloutPercent");
+  appendLocalDiff(changes, record.metadata, "profileRevisionId", "previousProfileRevisionId", "profileRevisionId");
+  if (/CREDENTIAL_ROTATE/.test(record.action) && typeof record.metadata.replacementVersionId === "string") {
+    changes.push({ field: "credentialVersionId", before: record.resource, after: record.metadata.replacementVersionId });
+  }
+  if (changes.length === 0 && /(CREATED|DRAFTED|DISCOVERED|READY)$/.test(record.action)) {
+    changes.push({ field: "resource", before: null, after: record.resource });
+  }
+  return changes.length ? { id: record.id, action: record.action, resource: record.resource, actorId: record.actor, at: record.at, changes } : null;
+}
+
+function appendLocalDiff(
+  target: Array<{ field: string; before: unknown; after: unknown }>,
+  metadata: Readonly<Record<string, unknown>>,
+  field: string,
+  beforeKey: string,
+  afterKey: string,
+) {
+  if (!(beforeKey in metadata) || !(afterKey in metadata) || metadata[beforeKey] === metadata[afterKey]) return;
+  target.push({ field, before: metadata[beforeKey], after: metadata[afterKey] });
+}
+
 function routeKey(segments: string[]): string {
   return segments.join("/");
 }
@@ -114,20 +191,24 @@ export async function GET(request: Request, context: RouteContext) {
         "x-deviludo-admin-auth-mode": "local-fixture" } });
     }
     if (key === "agent-health") {
+      const operations = localOperationalProjection(store);
       return json({
         data: {
-          workers: [
-            { pool: "dev-linux-a", agent: "claude-code", ready: 24, desired: 32, health: "HEALTHY" },
-            { pool: "dev-linux-b", agent: "codex-cli", ready: 14, desired: 16, health: "HEALTHY" },
-          ],
+          status: operations.alerts.length > 0 ? "DEGRADED" : "HEALTHY",
+          installations: store.installations,
           providers: store.providers.map(({ id, state, probe }) => ({ id, state, probe })),
-          e2eRunnersContainAgent: false,
-          steamPublishersContainAgent: false,
+          isolation: { developmentWorkers: true, e2eRunnersContainAgent: false, steamPublishersContainAgent: false },
           supplyChain: {
+            service: "deviludo-agent-supply-chain",
+            version: "0.1.0-local",
+            binaryDigest: "0".repeat(64),
+            status: "READY",
+            checkedAt: new Date().toISOString(),
             mode: "LOCAL_DETERMINISTIC_BROKER",
-            available: true,
             acceptsCallerAttestations: false,
           },
+          ...operations,
+          checkedAt: new Date().toISOString(),
         },
       });
     }
@@ -233,6 +314,7 @@ export async function POST(request: Request, context: RouteContext) {
         if (state === "APPROVED" && store.agentVersions[id] !== "DISCOVERED") {
           throw new HttpProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered version can be approved");
         }
+        const previousState = store.agentVersions[id];
         store.agentVersions[id] = state;
         if (state === "APPROVED" && receiptDigest && integrityDigest && evidenceDigest) {
           const metadata = store.agentVersionMetadata[id];
@@ -249,6 +331,8 @@ export async function POST(request: Request, context: RouteContext) {
           });
         }
         appendDemoAudit(`AGENT_VERSION_${state}`, id, role, {
+          previousState,
+          state,
           automaticActivation: false,
           trustBoundary: "LOCAL_DETERMINISTIC_BROKER",
           ...(receiptDigest ? { validationReceiptDigest: receiptDigest } : {}),
@@ -358,7 +442,8 @@ export async function POST(request: Request, context: RouteContext) {
           ? rollbackDemoProfiles(getDemoStore(), installation)
           : [];
         appendDemoAudit(`ROLLOUT_${action?.toUpperCase()}`, installationId, role, {
-          percent: rollout.percent,
+          previousRolloutPercent: rollout.previous,
+          rolloutPercent: rollout.percent,
           ...(installation?.activatedAt ? { activatedAt: installation.activatedAt } : {}),
           affectsRunningTasks: false,
           rollbackProfileCount: rollbackProfileRevisionIds.length,
@@ -383,6 +468,7 @@ export async function POST(request: Request, context: RouteContext) {
             throw new HttpProblem(409, "INSTALLATION_NOT_DRAINABLE", "Only a fully active installation can begin draining");
           }
           const at = new Date().toISOString();
+          const previousState = installation.state;
           rollout.previous = rollout.percent;
           rollout.percent = 0;
           rollout.state = "DRAINING";
@@ -391,6 +477,8 @@ export async function POST(request: Request, context: RouteContext) {
           installation.drainingAt = at;
           const rollbackProfileRevisionIds = rollbackDemoProfiles(store, installation);
           appendDemoAudit("AGENT_INSTALLATION_DRAINING", installationId, role, {
+            previousState,
+            state: installation.state,
             affectsRunningTasks: false,
             rollbackProfileCount: rollbackProfileRevisionIds.length,
             drainingAt: at,
@@ -406,10 +494,13 @@ export async function POST(request: Request, context: RouteContext) {
           throw new HttpProblem(409, "INSTALLATION_DEFAULT_STILL_REFERENCED", "Move every effective default away from this installation before retirement");
         }
         const at = new Date().toISOString();
+        const previousState = installation.state;
         rollout.state = "RETIRED";
         installation.state = "RETIRED";
         installation.retiredAt = at;
-        appendDemoAudit("AGENT_INSTALLATION_RETIRED", installationId, role, { activeRuns: 0, retiredAt: at });
+        appendDemoAudit("AGENT_INSTALLATION_RETIRED", installationId, role, {
+          previousState, state: installation.state, activeRuns: 0, retiredAt: at,
+        });
         return { installation, nonTerminalRuns: 0 };
       });
     }
@@ -524,6 +615,8 @@ export async function POST(request: Request, context: RouteContext) {
         if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
         const provider = store.providers.find((item) => item.id === profile.providerId);
         if (!provider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
+        const previousState = profile.state;
+        const previousProviderState = provider.state;
         if (action === "activate") {
           if (profile.state !== "READY" || provider.state !== "READY") throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
           profile.state = "ACTIVE";
@@ -532,7 +625,13 @@ export async function POST(request: Request, context: RouteContext) {
           profile.state = "DISABLED";
           provider.state = "DISABLED";
         }
-        appendDemoAudit(`AGENT_PROFILE_${action?.toUpperCase()}`, profile.id, role, { providerRevisionId: provider.id, state: profile.state });
+        appendDemoAudit(`AGENT_PROFILE_${action?.toUpperCase()}`, profile.id, role, {
+          providerRevisionId: provider.id,
+          previousState,
+          state: profile.state,
+          previousProviderState,
+          providerState: provider.state,
+        });
         return { profile, provider: { id: provider.id, state: provider.state, probe: provider.probe }, previousActivePreserved: action === "validate" };
       });
     }
@@ -605,8 +704,11 @@ export async function POST(request: Request, context: RouteContext) {
         const credential = store.credentials.find((item) => item.id === credentialId);
         if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
         if (action === "revoke") {
+          const previousState = credential.state;
           credential.state = "REVOKED";
-          appendDemoAudit("CREDENTIAL_REVOKE", credential.id, role, { newTokensIssued: false });
+          appendDemoAudit("CREDENTIAL_REVOKE", credential.id, role, {
+            previousState, state: credential.state, newTokensIssued: false,
+          });
           return { id: credential.id, state: credential.state, newTokensIssued: false, plaintextRecoverable: false };
         }
         if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
@@ -694,8 +796,12 @@ export async function PUT(request: Request, context: RouteContext) {
           "Defaults require a fully active Installation, approved version and active Provider",
         );
       }
-      store.defaults[match[1] ?? "platform"] = profileRevisionId;
-      appendDemoAudit("AGENT_DEFAULT_UPDATED", match[1] ?? "platform", role, { profileRevisionId, affectsRunningTasks: false });
+      const defaultScope = match[1] ?? "platform";
+      const previousProfileRevisionId = store.defaults[defaultScope] ?? "none";
+      store.defaults[defaultScope] = profileRevisionId;
+      appendDemoAudit("AGENT_DEFAULT_UPDATED", defaultScope, role, {
+        previousProfileRevisionId, profileRevisionId, affectsRunningTasks: false,
+      });
       return { scope: match[1], profileRevisionId, precedence: "project > tenant > platform > claude-code", affectsNewTasksOnly: true };
     });
     return json({ data: result.value, meta: { idempotentReplay: result.replayed } });

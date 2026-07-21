@@ -105,8 +105,8 @@ export class AdminController {
     return this.service.updateDefault(scope, objectBody(body), actor(request));
   }
 
-  health(): Promise<Readonly<Record<string, unknown>>> {
-    return this.service.health();
+  health(request: FastifyRequest): Promise<Readonly<Record<string, unknown>>> {
+    return this.service.health(actor(request));
   }
 
   audit(request: FastifyRequest) {
@@ -151,7 +151,7 @@ applyRoute("createCredential", Post("credentials"), ["SecurityAdmin", "TenantAdm
 applyRoute("rotateCredential", Post("credentials/:id/rotate"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("revokeCredential", Post("credentials/:id/revoke"), ["SecurityAdmin", "TenantAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("updateDefault", Put("agent-defaults/:scope"), PROFILE_ROLES, [Param("scope"), Body(), Req()]);
-applyRoute("health", Get("agent-health"), ALL_ROLES, []);
+applyRoute("health", Get("agent-health"), ALL_ROLES, [Req()]);
 applyRoute("audit", Get("audit"), ALL_ROLES, [Req()]);
 applyRoute("reconcileInferenceRequest", Post("inference-requests/:id/reconcile"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("lookupInferenceReconciliation", Get("inference-runs/:tenantId/:runId/reconciliation"), ["SecurityAdmin"], [Param("tenantId"), Param("runId")]);

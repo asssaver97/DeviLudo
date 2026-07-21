@@ -174,6 +174,33 @@ export interface AuditRecord {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
+export interface AgentUsageRecord {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly providerRevisionId: string;
+  readonly credentialVersionId: string;
+  readonly model: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly costUsd: number;
+  readonly recordedAt: string;
+}
+
+export interface AgentUsageSummary {
+  readonly available: boolean;
+  readonly source: "inference_usage_events";
+  readonly windowStartedAt: string;
+  readonly totals: Readonly<{
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  }>;
+  readonly records: readonly AgentUsageRecord[];
+}
+
 export interface RequestActor {
   readonly role: AdminRole;
   readonly requestId: string;

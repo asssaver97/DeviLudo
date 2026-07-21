@@ -388,7 +388,8 @@ paths:
   /admin/agent-health:
     get:
       operationId: getAgentHealth
-      responses: { "200": { $ref: "#/components/responses/Ok" } }
+      description: Returns role-scoped Agent health, append-only 24-hour inference usage, configuration before/after differences, and actionable alerts. A database role that cannot prove the requested usage scope reports telemetry unavailable rather than a partial aggregate.
+      responses: { "200": { $ref: "#/components/responses/AgentHealth" } }
   /admin/audit:
     get:
       operationId: listAgentAudit
@@ -950,11 +951,123 @@ components:
             properties:
               data: { $ref: "#/components/schemas/AgentSettingsProjection" }
               meta: { type: object, additionalProperties: true }
+    AgentHealth:
+      description: Role-scoped Agent operational health projection.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [data]
+            properties:
+              data: { $ref: "#/components/schemas/AgentHealthProjection" }
   schemas:
     EmptyObject:
       type: object
       additionalProperties: false
       maxProperties: 0
+    AgentHealthProjection:
+      type: object
+      additionalProperties: false
+      required: [status, installations, providers, supplyChain, isolation, usage, configurationDiffs, alerts, checkedAt]
+      properties:
+        status: { type: string, enum: [HEALTHY, DEGRADED] }
+        installations: { type: array, items: { type: object, additionalProperties: true } }
+        providers:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, state, probe]
+            properties:
+              id: { type: string }
+              state: { type: string }
+              probe: { type: object, additionalProperties: { type: string, enum: [PASS, FAIL] } }
+        supplyChain: { type: object, additionalProperties: true, required: [service, status] }
+        isolation:
+          type: object
+          additionalProperties: false
+          required: [developmentWorkers, e2eRunnersContainAgent, steamPublishersContainAgent]
+          properties:
+            developmentWorkers: { const: true }
+            e2eRunnersContainAgent: { const: false }
+            steamPublishersContainAgent: { const: false }
+        usage: { $ref: "#/components/schemas/AgentUsageSummary" }
+        configurationDiffs:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/AgentConfigurationDiff" }
+        alerts:
+          type: array
+          items: { $ref: "#/components/schemas/AgentOperationalAlert" }
+        checkedAt: { type: string, format: date-time }
+    AgentUsageSummary:
+      type: object
+      additionalProperties: false
+      required: [available, source, windowStartedAt, totals, records]
+      properties:
+        available: { type: boolean }
+        source: { const: inference_usage_events }
+        windowStartedAt: { type: string, format: date-time }
+        totals:
+          type: object
+          additionalProperties: false
+          required: [requests, inputTokens, outputTokens, costUsd]
+          properties:
+            requests: { type: integer, minimum: 0 }
+            inputTokens: { type: integer, minimum: 0 }
+            outputTokens: { type: integer, minimum: 0 }
+            costUsd: { type: number, minimum: 0 }
+        records:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [requestId, tenantId, projectId, runId, providerRevisionId, credentialVersionId, model, inputTokens, outputTokens, costUsd, recordedAt]
+            properties:
+              requestId: { type: string, format: uuid }
+              tenantId: { type: string, format: uuid }
+              projectId: { type: string, format: uuid }
+              runId: { type: string, format: uuid }
+              providerRevisionId: { type: string }
+              credentialVersionId: { type: string }
+              model: { type: string }
+              inputTokens: { type: integer, minimum: 0 }
+              outputTokens: { type: integer, minimum: 0 }
+              costUsd: { type: number, minimum: 0 }
+              recordedAt: { type: string, format: date-time }
+    AgentConfigurationDiff:
+      type: object
+      additionalProperties: false
+      required: [id, action, resource, actorId, at, changes]
+      properties:
+        id: { type: string }
+        action: { type: string }
+        resource: { type: string }
+        actorId: { type: string }
+        at: { type: string, format: date-time }
+        changes:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [field, before, after]
+            properties:
+              field: { type: string }
+              before: {}
+              after: {}
+    AgentOperationalAlert:
+      type: object
+      additionalProperties: false
+      required: [id, severity, code, resource, message]
+      properties:
+        id: { type: string }
+        severity: { type: string, enum: [WARNING, CRITICAL] }
+        code: { type: string }
+        resource: { type: string }
+        message: { type: string }
     ControlPlaneReadiness:
       type: object
       additionalProperties: false

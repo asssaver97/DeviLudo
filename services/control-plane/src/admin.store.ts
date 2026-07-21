@@ -4,11 +4,13 @@ import type {
   AdminMutationClaimBinding,
   AdminRole,
   AgentVersionRecord,
+  AgentUsageSummary,
   AuditRecord,
   CredentialVersionRecord,
   InstallationRecord,
   ProfileRevisionRecord,
   ProviderRevisionRecord,
+  RequestActor,
 } from "./contracts";
 
 export interface AdminCatalogState {
@@ -28,6 +30,8 @@ export interface AdminMutationCompletion<T> extends AdminMutationClaimBinding {
 
 export abstract class AdminStore {
   abstract read<T>(operation: (state: AdminCatalogState) => T): Promise<T>;
+  /** Tenant/project-scoped immutable inference usage projection for administrators. */
+  abstract readUsage(actor: RequestActor): Promise<AgentUsageSummary>;
   /** Global, fail-closed retirement guard for immutable AgentRun bindings. */
   abstract countNonTerminalRuns(installationId: string): Promise<number>;
   abstract mutate<T>(
@@ -43,6 +47,10 @@ export class InMemoryAdminStore extends AdminStore {
     return operation(this.#state);
   }
 
+  async readUsage(): Promise<AgentUsageSummary> {
+    return emptyUsageSummary(false);
+  }
+
   async countNonTerminalRuns(): Promise<number> { return 0; }
 
   async mutate<T>(
@@ -50,6 +58,16 @@ export class InMemoryAdminStore extends AdminStore {
   ): Promise<T> {
     return operation(this.#state);
   }
+}
+
+export function emptyUsageSummary(available: boolean, now = new Date()): AgentUsageSummary {
+  return Object.freeze({
+    available,
+    source: "inference_usage_events",
+    windowStartedAt: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+    totals: Object.freeze({ requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }),
+    records: Object.freeze([]),
+  });
 }
 
 export function emptyAdminCatalogState(): AdminCatalogState {

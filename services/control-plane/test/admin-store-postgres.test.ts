@@ -282,6 +282,59 @@ test("Postgres admin audit accepts materialized System failovers without exposin
   assert.equal(JSON.stringify(audit).includes("authorizationNonce"), false);
 });
 
+test("Postgres Agent usage projection applies tenant and project scope before returning immutable records", async () => {
+  const statements: Array<{ text: string; values?: unknown[] }> = [];
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const client = {
+    async query(text: string, values?: unknown[]) {
+      statements.push({ text, values });
+      if (text.includes("count(*)::text AS requests")) {
+        return result([{ requests: "1", input_tokens: "120", output_tokens: "30", cost_usd: "0.00048" }]);
+      }
+      if (text.includes("SELECT request_id::text")) {
+        return result([{
+          request_id: "44444444-4444-4444-8444-444444444444",
+          tenant_id: tenantId,
+          project_id: projectId,
+          run_id: "33333333-3333-4333-8333-333333333333",
+          provider_revision_id: "provider-platform-claude-r1",
+          credential_version_id: "credential-platform-claude-v1",
+          model: "claude-sonnet-4-6-20250514",
+          input_tokens: "120",
+          output_tokens: "30",
+          cost_usd: "0.00048",
+          recorded_at: "2026-07-22T01:00:00.000Z",
+        }]);
+      }
+      return result([]);
+    },
+    release() {},
+  } as unknown as PoolClient;
+  const store = new PostgresAdminStore({ async connect() { return client; }, async end() {} } as unknown as Pool);
+  const usage = await store.readUsage({
+    role: "Auditor", actorId: "project-auditor", tenantId, projectId,
+    requestId: "usage-read", mutation: undefined,
+  });
+  assert.equal(usage.available, true);
+  assert.deepEqual(usage.totals, { requests: 1, inputTokens: 120, outputTokens: 30, costUsd: 0.00048 });
+  assert.equal(usage.records[0]?.credentialVersionId, "credential-platform-claude-v1");
+  assert.equal(statements.some(({ text }) => text === "SET LOCAL row_security = off"), false);
+  const setTenant = statements.find(({ text }) => text.includes("set_config('app.tenant_id'"));
+  assert.deepEqual(setTenant?.values, [tenantId]);
+  const aggregate = statements.find(({ text }) => text.includes("count(*)::text AS requests"));
+  assert.match(aggregate?.text ?? "", /tenant_id = \$2::uuid/);
+  assert.match(aggregate?.text ?? "", /project_id = \$3::uuid/);
+  assert.equal(aggregate?.values?.[1], tenantId);
+  assert.equal(aggregate?.values?.[2], projectId);
+
+  await store.readUsage({
+    role: "SecurityAdmin", actorId: "security-admin", tenantId: null, projectId: null,
+    requestId: "global-usage-read", mutation: undefined,
+  });
+  assert.equal(statements.some(({ text }) => text === "SET LOCAL row_security = off"), true);
+});
+
 function result<Row extends Record<string, unknown>>(rows: Row[]): QueryResult<Row> {
   return { command: "", rowCount: rows.length, oid: 0, fields: [], rows };
 }
