@@ -157,6 +157,8 @@ export default function AgentAdminDashboard() {
   const [auditFilter, setAuditFilter] = useState("全部事件");
   const [auditRecords, setAuditRecords] = useState<AuditEvent[]>([]);
   const [localHealth, setLocalHealth] = useState<LocalHealth | null>(null);
+  const [newProviderRequest, setNewProviderRequest] = useState("");
+  const [providerEditorKey, setProviderEditorKey] = useState("provider-editor");
 
   const refreshAdminState = useCallback(async () => {
     try {
@@ -245,6 +247,9 @@ export default function AgentAdminDashboard() {
   const effectivePermissionRole: AdminRole = authMode === "loading" ? "Auditor" : role;
   const permissions = agentAdminCapabilities(effectivePermissionRole);
   const canOperateVersions = permissions.manageVersions && !adminLoading && !adminError;
+  const consumeNewProviderRequest = useCallback((requestId: string) => {
+    setNewProviderRequest((current) => current === requestId ? "" : current);
+  }, []);
 
   const updateVersion = async (id: string, status: AgentVersionRow["status"]) => {
     if (!canOperateVersions) {
@@ -416,7 +421,13 @@ export default function AgentAdminDashboard() {
           <div className={styles.headerActions}>
             <label className={styles.discoveryControl}><span>官方目录</span><select aria-label="选择要发现版本的 Agent" value={discoveryAgent} onChange={(event) => setDiscoveryAgent(event.target.value as AgentKind)}><option value="claude-code">Claude Code</option><option value="codex-cli">Codex CLI</option></select></label>
             <button className={styles.secondaryButton} type="button" onClick={() => void discoverVersions(discoveryAgent)} disabled={!permissions.manageVersions || adminLoading || Boolean(adminError)} title={permissions.manageVersions ? undefined : "需要 PlatformAgentAdmin 权限"}><AdminIcon name="refresh" />发现版本</button>
-            <button className={styles.primaryButton} type="button" onClick={() => { setActiveTab("providers"); notify("已打开 Provider 草稿编辑器", "neutral"); }} disabled={!permissions.editPlatformProvider} title={permissions.editPlatformProvider ? undefined : "当前角色不能编辑平台级 Provider"}>新建 Provider</button>
+            <button className={styles.primaryButton} type="button" onClick={() => {
+              const requestId = crypto.randomUUID();
+              setProviderEditorKey(requestId);
+              setNewProviderRequest(requestId);
+              setActiveTab("providers");
+              notify("已创建空白 Provider 草稿", "neutral");
+            }} disabled={!permissions.editPlatformProvider} title={permissions.editPlatformProvider ? undefined : "当前角色不能编辑平台级 Provider"}>新建 Provider</button>
           </div>
         </div>
 
@@ -443,9 +454,10 @@ export default function AgentAdminDashboard() {
           {activeTab === "overview" && <OverviewTab catalog={catalog} versions={versions} installations={installations} defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
           {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations && !adminLoading && !adminError} onAdvance={advanceRollout} onRollback={rollback} />}
-          {activeTab === "providers" && <ProvidersTab role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
+          {activeTab === "providers" && <ProvidersTab key={providerEditorKey} role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
             providers={providers} credentials={credentials}
-            production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }} />}
+            production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }}
+            newDraftRequest={newProviderRequest} onNewDraftConsumed={consumeNewProviderRequest} />}
           {activeTab === "inheritance" && <InheritanceTab defaults={defaults} installations={installations}
             profiles={profiles} providers={providers} notify={notify} />}
           {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} setFilter={setAuditFilter} />}
@@ -636,7 +648,8 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback }: {
   );
 }
 
-function ProvidersTab({ role, localHealth, installations, profiles, providers, credentials, production, notify, onChanged }: {
+function ProvidersTab({ role, localHealth, installations, profiles, providers, credentials, production, notify, onChanged,
+  newDraftRequest, onNewDraftConsumed }: {
   role: AdminRole;
   localHealth: LocalHealth | null;
   installations: AgentInstallation[];
@@ -646,27 +659,31 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
   production: boolean;
   notify: (message: string, tone?: "success" | "warning" | "neutral") => void;
   onChanged: () => void;
+  newDraftRequest: string;
+  onNewDraftConsumed: (requestId: string) => void;
 }) {
   const initialProfile = profiles.find((item) => item.agent === "claude-code" && item.scope === "platform"
     && item.scopeId === "global" && item.state === "ACTIVE");
   const initialProvider = providers.find((item) => item.id === initialProfile?.providerRevisionId);
+  const creatingProvider = Boolean(newDraftRequest);
   const [agent, setAgent] = useState<AgentKind>("claude-code");
-  const [baseUrl, setBaseUrl] = useState(initialProvider?.baseUrl ?? "https://gateway.example.com");
-  const [primaryModel, setPrimaryModel] = useState(initialProvider?.primaryModel ?? "claude-sonnet-4-5-20250929");
+  const [baseUrl, setBaseUrl] = useState(creatingProvider ? "" : initialProvider?.baseUrl ?? "https://gateway.example.com");
+  const [primaryModel, setPrimaryModel] = useState(creatingProvider ? "" : initialProvider?.primaryModel ?? "claude-sonnet-4-5-20250929");
   const [planningModel, setPlanningModel] = useState("");
   const [fastModel, setFastModel] = useState("");
   const [authentication, setAuthentication] = useState<"bearer" | "x-api-key" | "authorization-bearer">("x-api-key");
-  const [inputPrice, setInputPrice] = useState("3");
-  const [outputPrice, setOutputPrice] = useState("15");
+  const [inputPrice, setInputPrice] = useState(creatingProvider ? "" : "3");
+  const [outputPrice, setOutputPrice] = useState(creatingProvider ? "" : "15");
   const [apiKey, setApiKey] = useState("");
-  const [dataRegion, setDataRegion] = useState("新加坡");
-  const [retentionPolicy, setRetentionPolicy] = useState("最长保留 30 天，按供应商企业协议删除");
-  const [trainingPolicy, setTrainingPolicy] = useState("源码与提示词不用于模型训练");
+  const [dataRegion, setDataRegion] = useState(creatingProvider ? "" : "新加坡");
+  const [retentionPolicy, setRetentionPolicy] = useState(creatingProvider ? "" : "最长保留 30 天，按供应商企业协议删除");
+  const [trainingPolicy, setTrainingPolicy] = useState(creatingProvider ? "" : "源码与提示词不用于模型训练");
   const [regionAcknowledged, setRegionAcknowledged] = useState(false);
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
   const [writtenCredentialMasks, setWrittenCredentialMasks] = useState<Partial<Record<AgentKind, string>>>({});
   const [draftProfileId, setDraftProfileId] = useState("");
+  const [editorMode, setEditorMode] = useState<"existing" | "new">(creatingProvider ? "new" : "existing");
   const permissions = agentAdminCapabilities(role);
   const matchingCredential = credentials.find((credential) => credential.state === "ACTIVE" && credentialMatchesAgent(credential.label, agent));
 
@@ -677,15 +694,31 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
   });
 
   const protocol = agent === "claude-code" ? "Anthropic Messages / Gateway" : "OpenAI Responses";
-  const chooseAgent = (kind: AgentKind) => {
-    const current = activeProviders.find((item) => item.kind === kind)?.provider;
+  useEffect(() => {
+    if (!newDraftRequest) return;
+    onNewDraftConsumed(newDraftRequest);
+  }, [newDraftRequest, onNewDraftConsumed]);
+
+  const chooseAgent = (kind: AgentKind, loadExisting = true) => {
+    const current = loadExisting ? activeProviders.find((item) => item.kind === kind)?.provider : null;
     setAgent(kind);
-    setBaseUrl(current?.baseUrl ?? "https://gateway.example.com");
-    setPrimaryModel(current?.primaryModel ?? (kind === "claude-code" ? "claude-sonnet-4-5-20250929" : "gpt-5.2-codex-2026-02-01"));
+    setBaseUrl(current?.baseUrl ?? (loadExisting ? "https://gateway.example.com" : ""));
+    setPrimaryModel(current?.primaryModel ?? (loadExisting
+      ? kind === "claude-code" ? "claude-sonnet-4-5-20250929" : "gpt-5.2-codex-2026-02-01"
+      : ""));
+    setPlanningModel("");
+    setFastModel("");
     setAuthentication(kind === "claude-code" ? "x-api-key" : "bearer");
-    setInputPrice(kind === "claude-code" ? "3" : "2.5");
-    setOutputPrice(kind === "claude-code" ? "15" : "10");
+    setInputPrice(loadExisting ? kind === "claude-code" ? "3" : "2.5" : "");
+    setOutputPrice(loadExisting ? kind === "claude-code" ? "15" : "10" : "");
+    setApiKey("");
+    setDataRegion(loadExisting ? "新加坡" : "");
+    setRetentionPolicy(loadExisting ? "最长保留 30 天，按供应商企业协议删除" : "");
+    setTrainingPolicy(loadExisting ? "源码与提示词不用于模型训练" : "");
+    setRegionAcknowledged(false);
+    setError("");
     setDraftProfileId("");
+    setEditorMode(loadExisting ? "existing" : "new");
   };
 
   const validate = () => {
@@ -808,7 +841,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         {!permissions.editPlatformProvider ? <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看平台 Provider。租户和项目覆盖应在对应作用域页面配置。</div> : null}
         <div className={styles.providerRows}>
           {activeProviders.map(({ kind, provider }) => <button type="button" key={kind}
-            className={`${styles.providerRow} ${agent === kind ? styles.providerRowSelected : ""}`} onClick={() => chooseAgent(kind)}>
+            className={`${styles.providerRow} ${agent === kind && editorMode === "existing" ? styles.providerRowSelected : ""}`} onClick={() => chooseAgent(kind)}>
             <AgentMark kind={kind} small /><div><strong>{kind === "claude-code" ? "Anthropic Messages" : "OpenAI Responses"} · {provider ? providerHost(provider.baseUrl) : "未配置"}</strong>
               <span>{provider ? `${provider.protocol} · ${provider.primaryModel}` : "尚无 ACTIVE 平台 Provider"}</span></div>
             <StatusPill tone={provider?.state === "ACTIVE" ? "success" : "warning"}>{provider?.state ?? "NOT CONFIGURED"}</StatusPill><AdminIcon name="chevron" />
@@ -825,12 +858,12 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
       </section>
 
       <form className={`${styles.section} ${styles.providerForm}`} onSubmit={saveDraft} noValidate>
-        <SectionHeading eyebrow="DRAFT" title="编辑 Provider" description="保存草稿与测试激活分离；本地 API 不会在缺少受信 Connector 时访问上游。" />
+        <SectionHeading eyebrow="DRAFT" title={editorMode === "new" ? "新建 Provider" : "编辑 Provider"} description="保存草稿与测试激活分离；本地 API 不会在缺少受信 Connector 时访问上游。" />
         <div className={styles.formGroup}>
           <label>Agent</label>
           <div className={styles.segmented}>
-            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => chooseAgent("claude-code")}>Claude Code</button>
-            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => chooseAgent("codex-cli")}>Codex CLI</button>
+            <button className={agent === "claude-code" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => chooseAgent("claude-code", editorMode === "existing")}>Claude Code</button>
+            <button className={agent === "codex-cli" ? styles.segmentActive : ""} type="button" disabled={!permissions.editPlatformProvider} onClick={() => chooseAgent("codex-cli", editorMode === "existing")}>Codex CLI</button>
           </div>
         </div>
         <div className={styles.formGroup}><label htmlFor="protocol">协议</label><input id="protocol" value={protocol} disabled /><small>协议由 Agent Adapter 固定，不可混用。</small></div>

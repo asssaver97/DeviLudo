@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { agentAdminCapabilities } from "../lib/admin/agent-permissions.ts";
 
@@ -27,4 +28,18 @@ test("Agent admin UI capabilities mirror the platform-scoped RBAC boundary", () 
       manageGlobalCredentials: false,
     });
   }
+});
+
+test("new Provider opens an explicit blank draft without mutating the active snapshot", () => {
+  const source = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /setProviderEditorKey\(requestId\);[\s\S]*setNewProviderRequest\(requestId\);/);
+  assert.match(source, /<ProvidersTab key=\{providerEditorKey\}/);
+  assert.match(source, /title=\{editorMode === "new" \? "新建 Provider" : "编辑 Provider"\}/);
+  assert.match(source, /const creatingProvider = Boolean\(newDraftRequest\);/);
+  assert.match(source, /useState\(creatingProvider \? "" : initialProvider\?\.baseUrl/);
+  assert.match(source, /useState\(creatingProvider \? "" : initialProvider\?\.primaryModel/);
+  assert.match(source, /setDataRegion\(loadExisting \? "新加坡" : ""\);/);
+  assert.match(source, /agent === kind && editorMode === "existing"/);
+  assert.match(source, /onNewDraftConsumed\(newDraftRequest\)/);
 });
