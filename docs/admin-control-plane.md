@@ -51,6 +51,18 @@ successful `100%` Fleet receipt records `activatedAt`; the next image selects th
 healthy same-Agent/same-pool target with the newest activation timestamp rather
 than relying on catalog insertion order.
 
+A successful Installation upgrade does not mutate an existing Profile or force
+an administrator to recreate an already-approved Provider. Once the new image is
+healthy and `100% ACTIVE` with complete supply-chain receipts,
+`POST /admin/agent-profiles/{id}/rebind-installation` creates a `READY` immutable
+Profile successor that copies the active Provider, credential, model, budget,
+permission and fallback bindings and changes only the Installation pin. The
+source Profile, every default and all queued/running locks remain unchanged.
+`SecurityAdmin` must activate the successor, after which the owning scope admin
+must explicitly select its exact revision for new work. Disabling either shared
+Profile does not disable the Provider while another non-terminal Profile still
+references it.
+
 Local testing intentionally does not contact this Connector. Production health reports `adminControlPlaneBroker=CONFIGURED` only when its fixed origin is present; a missing connector leaves all production Agent administration fail-closed.
 
 ## Operational health and usage

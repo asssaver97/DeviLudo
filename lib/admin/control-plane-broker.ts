@@ -150,7 +150,7 @@ export function resolveAdminControlPlanePath(methodInput: string, segments: read
     : method === "POST"
       ? /^agent-rollouts\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:advance|rollback)$/.test(key)
         || /^agent-installations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:drain|retire)$/.test(key)
-        || /^agent-profiles\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:validate|activate|disable)$/.test(key)
+        || /^agent-profiles\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:validate|activate|disable|rebind-installation)$/.test(key)
         || /^credentials\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:rotate|revoke)$/.test(key)
         || /^inference-requests\/[a-f0-9-]{36}\/reconcile$/i.test(key)
         || /^spec-model-generations\/[a-f0-9]{64}\/reconcile$/i.test(key)

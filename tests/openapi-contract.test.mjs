@@ -76,6 +76,7 @@ test("Agent administration mutations publish exact request-body contracts", () =
   assert.match(operationBlock("/admin/agent-versions/discover", "post"), /AgentVersionDiscovery/);
   assert.match(operationBlock("/admin/agent-versions/deprecate", "post"), /VersionAction/);
   assert.match(operationBlock("/admin/agent-installations", "post"), /AgentInstallationDraft/);
+  assert.match(operationBlock("/admin/agent-profiles/{id}/rebind-installation", "post"), /AgentProfileInstallationRebind/);
   assert.match(operationBlock("/admin/credentials/{id}/rotate", "post"), /CredentialRotation/);
   assert.match(operationBlock("/settings/agents/credentials/{id}/rotate", "post"), /CredentialRotation/);
   assert.match(operationBlock("/settings/agents/credentials/{id}/revoke", "post"), /EmptyObject/);
@@ -91,7 +92,7 @@ test("Agent administration mutations publish exact request-body contracts", () =
     "/admin/credentials/{id}/revoke",
   ]) assert.match(operationBlock(path, "post"), /EmptyObject/, path);
 
-  for (const schema of ["CredentialDraft", "CredentialRotation", "AgentVersionDiscovery", "AgentInstallationDraft"]) {
+  for (const schema of ["CredentialDraft", "CredentialRotation", "AgentVersionDiscovery", "AgentInstallationDraft", "AgentProfileInstallationRebind"]) {
     assert.match(schemaBlock(schema), /additionalProperties: false/, schema);
   }
 });

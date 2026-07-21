@@ -1025,17 +1025,20 @@ export class AdminService {
         if (actor.role !== "SecurityAdmin") {
           throw new ServiceProblem(403, "SECURITY_APPROVAL_REQUIRED", "SecurityAdmin must activate a third-party Provider endpoint");
         }
-        if (profile.state !== "READY" || provider.state !== "READY" || !providerProbePassed(provider)) {
+        if (profile.state !== "READY" || !["READY", "ACTIVE"].includes(provider.state) || !providerProbePassed(provider)) {
           throw new ServiceProblem(409, "PROVIDER_PROBE_REQUIRED", "All Provider probes must pass before activation");
         }
         profile.state = "ACTIVE";
-        provider.state = "ACTIVE";
+        if (provider.state === "READY") provider.state = "ACTIVE";
       } else {
         if (profile.state === "SUPERSEDED") {
           throw new ServiceProblem(409, "PROFILE_IMMUTABLE", "A superseded Profile revision cannot be changed");
         }
         profile.state = "DISABLED";
-        provider.state = "DISABLED";
+        const providerStillReferenced = [...state.profiles.values()].some((candidate) =>
+          candidate.id !== profile.id && candidate.providerRevisionId === provider.id
+          && !["SUPERSEDED", "DISABLED"].includes(candidate.state));
+        if (!providerStillReferenced) provider.state = "DISABLED";
       }
       this.audit(state, `AGENT_PROFILE_${action.toUpperCase()}`, profile.id, actor, {
         previousState,
@@ -1046,6 +1049,103 @@ export class AdminService {
         priorActiveConfigurationPreserved: false,
       });
       return { profile, provider, affectsQueuedOrRunningTasks: false };
+    });
+  }
+
+  async rebindProfileInstallation(
+    profileId: string,
+    body: Record<string, unknown>,
+    actor: RequestActor,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    assertAllowedFields(body, ["installationId"]);
+    const installationId = requiredString(body, "installationId", 180);
+    return this.mutate(actor, (state) => {
+      const source = requireProfile(state, profileId);
+      assertScopeRole(source.scope, source.scopeId, actor);
+      if (source.state !== "ACTIVE") {
+        throw new ServiceProblem(409, "SOURCE_PROFILE_NOT_ACTIVE", "Only an active immutable Profile can be rebound to an upgraded Installation");
+      }
+      if (source.installationId === installationId) {
+        throw new ServiceProblem(409, "INSTALLATION_ALREADY_BOUND", "Profile already uses the requested Installation");
+      }
+      const provider = requireProvider(state, source.providerRevisionId);
+      const credential = state.credentials.get(source.credentialVersionId);
+      if (provider.agent !== source.agent || provider.state !== "ACTIVE" || !providerProbePassed(provider)
+        || provider.credentialVersionId !== source.credentialVersionId) {
+        throw new ServiceProblem(409, "PROVIDER_NOT_REUSABLE", "Installation rebind requires the source Profile's active, fully probed Provider");
+      }
+      if (!credential || credential.state !== "ACTIVE") {
+        throw new ServiceProblem(409, "CREDENTIAL_NOT_ACTIVE", "Installation rebind requires the source Profile's active credential version");
+      }
+      assertProfileCredential(source.scope, source.scopeId, credential, actor);
+      assertFallbackProfile(state, source.fallbackProfileRevisionId, source.agent, source.scope, source.scopeId);
+
+      const installation = state.installations.get(installationId);
+      const version = installation ? state.versions.get(installation.agentVersionId) : undefined;
+      const installationReady = installation?.agent === source.agent && installation.state === "ACTIVE"
+        && installation.health === "HEALTHY" && installation.rolloutPercent === 100
+        && installation.selfUpdateDisabled === true && !!installation.imageDigest && !!installation.workerImageId
+        && !!installation.buildReceiptId && !!installation.buildReceiptDigest && !!installation.activatedAt;
+      const versionReady = version?.agent === source.agent && ["APPROVED", "DEPRECATED"].includes(version.state)
+        && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
+        && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest;
+      if (!installationReady || !versionReady) {
+        throw new ServiceProblem(
+          409,
+          "INSTALLATION_NOT_SERVING_READY",
+          "Installation rebind requires a healthy 100% active WorkerImage with complete supply-chain attestation",
+        );
+      }
+
+      const id = reboundProfileRevisionId(source, installationId);
+      const existing = state.profiles.get(id);
+      if (existing) {
+        if (existing.revision !== source.revision + 1 || existing.installationId !== installationId
+          || existing.providerRevisionId !== source.providerRevisionId
+          || existing.credentialVersionId !== source.credentialVersionId
+          || existing.fallbackProfileRevisionId !== source.fallbackProfileRevisionId
+          || existing.scope !== source.scope || existing.scopeId !== source.scopeId || existing.agent !== source.agent) {
+          throw new ServiceProblem(409, "PROFILE_REBIND_CONFLICT", "An immutable Profile rebind successor conflicts with this request");
+        }
+        return {
+          profile: existing,
+          provider: { id: provider.id, state: provider.state, probe: provider.probe },
+          sourceProfileRevisionId: source.id,
+          providerReused: true,
+          requiresSecurityActivation: existing.state === "READY",
+          defaultsChanged: false,
+          affectsQueuedOrRunningTasks: false,
+        };
+      }
+      const profile: ProfileRevisionRecord = {
+        ...source,
+        id,
+        revision: source.revision + 1,
+        installationId,
+        state: "READY",
+        createdAt: new Date().toISOString(),
+      };
+      state.profiles.set(profile.id, profile);
+      this.audit(state, "AGENT_PROFILE_INSTALLATION_REBOUND", profile.id, actor, {
+        sourceProfileRevisionId: source.id,
+        previousInstallationId: source.installationId,
+        installationId,
+        providerRevisionId: provider.id,
+        profileState: profile.state,
+        providerReused: true,
+        requiresSecurityActivation: true,
+        defaultsChanged: false,
+        affectsQueuedOrRunningTasks: false,
+      });
+      return {
+        profile,
+        provider: { id: provider.id, state: provider.state, probe: provider.probe },
+        sourceProfileRevisionId: source.id,
+        providerReused: true,
+        requiresSecurityActivation: true,
+        defaultsChanged: false,
+        affectsQueuedOrRunningTasks: false,
+      };
     });
   }
 
@@ -1509,6 +1609,14 @@ function rollbackProfileRevisionId(
     .digest("hex")
     .slice(0, 24);
   return `profile-installation-rollback-${digest}-r${profile.revision + 1}`;
+}
+
+function reboundProfileRevisionId(profile: ProfileRevisionRecord, installationId: string): string {
+  const digest = createHash("sha256")
+    .update(`profile-installation-rebind\0${profile.id}\0${profile.installationId}\0${installationId}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `profile-installation-rebind-${digest}-r${profile.revision + 1}`;
 }
 
 function mostRecentlyActivatedInstallation(

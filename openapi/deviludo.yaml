@@ -315,6 +315,19 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/AgentProfileDraft" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/agent-profiles/{id}/rebind-installation:
+    post:
+      operationId: rebindAgentProfileInstallation
+      description: Creates a READY immutable Profile revision that reuses the source active Provider and credential while pinning a fully active, supply-chain-attested upgraded Installation. The source Profile, defaults, and queued or running tasks remain unchanged; SecurityAdmin activation is still required.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProfileInstallationRebind" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-profiles/{id}/validate:
     post:
       operationId: validateAgentProfile
@@ -1527,6 +1540,16 @@ components:
         maxTurns: { type: integer, minimum: 1, maximum: 200 }
         timeoutSeconds: { type: integer, minimum: 60, maximum: 14400 }
         fallbackProfileRevisionId: { type: [string, "null"], description: Explicit same-Agent fallback only. }
+    AgentProfileInstallationRebind:
+      type: object
+      additionalProperties: false
+      required: [installationId]
+      properties:
+        installationId:
+          type: string
+          minLength: 1
+          maxLength: 180
+          description: Exact healthy ACTIVE Installation at 100% rollout with a supply-chain-attested immutable WorkerImage.
     TenantAgentProfileDraft:
       type: object
       additionalProperties: false

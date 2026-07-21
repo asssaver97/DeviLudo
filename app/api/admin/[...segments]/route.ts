@@ -40,6 +40,10 @@ type LocalRole = typeof LOCAL_ROLES[number];
 type LocalActor = Readonly<{ role: LocalRole; actorId: string; tenantId: string | null; projectId: string | null }>;
 const EXACT_AGENT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const LOCAL_SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
+const PROVIDER_REQUIRED_CHECKS = Object.freeze([
+  "authentication", "modelExistence", "streaming", "toolCalling", "cancellation",
+  "usage", "timeout", "minimalReasoning", "dnsPinning", "redirectRevalidation",
+]);
 const PROFILE_DRAFT_FIELDS = Object.freeze([
   "agent", "installationId", "credentialVersionId", "scope", "scopeId", "baseUrl", "authentication",
   "primaryModel", "planningModel", "smallFastModel", "subagentModel",
@@ -778,6 +782,120 @@ export async function POST(request: Request, context: RouteContext) {
       });
     }
 
+    const rebindProfileMatch = /^agent-profiles\/([^/]+)\/rebind-installation$/.exec(key);
+    if (rebindProfileMatch) {
+      const role = requireRole(request, PROFILE_ROLES);
+      const actor = localActor(request, role);
+      assertAllowedBodyFields(body, ["installationId"]);
+      const sourceProfileId = rebindProfileMatch[1] ?? "";
+      const installationId = requireString(body, "installationId", 180);
+      const snapshot = getDemoStore();
+      const source = snapshot.profiles.find((item) => item.id === sourceProfileId);
+      if (!source) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
+      assertLocalProfileActor(actor, source.scope, source.scopeId);
+      if (source.state !== "ACTIVE") {
+        throw new HttpProblem(409, "SOURCE_PROFILE_NOT_ACTIVE", "Only an active immutable Profile can be rebound to an upgraded Installation");
+      }
+      if (source.installationId === installationId) {
+        throw new HttpProblem(409, "INSTALLATION_ALREADY_BOUND", "Profile already uses the requested Installation");
+      }
+      const provider = snapshot.providers.find((item) => item.id === source.providerRevisionId);
+      if (!provider || provider.agent !== source.agent || provider.state !== "ACTIVE"
+        || provider.credentialVersionId !== source.credentialVersionId || !demoProviderProbePassed(provider)) {
+        throw new HttpProblem(409, "PROVIDER_NOT_REUSABLE", "Installation rebind requires the source Profile's active, fully probed Provider");
+      }
+      const credential = snapshot.credentials.find((item) => item.id === source.credentialVersionId && item.state === "ACTIVE");
+      const fixtureCredential = source.scope === "platform" && provider.state === "ACTIVE";
+      if (!credential && !fixtureCredential) {
+        throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Installation rebind requires the source Profile's active credential version");
+      }
+      if (credential) assertLocalProfileCredential(actor, source.scope, source.scopeId, credential);
+      if (source.fallbackProfileRevisionId) {
+        const fallback = snapshot.profiles.find((item) => item.id === source.fallbackProfileRevisionId);
+        if (!fallback || fallback.state !== "ACTIVE" || fallback.agent !== source.agent
+          || fallback.scope !== source.scope || fallback.scopeId !== source.scopeId) {
+          throw new HttpProblem(409, "FALLBACK_NOT_SELECTABLE", "The source Profile fallback is no longer active in the same Agent scope");
+        }
+      }
+      const installation = snapshot.installations.find((item) => item.id === installationId);
+      const versionKey = installation ? `${installation.agent}@${installation.version}` : "";
+      const versionState = snapshot.agentVersions[versionKey];
+      const versionMetadata = snapshot.agentVersionMetadata[versionKey];
+      if (!installation || installation.agent !== source.agent || installation.state !== "ACTIVE"
+        || installation.health !== "HEALTHY" || installation.rolloutPercent !== 100 || !installation.activatedAt
+        || !installation.imageDigest || !installation.buildReceiptId || !installation.buildReceiptDigest
+        || !versionState || !["APPROVED", "DEPRECATED"].includes(versionState)
+        || !versionMetadata?.signatureVerified || versionMetadata.scan !== "PASS"
+        || !versionMetadata.validationReceiptId || !versionMetadata.validationReceiptDigest
+        || !versionMetadata.supplyChainEvidenceDigest) {
+        throw new HttpProblem(409, "INSTALLATION_NOT_SERVING_READY", "Installation rebind requires a healthy 100% active WorkerImage with complete supply-chain attestation");
+      }
+      const digest = await fingerprintSecret(new TextEncoder().encode(
+        `profile-installation-rebind\0${source.id}\0${source.installationId}\0${installationId}`,
+      ));
+      const successorId = `profile-installation-rebind-${digest.slice(7, 31)}-r${source.revision + 1}`;
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const currentSource = store.profiles.find((item) => item.id === sourceProfileId);
+        const currentProvider = currentSource
+          ? store.providers.find((item) => item.id === currentSource.providerRevisionId)
+          : undefined;
+        if (!currentSource || currentSource.state !== "ACTIVE" || !currentProvider || currentProvider.state !== "ACTIVE"
+          || !demoProviderProbePassed(currentProvider)) {
+          throw new HttpProblem(409, "PROFILE_REBIND_RACE", "Source Profile or Provider changed before the rebind could commit");
+        }
+        const existing = store.profiles.find((item) => item.id === successorId);
+        if (existing) {
+          if (existing.revision !== currentSource.revision + 1 || existing.installationId !== installationId
+            || existing.providerRevisionId !== currentSource.providerRevisionId
+            || existing.credentialVersionId !== currentSource.credentialVersionId
+            || existing.fallbackProfileRevisionId !== currentSource.fallbackProfileRevisionId
+            || existing.scope !== currentSource.scope || existing.scopeId !== currentSource.scopeId
+            || existing.agent !== currentSource.agent) {
+            throw new HttpProblem(409, "PROFILE_REBIND_CONFLICT", "An immutable Profile rebind successor conflicts with this request");
+          }
+          return {
+            profile: existing,
+            provider: { id: currentProvider.id, state: currentProvider.state, probe: currentProvider.probe },
+            sourceProfileRevisionId: currentSource.id,
+            providerReused: true,
+            requiresSecurityActivation: existing.state === "READY",
+            defaultsChanged: false,
+            affectsQueuedOrRunningTasks: false,
+          };
+        }
+        const profile: DemoProfile = {
+          ...currentSource,
+          id: successorId,
+          revision: currentSource.revision + 1,
+          installationId,
+          state: "READY",
+          createdAt: new Date().toISOString(),
+        };
+        store.profiles.push(profile);
+        appendDemoAudit("AGENT_PROFILE_INSTALLATION_REBOUND", profile.id, actor.actorId, {
+          sourceProfileRevisionId: currentSource.id,
+          previousInstallationId: currentSource.installationId,
+          installationId,
+          providerRevisionId: currentProvider.id,
+          profileState: profile.state,
+          providerReused: true,
+          requiresSecurityActivation: true,
+          defaultsChanged: false,
+          affectsQueuedOrRunningTasks: false,
+        });
+        return {
+          profile,
+          provider: { id: currentProvider.id, state: currentProvider.state, probe: currentProvider.probe },
+          sourceProfileRevisionId: currentSource.id,
+          providerReused: true,
+          requiresSecurityActivation: true,
+          defaultsChanged: false,
+          affectsQueuedOrRunningTasks: false,
+        };
+      });
+    }
+
     const profileMatch = /^agent-profiles\/([^/]+)\/(validate|activate|disable)$/.exec(key);
     if (profileMatch) {
       const role = requireRole(request, profileMatch[2] === "activate" ? SECURITY_ROLES : PROFILE_ROLES);
@@ -805,12 +923,16 @@ export async function POST(request: Request, context: RouteContext) {
         const previousState = profile.state;
         const previousProviderState = provider.state;
         if (action === "activate") {
-          if (profile.state !== "READY" || provider.state !== "READY") throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
+          if (profile.state !== "READY" || !["READY", "ACTIVE"].includes(provider.state) || !demoProviderProbePassed(provider)) {
+            throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
+          }
           profile.state = "ACTIVE";
-          provider.state = "ACTIVE";
+          if (provider.state === "READY") provider.state = "ACTIVE";
         } else {
           profile.state = "DISABLED";
-          provider.state = "DISABLED";
+          const providerStillReferenced = store.profiles.some((candidate) => candidate.id !== profile.id
+            && candidate.providerRevisionId === provider.id && !["SUPERSEDED", "DISABLED"].includes(candidate.state));
+          if (!providerStillReferenced) provider.state = "DISABLED";
         }
         appendDemoAudit(`AGENT_PROFILE_${action?.toUpperCase()}`, profile.id, actor.actorId, {
           providerRevisionId: provider.id,
@@ -1140,6 +1262,12 @@ function selectDemoRollbackInstallation(
     return creationOrder || right.id.localeCompare(left.id);
   });
   return candidates[0] ?? null;
+}
+
+function demoProviderProbePassed(provider: DemoProvider): boolean {
+  const keys = Object.keys(provider.probe);
+  return keys.length === PROVIDER_REQUIRED_CHECKS.length
+    && PROVIDER_REQUIRED_CHECKS.every((check) => provider.probe[check] === "PASS");
 }
 
 async function mutate<T>(lease: LocalAdminStateLease, idempotency: string, operation: () => T): Promise<Response> {

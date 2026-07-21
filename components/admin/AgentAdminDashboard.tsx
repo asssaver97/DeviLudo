@@ -436,6 +436,64 @@ export default function AgentAdminDashboard() {
     }
   };
 
+  const rebindInstallationProfile = async (installationId: string) => {
+    if (!permissions.manageInstallations) {
+      notify("需要 PlatformAgentAdmin 为升级安装生成新 Profile", "warning");
+      return;
+    }
+    const installation = installations.find((item) => item.id === installationId);
+    const candidates = profiles.filter((profile) => profile.agent === installation?.agent
+      && profile.scope === "platform" && profile.scopeId === "global" && profile.state === "ACTIVE"
+      && profile.installationId !== installationId);
+    const source = candidates.find((profile) => defaults.platform === profile.id) ?? candidates[0];
+    if (!source) {
+      notify("没有可复用的 ACTIVE 平台 Profile；请先配置并激活 Provider", "warning");
+      return;
+    }
+    try {
+      await adminRequest(`agent-profiles/${encodeURIComponent(source.id)}/rebind-installation`, {
+        method: "POST",
+        role,
+        body: { installationId },
+      });
+      await refreshAdminState();
+      await refreshAudit();
+      notify("升级 Profile 已生成并锁定新镜像；等待 SecurityAdmin 激活", "neutral");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "升级 Profile 生成失败", "warning");
+    }
+  };
+
+  const activateInstallationProfile = async (profileId: string) => {
+    if (!permissions.activatePlatformProvider) {
+      notify("升级 Profile 激活需要 SecurityAdmin", "warning");
+      return;
+    }
+    try {
+      await adminRequest(`agent-profiles/${encodeURIComponent(profileId)}/activate`, { method: "POST", role });
+      await refreshAdminState();
+      await refreshAudit();
+      notify("升级 Profile 已激活；默认选择尚未改变", "success");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "升级 Profile 激活失败", "warning");
+    }
+  };
+
+  const selectPlatformProfile = async (profileId: string) => {
+    if (!permissions.changePlatformDefault) {
+      notify("切换平台默认需要 PlatformAgentAdmin", "warning");
+      return;
+    }
+    try {
+      await adminRequest("agent-defaults/platform", { method: "PUT", role, body: { profileRevisionId: profileId } });
+      await refreshAdminState();
+      await refreshAudit();
+      notify("平台默认已精确切换到升级 Profile，仅影响新任务");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "平台默认切换失败", "warning");
+    }
+  };
+
   const changeDefaultAgent = async (agent: AgentKind) => {
     if (!canOperateVersions) {
       notify("仅 PlatformAgentAdmin 可修改全局默认", "warning");
@@ -571,7 +629,13 @@ export default function AgentAdminDashboard() {
         <div className={styles.content}>
           {activeTab === "overview" && <OverviewTab catalog={catalog} versions={versions} installations={installations} defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
-          {activeTab === "deployments" && <DeploymentsTab installations={installations} canOperate={permissions.manageInstallations && !adminLoading && !adminError} onAdvance={advanceRollout} onRollback={rollback} onLifecycle={transitionInstallation} />}
+          {activeTab === "deployments" && <DeploymentsTab installations={installations} profiles={profiles} defaults={defaults}
+            canOperate={permissions.manageInstallations && !adminLoading && !adminError}
+            canActivateProfile={permissions.activatePlatformProvider && !adminLoading && !adminError}
+            canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError}
+            onAdvance={advanceRollout} onRollback={rollback} onLifecycle={transitionInstallation}
+            onRebindProfile={rebindInstallationProfile} onActivateProfile={activateInstallationProfile}
+            onSelectDefault={selectPlatformProfile} />}
           {activeTab === "providers" && <ProvidersTab key={providerEditorKey} role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
             providers={providers} credentials={credentials}
             production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }}
@@ -711,12 +775,20 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
   );
 }
 
-function DeploymentsTab({ installations, canOperate, onAdvance, onRollback, onLifecycle }: {
+function DeploymentsTab({ installations, profiles, defaults, canOperate, canActivateProfile, canChangeDefault,
+  onAdvance, onRollback, onLifecycle, onRebindProfile, onActivateProfile, onSelectDefault }: {
   installations: AgentInstallation[];
+  profiles: AdminState["profiles"];
+  defaults: AdminState["defaults"];
   canOperate: boolean;
+  canActivateProfile: boolean;
+  canChangeDefault: boolean;
   onAdvance: (installationId: string) => void;
   onRollback: (installationId: string) => void;
   onLifecycle: (installationId: string, action: "drain" | "retire") => void;
+  onRebindProfile: (installationId: string) => void;
+  onActivateProfile: (profileId: string) => void;
+  onSelectDefault: (profileId: string) => void;
 }) {
   const trustedImageAvailable = installations.some((installation) => Boolean(installation.imageDigest && installation.buildReceiptId)
     && installation.health === "HEALTHY" && ["READY", "CANARY", "ACTIVE"].includes(installation.state));
@@ -728,6 +800,16 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback, onLi
         {installations.map((installation) => {
           const percent = installation.rolloutPercent;
           const next = percent < 5 ? "5%" : percent < 25 ? "25%" : "100%";
+          const platformProfiles = profiles.filter((profile) => profile.agent === installation.agent
+            && profile.scope === "platform" && profile.scopeId === "global" && profile.installationId === installation.id);
+          const readyProfile = platformProfiles.find((profile) => profile.state === "READY");
+          const activeProfile = platformProfiles.find((profile) => profile.state === "ACTIVE");
+          const hasSourceProfile = profiles.some((profile) => profile.agent === installation.agent
+            && profile.scope === "platform" && profile.scopeId === "global" && profile.state === "ACTIVE"
+            && profile.installationId !== installation.id);
+          const canCreateUpgradeProfile = installation.state === "ACTIVE" && installation.health === "HEALTHY"
+            && percent === 100 && Boolean(installation.imageDigest && installation.buildReceiptId)
+            && hasSourceProfile && !readyProfile && !activeProfile;
           return (
             <div className={styles.installationRow} key={installation.id}>
               <AgentMark kind={installation.agent} />
@@ -755,6 +837,10 @@ function DeploymentsTab({ installations, canOperate, onAdvance, onRollback, onLi
                 <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || !["CANARY", "ACTIVE"].includes(installation.state) || percent === 0}>回滚</button>
                 {installation.state === "ACTIVE" && <button className={styles.secondaryButton} type="button" onClick={() => onLifecycle(installation.id, "drain")} disabled={!canOperate}>排空</button>}
                 {installation.state === "DRAINING" && <button className={styles.secondaryButton} type="button" onClick={() => onLifecycle(installation.id, "retire")} disabled={!canOperate}>确认退役</button>}
+                {canCreateUpgradeProfile && <button className={styles.secondaryButton} type="button" onClick={() => onRebindProfile(installation.id)} disabled={!canOperate} title="复用已批准 Provider，不复制或暴露 API Key">生成升级 Profile</button>}
+                {readyProfile && <button className={styles.primaryButton} type="button" onClick={() => onActivateProfile(readyProfile.id)} disabled={!canActivateProfile} title={canActivateProfile ? "激活后仍不会自动切换默认" : "需要 SecurityAdmin"}>激活升级 Profile</button>}
+                {activeProfile && defaults.platform !== activeProfile.id && <button className={styles.primaryButton} type="button" onClick={() => onSelectDefault(activeProfile.id)} disabled={!canChangeDefault} title={canChangeDefault ? "仅影响新任务" : "需要 PlatformAgentAdmin"}>设为平台默认</button>}
+                {activeProfile && defaults.platform === activeProfile.id && <StatusPill tone="success">当前默认 Profile</StatusPill>}
               </div>
             </div>
           );

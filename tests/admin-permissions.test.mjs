@@ -83,6 +83,18 @@ test("Agent version discovery accepts an exact version and reuses the observed l
   assert.match(source, /row\.releaseNotesUrl/);
 });
 
+test("Agent installation upgrades require separate Profile creation, security activation and exact default selection", () => {
+  const source = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /agent-profiles\/\$\{encodeURIComponent\(source\.id\)\}\/rebind-installation/);
+  assert.match(source, /body: \{ installationId \}/);
+  assert.match(source, /生成升级 Profile/);
+  assert.match(source, /激活升级 Profile/);
+  assert.match(source, /设为平台默认/);
+  assert.match(source, /adminRequest\("agent-defaults\/platform", \{ method: "PUT", role, body: \{ profileRevisionId \} \}\)/);
+  assert.match(source, /默认选择尚未改变/);
+});
+
 test("Agent version links accept only the fixed official source and release-note hosts", () => {
   assert.equal(
     trustedAgentVersionUrl("claude-code", "2.1.201", "source", "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.201.tgz"),

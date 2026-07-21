@@ -401,6 +401,8 @@ test("Agent administration connector rejects cross-origin writes and credential 
     "/admin/agent-installations/claude-code-installation-2-1-18/drain");
   assert.equal(resolveAdminControlPlanePath("POST", ["agent-installations", "claude-code-installation-2-1-18", "retire"]),
     "/admin/agent-installations/claude-code-installation-2-1-18/retire");
+  assert.equal(resolveAdminControlPlanePath("POST", ["agent-profiles", "profile-platform-claude-r1", "rebind-installation"]),
+    "/admin/agent-profiles/profile-platform-claude-r1/rebind-installation");
   assert.equal(resolveAdminControlPlanePath("POST", ["spec-model-generations", "a".repeat(64), "reconcile"]),
     `/admin/spec-model-generations/${"a".repeat(64)}/reconcile`);
   assert.equal(resolveAdminControlPlanePath("GET", ["spec-model-generations", "11111111-1111-4111-8111-111111111111", "a".repeat(64), "reconciliation"]),

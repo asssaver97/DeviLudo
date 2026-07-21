@@ -264,6 +264,114 @@ test("exact Agent supply-chain and canary routes are independently injectable", 
 
 });
 
+test("an active Profile can reuse its approved Provider while rebinding to an upgraded Installation", async () => {
+  for (const [url, key, payload] of [
+    ["/admin/agent-versions/discover", "discover-claude-profile-rebind", { agent: "claude-code", version: "2.1.19" }],
+    ["/admin/agent-versions/approve", "approve-claude-profile-rebind", { id: "claude-code@2.1.19" }],
+  ] as const) {
+    const response = await inject({ method: "POST", url, role: "PlatformAgentAdmin", key, payload });
+    assert.equal(response.statusCode, 201, response.body);
+  }
+  const installation = await inject({
+    method: "POST",
+    url: "/admin/agent-installations",
+    role: "PlatformAgentAdmin",
+    key: "install-claude-profile-rebind",
+    payload: {
+      agent: "claude-code",
+      version: "2.1.19",
+      workerPool: "development-linux-profile-rebind",
+      adapterVersion: "1.1.0",
+    },
+  });
+  assert.equal(installation.statusCode, 201, installation.body);
+  const installationId = installation.json().data.id as string;
+  for (const [index, expected] of [5, 25, 100].entries()) {
+    const rollout = await inject({
+      method: "POST",
+      url: `/admin/agent-rollouts/${installationId}/advance`,
+      role: "PlatformAgentAdmin",
+      key: `advance-claude-profile-rebind-${index}`,
+      payload: {},
+    });
+    assert.equal(rollout.statusCode, 201, rollout.body);
+    assert.equal(rollout.json().data.installation.rolloutPercent, expected);
+  }
+
+  const sourceProfileId = "profile-platform-claude-r1";
+  const rebound = await inject({
+    method: "POST",
+    url: `/admin/agent-profiles/${sourceProfileId}/rebind-installation`,
+    role: "PlatformAgentAdmin",
+    key: "rebind-claude-profile-installation",
+    payload: { installationId },
+  });
+  assert.equal(rebound.statusCode, 201, rebound.body);
+  const reboundData = rebound.json().data;
+  const reboundProfileId = reboundData.profile.id as string;
+  assert.equal(reboundData.profile.state, "READY");
+  assert.equal(reboundData.profile.installationId, installationId);
+  assert.equal(reboundData.profile.providerRevisionId, "provider-platform-claude-r1");
+  assert.equal(reboundData.provider.state, "ACTIVE");
+  assert.equal(reboundData.sourceProfileRevisionId, sourceProfileId);
+  assert.equal(reboundData.providerReused, true);
+  assert.equal(reboundData.requiresSecurityActivation, true);
+  assert.equal(reboundData.defaultsChanged, false);
+  assert.equal(reboundData.affectsQueuedOrRunningTasks, false);
+
+  const beforeActivation = await inject({ method: "GET", url: "/admin/agents", role: "SecurityAdmin" });
+  assert.equal(beforeActivation.json().data.defaults.platform, sourceProfileId);
+  assert.equal(beforeActivation.json().data.profiles.find((item: { id: string }) => item.id === sourceProfileId).state, "ACTIVE");
+
+  const denied = await inject({
+    method: "POST",
+    url: `/admin/agent-profiles/${reboundProfileId}/activate`,
+    role: "PlatformAgentAdmin",
+    key: "activate-rebound-profile-denied",
+    payload: {},
+  });
+  assert.equal(denied.statusCode, 403);
+  const activated = await inject({
+    method: "POST",
+    url: `/admin/agent-profiles/${reboundProfileId}/activate`,
+    role: "SecurityAdmin",
+    key: "activate-rebound-profile",
+    payload: {},
+  });
+  assert.equal(activated.statusCode, 201, activated.body);
+  assert.equal(activated.json().data.profile.state, "ACTIVE");
+  assert.equal(activated.json().data.provider.state, "ACTIVE");
+
+  const selected = await inject({
+    method: "PUT",
+    url: "/admin/agent-defaults/platform",
+    role: "PlatformAgentAdmin",
+    key: "select-rebound-profile",
+    payload: { profileRevisionId: reboundProfileId },
+  });
+  assert.equal(selected.statusCode, 200, selected.body);
+  assert.equal(selected.json().data.newTasksOnly, true);
+  const restored = await inject({
+    method: "PUT",
+    url: "/admin/agent-defaults/platform",
+    role: "PlatformAgentAdmin",
+    key: "restore-source-profile-after-rebind-test",
+    payload: { profileRevisionId: sourceProfileId },
+  });
+  assert.equal(restored.statusCode, 200, restored.body);
+
+  const disabled = await inject({
+    method: "POST",
+    url: `/admin/agent-profiles/${reboundProfileId}/disable`,
+    role: "PlatformAgentAdmin",
+    key: "disable-rebound-profile",
+    payload: {},
+  });
+  assert.equal(disabled.statusCode, 201, disabled.body);
+  assert.equal(disabled.json().data.profile.state, "DISABLED");
+  assert.equal(disabled.json().data.provider.state, "ACTIVE", "shared Provider must remain active for the source Profile");
+});
+
 test("credentials never echo plaintext and Provider activation is a separate security gate", async () => {
   const plaintext = "fixture-secret-that-must-never-be-returned";
   const credential = await inject({

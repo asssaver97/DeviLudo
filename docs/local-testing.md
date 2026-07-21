@@ -77,6 +77,7 @@ npm run local:smoke
 - 本地 Agent 管理写入追加到不可修改的 D1 修订；停止并重新启动 `local:dev` 后，版本、安装、Profile、默认选择、幂等响应与脱敏审计仍可恢复；
 - `/api/admin/agent-versions/discover` 接受精确稳定版或预发布版本、拒绝浮动别名，且发现候选不会自动激活；
 - `/api/admin/agent-versions/deprecate` 只接受已批准版本，并禁止后续 WorkerImage 构建而不改变已有安装；
+- 新 WorkerImage 到达健康 `100% ACTIVE` 后，可从当前 ACTIVE Profile 生成只更换 Installation 的 `READY` 升级 Profile；Provider 与凭据不复制，SecurityAdmin 激活和 PlatformAgentAdmin 精确切换默认保持为两个独立步骤，旧默认与已锁定任务在切换前后均不漂移；
 - 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
 - 租户 BYOK 通过真实页面 API 创建新不可变版本、停止旧版本签发并撤销指定旧版本；响应和投影均不包含明文或 SecretRef；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。

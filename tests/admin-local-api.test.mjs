@@ -542,6 +542,85 @@ test("local default selection rejects an active Profile whose Installation has n
   assert.equal(store.defaults.platform, "profile-codex-platform-r2");
 });
 
+test("local upgrade workflow reuses an active Provider without changing defaults until explicit selection", async () => {
+  const store = resetDemoStore();
+  const sourceProfileId = "profile-claude-platform-r5";
+  const sourceProviderId = "provider-claude-platform-r3";
+  const version = "2.1.16";
+
+  const discovered = await POST(
+    request("agent-versions/discover", "POST", "PlatformAgentAdmin", { agent: "claude-code", version }),
+    context("agent-versions/discover"),
+  );
+  assert.equal(discovered.status, 201);
+  const approved = await POST(
+    request("agent-versions/approve", "POST", "PlatformAgentAdmin", { id: `claude-code@${version}` }),
+    context("agent-versions/approve"),
+  );
+  assert.equal(approved.status, 201);
+  const installed = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "claude-code", version, workerPool: "development-local-upgrade", adapterVersion: "1.3.1",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(installed.status, 201);
+  const installationId = (await installed.json()).data.id;
+  for (const expected of [5, 25, 100]) {
+    const path = `agent-rollouts/${installationId}/advance`;
+    const advanced = await POST(request(path, "POST", "PlatformAgentAdmin"), context(path));
+    assert.equal(advanced.status, 201);
+    assert.equal((await advanced.json()).data.percent, expected);
+  }
+
+  const rebindPath = `agent-profiles/${sourceProfileId}/rebind-installation`;
+  const rebound = await POST(
+    request(rebindPath, "POST", "PlatformAgentAdmin", { installationId }),
+    context(rebindPath),
+  );
+  assert.equal(rebound.status, 201);
+  const reboundData = (await rebound.json()).data;
+  const reboundProfileId = reboundData.profile.id;
+  assert.equal(reboundData.profile.state, "READY");
+  assert.equal(reboundData.profile.installationId, installationId);
+  assert.equal(reboundData.profile.providerRevisionId, sourceProviderId);
+  assert.equal(reboundData.provider.state, "ACTIVE");
+  assert.equal(reboundData.providerReused, true);
+  assert.equal(reboundData.requiresSecurityActivation, true);
+  assert.equal(reboundData.defaultsChanged, false);
+  assert.equal(reboundData.affectsQueuedOrRunningTasks, false);
+  assert.equal(store.defaults.platform, sourceProfileId);
+  assert.equal(store.profiles.find((item) => item.id === sourceProfileId)?.state, "ACTIVE");
+
+  const activatePath = `agent-profiles/${reboundProfileId}/activate`;
+  const denied = await POST(request(activatePath, "POST", "PlatformAgentAdmin"), context(activatePath));
+  assert.equal(denied.status, 403);
+  const activated = await POST(request(activatePath, "POST", "SecurityAdmin"), context(activatePath));
+  assert.equal(activated.status, 201);
+  const activatedData = (await activated.json()).data;
+  assert.equal(activatedData.profile.state, "ACTIVE");
+  assert.equal(activatedData.provider.state, "ACTIVE");
+  assert.equal(store.defaults.platform, sourceProfileId);
+
+  const selected = await PUT(
+    request("agent-defaults/platform", "PUT", "PlatformAgentAdmin", { profileRevisionId: reboundProfileId }),
+    context("agent-defaults/platform"),
+  );
+  assert.equal(selected.status, 200);
+  assert.equal(store.defaults.platform, reboundProfileId);
+  const restored = await PUT(
+    request("agent-defaults/platform", "PUT", "PlatformAgentAdmin", { profileRevisionId: sourceProfileId }),
+    context("agent-defaults/platform"),
+  );
+  assert.equal(restored.status, 200);
+
+  const disablePath = `agent-profiles/${reboundProfileId}/disable`;
+  const disabled = await POST(request(disablePath, "POST", "PlatformAgentAdmin"), context(disablePath));
+  assert.equal(disabled.status, 201);
+  assert.equal((await disabled.json()).data.provider.state, "ACTIVE");
+  assert.equal(store.providers.find((item) => item.id === sourceProviderId)?.state, "ACTIVE");
+});
+
 test("local rollout without a target degrades Profiles whose fallback chain would be broken", async () => {
   const store = resetDemoStore();
   const source = store.profiles.find((profile) => profile.id === "profile-claude-platform-r5");

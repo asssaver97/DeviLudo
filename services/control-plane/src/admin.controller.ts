@@ -69,6 +69,10 @@ export class AdminController {
     return this.service.createProfile(objectBody(body), actor(request));
   }
 
+  rebindProfileInstallation(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.rebindProfileInstallation(id, objectBody(body), actor(request));
+  }
+
   validateProfile(id: string, body: Record<string, unknown>, request: FastifyRequest) {
     assertAllowedFields(objectBody(body), []);
     return this.service.transitionProfile(id, "validate", actor(request));
@@ -149,6 +153,7 @@ applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAge
 applyRoute("drainInstallation", Post("agent-installations/:id/drain"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("retireInstallation", Post("agent-installations/:id/retire"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("createProfile", Post("agent-profiles"), PROFILE_ROLES, [Body(), Req()]);
+applyRoute("rebindProfileInstallation", Post("agent-profiles/:id/rebind-installation"), PROFILE_ROLES, [Param("id"), Body(), Req()]);
 applyRoute("validateProfile", Post("agent-profiles/:id/validate"), PROFILE_ROLES, [Param("id"), Body(), Req()]);
 applyRoute("activateProfile", Post("agent-profiles/:id/activate"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("disableProfile", Post("agent-profiles/:id/disable"), PROFILE_ROLES, [Param("id"), Body(), Req()]);
