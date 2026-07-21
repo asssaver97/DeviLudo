@@ -99,6 +99,13 @@ origin. Both public-origin variables point at the shared external platform
 origin whose selected paths are reverse-proxied to the isolated UI. The main Web process never receives a password, Guard code, MFA
 assertion, `config.vdf`, Vault key or KMS private key.
 
+The workload-authenticated `POST /v1/steam/enrollments/status` projection
+returns only the current tenant user's latest resumable enrollment or an
+unexpired ACTIVE build session. It exposes no password, Guard challenge,
+`config.vdf` content, credential version, fingerprint, or SecretRef. This lets
+the Web UI recover truthful connection state after refresh without storing a
+parallel browser-side session flag.
+
 Release authorization is a separate state machine. The internal Web route can
 only reserve an MFA challenge from an authoritative `WAITING_MFA` release
 snapshot. The isolated MFA UI completes the challenge under its own HttpOnly

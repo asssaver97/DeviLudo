@@ -11,6 +11,10 @@ test("Steam internal enrollment route requires workload identity and rejects cre
       if (request.headers["x-workload"] !== "web") throw new Error("unauthorized");
     },
     broker: {
+      async connectionStatus() {
+        return { state: "UNCONFIGURED", enrollmentId: null, enrollmentUrl: null, accountName: null,
+          allowedAppIds: [], permissions: [], verifiedAt: null, expiresAt: null };
+      },
       async begin(principal, idempotencyKey) {
         calls.push({ principal, idempotencyKey });
         return {
@@ -31,6 +35,15 @@ test("Steam internal enrollment route requires workload identity and rejects cre
   };
   const unauthorized = await server.inject({ method: "POST", url: "/v1/steam/enrollments", payload: body });
   assert.equal(unauthorized.statusCode, 401);
+
+  const status = await server.inject({
+    method: "POST",
+    url: "/v1/steam/enrollments/status",
+    headers: { "x-workload": "web" },
+    payload: body,
+  });
+  assert.equal(status.statusCode, 200);
+  assert.equal(status.json().state, "UNCONFIGURED");
 
   const accepted = await server.inject({
     method: "POST",
@@ -75,7 +88,10 @@ test("isolated Steam UI routes accept only binary secrets and wipe their request
         sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
       };
     },
-    broker: { async begin() { throw new Error("must not run"); } },
+    broker: {
+      async connectionStatus() { throw new Error("must not run"); },
+      async begin() { throw new Error("must not run"); },
+    },
     interactiveBroker: {
       async submitCredentials(input) {
         assert.equal(input.accountName, "deviludo_build_bot");

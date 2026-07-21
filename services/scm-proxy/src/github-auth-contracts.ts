@@ -42,7 +42,20 @@ export interface GitHubVerifiedInstallation {
   readonly verifiedAt: string;
 }
 
+export interface GitHubConnectionStatus {
+  readonly state: "CONNECTED" | "NOT_CONNECTED";
+  readonly installationCount: number;
+  readonly accountLogin: string | null;
+  readonly repositorySelection: "all" | "selected" | null;
+  readonly permissions: Readonly<Record<string, string>> | null;
+  readonly verifiedAt: string | null;
+}
+
 export interface GitHubAuthorizationStore {
+  connectionStatus(input: {
+    readonly tenantId: string;
+    readonly githubUserId: number;
+  }): Promise<GitHubConnectionStatus>;
   create(intent: GitHubAuthorizationIntent): Promise<void>;
   claim(input: {
     readonly stateDigest: string;

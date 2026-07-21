@@ -86,6 +86,14 @@ test("two-stage GitHub App authorization stores only state digests and persists 
   assert.equal(verifierInputs.length, 1);
   assert.equal(JSON.stringify(store.intents).includes("single-use-github-code"), false);
   assert.equal(JSON.stringify(store.intents).includes("session-binding-with-at-least-32-bytes-ada"), false);
+  assert.deepEqual(await broker.connectionStatus(principal), {
+    state: "CONNECTED",
+    installationCount: 1,
+    accountLogin: "north-dock",
+    repositorySelection: "selected",
+    permissions: { contents: "write", pull_requests: "write", metadata: "read" },
+    verifiedAt: "2099-01-01T00:00:00.000Z",
+  });
 });
 
 test("GitHub authorization state is bound to tenant, user, session, stage and expiry", async () => {
@@ -146,6 +154,13 @@ test("internal GitHub broker HTTP route is workload-authenticated and idempotent
   assert.equal(first.statusCode, 201);
   assert.deepEqual(replay.json(), first.json());
   assert.equal(store.intents.size, 1);
+  const disconnected = await server.inject({
+    method: "POST",
+    url: "/v1/github/connections/status",
+    payload: { principal },
+  });
+  assert.equal(disconnected.statusCode, 200);
+  assert.equal(disconnected.json().state, "NOT_CONNECTED");
   const installState = new URL(first.json().authorizeUrl).searchParams.get("state") ?? "";
 
   const setup = await server.inject({
@@ -165,6 +180,14 @@ test("internal GitHub broker HTTP route is workload-authenticated and idempotent
   assert.equal(completed.statusCode, 200);
   assert.deepEqual(completed.json(), { returnPath: "/settings/connections" });
   assert.doesNotMatch(completed.body, /single-use-code|session-binding/);
+  const connected = await server.inject({
+    method: "POST",
+    url: "/v1/github/connections/status",
+    payload: { principal },
+  });
+  assert.equal(connected.statusCode, 200);
+  assert.equal(connected.json().state, "CONNECTED");
+  assert.equal(connected.json().installationCount, 1);
   await server.close();
 });
 

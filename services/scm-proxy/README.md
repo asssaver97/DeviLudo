@@ -111,6 +111,10 @@ every returned GitHub redirect, and never reflects callback code/state.
 internal endpoint; `PostgresGitHubAuthorizationStore` persists only state and
 session digests under tenant RLS and records the numeric GitHub user that proved
 access to the exact installation. It never simulates a successful connection.
+The workload-authenticated `POST /v1/github/connections/status` projection
+re-reads only ACTIVE installations for that same tenant and numeric GitHub
+user. The Web connection page uses this projection after every refresh and
+treats the OAuth return query flag as a notification, never as authorization.
 
 Run its contract tests from the repository root:
 

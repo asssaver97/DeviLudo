@@ -118,6 +118,10 @@ test("public web worker remains fail-closed for runner event writes", async () =
 });
 
 test("localhost never fabricates a successful GitHub App authorization", async () => {
+  const status = await request("/api/connections/github");
+  assert.equal(status.status, 503);
+  assert.equal((await status.json()).error.code, "GITHUB_APP_INSTALLATION_BROKER_REQUIRED");
+
   const response = await request("/api/connections/github", { method: "POST" });
   assert.equal(response.status, 503);
   const payload = await response.json();
@@ -137,6 +141,10 @@ test("localhost never fabricates a successful GitHub App authorization", async (
 });
 
 test("localhost never fabricates a Steam Guard or build-account session", async () => {
+  const status = await request("/api/connections/steam");
+  assert.equal(status.status, 503);
+  assert.equal((await status.json()).error.code, "STEAM_GUARD_ENROLLMENT_BROKER_REQUIRED");
+
   const response = await request("/api/connections/steam", { method: "POST" });
   assert.equal(response.status, 503);
   const payload = await response.json();

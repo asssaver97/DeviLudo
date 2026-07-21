@@ -29,6 +29,10 @@ export interface SteamEnrollmentRecord {
 }
 
 export interface SteamEnrollmentStore {
+  findLatestForUser(input: {
+    readonly tenantId: string;
+    readonly userId: string;
+  }): Promise<SteamEnrollmentRecord | null>;
   create(input: Omit<SteamEnrollmentRecord, "state" | "challengeSecretRef" | "buildSession" | "completedAt">): Promise<SteamEnrollmentRecord>;
   find(input: {
     readonly tenantId: string;
@@ -98,4 +102,15 @@ export interface SteamEnrollmentView {
   readonly state: "WAITING_CREDENTIALS" | "WAITING_STEAM_GUARD" | "READY";
   readonly enrollmentUrl: string | null;
   readonly expiresAt: string;
+}
+
+export interface SteamConnectionStatus {
+  readonly state: "UNCONFIGURED" | "WAITING_CREDENTIALS" | "WAITING_STEAM_GUARD" | "READY";
+  readonly enrollmentId: string | null;
+  readonly enrollmentUrl: string | null;
+  readonly accountName: string | null;
+  readonly allowedAppIds: readonly string[];
+  readonly permissions: readonly ("EditAppMetadata" | "PublishAppChanges")[];
+  readonly verifiedAt: string | null;
+  readonly expiresAt: string | null;
 }

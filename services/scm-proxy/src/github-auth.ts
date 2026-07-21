@@ -5,6 +5,7 @@ import type {
   GitHubAuthorizationSecretStore,
   GitHubAuthorizationStage,
   GitHubAuthorizationStore,
+  GitHubConnectionStatus,
   GitHubUserAuthorizationVerifier,
   GitHubVerifiedInstallation,
 } from "./github-auth-contracts";
@@ -45,6 +46,14 @@ export class GitHubInstallationAuthorizationBroker {
     this.#secrets = options.secrets;
     this.#verifier = options.verifier;
     this.#now = options.now ?? (() => new Date());
+  }
+
+  async connectionStatus(principal: GitHubAuthorizationPrincipal): Promise<GitHubConnectionStatus> {
+    validatePrincipal(principal);
+    return this.#store.connectionStatus({
+      tenantId: principal.tenantId,
+      githubUserId: principal.expectedGithubUserId,
+    });
   }
 
   async begin(principal: GitHubAuthorizationPrincipal, returnPath = "/settings/connections"): Promise<{
@@ -179,6 +188,32 @@ export class GitHubInstallationAuthorizationBroker {
 export class InMemoryGitHubAuthorizationStore implements GitHubAuthorizationStore {
   readonly intents = new Map<string, GitHubAuthorizationIntent>();
   readonly installations = new Map<string, GitHubVerifiedInstallation>();
+
+  async connectionStatus(input: {
+    readonly tenantId: string;
+    readonly githubUserId: number;
+  }): Promise<GitHubConnectionStatus> {
+    const installations = [...this.installations.entries()]
+      .filter(([key, installation]) => key.startsWith(`${input.tenantId}:`) && installation.githubUserId === input.githubUserId)
+      .map(([, installation]) => installation)
+      .sort((left, right) => Date.parse(right.verifiedAt) - Date.parse(left.verifiedAt));
+    const latest = installations[0];
+    return Object.freeze(latest ? {
+      state: "CONNECTED",
+      installationCount: installations.length,
+      accountLogin: latest.accountLogin,
+      repositorySelection: latest.repositorySelection,
+      permissions: Object.freeze({ ...latest.permissions }),
+      verifiedAt: latest.verifiedAt,
+    } : {
+      state: "NOT_CONNECTED",
+      installationCount: 0,
+      accountLogin: null,
+      repositorySelection: null,
+      permissions: null,
+      verifiedAt: null,
+    });
+  }
 
   async create(intent: GitHubAuthorizationIntent): Promise<void> {
     if (this.intents.has(intent.stateDigest)) throw new Error("GitHub authorization state collision");

@@ -1093,3 +1093,16 @@ test("workflow action completions use a tenant-isolated transactional signal out
   assert.match(adapter, /INSERT INTO deviludo\.workflow_signal_outbox/);
   assert.match(adapter, /status = 'COMPLETED'/);
 });
+
+test("public API contract covers authoritative account connection and MFA release gates", () => {
+  const contract = readFileSync(new URL("../openapi/deviludo.yaml", import.meta.url), "utf8");
+  const connections = readFileSync(new URL("../components/console/ConnectionsPanel.tsx", import.meta.url), "utf8");
+  assert.match(contract, /^  \/connections\/github:$/m);
+  assert.match(contract, /^  \/connections\/steam:$/m);
+  assert.match(contract, /^  \/releases\/\{releaseId\}\/accept-and-publish:$/m);
+  assert.match(contract, /OAuth return query parameters are never treated as connection state/);
+  assert.match(contract, /Client-provided MFA proofs, commit SHAs, evidence status, and request bodies are rejected/);
+  assert.match(connections, /loadGitHubStatus\(\)/);
+  assert.match(connections, /loadSteamStatus\(\)/);
+  assert.doesNotMatch(connections, /initialGitHubConnected|useState\(initialGitHubConnected\)/);
+});

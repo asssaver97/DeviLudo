@@ -41,6 +41,131 @@ paths:
       security: [{ cookieAuth: [] }]
       responses:
         "204": { description: Session was revoked if present and both cookies were cleared. }
+  /connections/github:
+    get:
+      operationId: getGitHubConnectionStatus
+      description: Reads the active GitHub App installation projection for the authenticated tenant user from the isolated authorization Broker. OAuth return query parameters are never treated as connection state.
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: Authoritative GitHub App connection status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/GitHubConnectionStatus" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "502": { description: The isolated GitHub authorization Broker is unavailable or returned an invalid projection. }
+        "503": { description: The GitHub authorization Broker is not configured. }
+    post:
+      operationId: beginGitHubAppConnection
+      description: Reserves a single-use GitHub App installation authorization bound to the authenticated tenant user and browser session. GitHub passwords and user tokens are never accepted.
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "201":
+          description: Fixed-origin GitHub App installation URL.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/GitHubAuthorizationStart" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "503": { description: The GitHub authorization Broker is not configured. }
+  /connections/github/setup:
+    get:
+      operationId: continueGitHubAppSetup
+      description: Validates the GitHub App setup callback through the isolated Broker and redirects only to GitHub's fixed OAuth authorization endpoint.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } }
+        - { name: installation_id, in: query, required: true, schema: { type: string, pattern: "^[1-9][0-9]{0,19}$" } }
+        - { name: setup_action, in: query, required: true, schema: { type: string, enum: [install, update] } }
+      responses:
+        "303": { description: Redirect to the fixed GitHub OAuth endpoint with PKCE. }
+        "400": { description: Callback parameters or state binding are invalid. }
+  /connections/github/callback:
+    get:
+      operationId: completeGitHubAppConnection
+      description: Consumes the single-use OAuth code inside the Broker, verifies the numeric GitHub user and installation, and redirects to the connection page. The query flag is informational only.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } }
+        - { name: code, in: query, required: true, schema: { type: string, writeOnly: true, maxLength: 512 } }
+      responses:
+        "303": { description: Installation was verified and persisted under tenant RLS. }
+        "400": { description: Callback parameters or state binding are invalid. }
+  /connections/steam:
+    get:
+      operationId: getSteamConnectionStatus
+      description: Reads the authenticated user's latest active build-account session or resumable Guard enrollment from the isolated Steam Access Broker. No password, Guard code, config.vdf, or SecretRef is returned.
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: Authoritative Steam connection status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/SteamConnectionStatus" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "502": { description: The isolated Steam Access Broker is unavailable or returned an invalid projection. }
+        "503": { description: The isolated Steam Access Broker is not configured. }
+    post:
+      operationId: beginSteamGuardEnrollment
+      description: Creates or resumes a short-lived isolated enrollment. Steam credentials are accepted only by the separately hosted secure UI and never cross the main Web process.
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200":
+          description: A still-active build-account session is ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/SteamEnrollmentResult" } }
+        "202":
+          description: Continue credentials or Steam Guard entry in the isolated secure UI.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/SteamEnrollmentResult" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "503": { description: The isolated Steam Access Broker is not configured. }
+  /releases/{releaseId}/accept-and-publish:
+    post:
+      operationId: acceptAndPublishSteamRelease
+      description: Starts isolated AAL2 authorization for the authoritative WAITING_MFA release. Client-provided MFA proofs, commit SHAs, evidence status, and request bodies are rejected.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/ReleaseId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200":
+          description: The exact release authorization has already been signed and dispatched to its Temporal workflow.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/ReleaseAuthorization" } }
+        "202":
+          description: AAL2 authorization is required in the isolated secure UI.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/ReleaseAuthorization" } }
+        "400": { description: A client body or MFA proof header was supplied and rejected. }
+        "401": { description: A fresh trusted platform session is required. }
+        "503": { description: Release authorization, MFA signer, or authoritative evidence dispatch is not configured. }
   /admin/agents:
     get:
       operationId: listAgents
@@ -489,6 +614,11 @@ components:
       in: path
       required: true
       schema: { type: string }
+    ReleaseId:
+      name: releaseId
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$" }
   requestBodies:
     VersionAction:
       required: true
@@ -509,6 +639,57 @@ components:
               data: {}
               meta: { type: object, additionalProperties: true }
   schemas:
+    GitHubConnectionStatus:
+      type: object
+      additionalProperties: false
+      required: [state, installationCount, accountLogin, repositorySelection, permissions, verifiedAt]
+      properties:
+        state: { type: string, enum: [CONNECTED, NOT_CONNECTED] }
+        installationCount: { type: integer, minimum: 0, maximum: 1000 }
+        accountLogin: { type: [string, "null"], maxLength: 100 }
+        repositorySelection: { type: [string, "null"], enum: [all, selected, null] }
+        permissions: { type: [object, "null"], additionalProperties: { type: string } }
+        verifiedAt: { type: [string, "null"], format: date-time }
+    GitHubAuthorizationStart:
+      type: object
+      additionalProperties: false
+      required: [authorizeUrl, expiresAt]
+      properties:
+        authorizeUrl: { type: string, format: uri, pattern: "^https://github\\.com/apps/" }
+        expiresAt: { type: string, format: date-time }
+    SteamConnectionStatus:
+      type: object
+      additionalProperties: false
+      required: [state, enrollmentId, enrollmentUrl, accountName, allowedAppIds, permissions, verifiedAt, expiresAt]
+      properties:
+        state: { type: string, enum: [UNCONFIGURED, WAITING_CREDENTIALS, WAITING_STEAM_GUARD, READY] }
+        enrollmentId: { type: [string, "null"] }
+        enrollmentUrl: { type: [string, "null"], format: uri }
+        accountName: { type: [string, "null"], maxLength: 64 }
+        allowedAppIds: { type: array, maxItems: 100, uniqueItems: true, items: { type: string, pattern: "^[0-9]{1,20}$" } }
+        permissions: { type: array, uniqueItems: true, items: { type: string, enum: [EditAppMetadata, PublishAppChanges] } }
+        verifiedAt: { type: [string, "null"], format: date-time }
+        expiresAt: { type: [string, "null"], format: date-time }
+    SteamEnrollmentResult:
+      type: object
+      additionalProperties: false
+      required: [enrollmentId, state, enrollmentUrl, expiresAt]
+      properties:
+        enrollmentId: { type: string }
+        state: { type: string, enum: [WAITING_CREDENTIALS, WAITING_STEAM_GUARD, READY] }
+        enrollmentUrl: { type: [string, "null"], format: uri }
+        expiresAt: { type: string, format: date-time }
+    ReleaseAuthorization:
+      type: object
+      additionalProperties: false
+      required: [releaseId, state, approvalId, authorizationUrl, workflowId, expiresAt]
+      properties:
+        releaseId: { type: string }
+        state: { type: string, enum: [MFA_REQUIRED, DISPATCHED] }
+        approvalId: { type: string }
+        authorizationUrl: { type: [string, "null"], format: uri }
+        workflowId: { type: [string, "null"] }
+        expiresAt: { type: string, format: date-time }
     EvidenceCatalogProjection:
       type: object
       additionalProperties: false

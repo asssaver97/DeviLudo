@@ -13,6 +13,15 @@ export interface GitHubBrokerRuntime {
   readonly sessionHmacKey: Uint8Array;
 }
 
+export interface GitHubConnectionStatus {
+  readonly state: "CONNECTED" | "NOT_CONNECTED";
+  readonly installationCount: number;
+  readonly accountLogin: string | null;
+  readonly repositorySelection: "all" | "selected" | null;
+  readonly permissions: Readonly<Record<string, string>> | null;
+  readonly verifiedAt: string | null;
+}
+
 export interface TrustedPlatformSession {
   readonly tenantId: string;
   readonly userId: string;
@@ -48,6 +57,46 @@ export class GitHubAuthorizationBrokerClient {
     this.#origin = endpoint;
     this.#fetch = options.fetch ?? fetch;
     this.#timeoutMs = timeoutMs;
+  }
+
+  async connectionStatus(principal: GitHubAuthorizationPrincipal): Promise<GitHubConnectionStatus> {
+    const payload = await this.#call("/v1/github/connections/status", { principal });
+    const state = payload.state;
+    const installationCount = payload.installationCount;
+    if ((state !== "CONNECTED" && state !== "NOT_CONNECTED")
+      || !Number.isSafeInteger(installationCount) || (installationCount as number) < 0 || (installationCount as number) > 1_000) {
+      throw new Error("GitHub connection status is invalid");
+    }
+    if (state === "NOT_CONNECTED") {
+      if (installationCount !== 0 || payload.accountLogin !== null || payload.repositorySelection !== null
+        || payload.permissions !== null || payload.verifiedAt !== null) {
+        throw new Error("GitHub disconnected projection is invalid");
+      }
+      return Object.freeze({ state, installationCount: 0, accountLogin: null, repositorySelection: null, permissions: null, verifiedAt: null });
+    }
+    const accountLogin = requireString(payload, "accountLogin", 100);
+    const repositorySelection = payload.repositorySelection;
+    if (installationCount === 0 || (repositorySelection !== "all" && repositorySelection !== "selected")
+      || !payload.permissions || typeof payload.permissions !== "object" || Array.isArray(payload.permissions)) {
+      throw new Error("GitHub connected projection is invalid");
+    }
+    const permissions = Object.fromEntries(Object.entries(payload.permissions as Record<string, unknown>).map(([key, value]) => {
+      if (!/^[a-z_]{1,100}$/.test(key) || typeof value !== "string" || !/^[a-z_]{1,40}$/.test(value)) {
+        throw new Error("GitHub connection permissions are invalid");
+      }
+      return [key, value];
+    }));
+    if (permissions.contents !== "write" || permissions.pull_requests !== "write" || permissions.metadata !== "read") {
+      throw new Error("GitHub connection permissions are insufficient");
+    }
+    return Object.freeze({
+      state,
+      installationCount: installationCount as number,
+      accountLogin,
+      repositorySelection,
+      permissions: Object.freeze(permissions),
+      verifiedAt: requireIso(payload, "verifiedAt"),
+    });
   }
 
   async begin(
@@ -91,9 +140,9 @@ export class GitHubAuthorizationBrokerClient {
   async #call(
     path: string,
     body: Readonly<Record<string, unknown>>,
-    idempotencyKey: string,
+    idempotencyKey?: string,
   ): Promise<Record<string, unknown>> {
-    if (!OPAQUE_ID.test(idempotencyKey)) throw new Error("GitHub broker idempotency key is invalid");
+    if (idempotencyKey !== undefined && !OPAQUE_ID.test(idempotencyKey)) throw new Error("GitHub broker idempotency key is invalid");
     const url = new URL(path, this.#origin);
     if (url.origin !== this.#origin.origin) throw new Error("GitHub broker request origin is invalid");
     let response: Response;
@@ -104,7 +153,7 @@ export class GitHubAuthorizationBrokerClient {
         headers: {
           accept: "application/json",
           "content-type": "application/json",
-          "idempotency-key": idempotencyKey,
+          ...(idempotencyKey === undefined ? {} : { "idempotency-key": idempotencyKey }),
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.#timeoutMs),

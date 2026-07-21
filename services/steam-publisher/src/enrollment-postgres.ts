@@ -53,6 +53,20 @@ const SELECT_ENROLLMENT = `SELECT e.*,
 export class PostgresSteamEnrollmentStore implements SteamEnrollmentStore {
   constructor(private readonly pool: SteamPostgresPool) {}
 
+  async findLatestForUser(input: { readonly tenantId: string; readonly userId: string }): Promise<SteamEnrollmentRecord | null> {
+    return this.#transaction(input.tenantId, async (client) => {
+      const found = await client.query<EnrollmentRow>(
+        `${SELECT_ENROLLMENT}
+          WHERE e.tenant_id = $1::uuid AND e.user_subject = $2
+          ORDER BY e.created_at DESC, e.id DESC
+          LIMIT 1`,
+        [input.tenantId, input.userId],
+      );
+      const row = found.rows[0];
+      return row ? parseEnrollment(row) : null;
+    });
+  }
+
   async create(input: Parameters<SteamEnrollmentStore["create"]>[0]): Promise<SteamEnrollmentRecord> {
     return this.#transaction(input.tenantId, async (client) => {
       const inserted = await client.query<EnrollmentRow>(

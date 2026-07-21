@@ -390,6 +390,16 @@ test("GitHub Web broker client accepts only fixed GitHub redirects and hashes ca
     endpoint: "https://github-auth.internal/",
     async fetch(url, init) {
       requests.push({ url: String(url), init });
+      if (String(url).endsWith("/connections/status")) {
+        return Response.json({
+          state: "CONNECTED",
+          installationCount: 1,
+          accountLogin: "north-dock",
+          repositorySelection: "selected",
+          permissions: { contents: "write", pull_requests: "write", metadata: "read" },
+          verifiedAt: "2026-07-17T00:00:00.000Z",
+        });
+      }
       if (String(url).endsWith("/begin")) {
         return Response.json({
           authorizeUrl: `https://github.com/apps/deviludo/installations/new?state=${state}`,
@@ -422,6 +432,10 @@ test("GitHub Web broker client accepts only fixed GitHub redirects and hashes ca
   });
   assert.match(setup.authorizeUrl, /code_challenge_method=S256/);
   assert.equal((await broker.complete({ principal, state, code: "oauth-code-value", idempotencyKey: "github-oauth-001" })).returnPath, "/settings/connections");
+  const status = await broker.connectionStatus(principal);
+  assert.equal(status.state, "CONNECTED");
+  assert.equal(status.accountLogin, "north-dock");
+  assert.equal(requests.at(-1).init.headers["idempotency-key"], undefined);
   assert.equal(requests.every((entry) => entry.init.redirect === "error"), true);
   const callbackKey = await githubCallbackIdempotencyKey("oauth", state);
   assert.match(callbackKey, /^github-oauth-[a-f0-9]{64}$/);
@@ -445,6 +459,18 @@ test("Steam enrollment client sends no password and accepts only the configured 
     now: () => new Date("2026-07-17T00:00:00.000Z"),
     async fetch(url, init) {
       calls.push({ url: String(url), init });
+      if (String(url).endsWith("/status")) {
+        return Response.json({
+          state: "READY",
+          enrollmentId: "enrollment-001",
+          enrollmentUrl: null,
+          accountName: "deviludo_build_bot",
+          allowedAppIds: ["2841930"],
+          permissions: ["EditAppMetadata", "PublishAppChanges"],
+          verifiedAt: "2026-07-17T00:00:00.000Z",
+          expiresAt: "2026-08-17T00:00:00.000Z",
+        });
+      }
       return Response.json({
         enrollmentId: "enrollment-001",
         state: "WAITING_STEAM_GUARD",
@@ -461,6 +487,14 @@ test("Steam enrollment client sends no password and accepts only the configured 
   }, "steam-enrollment-001");
   assert.equal(result.state, "WAITING_STEAM_GUARD");
   assert.equal(result.enrollmentUrl, "https://steam-enroll.deviludo.example/enrollments/enrollment-001");
+  const status = await broker.connectionStatus({
+    tenantId: "tenant-001",
+    userId: "user-001",
+    sessionBinding: "session-binding-with-at-least-thirty-two-random-characters",
+    githubUserId: 424242,
+  });
+  assert.equal(status.state, "READY");
+  assert.deepEqual(status.allowedAppIds, ["2841930"]);
   const serializedRequest = JSON.stringify(calls[0]);
   assert.doesNotMatch(serializedRequest, /password|guardCode|config\.vdf/i);
   assert.equal(calls[0].init.redirect, "error");

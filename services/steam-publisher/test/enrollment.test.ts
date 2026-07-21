@@ -62,11 +62,13 @@ test("Steam enrollment requires an isolated Guard challenge and persists only a 
     },
   });
 
+  assert.equal((await coordinator.connectionStatus(principal)).state, "UNCONFIGURED");
   const started = await coordinator.begin(principal, "steam-enrollment-1");
   const replay = await coordinator.begin(principal, "steam-enrollment-1");
   assert.deepEqual(replay, started);
   assert.equal(started.state, "WAITING_CREDENTIALS");
   assert.equal(started.enrollmentUrl, `https://steam-enroll.deviludo.example/enrollments/${started.enrollmentId}`);
+  assert.equal((await coordinator.connectionStatus({ ...principal, sessionBinding: "another-valid-session-binding-with-more-than-32-bytes" })).state, "WAITING_CREDENTIALS");
 
   const password = new TextEncoder().encode("not-a-real-password");
   const challenged = await coordinator.submitCredentials({
@@ -87,6 +89,16 @@ test("Steam enrollment requires an isolated Guard challenge and persists only a 
   assert.equal(new TextDecoder().decode(vaultWrites[0]), "sensitive-config-vdf-session");
   assert.equal(ready.state, "READY");
   assert.equal(ready.enrollmentUrl, null);
+  assert.deepEqual(await coordinator.connectionStatus(principal), {
+    state: "READY",
+    enrollmentId: started.enrollmentId,
+    enrollmentUrl: null,
+    accountName: "deviludo_build_bot",
+    allowedAppIds: ["2841930"],
+    permissions: ["EditAppMetadata", "PublishAppChanges"],
+    verifiedAt: "2099-01-01T00:00:00.000Z",
+    expiresAt: "2099-02-01T00:00:00.000Z",
+  });
 
   const persisted = await store.find({
     tenantId: principal.tenantId,
@@ -136,6 +148,7 @@ test("Steam enrollment binds idempotency and browser session and revokes an unco
   const rejectingStore = new InMemorySteamEnrollmentStore();
   const rejectingCoordinator = new SteamEnrollmentCoordinator({
     store: {
+      findLatestForUser: (input) => rejectingStore.findLatestForUser(input),
       create: (input) => rejectingStore.create(input),
       find: (input) => rejectingStore.find(input),
       saveChallenge: (input) => rejectingStore.saveChallenge(input),

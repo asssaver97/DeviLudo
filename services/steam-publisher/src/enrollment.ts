@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   SteamAuthenticatedLogin,
+  SteamConnectionStatus,
   SteamConfigVault,
   SteamEnrollmentPrincipal,
   SteamEnrollmentRecord,
@@ -33,6 +34,40 @@ export class SteamEnrollmentCoordinator {
     this.#vault = options.vault;
     this.#publicOrigin = requireRootHttpsOrigin(options.publicOrigin);
     this.#now = options.now ?? (() => new Date());
+  }
+
+  async connectionStatus(principal: SteamEnrollmentPrincipal): Promise<SteamConnectionStatus> {
+    validatePrincipal(principal);
+    const record = await this.#store.findLatestForUser({ tenantId: principal.tenantId, userId: principal.userId });
+    if (!record) return unconfiguredStatus();
+    const now = validNow(this.#now()).getTime();
+    if (record.state === "READY" && record.buildSession?.state === "ACTIVE"
+      && Date.parse(record.buildSession.expiresAt) > now) {
+      return Object.freeze({
+        state: "READY",
+        enrollmentId: record.id,
+        enrollmentUrl: null,
+        accountName: record.buildSession.accountName,
+        allowedAppIds: Object.freeze([...record.buildSession.allowedAppIds]),
+        permissions: Object.freeze([...record.buildSession.permissions]),
+        verifiedAt: record.buildSession.verifiedAt,
+        expiresAt: record.buildSession.expiresAt,
+      });
+    }
+    if ((record.state === "WAITING_CREDENTIALS" || record.state === "WAITING_STEAM_GUARD")
+      && Date.parse(record.expiresAt) > now) {
+      return Object.freeze({
+        state: record.state,
+        enrollmentId: record.id,
+        enrollmentUrl: new URL(`/enrollments/${encodeURIComponent(record.id)}`, this.#publicOrigin).href,
+        accountName: null,
+        allowedAppIds: Object.freeze([]),
+        permissions: Object.freeze([]),
+        verifiedAt: null,
+        expiresAt: record.expiresAt,
+      });
+    }
+    return unconfiguredStatus();
   }
 
   async begin(principal: SteamEnrollmentPrincipal, idempotencyKey: string): Promise<SteamEnrollmentView> {
@@ -200,6 +235,13 @@ type MutableEnrollment = {
 export class InMemorySteamEnrollmentStore implements SteamEnrollmentStore {
   readonly #records = new Map<string, MutableEnrollment>();
 
+  async findLatestForUser(input: { readonly tenantId: string; readonly userId: string }): Promise<SteamEnrollmentRecord | null> {
+    const record = [...this.#records.values()]
+      .filter((entry) => entry.tenantId === input.tenantId && entry.userId === input.userId)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
+    return record ? freezeRecord(record) : null;
+  }
+
   async create(input: Omit<SteamEnrollmentRecord, "state" | "challengeSecretRef" | "buildSession" | "completedAt">): Promise<SteamEnrollmentRecord> {
     const existing = [...this.#records.values()].find((entry) => entry.tenantId === input.tenantId && entry.idempotencyKey === input.idempotencyKey);
     if (existing) {
@@ -286,6 +328,19 @@ function requireRootHttpsOrigin(value: string): URL {
 function validNow(now: Date): Date {
   if (!Number.isFinite(now.getTime())) throw new Error("Steam enrollment clock is invalid");
   return now;
+}
+
+function unconfiguredStatus(): SteamConnectionStatus {
+  return Object.freeze({
+    state: "UNCONFIGURED",
+    enrollmentId: null,
+    enrollmentUrl: null,
+    accountName: null,
+    allowedAppIds: Object.freeze([]),
+    permissions: Object.freeze([]),
+    verifiedAt: null,
+    expiresAt: null,
+  });
 }
 
 function digest(value: string): string {

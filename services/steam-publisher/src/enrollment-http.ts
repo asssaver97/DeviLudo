@@ -1,10 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   SteamEnrollmentPrincipal,
+  SteamConnectionStatus,
   SteamEnrollmentView,
 } from "./enrollment-contracts";
 
 export interface SteamEnrollmentBrokerPort {
+  connectionStatus(principal: SteamEnrollmentPrincipal): Promise<SteamConnectionStatus>;
   begin(principal: SteamEnrollmentPrincipal, idempotencyKey: string): Promise<SteamEnrollmentView>;
 }
 
@@ -37,6 +39,25 @@ export function registerSteamEnrollmentBrokerRoutes(
     ) => SteamEnrollmentPrincipal | Promise<SteamEnrollmentPrincipal>;
   },
 ): void {
+  server.post("/v1/steam/enrollments/status", { bodyLimit: 16 * 1024 }, async (request, reply) => {
+    secureHeaders(reply);
+    try {
+      await options.authorize(request);
+    } catch {
+      return reply.status(401).send({
+        error: { code: "WORKLOAD_IDENTITY_REQUIRED", message: "Authorized Web workload identity is required" },
+      });
+    }
+    try {
+      const body = requireExactObject(request.body, ["principal"], "Steam connection status body");
+      return reply.status(200).send(await options.broker.connectionStatus(requirePrincipal(body.principal)));
+    } catch {
+      return reply.status(400).send({
+        error: { code: "STEAM_CONNECTION_STATUS_REJECTED", message: "Steam connection status request was rejected" },
+      });
+    }
+  });
+
   server.post("/v1/steam/enrollments", { bodyLimit: 16 * 1024 }, async (request, reply) => {
     secureHeaders(reply);
     try {

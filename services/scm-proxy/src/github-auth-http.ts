@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
   GitHubAuthorizationPrincipal,
+  GitHubConnectionStatus,
   GitHubVerifiedInstallation,
 } from "./github-auth-contracts";
 
 export interface GitHubAuthorizationBrokerPort {
+  connectionStatus(principal: GitHubAuthorizationPrincipal): Promise<GitHubConnectionStatus>;
   begin(principal: GitHubAuthorizationPrincipal, returnPath?: string): Promise<{
     readonly authorizeUrl: string;
     readonly expiresAt: string;
@@ -44,6 +46,24 @@ export function registerGitHubAuthorizationBrokerRoutes(
   server: FastifyInstance,
   options: GitHubBrokerRouteOptions,
 ): void {
+  server.post("/v1/github/connections/status", { bodyLimit: 16 * 1024 }, async (request, reply) => {
+    secureHeaders(reply);
+    try {
+      await options.authorize(request);
+    } catch {
+      return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED", message: "Authorized Web workload identity is required" } });
+    }
+    try {
+      const body = requireObject(request.body);
+      exactKeys(body, ["principal"]);
+      return reply.status(200).send(await options.broker.connectionStatus(requirePrincipal(body.principal)));
+    } catch {
+      return reply.status(400).send({
+        error: { code: "GITHUB_CONNECTION_STATUS_REJECTED", message: "GitHub connection status request was rejected" },
+      });
+    }
+  });
+
   const route = (
     path: string,
     operation: "BEGIN" | "SETUP" | "COMPLETE",

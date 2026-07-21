@@ -1,6 +1,7 @@
 import type {
   GitHubAuthorizationIntent,
   GitHubAuthorizationStore,
+  GitHubConnectionStatus,
 } from "./github-auth-contracts";
 
 export interface ScmPostgresQueryResult<Row extends Record<string, unknown> = Record<string, unknown>> {
@@ -41,6 +42,54 @@ type IntentRow = Record<string, unknown> & {
 
 export class PostgresGitHubAuthorizationStore implements GitHubAuthorizationStore {
   constructor(private readonly pool: ScmPostgresPool) {}
+
+  async connectionStatus(input: {
+    readonly tenantId: string;
+    readonly githubUserId: number;
+  }): Promise<GitHubConnectionStatus> {
+    return this.#transaction(input.tenantId, async (client) => {
+      const result = await client.query<Record<string, unknown> & {
+        account_login: string;
+        repository_selection: "all" | "selected";
+        permissions: Record<string, string>;
+        verified_at: string | Date;
+        installation_count: string | number | bigint;
+      }>(
+        `SELECT account_login, repository_selection, permissions, verified_at,
+                count(*) OVER () AS installation_count
+           FROM deviludo.github_installations
+          WHERE tenant_id = $1::uuid
+            AND verified_by_github_user_id = $2::bigint
+            AND status = 'ACTIVE'
+          ORDER BY verified_at DESC, installation_id DESC
+          LIMIT 1`,
+        [input.tenantId, input.githubUserId],
+      );
+      const row = result.rows[0];
+      if (!row) return Object.freeze({
+        state: "NOT_CONNECTED" as const,
+        installationCount: 0,
+        accountLogin: null,
+        repositorySelection: null,
+        permissions: null,
+        verifiedAt: null,
+      });
+      const installationCount = Number(row.installation_count);
+      if (!Number.isSafeInteger(installationCount) || installationCount < 1
+        || !row.account_login || !["all", "selected"].includes(row.repository_selection)
+        || !row.permissions || typeof row.permissions !== "object" || Array.isArray(row.permissions)) {
+        throw new Error("GitHub connection projection is invalid");
+      }
+      return Object.freeze({
+        state: "CONNECTED" as const,
+        installationCount,
+        accountLogin: row.account_login,
+        repositorySelection: row.repository_selection,
+        permissions: Object.freeze({ ...row.permissions }),
+        verifiedAt: iso(row.verified_at),
+      });
+    });
+  }
 
   async create(intent: GitHubAuthorizationIntent): Promise<void> {
     await this.#transaction(intent.tenantId, (client) => insertIntent(client, intent));
