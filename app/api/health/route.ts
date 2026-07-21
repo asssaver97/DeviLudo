@@ -1,4 +1,5 @@
 import { json } from "@/lib/control-plane/http";
+import { evaluateProductionWebReadiness } from "@/lib/health/production-readiness";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
@@ -69,27 +70,17 @@ export async function GET(request: Request) {
 }
 
 function productionHealth(): Response {
+  const readiness = evaluateProductionWebReadiness();
   return json({
-    status: "ok",
+    status: readiness.ready ? "ok" : "degraded",
     service: "deviludo-control-plane",
     version: "0.1.0-beta",
     mode: "PRODUCTION",
-    dependencies: {
-      specDialogueBroker: configured("DEVILUDO_SPEC_DIALOGUE_BROKER_URL"),
-      deliveryProjectionBroker: configured("DEVILUDO_DELIVERY_PROJECTION_BROKER_URL"),
-      githubAuthorizationBroker: configured("DEVILUDO_GITHUB_AUTH_BROKER_URL"),
-      identityBroker: configured("DEVILUDO_IDENTITY_BROKER_URL"),
-      identityAdminBroker: configured("DEVILUDO_IDENTITY_ADMIN_BROKER_URL"),
-      adminControlPlaneBroker: configured("DEVILUDO_ADMIN_CONTROL_PLANE_BROKER_URL"),
-      projectRepositoryBroker: configured("DEVILUDO_PROJECT_REPOSITORY_BROKER_URL"),
-    },
-    capabilities: ["invited-github-login", "revocable-platform-session", "spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding"],
+    ready: readiness.ready,
+    dependencies: readiness.dependencies,
+    capabilities: ["invited-github-login", "revocable-platform-session", "spec-dialogue", "agent-governance", "delivery-projection", "github-app", "project-repository-onboarding", "user-acceptance", "steam-enrollment", "steam-release-authorization"],
     time: new Date().toISOString(),
-  }, { headers: { "cache-control": "no-store" } });
-}
-
-function configured(name: string): "CONFIGURED" | "NOT_CONFIGURED" {
-  return process.env[name] ? "CONFIGURED" : "NOT_CONFIGURED";
+  }, { status: readiness.ready ? 200 : 503, headers: { "cache-control": "no-store" } });
 }
 
 function isVerifiedAgentRuntime(health: LocalAgentHealth): boolean {

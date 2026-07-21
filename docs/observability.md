@@ -39,6 +39,17 @@ mTLS 或平台的 workload identity 向最终后端导出。
   gen-AI 输入/输出和 credential 字段。生产后端仍应采用最短可行保留期和
   严格的审计访问控制。
 
+## Web 就绪门禁
+
+生产 Web 的 `GET /api/health` 是流量就绪探针，不是无条件存活回执。只有身份、
+GitHub、项目仓库、规格对话、用户验收、交付投影、Agent 管理、Steam Guard 和
+发布授权这十个 Broker 的完整配置都通过各自客户端的 HTTPS/凭据契约校验时，
+才返回 `200`、`status=ok` 和 `ready=true`。缺失依赖返回 `503` 与
+`NOT_CONFIGURED`；不安全 Origin、残缺的 HMAC Key 或发布公共 Origin 返回
+`INVALID_CONFIGURATION`。响应不包含 URL、Key 或解析错误文本，避免健康端点
+泄露内部拓扑和凭据。编排器必须使用该端点控制流量接入，进程存活由容器运行时
+单独判断。
+
 ## 本地验证
 
 本地测试网站默认使用 `DEVILUDO_OTEL_MODE=disabled`，所以不会把开发活动

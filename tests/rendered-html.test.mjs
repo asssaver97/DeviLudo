@@ -59,12 +59,16 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.match(evidenceHtml, /不会以固定演示项目替代/);
 });
 
-test("production worker exposes health but keeps local admin and specification fixtures disabled", async () => {
+test("production worker fails readiness closed and keeps local admin and specification fixtures disabled", async () => {
   const health = await request("/api/health");
-  assert.equal(health.status, 200);
+  assert.equal(health.status, 503);
   const healthPayload = await health.json();
-  assert.equal(healthPayload.status, "ok");
+  assert.equal(healthPayload.status, "degraded");
+  assert.equal(healthPayload.ready, false);
   assert.equal(healthPayload.mode, "PRODUCTION");
+  assert.equal(healthPayload.dependencies.userAcceptanceBroker, "NOT_CONFIGURED");
+  assert.equal(healthPayload.dependencies.steamEnrollmentBroker, "NOT_CONFIGURED");
+  assert.equal(healthPayload.dependencies.releaseAuthorizationBroker, "NOT_CONFIGURED");
 
   const agents = await request("/api/admin/agents");
   assert.equal(agents.status, 401);
