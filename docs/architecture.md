@@ -210,6 +210,15 @@ SteamCMD invocation contains the build-account name but no password; an exact-Ap
 depot manifest IDs are bound to clean-client attempts for the full selected OS
 matrix before external approvals can begin.
 
+The external approval monitor is a separate Agent-free mTLS boundary. An
+allow-listed Steam verifier submits only the exact App ID, tested BuildID,
+current gate, verifier approval ID, observation time and digest of its raw Steam
+evidence. The monitor re-resolves the waiting action, release, BuildID and passed
+clean-install evidence under tenant RLS, rejects stale/future or out-of-order
+observations, and records an immutable receipt before enqueueing the Temporal
+signal. The public Web process cannot assert Valve review, first-release or
+default-branch confirmation.
+
 ## Tenant isolation and authorization
 
 The API authenticates through an invite-only GitHub App/OAuth flow. An

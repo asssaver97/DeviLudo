@@ -44,6 +44,21 @@ const productionStageLabels: Record<DeliveryState, string> = {
   CANCELLED: "已取消",
 };
 
+const externalGateCopy = {
+  VALVE_REVIEW: {
+    title: "等待 Valve 审核通过",
+    description: "Steam 验证连接器会读取审核结果；通过后以 mTLS 证据自动推进，网页不能手工跳过。",
+  },
+  FIRST_RELEASE: {
+    title: "等待首次发行操作完成",
+    description: "在 Steamworks 完成首次发行要求后，验证连接器会确认同一 App 与已回装 BuildID。",
+  },
+  DEFAULT_BRANCH_CONFIRMATION: {
+    title: "等待默认分支手机／短信确认",
+    description: "完成 Steam 的最终确认后，验证连接器会提交摘要证据；平台随后才允许发布默认分支。",
+  },
+} as const;
+
 export type DeliveryPanelStatus =
   | {
       readonly mode: "LOCAL_D1";
@@ -64,12 +79,15 @@ type ProductionProjection = {
   readonly snapshotDigest: string;
 };
 
-function primaryAction(stage: LocalDeliveryStage): { action: LocalDeliveryAction; label: string } | null {
+function primaryAction(stage: LocalDeliveryStage, externalApprovalCount = 0): { action: LocalDeliveryAction; label: string } | null {
   if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED" || stage === "CANCELLED") return null;
   if (stage === "WAITING_PROVIDER") return { action: "provider-resume", label: "恢复原 Provider" };
   if (stage === "AWAITING_ACCEPTANCE") return { action: "accept", label: "接受候选版本" };
   if (stage === "MFA_REQUIRED") return { action: "confirm-mfa", label: "本地确认 MFA" };
-  if (stage === "EXTERNAL_APPROVAL_REQUIRED") return { action: "external-approve", label: "模拟外部批准" };
+  if (stage === "EXTERNAL_APPROVAL_REQUIRED") return {
+    action: "external-approve",
+    label: ["模拟 Valve 审核通过", "模拟首次发行完成", "模拟默认分支确认"][externalApprovalCount] ?? "模拟外部批准",
+  };
   return { action: "advance", label: "推进 Fixture 演示" };
 }
 
@@ -145,7 +163,7 @@ export function LocalDeliveryPanel({
     };
   }, [localFixture, projectId, publish, refreshToken, onStatus]);
 
-  const action = snapshot ? primaryAction(snapshot.stage) : null;
+  const action = snapshot ? primaryAction(snapshot.stage, snapshot.externalApprovals.length) : null;
   const completedTargets = useMemo(
     () => snapshot ? Object.values(snapshot.targetResults).filter((value) => value === "PASSED").length : 0,
     [snapshot],
@@ -351,6 +369,20 @@ export function LocalDeliveryPanel({
             ) : <span className="local-real-validation-wait">批准规格后可运行</span>}
           </div>
 
+          {snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED" && snapshot.externalGate ? (
+            <div className="local-real-validation pending">
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">Localhost · 顺序外部门禁</span>
+                <h3>{externalGateCopy[snapshot.externalGate].title}</h3>
+                <p>本地按钮只模拟这一道门禁；生产环境必须由白名单 mTLS Steam 验证连接器提交摘要证据。</p>
+              </div>
+              <div className="local-real-validation-result">
+                <span>{snapshot.externalApprovals.length} / 3 已确认</span>
+                <div>BuildID {snapshot.steamBuildId ?? "本地模拟"}</div>
+              </div>
+            </div>
+          ) : null}
+
           <div className="local-delivery-actions">
             <div>
               {action ? <button className="button button-acid" disabled={busy} onClick={() => runAction(action.action)} type="button">{action.label}</button> : null}
@@ -530,6 +562,20 @@ function ProductionDeliveryProjection({
               {publishBusy ? "正在创建 MFA 授权…" : "确认发布并完成 MFA"}
             </button>
           ) : <span className="local-real-validation-wait">工作流正在绑定 main SHA 与发布证据</span>}
+        </div>
+      ) : null}
+
+      {snapshot.state === "EXTERNAL_APPROVAL_REQUIRED" && snapshot.externalGate ? (
+        <div className="local-real-validation pending">
+          <div className="local-real-validation-copy">
+            <span className="eyebrow">Steam 外部门禁 · {snapshot.externalGate}</span>
+            <h3>{externalGateCopy[snapshot.externalGate].title}</h3>
+            <p>{externalGateCopy[snapshot.externalGate].description}</p>
+          </div>
+          <div className="local-real-validation-result">
+            <span>自动验证中</span>
+            <div>BuildID {snapshot.steamBuildId ?? "正在绑定"}</div>
+          </div>
         </div>
       ) : null}
 

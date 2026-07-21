@@ -57,9 +57,21 @@ test("local delivery fixture exercises the complete gated chain without external
   assert.match(state.steamBuildId, /^BUILD-LOCAL-/);
   state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
+  assert.equal(state.externalGate, "VALVE_REVIEW");
+  state = applyLocalDeliveryAction(state, "external-approve");
+  assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
+  assert.equal(state.externalGate, "FIRST_RELEASE");
+  assert.deepEqual(state.externalApprovals, ["LOCAL_VALVE_REVIEW_APPROVED"]);
+  state = applyLocalDeliveryAction(state, "external-approve");
+  assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
+  assert.equal(state.externalGate, "DEFAULT_BRANCH_CONFIRMATION");
+  assert.deepEqual(state.externalApprovals, ["LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED"]);
   state = applyLocalDeliveryAction(state, "external-approve");
   assert.equal(state.stage, "RELEASED");
-  assert.deepEqual(state.externalApprovals, ["LOCAL_EXTERNAL_APPROVAL"]);
+  assert.equal(state.externalGate, null);
+  assert.deepEqual(state.externalApprovals, [
+    "LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED", "LOCAL_DEFAULT_BRANCH_CONFIRMED",
+  ]);
   assert.match(state.events[0].message, /未调用真实 Steam/);
 });
 

@@ -361,6 +361,50 @@ try {
     || cancellationPayload.data?.events?.[0]?.type !== "DELIVERY_CANCELLED") {
     throw new Error("local cancellation did not revoke delivery authority");
   }
+  const releaseDialogue = await request(baseUrl, "/api/projects/smoke-release-gates/conversation", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-release-dialogue-1" },
+    body: JSON.stringify({ expectedRevision: 0, message: "制作一款可完整演练 Steam 顺序发布门禁的桌面单机游戏" }),
+  });
+  const releaseDialoguePayload = await releaseDialogue.response.json();
+  if (![200, 201].includes(releaseDialogue.response.status) || releaseDialoguePayload.data?.revision !== 1) {
+    throw new Error("local release-gate dialogue contract failed");
+  }
+  const releaseApproval = await request(baseUrl, "/api/projects/smoke-release-gates/spec-revisions", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-release-approval-1" },
+    body: JSON.stringify({
+      action: "approve", revision: "SPEC-001",
+      conversationId: releaseDialoguePayload.data.conversationId,
+      expectedRevision: releaseDialoguePayload.data.revision,
+      specRevisionId: releaseDialoguePayload.data.specRevisionId,
+      testPlanRevisionId: releaseDialoguePayload.data.testPlanRevisionId,
+    }),
+  });
+  if (![200, 201].includes(releaseApproval.response.status)) throw new Error("local release-gate approval was rejected");
+  const releaseActions = [
+    "advance", "advance", "advance", "advance", "advance", "advance",
+    "accept", "advance", "advance", "confirm-mfa", "advance", "advance",
+    "external-approve", "external-approve", "external-approve",
+  ];
+  let completedRelease;
+  for (const [index, action] of releaseActions.entries()) {
+    completedRelease = await request(baseUrl, "/api/projects/smoke-release-gates/delivery", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-release-gate-${index + 1}` },
+      body: JSON.stringify({ action }),
+    });
+    if (!completedRelease.response.ok) throw new Error(`local release-gate action ${action} was rejected`);
+  }
+  const completedReleasePayload = await completedRelease.response.json();
+  if (completedReleasePayload.data?.stage !== "RELEASED"
+    || completedReleasePayload.data?.externalGate !== null
+    || JSON.stringify(completedReleasePayload.data?.externalApprovals) !== JSON.stringify([
+      "LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED", "LOCAL_DEFAULT_BRANCH_CONFIRMED",
+    ])
+    || completedReleasePayload.data?.events?.[0]?.type !== "DEFAULT_BRANCH_CONFIRMED") {
+    throw new Error("local release did not preserve all three ordered external approvals");
+  }
   const preflightPayload = await agentPreflight.response.json();
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
     throw new Error("local Agent preflight contract failed");
@@ -409,6 +453,7 @@ try {
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
   console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
+  console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);

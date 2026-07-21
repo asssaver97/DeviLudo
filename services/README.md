@@ -63,6 +63,10 @@ behind the web console:
   authorizations, consumes only an exact-App encrypted `config.vdf` SecretRef,
   plans a shell-free SteamCMD private-Beta upload, and dispatches clean Steam
   Client reinstall E2E across the selected matrix before external release gates.
+- `steam-approval-monitor`: accepts only allow-listed mTLS Steam verifier
+  observations for the current release gate, re-resolves the exact App, tested
+  BuildID and clean-install evidence under tenant RLS, and durably advances the
+  ordered Valve review, first-release and default-branch confirmation waits.
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,

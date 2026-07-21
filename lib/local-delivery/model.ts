@@ -18,6 +18,7 @@ export type LocalDeliveryStage =
   | "RELEASED";
 
 export type LocalPlatformStatus = "QUEUED" | "RUNNING" | "PASSED" | "INVALIDATED";
+export type LocalExternalApprovalGate = "VALVE_REVIEW" | "FIRST_RELEASE" | "DEFAULT_BRANCH_CONFIRMATION";
 
 export type LocalDeliveryEvent = {
   id: string;
@@ -93,6 +94,7 @@ export type LocalDeliverySnapshot = {
   mfaApprovalId: string | null;
   steamBuildId: string | null;
   steamReleaseId: string | null;
+  externalGate: LocalExternalApprovalGate | null;
   externalApprovals: readonly string[];
   repairHandoff: LocalPostMergeFailure | null;
   agentExecution: LocalAgentExecutionSnapshot | null;
@@ -144,6 +146,9 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     steamBuildId: snapshot.steamBuildId ?? null,
     steamReleaseId: snapshot.steamReleaseId ?? null,
     externalApprovals: snapshot.externalApprovals ?? [],
+    externalGate: snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
+      ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
+      : null),
     lockedProfile: {
       ...profile,
       ...snapshot.lockedProfile,
@@ -188,6 +193,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     mfaApprovalId: null,
     steamBuildId: null,
     steamReleaseId: null,
+    externalGate: null,
     externalApprovals: [],
     repairHandoff: null,
     agentExecution: null,
@@ -218,6 +224,7 @@ export function approveLocalSpec(
       mfaApprovalId: null,
       steamBuildId: null,
       steamReleaseId: null,
+      externalGate: null,
       externalApprovals: [],
       repairHandoff: null,
       agentExecution: null,
@@ -251,6 +258,7 @@ export function invalidateLocalDelivery(
       mfaApprovalId: null,
       steamBuildId: null,
       steamReleaseId: null,
+      externalGate: null,
       externalApprovals: [],
       repairHandoff: null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
@@ -364,6 +372,7 @@ export function applyLocalDeliveryAction(
         mfaApprovalId: null,
         steamBuildId: null,
         steamReleaseId: null,
+        externalGate: null,
         externalApprovals: [],
         localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
         agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
@@ -423,12 +432,35 @@ export function applyLocalDeliveryAction(
   }
 
   if (action === "external-approve") {
-    if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED") throw new Error("当前没有外部发布批准待处理");
-    return event(
-      { ...current, stage: "RELEASED", externalApprovals: ["LOCAL_EXTERNAL_APPROVAL"] },
-      "EXTERNAL_APPROVAL_CONFIRMED",
-      "本地模拟外部批准完成；未调用真实 Steam 发布接口。",
-    );
+    if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED" || !current.externalGate) {
+      throw new Error("当前没有外部发布批准待处理");
+    }
+    const transition = {
+      VALVE_REVIEW: {
+        approvalId: "LOCAL_VALVE_REVIEW_APPROVED",
+        nextGate: "FIRST_RELEASE" as const,
+        eventType: "VALVE_REVIEW_APPROVED",
+        message: "本地模拟 Valve 审核通过；继续等待首次发行操作。",
+      },
+      FIRST_RELEASE: {
+        approvalId: "LOCAL_FIRST_RELEASE_COMPLETED",
+        nextGate: "DEFAULT_BRANCH_CONFIRMATION" as const,
+        eventType: "FIRST_RELEASE_COMPLETED",
+        message: "本地模拟首次发行操作完成；继续等待默认分支手机／短信确认。",
+      },
+      DEFAULT_BRANCH_CONFIRMATION: {
+        approvalId: "LOCAL_DEFAULT_BRANCH_CONFIRMED",
+        nextGate: null,
+        eventType: "DEFAULT_BRANCH_CONFIRMED",
+        message: "本地模拟默认分支确认完成；未调用真实 Steam 发布接口。",
+      },
+    }[current.externalGate];
+    return event({
+      ...current,
+      stage: transition.nextGate ? "EXTERNAL_APPROVAL_REQUIRED" : "RELEASED",
+      externalGate: transition.nextGate,
+      externalApprovals: [...current.externalApprovals, transition.approvalId],
+    }, transition.eventType, transition.message);
   }
 
   if (action !== "advance") throw new Error("不支持的本地交付动作");
@@ -497,9 +529,9 @@ export function applyLocalDeliveryAction(
       );
     case "STEAM_REINSTALL_E2E":
       return event(
-        { ...current, stage: "EXTERNAL_APPROVAL_REQUIRED" },
+        { ...current, stage: "EXTERNAL_APPROVAL_REQUIRED", externalGate: "VALVE_REVIEW", externalApprovals: [] },
         "STEAM_REINSTALL_PASSED",
-        "回装测试通过；等待 Valve/首次发行等外部批准。",
+        "回装测试通过；按顺序等待 Valve 审核、首次发行与默认分支确认。",
       );
     case "AWAITING_SPEC_APPROVAL":
       throw new Error("请先批准当前规格修订");
@@ -558,6 +590,7 @@ function handoffLocalPostMergeFailure(
       mfaApprovalId: null,
       steamBuildId: null,
       steamReleaseId: null,
+      externalGate: null,
       externalApprovals: [],
       repairHandoff,
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,

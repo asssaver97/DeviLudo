@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 50 }, (_, index) => {
+  const offsets = Array.from({ length: 51 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -15,6 +15,31 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Steam external approvals require a current mTLS verifier observation and passed clean-install authority", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/051_steam_external_approval_observations.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/steam-approval-monitor/src/postgres-store.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/steam-approval-monitor/src/service.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/steam-approval-monitor/src/ingress-http.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:steam-approval-monitor"], observedServiceCommand("steam-approval-monitor"));
+  assert.match(packageJson.scripts["test:services"], /npm run test:steam-approval-monitor/);
+  assert.match(migration, /CREATE TABLE deviludo\.steam_external_approval_observations/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /steam_external_approval_observation_guard/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, action_id\)/);
+  assert.doesNotMatch(migration, /raw_response|access_token|password|config_vdf/i);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(store, /action\.operation AS action_operation/);
+  assert.match(store, /build\.steam_install_evidence_bundle_digest/);
+  assert.match(store, /attempt\.mode AS attempt_mode/);
+  assert.match(store, /FOR UPDATE OF action, release, build/);
+  assert.match(service, /source: "STEAM_APPROVAL_MONITOR"/);
+  assert.match(service, /type: "EXTERNAL_APPROVED"/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
 });
 
 test("project creation binds a live GitHub repository under tenant RLS and a durable claim", () => {

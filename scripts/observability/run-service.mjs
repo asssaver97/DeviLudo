@@ -33,6 +33,7 @@ export const SERVICE_ENTRYPOINTS = Object.freeze({
   "source-snapshot": Object.freeze({ entry: "services/scm-proxy/src/run-source-snapshot-service.ts" }),
   "artifact-preparer": Object.freeze({ entry: "services/artifact-preparer/src/run-service.ts" }),
   "steam-publisher-workflow": Object.freeze({ entry: "services/steam-publisher/src/run-workflow-service.ts" }),
+  "steam-approval-monitor": Object.freeze({ entry: "services/steam-approval-monitor/src/run-service.ts" }),
   "steam-access": Object.freeze({ entry: "services/steam-publisher/src/run-access-service.ts" }),
   "steam-secure-ui": Object.freeze({ entry: "services/steam-publisher/src/run-secure-ui-service.ts" }),
   "steam-workflow-broker": Object.freeze({ entry: "services/steam-publisher/src/run-workflow-broker-service.ts" }),

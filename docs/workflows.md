@@ -80,6 +80,12 @@ Activity boundaries are:
 7. `publishDefaultBranch` only after the ordered Valve review, first-release
    and default-branch confirmation signals.
 
+Those three signals are issued only by `services/steam-approval-monitor`. Its
+mTLS verifier ingress persists a fresh, content-digested Steam observation,
+then independently joins the current waiting action to the exact release,
+tested BuildID and passed clean-install evidence under tenant RLS. A delayed or
+out-of-order observation therefore cannot complete the next external gate.
+
 Accepting the publish activity is not a release result. The workflow remains
 open until `STEAM_RELEASED` binds the release ID and the same numeric Steam
 BuildID that passed private-Beta clean-client testing.
