@@ -377,6 +377,46 @@ test("service definitions render launchd safely and keep Windows blocked on the 
   assert.equal(transaction.definitions[0].format, "WINDOWS_SCM_DESCRIPTOR");
   assert.match(transaction.definitions[0].rendered, /requiresServiceBridgeContractVersion/);
   assert.ok(transaction.activation.actions.some(({ kind }) => kind === "APPLY_SCM_DESCRIPTOR"));
+
+  const bridgePath = "C:\\Program Files\\DeviLudo\\deviludo-windows-scm-service-bridge.exe";
+  const authorized = createRunnerNativeServiceTransaction({
+    plan: windowsPlan,
+    planDigest: windowsPlan.planDigest,
+    stagingReceipt: windowsReceipt,
+    physicalRunnerEnvironment: environmentBody,
+    steamClientConnectorEnvironment: null,
+    windowsBridgeAuthorization: {
+      verified: true,
+      component: "deviludo-windows-scm-service-bridge",
+      path: bridgePath,
+      architecture: windowsPlan.architecture,
+      bridgeVersion: "1.0.0",
+      contractVersion: 1,
+      binaryDigest: hex("1"),
+      sourceDigest: hex("2"),
+      supplyChainEvidenceDigest: hex("3"),
+      manifestDigest: hex("4"),
+      trustPolicyDigest: hex("5"),
+    },
+  });
+  const descriptor = JSON.parse(authorized.definitions[0].rendered);
+  assert.equal(authorized.status, "READY");
+  assert.equal(authorized.windowsBridge.verified, true);
+  assert.equal(authorized.definitions[0].executable, bridgePath);
+  assert.equal(authorized.definitions[0].targetExecutable, windowsPlan.services.physicalRunner.executable);
+  assert.equal(authorized.definitions[0].targetExecutableDigest,
+    windowsPlan.artifacts.find(({ component }) => component === "physical-runner").digest.slice(7));
+  assert.equal(descriptor.binaryPathName, bridgePath);
+  assert.equal(descriptor.targetExecutable, windowsPlan.services.physicalRunner.executable);
+  assert.equal(descriptor.bridgeManifestDigest, hex("4"));
+  assert.throws(() => createRunnerNativeServiceTransaction({
+    plan: windowsPlan,
+    planDigest: windowsPlan.planDigest,
+    stagingReceipt: windowsReceipt,
+    physicalRunnerEnvironment: environmentBody,
+    steamClientConnectorEnvironment: null,
+    windowsBridgeAuthorization: { ...authorized.windowsBridge, binaryDigest: hex("6"), unexpected: true },
+  }), /service transaction is invalid/);
 });
 
 test("service transaction CLI requires exact absolute create-only bindings", () => {
@@ -386,6 +426,16 @@ test("service transaction CLI requires exact absolute create-only bindings", () 
     "--output", "/private/staging/service-transaction.json",
   ]);
   assert.equal(parsed.planDigest, hex("a"));
+  const withBridge = parseRunnerNativeServiceTransactionArguments([
+    "--plan", "/private/staging/install-plan.json",
+    "--plan-digest", hex("a"),
+    "--output", "/private/staging/service-transaction.json",
+    "--windows-bridge", "/private/staging/deviludo-windows-scm-service-bridge.exe",
+    "--windows-bridge-manifest", "/private/staging/windows-bridge-manifest.json",
+    "--windows-bridge-trust-policy", "/private/staging/windows-bridge-trust-policy.json",
+    "--windows-bridge-trust-policy-digest", hex("b"),
+  ]);
+  assert.equal(withBridge.windowsBridgeTrustPolicyDigest, hex("b"));
   assert.throws(() => parseRunnerNativeServiceTransactionArguments([
     "--plan", "relative.json",
     "--plan-digest", hex("a"),

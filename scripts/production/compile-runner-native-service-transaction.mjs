@@ -6,6 +6,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { canonicalJson, sha256Canonical } from "../../services/runner-control/src/canonical.ts";
+import { verifySignedWindowsScmServiceBridgeManifest } from "../../services/runner-control/src/windows-scm-service-bridge.ts";
 import { validateRunnerNativeInstallPlan } from "./plan-runner-native-install.mjs";
 import { validateStagingReceipt, verifyStagedRunnerNativeInstallation } from "./stage-runner-native-install.mjs";
 
@@ -17,8 +18,11 @@ const INLINE_CREDENTIAL_NAME = /(?:API_KEY|PASSWORD|TOKEN|SECRET|SESSION|PRIVATE
 const SAFE_CREDENTIAL_REFERENCE = /(?:_FILE|_KEY_ID|_PUBLIC_KEY|_DIGEST)$/;
 
 export function parseRunnerNativeServiceTransactionArguments(argv) {
-  if (!Array.isArray(argv) || argv.length !== 6) invalid();
-  const allowed = new Set(["--output", "--plan", "--plan-digest"]);
+  if (!Array.isArray(argv) || !new Set([6, 14]).has(argv.length)) invalid();
+  const allowed = new Set([
+    "--output", "--plan", "--plan-digest", "--windows-bridge", "--windows-bridge-manifest",
+    "--windows-bridge-trust-policy", "--windows-bridge-trust-policy-digest",
+  ]);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
@@ -27,10 +31,18 @@ export function parseRunnerNativeServiceTransactionArguments(argv) {
     values.set(name, value);
   }
   if (!SHA256.test(values.get("--plan-digest"))) invalid();
+  const hasWindowsBridge = values.has("--windows-bridge");
+  if (["--windows-bridge-manifest", "--windows-bridge-trust-policy", "--windows-bridge-trust-policy-digest"]
+    .some((name) => values.has(name) !== hasWindowsBridge)) invalid();
+  if (hasWindowsBridge && !SHA256.test(values.get("--windows-bridge-trust-policy-digest"))) invalid();
   return Object.freeze({
     outputPath: absolute(values.get("--output")),
     planPath: absolute(values.get("--plan")),
     planDigest: values.get("--plan-digest"),
+    windowsBridgePath: hasWindowsBridge ? absolute(values.get("--windows-bridge")) : null,
+    windowsBridgeManifestPath: hasWindowsBridge ? absolute(values.get("--windows-bridge-manifest")) : null,
+    windowsBridgeTrustPolicyPath: hasWindowsBridge ? absolute(values.get("--windows-bridge-trust-policy")) : null,
+    windowsBridgeTrustPolicyDigest: hasWindowsBridge ? values.get("--windows-bridge-trust-policy-digest") : null,
   });
 }
 
@@ -48,6 +60,7 @@ export function createRunnerNativeServiceTransaction(input) {
       : null,
   });
   if (!plan.machine.steamCapable && input.steamClientConnectorEnvironment !== null) invalid();
+  const windowsBridge = validateWindowsBridgeAuthorization(plan, input.windowsBridgeAuthorization ?? null);
   const orderedServices = plan.machine.steamCapable
     ? [plan.services.steamClientConnector, plan.services.physicalRunner]
     : [plan.services.physicalRunner];
@@ -56,21 +69,16 @@ export function createRunnerNativeServiceTransaction(input) {
     service,
     environment: service.component === "physical-runner" ? environments.physicalRunner : environments.steamClientConnector,
     startOrder: index + 1,
+    windowsBridge,
   }));
   const managerTool = plan.platform === "linux" ? "/usr/bin/systemctl"
     : plan.platform === "macos" ? "/bin/launchctl" : "C:\\Windows\\System32\\sc.exe";
-  const windowsBridge = plan.platform === "windows" ? Object.freeze({
-    required: true,
-    component: "deviludo-windows-scm-service-bridge",
-    contractVersion: 1,
-    reasonCode: "SIGNED_WINDOWS_SCM_BRIDGE_REQUIRED",
-  }) : null;
   const activationActions = compileActivationActions(plan.platform, managerTool, definitions);
   const rollbackActions = plan.rollback === null ? Object.freeze([])
     : compileRollbackActions(plan.platform, managerTool, definitions);
   const core = Object.freeze({
     schemaVersion: "deviludo.runner-native-service-transaction.v1",
-    status: windowsBridge === null ? "READY" : "WAITING_NATIVE_BRIDGE",
+    status: plan.platform !== "windows" || windowsBridge?.verified === true ? "READY" : "WAITING_NATIVE_BRIDGE",
     planDigest: plan.planDigest,
     stagingReceiptDigest: receipt.receiptDigest,
     releaseId: plan.releaseId,
@@ -100,13 +108,16 @@ export function createRunnerNativeServiceTransaction(input) {
   return deepFreeze({ ...core, transactionDigest: sha256Canonical(core) });
 }
 
-export function createRunnerNativeServiceDefinition({ plan, service, environment, startOrder }) {
+export function createRunnerNativeServiceDefinition({ plan, service, environment, startOrder, windowsBridge = null }) {
   if (!plainRecord(plan) || !plainRecord(service) || !plainRecord(environment)
     || !Number.isSafeInteger(startOrder) || startOrder < 1 || startOrder > 2) invalid();
   assertSecretFreeEnvironment(environment);
+  if (plan.platform !== "windows" && windowsBridge !== null) invalid();
+  const artifactDigest = plan.artifacts.find(({ component }) => component === service.component)?.digest ?? null;
+  const targetExecutableDigest = plan.platform === "windows" ? rawSha256(artifactDigest) : artifactDigest;
   const rendered = plan.platform === "linux" ? renderSystemdUnit(service)
     : plan.platform === "macos" ? renderLaunchdPlist(service, environment)
-      : renderWindowsScmDescriptor(service, environment);
+      : renderWindowsScmDescriptor(service, environment, targetExecutableDigest, windowsBridge);
   const format = plan.platform === "linux" ? "SYSTEMD_UNIT"
     : plan.platform === "macos" ? "LAUNCHD_PLIST" : "WINDOWS_SCM_DESCRIPTOR";
   const destination = plan.platform === "linux" ? `/etc/systemd/system/${service.serviceId}`
@@ -119,8 +130,11 @@ export function createRunnerNativeServiceDefinition({ plan, service, environment
     manager: service.manager,
     format,
     destination,
-    executable: service.executable,
-    executableDigest: plan.artifacts.find(({ component }) => component === service.component)?.digest ?? null,
+    executable: plan.platform === "windows" && windowsBridge?.verified === true ? windowsBridge.path : service.executable,
+    executableDigest: plan.platform === "windows" && windowsBridge?.verified === true
+      ? windowsBridge.binaryDigest : targetExecutableDigest,
+    targetExecutable: plan.platform === "windows" ? service.executable : null,
+    targetExecutableDigest: plan.platform === "windows" ? targetExecutableDigest : null,
     environmentSourcePath: service.environmentSource.path,
     environmentSourceDigest: service.component === "physical-runner"
       ? plan.environmentLocks.physicalRunner.digest : plan.environmentLocks.steamClientConnector.digest,
@@ -132,6 +146,8 @@ export function createRunnerNativeServiceDefinition({ plan, service, environment
 
 export async function compileRunnerNativeServiceTransaction(options) {
   const plan = validateRunnerNativeInstallPlan(await readBoundedJson(options.planPath), options.planDigest);
+  const hasWindowsBridge = options.windowsBridgePath != null;
+  if ((plan.platform === "windows") !== hasWindowsBridge) invalid();
   const stagingReceipt = await verifyStagedRunnerNativeInstallation(plan, plan.releaseDirectory);
   const [physicalRunnerEnvironment, steamClientConnectorEnvironment] = await Promise.all([
     readBoundedFile(plan.environmentLocks.physicalRunner.path, MAX_ENV_BYTES),
@@ -140,12 +156,40 @@ export async function compileRunnerNativeServiceTransaction(options) {
   if (plan.machine.steamCapable
     && await digestLargeFile(plan.environmentLocks.steamClientConnector.bridgeExecutable)
       !== plan.environmentLocks.steamClientConnector.bridgeDigest) invalid();
+  let windowsBridgeAuthorization = null;
+  if (plan.platform === "windows") {
+    const [manifest, trustPolicy, observedDigest] = await Promise.all([
+      readBoundedJson(options.windowsBridgeManifestPath),
+      readBoundedJson(options.windowsBridgeTrustPolicyPath),
+      digestLargeFile(options.windowsBridgePath),
+    ]);
+    const claims = verifySignedWindowsScmServiceBridgeManifest(manifest, {
+      trustPolicy,
+      trustPolicyDigest: options.windowsBridgeTrustPolicyDigest,
+      architecture: plan.architecture,
+    });
+    if (observedDigest !== claims.binaryDigest) invalid();
+    windowsBridgeAuthorization = Object.freeze({
+      verified: true,
+      component: "deviludo-windows-scm-service-bridge",
+      path: options.windowsBridgePath,
+      architecture: claims.architecture,
+      bridgeVersion: claims.bridgeVersion,
+      contractVersion: claims.serviceContractVersion,
+      binaryDigest: claims.binaryDigest,
+      sourceDigest: claims.sourceDigest,
+      supplyChainEvidenceDigest: claims.supplyChainEvidenceDigest,
+      manifestDigest: sha256Canonical(manifest),
+      trustPolicyDigest: options.windowsBridgeTrustPolicyDigest,
+    });
+  }
   const transaction = createRunnerNativeServiceTransaction({
     plan,
     planDigest: options.planDigest,
     stagingReceipt,
     physicalRunnerEnvironment,
     steamClientConnectorEnvironment,
+    windowsBridgeAuthorization,
   });
   await createOnlyJson(options.outputPath, transaction);
   return transaction;
@@ -252,18 +296,62 @@ function renderLaunchdPlist(service, environment) {
   ].join("\n");
 }
 
-function renderWindowsScmDescriptor(service, environment) {
+function renderWindowsScmDescriptor(service, environment, targetDigest, windowsBridge) {
   return `${canonicalJson({
     schemaVersion: "deviludo.windows-scm-service-descriptor.v1",
     serviceName: service.serviceId,
     account: service.account,
-    binaryPathName: service.executable,
+    binaryPathName: windowsBridge?.verified === true ? windowsBridge.path : null,
+    binaryPathDigest: windowsBridge?.verified === true ? windowsBridge.binaryDigest : null,
+    targetExecutable: service.executable,
+    targetDigest,
     arguments: [],
     startType: "AUTO_START",
     failureActions: [{ action: "RESTART", delaySeconds: 5 }],
     environment: Object.fromEntries(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right))),
+    bridgeContractVersion: 1,
+    bridgeManifestDigest: windowsBridge?.verified === true ? windowsBridge.manifestDigest : null,
+    bridgeTrustPolicyDigest: windowsBridge?.verified === true ? windowsBridge.trustPolicyDigest : null,
     requiresServiceBridgeContractVersion: 1,
   })}\n`;
+}
+
+function validateWindowsBridgeAuthorization(plan, value) {
+  if (plan.platform !== "windows") {
+    if (value !== null) invalid();
+    return null;
+  }
+  if (value === null) return Object.freeze({
+    required: true,
+    verified: false,
+    component: "deviludo-windows-scm-service-bridge",
+    contractVersion: 1,
+    reasonCode: "SIGNED_WINDOWS_SCM_BRIDGE_REQUIRED",
+  });
+  const expectedKeys = [
+    "architecture", "binaryDigest", "bridgeVersion", "component", "contractVersion", "manifestDigest", "path",
+    "sourceDigest", "supplyChainEvidenceDigest", "trustPolicyDigest", "verified",
+  ];
+  if (!plainRecord(value) || !exactKeys(value, expectedKeys) || value.verified !== true
+    || value.component !== "deviludo-windows-scm-service-bridge" || value.architecture !== plan.architecture
+    || value.contractVersion !== 1 || !fixedVersion(value.bridgeVersion)
+    || !canonicalWindowsBridgePath(value.path) || !SHA256.test(value.binaryDigest)
+    || !SHA256.test(value.sourceDigest) || !SHA256.test(value.supplyChainEvidenceDigest)
+    || !SHA256.test(value.manifestDigest) || !SHA256.test(value.trustPolicyDigest)) invalid();
+  return deepFreeze({
+    required: true,
+    verified: true,
+    component: value.component,
+    path: value.path,
+    architecture: value.architecture,
+    bridgeVersion: value.bridgeVersion,
+    contractVersion: value.contractVersion,
+    binaryDigest: value.binaryDigest,
+    sourceDigest: value.sourceDigest,
+    supplyChainEvidenceDigest: value.supplyChainEvidenceDigest,
+    manifestDigest: value.manifestDigest,
+    trustPolicyDigest: value.trustPolicyDigest,
+  });
 }
 
 function parseBoundEnvironment(bytes, expectedDigest) {
@@ -333,6 +421,14 @@ async function createOnlyJson(path, value) {
   }
 }
 function xml(value) { return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;"); }
+function fixedVersion(value) { return typeof value === "string" && /^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value) && !/(?:latest|stable|default)/i.test(value); }
+function rawSha256(value) { if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value)) invalid(); return value.slice(7); }
+function canonicalWindowsBridgePath(value) {
+  if (typeof value !== "string" || value.length < 4 || value.length > 4_096 || /[\0\r\n/]/.test(value)
+    || !/^[A-Za-z]:\\[^:*?"<>|]+$/.test(value) || /(?:^|\\)\.\.?(?:\\|$)/.test(value)) return false;
+  return value.slice(value.lastIndexOf("\\") + 1).toLowerCase() === "deviludo-windows-scm-service-bridge.exe";
+}
+function exactKeys(value, expected) { const actual = Object.keys(value).sort(); const sorted = [...expected].sort(); return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]); }
 function absolute(value) { if (typeof value !== "string" || !isAbsolute(value) || resolve(value) !== value || value.length > 4_096) invalid(); return value; }
 function plainRecord(value) { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
 function deepFreeze(value) { Object.freeze(value); for (const child of Object.values(value)) if (child && typeof child === "object" && !Object.isFrozen(child)) deepFreeze(child); return value; }

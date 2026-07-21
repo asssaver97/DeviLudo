@@ -236,6 +236,16 @@ templates are `.physical-runner.env.example` and
 `physical-runner.config.example.json`; they intentionally contain no private
 key or platform credential.
 
+Windows additionally uses the native SCM host in `native/`. It is a fixed C17
+MSVC target rather than an Agent-installed package: it accepts only the Physical
+Runner and Steam Connector service names, verifies the revision-addressed SEA
+digest while holding the file against replacement, and starts it without a
+shell. Authenticode/scan evidence is bound into an Ed25519 release manifest by
+`npm run finalize:windows-scm-service-bridge`; signer mounts are documented in
+`.windows-scm-bridge-finalizer.env.example`. Service transaction compilation
+stays `WAITING_NATIVE_BRIDGE` unless the exact architecture, binary, manifest
+and trust policy verify together.
+
 Native upgrades are fenced by the same registration row used by lease issuance.
 Ingress changes the current identity to `DRAINING` under an exclusive row lock,
 waits for an authoritative zero count of unexpired leases and only then signs a

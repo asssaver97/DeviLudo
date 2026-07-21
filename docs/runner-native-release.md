@@ -192,6 +192,21 @@ NODE_ENV=production npm run compile:runner-native-service-transaction -- \
   --output /absolute/staging/service-transaction.json
 ```
 
+On Windows the compiler additionally requires the independently signed SCM
+host and its fixed trust input:
+
+```powershell
+$env:NODE_ENV = "production"
+npm run compile:runner-native-service-transaction -- `
+  --plan C:\DeviLudo\staging\install-plan.json `
+  --plan-digest <64-lowercase-hex> `
+  --output C:\DeviLudo\staging\service-transaction.json `
+  --windows-bridge "C:\Program Files\DeviLudo\deviludo-windows-scm-service-bridge.exe" `
+  --windows-bridge-manifest C:\DeviLudo\staging\windows-scm-bridge-manifest.json `
+  --windows-bridge-trust-policy C:\DeviLudo\policy\windows-scm-bridge-trust-policy.json `
+  --windows-bridge-trust-policy-digest <64-lowercase-hex>
+```
+
 The compiler re-verifies every staged binary and environment-file digest. It
 emits content-addressed systemd units, launchd plists or a Windows SCM
 descriptor together with a fixed action enum, manager executable, Connector-
@@ -202,11 +217,39 @@ dedicated accounts; launchd environment values are XML-escaped.
 
 A Windows transaction deliberately remains `WAITING_NATIVE_BRIDGE` until the
 signed `deviludo-windows-scm-service-bridge` contract v1 is present. A Node SEA
-console executable is not by itself a Windows Service Control Manager binary;
-the platform must not report that target activatable or invoke `sc.exe` against
-it directly. Linux and macOS transactions are `READY`. The later native bridge
-release is independently signed and digest-pinned in the same way as the Steam
-UI bridge.
+console executable is not by itself a Windows Service Control Manager binary.
+The bridge source and hardened MSVC build contract live under
+`services/runner-control/native`; it hosts only the two fixed DeviLudo services,
+rehashes the target while holding a non-replaceable file handle, then launches
+without a shell inside a kill-on-close Job Object. The compiler verifies its
+Ed25519 manifest, architecture, trust-policy digest and exact PE bytes before
+emitting a `READY` transaction. Linux and macOS transactions do not accept
+Windows bridge inputs.
+
+The approved Windows builder must compile with MSVC, create SBOM/malware/
+vulnerability evidence, apply Authenticode, and finalize the independent
+manifest before transaction compilation:
+
+```powershell
+$env:NODE_ENV = "production"
+npm run finalize:windows-scm-service-bridge -- `
+  --architecture x86_64 `
+  --binary C:\DeviLudo\release\deviludo-windows-scm-service-bridge.exe `
+  --bridge-version 1.0.0 `
+  --built-at 2026-07-22T05:00:00.000Z `
+  --evidence C:\DeviLudo\release\windows-scm-bridge-evidence.json `
+  --output C:\DeviLudo\release\windows-scm-bridge-manifest.json `
+  --revision 1 `
+  --source-digest <64-lowercase-hex> `
+  --trust-policy C:\DeviLudo\policy\windows-scm-bridge-trust-policy.json `
+  --trust-policy-digest <64-lowercase-hex>
+```
+
+Signer mTLS mounts are listed in
+`services/runner-control/.windows-scm-bridge-finalizer.env.example`; the
+private Ed25519 key never leaves KMS. The privileged Windows actuator must
+rehash both bridge and target, apply the canonical descriptor through Win32
+SCM/registry APIs, and write its `renderedDigest` as `DescriptorDigest`.
 
 ## Drain, activate, re-register or roll back
 

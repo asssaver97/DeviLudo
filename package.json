@@ -66,6 +66,8 @@
     "stage:runner-native-install": "node --import tsx scripts/production/stage-runner-native-install.mjs",
     "request:runner-native-activation": "node --import tsx scripts/production/request-runner-native-activation.mjs",
     "compile:runner-native-service-transaction": "node --import tsx scripts/production/compile-runner-native-service-transaction.mjs",
+    "finalize:windows-scm-service-bridge": "node --import tsx scripts/production/finalize-windows-scm-service-bridge.mjs",
+    "inspect:windows-scm-service-bridge-trust": "node --import tsx scripts/production/inspect-windows-scm-service-bridge-trust-policy.mjs",
     "start:agent-supply-chain-native": "node --import tsx scripts/observability/run-service.mjs agent-supply-chain-native",
     "start:control-plane-workflow": "node --import tsx scripts/observability/run-service.mjs control-plane-workflow",
     "start:agent-worker-workflow": "node --import tsx scripts/observability/run-service.mjs agent-worker-workflow",
