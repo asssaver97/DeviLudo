@@ -737,6 +737,109 @@ button {
   font-weight: 500;
 }
 
+.delivery-repair-notice {
+  background: #fff8e8;
+  border: 1px solid #e0bd6b;
+  margin: 18px 28px 20px;
+  padding: 17px 19px;
+}
+
+.delivery-repair-notice.compact {
+  margin: 18px 0 0;
+}
+
+.delivery-repair-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.delivery-repair-heading h3 {
+  font-size: 13px;
+  letter-spacing: -.01em;
+  margin: 4px 0 0;
+}
+
+.repair-state {
+  border-radius: 999px;
+  font-size: 7px;
+  font-weight: 800;
+  padding: 6px 9px;
+  white-space: nowrap;
+}
+
+.repair-state.active { background: #ffe0a0; color: #754500; }
+.repair-state.complete { background: #dff6a5; color: #385700; }
+
+.delivery-repair-notice > p {
+  color: #6d6044;
+  font-size: 8px;
+  line-height: 1.6;
+  margin: 8px 0 13px;
+}
+
+.delivery-repair-bindings {
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+
+.delivery-repair-bindings > div {
+  background: rgba(255, 255, 255, .65);
+  min-width: 0;
+  padding: 10px;
+}
+
+.delivery-repair-bindings dt {
+  color: #877650;
+  font-size: 7px;
+  font-weight: 750;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.delivery-repair-bindings dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 5px 0 0;
+  min-width: 0;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.delivery-repair-bindings code,
+.delivery-repair-notice footer code {
+  color: #3e4438;
+  font-size: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delivery-repair-bindings dd > code {
+  display: block;
+  flex-basis: 100%;
+}
+
+.delivery-repair-notice footer {
+  align-items: center;
+  border-top: 1px solid rgba(140, 105, 34, .22);
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
+}
+
+.delivery-repair-notice footer span {
+  color: #877650;
+  font-size: 7px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
 .pipeline {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
@@ -1125,6 +1228,7 @@ button {
   .build-summary { grid-template-columns: 1fr; }
   .build-summary > div { border-bottom: 1px solid var(--line); border-right: 0; padding: 10px 0; }
   .build-summary > div:last-child { border-bottom: 0; }
+  .delivery-repair-bindings { grid-template-columns: 1fr 1fr; }
   .pipeline { grid-template-columns: repeat(3, 1fr); row-gap: 22px; }
   .pipeline-step:nth-child(4)::before { display: none; }
   .platform-row { grid-template-columns: 1fr; }
@@ -1770,6 +1874,11 @@ button {
   .local-platform-row { grid-template-columns: 1fr; }
   .local-delivery-lock { grid-template-columns: 42px 1fr; }
   .local-delivery-lock code { grid-column: 2; justify-self: start; }
+  .delivery-repair-notice { margin-left: 18px; margin-right: 18px; }
+  .delivery-repair-notice.compact { margin-left: 0; margin-right: 0; }
+  .delivery-repair-heading { align-items: stretch; flex-direction: column; }
+  .repair-state { align-self: flex-start; }
+  .delivery-repair-bindings { grid-template-columns: 1fr; }
   .local-real-validation { align-items: stretch; flex-direction: column; }
   .local-real-validation-result { justify-items: start; }
   .local-event-log li b { display: block; min-width: 0; margin-bottom: 2px; }

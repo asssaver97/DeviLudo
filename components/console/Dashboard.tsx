@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { LocalDeliverySnapshot, LocalDeliveryStage } from "@/lib/local-delivery/model";
 import type { DeliverySnapshot, DeliveryState } from "@/lib/orchestration/game-delivery";
 import { AppShell } from "./AppShell";
+import { DeliveryRepairNotice } from "./DeliveryRepairNotice";
 import { ArrowIcon, CheckIcon, ClockIcon, PlusIcon, ServerIcon, SparkIcon } from "./Icons";
 import { ProjectScopeSelector } from "./ProjectScopeSelector";
 import { useLocalPlatform } from "./useLocalPlatform";
@@ -179,6 +180,8 @@ export function Dashboard() {
               <strong className="mono">{delivery?.mainSha ?? delivery?.candidateSha ?? productionDelivery?.mainCommitSha ?? productionDelivery?.candidateCommitSha ?? "等待产出"}</strong>
             </div>
           </div>
+
+          {productionDelivery ? <DeliveryRepairNotice compact snapshot={productionDelivery} /> : null}
 
           <div className="pipeline" aria-label="交付进度">
             {pipelineStages.map((stage, index) => (

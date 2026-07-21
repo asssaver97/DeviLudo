@@ -9,6 +9,7 @@ import type {
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
 import type { DeliverySnapshot, DeliveryState } from "@/lib/orchestration/game-delivery";
 import { CheckIcon, ClockIcon, SparkIcon } from "./Icons";
+import { DeliveryRepairNotice } from "./DeliveryRepairNotice";
 
 const stageLabels: Record<LocalDeliveryStage, string> = {
   AWAITING_SPEC_APPROVAL: "等待规格批准",
@@ -393,6 +394,8 @@ function ProductionDeliveryProjection({ projection }: { readonly projection: Pro
         <div className="local-delivery-metric"><small>证据</small><b>{snapshot.evidenceBundleId ?? "—"}</b><span>{targetGatePassed ? "候选矩阵证据已记录" : "尚无有效候选证据"}</span></div>
         <div className="local-delivery-metric"><small>提交</small><b>{snapshot.mainCommitSha ?? snapshot.candidateCommitSha ?? "—"}</b><span>{snapshot.mainCommitSha ? "实际 main SHA" : snapshot.candidateCommitSha ? "候选 SHA" : "尚未产出"}</span></div>
       </div>
+
+      <DeliveryRepairNotice snapshot={snapshot} />
 
       <div className="local-platform-row">
         {snapshot.targetMatrix.map((platform) => (

@@ -584,7 +584,10 @@ function platforms(value: unknown): readonly ("linux" | "macos" | "windows")[] {
   return Object.freeze([...(value as ("linux" | "macos" | "windows")[])]);
 }
 function parseRepairContext(value: unknown, runId: string): LockedAgentExecution["repairContext"] {
-  if (value === null) return null;
+  // Locks created before automatic successor repairs did not serialize this
+  // optional field. Treat absence as the canonical non-repair value so those
+  // immutable in-flight runs remain resumable after the schema rollout.
+  if (value === null || value === undefined) return null;
   const body = record(value);
   const expected = ["attempt", "reason", "fromRunConfigurationId", "diagnosticId", "evidenceBundleId",
     "evidenceBundleDigest", "repairPromptId", "candidateCommitSha", "draftPullRequest", "failedPlatforms"];
