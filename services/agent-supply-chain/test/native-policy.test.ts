@@ -124,6 +124,10 @@ test("native controller emits a fully bound discovery, validation, build and rol
   const validation = validateAgentSupplyChainResponse(
     await controller.execute(validationRequest, join(root, "validate")), validationRequest,
   );
+  assert.equal((validation as { validatedAdapterVersion: string }).validatedAdapterVersion, "1.3.0");
+  assert.deepEqual((validation as { adapterCompatibility: unknown }).adapterCompatibility, {
+    min: "1.3.0", maxExclusive: "1.3.1",
+  });
   const validationRetry = validateAgentSupplyChainResponse(
     await controller.execute(validationRequest, join(root, "validate")), validationRequest,
   );

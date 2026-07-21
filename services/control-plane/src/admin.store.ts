@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
+import { builtInAdapterVersion, exactAdapterCompatibility } from "../../../lib/agent/adapter-registry";
 import type {
   AdminMutationClaimBinding,
   AdminRole,
@@ -141,7 +142,7 @@ function seededState(): AdminCatalogState {
     workerPool: "development-linux-primary",
     imageDigest: `sha256:${"a".repeat(64)}`,
     workerImageId: "worker-image-claude-code-2-1-14",
-    adapterVersion: "1.0.0",
+    adapterVersion: builtInAdapterVersion("claude-code"),
     buildReceiptId: "build-claude-code-installation-2-1-14",
     buildReceiptDigest: "a".repeat(64),
     rollbackInstallationId: null,
@@ -224,6 +225,8 @@ function seededAgentVersion(
   seed: string,
   now: string,
 ): AgentVersionRecord {
+  const validatedAdapterVersion = builtInAdapterVersion(agent);
+  const adapterCompatibility = exactAdapterCompatibility(validatedAdapterVersion);
   const candidate = {
     agent,
     version,
@@ -244,7 +247,9 @@ function seededAgentVersion(
     signatureVerified: true as const,
     sbomRef: `oci://registry.internal/sbom/${agent}-${version}.spdx.json`,
     scan: "PASS" as const,
-    supplyChainEvidenceDigest: sha256Canonical({ agent, version, seed }),
+    supplyChainEvidenceDigest: sha256Canonical({ agent, version, seed, validatedAdapterVersion, adapterCompatibility }),
+    validatedAdapterVersion,
+    adapterCompatibility,
     validationReceiptId: `validation-${agent}-${version}`,
     validatedAt: now,
   };
@@ -260,6 +265,8 @@ function seededAgentVersion(
     validationReceiptId: validation.validationReceiptId,
     validationReceiptDigest: sha256Canonical(validation),
     supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
+    validatedAdapterVersion: validation.validatedAdapterVersion,
+    adapterCompatibility: validation.adapterCompatibility,
     validatedAt: now,
   };
 }

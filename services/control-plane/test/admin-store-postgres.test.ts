@@ -75,6 +75,8 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
       validationReceiptId: null,
       validationReceiptDigest: null,
       supplyChainEvidenceDigest: null,
+      validatedAdapterVersion: null,
+      adapterCompatibility: null,
       validatedAt: null,
       discoveredAt: "2026-07-18T00:00:00.000Z",
     };
@@ -176,6 +178,26 @@ test("Postgres admin catalog backfills legacy Installation and credential lifecy
   const createdAt = "2026-07-17T08:00:00.000Z";
   const legacyPayload = {
     ...emptyPayload,
+    versions: [{
+      id: "claude-code@2.1.14",
+      agent: "claude-code",
+      version: "2.1.14",
+      state: "APPROVED",
+      source: "https://code.claude.com/docs/en/installation",
+      sourceDigest: "1".repeat(64),
+      releaseNotesUrl: "https://github.com/anthropics/claude-code/releases",
+      integrity: `sha256:${"1".repeat(64)}`,
+      signatureVerified: true,
+      sbomRef: "oci://registry.internal/sbom/claude-code-2.1.14.spdx.json",
+      scan: "PASS",
+      catalogReceiptId: "catalog-claude-code-2.1.14",
+      catalogReceiptDigest: "2".repeat(64),
+      validationReceiptId: "validation-claude-code-2.1.14",
+      validationReceiptDigest: "3".repeat(64),
+      supplyChainEvidenceDigest: "4".repeat(64),
+      validatedAt: createdAt,
+      discoveredAt: createdAt,
+    }],
     installations: [{
       id: "claude-code-installation-legacy",
       agent: "claude-code",
@@ -220,9 +242,13 @@ test("Postgres admin catalog backfills legacy Installation and credential lifecy
   const lifecycle = await store.read((state) => ({
     activatedAt: state.installations.get("claude-code-installation-legacy")?.activatedAt,
     rotatedAt: state.credentials.get("credential-platform-legacy-v1")?.rotatedAt,
+    validatedAdapterVersion: state.versions.get("claude-code@2.1.14")?.validatedAdapterVersion,
+    adapterCompatibility: state.versions.get("claude-code@2.1.14")?.adapterCompatibility,
   }));
   assert.equal(lifecycle.activatedAt, createdAt);
   assert.equal(lifecycle.rotatedAt, null);
+  assert.equal(lifecycle.validatedAdapterVersion, null);
+  assert.equal(lifecycle.adapterCompatibility, null);
 
   const malformedClient = {
     async query(text: string) {

@@ -14,6 +14,7 @@ import {
   type AgentVersionRow,
   type AuditEvent,
 } from "@/lib/admin/agent-ui";
+import { isAdapterVersionAttested } from "@/lib/agent/adapter-registry";
 import { AdminIcon, type AdminIconName } from "./AdminIcons";
 import styles from "./admin.module.css";
 
@@ -755,16 +756,17 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
       {!canOperate && <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色为只读视图。切换至 PlatformAgentAdmin 批准或阻止版本。</div>}
       <div className={styles.tableWrap}>
         <table className={styles.dataTable}>
-          <thead><tr><th>Agent / 版本与来源</th><th>发现时间</th><th>完整性</th><th>SBOM</th><th>漏洞</th><th>状态</th><th><span className={styles.srOnly}>操作</span></th></tr></thead>
+          <thead><tr><th>Agent / 版本与来源</th><th>发现时间</th><th>完整性</th><th>Adapter 契约</th><th>SBOM</th><th>漏洞</th><th>状态</th><th><span className={styles.srOnly}>操作</span></th></tr></thead>
           <tbody>
             {rows.map((row) => (
               <tr key={row.id}>
                 <td><div className={styles.tableAgent}><AgentMark kind={row.agent} small /><div><strong>{row.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong><code>{row.version}</code><span className={styles.versionLinks}><a href={row.sourceUrl} target="_blank" rel="noreferrer noopener" aria-label={`打开 ${row.agent} ${row.version} 官方包来源`}>官方包</a><a href={row.releaseNotesUrl} target="_blank" rel="noreferrer noopener" aria-label={`打开 ${row.agent} ${row.version} 发行说明`}>发行说明</a></span></div></div></td>
-                <td>{row.discoveredAt}</td><td><span className={row.integrity.includes("待") ? styles.pendingText : ""}>{row.integrity}</span></td><td>{row.sbom}</td>
+                <td>{row.discoveredAt}</td><td><span className={row.integrity.includes("待") ? styles.pendingText : ""}>{row.integrity}</span></td>
+                <td><span className={row.adapterAttested ? styles.goodText : styles.dangerText}>{row.adapterBinding}</span></td><td>{row.sbom}</td>
                 <td><span className={row.vulnerabilities.includes("1 高危") ? styles.dangerText : styles.goodText}>{row.vulnerabilities}</span></td>
                 <td><StatusPill tone={row.status === "APPROVED" ? "success" : row.status === "BLOCKED" || row.status === "REJECTED" ? "danger" : "warning"}>{row.status}</StatusPill></td>
                 <td>
-                  {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : row.status === "APPROVED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onInstall(row.id)} disabled={!canOperate || installations.some((item) => item.agent === row.agent && item.version === row.version)}>{installations.some((item) => item.agent === row.agent && item.version === row.version) ? "已构建" : "构建镜像"}</button><button type="button" onClick={() => onUpdate(row.id, "DEPRECATED")} disabled={!canOperate}>弃用</button></div> : row.status === "DEPRECATED" ? <button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
+                  {row.status === "DISCOVERED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onUpdate(row.id, "APPROVED")} disabled={!canOperate}>批准</button><button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button></div> : row.status === "APPROVED" ? <div className={styles.inlineActions}><button type="button" onClick={() => onInstall(row.id)} disabled={!canOperate || !row.adapterAttested || installations.some((item) => item.agent === row.agent && item.version === row.version)}>{installations.some((item) => item.agent === row.agent && item.version === row.version) ? "已构建" : row.adapterAttested ? "构建镜像" : "需重新验证"}</button><button type="button" onClick={() => onUpdate(row.id, "DEPRECATED")} disabled={!canOperate}>弃用</button></div> : row.status === "DEPRECATED" ? <button type="button" onClick={() => onUpdate(row.id, "BLOCKED")} disabled={!canOperate}>阻止</button> : <button className={styles.moreButton} type="button"><AdminIcon name="more" /></button>}
                 </td>
               </tr>
             ))}
@@ -1391,6 +1393,13 @@ function versionRow(value: Record<string, unknown>): AgentVersionRow {
   const sourceDigest = text(value.sourceDigest);
   const validationDigest = text(value.validationReceiptDigest);
   const builtIn = builtInAgentUi.find((item) => item.id === agent)!;
+  const validatedAdapterVersion = text(value.validatedAdapterVersion);
+  const compatibility = object(value.adapterCompatibility);
+  const adapterAttested = !!validatedAdapterVersion && !!compatibility
+    && typeof compatibility.min === "string" && typeof compatibility.maxExclusive === "string"
+    && isAdapterVersionAttested(builtIn.adapterVersion, validatedAdapterVersion, {
+      min: compatibility.min, maxExclusive: compatibility.maxExclusive,
+    });
   const sourceUrl = trustedAgentVersionUrl(agent, version, "source", text(value.source) ?? builtIn.officialSource);
   const releaseNotesUrl = trustedAgentVersionUrl(agent, version, "release-notes", text(value.releaseNotesUrl) ?? (agent === "claude-code"
     ? "https://github.com/anthropics/claude-code/releases"
@@ -1408,6 +1417,10 @@ function versionRow(value: Record<string, unknown>): AgentVersionRow {
       : validationDigest ? `验证回执 ${shortDigest(validationDigest)}` : sourceDigest ? `待验证 · 来源 ${shortDigest(sourceDigest)}` : "等待供应链回执",
     sbom: text(value.sbomRef) ?? "SBOM 未投影",
     vulnerabilities: value.scan === "PASS" ? "扫描通过" : value.scan === "FAIL" ? "扫描失败" : "扫描状态未投影",
+    adapterBinding: adapterAttested
+      ? `${validatedAdapterVersion} · [${compatibility!.min}, ${compatibility!.maxExclusive})`
+      : "未证明 / 需重新验证",
+    adapterAttested,
     status,
   };
 }

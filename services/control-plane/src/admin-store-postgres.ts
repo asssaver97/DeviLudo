@@ -1,5 +1,6 @@
 import type { OnApplicationShutdown } from "@nestjs/common";
 import { Pool, type PoolClient } from "pg";
+import { isExactAdapterCompatibility } from "../../../lib/agent/adapter-registry";
 import type {
   AgentUsageRecord,
   AgentUsageSummary,
@@ -319,6 +320,7 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   const payload = value as Partial<CatalogPayload>;
   const state = emptyAdminCatalogState();
   loadRecords(payload.versions, state.versions, "version");
+  for (const version of state.versions.values()) normalizeAgentVersionCompatibility(version);
   loadRecords(payload.installations, state.installations, "installation");
   for (const installation of state.installations.values()) normalizeInstallationActivation(installation);
   loadRecords(payload.providers, state.providers, "provider");
@@ -334,6 +336,25 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   }
   state.audit.push(...audit);
   return state;
+}
+
+function normalizeAgentVersionCompatibility(version: AgentVersionRecord): void {
+  const mutable = version as unknown as {
+    validatedAdapterVersion?: unknown;
+    adapterCompatibility?: unknown;
+  };
+  if (mutable.validatedAdapterVersion === undefined) mutable.validatedAdapterVersion = null;
+  if (mutable.adapterCompatibility === undefined) mutable.adapterCompatibility = null;
+  if (mutable.validatedAdapterVersion === null && mutable.adapterCompatibility === null) return;
+  if (typeof mutable.validatedAdapterVersion !== "string"
+    || !mutable.adapterCompatibility || typeof mutable.adapterCompatibility !== "object"
+    || Array.isArray(mutable.adapterCompatibility)
+    || !isExactAdapterCompatibility(
+      mutable.validatedAdapterVersion,
+      mutable.adapterCompatibility as Readonly<{ min: string; maxExclusive: string }>,
+    )) {
+    throw new Error("Administrator catalog Agent version Adapter compatibility is invalid");
+  }
 }
 
 function normalizeCredentialTimestamps(credential: CredentialVersionRecord): void {

@@ -3,6 +3,8 @@
  * Production implementations persist the same immutable revisions in Postgres
  * (see infra/postgres/001_core.sql) and use Temporal for durable execution.
  */
+import { builtInAdapterVersion, exactAdapterCompatibility } from "../agent/adapter-registry";
+
 export type DemoAuditEvent = {
   id: string;
   action: string;
@@ -123,6 +125,8 @@ export type DemoAgentVersionMetadata = {
   validationReceiptId: string | null;
   validationReceiptDigest: string | null;
   supplyChainEvidenceDigest: string | null;
+  validatedAdapterVersion: string | null;
+  adapterCompatibility: Readonly<{ min: string; maxExclusive: string }> | null;
   validatedAt: string | null;
 };
 
@@ -515,7 +519,10 @@ function fixtureVersionMetadata(
   discoveredAt: string,
 ): DemoAgentVersionMetadata {
   const id = `${agent}@${version}`;
-  const seed = [...id].reduce((sum, value) => (sum + value.charCodeAt(0)) % 16, 0).toString(16);
+  const validatedAdapterVersion = validated ? builtInAdapterVersion(agent) : null;
+  const adapterCompatibility = validatedAdapterVersion ? exactAdapterCompatibility(validatedAdapterVersion) : null;
+  const receiptBinding = `${id}:${validatedAdapterVersion ?? "pending"}:${adapterCompatibility?.min ?? "pending"}:${adapterCompatibility?.maxExclusive ?? "pending"}`;
+  const seed = [...receiptBinding].reduce((sum, value) => (sum + value.charCodeAt(0)) % 16, 0).toString(16);
   const evidenceSeed = ((Number.parseInt(seed, 16) + 7) % 16).toString(16);
   return {
     source: agent === "claude-code"
@@ -533,6 +540,8 @@ function fixtureVersionMetadata(
     validationReceiptId: validated ? `local-validation-${agent}-${version}` : null,
     validationReceiptDigest: validated ? `sha256:${evidenceSeed.repeat(64)}` : null,
     supplyChainEvidenceDigest: validated ? `sha256:${seed.repeat(64)}` : null,
+    validatedAdapterVersion,
+    adapterCompatibility,
     validatedAt: validated ? discoveredAt : null,
   };
 }

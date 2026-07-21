@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
+import { exactAdapterCompatibility, isAdapterVersionAttested } from "../../../lib/agent/adapter-registry";
 import type {
   AgentInstallationBuildReceipt,
   AgentInstallationRolloutReceipt,
@@ -73,6 +74,8 @@ export class NativeAgentSupplyChainController {
     }
     const result = await this.tools.validate({ agent: candidate.agent, release, artifact, extractedRoot: extractionRoot, workRoot: attemptRoot });
     const validatedAt = timestamp(this.#now());
+    const validatedAdapterVersion = this.policy.agents[candidate.agent].adapterVersion;
+    const adapterCompatibility = exactAdapterCompatibility(validatedAdapterVersion);
     const core = Object.freeze({
       agent: candidate.agent,
       version: candidate.version,
@@ -82,6 +85,8 @@ export class NativeAgentSupplyChainController {
       sbomRef: result.sbomRef,
       scan: "PASS" as const,
       supplyChainEvidenceDigest: result.evidenceDigest,
+      validatedAdapterVersion,
+      adapterCompatibility,
       validationReceiptId: `validation-${candidate.agent}-${candidate.version}`,
       validatedAt,
     });
@@ -103,6 +108,7 @@ export class NativeAgentSupplyChainController {
     if (request.validation.agent !== request.candidate.agent || request.validation.version !== request.candidate.version
       || request.validation.sourceDigest !== request.candidate.sourceDigest
       || request.adapterVersion !== this.policy.agents[request.candidate.agent].adapterVersion
+      || !isAdapterVersionAttested(request.adapterVersion, request.validation.validatedAdapterVersion, request.validation.adapterCompatibility)
       || !this.policy.workerPools.some((pool) => pool.id === request.workerPool)) {
       throw new NativePolicyViolation("IMAGE_BUILD_FAILED", sha256Canonical({ request, stage: "immutable-build-binding" }));
     }

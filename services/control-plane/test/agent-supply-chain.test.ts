@@ -22,6 +22,8 @@ test("development supply-chain executes discovery, validation, immutable image b
   const validation = await chain.validateVersion({ ...operation, candidate: candidate! });
   assert.equal(validation.signatureVerified, true);
   assert.equal(validation.scan, "PASS");
+  assert.equal(validation.validatedAdapterVersion, "1.3.0");
+  assert.deepEqual(validation.adapterCompatibility, { min: "1.3.0", maxExclusive: "1.3.1" });
   const build = await chain.buildInstallation({
     ...operation,
     installationId: "claude-code-installation-test-001",
@@ -69,11 +71,17 @@ test("mTLS supply-chain client pins routes, health identity and exact receipt di
   const fixture = new DevelopmentAgentSupplyChain(now);
   const [candidate] = await fixture.discover({ ...operation, agent: "codex-cli", requestedVersion: "0.92.0" });
   const validation = await fixture.validateVersion({ ...operation, candidate: candidate! });
+  await assert.rejects(fixture.buildInstallation({
+    ...operation,
+    installationId: "codex-cli-installation-incompatible-001",
+    candidate: candidate!, validation,
+    workerPool: "development-linux-canary", adapterVersion: "1.2.0", rollbackInstallationId: null,
+  }), /receipt is invalid/);
   const buildInput = {
     ...operation,
     installationId: "codex-cli-installation-test-001",
     candidate: candidate!, validation,
-    workerPool: "development-linux-canary", adapterVersion: "1.2.0", rollbackInstallationId: null,
+    workerPool: "development-linux-canary", adapterVersion: "1.2.2", rollbackInstallationId: null,
   } as const;
   const build = await fixture.buildInstallation(buildInput);
   const rolloutInput = {
@@ -115,6 +123,17 @@ test("mTLS supply-chain client pins routes, health identity and exact receipt di
     async http() { return { statusCode: 200, payload: { ...validation, integrity: `sha256:${"f".repeat(64)}` } }; },
   });
   await assert.rejects(tampered.validateVersion({ ...operation, candidate: candidate! }), /receipt is invalid/);
+  const adapterTampered = new MtlsAgentSupplyChain({
+    endpoint: "https://agent-supply-chain.internal", version: "1.4.2", binaryDigest: "c".repeat(64),
+    tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },
+    async http() {
+      return { statusCode: 200, payload: {
+        ...validation,
+        adapterCompatibility: { min: validation.validatedAdapterVersion, maxExclusive: "9.9.9" },
+      } };
+    },
+  });
+  await assert.rejects(adapterTampered.validateVersion({ ...operation, candidate: candidate! }), /receipt is invalid/);
   assert.throws(() => new MtlsAgentSupplyChain({
     endpoint: "https://agent-supply-chain.internal?token=bad", version: "latest", binaryDigest: "c".repeat(64),
     tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },

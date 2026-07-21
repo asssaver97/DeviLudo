@@ -229,6 +229,7 @@ paths:
   /admin/agent-versions/approve:
     post:
       operationId: approveAgentVersion
+      description: The isolated supply-chain Broker records the exact validated Adapter version and its immutable half-open compatibility interval; callers cannot submit either attestation.
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { $ref: "#/components/requestBodies/VersionAction" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
@@ -248,13 +249,16 @@ paths:
   /admin/agent-installations:
     post:
       operationId: createAgentInstallation
+      description: Builds only when the approved AgentVersion validation receipt attests the selected built-in Adapter; legacy un-attested receipts must be revalidated first.
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AgentInstallationDraft" }
-      responses: { "201": { $ref: "#/components/responses/Ok" } }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: Agent version is unapproved, lacks an Adapter compatibility attestation, or does not attest the requested Adapter. }
   /admin/agent-rollouts/{id}/advance:
     post:
       operationId: advanceAgentRollout
@@ -1183,7 +1187,7 @@ components:
       type: object
       additionalProperties: false
       required: [agent, version, workerPool, adapterVersion]
-      description: Adapter version must exactly match the immutable built-in Agent Registry entry for the selected Agent.
+      description: Adapter version must exactly match both the immutable built-in Agent Registry entry and the selected AgentVersion's Broker-signed compatibility attestation.
       properties:
         agent: { type: string, enum: [claude-code, codex-cli] }
         version: { type: string, minLength: 1, maxLength: 100 }

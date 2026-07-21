@@ -3,7 +3,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import type { InferenceReconciliationReceipt } from "../../inference-gateway/src/contracts";
 import type { SpecModelReconciliationReceipt } from "../../spec-model-broker/src/contracts";
 import { normalizeModelRoles } from "../../../lib/agent/providers";
-import { isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
+import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
 import { AGENT_REGISTRY, AGENT_REGISTRY_SCHEMA_VERSION } from "../../../lib/agent/registry";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
 import { AdminStore, emptyUsageSummary, recordAdminAudit, type AdminCatalogState } from "./admin.store";
@@ -140,6 +140,8 @@ export class AdminService {
           validationReceiptId: null,
           validationReceiptDigest: null,
           supplyChainEvidenceDigest: null,
+          validatedAdapterVersion: null,
+          adapterCompatibility: null,
           validatedAt: null,
           discoveredAt: candidate.discoveredAt,
         };
@@ -190,7 +192,8 @@ export class AdminService {
     }
     if ([
       "integrity", "signatureVerified", "scan", "sbomRef", "sourceDigest", "validationReceipt",
-      "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAt", "imageDigest",
+      "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAdapterVersion",
+      "adapterCompatibility", "validatedAt", "imageDigest",
     ].some((field) => body[field] !== undefined)) {
       throw new ServiceProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "Supply-chain evidence must come from the isolated Broker");
     }
@@ -245,6 +248,8 @@ export class AdminService {
         validationReceiptId: validation.validationReceiptId,
         validationReceiptDigest: validation.validationReceiptDigest,
         supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
+        validatedAdapterVersion: validation.validatedAdapterVersion,
+        adapterCompatibility: validation.adapterCompatibility,
         validatedAt: validation.validatedAt,
       });
       this.audit(state, "AGENT_VERSION_APPROVED", record.id, actor, {
@@ -253,6 +258,9 @@ export class AdminService {
         validationReceiptId: validation.validationReceiptId,
         validationReceiptDigest: validation.validationReceiptDigest,
         supplyChainEvidenceDigest: validation.supplyChainEvidenceDigest,
+        validatedAdapterVersion: validation.validatedAdapterVersion,
+        adapterCompatibilityMin: validation.adapterCompatibility.min,
+        adapterCompatibilityMaxExclusive: validation.adapterCompatibility.maxExclusive,
         automaticActivation: false,
       });
       return { version: record, automaticActivation: false };
@@ -286,6 +294,12 @@ export class AdminService {
       const versionRecord = state.versions.get(`${agent}@${version}`);
       if (!versionRecord || versionRecord.state !== "APPROVED") {
         throw new ServiceProblem(409, "VERSION_NOT_APPROVED", "Installation requires an approved exact Agent version");
+      }
+      if (!versionRecord.validatedAdapterVersion || !versionRecord.adapterCompatibility) {
+        throw new ServiceProblem(409, "VERSION_ADAPTER_COMPATIBILITY_UNATTESTED", "Agent version must be revalidated against an Adapter before creating a new installation");
+      }
+      if (!isAdapterVersionAttested(adapterVersion, versionRecord.validatedAdapterVersion, versionRecord.adapterCompatibility)) {
+        throw new ServiceProblem(409, "VERSION_ADAPTER_INCOMPATIBLE", "Agent version validation receipt does not cover the requested Adapter version");
       }
       const rollback = mostRecentlyActivatedInstallation(state, agent, workerPool);
       const existing = state.installations.get(id);
@@ -1095,7 +1109,9 @@ export class AdminService {
         && !!installation.buildReceiptId && !!installation.buildReceiptDigest && !!installation.activatedAt;
       const versionReady = version?.agent === source.agent && ["APPROVED", "DEPRECATED"].includes(version.state)
         && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
-        && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest;
+        && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest
+        && !!version.validatedAdapterVersion && !!version.adapterCompatibility
+        && isAdapterVersionAttested(installation!.adapterVersion, version.validatedAdapterVersion, version.adapterCompatibility);
       if (!installationReady || !versionReady) {
         throw new ServiceProblem(
           409,
@@ -1458,7 +1474,8 @@ function versionCandidate(record: AgentVersionRecord): AgentVersionCandidateRece
 
 function versionValidation(record: AgentVersionRecord): AgentVersionValidationReceipt {
   if (record.state !== "APPROVED" || !record.signatureVerified || record.scan !== "PASS"
-    || !record.validationReceiptId || !record.validationReceiptDigest || !record.supplyChainEvidenceDigest || !record.validatedAt) {
+    || !record.validationReceiptId || !record.validationReceiptDigest || !record.supplyChainEvidenceDigest
+    || !record.validatedAdapterVersion || !record.adapterCompatibility || !record.validatedAt) {
     throw new ServiceProblem(409, "VERSION_NOT_ATTESTED", "Approved Agent version is missing its supply-chain validation receipt");
   }
   return Object.freeze({
@@ -1470,6 +1487,8 @@ function versionValidation(record: AgentVersionRecord): AgentVersionValidationRe
     sbomRef: record.sbomRef,
     scan: "PASS",
     supplyChainEvidenceDigest: record.supplyChainEvidenceDigest,
+    validatedAdapterVersion: record.validatedAdapterVersion,
+    adapterCompatibility: record.adapterCompatibility,
     validationReceiptId: record.validationReceiptId,
     validationReceiptDigest: record.validationReceiptDigest,
     validatedAt: record.validatedAt,
@@ -1665,7 +1684,9 @@ function assertProfileServingReady(
     && !!installation.buildReceiptId && !!installation.buildReceiptDigest;
   const versionReady = version?.agent === profile.agent && ["APPROVED", "DEPRECATED"].includes(version.state)
     && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
-    && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest;
+    && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest
+    && !!version.validatedAdapterVersion && !!version.adapterCompatibility
+    && isAdapterVersionAttested(installation!.adapterVersion, version.validatedAdapterVersion, version.adapterCompatibility);
   const providerReady = provider?.agent === profile.agent && provider.state === "ACTIVE"
     && provider.credentialVersionId === profile.credentialVersionId && providerProbePassed(provider);
   const credentialScopeReady = profile.scope === "platform"

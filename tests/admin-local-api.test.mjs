@@ -114,6 +114,34 @@ test("local installation rejects an exact SemVer outside the immutable Agent Reg
   assert.equal(store.installations.length, count);
 });
 
+test("local installation requires the approved AgentVersion receipt to attest the requested Adapter", async () => {
+  const legacyStore = resetDemoStore();
+  legacyStore.agentVersionMetadata["codex-cli@0.91.0"].validatedAdapterVersion = null;
+  legacyStore.agentVersionMetadata["codex-cli@0.91.0"].adapterCompatibility = null;
+  const unattested = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "codex-cli", version: "0.91.0", workerPool: "development-local-legacy", adapterVersion: "1.2.2",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(unattested.status, 409);
+  assert.equal((await unattested.json()).error.code, "VERSION_ADAPTER_COMPATIBILITY_UNATTESTED");
+  assert.equal(legacyStore.installations.some((item) => item.workerPool === "development-local-legacy"), false);
+
+  const incompatibleStore = resetDemoStore();
+  incompatibleStore.agentVersionMetadata["codex-cli@0.91.0"].validatedAdapterVersion = "1.2.1";
+  incompatibleStore.agentVersionMetadata["codex-cli@0.91.0"].adapterCompatibility = { min: "1.2.1", maxExclusive: "1.2.2" };
+  const incompatible = await POST(
+    request("agent-installations", "POST", "PlatformAgentAdmin", {
+      agent: "codex-cli", version: "0.91.0", workerPool: "development-local-incompatible", adapterVersion: "1.2.2",
+    }),
+    context("agent-installations"),
+  );
+  assert.equal(incompatible.status, 409);
+  assert.equal((await incompatible.json()).error.code, "VERSION_ADAPTER_INCOMPATIBLE");
+  assert.equal(incompatibleStore.installations.some((item) => item.workerPool === "development-local-incompatible"), false);
+});
+
 test("local Agent health exposes usage, configuration differences and derived alerts with the production shape", async () => {
   resetDemoStore();
   const changed = await PUT(

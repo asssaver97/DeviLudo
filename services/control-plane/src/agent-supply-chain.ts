@@ -2,6 +2,12 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import { isAbsolute, resolve } from "node:path";
+import {
+  builtInAdapterVersion,
+  exactAdapterCompatibility,
+  isAdapterVersionAttested,
+  isExactAdapterCompatibility,
+} from "../../../lib/agent/adapter-registry";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { ServiceProblem, type AgentKind } from "./contracts";
 
@@ -41,6 +47,8 @@ export interface AgentVersionValidationReceipt {
   readonly sbomRef: string;
   readonly scan: "PASS";
   readonly supplyChainEvidenceDigest: string;
+  readonly validatedAdapterVersion: string;
+  readonly adapterCompatibility: Readonly<{ min: string; maxExclusive: string }>;
   readonly validationReceiptId: string;
   readonly validationReceiptDigest: string;
   readonly validatedAt: string;
@@ -185,7 +193,9 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
     validateOperation(input);
     const candidate = candidateReceipt(input.candidate);
     const validatedAt = validDate(this.#now()).toISOString();
-    const evidenceDigest = sha256Canonical({ candidate, gates: [
+    const validatedAdapterVersion = builtInAdapterVersion(candidate.agent);
+    const adapterCompatibility = exactAdapterCompatibility(validatedAdapterVersion);
+    const evidenceDigest = sha256Canonical({ candidate, validatedAdapterVersion, adapterCompatibility, gates: [
       "official-signature", "package-integrity", "sbom", "malware", "vulnerability", "adapter-contract", "sandbox", "synthetic-task",
     ] });
     const core = Object.freeze({
@@ -197,6 +207,8 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
       sbomRef: `oci://registry.deviludo.local/sbom/${candidate.agent}@sha256:${evidenceDigest}`,
       scan: "PASS" as const,
       supplyChainEvidenceDigest: evidenceDigest,
+      validatedAdapterVersion,
+      adapterCompatibility,
       validationReceiptId: `validation-${candidate.agent}-${candidate.version}`,
       validatedAt,
     });
@@ -208,6 +220,7 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
     const candidate = candidateReceipt(input.candidate);
     const validation = validationReceipt(input.validation, candidate);
     if (!SAFE_ID.test(input.installationId) || !workerPool(input.workerPool) || !VERSION.test(input.adapterVersion)
+      || !isAdapterVersionAttested(input.adapterVersion, validation.validatedAdapterVersion, validation.adapterCompatibility)
       || (input.rollbackInstallationId !== null && !SAFE_ID.test(input.rollbackInstallationId))) invalidReceipt();
     const completedAt = validDate(this.#now()).toISOString();
     const imageHash = sha256Canonical({ candidate, validation, workerPool: input.workerPool, adapterVersion: input.adapterVersion });
@@ -432,17 +445,25 @@ function candidateReceipt(value: unknown): AgentVersionCandidateReceipt {
 function validationReceipt(value: unknown, candidate: AgentVersionCandidateReceipt): AgentVersionValidationReceipt {
   const body = record(value);
   exactKeys(body, ["agent", "version", "sourceDigest", "integrity", "signatureVerified", "sbomRef", "scan",
-    "supplyChainEvidenceDigest", "validationReceiptId", "validationReceiptDigest", "validatedAt"]);
+    "supplyChainEvidenceDigest", "validatedAdapterVersion", "adapterCompatibility",
+    "validationReceiptId", "validationReceiptDigest", "validatedAt"]);
+  const adapterCompatibility = record(body.adapterCompatibility);
+  exactKeys(adapterCompatibility, ["min", "maxExclusive"]);
   if (body.agent !== candidate.agent || body.version !== candidate.version || body.sourceDigest !== candidate.sourceDigest
     || typeof body.integrity !== "string" || !DIGEST.test(body.integrity) || body.signatureVerified !== true
     || typeof body.sbomRef !== "string" || !/^oci:\/\/[A-Za-z0-9][A-Za-z0-9._:/@-]{4,1000}$/.test(body.sbomRef)
     || body.scan !== "PASS" || typeof body.supplyChainEvidenceDigest !== "string" || !SHA256.test(body.supplyChainEvidenceDigest)
+    || typeof body.validatedAdapterVersion !== "string" || !VERSION.test(body.validatedAdapterVersion)
+    || typeof adapterCompatibility.min !== "string" || typeof adapterCompatibility.maxExclusive !== "string"
+    || !isExactAdapterCompatibility(body.validatedAdapterVersion, adapterCompatibility as unknown as Readonly<{ min: string; maxExclusive: string }>)
     || typeof body.validationReceiptId !== "string" || !SAFE_ID.test(body.validationReceiptId)
     || typeof body.validationReceiptDigest !== "string" || !SHA256.test(body.validationReceiptDigest)
     || typeof body.validatedAt !== "string" || !Number.isFinite(Date.parse(body.validatedAt))) invalidReceipt();
   const core = { agent: candidate.agent, version: candidate.version, sourceDigest: candidate.sourceDigest, integrity: body.integrity,
     signatureVerified: true as const, sbomRef: body.sbomRef, scan: "PASS" as const,
     supplyChainEvidenceDigest: body.supplyChainEvidenceDigest, validationReceiptId: body.validationReceiptId,
+    validatedAdapterVersion: body.validatedAdapterVersion,
+    adapterCompatibility: Object.freeze({ min: adapterCompatibility.min, maxExclusive: adapterCompatibility.maxExclusive }),
     validatedAt: body.validatedAt };
   if (sha256Canonical(core) !== body.validationReceiptDigest) invalidReceipt();
   return Object.freeze({ ...core, validationReceiptDigest: body.validationReceiptDigest });

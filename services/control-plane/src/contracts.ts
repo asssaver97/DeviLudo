@@ -56,6 +56,8 @@ export interface AgentVersionRecord {
   validationReceiptId: string | null;
   validationReceiptDigest: string | null;
   supplyChainEvidenceDigest: string | null;
+  validatedAdapterVersion: string | null;
+  adapterCompatibility: Readonly<{ min: string; maxExclusive: string }> | null;
   validatedAt: string | null;
   readonly discoveredAt: string;
 }

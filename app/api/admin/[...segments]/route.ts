@@ -1,5 +1,10 @@
 import { normalizeModelRoles } from "@/lib/agent/providers";
-import { isBuiltInAdapterVersion } from "@/lib/agent/adapter-registry";
+import {
+  builtInAdapterVersion,
+  exactAdapterCompatibility,
+  isAdapterVersionAttested,
+  isBuiltInAdapterVersion,
+} from "@/lib/agent/adapter-registry";
 import { AGENT_REGISTRY, AGENT_REGISTRY_SCHEMA_VERSION } from "@/lib/agent/registry";
 import { localWorkerImageDigest } from "@/lib/agent/local-worker-identity";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
@@ -413,6 +418,8 @@ export async function POST(request: Request, context: RouteContext) {
           validationReceiptId: null,
           validationReceiptDigest: null,
           supplyChainEvidenceDigest: null,
+          validatedAdapterVersion: null,
+          adapterCompatibility: null,
           validatedAt: null,
         };
         appendDemoAudit("AGENT_VERSION_DISCOVERED", id, role, {
@@ -431,17 +438,25 @@ export async function POST(request: Request, context: RouteContext) {
         : key.endsWith("deprecate") ? "DEPRECATED" as const : "BLOCKED" as const;
       const forbiddenAttestationFields = [
         "integrity", "signatureVerified", "scan", "sbomRef", "sourceDigest", "validationReceipt",
-        "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAt", "imageDigest",
+        "validationReceiptId", "validationReceiptDigest", "supplyChainEvidenceDigest", "validatedAdapterVersion",
+        "adapterCompatibility", "validatedAt", "imageDigest",
       ];
       if (state === "APPROVED" && forbiddenAttestationFields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
         throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "签名、扫描、SBOM 与 digest 只能来自受信供应链 Broker，不能由管理员请求提供");
       }
       assertAllowedBodyFields(body, ["id"]);
+      const approvalAgent = id.startsWith("claude-code@") ? "claude-code" : "codex-cli";
+      const approvalAdapterVersion = builtInAdapterVersion(approvalAgent);
+      const approvalAdapterCompatibility = exactAdapterCompatibility(approvalAdapterVersion);
       const [receiptDigest, integrityDigest, evidenceDigest] = state === "APPROVED"
         ? await Promise.all([
-          fingerprintSecret(new TextEncoder().encode(`local-agent-validation:v1:${id}`)),
+          fingerprintSecret(new TextEncoder().encode(
+            `local-agent-validation:v2:${id}:${approvalAdapterVersion}:${approvalAdapterCompatibility.min}:${approvalAdapterCompatibility.maxExclusive}`,
+          )),
           fingerprintSecret(new TextEncoder().encode(`local-agent-integrity:v1:${id}`)),
-          fingerprintSecret(new TextEncoder().encode(`local-agent-evidence:v1:${id}`)),
+          fingerprintSecret(new TextEncoder().encode(
+            `local-agent-evidence:v2:${id}:${approvalAdapterVersion}:${approvalAdapterCompatibility.min}:${approvalAdapterCompatibility.maxExclusive}`,
+          )),
         ])
         : [null, null, null];
       return await mutate(lease, `admin:${key}:${idempotency}`, () => {
@@ -469,6 +484,8 @@ export async function POST(request: Request, context: RouteContext) {
             validationReceiptId: `local-validation-${id.replaceAll("@", "-")}`,
             validationReceiptDigest: receiptDigest,
             supplyChainEvidenceDigest: evidenceDigest,
+            validatedAdapterVersion: approvalAdapterVersion,
+            adapterCompatibility: approvalAdapterCompatibility,
             validatedAt: new Date().toISOString(),
           });
         }
@@ -479,6 +496,9 @@ export async function POST(request: Request, context: RouteContext) {
           newInstallationsAllowed: false,
           trustBoundary: "LOCAL_DETERMINISTIC_BROKER",
           ...(receiptDigest ? { validationReceiptDigest: receiptDigest } : {}),
+          ...(state === "APPROVED" ? {
+            validatedAdapterVersion: approvalAdapterVersion,
+          } : {}),
         });
         return {
           id,
@@ -514,6 +534,13 @@ export async function POST(request: Request, context: RouteContext) {
       }
       if (getDemoStore().agentVersions[`${agentKind}@${version}`] !== "APPROVED") {
         throw new HttpProblem(409, "VERSION_NOT_APPROVED", "Only a Broker-attested approved version can build a WorkerImage");
+      }
+      const versionMetadata = getDemoStore().agentVersionMetadata[`${agentKind}@${version}`];
+      if (!versionMetadata?.validatedAdapterVersion || !versionMetadata.adapterCompatibility) {
+        throw new HttpProblem(409, "VERSION_ADAPTER_COMPATIBILITY_UNATTESTED", "Agent 版本必须重新通过 Adapter 契约验证后才能创建新安装");
+      }
+      if (!isAdapterVersionAttested(adapterVersion, versionMetadata.validatedAdapterVersion, versionMetadata.adapterCompatibility)) {
+        throw new HttpProblem(409, "VERSION_ADAPTER_INCOMPATIBLE", "Agent 版本验证回执不覆盖请求的 Adapter 版本");
       }
       const versionSlug = version.replaceAll(".", "").replaceAll("-", "");
       const identityDigest = await fingerprintSecret(new TextEncoder().encode(
@@ -829,7 +856,9 @@ export async function POST(request: Request, context: RouteContext) {
         || !versionState || !["APPROVED", "DEPRECATED"].includes(versionState)
         || !versionMetadata?.signatureVerified || versionMetadata.scan !== "PASS"
         || !versionMetadata.validationReceiptId || !versionMetadata.validationReceiptDigest
-        || !versionMetadata.supplyChainEvidenceDigest) {
+        || !versionMetadata.supplyChainEvidenceDigest || !versionMetadata.validatedAdapterVersion
+        || !versionMetadata.adapterCompatibility
+        || !isAdapterVersionAttested(installation.adapterVersion, versionMetadata.validatedAdapterVersion, versionMetadata.adapterCompatibility)) {
         throw new HttpProblem(409, "INSTALLATION_NOT_SERVING_READY", "Installation rebind requires a healthy 100% active WorkerImage with complete supply-chain attestation");
       }
       const digest = await fingerprintSecret(new TextEncoder().encode(

@@ -27,6 +27,8 @@ export type AgentVersionRow = {
   integrity: string;
   sbom: string;
   vulnerabilities: string;
+  adapterBinding: string;
+  adapterAttested: boolean;
   status: "APPROVED" | "DISCOVERED" | "VALIDATING" | "DEPRECATED" | "BLOCKED" | "REJECTED";
 };
 
