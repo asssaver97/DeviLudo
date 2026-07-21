@@ -32,7 +32,7 @@ export async function scmMergeServiceFromEnv(env: Readonly<Record<string, string
     const github = new GitHubAppScmProxy({ connector, store: operations, evidenceGate: authority,
       artifactAttestationKeys: new Map([[config.artifactKeyId, config.artifactPublicKey]]),
       acceptanceKeys: new Map([[config.acceptanceKeyId, config.acceptancePublicKey]]) });
-    const service = new AuthoritativeScmMergeService(authority, acceptanceSigner, github, authority, () => new Date(), [operations]);
+    const service = new AuthoritativeScmMergeService(authority, acceptanceSigner, github, authority, () => new Date(), [operations, githubSigner]);
     const handler = createScmMergeHandler({ service, allowedSpiffeIds: config.allowedSpiffeIds });
     const server = createScmMergeHttpsServer({ tls: { key: config.serverKey, cert: config.serverCertificate, ca: config.clientCa },
       handler, maxBodyBytes: config.maxBodyBytes, requestTimeoutMs: config.requestTimeoutMs });

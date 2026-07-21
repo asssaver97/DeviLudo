@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { workflowSpiffeIdFromAuthorizedTls } from "../../temporal/src/receiver-http";
 import { MtlsGitHubAppJwtSigner } from "./github-app-signer-client";
@@ -41,19 +41,18 @@ export async function projectRepositoryRuntimeFromEnv(env: Readonly<Record<strin
       https: { key: serverKey, cert: serverCertificate, ca: clientCa, requestCert: true, rejectUnauthorized: true, minVersion: "TLSv1.3" },
     });
     registerProjectRepositoryRoutes(server, { service, authorize });
-    server.get("/healthz", async (request, reply) => {
-      reply.header("cache-control", "no-store");
-      try { authorize(request); } catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
-      return reply.send({ status: "ok", service: "deviludo-project-repository-broker" });
+    registerProjectRepositoryHealthRoute(server, {
+      authorize,
+      dependencies: [store, signer],
     });
-    return Object.freeze({ host: host(env.DEVILUDO_PROJECT_REPOSITORY_HOST), port: port(env.DEVILUDO_PROJECT_REPOSITORY_PORT), pool, store, service, server });
+    return Object.freeze({ host: host(env.DEVILUDO_PROJECT_REPOSITORY_HOST), port: port(env.DEVILUDO_PROJECT_REPOSITORY_PORT), pool, store, signer, service, server });
   } catch (error) { await pool.close().catch(() => undefined); throw error; }
 }
 
 export async function runProjectRepositoryService(env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
   const runtime = await projectRepositoryRuntimeFromEnv(env);
   try {
-    await Promise.all([runtime.pool.probe(), runtime.store.probe()]);
+    await Promise.all([runtime.store.probe(), runtime.signer.probe()]);
     await runtime.server.listen({ host: runtime.host, port: runtime.port });
     console.log(`[project-repository] READY ${runtime.host}:${runtime.port}`);
     const shutdown = new AbortController(); const stop = () => shutdown.abort();
@@ -61,6 +60,24 @@ export async function runProjectRepositoryService(env: Readonly<Record<string, s
     try { await new Promise<void>((done) => shutdown.signal.addEventListener("abort", () => done(), { once: true })); }
     finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
   } finally { await runtime.server.close().catch(() => undefined); await runtime.pool.close(); console.log("[project-repository] STOPPED"); }
+}
+
+export function registerProjectRepositoryHealthRoute(server: FastifyInstance, options: Readonly<{
+  authorize(request: FastifyRequest): void | Promise<void>;
+  dependencies: readonly Readonly<{ probe(): Promise<void> }>[];
+}>): void {
+  if (!options.dependencies.length) throw new Error("Project repository readiness dependencies are required");
+  server.get("/healthz", async (request, reply) => {
+    reply.header("cache-control", "no-store"); reply.header("x-content-type-options", "nosniff");
+    try { await options.authorize(request); }
+    catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
+    try {
+      await Promise.all(options.dependencies.map(async (dependency) => dependency.probe()));
+      return reply.send({ status: "ok", service: "deviludo-project-repository-broker" });
+    } catch {
+      return reply.status(503).send({ status: "unavailable", service: "deviludo-project-repository-broker" });
+    }
+  });
 }
 
 async function secret(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> {

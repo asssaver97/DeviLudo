@@ -60,6 +60,16 @@ export class MtlsGitHubAppJwtSigner implements GitHubAppJwtSigner {
       || signature.toString("base64url") !== body.signature) invalid("signature");
     return new Uint8Array(signature);
   }
+
+  async probe(): Promise<void> {
+    const url = new URL(this.#endpoint.href);
+    url.pathname = "/healthz";
+    const response = await this.#http({ url, method: "GET", body: "{}", tls: this.#tls, timeoutMs: this.#timeoutMs });
+    const body = record(response.payload);
+    exactKeys(body, ["schemaVersion", "status", "keyId", "algorithm"]);
+    if (response.statusCode !== 200 || body.schemaVersion !== "deviludo.github-app-signer-health.v1"
+      || body.status !== "ok" || body.keyId !== this.keyId || body.algorithm !== "RS256") invalid("health");
+  }
 }
 
 function strictOrigin(value: string | URL): URL {

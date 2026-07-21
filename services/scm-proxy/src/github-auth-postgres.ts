@@ -43,6 +43,21 @@ type IntentRow = Record<string, unknown> & {
 export class PostgresGitHubAuthorizationStore implements GitHubAuthorizationStore {
   constructor(private readonly pool: ScmPostgresPool) {}
 
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.github_installation_authorizations')::text AS authorizations,
+                to_regclass('deviludo.github_installations')::text AS installations`,
+      );
+      const row = result.rows[0];
+      if (row?.authorizations !== "deviludo.github_installation_authorizations"
+        || row.installations !== "deviludo.github_installations") {
+        throw new Error("GitHub authorization PostgreSQL schema is unavailable");
+      }
+    } finally { client.release(); }
+  }
+
   async connectionStatus(input: {
     readonly tenantId: string;
     readonly githubUserId: number;

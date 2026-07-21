@@ -11,6 +11,7 @@ import type {
 } from "../src/project-repository-contracts";
 import { registerProjectRepositoryRoutes } from "../src/project-repository-http";
 import { ProjectRepositoryOnboardingService } from "../src/project-repository-service";
+import { registerProjectRepositoryHealthRoute } from "../src/run-project-repository-service";
 
 const principal: ProjectRepositoryPrincipal = Object.freeze({
   tenantId: "11111111-1111-4111-8111-111111111111",
@@ -168,5 +169,31 @@ test("project repository HTTP surface requires workload identity and exact reque
     method: "POST", url: "/v1/projects", headers: { "idempotency-key": "http-create-002" },
     payload: { principal, slug: "evil", name: "evil", installationId: "9001", repositoryId: 7001, owner: "attacker" },
   })).statusCode, 400);
+  await server.close();
+});
+
+test("project repository readiness requires its authorized caller, schema store, and GitHub App signer", async () => {
+  const server = Fastify({ logger: false });
+  let authorized = false;
+  let signerFailed = false;
+  let probes = 0;
+  registerProjectRepositoryHealthRoute(server, {
+    authorize() { if (!authorized) throw new Error("denied"); },
+    dependencies: [
+      { async probe() { probes += 1; } },
+      { async probe() { probes += 1; if (signerFailed) throw new Error("private KMS failure"); } },
+    ],
+  });
+  assert.equal((await server.inject({ method: "GET", url: "/healthz" })).statusCode, 401);
+  assert.equal(probes, 0);
+  authorized = true;
+  const ready = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(ready.statusCode, 200);
+  assert.deepEqual(ready.json(), { status: "ok", service: "deviludo-project-repository-broker" });
+  signerFailed = true;
+  const unavailable = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(unavailable.statusCode, 503);
+  assert.deepEqual(unavailable.json(), { status: "unavailable", service: "deviludo-project-repository-broker" });
+  assert.doesNotMatch(unavailable.body, /private KMS/);
   await server.close();
 });

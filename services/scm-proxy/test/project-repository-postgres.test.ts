@@ -59,3 +59,22 @@ test("PostgreSQL project catalog applies tenant RLS and returns only active acce
   assert.equal(statements[0], "BEGIN");
   assert.equal(statements.at(-1), "COMMIT");
 });
+
+test("PostgreSQL project repository readiness requires every onboarding and binding table", async () => {
+  const expected = {
+    projects: "deviludo.projects",
+    installations: "deviludo.github_installations",
+    bindings: "deviludo.github_repository_bindings",
+    operations: "deviludo.project_creation_operations",
+  };
+  const store = new PostgresProjectRepositoryOnboardingStore({ async connect() { return {
+    async query(text: string) { assert.match(text, /github_repository_bindings/); return { rowCount: 1, rows: [expected] }; },
+    release() {},
+  }; } } as unknown as ScmPostgresPool);
+  await store.probe();
+  const missing = new PostgresProjectRepositoryOnboardingStore({ async connect() { return {
+    async query() { return { rowCount: 1, rows: [{ ...expected, bindings: null }] }; },
+    release() {},
+  }; } } as unknown as ScmPostgresPool);
+  await assert.rejects(missing.probe());
+});

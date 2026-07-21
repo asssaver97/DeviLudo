@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { workflowSpiffeIdFromAuthorizedTls } from "../../temporal/src/receiver-http";
 import { MtlsGitHubAuthorizationSecretClient } from "../../scm-proxy/src/github-auth-secret-client";
@@ -42,11 +42,12 @@ export async function identityRuntimeFromEnv(env: Readonly<Record<string, string
       https: { key: serverKey, cert: serverCertificate, ca: clientCa, requestCert: true,
         rejectUnauthorized: true, minVersion: "TLSv1.3" } });
     registerIdentityRoutes(server, { broker, authorizeWeb: authorize(webSpiffeIds), authorizeAdmin: authorize(adminSpiffeIds) });
-    server.get("/healthz", async (request, reply) => {
-      reply.header("cache-control", "no-store"); reply.header("x-content-type-options", "nosniff");
-      const identity = workflowSpiffeIdFromAuthorizedTls(request);
-      if (!webSpiffeIds.has(identity) && !adminSpiffeIds.has(identity)) return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } });
-      return reply.send({ status: "ok", service: "deviludo-identity-broker" });
+    registerIdentityHealthRoute(server, {
+      authorize(request) {
+        const identity = workflowSpiffeIdFromAuthorizedTls(request);
+        if (!webSpiffeIds.has(identity) && !adminSpiffeIds.has(identity)) throw new Error("Identity workload is not allowed");
+      },
+      dependencies: [store, secrets],
     });
     return Object.freeze({ host: bindHost(env.DEVILUDO_IDENTITY_HOST), port: integer(env.DEVILUDO_IDENTITY_PORT, 4560, 1024, 65535),
       pool, secrets, store, github, broker, server });
@@ -56,7 +57,7 @@ export async function identityRuntimeFromEnv(env: Readonly<Record<string, string
 export async function runIdentityService(env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
   const runtime = await identityRuntimeFromEnv(env);
   try {
-    await Promise.all([runtime.pool.probe(), runtime.secrets.probe()]);
+    await Promise.all([runtime.store.probe(), runtime.secrets.probe()]);
     await runtime.server.listen({ host: runtime.host, port: runtime.port });
     console.log(`[identity] READY ${runtime.host}:${runtime.port}`);
     const shutdown = new AbortController(); const stop = () => shutdown.abort();
@@ -66,6 +67,24 @@ export async function runIdentityService(env: Readonly<Record<string, string | u
   } finally {
     await runtime.server.close().catch(() => undefined); await runtime.pool.close(); console.log("[identity] STOPPED");
   }
+}
+
+export function registerIdentityHealthRoute(server: FastifyInstance, options: Readonly<{
+  authorize(request: FastifyRequest): void | Promise<void>;
+  dependencies: readonly Readonly<{ probe(): Promise<void> }>[];
+}>): void {
+  if (!options.dependencies.length) throw new Error("Identity readiness dependencies are required");
+  server.get("/healthz", async (request, reply) => {
+    reply.header("cache-control", "no-store"); reply.header("x-content-type-options", "nosniff");
+    try { await options.authorize(request); }
+    catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
+    try {
+      await Promise.all(options.dependencies.map(async (dependency) => dependency.probe()));
+      return reply.send({ status: "ok", service: "deviludo-identity-broker" });
+    } catch {
+      return reply.status(503).send({ status: "unavailable", service: "deviludo-identity-broker" });
+    }
+  });
 }
 
 async function secretFile(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> {

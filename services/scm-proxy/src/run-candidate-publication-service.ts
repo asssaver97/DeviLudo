@@ -32,7 +32,7 @@ export async function candidatePublicationServiceFromEnv(env: Readonly<Record<st
       evidenceGate: { async verify() { return false; } },
       artifactAttestationKeys: new Map([[config.artifactKeyId, config.artifactKey]]),
       acceptanceKeys: new Map([[config.acceptanceKeyId, config.acceptanceKey]]) });
-    const service = new AuthoritativeCandidatePublicationService(authority, github, authority, () => new Date(), [operations]);
+    const service = new AuthoritativeCandidatePublicationService(authority, github, authority, () => new Date(), [operations, signer]);
     const handler = createCandidatePublicationHandler({ service, allowedSpiffeIds: config.allowedSpiffeIds,
       healthIdentity: { version: config.version, binaryDigest: config.binaryDigest } });
     const server = createCandidatePublicationHttpsServer({ tls: { key: config.serverKey, cert: config.serverCertificate,
@@ -44,7 +44,7 @@ export async function candidatePublicationServiceFromEnv(env: Readonly<Record<st
 export async function runCandidatePublicationService(env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
   const runtime = await candidatePublicationServiceFromEnv(env);
   try {
-    await runtime.service.probe(); await runtime.operations.probe(); await listen(runtime.server, runtime.port, runtime.host); diagnostic("READY");
+    await runtime.service.probe(); await listen(runtime.server, runtime.port, runtime.host); diagnostic("READY");
     const shutdown = new AbortController(); const stop = () => shutdown.abort(); process.once("SIGINT", stop); process.once("SIGTERM", stop);
     try { await Promise.race([waitForAbort(shutdown.signal), waitForFailure(runtime.server)]); }
     finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }

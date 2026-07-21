@@ -230,10 +230,16 @@ export class PostgresProjectRepositoryOnboardingStore implements ProjectReposito
   async probe(): Promise<void> {
     const client = await this.pool.connect();
     try {
-      const result = await client.query<{ table_name: string | null }>(
-        "SELECT to_regclass('deviludo.project_creation_operations')::text AS table_name",
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.projects')::text AS projects,
+                to_regclass('deviludo.github_installations')::text AS installations,
+                to_regclass('deviludo.github_repository_bindings')::text AS bindings,
+                to_regclass('deviludo.project_creation_operations')::text AS operations`,
       );
-      if (result.rows[0]?.table_name !== "deviludo.project_creation_operations") invalid();
+      const row = result.rows[0];
+      if (row?.projects !== "deviludo.projects" || row.installations !== "deviludo.github_installations"
+        || row.bindings !== "deviludo.github_repository_bindings"
+        || row.operations !== "deviludo.project_creation_operations") invalid();
     } finally { client.release(); }
   }
 

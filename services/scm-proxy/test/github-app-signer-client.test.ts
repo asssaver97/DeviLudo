@@ -57,3 +57,30 @@ test("GitHub App signer rejects alternate endpoints, malformed input and receipt
   await assert.rejects(signer.signRs256(signingInput), /receipt/);
   await assert.rejects(signer.signRs256(new TextEncoder().encode("not-a-jwt")), /input/);
 });
+
+test("GitHub App signer readiness binds the exact KMS key and RS256 health schema", async () => {
+  const calls: string[] = [];
+  const signer = new MtlsGitHubAppJwtSigner({
+    endpoint: "https://vault-signing.internal:8443",
+    keyId: "github-app-rsa-v3",
+    tls,
+    http: async (input) => {
+      calls.push(`${input.method ?? "POST"} ${input.url.pathname}`);
+      return { statusCode: 200, payload: {
+        schemaVersion: "deviludo.github-app-signer-health.v1",
+        status: "ok",
+        keyId: "github-app-rsa-v3",
+        algorithm: "RS256",
+      } };
+    },
+  });
+  await signer.probe();
+  assert.deepEqual(calls, ["GET /healthz"]);
+  const drifted = new MtlsGitHubAppJwtSigner({
+    endpoint: "https://vault-signing.internal:8443", keyId: "github-app-rsa-v3", tls,
+    http: async () => ({ statusCode: 200, payload: {
+      schemaVersion: "deviludo.github-app-signer-health.v1", status: "ok", keyId: "other-key", algorithm: "RS256",
+    } }),
+  });
+  await assert.rejects(drifted.probe(), /health/);
+});

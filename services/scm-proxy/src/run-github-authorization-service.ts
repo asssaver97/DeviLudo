@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { workflowSpiffeIdFromAuthorizedTls } from "../../temporal/src/receiver-http";
 import { GitHubInstallationAuthorizationBroker } from "./github-auth";
@@ -74,12 +74,9 @@ export async function githubAuthorizationRuntimeFromEnv(
       },
     });
     registerGitHubAuthorizationBrokerRoutes(server, { broker, ledger, authorize });
-    server.get("/healthz", async (request, reply) => {
-      reply.header("cache-control", "no-store");
-      reply.header("x-content-type-options", "nosniff");
-      try { authorize(request); }
-      catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
-      return reply.send({ status: "ok", service: "deviludo-github-authorization-broker" });
+    registerGitHubAuthorizationHealthRoute(server, {
+      authorize,
+      dependencies: [store, ledger, secrets],
     });
     return Object.freeze({
       host: bindHost(env.DEVILUDO_GITHUB_AUTH_HOST),
@@ -103,7 +100,7 @@ export async function runGitHubAuthorizationService(
 ): Promise<void> {
   const runtime = await githubAuthorizationRuntimeFromEnv(env);
   try {
-    await Promise.all([runtime.pool.probe(), runtime.ledger.probe(), runtime.secrets.probe()]);
+    await Promise.all([runtime.store.probe(), runtime.ledger.probe(), runtime.secrets.probe()]);
     await runtime.server.listen({ host: runtime.host, port: runtime.port });
     console.log(`[github-authorization] READY ${runtime.host}:${runtime.port}`);
     const shutdown = new AbortController();
@@ -120,6 +117,24 @@ export async function runGitHubAuthorizationService(
     await runtime.pool.close();
     console.log("[github-authorization] STOPPED");
   }
+}
+
+export function registerGitHubAuthorizationHealthRoute(server: FastifyInstance, options: Readonly<{
+  authorize(request: FastifyRequest): void | Promise<void>;
+  dependencies: readonly Readonly<{ probe(): Promise<void> }>[];
+}>): void {
+  if (!options.dependencies.length) throw new Error("GitHub authorization readiness dependencies are required");
+  server.get("/healthz", async (request, reply) => {
+    reply.header("cache-control", "no-store"); reply.header("x-content-type-options", "nosniff");
+    try { await options.authorize(request); }
+    catch { return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } }); }
+    try {
+      await Promise.all(options.dependencies.map(async (dependency) => dependency.probe()));
+      return reply.send({ status: "ok", service: "deviludo-github-authorization-broker" });
+    } catch {
+      return reply.status(503).send({ status: "unavailable", service: "deviludo-github-authorization-broker" });
+    }
+  });
 }
 
 async function secretFile(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> {

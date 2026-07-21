@@ -15,10 +15,12 @@ import {
 import {
   PostgresGitHubAuthorizationStore,
   type ScmPostgresClient,
+  type ScmPostgresPool,
   type ScmPostgresQueryResult,
 } from "../src/github-auth-postgres";
 import { PostgresGitHubBrokerRequestLedger } from "../src/github-auth-ledger-postgres";
 import { MtlsGitHubAuthorizationSecretClient } from "../src/github-auth-secret-client";
+import { registerGitHubAuthorizationHealthRoute } from "../src/run-github-authorization-service";
 
 const principal: GitHubAuthorizationPrincipal = Object.freeze({
   tenantId: "tenant-north-dock",
@@ -189,6 +191,50 @@ test("internal GitHub broker HTTP route is workload-authenticated and idempotent
   assert.equal(connected.json().state, "CONNECTED");
   assert.equal(connected.json().installationCount, 1);
   await server.close();
+});
+
+test("GitHub authorization readiness requires its authorized caller and every durable dependency", async () => {
+  const server = Fastify({ logger: false });
+  let authorized = false;
+  let failed = false;
+  let probes = 0;
+  registerGitHubAuthorizationHealthRoute(server, {
+    authorize() { if (!authorized) throw new Error("denied"); },
+    dependencies: [
+      { async probe() { probes += 1; } },
+      { async probe() { probes += 1; if (failed) throw new Error("private Vault failure"); } },
+      { async probe() { probes += 1; } },
+    ],
+  });
+  assert.equal((await server.inject({ method: "GET", url: "/healthz" })).statusCode, 401);
+  assert.equal(probes, 0);
+  authorized = true;
+  const ready = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(ready.statusCode, 200);
+  assert.deepEqual(ready.json(), { status: "ok", service: "deviludo-github-authorization-broker" });
+  failed = true;
+  const unavailable = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(unavailable.statusCode, 503);
+  assert.deepEqual(unavailable.json(), { status: "unavailable", service: "deviludo-github-authorization-broker" });
+  assert.doesNotMatch(unavailable.body, /private Vault/);
+  await server.close();
+});
+
+test("GitHub authorization store readiness proves both immutable authorization tables", async () => {
+  const expected = {
+    authorizations: "deviludo.github_installation_authorizations",
+    installations: "deviludo.github_installations",
+  };
+  const store = new PostgresGitHubAuthorizationStore({ async connect() { return {
+    async query(text: string) { assert.match(text, /github_installation_authorizations/); return { rowCount: 1, rows: [expected] }; },
+    release() {},
+  }; } } as unknown as ScmPostgresPool);
+  await store.probe();
+  const missing = new PostgresGitHubAuthorizationStore({ async connect() { return {
+    async query() { return { rowCount: 1, rows: [{ ...expected, installations: null }] }; },
+    release() {},
+  }; } } as unknown as ScmPostgresPool);
+  await assert.rejects(missing.probe(), /schema is unavailable/);
 });
 
 test("Postgres GitHub authorization store applies tenant RLS and persists only digests", async () => {

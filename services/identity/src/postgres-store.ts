@@ -31,6 +31,24 @@ type PrincipalRow = Record<string, unknown> & {
 export class PostgresIdentityStore implements IdentityStore {
   constructor(private readonly pool: IdentityPostgresPool) {}
 
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.tenants')::text AS tenants,
+                to_regclass('deviludo.users')::text AS users,
+                to_regclass('deviludo.tenant_memberships')::text AS tenant_memberships,
+                to_regclass('deviludo.tenant_invitations')::text AS tenant_invitations,
+                to_regclass('deviludo.identity_login_intents')::text AS identity_login_intents,
+                to_regclass('deviludo.platform_sessions')::text AS platform_sessions`,
+      );
+      const row = result.rows[0];
+      for (const table of ["tenants", "users", "tenant_memberships", "tenant_invitations", "identity_login_intents", "platform_sessions"]) {
+        if (row?.[table] !== `deviludo.${table}`) throw new Error("Identity PostgreSQL schema is unavailable");
+      }
+    } finally { client.release(); }
+  }
+
   async createInvitation(invitation: IdentityInvitation): Promise<void> {
     await this.#transaction(invitation.tenantId, async (client) => {
       const result = await client.query(

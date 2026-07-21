@@ -15,6 +15,8 @@ import type {
 } from "../src/contracts";
 import { GitHubRestIdentityVerifier } from "../src/github-oauth";
 import { registerIdentityRoutes } from "../src/http";
+import { PostgresIdentityStore, type IdentityPostgresPool } from "../src/postgres-store";
+import { registerIdentityHealthRoute } from "../src/run-service";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const now = new Date("2032-01-02T03:04:05.000Z");
@@ -157,6 +159,56 @@ test("HTTP surface separates admin and Web workload authority and never caches c
   const crossed = await server.inject({ method: "POST", url: "/v1/invitations", headers: { "x-test-workload": "web" }, payload: {} });
   assert.equal(crossed.statusCode, 401);
   await server.close();
+});
+
+test("identity readiness authenticates the mesh caller and fails closed on database or Secret Broker loss", async () => {
+  const server = Fastify({ logger: false });
+  let allowed = false;
+  let unavailable = false;
+  let probes = 0;
+  registerIdentityHealthRoute(server, {
+    authorize() { if (!allowed) throw new Error("denied"); },
+    dependencies: [
+      { async probe() { probes += 1; if (unavailable) throw new Error("private database failure"); } },
+      { async probe() { probes += 1; } },
+    ],
+  });
+  assert.equal((await server.inject({ method: "GET", url: "/healthz" })).statusCode, 401);
+  assert.equal(probes, 0);
+  allowed = true;
+  const ready = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(ready.statusCode, 200);
+  assert.deepEqual(ready.json(), { status: "ok", service: "deviludo-identity-broker" });
+  assert.equal(ready.headers["cache-control"], "no-store");
+  unavailable = true;
+  const failed = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(failed.statusCode, 503);
+  assert.deepEqual(failed.json(), { status: "unavailable", service: "deviludo-identity-broker" });
+  assert.doesNotMatch(failed.body, /private database/);
+  await server.close();
+});
+
+test("identity PostgreSQL readiness requires every credential-bearing schema table", async () => {
+  let releaseCount = 0;
+  const tables = {
+    tenants: "deviludo.tenants",
+    users: "deviludo.users",
+    tenant_memberships: "deviludo.tenant_memberships",
+    tenant_invitations: "deviludo.tenant_invitations",
+    identity_login_intents: "deviludo.identity_login_intents",
+    platform_sessions: "deviludo.platform_sessions",
+  };
+  const store = new PostgresIdentityStore({ async connect() { return {
+    async query(text: string) { assert.match(text, /to_regclass\('deviludo\.platform_sessions'\)/); return { rowCount: 1, rows: [tables] }; },
+    release() { releaseCount += 1; },
+  }; } } as unknown as IdentityPostgresPool);
+  await store.probe();
+  assert.equal(releaseCount, 1);
+  const missing = new PostgresIdentityStore({ async connect() { return {
+    async query() { return { rowCount: 1, rows: [{ ...tables, platform_sessions: null }] }; },
+    release() {},
+  }; } } as unknown as IdentityPostgresPool);
+  await assert.rejects(missing.probe(), /schema is unavailable/);
 });
 
 test("GitHub verifier revalidates /user and revokes the ephemeral token", async () => {

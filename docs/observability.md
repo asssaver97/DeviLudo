@@ -54,6 +54,14 @@ Steam 注册与项目配置共享同一个 Access Broker 时只发一次探针�
 `GET /healthz` 会实际探测权威目录存储和 Agent 供应链。编排器必须使用 Web 端点
 控制流量接入，进程存活由容器运行时单独判断。
 
+这条链路不是只验证 Broker 进程：Identity Broker 会检查六张身份/RLS 表及 Secret
+Broker；GitHub Authorization Broker 会检查授权表、installation 表、防重放账本和
+Secret Broker；Project Repository Broker 会检查项目、installation、仓库绑定、操作
+账本，并要求 GitHub App KMS 返回绑定精确 key ID 与 `RS256` 的
+`deviludo.github-app-signer-health.v1`。候选发布和合并服务的自身 `/healthz` 也包含
+同一个 KMS 探针。任何内部错误只折叠为稳定的 `503`，不会向 Web 传播数据库、Vault
+或 KMS 诊断文本。
+
 ## 本地验证
 
 本地测试网站默认使用 `DEVILUDO_OTEL_MODE=disabled`，所以不会把开发活动

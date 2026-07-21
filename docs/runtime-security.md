@@ -46,6 +46,16 @@ expiry and revocation, then emits a fresh HMAC assertion bound to the exact HTTP
 method and path. The Web verifies that assertion before using the tenant ID.
 Logout revokes the server-side digest first and then clears both cookies.
 
+Identity readiness is dependency-aware rather than a process echo. Its mTLS
+`/healthz` verifies the complete tenant, user, membership, invitation, login
+intent and platform-session schema plus the Secret Broker. GitHub authorization
+adds its installation/authorization schema, durable anti-replay ledger and
+Secret Broker. Project repository onboarding verifies all project and binding
+tables and calls the GitHub App KMS health contract, which must name the exact
+configured key ID and `RS256`; the same signer probe participates in candidate
+publication and merge readiness. Failures return only a bounded unavailable
+identity and never upstream diagnostics.
+
 ## Specification model boundary
 
 Idea refinement and feedback drafting never run Claude Code or Codex CLI. The
