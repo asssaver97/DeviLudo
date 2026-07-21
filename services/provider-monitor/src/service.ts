@@ -17,6 +17,7 @@ export interface ProviderRecoveryClaim extends ProviderRecoveryAuthority {
 }
 
 export interface ProviderRecoveryStore {
+  listDue(tenantId: string, limit: number): Promise<readonly ProviderRecoveryRequest[]>;
   begin(input: { readonly request: ProviderRecoveryRequest; readonly schedulerSubject: string }): Promise<
     | { readonly kind: "CLAIMED"; readonly claim: ProviderRecoveryClaim }
     | { readonly kind: "BUSY" }
@@ -28,6 +29,9 @@ export interface ProviderRecoveryStore {
     readonly probedAt: string;
     readonly delivery: Awaited<ReturnType<WorkflowActionCompletionPort["complete"]>>;
   }): Promise<ProviderRecoveryReceipt>;
+  defer(claim: ProviderRecoveryClaim, failureCode:
+    | "PROVIDER_PROBE_FAILED"
+    | "PROVIDER_RECOVERY_DELIVERY_FAILED"): Promise<void>;
   release(claim: ProviderRecoveryClaim): Promise<void>;
   probe(): Promise<void>;
 }
@@ -57,11 +61,17 @@ export class ProviderRecoveryService {
     if (outcome.kind === "COMPLETED") return Object.freeze({ ...outcome.receipt, replayed: true });
     if (outcome.kind === "BUSY") throw new ProviderRecoveryConflict("PROVIDER_RECOVERY_BUSY");
     const { claim } = outcome;
+    let checks: Readonly<Record<string, "PASS" | "FAIL">>;
     try {
-      const checks = await this.providerProbe.run(claim.provider);
+      checks = await this.providerProbe.run(claim.provider);
       if (Object.values(checks).some((result) => result !== "PASS")) {
         throw new ProviderRecoveryConflict("PROVIDER_RECOVERY_CONFLICT");
       }
+    } catch (error) {
+      await this.store.defer(claim, "PROVIDER_PROBE_FAILED").catch(() => undefined);
+      throw error;
+    }
+    try {
       const probedAt = exactDate(this.now()).toISOString();
       const delivery = await this.completions.complete({
         tenantId: claim.request.tenantId,
@@ -80,7 +90,7 @@ export class ProviderRecoveryService {
         claim, probeDigest: providerProbeDigest(checks), probedAt, delivery,
       });
     } catch (error) {
-      await this.store.release(claim).catch(() => undefined);
+      await this.store.defer(claim, "PROVIDER_RECOVERY_DELIVERY_FAILED").catch(() => undefined);
       throw error;
     }
   }

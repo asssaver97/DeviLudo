@@ -67,12 +67,13 @@ behind the web console:
   observations for the current release gate, re-resolves the exact App, tested
   BuildID and clean-install evidence under tenant RLS, and durably advances the
   ordered Valve review, first-release and default-branch confirmation waits.
-- `provider-monitor`: accepts only allow-listed mTLS scheduler checks for an
-  existing `WAIT_FOR_PROVIDER` action, derives the exact immutable Run and
-  Provider under tenant RLS, executes the full contract probe through the
-  Inference Gateway, and emits one replay-safe `PROVIDER_RESTORED` signal. It
-  cannot accept an Agent, model, Base URL, credential or fallback choice from
-  its caller.
+- `provider-monitor`: automatically scans only tenants in its freshly verified,
+  signed workload assignment for due `WAIT_FOR_PROVIDER` actions. It derives
+  the exact immutable Run and Provider under tenant RLS, executes the full
+  contract probe through the Inference Gateway, applies durable bounded retry
+  backoff, and emits one replay-safe `PROVIDER_RESTORED` signal. An allow-listed
+  mTLS scheduler can request the same canonical action check, but cannot supply
+  an Agent, model, Base URL, credential or fallback choice.
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,

@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 52 }, (_, index) => {
+  const offsets = Array.from({ length: 53 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -20,8 +20,11 @@ test("local integration PostgreSQL applies every migration in order", () => {
 test("Provider recovery probes only the exact immutable waiting Run binding", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/052_provider_recovery_checks.sql", import.meta.url), "utf8");
+  const scheduling = readFileSync(new URL("../infra/postgres/053_provider_recovery_scheduling.sql", import.meta.url), "utf8");
   const store = readFileSync(new URL("../services/provider-monitor/src/postgres-store.ts", import.meta.url), "utf8");
   const service = readFileSync(new URL("../services/provider-monitor/src/service.ts", import.meta.url), "utf8");
+  const worker = readFileSync(new URL("../services/provider-monitor/src/worker.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/provider-monitor/src/run-service.ts", import.meta.url), "utf8");
   const ingress = readFileSync(new URL("../services/provider-monitor/src/ingress-http.ts", import.meta.url), "utf8");
   assert.equal(packageJson.scripts["start:provider-monitor"], observedServiceCommand("provider-monitor"));
   assert.match(packageJson.scripts["test:services"], /npm run test:provider-monitor/);
@@ -29,12 +32,20 @@ test("Provider recovery probes only the exact immutable waiting Run binding", ()
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
   assert.match(migration, /UNIQUE \(tenant_id, project_id, action_id\)/);
   assert.doesNotMatch(migration, /api_key|raw_response|access_token|password/i);
+  assert.match(scheduling, /attempt_count/);
+  assert.match(scheduling, /next_probe_at/);
+  assert.match(scheduling, /provider_recovery_due_idx/);
+  assert.doesNotMatch(scheduling, /api_key|raw_response|access_token|password/i);
   assert.match(store, /SELECT set_config\('app\.tenant_id'/);
   assert.match(store, /action\.binding->>'lockedRunConfigurationId'/);
   assert.match(store, /failover\.to_provider_revision_id/);
   assert.match(store, /provider\.provider_revision_id = action\.binding->>'providerRevisionId'/);
+  assert.match(store, /recovery\.next_probe_at <= now\(\)/);
+  assert.match(store, /make_interval/);
   assert.match(service, /source: "PROVIDER_MONITOR"/);
   assert.match(service, /type: "PROVIDER_RESTORED"/);
+  assert.match(worker, /listTenantIds\("control-plane"\)/);
+  assert.match(runtime, /workflowAssignmentSourceFromEnv/);
   assert.match(ingress, /requestCert: true/);
   assert.match(ingress, /rejectUnauthorized: true/);
   assert.match(ingress, /minVersion: "TLSv1\.3"/);

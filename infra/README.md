@@ -67,7 +67,7 @@ make explicit same-Agent Provider failover both immutable and auditable.
 Migration `048` atomically binds a failed clean-Steam-client evidence bundle to
 an append-only release revocation before the Build and Release may enter
 `FAILED`.
-All forty-eight migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
+All fifty-three migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
 service code. Application

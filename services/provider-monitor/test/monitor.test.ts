@@ -4,6 +4,7 @@ import type { WorkflowActionCompletionReceipt } from "../../control-plane/src/wo
 import type { PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import {
   parseProviderRecoveryRequest,
+  providerRecoveryOperationKey,
   providerRecoveryRequestDigest,
   type ProviderRecoveryReceipt,
   type ProviderRecoveryRequest,
@@ -16,6 +17,7 @@ import {
   type ProviderRecoveryClaim,
   type ProviderRecoveryStore,
 } from "../src/service";
+import { ProviderRecoveryWorker } from "../src/worker";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -32,8 +34,10 @@ const probedAt = "2030-01-01T00:00:00.000Z";
 const checks = Object.freeze({ authentication: "PASS" as const, modelExistence: "PASS" as const });
 
 function request(overrides: Partial<ProviderRecoveryRequest> = {}): ProviderRecoveryRequest {
+  const identity = { tenantId: overrides.tenantId ?? tenantId, projectId: overrides.projectId ?? projectId,
+    actionId: overrides.actionId ?? actionId };
   return parseProviderRecoveryRequest({ schemaVersion: "deviludo.provider-recovery-check.v1",
-    operationKey: "a".repeat(64), tenantId, projectId, actionId, ...overrides });
+    operationKey: overrides.operationKey ?? providerRecoveryOperationKey(identity), ...identity, ...overrides });
 }
 function delivery(replayed = false): WorkflowActionCompletionReceipt {
   return Object.freeze({ actionId, outboxId, workflowId, signalId, signalDigest: "b".repeat(64),
@@ -54,12 +58,13 @@ test("monitor probes the store-derived Provider and emits one exact recovery sig
     signal: { signalId, type: "PROVIDER_RESTORED", providerRevisionId: providerId } }]);
 });
 
-test("failed probe keeps the action waiting and releases its durable claim", async () => {
+test("failed probe keeps the action waiting and defers its durable claim", async () => {
   const input = request(); const store = memoryStore({ claim: claimFor(input) }); let completions = 0;
   const service = new ProviderRecoveryService(store, { async run() { throw new Error("offline"); } },
     { async complete() { completions += 1; return delivery(); } });
   await assert.rejects(service.check(input, scheduler), /offline/);
-  assert.equal(store.released, 1); assert.equal(store.completed, 0); assert.equal(completions, 0);
+  assert.equal(store.deferred, 1); assert.equal(store.released, 0);
+  assert.equal(store.completed, 0); assert.equal(completions, 0);
 });
 
 test("completed replay never probes or sends another workflow signal", async () => {
@@ -75,6 +80,46 @@ test("request cannot supply Agent, model, endpoint, credential or Provider autho
   for (const field of ["agent", "model", "baseUrl", "credentialVersionId", "providerRevisionId"]) {
     assert.throws(() => parseProviderRecoveryRequest({ ...request(), [field]: "attacker-value" }), /invalid/i);
   }
+  assert.throws(() => parseProviderRecoveryRequest({ ...request(), operationKey: "a".repeat(64) }), /invalid/i);
+});
+
+test("automatic worker scans only signed assigned tenants and recovers due actions", async () => {
+  const secondTenant = "88888888-8888-4888-8888-888888888888";
+  const calls: string[] = [];
+  const worker = new ProviderRecoveryWorker({
+    async listDue(selectedTenant, limit) {
+      calls.push(`scan:${selectedTenant}:${limit}`);
+      return selectedTenant === tenantId ? [request()] : [];
+    },
+  }, {
+    async check(value, subject) {
+      const input = parseProviderRecoveryRequest(value);
+      calls.push(`check:${input.actionId}:${subject}`);
+      return receiptFor(input, delivery());
+    },
+  }, {
+    async listTenantIds(destination) {
+      assert.equal(destination, "control-plane");
+      return [tenantId, secondTenant];
+    },
+  }, scheduler, { perTenantLimit: 7 });
+  assert.deepEqual(await worker.runCycle(), { attempted: 1, recovered: 1 });
+  assert.deepEqual(calls, [
+    `scan:${tenantId}:7`, `check:${actionId}:${scheduler}`, `scan:${secondTenant}:7`,
+  ]);
+});
+
+test("automatic worker rejects unordered or cross-tenant assignment results", async () => {
+  const secondTenant = "88888888-8888-4888-8888-888888888888";
+  const unordered = new ProviderRecoveryWorker({ async listDue() { return []; } },
+    { async check() { throw new Error("unreachable"); } },
+    { async listTenantIds() { return [secondTenant, tenantId]; } }, scheduler);
+  await assert.rejects(unordered.runCycle(), /assignment is invalid/);
+
+  const drift = new ProviderRecoveryWorker({ async listDue() { return [request()]; } },
+    { async check() { throw new Error("unreachable"); } },
+    { async listTenantIds() { return [secondTenant]; } }, scheduler);
+  await assert.rejects(drift.runCycle(), /candidate set is invalid/);
 });
 
 test("PostgreSQL store derives current authority under RLS and persists a digest-only receipt", async () => {
@@ -97,6 +142,46 @@ test("PostgreSQL store derives current authority under RLS and persists a digest
   assert.doesNotMatch(update, /base_url|models|credential_version_id|raw_response|api_key/i);
   const replay = await store.begin({ request: request(), schedulerSubject: scheduler });
   assert.equal(replay.kind, "COMPLETED");
+});
+
+test("PostgreSQL due scan is bounded, RLS-scoped and derives the canonical operation key", async () => {
+  const client = new RecoverySqlFixture();
+  const store = new PostgresProviderRecoveryStore({ async connect() { return client; } });
+  const due = await store.listDue(tenantId, 9);
+  assert.deepEqual(due, [request()]);
+  const query = client.sql.find((value) => value.includes("AS candidate_project_id")) ?? "";
+  assert.match(query, /action\.tenant_id = \$1::uuid/);
+  assert.match(query, /recovery\.next_probe_at <= now\(\)/);
+  assert.match(query, /LIMIT \$2/);
+  assert.ok(client.sql.some((value) => value.includes("SELECT set_config('app.tenant_id'")));
+});
+
+test("failed PostgreSQL claims use bounded persistent backoff", async () => {
+  const client = new RecoverySqlFixture();
+  const store = new PostgresProviderRecoveryStore({ async connect() { return client; } },
+    { claimId: () => claimToken, signalId: () => signalId });
+  const outcome = await store.begin({ request: request(), schedulerSubject: scheduler });
+  if (outcome.kind !== "CLAIMED") throw new Error("claim missing");
+  await store.defer(outcome.claim, "PROVIDER_PROBE_FAILED");
+  const update = client.sql.find((value) => value.includes("make_interval")) ?? "";
+  assert.match(update, /LEAST\(\s*300/);
+  assert.match(update, /attempt_count - 1/);
+  assert.match(update, /last_failure_code = \$5/);
+});
+
+test("another allow-listed scheduler can safely take over the canonical released action", async () => {
+  const client = new RecoverySqlFixture();
+  const store = new PostgresProviderRecoveryStore({ async connect() { return client; } },
+    { claimId: () => claimToken, signalId: () => signalId });
+  const first = await store.begin({ request: request(), schedulerSubject: scheduler });
+  if (first.kind !== "CLAIMED") throw new Error("first claim missing");
+  await store.release(first.claim);
+  const secondScheduler = "spiffe://deviludo.internal/scheduler/provider-recovery-backup";
+  const second = await store.begin({ request: request(), schedulerSubject: secondScheduler });
+  assert.equal(second.kind, "CLAIMED");
+  if (second.kind !== "CLAIMED") throw new Error("second claim missing");
+  assert.equal(second.claim.schedulerSubject, scheduler);
+  assert.equal(second.claim.request.operationKey, first.claim.request.operationKey);
 });
 
 test("same-Agent project fallback is accepted, while cross-Agent drift is rejected", async () => {
@@ -161,11 +246,13 @@ function receiptFor(input: ProviderRecoveryRequest, result: WorkflowActionComple
     schedulerSubject: scheduler, delivery: result, replayed: result.replayed });
 }
 function memoryStore(options: { claim?: ProviderRecoveryClaim; completed?: ProviderRecoveryReceipt }) {
-  const store: ProviderRecoveryStore & { completed: number; released: number } = {
-    completed: 0, released: 0,
+  const store: ProviderRecoveryStore & { completed: number; deferred: number; released: number } = {
+    completed: 0, deferred: 0, released: 0,
+    async listDue() { return []; },
     async begin() { return options.completed ? { kind: "COMPLETED", receipt: options.completed }
       : { kind: "CLAIMED", claim: options.claim! }; },
     async complete(input) { this.completed += 1; return receiptFor(input.claim.request, input.delivery); },
+    async defer() { this.deferred += 1; },
     async release() { this.released += 1; }, async probe() {},
   }; return store;
 }
@@ -175,17 +262,30 @@ class RecoverySqlFixture implements PostgresWorkflowClient {
   constructor(private readonly options: { fallback?: boolean; providerAgent?: string } = {}) {}
   async query<Row extends Record<string, unknown>>(text: string, values: readonly unknown[] = []) {
     this.sql.push(text);
+    if (text.includes("AS candidate_project_id")) return rows([{
+      candidate_project_id: projectId, candidate_action_id: actionId,
+    } as unknown as Row]);
     if (text.includes("FROM deviludo.provider_recovery_checks")) return rows(this.row ? [this.row as Row] : []);
     if (text.includes("FROM deviludo.workflow_control_actions action")) return rows([this.authority() as unknown as Row]);
     if (text.includes("INSERT INTO deviludo.provider_recovery_checks")) {
       this.row = { operation_key: values[0], request_digest: values[1], tenant_id: values[2], project_id: values[3],
         action_id: values[4], workflow_id: values[5], run_id: values[6], provider_revision_id: values[7],
         scheduler_subject: values[8], signal_id: values[9], state: "PENDING", claim_token: values[10],
-        claim_active: true, receipt: null }; return rows([], 1);
+        claim_active: true, retry_due: true, attempt_count: 1, receipt: null }; return rows([], 1);
     }
     if (text.includes("SET state = 'COMPLETED'")) {
       this.row = { ...this.row, state: "COMPLETED", claim_token: null, claim_active: false,
         receipt: JSON.parse(String(values[7])) as unknown }; return rows([], 1);
+    }
+    if (text.includes("attempt_count = attempt_count + 1")) {
+      this.row = { ...this.row, claim_token: values[3], claim_active: true, retry_due: true,
+        attempt_count: Number(this.row?.attempt_count ?? 0) + 1 };
+      return rows([], 1);
+    }
+    if (text.includes("SET claim_token = NULL")) {
+      this.row = { ...this.row, claim_token: null, claim_active: false,
+        retry_due: !text.includes("make_interval") };
+      return rows([], 1);
     }
     return rows([]);
   }

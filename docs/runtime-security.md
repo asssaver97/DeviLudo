@@ -275,11 +275,14 @@ and project policy explicitly list the exact fallback revision and that revision
 is healthy. There is no automatic Claude↔Codex or provider switch.
 
 `provider-monitor` cannot choose a fallback or receive runtime configuration in
-its request. Its mTLS scheduler supplies only tenant/project/action identities;
-PostgreSQL RLS derives the effective Provider, and the workflow outbox repeats
-the exact Run, execution-operation, authorization, active-claim and Provider
-state checks after the Gateway probe. Probe failures and expired authorizations
-remain in `WAITING_PROVIDER`.
+its request. Its automatic Worker can inspect only tenants in a freshly verified
+signed workload assignment; the optional mTLS scheduler supplies only
+tenant/project/action identities. PostgreSQL RLS derives the effective Provider,
+and the workflow outbox repeats the exact Run, execution-operation,
+authorization, active-claim and Provider state checks after the Gateway probe.
+Probe failures use bounded persistent backoff. Expired authorizations remain in
+`WAITING_PROVIDER` for an explicit new authorization rather than weakening the
+locked configuration.
 
 The executor/gateway audit stream should contain IDs, fingerprints, byte/token
 counts, latency, decisions and safe error codes. It must never contain prompts,

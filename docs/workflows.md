@@ -17,15 +17,18 @@ its immutable ID. A Provider outage moves the run to `WAITING_PROVIDER` and a
 recovery signal resumes the same locked Agent. A different Profile can only be
 selected by a new approved iteration.
 
-Provider recovery is issued only by `services/provider-monitor`. An allow-listed
-mTLS scheduler identifies the tenant, project and waiting action but supplies no
-Provider configuration. The monitor re-resolves the Run and the exact effective
-Provider from PostgreSQL under RLS, rejects active inference claims and expired
-authorization, and asks the Inference Gateway to run the full authentication,
-model, streaming, tools, cancellation, usage, timeout and network-safety probe.
-The workflow completion transaction repeats the Run/Provider check before it
-writes the outbox signal, closing the probe-to-signal race. Failed probes keep
-the workflow waiting; completed checks replay without probing or signaling again.
+Provider recovery is issued only by `services/provider-monitor`. Its background
+Worker reloads a short-lived signed tenant assignment for every bounded scan;
+an allow-listed mTLS scheduler may also identify a tenant, project and waiting
+action, but supplies no Provider configuration. Both paths share the canonical
+action-derived operation key and durable claim. The monitor re-resolves the Run
+and exact effective Provider from PostgreSQL under RLS, rejects active inference
+claims and expired authorization, and asks the Inference Gateway to run the full
+authentication, model, streaming, tools, cancellation, usage, timeout and
+network-safety probe. The workflow completion transaction repeats the
+Run/Provider check before it writes the outbox signal, closing the
+probe-to-signal race. Failed attempts keep the workflow waiting with bounded
+persistent backoff; completed checks replay without probing or signaling again.
 
 A terminal Agent operation is never restarted. `AGENT_FAILED` and candidate
 `E2E_FAILED` transition back through `RESOLVING_AGENT_CONFIGURATION`, carrying

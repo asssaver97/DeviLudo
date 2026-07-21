@@ -38,12 +38,44 @@ export function parseProviderRecoveryRequest(value: unknown): ProviderRecoveryRe
   const keys = ["actionId", "operationKey", "projectId", "schemaVersion", "tenantId"];
   if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(keys)) invalid();
   if (body.schemaVersion !== "deviludo.provider-recovery-check.v1") invalid();
-  return Object.freeze({
+  const request = Object.freeze({
     schemaVersion: "deviludo.provider-recovery-check.v1",
     operationKey: match(body.operationKey, SHA256),
     tenantId: match(body.tenantId, UUID),
     projectId: match(body.projectId, UUID),
     actionId: match(body.actionId, UUID),
+  });
+  if (request.operationKey !== providerRecoveryOperationKey(request)) invalid();
+  return request;
+}
+
+/** A single waiting workflow action has one recovery ledger across all callers. */
+export function providerRecoveryOperationKey(
+  value: Pick<ProviderRecoveryRequest, "tenantId" | "projectId" | "actionId">,
+): string {
+  const tenantId = match(value.tenantId, UUID);
+  const projectId = match(value.projectId, UUID);
+  const actionId = match(value.actionId, UUID);
+  return sha256Canonical(Object.freeze({
+    schemaVersion: "deviludo.provider-recovery-operation.v1",
+    tenantId,
+    projectId,
+    actionId,
+  }));
+}
+
+export function providerRecoveryRequest(
+  value: Pick<ProviderRecoveryRequest, "tenantId" | "projectId" | "actionId">,
+): ProviderRecoveryRequest {
+  const tenantId = match(value.tenantId, UUID);
+  const projectId = match(value.projectId, UUID);
+  const actionId = match(value.actionId, UUID);
+  return Object.freeze({
+    schemaVersion: "deviludo.provider-recovery-check.v1",
+    operationKey: providerRecoveryOperationKey({ tenantId, projectId, actionId }),
+    tenantId,
+    projectId,
+    actionId,
   });
 }
 

@@ -3,6 +3,7 @@ import type { WorkflowActionCompletionReceipt } from "../../control-plane/src/wo
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import {
   parseProviderRecoveryRequest,
+  providerRecoveryRequest,
   providerRecoveryRequestDigest,
   validSchedulerSubject,
   type ProviderRecoveryAuthority,
@@ -23,7 +24,8 @@ type RecoveryRow = {
   operation_key: string; request_digest: string; tenant_id: string; project_id: string;
   action_id: string; workflow_id: string; run_id: string; provider_revision_id: string;
   scheduler_subject: string; signal_id: string; state: "PENDING" | "COMPLETED";
-  claim_token: string | null; claim_active: boolean; receipt: unknown | null;
+  claim_token: string | null; claim_active: boolean; retry_due: boolean;
+  attempt_count: number; receipt: unknown | null;
 };
 type AuthorityRow = {
   tenant_id: string; project_id: string; action_id: string; workflow_id: string;
@@ -51,6 +53,65 @@ export class PostgresProviderRecoveryStore implements ProviderRecoveryStore {
     this.#signalId = options.signalId ?? (() => `provider-recovery-${randomUUID()}`);
   }
 
+  async listDue(tenantId: string, limit: number): Promise<readonly ProviderRecoveryRequest[]> {
+    if (!UUID.test(tenantId) || !Number.isInteger(limit) || limit < 1 || limit > 100) invalid();
+    const normalizedTenantId = tenantId.toLowerCase();
+    return this.#transaction(normalizedTenantId, async (client) => {
+      const selected = await client.query<{ candidate_project_id: string; candidate_action_id: string }>(
+        `SELECT action.project_id::text AS candidate_project_id,
+                action.id::text AS candidate_action_id
+           FROM deviludo.workflow_control_actions action
+           JOIN deviludo.agent_runs run
+             ON run.tenant_id = action.tenant_id AND run.project_id = action.project_id
+            AND run.id::text = action.binding->>'lockedRunConfigurationId'
+           JOIN deviludo.inference_run_authorizations authorization
+             ON authorization.tenant_id = run.tenant_id AND authorization.project_id = run.project_id
+            AND authorization.run_id = run.id
+           LEFT JOIN deviludo.agent_run_provider_failovers failover
+             ON failover.tenant_id = run.tenant_id AND failover.project_id = run.project_id
+            AND failover.run_id = run.id
+           JOIN deviludo.agent_execution_operations execution
+             ON execution.tenant_id = run.tenant_id AND execution.project_id = run.project_id
+            AND execution.run_id = run.id
+           JOIN deviludo.inference_provider_revisions provider
+             ON provider.tenant_id = run.tenant_id
+            AND provider.provider_revision_id = action.binding->>'providerRevisionId'
+           LEFT JOIN deviludo.provider_recovery_checks recovery
+             ON recovery.tenant_id = action.tenant_id AND recovery.project_id = action.project_id
+            AND recovery.action_id = action.id
+          WHERE action.tenant_id = $1::uuid
+            AND action.operation = 'WAIT_FOR_PROVIDER' AND action.status = 'WAITING'
+            AND action.binding->>'state' = 'WAITING_PROVIDER'
+            AND run.state = 'WAITING_PROVIDER' AND execution.state = 'WAITING_PROVIDER'
+            AND execution.workflow_id = action.workflow_id
+            AND authorization.state = 'ACTIVE' AND provider.state = 'ACTIVE'
+            AND COALESCE(failover.to_provider_revision_id, authorization.provider_revision_id)
+                = provider.provider_revision_id
+            AND COALESCE(failover.to_credential_version_id, authorization.credential_version_id)
+                = provider.credential_version_id
+            AND COALESCE(failover.authorization_expires_at, authorization.expires_at)
+                > now() + interval '30 seconds'
+            AND NOT EXISTS (
+              SELECT 1 FROM deviludo.inference_request_claims claim
+               WHERE claim.tenant_id = run.tenant_id AND claim.run_id = run.id
+                 AND claim.state IN ('ACTIVE', 'INDETERMINATE')
+            )
+            AND (recovery.action_id IS NULL OR (
+              recovery.state = 'PENDING' AND recovery.next_probe_at <= now()
+              AND (recovery.claim_token IS NULL OR recovery.claim_expires_at <= now())
+            ))
+          ORDER BY action.created_at, action.id
+          LIMIT $2`,
+        [normalizedTenantId, limit],
+      );
+      return Object.freeze(selected.rows.map((row) => providerRecoveryRequest({
+        tenantId: normalizedTenantId,
+        projectId: row.candidate_project_id,
+        actionId: row.candidate_action_id,
+      })));
+    });
+  }
+
   async begin(input: { readonly request: ProviderRecoveryRequest; readonly schedulerSubject: string }) {
     const request = parseProviderRecoveryRequest(input.request);
     if (!validSchedulerSubject(input.schedulerSubject)) invalid();
@@ -60,15 +121,15 @@ export class PostgresProviderRecoveryStore implements ProviderRecoveryStore {
     if (!UUID.test(claimToken) || !SIGNAL_ID.test(signalId)) invalid();
     return this.#transaction(request.tenantId, async (client) => {
       const existing = await selectRecovery(client, request);
-      if (existing) return existingOutcome(existing, request, input.schedulerSubject, requestDigest, claimToken, client);
+      if (existing) return existingOutcome(existing, request, requestDigest, claimToken, client);
       const authority = parseAuthority(await selectAuthority(client, request), request);
       await client.query(
         `INSERT INTO deviludo.provider_recovery_checks
           (operation_key, request_digest, tenant_id, project_id, action_id,
            workflow_id, run_id, provider_revision_id, scheduler_subject, signal_id,
-           state, claim_token, claim_expires_at)
+           state, claim_token, claim_expires_at, attempt_count, next_probe_at)
          VALUES ($1, $2, $3::uuid, $4::uuid, $5::uuid, $6, $7::uuid, $8, $9, $10,
-                 'PENDING', $11::uuid, now() + interval '2 minutes')
+                 'PENDING', $11::uuid, now() + interval '2 minutes', 1, now())
          ON CONFLICT DO NOTHING`,
         [request.operationKey, requestDigest, request.tenantId, request.projectId, request.actionId,
           authority.workflowId, authority.runId, authority.provider.id, input.schedulerSubject,
@@ -76,7 +137,7 @@ export class PostgresProviderRecoveryStore implements ProviderRecoveryStore {
       );
       const selected = await selectRecovery(client, request);
       if (!selected) conflict();
-      assertRecoveryBinding(selected, request, input.schedulerSubject, requestDigest);
+      assertRecoveryBinding(selected, request, requestDigest);
       if (selected.claim_token !== claimToken || selected.signal_id !== signalId || selected.state !== "PENDING") {
         return selected.receipt !== null
           ? { kind: "COMPLETED" as const, receipt: parseReceipt(selected.receipt, selected) }
@@ -119,6 +180,28 @@ export class PostgresProviderRecoveryStore implements ProviderRecoveryStore {
     });
   }
 
+  async defer(claim: ProviderRecoveryClaim, failureCode:
+    | "PROVIDER_PROBE_FAILED"
+    | "PROVIDER_RECOVERY_DELIVERY_FAILED"): Promise<void> {
+    validateClaim(claim);
+    if (failureCode !== "PROVIDER_PROBE_FAILED" && failureCode !== "PROVIDER_RECOVERY_DELIVERY_FAILED") invalid();
+    await this.#transaction(claim.request.tenantId, async (client) => {
+      await client.query(
+        `UPDATE deviludo.provider_recovery_checks
+            SET claim_token = NULL, claim_expires_at = NULL,
+                next_probe_at = now() + make_interval(secs => LEAST(
+                  300, (5 * power(2, LEAST(attempt_count - 1, 6)))::integer
+                )),
+                last_failure_code = $5, updated_at = now()
+          WHERE tenant_id = $1::uuid AND operation_key = $2
+            AND request_digest = $3 AND claim_token = $4::uuid
+            AND state = 'PENDING' AND receipt IS NULL`,
+        [claim.request.tenantId, claim.request.operationKey, claim.requestDigest,
+          claim.claimToken, failureCode],
+      );
+    });
+  }
+
   async release(claim: ProviderRecoveryClaim): Promise<void> {
     validateClaim(claim);
     await this.#transaction(claim.request.tenantId, async (client) => {
@@ -158,7 +241,8 @@ async function selectRecovery(client: PostgresWorkflowClient, request: ProviderR
     `SELECT operation_key, request_digest, tenant_id::text, project_id::text,
             action_id::text, workflow_id, run_id::text, provider_revision_id,
             scheduler_subject, signal_id, state, claim_token::text,
-            COALESCE(claim_expires_at > now(), false) AS claim_active, receipt
+            COALESCE(claim_expires_at > now(), false) AS claim_active,
+            next_probe_at <= now() AS retry_due, attempt_count, receipt
        FROM deviludo.provider_recovery_checks
       WHERE tenant_id = $1::uuid AND (operation_key = $2 OR action_id = $3::uuid)
       FOR UPDATE`, [request.tenantId, request.operationKey, request.actionId],
@@ -272,21 +356,23 @@ function parseAuthority(row: AuthorityRow, request: ProviderRecoveryRequest): Pr
   }) });
 }
 
-async function existingOutcome(row: RecoveryRow, request: ProviderRecoveryRequest, subject: string,
+async function existingOutcome(row: RecoveryRow, request: ProviderRecoveryRequest,
   requestDigest: string, claimToken: string, client: PostgresWorkflowClient) {
-  assertRecoveryBinding(row, request, subject, requestDigest);
+  assertRecoveryBinding(row, request, requestDigest);
   if (row.state === "COMPLETED") return { kind: "COMPLETED" as const, receipt: parseReceipt(row.receipt, row) };
-  if (row.claim_active) return { kind: "BUSY" as const };
+  if (row.claim_active || !row.retry_due) return { kind: "BUSY" as const };
   const updated = await client.query(
     `UPDATE deviludo.provider_recovery_checks
-        SET claim_token = $4::uuid, claim_expires_at = now() + interval '2 minutes', updated_at = now()
+        SET claim_token = $4::uuid, claim_expires_at = now() + interval '2 minutes',
+            attempt_count = attempt_count + 1, next_probe_at = now(), updated_at = now()
       WHERE tenant_id = $1::uuid AND operation_key = $2 AND request_digest = $3
         AND state = 'PENDING' AND (claim_token IS NULL OR claim_expires_at <= now())
     RETURNING operation_key`, [request.tenantId, request.operationKey, requestDigest, claimToken],
   );
   if (updated.rowCount !== 1) return { kind: "BUSY" as const };
   const authority = parseAuthority(await selectAuthority(client, request), request);
-  return { kind: "CLAIMED" as const, claim: claimFrom(row, request, subject, requestDigest, claimToken, authority) };
+  return { kind: "CLAIMED" as const,
+    claim: claimFrom(row, request, row.scheduler_subject, requestDigest, claimToken, authority) };
 }
 
 function claimFrom(row: RecoveryRow, request: ProviderRecoveryRequest, subject: string, requestDigest: string,
@@ -296,10 +382,10 @@ function claimFrom(row: RecoveryRow, request: ProviderRecoveryRequest, subject: 
   return Object.freeze({ claimToken, requestDigest, request, schedulerSubject: subject,
     signalId: row.signal_id, ...authority });
 }
-function assertRecoveryBinding(row: RecoveryRow, request: ProviderRecoveryRequest, subject: string, digest: string): void {
+function assertRecoveryBinding(row: RecoveryRow, request: ProviderRecoveryRequest, digest: string): void {
   if (row.operation_key !== request.operationKey || row.request_digest !== digest
     || row.tenant_id !== request.tenantId || row.project_id !== request.projectId
-    || row.action_id !== request.actionId || row.scheduler_subject !== subject) conflict();
+    || row.action_id !== request.actionId || !validSchedulerSubject(row.scheduler_subject)) conflict();
 }
 function exactModels(value: unknown) {
   const body = record(value);

@@ -63,6 +63,7 @@ services:
       - ./postgres/050_delivery_cancellation_requests.sql:/docker-entrypoint-initdb.d/050_delivery_cancellation_requests.sql:ro
       - ./postgres/051_steam_external_approval_observations.sql:/docker-entrypoint-initdb.d/051_steam_external_approval_observations.sql:ro
       - ./postgres/052_provider_recovery_checks.sql:/docker-entrypoint-initdb.d/052_provider_recovery_checks.sql:ro
+      - ./postgres/053_provider_recovery_scheduling.sql:/docker-entrypoint-initdb.d/053_provider_recovery_scheduling.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s
