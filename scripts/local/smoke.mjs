@@ -167,6 +167,9 @@ const baseUrl = `http://${HOST}:${port}`;
 const runtimeUrl = `http://${HOST}:${localRuntimePort}`;
 const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
+const smokeNonce = `${process.pid}-${Date.now().toString(36)}`;
+const smokeSpecProject = `smoke-spec-${smokeNonce}`;
+const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
 
 try {
   const health = await waitForHealth(baseUrl);
@@ -188,7 +191,7 @@ try {
     request(runtimeUrl, "/health"),
     request(agentRuntimeUrl, "/health"),
     request(specRuntimeUrl, "/health"),
-    request(baseUrl, "/api/projects/smoke-spec/conversation", {
+    request(baseUrl, `/api/projects/${smokeSpecProject}/conversation`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "smoke-spec-dialogue-1" },
       body: JSON.stringify({ expectedRevision: 0, message: "制作一款十分钟一局的 2D 桌面单机游戏" }),
@@ -304,7 +307,7 @@ try {
     || specPayload.data.result.testPlan.version !== "godot-testkit-1.0.0") {
     throw new Error("local specification dialogue contract failed");
   }
-  const specApproval = await request(baseUrl, "/api/projects/smoke-spec/spec-revisions", {
+  const specApproval = await request(baseUrl, `/api/projects/${smokeSpecProject}/spec-revisions`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-spec-approval-1" },
     body: JSON.stringify({
@@ -321,12 +324,36 @@ try {
     || approvalPayload.data.authority.revision !== 2 || approvalPayload.data.run?.state !== "QUEUED") {
     throw new Error("local specification approval contract failed");
   }
+  const providerWait = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-provider-wait-1" },
+    body: JSON.stringify({ action: "provider-fail" }),
+  });
+  const providerWaitPayload = await providerWait.response.json();
+  const waitingProfile = JSON.stringify(providerWaitPayload.data?.lockedProfile);
+  if (!providerWait.response.ok || providerWaitPayload.data?.stage !== "WAITING_PROVIDER"
+    || providerWaitPayload.data?.resumeStage !== "AGENT_QUEUED"
+    || providerWaitPayload.data?.events?.[0]?.type !== "PROVIDER_UNAVAILABLE") {
+    throw new Error("local Provider outage did not preserve the waiting lock");
+  }
+  const providerResume = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-provider-resume-1" },
+    body: JSON.stringify({ action: "provider-resume" }),
+  });
+  const providerResumePayload = await providerResume.response.json();
+  if (!providerResume.response.ok || providerResumePayload.data?.stage !== "AGENT_QUEUED"
+    || providerResumePayload.data?.resumeStage !== null
+    || providerResumePayload.data?.events?.[0]?.type !== "PROVIDER_RESUMED"
+    || JSON.stringify(providerResumePayload.data?.lockedProfile) !== waitingProfile) {
+    throw new Error("local Provider recovery changed the immutable Agent lock");
+  }
   const failureActions = [
     "advance", "advance", "advance", "advance", "advance", "advance", "accept", "advance", "main-gate-fail",
   ];
   let postMergeFailure;
   for (const [index, action] of failureActions.entries()) {
-    postMergeFailure = await request(baseUrl, "/api/projects/smoke-spec/delivery", {
+    postMergeFailure = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `smoke-post-merge-${index + 1}` },
       body: JSON.stringify({ action }),
@@ -349,7 +376,7 @@ try {
     || postMergeFailurePayload.data?.evidenceValid !== false) {
     throw new Error("local post-merge failure did not revoke release authority");
   }
-  const cancellation = await request(baseUrl, "/api/projects/smoke-spec/delivery", {
+  const cancellation = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-delivery-cancel-1" },
     body: JSON.stringify({ action: "cancel", reason: "local smoke cancellation" }),
@@ -361,7 +388,7 @@ try {
     || cancellationPayload.data?.events?.[0]?.type !== "DELIVERY_CANCELLED") {
     throw new Error("local cancellation did not revoke delivery authority");
   }
-  const releaseDialogue = await request(baseUrl, "/api/projects/smoke-release-gates/conversation", {
+  const releaseDialogue = await request(baseUrl, `/api/projects/${smokeReleaseProject}/conversation`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-release-dialogue-1" },
     body: JSON.stringify({ expectedRevision: 0, message: "制作一款可完整演练 Steam 顺序发布门禁的桌面单机游戏" }),
@@ -370,7 +397,7 @@ try {
   if (![200, 201].includes(releaseDialogue.response.status) || releaseDialoguePayload.data?.revision !== 1) {
     throw new Error("local release-gate dialogue contract failed");
   }
-  const releaseApproval = await request(baseUrl, "/api/projects/smoke-release-gates/spec-revisions", {
+  const releaseApproval = await request(baseUrl, `/api/projects/${smokeReleaseProject}/spec-revisions`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-release-approval-1" },
     body: JSON.stringify({
@@ -389,7 +416,7 @@ try {
   ];
   let completedRelease;
   for (const [index, action] of releaseActions.entries()) {
-    completedRelease = await request(baseUrl, "/api/projects/smoke-release-gates/delivery", {
+    completedRelease = await request(baseUrl, `/api/projects/${smokeReleaseProject}/delivery`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `smoke-release-gate-${index + 1}` },
       body: JSON.stringify({ action }),
@@ -451,6 +478,7 @@ try {
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
+  console.log(`✓ Provider recovery ${providerResume.response.status} (${providerResume.elapsedMs}ms) · same immutable Profile`);
   console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
   console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);

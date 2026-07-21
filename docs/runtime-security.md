@@ -274,6 +274,13 @@ not healthy. It selects a fallback only when both the immutable primary profile
 and project policy explicitly list the exact fallback revision and that revision
 is healthy. There is no automatic Claude↔Codex or provider switch.
 
+`provider-monitor` cannot choose a fallback or receive runtime configuration in
+its request. Its mTLS scheduler supplies only tenant/project/action identities;
+PostgreSQL RLS derives the effective Provider, and the workflow outbox repeats
+the exact Run, execution-operation, authorization, active-claim and Provider
+state checks after the Gateway probe. Probe failures and expired authorizations
+remain in `WAITING_PROVIDER`.
+
 The executor/gateway audit stream should contain IDs, fingerprints, byte/token
 counts, latency, decisions and safe error codes. It must never contain prompts,
 source fragments, tokens, upstream keys, protected environment values or runtime

@@ -557,6 +557,69 @@ test("Agent configuration completion re-resolves the queued immutable lock befor
   assert.equal(statements.at(-1), "ROLLBACK");
 });
 
+test("Provider recovery completion revalidates the exact waiting Run in the outbox transaction", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const actionId = "33333333-3333-4333-8333-333333333333";
+  const runId = "44444444-4444-4444-8444-444444444444";
+  const outboxId = "55555555-5555-4555-8555-555555555555";
+  const providerId = "provider-claude-r1";
+  const resolutionDigest = "a".repeat(64);
+  let providerState = "ACTIVE";
+  let inserted: readonly unknown[] | undefined;
+  const action = {
+    id: actionId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+    operation: "WAIT_FOR_PROVIDER", status: "WAITING",
+    binding: { state: "WAITING_PROVIDER", specRevisionId: null, testPlanRevisionId: null,
+      specApprovalReceiptId: null, lockedRunConfigurationId: runId, providerRevisionId: providerId,
+      candidateCommitSha: null, draftPullRequest: null, evidenceBundleId: null, mainCommitSha: null,
+      releaseId: null, steamBuildId: null, externalGate: null, cancellationReason: null },
+    completion_signal_id: null, completion_signal_digest: null,
+    completion_source: null, completion_receipt_id: null,
+  };
+  const statements: string[] = [];
+  const client: ControlPlaneWorkflowSqlClient = {
+    async query<Row>(statement: string, values?: readonly unknown[]) {
+      statements.push(statement);
+      if (statement.includes("FROM deviludo.workflow_control_actions")) return { rows: [action] as Row[] };
+      if (statement.includes("JOIN deviludo.agent_execution_operations execution")) return { rows: [{
+        run_id: runId, run_state: "WAITING_PROVIDER", operation_state: "WAITING_PROVIDER",
+        operation_workflow_id: "delivery-001",
+        configuration_lock: { agent: "claude-code", profileSource: "platform:global",
+          profileRevisionId: "profile-claude-r1", providerRevisionId: providerId,
+          credentialVersionId: "credential-claude-v1", resolutionDigest },
+        resolution_digest: resolutionDigest, authorization_profile_revision_id: "profile-claude-r1",
+        authorization_provider_revision_id: providerId,
+        authorization_credential_version_id: "credential-claude-v1", authorization_state: "ACTIVE",
+        failover_to_profile_revision_id: null, failover_to_provider_revision_id: null,
+        failover_to_credential_version_id: null, provider_revision_id: providerId,
+        provider_credential_version_id: "credential-claude-v1", provider_agent: "claude-code",
+        provider_state: providerState, effective_authorization_active: true, active_claims: "0",
+      }] as Row[] };
+      if (statement.includes("INSERT INTO deviludo.workflow_signal_outbox")) inserted = values;
+      if (statement.includes("FROM deviludo.workflow_signal_outbox")) return { rows: [{
+        id: outboxId, tenant_id: tenantId, project_id: projectId, workflow_id: "delivery-001",
+        action_id: actionId, signal_id: inserted?.[4], signal_digest: inserted?.[5],
+        signal: JSON.parse(String(inserted?.[6])), state: "PENDING",
+      }] as Row[] };
+      if (statement.includes("UPDATE deviludo.workflow_control_actions")) return { rows: [{ id: actionId }] as Row[] };
+      return { rows: [] };
+    }, release() {},
+  };
+  const store = new PostgresWorkflowActionCompletionStore({ async connect() { return client; } });
+  const signal: DeliverySignal = { signalId: "provider-recovery-signal-001", type: "PROVIDER_RESTORED", providerRevisionId: providerId };
+  assert.equal((await store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "PROVIDER_MONITOR", sourceReceiptId: "b".repeat(64), signal })).outboxId, outboxId);
+  assert.ok(statements.findIndex((value) => value.includes("JOIN deviludo.agent_execution_operations execution"))
+    < statements.findIndex((value) => value.includes("INSERT INTO deviludo.workflow_signal_outbox")));
+
+  providerState = "DEGRADED"; inserted = undefined;
+  await assert.rejects(store.complete({ tenantId, projectId, workflowId: "delivery-001", actionId,
+    source: "PROVIDER_MONITOR", sourceReceiptId: "c".repeat(64),
+    signal: { ...signal, signalId: "provider-recovery-signal-002" } }), /recovery authority is unavailable/);
+  assert.equal(statements.at(-1), "ROLLBACK");
+});
+
 test("user feedback atomically tombstones exact candidate evidence before signaling the new draft iteration", async () => {
   const tenantId = "11111111-1111-4111-8111-111111111111";
   const projectId = "22222222-2222-4222-8222-222222222222";

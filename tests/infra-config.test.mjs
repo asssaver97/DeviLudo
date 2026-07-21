@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 51 }, (_, index) => {
+  const offsets = Array.from({ length: 52 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -15,6 +15,29 @@ test("local integration PostgreSQL applies every migration in order", () => {
     return offset;
   });
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
+});
+
+test("Provider recovery probes only the exact immutable waiting Run binding", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const migration = readFileSync(new URL("../infra/postgres/052_provider_recovery_checks.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/provider-monitor/src/postgres-store.ts", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/provider-monitor/src/service.ts", import.meta.url), "utf8");
+  const ingress = readFileSync(new URL("../services/provider-monitor/src/ingress-http.ts", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["start:provider-monitor"], observedServiceCommand("provider-monitor"));
+  assert.match(packageJson.scripts["test:services"], /npm run test:provider-monitor/);
+  assert.match(migration, /CREATE TABLE deviludo\.provider_recovery_checks/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /UNIQUE \(tenant_id, project_id, action_id\)/);
+  assert.doesNotMatch(migration, /api_key|raw_response|access_token|password/i);
+  assert.match(store, /SELECT set_config\('app\.tenant_id'/);
+  assert.match(store, /action\.binding->>'lockedRunConfigurationId'/);
+  assert.match(store, /failover\.to_provider_revision_id/);
+  assert.match(store, /provider\.provider_revision_id = action\.binding->>'providerRevisionId'/);
+  assert.match(service, /source: "PROVIDER_MONITOR"/);
+  assert.match(service, /type: "PROVIDER_RESTORED"/);
+  assert.match(ingress, /requestCert: true/);
+  assert.match(ingress, /rejectUnauthorized: true/);
+  assert.match(ingress, /minVersion: "TLSv1\.3"/);
 });
 
 test("Steam external approvals require a current mTLS verifier observation and passed clean-install authority", () => {

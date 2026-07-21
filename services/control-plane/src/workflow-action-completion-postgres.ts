@@ -98,6 +98,27 @@ type RunConfigurationAuthorityRow = {
   state: string;
   configuration_lock: unknown;
 };
+type ProviderRecoveryAuthorityRow = {
+  run_id: string;
+  run_state: string;
+  operation_state: string;
+  operation_workflow_id: string;
+  configuration_lock: unknown;
+  resolution_digest: string;
+  authorization_profile_revision_id: string;
+  authorization_provider_revision_id: string;
+  authorization_credential_version_id: string;
+  authorization_state: string;
+  failover_to_profile_revision_id: string | null;
+  failover_to_provider_revision_id: string | null;
+  failover_to_credential_version_id: string | null;
+  provider_revision_id: string;
+  provider_credential_version_id: string;
+  provider_agent: string;
+  provider_state: string;
+  effective_authorization_active: boolean;
+  active_claims: string | number;
+};
 
 type CandidateAcceptanceAuthorityRow = {
   candidate_receipt_id: string;
@@ -234,6 +255,9 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
       if (input.source === "AGENT_CONFIGURATION_SERVICE"
         && input.signal.type === "RUN_CONFIGURATION_LOCKED") {
         await this.#assertRunConfigurationAuthority(client, action, input.signal.lockedRunConfigurationId);
+      }
+      if (input.source === "PROVIDER_MONITOR" && input.signal.type === "PROVIDER_RESTORED") {
+        await this.#assertProviderRecoveryAuthority(client, action, input.signal.providerRevisionId);
       }
 
       if (input.source === "USER_ACCEPTANCE_SERVICE"
@@ -423,6 +447,76 @@ export class PostgresWorkflowActionCompletionStore implements WorkflowActionComp
       || lock.testPlanRevisionId !== action.binding.testPlanRevisionId
       || lock.specApprovalReceiptId !== action.binding.specApprovalReceiptId) {
       throw new WorkflowActionCompletionConflictError("Agent run configuration authority is unavailable");
+    }
+  }
+
+  async #assertProviderRecoveryAuthority(
+    client: ControlPlaneWorkflowSqlClient,
+    action: ActionRow,
+    providerRevisionId: string,
+  ): Promise<void> {
+    const runId = action.binding.lockedRunConfigurationId;
+    if (!runId || !UUID.test(runId) || action.binding.providerRevisionId !== providerRevisionId) invalidAuthority();
+    const selected = await client.query<ProviderRecoveryAuthorityRow>(
+      `SELECT run.id::text AS run_id, run.state AS run_state,
+              execution.state AS operation_state, execution.workflow_id AS operation_workflow_id,
+              run.configuration_lock,
+              run.resolution_digest,
+              authorization.profile_revision_id AS authorization_profile_revision_id,
+              authorization.provider_revision_id AS authorization_provider_revision_id,
+              authorization.credential_version_id AS authorization_credential_version_id,
+              authorization.state AS authorization_state,
+              failover.to_profile_revision_id AS failover_to_profile_revision_id,
+              failover.to_provider_revision_id AS failover_to_provider_revision_id,
+              failover.to_credential_version_id AS failover_to_credential_version_id,
+              provider.provider_revision_id, provider.credential_version_id AS provider_credential_version_id,
+              provider.agent AS provider_agent, provider.state AS provider_state,
+              COALESCE(failover.authorization_expires_at, authorization.expires_at)
+                > now() + interval '30 seconds' AS effective_authorization_active,
+              (SELECT count(*) FROM deviludo.inference_request_claims claim
+                WHERE claim.tenant_id = run.tenant_id AND claim.run_id = run.id
+                  AND claim.state IN ('ACTIVE', 'INDETERMINATE')) AS active_claims
+         FROM deviludo.agent_runs run
+         JOIN deviludo.inference_run_authorizations authorization
+           ON authorization.tenant_id = run.tenant_id AND authorization.project_id = run.project_id
+          AND authorization.run_id = run.id
+         LEFT JOIN deviludo.agent_run_provider_failovers failover
+           ON failover.tenant_id = run.tenant_id AND failover.project_id = run.project_id
+          AND failover.run_id = run.id
+         JOIN deviludo.agent_execution_operations execution
+           ON execution.tenant_id = run.tenant_id AND execution.project_id = run.project_id
+          AND execution.run_id = run.id
+         JOIN deviludo.inference_provider_revisions provider
+           ON provider.tenant_id = run.tenant_id AND provider.provider_revision_id = $4
+        WHERE run.tenant_id = $1::uuid AND run.project_id = $2::uuid AND run.id = $3::uuid
+        FOR SHARE OF run, authorization, failover, execution, provider`,
+      [action.tenant_id, action.project_id, runId, providerRevisionId],
+    );
+    const row = selected.rows[0];
+    const lock = row ? record(row.configuration_lock) : {};
+    const fallback = row?.failover_to_provider_revision_id ? record(lock.fallback) : null;
+    const selectedProfile = row?.failover_to_profile_revision_id ?? row?.authorization_profile_revision_id;
+    const selectedProvider = row?.failover_to_provider_revision_id ?? row?.authorization_provider_revision_id;
+    const selectedCredential = row?.failover_to_credential_version_id ?? row?.authorization_credential_version_id;
+    const selectedAgent = fallback?.agent ?? lock.agent;
+    if (selected.rows.length !== 1 || !row || row.run_id !== runId
+      || row.run_state !== "WAITING_PROVIDER" || row.operation_state !== "WAITING_PROVIDER"
+      || row.operation_workflow_id !== action.workflow_id
+      || lock.resolutionDigest !== row.resolution_digest
+      || selectedProvider !== providerRevisionId || row.provider_revision_id !== providerRevisionId
+      || selectedCredential !== row.provider_credential_version_id
+      || selectedAgent !== row.provider_agent || row.provider_state !== "ACTIVE"
+      || row.authorization_state !== "ACTIVE" || !row.effective_authorization_active
+      || Number(row.active_claims) !== 0
+      || (fallback && (lock.profileSource !== `project:${action.project_id}`
+        || fallback.profileRevisionId !== selectedProfile
+        || fallback.providerRevisionId !== selectedProvider
+        || fallback.credentialVersionId !== selectedCredential
+        || fallback.agent !== lock.agent))
+      || (!fallback && (lock.profileRevisionId !== selectedProfile
+        || lock.providerRevisionId !== selectedProvider
+        || lock.credentialVersionId !== selectedCredential))) {
+      throw new WorkflowActionCompletionConflictError("Provider recovery authority is unavailable");
     }
   }
 

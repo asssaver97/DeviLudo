@@ -21,6 +21,10 @@ export abstract class ProviderProbe {
   abstract run(provider: ProviderRevisionRecord): Promise<Readonly<Record<string, "PASS" | "FAIL">>>;
 }
 
+export type ProviderProbeConfiguration = Readonly<Pick<ProviderRevisionRecord,
+  "id" | "agent" | "protocol" | "baseUrl" | "approvedPorts" | "authentication" | "models" | "credentialVersionId"
+>>;
+
 /**
  * Probes run through the internal inference gateway, which owns DNS pinning,
  * redirect revalidation and temporary access to Vault. The control-plane sends
@@ -32,7 +36,7 @@ export class InferenceGatewayProviderProbeClient {
     private readonly http: ProviderProbeHttp = providerProbeHttpsJson,
   ) {}
 
-  async run(provider: ProviderRevisionRecord): Promise<Readonly<Record<string, "PASS" | "FAIL">>> {
+  async run(provider: ProviderProbeConfiguration): Promise<Readonly<Record<string, "PASS" | "FAIL">>> {
     const endpoint = this.env.DEVILUDO_INFERENCE_PROBE_URL;
     if (!endpoint) {
       if (this.env.NODE_ENV === "production") {

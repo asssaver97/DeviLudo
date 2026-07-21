@@ -69,6 +69,13 @@ running task is not resumed under an incompatible CLI. Provider failure yields
 only if the current Profile names it, every scope explicitly allows it, it is
 active, and it uses the same Agent kind.
 
+Recovery does not resolve defaults again. The Provider monitor's mTLS trigger
+contains only the waiting action identity; the monitor derives the effective
+Provider from the immutable Run and any already-recorded project-scoped
+same-Agent failover. It probes through the credential-isolating Inference
+Gateway and stores only a digest before a transactionally revalidated workflow
+signal is enqueued.
+
 ## Agent configuration inheritance
 
 Resolution is `project override → tenant override → platform default`, with an
