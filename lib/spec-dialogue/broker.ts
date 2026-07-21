@@ -1,5 +1,6 @@
 import { parseSpecModelResult, type SpecApprovalReceipt, type SpecDialogueMessage, type SpecDialogueSnapshot } from "@/services/spec-dialogue/src/contracts";
 import { verifyTrustedPlatformSession } from "@/lib/connections/github-broker";
+import { HttpProblem } from "@/lib/control-plane/http";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -36,7 +37,15 @@ export class SpecDialogueBrokerClient {
       headers: { accept: "application/json", "content-type": "application/json", "idempotency-key": command.operationKey as string },
       body: JSON.stringify(command), signal: AbortSignal.timeout(15_000),
     });
-    if (response.status !== 201) throw new Error(`Specification approval Broker rejected the request with status ${response.status}`);
+    if (response.status !== 201) {
+      if (response.status === 503) {
+        const failure = await safeFailure(response);
+        if (failure === "RUNNER_TOOLCHAIN_UNAVAILABLE") {
+          throw new HttpProblem(503, failure, "当前规格没有兼容且已批准的 Runner Toolchain；审批未写入，请先部署对应 Godot/目标平台工具链。");
+        }
+      }
+      throw new Error(`Specification approval Broker rejected the request with status ${response.status}`);
+    }
     const envelope = object(await response.json());
     if (JSON.stringify(Object.keys(envelope)) !== JSON.stringify(["data"])) invalid();
     return parseApproval(envelope.data, command);
@@ -56,6 +65,14 @@ export class SpecDialogueBrokerClient {
     if (envelope.data === null && expectedStatus === 200) return null;
     return parseSnapshot(envelope.data, body);
   }
+}
+
+async function safeFailure(response: Response): Promise<string | null> {
+  try {
+    const envelope = object(await response.json());
+    const error = object(envelope.error);
+    return typeof error.code === "string" && /^[A-Z][A-Z0-9_]{1,79}$/.test(error.code) ? error.code : null;
+  } catch { return null; }
 }
 
 export function specDialogueBrokerRuntimeFromEnvironment(env: Readonly<Record<string, string | undefined>> = process.env) {

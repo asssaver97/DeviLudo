@@ -252,6 +252,13 @@ the workflow already waits on the new draft. Approval enters
 `RESOLVING_AGENT_CONFIGURATION`; only a distinct Agent configuration workload
 may prove the queued immutable run lock and advance development.
 
+The approval transaction selects the newest project-scoped immutable Runner
+toolchain compatible with the exact Godot version and target matrix, then writes
+its revision ID and canonical digest into the test-plan binding. Missing
+toolchain authority returns `RUNNER_TOOLCHAIN_UNAVAILABLE` before any approved
+revision is created. Migration `057` enforces the same exact payload, export
+template and Godot compatibility at the PostgreSQL boundary.
+
 The corresponding production server is `services/spec-model-broker`. It uses
 the exact platform Profile revision configured at deployment, re-resolves the
 ACTIVE Provider/credential/`smallFastModel` from the administrator catalog,

@@ -14,6 +14,14 @@ export type SpecDialogueClaimResult =
   | { readonly kind: "BUSY" }
   | { readonly kind: "CONFLICT" };
 
+export class SpecDialogueToolchainUnavailable extends Error {
+  readonly code = "RUNNER_TOOLCHAIN_UNAVAILABLE";
+
+  constructor() {
+    super("No compatible immutable Runner toolchain is available for this specification");
+  }
+}
+
 export abstract class SpecDialogueStore {
   abstract begin(command: SpecDialogueCommand): Promise<SpecDialogueClaimResult>;
   abstract complete(claim: SpecDialogueClaim, result: SpecModelResult): Promise<SpecDialogueSnapshot>;

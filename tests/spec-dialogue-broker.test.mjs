@@ -6,6 +6,7 @@ import {
   SpecDialogueBrokerClient,
   verifyTrustedSpecSession,
 } from "../lib/spec-dialogue/broker.ts";
+import { HttpProblem } from "../lib/control-plane/http.ts";
 
 test("spec dialogue trusted session is short-lived and bound to the exact route", async () => {
   const key = new Uint8Array(32).fill(17);
@@ -50,4 +51,16 @@ test("Web Broker client rejects a response whose immutable binding drifted", asy
     },
   }), { status: 201, headers: { "content-type": "application/json" } }));
   await assert.rejects(client.send(command), /trust binding/);
+});
+
+test("Web Broker preserves the explicit Runner toolchain approval gate", async () => {
+  const client = new SpecDialogueBrokerClient("https://spec-dialogue.internal/", async () => new Response(JSON.stringify({
+    error: { code: "RUNNER_TOOLCHAIN_UNAVAILABLE" },
+  }), { status: 503, headers: { "content-type": "application/json" } }));
+  await assert.rejects(
+    client.approve({ operationKey: "a".repeat(64) }),
+    (error) => error instanceof HttpProblem
+      && error.status === 503
+      && error.code === "RUNNER_TOOLCHAIN_UNAVAILABLE",
+  );
 });

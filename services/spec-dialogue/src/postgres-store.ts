@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { parseRunnerToolchainRevision } from "../../../lib/domain/runner-toolchain";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
 import { parseSpecModelResult, type SpecApprovalCommand, type SpecApprovalReceipt, type SpecDialogueMessage, type SpecDialogueSnapshot, type SpecModelResult } from "./contracts";
-import { canonicalSpecJson, specDigest, SpecDialogueStore, type SpecDialogueClaim, type SpecDialogueClaimResult } from "./store";
+import {
+  canonicalSpecJson,
+  specDigest,
+  SpecDialogueStore,
+  SpecDialogueToolchainUnavailable,
+  type SpecDialogueClaim,
+  type SpecDialogueClaimResult,
+} from "./store";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -39,6 +47,12 @@ type RevisionRow = {
   aggregate_id: string;
   revision: string | number;
   state: string;
+  payload: unknown;
+  payload_digest: string;
+};
+type RunnerToolchainRow = {
+  id: string;
+  revision: string | number;
   payload: unknown;
   payload_digest: string;
 };
@@ -274,6 +288,12 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
         || conversation.currentTestPlanRevisionId !== command.testPlanRevisionId) invalid();
       const current = await readCurrentResult(client, conversation);
       if (!current) invalid();
+      const toolchain = await resolveRunnerToolchain(client, {
+        tenantId: command.tenantId,
+        projectId: command.projectId,
+        godotVersion: current.spec.godotVersion,
+        targetMatrix: current.spec.targetPlatforms,
+      });
       const revision = conversation.version + 1;
       const specRevisionId = randomUUID();
       const testPlanRevisionId = randomUUID();
@@ -297,10 +317,13 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
         `INSERT INTO deviludo.approved_test_plan_bindings
           (tenant_id, project_id, spec_revision_id, test_plan_revision_id,
            test_plan_digest, target_matrix, required_godot_version,
+           runner_toolchain_revision_id, runner_toolchain_digest,
            approved_by, approved_at)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::text[], $7, $8, now())`,
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::text[], $7,
+                 $8::uuid, $9, $10, now())`,
         [command.tenantId, command.projectId, specRevisionId, testPlanRevisionId,
-          testPlanPayloadDigest, current.spec.targetPlatforms, current.spec.godotVersion, command.actorId],
+          testPlanPayloadDigest, current.spec.targetPlatforms, current.spec.godotVersion,
+          toolchain.id, toolchain.digest, command.actorId],
       );
       if (bound.rowCount !== 1) invalid();
       const updated = await client.query<{ updated_at: string | Date }>(
@@ -440,6 +463,41 @@ async function readCurrentResult(client: PostgresWorkflowClient, conversation: R
     spec: specWrapper.spec,
     testPlan: planWrapper.testPlan,
   });
+}
+
+async function resolveRunnerToolchain(
+  client: PostgresWorkflowClient,
+  input: Readonly<{
+    tenantId: string;
+    projectId: string;
+    godotVersion: string;
+    targetMatrix: SpecModelResult["spec"]["targetPlatforms"];
+  }>,
+): Promise<Readonly<{ id: string; digest: string }>> {
+  const selected = await client.query<RunnerToolchainRow>(
+    `SELECT id::text, revision, payload, payload_digest
+       FROM deviludo.runner_toolchain_revisions
+      WHERE tenant_id = $1::uuid
+        AND project_id = $2::uuid
+        AND payload->>'schemaVersion' = 'deviludo.runner-toolchain.v1'
+        AND payload->>'requiredGodotVersion' = $3
+        AND jsonb_typeof(payload->'exportTemplates') = 'object'
+        AND (SELECT array_agg(key ORDER BY key)
+               FROM jsonb_object_keys(payload->'exportTemplates') AS template_keys(key)) = $4::text[]
+      ORDER BY revision DESC
+      LIMIT 1
+      FOR SHARE`,
+    [input.tenantId, input.projectId, input.godotVersion, input.targetMatrix],
+  );
+  if (selected.rows.length === 0) throw new SpecDialogueToolchainUnavailable();
+  if (selected.rows.length !== 1) invalid();
+  const row = selected.rows[0]!;
+  const revision = Number(row.revision);
+  if (!UUID.test(row.id) || !Number.isSafeInteger(revision) || revision < 1
+    || !SHA256.test(row.payload_digest) || specDigest(row.payload) !== row.payload_digest) invalid();
+  const payload = parseRunnerToolchainRevision(row.payload, input.targetMatrix);
+  if (payload.requiredGodotVersion !== input.godotVersion) invalid();
+  return Object.freeze({ id: row.id, digest: row.payload_digest });
 }
 
 async function readRevisionPair(client: PostgresWorkflowClient, conversation: ReturnType<typeof parseConversation>) {

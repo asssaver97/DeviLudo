@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 56 }, (_, index) => {
+  const offsets = Array.from({ length: 57 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -317,6 +317,9 @@ test("specification dialogue persists tenant-isolated messages and immutable dra
   assert.match(store, /state: "APPROVED"/);
   assert.match(store, /state: "FROZEN"/);
   assert.match(store, /INSERT INTO deviludo\.approved_test_plan_bindings/);
+  assert.match(store, /runner_toolchain_revision_id, runner_toolchain_digest/);
+  assert.match(store, /FROM deviludo\.runner_toolchain_revisions/);
+  assert.match(store, /SpecDialogueToolchainUnavailable/);
   assert.match(store, /spec\.aggregate_id !== conversation\.specAggregateId/);
   assert.match(store, /SELECT set_config\('app\.tenant_id'/);
   assert.match(runtime, /DEVILUDO_SPEC_DIALOGUE_WEB_SPIFFE_IDS/);
@@ -494,12 +497,24 @@ test("Steam install grants are tenant-isolated, expiring and once-per-platform",
 
 test("approved specifications bind one append-only Runner toolchain revision", () => {
   const migration = readFileSync(new URL("../infra/postgres/017_runner_toolchain_revisions.sql", import.meta.url), "utf8");
+  const guard = readFileSync(new URL("../infra/postgres/057_runner_toolchain_approval_guard.sql", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../services/spec-dialogue/src/postgres-store.ts", import.meta.url), "utf8");
+  const parser = readFileSync(new URL("../lib/domain/runner-toolchain.ts", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE deviludo\.runner_toolchain_revisions/);
   assert.match(migration, /UNIQUE \(tenant_id, project_id, id, payload_digest\)/);
   assert.match(migration, /runner_toolchain_revisions_append_only/);
   assert.match(migration, /ADD COLUMN runner_toolchain_revision_id uuid NOT NULL/);
   assert.match(migration, /approved_test_plan_runner_toolchain_fk/);
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(guard, /runner_toolchain_binding_is_valid/);
+  assert.match(guard, /approved_test_plan_toolchain_compatibility/);
+  assert.match(guard, /requiredGodotVersion/);
+  assert.match(guard, /exportTemplates/);
+  assert.match(guard, /existing approved test plan Runner toolchain is incompatible/);
+  assert.match(store, /ORDER BY revision DESC/);
+  assert.match(store, /runner_toolchain_revision_id, runner_toolchain_digest/);
+  assert.match(store, /toolchain\.id, toolchain\.digest/);
+  assert.match(parser, /Object\.keys\(exportTemplatesBody\)\.length !== targetMatrix\.length/);
 });
 
 test("approved specifications bind one append-only canonical test plan", () => {

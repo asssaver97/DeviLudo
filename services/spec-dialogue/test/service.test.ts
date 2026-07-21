@@ -5,7 +5,7 @@ import { createSpecDialogueHandler } from "../src/ingress-http";
 import { DeterministicLocalSpecModel } from "../src/model";
 import { MtlsSpecDialogueModel } from "../src/model-broker";
 import { SpecDialogueConflict, SpecDialogueService } from "../src/service";
-import { InMemorySpecDialogueStore } from "../src/store";
+import { InMemorySpecDialogueStore, SpecDialogueToolchainUnavailable } from "../src/store";
 
 const command = {
   operationKey: "a".repeat(64),
@@ -117,4 +117,27 @@ test("production dialogue ingress requires an allow-listed mTLS workload", async
   assert.equal((await missing({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 401);
   const forbidden = createSpecDialogueHandler({ service, allowedSpiffeIds: new Set(["spiffe://deviludo.internal/other"]), extractIdentity: () => identity });
   assert.equal((await forbidden({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 403);
+});
+
+test("production approval reports an explicit unavailable gate when no compatible Runner toolchain exists", async () => {
+  const identity = { spiffeId: "spiffe://deviludo.internal/web", certificateFingerprint: "b".repeat(64), certificateSerial: "01", certificateNotAfter: "2030-01-01T00:00:00.000Z" };
+  const handler = createSpecDialogueHandler({
+    service: {
+      async send() { throw new Error("not used"); },
+      async snapshot() { throw new Error("not used"); },
+      async approve() { throw new SpecDialogueToolchainUnavailable(); },
+      async probe() {},
+    },
+    allowedSpiffeIds: new Set([identity.spiffeId]),
+    extractIdentity: () => identity,
+  });
+  const response = await handler({
+    method: "POST",
+    path: "/v1/spec-dialogue/approve",
+    headers: { "content-type": "application/json" },
+    socket: {},
+    rawBody: JSON.stringify({}),
+  });
+  assert.equal(response.status, 503);
+  assert.equal((response.body.error as { code: string }).code, "RUNNER_TOOLCHAIN_UNAVAILABLE");
 });

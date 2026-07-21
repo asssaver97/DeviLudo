@@ -4,6 +4,7 @@ import type { EvidenceArchiveWorkloadIdentity } from "../../evidence-archive/src
 import { evidenceArchiveIdentityFromTlsSocket } from "../../evidence-archive/src/ingress-http";
 import { SpecDialogueRequestError } from "./contracts";
 import { SpecDialogueConflict, type SpecDialogueService } from "./service";
+import { SpecDialogueToolchainUnavailable } from "./store";
 
 const MAX_BODY_BYTES = 32 * 1024;
 
@@ -48,6 +49,7 @@ export function createSpecDialogueHandler(options: {
     } catch (error) {
       if (error instanceof SpecDialogueRequestError) return failure(400, error.code);
       if (error instanceof SpecDialogueConflict) return failure(409, error.code);
+      if (error instanceof SpecDialogueToolchainUnavailable) return failure(503, error.code);
       return failure(503, "SPEC_DIALOGUE_UNAVAILABLE");
     }
   };

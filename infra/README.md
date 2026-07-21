@@ -78,7 +78,9 @@ Migration `055` adds the prompt-free, tenant-RLS specification model generation
 ledger with replay, released and indeterminate charging states. Migration `056`
 adds monotonic dispatch generations and append-only SecurityAdmin no-usage or
 exact-usage reconciliation receipts; a trigger rejects release without the
-matching generation receipt. All fifty-six
+matching generation receipt. Migration `057` requires every approved test-plan
+binding to reference a canonical Runner toolchain whose Godot version and exact
+export-template matrix match the approval. All fifty-seven
 migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

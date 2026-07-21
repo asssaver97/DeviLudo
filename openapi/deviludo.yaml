@@ -330,7 +330,25 @@ paths:
           required: true
           schema: { type: string }
         - { $ref: "#/components/parameters/IdempotencyKey" }
-      responses: { "201": { $ref: "#/components/responses/Ok" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, revision, conversationId, expectedRevision, specRevisionId, testPlanRevisionId]
+              properties:
+                action: { type: string, enum: [approve] }
+                revision: { type: string, minLength: 1, maxLength: 32 }
+                conversationId: { type: string, format: uuid }
+                expectedRevision: { type: integer, minimum: 1 }
+                specRevisionId: { type: string, format: uuid }
+                testPlanRevisionId: { type: string, format: uuid }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: The specification approval binding changed concurrently. }
+        "503": { description: No compatible immutable Runner toolchain is available; no approval was committed. }
   /projects/{projectId}/feedback:
     post:
       operationId: createFeedbackIteration

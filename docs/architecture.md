@@ -221,6 +221,14 @@ JUnit, deterministic input timelines, screenshots/video, runner capability,
 SBOM, scan, and asset-license ledger. The bundle binds one spec, test plan,
 commit, source digest, and exact matrix.
 
+Specification approval does not accept a toolchain identifier from the browser
+or model. Inside the same tenant-RLS transaction it selects the newest
+project-scoped immutable revision whose Godot version and exact export-template
+key set match the approved matrix, validates the canonical payload, and freezes
+its ID and digest beside the test plan. Missing authority rolls back before the
+approved revisions are written. A database trigger repeats the compatibility
+check, closing alternate-writer and parser-drift paths.
+
 ## Steam boundary and external approvals
 
 “Accept and publish” requires a fresh MFA assertion. The publisher creates a

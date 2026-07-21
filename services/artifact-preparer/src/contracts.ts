@@ -1,22 +1,17 @@
 import type { TargetPlatform } from "../../../lib/domain/types";
+import {
+  parseRunnerToolchainRevision,
+  type RunnerToolchainRevisionPayload,
+} from "../../../lib/domain/runner-toolchain";
 import { sha256Canonical } from "../../runner-control/src/canonical";
+
+export { parseRunnerToolchainRevision } from "../../../lib/domain/runner-toolchain";
+export type { RunnerToolchainRevisionPayload } from "../../../lib/domain/runner-toolchain";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA1 = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const GODOT_VERSION = /^4\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9]+)*$/;
 const TARGETS = new Set<TargetPlatform>(["windows", "linux", "macos"]);
-
-export interface RunnerToolchainRevisionPayload {
-  readonly schemaVersion: "deviludo.runner-toolchain.v1";
-  readonly requiredGodotVersion: string;
-  readonly godotTestKitDigest: string;
-  readonly exportTemplates: Readonly<Partial<Record<TargetPlatform, string>>>;
-  readonly buildManifestDigest: string;
-  readonly sbomDigest: string;
-  readonly vulnerabilityScanDigest: string;
-  readonly assetLicenseLedgerDigest: string;
-}
 
 export interface SourceExecutionPreparationRequest {
   readonly schemaVersion: "deviludo.source-execution-preparation.v1";
@@ -94,35 +89,6 @@ export function parseSourceExecutionPreparationRequest(value: unknown): SourceEx
     runnerToolchainDigest,
     targetMatrix,
     toolchain,
-  });
-}
-
-export function parseRunnerToolchainRevision(
-  value: unknown,
-  expectedTargetMatrix: readonly TargetPlatform[],
-): Readonly<RunnerToolchainRevisionPayload> {
-  const targetMatrix = matrix(expectedTargetMatrix);
-  const toolchain = record(value, "toolchain");
-  exactKeys(toolchain, [
-    "schemaVersion", "requiredGodotVersion", "godotTestKitDigest", "exportTemplates", "buildManifestDigest",
-    "sbomDigest", "vulnerabilityScanDigest", "assetLicenseLedgerDigest",
-  ], "toolchain");
-  if (toolchain.schemaVersion !== "deviludo.runner-toolchain.v1") invalid("toolchain schema version");
-  const exportTemplatesBody = record(toolchain.exportTemplates, "export templates");
-  const exportTemplates = Object.fromEntries(targetMatrix.map((platform) => [
-    platform,
-    required(exportTemplatesBody[platform], SHA256, `${platform} export template`),
-  ])) as Partial<Record<TargetPlatform, string>>;
-  if (Object.keys(exportTemplatesBody).length !== targetMatrix.length) invalid("export template matrix");
-  return deepFreeze({
-    schemaVersion: "deviludo.runner-toolchain.v1",
-    requiredGodotVersion: required(toolchain.requiredGodotVersion, GODOT_VERSION, "Godot version"),
-    godotTestKitDigest: required(toolchain.godotTestKitDigest, SHA256, "TestKit digest"),
-    exportTemplates,
-    buildManifestDigest: required(toolchain.buildManifestDigest, SHA256, "build manifest"),
-    sbomDigest: required(toolchain.sbomDigest, SHA256, "SBOM"),
-    vulnerabilityScanDigest: required(toolchain.vulnerabilityScanDigest, SHA256, "vulnerability scan"),
-    assetLicenseLedgerDigest: required(toolchain.assetLicenseLedgerDigest, SHA256, "asset license ledger"),
   });
 }
 

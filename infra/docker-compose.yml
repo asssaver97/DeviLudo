@@ -67,6 +67,7 @@ services:
       - ./postgres/054_steam_depot_finalization_operations.sql:/docker-entrypoint-initdb.d/054_steam_depot_finalization_operations.sql:ro
       - ./postgres/055_spec_model_generation_operations.sql:/docker-entrypoint-initdb.d/055_spec_model_generation_operations.sql:ro
       - ./postgres/056_spec_model_generation_reconciliation.sql:/docker-entrypoint-initdb.d/056_spec_model_generation_reconciliation.sql:ro
+      - ./postgres/057_runner_toolchain_approval_guard.sql:/docker-entrypoint-initdb.d/057_runner_toolchain_approval_guard.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

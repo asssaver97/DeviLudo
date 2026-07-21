@@ -30,3 +30,13 @@ re-resolves the same PostgreSQL authority before accepting it. A failed publish
 does not roll back or create a second revision: replaying the same approval
 operation returns the committed receipt and republishes the same idempotency
 key. No Agent/Profile selection occurs at this boundary.
+
+Approval also resolves the newest project-scoped immutable Runner toolchain
+whose exact Godot version and export-template key set match the approved target
+matrix. The revision ID and canonical digest are written into
+`approved_test_plan_bindings` in the same transaction as the approved/frozen
+revision pair. If no compatible revision exists, the entire transaction rolls
+back with `RUNNER_TOOLCHAIN_UNAVAILABLE`; no partial approval or moving default
+is recorded. Migration `057` repeats the Godot, matrix, digest-field and exact
+payload-shape checks in a database trigger so another writer cannot create a
+binding that Artifact Preparer would interpret differently.
