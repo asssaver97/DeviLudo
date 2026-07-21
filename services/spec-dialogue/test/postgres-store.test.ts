@@ -75,6 +75,7 @@ class ApprovalClient implements PostgresWorkflowClient {
   bindingValues: readonly unknown[] | null = null;
   claimToken = "";
   released = false;
+  authorized = true;
 
   constructor(private readonly hasToolchain = true) {}
 
@@ -85,6 +86,12 @@ class ApprovalClient implements PostgresWorkflowClient {
     this.statements.push(text);
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK" || text.includes("set_config('app.tenant_id'")) {
       return response<Row>([], text === "ROLLBACK" ? 0 : 1);
+    }
+    if (text.includes("FROM deviludo.projects project")) {
+      assert.deepEqual(values, [tenantId, projectId, command.actorId]);
+      assert.match(text, /actor\.id::text = \$3 AND actor\.status = 'ACTIVE'/);
+      assert.match(text, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\)/);
+      return response<Row>(this.authorized ? [{ id: projectId }] : []);
     }
     if (text.includes("INSERT INTO deviludo.spec_dialogue_operations")) {
       this.claimToken = String(values[7]);
@@ -184,6 +191,7 @@ test("PostgreSQL approval resolves and atomically binds the newest compatible Ru
     "user-1",
   ]);
   assert.equal(client.immutableInserts.length, 2);
+  assert.match(client.statements[2] ?? "", /FROM deviludo\.projects project/);
   assert.equal(client.statements.at(-1), "COMMIT");
   assert.equal(client.released, true);
 });
@@ -198,6 +206,17 @@ test("PostgreSQL approval rolls back before freezing revisions when no compatibl
   );
   assert.equal(client.immutableInserts.length, 0);
   assert.equal(client.bindingValues, null);
+  assert.equal(client.statements.at(-1), "ROLLBACK");
+  assert.equal(client.released, true);
+});
+
+test("PostgreSQL approval rejects a read-only actor before creating an operation", async () => {
+  const client = new ApprovalClient();
+  client.authorized = false;
+  const pool: PostgresWorkflowPool = { async connect() { return client; } };
+  await assert.rejects(new PostgresSpecDialogueStore(pool).approve(command), /PostgreSQL binding is invalid/);
+  assert.equal(client.statements.some((statement) => statement.includes("INSERT INTO deviludo.spec_dialogue_operations")), false);
+  assert.equal(client.immutableInserts.length, 0);
   assert.equal(client.statements.at(-1), "ROLLBACK");
   assert.equal(client.released, true);
 });

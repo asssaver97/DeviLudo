@@ -63,6 +63,15 @@ test("user feedback, acceptance and Steam MFA remain bound to an active acceptin
   }
 });
 
+test("specification dialogue and approval reject read-only project actors before model or revision writes", () => {
+  const store = readFileSync(new URL("../services/spec-dialogue/src/postgres-store.ts", import.meta.url), "utf8");
+  assert.match(store, /await authorizeProjectWriter\(client, command\.tenantId, command\.projectId, command\.actorId\)/);
+  assert.match(store, /actor\.id::text = \$3 AND actor\.status = 'ACTIVE'/);
+  assert.match(store, /membership\.status = 'ACTIVE'/);
+  assert.match(store, /membership\.role IN \('TenantAdmin', 'ProjectOwner'\)/);
+  assert.match(store, /FOR SHARE OF project, actor, membership/);
+});
+
 test("Provider recovery probes only the exact immutable waiting Run binding", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/052_provider_recovery_checks.sql", import.meta.url), "utf8");

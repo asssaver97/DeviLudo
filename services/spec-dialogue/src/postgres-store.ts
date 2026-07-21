@@ -72,12 +72,7 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
     });
     const claimToken = randomUUID();
     return this.#transaction(command.tenantId, async (client) => {
-      const project = await client.query<{ id: string }>(
-        `SELECT id::text FROM deviludo.projects
-          WHERE tenant_id = $1::uuid AND id = $2::uuid FOR SHARE`,
-        [command.tenantId, command.projectId],
-      );
-      if (project.rows.length !== 1 || project.rows[0]!.id !== command.projectId) invalid();
+      await authorizeProjectWriter(client, command.tenantId, command.projectId, command.actorId);
       if (command.expectedRevision === 0) {
         await client.query(
           `INSERT INTO deviludo.spec_conversations
@@ -256,6 +251,7 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
     const requestDigest = specDigest(command);
     const claimToken = randomUUID();
     return this.#transaction(command.tenantId, async (client) => {
+      await authorizeProjectWriter(client, command.tenantId, command.projectId, command.actorId);
       await client.query(
         `INSERT INTO deviludo.spec_dialogue_operations
           (operation_key, tenant_id, project_id, conversation_id, actor_id,
@@ -403,6 +399,30 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
       throw error;
     } finally { client.release(); }
   }
+}
+
+async function authorizeProjectWriter(
+  client: PostgresWorkflowClient,
+  tenantId: string,
+  projectId: string,
+  actorId: string,
+): Promise<void> {
+  const authorized = await client.query<{ id: string }>(
+    `SELECT project.id::text
+       FROM deviludo.projects project
+       JOIN deviludo.users actor
+         ON actor.tenant_id = project.tenant_id
+        AND actor.id::text = $3 AND actor.status = 'ACTIVE'
+       JOIN deviludo.tenant_memberships membership
+         ON membership.tenant_id = actor.tenant_id
+        AND membership.user_id = actor.id
+        AND membership.status = 'ACTIVE'
+        AND membership.role IN ('TenantAdmin', 'ProjectOwner')
+      WHERE project.tenant_id = $1::uuid AND project.id = $2::uuid
+      FOR SHARE OF project, actor, membership`,
+    [tenantId, projectId, actorId],
+  );
+  if (authorized.rows.length !== 1 || authorized.rows[0]!.id !== projectId) invalid();
 }
 
 function conversationSelect(lock: boolean): string {
