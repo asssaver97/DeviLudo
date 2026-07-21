@@ -143,6 +143,8 @@ npm run infra:status
 
 `npm run image:build-control` 只接受内部镜像库中的 Node 22.13+ Debian slim 摘要引用、当前 40 位源码 revision，以及严格等于 `平台版本-源码前12位` 的目标 tag。构建固定启用无缓存拉取、BuildKit 最大 provenance、SBOM 和 registry push，并输出绑定最终 image digest、基础镜像、Dockerfile 与 lockfile 摘要的 JSON 回执。迁移 Job 可使用同一只读代码载体覆盖入口运行 `db:migrate`，但其独立数据库凭据不进入普通服务容器。物理和原生节点仍必须使用各自的专用签名镜像。
 
+`npm run deploy:control -- --receipt /绝对路径/receipt.json --render` 在本地校验回执并生成无副作用的三阶段 Kubernetes 发布包；显式追加 `--apply --context 精确上下文` 后才会依次应用 Namespace、等待摘要绑定的数据库迁移 Job 完成、发布 31 个控制面进程并等待可用。发布器不接受当前默认 context，不执行 shell/delete/prune，也不会把 Agent、E2E、签名或 Steam 原生节点混入共享镜像。生产密钥对象、分阶段命令与 Pod 安全约束见 [控制面发布手册](docs/production-control-release.md)。
+
 ## API
 
 生产 API 使用独立域名，因此 UI 的 `GET /admin/agents` 与 API 的 `GET /admin/agents` 不冲突。本地单进程预览将 API 映射到 `/api/admin/agents`。

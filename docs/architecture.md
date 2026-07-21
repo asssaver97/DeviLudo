@@ -367,6 +367,7 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
   and OTel integration stack.
 - `Dockerfile.control-plane`, `.dockerignore` and `scripts/production/`: the
   least-authority shared control image, digest-bound build receipt, immutable
-  migration runner and exhaustive production configuration contracts.
+  migration runner, three-stage Kubernetes release gate and exhaustive
+  production configuration contracts.
 - `infra/vault` and `infra/otel`: least-privilege and telemetry redaction
   starting points.

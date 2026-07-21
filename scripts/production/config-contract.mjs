@@ -126,6 +126,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
   }
   for (const utility of [
     "scripts/production/build-control-plane-image.mjs",
+    "scripts/production/deploy-control-plane.mjs",
     "scripts/production/migrate-postgres.mjs",
     "scripts/production/run-control-service.mjs",
   ]) {
