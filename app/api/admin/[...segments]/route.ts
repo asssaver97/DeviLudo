@@ -197,8 +197,8 @@ export async function GET(request: Request, context: RouteContext) {
           rollouts: store.rollouts,
           providers: store.providers,
           profiles: store.profiles,
-          credentials: store.credentials.map(({ id, label, masked, version, state, createdAt }) => ({
-            id, label, masked, version, state, createdAt, lastUsedAt: credentialLastUsedAt[id] ?? null,
+          credentials: store.credentials.map(({ id, label, masked, version, state, createdAt, rotatedAt }) => ({
+            id, label, masked, version, state, createdAt, rotatedAt, lastUsedAt: credentialLastUsedAt[id] ?? null,
           })),
           defaults: store.defaults,
         },
@@ -686,11 +686,13 @@ export async function POST(request: Request, context: RouteContext) {
           version: 1,
           state: "ACTIVE" as const,
           createdAt: new Date().toISOString(),
+          rotatedAt: null,
         };
         store.credentials.push(credential);
         appendDemoAudit("CREDENTIAL_CREATED", id, role, { label, credentialVersion: credential.version });
         return { id: credential.id, label: credential.label, maskedFingerprint: credential.masked,
-          version: credential.version, state: credential.state, createdAt: credential.createdAt, plaintextRecoverable: false };
+          version: credential.version, state: credential.state, createdAt: credential.createdAt,
+          rotatedAt: credential.rotatedAt, plaintextRecoverable: false };
       });
     }
 
@@ -738,7 +740,9 @@ export async function POST(request: Request, context: RouteContext) {
         if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
         if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
         if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+        const rotatedAt = new Date().toISOString();
         credential.state = "PREVIOUS";
+        credential.rotatedAt = rotatedAt;
         const nextVersion = credential.version + 1;
         const replacement = {
           ...credential,
@@ -748,11 +752,18 @@ export async function POST(request: Request, context: RouteContext) {
           masked: maskFingerprint(replacementFingerprint),
           version: nextVersion,
           state: "ACTIVE" as const,
-          createdAt: new Date().toISOString(),
+          createdAt: rotatedAt,
+          rotatedAt,
         };
         store.credentials.push(replacement);
-        appendDemoAudit("CREDENTIAL_ROTATE", credential.id, role, { replacementVersionId: replacement.id, newTasksOnly: true });
-        return { id: replacement.id, previousId: credential.id, state: replacement.state, fingerprint: replacement.masked, newTokensIssued: true, oldVersionNoLongerIssued: true, plaintextRecoverable: false };
+        appendDemoAudit("CREDENTIAL_ROTATE", credential.id, role, {
+          replacementVersionId: replacement.id, rotatedAt, newTasksOnly: true,
+        });
+        return {
+          id: replacement.id, previousId: credential.id, state: replacement.state,
+          fingerprint: replacement.masked, rotatedAt, newTokensIssued: true,
+          oldVersionNoLongerIssued: true, plaintextRecoverable: false,
+        };
       });
     }
 

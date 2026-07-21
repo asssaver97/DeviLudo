@@ -69,6 +69,7 @@ type AdminState = {
     version: number | null;
     state: string;
     createdAt: string | null;
+    rotatedAt: string | null;
     lastUsedAt: string | null;
   }>;
   defaults: Record<string, string>;
@@ -1013,7 +1014,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         </div>
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
-          <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>v{matchingCredential?.version ?? "?"} · 创建 {formatLifecycleTime(matchingCredential?.createdAt ?? null)} · 最后使用 {formatLifecycleTime(matchingCredential?.lastUsedAt ?? null)}</small></div>
+          <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>v{matchingCredential?.version ?? "?"} · 轮换 {formatLifecycleTime(matchingCredential?.rotatedAt ?? null)} · 最后使用 {formatLifecycleTime(matchingCredential?.lastUsedAt ?? null)}</small></div>
           <div className={styles.credentialActions}>
             <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "使用下方输入的新 Key 创建不可变版本" : "需要 SecurityAdmin 权限"} onClick={() => void rotateCredential()}>轮换</button>
             <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "立即停止该版本签发新租约" : "需要 SecurityAdmin 权限"} onClick={() => void revokeCredential()}>撤销当前</button>
@@ -1021,7 +1022,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         </div>
         {agentCredentials.length ? <div className={styles.credentialHistory}>
           {agentCredentials.map((credential) => <div key={credential.id}>
-            <span><strong>{credential.label}</strong><small>{credential.id} · v{credential.version ?? "?"} · {credential.state} · 最后使用 {formatLifecycleTime(credential.lastUsedAt)}</small></span>
+            <span><strong>{credential.label}</strong><small>{credential.id} · v{credential.version ?? "?"} · {credential.state} · 创建 {formatLifecycleTime(credential.createdAt)} · 轮换 {formatLifecycleTime(credential.rotatedAt)} · 最后使用 {formatLifecycleTime(credential.lastUsedAt)}</small></span>
             <code>{credential.maskedFingerprint}</code>
             {credential.state !== "REVOKED" ? <button type="button" disabled={testing || !permissions.manageGlobalCredentials}
               onClick={() => void revokeCredential(credential)}>撤销此版本</button> : <StatusPill tone="danger">REVOKED</StatusPill>}
@@ -1353,6 +1354,7 @@ function credentialRow(value: Record<string, unknown>): AdminState["credentials"
   return id && label && state && maskedFingerprint
     ? {
       id, label, state, maskedFingerprint, version: number(value.version), createdAt: text(value.createdAt),
+      rotatedAt: text(value.rotatedAt),
       lastUsedAt: text(value.lastUsedAt),
     } : null;
 }

@@ -11,6 +11,7 @@ export function credentialView(record: CredentialVersionRecord): Readonly<Record
     maskedFingerprint: record.maskedFingerprint,
     state: record.state,
     createdAt: record.createdAt,
+    rotatedAt: record.rotatedAt,
     lastUsedAt: record.lastUsedAt,
     plaintextRecoverable: false,
   });

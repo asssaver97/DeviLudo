@@ -90,6 +90,7 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
       maskedFingerprint: "sha256:12345678…abcdef",
       state: "ACTIVE",
       createdAt: "2026-07-18T00:00:00.000Z",
+      rotatedAt: null,
       lastUsedAt: null,
       rotation: {
         operationKey: "e".repeat(64),
@@ -171,7 +172,7 @@ test("Postgres admin retirement guard counts every non-terminal run with RLS fai
   assert.match(statements.find((text) => text.includes("FROM deviludo.agent_runs")) ?? "", /state NOT IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
 });
 
-test("Postgres admin catalog backfills legacy active Installation activation time deterministically", async () => {
+test("Postgres admin catalog backfills legacy Installation and credential lifecycle timestamps deterministically", async () => {
   const createdAt = "2026-07-17T08:00:00.000Z";
   const legacyPayload = {
     ...emptyPayload,
@@ -193,6 +194,19 @@ test("Postgres admin catalog backfills legacy active Installation activation tim
       selfUpdateDisabled: true,
       createdAt,
     }],
+    credentials: [{
+      id: "credential-platform-legacy-v1",
+      familyId: "credential-platform-legacy",
+      version: 1,
+      label: "legacy credential",
+      scope: "platform",
+      scopeId: "global",
+      secretRef: "vault://kv/data/deviludo/platform/legacy?version=1",
+      maskedFingerprint: "sha256:legacy00…000001",
+      state: "ACTIVE",
+      createdAt,
+      lastUsedAt: null,
+    }],
   };
   const client = {
     async query(text: string) {
@@ -203,8 +217,12 @@ test("Postgres admin catalog backfills legacy active Installation activation tim
     release() {},
   } as unknown as PoolClient;
   const store = new PostgresAdminStore({ async connect() { return client; }, async end() {} } as unknown as Pool);
-  const activatedAt = await store.read((state) => state.installations.get("claude-code-installation-legacy")?.activatedAt);
-  assert.equal(activatedAt, createdAt);
+  const lifecycle = await store.read((state) => ({
+    activatedAt: state.installations.get("claude-code-installation-legacy")?.activatedAt,
+    rotatedAt: state.credentials.get("credential-platform-legacy-v1")?.rotatedAt,
+  }));
+  assert.equal(lifecycle.activatedAt, createdAt);
+  assert.equal(lifecycle.rotatedAt, null);
 
   const malformedClient = {
     async query(text: string) {

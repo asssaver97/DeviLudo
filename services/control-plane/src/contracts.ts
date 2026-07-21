@@ -145,6 +145,8 @@ export interface CredentialVersionRecord {
   readonly maskedFingerprint: string;
   state: "ACTIVE" | "PREVIOUS" | "REVOKED";
   readonly createdAt: string;
+  /** Atomic completion time of the rotation that introduced or superseded this version. */
+  rotatedAt: string | null;
   lastUsedAt: string | null;
   /** Internal crash-recovery binding. Public credential projectors omit it. */
   readonly rotation?: Readonly<{

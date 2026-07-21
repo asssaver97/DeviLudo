@@ -330,6 +330,8 @@ test("credentials never echo plaintext and Provider activation is a separate sec
   assert.equal(rotate.body.includes("rotationBindings"), false);
   assert.equal(rotate.json().data.previous.state, "PREVIOUS");
   assert.equal(rotate.json().data.active.state, "ACTIVE");
+  assert.ok(Number.isFinite(Date.parse(rotate.json().data.active.rotatedAt)));
+  assert.equal(rotate.json().data.previous.rotatedAt, rotate.json().data.active.rotatedAt);
   assert.equal(rotate.json().data.oldVersionNoLongerIssued, true);
   assert.equal(rotate.json().data.successorProfileRevisionIds.length > 0, true);
 
@@ -341,6 +343,9 @@ test("credentials never echo plaintext and Provider activation is a separate sec
   const successor = rotatedCatalog.json().data.profiles.find((item: { id: string }) => item.id === successorProfileId);
   assert.equal(successor.state, "ACTIVE");
   assert.equal(successor.credentialVersionId, rotate.json().data.active.id);
+  const catalogCredentials = rotatedCatalog.json().data.credentials as Array<{ id: string; rotatedAt: string | null }>;
+  assert.equal(catalogCredentials.find((item) => item.id === credentialId)?.rotatedAt, rotate.json().data.active.rotatedAt);
+  assert.equal(catalogCredentials.find((item) => item.id === rotate.json().data.active.id)?.rotatedAt, rotate.json().data.active.rotatedAt);
 
   const revokePrevious = await inject({
     method: "POST",

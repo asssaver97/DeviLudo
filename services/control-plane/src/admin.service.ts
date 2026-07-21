@@ -748,10 +748,14 @@ export class AdminService {
           if (provider.credentialVersionId === current.id && !supersededProviders.has(provider.id)
             && !["SUPERSEDED", "DISABLED"].includes(provider.state)) provider.state = "DEGRADED";
         }
+        const rotatedAt = new Date().toISOString();
         active.state = "PREVIOUS";
+        active.rotatedAt = rotatedAt;
+        next.rotatedAt = rotatedAt;
         this.audit(state, "CREDENTIAL_ROTATED", active.id, actor, {
           operationKey,
           replacementVersionId: replacement.id,
+          rotatedAt,
           successorProfileRevisionIds: stage!.profiles.map((item) => item.successorProfileId),
           reboundDefaultCount: [...state.defaults.values()].filter((id) => stage!.profiles.some((item) => item.successorProfileId === id)).length,
           oldVersionNoLongerIssued: true,
@@ -1240,6 +1244,7 @@ export class AdminService {
         maskedFingerprint: result.maskedFingerprint,
         state: "ACTIVE",
         createdAt: new Date().toISOString(),
+        rotatedAt: null,
         lastUsedAt: null,
       };
     } finally {

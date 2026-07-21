@@ -1190,7 +1190,7 @@ components:
           items:
             type: object
             additionalProperties: true
-            required: [id, familyId, version, label, scope, scopeId, maskedFingerprint, state, createdAt, lastUsedAt, plaintextRecoverable]
+            required: [id, familyId, version, label, scope, scopeId, maskedFingerprint, state, createdAt, rotatedAt, lastUsedAt, plaintextRecoverable]
             properties:
               id: { type: string }
               familyId: { type: string }
@@ -1201,6 +1201,7 @@ components:
               maskedFingerprint: { type: string }
               state: { type: string, enum: [ACTIVE, PREVIOUS, REVOKED] }
               createdAt: { type: string, format: date-time }
+              rotatedAt: { type: [string, "null"], format: date-time }
               lastUsedAt: { type: [string, "null"], format: date-time }
               plaintextRecoverable: { const: false }
         defaults: { type: object, additionalProperties: { type: string } }

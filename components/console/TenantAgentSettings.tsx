@@ -7,7 +7,7 @@ import { CheckIcon, GamepadIcon, ShieldIcon, SparkIcon } from "./Icons";
 
 type AgentKind = "claude-code" | "codex-cli";
 type Profile = { id: string; agent: AgentKind; scope: string; scopeId: string; state: string; installationId: string };
-type Credential = { id: string; label: string; state: string; version?: number; createdAt?: string; lastUsedAt?: string | null; maskedFingerprint?: string; masked?: string };
+type Credential = { id: string; label: string; state: string; version?: number; createdAt?: string; rotatedAt?: string | null; lastUsedAt?: string | null; maskedFingerprint?: string; masked?: string };
 type Installation = { id: string; agent: AgentKind; state: string; health: string };
 type AgentData = {
   catalog?: Array<{ id: AgentKind; installations?: Installation[] }>;
@@ -148,7 +148,7 @@ export function TenantAgentSettings() {
           <button className="button button-primary" disabled={busy || readOnly} type="submit">安全写入 Vault</button>
         </form>
         <div className="masked-list credential-version-list">{credentialRows.length ? credentialRows.map((item) => <article key={item.id}>
-          <div className="credential-version-summary"><span><b>{item.label}</b><small>{item.id} · v{item.version ?? "?"} · {item.state}</small><small>创建 {credentialTime(item.createdAt)} · 最后使用 {credentialTime(item.lastUsedAt)}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>
+          <div className="credential-version-summary"><span><b>{item.label}</b><small>{item.id} · v{item.version ?? "?"} · {item.state}</small><small>创建 {credentialTime(item.createdAt)} · 轮换 {credentialTime(item.rotatedAt)} · 最后使用 {credentialTime(item.lastUsedAt)}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>
           <div className="credential-version-actions">
             {item.state === "ACTIVE" ? <button disabled={busy || readOnly} onClick={() => setRotatingCredentialId(item.id)} type="button">轮换</button> : null}
             {item.state !== "REVOKED" ? <button disabled={busy || readOnly} onClick={() => void revokeCredential(item)} type="button">撤销</button> : null}

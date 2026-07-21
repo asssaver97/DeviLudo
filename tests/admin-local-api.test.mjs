@@ -196,8 +196,18 @@ test("local credential lifecycle creates a new version and can revoke the exact 
   assert.equal(rotation.previousId, credentialId);
   assert.equal(rotation.state, "ACTIVE");
   assert.notEqual(rotation.id, credentialId);
-  assert.equal(store.credentials.find((item) => item.id === credentialId)?.state, "PREVIOUS");
-  assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "ACTIVE");
+  assert.ok(Number.isFinite(Date.parse(rotation.rotatedAt)));
+  const previousVersion = store.credentials.find((item) => item.id === credentialId);
+  const activeVersion = store.credentials.find((item) => item.id === rotation.id);
+  assert.equal(previousVersion?.state, "PREVIOUS");
+  assert.equal(activeVersion?.state, "ACTIVE");
+  assert.equal(previousVersion?.rotatedAt, rotation.rotatedAt);
+  assert.equal(activeVersion?.rotatedAt, rotation.rotatedAt);
+
+  const catalogResponse = await GET(new Request("http://127.0.0.1:3000/api/admin/agents"), context("agents"));
+  const catalog = await catalogResponse.json();
+  assert.equal(catalog.meta.credentials.find((item) => item.id === credentialId)?.rotatedAt, rotation.rotatedAt);
+  assert.equal(catalog.meta.credentials.find((item) => item.id === rotation.id)?.rotatedAt, rotation.rotatedAt);
 
   const repeatedRotation = await POST(
     request(rotatePath, "POST", "TenantAdmin", { apiKey: "another-replacement-secret" }),

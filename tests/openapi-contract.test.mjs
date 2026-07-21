@@ -57,6 +57,7 @@ test("Agent settings contract uses immutable credential revisions and governance
   assert.match(adminProfile, /required: \[agent, installationId, credentialVersionId, scope, scopeId,/);
   assert.doesNotMatch(adminProfile, /required: \[[^\n]*\b(?:maxBudgetUsd|maxTurns|timeoutSeconds)\b/);
   assert.match(operationBlock("/admin/agent-defaults/{scope}", "put"), /AgentProfileSelection/);
+  assert.match(schemaBlock("AgentSettingsProjection"), /\brotatedAt\b/);
 });
 
 test("Agent administration mutations publish exact request-body contracts", () => {

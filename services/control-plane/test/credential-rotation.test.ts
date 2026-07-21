@@ -178,6 +178,9 @@ test("successful key rotation atomically rebinds every default sharing the activ
   assert.equal(catalog.tenantDefault, tenantSuccessor?.id);
   assert.equal(tenantSuccessor?.fallbackProfileRevisionId, platformSuccessor?.id);
   assert.equal(catalog.oldCredential?.state, "PREVIOUS");
+  assert.ok(Number.isFinite(Date.parse(catalog.oldCredential?.rotatedAt ?? "")));
+  const activeCredential = result.active as { rotatedAt: string | null };
+  assert.equal(catalog.oldCredential?.rotatedAt, activeCredential.rotatedAt);
   assert.deepEqual(catalog.oldProfiles.map((profile) => profile?.state), ["SUPERSEDED", "SUPERSEDED"]);
   assert.deepEqual(catalog.successors.map((profile) => profile?.state), ["ACTIVE", "ACTIVE"]);
   assert.equal(catalog.oldProvider?.state, "SUPERSEDED");
@@ -264,6 +267,8 @@ test("an interrupted rotation resumes the same Vault version and immutable succe
   }));
   assert.equal(final.credentials.length, 2);
   assert.equal(final.credentials.filter((credential) => credential.state === "ACTIVE").length, 1);
+  assert.ok(final.credentials.every((credential) => credential.rotatedAt !== null));
+  assert.equal(new Set(final.credentials.map((credential) => credential.rotatedAt)).size, 1);
   assert.equal(final.successorProfiles.length, 1);
   assert.equal(final.successorProfiles[0]?.state, "ACTIVE");
   assert.equal(final.successorProviders.length, 1);

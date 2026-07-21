@@ -324,6 +324,7 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   loadRecords(payload.providers, state.providers, "provider");
   loadRecords(payload.profiles, state.profiles, "profile");
   loadRecords(payload.credentials, state.credentials, "credential");
+  for (const credential of state.credentials.values()) normalizeCredentialTimestamps(credential);
   if (!Array.isArray(payload.defaults)) throw new Error("Administrator catalog defaults are invalid");
   for (const entry of payload.defaults) {
     if (!Array.isArray(entry) || entry.length !== 2 || !entry.every((item) => typeof item === "string")) {
@@ -333,6 +334,21 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   }
   state.audit.push(...audit);
   return state;
+}
+
+function normalizeCredentialTimestamps(credential: CredentialVersionRecord): void {
+  const mutable = credential as unknown as { createdAt?: unknown; rotatedAt?: unknown; lastUsedAt?: unknown };
+  if (mutable.rotatedAt === undefined) mutable.rotatedAt = null;
+  if (typeof mutable.createdAt !== "string" || !Number.isFinite(Date.parse(mutable.createdAt))) {
+    throw new Error("Administrator catalog credential creation timestamp is invalid");
+  }
+  for (const field of ["rotatedAt", "lastUsedAt"] as const) {
+    if (mutable[field] === undefined) mutable[field] = null;
+    if (mutable[field] !== null
+      && (typeof mutable[field] !== "string" || !Number.isFinite(Date.parse(mutable[field] as string)))) {
+      throw new Error(`Administrator catalog credential ${field} timestamp is invalid`);
+    }
+  }
 }
 
 function normalizeInstallationActivation(installation: InstallationRecord): void {

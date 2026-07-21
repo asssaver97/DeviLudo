@@ -35,6 +35,7 @@ export type DemoCredential = {
   version: number;
   state: "ACTIVE" | "PREVIOUS" | "REVOKED";
   createdAt: string;
+  rotatedAt: string | null;
 };
 
 export type DemoProvider = {
@@ -313,6 +314,7 @@ const globalStore = globalThis as typeof globalThis & { __deviludoDemoStore?: De
 export function getDemoStore(): DemoStoreState {
   globalStore.__deviludoDemoStore ??= initialState();
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
+  backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
 }
 
@@ -331,6 +333,12 @@ function backfillVersionMetadata(store: DemoStoreState): void {
     if ((agent === "claude-code" || agent === "codex-cli") && version) {
       store.agentVersionMetadata[id] = fixtureVersionMetadata(agent, version, state === "APPROVED", new Date().toISOString());
     }
+  }
+}
+
+function backfillCredentialTimestamps(store: DemoStoreState): void {
+  for (const credential of store.credentials) {
+    if (credential.rotatedAt === undefined) credential.rotatedAt = null;
   }
 }
 

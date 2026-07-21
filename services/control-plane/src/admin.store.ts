@@ -131,6 +131,7 @@ function seededState(): AdminCatalogState {
     maskedFingerprint: "sha256:managed0…000001",
     state: "ACTIVE",
     createdAt: now,
+    rotatedAt: null,
     lastUsedAt: null,
   };
   const installation: InstallationRecord = {
