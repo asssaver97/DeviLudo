@@ -2,12 +2,12 @@
 
 import { constants as osSignals } from "node:os";
 import { randomBytes } from "node:crypto";
-import { access, chmod, mkdir, writeFile } from "node:fs/promises";
-import { unlinkSync } from "node:fs";
+import { access, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { installLocalSidecarCredentials } from "./sidecar-credentials.mjs";
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
@@ -144,12 +144,7 @@ const localSidecarCredentials = Object.freeze([
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-spec-runtime.hmac"), key: localSpecRuntimeHmacKey }),
 ]);
 
-function removeLocalSidecarKeys() {
-  for (const credential of localSidecarCredentials) {
-    try { unlinkSync(credential.file); }
-    catch (error) { if (error?.code !== "ENOENT") console.error("[local:dev] Could not remove a sidecar session key."); }
-  }
-}
+let removeLocalSidecarKeys = () => {};
 
 const vinextCli = path.join(workspaceRoot, "node_modules", "vinext", "dist", "cli.js");
 const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
@@ -166,10 +161,7 @@ try {
   await assertPortAvailable(localSpecRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
   await mkdir(path.join(workspaceRoot, ".deviludo"), { recursive: true, mode: 0o700 });
-  for (const credential of localSidecarCredentials) {
-    await writeFile(credential.file, `${credential.key}\n`, { encoding: "utf8", mode: 0o600 });
-    await chmod(credential.file, 0o600);
-  }
+  removeLocalSidecarKeys = await installLocalSidecarCredentials(localSidecarCredentials);
 } catch (error) {
   removeLocalSidecarKeys();
   fail(error instanceof Error ? error.message : String(error));
@@ -397,5 +389,6 @@ siteChild.once("exit", (code, signal) => {
 
 process.once("exit", () => {
   killAll("SIGKILL");
-  removeLocalSidecarKeys();
+  try { removeLocalSidecarKeys(); }
+  catch { console.error("[local:dev] Could not remove a sidecar session key."); }
 });
