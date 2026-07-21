@@ -19,6 +19,8 @@ import {
 } from "../src/store";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import { RUNNER_FLEET_PROJECTION_SCHEMA_VERSION } from "../../../lib/runner/fleet-projection";
+import { EVIDENCE_CATALOG_SCHEMA_VERSION } from "../../../lib/evidence/catalog-projection";
+import { canonicalJson as canonicalEvidenceJson } from "../../runner-control/src/canonical";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -169,6 +171,16 @@ class MemoryStore implements DeliveryProjectionStore {
       runners: [],
     } as const;
   }
+  async readEvidenceCatalog(readTenantId: string, readProjectId: string) {
+    if (readTenantId !== tenantId || readProjectId !== projectId) return null;
+    return {
+      schemaVersion: EVIDENCE_CATALOG_SCHEMA_VERSION,
+      tenantId,
+      projectId,
+      observedAt: "2026-07-18T00:00:00.000Z",
+      entries: [],
+    } as const;
+  }
   async probe() {}
 }
 
@@ -211,6 +223,12 @@ test("mTLS projection ingress separates Temporal writes from Web reads", async (
   const fleet = await handler({ ...fleetRead, socket: readerId });
   assert.equal(fleet.status, 200);
   assert.deepEqual((fleet.body.data as { runners: unknown[] }).runners, []);
+
+  const evidenceRead = { ...read, path: `/v1/evidence-catalog/${projectId}` };
+  assert.equal((await handler({ ...evidenceRead, socket: writerId })).status, 403);
+  const evidence = await handler({ ...evidenceRead, socket: readerId });
+  assert.equal(evidence.status, 200);
+  assert.deepEqual((evidence.body.data as { entries: unknown[] }).entries, []);
 });
 
 test("projection ingress rejects identity overlap and transport drift", async () => {
@@ -302,6 +320,107 @@ test("PostgreSQL Runner Fleet projection exposes only the latest project-bound l
   assert.ok(statements.findIndex((statement) => statement.includes("set_config('app.tenant_id'"))
     < statements.findIndex((statement) => statement.includes("DISTINCT ON")));
 });
+
+test("PostgreSQL Evidence Catalog verifies immutable bindings without exposing archive object keys", async () => {
+  const statements: string[] = [];
+  const bundle = evidenceBundle();
+  const binding = evidenceBinding();
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string) {
+      statements.push(text);
+      const result = text.includes("AS project_exists")
+        ? [{ project_exists: true, observed_at: "2026-07-18T00:05:00.000Z" }]
+        : text.includes("FROM deviludo.evidence_bundles") ? [{
+          id: bundle.id,
+          attempt_id: bundle.attemptId,
+          commit_sha: bundle.commitSha,
+          source_digest: bundle.sourceDigest,
+          binding,
+          manifest: bundle,
+          bundle_digest: bundle.bundleDigest,
+          status: bundle.status,
+          invalidated_at: null,
+          created_at: bundle.createdAt,
+        }] : [];
+      return { rowCount: result.length, rows: result as unknown as readonly Row[] };
+    },
+    release() {},
+  };
+  const store = new PostgresDeliveryProjectionStore({ async connect() { return client; } });
+  const catalog = await store.readEvidenceCatalog(tenantId, projectId);
+  assert.equal(catalog?.entries[0]?.bundle.bundleDigest, bundle.bundleDigest);
+  assert.equal(catalog?.entries[0]?.binding.runnerToolchainRevisionId, binding.runnerToolchainRevisionId);
+  assert.equal(catalog?.entries[0]?.invalidatedAt, null);
+  assert.equal("objectKey" in (catalog?.entries[0] ?? {}), false);
+  const query = statements.find((statement) => statement.includes("FROM deviludo.evidence_bundles")) ?? "";
+  assert.match(query, /tenant_id = \$1::uuid AND project_id = \$2::uuid/);
+  assert.doesNotMatch(query, /object_key/);
+  assert.ok(statements.findIndex((statement) => statement.includes("set_config('app.tenant_id'"))
+    < statements.findIndex((statement) => statement.includes("FROM deviludo.evidence_bundles")));
+
+  const driftedClient: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string) {
+      const result = text.includes("AS project_exists")
+        ? [{ project_exists: true, observed_at: "2026-07-18T00:05:00.000Z" }]
+        : text.includes("FROM deviludo.evidence_bundles") ? [{
+          id: bundle.id, attempt_id: bundle.attemptId, commit_sha: "f".repeat(40), source_digest: bundle.sourceDigest,
+          binding, manifest: bundle, bundle_digest: bundle.bundleDigest, status: bundle.status,
+          invalidated_at: null, created_at: bundle.createdAt,
+        }] : [];
+      return { rowCount: result.length, rows: result as unknown as readonly Row[] };
+    },
+    release() {},
+  };
+  await assert.rejects(
+    new PostgresDeliveryProjectionStore({ async connect() { return driftedClient; } }).readEvidenceCatalog(tenantId, projectId),
+    DeliveryProjectionConflictError,
+  );
+});
+
+function evidenceBundle() {
+  const core = {
+    id: "66666666-6666-4666-8666-666666666666",
+    attemptId: "66666666-6666-4666-8666-666666666666",
+    specRevisionId: "77777777-7777-4777-8777-777777777777",
+    specDigest: "1".repeat(64),
+    testPlanDigest: "2".repeat(64),
+    commitSha: "a".repeat(40),
+    sourceDigest: "3".repeat(64),
+    targetMatrix: ["linux"],
+    godotTestKitDigest: "4".repeat(64),
+    buildManifestDigest: "5".repeat(64),
+    sbomDigest: "6".repeat(64),
+    vulnerabilityScanDigest: "7".repeat(64),
+    assetLicenseLedgerDigest: "8".repeat(64),
+    platformEvidence: [{
+      platform: "linux", runnerId: "runner-linux-01", runnerCapabilityDigest: "9".repeat(64),
+      exportDigest: "a".repeat(64), logsDigest: "b".repeat(64), junitDigest: "c".repeat(64),
+      inputTimelineDigest: "d".repeat(64), screenshotManifestDigest: "e".repeat(64),
+      videoManifestDigest: "f".repeat(64), status: "PASSED",
+    }],
+    status: "PASSED",
+    valid: true,
+    createdAt: "2026-07-18T00:04:00.000Z",
+  } as const;
+  return { ...core, bundleDigest: createHash("sha256").update(canonicalEvidenceJson(core)).digest("hex") };
+}
+
+function evidenceBinding() {
+  return {
+    schemaVersion: "deviludo.evidence-binding.v1",
+    attemptId: "66666666-6666-4666-8666-666666666666",
+    executionLockId: "88888888-8888-4888-8888-888888888888",
+    executionLockDigest: "0".repeat(64),
+    specRevisionId: "77777777-7777-4777-8777-777777777777",
+    specDigest: "1".repeat(64),
+    testPlanDigest: "2".repeat(64),
+    runnerToolchainRevisionId: "99999999-9999-4999-8999-999999999999",
+    runnerToolchainDigest: "a".repeat(64),
+    commitSha: "a".repeat(40),
+    sourceDigest: "3".repeat(64),
+    targetMatrix: ["linux"],
+  } as const;
+}
 
 class ProjectionDatabase {
   readonly statements: string[] = [];

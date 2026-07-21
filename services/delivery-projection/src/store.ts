@@ -8,6 +8,11 @@ import {
 } from "../../../lib/orchestration/delivery-projection";
 import type { DeliverySnapshot } from "../../../lib/orchestration/game-delivery";
 import {
+  EVIDENCE_CATALOG_SCHEMA_VERSION,
+  parseEvidenceCatalogProjection,
+  type EvidenceCatalogProjection,
+} from "../../../lib/evidence/catalog-projection";
+import {
   RUNNER_FLEET_PROJECTION_SCHEMA_VERSION,
   parseRunnerFleetProjection,
   runnerConnectivity,
@@ -60,10 +65,24 @@ type RunnerRow = {
   updated_at: string | Date;
 };
 
+type EvidenceRow = {
+  id: string;
+  attempt_id: string;
+  commit_sha: string;
+  source_digest: string;
+  binding: unknown;
+  manifest: unknown;
+  bundle_digest: string;
+  status: string;
+  invalidated_at: string | Date | null;
+  created_at: string | Date;
+};
+
 export interface DeliveryProjectionStore {
   persist(input: DeliveryProjectionRequest): Promise<DeliveryProjectionReceipt>;
   read(tenantId: string, projectId: string): Promise<DeliveryProjectionView | null>;
   readRunnerFleet(tenantId: string, projectId: string): Promise<RunnerFleetProjection | null>;
+  readEvidenceCatalog(tenantId: string, projectId: string): Promise<EvidenceCatalogProjection | null>;
   probe(): Promise<void>;
 }
 
@@ -257,6 +276,60 @@ export class PostgresDeliveryProjectionStore implements DeliveryProjectionStore 
           };
         }),
       }, { tenantId, projectId });
+    });
+  }
+
+  async readEvidenceCatalog(tenantId: string, projectId: string): Promise<EvidenceCatalogProjection | null> {
+    validateUuid(tenantId, "Tenant");
+    validateUuid(projectId, "Project");
+    return this.#transaction(tenantId, async (client) => {
+      const authority = await client.query<{ project_exists: boolean; observed_at: string | Date }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM deviludo.projects
+            WHERE tenant_id = $1::uuid AND id = $2::uuid
+         ) AS project_exists,
+         current_timestamp AS observed_at`,
+        [tenantId, projectId],
+      );
+      const observedAt = iso(authority.rows[0]?.observed_at ?? "");
+      if (authority.rows[0]?.project_exists !== true) return null;
+      const result = await client.query<EvidenceRow>(
+        `SELECT id::text, attempt_id::text, commit_sha, source_digest,
+                binding, manifest, bundle_digest, status,
+                invalidated_at, created_at
+           FROM deviludo.evidence_bundles
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid
+          ORDER BY created_at DESC, id DESC
+          LIMIT 50`,
+        [tenantId, projectId],
+      );
+      let projection: EvidenceCatalogProjection;
+      try {
+        projection = await parseEvidenceCatalogProjection({
+          schemaVersion: EVIDENCE_CATALOG_SCHEMA_VERSION,
+          tenantId,
+          projectId,
+          observedAt,
+          entries: result.rows.map((row) => ({
+            evidenceBundleId: row.id,
+            invalidatedAt: row.invalidated_at === null ? null : iso(row.invalidated_at),
+            binding: json(row.binding),
+            bundle: json(row.manifest),
+          })),
+        }, { tenantId, projectId });
+      } catch { conflict(); }
+      for (let index = 0; index < projection.entries.length; index += 1) {
+        const entry = projection.entries[index]!;
+        const row = result.rows[index]!;
+        if (row.id !== entry.evidenceBundleId
+          || row.attempt_id !== entry.bundle.attemptId
+          || row.commit_sha !== entry.bundle.commitSha
+          || row.source_digest !== entry.bundle.sourceDigest
+          || row.bundle_digest !== entry.bundle.bundleDigest
+          || row.status !== entry.bundle.status
+          || iso(row.created_at) !== entry.bundle.createdAt) conflict();
+      }
+      return projection;
     });
   }
 

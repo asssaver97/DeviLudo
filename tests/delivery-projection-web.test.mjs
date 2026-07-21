@@ -8,9 +8,12 @@ import {
 } from "../lib/orchestration/delivery-projection.ts";
 import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 import { GET, POST } from "../app/api/projects/[projectId]/delivery/route.ts";
+import { GET as GET_EVIDENCE } from "../app/api/projects/[projectId]/evidence/route.ts";
 import { GET as GET_RUNNERS } from "../app/api/projects/[projectId]/runners/route.ts";
 import { signTrustedSpecSession } from "../lib/spec-dialogue/broker.ts";
 import { RUNNER_FLEET_PROJECTION_SCHEMA_VERSION } from "../lib/runner/fleet-projection.ts";
+import { EVIDENCE_CATALOG_SCHEMA_VERSION } from "../lib/evidence/catalog-projection.ts";
+import { canonicalJson as canonicalEvidenceJson } from "../services/runner-control/src/canonical.ts";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -68,6 +71,30 @@ test("Web Runner Fleet read is project-bound and rejects derived connectivity dr
   await assert.rejects(drifted.readRunnerFleet({ tenantId, projectId }), /response binding is invalid/);
 });
 
+test("Web Evidence Catalog revalidates manifest digests and excludes archive locations", async () => {
+  const expected = evidenceCatalogProjection();
+  let request;
+  const client = new DeliveryProjectionBrokerClient("https://projection.internal/", async (url, init) => {
+    request = { url: String(url), init };
+    return new Response(JSON.stringify({ data: expected }), { status: 200 });
+  });
+  assert.deepEqual(await client.readEvidenceCatalog({ tenantId, projectId }), expected);
+  assert.equal(request.url, `https://projection.internal/v1/evidence-catalog/${projectId}`);
+  assert.equal(request.init.headers["x-deviludo-tenant-id"], tenantId);
+  assert.equal("objectKey" in expected.entries[0], false);
+
+  const drifted = new DeliveryProjectionBrokerClient("https://projection.internal/", async () => new Response(JSON.stringify({
+    data: {
+      ...expected,
+      entries: [{
+        ...expected.entries[0],
+        bundle: { ...expected.entries[0].bundle, commitSha: "f".repeat(40) },
+      }],
+    },
+  }), { status: 200 }));
+  await assert.rejects(drifted.readEvidenceCatalog({ tenantId, projectId }), /response binding is invalid/);
+});
+
 function runnerFleetProjection() {
   return {
     schemaVersion: RUNNER_FLEET_PROJECTION_SCHEMA_VERSION,
@@ -80,6 +107,44 @@ function runnerFleetProjection() {
       certificateNotAfter: "2027-07-18T00:00:00.000Z", attemptId: "66666666-6666-4666-8666-666666666666",
       leaseState: "RUNNING", fencingToken: "19", leaseExpiresAt: "2026-07-18T00:10:00.000Z",
       updatedAt: "2026-07-18T00:04:31.000Z",
+    }],
+  };
+}
+
+function evidenceCatalogProjection() {
+  const core = {
+    id: "66666666-6666-4666-8666-666666666666",
+    attemptId: "66666666-6666-4666-8666-666666666666",
+    specRevisionId: "77777777-7777-4777-8777-777777777777",
+    specDigest: "1".repeat(64), testPlanDigest: "2".repeat(64), commitSha: "a".repeat(40),
+    sourceDigest: "3".repeat(64), targetMatrix: ["linux"], godotTestKitDigest: "4".repeat(64),
+    buildManifestDigest: "5".repeat(64), sbomDigest: "6".repeat(64), vulnerabilityScanDigest: "7".repeat(64),
+    assetLicenseLedgerDigest: "8".repeat(64),
+    platformEvidence: [{
+      platform: "linux", runnerId: "runner-linux-01", runnerCapabilityDigest: "9".repeat(64),
+      exportDigest: "a".repeat(64), logsDigest: "b".repeat(64), junitDigest: "c".repeat(64),
+      inputTimelineDigest: "d".repeat(64), screenshotManifestDigest: "e".repeat(64),
+      videoManifestDigest: "f".repeat(64), status: "PASSED",
+    }],
+    status: "PASSED", valid: true, createdAt: "2026-07-18T00:04:00.000Z",
+  };
+  const bundle = { ...core, bundleDigest: createHash("sha256").update(canonicalEvidenceJson(core)).digest("hex") };
+  return {
+    schemaVersion: EVIDENCE_CATALOG_SCHEMA_VERSION,
+    tenantId,
+    projectId,
+    observedAt: "2026-07-18T00:05:00.000Z",
+    entries: [{
+      evidenceBundleId: bundle.id,
+      invalidatedAt: null,
+      binding: {
+        schemaVersion: "deviludo.evidence-binding.v1", attemptId: bundle.attemptId,
+        executionLockId: "88888888-8888-4888-8888-888888888888", executionLockDigest: "0".repeat(64),
+        specRevisionId: bundle.specRevisionId, specDigest: bundle.specDigest, testPlanDigest: bundle.testPlanDigest,
+        runnerToolchainRevisionId: "99999999-9999-4999-8999-999999999999", runnerToolchainDigest: "a".repeat(64),
+        commitSha: bundle.commitSha, sourceDigest: bundle.sourceDigest, targetMatrix: bundle.targetMatrix,
+      },
+      bundle,
     }],
   };
 }
@@ -112,6 +177,47 @@ test("production Runner Fleet route requires a signed tenant session and exposes
     assert.equal(response.status, 200);
     assert.equal((await response.json()).data.runners[0].runnerId, "runner-linux-01");
     assert.equal((await GET_RUNNERS(new Request(`https://app.deviludo.example${pathname}`), {
+      params: Promise.resolve({ projectId }),
+    })).status, 401);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalEndpoint === undefined) delete process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+    else process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = originalEndpoint;
+    if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
+    else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
+  }
+});
+
+test("production Evidence Catalog route requires a signed tenant session and exposes no object key", async () => {
+  const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const pathname = `/api/projects/${projectId}/evidence`;
+  const issuedAt = String(Date.now());
+  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
+  const userId = "88888888-8888-4888-8888-888888888888";
+  const signature = await signTrustedSpecSession({ method: "GET", pathname, tenantId, userId, sessionBinding, issuedAt, key });
+  const originalFetch = globalThis.fetch;
+  const originalEndpoint = process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL;
+  const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), `https://projection.internal/v1/evidence-catalog/${projectId}`);
+    assert.equal(init.headers["x-deviludo-tenant-id"], tenantId);
+    return new Response(JSON.stringify({ data: evidenceCatalogProjection() }), { status: 200 });
+  };
+  process.env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL = "https://projection.internal/";
+  process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
+  try {
+    const response = await GET_EVIDENCE(new Request(`https://app.deviludo.example${pathname}`, { headers: {
+      "x-deviludo-session-tenant": tenantId,
+      "x-deviludo-session-user": userId,
+      "x-deviludo-session-binding": sessionBinding,
+      "x-deviludo-session-issued-at": issuedAt,
+      "x-deviludo-session-signature": signature,
+    } }), { params: Promise.resolve({ projectId }) });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.data.entries[0].bundle.status, "PASSED");
+    assert.equal(JSON.stringify(body).includes("objectKey"), false);
+    assert.equal((await GET_EVIDENCE(new Request(`https://app.deviludo.example${pathname}`), {
       params: Promise.resolve({ projectId }),
     })).status, 401);
   } finally {

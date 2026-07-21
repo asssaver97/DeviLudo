@@ -313,6 +313,23 @@ paths:
         "401": { description: A fresh trusted platform session is required. }
         "404": { description: The project is missing or inaccessible to the current account. }
         "503": { description: The isolated delivery/Runner projection Broker is unavailable. }
+  /projects/{projectId}/evidence:
+    get:
+      operationId: getProjectEvidenceCatalog
+      description: Returns the latest 50 immutable evidence manifests for this tenant project after revalidating canonical bundle digests, authority bindings, platform coverage, and invalidation tombstones. Archive object keys and storage grants are never returned.
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200":
+          description: Tenant-isolated project Evidence Catalog projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/EvidenceCatalogProjection" } }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "503": { description: The isolated evidence projection Broker is unavailable or stored evidence failed verification. }
   /projects/{projectId}/conversation:
     get:
       operationId: getSpecConversation
@@ -434,6 +451,96 @@ components:
               data: {}
               meta: { type: object, additionalProperties: true }
   schemas:
+    EvidenceCatalogProjection:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, tenantId, projectId, observedAt, entries]
+      properties:
+        schemaVersion: { const: deviludo.evidence-catalog-projection.v1 }
+        tenantId: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        observedAt: { type: string, format: date-time }
+        entries:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [evidenceBundleId, invalidatedAt, binding, bundle]
+            properties:
+              evidenceBundleId: { type: string, format: uuid }
+              invalidatedAt: { type: [string, "null"], format: date-time }
+              binding: { $ref: "#/components/schemas/EvidenceAuthorityBinding" }
+              bundle: { $ref: "#/components/schemas/EvidenceBundleManifest" }
+    EvidenceAuthorityBinding:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, attemptId, executionLockId, executionLockDigest, specRevisionId, specDigest, testPlanDigest, runnerToolchainRevisionId, runnerToolchainDigest, commitSha, sourceDigest, targetMatrix]
+      properties:
+        schemaVersion: { const: deviludo.evidence-binding.v1 }
+        attemptId: { type: string, format: uuid }
+        executionLockId: { type: string, format: uuid }
+        executionLockDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        specRevisionId: { type: string, format: uuid }
+        specDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        testPlanDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        runnerToolchainRevisionId: { type: string, format: uuid }
+        runnerToolchainDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        commitSha: { type: string, pattern: "^[a-f0-9]{40}$" }
+        sourceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        targetMatrix:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items: { type: string, enum: [linux, macos, windows] }
+    EvidenceBundleManifest:
+      type: object
+      additionalProperties: false
+      required: [id, attemptId, specRevisionId, specDigest, testPlanDigest, commitSha, sourceDigest, targetMatrix, godotTestKitDigest, buildManifestDigest, sbomDigest, vulnerabilityScanDigest, assetLicenseLedgerDigest, platformEvidence, bundleDigest, status, valid, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        attemptId: { type: string, format: uuid }
+        specRevisionId: { type: string, format: uuid }
+        specDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        testPlanDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        commitSha: { type: string, pattern: "^[a-f0-9]{40}$" }
+        sourceDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        targetMatrix:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items: { type: string, enum: [linux, macos, windows] }
+        godotTestKitDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        buildManifestDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        sbomDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        vulnerabilityScanDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        assetLicenseLedgerDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        platformEvidence:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: { $ref: "#/components/schemas/PlatformEvidenceManifest" }
+        bundleDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        status: { type: string, enum: [PASSED, FAILED] }
+        valid: { const: true }
+        createdAt: { type: string, format: date-time }
+    PlatformEvidenceManifest:
+      type: object
+      additionalProperties: false
+      required: [platform, runnerId, runnerCapabilityDigest, exportDigest, logsDigest, junitDigest, inputTimelineDigest, screenshotManifestDigest, videoManifestDigest, status]
+      properties:
+        platform: { type: string, enum: [linux, macos, windows] }
+        runnerId: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$" }
+        runnerCapabilityDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        exportDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        logsDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        junitDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        inputTimelineDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        screenshotManifestDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        videoManifestDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        status: { type: string, enum: [PASSED, FAILED] }
     RunnerFleetProjection:
       type: object
       additionalProperties: false

@@ -94,6 +94,23 @@ export function createDeliveryProjectionHandler(options: {
           : failure(404, "RUNNER_FLEET_NOT_FOUND");
       } catch (error) { return mappedFailure(error); }
     }
+    const evidenceMatch = request.method === "GET" ? /^\/v1\/evidence-catalog\/([^/]+)$/.exec(request.path) : null;
+    if (evidenceMatch) {
+      if (!options.readerSpiffeIds.has(identity.spiffeId)) return failure(403, "DELIVERY_PROJECTION_READER_FORBIDDEN");
+      const tenantId = single(request.headers["x-deviludo-tenant-id"]);
+      let projectId: string;
+      try { projectId = decodeURIComponent(evidenceMatch[1]!); }
+      catch { return failure(400, "INVALID_EVIDENCE_CATALOG_READ"); }
+      if (!tenantId || !UUID.test(tenantId) || !UUID.test(projectId) || request.rawBody.length) {
+        return failure(400, "INVALID_EVIDENCE_CATALOG_READ");
+      }
+      try {
+        const projection = await options.store.readEvidenceCatalog(tenantId, projectId);
+        return projection
+          ? { status: 200, body: { data: projection } }
+          : failure(404, "EVIDENCE_CATALOG_NOT_FOUND");
+      } catch (error) { return mappedFailure(error); }
+    }
     return failure(404, "DELIVERY_PROJECTION_ROUTE_NOT_FOUND");
   };
 }

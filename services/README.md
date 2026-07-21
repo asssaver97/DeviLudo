@@ -18,7 +18,10 @@ behind the web console:
   tenant/project's latest fenced platform leases to immutable Runner
   registrations; heartbeat freshness and certificate expiry are re-derived in
   the strict response contract, so the Web cannot enumerate global machines or
-  present a stale registration as online.
+  present a stale registration as online. The same reader identity obtains a
+  bounded project Evidence Catalog that revalidates canonical bundle digests,
+  frozen authority bindings and invalidation tombstones under tenant RLS,
+  without returning archive object keys or storage grants.
 - `agent-worker`: a one-run supervisor for the exact Claude Code or Codex CLI
   RuntimeSpec. It uses `shell: false`, validates all workspace/runtime paths,
   verifies the locked CLI version and WorkerImage digest, writes Adapter files
