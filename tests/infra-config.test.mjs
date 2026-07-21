@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 46 }, (_, index) => {
+  const offsets = Array.from({ length: 48 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -301,6 +301,7 @@ test("Inference Gateway serializes each run and fails closed on ambiguous usage"
 
 test("Steam release lifecycle advances only from authoritative persisted evidence", () => {
   const migration = readFileSync(new URL("../infra/postgres/025_steam_release_lifecycle.sql", import.meta.url), "utf8");
+  const revocationMigration = readFileSync(new URL("../infra/postgres/048_steam_install_failure_revocations.sql", import.meta.url), "utf8");
   const runner = readFileSync(new URL("../services/runner-control/src/postgres-workflow.ts", import.meta.url), "utf8");
   const completion = readFileSync(new URL("../services/control-plane/src/workflow-action-completion-postgres.ts", import.meta.url), "utf8");
   const execution = readFileSync(new URL("../services/steam-publisher/src/postgres-workflow-execution.ts", import.meta.url), "utf8");
@@ -309,6 +310,13 @@ test("Steam release lifecycle advances only from authoritative persisted evidenc
   assert.match(migration, /NEW\.version <> OLD\.version \+ 1/);
   assert.match(runner, /#projectSteamInstallEvidence/);
   assert.match(runner, /steam_install_evidence_bundle_digest = \$4/);
+  assert.match(revocationMigration, /CREATE TABLE deviludo\.steam_release_revocations/);
+  assert.match(revocationMigration, /steam_release_revocations_append_only/);
+  assert.match(revocationMigration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(revocationMigration, /state IN \('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED', 'FAILED'\)/);
+  assert.match(revocationMigration, /steam build failure has no revocation receipt/i);
+  assert.match(runner, /#projectSteamInstallFailure/);
+  assert.match(runner, /STEAM_INSTALL_FAILURE_REVOCATION_RECEIPT_CONFLICT/);
   assert.match(completion, /INSERT INTO deviludo\.workflow_external_approval_receipts/);
   assert.match(completion, /ON CONFLICT \(release_id, gate\) DO NOTHING/);
   assert.match(execution, /SET state = 'INSTALL_TESTING'/);

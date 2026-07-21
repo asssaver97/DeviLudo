@@ -57,6 +57,8 @@ services:
       - ./postgres/044_invited_platform_identity.sql:/docker-entrypoint-initdb.d/044_invited_platform_identity.sql:ro
       - ./postgres/045_secret_broker.sql:/docker-entrypoint-initdb.d/045_secret_broker.sql:ro
       - ./postgres/046_agent_run_provider_failovers.sql:/docker-entrypoint-initdb.d/046_agent_run_provider_failovers.sql:ro
+      - ./postgres/047_agent_run_provider_failover_audit.sql:/docker-entrypoint-initdb.d/047_agent_run_provider_failover_audit.sql:ro
+      - ./postgres/048_steam_install_failure_revocations.sql:/docker-entrypoint-initdb.d/048_steam_install_failure_revocations.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

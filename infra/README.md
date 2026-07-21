@@ -62,8 +62,12 @@ GitHub authorization anti-replay, and atomic project-to-repository onboarding.
 Migration `044` adds invite-only GitHub identities, tenant memberships,
 single-use login intents and revocable platform sessions. Raw invitation,
 OAuth state, PKCE and session values never enter PostgreSQL; all five identity
-tables force tenant RLS.
-All forty-four migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
+tables force tenant RLS. Migrations `045`–`047` isolate secret brokerage and
+make explicit same-Agent Provider failover both immutable and auditable.
+Migration `048` atomically binds a failed clean-Steam-client evidence bundle to
+an append-only release revocation before the Build and Release may enter
+`FAILED`.
+All forty-eight migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer
 service code. Application

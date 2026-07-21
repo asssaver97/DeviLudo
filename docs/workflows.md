@@ -54,6 +54,15 @@ These post-merge contexts are rejected by the automatic Agent-configuration
 boundary, so they cannot silently consume another model run or bypass user
 approval.
 
+For `STEAM_INSTALL_FAILED`, Runner Control returns the workflow receipt only
+after one PostgreSQL transaction has written an append-only revocation bound to
+the failed attempt, evidence digest, repair prompt, main SHA and Steam BuildID,
+then moved both `steam_build_receipts` and `steam_releases` to `FAILED`.
+Database guards reject either transition without that exact receipt. Activity
+replay may read the terminal release only when the original failed attempt and
+operation key match; it cannot schedule a new install against revoked release
+authority.
+
 Agent failures persist a bounded, secret-redacted and content-addressed
 diagnostic containing the failed runtime stage, exit/timeout classification and
 safe messages. The successor configuration service re-resolves that diagnostic

@@ -297,10 +297,26 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
         WHERE build.tenant_id = $1::uuid AND build.project_id = $2::uuid
           AND main_attempt.run_id = $3::uuid AND build.main_commit_sha = $4
           AND build.build_id = $5
-          AND build.state IN ('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED')
+          AND (
+            build.state IN ('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED')
+            OR (build.state = 'FAILED' AND EXISTS (
+              SELECT 1
+                FROM deviludo.e2e_attempts replay
+               WHERE replay.tenant_id = build.tenant_id
+                 AND replay.project_id = build.project_id
+                 AND replay.run_id = $3::uuid
+                 AND replay.workflow_operation_key = $6
+                 AND replay.workflow_id = release.workflow_id
+                 AND replay.mode = 'STEAM_CLEAN_INSTALL'
+                 AND replay.commit_sha = build.main_commit_sha
+                 AND replay.steam_build_id = build.build_id
+                 AND replay.state = 'FAILED'
+            ))
+          )
           AND build.source_digest = main_evidence.source_digest
           AND main_evidence.invalidated_at IS NULL`,
-      [input.tenantId, input.projectId, input.runId, input.commitSha, input.steamBuildId],
+      [input.tenantId, input.projectId, input.runId, input.commitSha, input.steamBuildId,
+        input.operationKey],
     );
     return onlyRow(result.rows, "Steam Build source receipt is not available");
   }
@@ -345,8 +361,12 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
       if (attempt.state === "FAILED" && (!attempt.repair_prompt_id || !SAFE_ID.test(attempt.repair_prompt_id))) {
         throw new WorkflowJobError("E2E_REPAIR_PROMPT_MISSING", true);
       }
-      if (input.mode === "STEAM_CLEAN_INSTALL" && attempt.state === "PASSED") {
-        await this.#projectSteamInstallEvidence(client, input, attempt, evidence);
+      if (input.mode === "STEAM_CLEAN_INSTALL") {
+        if (attempt.state === "PASSED") {
+          await this.#projectSteamInstallEvidence(client, input, attempt, evidence);
+        } else {
+          await this.#projectSteamInstallFailure(client, input, attempt, evidence);
+        }
       }
       return Object.freeze({
         receiptId: `runner-receipt:${attempt.id}:${evidence.bundle_digest}`,
@@ -440,6 +460,133 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
     if (row.build_state !== "EXTERNAL_APPROVAL_REQUIRED"
       || row.steam_install_evidence_bundle_digest !== evidence.bundle_digest || !downstreamState) {
       throw new WorkflowJobError("STEAM_INSTALL_EVIDENCE_PROJECTION_CONFLICT", true);
+    }
+  }
+
+  async #projectSteamInstallFailure(
+    client: PostgresWorkflowClient,
+    input: WorkflowInput,
+    attempt: AttemptRow,
+    evidence: EvidenceRow,
+  ): Promise<void> {
+    const result = await client.query<SteamInstallProjectionRow>(
+      `SELECT build.id::text AS build_receipt_id,
+              build.state AS build_state,
+              build.steam_install_evidence_bundle_digest,
+              release.id::text AS release_id,
+              release.state AS release_state,
+              release.external_gate,
+              release.workflow_id,
+              release.run_id::text AS release_run_id,
+              release.main_commit_sha,
+              release.target_matrix,
+              build.build_id,
+              install_evidence.id::text AS evidence_id,
+              install_evidence.bundle_digest AS evidence_bundle_digest
+         FROM deviludo.steam_build_receipts build
+         JOIN deviludo.steam_releases release
+           ON release.tenant_id = build.tenant_id
+          AND release.project_id = build.project_id
+          AND release.id = build.release_id
+         JOIN deviludo.evidence_bundles install_evidence
+           ON install_evidence.tenant_id = build.tenant_id
+          AND install_evidence.project_id = build.project_id
+          AND install_evidence.attempt_id = $6::uuid
+        WHERE build.tenant_id = $1::uuid AND build.project_id = $2::uuid
+          AND release.run_id = $3::uuid AND release.workflow_id = $4
+          AND build.build_id = $5 AND build.main_commit_sha = $7
+          AND install_evidence.id = $8::uuid
+          AND install_evidence.status = 'FAILED'
+          AND install_evidence.invalidated_at IS NULL
+        FOR UPDATE OF build, release`,
+      [input.tenantId, input.projectId, input.runId, input.workflowId, input.steamBuildId,
+        attempt.id, attempt.commit_sha, evidence.id],
+    );
+    const row = onlyRow(result.rows, "Steam clean-install failure cannot revoke release authority");
+    if (!UUID.test(row.build_receipt_id) || !UUID.test(row.release_id)
+      || row.workflow_id !== input.workflowId || row.release_run_id !== input.runId
+      || row.main_commit_sha !== attempt.commit_sha || row.build_id !== input.steamBuildId
+      || row.evidence_id !== evidence.id || row.evidence_bundle_digest !== evidence.bundle_digest
+      || JSON.stringify(row.target_matrix) !== JSON.stringify(input.targetMatrix)
+      || !attempt.repair_prompt_id || !attempt.completed_at) {
+      throw new WorkflowJobError("STEAM_INSTALL_FAILURE_REVOCATION_BINDING_CONFLICT", true);
+    }
+
+    const initial = row.build_state === "INSTALL_TESTING"
+      && row.steam_install_evidence_bundle_digest === null
+      && row.release_state === "INSTALL_TESTING" && row.external_gate === "NONE";
+    const replay = row.build_state === "FAILED"
+      && row.steam_install_evidence_bundle_digest === evidence.bundle_digest
+      && row.release_state === "FAILED" && row.external_gate === "NONE";
+    if (!initial && !replay) {
+      throw new WorkflowJobError("STEAM_INSTALL_FAILURE_REVOCATION_CONFLICT", true);
+    }
+
+    if (initial) {
+      await client.query(
+        `INSERT INTO deviludo.steam_release_revocations
+          (tenant_id, project_id, workflow_id, run_id, release_id, build_receipt_id,
+           attempt_id, evidence_bundle_id, evidence_bundle_digest, repair_prompt_id,
+           main_commit_sha, build_id, reason, revoked_at)
+         VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6::uuid,
+                 $7::uuid, $8::uuid, $9, $10, $11, $12,
+                 'STEAM_INSTALL_E2E_FAILED', $13::timestamptz)
+         ON CONFLICT (tenant_id, release_id) DO NOTHING`,
+        [input.tenantId, input.projectId, input.workflowId, input.runId, row.release_id,
+          row.build_receipt_id, attempt.id, evidence.id, evidence.bundle_digest,
+          attempt.repair_prompt_id, attempt.commit_sha, input.steamBuildId, attempt.completed_at],
+      );
+    }
+    await this.#validateSteamInstallFailureReceipt(client, input, attempt, evidence, row);
+
+    if (!initial) return;
+    const build = await client.query(
+      `UPDATE deviludo.steam_build_receipts
+          SET state = 'FAILED', steam_install_evidence_bundle_digest = $4
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+          AND state = 'INSTALL_TESTING'
+          AND steam_install_evidence_bundle_digest IS NULL
+      RETURNING id`,
+      [input.tenantId, input.projectId, row.build_receipt_id, evidence.bundle_digest],
+    );
+    const release = await client.query(
+      `UPDATE deviludo.steam_releases
+          SET state = 'FAILED', external_gate = 'NONE', version = version + 1
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+          AND state = 'INSTALL_TESTING' AND external_gate = 'NONE'
+      RETURNING id`,
+      [input.tenantId, input.projectId, row.release_id],
+    );
+    if (build.rows.length !== 1 || release.rows.length !== 1) {
+      throw new WorkflowJobError("STEAM_INSTALL_FAILURE_REVOCATION_RACE", true);
+    }
+  }
+
+  async #validateSteamInstallFailureReceipt(
+    client: PostgresWorkflowClient,
+    input: WorkflowInput,
+    attempt: AttemptRow,
+    evidence: EvidenceRow,
+    row: SteamInstallProjectionRow,
+  ): Promise<void> {
+    const receipt = await client.query<{ id: string }>(
+      `SELECT id::text
+         FROM deviludo.steam_release_revocations
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid
+          AND workflow_id = $3 AND run_id = $4::uuid
+          AND release_id = $5::uuid AND build_receipt_id = $6::uuid
+          AND attempt_id = $7::uuid AND evidence_bundle_id = $8::uuid
+          AND evidence_bundle_digest = $9 AND repair_prompt_id = $10
+          AND main_commit_sha = $11 AND build_id = $12
+          AND reason = 'STEAM_INSTALL_E2E_FAILED'
+          AND revoked_at = $13::timestamptz
+        FOR SHARE`,
+      [input.tenantId, input.projectId, input.workflowId, input.runId, row.release_id,
+        row.build_receipt_id, attempt.id, evidence.id, evidence.bundle_digest,
+        attempt.repair_prompt_id, attempt.commit_sha, input.steamBuildId, attempt.completed_at],
+    );
+    if (receipt.rows.length !== 1 || !UUID.test(receipt.rows[0]?.id ?? "")) {
+      throw new WorkflowJobError("STEAM_INSTALL_FAILURE_REVOCATION_RECEIPT_CONFLICT", true);
     }
   }
 

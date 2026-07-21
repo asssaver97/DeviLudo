@@ -25,6 +25,7 @@ const specDigest = sha("c");
 const testPlanDigest = sha("d");
 const buildReceiptId = "12121212-1212-4212-8212-121212121212";
 const releaseId = "13131313-1313-4313-8313-131313131313";
+const revocationId = "14141414-1414-4414-8414-141414141414";
 
 const executionLock: RunnerExecutionLock = Object.freeze({
   schemaVersion: "deviludo.runner-execution-lock.v1",
@@ -253,17 +254,17 @@ function steamBinding() {
   return { ...binding(), mode: steamInput.mode, executionLockDigest: steamExecutionLockDigest };
 }
 
-function steamTerminalRow() {
+function steamTerminalRow(status: "PASSED" | "FAILED" = "PASSED") {
   const platformEvidence = [{
     platform: "linux", runnerId: "linux-runner-001", runnerCapabilityDigest: sha("1"),
     exportDigest: sha("2"), logsDigest: sha("3"), junitDigest: sha("4"), inputTimelineDigest: sha("5"),
-    screenshotManifestDigest: sha("6"), videoManifestDigest: sha("7"), status: "PASSED",
+    screenshotManifestDigest: sha("6"), videoManifestDigest: sha("7"), status,
   }];
   const core = {
     id: evidenceId, attemptId, specRevisionId, specDigest, testPlanDigest, commitSha, sourceDigest,
     targetMatrix: ["linux"], godotTestKitDigest: sha("8"), buildManifestDigest: sha("9"),
     sbomDigest: sha("a"), vulnerabilityScanDigest: sha("b"), assetLicenseLedgerDigest: sha("c"),
-    platformEvidence, status: "PASSED", valid: true, createdAt: "2026-07-18T00:01:00.000Z",
+    platformEvidence, status, valid: true, createdAt: "2026-07-18T00:01:00.000Z",
   };
   const bundleDigest = sha256Canonical(core);
   return {
@@ -271,7 +272,8 @@ function steamTerminalRow() {
     workflow_operation_key: steamInput.operationKey, workflow_request_digest: steamInput.requestDigest,
     execution_lock_id: executionLockId, mode: steamInput.mode, commit_sha: commitSha, source_digest: sourceDigest,
     binding: steamBinding(), target_matrix: ["linux"], draft_pull_request: null,
-    steam_build_id: steamInput.steamBuildId, state: "PASSED", repair_prompt_id: null,
+    steam_build_id: steamInput.steamBuildId, state: status,
+    repair_prompt_id: status === "FAILED" ? "steam-install-repair-001" : null,
     completed_at: "2026-07-18T00:01:00.000Z", evidence_id: evidenceId,
     evidence_commit_sha: commitSha, evidence_source_digest: sourceDigest,
     evidence_binding: {
@@ -282,16 +284,23 @@ function steamTerminalRow() {
     },
     evidence_manifest: { ...core, bundleDigest }, evidence_bundle_digest: bundleDigest,
     evidence_object_key: `tenants/${tenantId}/evidence/${bundleDigest}.json`,
-    evidence_status: "PASSED", evidence_invalidated_at: null,
+    evidence_status: status, evidence_invalidated_at: null,
   };
 }
 
 class SteamProjectionClient implements PostgresWorkflowClient {
   readonly sql: string[] = [];
   projected: boolean;
-  readonly terminal = steamTerminalRow();
+  readonly terminal: ReturnType<typeof steamTerminalRow>;
 
-  constructor(projected = false) { this.projected = projected; }
+  constructor(
+    projected = false,
+    readonly outcome: "PASSED" | "FAILED" = "PASSED",
+    readonly receiptConflict = false,
+  ) {
+    this.projected = projected;
+    this.terminal = steamTerminalRow(outcome);
+  }
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
@@ -307,6 +316,7 @@ class SteamProjectionClient implements PostgresWorkflowClient {
     }
     if (text.includes("FROM deviludo.steam_build_receipts build") && !text.includes("AS build_receipt_id")) {
       assert.match(text, /build\.state IN \('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED'\)/);
+      assert.match(text, /build\.state = 'FAILED'[\s\S]*replay\.workflow_operation_key = \$6/);
       return result([{ source_digest: sourceDigest, spec_revision_id: specRevisionId }] as unknown as Row[]);
     }
     if (text.includes("FROM deviludo.runner_execution_locks")) {
@@ -318,17 +328,28 @@ class SteamProjectionClient implements PostgresWorkflowClient {
     }
     if (text.includes("LEFT JOIN deviludo.evidence_bundles")) return result([this.terminal] as unknown as Row[]);
     if (text.includes("AS build_receipt_id")) {
+      const terminalState = this.outcome === "PASSED" ? "EXTERNAL_APPROVAL_REQUIRED" : "FAILED";
       return result([{
         build_receipt_id: buildReceiptId,
-        build_state: this.projected ? "EXTERNAL_APPROVAL_REQUIRED" : "INSTALL_TESTING",
+        build_state: this.projected ? terminalState : "INSTALL_TESTING",
         steam_install_evidence_bundle_digest: this.projected ? this.terminal.evidence_bundle_digest : null,
         release_id: releaseId,
-        release_state: this.projected ? "EXTERNAL_APPROVAL_REQUIRED" : "INSTALL_TESTING",
-        external_gate: this.projected ? "VALVE_REVIEW" : "NONE",
+        release_state: this.projected ? terminalState : "INSTALL_TESTING",
+        external_gate: this.projected && this.outcome === "PASSED" ? "VALVE_REVIEW" : "NONE",
         workflow_id: steamInput.workflowId, release_run_id: runId, main_commit_sha: commitSha,
         build_id: steamInput.steamBuildId, target_matrix: ["linux"], evidence_id: evidenceId,
         evidence_bundle_digest: this.terminal.evidence_bundle_digest,
       }] as unknown as Row[]);
+    }
+    if (text.includes("INSERT INTO deviludo.steam_release_revocations")) {
+      assert.deepEqual(values, [tenantId, projectId, steamInput.workflowId, runId, releaseId,
+        buildReceiptId, attemptId, evidenceId, this.terminal.evidence_bundle_digest,
+        "steam-install-repair-001", commitSha, steamInput.steamBuildId,
+        "2026-07-18T00:01:00.000Z"]);
+      return result([]);
+    }
+    if (text.includes("FROM deviludo.steam_release_revocations")) {
+      return result((this.receiptConflict ? [] : [{ id: revocationId }]) as unknown as Row[]);
     }
     if (text.includes("UPDATE deviludo.steam_build_receipts")) return result([{ id: buildReceiptId }] as unknown as Row[]);
     if (text.includes("UPDATE deviludo.steam_releases")) {
@@ -442,4 +463,38 @@ test("PostgreSQL Runner projects passed clean-Steam-install evidence before retu
   const replay = await new PostgresRunnerWorkflowPort({ pool: pool(replayClient) }).execute(steamInput);
   assert.equal(replay.evidenceBundleId, evidenceId);
   assert.equal(replayClient.sql.some((sql) => sql.includes("UPDATE deviludo.steam_releases")), false);
+});
+
+test("PostgreSQL Runner atomically revokes failed Steam install authority before returning", async () => {
+  const client = new SteamProjectionClient(false, "FAILED");
+  const receipt = await new PostgresRunnerWorkflowPort({ pool: pool(client) }).execute(steamInput);
+  assert.equal(receipt.status, "FAILED");
+  assert.equal(receipt.repairPromptId, "steam-install-repair-001");
+  assert.equal(client.projected, true);
+
+  const insert = client.sql.findIndex((sql) => sql.includes("INSERT INTO deviludo.steam_release_revocations"));
+  const validate = client.sql.findIndex((sql) => sql.includes("FROM deviludo.steam_release_revocations"));
+  const build = client.sql.findIndex((sql) => sql.includes("UPDATE deviludo.steam_build_receipts"));
+  const release = client.sql.findIndex((sql) => sql.includes("UPDATE deviludo.steam_releases"));
+  assert.ok(insert >= 0 && insert < validate && validate < build && build < release);
+  assert.match(client.sql[build] as string, /SET state = 'FAILED'/);
+  assert.match(client.sql[release] as string, /version = version \+ 1/);
+});
+
+test("PostgreSQL Runner replays only the exact failed Steam revocation receipt", async () => {
+  const replayClient = new SteamProjectionClient(true, "FAILED");
+  const replay = await new PostgresRunnerWorkflowPort({ pool: pool(replayClient) }).execute(steamInput);
+  assert.equal(replay.status, "FAILED");
+  assert.equal(replay.evidenceBundleId, evidenceId);
+  assert.equal(replayClient.sql.some((sql) => sql.includes("INSERT INTO deviludo.steam_release_revocations")), false);
+  assert.equal(replayClient.sql.some((sql) => sql.includes("UPDATE deviludo.steam_build_receipts")), false);
+  assert.equal(replayClient.sql.some((sql) => sql.includes("UPDATE deviludo.steam_releases")), false);
+
+  const conflict = new SteamProjectionClient(true, "FAILED", true);
+  await assert.rejects(new PostgresRunnerWorkflowPort({ pool: pool(conflict) }).execute(steamInput), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "STEAM_INSTALL_FAILURE_REVOCATION_RECEIPT_CONFLICT");
+    assert.equal((error as { terminal?: boolean }).terminal, true);
+    return true;
+  });
+  assert.ok(conflict.sql.includes("ROLLBACK"));
 });
