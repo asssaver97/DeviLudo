@@ -8,7 +8,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 
 ## 已实现
 
-- `/`：项目总览、候选版本流水线、跨平台状态、审计流和 Runner 集群。
+- `/`：从当前租户的权威项目目录选择项目，并展示对应候选版本流水线、跨平台状态、审计流和 Runner 集群；无项目时明确为空，不以演示数据回退。
 - `/projects`：经 PostgreSQL RLS 与独立 Project Repository Broker 列出当前账号仍可访问的项目；项目创建者或仍控制对应 GitHub App installation 的用户才能看到条目，侧栏不再固定到示例项目。本地测试模式展示明确标记的隔离 fixture。
 - `/projects/new`：生产环境先从当前已验证 GitHub App installation 实时列出可见仓库，并以数值 installation/repository ID 原子创建项目和仓库绑定；浏览器不能指定 owner、仓库名或默认分支。绑定后进入可交互多轮构想、实时 `GameSpecRevision`、验收标准、冻结测试计划和明确批准动作。本地测试模式继续使用隔离草稿夹具。
 - `/projects/{projectId}`：按签名租户会话读取权威项目/仓库资料和当前规格快照；空项目从 revision 0 冷启动，不复用演示规格。只有进入候选验收门禁后才显示反馈与合并动作，新反馈创建不可变规格并让旧证据失效。
@@ -17,7 +17,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `/settings/agents`：TenantAdmin 写入租户 BYOK、创建第三方 Provider/Profile 草稿并选择租户默认；API Key 明文仅进入 Vault，第三方端点通过探针且由 SecurityAdmin 激活前不会生效。
 - `/projects/{projectId}/agent-settings`：ProjectOwner 从租户/平台已经批准的 ACTIVE Profile 中选择项目 Agent。服务端先通过项目仓库 Broker 校验精确项目归属，再签发项目作用域控制面身份；项目层不读取或复制 Provider 凭据。
 - `/settings/connections`：GitHub App 安装授权和 Steam Guard 会话入口；不接收或保存 GitHub/Steam 主密码。GitHub 生产路由使用短期签名平台会话、内部 mTLS Broker、PKCE 与 PostgreSQL RLS 状态存储；Steam Web 路由只创建隔离登记会话并跳转到固定 HTTPS Broker，账号密码与 Guard 码不经过 Web 控制面。未配置 Broker 时入口明确返回外部门禁，不伪造“已连接/会话可用”。
-- `/runners`、`/evidence`：读取本地健康状态、持久交付快照和真实 Godot evidence manifest；未连接的 Windows/Linux 不显示为在线。
+- `/runners`、`/evidence`：共享当前租户的权威项目选择，读取所选项目的本地健康状态、持久交付快照和真实 Godot evidence manifest；项目切换时旧快照立即隐藏，未连接的 Windows/Linux 不显示为在线。
 - `lib/domain`：规格、迭代、AgentVersion、Installation、Profile、Run、E2E、Steam 的严格状态机和不可变快照。
 - `lib/agent`、`adapters`、`lib/security`：统一 Runtime Adapter、精确 CLI 参数、固定模型、SSRF/DNS rebinding/redirect 校验、短期 run token、SecretRef 与显式 fallback。
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。

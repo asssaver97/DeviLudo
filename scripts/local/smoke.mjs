@@ -170,10 +170,12 @@ const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const [home, login, projects, admin, invitations, tenantAgents, projectAgents, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
+  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, runnerIngress, githubAuthorization, steamEnrollment, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
+    checkHtmlRoute(baseUrl, "/runners", "运行节点"),
+    checkHtmlRoute(baseUrl, "/evidence", "证据中心"),
     checkHtmlRoute(baseUrl, "/admin/agents", "Agent"),
     checkHtmlRoute(baseUrl, "/admin/invitations", "受邀账号管理"),
     checkHtmlRoute(baseUrl, "/settings/agents", "开发 Agent"),
@@ -348,6 +350,8 @@ try {
   console.log(`✓ GET /              ${home.response.status} (${home.elapsedMs}ms) · HTML shell`);
   console.log(`✓ GET /login         ${login.response.status} (${login.elapsedMs}ms) · invite-only login`);
   console.log(`✓ GET /projects      ${projects.response.status} (${projects.elapsedMs}ms) · project catalog`);
+  console.log(`✓ GET /runners       ${runnersPage.response.status} (${runnersPage.elapsedMs}ms) · project-scoped runners`);
+  console.log(`✓ GET /evidence      ${evidencePage.response.status} (${evidencePage.elapsedMs}ms) · project-scoped evidence`);
   console.log(`✓ Project catalog    ${projectCatalog.response.status} (${projectCatalog.elapsedMs}ms) · ${projectCatalogPayload.data.length} accessible`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
   console.log(`✓ GET /admin/invitations ${invitations.response.status} (${invitations.elapsedMs}ms) · invite console`);

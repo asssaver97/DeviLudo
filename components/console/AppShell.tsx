@@ -56,6 +56,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, []);
 
   const tenantName = account?.tenantName ?? (account === undefined ? "正在验证…" : "未登录");
+  const tenantInitials = account ? initialsFor(account.tenantName) : "—";
   const initials = account ? account.displayName.slice(0, 2).toUpperCase() : "—";
 
   async function signOut() {
@@ -72,7 +73,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </Link>
 
         <div className="workspace-switcher">
-          <span className="workspace-avatar">ND</span>
+          <span className="workspace-avatar">{tenantInitials}</span>
           <span><b>{tenantName}</b><small>受邀 Beta</small></span>
           <span className="workspace-chevron">⌄</span>
         </div>
@@ -113,4 +114,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       </div>
     </div>
   );
+}
+
+function initialsFor(value: string) {
+  const words = value.trim().split(/[\s_-]+/).filter(Boolean);
+  return (words.length > 1 ? words.slice(0, 2).map((word) => word[0]).join("") : value.slice(0, 2)).toUpperCase();
 }

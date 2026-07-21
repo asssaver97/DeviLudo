@@ -26,10 +26,10 @@ const frozenTests = ["启动与退出", "核心循环", "胜负条件", "存档�
 
 export function ProjectStudio({
   mode = "existing",
-  projectId = mode === "new" ? "new-project-draft" : "ember-archipelago",
+  projectId,
 }: {
   mode?: "new" | "existing";
-  projectId?: string;
+  projectId: string;
 }) {
   const localFixture = process.env.DEVILUDO_LOCAL_TEST_MODE === "1";
   const [messages, setMessages] = useState<Message[]>([]);

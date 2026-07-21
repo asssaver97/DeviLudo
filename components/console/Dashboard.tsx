@@ -4,10 +4,11 @@ import Link from "next/link";
 import { useState } from "react";
 import type { LocalDeliverySnapshot, LocalDeliveryStage } from "@/lib/local-delivery/model";
 import type { DeliverySnapshot, DeliveryState } from "@/lib/orchestration/game-delivery";
-import { activeProject, pipelineStages as demoPipeline, recentActivity } from "@/lib/demo/platform-data";
 import { AppShell } from "./AppShell";
 import { ArrowIcon, CheckIcon, ClockIcon, PlusIcon, ServerIcon, SparkIcon } from "./Icons";
+import { ProjectScopeSelector } from "./ProjectScopeSelector";
 import { useLocalPlatform } from "./useLocalPlatform";
+import { useProjectSelection } from "./useProjectCatalog";
 
 const stageNames: Record<LocalDeliveryStage, string> = {
   AWAITING_SPEC_APPROVAL: "等待规格批准", AGENT_QUEUED: "Agent 已入队", AGENT_RUNNING: "Agent 开发中",
@@ -39,20 +40,27 @@ const productionOrder: DeliveryState[] = [
   "EXTERNAL_APPROVAL_REQUIRED", "READY_TO_PUBLISH", "RELEASED", "CANCELLED",
 ];
 
-function pipelineFor(delivery: LocalDeliverySnapshot | null) {
-  if (!delivery) return demoPipeline;
+const pipelineTemplate = [
+  { label: "规格批准", state: "pending", meta: "等待" },
+  { label: "Agent 开发", state: "pending", meta: "等待" },
+  { label: "安全扫描", state: "pending", meta: "等待" },
+  { label: "跨平台 E2E", state: "pending", meta: "等待" },
+  { label: "用户验收", state: "pending", meta: "等待" },
+  { label: "Steam Beta", state: "pending", meta: "门禁" },
+] as const;
+
+function pipelineFor(delivery: LocalDeliverySnapshot) {
   const rank = stageOrder.indexOf(delivery.stage);
   const points = [1, 4, 4, 5, 6, 10];
   const meta = [delivery.specRevisionId, delivery.runId ?? "等待", delivery.localValidation ? "本机已验证" : "等待证据", `${Object.values(delivery.targetResults).filter((value) => value === "PASSED").length} / 3`, delivery.stage === "AWAITING_ACCEPTANCE" ? "待确认" : rank > 6 ? "已确认" : "等待", delivery.stage === "RELEASED" ? "完成" : "门禁"];
-  return demoPipeline.map((stage, index) => ({
+  return pipelineTemplate.map((stage, index) => ({
     ...stage,
     state: rank > points[index] ? "complete" : rank === points[index] ? "active" : "pending",
     meta: meta[index],
   }));
 }
 
-function productionPipelineFor(delivery: DeliverySnapshot | null) {
-  if (!delivery) return demoPipeline;
+function productionPipelineFor(delivery: DeliverySnapshot) {
   const rank = productionOrder.indexOf(delivery.state);
   const points = [1, 4, 6, 6, 7, 15];
   const meta = [
@@ -63,7 +71,7 @@ function productionPipelineFor(delivery: DeliverySnapshot | null) {
     delivery.state === "WAITING_USER_ACCEPTANCE" ? "待确认" : rank > 7 ? "已确认" : "等待",
     delivery.state === "RELEASED" ? "完成" : "门禁",
   ];
-  return demoPipeline.map((stage, index) => ({
+  return pipelineTemplate.map((stage, index) => ({
     ...stage,
     state: rank > points[index]! ? "complete" : rank === points[index] ? "active" : "pending",
     meta: meta[index],
@@ -72,7 +80,9 @@ function productionPipelineFor(delivery: DeliverySnapshot | null) {
 
 export function Dashboard() {
   const [activityFilter, setActivityFilter] = useState<"全部" | "运行" | "测试">("全部");
-  const { delivery, productionDelivery, projectionMeta, health, error } = useLocalPlatform();
+  const { projects, project, selectedProjectId, selectProject, mode, loading: projectsLoading, error: projectError } = useProjectSelection();
+  const { delivery, productionDelivery, projectionMeta, health, error: deliveryError } = useLocalPlatform(selectedProjectId);
+  const error = projectError || deliveryError;
   const localActivity = delivery?.events.map((event) => ({
     id: event.id,
     title: event.message,
@@ -89,54 +99,80 @@ export function Dashboard() {
     status: "已投影",
     tone: event.signal.type.includes("E2E") ? "green" : "blue",
     time: `#${event.sequence}`,
-  })) ?? recentActivity;
+  })) ?? [];
   const visibleActivity = localActivity.filter((item) => {
     if (activityFilter === "运行") return item.kind === "运行";
     if (activityFilter === "测试") return item.kind === "测试";
     return true;
   });
-  const pipelineStages = delivery ? pipelineFor(delivery) : productionPipelineFor(productionDelivery);
+  const pipelineStages = delivery ? pipelineFor(delivery)
+    : productionDelivery ? productionPipelineFor(productionDelivery) : pipelineTemplate;
   const passedTargets = delivery
     ? Object.values(delivery.targetResults).filter((value) => value === "PASSED").length
     : productionDelivery?.candidateEvidenceBundleId ? productionDelivery.targetMatrix.length : 0;
-  const targetCount = delivery ? 3 : productionDelivery?.targetMatrix.length ?? 3;
+  const targetCount = delivery ? 3 : productionDelivery?.targetMatrix.length ?? 0;
   const stageName = delivery ? stageNames[delivery.stage]
     : productionDelivery ? productionStageNames[productionDelivery.state] : null;
+  const platforms = delivery
+    ? (["linux", "windows", "macos"] as const).map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: delivery.targetResults[id] }))
+    : productionDelivery ? productionDelivery.targetMatrix.map((id) => ({
+      id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS",
+      state: productionDelivery.candidateEvidenceBundleId ? "PASSED" : productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED",
+    })) : [];
+
+  if (!project) {
+    return (
+      <AppShell>
+        <section className="page-heading dashboard-heading">
+          <div><span className="eyebrow">项目控制面</span><h1>游戏开发工作台</h1><p>{error || (projectsLoading ? "正在读取可访问项目…" : "创建或绑定一个 GitHub App 项目后开始构想。")}</p></div>
+          <Link className="button button-primary" href="/projects/new"><PlusIcon /> 开始新构想</Link>
+        </section>
+        <section className="dashboard-empty-project">
+          <SparkIcon /><h2>{projectsLoading ? "正在同步项目目录" : "还没有可访问的项目"}</h2>
+          <p>平台不会用演示项目替代真实租户数据。</p>
+          {!projectsLoading ? <Link className="button button-acid" href="/projects/new">创建第一个项目</Link> : null}
+        </section>
+      </AppShell>
+    );
+  }
 
   return (
     <AppShell>
       <section className="page-heading dashboard-heading">
         <div>
-          <span className="eyebrow">{productionDelivery ? "生产控制面 · Temporal 投影" : "本地控制面 · 持久状态"}</span>
-          <h1>早上好，天扬。</h1>
-          <p>{error ? `交付状态暂不可用：${error}` : stageName ? `${stageName}，${passedTargets} / ${targetCount} 个目标已通过。` : "正在读取交付状态…"}</p>
+          <span className="eyebrow">{mode === "LOCAL_FIXTURE" ? "本地控制面 · 持久状态" : "生产控制面 · Temporal 投影"}</span>
+          <h1>游戏开发工作台</h1>
+          <p>{error ? `交付状态暂不可用：${error}` : stageName ? `${project.name}：${stageName}，${passedTargets} / ${targetCount} 个目标已通过。` : `正在读取 ${project.name} 的交付状态…`}</p>
         </div>
-        <Link className="button button-primary" href="/projects/new"><PlusIcon /> 开始新构想</Link>
+        <div className="dashboard-heading-actions">
+          <ProjectScopeSelector projects={projects} selectedProjectId={selectedProjectId} onChange={selectProject} />
+          <Link className="button button-primary" href="/projects/new"><PlusIcon /> 开始新构想</Link>
+        </div>
       </section>
 
       <section className="dashboard-grid">
         <article className="focus-project">
           <div className="focus-project-topline">
             <span className="live-label"><i /> {stageName ?? "读取状态"}</span>
-            <span>{delivery ? new Date(delivery.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : projectionMeta ? new Date(projectionMeta.projectedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : activeProject.updatedAt} 更新</span>
+            <span>{delivery ? new Date(delivery.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : projectionMeta ? new Date(projectionMeta.projectedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "等待投影"} 更新</span>
           </div>
           <div className="focus-project-title">
-            <div className="project-glyph" aria-hidden="true"><span>岛</span></div>
+            <div className="project-glyph" aria-hidden="true"><span>{project.name.slice(0, 1)}</span></div>
             <div>
-              <p>{delivery?.specRevisionId ?? productionDelivery?.specRevisionId ?? activeProject.specRevision} · {activeProject.genre}</p>
-              <h2>{activeProject.name}</h2>
+              <p>{delivery?.specRevisionId ?? productionDelivery?.specRevisionId ?? "规格尚未冻结"} · {project.owner}/{project.repositoryName}</p>
+              <h2>{project.name}</h2>
             </div>
-            <Link aria-label="打开余烬群岛项目" className="round-arrow" href={`/projects/${activeProject.id}`}><ArrowIcon /></Link>
+            <Link aria-label={`打开${project.name}项目`} className="round-arrow" href={`/projects/${encodeURIComponent(project.projectId)}`}><ArrowIcon /></Link>
           </div>
 
           <div className="build-summary">
             <div>
               <span>当前阶段</span>
-              <strong>{stageName ?? activeProject.currentStage}</strong>
+              <strong>{stageName ?? "等待交付投影"}</strong>
             </div>
             <div>
               <span>锁定 Agent</span>
-              <strong>{productionDelivery ? productionDelivery.lockedRunConfigurationId ?? "等待锁定" : <>{activeProject.agent} <small>v{activeProject.agentVersion}</small></>}</strong>
+              <strong>{productionDelivery ? productionDelivery.lockedRunConfigurationId ?? "等待锁定" : delivery ? <>{delivery.lockedProfile.agent === "claude-code" ? "Claude Code" : delivery.lockedProfile.agent} <small>v{delivery.lockedProfile.exactAgentVersion}</small></> : "等待锁定"}</strong>
             </div>
             <div>
               <span>候选提交</span>
@@ -157,13 +193,14 @@ export function Dashboard() {
           </div>
 
           <div className="platform-row">
-            {(delivery ? (["linux", "windows", "macos"] as const).map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: delivery.targetResults[id] })) : productionDelivery ? productionDelivery.targetMatrix.map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: productionDelivery.candidateEvidenceBundleId ? "PASSED" : productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED" })) : activeProject.platforms.map((item) => ({ id: item.id, label: item.label, state: item.status.toUpperCase() }))).map((platform) => (
+            {platforms.map((platform) => (
               <div className={`platform-status ${platform.state === "PASSED" ? "passed" : platform.state === "RUNNING" ? "running" : "queued"}`} key={platform.id}>
                 <span className="os-mark">{platform.label.slice(0, 1)}</span>
                 <span><b>{platform.label}</b><small>{platform.label === "macOS" && delivery?.localValidation?.valid ? `本机 ${delivery.localValidation.godotVersion}` : "锁定目标"}</small></span>
                 <i>{platform.state === "PASSED" ? "通过" : platform.state === "RUNNING" ? "测试中" : platform.state === "INVALIDATED" ? "已失效" : "排队"}</i>
               </div>
             ))}
+            {platforms.length === 0 ? <div className="dashboard-data-loading">等待权威目标矩阵投影</div> : null}
           </div>
         </article>
 
@@ -180,7 +217,7 @@ export function Dashboard() {
             <span className="attention-icon violet"><SparkIcon /></span>
             <div><b>{health?.dependencies?.steam === "GUARD_REQUIRED" ? "Steam Guard 尚未连接" : "Steam 发布门禁"}</b><p>本地流程不会保存主密码，也不会伪造真实上传。</p></div>
           </div>
-          <Link className="text-link" href="/evidence">查看所有门禁 <ArrowIcon /></Link>
+          <Link className="text-link" href={`/evidence?project=${encodeURIComponent(project.projectId)}`}>查看所有门禁 <ArrowIcon /></Link>
         </aside>
       </section>
 
@@ -204,6 +241,7 @@ export function Dashboard() {
                 <span className="mono">{item.time}</span>
               </div>
             ))}
+            {visibleActivity.length === 0 ? <div className="activity-empty">等待该项目的首个权威事件。</div> : null}
           </div>
         </article>
 
@@ -219,7 +257,7 @@ export function Dashboard() {
               <div className="load-track"><span style={{ width: `${runner.load}%` }} /></div>
             </div>
           ))}
-          <Link className="text-link" href="/runners">管理运行节点 <ArrowIcon /></Link>
+          <Link className="text-link" href={`/runners?project=${encodeURIComponent(project.projectId)}`}>管理运行节点 <ArrowIcon /></Link>
         </aside>
       </section>
     </AppShell>

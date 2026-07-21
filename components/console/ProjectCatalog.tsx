@@ -1,46 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
 import { AppShell } from "./AppShell";
 import { ArrowIcon, GithubIcon, PlusIcon, ShieldIcon } from "./Icons";
-
-type ProjectCatalogItem = Readonly<{
-  projectId: string;
-  slug: string;
-  name: string;
-  owner: string;
-  repositoryName: string;
-  defaultBranch: string;
-  createdAt: string;
-}>;
+import { useProjectCatalog } from "./useProjectCatalog";
 
 export function ProjectCatalog() {
-  const [projects, setProjects] = useState<readonly ProjectCatalogItem[]>([]);
-  const [mode, setMode] = useState<"LOCAL_FIXTURE" | "PRODUCTION" | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/projects", { cache: "no-store", signal: controller.signal })
-      .then(async (response) => {
-        const body = await response.json() as {
-          data?: readonly ProjectCatalogItem[];
-          meta?: { mode?: "LOCAL_FIXTURE" | "PRODUCTION" };
-          error?: { message?: string };
-        };
-        if (!response.ok || !Array.isArray(body.data)) throw new Error(body.error?.message ?? "项目目录不可用");
-        setProjects(body.data);
-        setMode(body.meta?.mode ?? "PRODUCTION");
-        setError("");
-      })
-      .catch((reason) => {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "项目目录不可用");
-      })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, []);
+  const { projects, mode, loading, error } = useProjectCatalog();
 
   return (
     <AppShell>

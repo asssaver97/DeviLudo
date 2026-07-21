@@ -22,8 +22,9 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.equal(home.status, 200);
   const html = await home.text();
   assert.match(html, /DeviLudo/);
-  assert.match(html, /余烬群岛/);
-  assert.match(html, /三平台 E2E/);
+  assert.match(html, /游戏开发工作台/);
+  assert.match(html, /平台不会用演示项目替代真实租户数据/);
+  assert.doesNotMatch(html, /余烬群岛|三平台 E2E/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 
   const admin = await request("/admin/agents", { headers: { accept: "text/html" } });
@@ -42,6 +43,18 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   const projectsHtml = await projects.text();
   assert.match(projectsHtml, /游戏项目/);
   assert.match(projectsHtml, /GitHub App/);
+
+  const runners = await request("/runners", { headers: { accept: "text/html" } });
+  assert.equal(runners.status, 200);
+  const runnersHtml = await runners.text();
+  assert.match(runnersHtml, /运行节点/);
+  assert.match(runnersHtml, /不会以固定演示项目替代/);
+
+  const evidence = await request("/evidence", { headers: { accept: "text/html" } });
+  assert.equal(evidence.status, 200);
+  const evidenceHtml = await evidence.text();
+  assert.match(evidenceHtml, /证据中心/);
+  assert.match(evidenceHtml, /不会以固定演示项目替代/);
 });
 
 test("production worker exposes health but keeps local admin and specification fixtures disabled", async () => {

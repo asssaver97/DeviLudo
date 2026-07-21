@@ -32,15 +32,23 @@ export type LocalAgentReadiness = {
   state: "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
 };
 
-export function useLocalPlatform(projectId = "ember-archipelago") {
+export function useLocalPlatform(projectId: string | null) {
   const [delivery, setDelivery] = useState<LocalDeliverySnapshot | null>(null);
   const [productionDelivery, setProductionDelivery] = useState<DeliverySnapshot | null>(null);
   const [projectionMeta, setProjectionMeta] = useState<{ projectedAt: string; snapshotDigest: string } | null>(null);
+  const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
   const [health, setHealth] = useState<LocalHealth | null>(null);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
+      if (!projectId) {
+        const healthResponse = await fetch("/api/health", { cache: "no-store", signal });
+        const healthPayload = await healthResponse.json() as LocalHealth & { error?: string };
+        if (!healthResponse.ok) throw new Error(healthPayload.error ?? "平台健康状态不可用");
+        setDelivery(null); setProductionDelivery(null); setProjectionMeta(null); setLoadedProjectId(null); setHealth(healthPayload); setError("");
+        return;
+      }
       const [deliveryResponse, healthResponse] = await Promise.all([
         fetch(`/api/projects/${projectId}/delivery`, { cache: "no-store", signal }),
         fetch("/api/health", { cache: "no-store", signal }),
@@ -63,6 +71,7 @@ export function useLocalPlatform(projectId = "ember-archipelago") {
         setProductionDelivery(null);
         setProjectionMeta(null);
       }
+      setLoadedProjectId(projectId);
       setHealth(healthPayload);
       setError("");
     } catch (reason) {
@@ -82,5 +91,13 @@ export function useLocalPlatform(projectId = "ember-archipelago") {
     };
   }, [refresh]);
 
-  return { delivery, productionDelivery, projectionMeta, health, error, refresh };
+  const isCurrentProject = loadedProjectId === projectId;
+  return {
+    delivery: isCurrentProject ? delivery : null,
+    productionDelivery: isCurrentProject ? productionDelivery : null,
+    projectionMeta: isCurrentProject ? projectionMeta : null,
+    health,
+    error,
+    refresh,
+  };
 }

@@ -1,11 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { AppShell } from "./AppShell";
 import { CheckIcon, FileIcon, ServerIcon, ShieldIcon } from "./Icons";
+import { ProjectScopeSelector } from "./ProjectScopeSelector";
 import { useLocalPlatform } from "./useLocalPlatform";
-
-const projectId = "ember-archipelago";
+import { useProjectSelection } from "./useProjectCatalog";
 
 type RunnerView = {
   os: "macOS" | "Windows" | "Linux";
@@ -16,7 +17,9 @@ type RunnerView = {
 
 export function RunnersPage() {
   const [selected, setSelected] = useState<RunnerView["os"]>("macOS");
-  const { delivery, productionDelivery, health, error } = useLocalPlatform(projectId);
+  const { projects, project, selectedProjectId, selectProject, mode, loading: projectsLoading, error: projectError } = useProjectSelection();
+  const { delivery, productionDelivery, health, error: deliveryError } = useLocalPlatform(selectedProjectId);
+  const error = projectError || deliveryError;
   const productionTargetState = (platform: "linux" | "windows" | "macos") => {
     if (!productionDelivery?.targetMatrix.includes(platform)) return "NOT_SELECTED";
     if (productionDelivery.candidateEvidenceBundleId) return "PASSED";
@@ -36,7 +39,11 @@ export function RunnersPage() {
   const onlineCount = runners.filter((runner) => runner.online).length;
   return (
     <AppShell>
-      <section className="page-heading resource-heading"><div><span className="eyebrow">跨平台执行面 · {productionDelivery ? "生产投影" : "本地实况"}</span><h1>运行节点</h1><p>{error ? `状态读取失败：${error}` : "本机侧车与未来通过出站 mTLS 注册的 E2E Runner；开发 Agent 不会安装在这些节点。"}</p></div><span className="resource-stat"><b>{onlineCount}</b><small>在线节点</small></span></section>
+      <section className="page-heading resource-heading">
+        <div><span className="eyebrow">跨平台执行面 · {mode === "LOCAL_FIXTURE" ? "本地实况" : "生产投影"}</span><h1>运行节点</h1><p>{error ? `状态读取失败：${error}` : project ? `${project.name} 的目标矩阵与已注册 Runner；开发 Agent 不会安装在这些节点。` : projectsLoading ? "正在读取可访问项目…" : "创建或绑定项目后查看目标矩阵。"}</p></div>
+        <div className="resource-heading-actions"><ProjectScopeSelector projects={projects} selectedProjectId={selectedProjectId} onChange={selectProject} /><span className="resource-stat"><b>{project ? onlineCount : 0}</b><small>在线节点</small></span></div>
+      </section>
+      {!project ? <EmptyProjectResource loading={projectsLoading} noun="运行节点" /> : (
       <div className="resource-grid">
         <section className="resource-list">
           {runners.map((runner) => (
@@ -53,20 +60,23 @@ export function RunnersPage() {
           <div className="fencing-note"><ShieldIcon /><span><b>防迟到结果</b><small>attempt_id、fencing_token 和 seq_no 不匹配的结果会被丢弃。</small></span></div>
         </aside>
       </div>
+      )}
     </AppShell>
   );
 }
 
 export function EvidencePage() {
-  const { delivery, productionDelivery, projectionMeta, error } = useLocalPlatform(projectId);
-  const [verification, setVerification] = useState<{ evidenceId: string; message: string; ok: boolean } | null>(null);
+  const { projects, project, selectedProjectId, selectProject, mode, loading: projectsLoading, error: projectError } = useProjectSelection();
+  const { delivery, productionDelivery, projectionMeta, error: deliveryError } = useLocalPlatform(selectedProjectId);
+  const [verification, setVerification] = useState<{ projectId: string; evidenceId: string; message: string; ok: boolean } | null>(null);
+  const error = projectError || deliveryError;
   const evidence = delivery?.localValidation ?? null;
   const productionEvidenceId = productionDelivery?.evidenceBundleId ?? null;
 
   async function verifyEvidence() {
-    if (!evidence) return;
+    if (!evidence || !selectedProjectId) return;
     try {
-      const base = `/api/projects/${projectId}/local-validation/evidence`;
+      const base = `/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence`;
       const [manifestResponse, junitResponse, logResponse] = await Promise.all([
         fetch(`${base}/manifest.json`, { cache: "no-store" }),
         fetch(`${base}/junit.xml`, { cache: "no-store" }),
@@ -89,16 +99,20 @@ export function EvidencePage() {
         && bundleDigest === await sha256(JSON.stringify(unsigned))
         && manifest.artifactDigests?.["junit.xml"] === await sha256(junit)
         && manifest.artifactDigests?.["godot.log"] === await sha256(log);
-      setVerification({ evidenceId: evidence.evidenceId, ok, message: ok ? "清单、Git 提交、bundle、JUnit 与日志摘要一致。" : "证据内容摘要不一致，已拒绝验证。" });
+      setVerification({ projectId: selectedProjectId, evidenceId: evidence.evidenceId, ok, message: ok ? "清单、Git 提交、bundle、JUnit 与日志摘要一致。" : "证据内容摘要不一致，已拒绝验证。" });
     } catch (reason) {
-      setVerification({ evidenceId: evidence.evidenceId, ok: false, message: reason instanceof Error ? reason.message : "证据验证失败" });
+      setVerification({ projectId: selectedProjectId, evidenceId: evidence.evidenceId, ok: false, message: reason instanceof Error ? reason.message : "证据验证失败" });
     }
   }
 
   return (
     <AppShell>
-      <section className="page-heading resource-heading"><div><span className="eyebrow">可追溯交付 · {productionDelivery ? "生产投影" : "本地实况"}</span><h1>证据中心</h1><p>{error ? `状态读取失败：${error}` : "证据绑定冻结规格、锁定提交与目标矩阵；生产页面只展示权威证据引用，不从 Web 进程读取制品库。"}</p></div><span className="resource-stat"><b>{evidence?.valid || productionEvidenceId ? 1 : 0}</b><small>有效证据包</small></span></section>
-      {verification ? <div className={`inline-notice ${verification.ok ? "" : "danger"}`}><CheckIcon /> {verification.evidenceId}：{verification.message}</div> : null}
+      <section className="page-heading resource-heading">
+        <div><span className="eyebrow">可追溯交付 · {mode === "LOCAL_FIXTURE" ? "本地实况" : "生产投影"}</span><h1>证据中心</h1><p>{error ? `状态读取失败：${error}` : project ? `${project.name} 的证据绑定冻结规格、锁定提交与目标矩阵；Web 进程不读取生产制品库。` : projectsLoading ? "正在读取可访问项目…" : "创建或绑定项目后查看交付证据。"}</p></div>
+        <div className="resource-heading-actions"><ProjectScopeSelector projects={projects} selectedProjectId={selectedProjectId} onChange={selectProject} /><span className="resource-stat"><b>{project && (evidence?.valid || productionEvidenceId) ? 1 : 0}</b><small>有效证据包</small></span></div>
+      </section>
+      {!project ? <EmptyProjectResource loading={projectsLoading} noun="交付证据" /> : <>
+      {verification?.projectId === selectedProjectId ? <div className={`inline-notice ${verification.ok ? "" : "danger"}`}><CheckIcon /> {verification.evidenceId}：{verification.message}</div> : null}
       <section className="evidence-table-panel">
         <div className="evidence-head"><span>证据包</span><span>平台</span><span>提交</span><span>测试</span><span>签名</span><span>生成时间</span><span /></div>
         {evidence ? (
@@ -116,9 +130,14 @@ export function EvidencePage() {
           </div>
         ) : <div className="evidence-empty"><FileIcon /><b>尚无真实证据</b><span>完成锁定目标矩阵后，权威投影会显示证据引用。</span></div>}
       </section>
-      {evidence ? <div className="evidence-artifacts"><b>原始证据</b><a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${projectId}/local-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${projectId}/local-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{evidence.godotVersion} · {evidence.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待导出模板" : "本地门禁通过"}</span></div> : null}
+      {evidence && selectedProjectId ? <div className="evidence-artifacts"><b>原始证据</b><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{evidence.godotVersion} · {evidence.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待导出模板" : "本地门禁通过"}</span></div> : null}
+      </>}
     </AppShell>
   );
+}
+
+function EmptyProjectResource({ loading, noun }: { loading: boolean; noun: string }) {
+  return <section className="resource-empty-project"><FileIcon /><h2>{loading ? "正在同步项目目录" : `还没有可用于${noun}的项目`}</h2><p>此页面不会以固定演示项目替代当前租户的真实项目。</p>{!loading ? <Link className="button button-acid" href="/projects/new">创建第一个项目</Link> : null}</section>;
 }
 
 async function sha256(value: string) {
