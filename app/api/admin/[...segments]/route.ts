@@ -336,6 +336,18 @@ export async function POST(request: Request, context: RouteContext) {
         || outputUsdPerMillionTokens < 0 || outputUsdPerMillionTokens > 1_000_000) {
         throw new HttpProblem(400, "PROVIDER_PRICING_REJECTED", "Provider token pricing must be explicit non-negative USD per million tokens");
       }
+      const credentialVersionId = requireString(body, "credentialVersionId", 160);
+      const dataRegion = requireString(body, "dataRegion", 120);
+      const retentionPolicy = requireString(body, "retentionPolicy", 500);
+      const trainingPolicy = requireString(body, "trainingPolicy", 500);
+      const maxBudgetUsd = body.maxBudgetUsd;
+      const maxTurns = body.maxTurns;
+      const timeoutSeconds = body.timeoutSeconds;
+      if (typeof maxBudgetUsd !== "number" || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 100
+        || !Number.isInteger(maxTurns) || (maxTurns as number) < 1 || (maxTurns as number) > 200
+        || !Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < 60 || (timeoutSeconds as number) > 14_400) {
+        throw new HttpProblem(400, "BUDGET_OUT_OF_POLICY", "Profile budget or timeout exceeds platform limits");
+      }
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         const providerId = `provider-${agent}-${store.providers.length + 1}`;
@@ -348,8 +360,8 @@ export async function POST(request: Request, context: RouteContext) {
           providerId,
           installationId: requireString(body, "installationId", 160),
           state: "DRAFT",
-          budgetUsd: typeof body.budgetUsd === "number" ? Math.min(100, Math.max(0, body.budgetUsd)) : 25,
-          fallbackProfileId: typeof body.fallbackProfileId === "string" ? body.fallbackProfileId : null,
+          budgetUsd: maxBudgetUsd,
+          fallbackProfileId: typeof body.fallbackProfileRevisionId === "string" ? body.fallbackProfileRevisionId : null,
         };
         store.providers.push({
           id: providerId,
@@ -361,12 +373,17 @@ export async function POST(request: Request, context: RouteContext) {
           inputUsdPerMillionTokens,
           outputUsdPerMillionTokens,
           primaryModel: models.primaryModel,
-          credentialId: requireString(body, "credentialId", 160),
+          credentialId: credentialVersionId,
           state: "DRAFT",
           probe: {},
         });
         store.profiles.push(profile);
-        appendDemoAudit("AGENT_PROFILE_DRAFTED", profile.id, role, { agent, protocol, baseUrl });
+        appendDemoAudit("AGENT_PROFILE_DRAFTED", profile.id, role, {
+          agent, protocol, baseUrl, dataRegion,
+          governanceConfirmed: Boolean(retentionPolicy && trainingPolicy),
+          maxTurns: maxTurns as number,
+          timeoutSeconds: timeoutSeconds as number,
+        });
         return { profile, provider: { id: providerId, protocol, baseUrl, authentication,
           pricing: { inputUsdPerMillionTokens, outputUsdPerMillionTokens }, models, state: "DRAFT" } };
       });

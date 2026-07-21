@@ -778,7 +778,6 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         outputUsdPerMillionTokens: Number(outputPrice),
         installationId,
         credentialVersionId: credentialId,
-        credentialId,
         scope: "platform",
         scopeId: "global",
         dataRegion: dataRegion.trim(),
@@ -787,7 +786,6 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         maxBudgetUsd: 25,
         maxTurns: 100,
         timeoutSeconds: 7200,
-        budgetUsd: 25,
       },
     });
     setDraftProfileId(created.profile.id);

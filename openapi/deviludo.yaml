@@ -2,12 +2,28 @@ openapi: 3.1.0
 info:
   title: DeviLudo Control Plane API
   version: 0.1.0-beta
-  description: Production API contract. The local Sites preview exposes the same operations below /api/admin.
+  description: Production API contract. The local Sites preview exposes the browser and administrator operations below /api; localhost-only fixture execution routes are intentionally omitted.
 servers:
   - url: https://api.deviludo.example
 security:
   - bearerAuth: []
 paths:
+  /health:
+    get:
+      operationId: getControlPlaneReadiness
+      description: Reports production Web readiness without returning credentials, connector URLs, or internal authority material.
+      security: []
+      responses:
+        "200":
+          description: Every production Web dependency is configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ControlPlaneReadiness" }
+        "503":
+          description: One or more required production Web dependencies are unavailable or unconfigured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ControlPlaneReadiness" }
   /auth/github:
     get:
       operationId: beginInvitedGitHubLogin
@@ -267,12 +283,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [label, apiKey]
-              properties:
-                label: { type: string, maxLength: 120 }
-                apiKey: { type: string, format: password, writeOnly: true }
+            schema: { $ref: "#/components/schemas/CredentialDraft" }
       responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/credentials/{id}/rotate:
     post:
@@ -297,6 +308,11 @@ paths:
           required: true
           schema: { type: string, examples: [platform, "tenant:north-dock", "project:ember-archipelago"] }
         - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProfileSelection" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
   /admin/agent-health:
     get:
@@ -369,10 +385,97 @@ paths:
           schema: { type: string, pattern: "^[a-f0-9]{64}$" }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+  /settings/agents:
+    get:
+      operationId: getTenantAgentSettings
+      description: Returns only the Agent catalog, installations, immutable Profiles, masked credentials, and defaults visible to the authenticated tenant. TenantAdmin and Auditor sessions are accepted; plaintext credentials and SecretRefs are never returned.
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AgentSettings" }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: The signed-in account is not a TenantAdmin or Auditor. }
+        "502": { description: The isolated Agent control plane is unavailable. }
+        "503": { description: The isolated Agent control plane is not configured. }
+  /settings/agents/credentials:
+    post:
+      operationId: createTenantAgentCredential
+      description: Writes one tenant-scoped BYOK credential through the Vault ingress. The plaintext API key is accepted once, cleared by the control plane, and never returned.
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CredentialDraft" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "400": { description: The credential label or plaintext is invalid. }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires TenantAdmin authority. }
+        "502": { description: The isolated Agent control plane or Vault ingress is unavailable. }
+        "503": { description: The isolated Agent control plane is not configured. }
+  /settings/agents/profiles:
+    post:
+      operationId: createTenantAgentProfileRevision
+      description: Creates a tenant-scoped immutable Provider and Profile draft. The server derives scope and scopeId from the trusted session, so the browser cannot widen its authority.
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantAgentProfileDraft" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "400": { description: The endpoint, model, authentication, governance, pricing, or budget is invalid. }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires TenantAdmin authority. }
+        "409": { description: The installation or credential is not active and selectable within this tenant. }
+        "502": { description: The isolated Agent control plane is unavailable. }
+        "503": { description: The isolated Agent control plane is not configured. }
+  /settings/agents/profiles/{id}/validate:
+    post:
+      operationId: validateTenantAgentProfile
+      description: Starts the mandatory Provider and policy probes for a tenant-owned draft. Validation does not activate the Profile and cannot replace the current effective configuration on failure.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires TenantAdmin authority over this Profile. }
+        "404": { description: The Profile does not exist within the tenant-visible scope. }
+        "502": { description: The isolated Agent control plane is unavailable. }
+        "503": { description: The Agent control plane or trusted Provider Connector is not configured. }
+  /settings/agents/default:
+    put:
+      operationId: updateTenantAgentDefault
+      description: Selects an ACTIVE immutable Profile for new tenant tasks. Running and already queued tasks retain their pinned Profile revision.
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProfileSelection" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires TenantAdmin authority. }
+        "409": { description: The Profile is not ACTIVE, serving-ready, or selectable by this tenant. }
+        "502": { description: The isolated Agent control plane is unavailable. }
+        "503": { description: The isolated Agent control plane is not configured. }
   /projects/repositories:
     get:
       operationId: listAuthorizedProjectRepositories
       description: Lists live repositories for GitHub App installations verified against the signed-in numeric GitHub user. No installation token is returned.
+      security: [{ cookieAuth: [] }]
       responses:
         "200":
           description: Current GitHub App repository catalog.
@@ -387,6 +490,7 @@ paths:
     get:
       operationId: listRepositoryBoundProjects
       description: Lists at most 500 active projects visible to the signed-in tenant user through project creator authority or a still-active verified GitHub App installation.
+      security: [{ cookieAuth: [] }]
       responses:
         "200":
           description: Tenant-isolated project catalog derived by the Project Repository Broker.
@@ -404,6 +508,7 @@ paths:
     post:
       operationId: createRepositoryBoundProject
       description: The server derives owner, repository name, node ID, and default branch from a fresh GitHub response and atomically persists the project and repository binding.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -417,14 +522,49 @@ paths:
     get:
       operationId: getRepositoryBoundProject
       description: Returns a project only when the signed-in tenant user created it or still controls its verified active GitHub App installation.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { description: The project is missing or inaccessible to the current account. }
+  /projects/{projectId}/agent-settings:
+    get:
+      operationId: getProjectAgentSettings
+      description: Revalidates exact project access and returns only ACTIVE platform, tenant, and same-project Profiles visible through the inherited Agent policy. Credentials and SecretRefs are never returned.
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200": { $ref: "#/components/responses/AgentSettings" }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: The signed-in account is not a ProjectOwner or Auditor. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "502": { description: Project authority or the isolated Agent control plane is unavailable. }
+        "503": { description: Project authority or the isolated Agent control plane is not configured. }
+    put:
+      operationId: updateProjectAgentDefault
+      description: Revalidates exact project access and pins an ACTIVE immutable Profile for new project tasks. Running and already queued tasks retain their original Profile revision.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/ProjectId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProfileSelection" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "403": { description: Requires ProjectOwner authority over the exact project. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "409": { description: The Profile is not ACTIVE, serving-ready, or selectable through project inheritance. }
+        "502": { description: Project authority or the isolated Agent control plane is unavailable. }
+        "503": { description: Project authority or the isolated Agent control plane is not configured. }
   /projects/{projectId}/steam-settings:
     get:
       operationId: getProjectSteamSettings
       description: Revalidates exact GitHub project access, then reads the active immutable Steam release/depot revision and its build-session readiness. Passwords and SecretRefs are never returned.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200":
@@ -441,6 +581,7 @@ paths:
     post:
       operationId: beginProjectSteamSettings
       description: Creates a five-minute, user/session/build-account-bound intent. This operation accepts no request body; App, Depot, branch and branch-password fields are accepted only by the separately hosted Steam Secure UI.
+      security: [{ cookieAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -461,6 +602,7 @@ paths:
     get:
       operationId: getProjectRunnerFleet
       description: Revalidates the signed GitHub user's access to the exact project, then returns at most one latest fenced Runner lease per platform. Connectivity is derived from immutable registration state, heartbeat freshness, and certificate expiry; the endpoint has no Runner write authority.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200":
@@ -478,6 +620,7 @@ paths:
     get:
       operationId: getProjectEvidenceCatalog
       description: Revalidates the signed GitHub user's access to the exact project, then returns the latest 50 immutable evidence manifests after checking canonical bundle digests, authority bindings, platform coverage, and invalidation tombstones. Archive object keys and storage grants are never returned.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200":
@@ -495,6 +638,7 @@ paths:
     get:
       operationId: getProjectDelivery
       description: Revalidates the signed GitHub user's access to the exact project, then returns the replay-verified Temporal delivery projection. The Web workload has no workflow or database write authority.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200": { $ref: "#/components/responses/Ok" }
@@ -504,6 +648,7 @@ paths:
     post:
       operationId: cancelProjectDelivery
       description: Revalidates exact project access and asks the user-decision Broker to cancel the current replay-verified workflow. Clients cannot submit workflow, Agent, Runner, evidence, or Steam authority.
+      security: [{ cookieAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -527,6 +672,7 @@ paths:
     get:
       operationId: getSpecConversation
       description: Revalidates exact project access before reading the immutable specification conversation snapshot.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200": { $ref: "#/components/responses/Ok" }
@@ -535,6 +681,7 @@ paths:
     post:
       operationId: sendSpecConversationMessage
       description: Revalidates exact project access and uses the independent low-latency specification service, never the development Agent.
+      security: [{ cookieAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -558,6 +705,7 @@ paths:
     get:
       operationId: getGameSpecRevision
       description: Revalidates exact project access before reading the current immutable specification and test-plan revision.
+      security: [{ cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
       responses:
         "200": { $ref: "#/components/responses/Ok" }
@@ -566,6 +714,7 @@ paths:
     post:
       operationId: approveGameSpecRevision
       description: Revalidates exact project access before approving the current immutable draft and its server-selected Runner toolchain.
+      security: [{ cookieAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -594,6 +743,7 @@ paths:
     post:
       operationId: createFeedbackIteration
       description: Revalidates exact project access before creating the next immutable specification draft and invalidating prior candidate evidence.
+      security: [{ cookieAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -614,6 +764,7 @@ paths:
     post:
       operationId: acceptCandidate
       description: Revalidates exact project access, then resolves the authoritative candidate commit, Draft PR, passed E2E attempt, and non-invalidated evidence; clients cannot supply those bindings.
+      security: [{ cookieAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -674,7 +825,126 @@ components:
             properties:
               data: {}
               meta: { type: object, additionalProperties: true }
+    AgentSettings:
+      description: Tenant- and project-scoped public Agent configuration projection.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [data]
+            properties:
+              data: { $ref: "#/components/schemas/AgentSettingsProjection" }
+              meta: { type: object, additionalProperties: true }
   schemas:
+    EmptyObject:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
+    ControlPlaneReadiness:
+      type: object
+      additionalProperties: false
+      required: [status, service, version, mode, ready, dependencies, capabilities, time]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        service: { const: deviludo-control-plane }
+        version: { type: string }
+        mode: { const: PRODUCTION }
+        ready: { type: boolean }
+        dependencies:
+          type: object
+          additionalProperties: false
+          required: [identityBroker, identityAdminBroker, githubAuthorizationBroker, projectRepositoryBroker, specificationDialogueBroker, userAcceptanceBroker, deliveryProjectionBroker, adminControlPlaneBroker, steamEnrollmentBroker, steamProjectConfigurationBroker, releaseAuthorizationBroker]
+          properties:
+            identityBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            identityAdminBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            githubAuthorizationBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            projectRepositoryBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            specificationDialogueBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            userAcceptanceBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            deliveryProjectionBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            adminControlPlaneBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            steamEnrollmentBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            steamProjectConfigurationBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+            releaseAuthorizationBroker: { $ref: "#/components/schemas/ProductionDependencyStatus" }
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+        time: { type: string, format: date-time }
+    ProductionDependencyStatus:
+      type: string
+      enum: [CONFIGURED, NOT_CONFIGURED, INVALID_CONFIGURATION]
+    CredentialDraft:
+      type: object
+      additionalProperties: false
+      required: [label, apiKey]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 120 }
+        apiKey: { type: string, format: password, writeOnly: true, minLength: 1, maxLength: 8192 }
+    AgentProfileSelection:
+      type: object
+      additionalProperties: false
+      required: [profileRevisionId]
+      properties:
+        profileRevisionId: { type: string, minLength: 1, maxLength: 160 }
+    AgentSettingsProjection:
+      type: object
+      additionalProperties: false
+      required: [catalog, platformDefault, effectivePlatformDefaultAgent, selectionPrecedence, pinnedVersionsOnly, profiles, providers, credentials, defaults]
+      properties:
+        catalog:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            additionalProperties: true
+            required: [id, name, vendor, officialSource, capabilities, supportedWorkers, installedOn, forbiddenOn, platformDefault, versions, installations]
+            properties:
+              id: { type: string, enum: [claude-code, codex-cli] }
+              name: { type: string }
+              vendor: { type: string }
+              officialSource: { type: string, format: uri }
+              capabilities: { type: array, items: { type: string, enum: [plan, code, repair, review] } }
+              supportedWorkers: { type: array, items: { type: string } }
+              installedOn: { type: array, items: { type: string } }
+              forbiddenOn: { type: array, items: { type: string, enum: [e2e-runner, steam-publisher] } }
+              platformDefault: { type: boolean }
+              versions: { type: array, items: { type: object, additionalProperties: true } }
+              installations: { type: array, items: { type: object, additionalProperties: true } }
+        platformDefault: { type: string }
+        effectivePlatformDefaultAgent: { type: string, enum: [claude-code, codex-cli] }
+        selectionPrecedence:
+          type: array
+          prefixItems:
+            - { const: project }
+            - { const: tenant }
+            - { const: platform }
+            - { const: "built-in:claude-code" }
+          minItems: 4
+          maxItems: 4
+        pinnedVersionsOnly: { const: true }
+        profiles: { type: array, items: { type: object, additionalProperties: true } }
+        providers: { type: array, items: { type: object, additionalProperties: true } }
+        credentials:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required: [id, familyId, version, label, scope, scopeId, maskedFingerprint, state, createdAt, lastUsedAt, plaintextRecoverable]
+            properties:
+              id: { type: string }
+              familyId: { type: string }
+              version: { type: integer, minimum: 1 }
+              label: { type: string }
+              scope: { type: string, enum: [platform, tenant] }
+              scopeId: { type: string }
+              maskedFingerprint: { type: string }
+              state: { type: string, enum: [ACTIVE, PREVIOUS, REVOKED] }
+              createdAt: { type: string, format: date-time }
+              lastUsedAt: { type: [string, "null"], format: date-time }
+              plaintextRecoverable: { const: false }
+        defaults: { type: object, additionalProperties: { type: string } }
     GitHubConnectionStatus:
       type: object
       additionalProperties: false
@@ -940,20 +1210,52 @@ components:
                     disabled: { const: false }
     AgentProfileDraft:
       type: object
-      required: [agent, baseUrl, primaryModel, credentialId, installationId]
+      additionalProperties: false
+      required: [agent, installationId, credentialVersionId, scope, scopeId, baseUrl, authentication, primaryModel, inputUsdPerMillionTokens, outputUsdPerMillionTokens, dataRegion, retentionPolicy, trainingPolicy, maxBudgetUsd, maxTurns, timeoutSeconds]
       properties:
         agent: { type: string, enum: [claude-code, codex-cli] }
-        baseUrl: { type: string, format: uri }
-        primaryModel: { type: string, description: Exact version-bearing model ID; floating aliases are rejected. }
-        planningModel: { type: string }
-        smallFastModel: { type: string }
-        subagentModel: { type: string }
-        credentialId: { type: string }
-        installationId: { type: string }
+        installationId: { type: string, minLength: 1, maxLength: 180 }
+        credentialVersionId: { type: string, minLength: 1, maxLength: 180 }
         scope: { type: string, enum: [platform, tenant, project] }
-        scopeId: { type: string }
-        budgetUsd: { type: number, minimum: 0, maximum: 100 }
-        fallbackProfileId: { type: [string, "null"], description: Explicit same-Agent fallback only. }
+        scopeId: { type: string, minLength: 1, maxLength: 160 }
+        baseUrl: { type: string, format: uri, pattern: "^https://" }
+        authentication: { type: string, enum: [bearer, x-api-key, authorization-bearer], description: Codex CLI accepts bearer; Claude Code accepts x-api-key or authorization-bearer. }
+        primaryModel: { type: string, minLength: 1, maxLength: 200, description: Exact version-bearing model ID; floating aliases are rejected. }
+        planningModel: { type: string, minLength: 1, maxLength: 200 }
+        smallFastModel: { type: string, minLength: 1, maxLength: 200 }
+        subagentModel: { type: string, minLength: 1, maxLength: 200 }
+        inputUsdPerMillionTokens: { type: number, minimum: 0, maximum: 1000000 }
+        outputUsdPerMillionTokens: { type: number, minimum: 0, maximum: 1000000 }
+        dataRegion: { type: string, minLength: 1, maxLength: 120 }
+        retentionPolicy: { type: string, minLength: 1, maxLength: 500 }
+        trainingPolicy: { type: string, minLength: 1, maxLength: 500 }
+        maxBudgetUsd: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxTurns: { type: integer, minimum: 1, maximum: 200 }
+        timeoutSeconds: { type: integer, minimum: 60, maximum: 14400 }
+        fallbackProfileRevisionId: { type: [string, "null"], description: Explicit same-Agent fallback only. }
+    TenantAgentProfileDraft:
+      type: object
+      additionalProperties: false
+      required: [agent, installationId, credentialVersionId, baseUrl, authentication, primaryModel, inputUsdPerMillionTokens, outputUsdPerMillionTokens, dataRegion, retentionPolicy, trainingPolicy, maxBudgetUsd, maxTurns, timeoutSeconds]
+      properties:
+        agent: { type: string, enum: [claude-code, codex-cli] }
+        installationId: { type: string, minLength: 1, maxLength: 180 }
+        credentialVersionId: { type: string, minLength: 1, maxLength: 180 }
+        baseUrl: { type: string, format: uri, pattern: "^https://" }
+        authentication: { type: string, enum: [bearer, x-api-key, authorization-bearer], description: Codex CLI accepts bearer; Claude Code accepts x-api-key or authorization-bearer. }
+        primaryModel: { type: string, minLength: 1, maxLength: 200, description: Exact version-bearing model ID; floating aliases are rejected. }
+        planningModel: { type: string, minLength: 1, maxLength: 200 }
+        smallFastModel: { type: string, minLength: 1, maxLength: 200 }
+        subagentModel: { type: string, minLength: 1, maxLength: 200 }
+        inputUsdPerMillionTokens: { type: number, minimum: 0, maximum: 1000000 }
+        outputUsdPerMillionTokens: { type: number, minimum: 0, maximum: 1000000 }
+        dataRegion: { type: string, minLength: 1, maxLength: 120 }
+        retentionPolicy: { type: string, minLength: 1, maxLength: 500 }
+        trainingPolicy: { type: string, minLength: 1, maxLength: 500 }
+        maxBudgetUsd: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxTurns: { type: integer, minimum: 1, maximum: 200 }
+        timeoutSeconds: { type: integer, minimum: 60, maximum: 14400 }
+        fallbackProfileRevisionId: { type: [string, "null"], description: Explicit same-Agent fallback only. }
     InferenceReconciliation:
       oneOf:
         - type: object

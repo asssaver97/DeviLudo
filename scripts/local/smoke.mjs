@@ -371,6 +371,58 @@ try {
     || tenantAgentPayload.meta?.defaultAgent !== "claude-code" || JSON.stringify(tenantAgentPayload).includes("secretRef")) {
     throw new Error("tenant Agent settings projection contract failed");
   }
+  const tenantCredential = await request(baseUrl, "/api/settings/agents/credentials", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-v1" },
+    body: JSON.stringify({ label: "Smoke tenant Provider", apiKey: "smoke-local-provider-key-material" }),
+  });
+  const tenantCredentialText = await tenantCredential.response.text();
+  const tenantCredentialPayload = JSON.parse(tenantCredentialText);
+  if (![200, 201].includes(tenantCredential.response.status) || !tenantCredentialPayload.data?.id
+    || tenantCredentialText.includes("smoke-local-provider-key-material") || tenantCredentialText.includes("secretRef")) {
+    throw new Error("tenant Agent credential ingress contract failed");
+  }
+  const tenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-r1" },
+    body: JSON.stringify({
+      agent: "claude-code",
+      installationId: "claude-installation-214",
+      credentialVersionId: tenantCredentialPayload.data.id,
+      baseUrl: "https://gateway.example.com/v1",
+      authentication: "x-api-key",
+      primaryModel: "claude-sonnet-4-6-20250514",
+      inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15,
+      dataRegion: "us-east",
+      retentionPolicy: "zero application retention",
+      trainingPolicy: "no training",
+      maxBudgetUsd: 25,
+      maxTurns: 100,
+      timeoutSeconds: 7200,
+    }),
+  });
+  const tenantProfilePayload = await tenantProfile.response.json();
+  if (![200, 201].includes(tenantProfile.response.status)
+    || tenantProfilePayload.data?.profile?.scope !== "tenant"
+    || tenantProfilePayload.data?.profile?.scopeId !== "tenant-local"
+    || tenantProfilePayload.data?.provider?.state !== "DRAFT") {
+    throw new Error("tenant Agent Profile draft contract failed");
+  }
+  const tenantProfileProbe = await request(
+    baseUrl,
+    `/api/settings/agents/profiles/${encodeURIComponent(tenantProfilePayload.data.profile.id)}/validate`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-probe-r1" },
+      body: "{}",
+    },
+  );
+  const tenantProfileProbePayload = await tenantProfileProbe.response.json();
+  if (tenantProfileProbe.response.status !== 503
+    || tenantProfileProbePayload.error?.code !== "PROVIDER_PROBE_NOT_CONFIGURED") {
+    throw new Error("local tenant Agent Profile probe fabricated an external trust result");
+  }
   const invitationGatePayload = await invitationGate.response.json();
   if (invitationGate.response.status !== 503 || invitationGatePayload.error?.code !== "IDENTITY_ADMIN_BROKER_REQUIRED") {
     throw new Error("local admin unexpectedly fabricated a production invitation");
@@ -841,6 +893,8 @@ try {
   console.log(`✓ Admin state        ${adminState.response.status} (${adminState.elapsedMs}ms) · default=${adminPayload.meta.defaultAgent}`);
   console.log(`✓ Agent inheritance  ${adminState.response.status} (${adminState.elapsedMs}ms) · platform/tenant/project bound`);
   console.log(`✓ Tenant Agent state ${tenantAgentState.response.status} (${tenantAgentState.elapsedMs}ms) · scoped projection`);
+  console.log(`✓ Tenant Agent write ${tenantProfile.response.status} (${tenantProfile.elapsedMs}ms) · scoped immutable draft`);
+  console.log(`✓ Provider probe gate ${tenantProfileProbe.response.status} (${tenantProfileProbe.elapsedMs}ms) · external trust required`);
   console.log(`✓ Invitation gate    ${invitationGate.response.status} (${invitationGate.elapsedMs}ms) · ${invitationGatePayload.error.code}`);
   console.log(`✓ Local session      ${localSession.response.status} (${localSession.elapsedMs}ms) · @${sessionPayload.data.githubLogin}`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);
