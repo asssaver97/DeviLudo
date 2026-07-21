@@ -44,9 +44,16 @@ export function localAdminRequest(
   downstreamPath: string,
   role: ControlPlaneAdminPrincipal["role"],
   body?: Record<string, unknown>,
+  principal?: Pick<ControlPlaneAdminPrincipal, "actorId" | "sessionId" | "tenantId" | "projectId">,
 ): Request {
   const url = new URL(`/api${downstreamPath}`, "http://127.0.0.1:3000");
   const headers = new Headers({ accept: "application/json", "x-deviludo-role": role });
+  if (principal) {
+    headers.set("x-deviludo-actor-id", principal.actorId);
+    headers.set("x-deviludo-session-id", principal.sessionId);
+    if (principal.tenantId) headers.set("x-deviludo-tenant-id", principal.tenantId);
+    if (principal.projectId) headers.set("x-deviludo-project-id", principal.projectId);
+  }
   const idempotency = request.headers.get("idempotency-key");
   if (idempotency) headers.set("idempotency-key", idempotency);
   if (request.method !== "GET") headers.set("content-type", "application/json");

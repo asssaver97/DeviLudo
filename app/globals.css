@@ -287,7 +287,7 @@ button {
 .settings-form input:focus, .settings-form select:focus, .profile-selection-row select:focus { border-color: #70836c; box-shadow: 0 0 0 3px rgba(93, 119, 88, .1); outline: none; }
 .settings-form .button { justify-self: start; margin-top: 2px; }
 .provider-grid { grid-template-columns: repeat(3, 1fr); }
-.provider-grid label:nth-of-type(4), .provider-grid label:nth-of-type(5) { grid-column: span 2; }
+.provider-grid .provider-wide { grid-column: span 2; }
 .provider-submit { align-self: end; justify-self: stretch !important; min-height: 38px; }
 .masked-list { border-top: 1px solid #ecece6; margin-top: 18px; padding-top: 12px; }
 .masked-list > div { align-items: center; display: flex; gap: 8px; justify-content: space-between; padding: 8px 0; }
@@ -328,6 +328,10 @@ button {
 .effective-agent > span { align-items: center; background: #222a24; border-radius: 12px; color: #fff; display: flex; font: 700 14px var(--font-geist-mono); height: 51px; justify-content: center; width: 51px; }
 .effective-agent h3 { font-size: 18px; margin: 0 0 4px; }
 .effective-agent code { color: var(--muted); font-size: 8px; }
+.effective-lock-grid { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; margin: 18px 0 0; }
+.effective-lock-grid > div { background: #f5f6f1; border: 1px solid #e4e6dd; border-radius: 8px; min-width: 0; padding: 9px 10px; }
+.effective-lock-grid dt { color: var(--muted); font-size: 8px; letter-spacing: .08em; margin-bottom: 4px; text-transform: uppercase; }
+.effective-lock-grid dd { font-size: 9px; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
 .scope-chain { display: grid; gap: 0; margin: 22px 0 0; }
 .scope-chain > div { align-items: center; border-top: 1px solid #ecece6; display: flex; gap: 11px; padding: 11px 0; }
 .scope-chain dt { align-items: center; background: #f0f1ec; border-radius: 50%; display: flex; font-size: 9px; height: 23px; justify-content: center; width: 23px; }
@@ -353,7 +357,8 @@ button {
 
 @media (max-width: 720px) {
   .provider-grid { grid-template-columns: 1fr; }
-  .provider-grid label:nth-of-type(4), .provider-grid label:nth-of-type(5) { grid-column: auto; }
+  .provider-grid .provider-wide { grid-column: auto; }
+  .effective-lock-grid { grid-template-columns: 1fr; }
   .profile-selection-row { grid-template-columns: 1fr; }
   .profile-table > div { grid-template-columns: 72px minmax(0, 1fr); }
   .profile-table code, .profile-table small { grid-column: 2; }

@@ -230,6 +230,12 @@ const smokeValidationProject = `smoke-validation-${smokeNonce}`;
 const smokeFeedbackProject = `smoke-feedback-${smokeNonce}`;
 const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
 const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
+const smokeClaudeModels = Object.freeze({
+  primaryModel: "claude-sonnet-4-6-20250514",
+  planningModel: "claude-sonnet-4-6-20250514",
+  smallFastModel: "claude-haiku-4-5-20251001",
+  subagentModel: "claude-sonnet-4-6-20250514",
+});
 
 try {
   const health = await waitForHealth(baseUrl);
@@ -268,6 +274,7 @@ try {
     providerRevisionId: "provider-platform-claude-r1",
     credentialVersionId: "credential-platform-claude-v1",
     model: "claude-sonnet-4-6-20250514",
+    modelRoles: smokeClaudeModels,
   });
   const executionCommand = JSON.stringify({
     tenantId: "tenant-local",
@@ -286,11 +293,12 @@ try {
     providerProtocol: "anthropic-messages",
     credentialVersionId: "credential-platform-claude-v1",
     model: "claude-sonnet-4-6-20250514",
+    modelRoles: smokeClaudeModels,
     budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200000, maxOutputTokens: 50000 },
     timeoutSeconds: 7200,
     prompt: "Smoke contract only; execution must remain gated.",
   });
-  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, forgedRuntimeRequest, forgedSpecRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
+  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, projectAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, forgedRuntimeRequest, forgedSpecRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
@@ -304,6 +312,7 @@ try {
     request(baseUrl, "/api/projects"),
     request(baseUrl, "/api/admin/agents"),
     request(baseUrl, "/api/settings/agents"),
+    request(baseUrl, "/api/projects/ember-archipelago/agent-settings"),
     request(baseUrl, "/api/admin/invitations", { method: "POST" }),
     request(baseUrl, "/api/auth/session"),
     request(runtimeUrl, "/health"),
@@ -371,14 +380,26 @@ try {
   const adminProfileIds = new Set((adminPayload.meta?.profiles ?? []).map((profile) => profile?.id).filter(Boolean));
   const adminDefaults = adminPayload.meta?.defaults;
   if (!adminDefaults || typeof adminDefaults !== "object" || Array.isArray(adminDefaults)
-    || !["platform", "tenant:north-dock", "project:ember-archipelago"].every((scope) =>
+    || !["platform", "tenant:tenant-local", "project:ember-archipelago"].every((scope) =>
       typeof adminDefaults[scope] === "string" && adminProfileIds.has(adminDefaults[scope]))) {
     throw new Error("local Agent inheritance contains a dangling default Profile");
   }
   const tenantAgentPayload = await tenantAgentState.response.json();
   if (!tenantAgentState.response.ok || !Array.isArray(tenantAgentPayload.data)
-    || tenantAgentPayload.meta?.defaultAgent !== "claude-code" || JSON.stringify(tenantAgentPayload).includes("secretRef")) {
+    || tenantAgentPayload.meta?.defaultAgent !== "claude-code" || JSON.stringify(tenantAgentPayload).includes("secretRef")
+    || (tenantAgentPayload.meta?.profiles ?? []).some((profile) => profile.scope !== "platform"
+      && !(profile.scope === "tenant" && profile.scopeId === "tenant-local"))
+    || Object.keys(tenantAgentPayload.meta?.defaults ?? {}).some((scope) => scope !== "platform" && scope !== "tenant:tenant-local")
+    || (tenantAgentPayload.meta?.credentials ?? []).some((credential) => credential.scope !== "tenant" || credential.scopeId !== "tenant-local")) {
     throw new Error("tenant Agent settings projection contract failed");
+  }
+  const projectAgentPayload = await projectAgentState.response.json();
+  if (!projectAgentState.response.ok || !Array.isArray(projectAgentPayload.data)
+    || (projectAgentPayload.meta?.credentials ?? []).length !== 0
+    || (projectAgentPayload.meta?.profiles ?? []).some((profile) => profile.scope === "tenant" && profile.scopeId !== "tenant-local")
+    || (projectAgentPayload.meta?.profiles ?? []).some((profile) => profile.scope === "project" && profile.scopeId !== "ember-archipelago")
+    || Object.keys(projectAgentPayload.meta?.defaults ?? {}).some((scope) => !["platform", "tenant:tenant-local", "project:ember-archipelago"].includes(scope))) {
+    throw new Error("project Agent settings projection crossed its authenticated scope");
   }
   const unknownFieldMarker = "unknown-agent-field-must-not-be-echoed";
   const forgedTenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
@@ -429,7 +450,7 @@ try {
   }
   const tenantCredential = await request(baseUrl, "/api/settings/agents/credentials", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-v1" },
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-${smokeNonce}` },
     body: JSON.stringify({ label: "Smoke tenant Provider", apiKey: "smoke-local-provider-key-material" }),
   });
   const tenantCredentialText = await tenantCredential.response.text();
@@ -444,7 +465,7 @@ try {
     `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/rotate`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-rotate-v2" },
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-rotate-${smokeNonce}` },
       body: JSON.stringify({ apiKey: rotatedCredentialSecret }),
     },
   );
@@ -462,7 +483,7 @@ try {
     `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/revoke`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-revoke-v1" },
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-revoke-${smokeNonce}` },
       body: "{}",
     },
   );
@@ -481,7 +502,7 @@ try {
   }
   const tenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-r2" },
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-profile-${smokeNonce}` },
     body: JSON.stringify({
       agent: "claude-code",
       installationId: "claude-installation-214",
@@ -489,21 +510,30 @@ try {
       baseUrl: "https://gateway.example.com/v1",
       authentication: "x-api-key",
       primaryModel: "claude-sonnet-4-6-20250514",
+      planningModel: "claude-opus-4-6-20260205",
+      smallFastModel: "claude-haiku-4-5-20251001",
+      subagentModel: "claude-sonnet-4-6-20250514",
       inputUsdPerMillionTokens: 3,
       outputUsdPerMillionTokens: 15,
       dataRegion: "us-east",
       retentionPolicy: "zero application retention",
       trainingPolicy: "no training",
-      maxBudgetUsd: 25,
-      maxTurns: 100,
-      timeoutSeconds: 7200,
+      maxBudgetUsd: 29,
+      maxTurns: 77,
+      timeoutSeconds: 5400,
     }),
   });
   const tenantProfilePayload = await tenantProfile.response.json();
   if (![200, 201].includes(tenantProfile.response.status)
     || tenantProfilePayload.data?.profile?.scope !== "tenant"
     || tenantProfilePayload.data?.profile?.scopeId !== "tenant-local"
-    || tenantProfilePayload.data?.provider?.state !== "DRAFT") {
+    || tenantProfilePayload.data?.provider?.state !== "DRAFT"
+    || tenantProfilePayload.data?.profile?.budget?.maxUsd !== 29
+    || tenantProfilePayload.data?.profile?.budget?.maxTurns !== 77
+    || tenantProfilePayload.data?.profile?.budget?.timeoutSeconds !== 5400
+    || tenantProfilePayload.data?.provider?.models?.planningModel !== "claude-opus-4-6-20260205"
+    || tenantProfilePayload.data?.provider?.models?.smallFastModel !== "claude-haiku-4-5-20251001"
+    || tenantProfilePayload.data?.provider?.models?.subagentModel !== "claude-sonnet-4-6-20250514") {
     throw new Error("tenant Agent Profile draft contract failed");
   }
   const tenantProfileProbe = await request(
@@ -511,7 +541,7 @@ try {
     `/api/settings/agents/profiles/${encodeURIComponent(tenantProfilePayload.data.profile.id)}/validate`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-probe-r1" },
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-profile-probe-${smokeNonce}` },
       body: "{}",
     },
   );

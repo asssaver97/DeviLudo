@@ -44,6 +44,41 @@ test("Agent console projection exposes usable public configuration without Vault
   assert.deepEqual(tenant.json().data.credentials, []);
 });
 
+test("Agent defaults expose only the authenticated tenant and project even when scopes share a platform Profile", async () => {
+  const catalog = await inject({ method: "GET", url: "/admin/agents", role: "SecurityAdmin" });
+  const profileRevisionId = catalog.json().data.defaults.platform;
+  const tenantId = "tenant-default-private-alpha";
+  const projectId = "project-default-private-alpha";
+  const tenantDefault = await inject({
+    method: "PUT", url: `/admin/agent-defaults/tenant:${tenantId}`, role: "TenantAdmin", tenantId,
+    key: "tenant-default-private-alpha", payload: { profileRevisionId },
+  });
+  assert.equal(tenantDefault.statusCode, 200);
+  const projectDefault = await inject({
+    method: "PUT", url: `/admin/agent-defaults/project:${projectId}`, role: "ProjectOwner", tenantId, projectId,
+    key: "project-default-private-alpha", payload: { profileRevisionId },
+  });
+  assert.equal(projectDefault.statusCode, 200);
+
+  const otherTenant = await inject({
+    method: "GET", url: "/admin/agents", role: "TenantAdmin", tenantId: "tenant-default-private-bravo",
+  });
+  assert.deepEqual(Object.keys(otherTenant.json().data.defaults), ["platform"]);
+
+  const owningTenant = await inject({ method: "GET", url: "/admin/agents", role: "TenantAdmin", tenantId });
+  assert.deepEqual(owningTenant.json().data.defaults, {
+    platform: profileRevisionId,
+    [`tenant:${tenantId}`]: profileRevisionId,
+  });
+
+  const owningProject = await inject({ method: "GET", url: "/admin/agents", role: "ProjectOwner", tenantId, projectId });
+  assert.deepEqual(owningProject.json().data.defaults, {
+    platform: profileRevisionId,
+    [`tenant:${tenantId}`]: profileRevisionId,
+    [`project:${projectId}`]: profileRevisionId,
+  });
+});
+
 test("mutations require RBAC and Idempotency-Key", async () => {
   const forbidden = await inject({
     method: "POST",

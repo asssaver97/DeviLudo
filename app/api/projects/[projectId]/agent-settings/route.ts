@@ -11,7 +11,7 @@ export async function GET(request: Request, context: Context) {
     const { projectId } = await context.params;
     const principal = await projectAgentPrincipal(request, projectId);
     if (isLoopbackTestRequest(request)) {
-      return localAdminGet(localAdminRequest(request, "/admin/agents", principal.role), {
+      return localAdminGet(localAdminRequest(request, "/admin/agents", principal.role, undefined, principal), {
         params: Promise.resolve({ segments: ["agents"] }),
       });
     }
@@ -30,7 +30,7 @@ export async function PUT(request: Request, context: Context) {
     const downstream = `/admin/agent-defaults/project:${principal.projectId}`;
     const rewritten = rewrittenJsonRequest(request, forced);
     if (isLoopbackTestRequest(request)) {
-      return localAdminPut(localAdminRequest(rewritten, downstream, "ProjectOwner", forced), {
+      return localAdminPut(localAdminRequest(rewritten, downstream, "ProjectOwner", forced, principal), {
         params: Promise.resolve({ segments: downstream.slice("/admin/".length).split("/") }),
       });
     }

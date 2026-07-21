@@ -86,7 +86,7 @@ export class AdminService {
           lastUsedAt: credentialLastUsedAt[credential.id] ?? credential.lastUsedAt,
         }));
       const defaults = Object.fromEntries([...state.defaults.entries()].filter(([scope, profileId]) =>
-        scope === "platform" || visibleProfileIds.has(profileId)));
+        defaultVisibleTo(scope, actor) && visibleProfileIds.has(profileId)));
       const platformProfile = state.profiles.get(state.defaults.get("platform") ?? "");
       return Object.freeze({
         catalog,
@@ -2067,6 +2067,13 @@ function profileVisibleTo(profile: ProfileRevisionRecord, actor: RequestActor): 
 function credentialVisibleTo(credential: CredentialVersionRecord, actor: RequestActor): boolean {
   if (actor.role === "PlatformAgentAdmin" || actor.role === "SecurityAdmin" || (actor.role === "Auditor" && !actor.tenantId)) return true;
   return actor.role === "TenantAdmin" && credential.scope === "tenant" && credential.scopeId === actor.tenantId;
+}
+
+function defaultVisibleTo(scope: string, actor: RequestActor): boolean {
+  if (actor.role === "PlatformAgentAdmin" || actor.role === "SecurityAdmin" || (actor.role === "Auditor" && !actor.tenantId)) return true;
+  if (scope === "platform") return true;
+  if (scope === `tenant:${actor.tenantId}`) return true;
+  return Boolean(actor.projectId && scope === `project:${actor.projectId}`);
 }
 
 function parseDefaultScope(value: string): { scope: ProfileScope; scopeId: string } {

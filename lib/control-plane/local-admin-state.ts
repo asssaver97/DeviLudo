@@ -5,8 +5,11 @@ import {
   type DemoStoreState,
 } from "./demo-store";
 
-const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v2";
-const LEGACY_SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v1";
+const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v3";
+const LEGACY_SNAPSHOT_SCHEMAS = new Set([
+  "deviludo.local-admin-state.v1",
+  "deviludo.local-admin-state.v2",
+]);
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const COMMAND_KEY = /^[A-Za-z0-9][A-Za-z0-9:._@/-]{0,511}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -107,7 +110,8 @@ export function parseLocalAdminState(serialized: string): DemoStoreState {
   try { envelope = JSON.parse(serialized); }
   catch { throw new Error("本地 Agent 管理状态快照无法解析"); }
   if (!record(envelope)
-    || (envelope.schemaVersion !== SNAPSHOT_SCHEMA && envelope.schemaVersion !== LEGACY_SNAPSHOT_SCHEMA)
+    || (envelope.schemaVersion !== SNAPSHOT_SCHEMA
+      && (typeof envelope.schemaVersion !== "string" || !LEGACY_SNAPSHOT_SCHEMAS.has(envelope.schemaVersion)))
     || !record(envelope.state)) {
     throw new Error("本地 Agent 管理状态快照版本无效");
   }
@@ -210,7 +214,10 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
   for (const credential of value.credentials) {
     if (!record(credential) || typeof credential.id !== "string" || typeof credential.secretRef !== "string"
       || !credential.secretRef.startsWith("vault://") || typeof credential.fingerprint !== "string"
-      || !DIGEST.test(credential.fingerprint)) {
+      || !DIGEST.test(credential.fingerprint) || typeof credential.familyId !== "string"
+      || (credential.scope !== "platform" && credential.scope !== "tenant")
+      || typeof credential.scopeId !== "string" || !credential.scopeId
+      || (credential.scope === "platform" && credential.scopeId !== "global")) {
       throw new Error("本地 Agent 凭据投影无效");
     }
   }

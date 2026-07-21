@@ -46,7 +46,7 @@ export async function POST(request: Request, context: Context) {
     const rewritten = rewrittenJsonRequest(request, forced);
     if (isLoopbackTestRequest(request)) {
       const localPath = downstream.slice("/admin/".length).split("/");
-      return localAdminPost(localAdminRequest(rewritten, downstream, "TenantAdmin", forced), { params: Promise.resolve({ segments: localPath }) });
+      return localAdminPost(localAdminRequest(rewritten, downstream, "TenantAdmin", forced, principal), { params: Promise.resolve({ segments: localPath }) });
     }
     return forwardScopedAgentRequest(rewritten, downstream, principal);
   } catch (error) { return scopedAccessProblem(error); }
@@ -64,7 +64,7 @@ export async function PUT(request: Request, context: Context) {
     const downstream = `/admin/agent-defaults/tenant:${principal.tenantId}`;
     const rewritten = rewrittenJsonRequest(request, forced);
     if (isLoopbackTestRequest(request)) {
-      return localAdminPut(localAdminRequest(rewritten, downstream, "TenantAdmin", forced), {
+      return localAdminPut(localAdminRequest(rewritten, downstream, "TenantAdmin", forced, principal), {
         params: Promise.resolve({ segments: downstream.slice("/admin/".length).split("/") }),
       });
     }

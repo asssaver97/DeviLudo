@@ -7,16 +7,28 @@ function context(path) {
   return { params: Promise.resolve({ segments: path.split("/") }) };
 }
 
-function request(path, method, role, body = {}) {
+function request(path, method, role, body = {}, scope = {}) {
   return new Request(`http://127.0.0.1:3000/api/admin/${path}`, {
     method,
     headers: {
       "content-type": "application/json",
       "idempotency-key": `test-${path}-${crypto.randomUUID()}`,
       "x-deviludo-role": role,
+      ...((role === "TenantAdmin" || role === "ProjectOwner")
+        ? { "x-deviludo-tenant-id": scope.tenantId ?? "tenant-local" }
+        : {}),
+      ...(role === "ProjectOwner" ? { "x-deviludo-project-id": scope.projectId ?? "ember-archipelago" } : {}),
     },
     body: JSON.stringify(body),
   });
+}
+
+function readRequest(role, scope = {}) {
+  return new Request("http://127.0.0.1:3000/api/admin/agents", { headers: {
+    "x-deviludo-role": role,
+    ...(scope.tenantId ? { "x-deviludo-tenant-id": scope.tenantId } : {}),
+    ...(scope.projectId ? { "x-deviludo-project-id": scope.projectId } : {}),
+  } });
 }
 
 test("local Agent admin mutations persist behind RBAC and emit audit records", async () => {
@@ -146,7 +158,7 @@ test("local Agent defaults expose only complete platform, tenant and project Pro
   const payload = await response.json();
   assert.deepEqual(payload.meta.defaults, {
     platform: "profile-claude-platform-r5",
-    "tenant:north-dock": "profile-claude-tenant-r2",
+    "tenant:tenant-local": "profile-claude-tenant-r2",
     "project:ember-archipelago": "profile-codex-project-r1",
   });
   const profiles = new Map(store.profiles.map((profile) => [profile.id, profile]));
@@ -157,6 +169,32 @@ test("local Agent defaults expose only complete platform, tenant and project Pro
     assert.equal(scope === "platform" ? profile.scope : scope.split(":", 1)[0], profile.scope);
     assert.equal(scope === "platform" ? profile.scopeId : scope.slice(scope.indexOf(":") + 1), profile.scopeId);
   }
+});
+
+test("local Agent default selection derives tenant and project scope from the authenticated principal", async () => {
+  resetDemoStore();
+  const wrongTenant = await PUT(request("agent-defaults/project:ember-archipelago", "PUT", "ProjectOwner", {
+    profileRevisionId: "profile-claude-tenant-r2",
+  }, { tenantId: "tenant-alpha", projectId: "ember-archipelago" }), context("agent-defaults/project:ember-archipelago"));
+  assert.equal(wrongTenant.status, 409);
+  assert.equal((await wrongTenant.json()).error.code, "PROFILE_SCOPE_MISMATCH");
+
+  const forgedProject = await PUT(request("agent-defaults/project:ember-archipelago", "PUT", "ProjectOwner", {
+    profileRevisionId: "profile-claude-platform-r5",
+  }, { tenantId: "tenant-alpha", projectId: "another-project" }), context("agent-defaults/project:ember-archipelago"));
+  assert.equal(forgedProject.status, 403);
+  assert.equal((await forgedProject.json()).error.code, "SCOPE_FORBIDDEN");
+
+  const forgedTenant = await PUT(request("agent-defaults/tenant:north-dock", "PUT", "TenantAdmin", {
+    profileRevisionId: "profile-claude-tenant-r2",
+  }, { tenantId: "tenant-alpha" }), context("agent-defaults/tenant:north-dock"));
+  assert.equal(forgedTenant.status, 403);
+  assert.equal((await forgedTenant.json()).error.code, "SCOPE_FORBIDDEN");
+
+  const validPlatformInheritance = await PUT(request("agent-defaults/project:ember-archipelago", "PUT", "ProjectOwner", {
+    profileRevisionId: "profile-claude-platform-r5",
+  }, { tenantId: "tenant-alpha", projectId: "ember-archipelago" }), context("agent-defaults/project:ember-archipelago"));
+  assert.equal(validPlatformInheritance.status, 200);
 });
 
 test("local credential writes return only public metadata and never a SecretRef or plaintext", async () => {
@@ -223,6 +261,53 @@ test("local credential lifecycle creates a new version and can revoke the exact 
   assert.equal((await revoked.json()).data.state, "REVOKED");
   assert.equal(store.credentials.find((item) => item.id === credentialId)?.state, "REVOKED");
   assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "ACTIVE");
+});
+
+test("local scoped Agent projections and credential mutations enforce tenant ownership", async () => {
+  resetDemoStore();
+  const tenantA = { tenantId: "tenant-alpha" };
+  const tenantB = { tenantId: "tenant-bravo" };
+  const createdA = await POST(request("credentials", "POST", "TenantAdmin", {
+    label: "Alpha key", apiKey: "tenant-alpha-secret",
+  }, tenantA), context("credentials"));
+  const credentialA = (await createdA.json()).data;
+  const createdB = await POST(request("credentials", "POST", "TenantAdmin", {
+    label: "Bravo key", apiKey: "tenant-bravo-secret",
+  }, tenantB), context("credentials"));
+  const credentialB = (await createdB.json()).data;
+  const platform = await POST(request("credentials", "POST", "SecurityAdmin", {
+    label: "Platform key", apiKey: "platform-admin-secret",
+  }), context("credentials"));
+  const platformCredential = (await platform.json()).data;
+
+  assert.deepEqual({ scope: credentialA.scope, scopeId: credentialA.scopeId }, { scope: "tenant", scopeId: "tenant-alpha" });
+  assert.deepEqual({ scope: platformCredential.scope, scopeId: platformCredential.scopeId }, { scope: "platform", scopeId: "global" });
+
+  const alphaProjection = await GET(readRequest("TenantAdmin", tenantA), context("agents"));
+  const alpha = (await alphaProjection.json()).meta;
+  assert.deepEqual(alpha.credentials.map((item) => item.id), [credentialA.id]);
+  assert.equal(alpha.credentials.some((item) => "secretRef" in item || "fingerprint" in item), false);
+  assert.equal(alpha.profiles.every((profile) => (profile.scope === "platform" && profile.state === "ACTIVE")
+    || (profile.scope === "tenant" && profile.scopeId === "tenant-alpha")), true);
+  assert.deepEqual(alpha.defaults, { platform: "profile-claude-platform-r5" });
+
+  const bravoProjection = await GET(readRequest("TenantAdmin", tenantB), context("agents"));
+  assert.deepEqual((await bravoProjection.json()).meta.credentials.map((item) => item.id), [credentialB.id]);
+
+  const crossTenantRotate = await POST(request(`credentials/${credentialA.id}/rotate`, "POST", "TenantAdmin", {
+    apiKey: "bravo-cannot-rotate-alpha",
+  }, tenantB), context(`credentials/${credentialA.id}/rotate`));
+  assert.equal(crossTenantRotate.status, 403);
+  assert.equal((await crossTenantRotate.json()).error.code, "CREDENTIAL_SCOPE_FORBIDDEN");
+
+  const projectProjection = await GET(readRequest("ProjectOwner", {
+    tenantId: "tenant-alpha", projectId: "ember-archipelago",
+  }), context("agents"));
+  const project = (await projectProjection.json()).meta;
+  assert.deepEqual(project.credentials, []);
+  assert.equal(project.profiles.some((profile) => profile.scope === "tenant" && profile.scopeId === "north-dock"), false);
+  assert.equal(project.profiles.some((profile) => profile.scope === "project" && profile.scopeId === "ember-archipelago"), true);
+  assert.equal(project.credentials.some((item) => item.id === platformCredential.id), false);
 });
 
 test("local Agent mutations reject unknown and legacy fields before changing state", async () => {
@@ -413,7 +498,7 @@ test("local Installation drains new work and retires only after defaults move aw
 
   const moveDefaultPath = "agent-defaults/project:ember-archipelago";
   const moved = await PUT(
-    request(moveDefaultPath, "PUT", "PlatformAgentAdmin", { profileRevisionId: "profile-claude-platform-r5" }),
+    request(moveDefaultPath, "PUT", "ProjectOwner", { profileRevisionId: "profile-claude-platform-r5" }),
     context(moveDefaultPath),
   );
   assert.equal(moved.status, 200);

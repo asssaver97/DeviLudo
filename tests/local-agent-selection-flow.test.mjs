@@ -19,7 +19,7 @@ test("new local runs lock the inherited Claude Profile while later configuration
   const approved = await approve(projectId, "claude-approval");
   assert.equal(approved.run.agent, "claude-code");
   assert.equal(approved.run.profileRevisionId, "profile-claude-tenant-r2");
-  assert.equal(approved.run.configurationSource, "tenant:north-dock");
+  assert.equal(approved.run.configurationSource, "tenant:tenant-local");
   assert.equal(approved.run.providerRevisionId, "provider-claude-platform-r3");
   assert.equal(approved.run.credentialVersionId, "cred-claude-platform-v4");
   assert.equal(approved.run.exactAgentVersion, "2.1.14");

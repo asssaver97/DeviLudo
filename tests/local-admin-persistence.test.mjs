@@ -114,9 +114,9 @@ test("local Agent administrator snapshots fail closed on corruption and plaintex
   resetDemoStore();
 });
 
-test("local Agent administrator upgrades v1 Provider/Profile projections and writes v2 snapshots", () => {
+test("local Agent administrator upgrades legacy Provider/Profile and credential ownership into v3 snapshots", () => {
   const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
-  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v2");
+  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v3");
   envelope.schemaVersion = "deviludo.local-admin-state.v1";
   const provider = envelope.state.providers[0];
   provider.primaryModel = provider.models.primaryModel;
@@ -131,6 +131,16 @@ test("local Agent administrator upgrades v1 Provider/Profile projections and wri
   profile.fallbackProfileId = profile.fallbackProfileRevisionId;
   delete profile.providerRevisionId; delete profile.credentialVersionId;
   delete profile.budget; delete profile.fallbackProfileRevisionId; delete profile.createdAt;
+  envelope.state.credentials.push({
+    id: "credential-legacy-v1", label: "Legacy unscoped key",
+    secretRef: "vault://kv/data/deviludo/credential-legacy-v1#1",
+    fingerprint: `sha256:${"a".repeat(64)}`, masked: "sha256:aaaa…aaaa",
+    version: 1, state: "ACTIVE", createdAt: "2026-07-17T00:00:00.000Z", rotatedAt: null,
+  });
+  const legacyTenantProfile = envelope.state.profiles.find((item) => item.id === "profile-claude-tenant-r2");
+  legacyTenantProfile.scopeId = "north-dock";
+  envelope.state.defaults["tenant:north-dock"] = "profile-claude-tenant-r2";
+  delete envelope.state.defaults["tenant:tenant-local"];
 
   const migrated = parseLocalAdminState(JSON.stringify(envelope));
   assert.deepEqual(migrated.providers[0].models, {
@@ -142,6 +152,18 @@ test("local Agent administrator upgrades v1 Provider/Profile projections and wri
   assert.equal(migrated.providers[0].credentialVersionId, provider.credentialId);
   assert.deepEqual(migrated.profiles[0].budget, { maxUsd: profile.budgetUsd, maxTurns: 64, timeoutSeconds: 7200 });
   assert.equal(migrated.profiles[0].providerRevisionId, profile.providerId);
+  assert.deepEqual({
+    familyId: migrated.credentials[0].familyId,
+    scope: migrated.credentials[0].scope,
+    scopeId: migrated.credentials[0].scopeId,
+  }, { familyId: "credential-legacy", scope: "platform", scopeId: "global" });
+  assert.equal(migrated.profiles.find((item) => item.id === "profile-claude-tenant-r2").scopeId, "tenant-local");
+  assert.equal(migrated.defaults["tenant:tenant-local"], "profile-claude-tenant-r2");
+  assert.equal(migrated.defaults["tenant:north-dock"], undefined);
+
+  const v2Envelope = JSON.parse(serializeLocalAdminState(migrated));
+  v2Envelope.schemaVersion = "deviludo.local-admin-state.v2";
+  assert.equal(parseLocalAdminState(JSON.stringify(v2Envelope)).credentials[0].scope, "platform");
 });
 
 test("local Agent administrator migration makes every persisted revision immutable", async () => {

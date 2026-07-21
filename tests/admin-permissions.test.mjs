@@ -92,6 +92,7 @@ test("Agent version links accept only the fixed official source and release-note
 test("credential lifecycle controls call the real rotate and revoke APIs", () => {
   const admin = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
   const tenant = readFileSync(new URL("../components/console/TenantAgentSettings.tsx", import.meta.url), "utf8");
+  const project = readFileSync(new URL("../components/console/ProjectAgentSettings.tsx", import.meta.url), "utf8");
 
   assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(matchingCredential\.id\)\}\/rotate`/);
   assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(credential\.id\)\}\/revoke`/);
@@ -102,4 +103,16 @@ test("credential lifecycle controls call the real rotate and revoke APIs", () =>
   assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credentialId\)\}\/rotate/);
   assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credential\.id\)\}\/revoke/);
   assert.match(tenant, /window\.confirm\(/);
+  assert.match(tenant, /planningModel: String\(form\.get\("planningModel"\)/);
+  assert.match(tenant, /smallFastModel: String\(form\.get\("smallFastModel"\)/);
+  assert.match(tenant, /subagentModel: String\(form\.get\("subagentModel"\)/);
+  assert.match(tenant, /maxTurns: Number\(form\.get\("maxTurns"\)/);
+  assert.match(tenant, /timeoutSeconds: Number\(form\.get\("timeoutSeconds"\)/);
+  assert.match(tenant, /fallbackProfileRevisionId/);
+  assert.match(tenant, /draftInstallations\.map/);
+
+  assert.match(project, /currentProvider\.models\.planningModel/);
+  assert.match(project, /currentProvider\.models\.subagentModel/);
+  assert.match(project, /current\.budget\.timeoutSeconds/);
+  assert.match(project, /profile\.providerRevisionId/);
 });

@@ -38,6 +38,21 @@ test("TenantAdmin browser session rejects client scope injection and binds accep
       const body = JSON.parse(new TextDecoder().decode(init.body));
       assert.equal(body.scope, "tenant");
       assert.equal(body.scopeId, tenantId);
+      assert.deepEqual({
+        planningModel: body.planningModel,
+        smallFastModel: body.smallFastModel,
+        subagentModel: body.subagentModel,
+        maxBudgetUsd: body.maxBudgetUsd,
+        maxTurns: body.maxTurns,
+        timeoutSeconds: body.timeoutSeconds,
+      }, {
+        planningModel: "claude-opus-4-6-20260205",
+        smallFastModel: "claude-haiku-4-5-20251001",
+        subagentModel: "claude-sonnet-4-6-20250514",
+        maxBudgetUsd: 31,
+        maxTurns: 88,
+        timeoutSeconds: 5400,
+      });
       assert.equal(headers.get("x-deviludo-role"), "TenantAdmin");
       assert.equal(headers.get("x-deviludo-tenant-id"), tenantId);
       assert.equal(headers.has("x-deviludo-project-id"), false);
@@ -49,8 +64,11 @@ test("TenantAdmin browser session rejects client scope injection and binds accep
       scope: "project", scopeId: "attacker-project", agent: "claude-code",
       installationId: "claude-ready", credentialVersionId: "credential-tenant-v1",
       baseUrl: "https://provider.example/v1", authentication: "x-api-key",
-      primaryModel: "claude-sonnet-4-6-20250514", inputUsdPerMillionTokens: 3,
+      primaryModel: "claude-sonnet-4-6-20250514", planningModel: "claude-opus-4-6-20260205",
+      smallFastModel: "claude-haiku-4-5-20251001", subagentModel: "claude-sonnet-4-6-20250514",
+      inputUsdPerMillionTokens: 3,
       outputUsdPerMillionTokens: 15, dataRegion: "cn-east", retentionPolicy: "zero retention", trainingPolicy: "no training",
+      maxBudgetUsd: 31, maxTurns: 88, timeoutSeconds: 5400,
     });
     const rejected = await tenantMutation(forged, { params: Promise.resolve({ segments: ["profiles"] }) });
     assert.equal(rejected.status, 400);
@@ -60,8 +78,11 @@ test("TenantAdmin browser session rejects client scope injection and binds accep
     const legitimate = browserRequest("POST", pathname, "TenantAdmin", {
       agent: "claude-code", installationId: "claude-ready", credentialVersionId: "credential-tenant-v1",
       baseUrl: "https://provider.example/v1", authentication: "x-api-key",
-      primaryModel: "claude-sonnet-4-6-20250514", inputUsdPerMillionTokens: 3,
+      primaryModel: "claude-sonnet-4-6-20250514", planningModel: "claude-opus-4-6-20260205",
+      smallFastModel: "claude-haiku-4-5-20251001", subagentModel: "claude-sonnet-4-6-20250514",
+      inputUsdPerMillionTokens: 3,
       outputUsdPerMillionTokens: 15, dataRegion: "cn-east", retentionPolicy: "zero retention", trainingPolicy: "no training",
+      maxBudgetUsd: 31, maxTurns: 88, timeoutSeconds: 5400,
     });
     const response = await tenantMutation(legitimate, { params: Promise.resolve({ segments: ["profiles"] }) });
     assert.ifError(connectorFailure);

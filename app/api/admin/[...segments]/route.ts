@@ -6,6 +6,7 @@ import {
   getDemoStore,
   withIdempotency,
   type DemoAuditEvent,
+  type DemoCredential,
   type DemoInstallation,
   type DemoProfile,
   type DemoProvider,
@@ -33,7 +34,11 @@ type RouteContext = { params: Promise<{ segments: string[] }> };
 const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
 const SECURITY_ROLES = ["SecurityAdmin"] as const;
 const PROFILE_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner"] as const;
+const LOCAL_ROLES = ["PlatformAgentAdmin", "SecurityAdmin", "TenantAdmin", "ProjectOwner", "Auditor"] as const;
+type LocalRole = typeof LOCAL_ROLES[number];
+type LocalActor = Readonly<{ role: LocalRole; actorId: string; tenantId: string | null; projectId: string | null }>;
 const EXACT_AGENT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const LOCAL_SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
 const PROFILE_DRAFT_FIELDS = Object.freeze([
   "agent", "installationId", "credentialVersionId", "scope", "scopeId", "baseUrl", "authentication",
   "primaryModel", "planningModel", "smallFastModel", "subagentModel",
@@ -73,6 +78,106 @@ function agentCatalog() {
       approvedVersions: Object.entries(store.agentVersions).filter(([key, state]) => key.startsWith("codex-cli@") && state === "APPROVED").map(([key]) => key.split("@")[1]),
     },
   ];
+}
+
+function localActor(request: Request, expectedRole?: string): LocalActor {
+  const roleValue = expectedRole ?? request.headers.get("x-deviludo-role") ?? "Auditor";
+  if (!LOCAL_ROLES.includes(roleValue as LocalRole)) {
+    throw new HttpProblem(403, "FORBIDDEN", "Local Agent role is not allowed");
+  }
+  const role = roleValue as LocalRole;
+  const tenantId = localScopeHeader(request, "x-deviludo-tenant-id");
+  const projectId = localScopeHeader(request, "x-deviludo-project-id");
+  if (role === "TenantAdmin" && !tenantId) {
+    throw new HttpProblem(403, "TENANT_SCOPE_REQUIRED", "TenantAdmin requests require an authenticated tenant scope");
+  }
+  if (role === "ProjectOwner" && (!tenantId || !projectId)) {
+    throw new HttpProblem(403, "PROJECT_SCOPE_REQUIRED", "ProjectOwner requests require authenticated tenant and project scopes");
+  }
+  if (projectId && !tenantId) {
+    throw new HttpProblem(403, "TENANT_SCOPE_REQUIRED", "A project scope cannot exist without its tenant scope");
+  }
+  const actorId = request.headers.get("x-deviludo-actor-id")?.trim() || role;
+  return Object.freeze({ role, actorId, tenantId, projectId });
+}
+
+function localScopeHeader(request: Request, name: string): string | null {
+  const value = request.headers.get(name)?.trim() ?? "";
+  if (!value) return null;
+  if (!LOCAL_SCOPE_ID.test(value)) throw new HttpProblem(403, "INVALID_SCOPE", `Invalid ${name} binding`);
+  return value;
+}
+
+function localAgentProjection(store: DemoStoreState, actor: LocalActor) {
+  const unrestricted = actor.role === "PlatformAgentAdmin" || actor.role === "SecurityAdmin"
+    || (actor.role === "Auditor" && !actor.tenantId);
+  const profiles = unrestricted ? store.profiles : store.profiles.filter((profile) => {
+    if (profile.scope === "platform") return profile.state === "ACTIVE";
+    if (profile.scope === "tenant") return Boolean(actor.tenantId && profile.scopeId === actor.tenantId);
+    return Boolean(actor.projectId && profile.scopeId === actor.projectId);
+  });
+  const visibleProfileIds = new Set(profiles.map((profile) => profile.id));
+  const visibleProviderIds = new Set(profiles.map((profile) => profile.providerRevisionId));
+  const credentialLastUsedAt = localCredentialLastUsedAt(store);
+  const credentials = store.credentials.filter((credential) => unrestricted
+    || actor.role === "TenantAdmin" && credential.scope === "tenant" && credential.scopeId === actor.tenantId);
+  const defaults = Object.fromEntries(Object.entries(store.defaults).filter(([scope, profileId]) =>
+    localDefaultVisible(scope, actor, unrestricted) && visibleProfileIds.has(profileId)));
+  return {
+    providers: store.providers.filter((provider) => unrestricted || visibleProviderIds.has(provider.id)),
+    profiles,
+    credentials: credentials.map(({ id, familyId, label, scope, scopeId, masked, version, state, createdAt, rotatedAt }) => ({
+      id, familyId, label, scope, scopeId, maskedFingerprint: masked, version, state, createdAt, rotatedAt,
+      lastUsedAt: credentialLastUsedAt[id] ?? null,
+      plaintextRecoverable: false,
+    })),
+    defaults,
+  };
+}
+
+function localDefaultVisible(scope: string, actor: LocalActor, unrestricted: boolean): boolean {
+  if (unrestricted) return true;
+  if (scope === "platform") return true;
+  if (scope === `tenant:${actor.tenantId}`) return true;
+  return Boolean(actor.projectId && scope === `project:${actor.projectId}`);
+}
+
+function assertLocalProfileActor(actor: LocalActor, scope: DemoProfile["scope"], scopeId: string): void {
+  if (actor.role === "SecurityAdmin") return;
+  if (actor.role === "PlatformAgentAdmin" && scope === "platform" && scopeId === "global") return;
+  if (actor.role === "TenantAdmin" && scope === "tenant" && actor.tenantId === scopeId) return;
+  if (actor.role === "ProjectOwner" && scope === "project" && actor.projectId === scopeId && actor.tenantId) return;
+  throw new HttpProblem(403, "SCOPE_FORBIDDEN", `Role ${actor.role} cannot administer ${scope} Agent configuration`);
+}
+
+function assertLocalProfileCredential(
+  actor: LocalActor,
+  scope: DemoProfile["scope"],
+  scopeId: string,
+  credential: DemoCredential,
+): void {
+  const allowed = scope === "platform"
+    ? credential.scope === "platform" && credential.scopeId === "global"
+    : scope === "tenant"
+      ? credential.scope === "tenant" && credential.scopeId === scopeId
+      : credential.scope === "tenant" && credential.scopeId === actor.tenantId;
+  if (!allowed) {
+    throw new HttpProblem(403, "CREDENTIAL_SCOPE_FORBIDDEN", "Profile cannot use a credential from another scope");
+  }
+}
+
+function assertLocalCredentialActor(actor: LocalActor, credential: DemoCredential): void {
+  if (actor.role === "SecurityAdmin") return;
+  if (actor.role === "TenantAdmin" && credential.scope === "tenant" && credential.scopeId === actor.tenantId) return;
+  throw new HttpProblem(403, "CREDENTIAL_SCOPE_FORBIDDEN", "Credential does not belong to the authenticated scope");
+}
+
+function assertLocalDefaultActor(actor: LocalActor, scope: DemoProfile["scope"], scopeId: string): void {
+  if (actor.role === "SecurityAdmin") return;
+  if (scope === "platform" && actor.role === "PlatformAgentAdmin" && scopeId === "global") return;
+  if (scope === "tenant" && actor.role === "TenantAdmin" && actor.tenantId === scopeId) return;
+  if (scope === "project" && actor.role === "ProjectOwner" && actor.projectId === scopeId && actor.tenantId) return;
+  throw new HttpProblem(403, "SCOPE_FORBIDDEN", `Role ${actor.role} cannot update ${scope}:${scopeId}`);
 }
 
 function localOperationalProjection(store: DemoStoreState) {
@@ -191,7 +296,8 @@ export async function GET(request: Request, context: RouteContext) {
     const key = routeKey(segments);
     const store = getDemoStore();
     if (key === "agents") {
-      const credentialLastUsedAt = localCredentialLastUsedAt(store);
+      const actor = localActor(request);
+      const projection = localAgentProjection(store, actor);
       return json({
         data: agentCatalog(),
         meta: {
@@ -203,12 +309,10 @@ export async function GET(request: Request, context: RouteContext) {
           }),
           installations: store.installations,
           rollouts: store.rollouts,
-          providers: store.providers,
-          profiles: store.profiles,
-          credentials: store.credentials.map(({ id, label, masked, version, state, createdAt, rotatedAt }) => ({
-            id, label, masked, version, state, createdAt, rotatedAt, lastUsedAt: credentialLastUsedAt[id] ?? null,
-          })),
-          defaults: store.defaults,
+          providers: projection.providers,
+          profiles: projection.profiles,
+          credentials: projection.credentials,
+          defaults: projection.defaults,
         },
       }, { headers: { "x-deviludo-effective-role": request.headers.get("x-deviludo-role") ?? "Auditor",
         "x-deviludo-admin-auth-mode": "local-fixture" } });
@@ -600,20 +704,28 @@ export async function POST(request: Request, context: RouteContext) {
         || (scope !== "platform" && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(scopeId))) {
         throw new HttpProblem(400, "PROFILE_SCOPE_REJECTED", "Profile scope identifier is invalid");
       }
+      const actor = localActor(request, role);
+      assertLocalProfileActor(actor, scope, scopeId);
       const installationId = requireString(body, "installationId", 160);
-      const installation = getDemoStore().installations.find((item) => item.id === installationId);
+      const currentStore = getDemoStore();
+      const installation = currentStore.installations.find((item) => item.id === installationId);
       if (!installation || installation.agent !== agent || !["READY", "CANARY", "ACTIVE"].includes(installation.state)
-        || !installation.imageDigest || !["APPROVED", "DEPRECATED"].includes(getDemoStore().agentVersions[`${agent}@${installation.version}`])) {
+        || !installation.imageDigest || !["APPROVED", "DEPRECATED"].includes(currentStore.agentVersions[`${agent}@${installation.version}`])) {
         throw new HttpProblem(409, "INSTALLATION_NOT_SELECTABLE", "Profile requires a supply-chain-attested Installation for the selected Agent");
       }
-      const credentialKnown = getDemoStore().credentials.some((item) => item.id === credentialVersionId && item.state === "ACTIVE")
-        || getDemoStore().providers.some((item) => item.agent === agent && item.credentialVersionId === credentialVersionId && item.state === "ACTIVE");
-      if (!credentialKnown) throw new HttpProblem(409, "CREDENTIAL_NOT_SELECTABLE", "Profile requires an active credential version for the selected Agent");
+      const credential = currentStore.credentials.find((item) => item.id === credentialVersionId && item.state === "ACTIVE");
+      const fixtureCredential = scope === "platform" && currentStore.providers.some((item) => item.agent === agent
+        && item.credentialVersionId === credentialVersionId && item.state === "ACTIVE");
+      if (!credential && !fixtureCredential) {
+        throw new HttpProblem(409, "CREDENTIAL_NOT_SELECTABLE", "Profile requires an active credential version for the selected Agent");
+      }
+      if (credential) assertLocalProfileCredential(actor, scope, scopeId, credential);
       const fallbackProfileRevisionId = typeof body.fallbackProfileRevisionId === "string" ? body.fallbackProfileRevisionId : null;
       if (fallbackProfileRevisionId) {
-        const fallback = getDemoStore().profiles.find((item) => item.id === fallbackProfileRevisionId);
-        if (!fallback || fallback.agent !== agent || fallback.state !== "ACTIVE") {
-          throw new HttpProblem(409, "FALLBACK_NOT_SELECTABLE", "Fallback must be an active immutable Profile for the same Agent");
+        const fallback = currentStore.profiles.find((item) => item.id === fallbackProfileRevisionId);
+        if (!fallback || fallback.agent !== agent || fallback.state !== "ACTIVE"
+          || fallback.scope !== scope || fallback.scopeId !== scopeId) {
+          throw new HttpProblem(409, "FALLBACK_NOT_SELECTABLE", "Fallback must be an active immutable Profile for the same Agent and scope");
         }
       }
       return await mutate(lease, `admin:${key}:${idempotency}`, () => {
@@ -648,7 +760,7 @@ export async function POST(request: Request, context: RouteContext) {
             dataRegion,
             retentionPolicy,
             trainingPolicy,
-            confirmedBy: role,
+            confirmedBy: actor.actorId,
             confirmedAt: new Date().toISOString(),
           },
           state: "DRAFT",
@@ -668,9 +780,13 @@ export async function POST(request: Request, context: RouteContext) {
     const profileMatch = /^agent-profiles\/([^/]+)\/(validate|activate|disable)$/.exec(key);
     if (profileMatch) {
       const role = requireRole(request, profileMatch[2] === "activate" ? SECURITY_ROLES : PROFILE_ROLES);
+      const actor = localActor(request, role);
       assertAllowedBodyFields(body, []);
       const profileId = profileMatch[1] ?? "";
       const action = profileMatch[2];
+      const authorizedProfile = getDemoStore().profiles.find((item) => item.id === profileId);
+      if (!authorizedProfile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
+      assertLocalProfileActor(actor, authorizedProfile.scope, authorizedProfile.scopeId);
       if (action === "validate") {
         throw new HttpProblem(
           503,
@@ -682,6 +798,7 @@ export async function POST(request: Request, context: RouteContext) {
         const store = getDemoStore();
         const profile = store.profiles.find((item) => item.id === profileId);
         if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
+        assertLocalProfileActor(actor, profile.scope, profile.scopeId);
         const provider = store.providers.find((item) => item.id === profile.providerRevisionId);
         if (!provider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
         const previousState = profile.state;
@@ -694,7 +811,7 @@ export async function POST(request: Request, context: RouteContext) {
           profile.state = "DISABLED";
           provider.state = "DISABLED";
         }
-        appendDemoAudit(`AGENT_PROFILE_${action?.toUpperCase()}`, profile.id, role, {
+        appendDemoAudit(`AGENT_PROFILE_${action?.toUpperCase()}`, profile.id, actor.actorId, {
           providerRevisionId: provider.id,
           previousState,
           state: profile.state,
@@ -707,6 +824,10 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (key === "credentials") {
       const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
+      const actor = localActor(request, role);
+      const credentialScope = role === "SecurityAdmin"
+        ? { scope: "platform" as const, scopeId: "global" }
+        : { scope: "tenant" as const, scopeId: actor.tenantId! };
       assertAllowedBodyFields(body, ["label", "apiKey"]);
       const label = requireString(body, "label", 120);
       const secret = requireString(body, "apiKey", 8192);
@@ -721,10 +842,13 @@ export async function POST(request: Request, context: RouteContext) {
       }
       return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
-        const id = `credential-${store.credentials.length + 1}-v1`;
+        const familyId = `credential-${store.credentials.length + 1}`;
+        const id = `${familyId}-v1`;
         const credential = {
           id,
+          familyId,
           label,
+          ...credentialScope,
           secretRef: `vault://kv/data/deviludo/${id}#1`,
           fingerprint,
           masked: maskFingerprint(fingerprint),
@@ -734,8 +858,11 @@ export async function POST(request: Request, context: RouteContext) {
           rotatedAt: null,
         };
         store.credentials.push(credential);
-        appendDemoAudit("CREDENTIAL_CREATED", id, role, { label, credentialVersion: credential.version });
+        appendDemoAudit("CREDENTIAL_CREATED", id, actor.actorId, {
+          label, credentialVersion: credential.version, scope: credential.scope, scopeId: credential.scopeId,
+        });
         return { id: credential.id, label: credential.label, maskedFingerprint: credential.masked,
+          familyId: credential.familyId, scope: credential.scope, scopeId: credential.scopeId,
           version: credential.version, state: credential.state, createdAt: credential.createdAt,
           rotatedAt: credential.rotatedAt, plaintextRecoverable: false };
       });
@@ -744,9 +871,13 @@ export async function POST(request: Request, context: RouteContext) {
     const credentialMatch = /^credentials\/([^/]+)\/(rotate|revoke)$/.exec(key);
     if (credentialMatch) {
       const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
+      const actor = localActor(request, role);
       const credentialId = credentialMatch[1] ?? "";
       const action = credentialMatch[2];
       assertAllowedBodyFields(body, action === "rotate" ? ["apiKey"] : []);
+      const authorizedCredential = getDemoStore().credentials.find((item) => item.id === credentialId);
+      if (!authorizedCredential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+      assertLocalCredentialActor(actor, authorizedCredential);
       let replacementFingerprint: `sha256:${string}` | null = null;
       if (action === "rotate") {
         const replacement = requireString(body, "apiKey", 8192);
@@ -774,10 +905,11 @@ export async function POST(request: Request, context: RouteContext) {
         const store = getDemoStore();
         const credential = store.credentials.find((item) => item.id === credentialId);
         if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+        assertLocalCredentialActor(actor, credential);
         if (action === "revoke") {
           const previousState = credential.state;
           credential.state = "REVOKED";
-          appendDemoAudit("CREDENTIAL_REVOKE", credential.id, role, {
+          appendDemoAudit("CREDENTIAL_REVOKE", credential.id, actor.actorId, {
             previousState, state: credential.state, newTokensIssued: false,
           });
           return { id: credential.id, state: credential.state, newTokensIssued: false, plaintextRecoverable: false };
@@ -801,7 +933,7 @@ export async function POST(request: Request, context: RouteContext) {
           rotatedAt,
         };
         store.credentials.push(replacement);
-        appendDemoAudit("CREDENTIAL_ROTATE", credential.id, role, {
+        appendDemoAudit("CREDENTIAL_ROTATE", credential.id, actor.actorId, {
           replacementVersionId: replacement.id, rotatedAt, newTasksOnly: true,
         });
         return {
@@ -849,6 +981,7 @@ export async function PUT(request: Request, context: RouteContext) {
     const match = /^agent-defaults\/(platform|tenant:[a-z0-9-]+|project:[a-z0-9-]+)$/i.exec(key);
     if (!match) throw new HttpProblem(404, "NOT_FOUND", `Unknown admin resource: ${key}`);
     const role = requireRole(request, match[1]?.startsWith("platform") ? VERSION_ROLES : PROFILE_ROLES);
+    const actor = localActor(request, role);
     const body = await bodyObject(request);
     assertAllowedBodyFields(body, ["profileRevisionId"]);
     const profileRevisionId = requireString(body, "profileRevisionId", 160);
@@ -861,11 +994,12 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       const scope = match[1] ?? "platform";
       const [scopeKind, scopeId = "global"] = scope.split(":");
+      assertLocalDefaultActor(actor, scopeKind as DemoProfile["scope"], scopeId);
       const selectable = scopeKind === "platform"
         ? profile.scope === "platform" && profile.scopeId === "global"
         : profile.scope === "platform" && profile.scopeId === "global"
           || profile.scope === scopeKind && profile.scopeId === scopeId
-          || scopeKind === "project" && profile.scope === "tenant" && profile.scopeId === "north-dock";
+          || scopeKind === "project" && profile.scope === "tenant" && profile.scopeId === actor.tenantId;
       if (!selectable) {
         throw new HttpProblem(409, "PROFILE_SCOPE_MISMATCH", "Profile revision is outside the active configuration inherited by this scope");
       }
@@ -885,7 +1019,7 @@ export async function PUT(request: Request, context: RouteContext) {
       const defaultScope = match[1] ?? "platform";
       const previousProfileRevisionId = store.defaults[defaultScope] ?? "none";
       store.defaults[defaultScope] = profileRevisionId;
-      appendDemoAudit("AGENT_DEFAULT_UPDATED", defaultScope, role, {
+      appendDemoAudit("AGENT_DEFAULT_UPDATED", defaultScope, actor.actorId, {
         previousProfileRevisionId, profileRevisionId, affectsRunningTasks: false,
       });
       return { scope: match[1], profileRevisionId, precedence: "project > tenant > platform > claude-code", affectsNewTasksOnly: true };

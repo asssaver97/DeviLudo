@@ -7,7 +7,7 @@ import {
 import { HttpProblem } from "@/lib/control-plane/http";
 import type { LocalLockedAgentProfile } from "@/lib/local-delivery/model";
 
-const LOCAL_TENANT_SCOPE_ID = "north-dock";
+const LOCAL_TENANT_SCOPE_ID = "tenant-local";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/;

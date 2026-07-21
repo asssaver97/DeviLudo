@@ -28,7 +28,10 @@ export type DemoUsageRecord = {
 
 export type DemoCredential = {
   id: string;
+  familyId: string;
   label: string;
+  scope: "platform" | "tenant";
+  scopeId: string;
   secretRef: string;
   fingerprint: string;
   masked: string;
@@ -298,7 +301,7 @@ const initialState = (): DemoStoreState => {
       id: "profile-claude-tenant-r2",
       revision: 2,
       scope: "tenant",
-      scopeId: "north-dock",
+      scopeId: "tenant-local",
       agent: "claude-code",
       providerRevisionId: "provider-claude-platform-r3",
       installationId: "claude-installation-214",
@@ -326,7 +329,7 @@ const initialState = (): DemoStoreState => {
   credentials: [],
   defaults: {
     platform: "profile-claude-platform-r5",
-    "tenant:north-dock": "profile-claude-tenant-r2",
+    "tenant:tenant-local": "profile-claude-tenant-r2",
     "project:ember-archipelago": "profile-codex-project-r1",
   },
   audit: [],
@@ -367,6 +370,7 @@ const globalStore = globalThis as typeof globalThis & { __deviludoDemoStore?: De
 export function getDemoStore(): DemoStoreState {
   globalStore.__deviludoDemoStore ??= initialState();
   backfillProviderProfileShapes(globalStore.__deviludoDemoStore);
+  backfillLocalFixtureTenantScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
@@ -385,6 +389,7 @@ export function resetDemoStore(): DemoStoreState {
 export function restoreDemoStore(snapshot: DemoStoreState): DemoStoreState {
   globalStore.__deviludoDemoStore = structuredClone(snapshot);
   backfillProviderProfileShapes(globalStore.__deviludoDemoStore);
+  backfillLocalFixtureTenantScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
@@ -397,6 +402,7 @@ export function migrateDemoStoreState(snapshot: unknown): DemoStoreState {
   }
   const migrated = structuredClone(snapshot) as DemoStoreState;
   backfillProviderProfileShapes(migrated);
+  backfillLocalFixtureTenantScope(migrated);
   backfillVersionMetadata(migrated);
   backfillCredentialTimestamps(migrated);
   return migrated;
@@ -460,6 +466,17 @@ function backfillProviderProfileShapes(store: DemoStoreState): void {
   }
 }
 
+function backfillLocalFixtureTenantScope(store: DemoStoreState): void {
+  const bundledTenantProfile = store.profiles.find((profile) => profile.id === "profile-claude-tenant-r2");
+  if (bundledTenantProfile?.scope === "tenant" && bundledTenantProfile.scopeId === "north-dock") {
+    bundledTenantProfile.scopeId = "tenant-local";
+  }
+  if (store.defaults["tenant:north-dock"] === "profile-claude-tenant-r2") {
+    store.defaults["tenant:tenant-local"] ??= "profile-claude-tenant-r2";
+    delete store.defaults["tenant:north-dock"];
+  }
+}
+
 function recordString(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = (value as Record<string, unknown>)[key];
@@ -480,7 +497,13 @@ function backfillVersionMetadata(store: DemoStoreState): void {
 }
 
 function backfillCredentialTimestamps(store: DemoStoreState): void {
-  for (const credential of store.credentials) {
+  for (const credentialValue of store.credentials as unknown as Record<string, unknown>[]) {
+    const credential = credentialValue as unknown as DemoCredential;
+    credential.familyId ??= credential.id.replace(/-v\d+$/, "");
+    // Old localhost snapshots carried no ownership proof. Treat them as
+    // platform-only instead of guessing a tenant and risking metadata leaks.
+    credential.scope ??= "platform";
+    credential.scopeId ??= "global";
     if (credential.rotatedAt === undefined) credential.rotatedAt = null;
   }
 }
