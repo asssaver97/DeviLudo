@@ -6,6 +6,11 @@ Agent destination and isolated development Workers.
 - `POST /v1/agent-runs` accepts IDs and immutable digests only over mTLS.
 - PostgreSQL RLS re-resolves the exact `AgentRun`, Provider projection and
   inference authorization before every claim.
+- PostgreSQL migration 060 and the Broker independently validate the primary
+  and fallback AgentVersion receipt digests, exact Adapter interval and built-in
+  Adapter before a short-lived token can be issued. Only database-marked
+  pre-migration Runs (and runtime-identical repair descendants verified by the
+  insert trigger) may retain an explicit null legacy attestation.
 - The Worker receives an expiring `secret://`/Vault reference to a DLRT. The
   token and upstream API key are never stored in PostgreSQL or returned by HTTP.
 - Leases prevent a stale microVM attempt from committing a result.

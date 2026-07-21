@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 59 }, (_, index) => {
+  const offsets = Array.from({ length: 60 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -33,6 +33,28 @@ test("local integration PostgreSQL applies every migration in order", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(packageJson.scripts["infra:status"], "node scripts/local/integration-status.mjs");
   assert.match(packageJson.scripts["infra:up"], /--env-file \.env[\s\S]*--wait/);
+});
+
+test("new AgentRun rows require database-enforced version and Adapter attestations", () => {
+  const migration = readFileSync(new URL("../infra/postgres/060_agent_run_version_attestations.sql", import.meta.url), "utf8");
+  assert.match(migration, /agent_version_attestation_required boolean/);
+  assert.match(migration, /NEW\.agent_version_attestation_required := true/);
+  assert.match(migration, /repairContext'->>'fromRunConfigurationId/);
+  assert.match(migration, /predecessor\.agent_version_attestation_required/);
+  assert.match(migration, /predecessor\.tenant_id = NEW\.tenant_id/);
+  assert.match(migration, /predecessor\.project_id = NEW\.project_id/);
+  assert.match(migration, /NEW\.configuration_lock->>'profileSource'[\s\S]*predecessor_lock->>'profileSource'/);
+  assert.match(migration, /agent_profile_runtime_binding/);
+  assert.match(migration, /agent_profile_version_attestation_is_valid/);
+  assert.match(migration, /agentVersionAttestation/);
+  assert.match(migration, /catalogReceiptDigest/);
+  assert.match(migration, /validationReceiptDigest/);
+  assert.match(migration, /supplyChainEvidenceDigest/);
+  assert.match(migration, /validatedAdapterVersion/);
+  assert.match(migration, /catalogReceiptDigest' ~ '\^\[a-f0-9\]\{64\}\$'/);
+  assert.doesNotMatch(migration, /catalogReceiptDigest' ~ '\^sha256:/);
+  assert.match(migration, /agent_run_version_attestation_shape/);
+  assert.match(migration, /NEW\.agent_version_attestation_required[\s\S]*OLD\.agent_version_attestation_required/);
 });
 
 test("project Steam release configuration is one-time, tenant-isolated and secret-UI-only", () => {

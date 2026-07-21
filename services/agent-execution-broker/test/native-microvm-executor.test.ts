@@ -29,11 +29,16 @@ const specPayload = Object.freeze({ schemaVersion: "deviludo.game-spec.v1", conv
     acceptanceCriteria: Object.freeze([{ id: "core-loop", description: "A full match can be completed.", required: true }]) }) });
 const planPayload = Object.freeze({ schemaVersion: "deviludo.test-plan.v1", conversationId: "conversation-r1", revision: 2,
   testPlan: Object.freeze({ version: "godot-testkit-1.0.0", scenarios: Object.freeze(["Complete one match"]), minimumFps: 60, maxCrashCount: 0 }) });
+const agentVersionAttestation = Object.freeze({
+  catalogReceiptDigest: "1".repeat(64), validationReceiptId: "validation-claude-2.1.14",
+  validationReceiptDigest: "2".repeat(64), supplyChainEvidenceDigest: "3".repeat(64),
+  validatedAdapterVersion: "1.3.0", adapterCompatibility: Object.freeze({ min: "1.3.0", maxExclusive: "1.3.1" }),
+});
 
 function request(overrides: Partial<IsolatedAgentExecutionRequest> = {}): IsolatedAgentExecutionRequest {
   return Object.freeze({ tenantId, projectId, runId, attemptId, resolutionDigest: "a".repeat(64),
     profileRevisionId: "profile-r1", installationId: "installation-r1", imageDigest: `sha256:${"b".repeat(64)}`,
-    exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code",
+    exactAgentVersion: "2.1.14", adapterVersion: "1.3.0", agentVersionAttestation, agent: "claude-code",
     providerRevisionId: "provider-r1", providerProtocol: "anthropic-messages",
     providerBaseUrl: "https://third-party.example.invalid/v1", credentialVersionId: "credential-v1",
     model: "gateway/claude-sonnet-4-6-20250514",

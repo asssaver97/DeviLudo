@@ -48,7 +48,11 @@ function request() { return createCandidatePublicationRequest({ tenantId, projec
 
 function lock(): LockedAgentExecution { return Object.freeze({ tenantId, projectId, runId, resolutionDigest,
   profileRevisionId: "profile-r1", installationId: "installation-r1", imageDigest: `sha256:${"e".repeat(64)}`,
-  exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code", providerRevisionId: "provider-r1",
+  exactAgentVersion: "2.1.14", adapterVersion: "1.3.0", agentVersionAttestation: Object.freeze({
+    catalogReceiptDigest: "1".repeat(64), validationReceiptId: "validation-claude-2.1.14",
+    validationReceiptDigest: "2".repeat(64), supplyChainEvidenceDigest: "3".repeat(64),
+    validatedAdapterVersion: "1.3.0", adapterCompatibility: Object.freeze({ min: "1.3.0", maxExclusive: "1.3.1" }),
+  }), agent: "claude-code", providerRevisionId: "provider-r1",
   providerProtocol: "anthropic-messages", providerBaseUrl: "https://gateway.example.invalid/v1", credentialVersionId: "credential-v1",
   model: "gateway/claude-sonnet-4-6-20250514",
   modelRoles: { primaryModel: "gateway/claude-sonnet-4-6-20250514",

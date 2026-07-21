@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
+import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import type { AgentVersionAttestationLock } from "../../agent-configuration/src/contracts";
 import type { AgentExecutionRequest, AgentExecutionStatus, LockedAgentExecution } from "./contracts";
 import { parseAgentExecutionRequest, validateAgentExecutionStatus, validateAuthoritativeResult } from "./contracts";
 import {
@@ -11,6 +13,7 @@ import {
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
+const SAFE_ATTESTATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 type RepairPlatform = NonNullable<LockedAgentExecution["repairContext"]>["failedPlatforms"][number];
 
 type AuthorityRow = {
@@ -31,6 +34,7 @@ type AuthorityRow = {
   spec_revision_id: string;
   test_plan_revision_id: string;
   source_baseline_receipt_id: string;
+  agent_version_attestation_required: boolean;
   authorization_profile_revision_id: string;
   authorization_provider_revision_id: string;
   authorization_credential_version_id: string;
@@ -309,6 +313,7 @@ async function selectAuthority(client: PostgresWorkflowClient, tenantId: string,
             run.model, run.credential_version_id, run.resolution_digest,
             run.configuration_lock, run.spec_revision_id::text,
             run.test_plan_revision_id::text, run.source_baseline_receipt_id::text,
+            run.agent_version_attestation_required,
             authorization.profile_revision_id AS authorization_profile_revision_id,
             authorization.provider_revision_id AS authorization_provider_revision_id,
             authorization.credential_version_id AS authorization_credential_version_id,
@@ -365,6 +370,24 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
   const value = record(row.configuration_lock);
   const primaryBudget = record(value.budget);
   const primaryModelRoles = parseModelRoles(value.modelRoles);
+  if (typeof row.agent_version_attestation_required !== "boolean") invalid();
+  const primaryAgentVersionAttestation = parseAgentVersionAttestation(
+    value.agentVersionAttestation,
+    value.agent,
+    value.adapterVersion,
+    row.agent_version_attestation_required,
+  );
+  const fallbackValue = value.fallback === null || value.fallback === undefined
+    ? null
+    : record(value.fallback);
+  const fallbackAgentVersionAttestation = fallbackValue === null
+    ? null
+    : parseAgentVersionAttestation(
+      fallbackValue.agentVersionAttestation,
+      fallbackValue.agent,
+      fallbackValue.adapterVersion,
+      row.agent_version_attestation_required,
+    );
   const authBudget = record(row.authorization_budget);
   if (row.id !== request.lockedRunConfigurationId || row.tenant_id !== request.tenantId || row.project_id !== request.projectId
     || !["QUEUED", "PREPARING", "RUNNING", "WAITING_PROVIDER", "SUCCEEDED", "FAILED", "CANCELLED"].includes(row.state)
@@ -387,6 +410,7 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
   let budget = primaryBudget;
   let authorizationNonce = row.authorization_nonce;
   let authorizationExpiresAt = row.authorization_expires_at;
+  let agentVersionAttestation = primaryAgentVersionAttestation;
   const failoverValues = [row.failover_from_profile_revision_id, row.failover_from_provider_revision_id,
     row.failover_to_profile_revision_id, row.failover_to_provider_revision_id,
     row.failover_to_credential_version_id, row.failover_to_models, row.failover_to_budget,
@@ -394,7 +418,8 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
   const hasFailover = failoverValues.some((entry) => entry !== null && entry !== undefined);
   if (hasFailover) {
     if (failoverValues.some((entry) => entry === null || entry === undefined)) invalid();
-    const fallback = record(value.fallback);
+    if (fallbackValue === null) invalid();
+    const fallback = fallbackValue;
     const fallbackModels = parseModelRoles(fallback.modelRoles);
     const fallbackBudget = record(fallback.budget);
     const fallbackAuthorizationBudget = record(row.failover_to_budget);
@@ -415,6 +440,7 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     budget = fallbackBudget;
     authorizationNonce = string(row.failover_authorization_nonce);
     authorizationExpiresAt = string(row.failover_authorization_expires_at);
+    agentVersionAttestation = fallbackAgentVersionAttestation;
   }
   const agent = runtime.agent;
   const protocol = runtime.providerProtocol;
@@ -428,6 +454,7 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     resolutionDigest: row.resolution_digest, profileRevisionId: string(runtime.profileRevisionId),
     installationId: string(runtime.installationId), imageDigest: string(runtime.imageDigest),
     exactAgentVersion: string(runtime.exactAgentVersion), adapterVersion: string(runtime.adapterVersion),
+    agentVersionAttestation,
     agent, providerRevisionId: string(runtime.providerRevisionId), providerProtocol: protocol,
     providerBaseUrl: string(runtime.providerBaseUrl), credentialVersionId: string(runtime.credentialVersionId),
     model: modelRoles.primaryModel, modelRoles, authorizedModels: Object.freeze([...authorizedModels]),
@@ -439,6 +466,47 @@ function parseAuthority(row: AuthorityRow, request: AgentExecutionRequest): Lock
     sourceBaselineReceiptId: row.source_baseline_receipt_id,
     baseCommitSha: string(value.commitSha), sourceDigest: string(value.sourceDigest),
     repairContext,
+  });
+}
+
+function parseAgentVersionAttestation(
+  value: unknown,
+  agentValue: unknown,
+  adapterVersionValue: unknown,
+  required: boolean,
+): AgentVersionAttestationLock | null {
+  if (value === null || value === undefined) {
+    if (required) invalid();
+    return null;
+  }
+  const agent = agentValue;
+  const adapterVersion = string(adapterVersionValue);
+  if ((agent !== "claude-code" && agent !== "codex-cli")
+    || (required && !isBuiltInAdapterVersion(agent, adapterVersion))) invalid();
+  const attestation = record(value);
+  const expectedKeys = ["adapterCompatibility", "catalogReceiptDigest", "supplyChainEvidenceDigest",
+    "validatedAdapterVersion", "validationReceiptDigest", "validationReceiptId"];
+  if (JSON.stringify(Object.keys(attestation).sort()) !== JSON.stringify([...expectedKeys].sort())) invalid();
+  const compatibility = record(attestation.adapterCompatibility);
+  if (JSON.stringify(Object.keys(compatibility).sort()) !== JSON.stringify(["maxExclusive", "min"])) invalid();
+  const validatedAdapterVersion = string(attestation.validatedAdapterVersion);
+  const adapterCompatibility = Object.freeze({
+    min: string(compatibility.min),
+    maxExclusive: string(compatibility.maxExclusive),
+  });
+  if (!isAdapterVersionAttested(adapterVersion, validatedAdapterVersion, adapterCompatibility)
+    || typeof attestation.validationReceiptId !== "string"
+    || !SAFE_ATTESTATION_ID.test(attestation.validationReceiptId)
+    || ![attestation.catalogReceiptDigest, attestation.validationReceiptDigest,
+      attestation.supplyChainEvidenceDigest]
+      .every((digestValue) => typeof digestValue === "string" && SHA256.test(digestValue))) invalid();
+  return Object.freeze({
+    catalogReceiptDigest: attestation.catalogReceiptDigest as string,
+    validationReceiptId: attestation.validationReceiptId,
+    validationReceiptDigest: attestation.validationReceiptDigest as string,
+    supplyChainEvidenceDigest: attestation.supplyChainEvidenceDigest as string,
+    validatedAdapterVersion,
+    adapterCompatibility,
   });
 }
 

@@ -30,6 +30,18 @@ const attemptId = "66666666-6666-4666-8666-666666666666";
 const now = new Date("2030-01-01T00:00:00.000Z");
 const candidateKey = generateKeyPairSync("ed25519").privateKey;
 
+function versionAttestation(adapterVersion = "1.3.0") {
+  const [major, minor, patch] = adapterVersion.split(".");
+  return Object.freeze({
+    catalogReceiptDigest: "3".repeat(64),
+    validationReceiptId: `validation-claude-${adapterVersion}`,
+    validationReceiptDigest: "4".repeat(64),
+    supplyChainEvidenceDigest: "5".repeat(64),
+    validatedAdapterVersion: adapterVersion,
+    adapterCompatibility: Object.freeze({ min: adapterVersion, maxExclusive: `${major}.${minor}.${Number(patch) + 1}` }),
+  });
+}
+
 function request(): AgentExecutionRequest {
   return Object.freeze({
     schemaVersion: "deviludo.agent-execution.v1", operationKey: "workflow-job:44444444-4444-4444-8444-444444444444",
@@ -42,7 +54,7 @@ function lock(): LockedAgentExecution {
   return Object.freeze({
     tenantId, projectId, runId, resolutionDigest: "b".repeat(64), profileRevisionId: "profile-r1",
     installationId: "installation-r1", imageDigest: `sha256:${"c".repeat(64)}`, exactAgentVersion: "2.1.14",
-    adapterVersion: "adapter-1.0.0", agent: "claude-code", providerRevisionId: "provider-r1",
+    adapterVersion: "1.3.0", agentVersionAttestation: versionAttestation(), agent: "claude-code", providerRevisionId: "provider-r1",
     providerProtocol: "anthropic-messages", providerBaseUrl: "https://gateway.example.invalid/v1",
     credentialVersionId: "credential-v1", model: "gateway/claude-sonnet-4-6-20250514",
     modelRoles: Object.freeze({ primaryModel: "gateway/claude-sonnet-4-6-20250514",
@@ -113,6 +125,7 @@ test("PostgreSQL cancellation projection remains queryable after inference autho
     imageDigest: locked.imageDigest,
     exactAgentVersion: locked.exactAgentVersion,
     adapterVersion: locked.adapterVersion,
+    agentVersionAttestation: locked.agentVersionAttestation,
     agent: locked.agent,
     providerRevisionId: locked.providerRevisionId,
     providerProtocol: locked.providerProtocol,
@@ -131,7 +144,7 @@ test("PostgreSQL cancellation projection remains queryable after inference autho
     repairContext: null,
   };
   const resolutionDigest = sha256Canonical(configurationWithoutDigest);
-  const authority = {
+  const authority: Record<string, unknown> = {
     id: runId, tenant_id: tenantId, project_id: projectId, state: "CANCELLED",
     profile_revision_id: locked.profileRevisionId, installation_id: locked.installationId,
     image_digest: locked.imageDigest, adapter_version: locked.adapterVersion,
@@ -139,6 +152,7 @@ test("PostgreSQL cancellation projection remains queryable after inference autho
     model: locked.model, credential_version_id: locked.credentialVersionId, resolution_digest: resolutionDigest,
     configuration_lock: { ...configurationWithoutDigest, resolutionDigest }, spec_revision_id: locked.specRevisionId,
     test_plan_revision_id: locked.testPlanRevisionId, source_baseline_receipt_id: locked.sourceBaselineReceiptId,
+    agent_version_attestation_required: true,
     authorization_profile_revision_id: locked.profileRevisionId,
     authorization_provider_revision_id: locked.providerRevisionId,
     authorization_credential_version_id: locked.credentialVersionId,
@@ -381,7 +395,7 @@ test("PostgreSQL Provider wait commits before returning 409 semantics", async ()
   const sql: string[] = [];
   const lockWithoutDigest = {
     profileRevisionId: "profile-r1", installationId: "installation-r1", imageDigest: `sha256:${"c".repeat(64)}`,
-    exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code",
+    exactAgentVersion: "2.1.14", adapterVersion: "1.3.0", agentVersionAttestation: versionAttestation(), agent: "claude-code",
     providerRevisionId: "provider-r1", providerProtocol: "anthropic-messages",
     providerBaseUrl: "https://gateway.example.invalid/v1", credentialVersionId: "credential-v1",
     modelRoles: { primaryModel: "gateway/claude-sonnet-4-6-20250514",
@@ -395,13 +409,14 @@ test("PostgreSQL Provider wait commits before returning 409 semantics", async ()
     commitSha: "d".repeat(40), sourceDigest: "e".repeat(64),
   };
   const resolutionDigest = sha256Canonical(lockWithoutDigest);
-  const authority = {
+  const authority: Record<string, unknown> = {
     id: runId, tenant_id: tenantId, project_id: projectId, state: "QUEUED",
     profile_revision_id: "profile-r1", installation_id: "installation-r1", image_digest: `sha256:${"c".repeat(64)}`,
-    adapter_version: "adapter-1.0.0", exact_agent_version: "2.1.14", provider_revision_id: "provider-r1",
+    adapter_version: "1.3.0", exact_agent_version: "2.1.14", provider_revision_id: "provider-r1",
     model: "gateway/claude-sonnet-4-6-20250514", credential_version_id: "credential-v1", resolution_digest: resolutionDigest,
     configuration_lock: { ...lockWithoutDigest, resolutionDigest }, spec_revision_id: lockWithoutDigest.specRevisionId,
     test_plan_revision_id: lockWithoutDigest.testPlanRevisionId, source_baseline_receipt_id: lockWithoutDigest.sourceBaselineReceiptId,
+    agent_version_attestation_required: true,
     authorization_profile_revision_id: "profile-r1", authorization_provider_revision_id: "provider-r1",
     authorization_credential_version_id: "credential-v1", authorization_models: ["gateway/claude-sonnet-4-6-20250514"],
     authorization_budget: { maxCostUsd: 10 }, authorization_nonce: "nonce-r1", authorization_state: "ACTIVE",
@@ -420,6 +435,49 @@ test("PostgreSQL Provider wait commits before returning 409 semantics", async ()
   };
   const pool: PostgresWorkflowPool = { async connect() { return client; } };
   const store = new PostgresAgentExecutionOperations(pool);
+  const setAuthorityLock = (candidate: Record<string, unknown>, required: boolean) => {
+    const digest = sha256Canonical(candidate);
+    authority.resolution_digest = digest;
+    authority.configuration_lock = { ...candidate, resolutionDigest: digest };
+    authority.agent_version_attestation_required = required;
+  };
+  const legacyLock = Object.fromEntries(
+    Object.entries(lockWithoutDigest).filter(([key]) => key !== "agentVersionAttestation"),
+  );
+  const driftedLock = {
+    ...lockWithoutDigest,
+    agentVersionAttestation: {
+      ...versionAttestation(),
+      adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.2" },
+    },
+  };
+  const prefixedDigestLock = {
+    ...lockWithoutDigest,
+    agentVersionAttestation: {
+      ...versionAttestation(),
+      catalogReceiptDigest: `sha256:${"3".repeat(64)}`,
+    },
+  };
+  for (const invalidLock of [legacyLock, driftedLock, prefixedDigestLock]) {
+    sql.length = 0;
+    setAuthorityLock(invalidLock, true);
+    await assert.rejects(store.reserve({ submitterSpiffeId: "spiffe://deviludo.internal/service/agent-worker",
+      request: request(), createdAt: now.toISOString() }), /PostgreSQL Agent execution operation is invalid/);
+    assert.equal(sql.at(-1), "ROLLBACK");
+    assert.equal(sql.some((statement) => statement.includes("INSERT INTO deviludo.agent_execution_operations")), false);
+  }
+
+  // Rows that existed before migration 060 are the only compatibility path;
+  // the database-owned marker is false and the Broker still verifies the full
+  // legacy lock digest before preserving its Provider wait.
+  sql.length = 0;
+  setAuthorityLock(legacyLock, false);
+  await assert.rejects(store.reserve({ submitterSpiffeId: "spiffe://deviludo.internal/service/agent-worker",
+    request: request(), createdAt: now.toISOString() }), (error: unknown) => error instanceof AgentProviderUnavailable);
+  assert.equal(sql.at(-1), "COMMIT");
+
+  sql.length = 0;
+  setAuthorityLock(lockWithoutDigest, true);
   await assert.rejects(store.reserve({ submitterSpiffeId: "spiffe://deviludo.internal/service/agent-worker",
     request: request(), createdAt: now.toISOString() }), (error: unknown) => error instanceof AgentProviderUnavailable);
   assert.equal(sql.at(-1), "COMMIT");
@@ -434,7 +492,7 @@ test("PostgreSQL Broker activates only the exact locked same-Agent fallback", as
   const fallback = {
     profileRevisionId: "profile-fallback-r1", installationId: "installation-fallback-r1",
     imageDigest: `sha256:${"2".repeat(64)}`, exactAgentVersion: "2.1.15",
-    adapterVersion: "adapter-1.0.1", agent: "claude-code",
+    adapterVersion: "1.3.0", agentVersionAttestation: versionAttestation(), agent: "claude-code",
     providerRevisionId: "provider-fallback-r1", providerProtocol: "anthropic-messages",
     providerBaseUrl: "https://fallback.example.invalid/v1", credentialVersionId: "credential-fallback-v1",
     modelRoles: { primaryModel: fallbackModel, planningModel: fallbackModel,
@@ -445,7 +503,7 @@ test("PostgreSQL Broker activates only the exact locked same-Agent fallback", as
   const lockWithoutDigest = {
     profileSource: `project:${projectId}`, profileRevisionId: "profile-r1",
     installationId: "installation-r1", imageDigest: `sha256:${"c".repeat(64)}`,
-    exactAgentVersion: "2.1.14", adapterVersion: "adapter-1.0.0", agent: "claude-code",
+    exactAgentVersion: "2.1.14", adapterVersion: "1.3.0", agentVersionAttestation: versionAttestation(), agent: "claude-code",
     providerRevisionId: "provider-r1", providerProtocol: "anthropic-messages",
     providerBaseUrl: "https://gateway.example.invalid/v1", credentialVersionId: "credential-v1",
     modelRoles: { primaryModel, planningModel: primaryModel, smallFastModel: primaryModel, subagentModel: primaryModel },
@@ -461,11 +519,12 @@ test("PostgreSQL Broker activates only the exact locked same-Agent fallback", as
   const authority = () => ({
     id: runId, tenant_id: tenantId, project_id: projectId, state: "QUEUED",
     profile_revision_id: "profile-r1", installation_id: "installation-r1", image_digest: `sha256:${"c".repeat(64)}`,
-    adapter_version: "adapter-1.0.0", exact_agent_version: "2.1.14", provider_revision_id: "provider-r1",
+    adapter_version: "1.3.0", exact_agent_version: "2.1.14", provider_revision_id: "provider-r1",
     model: primaryModel, credential_version_id: "credential-v1", resolution_digest: resolutionDigest,
     configuration_lock: { ...lockWithoutDigest, resolutionDigest }, spec_revision_id: lockWithoutDigest.specRevisionId,
     test_plan_revision_id: lockWithoutDigest.testPlanRevisionId,
     source_baseline_receipt_id: lockWithoutDigest.sourceBaselineReceiptId,
+    agent_version_attestation_required: true,
     authorization_profile_revision_id: "profile-r1", authorization_provider_revision_id: "provider-r1",
     authorization_credential_version_id: "credential-v1", authorization_models: [primaryModel],
     authorization_budget: { maxCostUsd: 10 }, authorization_nonce: "nonce-r1", authorization_state: "ACTIVE",
@@ -499,6 +558,17 @@ test("PostgreSQL Broker activates only the exact locked same-Agent fallback", as
   };
   const pool: PostgresWorkflowPool = { async connect() { return client; } };
   const store = new PostgresAgentExecutionOperations(pool);
+  const acceptedFallbackAttestation = fallback.agentVersionAttestation;
+  fallback.agentVersionAttestation = {
+    ...acceptedFallbackAttestation,
+    adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.2" },
+  };
+  await assert.rejects(store.reserve({ submitterSpiffeId: "spiffe://deviludo.internal/service/agent-worker",
+    request: request(), createdAt: now.toISOString() }), /PostgreSQL Agent execution operation is invalid/);
+  assert.equal(failedOver, false);
+  assert.equal(sql.at(-1), "ROLLBACK");
+  fallback.agentVersionAttestation = acceptedFallbackAttestation;
+  sql.length = 0;
   const result = await store.reserve({ submitterSpiffeId: "spiffe://deviludo.internal/service/agent-worker",
     request: request(), createdAt: now.toISOString() });
   assert.equal(result.status.providerRevisionId, fallback.providerRevisionId);

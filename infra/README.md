@@ -13,7 +13,7 @@ PostgreSQL, Redis, Temporal, MinIO, Vault and the OpenTelemetry health endpoint
 are exposed only on `127.0.0.1`. Host-started DeviLudo services therefore use
 the same loopback `DATABASE_URL`, authenticated `REDIS_URL`, `TEMPORAL_ADDRESS`,
 `S3_ENDPOINT`, `VAULT_ADDR` and telemetry values as the Compose stack. The
-status command authenticates to PostgreSQL and Redis, proves migration `059` is
+status command authenticates to PostgreSQL and Redis, proves migration `060` is
 present, and checks every other dependency without printing credentials. Stop
 the containers with `npm run infra:down`.
 
@@ -98,7 +98,12 @@ tenant-RLS Runner Toolchain Publisher ledger. The service revalidates signed
 tenant assignment, while insert guards bind every new revision to current
 ONLINE Runner capabilities and the exact supply-chain evidence. Migration `059`
 adds one-time, actor-bound Steam project configuration intents and immutable
-Depot/Release revisions without storing Beta branch passwords. All fifty-nine
+Depot/Release revisions without storing Beta branch passwords. Migration `060`
+marks pre-migration Agent runs as historical, forces every ordinary new Run to
+carry the exact AgentVersion/Adapter supply-chain proof in its primary and
+fallback lock, and permits proof-free repair descendants only when a database
+trigger verifies the same immutable runtime identity against a historical
+predecessor in the same tenant/project. All sixty
 migrations are mounted in numeric order for a newly initialized local PostgreSQL volume.
 Docker's initialization directory is not rerun for an existing volume, so an
 existing development database must be migrated explicitly before using newer

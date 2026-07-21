@@ -27,7 +27,7 @@ export function resolveIntegrationConfig(env = process.env) {
 export async function inspectLocalIntegration(env = process.env, probes = defaultProbes()) {
   const config = resolveIntegrationConfig(env);
   const checks = [
-    ["PostgreSQL schema 059", () => probes.postgres(config.database)],
+    ["PostgreSQL schema 060", () => probes.postgres(config.database)],
     ["Redis authenticated PING", () => probes.redis(config.redis)],
     ["Temporal transport", () => probes.tcp(config.temporal)],
     ["MinIO health", () => probes.http(new URL("/minio/health/live", config.minio))],
@@ -57,8 +57,15 @@ async function postgresProbe(url) {
   const client = new Client({ connectionString: url.href, connectionTimeoutMillis: DEFAULT_TIMEOUT_MS, ssl: false });
   try {
     await client.connect();
-    const result = await client.query("SELECT to_regclass('deviludo.steam_project_configuration_intents')::text AS latest_schema");
-    if (result.rows[0]?.latest_schema !== "deviludo.steam_project_configuration_intents") {
+    const result = await client.query(`SELECT
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'deviludo' AND table_name = 'agent_runs'
+           AND column_name = 'agent_version_attestation_required'
+      ) AND to_regprocedure(
+        'deviludo.agent_profile_version_attestation_is_valid(jsonb)'
+      ) IS NOT NULL AS latest_schema`);
+    if (result.rows[0]?.latest_schema !== true) {
       throw new Error("latest migration is missing");
     }
   } finally {

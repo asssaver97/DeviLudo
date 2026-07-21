@@ -109,9 +109,14 @@ Fresh `AgentRun` resolution also revalidates the selected AgentVersion's
 catalog/validation receipts and exact half-open Adapter compatibility interval,
 then embeds that evidence in the immutable configuration lock for both the
 primary Profile and an explicitly approved fallback. A digest-valid historical
-lock without this field can continue only through its existing repair lineage;
-it is marked with a null attestation and never upgraded from moving catalog
-state.
+lock without this field can continue only when PostgreSQL migration 060 marked
+the original row as historical, or when the insert trigger proves a repair
+descendant has the same Agent/Profile/image/Adapter/Provider/model/budget
+identity as a historical predecessor in the same tenant/project. Ordinary new
+inserts are forced back to strict mode even if a caller supplies the legacy
+flag. The execution Broker independently parses the primary and fallback proof
+before it can issue a short-lived inference token or dispatch a microVM; a null
+attestation is never upgraded from moving catalog state.
 
 ## Credential and provider boundary
 

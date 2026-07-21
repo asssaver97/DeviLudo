@@ -135,7 +135,7 @@ npm run infra:up
 npm run infra:status
 ```
 
-依赖服务只绑定到 `127.0.0.1`。状态检查会认证 PostgreSQL/Redis、确认数据库已应用到 migration `059`，并验证 Temporal、MinIO、Vault 与 OTel Collector。使用 `npm run infra:down` 停止。该 Compose 仅用于开发；生产应使用高可用 PostgreSQL/PITR、Temporal 集群、TLS Redis、版本化并锁定的 S3、自动解封 Vault/KMS，以及独立网络分区的开发 Worker、E2E Runner、Inference Connector 和 Steam Publisher。
+依赖服务只绑定到 `127.0.0.1`。状态检查会认证 PostgreSQL/Redis、确认数据库已应用到 migration `060`，并验证 Temporal、MinIO、Vault 与 OTel Collector。使用 `npm run infra:down` 停止。该 Compose 仅用于开发；生产应使用高可用 PostgreSQL/PITR、Temporal 集群、TLS Redis、版本化并锁定的 S3、自动解封 Vault/KMS，以及独立网络分区的开发 Worker、E2E Runner、Inference Connector 和 Steam Publisher。
 
 ## API
 
