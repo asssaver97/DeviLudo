@@ -44,7 +44,10 @@ import {
 import { postgresWorkflowPoolFromEnv } from "../src/node-postgres";
 import { MtlsCommandDispatcher } from "../src/mtls-dispatcher";
 import { temporalTlsConfigFromEnv } from "../src/temporal-tls";
-import { dispatchKey } from "../src/workflows/game-delivery.workflow";
+import {
+  AGENT_CODE_REVIEW_GATE_PATCH,
+  dispatchKey,
+} from "../src/workflows/game-delivery.workflow";
 import { GameDeliveryWorkflow } from "../../../lib/orchestration/game-delivery";
 import {
   DELIVERY_PROJECTION_SCHEMA_VERSION,
@@ -1029,4 +1032,5 @@ test("Temporal can bundle the deterministic workflow and signal-backed waits", a
   const bundle = await bundleWorkflowCode({ workflowsPath, webpackConfigHook: temporalWebpackConfigHook });
   assert.ok(bundle.code.length > 10_000);
   assert.match(bundle.code, /gameDeliveryWorkflow/);
+  assert.ok(bundle.code.includes(AGENT_CODE_REVIEW_GATE_PATCH));
 });

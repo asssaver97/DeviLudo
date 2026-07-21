@@ -28,6 +28,7 @@ export const deliverySnapshotQuery = defineQuery<DeliverySnapshot>("deliverySnap
 export const deliveryNextCommandQuery = defineQuery<DeliveryCommand>("deliveryNextCommand");
 export const AUTOMATIC_REPAIR_SUCCESSOR_RUNS_PATCH = "automatic-repair-successor-runs-v1";
 export const BOUNDED_AUTOMATIC_REPAIRS_PATCH = "bounded-automatic-repairs-v1";
+export const AGENT_CODE_REVIEW_GATE_PATCH = "agent-code-review-gate-v1";
 
 const activities = proxyActivities<DeliveryActivities>({
   startToCloseTimeout: "10 minutes",
@@ -54,6 +55,10 @@ export async function gameDeliveryWorkflow(
     automaticRepairLimit: patched(BOUNDED_AUTOMATIC_REPAIRS_PATCH)
       ? DEFAULT_AUTOMATIC_REPAIR_LIMIT
       : null,
+    // Upgrade-safe: histories created before this marker keep their original
+    // AGENT_COMPLETED shape, while every new workflow records the marker and
+    // requires the immutable review receipt before candidate E2E.
+    requireAgentCodeReview: patched(AGENT_CODE_REVIEW_GATE_PATCH),
   });
   const queue: DeliverySignal[] = [];
   let lastDispatchedKey: string | null = null;
