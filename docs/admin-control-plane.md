@@ -19,6 +19,8 @@ Configure the control-plane workload's `DEVILUDO_ADMIN_SESSION_HMAC_KEY` with th
 
 The Connector must present the approved Web administration SPIFFE identity over mTLS. It must not expose a generic proxy or accept a caller-selected destination. The Web allow-list contains only the documented Agent administration routes and never forwards cookies, Authorization, caller role headers or query strings.
 
+The version catalog projects the exact package source, source digest, discovery time, release-notes URL, signature result, integrity, SBOM, vulnerability state and validation receipts. The browser renders source and release-note links only when HTTPS, host, repository path, Agent kind and exact package version all match the built-in Claude Code or Codex CLI allow-list. A same-host link for another version, a redirect-style query, credentials, nonstandard port or lookalike host invalidates the projection instead of producing a clickable link.
+
 Credential request bodies are capped at 64 KiB and are never logged. Responses are capped, must be JSON, may not contain Vault `SecretRef` values, and are rejected if they reproduce submitted credential plaintext. The browser receives only masked fingerprints and public credential metadata.
 
 Rotating a credential used by an active Profile is a gated revision operation,

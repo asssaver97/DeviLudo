@@ -15,12 +15,46 @@ export type AgentVersionRow = {
   id: string;
   agent: AgentKind;
   version: string;
-  releasedAt: string;
+  discoveredAt: string;
+  sourceUrl: string;
+  releaseNotesUrl: string;
   integrity: string;
   sbom: string;
   vulnerabilities: string;
   status: "APPROVED" | "DISCOVERED" | "VALIDATING" | "DEPRECATED" | "BLOCKED" | "REJECTED";
 };
+
+export function trustedAgentVersionUrl(
+  agent: AgentKind,
+  version: string,
+  kind: "source" | "release-notes",
+  value: string,
+): string {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || /latest|stable|default/i.test(version)) {
+    throw new Error("Agent 版本来源必须绑定精确版本");
+  }
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("Agent 版本来源 URL 无效"); }
+  if (url.protocol !== "https:" || url.port || url.username || url.password || url.search || url.hash) {
+    throw new Error("Agent 版本来源 URL 无效");
+  }
+  const path = url.pathname.replace(/\/$/, "");
+  let allowed = false;
+  if (kind === "release-notes") {
+    const prefix = agent === "claude-code" ? "/anthropics/claude-code/releases" : "/openai/codex/releases";
+    allowed = url.hostname === "github.com" && (path === prefix || path.startsWith(`${prefix}/`));
+  } else if (agent === "claude-code") {
+    allowed = url.hostname === "code.claude.com" && path === "/docs/en/installation"
+      || url.hostname === "registry.npmjs.org"
+        && path === `/@anthropic-ai/claude-code/-/claude-code-${version}.tgz`;
+  } else {
+    allowed = url.hostname === "github.com" && path === "/openai/codex"
+      || url.hostname === "registry.npmjs.org"
+        && path === `/@openai/codex/-/codex-${version}.tgz`;
+  }
+  if (!allowed) throw new Error("Agent 版本来源 URL 不在官方允许列表");
+  return url.toString();
+}
 
 export type AuditEvent = {
   id: string;

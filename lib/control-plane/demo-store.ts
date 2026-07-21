@@ -68,12 +68,30 @@ export type DemoInstallation = {
   activatedAt: string | null;
 };
 
+export type DemoAgentVersionState = "DISCOVERED" | "VALIDATING" | "APPROVED" | "DEPRECATED" | "BLOCKED" | "REJECTED";
+
+export type DemoAgentVersionMetadata = {
+  source: string;
+  sourceDigest: string;
+  releaseNotesUrl: string;
+  discoveredAt: string;
+  integrity: string | null;
+  signatureVerified: boolean;
+  sbomRef: string | null;
+  scan: "PASS" | "FAIL" | "PENDING";
+  validationReceiptId: string | null;
+  validationReceiptDigest: string | null;
+  supplyChainEvidenceDigest: string | null;
+  validatedAt: string | null;
+};
+
 export type DemoStoreState = {
   specRevision: number;
   specState: "DRAFT" | "APPROVED";
   feedback: Array<{ id: string; text: string; revision: number; at: string }>;
   invalidatedEvidence: string[];
-  agentVersions: Record<string, "DISCOVERED" | "VALIDATING" | "APPROVED" | "DEPRECATED" | "BLOCKED" | "REJECTED">;
+  agentVersions: Record<string, DemoAgentVersionState>;
+  agentVersionMetadata: Record<string, DemoAgentVersionMetadata>;
   installations: DemoInstallation[];
   rollouts: Record<string, { percent: 0 | 5 | 25 | 100; state: string; previous: number }>;
   providers: DemoProvider[];
@@ -96,6 +114,11 @@ const initialState = (): DemoStoreState => ({
     "claude-code@2.1.14": "APPROVED",
     "claude-code@2.1.15": "DISCOVERED",
     "codex-cli@0.91.0": "APPROVED",
+  },
+  agentVersionMetadata: {
+    "claude-code@2.1.14": fixtureVersionMetadata("claude-code", "2.1.14", true, "2026-07-18T08:32:00.000Z"),
+    "claude-code@2.1.15": fixtureVersionMetadata("claude-code", "2.1.15", false, "2026-07-20T06:10:00.000Z"),
+    "codex-cli@0.91.0": fixtureVersionMetadata("codex-cli", "0.91.0", true, "2026-07-17T18:10:00.000Z"),
   },
   installations: [
     {
@@ -237,12 +260,55 @@ const globalStore = globalThis as typeof globalThis & { __deviludoDemoStore?: De
 
 export function getDemoStore(): DemoStoreState {
   globalStore.__deviludoDemoStore ??= initialState();
+  backfillVersionMetadata(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
 }
 
 export function resetDemoStore(): DemoStoreState {
   globalStore.__deviludoDemoStore = initialState();
   return globalStore.__deviludoDemoStore;
+}
+
+function backfillVersionMetadata(store: DemoStoreState): void {
+  store.agentVersionMetadata ??= {};
+  for (const [id, state] of Object.entries(store.agentVersions)) {
+    if (store.agentVersionMetadata[id]) continue;
+    const separator = id.lastIndexOf("@");
+    const agent = id.slice(0, separator);
+    const version = id.slice(separator + 1);
+    if ((agent === "claude-code" || agent === "codex-cli") && version) {
+      store.agentVersionMetadata[id] = fixtureVersionMetadata(agent, version, state === "APPROVED", new Date().toISOString());
+    }
+  }
+}
+
+function fixtureVersionMetadata(
+  agent: "claude-code" | "codex-cli",
+  version: string,
+  validated: boolean,
+  discoveredAt: string,
+): DemoAgentVersionMetadata {
+  const id = `${agent}@${version}`;
+  const seed = [...id].reduce((sum, value) => (sum + value.charCodeAt(0)) % 16, 0).toString(16);
+  const evidenceSeed = ((Number.parseInt(seed, 16) + 7) % 16).toString(16);
+  return {
+    source: agent === "claude-code"
+      ? `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${version}.tgz`
+      : `https://registry.npmjs.org/@openai/codex/-/codex-${version}.tgz`,
+    sourceDigest: `sha256:${seed.repeat(64)}`,
+    releaseNotesUrl: agent === "claude-code"
+      ? "https://github.com/anthropics/claude-code/releases"
+      : "https://github.com/openai/codex/releases",
+    discoveredAt,
+    integrity: validated ? `sha256:${evidenceSeed.repeat(64)}` : null,
+    signatureVerified: validated,
+    sbomRef: validated ? `urn:deviludo:local-sbom:${agent}:${version}` : null,
+    scan: validated ? "PASS" : "PENDING",
+    validationReceiptId: validated ? `local-validation-${agent}-${version}` : null,
+    validationReceiptDigest: validated ? `sha256:${evidenceSeed.repeat(64)}` : null,
+    supplyChainEvidenceDigest: validated ? `sha256:${seed.repeat(64)}` : null,
+    validatedAt: validated ? discoveredAt : null,
+  };
 }
 
 export function withIdempotency<T>(key: string, operation: () => T): { replayed: boolean; value: T } {

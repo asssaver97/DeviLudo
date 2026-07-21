@@ -51,7 +51,16 @@ test("local Agent discovery selects Claude Code and Codex CLI explicitly without
   );
   assert.equal(codex.status, 201);
   const payload = await codex.json();
-  assert.deepEqual(payload.data.candidates, [{ agent: "codex-cli", version: "0.92.0", state: "DISCOVERED", activated: false }]);
+  const codexCandidate = payload.data.candidates[0];
+  assert.equal(codexCandidate.agent, "codex-cli");
+  assert.equal(codexCandidate.version, "0.92.0");
+  assert.equal(codexCandidate.state, "DISCOVERED");
+  assert.equal(codexCandidate.activated, false);
+  assert.equal(codexCandidate.source, "https://registry.npmjs.org/@openai/codex/-/codex-0.92.0.tgz");
+  assert.equal(codexCandidate.releaseNotesUrl, "https://github.com/openai/codex/releases");
+  assert.match(codexCandidate.sourceDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(codexCandidate.signatureVerified, false);
+  assert.equal(codexCandidate.scan, "PENDING");
   assert.equal(getDemoStore().agentVersions["codex-cli@0.92.0"], "DISCOVERED");
   assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "DISCOVERED");
   assert.equal(getDemoStore().audit[0]?.resource, "codex-cli@0.92.0");
@@ -61,7 +70,12 @@ test("local Agent discovery selects Claude Code and Codex CLI explicitly without
     context("agent-versions/discover"),
   );
   assert.equal(exact.status, 201);
-  assert.deepEqual((await exact.json()).data.candidates, [{ agent: "codex-cli", version: "0.145.0-alpha.18", state: "DISCOVERED", activated: false }]);
+  const exactCandidate = (await exact.json()).data.candidates[0];
+  assert.equal(exactCandidate.agent, "codex-cli");
+  assert.equal(exactCandidate.version, "0.145.0-alpha.18");
+  assert.equal(exactCandidate.state, "DISCOVERED");
+  assert.equal(exactCandidate.activated, false);
+  assert.equal(exactCandidate.source, "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-alpha.18.tgz");
   assert.equal(getDemoStore().agentVersions["codex-cli@0.145.0-alpha.18"], "DISCOVERED");
 
   const floating = await POST(
@@ -214,6 +228,12 @@ test("version approval and installation accept only local Broker receipts, never
   assert.equal(approved.status, 201);
   assert.match((await approved.clone().json()).data.validationReceiptDigest, /^sha256:[a-f0-9]{64}$/);
   assert.equal(getDemoStore().agentVersions["claude-code@2.1.15"], "APPROVED");
+  const approvedMetadata = getDemoStore().agentVersionMetadata["claude-code@2.1.15"];
+  assert.equal(approvedMetadata.signatureVerified, true);
+  assert.equal(approvedMetadata.scan, "PASS");
+  assert.match(approvedMetadata.integrity, /^sha256:[a-f0-9]{64}$/);
+  assert.match(approvedMetadata.validationReceiptDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.match(approvedMetadata.sbomRef, /^urn:deviludo:local-sbom:/);
 
   const forgedImage = await POST(
     request("agent-installations", "POST", "PlatformAgentAdmin", {

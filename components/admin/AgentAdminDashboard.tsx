@@ -7,6 +7,7 @@ import { agentAdminCapabilities } from "@/lib/admin/agent-permissions";
 import {
   builtInAgentUi,
   rolePermissions,
+  trustedAgentVersionUrl,
   type AdminRole,
   type AgentCatalogItem,
   type AgentKind,
@@ -587,12 +588,12 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
       {!canOperate && <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色为只读视图。切换至 PlatformAgentAdmin 批准或阻止版本。</div>}
       <div className={styles.tableWrap}>
         <table className={styles.dataTable}>
-          <thead><tr><th>Agent / 版本</th><th>官方发现</th><th>完整性</th><th>SBOM</th><th>漏洞</th><th>状态</th><th><span className={styles.srOnly}>操作</span></th></tr></thead>
+          <thead><tr><th>Agent / 版本与来源</th><th>发现时间</th><th>完整性</th><th>SBOM</th><th>漏洞</th><th>状态</th><th><span className={styles.srOnly}>操作</span></th></tr></thead>
           <tbody>
             {rows.map((row) => (
               <tr key={row.id}>
-                <td><div className={styles.tableAgent}><AgentMark kind={row.agent} small /><div><strong>{row.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong><code>{row.version}</code></div></div></td>
-                <td>{row.releasedAt}</td><td><span className={row.integrity.includes("待") ? styles.pendingText : ""}>{row.integrity}</span></td><td>{row.sbom}</td>
+                <td><div className={styles.tableAgent}><AgentMark kind={row.agent} small /><div><strong>{row.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong><code>{row.version}</code><span className={styles.versionLinks}><a href={row.sourceUrl} target="_blank" rel="noreferrer noopener" aria-label={`打开 ${row.agent} ${row.version} 官方包来源`}>官方包</a><a href={row.releaseNotesUrl} target="_blank" rel="noreferrer noopener" aria-label={`打开 ${row.agent} ${row.version} 发行说明`}>发行说明</a></span></div></div></td>
+                <td>{row.discoveredAt}</td><td><span className={row.integrity.includes("待") ? styles.pendingText : ""}>{row.integrity}</span></td><td>{row.sbom}</td>
                 <td><span className={row.vulnerabilities.includes("1 高危") ? styles.dangerText : styles.goodText}>{row.vulnerabilities}</span></td>
                 <td><StatusPill tone={row.status === "APPROVED" ? "success" : row.status === "BLOCKED" || row.status === "REJECTED" ? "danger" : "warning"}>{row.status}</StatusPill></td>
                 <td>
@@ -1092,13 +1093,22 @@ function versionRow(value: Record<string, unknown>): AgentVersionRow {
   const discoveredAt = text(value.discoveredAt);
   const sourceDigest = text(value.sourceDigest);
   const validationDigest = text(value.validationReceiptDigest);
+  const builtIn = builtInAgentUi.find((item) => item.id === agent)!;
+  const sourceUrl = trustedAgentVersionUrl(agent, version, "source", text(value.source) ?? builtIn.officialSource);
+  const releaseNotesUrl = trustedAgentVersionUrl(agent, version, "release-notes", text(value.releaseNotesUrl) ?? (agent === "claude-code"
+    ? "https://github.com/anthropics/claude-code/releases"
+    : "https://github.com/openai/codex/releases"));
   return {
     id: text(value.id) ?? `${agent}@${version}`,
     agent,
     version,
-    releasedAt: discoveredAt && Number.isFinite(Date.parse(discoveredAt))
+    discoveredAt: discoveredAt && Number.isFinite(Date.parse(discoveredAt))
       ? new Date(discoveredAt).toLocaleString("zh-CN", { hour12: false }) : "时间未投影",
-    integrity: text(value.integrity) ?? (validationDigest ? `验证回执 ${shortDigest(validationDigest)}` : sourceDigest ? `来源 ${shortDigest(sourceDigest)}` : "等待供应链回执"),
+    sourceUrl,
+    releaseNotesUrl,
+    integrity: value.signatureVerified === true && text(value.integrity)
+      ? text(value.integrity)!
+      : validationDigest ? `验证回执 ${shortDigest(validationDigest)}` : sourceDigest ? `待验证 · 来源 ${shortDigest(sourceDigest)}` : "等待供应链回执",
     sbom: text(value.sbomRef) ?? "SBOM 未投影",
     vulnerabilities: value.scan === "PASS" ? "扫描通过" : value.scan === "FAIL" ? "扫描失败" : "扫描状态未投影",
     status,

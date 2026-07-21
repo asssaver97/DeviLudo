@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { agentAdminCapabilities } from "../lib/admin/agent-permissions.ts";
+import { trustedAgentVersionUrl } from "../lib/admin/agent-ui.ts";
 
 test("Agent admin UI capabilities mirror the platform-scoped RBAC boundary", () => {
   const platform = agentAdminCapabilities("PlatformAgentAdmin");
@@ -51,6 +52,37 @@ test("Agent version discovery accepts an exact version and reuses the observed l
   assert.match(source, /localAgents\.find\(\(item\) => item\.agent === agent\)\?\.observedVersion/);
   assert.match(source, /\{ agent, \.\.\.\(requestedVersion \? \{ version: requestedVersion \} : \{\}\) \}/);
   assert.match(source, /aria-label="要发现的精确 Agent 版本"/);
+  assert.match(source, /row\.sourceUrl/);
+  assert.match(source, /row\.releaseNotesUrl/);
+});
+
+test("Agent version links accept only the fixed official source and release-note hosts", () => {
+  assert.equal(
+    trustedAgentVersionUrl("claude-code", "2.1.201", "source", "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.201.tgz"),
+    "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.201.tgz",
+  );
+  assert.equal(
+    trustedAgentVersionUrl("codex-cli", "0.145.0-alpha.18", "source", "https://github.com/openai/codex"),
+    "https://github.com/openai/codex",
+  );
+  assert.equal(
+    trustedAgentVersionUrl("codex-cli", "0.145.0-alpha.18", "release-notes", "https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.18"),
+    "https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.18",
+  );
+  for (const value of [
+    "https://registry.npmjs.org.evil.example/@openai/codex/-/codex-1.0.0.tgz",
+    "https://user:password@github.com/openai/codex/releases",
+    "https://github.com/openai/codex/releases?token=secret",
+    "http://github.com/openai/codex/releases",
+  ]) {
+    assert.throws(() => trustedAgentVersionUrl("codex-cli", "0.145.0-alpha.18", value.includes("tgz") ? "source" : "release-notes", value), /URL|允许列表/);
+  }
+  assert.throws(() => trustedAgentVersionUrl(
+    "codex-cli",
+    "0.145.0-alpha.18",
+    "source",
+    "https://registry.npmjs.org/@openai/codex/-/codex-0.144.0.tgz",
+  ), /允许列表/);
 });
 
 test("credential lifecycle controls call the real rotate and revoke APIs", () => {

@@ -74,6 +74,18 @@ function routeKey(segments: string[]): string {
   return segments.join("/");
 }
 
+function officialPackageSource(agent: "claude-code" | "codex-cli", version: string): string {
+  return agent === "claude-code"
+    ? `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${version}.tgz`
+    : `https://registry.npmjs.org/@openai/codex/-/codex-${version}.tgz`;
+}
+
+function officialReleaseNotes(agent: "claude-code" | "codex-cli"): string {
+  return agent === "claude-code"
+    ? "https://github.com/anthropics/claude-code/releases"
+    : "https://github.com/openai/codex/releases";
+}
+
 export async function GET(request: Request, context: RouteContext) {
   try {
     const { segments } = await context.params;
@@ -89,7 +101,7 @@ export async function GET(request: Request, context: RouteContext) {
           revisionPolicy: "pinned-only",
           versions: Object.entries(store.agentVersions).map(([id, state]) => {
             const separator = id.lastIndexOf("@");
-            return { id, agent: id.slice(0, separator), version: id.slice(separator + 1), state };
+            return { id, agent: id.slice(0, separator), version: id.slice(separator + 1), state, ...store.agentVersionMetadata[id] };
           }),
           installations: store.installations,
           rollouts: store.rollouts,
@@ -167,11 +179,32 @@ export async function POST(request: Request, context: RouteContext) {
         throw new HttpProblem(400, "INVALID_AGENT_VERSION", "Version discovery requires an exact non-floating version");
       }
       const id = `${agent}@${version}`;
+      const source = officialPackageSource(agent, version);
+      const sourceDigest = await fingerprintSecret(new TextEncoder().encode(`local-agent-source:v1:${source}`));
+      const discoveredAt = new Date().toISOString();
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         store.agentVersions[id] ??= "DISCOVERED";
-        appendDemoAudit("AGENT_VERSION_DISCOVERED", id, role, { source: "official-manifest", automaticActivation: false });
-        return { candidates: [{ agent, version, state: store.agentVersions[id], activated: false }] };
+        store.agentVersionMetadata[id] ??= {
+          source,
+          sourceDigest,
+          releaseNotesUrl: officialReleaseNotes(agent),
+          discoveredAt,
+          integrity: null,
+          signatureVerified: false,
+          sbomRef: null,
+          scan: "PENDING",
+          validationReceiptId: null,
+          validationReceiptDigest: null,
+          supplyChainEvidenceDigest: null,
+          validatedAt: null,
+        };
+        appendDemoAudit("AGENT_VERSION_DISCOVERED", id, role, {
+          source: "official-npm-registry",
+          sourceDigest: store.agentVersionMetadata[id].sourceDigest,
+          automaticActivation: false,
+        });
+        return { candidates: [{ id, agent, version, state: store.agentVersions[id], ...store.agentVersionMetadata[id], activated: false }] };
       });
     }
 
@@ -187,9 +220,13 @@ export async function POST(request: Request, context: RouteContext) {
         throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "签名、扫描、SBOM 与 digest 只能来自受信供应链 Broker，不能由管理员请求提供");
       }
       assertAllowedBodyFields(body, ["id"]);
-      const receiptDigest = state === "APPROVED"
-        ? await fingerprintSecret(new TextEncoder().encode(`local-agent-validation:v1:${id}`))
-        : null;
+      const [receiptDigest, integrityDigest, evidenceDigest] = state === "APPROVED"
+        ? await Promise.all([
+          fingerprintSecret(new TextEncoder().encode(`local-agent-validation:v1:${id}`)),
+          fingerprintSecret(new TextEncoder().encode(`local-agent-integrity:v1:${id}`)),
+          fingerprintSecret(new TextEncoder().encode(`local-agent-evidence:v1:${id}`)),
+        ])
+        : [null, null, null];
       return mutate(`admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
         if (!(id in store.agentVersions)) throw new HttpProblem(404, "VERSION_NOT_FOUND", "Agent version was not discovered");
@@ -197,6 +234,20 @@ export async function POST(request: Request, context: RouteContext) {
           throw new HttpProblem(409, "INVALID_VERSION_TRANSITION", "Only a discovered version can be approved");
         }
         store.agentVersions[id] = state;
+        if (state === "APPROVED" && receiptDigest && integrityDigest && evidenceDigest) {
+          const metadata = store.agentVersionMetadata[id];
+          if (!metadata) throw new HttpProblem(409, "VERSION_METADATA_NOT_FOUND", "Agent version source metadata is unavailable");
+          Object.assign(metadata, {
+            integrity: integrityDigest,
+            signatureVerified: true,
+            sbomRef: `urn:deviludo:local-sbom:${id.replaceAll("@", ":")}`,
+            scan: "PASS",
+            validationReceiptId: `local-validation-${id.replaceAll("@", "-")}`,
+            validationReceiptDigest: receiptDigest,
+            supplyChainEvidenceDigest: evidenceDigest,
+            validatedAt: new Date().toISOString(),
+          });
+        }
         appendDemoAudit(`AGENT_VERSION_${state}`, id, role, {
           automaticActivation: false,
           trustBoundary: "LOCAL_DETERMINISTIC_BROKER",

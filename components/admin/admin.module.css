@@ -1020,6 +1020,24 @@
   font-size: 8px;
 }
 
+.versionLinks {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.versionLinks a {
+  color: #356d57;
+  font-size: 8px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.versionLinks a:hover,
+.versionLinks a:focus-visible {
+  text-decoration: underline;
+}
+
 .pendingText { color: #937330; }
 .dangerText { color: #b14c38; font-weight: 610; }
 

@@ -537,18 +537,27 @@ try {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "idempotency-key": `smoke-agent-version-${installedAgent.agent}-${installedAgent.observedVersion}`,
+      "idempotency-key": `smoke-agent-version-source-v2-${installedAgent.agent}-${installedAgent.observedVersion}`,
       "x-deviludo-role": "PlatformAgentAdmin",
     },
     body: JSON.stringify({ agent: installedAgent.agent, version: installedAgent.observedVersion }),
   });
   const exactAgentDiscoveryPayload = await exactAgentDiscovery.response.json();
   const discoveredCandidate = exactAgentDiscoveryPayload.data?.candidates?.[0];
+  const expectedAgentSource = installedAgent.agent === "claude-code"
+    ? `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${installedAgent.observedVersion}.tgz`
+    : `https://registry.npmjs.org/@openai/codex/-/codex-${installedAgent.observedVersion}.tgz`;
+  const expectedReleaseNotes = installedAgent.agent === "claude-code"
+    ? "https://github.com/anthropics/claude-code/releases"
+    : "https://github.com/openai/codex/releases";
   if (![200, 201].includes(exactAgentDiscovery.response.status)
     || discoveredCandidate?.agent !== installedAgent.agent
     || discoveredCandidate?.version !== installedAgent.observedVersion
+    || discoveredCandidate?.source !== expectedAgentSource
+    || discoveredCandidate?.releaseNotesUrl !== expectedReleaseNotes
+    || !/^sha256:[a-f0-9]{64}$/.test(String(discoveredCandidate?.sourceDigest))
     || discoveredCandidate?.activated !== false) {
-    throw new Error("local Agent discovery did not preserve the observed exact CLI version");
+    throw new Error("local Agent discovery did not preserve the observed exact CLI version and official source metadata");
   }
   const floatingAgentDiscovery = await request(baseUrl, "/api/admin/agent-versions/discover", {
     method: "POST",
