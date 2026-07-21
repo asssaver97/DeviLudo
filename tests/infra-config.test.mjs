@@ -221,6 +221,7 @@ test("approved specifications lock one tenant-bound source and Agent catalog rev
 
 test("project-approved Agent fallback is append-only and shared by execution and inference authority", () => {
   const migration = readFileSync(new URL("../infra/postgres/046_agent_run_provider_failovers.sql", import.meta.url), "utf8");
+  const auditMigration = readFileSync(new URL("../infra/postgres/047_agent_run_provider_failover_audit.sql", import.meta.url), "utf8");
   const execution = readFileSync(new URL("../services/agent-execution-broker/src/postgres-operations.ts", import.meta.url), "utf8");
   const gateway = readFileSync(new URL("../services/inference-gateway/src/postgres-store.ts", import.meta.url), "utf8");
   const secrets = readFileSync(new URL("../services/secret-broker/src/authority.ts", import.meta.url), "utf8");
@@ -235,6 +236,11 @@ test("project-approved Agent fallback is append-only and shared by execution and
   assert.match(gateway, /LEFT JOIN deviludo\.agent_run_provider_failovers/);
   assert.match(secrets, /LEFT JOIN deviludo\.agent_run_provider_failovers/);
   assert.doesNotMatch(execution, /UPDATE deviludo\.inference_run_authorizations SET provider_revision_id/);
+  assert.match(auditMigration, /AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED/);
+  assert.match(auditMigration, /actor_role[\s\S]*'System'/);
+  assert.match(auditMigration, /AFTER INSERT ON deviludo\.agent_run_provider_failovers/);
+  assert.match(auditMigration, /INSERT INTO deviludo\.admin_audit_records/);
+  assert.doesNotMatch(auditMigration, /authorization_nonce/);
 });
 
 test("specification dialogue persists tenant-isolated messages and immutable draft pairs", () => {

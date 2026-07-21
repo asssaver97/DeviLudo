@@ -68,3 +68,38 @@ test("successful inference reconciliation commits one exact SecurityAdmin audit 
   assert.equal(audit[0]?.metadata.affectedTenantId, tenantId);
   assert.equal(audit[0]?.metadata.evidenceDigest, evidenceDigest);
 });
+
+test("runtime Provider failover audit remains tenant and project isolated", async () => {
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const store = new InMemoryAdminStore();
+  await store.mutate((state) => state.audit.unshift(Object.freeze({
+    id: `runtime-provider-failover:${tenantId}:${runId}`,
+    action: "AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED",
+    resource: `agent-run:${runId}`,
+    actorRole: "System" as const,
+    actorId: "agent-execution-broker",
+    tenantId,
+    projectId,
+    requestId: `provider-failover:${runId}`,
+    at: "2026-07-21T04:00:00.000Z",
+    metadata: Object.freeze({ reason: "PRIMARY_PROVIDER_UNAVAILABLE" }),
+  })));
+  const service = new AdminService(
+    store,
+    new ProcessIsolatedSecretVault(),
+    new InferenceGatewayProviderProbe(),
+    new DevelopmentAgentSupplyChain(),
+    new class extends InferenceRequestReconciler {
+      async lookup() { return null; }
+      async reconcile(): Promise<never> { throw new Error("not used"); }
+    }(),
+  );
+  const baseActor: RequestActor = {
+    role: "Auditor", actorId: "tenant-auditor@example.com", tenantId,
+    projectId, requestId: "audit-request", mutation: undefined,
+  };
+  assert.equal((await service.auditLog(baseActor))[0]?.actorRole, "System");
+  assert.equal((await service.auditLog({ ...baseActor, projectId: "55555555-5555-4555-8555-555555555555" })).length, 0);
+  assert.equal((await service.auditLog({ ...baseActor, tenantId: "66666666-6666-4666-8666-666666666666", projectId: null })).length, 0);
+  assert.equal((await service.auditLog({ ...baseActor, tenantId: null, projectId: null })).length, 1);
+});

@@ -204,6 +204,65 @@ test("Postgres admin catalog backfills legacy active Installation activation tim
   await assert.rejects(malformed.read(() => undefined), /activation timestamp is invalid/);
 });
 
+test("Postgres admin audit accepts materialized System failovers without exposing authorization nonces", async () => {
+  const activatedAt = "2026-07-21T04:00:00.000Z";
+  const client = {
+    async query(text: string) {
+      if (text.includes("SELECT revision, payload")) return result([{ revision: 9, payload: emptyPayload }]);
+      if (text.includes("FROM deviludo.admin_audit_records")) return result([{
+        id: "audit-77777777-7777-4777-8777-777777777777",
+        action: "AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED",
+        resource: "agent-run:33333333-3333-4333-8333-333333333333",
+        actor_role: "System",
+        actor_id: "agent-execution-broker",
+        tenant_id: "11111111-1111-4111-8111-111111111111",
+        project_id: "22222222-2222-4222-8222-222222222222",
+        request_id: "provider-failover:33333333-3333-4333-8333-333333333333",
+        occurred_at: activatedAt,
+        metadata: {
+          reason: "PRIMARY_PROVIDER_UNAVAILABLE",
+          fromProfileRevisionId: "profile-primary-r4",
+          fromProviderRevisionId: "provider-primary-r4",
+          toProfileRevisionId: "profile-fallback-r2",
+          toProviderRevisionId: "provider-fallback-r2",
+          toCredentialVersionId: "credential-fallback-v3",
+          toModels: ["gateway/claude-sonnet-4-6-20250601"],
+          toBudget: { maxCostUsd: 10 },
+          authorizationExpiresAt: "2026-07-21T05:00:00.000Z",
+        },
+      }]);
+      return result([]);
+    },
+    release() {},
+  } as unknown as PoolClient;
+  const store = new PostgresAdminStore({ async connect() { return client; }, async end() {} } as unknown as Pool);
+  const audit = await store.read((state) => state.audit);
+  assert.equal(audit.length, 1);
+  assert.deepEqual(audit[0], {
+    id: "audit-77777777-7777-4777-8777-777777777777",
+    action: "AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED",
+    resource: "agent-run:33333333-3333-4333-8333-333333333333",
+    actorRole: "System",
+    actorId: "agent-execution-broker",
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    projectId: "22222222-2222-4222-8222-222222222222",
+    requestId: "provider-failover:33333333-3333-4333-8333-333333333333",
+    at: activatedAt,
+    metadata: {
+      reason: "PRIMARY_PROVIDER_UNAVAILABLE",
+      fromProfileRevisionId: "profile-primary-r4",
+      fromProviderRevisionId: "provider-primary-r4",
+      toProfileRevisionId: "profile-fallback-r2",
+      toProviderRevisionId: "provider-fallback-r2",
+      toCredentialVersionId: "credential-fallback-v3",
+      toModels: ["gateway/claude-sonnet-4-6-20250601"],
+      toBudget: { maxCostUsd: 10 },
+      authorizationExpiresAt: "2026-07-21T05:00:00.000Z",
+    },
+  });
+  assert.equal(JSON.stringify(audit).includes("authorizationNonce"), false);
+});
+
 function result<Row extends Record<string, unknown>>(rows: Row[]): QueryResult<Row> {
   return { command: "", rowCount: rows.length, oid: 0, fields: [], rows };
 }

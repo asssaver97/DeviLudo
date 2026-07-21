@@ -28,6 +28,8 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 
 `/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本阻止、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计。版本批准仍要求供应链证据；Provider 激活仍要求受信 Connector 的完整探针。默认测试栈不会伪造这两类结果，因此相关操作会以明确错误失败关闭。
 
+生产数据库会在 `agent_run_provider_failovers` 提交时原子物化追加式 `AGENT_RUN_PROVIDER_FAILOVER_ACTIVATED` 管理审计事件，标明原/目标 Profile、Provider、模型、预算和授权到期时间。投影不复制一次性授权 nonce，也不暴露 SecretRef 或密钥；租户和项目管理员仍按请求身份过滤可见范围。
+
 `/settings/agents` 使用租户作用域的本地代理验证 BYOK 只写响应、Provider 草稿和默认 Profile；`/projects/ember-archipelago/agent-settings` 验证项目从 ACTIVE 继承 Profile 中选择。两条本地路径与生产页面相同，但只对真实 loopback URL 且显式 `DEVILUDO_LOCAL_TEST_MODE=1` 生效，不会联系第三方 Provider。
 
 在项目页批准规格后，点击“运行真实本机验证”。侧车会：

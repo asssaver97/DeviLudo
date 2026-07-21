@@ -162,7 +162,8 @@ export interface AuditRecord {
   readonly id: string;
   readonly action: string;
   readonly resource: string;
-  readonly actorRole: AdminRole;
+  /** Runtime security events are projected as System records; request RBAC remains AdminRole-only. */
+  readonly actorRole: AdminRole | "System";
   readonly actorId: string;
   readonly tenantId: string | null;
   readonly projectId: string | null;
