@@ -3,7 +3,7 @@ import {
   DeliveryProjectionBrokerError,
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
-import { authorizeProjectRead, projectReadAccessResponse } from "@/lib/projects/project-read-access";
+import { authorizeProjectAccess, projectAccessResponse } from "@/lib/projects/project-read-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -20,9 +20,9 @@ export async function GET(
     if (!UUID.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效。" } }, { status: 400 });
     const broker = deliveryProjectionBrokerFromEnvironment();
     if (!broker) return brokerRequired();
-    let principal: Awaited<ReturnType<typeof authorizeProjectRead>>;
-    try { principal = await authorizeProjectRead(request, projectId); }
-    catch (error) { return projectReadAccessResponse(error); }
+    let principal: Awaited<ReturnType<typeof authorizeProjectAccess>>;
+    try { principal = await authorizeProjectAccess(request, projectId); }
+    catch (error) { return projectAccessResponse(error); }
     try {
       const projection = await broker.readRunnerFleet({ tenantId: principal.tenantId, projectId });
       return json({ data: projection, meta: { mode: "PRODUCTION" } }, { headers: { "cache-control": "no-store" } });

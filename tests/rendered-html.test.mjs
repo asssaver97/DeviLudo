@@ -80,7 +80,7 @@ test("production worker fails readiness closed and keeps local admin and specifi
     headers: { "content-type": "application/json", "idempotency-key": "test-spec-approve" },
     body: JSON.stringify({ action: "approve", revision: "SPEC-008" }),
   };
-  const first = await request("/api/projects/ember-archipelago/spec-revisions", init);
+  const first = await request("/api/projects/22222222-2222-4222-8222-222222222222/spec-revisions", init);
   assert.equal(first.status, 400);
   const firstPayload = await first.json();
   assert.equal(firstPayload.error.code, "SPEC_APPROVAL_AUTHORITY_REQUIRED");

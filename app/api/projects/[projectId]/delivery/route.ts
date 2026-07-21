@@ -5,8 +5,7 @@ import {
   DeliveryProjectionBrokerError,
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
-import { trustedSessionKeyFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
-import { authorizeProjectRead, projectReadAccessResponse } from "@/lib/projects/project-read-access";
+import { authorizeProjectAccess, projectAccessResponse } from "@/lib/projects/project-read-access";
 import {
   deliveryCancellationOperationKey,
   userAcceptanceBrokerFromEnvironment,
@@ -39,9 +38,9 @@ export async function GET(
     if (!UUID.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效。" } }, { status: 400 });
     const broker = deliveryProjectionBrokerFromEnvironment();
     if (!broker) return projectionRequired();
-    let principal: Awaited<ReturnType<typeof authorizeProjectRead>>;
-    try { principal = await authorizeProjectRead(request, projectId); }
-    catch (error) { return projectReadAccessResponse(error); }
+    let principal: Awaited<ReturnType<typeof authorizeProjectAccess>>;
+    try { principal = await authorizeProjectAccess(request, projectId); }
+    catch (error) { return projectAccessResponse(error); }
     let projection: Awaited<ReturnType<typeof broker.read>>;
     try { projection = await broker.read({ tenantId: principal.tenantId, projectId }); }
     catch (error) {
@@ -87,16 +86,11 @@ export async function POST(
         return json({ error: { code: "INVALID_DELIVERY_CANCELLATION_REQUEST", message: "取消请求格式无效。" } }, { status: 400 });
       }
       const reason = requireString(body, "reason", 2_000);
-      let sessionKey: Uint8Array;
-      try { sessionKey = trustedSessionKeyFromEnvironment(); }
-      catch { return cancellationBrokerRequired(); }
-      let principal: Awaited<ReturnType<typeof verifyTrustedSpecSession>>;
-      try { principal = await verifyTrustedSpecSession(request, sessionKey); }
-      catch {
-        return json({ error: { code: "TRUSTED_SESSION_REQUIRED", message: "需要有效的平台会话。" } }, { status: 401 });
-      }
       const broker = userAcceptanceBrokerFromEnvironment();
       if (!broker) return cancellationBrokerRequired();
+      let principal: Awaited<ReturnType<typeof authorizeProjectAccess>>;
+      try { principal = await authorizeProjectAccess(request, projectId); }
+      catch (error) { return projectAccessResponse(error); }
       const receipt = await broker.cancel({
         operationKey: await deliveryCancellationOperationKey({
           tenantId: principal.tenantId,

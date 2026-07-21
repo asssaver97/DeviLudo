@@ -10,7 +10,6 @@ import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 import { GET, POST } from "../app/api/projects/[projectId]/delivery/route.ts";
 import { GET as GET_EVIDENCE } from "../app/api/projects/[projectId]/evidence/route.ts";
 import { GET as GET_RUNNERS } from "../app/api/projects/[projectId]/runners/route.ts";
-import { signTrustedSpecSession } from "../lib/spec-dialogue/broker.ts";
 import { signTrustedGitHubSession } from "../lib/connections/github-broker.ts";
 import { RUNNER_FLEET_PROJECTION_SCHEMA_VERSION } from "../lib/runner/fleet-projection.ts";
 import { EVIDENCE_CATALOG_SCHEMA_VERSION } from "../lib/evidence/catalog-projection.ts";
@@ -20,21 +19,22 @@ const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
 const repositoryBindingId = "33333333-3333-4333-8333-333333333333";
 
-async function trustedProjectReadRequest(pathname, key, userId) {
+async function trustedProjectReadRequest(pathname, key, userId, init = {}) {
   const issuedAt = String(Date.now());
   const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
   const githubUserId = "42";
+  const method = init.method ?? "GET";
   const signature = await signTrustedGitHubSession({
-    method: "GET", pathname, tenantId, userId, sessionBinding, githubUserId, issuedAt, key,
+    method, pathname, tenantId, userId, sessionBinding, githubUserId, issuedAt, key,
   });
-  return new Request(`https://app.deviludo.example${pathname}`, { headers: {
-    "x-deviludo-session-tenant": tenantId,
-    "x-deviludo-session-user": userId,
-    "x-deviludo-session-binding": sessionBinding,
-    "x-deviludo-session-github-user-id": githubUserId,
-    "x-deviludo-session-issued-at": issuedAt,
-    "x-deviludo-session-signature": signature,
-  } });
+  const headers = new Headers(init.headers);
+  headers.set("x-deviludo-session-tenant", tenantId);
+  headers.set("x-deviludo-session-user", userId);
+  headers.set("x-deviludo-session-binding", sessionBinding);
+  headers.set("x-deviludo-session-github-user-id", githubUserId);
+  headers.set("x-deviludo-session-issued-at", issuedAt);
+  headers.set("x-deviludo-session-signature", signature);
+  return new Request(`https://app.deviludo.example${pathname}`, { ...init, method, headers });
 }
 
 function projectLookup(input, init, expectedUserId) {
@@ -338,17 +338,15 @@ test("delivery route keeps localhost fixture mode and production mutations read-
 test("production cancellation accepts only a signed reason and server derives workflow authority", async () => {
   const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
   const pathname = `/api/projects/${projectId}/delivery`;
-  const issuedAt = String(Date.now());
-  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
   const actorId = "55555555-5555-4555-8555-555555555555";
-  const signature = await signTrustedSpecSession({
-    method: "POST", pathname, tenantId, userId: actorId, sessionBinding, issuedAt, key,
-  });
   const originalFetch = globalThis.fetch;
   const originalEndpoint = process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL;
+  const originalProjectEndpoint = process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
   const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
   let brokerCommand;
   globalThis.fetch = async (url, init) => {
+    const lookup = projectLookup(url, init, actorId);
+    if (lookup) return lookup;
     assert.equal(String(url), "https://user-acceptance.internal/v1/delivery-cancellations");
     brokerCommand = JSON.parse(init.body);
     return new Response(JSON.stringify({ data: {
@@ -365,18 +363,14 @@ test("production cancellation accepts only a signed reason and server derives wo
     } }), { status: 201 });
   };
   process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL = "https://user-acceptance.internal/";
+  process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = "https://project-repository.internal/";
   process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
   try {
-    const response = await POST(new Request(`https://app.deviludo.example${pathname}`, {
+    const response = await POST(await trustedProjectReadRequest(pathname, key, actorId, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "idempotency-key": "cancel-request-001",
-        "x-deviludo-session-tenant": tenantId,
-        "x-deviludo-session-user": actorId,
-        "x-deviludo-session-binding": sessionBinding,
-        "x-deviludo-session-issued-at": issuedAt,
-        "x-deviludo-session-signature": signature,
       },
       body: JSON.stringify({ action: "cancel", reason: "项目方向已改变。" }),
     }), { params: Promise.resolve({ projectId }) });
@@ -390,6 +384,8 @@ test("production cancellation accepts only a signed reason and server derives wo
     globalThis.fetch = originalFetch;
     if (originalEndpoint === undefined) delete process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL;
     else process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL = originalEndpoint;
+    if (originalProjectEndpoint === undefined) delete process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+    else process.env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL = originalProjectEndpoint;
     if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
     else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
   }

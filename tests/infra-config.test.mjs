@@ -476,7 +476,8 @@ test("project-owner cancellation is projection-bound before Temporal receives au
   assert.match(service, /expectedHistoryLength: decision\.projectionSequence/);
   assert.match(runtime, /new TemporalWorkflowSignalPort/);
   assert.match(route, /deliveryCancellationOperationKey/);
-  assert.match(route, /verifyTrustedSpecSession/);
+  assert.match(route, /authorizeProjectAccess\(request, projectId\)/);
+  assert.match(route, /projectAccessResponse/);
   assert.doesNotMatch(route, /workflowId:\s*body\./);
 });
 

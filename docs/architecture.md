@@ -190,6 +190,13 @@ user before returning metadata. The UI then reads the specification service's
 authoritative snapshot; an absent snapshot starts at revision zero rather than
 reusing a demo conversation.
 
+That project check is also a mandatory Web precondition for every production
+idea turn, specification read or approval, feedback iteration, candidate
+acceptance, delivery cancellation, delivery projection, Runner Fleet view and
+Evidence Catalog read. A tenant assertion alone never authorizes a project UUID;
+revoked installation access stops the request before any downstream Broker is
+called.
+
 ## Runner fencing and evidence
 
 Every selected OS receives a separate lease binding `attempt_id`, platform,

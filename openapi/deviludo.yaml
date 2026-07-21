@@ -330,14 +330,50 @@ paths:
         "401": { description: A fresh trusted platform session is required. }
         "404": { description: The project is missing or inaccessible to the current account. }
         "503": { description: The isolated evidence projection Broker is unavailable or stored evidence failed verification. }
+  /projects/{projectId}/delivery:
+    get:
+      operationId: getProjectDelivery
+      description: Revalidates the signed GitHub user's access to the exact project, then returns the replay-verified Temporal delivery projection. The Web workload has no workflow or database write authority.
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is inaccessible or has no production delivery workflow. }
+        "503": { description: The project repository or delivery projection Broker is unavailable. }
+    post:
+      operationId: cancelProjectDelivery
+      description: Revalidates exact project access and asks the user-decision Broker to cancel the current replay-verified workflow. Clients cannot submit workflow, Agent, Runner, evidence, or Steam authority.
+      parameters:
+        - { $ref: "#/components/parameters/ProjectId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, reason]
+              properties:
+                action: { type: string, const: cancel }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        "202": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
+        "409": { description: The authoritative workflow is terminal or has crossed the irreversible publish boundary. }
   /projects/{projectId}/conversation:
     get:
       operationId: getSpecConversation
+      description: Revalidates exact project access before reading the immutable specification conversation snapshot.
       parameters: [{ $ref: "#/components/parameters/ProjectId" }]
-      responses: { "200": { $ref: "#/components/responses/Ok" } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
     post:
       operationId: sendSpecConversationMessage
-      description: Uses the independent low-latency specification service, never the development Agent.
+      description: Revalidates exact project access and uses the independent low-latency specification service, never the development Agent.
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -354,15 +390,23 @@ paths:
                 message: { type: string, minLength: 1, maxLength: 4000 }
       responses:
         "201": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
         "409": { description: Expected revision changed or the command is in progress. }
   /projects/{projectId}/spec-revisions:
+    get:
+      operationId: getGameSpecRevision
+      description: Revalidates exact project access before reading the current immutable specification and test-plan revision.
+      parameters: [{ $ref: "#/components/parameters/ProjectId" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is inaccessible or has not produced a specification revision. }
     post:
       operationId: approveGameSpecRevision
+      description: Revalidates exact project access before approving the current immutable draft and its server-selected Runner toolchain.
       parameters:
-        - name: projectId
-          in: path
-          required: true
-          schema: { type: string }
+        - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody:
         required: true
@@ -381,22 +425,34 @@ paths:
                 testPlanRevisionId: { type: string, format: uuid }
       responses:
         "201": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
         "409": { description: The specification approval binding changed concurrently. }
         "503": { description: No compatible immutable Runner toolchain is available; no approval was committed. }
   /projects/{projectId}/feedback:
     post:
       operationId: createFeedbackIteration
+      description: Revalidates exact project access before creating the next immutable specification draft and invalidating prior candidate evidence.
       parameters:
-        - name: projectId
-          in: path
-          required: true
-          schema: { type: string }
+        - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
-      responses: { "201": { $ref: "#/components/responses/Ok" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [feedback]
+              properties: { feedback: { type: string, minLength: 1, maxLength: 4000 } }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
   /projects/{projectId}/acceptance:
     post:
       operationId: acceptCandidate
-      description: The service resolves the authoritative candidate commit, Draft PR, passed E2E attempt, and non-invalidated evidence; clients cannot supply those bindings.
+      description: Revalidates exact project access, then resolves the authoritative candidate commit, Draft PR, passed E2E attempt, and non-invalidated evidence; clients cannot supply those bindings.
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -410,6 +466,8 @@ paths:
               maxProperties: 0
       responses:
         "201": { $ref: "#/components/responses/Ok" }
+        "401": { description: A fresh trusted platform session is required. }
+        "404": { description: The project is missing or inaccessible to the current account. }
         "409": { description: No single authoritative candidate is awaiting this user's acceptance. }
 components:
   securitySchemes:
@@ -420,7 +478,7 @@ components:
       name: projectId
       in: path
       required: true
-      schema: { type: string }
+      schema: { type: string, format: uuid }
     IdempotencyKey:
       name: Idempotency-Key
       in: header

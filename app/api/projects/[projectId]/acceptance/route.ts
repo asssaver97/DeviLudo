@@ -1,6 +1,10 @@
 import { bodyObject, idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { commandLocalDelivery } from "@/lib/local-delivery/store";
-import { specDialogueBrokerRuntimeFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
+import {
+  authorizeProjectAccess,
+  ProjectAccessError,
+  projectAccessResponse,
+} from "@/lib/projects/project-read-access";
 import {
   candidateAcceptanceOperationKey,
   userAcceptanceBrokerFromEnvironment,
@@ -8,6 +12,7 @@ import {
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 export async function POST(
   request: Request,
@@ -28,10 +33,10 @@ export async function POST(
         { status: result.replayed ? 200 : 201 },
       );
     }
-    const session = specDialogueBrokerRuntimeFromEnvironment();
+    if (!UUID.test(projectId)) return invalidProject();
     const broker = userAcceptanceBrokerFromEnvironment();
-    if (!session || !broker) return brokerRequired();
-    const principal = await verifyTrustedSpecSession(request, session.sessionHmacKey);
+    if (!broker) return brokerRequired();
+    const principal = await authorizeProjectAccess(request, projectId);
     const receipt = await broker.accept({
       operationKey: await candidateAcceptanceOperationKey({
         tenantId: principal.tenantId,
@@ -45,8 +50,12 @@ export async function POST(
     });
     return json({ data: receipt, meta: { idempotentReplay: receipt.delivery.replayed } }, { status: 201 });
   } catch (error) {
-    return problemResponse(error);
+    return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error);
   }
+}
+
+function invalidProject(): Response {
+  return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效" } }, { status: 400 });
 }
 
 function brokerRequired(): Response {

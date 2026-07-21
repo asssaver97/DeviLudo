@@ -1,13 +1,18 @@
 import { bodyObject, idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
+import {
+  authorizeProjectAccess,
+  ProjectAccessError,
+  projectAccessResponse,
+} from "@/lib/projects/project-read-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 import {
   deterministicConversationId,
   specDialogueBrokerRuntimeFromEnvironment,
   specOperationKey,
-  verifyTrustedSpecSession,
 } from "@/lib/spec-dialogue/broker";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 export async function GET(
   request: Request,
@@ -17,12 +22,13 @@ export async function GET(
     const { projectId } = await context.params;
     const local = localRuntimeUrl(request);
     if (local) return await proxyLocal(local, projectId, { method: "GET" });
+    if (!UUID.test(projectId)) return invalidProject();
     const runtime = specDialogueBrokerRuntimeFromEnvironment();
     if (!runtime) return brokerRequired();
-    const principal = await verifyTrustedSpecSession(request, runtime.sessionHmacKey);
+    const principal = await authorizeProjectAccess(request, projectId);
     const conversationId = await deterministicConversationId(principal.tenantId, projectId);
     return json({ data: await runtime.broker.snapshot({ tenantId: principal.tenantId, projectId, conversationId }) });
-  } catch (error) { return problemResponse(error); }
+  } catch (error) { return accessProblem(error); }
 }
 
 export async function POST(
@@ -45,9 +51,10 @@ export async function POST(
       headers: { "content-type": "application/json", "idempotency-key": idempotencyKey(request) },
       body: JSON.stringify({ expectedRevision: body.expectedRevision, message: body.message }),
     });
+    if (!UUID.test(projectId)) return invalidProject();
     const runtime = specDialogueBrokerRuntimeFromEnvironment();
     if (!runtime) return brokerRequired();
-    const principal = await verifyTrustedSpecSession(request, runtime.sessionHmacKey);
+    const principal = await authorizeProjectAccess(request, projectId);
     let conversationId = await deterministicConversationId(principal.tenantId, projectId);
     if (hasConversation) {
       if (typeof body.conversationId !== "string") throw new Error("Specification conversation binding is invalid");
@@ -72,7 +79,7 @@ export async function POST(
       message: body.message,
     });
     return json({ data: snapshot }, { status: 201 });
-  } catch (error) { return problemResponse(error); }
+  } catch (error) { return accessProblem(error); }
 }
 
 async function proxyLocal(endpoint: URL, projectId: string, init: RequestInit): Promise<Response> {
@@ -95,6 +102,14 @@ async function proxyLocal(endpoint: URL, projectId: string, init: RequestInit): 
 
 function brokerRequired(): Response {
   return json({ error: { code: "SPEC_DIALOGUE_BROKER_REQUIRED", message: "规格对话需要独立的生产 Broker；当前入口不会在 Web 进程内伪造模型回复。" } }, { status: 503 });
+}
+
+function invalidProject(): Response {
+  return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效" } }, { status: 400 });
+}
+
+function accessProblem(error: unknown): Response {
+  return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error);
 }
 
 function localRuntimeUrl(request: Request): URL | null {
