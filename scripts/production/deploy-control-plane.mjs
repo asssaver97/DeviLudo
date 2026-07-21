@@ -8,6 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CONTAINER_SERVICES } from "./run-control-service.mjs";
 import { verifyControlReleaseAuthorization } from "./control-release-authorization.mjs";
+import {
+  inspectControlRuntimeResources,
+  validateControlRuntimeLock,
+  verifyControlRuntimeLock,
+} from "./lock-control-runtime.mjs";
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
 const SOURCE_REVISION = /^[a-f0-9]{40}$/;
@@ -30,7 +35,7 @@ const RECEIPT_KEYS = Object.freeze([
   "schemaVersion",
   "sourceRevision",
 ]);
-const RELEASE_SCHEMA = "deviludo.kubernetes-control-release.v1";
+const RELEASE_SCHEMA = "deviludo.kubernetes-control-release.v2";
 const MAX_JSON_BYTES = 1024 * 1024;
 
 // A port is exposed only for a process that owns an authenticated in-cluster
@@ -144,7 +149,7 @@ export function parseControlPlaneDeploymentArguments(argv) {
   const flagNames = new Set(["--apply", "--render"]);
   const valueNames = new Set([
     "--authorization", "--context", "--namespace", "--receipt", "--replicas", "--services",
-    "--timeout-seconds", "--trust-policy", "--trust-policy-digest",
+    "--runtime-lock", "--timeout-seconds", "--trust-policy", "--trust-policy-digest",
   ]);
   for (let index = 0; index < argv.length;) {
     const name = argv[index];
@@ -168,10 +173,11 @@ export function parseControlPlaneDeploymentArguments(argv) {
   const trustPolicyPath = values.get("--trust-policy");
   const trustPolicyDigest = values.get("--trust-policy-digest");
   const context = values.get("--context");
+  const runtimeLockPath = values.get("--runtime-lock");
   const namespace = values.get("--namespace") ?? "deviludo-system";
   const replicas = exactInteger(values.get("--replicas") ?? "1", 1, 10);
   const timeoutSeconds = exactInteger(values.get("--timeout-seconds") ?? "900", 60, 3_600);
-  if (typeof receiptPath !== "string" || !isAbsolute(receiptPath) || !validNamespace(namespace)
+  if (typeof receiptPath !== "string" || !isAbsolute(receiptPath) || !absolutePath(runtimeLockPath) || !validNamespace(namespace)
     || (mode === "apply" && (typeof context !== "string" || !KUBERNETES_CONTEXT.test(context)))
     || (mode === "apply" && (!absolutePath(authorizationPath) || !absolutePath(trustPolicyPath) || !SHA256.test(trustPolicyDigest)))
     || (mode === "render" && [context, authorizationPath, trustPolicyPath, trustPolicyDigest].some((value) => value !== undefined))) {
@@ -180,7 +186,7 @@ export function parseControlPlaneDeploymentArguments(argv) {
   const services = parseServices(values.get("--services"));
   return Object.freeze({
     authorizationPath, context, mode, namespace, receiptPath, replicas, services,
-    timeoutSeconds, trustPolicyDigest, trustPolicyPath,
+    runtimeLockPath, timeoutSeconds, trustPolicyDigest, trustPolicyPath,
   });
 }
 
@@ -200,6 +206,7 @@ export function renderControlPlaneRelease(receipt, options = {}) {
     || !Array.isArray(services) || services.length < 1 || new Set(services).size !== services.length
     || services.some((service) => !CONTROL_PLANE_CONTAINER_SERVICES.includes(service))) invalidArguments();
   const selectedServices = [...services].sort();
+  const runtimeLock = validateControlRuntimeLock(options.runtimeLock, { namespace, services: selectedServices });
   const identity = `${receipt.sourceRevision.slice(0, 12)}-${receipt.imageDigest.slice(7, 19)}`;
   const migrationJobName = `deviludo-schema-${identity}`;
   const common = commonLabels(receipt);
@@ -222,7 +229,7 @@ export function renderControlPlaneRelease(receipt, options = {}) {
     kind: "ServiceAccount",
     metadata: { name: "deviludo-control", namespace, labels: common },
     automountServiceAccountToken: false,
-    imagePullSecrets: [{ name: "deviludo-control-registry" }],
+    imagePullSecrets: [{ name: runtimeLock.registrySecret.name }],
   };
   const networkPolicy = {
     apiVersion: "networking.k8s.io/v1",
@@ -230,9 +237,10 @@ export function renderControlPlaneRelease(receipt, options = {}) {
     metadata: { name: "deviludo-default-deny", namespace, labels: common },
     spec: { podSelector: {}, policyTypes: ["Ingress", "Egress"] },
   };
-  const migration = migrationJob(receipt, namespace, migrationJobName, timeoutSeconds, common);
+  const migration = migrationJob(receipt, namespace, migrationJobName, timeoutSeconds, common, runtimeLock.migrationSecret.name);
+  const runtimeServices = new Map(runtimeLock.services.map((entry) => [entry.service, entry]));
   const workloads = selectedServices.flatMap((service) => {
-    const deployment = serviceDeployment(receipt, namespace, service, replicas, common);
+    const deployment = serviceDeployment(receipt, namespace, service, replicas, common, runtimeServices.get(service));
     const port = CONTROL_SERVICE_PORTS[service];
     return port === undefined ? [deployment] : [serviceResource(namespace, service, port, common), deployment];
   });
@@ -242,6 +250,7 @@ export function renderControlPlaneRelease(receipt, options = {}) {
     migrationJobName,
     receipt,
     replicas,
+    runtimeLock,
     services: Object.freeze(selectedServices),
     timeoutSeconds,
     stages: Object.freeze([
@@ -263,10 +272,12 @@ export async function applyControlPlaneRelease(bundle, context, security, execut
     namespace: bundle.namespace,
     replicas: bundle.replicas,
     services: bundle.services,
+    runtimeLock: bundle.runtimeLock,
     timeoutSeconds: bundle.timeoutSeconds,
   });
   if (JSON.stringify(bundle) !== JSON.stringify(canonical)) invalidArguments();
   if (!security || typeof security !== "object" || typeof security.trustPolicyDigest !== "string"
+    || typeof security.inspectRuntimeResources !== "function"
     || !SHA256.test(security.trustPolicyDigest)) invalidArguments();
   const authorizeMutation = async () => verifyControlReleaseAuthorization(
     security.authorization,
@@ -278,15 +289,24 @@ export async function applyControlPlaneRelease(bundle, context, security, execut
       now: typeof security.clock === "function" ? security.clock() : security.now ?? new Date(),
     },
   );
+  const authorizeStage = async () => {
+    const authorization = await authorizeMutation();
+    const runtime = await verifyControlRuntimeLock(bundle.runtimeLock, {
+      clusterContext: context,
+      namespace: bundle.namespace,
+      services: bundle.services,
+    }, security.inspectRuntimeResources);
+    return Object.freeze({ authorization, runtime });
+  };
   const [namespaceStage, migrationStage, workloadStage] = bundle.stages;
-  await authorizeMutation();
+  await authorizeStage();
   await execute(kubectlApply(context, undefined), manifestList(namespaceStage.resources));
   const migrationJob = migrationStage.resources.find((resource) => resource.kind === "Job");
   const migrationPrerequisites = migrationStage.resources.filter((resource) => resource.kind !== "Job");
   if (!migrationJob || migrationPrerequisites.length !== migrationStage.resources.length - 1) invalidArguments();
-  await authorizeMutation();
+  await authorizeStage();
   await execute(kubectlApply(context, bundle.namespace), manifestList(migrationPrerequisites));
-  await authorizeMutation();
+  await authorizeStage();
   await execute(kubectlApply(context, bundle.namespace), manifestList([migrationJob]));
   await execute({
     command: "kubectl",
@@ -298,7 +318,7 @@ export async function applyControlPlaneRelease(bundle, context, security, execut
       `job/${bundle.migrationJobName}`,
     ],
   });
-  const authorizationEvidence = await authorizeMutation();
+  const stageEvidence = await authorizeStage();
   await execute(kubectlApply(context, bundle.namespace), manifestList(workloadStage.resources));
   await execute({
     command: "kubectl",
@@ -312,18 +332,19 @@ export async function applyControlPlaneRelease(bundle, context, security, execut
     ],
   });
   return Object.freeze({
-    schemaVersion: "deviludo.kubernetes-control-release-result.v1",
+    schemaVersion: "deviludo.kubernetes-control-release-result.v2",
     context,
     namespace: bundle.namespace,
     imageReference: bundle.receipt.imageReference,
     sourceRevision: bundle.receipt.sourceRevision,
     migrationJobName: bundle.migrationJobName,
     deployedServices: Object.freeze([...bundle.services]),
-    authorization: authorizationEvidence,
+    authorization: stageEvidence.authorization,
+    runtimeConfiguration: stageEvidence.runtime,
   });
 }
 
-function migrationJob(receipt, namespace, name, timeoutSeconds, labels) {
+function migrationJob(receipt, namespace, name, timeoutSeconds, labels, migrationSecretName) {
   return {
     apiVersion: "batch/v1",
     kind: "Job",
@@ -361,7 +382,7 @@ function migrationJob(receipt, namespace, name, timeoutSeconds, labels) {
           }],
           volumes: [
             temporaryVolume(),
-            { name: "migration-credentials", secret: { secretName: "deviludo-schema-migrator-files", defaultMode: 256 } },
+            { name: "migration-credentials", secret: { secretName: migrationSecretName, defaultMode: 256 } },
           ],
         },
       },
@@ -369,7 +390,7 @@ function migrationJob(receipt, namespace, name, timeoutSeconds, labels) {
   };
 }
 
-function serviceDeployment(receipt, namespace, service, replicas, labels) {
+function serviceDeployment(receipt, namespace, service, replicas, labels, runtime) {
   const name = `deviludo-${service}`;
   const port = CONTROL_SERVICE_PORTS[service];
   const selector = { "app.kubernetes.io/name": "deviludo", "app.kubernetes.io/component": service };
@@ -382,8 +403,8 @@ function serviceDeployment(receipt, namespace, service, replicas, labels) {
       ...(port === undefined ? [] : [{ name: CONTROL_SERVICE_PORT_ENVIRONMENT[service], value: String(port) }]),
     ]),
     envFrom: [
-      { configMapRef: { name: `${name}-config`, optional: false } },
-      { secretRef: { name: `${name}-environment`, optional: false } },
+      { configMapRef: { name: runtime.configMap.name, optional: false } },
+      { secretRef: { name: runtime.environmentSecret.name, optional: false } },
     ],
     resources: containerResources(),
     securityContext: containerSecurityContext(),
@@ -424,7 +445,7 @@ function serviceDeployment(receipt, namespace, service, replicas, labels) {
           containers: [container],
           volumes: [
             temporaryVolume(),
-            { name: "service-files", secret: { secretName: `${name}-files`, defaultMode: 256 } },
+            { name: "service-files", secret: { secretName: runtime.filesSecret.name, defaultMode: 256 } },
           ],
         },
       },
@@ -592,11 +613,13 @@ async function main() {
       packageLockDigest: await digestFile(resolve(root, "package-lock.json")),
     },
   );
-  const bundle = renderControlPlaneRelease(receipt, options);
+  const runtimeLock = await readJson(options.runtimeLockPath);
+  const bundle = renderControlPlaneRelease(receipt, { ...options, runtimeLock });
   const output = options.mode === "apply"
     ? await applyControlPlaneRelease(bundle, options.context, {
       authorization: await readJson(options.authorizationPath),
       loadTrustPolicy: () => readJson(options.trustPolicyPath),
+      inspectRuntimeResources: inspectControlRuntimeResources,
       trustPolicyDigest: options.trustPolicyDigest,
     })
     : bundle;

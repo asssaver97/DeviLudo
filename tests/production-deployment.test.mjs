@@ -19,6 +19,11 @@ import {
   CONTROL_PLANE_CONTAINER_SERVICES,
   EXTERNAL_WORKLOAD_SERVICES,
 } from "../scripts/production/run-control-service.mjs";
+import {
+  makeControlRuntimeLock,
+  observedControlRuntimeResources,
+  runtimeConfigurationRevision,
+} from "./control-runtime-lock-fixture.mjs";
 
 const imageDigest = `sha256:${"c".repeat(64)}`;
 const dockerfileDigest = `sha256:${"d".repeat(64)}`;
@@ -87,6 +92,7 @@ test("deployment receipt validation binds the exact image, platform inputs and B
 test("deployment CLI renders by default and makes a cluster context mandatory only for explicit apply", () => {
   assert.deepEqual(parseControlPlaneDeploymentArguments([
     "--receipt", "/private/tmp/control-receipt.json",
+    "--runtime-lock", "/private/tmp/control-runtime-lock.json",
     "--services", "control-plane,agent-configuration",
     "--replicas", "2",
   ]), {
@@ -96,6 +102,7 @@ test("deployment CLI renders by default and makes a cluster context mandatory on
     namespace: "deviludo-system",
     receiptPath: "/private/tmp/control-receipt.json",
     replicas: 2,
+    runtimeLockPath: "/private/tmp/control-runtime-lock.json",
     services: ["agent-configuration", "control-plane"],
     timeoutSeconds: 900,
     trustPolicyDigest: undefined,
@@ -106,24 +113,29 @@ test("deployment CLI renders by default and makes a cluster context mandatory on
     "--context", "production-ap-east-1/admin",
     "--namespace", "deviludo-prod",
     "--receipt", "/private/tmp/control-receipt.json",
+    "--runtime-lock", "/private/tmp/control-runtime-lock.json",
     "--authorization", "/private/tmp/control-authorization.json",
     "--trust-policy", "/private/tmp/control-trust.json",
     "--trust-policy-digest", trustPolicyDigest,
   ]).mode, "apply");
   assert.throws(
-    () => parseControlPlaneDeploymentArguments(["--apply", "--receipt", "/private/tmp/control-receipt.json"]),
+    () => parseControlPlaneDeploymentArguments(["--apply", "--receipt", "/private/tmp/control-receipt.json", "--runtime-lock", "/tmp/lock.json"]),
     /input is invalid/,
   );
   assert.throws(
-    () => parseControlPlaneDeploymentArguments(["--context", "production", "--receipt", "/private/tmp/control-receipt.json"]),
+    () => parseControlPlaneDeploymentArguments(["--context", "production", "--receipt", "/private/tmp/control-receipt.json", "--runtime-lock", "/tmp/lock.json"]),
     /input is invalid/,
   );
   assert.throws(
-    () => parseControlPlaneDeploymentArguments(["--apply", "--context", "prod\n--namespace=other", "--receipt", "/tmp/a"]),
+    () => parseControlPlaneDeploymentArguments(["--apply", "--context", "prod\n--namespace=other", "--receipt", "/tmp/a", "--runtime-lock", "/tmp/lock.json"]),
     /input is invalid/,
   );
   assert.throws(
-    () => parseControlPlaneDeploymentArguments(["--receipt", "relative.json"]),
+    () => parseControlPlaneDeploymentArguments(["--receipt", "relative.json", "--runtime-lock", "/tmp/lock.json"]),
+    /input is invalid/,
+  );
+  assert.throws(
+    () => parseControlPlaneDeploymentArguments(["--receipt", "/private/tmp/control-receipt.json"]),
     /input is invalid/,
   );
 });
@@ -134,7 +146,8 @@ test("every shared-image workload is rendered as a least-authority deployment an
   assert.equal(classification.networked.length, 29);
   assert.equal(Object.keys(CONTROL_SERVICE_PORTS).length, CONTROL_PLANE_CONTAINER_SERVICES.length - 2);
 
-  const bundle = renderControlPlaneRelease(receipt);
+  const runtimeLock = makeControlRuntimeLock({ services: CONTROL_PLANE_CONTAINER_SERVICES });
+  const bundle = renderControlPlaneRelease(receipt, { runtimeLock });
   assert.equal(bundle.stages[0].resources.length, 1);
   assert.equal(bundle.stages[1].resources.length, 3);
   assert.equal(bundle.stages[2].resources.filter((resource) => resource.kind === "Deployment").length, 31);
@@ -145,7 +158,7 @@ test("every shared-image workload is rendered as a least-authority deployment an
   assert.equal(namespace.metadata.labels["pod-security.kubernetes.io/enforce"], "restricted");
   const account = bundle.stages[1].resources[0];
   assert.equal(account.automountServiceAccountToken, false);
-  assert.deepEqual(account.imagePullSecrets, [{ name: "deviludo-control-registry" }]);
+  assert.deepEqual(account.imagePullSecrets, [{ name: `deviludo-control-registry-${runtimeConfigurationRevision}` }]);
   const policy = bundle.stages[1].resources.find((resource) => resource.kind === "NetworkPolicy");
   assert.deepEqual(policy.spec, { podSelector: {}, policyTypes: ["Ingress", "Egress"] });
 
@@ -166,19 +179,21 @@ test("every shared-image workload is rendered as a least-authority deployment an
   assert.deepEqual(container.env.find((entry) => entry.name === "DEVILUDO_CONTROL_PLANE_PORT"),
     { name: "DEVILUDO_CONTROL_PLANE_PORT", value: "4100" });
   assert.deepEqual(container.envFrom, [
-    { configMapRef: { name: "deviludo-control-plane-config", optional: false } },
-    { secretRef: { name: "deviludo-control-plane-environment", optional: false } },
+    { configMapRef: { name: `deviludo-control-plane-config-${runtimeConfigurationRevision}`, optional: false } },
+    { secretRef: { name: `deviludo-control-plane-environment-${runtimeConfigurationRevision}`, optional: false } },
   ]);
   assert.equal(pod.automountServiceAccountToken, false);
   assert.deepEqual(pod.nodeSelector, { "kubernetes.io/os": "linux", "kubernetes.io/arch": "amd64" });
   assert.equal(pod.securityContext.seccompProfile.type, "RuntimeDefault");
   assert.equal(container.securityContext.readOnlyRootFilesystem, true);
   assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
-  assert.equal(pod.volumes.find((volume) => volume.name === "service-files").secret.secretName, "deviludo-control-plane-files");
+  assert.equal(pod.volumes.find((volume) => volume.name === "service-files").secret.secretName,
+    `deviludo-control-plane-files-${runtimeConfigurationRevision}`);
 });
 
 test("migration job alone receives the dedicated file-mounted database owner credential", () => {
-  const bundle = renderControlPlaneRelease(receipt, { services: ["control-plane"] });
+  const runtimeLock = makeControlRuntimeLock({ services: ["control-plane"] });
+  const bundle = renderControlPlaneRelease(receipt, { services: ["control-plane"], runtimeLock });
   const migration = bundle.stages[1].resources.find((resource) => resource.kind === "Job");
   const container = migration.spec.template.spec.containers[0];
   assert.deepEqual(container.command, ["node", "scripts/production/migrate-postgres.mjs"]);
@@ -187,7 +202,7 @@ test("migration job alone receives the dedicated file-mounted database owner cre
   assert.equal(container.env.find((entry) => entry.name === "DEVILUDO_MIGRATION_DATABASE_URL_FILE").value,
     "/run/secrets/migration/database-url");
   assert.equal(migration.spec.template.spec.volumes.find((volume) => volume.name === "migration-credentials")
-    .secret.secretName, "deviludo-schema-migrator-files");
+    .secret.secretName, `deviludo-schema-migrator-files-${runtimeConfigurationRevision}`);
   assert.deepEqual(migration.spec.template.spec.nodeSelector,
     { "kubernetes.io/os": "linux", "kubernetes.io/arch": "amd64" });
   const workload = bundle.stages[2].resources.find((resource) => resource.kind === "Deployment");
@@ -196,7 +211,10 @@ test("migration job alone receives the dedicated file-mounted database owner cre
 });
 
 test("apply uses shell-free, explicit-context stages and does not release workloads before migration completes", async () => {
-  const bundle = renderControlPlaneRelease(receipt, { services: ["agent-configuration", "control-plane"], timeoutSeconds: 300 });
+  const runtimeLock = makeControlRuntimeLock({ services: ["agent-configuration", "control-plane"] });
+  const bundle = renderControlPlaneRelease(receipt, {
+    services: ["agent-configuration", "control-plane"], timeoutSeconds: 300, runtimeLock,
+  });
   const security = signedSecurity(bundle, "prod-cluster/admin");
   const calls = [];
   const result = await applyControlPlaneRelease(bundle, "prod-cluster/admin", security, async (invocation, input) => {
@@ -215,6 +233,37 @@ test("apply uses shell-free, explicit-context stages and does not release worklo
   assert.equal(result.imageReference, receipt.imageReference);
   assert.deepEqual(result.deployedServices, ["agent-configuration", "control-plane"]);
   assert.equal(result.authorization.keyId, "control-release-key-2026-01");
+  assert.equal(result.runtimeConfiguration.lockId, runtimeLock.lockId);
+  assert.equal(result.runtimeConfiguration.resourceCount, 8);
+
+  const configurationDriftCalls = [];
+  const driftedResources = observedControlRuntimeResources(runtimeLock).map((resource, index) => index === 0
+    ? { ...resource, resourceVersion: "999999" }
+    : resource);
+  await assert.rejects(
+    applyControlPlaneRelease(bundle, "prod-cluster/admin", {
+      ...security,
+      inspectRuntimeResources: async () => driftedResources,
+    }, async (...args) => configurationDriftCalls.push(args)),
+    /runtime lock is invalid/,
+  );
+  assert.equal(configurationDriftCalls.length, 0);
+
+  let runtimeChecks = 0;
+  const lateConfigurationDriftCalls = [];
+  await assert.rejects(
+    applyControlPlaneRelease(bundle, "prod-cluster/admin", {
+      ...security,
+      inspectRuntimeResources: async () => {
+        runtimeChecks += 1;
+        return runtimeChecks < 4 ? observedControlRuntimeResources(runtimeLock) : driftedResources;
+      },
+    }, async (...args) => lateConfigurationDriftCalls.push(args)),
+    /runtime lock is invalid/,
+  );
+  assert.equal(runtimeChecks, 4);
+  assert.equal(lateConfigurationDriftCalls.length, 4);
+  assert.ok(lateConfigurationDriftCalls[3][0].args.includes("--for=condition=complete"));
 
   const mutated = structuredClone(bundle);
   mutated.stages[2].resources[0].metadata.name = "injected";
@@ -234,11 +283,19 @@ test("apply uses shell-free, explicit-context stages and does not release worklo
   assert.equal(blockedCalls.length, 4);
 
   const unauthorizedCalls = [];
+  let unauthorizedRuntimeChecks = 0;
   await assert.rejects(
-    applyControlPlaneRelease(bundle, "another-cluster/admin", security, async (...args) => unauthorizedCalls.push(args)),
+    applyControlPlaneRelease(bundle, "another-cluster/admin", {
+      ...security,
+      inspectRuntimeResources: async () => {
+        unauthorizedRuntimeChecks += 1;
+        return observedControlRuntimeResources(runtimeLock);
+      },
+    }, async (...args) => unauthorizedCalls.push(args)),
     /authorization is invalid/,
   );
   assert.equal(unauthorizedCalls.length, 0);
+  assert.equal(unauthorizedRuntimeChecks, 0);
   await assert.rejects(
     applyControlPlaneRelease(bundle, "prod-cluster/admin", {
       ...security,
@@ -276,7 +333,7 @@ function signedSecurity(bundle, context) {
   });
   return Object.freeze({
     authorization: Object.freeze({
-      schemaVersion: "deviludo.control-release-authorization.v1",
+      schemaVersion: "deviludo.control-release-authorization.v2",
       claims,
       signature: Object.freeze({
         algorithm: "Ed25519",
@@ -287,5 +344,6 @@ function signedSecurity(bundle, context) {
     trustPolicy,
     trustPolicyDigest,
     now: new Date("2026-07-22T00:05:00.000Z"),
+    inspectRuntimeResources: async () => observedControlRuntimeResources(bundle.runtimeLock),
   });
 }

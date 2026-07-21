@@ -130,6 +130,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/control-release-authorization.mjs",
     "scripts/production/deploy-control-plane.mjs",
     "scripts/production/inspect-control-release-trust-policy.mjs",
+    "scripts/production/lock-control-runtime.mjs",
     "scripts/production/migrate-postgres.mjs",
     "scripts/production/run-control-service.mjs",
   ]) {

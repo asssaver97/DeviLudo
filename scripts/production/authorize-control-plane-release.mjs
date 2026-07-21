@@ -27,7 +27,7 @@ export function parseControlReleaseAuthorizationArguments(argv) {
   if (!Array.isArray(argv)) invalid();
   const allowed = new Set([
     "--authorization-id", "--context", "--namespace", "--receipt", "--replicas",
-    "--services", "--trust-policy", "--trust-policy-digest", "--ttl-seconds",
+    "--runtime-lock", "--services", "--trust-policy", "--trust-policy-digest", "--ttl-seconds",
   ]);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
@@ -38,6 +38,7 @@ export function parseControlReleaseAuthorizationArguments(argv) {
   }
   if (argv.length % 2 !== 0) invalid();
   const receiptPath = values.get("--receipt");
+  const runtimeLockPath = values.get("--runtime-lock");
   const trustPolicyPath = values.get("--trust-policy");
   const trustPolicyDigest = values.get("--trust-policy-digest");
   const clusterContext = values.get("--context");
@@ -45,7 +46,7 @@ export function parseControlReleaseAuthorizationArguments(argv) {
   const replicas = integer(values.get("--replicas") ?? "1", 1, 10);
   const ttlSeconds = integer(values.get("--ttl-seconds") ?? "900", 60, 1_800);
   const authorizationId = values.get("--authorization-id");
-  if (!isAbsolutePath(receiptPath) || !isAbsolutePath(trustPolicyPath) || !SHA256.test(trustPolicyDigest)
+  if (!isAbsolutePath(receiptPath) || !isAbsolutePath(runtimeLockPath) || !isAbsolutePath(trustPolicyPath) || !SHA256.test(trustPolicyDigest)
     || typeof clusterContext !== "string" || !CONTEXT.test(clusterContext)
     || namespace.length > 63 || !NAMESPACE.test(namespace)
     || authorizationId !== undefined && !UUID.test(authorizationId)) invalid();
@@ -56,6 +57,7 @@ export function parseControlReleaseAuthorizationArguments(argv) {
     namespace,
     receiptPath,
     replicas,
+    runtimeLockPath,
     services,
     trustPolicyDigest,
     trustPolicyPath,
@@ -75,7 +77,10 @@ async function main() {
   });
   const policy = validateControlReleaseTrustPolicy(await readJson(options.trustPolicyPath), options.trustPolicyDigest);
   if (controlReleaseTrustPolicyDigest(policy) !== options.trustPolicyDigest) invalid();
-  const bundle = renderControlPlaneRelease(receipt, options);
+  const bundle = renderControlPlaneRelease(receipt, {
+    ...options,
+    runtimeLock: await readJson(options.runtimeLockPath),
+  });
   const claims = createControlReleaseClaims(bundle, options.clusterContext, {
     ...(options.authorizationId === undefined ? {} : { authorizationId: options.authorizationId }),
     ttlSeconds: options.ttlSeconds,

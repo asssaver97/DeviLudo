@@ -18,6 +18,7 @@
     "db:migrate": "node scripts/production/migrate-postgres.mjs",
     "db:adopt-local": "node scripts/production/migrate-postgres.mjs --adopt-existing",
     "image:build-control": "node scripts/production/build-control-plane-image.mjs",
+    "lock:control-runtime": "node scripts/production/lock-control-runtime.mjs",
     "inspect:control-trust": "node scripts/production/inspect-control-release-trust-policy.mjs",
     "authorize:control": "node scripts/production/authorize-control-plane-release.mjs",
     "deploy:control": "node scripts/production/deploy-control-plane.mjs",

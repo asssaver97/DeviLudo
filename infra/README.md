@@ -156,17 +156,21 @@ before control workloads are released. Only that Job receives the migration
 credential files. A normal control container receives application credentials
 for its own role and never receives the migration role.
 
-`npm run deploy:control` consumes that image receipt and renders an ordered
-Kubernetes release bundle without contacting a cluster. An actual apply requires
+`npm run lock:control-runtime` first snapshots only the kind, name, UID,
+resourceVersion and immutable flag of the revision-suffixed ConfigMaps and
+Secrets; it never reads Secret data. `npm run deploy:control` consumes that lock
+and the image receipt and renders an ordered Kubernetes release bundle without
+contacting a cluster. An actual apply requires
 `--apply`, an explicit kubeconfig context and a short-lived Ed25519 authorization
 from the dedicated mTLS Vault/KMS Broker. The authorization binds the exact
-receipt, context, namespace, service set and replicas; local verification happens
-before any `kubectl` call. It server-side-applies the
+receipt, runtime-lock digest, context, namespace, service set and replicas; local
+verification happens before any `kubectl` call. The live immutable resource
+identities are then rechecked before every mutating stage. It server-side-applies the
 restricted Namespace and tokenless ServiceAccount, waits for the exact migration
 Job, then applies only the allow-listed control Deployments/ClusterIP Services
 and waits for the receipt revision. It performs no delete or prune operation.
 The generated namespace-wide default-deny NetworkPolicy requires externally
 managed least-privilege allow rules before migration or service startup.
 The target namespace's registry, migration and per-service ConfigMap/Secret
-objects are external production inputs; see
+objects are revision-suffixed, immutable external production inputs; see
 [`docs/production-control-release.md`](../docs/production-control-release.md).

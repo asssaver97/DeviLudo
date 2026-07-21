@@ -41,17 +41,19 @@ the policy ID, revision, canonical digest and each key lifecycle.
 Configure the authorizer with a dedicated mTLS identity:
 
 - `DEVILUDO_CONTROL_RELEASE_SIGNER_ENDPOINT` is an HTTPS origin on port 443 or
-  8443. The only request path is `/v1/control-releases/sign-ed25519`.
+  8443. The only request path is `/v2/control-releases/sign-ed25519`.
 - `DEVILUDO_CONTROL_RELEASE_SIGNER_TLS_KEY_FILE`, `_CERT_FILE` and `_CA_FILE`
   are file-mounted mTLS material.
 - `DEVILUDO_CONTROL_RELEASE_SIGNING_KEY_ID` selects one `ACTIVE` trust-policy
   key. Private signing material stays inside Vault/KMS.
 
-Request one authorization after the image receipt and target scope are final:
+Request one authorization after the image receipt, runtime lock and target scope
+are final:
 
 ```bash
 NODE_ENV=production npm --silent run authorize:control -- \
   --receipt /absolute/private/path/control-image-receipt.json \
+  --runtime-lock /absolute/private/path/control-runtime-lock.json \
   --context production-ap-east-1/platform-admin \
   --namespace deviludo-prod \
   --services agent-configuration,control-plane \
@@ -66,31 +68,56 @@ The mTLS client sends only canonical claims and a digest, uses the authorization
 UUID as its idempotency key, and locally verifies the returned signature before
 writing the authorization. Claims bind the complete receipt digest, final OCI
 digest, source revision, architecture, exact kubeconfig context, namespace,
-sorted service allow-list, replica count and expiry. Lifetime is limited to 30
-minutes. Rotating the policy requires an explicit new policy digest; marking a
-key `REVOKED` invalidates its outstanding authorizations immediately.
+sorted service allow-list, replica count, canonical runtime-lock digest and
+expiry. The v2 claim/envelope contract cannot accept a pre-runtime-lock v1
+authorization. Lifetime is limited to 30 minutes. Rotating the policy requires
+an explicit new policy digest; marking a key `REVOKED` invalidates its
+outstanding authorizations immediately.
 
 ## Required namespace inputs
 
-Production secret/configuration automation must provision these objects in the
-target namespace before a release:
+Production secret/configuration automation must provision a complete immutable
+configuration revision in the target namespace before a release. Derive one
+12-character lowercase hexadecimal revision from the independently reviewed
+configuration inventory and suffix every object with it:
 
-- `deviludo-control-registry`: image-pull Secret, used by the kubelet only.
-- `deviludo-schema-migrator-files`: Secret with `database-url`, `ca.pem`,
+- `deviludo-control-registry-REVISION`: image-pull Secret, used by the kubelet
+  only.
+- `deviludo-schema-migrator-files-REVISION`: Secret with `database-url`, `ca.pem`,
   `client.crt` and `client.key`. The URL belongs to the migration role and is
   mounted only in the one-shot migration Job.
-- For every selected service `NAME`, `deviludo-NAME-config` is a ConfigMap,
-  `deviludo-NAME-environment` is an application-role environment Secret, and
-  `deviludo-NAME-files` is a file Secret mounted read-only at
-  `/run/secrets/deviludo`.
+- For every selected service `NAME`, `deviludo-NAME-config-REVISION` is a
+  ConfigMap, `deviludo-NAME-environment-REVISION` is an application-role
+  environment Secret, and `deviludo-NAME-files-REVISION` is a file Secret
+  mounted read-only at `/run/secrets/deviludo`.
+
+Every one of these ConfigMaps and Secrets must have Kubernetes `immutable: true`.
+Once the operator has reconciled them, snapshot their cluster identities:
+
+```bash
+NODE_ENV=production npm --silent run lock:control-runtime -- \
+  --context production-ap-east-1/platform-admin \
+  --namespace deviludo-prod \
+  --configuration-revision 0123456789ab \
+  --services agent-configuration,control-plane \
+  > /absolute/private/path/control-runtime-lock.json
+```
+
+The lock command invokes `kubectl` directly without a shell and requests only
+custom metadata columns: kind, name, UID, resourceVersion and `immutable`. It
+does not request Secret data, annotations or a general JSON/YAML object. The
+result binds the exact cluster, namespace, selected services and all resource
+UID/resourceVersion pairs. Deleting and recreating an object, changing metadata,
+or attempting to use a mutable object invalidates the lock. A later revision
+uses new suffixed object names, so in-flight pods retain their prior revision.
 
 The per-service environment Secret must contain only that process's application
 credentials. Third-party model API keys, GitHub App private keys and Steam
 sessions remain behind their dedicated brokers/Vault bindings; they must not be
 copied into every workload. File paths in a service ConfigMap refer to keys below
 `/run/secrets/deviludo`. Empty per-service Secret objects may be used when a
-process genuinely requires no secret values, but the objects are never generated
-by this repository.
+process genuinely requires no secret values, but they must still be immutable
+and are never generated by this repository.
 
 The namespace and these inputs are normally reconciled ahead of time by the
 cluster's secret operator. The release tool also server-side-applies the
@@ -120,16 +147,20 @@ Rendering is the default and has no cluster side effect:
 ```bash
 npm run deploy:control -- \
   --receipt /absolute/private/path/control-image-receipt.json \
+  --runtime-lock /absolute/private/path/control-runtime-lock.json \
   --namespace deviludo-prod \
+  --services agent-configuration,control-plane \
+  --replicas 2 \
   --render
 ```
 
-The output is a `deviludo.kubernetes-control-release.v1` bundle with three
+The output is a `deviludo.kubernetes-control-release.v2` bundle with three
 ordered stages: Namespace, migration, and workloads. It contains all 31 admitted
 control processes by default. `--services` accepts a comma-separated allow-listed
 subset, and `--replicas` accepts 1 through 10. Agent execution, Godot/E2E,
 signing, Steam Client and local preview processes cannot be selected because they
-are not present in the shared control image.
+are not present in the shared control image. Rendering has no cluster side
+effect, but the supplied lock must cover exactly the same namespace and services.
 
 ## Apply with the migration gate
 
@@ -144,6 +175,7 @@ npm run deploy:control -- \
   --services agent-configuration,control-plane \
   --replicas 2 \
   --receipt /absolute/private/path/control-image-receipt.json \
+  --runtime-lock /absolute/private/path/control-runtime-lock.json \
   --authorization /absolute/private/path/control-release-authorization.json \
   --trust-policy /absolute/reviewed/control-release-trust.json \
   --trust-policy-digest sha256:REVIEWED_POLICY_DIGEST
@@ -151,19 +183,22 @@ npm run deploy:control -- \
 
 Authorization verification and canonical manifest regeneration occur before
 the first `kubectl` process is created. Any signature, key lifecycle, expiry,
-context, namespace, image, service, replica or trust-policy drift therefore
-produces zero cluster calls.
+context, namespace, image, runtime-lock, service, replica or trust-policy drift
+therefore produces zero cluster calls. After authorization succeeds, the tool
+uses the metadata-only probe to compare all live immutable resources with the
+signed lock before each mutating stage. Runtime drift produces zero mutation for
+that stage; drift discovered after migration prevents workload deployment.
 
 The tool invokes `kubectl` directly without a shell and performs only these
 operations:
 
-1. Server-side apply the Namespace with the Kubernetes Restricted Pod Security
-   profile.
-2. Server-side apply the tokenless ServiceAccount and default-deny network
-   policy.
-3. Apply the digest-bound migration Job, then wait for that exact Job to reach
-   `Complete`; a failure or timeout stops here.
-4. Server-side apply ClusterIP Services and Deployments.
+1. Verify the complete immutable runtime lock, then server-side apply the
+   Namespace with the Kubernetes Restricted Pod Security profile.
+2. Reverify the lock, then server-side apply the tokenless ServiceAccount and
+   default-deny network policy.
+3. Reverify the lock, apply the digest-bound migration Job, then wait for that
+   exact Job to reach `Complete`; a failure or timeout stops here.
+4. Reverify the lock, then server-side apply ClusterIP Services and Deployments.
 5. Wait for Deployments at the receipt's exact source revision to become
    `Available`.
 

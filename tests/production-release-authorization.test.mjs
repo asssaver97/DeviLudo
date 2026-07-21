@@ -14,10 +14,12 @@ import {
   verifyControlReleaseAuthorization,
 } from "../scripts/production/control-release-authorization.mjs";
 import { renderControlPlaneRelease } from "../scripts/production/deploy-control-plane.mjs";
+import { controlRuntimeLockDigest } from "../scripts/production/lock-control-runtime.mjs";
 import {
   inspectControlReleaseTrustPolicy,
   parseControlReleaseTrustInspectionArguments,
 } from "../scripts/production/inspect-control-release-trust-policy.mjs";
+import { makeControlRuntimeLock } from "./control-runtime-lock-fixture.mjs";
 
 const keyPair = generateKeyPairSync("ed25519");
 const keyId = "control-release-key-2026-01";
@@ -48,12 +50,18 @@ const receipt = Object.freeze({
   attestations: Object.freeze(["buildkit-provenance-mode-max", "buildkit-sbom"]),
   completedAt: "2026-07-22T00:00:00.000Z",
 });
+const context = "production-ap-east-1/platform-admin";
+const runtimeLock = makeControlRuntimeLock({
+  clusterContext: context,
+  namespace: "deviludo-prod",
+  services: ["agent-configuration", "control-plane"],
+});
 const bundle = renderControlPlaneRelease(receipt, {
   namespace: "deviludo-prod",
   replicas: 2,
   services: ["agent-configuration", "control-plane"],
+  runtimeLock,
 });
-const context = "production-ap-east-1/platform-admin";
 const issuedAt = new Date("2026-07-22T00:00:00.000Z");
 const now = new Date("2026-07-22T00:05:00.000Z");
 
@@ -102,18 +110,25 @@ test("checked-in trust template is valid but revoked, and inspection reveals no 
   );
 });
 
-test("short-lived authorization is bound to receipt, image, cluster, namespace, services and replicas", () => {
+test("short-lived authorization binds the image, cluster, runtime lock, namespace, services and replicas", () => {
   const claims = claimsFor(bundle);
   const authorization = signedAuthorization(claims);
   const evidence = verifyControlReleaseAuthorization(authorization, policy, policyDigest, { bundle, clusterContext: context, now });
   assert.equal(evidence.authorizationId, claims.authorizationId);
   assert.equal(evidence.keyId, keyId);
   assert.equal(evidence.trustPolicyDigest, policyDigest);
+  assert.equal(claims.runtimeLockDigest, controlRuntimeLockDigest(runtimeLock));
+  assert.throws(
+    () => verifyControlReleaseAuthorization({ ...authorization, schemaVersion: "deviludo.control-release-authorization.v1" },
+      policy, policyDigest, { bundle, clusterContext: context, now }),
+    /authorization is invalid/,
+  );
 
   for (const [changedBundle, changedContext] of [
     [{ ...bundle, namespace: "other-prod" }, context],
     [{ ...bundle, replicas: 3 }, context],
     [{ ...bundle, services: ["control-plane"] }, context],
+    [{ ...bundle, runtimeLock: { ...runtimeLock, configurationRevision: "abcdefabcdef" } }, context],
     [{ ...bundle, receipt: { ...receipt, imageDigest: `sha256:${"f".repeat(64)}` } }, context],
     [bundle, "another-cluster/admin"],
   ]) {
@@ -167,7 +182,7 @@ test("mTLS signer sends only canonical claims to one fixed KMS route and locally
       return {
         statusCode: 200,
         body: {
-          schemaVersion: "deviludo.control-release-signing-response.v1",
+          schemaVersion: "deviludo.control-release-signing-response.v2",
           algorithm: "Ed25519",
           keyId,
           claimsDigest: body.claimsDigest,
@@ -178,7 +193,7 @@ test("mTLS signer sends only canonical claims to one fixed KMS route and locally
   });
   const authorization = await signer.sign(bundle, claims, policy, policyDigest, now);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url.href, "https://kms-signing.internal:8443/v1/control-releases/sign-ed25519");
+  assert.equal(calls[0].url.href, "https://kms-signing.internal:8443/v2/control-releases/sign-ed25519");
   assert.equal(calls[0].headers["idempotency-key"], claims.authorizationId);
   assert.equal(authorization.claims, claims);
   assert.equal(authorization.signature.keyId, keyId);
@@ -195,7 +210,7 @@ test("mTLS signer sends only canonical claims to one fixed KMS route and locally
     request: async () => ({
       statusCode: 200,
       body: {
-        schemaVersion: "deviludo.control-release-signing-response.v1",
+        schemaVersion: "deviludo.control-release-signing-response.v2",
         algorithm: "Ed25519",
         keyId,
         claimsDigest: `sha256:${"0".repeat(64)}`,
@@ -217,6 +232,7 @@ test("mTLS signer sends only canonical claims to one fixed KMS route and locally
 test("authorization CLI requires absolute inputs, an exact trust digest and explicit cluster context", () => {
   assert.deepEqual(parseControlReleaseAuthorizationArguments([
     "--receipt", "/private/control-receipt.json",
+    "--runtime-lock", "/private/control-runtime-lock.json",
     "--context", context,
     "--namespace", "deviludo-prod",
     "--services", "control-plane,agent-configuration",
@@ -231,6 +247,7 @@ test("authorization CLI requires absolute inputs, an exact trust digest and expl
     namespace: "deviludo-prod",
     receiptPath: "/private/control-receipt.json",
     replicas: 2,
+    runtimeLockPath: "/private/control-runtime-lock.json",
     services: ["agent-configuration", "control-plane"],
     trustPolicyDigest: policyDigest,
     trustPolicyPath: "/private/control-trust.json",
@@ -238,14 +255,14 @@ test("authorization CLI requires absolute inputs, an exact trust digest and expl
   });
   assert.throws(
     () => parseControlReleaseAuthorizationArguments([
-      "--receipt", "relative.json", "--context", context,
+      "--receipt", "relative.json", "--runtime-lock", "/private/lock.json", "--context", context,
       "--trust-policy", "/private/policy.json", "--trust-policy-digest", policyDigest,
     ]),
     /input is invalid/,
   );
   assert.throws(
     () => parseControlReleaseAuthorizationArguments([
-      "--receipt", "/private/receipt.json", "--context", "prod\nother",
+      "--receipt", "/private/receipt.json", "--runtime-lock", "/private/lock.json", "--context", "prod\nother",
       "--trust-policy", "/private/policy.json", "--trust-policy-digest", policyDigest,
     ]),
     /input is invalid/,
@@ -262,7 +279,7 @@ function claimsFor(selectedBundle) {
 
 function signedAuthorization(claims) {
   return Object.freeze({
-    schemaVersion: "deviludo.control-release-authorization.v1",
+    schemaVersion: "deviludo.control-release-authorization.v2",
     claims,
     signature: Object.freeze({
       algorithm: "Ed25519",

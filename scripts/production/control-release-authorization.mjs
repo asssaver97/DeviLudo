@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { request as httpsRequest } from "node:https";
 
+import { controlRuntimeLockDigest, validateControlRuntimeLock } from "./lock-control-runtime.mjs";
+
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/;
@@ -14,7 +16,8 @@ const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const BASE64URL = /^[A-Za-z0-9_-]{86}$/;
 const CLAIM_KEYS = Object.freeze([
   "authorizationId", "clusterContext", "expiresAt", "imageDigest", "imageReference", "issuedAt",
-  "namespace", "platform", "platformVersion", "receiptDigest", "replicas", "schemaVersion", "services", "sourceRevision",
+  "namespace", "platform", "platformVersion", "receiptDigest", "replicas", "runtimeLockDigest", "schemaVersion", "services",
+  "sourceRevision",
 ]);
 const AUTHORIZATION_KEYS = Object.freeze(["claims", "schemaVersion", "signature"]);
 const SIGNATURE_KEYS = Object.freeze(["algorithm", "keyId", "value"]);
@@ -77,9 +80,9 @@ export function createControlReleaseClaims(bundle, clusterContext, {
     || typeof authorizationId !== "string" || !UUID.test(authorizationId)
     || !(issuedAt instanceof Date) || !Number.isFinite(issuedAt.valueOf())
     || !Number.isSafeInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > MAX_AUTHORIZATION_SECONDS
-    || !validReleaseBundleBinding(bundle)) invalidAuthorization();
+    || !validReleaseBundleBinding(bundle) || bundle.runtimeLock.clusterContext !== clusterContext) invalidAuthorization();
   return Object.freeze({
-    schemaVersion: "deviludo.control-release-claims.v1",
+    schemaVersion: "deviludo.control-release-claims.v2",
     authorizationId,
     receiptDigest: sha256Canonical(bundle.receipt),
     imageReference: bundle.receipt.imageReference,
@@ -91,6 +94,7 @@ export function createControlReleaseClaims(bundle, clusterContext, {
     namespace: bundle.namespace,
     services: Object.freeze([...bundle.services]),
     replicas: bundle.replicas,
+    runtimeLockDigest: controlRuntimeLockDigest(bundle.runtimeLock),
     issuedAt: issuedAt.toISOString(),
     expiresAt: new Date(issuedAt.valueOf() + ttlSeconds * 1_000).toISOString(),
   });
@@ -100,7 +104,7 @@ export function controlReleaseSigningRequest(claims) {
   validateClaimsShape(claims);
   const input = Buffer.from(canonicalJson(claims), "utf8");
   return Object.freeze({
-    schemaVersion: "deviludo.control-release-signing-request.v1",
+    schemaVersion: "deviludo.control-release-signing-request.v2",
     authorizationId: claims.authorizationId,
     claimsDigest: sha256Canonical(claims),
     signingInput: input.toString("base64url"),
@@ -112,11 +116,11 @@ export function controlReleaseAuthorizationFromSigner(claims, response, bundle, 
   const trusted = validateControlReleaseTrustPolicy(policy, expectedPolicyDigest);
   const request = controlReleaseSigningRequest(claims);
   if (!plainRecord(response) || !exactKeys(response, SIGNER_RESPONSE_KEYS)
-    || response.schemaVersion !== "deviludo.control-release-signing-response.v1"
+    || response.schemaVersion !== "deviludo.control-release-signing-response.v2"
     || response.algorithm !== "Ed25519" || response.claimsDigest !== request.claimsDigest
     || typeof response.keyId !== "string" || typeof response.signature !== "string") invalidAuthorization();
   const authorization = Object.freeze({
-    schemaVersion: "deviludo.control-release-authorization.v1",
+    schemaVersion: "deviludo.control-release-authorization.v2",
     claims,
     signature: Object.freeze({ algorithm: "Ed25519", keyId: response.keyId, value: response.signature }),
   });
@@ -136,7 +140,7 @@ export function verifyControlReleaseAuthorization(authorization, policy, expecte
   if (typeof expectedPolicyDigest !== "string" || !SHA256.test(expectedPolicyDigest)) invalidAuthorization();
   const trusted = validateControlReleaseTrustPolicy(policy, expectedPolicyDigest);
   if (!plainRecord(authorization) || !exactKeys(authorization, AUTHORIZATION_KEYS)
-    || authorization.schemaVersion !== "deviludo.control-release-authorization.v1"
+    || authorization.schemaVersion !== "deviludo.control-release-authorization.v2"
     || !plainRecord(authorization.signature) || !exactKeys(authorization.signature, SIGNATURE_KEYS)
     || authorization.signature.algorithm !== "Ed25519" || typeof authorization.signature.keyId !== "string"
     || typeof authorization.signature.value !== "string" || !BASE64URL.test(authorization.signature.value)
@@ -176,7 +180,7 @@ export class MtlsControlReleaseSigner {
       || binding.expires > Date.parse(selectedKey.notAfter)) invalidSigner();
     const signingRequest = controlReleaseSigningRequest(claims);
     const response = await this.request({
-      url: new URL("/v1/control-releases/sign-ed25519", this.endpoint),
+      url: new URL("/v2/control-releases/sign-ed25519", this.endpoint),
       tls: this.tls,
       headers: Object.freeze({
         "content-type": "application/json",
@@ -205,7 +209,7 @@ export async function controlReleaseSignerFromEnvironment(env = process.env) {
 
 function validateClaimsShape(claims) {
   if (!plainRecord(claims) || !exactKeys(claims, CLAIM_KEYS)
-    || claims.schemaVersion !== "deviludo.control-release-claims.v1"
+    || claims.schemaVersion !== "deviludo.control-release-claims.v2"
     || typeof claims.authorizationId !== "string" || !UUID.test(claims.authorizationId)
     || typeof claims.receiptDigest !== "string" || !SHA256.test(claims.receiptDigest)
     || typeof claims.imageReference !== "string" || !IMAGE.test(claims.imageReference)
@@ -216,6 +220,7 @@ function validateClaimsShape(claims) {
     || typeof claims.platformVersion !== "string" || !VERSION.test(claims.platformVersion)
     || typeof claims.clusterContext !== "string" || !CONTEXT.test(claims.clusterContext)
     || typeof claims.namespace !== "string" || claims.namespace.length > 63 || !NAMESPACE.test(claims.namespace)
+    || typeof claims.runtimeLockDigest !== "string" || !SHA256.test(claims.runtimeLockDigest)
     || !Array.isArray(claims.services) || claims.services.length < 1 || claims.services.length > 64
     || claims.services.some((service) => typeof service !== "string" || !NAMESPACE.test(service))
     || new Set(claims.services).size !== claims.services.length
@@ -234,6 +239,8 @@ function validateClaimsBinding(value, bundle, clusterContext, now) {
     || claims.imageReference !== bundle.receipt.imageReference || claims.imageDigest !== bundle.receipt.imageDigest
     || claims.sourceRevision !== bundle.receipt.sourceRevision || claims.platform !== bundle.receipt.platform
     || claims.platformVersion !== bundle.receipt.platformVersion || claims.namespace !== bundle.namespace
+    || bundle.runtimeLock.clusterContext !== clusterContext
+    || claims.runtimeLockDigest !== controlRuntimeLockDigest(bundle.runtimeLock)
     || claims.replicas !== bundle.replicas || JSON.stringify(claims.services) !== JSON.stringify(bundle.services)) {
     invalidAuthorization();
   }
@@ -245,6 +252,15 @@ function validateClaimsBinding(value, bundle, clusterContext, now) {
 }
 
 function validReleaseBundleBinding(bundle) {
+  let runtimeLock;
+  try {
+    runtimeLock = validateControlRuntimeLock(bundle?.runtimeLock, {
+      namespace: bundle?.namespace,
+      services: bundle?.services,
+    });
+  } catch {
+    return false;
+  }
   return plainRecord(bundle.receipt) && SHA256.test(bundle.receipt.imageDigest)
     && IMAGE.test(bundle.receipt.imageReference) && SOURCE.test(bundle.receipt.sourceRevision)
     && new Set(["linux/amd64", "linux/arm64"]).has(bundle.receipt.platform)
@@ -253,6 +269,7 @@ function validReleaseBundleBinding(bundle) {
     && bundle.services.length > 0 && new Set(bundle.services).size === bundle.services.length
     && bundle.services.every((service) => typeof service === "string" && NAMESPACE.test(service))
     && JSON.stringify(bundle.services) === JSON.stringify([...bundle.services].sort())
+    && runtimeLock.namespace === bundle.namespace
     && Number.isSafeInteger(bundle.replicas) && bundle.replicas >= 1 && bundle.replicas <= 10;
 }
 
