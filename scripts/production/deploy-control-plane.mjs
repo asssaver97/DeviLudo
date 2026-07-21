@@ -7,6 +7,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CONTAINER_SERVICES } from "./run-control-service.mjs";
+import { verifyControlReleaseAuthorization } from "./control-release-authorization.mjs";
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
 const SOURCE_REVISION = /^[a-f0-9]{40}$/;
@@ -30,6 +31,7 @@ const RECEIPT_KEYS = Object.freeze([
   "sourceRevision",
 ]);
 const RELEASE_SCHEMA = "deviludo.kubernetes-control-release.v1";
+const MAX_JSON_BYTES = 1024 * 1024;
 
 // A port is exposed only for a process that owns an authenticated in-cluster
 // server. The two absent services are background workers and deliberately get
@@ -140,7 +142,10 @@ export function parseControlPlaneDeploymentArguments(argv) {
   const flags = new Set();
   const values = new Map();
   const flagNames = new Set(["--apply", "--render"]);
-  const valueNames = new Set(["--context", "--namespace", "--receipt", "--replicas", "--services", "--timeout-seconds"]);
+  const valueNames = new Set([
+    "--authorization", "--context", "--namespace", "--receipt", "--replicas", "--services",
+    "--timeout-seconds", "--trust-policy", "--trust-policy-digest",
+  ]);
   for (let index = 0; index < argv.length;) {
     const name = argv[index];
     if (flagNames.has(name)) {
@@ -159,15 +164,24 @@ export function parseControlPlaneDeploymentArguments(argv) {
   if (flags.has("--apply") && flags.has("--render")) invalidArguments();
   const mode = flags.has("--apply") ? "apply" : "render";
   const receiptPath = values.get("--receipt");
+  const authorizationPath = values.get("--authorization");
+  const trustPolicyPath = values.get("--trust-policy");
+  const trustPolicyDigest = values.get("--trust-policy-digest");
   const context = values.get("--context");
   const namespace = values.get("--namespace") ?? "deviludo-system";
   const replicas = exactInteger(values.get("--replicas") ?? "1", 1, 10);
   const timeoutSeconds = exactInteger(values.get("--timeout-seconds") ?? "900", 60, 3_600);
   if (typeof receiptPath !== "string" || !isAbsolute(receiptPath) || !validNamespace(namespace)
     || (mode === "apply" && (typeof context !== "string" || !KUBERNETES_CONTEXT.test(context)))
-    || (mode === "render" && context !== undefined)) invalidArguments();
+    || (mode === "apply" && (!absolutePath(authorizationPath) || !absolutePath(trustPolicyPath) || !SHA256.test(trustPolicyDigest)))
+    || (mode === "render" && [context, authorizationPath, trustPolicyPath, trustPolicyDigest].some((value) => value !== undefined))) {
+    invalidArguments();
+  }
   const services = parseServices(values.get("--services"));
-  return Object.freeze({ context, mode, namespace, receiptPath, replicas, services, timeoutSeconds });
+  return Object.freeze({
+    authorizationPath, context, mode, namespace, receiptPath, replicas, services,
+    timeoutSeconds, trustPolicyDigest, trustPolicyPath,
+  });
 }
 
 export function renderControlPlaneRelease(receipt, options = {}) {
@@ -238,7 +252,7 @@ export function renderControlPlaneRelease(receipt, options = {}) {
   });
 }
 
-export async function applyControlPlaneRelease(bundle, context, execute = executeKubectl) {
+export async function applyControlPlaneRelease(bundle, context, security, execute = executeKubectl) {
   if (!bundle || bundle.schemaVersion !== RELEASE_SCHEMA || typeof context !== "string"
     || !KUBERNETES_CONTEXT.test(context) || !validNamespace(bundle.namespace)
     || !Number.isSafeInteger(bundle.timeoutSeconds) || !DNS_LABEL.test(bundle.migrationJobName)
@@ -252,12 +266,27 @@ export async function applyControlPlaneRelease(bundle, context, execute = execut
     timeoutSeconds: bundle.timeoutSeconds,
   });
   if (JSON.stringify(bundle) !== JSON.stringify(canonical)) invalidArguments();
+  if (!security || typeof security !== "object" || typeof security.trustPolicyDigest !== "string"
+    || !SHA256.test(security.trustPolicyDigest)) invalidArguments();
+  const authorizeMutation = async () => verifyControlReleaseAuthorization(
+    security.authorization,
+    typeof security.loadTrustPolicy === "function" ? await security.loadTrustPolicy() : security.trustPolicy,
+    security.trustPolicyDigest,
+    {
+      bundle,
+      clusterContext: context,
+      now: typeof security.clock === "function" ? security.clock() : security.now ?? new Date(),
+    },
+  );
   const [namespaceStage, migrationStage, workloadStage] = bundle.stages;
+  await authorizeMutation();
   await execute(kubectlApply(context, undefined), manifestList(namespaceStage.resources));
   const migrationJob = migrationStage.resources.find((resource) => resource.kind === "Job");
   const migrationPrerequisites = migrationStage.resources.filter((resource) => resource.kind !== "Job");
   if (!migrationJob || migrationPrerequisites.length !== migrationStage.resources.length - 1) invalidArguments();
+  await authorizeMutation();
   await execute(kubectlApply(context, bundle.namespace), manifestList(migrationPrerequisites));
+  await authorizeMutation();
   await execute(kubectlApply(context, bundle.namespace), manifestList([migrationJob]));
   await execute({
     command: "kubectl",
@@ -269,6 +298,7 @@ export async function applyControlPlaneRelease(bundle, context, execute = execut
       `job/${bundle.migrationJobName}`,
     ],
   });
+  const authorizationEvidence = await authorizeMutation();
   await execute(kubectlApply(context, bundle.namespace), manifestList(workloadStage.resources));
   await execute({
     command: "kubectl",
@@ -289,6 +319,7 @@ export async function applyControlPlaneRelease(bundle, context, execute = execut
     sourceRevision: bundle.receipt.sourceRevision,
     migrationJobName: bundle.migrationJobName,
     deployedServices: Object.freeze([...bundle.services]),
+    authorization: authorizationEvidence,
   });
 }
 
@@ -506,6 +537,10 @@ function validNamespace(value) {
   return typeof value === "string" && value.length <= 63 && DNS_LABEL.test(value);
 }
 
+function absolutePath(value) {
+  return typeof value === "string" && isAbsolute(value);
+}
+
 function exactInteger(value, minimum, maximum) {
   const result = Number(value);
   if (!Number.isSafeInteger(result) || String(result) !== value || result < minimum || result > maximum) invalidArguments();
@@ -531,6 +566,12 @@ async function digestFile(path) {
   return `sha256:${createHash("sha256").update(await readFile(path)).digest("hex")}`;
 }
 
+async function readJson(path) {
+  const source = await readFile(path);
+  if (source.length < 2 || source.length > MAX_JSON_BYTES || source.includes(0)) invalidArguments();
+  try { return JSON.parse(source.toString("utf8")); } catch { invalidArguments(); }
+}
+
 function invalidReceipt() {
   throw new Error("Control-plane image receipt is invalid");
 }
@@ -542,9 +583,9 @@ function invalidArguments() {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const options = parseControlPlaneDeploymentArguments(process.argv.slice(2));
-  const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+  const packageJson = await readJson(resolve(root, "package.json"));
   const receipt = validateControlPlaneImageReceipt(
-    JSON.parse(await readFile(options.receiptPath, "utf8")),
+    await readJson(options.receiptPath),
     {
       platformVersion: packageJson.version,
       dockerfileDigest: await digestFile(resolve(root, "Dockerfile.control-plane")),
@@ -553,7 +594,11 @@ async function main() {
   );
   const bundle = renderControlPlaneRelease(receipt, options);
   const output = options.mode === "apply"
-    ? await applyControlPlaneRelease(bundle, options.context)
+    ? await applyControlPlaneRelease(bundle, options.context, {
+      authorization: await readJson(options.authorizationPath),
+      loadTrustPolicy: () => readJson(options.trustPolicyPath),
+      trustPolicyDigest: options.trustPolicyDigest,
+    })
     : bundle;
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }

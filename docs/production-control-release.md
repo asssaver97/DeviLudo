@@ -12,8 +12,63 @@ node-selected to that exact OS/architecture so a single-platform digest cannot
 silently land on an incompatible node.
 
 Registry signature and provenance verification still belongs in the registry
-promotion and cluster admission policy. A JSON receipt is a binding record, not
-a substitute for KMS-backed image signing.
+promotion and cluster admission policy. In addition, every cluster mutation now
+requires a separate short-lived Ed25519 authorization from the dedicated
+Vault/KMS signing Broker. The build receipt is a binding record and cannot by
+itself authorize a release.
+
+## Security authorization
+
+Start from
+[`infra/control-release-trust-policy.example.json`](../infra/control-release-trust-policy.example.json),
+replace its public key and identifiers, set the production key to `ACTIVE`, and
+store the policy plus its canonical SHA-256 in independently reviewed deployment
+configuration. The example key is deliberately `REVOKED` and cannot authorize a
+release. Keys must be sorted by `keyId`; each key fixes Ed25519 SPKI bytes,
+validity and current `ACTIVE`/`REVOKED` status.
+
+Inspect the exact semantic digest that must be approved and passed to both later
+commands:
+
+```bash
+npm --silent run inspect:control-trust -- \
+  --trust-policy /absolute/reviewed/control-release-trust.json
+```
+
+The inspection output excludes public-key bytes from routine logs while showing
+the policy ID, revision, canonical digest and each key lifecycle.
+
+Configure the authorizer with a dedicated mTLS identity:
+
+- `DEVILUDO_CONTROL_RELEASE_SIGNER_ENDPOINT` is an HTTPS origin on port 443 or
+  8443. The only request path is `/v1/control-releases/sign-ed25519`.
+- `DEVILUDO_CONTROL_RELEASE_SIGNER_TLS_KEY_FILE`, `_CERT_FILE` and `_CA_FILE`
+  are file-mounted mTLS material.
+- `DEVILUDO_CONTROL_RELEASE_SIGNING_KEY_ID` selects one `ACTIVE` trust-policy
+  key. Private signing material stays inside Vault/KMS.
+
+Request one authorization after the image receipt and target scope are final:
+
+```bash
+NODE_ENV=production npm --silent run authorize:control -- \
+  --receipt /absolute/private/path/control-image-receipt.json \
+  --context production-ap-east-1/platform-admin \
+  --namespace deviludo-prod \
+  --services agent-configuration,control-plane \
+  --replicas 2 \
+  --ttl-seconds 900 \
+  --trust-policy /absolute/reviewed/control-release-trust.json \
+  --trust-policy-digest sha256:REVIEWED_POLICY_DIGEST \
+  > /absolute/private/path/control-release-authorization.json
+```
+
+The mTLS client sends only canonical claims and a digest, uses the authorization
+UUID as its idempotency key, and locally verifies the returned signature before
+writing the authorization. Claims bind the complete receipt digest, final OCI
+digest, source revision, architecture, exact kubeconfig context, namespace,
+sorted service allow-list, replica count and expiry. Lifetime is limited to 30
+minutes. Rotating the policy requires an explicit new policy digest; marking a
+key `REVOKED` invalidates its outstanding authorizations immediately.
 
 ## Required namespace inputs
 
@@ -79,15 +134,25 @@ are not present in the shared control image.
 ## Apply with the migration gate
 
 Applying is never inferred from a current kubeconfig context. It requires both
-`--apply` and an exact context:
+`--apply`, an exact context, and the independently signed authorization:
 
 ```bash
 npm run deploy:control -- \
   --apply \
   --context production-ap-east-1/platform-admin \
   --namespace deviludo-prod \
-  --receipt /absolute/private/path/control-image-receipt.json
+  --services agent-configuration,control-plane \
+  --replicas 2 \
+  --receipt /absolute/private/path/control-image-receipt.json \
+  --authorization /absolute/private/path/control-release-authorization.json \
+  --trust-policy /absolute/reviewed/control-release-trust.json \
+  --trust-policy-digest sha256:REVIEWED_POLICY_DIGEST
 ```
+
+Authorization verification and canonical manifest regeneration occur before
+the first `kubectl` process is created. Any signature, key lifecycle, expiry,
+context, namespace, image, service, replica or trust-policy drift therefore
+produces zero cluster calls.
 
 The tool invokes `kubectl` directly without a shell and performs only these
 operations:

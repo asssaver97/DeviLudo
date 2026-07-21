@@ -18,6 +18,8 @@
     "db:migrate": "node scripts/production/migrate-postgres.mjs",
     "db:adopt-local": "node scripts/production/migrate-postgres.mjs --adopt-existing",
     "image:build-control": "node scripts/production/build-control-plane-image.mjs",
+    "inspect:control-trust": "node scripts/production/inspect-control-release-trust-policy.mjs",
+    "authorize:control": "node scripts/production/authorize-control-plane-release.mjs",
     "deploy:control": "node scripts/production/deploy-control-plane.mjs",
     "test": "npm run build && DEVILUDO_LOCAL_TEST_MODE=1 node --import tsx --test tests/*.test.mjs && npm run test:services",
     "test:unit": "node --import tsx --test tests/domain-contracts.test.mjs tests/runtime-security.test.mjs tests/workflow.test.mjs",

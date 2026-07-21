@@ -158,7 +158,10 @@ for its own role and never receives the migration role.
 
 `npm run deploy:control` consumes that image receipt and renders an ordered
 Kubernetes release bundle without contacting a cluster. An actual apply requires
-both `--apply` and an explicit kubeconfig context. It server-side-applies the
+`--apply`, an explicit kubeconfig context and a short-lived Ed25519 authorization
+from the dedicated mTLS Vault/KMS Broker. The authorization binds the exact
+receipt, context, namespace, service set and replicas; local verification happens
+before any `kubectl` call. It server-side-applies the
 restricted Namespace and tokenless ServiceAccount, waits for the exact migration
 Job, then applies only the allow-listed control Deployments/ClusterIP Services
 and waits for the receipt revision. It performs no delete or prune operation.

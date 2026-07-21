@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -9,6 +10,11 @@ import {
   renderControlPlaneRelease,
   validateControlPlaneImageReceipt,
 } from "../scripts/production/deploy-control-plane.mjs";
+import {
+  canonicalJson,
+  controlReleaseTrustPolicyDigest,
+  createControlReleaseClaims,
+} from "../scripts/production/control-release-authorization.mjs";
 import {
   CONTROL_PLANE_CONTAINER_SERVICES,
   EXTERNAL_WORKLOAD_SERVICES,
@@ -33,6 +39,21 @@ const receipt = Object.freeze({
   completedAt: "2026-07-22T00:00:00.000Z",
 });
 const expected = Object.freeze({ platformVersion, dockerfileDigest, packageLockDigest });
+const releaseKeys = generateKeyPairSync("ed25519");
+const trustPolicy = Object.freeze({
+  schemaVersion: "deviludo.control-release-trust-policy.v1",
+  policyId: "deviludo-production-releases",
+  policyRevision: 1,
+  keys: Object.freeze([Object.freeze({
+    keyId: "control-release-key-2026-01",
+    algorithm: "Ed25519",
+    publicKeySpkiBase64: releaseKeys.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+    notBefore: "2026-01-01T00:00:00.000Z",
+    notAfter: "2027-01-01T00:00:00.000Z",
+    status: "ACTIVE",
+  })]),
+});
+const trustPolicyDigest = controlReleaseTrustPolicyDigest(trustPolicy);
 
 test("deployment receipt validation binds the exact image, platform inputs and BuildKit attestations", () => {
   assert.deepEqual(validateControlPlaneImageReceipt(receipt, expected), receipt);
@@ -69,6 +90,7 @@ test("deployment CLI renders by default and makes a cluster context mandatory on
     "--services", "control-plane,agent-configuration",
     "--replicas", "2",
   ]), {
+    authorizationPath: undefined,
     context: undefined,
     mode: "render",
     namespace: "deviludo-system",
@@ -76,12 +98,17 @@ test("deployment CLI renders by default and makes a cluster context mandatory on
     replicas: 2,
     services: ["agent-configuration", "control-plane"],
     timeoutSeconds: 900,
+    trustPolicyDigest: undefined,
+    trustPolicyPath: undefined,
   });
   assert.equal(parseControlPlaneDeploymentArguments([
     "--apply",
     "--context", "production-ap-east-1/admin",
     "--namespace", "deviludo-prod",
     "--receipt", "/private/tmp/control-receipt.json",
+    "--authorization", "/private/tmp/control-authorization.json",
+    "--trust-policy", "/private/tmp/control-trust.json",
+    "--trust-policy-digest", trustPolicyDigest,
   ]).mode, "apply");
   assert.throws(
     () => parseControlPlaneDeploymentArguments(["--apply", "--receipt", "/private/tmp/control-receipt.json"]),
@@ -170,8 +197,9 @@ test("migration job alone receives the dedicated file-mounted database owner cre
 
 test("apply uses shell-free, explicit-context stages and does not release workloads before migration completes", async () => {
   const bundle = renderControlPlaneRelease(receipt, { services: ["agent-configuration", "control-plane"], timeoutSeconds: 300 });
+  const security = signedSecurity(bundle, "prod-cluster/admin");
   const calls = [];
-  const result = await applyControlPlaneRelease(bundle, "prod-cluster/admin", async (invocation, input) => {
+  const result = await applyControlPlaneRelease(bundle, "prod-cluster/admin", security, async (invocation, input) => {
     calls.push({ invocation, input });
   });
   assert.equal(calls.length, 6);
@@ -186,21 +214,78 @@ test("apply uses shell-free, explicit-context stages and does not release worklo
   assert.ok(calls[5].invocation.args.includes("--for=condition=Available"));
   assert.equal(result.imageReference, receipt.imageReference);
   assert.deepEqual(result.deployedServices, ["agent-configuration", "control-plane"]);
+  assert.equal(result.authorization.keyId, "control-release-key-2026-01");
 
   const mutated = structuredClone(bundle);
   mutated.stages[2].resources[0].metadata.name = "injected";
   await assert.rejects(
-    applyControlPlaneRelease(mutated, "prod-cluster/admin", async () => undefined),
+    applyControlPlaneRelease(mutated, "prod-cluster/admin", security, async () => undefined),
     /input is invalid/,
   );
 
   const blockedCalls = [];
   await assert.rejects(
-    applyControlPlaneRelease(bundle, "prod-cluster/admin", async (invocation, input) => {
+    applyControlPlaneRelease(bundle, "prod-cluster/admin", security, async (invocation, input) => {
       blockedCalls.push({ invocation, input });
       if (blockedCalls.length === 4) throw new Error("migration did not complete");
     }),
     /migration did not complete/,
   );
   assert.equal(blockedCalls.length, 4);
+
+  const unauthorizedCalls = [];
+  await assert.rejects(
+    applyControlPlaneRelease(bundle, "another-cluster/admin", security, async (...args) => unauthorizedCalls.push(args)),
+    /authorization is invalid/,
+  );
+  assert.equal(unauthorizedCalls.length, 0);
+  await assert.rejects(
+    applyControlPlaneRelease(bundle, "prod-cluster/admin", {
+      ...security,
+      trustPolicyDigest: undefined,
+    }, async (...args) => unauthorizedCalls.push(args)),
+    /input is invalid/,
+  );
+  assert.equal(unauthorizedCalls.length, 0);
+
+  let clockReads = 0;
+  const expiringSecurity = {
+    ...security,
+    now: undefined,
+    clock: () => {
+      clockReads += 1;
+      return new Date(clockReads < 4 ? "2026-07-22T00:05:00.000Z" : "2026-07-22T00:20:00.000Z");
+    },
+  };
+  const expiryCalls = [];
+  await assert.rejects(
+    applyControlPlaneRelease(bundle, "prod-cluster/admin", expiringSecurity,
+      async (...args) => expiryCalls.push(args)),
+    /authorization is invalid/,
+  );
+  assert.equal(clockReads, 4);
+  assert.equal(expiryCalls.length, 4);
+  assert.ok(expiryCalls[3][0].args.includes("--for=condition=complete"));
 });
+
+function signedSecurity(bundle, context) {
+  const claims = createControlReleaseClaims(bundle, context, {
+    authorizationId: "22222222-2222-4222-8222-222222222222",
+    issuedAt: new Date("2026-07-22T00:00:00.000Z"),
+    ttlSeconds: 900,
+  });
+  return Object.freeze({
+    authorization: Object.freeze({
+      schemaVersion: "deviludo.control-release-authorization.v1",
+      claims,
+      signature: Object.freeze({
+        algorithm: "Ed25519",
+        keyId: "control-release-key-2026-01",
+        value: sign(null, Buffer.from(canonicalJson(claims)), releaseKeys.privateKey).toString("base64url"),
+      }),
+    }),
+    trustPolicy,
+    trustPolicyDigest,
+    now: new Date("2026-07-22T00:05:00.000Z"),
+  });
+}
