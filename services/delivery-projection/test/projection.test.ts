@@ -27,6 +27,7 @@ const projectId = "22222222-2222-4222-8222-222222222222";
 const workflowId = "delivery-33333333-3333-4333-8333-333333333333";
 const writerId = "spiffe://deviludo.internal/control/temporal-worker";
 const readerId = "spiffe://deviludo.internal/control/web";
+const codeReview = Object.freeze({ codeReviewReceiptId: "review-receipt-0001", codeReviewDigest: "f".repeat(64) });
 
 function snapshots() {
   const machine = new GameDeliveryWorkflow({ workflowId, tenantId, projectId, targetMatrix: ["linux", "macos", "windows"] });
@@ -57,6 +58,7 @@ test("projection parser accepts only the exact deterministic replay", () => {
 test("projection replay remains compatible with pre-patch terminal-run repair histories", () => {
   const machine = new GameDeliveryWorkflow({
     workflowId, tenantId, projectId, targetMatrix: ["linux"], automaticRepairSuccessorRuns: false,
+    requireAgentCodeReview: false,
   });
   machine.signal({ signalId: "legacy-001", type: "SPEC_READY", specRevisionId: "spec-r1" });
   machine.signal({ signalId: "legacy-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "spec-r1", testPlanRevisionId: "plan-r1", approvalReceiptId: "approval-r1" });
@@ -93,7 +95,7 @@ test("projection replay preserves an explicit post-merge failure handoff", () =>
   });
   machine.signal({ signalId: "postmerge-lock-001", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-r1" });
   machine.signal({ signalId: "postmerge-start-001", type: "AGENT_STARTED", runId: "run-r1" });
-  machine.signal({ signalId: "postmerge-complete-001", type: "AGENT_COMPLETED", candidateCommitSha: "a".repeat(40), draftPullRequest: 17 });
+  machine.signal({ signalId: "postmerge-complete-001", type: "AGENT_COMPLETED", candidateCommitSha: "a".repeat(40), draftPullRequest: 17, ...codeReview });
   machine.signal({ signalId: "postmerge-candidate-pass-001", type: "E2E_PASSED", evidenceBundleId: "candidate-evidence-r1" });
   machine.signal({ signalId: "postmerge-accepted-001", type: "USER_ACCEPTED" });
   machine.signal({ signalId: "postmerge-merged-001", type: "MAIN_MERGED", mainCommitSha: "b".repeat(40) });

@@ -5,6 +5,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DeliveryRepairNotice } from "../components/console/DeliveryRepairNotice.tsx";
 import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 
+const codeReview = Object.freeze({ codeReviewReceiptId: "review-receipt-0001", codeReviewDigest: "f".repeat(64) });
+
 const candidateSha = "a".repeat(40);
 const mainSha = "b".repeat(40);
 
@@ -31,7 +33,7 @@ function render(snapshot) {
 
 test("repair notice exposes the immutable failed E2E binding and successor lineage", () => {
   const workflow = approvedWorkflow("delivery-repair-ui-e2e");
-  workflow.signal({ signalId: "repair-ui-e2e-05", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41 });
+  workflow.signal({ signalId: "repair-ui-e2e-05", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41, ...codeReview });
   workflow.signal({
     signalId: "repair-ui-e2e-06", type: "E2E_FAILED", evidenceBundleId: "evidence-failed-001",
     repairPromptId: "repair:failed-bundle-001",
@@ -84,7 +86,7 @@ test("repair notice exposes budget exhaustion and a human specification takeover
 
 test("repair notice makes a post-merge release revocation and main baseline visible", () => {
   const workflow = approvedWorkflow("delivery-repair-ui-main");
-  workflow.signal({ signalId: "repair-ui-main-05", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41 });
+  workflow.signal({ signalId: "repair-ui-main-05", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41, ...codeReview });
   workflow.signal({ signalId: "repair-ui-main-06", type: "E2E_PASSED", evidenceBundleId: "candidate-evidence-main-001" });
   workflow.signal({ signalId: "repair-ui-main-07", type: "USER_ACCEPTED" });
   workflow.signal({ signalId: "repair-ui-main-08", type: "MAIN_MERGED", mainCommitSha: mainSha });

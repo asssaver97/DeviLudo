@@ -2,7 +2,7 @@
 
 DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面向 Godot 4 桌面单机游戏，把“游戏构想”串成可审计的完整交付链路：
 
-`构想对话 → 规格批准 → Agent 开发/修复 → Windows/Linux/macOS E2E → 用户反馈迭代 → 合并 → Steam 私有 Beta 回装测试 → 外部发布门禁`
+`构想对话 → 规格批准 → Agent 开发/修复 → 不可变代码评审回执 → Windows/Linux/macOS E2E → 用户反馈迭代 → 合并 → Steam 私有 Beta 回装测试 → 外部发布门禁`
 
 本仓库包含可运行的产品工作台与管理后台、领域状态机、Claude Code/Codex CLI 安全适配器、分平台 Runner fencing 与签名作业协议、证据链、NestJS/Fastify 控制面入口、Temporal 工作流适配层，以及本地集成基础设施。
 
@@ -20,7 +20,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `/settings/connections`：GitHub App 安装授权和 Steam Guard 会话入口；不接收或保存 GitHub/Steam 主密码。GitHub 生产路由使用短期签名平台会话、内部 mTLS Broker、PKCE 与 PostgreSQL RLS 状态存储；Steam Web 路由只创建隔离登记会话并跳转到固定 HTTPS Broker，账号密码与 Guard 码不经过 Web 控制面。未配置 Broker 时入口明确返回外部门禁，不伪造“已连接/会话可用”。
 - `/runners`、`/evidence`：共享当前租户的权威项目选择，读取所选项目的本地健康状态、持久交付快照和真实 Godot evidence manifest；每次生产构想、规格批准、反馈、候选验收、交付取消、交付投影、Runner 或证据操作都会先用完整 GitHub 用户断言向 Project Repository Broker 重新验证精确 installation 访问权，同租户内知道项目 UUID 的其他用户不能绕过项目目录读取或修改状态。生产 Runner 视图经同一只读 mTLS 投影服务，在租户 RLS 下只查询该项目各平台最新租约，并以注册心跳、证书期限和状态推导 READY/STALE/隔离状态。生产证据目录最多返回该项目最近 50 个不可变 manifest，在服务端和浏览器端重验 bundle SHA-256、冻结规格/测试计划、执行锁、Runner Toolchain、提交、目标矩阵、分平台结果与失效墓碑，但不暴露 S3 object key 或下载授权。项目切换时旧快照立即隐藏，未连接的目标不会显示为在线。
 - `lib/domain`：规格、迭代、AgentVersion、Installation、Profile、Run、E2E、Steam 的严格状态机和不可变快照。
-- `lib/agent`、`adapters`、`lib/security`：统一 Runtime Adapter、精确 CLI 参数、固定模型、SSRF/DNS rebinding/redirect 校验、短期 run token、SecretRef 与显式 fallback。
+- `lib/agent`、`adapters`、`lib/security`：统一 Runtime Adapter、精确 CLI 参数、固定模型、SSRF/DNS rebinding/redirect 校验、短期 run token、SecretRef、显式 fallback 与严格代码评审合同。Claude Code/Codex 必须在隔离工作区生成无阻断项的评审结果；平台删除保留文件并生成绑定 Run、Attempt、Profile、Installation、镜像、模型、规格、测试计划和候选源码摘要的不可变回执，缺失、畸形或阻断评审直接进入失败/自动修复，不能启动 E2E。
 - `lib/orchestration`：可重放的确定性交付工作流；Provider、用户、MFA 和 Valve 等长等待均为 signal。
 - 自动修复不会复用已经终态化的 AgentRun。Agent 或候选 E2E 失败会创建新的不可变 Run/短期推理授权；Agent 失败还会保存经过脱敏、限长且内容寻址的阶段化诊断，后继提示词不读取原始 stderr。E2E 修复精确绑定前序候选 SHA、Draft PR、失败 evidence digest 与分平台日志/JUnit/截图/视频摘要，并从该候选继续开发。每轮最多自动修复 3 次；第 3 次失败后工作流停止继续计费，进入人工规格修订，只有用户提交并批准新的不可变草稿才会重置额度。若实际 main SHA 发布门禁或 Steam 私有 Beta 回装失败，Runner 会发出独立失败信号，平台立即撤销旧 main/MFA/BuildID/发布与外部审批权限，并要求用户从失败 main 基线创建、批准新规格，绝不把页面留在伪“测试中”状态。项目页和总览直接展示修复次数、失败绑定、原/后继运行配置和候选或 main 基线，不维护可篡改的前端副本。移动的管理员默认值不会改变这条修复链；Temporal patch marker 与投影多模式重放继续兼容升级前的无上限历史。
 - `services/temporal`：按控制面、Agent、Runner、SCM、Steam 固定路由活动；服务端以 mTLS/SPIFFE、PostgreSQL 租约 inbox 和全绑定回执实现幂等接收。三段外部审批逐门绑定，公开发布只有收到相同 Steam BuildID 的完成信号后才进入终态。

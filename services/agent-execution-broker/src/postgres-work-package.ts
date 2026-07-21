@@ -2,6 +2,7 @@ import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../tempora
 import { canonicalJson, sha256Canonical } from "../../runner-control/src/canonical";
 import { parseSpecModelResult } from "../../spec-dialogue/src/contracts";
 import type { LockedAgentExecution } from "./contracts";
+import { AGENT_CODE_REVIEW_OUTPUT_PATH } from "../../../lib/agent/code-review";
 
 const MAX_PROMPT_BYTES = 512 * 1024;
 
@@ -95,6 +96,8 @@ export class PostgresAgentDevelopmentWorkPackage implements AgentDevelopmentWork
           "The repair context is content-addressed and bound to the previous AgentRun. Address the listed diagnostic or failed-platform evidence without changing the approved scope.",
         ] : []),
         "Use only the internal inference gateway. Finish with a runnable project and emit the adapter's structured completion events.",
+        `Before finishing, review every change against the approved specification and frozen test plan. Write exactly one UTF-8 JSON review result to ${AGENT_CODE_REVIEW_OUTPUT_PATH}. This reserved file must not exist before the run and the platform will remove it before publishing the candidate.`,
+        "The review JSON must use schemaVersion deviludo.agent-code-review-output.v1 with exactly: verdict (PASSED or FAILED), a non-empty summary, and findings. Each finding must contain severity (BLOCKING, WARNING, or INFO), an uppercase code, path (repository-relative or null), and a non-empty message. Verdict PASSED is allowed only when there are no BLOCKING findings. Do not finish without this review file.",
         canonicalJson(workPackage),
       ].join("\n\n");
       if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) invalid();

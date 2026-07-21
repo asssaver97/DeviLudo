@@ -82,11 +82,20 @@ function sleep(milliseconds) {
 
 async function request(baseUrl, route, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const startedAt = performance.now();
-  const response = await fetch(`${baseUrl}${route}`, {
+  const upstream = await fetch(`${baseUrl}${route}`, {
     ...init,
     headers: { accept: route.startsWith("/api/") || route.startsWith("/v1/") ? "application/json" : "text/html", ...(init.headers ?? {}) },
     redirect: "follow",
     signal: AbortSignal.timeout(timeoutMs),
+  });
+  // Buffer inside the per-request timeout. Some responses are intentionally
+  // inspected after two real Godot runs; retaining the upstream response would
+  // let AbortSignal.timeout() cancel that later read based on total suite time.
+  const body = await upstream.arrayBuffer();
+  const response = new Response(body.byteLength > 0 ? body : null, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: upstream.headers,
   });
 
   return {

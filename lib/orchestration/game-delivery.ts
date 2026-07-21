@@ -38,7 +38,14 @@ export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "AGENT_STARTED"; runId: string }
   | { type: "PROVIDER_UNAVAILABLE"; providerRevisionId: string }
   | { type: "PROVIDER_RESTORED"; providerRevisionId: string }
-  | { type: "AGENT_COMPLETED"; candidateCommitSha: string; draftPullRequest: number }
+  | {
+      type: "AGENT_COMPLETED";
+      candidateCommitSha: string;
+      draftPullRequest: number;
+      /** Absent only in workflow histories created before the review gate. */
+      codeReviewReceiptId?: string;
+      codeReviewDigest?: string;
+    }
   | { type: "AGENT_FAILED"; diagnosticId: string }
   | { type: "E2E_PASSED"; evidenceBundleId: string }
   | { type: "E2E_FAILED"; evidenceBundleId: string; repairPromptId: string }
@@ -101,6 +108,9 @@ export interface DeliverySnapshot {
   readonly runId: string | null;
   readonly candidateCommitSha: string | null;
   readonly draftPullRequest: number | null;
+  /** Absent only in workflow histories created before the review gate. */
+  readonly codeReviewReceiptId?: string | null;
+  readonly codeReviewDigest?: string | null;
   readonly mainCommitSha: string | null;
   readonly evidenceBundleId: string | null;
   readonly candidateEvidenceBundleId: string | null;
@@ -132,6 +142,7 @@ export class GameDeliveryWorkflow {
   private snapshot: DeliverySnapshot;
   private readonly automaticRepairSuccessorRuns: boolean;
   private readonly automaticRepairLimit: number | null;
+  private readonly requireAgentCodeReview: boolean;
 
   constructor(input: {
     workflowId: string;
@@ -139,11 +150,14 @@ export class GameDeliveryWorkflow {
     projectId: string;
     targetMatrix: readonly TargetPlatform[];
     automaticRepairSuccessorRuns?: boolean;
+    /** false is reserved for deterministic replay of pre-review histories. */
+    requireAgentCodeReview?: boolean;
     /** null preserves Temporal histories created before repair budgets existed. */
     automaticRepairLimit?: number | null;
   }) {
     if (!input.targetMatrix.length) throw new Error("A delivery needs at least one target platform");
     this.automaticRepairSuccessorRuns = input.automaticRepairSuccessorRuns ?? true;
+    this.requireAgentCodeReview = input.requireAgentCodeReview ?? true;
     this.automaticRepairLimit = input.automaticRepairLimit === undefined
       ? DEFAULT_AUTOMATIC_REPAIR_LIMIT
       : input.automaticRepairLimit;
@@ -168,6 +182,7 @@ export class GameDeliveryWorkflow {
       runId: null,
       candidateCommitSha: null,
       draftPullRequest: null,
+      ...(this.requireAgentCodeReview ? { codeReviewReceiptId: null, codeReviewDigest: null } : {}),
       mainCommitSha: null,
       evidenceBundleId: null,
       candidateEvidenceBundleId: null,
@@ -259,6 +274,7 @@ export class GameDeliveryWorkflow {
             specApprovalReceiptId: null,
             candidateCommitSha: null,
             draftPullRequest: null,
+            ...this.clearCodeReview(),
             evidenceBundleId: null,
             candidateEvidenceBundleId: null,
             mainCommitSha: null,
@@ -302,10 +318,16 @@ export class GameDeliveryWorkflow {
       case "DEVELOPING":
         if (signal.type === "PROVIDER_UNAVAILABLE") return this.commit(signal, { state: "WAITING_PROVIDER", waitingProviderRevisionId: signal.providerRevisionId });
         if (signal.type === "AGENT_COMPLETED") {
+          const hasReview = Boolean(signal.codeReviewReceiptId && signal.codeReviewDigest);
+          if (hasReview !== this.requireAgentCodeReview) return this.invalid(signal);
           return this.commit(signal, {
             state: "CROSS_PLATFORM_E2E",
             candidateCommitSha: signal.candidateCommitSha,
             draftPullRequest: signal.draftPullRequest,
+            ...(this.requireAgentCodeReview ? {
+              codeReviewReceiptId: signal.codeReviewReceiptId as string,
+              codeReviewDigest: signal.codeReviewDigest as string,
+            } : {}),
           });
         }
         if (signal.type === "AGENT_FAILED") {
@@ -336,6 +358,7 @@ export class GameDeliveryWorkflow {
             ...(this.automaticRepairLimit !== null ? {
               candidateCommitSha: null,
               draftPullRequest: null,
+              ...this.clearCodeReview(),
               evidenceBundleId: null,
               candidateEvidenceBundleId: null,
             } : {}),
@@ -388,6 +411,7 @@ export class GameDeliveryWorkflow {
             ...(exhausted ? {
               candidateCommitSha: null,
               draftPullRequest: null,
+              ...this.clearCodeReview(),
               candidateEvidenceBundleId: null,
             } : {}),
             repairAttempts: attempt,
@@ -406,6 +430,7 @@ export class GameDeliveryWorkflow {
             runId: null,
             candidateCommitSha: null,
             draftPullRequest: null,
+            ...this.clearCodeReview(),
             evidenceBundleId: null,
             candidateEvidenceBundleId: null,
             repairContext: null,
@@ -516,6 +541,12 @@ export class GameDeliveryWorkflow {
     return this.automaticRepairLimit !== null && attempt >= this.automaticRepairLimit;
   }
 
+  private clearCodeReview(): Partial<DeliverySnapshot> {
+    return this.requireAgentCodeReview
+      ? { codeReviewReceiptId: null, codeReviewDigest: null }
+      : {};
+  }
+
   private requiresHumanRevision(repair: DeliveryRepairContext): boolean {
     return repair.reason === "MAIN_GATE_FAILURE"
       || repair.reason === "STEAM_INSTALL_FAILURE"
@@ -535,6 +566,7 @@ export class GameDeliveryWorkflow {
       runId: null,
       candidateCommitSha: null,
       draftPullRequest: null,
+      ...this.clearCodeReview(),
       mainCommitSha: null,
       evidenceBundleId: signal.evidenceBundleId,
       candidateEvidenceBundleId: null,
@@ -589,6 +621,15 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
     case "AGENT_COMPLETED":
       if (!SHA1.test(signal.candidateCommitSha) || !Number.isSafeInteger(signal.draftPullRequest) || signal.draftPullRequest < 1) {
         throw new Error("Agent completion binding is invalid");
+      }
+      if ((signal.codeReviewReceiptId === undefined) !== (signal.codeReviewDigest === undefined)) {
+        throw new Error("Agent code review binding is incomplete");
+      }
+      if (signal.codeReviewReceiptId !== undefined) {
+        assertOpaqueId(signal.codeReviewReceiptId, "Agent code review receipt");
+        if (!/^[a-f0-9]{64}$/.test(signal.codeReviewDigest as string)) {
+          throw new Error("Agent code review digest is invalid");
+        }
       }
       return;
     case "AGENT_FAILED":

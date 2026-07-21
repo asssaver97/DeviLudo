@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
+import { validateAgentCodeReviewReceipt } from "../../../lib/agent/code-review";
 import {
   AgentProviderUnavailableError,
   type AgentWorkflowRun,
@@ -286,11 +287,18 @@ function parseReceipt(
     || !SHA256_IMAGE.test(String(body.imageDigest ?? ""))
     || !validModel(body.model) || !SAFE_ID.test(String(body.receiptId ?? ""))) invalidResponse();
   const completed = status === "COMPLETED";
-  if (completed && (!SHA1.test(String(body.candidateCommitSha ?? ""))
-    || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
-    || body.diagnosticId !== null || body.diagnostic !== null && body.diagnostic !== undefined)) invalidResponse();
+  let codeReviewReceipt = null;
+  if (completed) {
+    codeReviewReceipt = validateAgentCodeReviewReceipt(body.codeReviewReceipt);
+    if (!SHA1.test(String(body.candidateCommitSha ?? ""))
+      || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
+      || codeReviewReceipt.runId !== runId || codeReviewReceipt.profileRevisionId !== body.profileRevisionId
+      || codeReviewReceipt.installationId !== body.installationId || codeReviewReceipt.imageDigest !== body.imageDigest
+      || codeReviewReceipt.model !== body.model
+      || body.diagnosticId !== null || body.diagnostic !== null && body.diagnostic !== undefined) invalidResponse();
+  }
   if (!completed && (!SAFE_ID.test(String(body.diagnosticId ?? ""))
-    || body.candidateCommitSha !== null || body.draftPullRequest !== null)) invalidResponse();
+    || body.candidateCommitSha !== null || body.draftPullRequest !== null || body.codeReviewReceipt !== null)) invalidResponse();
   const diagnostic = completed || body.diagnostic === null || body.diagnostic === undefined
     ? null
     : validateAgentFailureDiagnostic(body.diagnostic);
@@ -307,6 +315,7 @@ function parseReceipt(
     model: body.model,
     candidateCommitSha: body.candidateCommitSha,
     draftPullRequest: body.draftPullRequest,
+    codeReviewReceipt,
     diagnosticId: body.diagnosticId,
     diagnostic,
     receiptId: body.receiptId,

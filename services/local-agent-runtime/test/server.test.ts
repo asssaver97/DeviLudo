@@ -110,6 +110,14 @@ function receipt(command: LocalAgentExecutionRequest): LocalAgentExecutionReceip
     summary: "Implemented the approved fixture.",
     usage: Object.freeze({ inputTokens: 120, outputTokens: 48, costUsd: 0.21 }),
     warnings: Object.freeze([]),
+    codeReviewReceipt: Object.freeze({
+      schemaVersion: "deviludo.agent-code-review-receipt.v1", receiptId: `review-${command.attemptId}`,
+      runId: command.runId, attemptId: command.attemptId, profileRevisionId: command.profileRevisionId,
+      installationId: command.installationId, imageDigest: command.imageDigest, model: command.model,
+      specRevisionId: command.specRevisionId, testPlanRevisionId: command.testPlanRevisionId,
+      sourceDigest: "b".repeat(64), verdict: "PASSED", reviewDigest: "d".repeat(64),
+      findingCount: 0, warningCount: 0, reviewedAt: "2026-07-21T00:00:00.000Z",
+    }),
     candidate: Object.freeze({
       scmProxy: "local-git-proxy-v1",
       branch: "deviludo/run-1-attempt-1",

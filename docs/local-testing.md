@@ -36,7 +36,7 @@ npm run local:dev
 
 Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/模型通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。默认配置没有受信 Provider 绑定探针，也没有隔离执行器，会安全地报告 `BLOCKED`；这不是测试栈故障。
 
-`POST /v1/runs` 会先执行同一预检。预检未通过时返回原始门禁码；全部通过但没有隔离执行器时返回 `LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED`。项目 API 只接受逐项匹配锁定运行的完成回执，并保存 SCM 代理产生的完整候选 SHA、源码摘要、changed-files、usage 和警告；浏览器不能直接提交或伪造回执。
+`POST /v1/runs` 会先执行同一预检。预检未通过时返回原始门禁码；全部通过但没有隔离执行器时返回 `LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED`。启用隔离执行器后，Claude Code/Codex 还必须按严格 schema 写入保留的 `.deviludo-agent-code-review.json`；执行器以禁止符号链接和限长方式读取后立即删除它，只在没有阻断项时生成绑定当前 Run、Attempt、镜像、固定模型、规格、测试计划和候选 source digest 的不可变评审回执。缺失、畸形、浮动模型或阻断评审均失败关闭，候选不能进入 E2E。项目 API 只接受逐项匹配锁定运行的完成回执，并保存 SCM 代理产生的完整候选 SHA、源码摘要、评审回执、changed-files、usage 和警告；浏览器不能直接提交或伪造回执。
 
 `/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本发现可以填写精确版本；在本地测试环境留空时，页面会复用只读探针实际看到的 CLI 版本，方便把已经安装的 Claude Code 或 Codex CLI 写入候选目录，但仍不会自动批准、安装、灰度或激活。版本目录同时显示精确官方包来源、发现时间、发行说明、完整性、SBOM 和扫描状态；可点击链接必须与 Agent、精确版本和固定官方域名/路径一致。版本阻止、弃用、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计；弃用只阻止新镜像构建，已有安装与运行任务保持锁定。凭据列表显示创建时间和原子轮换完成时间，并从本地追加式用量记录计算最后使用时间。版本批准仍要求供应链证据；Provider 激活仍要求受信 Connector 的完整探针。默认测试栈不会伪造这两类结果，因此相关操作会以明确错误失败关闭。
 

@@ -530,6 +530,7 @@ function ProductionDeliveryProjection({
           <code>{snapshot.runId ?? "等待锁定开发运行"}</code>
         </div>
         <div className="local-delivery-metric"><small>规格</small><b>{snapshot.specRevisionId ?? "—"}</b><span>{snapshot.testPlanRevisionId ? "测试计划已冻结" : "尚未冻结测试计划"}</span></div>
+        <div className="local-delivery-metric"><small>Agent 评审</small><b>{snapshot.codeReviewReceiptId ?? "—"}</b><span>{snapshot.codeReviewDigest ? `${snapshot.codeReviewDigest.slice(0, 16)}… · E2E 前已锁定` : "等待不可变评审回执"}</span></div>
         <div className="local-delivery-metric"><small>证据</small><b>{snapshot.evidenceBundleId ?? "—"}</b><span>{targetGatePassed ? "候选矩阵证据已记录" : "尚无有效候选证据"}</span></div>
         <div className="local-delivery-metric"><small>提交</small><b>{snapshot.mainCommitSha ?? snapshot.candidateCommitSha ?? "—"}</b><span>{snapshot.mainCommitSha ? "实际 main SHA" : snapshot.candidateCommitSha ? "候选 SHA" : "尚未产出"}</span></div>
       </div>

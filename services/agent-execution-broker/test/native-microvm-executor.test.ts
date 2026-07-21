@@ -65,6 +65,8 @@ test("PostgreSQL work package re-resolves the approved spec pair under tenant RL
   const work = await new PostgresAgentDevelopmentWorkPackage(pool(client)).resolve(request());
   assert.match(work.promptDigest, /^[a-f0-9]{64}$/);
   assert.match(work.prompt, /Signal Orchard/);
+  assert.match(work.prompt, /\.deviludo-agent-code-review\.json/);
+  assert.match(work.prompt, /verdict \(PASSED or FAILED\)/);
   assert.ok(sql.some((statement) => statement.includes("set_config('app.tenant_id'")));
   assert.equal(sql.at(-1), "COMMIT");
 });
@@ -228,6 +230,11 @@ test("locked native executor provisions the baseline and accepts only an atteste
         installationId: locked.installationId, imageDigest: locked.imageDigest, adapterVersion: locked.adapterVersion,
         providerRevisionId: locked.providerRevisionId, credentialVersionId: locked.credentialVersionId,
         model: locked.model, executionReceiptId: "microvm-receipt-r1", candidateArtifact: artifact,
+        codeReviewReceipt: { schemaVersion: "deviludo.agent-code-review-receipt.v1", receiptId: `review-${attemptId}`,
+          runId, attemptId, profileRevisionId: locked.profileRevisionId, installationId: locked.installationId,
+          imageDigest: locked.imageDigest, model: locked.model, specRevisionId, testPlanRevisionId,
+          sourceDigest: "d".repeat(64), verdict: "PASSED", reviewDigest: "e".repeat(64), findingCount: 0,
+          warningCount: 0, reviewedAt: "2030-01-01T00:05:00.000Z" },
         diagnosticId: null, diagnostic: null }));
       return { exitCode: 0, stdout: "", stderr: "" };
     } });

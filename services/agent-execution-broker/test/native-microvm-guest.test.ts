@@ -8,6 +8,7 @@ import type { AgentExecutionRequest } from "../../agent-worker/src/contracts";
 import { signGitHubCandidateArtifact, verifyGitHubCandidateArtifact } from "../../scm-proxy/src/github-artifacts";
 import { NativeMicrovmAgentGuest } from "../src/native-microvm-guest";
 import { parseNativeMicrovmAgentRequest, type NativeMicrovmAgentRequest } from "../src/native-microvm-contracts";
+import { AGENT_CODE_REVIEW_OUTPUT_PATH } from "../../../lib/agent/code-review";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -46,7 +47,12 @@ test("microVM guest executes the locked adapter and emits an attested authoritat
         observedRuntimes.push(input);
         const executableAfter = Buffer.from("#!/bin/sh\necho after\n");
         await Promise.all([writeFile(join(workspace, "scripts", "tool.sh"), executableAfter),
-          writeFile(join(workspace, "main.gd"), "extends Node\n"), unlink(join(workspace, "old.txt"))]);
+          writeFile(join(workspace, "main.gd"), "extends Node\n"), unlink(join(workspace, "old.txt")),
+          writeFile(join(workspace, AGENT_CODE_REVIEW_OUTPUT_PATH), JSON.stringify({
+            schemaVersion: "deviludo.agent-code-review-output.v1", verdict: "PASSED",
+            summary: "Reviewed the candidate against the frozen specification and test plan.",
+            findings: [{ severity: "WARNING", code: "TEST_COVERAGE", path: "main.gd", message: "Keep E2E coverage enabled." }],
+          }))]);
         if (process.platform !== "win32") await chmod(join(workspace, "scripts", "tool.sh"), 0o700);
         return Object.freeze({ cancel: () => false, completion: Promise.resolve(Object.freeze({ status: "completed" as const,
           events: Object.freeze([]), result: Object.freeze({ status: "completed" as const, summary: "done",
@@ -64,6 +70,9 @@ test("microVM guest executes the locked adapter and emits an attested authoritat
     if (outcome.status !== "COMPLETED") assert.fail("expected completed guest result");
     assert.equal(verifyGitHubCandidateArtifact(outcome.candidateArtifact,
       new Map([["guest-attestation-v1", keys.publicKey]])), true);
+    assert.equal(outcome.codeReviewReceipt.verdict, "PASSED");
+    assert.equal(outcome.codeReviewReceipt.sourceDigest, outcome.candidateArtifact.payload.sourceDigest);
+    assert.equal(outcome.codeReviewReceipt.warningCount, 1);
     assert.deepEqual(outcome.candidateArtifact.payload.changes.map((change) => [change.operation, change.path]), [
       ["UPSERT", "main.gd"], ["DELETE", "old.txt"], ["UPSERT", "scripts/tool.sh"],
     ]);
@@ -77,6 +86,7 @@ test("microVM guest executes the locked adapter and emits an attested authoritat
     assert.equal(relayClosed, true);
     assert.equal("providerBaseUrl" in (parseNativeMicrovmAgentRequest(request(baselineDigest)) as object), false);
     assert.equal(await readFile(join(workspace, "main.gd"), "utf8"), "extends Node\n");
+    await assert.rejects(readFile(join(workspace, AGENT_CODE_REVIEW_OUTPUT_PATH)), /ENOENT/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -98,7 +108,11 @@ test("microVM request rejects mutable fields and guest fails closed when the Age
       secretResolver: { async resolve() { return "attempt-local-relay-password"; } }, close: async () => {},
     }); } },
       signer: { async sign(core) { return signGitHubCandidateArtifact(core, keys.privateKey, "guest-attestation-v1"); } },
-      now: () => new Date("2030-01-01T00:00:00.000Z"), supervisor: { async start() { return Object.freeze({ cancel: () => false,
+      now: () => new Date("2030-01-01T00:00:00.000Z"), supervisor: { async start() {
+        await writeFile(join(workspace, AGENT_CODE_REVIEW_OUTPUT_PATH), JSON.stringify({
+          schemaVersion: "deviludo.agent-code-review-output.v1", verdict: "PASSED", summary: "No blocking findings.", findings: [],
+        }));
+        return Object.freeze({ cancel: () => false,
         completion: Promise.resolve(Object.freeze({ status: "completed" as const, events: Object.freeze([]),
           result: Object.freeze({ status: "completed" as const, usage: Object.freeze({ inputTokens: 1, outputTokens: 1, costUsd: 0.01 }),
             changedFiles: Object.freeze([]), warnings: Object.freeze([]) }), diagnostics: Object.freeze({ exitCode: 0, signal: null,

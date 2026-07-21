@@ -69,6 +69,13 @@ function completedResult(): IsolatedAgentExecutionResult {
     imageDigest: locked.imageDigest, adapterVersion: locked.adapterVersion,
     providerRevisionId: locked.providerRevisionId, credentialVersionId: locked.credentialVersionId,
     model: locked.model, diagnosticId: null, diagnostic: null, executionReceiptId: "execution-receipt-r1",
+    codeReviewReceipt: Object.freeze({
+      schemaVersion: "deviludo.agent-code-review-receipt.v1", receiptId: `review-${attemptId}`,
+      runId, attemptId, profileRevisionId: locked.profileRevisionId, installationId: locked.installationId,
+      imageDigest: locked.imageDigest, model: locked.model, specRevisionId: locked.specRevisionId,
+      testPlanRevisionId: locked.testPlanRevisionId, sourceDigest: "1".repeat(64), verdict: "PASSED",
+      reviewDigest: "2".repeat(64), findingCount: 1, warningCount: 1, reviewedAt: now.toISOString(),
+    }),
     candidateArtifact: signGitHubCandidateArtifact({
       schemaVersion: "deviludo.github-candidate.v1", artifactId: "artifact-r1", tenantId, projectId,
       runId, attemptId, specRevisionId: locked.specRevisionId, expectedBaseCommitSha: locked.baseCommitSha,
@@ -205,6 +212,10 @@ test("worker deposits a 15-minute bound DLRT, passes only its SecretRef, and rev
   assert.equal(status?.status, "COMPLETED");
   assert.equal(status?.receipt?.candidateCommitSha, "f".repeat(40));
   assert.equal(status?.receipt?.receiptId, "candidate-receipt-r1");
+  const review = status?.receipt?.codeReviewReceipt;
+  assert.ok(review);
+  assert.equal(review.receiptId, `review-${attemptId}`);
+  assert.equal(review.sourceDigest, "1".repeat(64));
   assert.equal(candidatePublishes, 1);
   assert.equal(dispatchedSecretRef, `secret://agent-runs/${runId}/${attemptId}`);
   assert.deepEqual(revoked, [dispatchedSecretRef]);

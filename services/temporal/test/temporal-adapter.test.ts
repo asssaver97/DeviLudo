@@ -372,7 +372,8 @@ test("job processor heartbeats, signals with a stable job ID and completes the e
         await context.heartbeat();
         await context.emitSignal("started", { type: "AGENT_STARTED", runId: "run-1" });
         events.push("execute");
-        return { result: { runId: "run-1" }, signal: { type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 91 } };
+        return { result: { runId: "run-1" }, signal: { type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40),
+          draftPullRequest: 91, codeReviewReceiptId: "review-receipt-0001", codeReviewDigest: "e".repeat(64) } };
       },
     },
     signals: {
@@ -382,7 +383,9 @@ test("job processor heartbeats, signals with a stable job ID and completes the e
           assert.deepEqual(signal, { signalId: `job:${job.id}:started`, type: "AGENT_STARTED", runId: "run-1" });
           events.push("signal-started");
         } else {
-          assert.deepEqual(signal, { signalId: `job:${job.id}:final`, type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 91 });
+          assert.deepEqual(signal, { signalId: `job:${job.id}:final`, type: "AGENT_COMPLETED",
+            candidateCommitSha: "c".repeat(40), draftPullRequest: 91,
+            codeReviewReceiptId: "review-receipt-0001", codeReviewDigest: "e".repeat(64) });
           events.push("signal-final");
         }
       },
@@ -751,6 +754,28 @@ test("command receiver rejects confused-deputy, transport and state drift", asyn
     /missing its required snapshot binding/,
   );
   assert.equal(queued, 0);
+});
+
+test("candidate E2E receiver requires the immutable Agent code review binding for modern snapshots", async () => {
+  let queued = 0;
+  const receiver = new WorkflowCommandReceiver("runner-control",
+    new InMemoryWorkflowCommandInbox(() => new Date("2026-07-17T00:00:00.000Z")),
+    { async enqueue() { queued += 1; } });
+  const candidate = { ...snapshot, state: "CROSS_PLATFORM_E2E" as const,
+    candidateCommitSha: "c".repeat(40), draftPullRequest: 91,
+    codeReviewReceiptId: null, codeReviewDigest: null };
+  const request = (value: DeliverySnapshot): Extract<DeliveryDispatchRequest, { kind: "COMMAND" }> => ({
+    kind: "COMMAND", destination: "runner-control", payload: {
+      idempotencyKey: dispatchKey(value, "START_TARGET_MATRIX_E2E"), workflowId: value.workflowId,
+      tenantId: value.tenantId, projectId: value.projectId, destination: "runner-control",
+      command: "START_TARGET_MATRIX_E2E", snapshot: value,
+    },
+  });
+  const missing = request(candidate);
+  await assert.rejects(receiver.receive(missing, headersFor(missing)), /missing its required snapshot binding/);
+  const reviewed = request({ ...candidate, codeReviewReceiptId: "review-receipt-0001", codeReviewDigest: "e".repeat(64) });
+  await receiver.receive(reviewed, headersFor(reviewed));
+  assert.equal(queued, 1);
 });
 
 test("command receiver releases a failed claim but forbids idempotency digest reuse", async () => {

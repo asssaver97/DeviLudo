@@ -1,4 +1,5 @@
 import type { AgentKind } from "../../../lib/agent/types";
+import type { AgentCodeReviewReceipt } from "../../../lib/agent/code-review";
 
 export type LocalAgentReadinessState = "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
 
@@ -105,6 +106,7 @@ export interface LocalAgentExecutionReceipt {
     readonly costUsd: number;
   };
   readonly warnings: readonly string[];
+  readonly codeReviewReceipt: AgentCodeReviewReceipt;
   readonly candidate: {
     readonly scmProxy: "local-git-proxy-v1";
     readonly branch: string;

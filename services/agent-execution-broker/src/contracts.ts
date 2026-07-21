@@ -1,6 +1,7 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
+import { validateAgentCodeReviewReceipt, type AgentCodeReviewReceipt } from "../../../lib/agent/code-review";
 import type { AgentWorkflowRunReceipt } from "../../agent-worker/src/workflow-handler";
 import type { SignedGitHubCandidateArtifact } from "../../scm-proxy/src/github-contracts";
 import type { AgentConfigurationLock } from "../../agent-configuration/src/contracts";
@@ -98,12 +99,14 @@ export type IsolatedAgentExecutionResult =
   | IsolatedAgentExecutionResultBinding & Readonly<{
       status: "COMPLETED";
       candidateArtifact: SignedGitHubCandidateArtifact;
+      codeReviewReceipt: AgentCodeReviewReceipt;
       diagnosticId: null;
       diagnostic: null;
     }>
   | IsolatedAgentExecutionResultBinding & Readonly<{
       status: "FAILED";
       candidateArtifact: null;
+      codeReviewReceipt: null;
       diagnosticId: string;
       diagnostic: AgentFailureDiagnostic;
     }>;
@@ -134,6 +137,7 @@ export interface AuthoritativeAgentExecutionResult {
   readonly model: string;
   readonly candidateCommitSha: string | null;
   readonly draftPullRequest: number | null;
+  readonly codeReviewReceipt: AgentCodeReviewReceipt | null;
   readonly diagnosticId: string | null;
   readonly diagnostic: AgentFailureDiagnostic | null;
   readonly receiptId: string;
@@ -192,7 +196,7 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
   const body = record(value);
   exactKeys(body, ["status", "runId", "attemptId", "resolutionDigest", "profileRevisionId", "installationId",
     "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "executionReceiptId",
-    "candidateArtifact", "diagnosticId", "diagnostic"]);
+    "candidateArtifact", "codeReviewReceipt", "diagnosticId", "diagnostic"]);
   if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
     || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
@@ -213,8 +217,14 @@ export function validateIsolatedResult(value: unknown, lock: LockedAgentExecutio
       || !Array.isArray(payload.changes) || payload.changes.length < 1
       || attestation.algorithm !== "Ed25519" || typeof attestation.keyId !== "string" || !SAFE_ID.test(attestation.keyId)
       || typeof attestation.signature !== "string" || attestation.signature.length < 32) invalid();
+    const review = validateAgentCodeReviewReceipt(body.codeReviewReceipt);
+    if (review.runId !== lock.runId || review.attemptId !== attemptId
+      || review.profileRevisionId !== lock.profileRevisionId || review.installationId !== lock.installationId
+      || review.imageDigest !== lock.imageDigest || review.model !== lock.model
+      || review.specRevisionId !== lock.specRevisionId || review.testPlanRevisionId !== lock.testPlanRevisionId
+      || review.sourceDigest !== payload.sourceDigest) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
-    || body.candidateArtifact !== null) invalid();
+    || body.candidateArtifact !== null || body.codeReviewReceipt !== null) invalid();
   if (body.status === "FAILED") {
     const diagnostic = validateAgentFailureDiagnostic(body.diagnostic);
     if (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== lock.runId
@@ -228,7 +238,7 @@ export function validateAuthoritativeResult(value: unknown, lock: LockedAgentExe
   const body = record(value);
   exactKeys(body, ["status", "runId", "attemptId", "resolutionDigest", "profileRevisionId", "installationId",
     "imageDigest", "adapterVersion", "providerRevisionId", "credentialVersionId", "model", "candidateCommitSha",
-    "draftPullRequest", "diagnosticId", "diagnostic", "receiptId"]);
+    "draftPullRequest", "codeReviewReceipt", "diagnosticId", "diagnostic", "receiptId"]);
   if ((body.status !== "COMPLETED" && body.status !== "FAILED") || body.runId !== lock.runId
     || body.attemptId !== attemptId || body.resolutionDigest !== lock.resolutionDigest
     || body.profileRevisionId !== lock.profileRevisionId || body.installationId !== lock.installationId
@@ -239,8 +249,13 @@ export function validateAuthoritativeResult(value: unknown, lock: LockedAgentExe
     if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
       || body.candidateCommitSha === lock.baseCommitSha || !Number.isSafeInteger(body.draftPullRequest)
       || (body.draftPullRequest as number) < 1 || body.diagnosticId !== null || body.diagnostic !== null) invalid();
+    const review = validateAgentCodeReviewReceipt(body.codeReviewReceipt);
+    if (review.runId !== lock.runId || review.attemptId !== attemptId
+      || review.profileRevisionId !== lock.profileRevisionId || review.installationId !== lock.installationId
+      || review.imageDigest !== lock.imageDigest || review.model !== lock.model
+      || review.specRevisionId !== lock.specRevisionId || review.testPlanRevisionId !== lock.testPlanRevisionId) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
-    || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
+    || body.candidateCommitSha !== null || body.draftPullRequest !== null || body.codeReviewReceipt !== null) invalid();
   if (body.status === "FAILED") {
     const diagnostic = validateAgentFailureDiagnostic(body.diagnostic);
     if (diagnostic.diagnosticId !== body.diagnosticId || diagnostic.runId !== lock.runId
@@ -271,11 +286,15 @@ function validateReceipt(value: unknown, status: "COMPLETED" | "FAILED", runId: 
     || typeof body.imageDigest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(body.imageDigest)
     || typeof body.model !== "string" || !validModel(body.model)) invalid();
   if (status === "COMPLETED") {
+    const review = validateAgentCodeReviewReceipt(body.codeReviewReceipt);
     if (typeof body.candidateCommitSha !== "string" || !/^[a-f0-9]{40}$/.test(body.candidateCommitSha)
       || !Number.isSafeInteger(body.draftPullRequest) || (body.draftPullRequest as number) < 1
+      || review.runId !== runId || review.profileRevisionId !== body.profileRevisionId
+      || review.installationId !== body.installationId || review.imageDigest !== body.imageDigest
+      || review.model !== body.model
       || body.diagnosticId !== null || body.diagnostic !== null && body.diagnostic !== undefined) invalid();
   } else if (typeof body.diagnosticId !== "string" || !SAFE_ID.test(body.diagnosticId)
-    || body.candidateCommitSha !== null || body.draftPullRequest !== null) invalid();
+    || body.candidateCommitSha !== null || body.draftPullRequest !== null || body.codeReviewReceipt !== null) invalid();
   const diagnostic = status === "COMPLETED" || body.diagnostic === null || body.diagnostic === undefined
     ? null
     : validateAgentFailureDiagnostic(body.diagnostic);

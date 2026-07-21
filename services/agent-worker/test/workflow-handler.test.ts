@@ -23,6 +23,18 @@ const snapshot: DeliverySnapshot = Object.freeze({
   externalApprovals: Object.freeze([]), history: Object.freeze([]),
 });
 
+function codeReview(runId = "run-001") {
+  return Object.freeze({
+    schemaVersion: "deviludo.agent-code-review-receipt.v1" as const,
+    receiptId: "review-attempt-001", runId, attemptId: "attempt-001",
+    profileRevisionId: "profile-r1", installationId: "installation-r1",
+    imageDigest: `sha256:${"b".repeat(64)}`, model: "gateway/claude-sonnet-4-6-20250514",
+    specRevisionId: "spec-r1", testPlanRevisionId: "plan-r1", sourceDigest: "d".repeat(64),
+    verdict: "PASSED" as const, reviewDigest: "e".repeat(64), findingCount: 0, warningCount: 0,
+    reviewedAt: "2030-01-01T00:00:00.000Z",
+  });
+}
+
 function job(value: DeliverySnapshot = snapshot): ClaimedWorkflowJob {
   const request = { kind: "COMMAND", destination: "agent-worker", payload: {
     idempotencyKey: "delivery-001:0:DEVELOPMENT_QUEUED:START_LOCKED_AGENT_RUN",
@@ -58,14 +70,15 @@ test("Agent workflow handler starts one locked CLI run and emits its authoritati
           agent: "claude-code", profileRevisionId: "profile-r1", installationId: "installation-r1",
           imageDigest: `sha256:${"b".repeat(64)}`, providerRevisionId: "provider-r1",
           model: "gateway/claude-sonnet-4-6-20250514", candidateCommitSha: "c".repeat(40),
-          draftPullRequest: 91, diagnosticId: null, receiptId: "agent-receipt-001",
+          draftPullRequest: 91, codeReviewReceipt: codeReview(), diagnosticId: null, receiptId: "agent-receipt-001",
         }; },
       };
     },
   });
   const outcome = await handler.execute(job(), context(signals));
   assert.deepEqual(signals, [{ phase: "started", value: { type: "AGENT_STARTED", runId: "run-001" } }]);
-  assert.deepEqual(outcome.signal, { type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 91 });
+  assert.deepEqual(outcome.signal, { type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 91,
+    codeReviewReceiptId: "review-attempt-001", codeReviewDigest: "e".repeat(64) });
   assert.equal(outcome.result.agent, "claude-code");
 });
 
@@ -99,7 +112,8 @@ test("Agent workflow handler resumes only the same run after the Provider monito
           agent: "claude-code", profileRevisionId: "profile-r1", installationId: "installation-r1",
           imageDigest: `sha256:${"b".repeat(64)}`, providerRevisionId: "provider-r1",
           model: "claude-sonnet-4-6-20250514", candidateCommitSha: "c".repeat(40),
-          draftPullRequest: 91, diagnosticId: null, receiptId: "agent-receipt-001",
+          draftPullRequest: 91, codeReviewReceipt: { ...codeReview(), model: "claude-sonnet-4-6-20250514" },
+          diagnosticId: null, receiptId: "agent-receipt-001",
         }; },
       };
     },

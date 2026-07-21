@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getRuntimeAdapter } from "../../../adapters";
 import { DEFAULT_RUNTIME_PERMISSIONS, type AgentProfileRevision, type RunContext, type RunHandle } from "../../../lib/agent/types";
+import {
+  AGENT_CODE_REVIEW_OUTPUT_PATH,
+  createAgentCodeReviewReceipt,
+  parseAgentCodeReviewOutput,
+  type AgentCodeReviewOutput,
+  type AgentCodeReviewReceipt,
+} from "../../../lib/agent/code-review";
 import type { AgentExecutionRequest, SupervisedRun } from "../../agent-worker/src/contracts";
 import type { LocalScmCandidateReceipt } from "../../scm-proxy/src/contracts";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
@@ -74,6 +82,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     await this.#workspaceProvisioner.provision(request, workspaceRoot);
+    await assertReviewOutputAbsent(workspaceRoot);
 
     const scmBinding = {
       projectId: request.projectId,
@@ -103,7 +112,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
       runTokenSecretRef: token.secretRef,
     });
     const runtime = adapter.prepare(context, profile);
-    const runtimeSpec = adapter.start(runtime, request.prompt, workspaceRoot);
+    const runtimeSpec = adapter.start(runtime, reviewPrompt(request.prompt), workspaceRoot);
     const runHandle: RunHandle = Object.freeze({
       runId: request.runId,
       attemptId: request.attemptId,
@@ -122,13 +131,22 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     if (completion.status !== "completed" || completion.result.status !== "completed") {
       throw new Error(`Local Agent attempt did not complete (${completion.status})`);
     }
+    const reviewOutput = await consumeReviewOutput(workspaceRoot);
+    if (reviewOutput.verdict !== "PASSED") throw new Error("Local Agent code review contains blocking findings");
     const candidate = await this.#scmProxy.finalize({
       ...scmBinding,
       expectedBaseCommitSha: base.baseCommitSha,
       candidateBranch: `deviludo/${safeBranchPart(request.projectId)}/${hash(request.attemptId).slice(0, 16)}`,
       commitMessage: `agent: implement ${request.specRevisionId}`,
     });
-    const receipt = buildReceipt(request, completion.result, candidate);
+    const codeReviewReceipt = createAgentCodeReviewReceipt({
+      output: reviewOutput, runId: request.runId, attemptId: request.attemptId,
+      profileRevisionId: request.profileRevisionId, installationId: request.installationId,
+      imageDigest: request.imageDigest, model: request.model, specRevisionId: request.specRevisionId,
+      testPlanRevisionId: request.testPlanRevisionId, sourceDigest: candidate.sourceDigest,
+      reviewedAt: candidate.createdAt,
+    });
+    const receipt = buildReceipt(request, completion.result, candidate, codeReviewReceipt);
     await writeFile(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return receipt;
   }
@@ -172,6 +190,7 @@ function buildReceipt(
   request: LocalAgentExecutionRequest,
   result: Awaited<SupervisedRun["completion"]>["result"],
   candidate: LocalScmCandidateReceipt,
+  codeReviewReceipt: AgentCodeReviewReceipt,
 ): LocalAgentExecutionReceipt {
   const reported = [...result.changedFiles].sort();
   const authoritative = [...candidate.changedFiles].sort();
@@ -207,6 +226,7 @@ function buildReceipt(
     summary: (result.summary?.trim() || "Agent completed and SCM proxy created a candidate commit.").slice(0, 4_000),
     usage: Object.freeze({ ...result.usage }),
     warnings: Object.freeze(warnings),
+    codeReviewReceipt,
     candidate: Object.freeze({
       scmProxy: "local-git-proxy-v1",
       branch: candidate.branch,
@@ -218,6 +238,43 @@ function buildReceipt(
     }),
     completedAt: candidate.createdAt,
   });
+}
+
+function reviewPrompt(prompt: string): string {
+  return `${prompt}\n\nBefore finishing, review every change against the approved specification and frozen test plan. Write exactly one UTF-8 JSON object to ${AGENT_CODE_REVIEW_OUTPUT_PATH}. Use schemaVersion deviludo.agent-code-review-output.v1 with exactly verdict (PASSED or FAILED), a non-empty summary, and findings. Each finding has severity (BLOCKING, WARNING, or INFO), an uppercase code, a repository-relative path or null, and a non-empty message. PASSED is allowed only without BLOCKING findings.`;
+}
+
+async function assertReviewOutputAbsent(workspaceRoot: string): Promise<void> {
+  try {
+    await lstat(path.join(workspaceRoot, AGENT_CODE_REVIEW_OUTPUT_PATH));
+    throw new Error("Local Agent reserved code review path already exists");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function consumeReviewOutput(workspaceRoot: string): Promise<AgentCodeReviewOutput> {
+  const reviewPath = path.join(workspaceRoot, AGENT_CODE_REVIEW_OUTPUT_PATH);
+  const metadata = await lstat(reviewPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 64 * 1024) {
+    throw new Error("Local Agent code review output is invalid");
+  }
+  const file = await open(reviewPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const content = await file.readFile();
+    const after = await file.stat();
+    if (!after.isFile() || after.size !== metadata.size || after.mtimeMs !== metadata.mtimeMs
+      || after.ctimeMs !== metadata.ctimeMs || content.byteLength !== metadata.size) {
+      throw new Error("Local Agent code review output changed while being read");
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(content.toString("utf8")); }
+    catch { throw new Error("Local Agent code review output is not valid JSON"); }
+    return parseAgentCodeReviewOutput(parsed);
+  } finally {
+    await file.close();
+    await unlink(reviewPath);
+  }
 }
 
 async function readReceipt(file: string): Promise<LocalAgentExecutionReceipt | null> {

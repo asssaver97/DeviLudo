@@ -5,6 +5,7 @@ import type {
   LocalAgentPreflightResult,
 } from "./contracts";
 import { LocalAgentReadinessService } from "./readiness";
+import { validateAgentCodeReviewReceipt } from "../../../lib/agent/code-review";
 
 export type LocalAgentExecutionOutcome =
   | { readonly state: "BLOCKED"; readonly preflight: LocalAgentPreflightResult }
@@ -85,6 +86,13 @@ function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgen
   if (!Array.isArray(receipt.warnings) || receipt.warnings.length > 100 || receipt.warnings.some((value) => typeof value !== "string" || value.length > 1_000)) {
     throw new Error("Local Agent execution receipt warnings are invalid");
   }
+  const review = validateAgentCodeReviewReceipt(receipt.codeReviewReceipt);
+  if (review.runId !== request.runId || review.attemptId !== request.attemptId
+    || review.profileRevisionId !== request.profileRevisionId || review.installationId !== request.installationId
+    || review.imageDigest !== request.imageDigest || review.model !== request.model
+    || review.specRevisionId !== request.specRevisionId || review.testPlanRevisionId !== request.testPlanRevisionId) {
+    throw new Error("Local Agent code review receipt does not match the immutable run lock");
+  }
   if (receipt.candidate.scmProxy !== "local-git-proxy-v1"
     || !validCandidateBranch(receipt.candidate.branch)
     || !/^[a-f0-9]{40}$/.test(receipt.candidate.baseCommitSha)
@@ -94,6 +102,9 @@ function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgen
     || receipt.candidate.draftPullRequest !== null
     || !validChangedFiles(receipt.candidate.changedFiles)) {
     throw new Error("Local Agent execution candidate receipt is invalid");
+  }
+  if (review.sourceDigest !== receipt.candidate.sourceDigest) {
+    throw new Error("Local Agent code review does not match the authoritative candidate");
   }
   if (!Number.isFinite(Date.parse(receipt.completedAt))) throw new Error("Local Agent execution completion time is invalid");
 }
@@ -149,6 +160,7 @@ function freezeReceipt(receipt: LocalAgentExecutionReceipt): LocalAgentExecution
     ...receipt,
     usage: Object.freeze({ ...receipt.usage }),
     warnings: Object.freeze([...receipt.warnings]),
+    codeReviewReceipt: Object.freeze({ ...receipt.codeReviewReceipt }),
     candidate: Object.freeze({ ...receipt.candidate, changedFiles: Object.freeze([...receipt.candidate.changedFiles]) }),
   });
 }

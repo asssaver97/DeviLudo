@@ -244,7 +244,10 @@ function assertSnapshotCommandBinding(
   if (operation === "RESOLVE_AGENT_RUN_CONFIGURATION"
     && (!snapshot.specRevisionId || !snapshot.testPlanRevisionId || !snapshot.specApprovalReceiptId)) missing(operation);
   if (operation === "START_LOCKED_AGENT_RUN" && !snapshot.lockedRunConfigurationId) missing(operation);
-  if (operation === "START_TARGET_MATRIX_E2E" && (!snapshot.candidateCommitSha || !snapshot.draftPullRequest)) missing(operation);
+  if (operation === "START_TARGET_MATRIX_E2E" && (!snapshot.candidateCommitSha || !snapshot.draftPullRequest
+    || ("codeReviewReceiptId" in snapshot || "codeReviewDigest" in snapshot)
+      && (!snapshot.codeReviewReceiptId || !snapshot.codeReviewDigest
+        || !/^[a-f0-9]{64}$/.test(snapshot.codeReviewDigest)))) missing(operation);
   if (operation === "MERGE_DRAFT_PULL_REQUEST" && (!snapshot.candidateCommitSha || !snapshot.draftPullRequest || !snapshot.candidateEvidenceBundleId)) missing(operation);
   if (operation === "START_MAIN_SHA_RELEASE_GATE" && !snapshot.mainCommitSha) missing(operation);
   if (operation === "REQUEST_FRESH_MFA" && (!snapshot.mainCommitSha || !snapshot.mainEvidenceBundleId)) missing(operation);

@@ -8,7 +8,7 @@ import {
 } from "./game-delivery";
 import type { TargetPlatform } from "../domain/types";
 
-export const DELIVERY_PROJECTION_SCHEMA_VERSION = 2 as const;
+export const DELIVERY_PROJECTION_SCHEMA_VERSION = 3 as const;
 
 export const DELIVERY_STATES = Object.freeze([
   "IDEATION",
@@ -42,7 +42,7 @@ const SIGNAL_FIELDS = Object.freeze({
   AGENT_STARTED: ["signalId", "type", "runId"],
   PROVIDER_UNAVAILABLE: ["signalId", "type", "providerRevisionId"],
   PROVIDER_RESTORED: ["signalId", "type", "providerRevisionId"],
-  AGENT_COMPLETED: ["signalId", "type", "candidateCommitSha", "draftPullRequest"],
+  AGENT_COMPLETED: ["signalId", "type", "candidateCommitSha", "draftPullRequest", "codeReviewReceiptId", "codeReviewDigest"],
   AGENT_FAILED: ["signalId", "type", "diagnosticId"],
   E2E_PASSED: ["signalId", "type", "evidenceBundleId"],
   E2E_FAILED: ["signalId", "type", "evidenceBundleId", "repairPromptId"],
@@ -91,7 +91,7 @@ export function deliveryProjectionKey(
  */
 export function parseDeliverySnapshot(value: unknown): DeliverySnapshot {
   const candidate = object(value, "Delivery snapshot");
-  exactKeys(candidate, [
+  const legacyFields = [
     "workflowId", "tenantId", "projectId", "state", "specRevisionId",
     "testPlanRevisionId", "specApprovalReceiptId", "lockedRunConfigurationId",
     "runId", "candidateCommitSha", "draftPullRequest", "mainCommitSha",
@@ -100,7 +100,13 @@ export function parseDeliverySnapshot(value: unknown): DeliverySnapshot {
     "steamReleaseId", "defaultBranchBuildId", "targetMatrix", "iteration",
     "repairAttempts", "repairContext", "waitingProviderRevisionId", "externalGate",
     "externalApprovals", "history",
-  ], "Delivery snapshot");
+  ];
+  const hasReviewReceipt = Object.hasOwn(candidate, "codeReviewReceiptId");
+  const hasReviewDigest = Object.hasOwn(candidate, "codeReviewDigest");
+  if (hasReviewReceipt !== hasReviewDigest) invalid("Delivery code review binding is incomplete");
+  exactKeys(candidate, hasReviewReceipt
+    ? [...legacyFields, "codeReviewReceiptId", "codeReviewDigest"]
+    : legacyFields, "Delivery snapshot");
   if (typeof candidate.workflowId !== "string" || !SAFE_WORKFLOW_ID.test(candidate.workflowId)
     || typeof candidate.tenantId !== "string" || !UUID.test(candidate.tenantId)
     || typeof candidate.projectId !== "string" || !UUID.test(candidate.projectId)
@@ -116,9 +122,9 @@ export function parseDeliverySnapshot(value: unknown): DeliverySnapshot {
     invalid("Delivery target matrix is not canonical");
   }
   const history = parseHistory(candidate.history as unknown[]);
-  const replayed = replaySnapshot(candidate, targetMatrix, history, true, DEFAULT_AUTOMATIC_REPAIR_LIMIT)
-    ?? replaySnapshot(candidate, targetMatrix, history, true, null)
-    ?? replaySnapshot(candidate, targetMatrix, history, false, null);
+  const replayed = replaySnapshot(candidate, targetMatrix, history, true, DEFAULT_AUTOMATIC_REPAIR_LIMIT, hasReviewReceipt)
+    ?? replaySnapshot(candidate, targetMatrix, history, true, null, hasReviewReceipt)
+    ?? replaySnapshot(candidate, targetMatrix, history, false, null, hasReviewReceipt);
   if (!replayed) invalid("Delivery snapshot does not match deterministic workflow replay");
   return replayed;
 }
@@ -129,6 +135,7 @@ function replaySnapshot(
   history: readonly Readonly<{ signal: DeliverySignal; resultingState: DeliveryState }>[],
   automaticRepairSuccessorRuns: boolean,
   automaticRepairLimit: number | null,
+  requireAgentCodeReview: boolean,
 ): DeliverySnapshot | null {
   const machine = new GameDeliveryWorkflow({
     workflowId: candidate.workflowId as string,
@@ -137,6 +144,7 @@ function replaySnapshot(
     targetMatrix,
     automaticRepairSuccessorRuns,
     automaticRepairLimit,
+    requireAgentCodeReview,
   });
   try {
     for (const entry of history) {
@@ -191,7 +199,10 @@ export function canonicalDeliveryJson(value: unknown): string {
 function exactDeliverySignal(value: unknown): DeliverySignal {
   const signal = object(value, "Delivery signal");
   if (typeof signal.type !== "string" || !(signal.type in SIGNAL_FIELDS)) invalid("Delivery signal type is invalid");
-  exactKeys(signal, SIGNAL_FIELDS[signal.type as DeliverySignal["type"]], "Delivery signal");
+  const expected = signal.type === "AGENT_COMPLETED" && !Object.hasOwn(signal, "codeReviewReceiptId")
+    ? ["signalId", "type", "candidateCommitSha", "draftPullRequest"]
+    : SIGNAL_FIELDS[signal.type as DeliverySignal["type"]];
+  exactKeys(signal, expected, "Delivery signal");
   try { assertDeliverySignal(signal as unknown as DeliverySignal); }
   catch { invalid("Delivery signal binding is invalid"); }
   return Object.freeze({ ...signal }) as unknown as DeliverySignal;

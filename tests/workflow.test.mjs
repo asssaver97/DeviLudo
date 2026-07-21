@@ -4,6 +4,7 @@ import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 
 const candidateSha = "a".repeat(40);
 const mainSha = "b".repeat(40);
+const codeReview = Object.freeze({ codeReviewReceiptId: "review-receipt-0001", codeReviewDigest: "f".repeat(64) });
 
 function workflowAtMainGate(id) {
   const workflow = new GameDeliveryWorkflow({ workflowId: id, tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"] });
@@ -11,7 +12,7 @@ function workflowAtMainGate(id) {
   workflow.signal({ signalId: `${id}-approved`, type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001" });
   workflow.signal({ signalId: `${id}-locked`, type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-001" });
   workflow.signal({ signalId: `${id}-started`, type: "AGENT_STARTED", runId: "run-001" });
-  workflow.signal({ signalId: `${id}-completed`, type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18 });
+  workflow.signal({ signalId: `${id}-completed`, type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18, ...codeReview });
   workflow.signal({ signalId: `${id}-candidate-e2e`, type: "E2E_PASSED", evidenceBundleId: "candidate-evidence-001" });
   workflow.signal({ signalId: `${id}-accepted`, type: "USER_ACCEPTED" });
   workflow.signal({ signalId: `${id}-merged`, type: "MAIN_MERGED", mainCommitSha: mainSha });
@@ -27,8 +28,12 @@ test("delivery workflow requires every Steam external gate and release receipt",
   workflow.signal({ signalId: "signal-002-lock", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-1" });
   assert.equal(workflow.nextCommand(), "START_LOCKED_AGENT_RUN");
   workflow.signal({ signalId: "signal-003", type: "AGENT_STARTED", runId: "run-1" });
-  workflow.signal({ signalId: "signal-004", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18 });
+  assert.throws(() => workflow.signal({ signalId: "signal-missing-review", type: "AGENT_COMPLETED",
+    candidateCommitSha: candidateSha, draftPullRequest: 18 }), /invalid while delivery is DEVELOPING/);
+  workflow.signal({ signalId: "signal-004", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18, ...codeReview });
   assert.equal(workflow.current().draftPullRequest, 18);
+  assert.equal(workflow.current().codeReviewReceiptId, codeReview.codeReviewReceiptId);
+  assert.equal(workflow.current().codeReviewDigest, codeReview.codeReviewDigest);
   workflow.signal({ signalId: "signal-005", type: "E2E_PASSED", evidenceBundleId: "evidence-candidate" });
   workflow.signal({ signalId: "signal-006", type: "USER_ACCEPTED" });
   workflow.signal({ signalId: "signal-007", type: "MAIN_MERGED", mainCommitSha: mainSha });
@@ -131,7 +136,7 @@ test("feedback invalidates evidence and the approved second iteration returns th
   assert.equal(workflow.current().lockedRunConfigurationId, "lock-claude-r1");
   workflow.signal({ signalId: "signal-104", type: "PROVIDER_RESTORED", providerRevisionId: "provider-claude-r1" });
   workflow.signal({ signalId: "signal-105", type: "AGENT_STARTED", runId: "run-1" });
-  workflow.signal({ signalId: "signal-106", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18 });
+  workflow.signal({ signalId: "signal-106", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 18, ...codeReview });
   workflow.signal({ signalId: "signal-107", type: "E2E_PASSED", evidenceBundleId: "evidence-1" });
   workflow.signal({ signalId: "signal-108", type: "USER_FEEDBACK", nextSpecRevisionId: "SPEC-002", evidenceInvalidationId: "invalidate-1" });
   assert.equal(workflow.current().state, "WAITING_SPEC_APPROVAL");
@@ -154,7 +159,7 @@ test("feedback invalidates evidence and the approved second iteration returns th
   assert.equal(workflow.nextCommand(), "RESOLVE_AGENT_RUN_CONFIGURATION");
   workflow.signal({ signalId: "signal-110", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "lock-claude-r2" });
   workflow.signal({ signalId: "signal-111", type: "AGENT_STARTED", runId: "run-2" });
-  workflow.signal({ signalId: "signal-112", type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 19 });
+  workflow.signal({ signalId: "signal-112", type: "AGENT_COMPLETED", candidateCommitSha: "c".repeat(40), draftPullRequest: 19, ...codeReview });
   assert.equal(workflow.nextCommand(), "START_TARGET_MATRIX_E2E");
   workflow.signal({ signalId: "signal-113", type: "E2E_PASSED", evidenceBundleId: "evidence-2" });
   assert.equal(workflow.current().state, "WAITING_USER_ACCEPTANCE");
@@ -215,7 +220,7 @@ test("failed candidate E2E creates a new immutable repair run bound to the faile
   workflow.signal({ signalId: "repair-002", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-APPROVED-001", testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001" });
   workflow.signal({ signalId: "repair-003", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-original" });
   workflow.signal({ signalId: "repair-004", type: "AGENT_STARTED", runId: "run-original" });
-  workflow.signal({ signalId: "repair-005", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41 });
+  workflow.signal({ signalId: "repair-005", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 41, ...codeReview });
   workflow.signal({ signalId: "repair-006", type: "E2E_FAILED", evidenceBundleId: "evidence-failed-001", repairPromptId: "repair:failed-bundle-001" });
 
   assert.equal(workflow.current().state, "RESOLVING_AGENT_CONFIGURATION");
@@ -339,7 +344,7 @@ test("an exhausted E2E repair budget preserves failed lineage but clears stale c
   });
   workflow.signal({ signalId: "e2e-budget-locked", type: "RUN_CONFIGURATION_LOCKED", lockedRunConfigurationId: "run-config-e2e-budget" });
   workflow.signal({ signalId: "e2e-budget-started", type: "AGENT_STARTED", runId: "run-e2e-budget" });
-  workflow.signal({ signalId: "e2e-budget-complete", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 71 });
+  workflow.signal({ signalId: "e2e-budget-complete", type: "AGENT_COMPLETED", candidateCommitSha: candidateSha, draftPullRequest: 71, ...codeReview });
   workflow.signal({
     signalId: "e2e-budget-failed", type: "E2E_FAILED", evidenceBundleId: "evidence-e2e-budget",
     repairPromptId: "repair-prompt-e2e-budget",

@@ -6,6 +6,7 @@ import test from "node:test";
 import type { AgentExecutionRequest, SupervisedExecutionResult, SupervisedRun } from "../../agent-worker/src/contracts";
 import type { LocalAgentExecutionRequest } from "../src/contracts";
 import { IsolatedLocalAgentExecutor } from "../src/isolated-executor";
+import { AGENT_CODE_REVIEW_OUTPUT_PATH } from "../../../lib/agent/code-review";
 
 function request(agent: "claude-code" | "codex-cli", suffix: string): LocalAgentExecutionRequest {
   const claude = agent === "claude-code";
@@ -94,6 +95,10 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
           if (agent === "claude-code") assert.equal(supervised.runtimeSpec.args.includes("--no-session-persistence"), true);
           else assert.equal(supervised.runtimeSpec.args.includes("--ephemeral"), true);
           await writeFile(path.join(supervised.workspaceRoot, "scripts", "main.gd"), "extends Node\nfunc _ready():\n\tprint(\"agent\")\n", "utf8");
+          await writeFile(path.join(supervised.workspaceRoot, AGENT_CODE_REVIEW_OUTPUT_PATH), JSON.stringify({
+            schemaVersion: "deviludo.agent-code-review-output.v1", verdict: "PASSED",
+            summary: "Reviewed the local candidate against the frozen specification and test plan.", findings: [],
+          }), "utf8");
           return completed(supervised);
         },
       },
@@ -105,6 +110,8 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
     assert.equal(receipt.candidate.commitSha.length, 40);
     assert.notEqual(receipt.candidate.commitSha, receipt.candidate.baseCommitSha);
     assert.deepEqual(receipt.candidate.changedFiles, ["scripts/main.gd"]);
+    assert.equal(receipt.codeReviewReceipt.verdict, "PASSED");
+    assert.equal(receipt.codeReviewReceipt.sourceDigest, receipt.candidate.sourceDigest);
     assert.equal(receipt.budget.maxOutputTokens, input.budget.maxOutputTokens);
     assert.equal(JSON.stringify(receipt).includes("secret://"), false);
 

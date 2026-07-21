@@ -7,6 +7,7 @@ import type { ClaimedWorkflowJob } from "../../temporal/src/postgres-queue";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import { validateAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
 import type { AgentFailureDiagnostic } from "../../../lib/agent/types";
+import { validateAgentCodeReviewReceipt, type AgentCodeReviewReceipt } from "../../../lib/agent/code-review";
 import { WorkflowJobCancelledError } from "../../temporal/src/job-cancellation";
 import { AgentExecutionCancelledError } from "./workflow-errors";
 
@@ -26,6 +27,7 @@ export interface AgentWorkflowRunReceipt {
   readonly model: string;
   readonly candidateCommitSha: string | null;
   readonly draftPullRequest: number | null;
+  readonly codeReviewReceipt: AgentCodeReviewReceipt | null;
   readonly diagnosticId: string | null;
   readonly diagnostic?: AgentFailureDiagnostic | null;
   readonly receiptId: string;
@@ -140,6 +142,8 @@ export class AgentWorkerWorkflowHandler implements WorkflowJobHandler {
         type: "AGENT_COMPLETED",
         candidateCommitSha: receipt.candidateCommitSha as string,
         draftPullRequest: receipt.draftPullRequest as number,
+        codeReviewReceiptId: (receipt.codeReviewReceipt as AgentCodeReviewReceipt).receiptId,
+        codeReviewDigest: (receipt.codeReviewReceipt as AgentCodeReviewReceipt).reviewDigest,
       }),
     });
   }
@@ -180,13 +184,18 @@ function validateReceipt(receipt: AgentWorkflowRunReceipt, run: AgentWorkflowRun
     throw new Error("Agent workflow receipt lock binding is invalid");
   }
   if (receipt.status === "COMPLETED") {
+    const review = validateAgentCodeReviewReceipt(receipt.codeReviewReceipt);
     if (!receipt.candidateCommitSha || !SHA1.test(receipt.candidateCommitSha)
       || !Number.isSafeInteger(receipt.draftPullRequest) || (receipt.draftPullRequest as number) < 1
+      || review.runId !== receipt.runId || review.profileRevisionId !== receipt.profileRevisionId
+      || review.installationId !== receipt.installationId || review.imageDigest !== receipt.imageDigest
+      || review.model !== receipt.model
       || receipt.diagnosticId !== null || receipt.diagnostic !== null && receipt.diagnostic !== undefined) {
       throw new Error("Completed Agent workflow receipt is invalid");
     }
   } else if (!receipt.diagnosticId || !ID.test(receipt.diagnosticId)
-    || receipt.candidateCommitSha !== null || receipt.draftPullRequest !== null) {
+    || receipt.candidateCommitSha !== null || receipt.draftPullRequest !== null
+    || receipt.codeReviewReceipt !== null) {
     throw new Error("Failed Agent workflow receipt is invalid");
   } else if (receipt.diagnostic !== null && receipt.diagnostic !== undefined) {
     const diagnostic = validateAgentFailureDiagnostic(receipt.diagnostic);
@@ -219,6 +228,7 @@ function publicReceipt(receipt: AgentWorkflowRunReceipt): Readonly<Record<string
     model: receipt.model,
     candidateCommitSha: receipt.candidateCommitSha,
     draftPullRequest: receipt.draftPullRequest,
+    codeReviewReceipt: receipt.codeReviewReceipt,
     diagnosticId: receipt.diagnosticId,
     diagnostic: receipt.diagnostic ?? null,
   });

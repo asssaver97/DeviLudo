@@ -65,6 +65,14 @@ function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgen
     summary: "Implemented the approved fixture.",
     usage: { inputTokens: 120, outputTokens: 48, costUsd: 0.21 },
     warnings: [],
+    codeReviewReceipt: {
+      schemaVersion: "deviludo.agent-code-review-receipt.v1", receiptId: `review-${execution.attemptId}`,
+      runId: execution.runId, attemptId: execution.attemptId, profileRevisionId: execution.profileRevisionId,
+      installationId: execution.installationId, imageDigest: execution.imageDigest, model: execution.model,
+      specRevisionId: execution.specRevisionId, testPlanRevisionId: execution.testPlanRevisionId,
+      sourceDigest: "b".repeat(64), verdict: "PASSED", reviewDigest: "d".repeat(64),
+      findingCount: 0, warningCount: 0, reviewedAt: "2026-07-18T00:00:00.000Z",
+    },
     candidate: {
       scmProxy: "local-git-proxy-v1" as const,
       branch: "deviludo/run-1-attempt-1",

@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { createHash, createPublicKey, type KeyObject } from "node:crypto";
-import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { lstat, open, readdir, realpath, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getRuntimeAdapter } from "../../../adapters";
 import {
@@ -11,6 +11,12 @@ import {
   type RunHandle,
 } from "../../../lib/agent/types";
 import { createAgentFailureDiagnostic } from "../../../lib/agent/failure-diagnostics";
+import {
+  AGENT_CODE_REVIEW_OUTPUT_PATH,
+  createAgentCodeReviewReceipt,
+  parseAgentCodeReviewOutput,
+  type AgentCodeReviewOutput,
+} from "../../../lib/agent/code-review";
 import type { AgentExecutionRequest, SupervisedRun } from "../../agent-worker/src/contracts";
 import { AgentExecutionSupervisor } from "../../agent-worker/src/supervisor";
 import { sha256Canonical } from "../../runner-control/src/canonical";
@@ -93,6 +99,7 @@ export class NativeMicrovmAgentGuest {
       // may already have rotated the stable SecretRef while materializing a
       // large source tree, so the relay resolves the current value on demand.
       if (remainingSeconds < 60) invalid("DLRT lifetime");
+      await assertReviewOutputAbsent(roots.workspaceRoot);
       const before = await scanRepository(roots.workspaceRoot);
       if (sourceDigest(before) !== request.sourceDigest) invalid("baseline source digest");
       stage = "STARTING_RELAY";
@@ -129,12 +136,27 @@ export class NativeMicrovmAgentGuest {
         || !Number.isSafeInteger(completion.result.usage.outputTokens) || completion.result.usage.outputTokens < 0
         || !Number.isFinite(completion.result.usage.costUsd) || completion.result.usage.costUsd < 0
         || completion.result.usage.costUsd > request.budget.maxUsd) invalid("Agent usage");
-      stage = "BUILDING_CANDIDATE";
+      const reviewOutput = await consumeReviewOutput(roots.workspaceRoot);
       const after = await scanRepository(roots.workspaceRoot);
-      const changes = await buildChanges(before, after);
       const verifiedAfter = await scanRepository(roots.workspaceRoot);
       if (inventoryDigest(after) !== inventoryDigest(verifiedAfter)) invalid("post-execution mutation");
       const createdAt = validNow(this.#now()).toISOString();
+      const candidateSourceDigest = sourceDigest(after);
+      const codeReviewReceipt = createAgentCodeReviewReceipt({
+        output: reviewOutput,
+        runId: request.runId,
+        attemptId: request.attemptId,
+        profileRevisionId: request.profileRevisionId,
+        installationId: request.installationId,
+        imageDigest: request.imageDigest,
+        model: request.model,
+        specRevisionId: request.specRevisionId,
+        testPlanRevisionId: request.testPlanRevisionId,
+        sourceDigest: candidateSourceDigest,
+        reviewedAt: createdAt,
+      });
+      stage = "BUILDING_CANDIDATE";
+      const changes = await buildChanges(before, after);
       const core: GitHubCandidateArtifactCore = Object.freeze({
         schemaVersion: "deviludo.github-candidate.v1",
         artifactId: `candidate-${request.attemptId}`,
@@ -146,7 +168,7 @@ export class NativeMicrovmAgentGuest {
         expectedBaseCommitSha: request.baseCommitSha,
         candidateBranch: `deviludo/${request.projectId.slice(0, 8)}/${request.runId.slice(0, 8)}-${request.attemptId.slice(0, 8)}`,
         commitMessage: `agent: implement approved specification ${request.specRevisionId}`,
-        sourceDigest: sourceDigest(after),
+        sourceDigest: candidateSourceDigest,
         changes,
         createdAt,
       });
@@ -156,6 +178,7 @@ export class NativeMicrovmAgentGuest {
         status: "COMPLETED",
         executionReceiptId: `microvm-${request.attemptId}`,
         candidateArtifact: artifact,
+        codeReviewReceipt,
         diagnosticId: null,
         diagnostic: null,
       });
@@ -171,6 +194,7 @@ export class NativeMicrovmAgentGuest {
         status: "FAILED",
         executionReceiptId: `microvm-${request.attemptId}`,
         candidateArtifact: null,
+        codeReviewReceipt: null,
         diagnosticId: diagnostic.diagnosticId,
         diagnostic,
       });
@@ -297,14 +321,45 @@ function validateSignedArtifact(artifact: SignedGitHubCandidateArtifact, core: G
 }
 
 function result(request: NativeMicrovmAgentRequest, outcome: Pick<IsolatedAgentExecutionResult,
-  "status" | "executionReceiptId" | "candidateArtifact" | "diagnosticId" | "diagnostic">): IsolatedAgentExecutionResult {
+  "status" | "executionReceiptId" | "candidateArtifact" | "codeReviewReceipt" | "diagnosticId" | "diagnostic">): IsolatedAgentExecutionResult {
   return Object.freeze({ status: outcome.status, runId: request.runId, attemptId: request.attemptId,
     resolutionDigest: request.resolutionDigest, profileRevisionId: request.profileRevisionId,
     installationId: request.installationId, imageDigest: request.imageDigest, adapterVersion: request.adapterVersion,
     providerRevisionId: request.providerRevisionId, credentialVersionId: request.credentialVersionId,
     model: request.model, executionReceiptId: outcome.executionReceiptId,
-    candidateArtifact: outcome.candidateArtifact, diagnosticId: outcome.diagnosticId,
+    candidateArtifact: outcome.candidateArtifact, codeReviewReceipt: outcome.codeReviewReceipt,
+    diagnosticId: outcome.diagnosticId,
     diagnostic: outcome.diagnostic }) as IsolatedAgentExecutionResult;
+}
+
+async function assertReviewOutputAbsent(workspaceRoot: string): Promise<void> {
+  try {
+    await lstat(join(workspaceRoot, AGENT_CODE_REVIEW_OUTPUT_PATH));
+    invalid("reserved code review path");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function consumeReviewOutput(workspaceRoot: string): Promise<AgentCodeReviewOutput> {
+  const path = join(workspaceRoot, AGENT_CODE_REVIEW_OUTPUT_PATH);
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 64 * 1024) {
+    invalid("code review output");
+  }
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const content = await file.readFile();
+    assertIdentity(await file.stat(), metadata);
+    if (content.byteLength !== metadata.size) invalid("code review output");
+    let value: unknown;
+    try { value = JSON.parse(content.toString("utf8")); }
+    catch { invalid("code review output"); }
+    return parseAgentCodeReviewOutput(value);
+  } finally {
+    await file.close();
+    await unlink(path);
+  }
 }
 
 async function validateRoots(runRootValue: string, workspaceRootValue: string): Promise<Readonly<{ runRoot: string; workspaceRoot: string }>> {
