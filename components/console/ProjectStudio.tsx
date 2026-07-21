@@ -257,7 +257,7 @@ export function ProjectStudio({
       : status.stage === "WAITING_USER_ACCEPTANCE";
     if (!ready) acceptanceCommandRef.current = null;
     setCandidateAcceptanceReady(ready);
-    setHumanRepairTakeover(status.mode === "PRODUCTION" && status.humanRepairTakeover);
+    setHumanRepairTakeover(status.humanRepairTakeover);
     const awaitingApproval = status.mode === "LOCAL_D1"
       ? status.stage === "AWAITING_SPEC_APPROVAL"
       : status.stage === "IDEATION" || status.stage === "WAITING_SPEC_APPROVAL";

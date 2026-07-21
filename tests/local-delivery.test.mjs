@@ -9,6 +9,18 @@ import {
   recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
 
+function localDeliveryAtMainGate(projectId) {
+  let state = approveLocalSpec(createLocalDelivery(projectId), "SPEC-POST-MERGE-001", `RUN-${projectId}`);
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "accept");
+  return applyLocalDeliveryAction(state, "advance");
+}
+
 test("local delivery fixture exercises the complete gated chain without external calls", () => {
   let state = approveLocalSpec(createLocalDelivery("project-local"), "SPEC-004", "RUN-LOCAL-1");
   assert.equal(state.stage, "AGENT_QUEUED");
@@ -38,12 +50,16 @@ test("local delivery fixture exercises the complete gated chain without external
   assert.equal(state.mainSha, "f21c0de");
   state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "MFA_REQUIRED");
+  assert.match(state.steamReleaseId, /^RELEASE-LOCAL-/);
   state = applyLocalDeliveryAction(state, "confirm-mfa");
+  assert.match(state.mfaApprovalId, /^MFA-LOCAL-/);
   state = applyLocalDeliveryAction(state, "advance");
+  assert.match(state.steamBuildId, /^BUILD-LOCAL-/);
   state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
   state = applyLocalDeliveryAction(state, "external-approve");
   assert.equal(state.stage, "RELEASED");
+  assert.deepEqual(state.externalApprovals, ["LOCAL_EXTERNAL_APPROVAL"]);
   assert.match(state.events[0].message, /未调用真实 Steam/);
 });
 
@@ -67,8 +83,64 @@ test("feedback invalidates all local evidence and requires a new immutable appro
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
   assert.equal(state.evidenceValid, false);
   assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
+  assert.equal(state.runId, null);
+  assert.equal(state.candidateSha, null);
+  assert.equal(state.candidatePr, null);
   assert.equal(state.localValidation.valid, false);
   assert.throws(() => applyLocalDeliveryAction(state, "advance"), /先批准/);
+});
+
+test("local main-gate failure freezes evidence, revokes release authority and requires a new spec", () => {
+  const originalRunId = "RUN-project-main-failure";
+  let state = localDeliveryAtMainGate("project-main-failure");
+  assert.equal(state.stage, "MAIN_GATE_RUNNING");
+  assert.equal(state.mainSha, "f21c0de");
+
+  state = applyLocalDeliveryAction(state, "main-gate-fail");
+  assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
+  assert.equal(state.runId, null);
+  assert.equal(state.mainSha, null);
+  assert.equal(state.candidateSha, null);
+  assert.equal(state.steamBranch, null);
+  assert.equal(state.evidenceValid, false);
+  assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
+  assert.equal(state.repairHandoff.reason, "MAIN_GATE_FAILURE");
+  assert.equal(state.repairHandoff.baselineMainSha, "f21c0de");
+  assert.equal(state.repairHandoff.previousRunId, originalRunId);
+  assert.deepEqual(state.repairHandoff.revokedAuthorities, [
+    "MAIN_SHA", "MFA", "STEAM_BUILD", "STEAM_RELEASE", "EXTERNAL_APPROVALS",
+  ]);
+  assert.throws(() => applyLocalDeliveryAction(state, "advance"), /先批准/);
+
+  state = invalidateLocalDelivery(state, "SPEC-POST-MERGE-002");
+  assert.equal(state.repairHandoff, null);
+  state = approveLocalSpec(state, "SPEC-POST-MERGE-002", "RUN-project-main-failure-2");
+  assert.equal(state.stage, "AGENT_QUEUED");
+  assert.equal(state.runId, "RUN-project-main-failure-2");
+});
+
+test("local Steam reinstall failure clears Beta authority before human revision", () => {
+  let state = localDeliveryAtMainGate("project-steam-failure");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "confirm-mfa");
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.equal(state.stage, "STEAM_REINSTALL_E2E");
+  assert.equal(state.steamBranch, "local-password-beta");
+  assert.match(state.mfaApprovalId, /^MFA-LOCAL-/);
+  assert.match(state.steamBuildId, /^BUILD-LOCAL-/);
+  assert.match(state.steamReleaseId, /^RELEASE-LOCAL-/);
+
+  state = applyLocalDeliveryAction(state, "steam-reinstall-fail");
+  assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
+  assert.equal(state.repairHandoff.reason, "STEAM_INSTALL_FAILURE");
+  assert.equal(state.repairHandoff.baselineMainSha, "f21c0de");
+  assert.equal(state.steamBranch, null);
+  assert.equal(state.mfaApprovalId, null);
+  assert.equal(state.steamBuildId, null);
+  assert.equal(state.steamReleaseId, null);
+  assert.deepEqual(state.externalApprovals, []);
+  assert.equal(state.events[0].type, "STEAM_REINSTALL_FAILED");
+  assert.match(state.events[0].message, /旧发布权限已撤销/);
 });
 
 test("failed local validation is auditable but cannot advance the candidate gate", () => {

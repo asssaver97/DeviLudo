@@ -321,6 +321,34 @@ try {
     || approvalPayload.data.authority.revision !== 2 || approvalPayload.data.run?.state !== "QUEUED") {
     throw new Error("local specification approval contract failed");
   }
+  const failureActions = [
+    "advance", "advance", "advance", "advance", "advance", "advance", "accept", "advance", "main-gate-fail",
+  ];
+  let postMergeFailure;
+  for (const [index, action] of failureActions.entries()) {
+    postMergeFailure = await request(baseUrl, "/api/projects/smoke-spec/delivery", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-post-merge-${index + 1}` },
+      body: JSON.stringify({ action }),
+    });
+    if (!postMergeFailure.response.ok) {
+      throw new Error(`local post-merge failure action ${action} was rejected`);
+    }
+  }
+  const postMergeFailurePayload = await postMergeFailure.response.json();
+  if (postMergeFailurePayload.data?.stage !== "AWAITING_SPEC_APPROVAL"
+    || postMergeFailurePayload.data?.repairHandoff?.reason !== "MAIN_GATE_FAILURE"
+    || postMergeFailurePayload.data?.repairHandoff?.baselineMainSha !== "f21c0de"
+    || postMergeFailurePayload.data?.mainSha !== null
+    || postMergeFailurePayload.data?.steamBranch !== null
+    || postMergeFailurePayload.data?.mfaApprovalId !== null
+    || postMergeFailurePayload.data?.steamBuildId !== null
+    || postMergeFailurePayload.data?.steamReleaseId !== null
+    || !Array.isArray(postMergeFailurePayload.data?.externalApprovals)
+    || postMergeFailurePayload.data.externalApprovals.length !== 0
+    || postMergeFailurePayload.data?.evidenceValid !== false) {
+    throw new Error("local post-merge failure did not revoke release authority");
+  }
   const preflightPayload = await agentPreflight.response.json();
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
     throw new Error("local Agent preflight contract failed");
@@ -367,6 +395,7 @@ try {
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
+  console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);

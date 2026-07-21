@@ -44,7 +44,12 @@ const productionStageLabels: Record<DeliveryState, string> = {
 };
 
 export type DeliveryPanelStatus =
-  | { readonly mode: "LOCAL_D1"; readonly stage: LocalDeliveryStage; readonly specRevisionId: string }
+  | {
+      readonly mode: "LOCAL_D1";
+      readonly stage: LocalDeliveryStage;
+      readonly specRevisionId: string;
+      readonly humanRepairTakeover: boolean;
+    }
   | {
       readonly mode: "PRODUCTION";
       readonly stage: DeliveryState;
@@ -88,7 +93,12 @@ export function LocalDeliveryPanel({
     setSnapshot(value);
     setProduction(null);
     setAgentPreflight((current) => current?.runId === value.runId ? current : null);
-    onStatus?.({ mode: "LOCAL_D1", stage: value.stage, specRevisionId: value.specRevisionId });
+    onStatus?.({
+      mode: "LOCAL_D1",
+      stage: value.stage,
+      specRevisionId: value.specRevisionId,
+      humanRepairTakeover: value.stage === "AWAITING_SPEC_APPROVAL" && value.repairHandoff !== null,
+    });
   }, [onStatus]);
 
   useEffect(() => {
@@ -255,6 +265,30 @@ export function LocalDeliveryPanel({
             ))}
           </div>
 
+          {snapshot.repairHandoff ? (
+            <section
+              className="delivery-repair-notice"
+              data-repair-attempt={snapshot.repairHandoff.attempt}
+              data-repair-reason={snapshot.repairHandoff.reason}
+            >
+              <div className="delivery-repair-heading">
+                <div>
+                  <span className="eyebrow">Localhost · 发布后失败演练</span>
+                  <h3>{snapshot.repairHandoff.reason === "MAIN_GATE_FAILURE" ? "main SHA 发布门禁失败" : "Steam 回装 E2E 失败"}</h3>
+                </div>
+                <span className="repair-state waiting">等待人工修订</span>
+              </div>
+              <p>失败证据已冻结，旧发布授权已全部撤销。提交修改说明并批准新的不可变规格后，才能从当前 main 基线恢复开发。</p>
+              <dl className="delivery-repair-bindings">
+                <div><dt>失败证据</dt><dd><code>{snapshot.repairHandoff.evidenceId}</code></dd></div>
+                <div><dt>原运行</dt><dd><code>{snapshot.repairHandoff.previousRunId}</code></dd></div>
+                <div><dt>main 基线</dt><dd><code>{snapshot.repairHandoff.baselineMainSha}</code></dd></div>
+                <div><dt>已撤销</dt><dd><span>{snapshot.repairHandoff.revokedAuthorities.join(" · ")}</span></dd></div>
+              </dl>
+              <footer><span>冻结修复指令</span><code>{snapshot.repairHandoff.repairPromptId}</code></footer>
+            </section>
+          ) : null}
+
           <div className={`local-real-validation ${agentPreflight?.status === "READY" ? "ready" : "pending"}`}>
             <div className="local-real-validation-copy">
               <span className="eyebrow">真实 Agent 启动预检</span>
@@ -321,6 +355,12 @@ export function LocalDeliveryPanel({
               {action ? <button className="button button-acid" disabled={busy} onClick={() => runAction(action.action)} type="button">{action.label}</button> : null}
               {snapshot.stage === "AGENT_QUEUED" || snapshot.stage === "AGENT_RUNNING" ? (
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("provider-fail")} type="button">模拟 Provider 故障</button>
+              ) : null}
+              {snapshot.stage === "MAIN_GATE_RUNNING" ? (
+                <button className="button button-secondary" disabled={busy} onClick={() => runAction("main-gate-fail")} type="button">模拟 main 门禁失败</button>
+              ) : null}
+              {snapshot.stage === "STEAM_REINSTALL_E2E" ? (
+                <button className="button button-secondary" disabled={busy} onClick={() => runAction("steam-reinstall-fail")} type="button">模拟 Steam 回装失败</button>
               ) : null}
             </div>
             <button className="local-reset" disabled={busy} onClick={() => runAction("reset")} type="button">重置本地流程</button>

@@ -43,6 +43,8 @@ Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工
 
 如果本机未安装对应 Godot export templates，测试会如实记录为 `TESTS_PASSED + WAITING_EXPORT_TEMPLATES`，不能授权生产发布。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 
+Fixture 成功链走到 `main SHA 发布门禁` 或 `Steam 回装测试` 时，可以分别点击“模拟 main 门禁失败”或“模拟 Steam 回装失败”。本地 D1 会持久化失败 evidence、冻结修复指令和失败 main 基线，同时清空旧 main、MFA、Steam Build/Release 与外部批准授权。项目页随后只显示人工修改入口；创建不同的新规格草稿并再次批准后才会签发新运行。该演练完全在 loopback Fixture 内完成，不会请求 GitHub、Steam 或开发模型。
+
 ## Smoke check
 
 保持测试站运行，在第二个终端执行：

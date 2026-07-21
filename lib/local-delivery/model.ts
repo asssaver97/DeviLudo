@@ -40,6 +40,22 @@ export type LocalValidationSnapshot = {
 
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
+export type LocalPostMergeFailure = {
+  readonly reason: "MAIN_GATE_FAILURE" | "STEAM_INSTALL_FAILURE";
+  readonly attempt: 1;
+  readonly evidenceId: string;
+  readonly repairPromptId: string;
+  readonly baselineMainSha: string;
+  readonly previousRunId: string;
+  readonly revokedAuthorities: readonly (
+    | "MAIN_SHA"
+    | "MFA"
+    | "STEAM_BUILD"
+    | "STEAM_RELEASE"
+    | "EXTERNAL_APPROVALS"
+  )[];
+};
+
 export type LocalDeliverySnapshot = {
   projectId: string;
   revision: number;
@@ -73,6 +89,11 @@ export type LocalDeliverySnapshot = {
   evidenceValid: boolean;
   targetResults: Record<"linux" | "windows" | "macos", LocalPlatformStatus>;
   steamBranch: "local-password-beta" | null;
+  mfaApprovalId: string | null;
+  steamBuildId: string | null;
+  steamReleaseId: string | null;
+  externalApprovals: readonly string[];
+  repairHandoff: LocalPostMergeFailure | null;
   agentExecution: LocalAgentExecutionSnapshot | null;
   localValidation: LocalValidationSnapshot | null;
   events: LocalDeliveryEvent[];
@@ -85,6 +106,8 @@ export type LocalDeliveryAction =
   | "provider-resume"
   | "accept"
   | "confirm-mfa"
+  | "main-gate-fail"
+  | "steam-reinstall-fail"
   | "external-approve"
   | "reset";
 
@@ -114,6 +137,11 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   return {
     ...snapshot,
     agentExecution: snapshot.agentExecution ?? null,
+    repairHandoff: snapshot.repairHandoff ?? null,
+    mfaApprovalId: snapshot.mfaApprovalId ?? null,
+    steamBuildId: snapshot.steamBuildId ?? null,
+    steamReleaseId: snapshot.steamReleaseId ?? null,
+    externalApprovals: snapshot.externalApprovals ?? [],
     lockedProfile: {
       ...profile,
       ...snapshot.lockedProfile,
@@ -155,6 +183,11 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     evidenceValid: false,
     targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
     steamBranch: null,
+    mfaApprovalId: null,
+    steamBuildId: null,
+    steamReleaseId: null,
+    externalApprovals: [],
+    repairHandoff: null,
     agentExecution: null,
     localValidation: null,
     events: [{ id: "LOCAL-EVT-0001", type: "PROJECT_CREATED", message: "本地项目已创建，等待批准规格。", at }],
@@ -180,6 +213,11 @@ export function approveLocalSpec(
       evidenceValid: false,
       targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
       steamBranch: null,
+      mfaApprovalId: null,
+      steamBuildId: null,
+      steamReleaseId: null,
+      externalApprovals: [],
+      repairHandoff: null,
       agentExecution: null,
       localValidation: null,
     },
@@ -199,10 +237,20 @@ export function invalidateLocalDelivery(
       specRevisionId: nextSpecRevisionId,
       stage: "AWAITING_SPEC_APPROVAL",
       resumeStage: null,
+      runId: null,
+      candidatePr: null,
+      candidateSha: null,
+      mainSha: null,
       evidenceValid: false,
       targetResults: Object.fromEntries(
         Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
       ) as LocalDeliverySnapshot["targetResults"],
+      steamBranch: null,
+      mfaApprovalId: null,
+      steamBuildId: null,
+      steamReleaseId: null,
+      externalApprovals: [],
+      repairHandoff: null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
     },
@@ -327,16 +375,29 @@ export function applyLocalDeliveryAction(
   if (action === "confirm-mfa") {
     if (current.stage !== "MFA_REQUIRED") throw new Error("当前不需要 MFA 确认");
     return event(
-      { ...current, stage: "STEAM_BETA_UPLOADING", steamBranch: "local-password-beta" },
+      {
+        ...current,
+        stage: "STEAM_BETA_UPLOADING",
+        steamBranch: "local-password-beta",
+        mfaApprovalId: `MFA-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
+      },
       "MFA_CONFIRMED",
       "本地测试 MFA 已确认；开始模拟上传密码保护 Beta。",
     );
   }
 
+  if (action === "main-gate-fail") {
+    return handoffLocalPostMergeFailure(current, "MAIN_GATE_FAILURE");
+  }
+
+  if (action === "steam-reinstall-fail") {
+    return handoffLocalPostMergeFailure(current, "STEAM_INSTALL_FAILURE");
+  }
+
   if (action === "external-approve") {
     if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED") throw new Error("当前没有外部发布批准待处理");
     return event(
-      { ...current, stage: "RELEASED" },
+      { ...current, stage: "RELEASED", externalApprovals: ["LOCAL_EXTERNAL_APPROVAL"] },
       "EXTERNAL_APPROVAL_CONFIRMED",
       "本地模拟外部批准完成；未调用真实 Steam 发布接口。",
     );
@@ -391,10 +452,18 @@ export function applyLocalDeliveryAction(
         "Draft PR 已在本地 SCM 合并；发布门禁锁定实际 main SHA。",
       );
     case "MAIN_GATE_RUNNING":
-      return event({ ...current, stage: "MFA_REQUIRED" }, "MAIN_GATE_PASSED", "main SHA 完整门禁通过，等待 MFA。 ");
+      return event({
+        ...current,
+        stage: "MFA_REQUIRED",
+        steamReleaseId: `RELEASE-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
+      }, "MAIN_GATE_PASSED", "main SHA 完整门禁通过，等待 MFA。 ");
     case "STEAM_BETA_UPLOADING":
       return event(
-        { ...current, stage: "STEAM_REINSTALL_E2E" },
+        {
+          ...current,
+          stage: "STEAM_REINSTALL_E2E",
+          steamBuildId: `BUILD-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
+        },
         "STEAM_BETA_READY",
         "本地模拟 Beta 已激活；开始干净客户端回装测试。",
       );
@@ -419,4 +488,52 @@ export function applyLocalDeliveryAction(
     default:
       throw new Error(`没有可用的下一步：${current.stage satisfies never}`);
   }
+}
+
+function handoffLocalPostMergeFailure(
+  current: LocalDeliverySnapshot,
+  reason: LocalPostMergeFailure["reason"],
+): LocalDeliverySnapshot {
+  const expectedStage = reason === "MAIN_GATE_FAILURE" ? "MAIN_GATE_RUNNING" : "STEAM_REINSTALL_E2E";
+  if (current.stage !== expectedStage || !current.mainSha || !current.runId) {
+    throw new Error(reason === "MAIN_GATE_FAILURE"
+      ? "只能在 main SHA 发布门禁运行时模拟失败"
+      : "只能在 Steam 回装 E2E 运行时模拟失败");
+  }
+  const sequence = String(current.revision + 1).padStart(4, "0");
+  const label = reason === "MAIN_GATE_FAILURE" ? "main SHA 发布门禁" : "Steam 干净回装 E2E";
+  const repairHandoff: LocalPostMergeFailure = Object.freeze({
+    reason,
+    attempt: 1,
+    evidenceId: `EV-LOCAL-FAILED-${sequence}`,
+    repairPromptId: `repair:local-post-merge-${sequence}`,
+    baselineMainSha: current.mainSha,
+    previousRunId: current.runId,
+    revokedAuthorities: Object.freeze([
+      "MAIN_SHA", "MFA", "STEAM_BUILD", "STEAM_RELEASE", "EXTERNAL_APPROVALS",
+    ] as const),
+  });
+  return event(
+    {
+      ...current,
+      stage: "AWAITING_SPEC_APPROVAL",
+      resumeStage: null,
+      runId: null,
+      candidatePr: null,
+      candidateSha: null,
+      mainSha: null,
+      evidenceValid: false,
+      targetResults: { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" },
+      steamBranch: null,
+      mfaApprovalId: null,
+      steamBuildId: null,
+      steamReleaseId: null,
+      externalApprovals: [],
+      repairHandoff,
+      agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
+      localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+    },
+    reason === "MAIN_GATE_FAILURE" ? "MAIN_GATE_FAILED" : "STEAM_REINSTALL_FAILED",
+    `${label} 的失败证据已冻结；旧发布权限已撤销，等待用户创建并批准新规格。`,
+  );
 }

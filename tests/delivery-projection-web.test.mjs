@@ -68,9 +68,14 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   const source = readFileSync(new URL("../components/console/LocalDeliveryPanel.tsx", import.meta.url), "utf8");
   assert.match(source, /Production · Temporal 权威投影/);
   assert.match(source, /if \(production\) return <ProductionDeliveryProjection/);
+  assert.match(source, /模拟 main 门禁失败/);
+  assert.match(source, /模拟 Steam 回装失败/);
+  assert.match(source, /snapshot\.repairHandoff/);
   assert.doesNotMatch(source.slice(source.indexOf("function ProductionDeliveryProjection")), /runAction\(/);
   const routeSource = readFileSync(new URL("../app/api/projects/[projectId]/delivery/route.ts", import.meta.url), "utf8");
   assert.match(routeSource, /isLoopbackTestRequest\(request\)/);
+  assert.match(routeSource, /"main-gate-fail"/);
+  assert.match(routeSource, /"steam-reinstall-fail"/);
 });
 
 test("production delivery GET requires a signed tenant session and returns only its projection", async () => {
