@@ -53,7 +53,12 @@ export type DeliverySignal = Readonly<{ signalId: string }> & (
   | { type: "STEAM_INSTALL_PASSED"; evidenceBundleId: string }
   | { type: "EXTERNAL_APPROVED"; gate: ExternalApprovalGate; approvalId: string }
   | { type: "STEAM_RELEASED"; releaseId: string; defaultBranchBuildId: string }
-  | { type: "CANCEL"; reason: string }
+  | {
+      type: "CANCEL";
+      reason: string;
+      expectedState: DeliveryState;
+      expectedHistoryLength: number;
+    }
 );
 
 export type DeliveryCommand =
@@ -220,6 +225,14 @@ export class GameDeliveryWorkflow {
     }
     if (this.snapshot.state === "CANCELLED") throw new Error("Cancelled workflows are terminal");
     if (signal.type === "CANCEL") {
+      // A cancellation is authorized against the last replay-validated
+      // projection observed by the server-side command broker. If another
+      // transition wins the race, ignore this stale signal instead of
+      // poisoning a Temporal workflow task or cancelling a newer authority.
+      if (signal.expectedState !== this.snapshot.state
+        || signal.expectedHistoryLength !== this.snapshot.history.length) {
+        return this.current();
+      }
       // The default-branch publish dispatch is intentionally treated as an
       // irreversible boundary. Cancellation after that point could make the
       // workflow projection claim success was revoked after Steam already
@@ -612,11 +625,25 @@ export function assertDeliverySignal(signal: DeliverySignal): void {
       if (typeof signal.reason !== "string" || !signal.reason.trim() || signal.reason.length > 2_000) {
         throw new Error("Cancellation reason is invalid");
       }
+      if (!DELIVERY_STATES.has(signal.expectedState)
+        || !Number.isSafeInteger(signal.expectedHistoryLength)
+        || signal.expectedHistoryLength < 0 || signal.expectedHistoryLength > 100_000) {
+        throw new Error("Cancellation projection binding is invalid");
+      }
       return;
     default:
       throw new Error("Delivery signal type is invalid");
   }
 }
+
+const DELIVERY_STATES = new Set<DeliveryState>([
+  "IDEATION", "WAITING_SPEC_APPROVAL", "RESOLVING_AGENT_CONFIGURATION",
+  "DEVELOPMENT_QUEUED", "DEVELOPING", "WAITING_PROVIDER",
+  "CROSS_PLATFORM_E2E", "WAITING_USER_ACCEPTANCE", "MERGING",
+  "MAIN_SHA_E2E", "WAITING_MFA", "STEAM_PRIVATE_BETA",
+  "STEAM_INSTALL_E2E", "EXTERNAL_APPROVAL_REQUIRED", "READY_TO_PUBLISH",
+  "RELEASED", "CANCELLED",
+]);
 
 function assertOpaqueId(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || !value.trim() || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {

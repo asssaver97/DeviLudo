@@ -349,6 +349,18 @@ try {
     || postMergeFailurePayload.data?.evidenceValid !== false) {
     throw new Error("local post-merge failure did not revoke release authority");
   }
+  const cancellation = await request(baseUrl, "/api/projects/smoke-spec/delivery", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-delivery-cancel-1" },
+    body: JSON.stringify({ action: "cancel", reason: "local smoke cancellation" }),
+  });
+  const cancellationPayload = await cancellation.response.json();
+  if (!cancellation.response.ok || cancellationPayload.data?.stage !== "CANCELLED"
+    || cancellationPayload.data?.evidenceValid !== false
+    || cancellationPayload.data?.steamBranch !== null
+    || cancellationPayload.data?.events?.[0]?.type !== "DELIVERY_CANCELLED") {
+    throw new Error("local cancellation did not revoke delivery authority");
+  }
   const preflightPayload = await agentPreflight.response.json();
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
     throw new Error("local Agent preflight contract failed");
@@ -396,6 +408,7 @@ try {
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
   console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
+  console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);

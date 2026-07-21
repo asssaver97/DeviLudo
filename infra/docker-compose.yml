@@ -60,6 +60,7 @@ services:
       - ./postgres/047_agent_run_provider_failover_audit.sql:/docker-entrypoint-initdb.d/047_agent_run_provider_failover_audit.sql:ro
       - ./postgres/048_steam_install_failure_revocations.sql:/docker-entrypoint-initdb.d/048_steam_install_failure_revocations.sql:ro
       - ./postgres/049_delivery_cancellation_revocations.sql:/docker-entrypoint-initdb.d/049_delivery_cancellation_revocations.sql:ro
+      - ./postgres/050_delivery_cancellation_requests.sql:/docker-entrypoint-initdb.d/050_delivery_cancellation_requests.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
       interval: 5s

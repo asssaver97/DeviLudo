@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   candidateAcceptanceOperationKey,
+  deliveryCancellationOperationKey,
   UserAcceptanceBrokerClient,
   userFeedbackOperationKey,
 } from "../lib/user-acceptance/broker.ts";
@@ -53,6 +54,34 @@ test("candidate acceptance operation identity is user and idempotency bound", as
   });
   assert.match(first, /^[a-f0-9]{64}$/);
   assert.notEqual(first, changed);
+});
+
+test("delivery cancellation operation identity is tenant, project, user and idempotency bound", async () => {
+  const first = await deliveryCancellationOperationKey({
+    tenantId: command.tenantId, projectId: command.projectId,
+    userId: command.actorId, idempotencyKey: "cancel-1",
+  });
+  const changed = await deliveryCancellationOperationKey({
+    tenantId: command.tenantId, projectId: command.projectId,
+    userId: command.actorId, idempotencyKey: "cancel-2",
+  });
+  assert.match(first, /^[a-f0-9]{64}$/);
+  assert.notEqual(first, changed);
+});
+
+test("Web cancellation Broker rejects a drifted projection or actor binding", async () => {
+  const cancellationCommand = {
+    operationKey: "f".repeat(64), tenantId: command.tenantId,
+    projectId: command.projectId, actorId: "55555555-5555-4555-8555-555555555555",
+    reason: "停止当前交付。",
+  };
+  const payload = cancellationReceipt(cancellationCommand);
+  payload.data.projectionState = "READY_TO_PUBLISH";
+  const client = new UserAcceptanceBrokerClient(
+    "https://user-acceptance.internal/",
+    async () => new Response(JSON.stringify(payload), { status: 201 }),
+  );
+  await assert.rejects(client.cancel(cancellationCommand), /response binding/);
 });
 
 test("Web acceptance Broker rejects an actor or delivery binding drift", async () => {
@@ -175,6 +204,23 @@ function acceptanceReceipt(acceptanceCommand) {
         state: "PENDING_DELIVERY",
         replayed: false,
       },
+    },
+  };
+}
+
+function cancellationReceipt(cancellationCommand) {
+  return {
+    data: {
+      ...cancellationCommand,
+      workflowId: "delivery-33333333-3333-4333-8333-333333333333",
+      projectionSequence: 7,
+      projectionKey: `projection:${"a".repeat(64)}`,
+      projectionState: "DEVELOPING",
+      projectionDigest: "b".repeat(64),
+      signalId: "cancel-44444444-4444-4444-8444-444444444444",
+      requestedAt: "2026-07-21T06:00:00.000Z",
+      state: "CANCEL_REQUESTED",
+      deliveredAt: "2026-07-21T06:00:01.000Z",
     },
   };
 }

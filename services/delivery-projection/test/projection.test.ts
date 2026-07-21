@@ -111,6 +111,7 @@ test("projection replay preserves a terminal cancellation history", () => {
   machine.signal({ signalId: "cancel-ready-001", type: "SPEC_READY", specRevisionId: "spec-r1" });
   const cancelled = machine.signal({
     signalId: "cancel-terminal-001", type: "CANCEL", reason: "project owner withdrew delivery",
+    expectedState: "WAITING_SPEC_APPROVAL", expectedHistoryLength: 1,
   }) as DeliverySnapshot;
   assert.equal(cancelled.state, "CANCELLED");
   assert.deepEqual(parseDeliverySnapshot(cancelled), cancelled);

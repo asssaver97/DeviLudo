@@ -14,6 +14,7 @@ export type LocalDeliveryStage =
   | "STEAM_BETA_UPLOADING"
   | "STEAM_REINSTALL_E2E"
   | "EXTERNAL_APPROVAL_REQUIRED"
+  | "CANCELLED"
   | "RELEASED";
 
 export type LocalPlatformStatus = "QUEUED" | "RUNNING" | "PASSED" | "INVALIDATED";
@@ -109,6 +110,7 @@ export type LocalDeliveryAction =
   | "main-gate-fail"
   | "steam-reinstall-fail"
   | "external-approve"
+  | "cancel"
   | "reset";
 
 const profile = {
@@ -345,6 +347,32 @@ export function applyLocalDeliveryAction(
     );
   }
 
+  if (action === "cancel") {
+    if (current.stage === "RELEASED" || current.stage === "CANCELLED") {
+      throw new Error("当前交付已越过可取消边界");
+    }
+    return event(
+      {
+        ...current,
+        stage: "CANCELLED",
+        resumeStage: null,
+        evidenceValid: false,
+        targetResults: Object.fromEntries(
+          Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
+        ) as LocalDeliverySnapshot["targetResults"],
+        steamBranch: null,
+        mfaApprovalId: null,
+        steamBuildId: null,
+        steamReleaseId: null,
+        externalApprovals: [],
+        localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+        agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
+      },
+      "DELIVERY_CANCELLED",
+      "项目所有者已取消交付；本地 Agent、Runner、证据与 Steam 权限均视为撤销。",
+    );
+  }
+
   if (action === "provider-fail") {
     if (!['AGENT_QUEUED', 'AGENT_RUNNING'].includes(current.stage)) {
       throw new Error("Provider 只能在 Agent 排队或运行期间进入等待状态");
@@ -485,6 +513,8 @@ export function applyLocalDeliveryAction(
       throw new Error("Provider 未恢复，任务不会静默切换 Agent");
     case "RELEASED":
       throw new Error("本地交付链路已经完成");
+    case "CANCELLED":
+      throw new Error("本地交付链路已取消");
     default:
       throw new Error(`没有可用的下一步：${current.stage satisfies never}`);
   }

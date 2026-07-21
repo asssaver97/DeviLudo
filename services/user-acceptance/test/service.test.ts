@@ -114,6 +114,7 @@ test("production feedback ingress requires an allow-listed mTLS workload", async
   const allowed = createUserAcceptanceHandler({
     service: fixture.service,
     acceptance: unusedAcceptance(),
+    cancellation: unusedCancellation(),
     allowedSpiffeIds: new Set([identity.spiffeId]),
     extractIdentity: () => identity,
   });
@@ -136,6 +137,7 @@ test("production feedback ingress requires an allow-listed mTLS workload", async
   const missing = createUserAcceptanceHandler({
     service: fixture.service,
     acceptance: unusedAcceptance(),
+    cancellation: unusedCancellation(),
     allowedSpiffeIds: new Set([identity.spiffeId]),
     extractIdentity: () => { throw new Error("missing"); },
   });
@@ -143,6 +145,7 @@ test("production feedback ingress requires an allow-listed mTLS workload", async
   const forbidden = createUserAcceptanceHandler({
     service: fixture.service,
     acceptance: unusedAcceptance(),
+    cancellation: unusedCancellation(),
     allowedSpiffeIds: new Set(["spiffe://deviludo.internal/other"]),
     extractIdentity: () => identity,
   });
@@ -461,6 +464,13 @@ function result<Row extends Record<string, unknown>>(rowCount: number) {
 function unusedAcceptance() {
   return {
     async accept() { throw new Error("unused"); },
+    async probe() {},
+  };
+}
+
+function unusedCancellation() {
+  return {
+    async cancel() { throw new Error("unused"); },
     async probe() {},
   };
 }

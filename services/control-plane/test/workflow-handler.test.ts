@@ -63,7 +63,10 @@ function snapshotFor(operation: ControlPlaneWorkflowAction): DeliverySnapshot {
     ...base, state: "EXTERNAL_APPROVAL_REQUIRED", steamBuildId: "91234567", evidenceBundleId: "steam-evidence-1",
     steamInstallEvidenceBundleId: "steam-evidence-1", externalGate: "VALVE_REVIEW",
   });
-  const cancelSignal: DeliverySignal = Object.freeze({ signalId: "cancel-signal-0001", type: "CANCEL", reason: "user cancelled" });
+  const cancelSignal: DeliverySignal = Object.freeze({
+    signalId: "cancel-signal-0001", type: "CANCEL", reason: "user cancelled",
+    expectedState: "IDEATION", expectedHistoryLength: 0,
+  });
   return Object.freeze({
     ...base, state: "CANCELLED", lockedRunConfigurationId: runId, runId,
     steamReleaseId: releaseId, steamBuildId: "91234567",

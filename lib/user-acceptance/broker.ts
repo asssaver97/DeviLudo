@@ -1,5 +1,6 @@
 import type { UserFeedbackReceipt } from "@/services/user-acceptance/src/contracts";
 import type { CandidateAcceptanceReceipt } from "@/services/user-acceptance/src/candidate-acceptance";
+import type { DeliveryCancellationReceipt } from "@/services/user-acceptance/src/delivery-cancellation";
 import { parseSpecModelResult, type SpecDialogueMessage } from "@/services/spec-dialogue/src/contracts";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -23,6 +24,10 @@ export class UserAcceptanceBrokerClient {
 
   async accept(command: Readonly<Record<string, unknown>>): Promise<CandidateAcceptanceReceipt> {
     return parseAcceptanceReceipt(await this.#call("/v1/candidate-acceptance", command), command);
+  }
+
+  async cancel(command: Readonly<Record<string, unknown>>): Promise<DeliveryCancellationReceipt> {
+    return parseCancellationReceipt(await this.#call("/v1/delivery-cancellations", command), command);
   }
 
   async #call(path: string, command: Readonly<Record<string, unknown>>): Promise<unknown> {
@@ -73,6 +78,19 @@ export async function candidateAcceptanceOperationKey(input: {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(["deviludo-candidate-acceptance-v1", ...Object.values(input)].join("\0")),
+  );
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+export async function deliveryCancellationOperationKey(input: {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly userId: string;
+  readonly idempotencyKey: string;
+}): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(["deviludo-delivery-cancellation-v1", ...Object.values(input)].join("\0")),
   );
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -203,6 +221,46 @@ function parseAcceptanceReceipt(value: unknown, command: Readonly<Record<string,
     }),
   });
 }
+
+function parseCancellationReceipt(value: unknown, command: Readonly<Record<string, unknown>>): DeliveryCancellationReceipt {
+  const body = object(value);
+  if (body.operationKey !== command.operationKey || body.tenantId !== command.tenantId
+    || body.projectId !== command.projectId || body.actorId !== command.actorId
+    || body.reason !== command.reason || body.state !== "CANCEL_REQUESTED"
+    || typeof body.workflowId !== "string" || !/^delivery-[a-f0-9-]{36}$/.test(body.workflowId)
+    || !Number.isSafeInteger(body.projectionSequence) || (body.projectionSequence as number) < 0
+    || (body.projectionSequence as number) > 100_000
+    || typeof body.projectionKey !== "string" || body.projectionKey.length < 32 || body.projectionKey.length > 512
+    || typeof body.projectionState !== "string" || !CANCELLABLE_STATES.has(body.projectionState)
+    || typeof body.projectionDigest !== "string" || !SHA256.test(body.projectionDigest)
+    || typeof body.signalId !== "string" || !/^cancel-[a-f0-9-]{36}$/.test(body.signalId)
+    || typeof body.requestedAt !== "string" || !Number.isFinite(Date.parse(body.requestedAt))
+    || typeof body.deliveredAt !== "string" || !Number.isFinite(Date.parse(body.deliveredAt))) invalid();
+  return Object.freeze({
+    operationKey: body.operationKey as string,
+    tenantId: body.tenantId as string,
+    projectId: body.projectId as string,
+    actorId: body.actorId as string,
+    reason: body.reason as string,
+    workflowId: body.workflowId,
+    projectionSequence: body.projectionSequence as number,
+    projectionKey: body.projectionKey,
+    projectionState: body.projectionState,
+    projectionDigest: body.projectionDigest,
+    signalId: body.signalId,
+    requestedAt: new Date(body.requestedAt).toISOString(),
+    state: "CANCEL_REQUESTED",
+    deliveredAt: new Date(body.deliveredAt).toISOString(),
+  } as DeliveryCancellationReceipt);
+}
+
+const CANCELLABLE_STATES = new Set([
+  "IDEATION", "WAITING_SPEC_APPROVAL", "RESOLVING_AGENT_CONFIGURATION",
+  "DEVELOPMENT_QUEUED", "DEVELOPING", "WAITING_PROVIDER",
+  "CROSS_PLATFORM_E2E", "WAITING_USER_ACCEPTANCE", "MERGING",
+  "MAIN_SHA_E2E", "WAITING_MFA", "STEAM_PRIVATE_BETA",
+  "STEAM_INSTALL_E2E", "EXTERNAL_APPROVAL_REQUIRED",
+]);
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalid();

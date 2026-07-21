@@ -20,3 +20,12 @@ signature. The browser can submit only an idempotency-bound empty decision.
 `GENERATING`, `DRAFT_READY` and `COMPLETED` are durable recovery points. Model
 failure only expires the generation claim. Completion failure preserves the
 new draft and retries delivery without regenerating it.
+
+Project-owner cancellation uses the same authenticated ingress but accepts
+only a free-form reason. The service resolves the active workflow plus the
+current replay-validated projection under tenant RLS, records an immutable
+request, and sends a state/history-bound `CANCEL` directly to Temporal. A
+concurrent transition makes that signal a safe no-op; a retry uses the same
+signal ID. Once Temporal commits cancellation, the control-plane revocation
+transaction fences Agent, inference, Runner and Steam authority before the
+workflow becomes terminal.

@@ -172,6 +172,20 @@ test("reset keeps event revisions monotonic for the persistent D1 audit log", ()
   assert.equal(state.events[1].type, "SPEC_APPROVED");
 });
 
+test("local cancellation invalidates evidence and revokes unreleased authority", () => {
+  let state = approveLocalSpec(createLocalDelivery("project-cancel"), "SPEC-CANCEL-001", "RUN-CANCEL-001");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = { ...state, evidenceValid: true, mainSha: "f21c0de", steamBranch: "local-password-beta" };
+  state = applyLocalDeliveryAction(state, "cancel");
+  assert.equal(state.stage, "CANCELLED");
+  assert.equal(state.evidenceValid, false);
+  assert.equal(state.steamBranch, null);
+  assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
+  assert.equal(state.events[0].type, "DELIVERY_CANCELLED");
+  assert.throws(() => applyLocalDeliveryAction(state, "advance"), /已取消/);
+  assert.throws(() => applyLocalDeliveryAction(state, "cancel"), /越过可取消边界/);
+});
+
 test("a completed Agent receipt must match every immutable lock before becoming a candidate", () => {
   let state = approveLocalSpec(createLocalDelivery("project-agent"), "SPEC-012", "RUN-AGENT-001");
   const receipt = {

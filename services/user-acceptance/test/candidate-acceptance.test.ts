@@ -41,6 +41,7 @@ test("candidate acceptance mTLS ingress dispatches the empty authority-free comm
   const handler = createUserAcceptanceHandler({
     service: { async submit() { throw new Error("unused"); }, async probe() {} },
     acceptance: service,
+    cancellation: { async cancel() { throw new Error("unused"); }, async probe() {} },
     allowedSpiffeIds: new Set([identity.spiffeId]),
     extractIdentity: () => identity,
   });

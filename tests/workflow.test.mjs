@@ -62,7 +62,10 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.nextCommand(), "PUBLISH_STEAM_DEFAULT_BRANCH");
   assert.equal(workflow.current().externalApprovals.length, 3);
   assert.throws(
-    () => workflow.signal({ signalId: "signal-too-late-cancel", type: "CANCEL", reason: "publish already authorized" }),
+    () => workflow.signal({
+      signalId: "signal-too-late-cancel", type: "CANCEL", reason: "publish already authorized",
+      expectedState: workflow.current().state, expectedHistoryLength: workflow.current().history.length,
+    }),
     /invalid while delivery is READY_TO_PUBLISH/,
   );
   assert.throws(
@@ -75,7 +78,10 @@ test("delivery workflow requires every Steam external gate and release receipt",
   assert.equal(workflow.current().steamReleaseId, "release-1");
   assert.equal(workflow.current().history.length, 17);
   assert.throws(
-    () => workflow.signal({ signalId: "signal-post-release-cancel", type: "CANCEL", reason: "release already public" }),
+    () => workflow.signal({
+      signalId: "signal-post-release-cancel", type: "CANCEL", reason: "release already public",
+      expectedState: workflow.current().state, expectedHistoryLength: workflow.current().history.length,
+    }),
     /invalid while delivery is RELEASED/,
   );
 });
@@ -85,13 +91,34 @@ test("delivery cancellation is terminal before the irreversible publish boundary
     workflowId: "delivery-cancel", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
   });
   workflow.signal({ signalId: "cancel-ready", type: "SPEC_READY", specRevisionId: "SPEC-001" });
-  workflow.signal({ signalId: "cancel-signal", type: "CANCEL", reason: "user withdrew the game" });
+  workflow.signal({
+    signalId: "cancel-signal", type: "CANCEL", reason: "user withdrew the game",
+    expectedState: "WAITING_SPEC_APPROVAL", expectedHistoryLength: 1,
+  });
   assert.equal(workflow.current().state, "CANCELLED");
   assert.equal(workflow.nextCommand(), "NONE");
   assert.throws(
     () => workflow.signal({ signalId: "cancel-after-terminal", type: "SPEC_READY", specRevisionId: "SPEC-002" }),
     /Cancelled workflows are terminal/,
   );
+});
+
+test("a stale cancellation is a safe no-op after a concurrent projection transition", () => {
+  const workflow = new GameDeliveryWorkflow({
+    workflowId: "delivery-stale-cancel", tenantId: "tenant-1", projectId: "project-1", targetMatrix: ["linux"],
+  });
+  workflow.signal({ signalId: "stale-ready", type: "SPEC_READY", specRevisionId: "SPEC-001" });
+  workflow.signal({
+    signalId: "stale-approved", type: "SPEC_APPROVED", approvedSpecRevisionId: "SPEC-001",
+    testPlanRevisionId: "PLAN-001", approvalReceiptId: "approval-001",
+  });
+  const historyLength = workflow.current().history.length;
+  const snapshot = workflow.signal({
+    signalId: "stale-cancel-signal", type: "CANCEL", reason: "based on an old projection",
+    expectedState: "WAITING_SPEC_APPROVAL", expectedHistoryLength: 1,
+  });
+  assert.equal(snapshot.state, "RESOLVING_AGENT_CONFIGURATION");
+  assert.equal(snapshot.history.length, historyLength);
 });
 
 test("feedback invalidates evidence and the approved second iteration returns through development and E2E", () => {

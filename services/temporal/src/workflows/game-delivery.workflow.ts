@@ -83,6 +83,12 @@ export async function gameDeliveryWorkflow(
       const signal = queue.shift();
       if (!signal) continue;
       const snapshot = machine.signal(signal) as DeliverySnapshot;
+      if (signal.type === "CANCEL" && snapshot.state !== "CANCELLED") {
+        // The cancellation was bound to an older projection and therefore
+        // lost a concurrent transition. It is a safe no-op; the caller will
+        // observe the authoritative projection and may make a new decision.
+        continue;
+      }
       await persist(snapshot);
       if (signal.type === "CANCEL") {
         await activities.cancelDelivery({

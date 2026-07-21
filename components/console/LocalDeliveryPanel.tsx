@@ -25,6 +25,7 @@ const stageLabels: Record<LocalDeliveryStage, string> = {
   STEAM_BETA_UPLOADING: "Steam 私有 Beta",
   STEAM_REINSTALL_E2E: "Steam 回装测试",
   EXTERNAL_APPROVAL_REQUIRED: "等待外部批准",
+  CANCELLED: "已取消",
   RELEASED: "本地闭环完成",
 };
 
@@ -64,7 +65,7 @@ type ProductionProjection = {
 };
 
 function primaryAction(stage: LocalDeliveryStage): { action: LocalDeliveryAction; label: string } | null {
-  if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED") return null;
+  if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED" || stage === "CANCELLED") return null;
   if (stage === "WAITING_PROVIDER") return { action: "provider-resume", label: "恢复原 Provider" };
   if (stage === "AWAITING_ACCEPTANCE") return { action: "accept", label: "接受候选版本" };
   if (stage === "MFA_REQUIRED") return { action: "confirm-mfa", label: "本地确认 MFA" };
@@ -228,7 +229,7 @@ export function LocalDeliveryPanel({
     }
   }
 
-  if (production) return <ProductionDeliveryProjection projection={production} />;
+  if (production) return <ProductionDeliveryProjection projectId={projectId} projection={production} />;
 
   return (
     <section className="local-delivery" aria-live="polite">
@@ -362,6 +363,9 @@ export function LocalDeliveryPanel({
               {snapshot.stage === "STEAM_REINSTALL_E2E" ? (
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("steam-reinstall-fail")} type="button">模拟 Steam 回装失败</button>
               ) : null}
+              {snapshot.stage !== "RELEASED" && snapshot.stage !== "CANCELLED" ? (
+                <button className="button button-secondary" disabled={busy} onClick={() => runAction("cancel")} type="button">取消本地交付</button>
+              ) : null}
             </div>
             <button className="local-reset" disabled={busy} onClick={() => runAction("reset")} type="button">重置本地流程</button>
           </div>
@@ -380,12 +384,23 @@ export function LocalDeliveryPanel({
   );
 }
 
-function ProductionDeliveryProjection({ projection }: { readonly projection: ProductionProjection }) {
+function ProductionDeliveryProjection({
+  projectId,
+  projection,
+}: {
+  readonly projectId: string;
+  readonly projection: ProductionProjection;
+}) {
   const snapshot = projection.snapshot;
   const targetGatePassed = Boolean(snapshot.candidateEvidenceBundleId);
   const publishCommandRef = useRef<string | null>(null);
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishNotice, setPublishNotice] = useState("");
+  const cancelCommandRef = useRef<string | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelNotice, setCancelNotice] = useState("");
+  const cancellable = !["READY_TO_PUBLISH", "RELEASED", "CANCELLED"].includes(snapshot.state);
 
   async function beginAcceptAndPublish() {
     if (snapshot.state !== "WAITING_MFA" || !snapshot.steamReleaseId || publishBusy) return;
@@ -420,6 +435,39 @@ function ProductionDeliveryProjection({ projection }: { readonly projection: Pro
       setPublishNotice(reason instanceof Error ? reason.message : "Steam 发布授权失败");
     } finally {
       setPublishBusy(false);
+    }
+  }
+
+  async function cancelDelivery() {
+    const reason = cancelReason.trim();
+    if (!cancellable || cancelBusy || !reason) return;
+    if (!window.confirm("确认取消这次交付？运行中的 Agent、E2E 与 Steam Beta 权限将被撤销。")) return;
+    setCancelBusy(true);
+    setCancelNotice("");
+    cancelCommandRef.current ??= `cancel-${crypto.randomUUID()}`;
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/delivery`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": cancelCommandRef.current,
+        },
+        body: JSON.stringify({ action: "cancel", reason }),
+      });
+      const payload = await response.json() as {
+        data?: { state?: "CANCEL_REQUESTED" };
+        error?: { message?: string };
+      };
+      if (!response.ok || payload.data?.state !== "CANCEL_REQUESTED") {
+        throw new Error(payload.error?.message ?? "交付取消请求未被接受");
+      }
+      cancelCommandRef.current = null;
+      setCancelReason("");
+      setCancelNotice("取消请求已送达 Temporal；页面将在原子撤销 Agent、Runner 与 Steam 权限后显示终态。");
+    } catch (reasonValue) {
+      setCancelNotice(reasonValue instanceof Error ? reasonValue.message : "交付取消失败");
+    } finally {
+      setCancelBusy(false);
     }
   }
 
@@ -482,6 +530,31 @@ function ProductionDeliveryProjection({ projection }: { readonly projection: Pro
               {publishBusy ? "正在创建 MFA 授权…" : "确认发布并完成 MFA"}
             </button>
           ) : <span className="local-real-validation-wait">工作流正在绑定 main SHA 与发布证据</span>}
+        </div>
+      ) : null}
+
+      {cancellable ? (
+        <div className="local-real-validation pending delivery-cancel-controls">
+          <div className="local-real-validation-copy">
+            <span className="eyebrow">停止交付</span>
+            <h3>撤销运行权限</h3>
+            <p>取消会终止当前工作流，并原子撤销 Agent、推理、Runner、证据与尚未公开的 Steam 权限；进入默认分支发布边界后不可取消。</p>
+            <label>
+              <span>取消原因</span>
+              <textarea
+                disabled={cancelBusy}
+                maxLength={2_000}
+                onChange={(event) => setCancelReason(event.target.value)}
+                placeholder="说明为什么停止这次交付（必填）"
+                rows={2}
+                value={cancelReason}
+              />
+            </label>
+            {cancelNotice ? <p role="status">{cancelNotice}</p> : null}
+          </div>
+          <button className="button button-secondary" disabled={cancelBusy || !cancelReason.trim()} onClick={cancelDelivery} type="button">
+            {cancelBusy ? "正在安全撤销…" : "取消交付"}
+          </button>
         </div>
       ) : null}
 

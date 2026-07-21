@@ -16,13 +16,13 @@ const stageNames: Record<LocalDeliveryStage, string> = {
   WAITING_PROVIDER: "等待 Provider", CANDIDATE_READY: "候选版本就绪", E2E_RUNNING: "目标矩阵 E2E",
   AWAITING_ACCEPTANCE: "等待用户验收", MERGING: "正在合并", MAIN_GATE_RUNNING: "main SHA 门禁",
   MFA_REQUIRED: "等待 MFA", STEAM_BETA_UPLOADING: "Steam 私有 Beta", STEAM_REINSTALL_E2E: "Steam 回装测试",
-  EXTERNAL_APPROVAL_REQUIRED: "等待外部批准", RELEASED: "本地闭环完成",
+  EXTERNAL_APPROVAL_REQUIRED: "等待外部批准", CANCELLED: "已取消", RELEASED: "本地闭环完成",
 };
 
 const stageOrder: LocalDeliveryStage[] = [
   "AWAITING_SPEC_APPROVAL", "AGENT_QUEUED", "AGENT_RUNNING", "WAITING_PROVIDER", "CANDIDATE_READY",
   "E2E_RUNNING", "AWAITING_ACCEPTANCE", "MERGING", "MAIN_GATE_RUNNING", "MFA_REQUIRED",
-  "STEAM_BETA_UPLOADING", "STEAM_REINSTALL_E2E", "EXTERNAL_APPROVAL_REQUIRED", "RELEASED",
+  "STEAM_BETA_UPLOADING", "STEAM_REINSTALL_E2E", "EXTERNAL_APPROVAL_REQUIRED", "RELEASED", "CANCELLED",
 ];
 
 const productionStageNames: Record<DeliveryState, string> = {
@@ -51,7 +51,7 @@ const pipelineTemplate = [
 ] as const;
 
 function pipelineFor(delivery: LocalDeliverySnapshot) {
-  const rank = stageOrder.indexOf(delivery.stage);
+  const rank = delivery.stage === "CANCELLED" ? -1 : stageOrder.indexOf(delivery.stage);
   const points = [1, 4, 4, 5, 6, 10];
   const meta = [delivery.specRevisionId, delivery.runId ?? "等待", delivery.localValidation ? "本机已验证" : "等待证据", `${Object.values(delivery.targetResults).filter((value) => value === "PASSED").length} / 3`, delivery.stage === "AWAITING_ACCEPTANCE" ? "待确认" : rank > 6 ? "已确认" : "等待", delivery.stage === "RELEASED" ? "完成" : "门禁"];
   return pipelineTemplate.map((stage, index) => ({
@@ -62,7 +62,7 @@ function pipelineFor(delivery: LocalDeliverySnapshot) {
 }
 
 function productionPipelineFor(delivery: DeliverySnapshot) {
-  const rank = productionOrder.indexOf(delivery.state);
+  const rank = delivery.state === "CANCELLED" ? -1 : productionOrder.indexOf(delivery.state);
   const points = [1, 4, 6, 6, 7, 15];
   const meta = [
     delivery.specRevisionId ?? "草稿",

@@ -7,7 +7,7 @@ const observedServiceCommand = (service) =>
 
 test("local integration PostgreSQL applies every migration in order", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  const offsets = Array.from({ length: 49 }, (_, index) => {
+  const offsets = Array.from({ length: 50 }, (_, index) => {
     const prefix = String(index + 1).padStart(3, "0");
     const marker = `./postgres/${prefix}_`;
     const offset = compose.indexOf(marker);
@@ -342,6 +342,25 @@ test("delivery cancellation atomically fences Agent, Runner and Steam authoritie
   assert.match(workflow, /READY_TO_PUBLISH" \|\| this\.snapshot\.state === "RELEASED/);
   assert.match(agentOperations, /AND state = 'RUNNING'[\s\S]+AND claim_token = \$7::uuid/);
   assert.match(runnerIngress, /lease\.state !== "RUNNING"/);
+});
+
+test("project-owner cancellation is projection-bound before Temporal receives authority", () => {
+  const migration = readFileSync(new URL("../infra/postgres/050_delivery_cancellation_requests.sql", import.meta.url), "utf8");
+  const service = readFileSync(new URL("../services/user-acceptance/src/delivery-cancellation.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../services/user-acceptance/src/run-service.ts", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/projects/[projectId]/delivery/route.ts", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.delivery_cancellation_requests/);
+  assert.match(migration, /REFERENCES deviludo\.delivery_state_projection_events/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /delivery_cancellation_request_guard/);
+  assert.match(migration, /mark_cancelled_delivery_workflow_terminal/);
+  assert.match(service, /projection\.state NOT IN \('READY_TO_PUBLISH', 'RELEASED', 'CANCELLED'\)/);
+  assert.match(service, /FOR SHARE OF projection, delivery, membership/);
+  assert.match(service, /expectedHistoryLength: decision\.projectionSequence/);
+  assert.match(runtime, /new TemporalWorkflowSignalPort/);
+  assert.match(route, /deliveryCancellationOperationKey/);
+  assert.match(route, /verifyTrustedSpecSession/);
+  assert.doesNotMatch(route, /workflowId:\s*body\./);
 });
 
 test("Steam install grants are tenant-isolated, expiring and once-per-platform", () => {

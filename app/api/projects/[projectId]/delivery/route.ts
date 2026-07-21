@@ -6,6 +6,10 @@ import {
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
 import { trustedSessionKeyFromEnvironment, verifyTrustedSpecSession } from "@/lib/spec-dialogue/broker";
+import {
+  deliveryCancellationOperationKey,
+  userAcceptanceBrokerFromEnvironment,
+} from "@/lib/user-acceptance/broker";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const actions = new Set<LocalDeliveryAction>([
@@ -17,6 +21,7 @@ const actions = new Set<LocalDeliveryAction>([
   "main-gate-fail",
   "steam-reinstall-fail",
   "external-approve",
+  "cancel",
   "reset",
 ]);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -72,12 +77,43 @@ export async function POST(
   try {
     const { projectId } = await context.params;
     if (!isLoopbackTestRequest(request)) {
-      return json({
-        error: {
-          code: "DELIVERY_PROJECTION_READ_ONLY",
-          message: "生产交付状态由 Temporal 投影；请通过对应的规格、反馈、验收或批准接口推进工作流。",
-        },
-      }, { status: 405, headers: { allow: "GET" } });
+      const body = await bodyObject(request);
+      if (body.action !== "cancel") {
+        return json({
+          error: {
+            code: "DELIVERY_PROJECTION_READ_ONLY",
+            message: "生产交付状态由 Temporal 投影；只有经过认证的取消请求可以从此入口发送。",
+          },
+        }, { status: 405, headers: { allow: "GET, POST" } });
+      }
+      if (!UUID.test(projectId)
+        || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["action", "reason"])) {
+        return json({ error: { code: "INVALID_DELIVERY_CANCELLATION_REQUEST", message: "取消请求格式无效。" } }, { status: 400 });
+      }
+      const reason = requireString(body, "reason", 2_000);
+      let sessionKey: Uint8Array;
+      try { sessionKey = trustedSessionKeyFromEnvironment(); }
+      catch { return cancellationBrokerRequired(); }
+      let principal: Awaited<ReturnType<typeof verifyTrustedSpecSession>>;
+      try { principal = await verifyTrustedSpecSession(request, sessionKey); }
+      catch {
+        return json({ error: { code: "TRUSTED_SESSION_REQUIRED", message: "需要有效的平台会话。" } }, { status: 401 });
+      }
+      const broker = userAcceptanceBrokerFromEnvironment();
+      if (!broker) return cancellationBrokerRequired();
+      const receipt = await broker.cancel({
+        operationKey: await deliveryCancellationOperationKey({
+          tenantId: principal.tenantId,
+          projectId,
+          userId: principal.userId,
+          idempotencyKey: idempotencyKey(request),
+        }),
+        tenantId: principal.tenantId,
+        projectId,
+        actorId: principal.userId,
+        reason,
+      });
+      return json({ data: receipt, meta: { mode: "PRODUCTION" } }, { status: 202 });
     }
     const body = await bodyObject(request);
     const action = requireString(body, "action", 64) as LocalDeliveryAction;
@@ -103,6 +139,15 @@ function projectionRequired(): Response {
     error: {
       code: "DELIVERY_PROJECTION_BROKER_REQUIRED",
       message: "生产项目状态需要独立的租户隔离投影 Broker。",
+    },
+  }, { status: 503 });
+}
+
+function cancellationBrokerRequired(): Response {
+  return json({
+    error: {
+      code: "DELIVERY_CANCELLATION_BROKER_REQUIRED",
+      message: "生产取消需要独立的用户决定 Broker；Web 进程不会直接持有 Temporal 或数据库权限。",
     },
   }, { status: 503 });
 }

@@ -5,10 +5,14 @@ import { pathToFileURL } from "node:url";
 import { PostgresWorkflowActionCompletionStore } from "../../control-plane/src/workflow-action-completion-postgres";
 import { MtlsSpecDialogueModel } from "../../spec-dialogue/src/model-broker";
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
+import { connectDeliveryClient } from "../../temporal/src/client";
+import { TemporalWorkflowSignalPort } from "../../temporal/src/temporal-signal";
+import { temporalTlsConfigFromEnv } from "../../temporal/src/temporal-tls";
 import { createUserAcceptanceHandler, createUserAcceptanceHttpsServer } from "./ingress-http";
 import { PostgresUserFeedbackStore } from "./postgres-store";
 import { UserAcceptanceService } from "./service";
 import { CandidateAcceptanceService, PostgresCandidateAcceptanceStore } from "./candidate-acceptance";
+import { DeliveryCancellationService, PostgresDeliveryCancellationStore } from "./delivery-cancellation";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -24,7 +28,13 @@ export async function userAcceptanceRuntimeFromEnv(
     secret(env, "DEVILUDO_USER_ACCEPTANCE_MODEL_CA_FILE"),
   ]);
   const pool = postgresWorkflowPoolFromEnv({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "user-acceptance" });
+  let temporal: Awaited<ReturnType<typeof connectDeliveryClient>> | null = null;
   try {
+    temporal = await connectDeliveryClient({
+      address: env.TEMPORAL_ADDRESS,
+      namespace: env.TEMPORAL_NAMESPACE,
+      tls: await temporalTlsConfigFromEnv(env),
+    });
     const store = new PostgresUserFeedbackStore(pool);
     const model = new MtlsSpecDialogueModel({
       endpoint: required(env, "DEVILUDO_SPEC_MODEL_BROKER_URL"),
@@ -41,9 +51,14 @@ export async function userAcceptanceRuntimeFromEnv(
       new PostgresCandidateAcceptanceStore(pool),
       completions,
     );
+    const cancellation = new DeliveryCancellationService(
+      new PostgresDeliveryCancellationStore(pool),
+      new TemporalWorkflowSignalPort(temporal.client),
+    );
     const handler = createUserAcceptanceHandler({
       service,
       acceptance,
+      cancellation,
       allowedSpiffeIds: spiffeSet(required(env, "DEVILUDO_USER_ACCEPTANCE_WEB_SPIFFE_IDS")),
     });
     const server = createUserAcceptanceHttpsServer({
@@ -54,12 +69,15 @@ export async function userAcceptanceRuntimeFromEnv(
       host: host(env.DEVILUDO_USER_ACCEPTANCE_HOST),
       port: port(env.DEVILUDO_USER_ACCEPTANCE_PORT),
       pool,
+      temporal,
       store,
       service,
       acceptance,
+      cancellation,
       server,
     });
   } catch (error) {
+    if (temporal) await temporal.close().catch(() => undefined);
     await pool.close().catch(() => undefined);
     throw error;
   }
@@ -72,6 +90,7 @@ export async function runUserAcceptanceService(
   try {
     await runtime.pool.probe();
     await runtime.service.probe();
+    await runtime.cancellation.probe();
     await new Promise<void>((resolveListen, reject) => {
       const fail = (error: Error) => reject(error);
       runtime.server.once("error", fail);
@@ -89,6 +108,7 @@ export async function runUserAcceptanceService(
       runtime.server.once("error", reject);
     });
   } finally {
+    await runtime.temporal.close().catch(() => undefined);
     await runtime.pool.close();
   }
 }

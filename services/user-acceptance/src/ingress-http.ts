@@ -9,6 +9,11 @@ import {
   type CandidateAcceptanceService,
 } from "./candidate-acceptance";
 import { UserFeedbackConflict, type UserAcceptanceService } from "./service";
+import {
+  DeliveryCancellationConflict,
+  DeliveryCancellationRequestError,
+  type DeliveryCancellationService,
+} from "./delivery-cancellation";
 
 const MAX_BODY_BYTES = 32 * 1024;
 
@@ -28,6 +33,7 @@ export interface UserAcceptanceHttpResponse {
 export function createUserAcceptanceHandler(options: {
   readonly service: Pick<UserAcceptanceService, "submit" | "probe">;
   readonly acceptance: Pick<CandidateAcceptanceService, "accept" | "probe">;
+  readonly cancellation: Pick<DeliveryCancellationService, "cancel" | "probe">;
   readonly allowedSpiffeIds: ReadonlySet<string>;
   readonly extractIdentity?: (socket: unknown) => EvidenceArchiveWorkloadIdentity;
 }) {
@@ -39,11 +45,13 @@ export function createUserAcceptanceHandler(options: {
     catch { return failure(401, "USER_ACCEPTANCE_MTLS_IDENTITY_REQUIRED"); }
     if (!options.allowedSpiffeIds.has(identity.spiffeId)) return failure(403, "USER_ACCEPTANCE_WORKLOAD_FORBIDDEN");
     if (request.method === "GET" && request.path === "/healthz") {
-      try { await Promise.all([options.service.probe(), options.acceptance.probe()]); }
+      try { await Promise.all([options.service.probe(), options.acceptance.probe(), options.cancellation.probe()]); }
       catch { return failure(503, "USER_ACCEPTANCE_NOT_READY"); }
       return { status: 200, body: { status: "ok", service: "deviludo-user-acceptance" } };
     }
-    if (request.method !== "POST" || !["/v1/user-feedback", "/v1/candidate-acceptance"].includes(request.path)) {
+    if (request.method !== "POST" || ![
+      "/v1/user-feedback", "/v1/candidate-acceptance", "/v1/delivery-cancellations",
+    ].includes(request.path)) {
       return failure(404, "USER_ACCEPTANCE_ROUTE_NOT_FOUND");
     }
     if (contentType(request.headers["content-type"]) !== "application/json") {
@@ -55,11 +63,17 @@ export function createUserAcceptanceHandler(options: {
     try {
       return {
         status: 201,
-        body: { data: request.path === "/v1/user-feedback" ? await options.service.submit(body) : await options.acceptance.accept(body) },
+        body: { data: request.path === "/v1/user-feedback"
+          ? await options.service.submit(body)
+          : request.path === "/v1/candidate-acceptance"
+            ? await options.acceptance.accept(body)
+            : await options.cancellation.cancel(body) },
       };
     } catch (error) {
-      if (error instanceof UserFeedbackRequestError || error instanceof CandidateAcceptanceRequestError) return failure(400, error.code);
-      if (error instanceof UserFeedbackConflict || error instanceof CandidateAcceptanceConflict) return failure(409, error.code);
+      if (error instanceof UserFeedbackRequestError || error instanceof CandidateAcceptanceRequestError
+        || error instanceof DeliveryCancellationRequestError) return failure(400, error.code);
+      if (error instanceof UserFeedbackConflict || error instanceof CandidateAcceptanceConflict
+        || error instanceof DeliveryCancellationConflict) return failure(409, error.code);
       return failure(503, "USER_ACCEPTANCE_UNAVAILABLE");
     }
   };

@@ -62,7 +62,7 @@ test("delivery route keeps localhost fixture mode and production mutations read-
     body: JSON.stringify({ action: "advance" }),
   }), { params: Promise.resolve({ projectId }) });
   assert.equal(productionMutation.status, 405);
-  assert.equal(productionMutation.headers.get("allow"), "GET");
+  assert.equal(productionMutation.headers.get("allow"), "GET, POST");
   assert.equal((await productionMutation.json()).error.code, "DELIVERY_PROJECTION_READ_ONLY");
 
   const source = readFileSync(new URL("../components/console/LocalDeliveryPanel.tsx", import.meta.url), "utf8");
@@ -72,10 +72,71 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   assert.match(source, /模拟 Steam 回装失败/);
   assert.match(source, /snapshot\.repairHandoff/);
   assert.doesNotMatch(source.slice(source.indexOf("function ProductionDeliveryProjection")), /runAction\(/);
+  assert.match(source, /expected.*Temporal|取消请求已送达 Temporal/);
   const routeSource = readFileSync(new URL("../app/api/projects/[projectId]/delivery/route.ts", import.meta.url), "utf8");
   assert.match(routeSource, /isLoopbackTestRequest\(request\)/);
   assert.match(routeSource, /"main-gate-fail"/);
   assert.match(routeSource, /"steam-reinstall-fail"/);
+});
+
+test("production cancellation accepts only a signed reason and server derives workflow authority", async () => {
+  const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const pathname = `/api/projects/${projectId}/delivery`;
+  const issuedAt = String(Date.now());
+  const sessionBinding = "session-binding-that-is-longer-than-thirty-two-bytes";
+  const actorId = "55555555-5555-4555-8555-555555555555";
+  const signature = await signTrustedSpecSession({
+    method: "POST", pathname, tenantId, userId: actorId, sessionBinding, issuedAt, key,
+  });
+  const originalFetch = globalThis.fetch;
+  const originalEndpoint = process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL;
+  const originalKey = process.env.DEVILUDO_SESSION_HMAC_KEY;
+  let brokerCommand;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "https://user-acceptance.internal/v1/delivery-cancellations");
+    brokerCommand = JSON.parse(init.body);
+    return new Response(JSON.stringify({ data: {
+      ...brokerCommand,
+      workflowId: "delivery-33333333-3333-4333-8333-333333333333",
+      projectionSequence: 7,
+      projectionKey: `projection:${"a".repeat(64)}`,
+      projectionState: "DEVELOPING",
+      projectionDigest: "b".repeat(64),
+      signalId: "cancel-44444444-4444-4444-8444-444444444444",
+      requestedAt: "2026-07-21T06:00:00.000Z",
+      state: "CANCEL_REQUESTED",
+      deliveredAt: "2026-07-21T06:00:01.000Z",
+    } }), { status: 201 });
+  };
+  process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL = "https://user-acceptance.internal/";
+  process.env.DEVILUDO_SESSION_HMAC_KEY = Buffer.from(key).toString("base64url");
+  try {
+    const response = await POST(new Request(`https://app.deviludo.example${pathname}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "cancel-request-001",
+        "x-deviludo-session-tenant": tenantId,
+        "x-deviludo-session-user": actorId,
+        "x-deviludo-session-binding": sessionBinding,
+        "x-deviludo-session-issued-at": issuedAt,
+        "x-deviludo-session-signature": signature,
+      },
+      body: JSON.stringify({ action: "cancel", reason: "项目方向已改变。" }),
+    }), { params: Promise.resolve({ projectId }) });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).data.state, "CANCEL_REQUESTED");
+    assert.equal(brokerCommand.reason, "项目方向已改变。");
+    assert.equal(brokerCommand.tenantId, tenantId);
+    assert.equal("workflowId" in brokerCommand, false);
+    assert.equal("projectionState" in brokerCommand, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalEndpoint === undefined) delete process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL;
+    else process.env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL = originalEndpoint;
+    if (originalKey === undefined) delete process.env.DEVILUDO_SESSION_HMAC_KEY;
+    else process.env.DEVILUDO_SESSION_HMAC_KEY = originalKey;
+  }
 });
 
 test("production delivery GET requires a signed tenant session and returns only its projection", async () => {

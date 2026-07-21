@@ -1838,6 +1838,11 @@ button {
 .local-real-validation.ready { border-color: #a8c85f; background: #f7ffe8; }
 .local-real-validation-copy h3 { margin: 4px 0; font-size: 12px; letter-spacing: -.01em; }
 .local-real-validation-copy p { margin: 0; color: var(--muted); font-size: 8px; }
+.delivery-cancel-controls { border-color: #dfb8ae; background: #fff8f5; }
+.delivery-cancel-controls .local-real-validation-copy { flex: 1; min-width: 0; }
+.delivery-cancel-controls label { color: var(--muted); display: grid; font-size: 8px; font-weight: 750; gap: 6px; margin-top: 12px; text-transform: uppercase; }
+.delivery-cancel-controls textarea { background: white; border: 1px solid var(--line-strong); color: var(--ink); font: 10px var(--font-geist-mono), monospace; max-width: 680px; padding: 10px 12px; resize: vertical; text-transform: none; width: 100%; }
+.delivery-cancel-controls textarea:focus { border-color: var(--ink); outline: 2px solid color-mix(in srgb, var(--acid) 48%, transparent); outline-offset: 1px; }
 .local-real-validation-result { display: grid; justify-items: end; gap: 8px; }
 .local-real-validation-result > span { padding: 6px 9px; border-radius: 999px; font-size: 7px; font-weight: 800; }
 .local-real-validation-result .passed { background: #dff6a5; color: #385700; }

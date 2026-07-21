@@ -57,7 +57,7 @@ const SIGNAL_FIELDS = Object.freeze({
   STEAM_INSTALL_PASSED: ["signalId", "type", "evidenceBundleId"],
   EXTERNAL_APPROVED: ["signalId", "type", "gate", "approvalId"],
   STEAM_RELEASED: ["signalId", "type", "releaseId", "defaultBranchBuildId"],
-  CANCEL: ["signalId", "type", "reason"],
+  CANCEL: ["signalId", "type", "reason", "expectedState", "expectedHistoryLength"],
 } as const satisfies Record<DeliverySignal["type"], readonly string[]>);
 
 export interface DeliveryProjectionRequest {
