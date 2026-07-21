@@ -33,6 +33,11 @@ release trust policy described in `docs/runner-native-release.md`. The checked-i
 Runner trust template is revoked; production distributes an independently
 reviewed policy digest and accepts no raw or ad-hoc-signed candidate.
 
+The OS-specific Steam UI bridge uses a separate reviewed policy and KMS key.
+`steam-native-bridge-trust-policy.example.json` is also intentionally revoked;
+Connector startup requires its exact out-of-band digest and rejects
+revoked/expired signing keys before probing the bridge.
+
 Every Node service start command registers the platform-owned OpenTelemetry SDK
 before application imports. Production processes fail closed without a fixed
 OTLP traces endpoint. The recommended deployment gives each workload a

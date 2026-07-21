@@ -138,7 +138,9 @@ only on a Steam-capable host; its embedded platform version must equal
 `DEVILUDO_STEAM_CONNECTOR_VERSION`, and its mTLS certificate cannot be reused
 by the Physical Runner. The platform-specific Steam UI bridge remains a fourth,
 separately signed artifact whose exact digest is admitted through the existing
-Runner-bound bridge manifest.
+Runner-bound bridge manifest. Its platform evidence and KMS manifest are
+finalized by `npm run finalize:steam-native-bridge`; see the
+[Connector release contract](../services/steam-client-connector/README.md#bridge-manifest-finalization).
 `testKitDigest` and `runnerImageDigest` in the admitted machine capability must
 be taken from this verified final release. In-place replacement is forbidden:
 install a new revision, drain the host, switch the service pointer, re-register

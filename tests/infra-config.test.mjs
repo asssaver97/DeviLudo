@@ -810,6 +810,8 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   const runtime = readFileSync(new URL("../services/steam-client-connector/src/run-service.ts", import.meta.url), "utf8");
   const nativeEntry = readFileSync(new URL("../services/steam-client-connector/src/native-main.ts", import.meta.url), "utf8");
   const nativeBuilder = readFileSync(new URL("../scripts/production/build-runner-native.mjs", import.meta.url), "utf8");
+  const bridgeFinalizer = readFileSync(new URL("../scripts/production/finalize-steam-native-bridge.mjs", import.meta.url), "utf8");
+  const bridgeTrustPolicy = JSON.parse(readFileSync(new URL("../infra/steam-native-bridge-trust-policy.example.json", import.meta.url), "utf8"));
   const readme = readFileSync(new URL("../services/steam-client-connector/README.md", import.meta.url), "utf8");
   assert.match(packageJson.scripts["test:services"], /npm run test:steam-client-connector/);
   assert.equal(packageJson.scripts["start:steam-client-connector"], observedServiceCommand("steam-client-connector"));
@@ -829,6 +831,7 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   assert.match(native, /"execute", "--request-file"/);
   assert.match(native, /verifyExecutable/);
   assert.match(manifest, /verifyCanonical/);
+  assert.match(manifest, /validateSteamNativeBridgeTrustPolicy/);
   assert.match(manifest, /automationPolicyDigest/);
   assert.match(manifest, /supplyChainEvidenceDigest/);
   assert.match(nativeController, /resetClient/);
@@ -844,9 +847,16 @@ test("Steam Client Connector independently verifies signed clean-install jobs be
   assert.match(runtime, /platform does not match this host/);
   assert.match(runtime, /automationPolicyDigest: nativeBridge\.automationPolicyDigest/);
   assert.match(runtime, /supplyChainEvidenceDigest: nativeBridge\.supplyChainEvidenceDigest/);
+  assert.match(runtime, /NATIVE_TRUST_POLICY_DIGEST/);
+  assert.doesNotMatch(runtime, /NATIVE_MANIFEST_PUBLIC_KEY/);
   assert.match(nativeEntry, /isSea\(\)/);
   assert.match(nativeEntry, /version does not match its embedded release identity/);
   assert.match(nativeBuilder, /steam-client-connector/);
+  assert.equal(packageJson.scripts["finalize:steam-native-bridge"],
+    "node --import tsx scripts/production/finalize-steam-native-bridge.mjs");
+  assert.match(bridgeFinalizer, /\/v1\/steam-native-bridges\/sign-ed25519/);
+  assert.match(bridgeFinalizer, /idempotency-key/);
+  assert.equal(bridgeTrustPolicy.keys[0].status, "REVOKED");
   assert.doesNotMatch(runtime, /NATIVE_EXECUTABLE_DIGEST/);
   assert.doesNotMatch(connector, /configVdf|branchPassword|accountPassword|steamGuard/);
   assert.match(readme, /does not ship\s+Valve credentials/);

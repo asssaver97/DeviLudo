@@ -26,12 +26,28 @@ import {
   type NativeSteamDesktopAutomationPort,
 } from "../src/native-bridge-controller";
 import {
+  steamNativeBridgeTrustPolicyDigest,
+  validateSteamNativeBridgeTrustPolicy,
   verifySignedSteamNativeBridgeManifest,
   type SteamNativeBridgeClaims,
 } from "../src/native-bridge-manifest";
 import { verifySteamAppManifest } from "../src/steam-appmanifest";
 
 const keys = generateKeyPairSync("ed25519");
+const nativeBridgeTrustPolicy = Object.freeze({
+  schemaVersion: "deviludo.steam-native-bridge-trust-policy.v1",
+  policyId: "steam-native-bridge-production",
+  policyRevision: 1,
+  keys: Object.freeze([Object.freeze({
+    keyId: "steam-native-release-key-01",
+    algorithm: "Ed25519",
+    publicKeySpkiBase64: keys.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+    notBefore: "2029-01-01T00:00:00.000Z",
+    notAfter: "2031-01-01T00:00:00.000Z",
+    status: "ACTIVE",
+  })]),
+});
+const nativeBridgeTrustPolicyDigest = steamNativeBridgeTrustPolicyDigest(nativeBridgeTrustPolicy);
 const sha = (character: string) => character.repeat(64);
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const now = "2030-01-01T00:00:00.000Z";
@@ -412,8 +428,8 @@ test("signed native bridge manifest binds one immutable platform artifact and su
     signature: signCanonical(keys.privateKey, claims),
   };
   const verified = verifySignedSteamNativeBridgeManifest(manifest, {
-    keyId: manifest.keyId,
-    publicKey: keys.publicKey,
+    trustPolicy: nativeBridgeTrustPolicy,
+    trustPolicyDigest: nativeBridgeTrustPolicyDigest,
     runnerId: claims.runnerId,
     platform: claims.platform,
     connectorVersion: claims.connectorVersion,
@@ -427,8 +443,8 @@ test("native bridge manifest rejects signature, platform, policy, contract and e
   const claims = nativeBridgeClaims();
   const verify = (changed: SteamNativeBridgeClaims, signature = signCanonical(keys.privateKey, changed)) =>
     verifySignedSteamNativeBridgeManifest({ keyId: "steam-native-release-key-01", claims: changed, signature }, {
-      keyId: "steam-native-release-key-01",
-      publicKey: keys.publicKey,
+      trustPolicy: nativeBridgeTrustPolicy,
+      trustPolicyDigest: nativeBridgeTrustPolicyDigest,
       runnerId: claims.runnerId,
       platform: claims.platform,
       connectorVersion: claims.connectorVersion,
@@ -441,6 +457,21 @@ test("native bridge manifest rejects signature, platform, policy, contract and e
   assert.throws(() => verify({ ...claims, automationPolicyDigest: "not-a-digest" }), /manifest is invalid/);
   assert.throws(() => verify({ ...claims, supplyChainEvidenceDigest: "not-a-digest" }), /manifest is invalid/);
   assert.throws(() => verify({ ...claims, builtAt: "2031-01-01T00:00:00.000Z" }), /manifest is invalid/);
+  assert.throws(() => verifySignedSteamNativeBridgeManifest({
+    keyId: "steam-native-release-key-01", claims, signature: signCanonical(keys.privateKey, claims),
+  }, {
+    trustPolicy: { ...nativeBridgeTrustPolicy, keys: [{ ...nativeBridgeTrustPolicy.keys[0], status: "REVOKED" }] },
+    trustPolicyDigest: steamNativeBridgeTrustPolicyDigest({
+      ...nativeBridgeTrustPolicy, keys: [{ ...nativeBridgeTrustPolicy.keys[0], status: "REVOKED" }],
+    }),
+    runnerId: claims.runnerId,
+    platform: claims.platform,
+    connectorVersion: claims.connectorVersion,
+    now: new Date("2030-01-02T00:00:00.000Z"),
+  }), /manifest is invalid/);
+  assert.throws(() => validateSteamNativeBridgeTrustPolicy(
+    nativeBridgeTrustPolicy, "0".repeat(64),
+  ), /trust policy is invalid/);
 });
 
 function connector(

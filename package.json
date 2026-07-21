@@ -58,6 +58,8 @@
     "build:agent-supply-chain-native": "node scripts/build-agent-supply-chain-native.mjs",
     "build:runner-native": "node scripts/production/build-runner-native.mjs",
     "finalize:runner-native": "node scripts/production/finalize-runner-native-release.mjs",
+    "finalize:steam-native-bridge": "node --import tsx scripts/production/finalize-steam-native-bridge.mjs",
+    "inspect:steam-native-bridge-trust": "node --import tsx scripts/production/inspect-steam-native-bridge-trust-policy.mjs",
     "inspect:runner-native-trust": "node scripts/production/inspect-runner-native-trust-policy.mjs",
     "verify:runner-native": "node scripts/production/verify-runner-native-release.mjs",
     "start:agent-supply-chain-native": "node --import tsx scripts/observability/run-service.mjs agent-supply-chain-native",

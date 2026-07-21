@@ -17,7 +17,7 @@ export async function steamClientConnectorServiceFromEnv(
   const platform = targetPlatform(required(env, "DEVILUDO_STEAM_CONNECTOR_PLATFORM"));
   if (platform !== targetPlatform(runtimePlatform)) throw new Error("Steam Client Connector platform does not match this host");
   const [jobKeyPem, tlsKey, tlsCertificate, tlsCa, grantKey, grantCertificate, grantCa,
-    nativeManifestBytes, nativeManifestKeyPem, stagingRoot, workRoot] = await Promise.all([
+    nativeManifestBytes, nativeTrustPolicyBytes, stagingRoot, workRoot] = await Promise.all([
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_JOB_PUBLIC_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_KEY_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_TLS_CERT_FILE", 32, 1024 * 1024),
@@ -26,20 +26,22 @@ export async function steamClientConnectorServiceFromEnv(
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_TLS_CERT_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_GRANT_CA_FILE", 32, 1024 * 1024),
     safeFile(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_MANIFEST_FILE", 32, 1024 * 1024),
-    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_MANIFEST_PUBLIC_KEY_FILE", 32, 1024 * 1024),
+    safeFile(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_TRUST_POLICY_FILE", 32, 1024 * 1024),
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_STAGING_ROOT"),
     safeDirectory(env, "DEVILUDO_STEAM_CONNECTOR_WORK_ROOT"),
   ]);
   const jobPublicKey = createPublicKey(jobKeyPem);
   const runnerId = safeId(env, "DEVILUDO_STEAM_CONNECTOR_RUNNER_ID");
   const connectorVersion = version(env, "DEVILUDO_STEAM_CONNECTOR_VERSION");
-  const nativeManifestKey = createPublicKey(nativeManifestKeyPem);
   let nativeManifest: unknown;
+  let nativeTrustPolicy: unknown;
   try { nativeManifest = JSON.parse(nativeManifestBytes.toString("utf8")) as unknown; }
   catch { throw new Error("Steam native bridge manifest JSON is invalid"); }
+  try { nativeTrustPolicy = JSON.parse(nativeTrustPolicyBytes.toString("utf8")) as unknown; }
+  catch { throw new Error("Steam native bridge trust policy JSON is invalid"); }
   const nativeBridge = verifySignedSteamNativeBridgeManifest(nativeManifest, {
-    keyId: safeId(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_MANIFEST_KEY_ID"),
-    publicKey: nativeManifestKey,
+    trustPolicy: nativeTrustPolicy,
+    trustPolicyDigest: digest(env, "DEVILUDO_STEAM_CONNECTOR_NATIVE_TRUST_POLICY_DIGEST"),
     runnerId,
     platform,
     connectorVersion,
@@ -147,6 +149,12 @@ function version(env: Readonly<Record<string, string | undefined>>, name: string
   const value = required(env, name);
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9]+){0,5}$/.test(value)
     || /(?:latest|stable|default)/i.test(value)) throw new Error(`${name} is invalid`);
+  return value;
+}
+
+function digest(env: Readonly<Record<string, string | undefined>>, name: string): string {
+  const value = required(env, name);
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new Error(`${name} is invalid`);
   return value;
 }
 
