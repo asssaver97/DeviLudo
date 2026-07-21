@@ -4,6 +4,11 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import type { LocalRuntimeRequest } from "./contracts";
 import { LocalFixtureRunner } from "./fixture-runner";
+import {
+  LocalRuntimeAuthenticationError,
+  LocalRuntimeRequestVerifier,
+  localRuntimeKeyFromEnvironment,
+} from "./request-auth";
 
 const HOST = "127.0.0.1";
 const PORT = Number.parseInt(process.env.DEVILUDO_LOCAL_RUNTIME_PORT ?? "4311", 10);
@@ -12,13 +17,18 @@ const runner = new LocalFixtureRunner({
   repositoryRoot,
   godotBinary: process.env.DEVILUDO_GODOT_BINARY,
 });
+const requestVerifier = new LocalRuntimeRequestVerifier(localRuntimeKeyFromEnvironment());
 const running = new Map<string, Promise<unknown>>();
 
 const server = createServer(async (request, response) => {
   try {
     await route(request, response);
   } catch (error) {
-    json(response, 500, { error: { code: "LOCAL_RUNTIME_FAILED", message: error instanceof Error ? error.message : "Local runtime failed" } });
+    if (error instanceof LocalRuntimeAuthenticationError) {
+      json(response, 403, { error: { code: "LOCAL_RUNTIME_AUTH_REQUIRED", message: "Authenticated local Godot runtime request is required" } });
+      return;
+    }
+    json(response, 500, { error: { code: "LOCAL_RUNTIME_FAILED", message: "Local runtime request failed" } });
   }
 });
 
@@ -37,8 +47,14 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return;
   }
 
-  if (request.method === "POST" && url.pathname === "/v1/runs") {
-    const body = await readJson(request) as Partial<LocalRuntimeRequest>;
+  if (request.method === "POST" && url.pathname === "/v1/runs" && !url.search) {
+    if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      json(response, 415, { error: { code: "JSON_REQUIRED", message: "Local runtime request requires JSON" } });
+      return;
+    }
+    const rawBody = await readBody(request);
+    requestVerifier.verify({ method: "POST", path: "/v1/runs", body: rawBody, headers: request.headers });
+    const body = JSON.parse(rawBody.toString("utf8")) as Partial<LocalRuntimeRequest>;
     if (!body.projectId || !body.runId || !body.specRevisionId) {
       json(response, 400, { error: { code: "INVALID_REQUEST", message: "projectId, runId and specRevisionId are required" } });
       return;
@@ -54,7 +70,8 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   }
 
   const evidenceMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/([^/]+)\/evidence\/(manifest\.json|junit\.xml|godot\.log)$/);
-  if (request.method === "GET" && evidenceMatch) {
+  if (request.method === "GET" && evidenceMatch && !url.search) {
+    requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
     const [, projectId, runId, file] = evidenceMatch;
     const directory = runner.evidenceDirectory({ projectId, runId });
     const target = path.join(directory, file);
@@ -69,7 +86,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   json(response, 404, { error: { code: "NOT_FOUND", message: "Local runtime route not found" } });
 }
 
-async function readJson(request: IncomingMessage) {
+async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
@@ -78,7 +95,7 @@ async function readJson(request: IncomingMessage) {
     if (size > 32 * 1024) throw new Error("Request body is too large");
     chunks.push(buffer);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return Buffer.concat(chunks);
 }
 
 function json(response: ServerResponse, status: number, body: unknown) {

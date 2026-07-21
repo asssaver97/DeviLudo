@@ -14,6 +14,17 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  ...(process.env.DEVILUDO_LOCAL_TEST_MODE === "1"
+    ? {
+        secrets: {
+          required: [
+            "DEVILUDO_LOCAL_RUNTIME_HMAC_KEY",
+            "DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY",
+            "DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY",
+          ],
+        },
+      }
+    : {}),
   d1_databases: d1
     ? [
         {

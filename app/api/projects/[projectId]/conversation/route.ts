@@ -10,6 +10,7 @@ import {
   specDialogueBrokerRuntimeFromEnvironment,
   specOperationKey,
 } from "@/lib/spec-dialogue/broker";
+import { createLocalSpecRuntimeHeaders } from "@/services/local-spec-runtime/src/request-auth";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -84,12 +85,15 @@ export async function POST(
 
 async function proxyLocal(endpoint: URL, projectId: string, init: RequestInit): Promise<Response> {
   if (!PROJECT.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效" } }, { status: 400 });
+  const path = `/v1/projects/${encodeURIComponent(projectId)}/conversation`;
+  const method = init.method === "POST" ? "POST" : "GET";
+  const body = typeof init.body === "string" ? init.body : "";
   let upstream: Response;
   try {
-    upstream = await fetch(new URL(`/v1/projects/${encodeURIComponent(projectId)}/conversation`, endpoint), {
+    upstream = await fetch(new URL(path, endpoint), {
       ...init,
       redirect: "manual",
-      headers: { accept: "application/json", "x-deviludo-local-spec-runtime": "v1", ...(init.headers ?? {}) },
+      headers: { accept: "application/json", ...(init.headers ?? {}), ...createLocalSpecRuntimeHeaders({ method, path, body }) },
       signal: AbortSignal.timeout(15_000),
     });
     if (upstream.status >= 300 && upstream.status < 400) throw new Error("Local specification runtime redirected the request");

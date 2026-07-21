@@ -20,6 +20,8 @@ npm run local:dev
 
 测试站地址为 <http://127.0.0.1:3000>，Godot 验证侧车为 `http://127.0.0.1:4311`，Agent 就绪探针为 `http://127.0.0.1:4312`，规格对话侧车为 `http://127.0.0.1:4313`。同一命令会检查四个端口并同时启动四个进程。按一次 `Ctrl-C` 会向完整子进程树发送优雅停止信号；五秒后仍未退出会自动强制清理，再按一次 `Ctrl-C` 可立即强制停止。
 
+启动器会为 Godot、Agent 和规格 sidecar 分别生成独立 256-bit 会话 Key。Web 到 sidecar 的每个非健康请求都签名绑定服务受众、方法、路径、正文摘要、时间戳和单次 nonce；Key 以 `0600` 写入被 Git 忽略的 `.deviludo/` 仅供 smoke 验证，并在退出时删除。固定请求头、跨服务 Key、过期请求、正文或路径篡改都会被拒绝。
+
 项目页的构想消息会真实经过规格对话 sidecar，返回完整规格、验收标准和 TestKit 计划；批准会创建独立的已批准/已冻结后继修订。该本地模型明确报告为 `deterministic-loopback`，生产环境不会启用它或假装第三方模型已配置。
 
 Agent 探针只运行固定的版本命令。只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/模型通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。默认配置没有受信 Provider 绑定探针，也没有隔离执行器，会安全地报告 `BLOCKED`；这不是测试栈故障。
@@ -65,6 +67,8 @@ npm run local:smoke
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`；`degraded` 是未启用执行时的预期状态。
 - Agent 探针 `/v1/preflight` 使用固定测试运行锁，验证 CLI、镜像、Provider/Gateway 与执行开关；它只返回阻塞原因或 `READY`，不会启动 Agent。
 - Agent `/v1/runs` 在默认测试栈必须以明确门禁码返回 409/503，证明没有执行器时失败关闭。
+- 通过 Web API 真实运行固定 Godot 样例并下载同一 bundle 的 `manifest.json`，覆盖签名后的执行和证据读取链路。
+- 直接向 Godot、Agent、规格三个 sidecar 发送旧固定请求头，必须全部返回 403，证明 loopback 本身不构成权限。
 - 两个隔离项目分别选择 Claude Code 与 Codex CLI Profile，从规格批准一直推进到三平台通过和 `RELEASED`，并确认整个链路保持最初的不可变 Agent 锁。
 
 任何路由超时、非 2xx、错误内容类型或内容标记缺失都会以非零状态退出，适合本地脚本和 CI 调用。
@@ -87,7 +91,7 @@ DEVILUDO_LOCAL_PORT=4310 npm run local:smoke
 
 脚本不读取通用 `PORT` 变量，避免被其他开发工具的环境配置意外影响。
 
-Godot 侧车端口默认是 `4311`，Agent 探针端口默认是 `4312`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT` / `DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`。
+Godot 侧车、Agent 探针和规格侧车端口默认分别是 `4311`、`4312`、`4313`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT`、`DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`、`DEVILUDO_LOCAL_SPEC_RUNTIME_PORT`。
 
 `npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。
 

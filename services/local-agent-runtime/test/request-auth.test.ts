@@ -5,6 +5,10 @@ import {
   LocalAgentRuntimeRequestVerifier,
   localAgentRuntimeKeyFromEnvironment,
 } from "../src/request-auth";
+import {
+  createLocalSidecarHeaders,
+  LocalSidecarRequestVerifier,
+} from "../../../lib/security/local-sidecar-auth";
 
 const key = new Uint8Array(Buffer.alloc(32, 7));
 const now = new Date("2026-07-21T12:00:00.000Z");
@@ -34,4 +38,25 @@ test("local Agent sidecar rejects stale assertions and non-canonical deployment 
   assert.deepEqual(localAgentRuntimeKeyFromEnvironment({ DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: encoded }), key);
   assert.throws(() => localAgentRuntimeKeyFromEnvironment({ DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: "short" }), /configuration is invalid/);
   assert.throws(() => localAgentRuntimeKeyFromEnvironment({}), /configuration is invalid/);
+});
+
+test("local sidecar assertions cannot cross service audiences or deployment keys", () => {
+  const godot = { audience: "godot-runtime", keyEnvironmentVariable: "DEVILUDO_LOCAL_RUNTIME_HMAC_KEY" };
+  const specification = { audience: "spec-runtime", keyEnvironmentVariable: "DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY" };
+  const path = "/v1/projects/project-1/conversation";
+  const assertion = { method: "POST" as const, path, body };
+  const headers = createLocalSidecarHeaders(godot, assertion, { key, now, nonce });
+
+  assert.throws(
+    () => new LocalSidecarRequestVerifier(specification, key).verify({ ...assertion, headers }, now),
+    /authentication failed/,
+  );
+  assert.throws(
+    () => new LocalSidecarRequestVerifier(godot, new Uint8Array(Buffer.alloc(32, 8))).verify({ ...assertion, headers }, now),
+    /authentication failed/,
+  );
+  assert.throws(
+    () => createLocalSidecarHeaders(godot, { method: "GET", path, body: "not-empty" }, { key, now, nonce }),
+    /configuration is invalid/,
+  );
 });

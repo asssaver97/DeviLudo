@@ -109,18 +109,25 @@ behind the web console:
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,
   JUnit and log evidence below the ignored `.deviludo/` directory. Missing
-  export templates remain an explicit release gate.
+  export templates remain an explicit release gate. Run and evidence reads
+  require a fresh request signature bound to the `godot-runtime` audience.
 - `local-agent-runtime`: a loopback-only readiness and execution sidecar. It
   executes fixed `--version` probes and reports the observed Claude Code/Codex
-  CLI versions. The local launcher generates a fresh 256-bit HMAC session for
-  each deployment; preflight and run requests bind method, path, body digest,
-  timestamp and a single-use nonce, so loopback plus a predictable header is
-  never treated as execution authority. Execution stays blocked unless an exact
+  CLI versions. Preflight and run requests require a fresh signature bound to
+  the `agent-runtime` audience. Execution stays blocked unless an exact
   approved version, verified WorkerImage identity matching a separately pinned
   expected digest, a safe HTTPS internal inference gateway, a verified Provider
   binding and explicit opt-in all exist. `/v1/runs` also returns 503 until a
   trusted isolated executor is injected; it never falls back to spawning a CLI
   directly from the Web process.
+- `local-spec-runtime`: a loopback-only deterministic specification sidecar.
+  Conversation reads, writes and approvals require a fresh request signature
+  bound to the `spec-runtime` audience.
+
+The local launcher generates separate 256-bit keys for all three sidecars on
+every deployment. Every signature covers audience, method, path, body digest,
+timestamp and a single-use nonce. A key cannot cross sidecar audiences, and a
+predictable loopback header is never treated as execution or mutation authority.
 
 The root application can keep using its lightweight route handlers for the
 Sites preview. Production traffic should route `/admin/*` to the control-plane

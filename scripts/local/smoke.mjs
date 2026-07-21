@@ -9,7 +9,7 @@ const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const DEFAULT_LOCAL_AGENT_RUNTIME_PORT = 4312;
 const DEFAULT_LOCAL_SPEC_RUNTIME_PORT = 4313;
 const READY_TIMEOUT_MS = 30_000;
-const REQUEST_TIMEOUT_MS = 5_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const RETRY_INTERVAL_MS = 250;
 
 function usage() {
@@ -80,13 +80,13 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function request(baseUrl, route, init = {}) {
+async function request(baseUrl, route, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const startedAt = performance.now();
   const response = await fetch(`${baseUrl}${route}`, {
     ...init,
     headers: { accept: route.startsWith("/api/") || route.startsWith("/v1/") ? "application/json" : "text/html", ...(init.headers ?? {}) },
     redirect: "follow",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   return {
@@ -141,29 +141,33 @@ async function checkHtmlRoute(baseUrl, route, expectedText) {
   return result;
 }
 
-async function localAgentRuntimeKey() {
-  const encoded = (await readFile(new URL("../../.deviludo/local-agent-runtime.hmac", import.meta.url), "utf8")).trim();
-  if (!/^[A-Za-z0-9_-]{43,86}$/.test(encoded)) throw new Error("local Agent sidecar key is invalid");
+async function localSidecarKey(name) {
+  if (!new Set(["local-runtime", "local-agent-runtime", "local-spec-runtime"]).has(name)) {
+    throw new Error("local sidecar key name is invalid");
+  }
+  const encoded = (await readFile(new URL(`../../.deviludo/${name}.hmac`, import.meta.url), "utf8")).trim();
+  if (!/^[A-Za-z0-9_-]{43,86}$/.test(encoded)) throw new Error("local sidecar key is invalid");
   const key = Buffer.from(encoded, "base64url");
   if (key.byteLength < 32 || key.byteLength > 64 || key.toString("base64url") !== encoded) {
-    throw new Error("local Agent sidecar key is invalid");
+    throw new Error("local sidecar key is invalid");
   }
   return key;
 }
 
-function localAgentRuntimeHeaders(route, body, key) {
+function localSidecarHeaders(audience, method, route, body, key) {
   const issuedAt = new Date().toISOString();
   const nonce = randomBytes(18).toString("base64url");
   const bodyDigest = createHash("sha256").update(body).digest("hex");
   const signature = createHmac("sha256", key)
-    .update(["deviludo.local-agent-runtime.v1", "POST", route, bodyDigest, issuedAt, nonce].join("\n"))
+    .update(["deviludo.local-sidecar.v1", audience, method, route, bodyDigest, issuedAt, nonce].join("\n"))
     .digest("base64url");
   return {
-    "x-deviludo-local-agent-runtime": "v1",
-    "x-deviludo-local-agent-issued-at": issuedAt,
-    "x-deviludo-local-agent-nonce": nonce,
-    "x-deviludo-local-agent-body-sha256": bodyDigest,
-    "x-deviludo-local-agent-signature": signature,
+    "x-deviludo-local-sidecar": "v1",
+    "x-deviludo-local-sidecar-audience": audience,
+    "x-deviludo-local-sidecar-issued-at": issuedAt,
+    "x-deviludo-local-sidecar-nonce": nonce,
+    "x-deviludo-local-sidecar-body-sha256": bodyDigest,
+    "x-deviludo-local-sidecar-signature": signature,
   };
 }
 
@@ -198,12 +202,21 @@ const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 const smokeNonce = `${process.pid}-${Date.now().toString(36)}`;
 const smokeSpecProject = `smoke-spec-${smokeNonce}`;
+const smokeValidationProject = `smoke-validation-${smokeNonce}`;
 const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
 const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
 
 try {
   const health = await waitForHealth(baseUrl);
-  const sidecarKey = await localAgentRuntimeKey();
+  const [runtimeSidecarKey, agentSidecarKey, specSidecarKey] = await Promise.all([
+    localSidecarKey("local-runtime"),
+    localSidecarKey("local-agent-runtime"),
+    localSidecarKey("local-spec-runtime"),
+  ]);
+  if (runtimeSidecarKey.equals(agentSidecarKey) || runtimeSidecarKey.equals(specSidecarKey)
+    || agentSidecarKey.equals(specSidecarKey)) {
+    throw new Error("local sidecars unexpectedly share an authentication key");
+  }
   const [claudeSelection, codexSelection] = await Promise.all([
     request(baseUrl, `/api/projects/${smokeReleaseProject}/agent-settings`, {
       method: "PUT",
@@ -252,7 +265,7 @@ try {
     timeoutSeconds: 7200,
     prompt: "Smoke contract only; execution must remain gated.",
   });
-  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
+  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, forgedRuntimeRequest, forgedSpecRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
@@ -278,18 +291,28 @@ try {
     }),
     request(agentRuntimeUrl, "/v1/preflight", {
       method: "POST",
-      headers: { "content-type": "application/json", ...localAgentRuntimeHeaders("/v1/preflight", preflightCommand, sidecarKey) },
+      headers: { "content-type": "application/json", ...localSidecarHeaders("agent-runtime", "POST", "/v1/preflight", preflightCommand, agentSidecarKey) },
       body: preflightCommand,
     }),
     request(agentRuntimeUrl, "/v1/runs", {
       method: "POST",
-      headers: { "content-type": "application/json", ...localAgentRuntimeHeaders("/v1/runs", executionCommand, sidecarKey) },
+      headers: { "content-type": "application/json", ...localSidecarHeaders("agent-runtime", "POST", "/v1/runs", executionCommand, agentSidecarKey) },
       body: executionCommand,
     }),
     request(agentRuntimeUrl, "/v1/preflight", {
       method: "POST",
       headers: { "content-type": "application/json", "x-deviludo-local-agent-runtime": "v1" },
       body: preflightCommand,
+    }),
+    request(runtimeUrl, "/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-deviludo-local-runtime": "v1" },
+      body: JSON.stringify({ projectId: "forged", runId: "forged", specRevisionId: "forged" }),
+    }),
+    request(specRuntimeUrl, "/v1/projects/forged/conversation", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "forged", "x-deviludo-local-spec-runtime": "v1" },
+      body: JSON.stringify({ expectedRevision: 0, message: "forged" }),
     }),
     request(baseUrl, "/api/runner/events", {
       method: "POST",
@@ -378,6 +401,49 @@ try {
   if (![200, 201].includes(specApproval.response.status) || approvalPayload.data?.authority?.state !== "APPROVED"
     || approvalPayload.data.authority.revision !== 2 || approvalPayload.data.run?.state !== "QUEUED") {
     throw new Error("local specification approval contract failed");
+  }
+  const validationDialogue = await request(baseUrl, `/api/projects/${smokeValidationProject}/conversation`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-validation-dialogue-1" },
+    body: JSON.stringify({ expectedRevision: 0, message: "制作一个用于真实 Godot 验证的固定桌面单机样例" }),
+  });
+  const validationDialoguePayload = await validationDialogue.response.json();
+  if (validationDialogue.response.status !== 201 || validationDialoguePayload.data?.revision !== 1) {
+    throw new Error("local validation specification dialogue failed");
+  }
+  const validationApproval = await request(baseUrl, `/api/projects/${smokeValidationProject}/spec-revisions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-validation-approval-1" },
+    body: JSON.stringify({
+      action: "approve",
+      revision: "SPEC-001",
+      conversationId: validationDialoguePayload.data.conversationId,
+      expectedRevision: validationDialoguePayload.data.revision,
+      specRevisionId: validationDialoguePayload.data.specRevisionId,
+      testPlanRevisionId: validationDialoguePayload.data.testPlanRevisionId,
+    }),
+  });
+  const validationApprovalPayload = await validationApproval.response.json();
+  if (![200, 201].includes(validationApproval.response.status) || validationApprovalPayload.data?.run?.state !== "QUEUED") {
+    throw new Error("local validation specification approval failed");
+  }
+  const localValidation = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation`, {
+    method: "POST",
+    headers: { "idempotency-key": "smoke-local-validation-1" },
+  }, 90_000);
+  const localValidationPayload = await localValidation.response.json();
+  if (![200, 201].includes(localValidation.response.status)
+    || localValidationPayload.data?.status !== "TESTS_PASSED"
+    || !/^[a-f0-9]{64}$/.test(String(localValidationPayload.data?.bundleDigest))) {
+    throw new Error("authenticated local Godot validation did not produce bound evidence");
+  }
+  const localManifest = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation/evidence/manifest.json`);
+  const localManifestPayload = await localManifest.response.json();
+  if (!localManifest.response.ok
+    || localManifestPayload.projectId !== smokeValidationProject
+    || localManifestPayload.runId !== validationApprovalPayload.data.run.id
+    || localManifestPayload.bundleDigest !== localValidationPayload.data.bundleDigest) {
+    throw new Error("authenticated local evidence download did not preserve the validation binding");
   }
   const providerWait = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
     method: "POST",
@@ -551,6 +617,16 @@ try {
     || forgedAgentRequestPayload.error?.code !== "LOCAL_AGENT_RUNTIME_AUTH_REQUIRED") {
     throw new Error("local Agent runtime accepted the legacy static header without a signed assertion");
   }
+  const forgedRuntimeRequestPayload = await forgedRuntimeRequest.response.json();
+  if (forgedRuntimeRequest.response.status !== 403
+    || forgedRuntimeRequestPayload.error?.code !== "LOCAL_RUNTIME_AUTH_REQUIRED") {
+    throw new Error("local Godot runtime accepted the legacy static header without a signed assertion");
+  }
+  const forgedSpecRequestPayload = await forgedSpecRequest.response.json();
+  if (forgedSpecRequest.response.status !== 403
+    || forgedSpecRequestPayload.error?.code !== "LOCAL_SPEC_RUNTIME_AUTH_REQUIRED") {
+    throw new Error("local specification runtime accepted the legacy static header without a signed assertion");
+  }
   const runnerIngressPayload = await runnerIngress.response.json();
   if (runnerIngress.response.status !== 503 || runnerIngressPayload.error?.code !== "RUNNER_MTLS_INGRESS_REQUIRED") {
     throw new Error("public Web process unexpectedly accepted a Runner event write");
@@ -595,6 +671,8 @@ try {
   console.log(`✓ Agent readiness   ${agentRuntime.response.status} (${agentRuntime.elapsedMs}ms) · ${agentSummary}`);
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
+  console.log(`✓ Godot validation ${localValidation.response.status} (${localValidation.elapsedMs}ms) · ${localValidationPayload.data.releaseGate}`);
+  console.log(`✓ Evidence download ${localManifest.response.status} (${localManifest.elapsedMs}ms) · signed sidecar request`);
   console.log(`✓ Provider recovery ${providerResume.response.status} (${providerResume.elapsedMs}ms) · same immutable Profile`);
   console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
@@ -603,6 +681,8 @@ try {
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Agent auth gate   ${forgedAgentRequest.response.status} (${forgedAgentRequest.elapsedMs}ms) · ${forgedAgentRequestPayload.error.code}`);
+  console.log(`✓ Godot auth gate   ${forgedRuntimeRequest.response.status} (${forgedRuntimeRequest.elapsedMs}ms) · ${forgedRuntimeRequestPayload.error.code}`);
+  console.log(`✓ Spec auth gate    ${forgedSpecRequest.response.status} (${forgedSpecRequest.elapsedMs}ms) · ${forgedSpecRequestPayload.error.code}`);
   console.log(`✓ Runner ingress    ${runnerIngress.response.status} (${runnerIngress.elapsedMs}ms) · ${runnerIngressPayload.error.code}`);
   console.log(`✓ GitHub auth       ${githubAuthorization.response.status} (${githubAuthorization.elapsedMs}ms) · ${githubAuthorizationPayload.error.code}`);
   console.log(`✓ Steam enrollment  ${steamEnrollment.response.status} (${steamEnrollment.elapsedMs}ms) · ${steamEnrollmentPayload.error.code}`);

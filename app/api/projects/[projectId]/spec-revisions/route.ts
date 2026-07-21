@@ -14,6 +14,7 @@ import {
   specOperationKey,
 } from "@/lib/spec-dialogue/broker";
 import type { SpecApprovalReceipt } from "@/services/spec-dialogue/src/contracts";
+import { createLocalSpecRuntimeHeaders } from "@/services/local-spec-runtime/src/request-auth";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -173,10 +174,12 @@ async function approveDialogue(
     || (body.expectedRevision as number) < 1) throw new Error("Specification approval authority is invalid");
   const local = localSpecRuntimeUrl(request);
   if (local) {
-    const upstream = await fetch(new URL(`/v1/projects/${encodeURIComponent(projectId)}/spec-approval`, local), {
+    const path = `/v1/projects/${encodeURIComponent(projectId)}/spec-approval`;
+    const command = JSON.stringify({ expectedRevision: body.expectedRevision, specRevisionId: body.specRevisionId, testPlanRevisionId: body.testPlanRevisionId });
+    const upstream = await fetch(new URL(path, local), {
       method: "POST", redirect: "manual",
-      headers: { accept: "application/json", "content-type": "application/json", "idempotency-key": requestKey, "x-deviludo-local-spec-runtime": "v1" },
-      body: JSON.stringify({ expectedRevision: body.expectedRevision, specRevisionId: body.specRevisionId, testPlanRevisionId: body.testPlanRevisionId }),
+      headers: { accept: "application/json", "content-type": "application/json", "idempotency-key": requestKey, ...createLocalSpecRuntimeHeaders({ method: "POST", path, body: command }) },
+      body: command,
       signal: AbortSignal.timeout(15_000),
     });
     if (upstream.status >= 300 && upstream.status < 400) throw new Error("Local specification approval redirected the request");

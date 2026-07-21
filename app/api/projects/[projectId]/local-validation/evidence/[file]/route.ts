@@ -1,6 +1,7 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { createLocalRuntimeHeaders } from "@/services/local-runtime/src/request-auth";
 
 const RUNTIME_URL = loopbackRuntimeUrl();
 const allowedFiles = new Set(["manifest.json", "junit.xml", "godot.log"]);
@@ -17,8 +18,9 @@ export async function GET(
     if (!delivery.runId || !delivery.localValidation) {
       return json({ error: { code: "EVIDENCE_NOT_READY", message: "本机证据尚未生成" } }, { status: 404 });
     }
-    const upstream = await fetch(`${RUNTIME_URL}/v1/runs/${encodeURIComponent(projectId)}/${encodeURIComponent(delivery.runId)}/evidence/${file}`, {
-      headers: { "x-deviludo-local-runtime": "v1" },
+    const path = `/v1/runs/${encodeURIComponent(projectId)}/${encodeURIComponent(delivery.runId)}/evidence/${file}`;
+    const upstream = await fetch(`${RUNTIME_URL}${path}`, {
+      headers: createLocalRuntimeHeaders({ method: "GET", path, body: "" }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!upstream.ok) return json({ error: { code: "EVIDENCE_UNAVAILABLE", message: "本机证据文件不可用" } }, { status: 502 });

@@ -135,8 +135,22 @@ if (port === null || port === undefined || localRuntimePort === undefined || loc
   process.exit();
 }
 
+const localRuntimeHmacKey = randomBytes(32).toString("base64url");
 const localAgentRuntimeHmacKey = randomBytes(32).toString("base64url");
-const localAgentRuntimeHmacKeyFile = path.join(workspaceRoot, ".deviludo", "local-agent-runtime.hmac");
+const localSpecRuntimeHmacKey = randomBytes(32).toString("base64url");
+const localSidecarCredentials = Object.freeze([
+  Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-runtime.hmac"), key: localRuntimeHmacKey }),
+  Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-agent-runtime.hmac"), key: localAgentRuntimeHmacKey }),
+  Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-spec-runtime.hmac"), key: localSpecRuntimeHmacKey }),
+]);
+
+function removeLocalSidecarKeys() {
+  for (const credential of localSidecarCredentials) {
+    try { unlinkSync(credential.file); }
+    catch (error) { if (error?.code !== "ENOENT") console.error("[local:dev] Could not remove a sidecar session key."); }
+  }
+}
+
 const vinextCli = path.join(workspaceRoot, "node_modules", "vinext", "dist", "cli.js");
 const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
 const localAgentRuntimeEntry = path.join(workspaceRoot, "services", "local-agent-runtime", "src", "server.ts");
@@ -151,10 +165,13 @@ try {
   await assertPortAvailable(localAgentRuntimePort);
   await assertPortAvailable(localSpecRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
-  await mkdir(path.dirname(localAgentRuntimeHmacKeyFile), { recursive: true, mode: 0o700 });
-  await writeFile(localAgentRuntimeHmacKeyFile, `${localAgentRuntimeHmacKey}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(localAgentRuntimeHmacKeyFile, 0o600);
+  await mkdir(path.join(workspaceRoot, ".deviludo"), { recursive: true, mode: 0o700 });
+  for (const credential of localSidecarCredentials) {
+    await writeFile(credential.file, `${credential.key}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(credential.file, 0o600);
+  }
 } catch (error) {
+  removeLocalSidecarKeys();
   fail(error instanceof Error ? error.message : String(error));
   if (error?.code === "ENOENT") {
     console.error("[local:dev] Run `npm install` before starting the local site.");
@@ -179,6 +196,7 @@ const localRuntimeChild = spawn(
       NODE_ENV: "development",
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_RUNTIME_PORT: String(localRuntimePort),
+      DEVILUDO_LOCAL_RUNTIME_HMAC_KEY: localRuntimeHmacKey,
     },
     stdio: "inherit",
   },
@@ -212,6 +230,7 @@ const localSpecRuntimeChild = spawn(
       NODE_ENV: "development",
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_SPEC_RUNTIME_PORT: String(localSpecRuntimePort),
+      DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY: localSpecRuntimeHmacKey,
     },
     stdio: "inherit",
   },
@@ -228,9 +247,11 @@ const siteChild = spawn(
       NODE_ENV: "development",
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_RUNTIME_URL: `http://${HOST}:${localRuntimePort}`,
+      DEVILUDO_LOCAL_RUNTIME_HMAC_KEY: localRuntimeHmacKey,
       DEVILUDO_LOCAL_AGENT_RUNTIME_URL: `http://${HOST}:${localAgentRuntimePort}`,
       DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: localAgentRuntimeHmacKey,
       DEVILUDO_LOCAL_SPEC_RUNTIME_URL: `http://${HOST}:${localSpecRuntimePort}`,
+      DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY: localSpecRuntimeHmacKey,
       WRANGLER_LOG_PATH: path.join(workspaceRoot, ".wrangler", "wrangler-local.log"),
     },
     stdio: "inherit",
@@ -376,6 +397,5 @@ siteChild.once("exit", (code, signal) => {
 
 process.once("exit", () => {
   killAll("SIGKILL");
-  try { unlinkSync(localAgentRuntimeHmacKeyFile); }
-  catch (error) { if (error?.code !== "ENOENT") console.error("[local:dev] Could not remove the Agent sidecar key."); }
+  removeLocalSidecarKeys();
 });

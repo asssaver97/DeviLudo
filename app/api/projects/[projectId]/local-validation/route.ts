@@ -2,6 +2,7 @@ import { idempotencyKey, json, problemResponse } from "@/lib/control-plane/http"
 import { readLocalDelivery, saveLocalValidation } from "@/lib/local-delivery/store";
 import type { LocalValidationSnapshot } from "@/lib/local-delivery/model";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { createLocalRuntimeHeaders } from "@/services/local-runtime/src/request-auth";
 
 const RUNTIME_URL = loopbackRuntimeUrl();
 
@@ -34,12 +35,15 @@ export async function POST(
       return json({ error: { code: "INVALID_DELIVERY_STAGE", message: "当前交付阶段不能运行本机验证" } }, { status: 409 });
     }
 
+    const command = JSON.stringify({ projectId, runId: delivery.runId, specRevisionId: delivery.specRevisionId });
     let runtimeResponse: Response;
     try {
       runtimeResponse = await fetch(`${RUNTIME_URL}/v1/runs`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-deviludo-local-runtime": "v1" },
-        body: JSON.stringify({ projectId, runId: delivery.runId, specRevisionId: delivery.specRevisionId }),
+        headers: { "content-type": "application/json", ...createLocalRuntimeHeaders({
+          method: "POST", path: "/v1/runs", body: command,
+        }) },
+        body: command,
         signal: AbortSignal.timeout(90_000),
       });
     } catch {

@@ -4,6 +4,11 @@ import { pathToFileURL } from "node:url";
 import { DeterministicLocalSpecModel } from "../../spec-dialogue/src/model";
 import { SpecDialogueConflict, SpecDialogueService } from "../../spec-dialogue/src/service";
 import { InMemorySpecDialogueStore } from "../../spec-dialogue/src/store";
+import {
+  LocalSpecRuntimeAuthenticationError,
+  LocalSpecRuntimeRequestVerifier,
+  localSpecRuntimeKeyFromEnvironment,
+} from "./request-auth";
 
 const HOST = "127.0.0.1";
 const PORT = parsePort(process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_PORT ?? "4313");
@@ -12,12 +17,18 @@ const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const service = new SpecDialogueService(new InMemorySpecDialogueStore(), new DeterministicLocalSpecModel());
 
-export function createLocalSpecRuntimeServer() {
+export function createLocalSpecRuntimeServer(
+  options: Readonly<{ authenticationKey?: Uint8Array }> = {},
+) {
+  const requestVerifier = new LocalSpecRuntimeRequestVerifier(
+    options.authenticationKey ?? localSpecRuntimeKeyFromEnvironment(),
+  );
   return createServer(async (request, response) => {
     secure(response);
     try {
-      await dispatch(request, response);
+      await dispatch(request, response, requestVerifier);
     } catch (error) {
+      if (error instanceof LocalSpecRuntimeAuthenticationError) return json(response, 403, { error: { code: "LOCAL_SPEC_RUNTIME_AUTH_REQUIRED", message: "Authenticated local specification runtime request is required" } });
       if (error instanceof BodyLimitError) return json(response, 413, { error: { code: "LOCAL_SPEC_REQUEST_TOO_LARGE", message: "Local specification message is too large" } });
       if (error instanceof SpecDialogueConflict) return json(response, 409, { error: { code: error.code, message: "Specification revision changed; refresh before retrying" } });
       return json(response, 400, { error: { code: "INVALID_LOCAL_SPEC_REQUEST", message: "Local specification request is invalid" } });
@@ -25,15 +36,17 @@ export function createLocalSpecRuntimeServer() {
   });
 }
 
-async function dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
+async function dispatch(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestVerifier: LocalSpecRuntimeRequestVerifier,
+): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${HOST}`);
   if (request.method === "GET" && url.pathname === "/health") {
     await service.probe();
     return json(response, 200, { status: "ok", service: "deviludo-local-spec-runtime", mode: "deterministic-loopback" });
   }
-  if (request.headers["x-deviludo-local-spec-runtime"] !== "v1") {
-    return json(response, 403, { error: { code: "LOCAL_SPEC_RUNTIME_HEADER_REQUIRED", message: "Local specification runtime header is required" } });
-  }
+  if (url.search) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
   const match = /^\/v1\/projects\/([^/]+)\/(conversation|spec-approval)$/.exec(url.pathname);
   if (!match) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
   const projectId = decodeURIComponent(match[1]!);
@@ -41,14 +54,17 @@ async function dispatch(request: IncomingMessage, response: ServerResponse): Pro
   if (!PROJECT.test(projectId)) throw new Error("project");
   const binding = { tenantId: "tenant-local", projectId, conversationId: `local:${projectId}` };
   if (request.method === "GET" && operation === "conversation") {
+    requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
     return json(response, 200, { data: await service.snapshot(binding) });
   }
   if (request.method !== "POST" || contentType(request.headers["content-type"]) !== "application/json") {
     return json(response, 405, { error: { code: "METHOD_NOT_ALLOWED", message: "Local specification route requires JSON POST" } });
   }
+  const rawBody = await readBody(request);
+  requestVerifier.verify({ method: "POST", path: url.pathname, body: rawBody, headers: request.headers });
   const idempotency = header(request, "idempotency-key");
   if (!idempotency || !IDEMPOTENCY.test(idempotency)) throw new Error("idempotency");
-  const body = object(JSON.parse(await readBody(request)));
+  const body = object(JSON.parse(rawBody));
   const operationKey = createHash("sha256").update(`${projectId}\0${idempotency}`).digest("hex");
   if (operation === "spec-approval") {
     if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "specRevisionId", "testPlanRevisionId"])) throw new Error("shape");

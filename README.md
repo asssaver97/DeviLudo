@@ -41,7 +41,8 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - 规格批准会在同一 PostgreSQL RLS 事务中解析与 Godot 版本、目标矩阵完全兼容的最新项目 Runner Toolchain，并把其不可变 revision/digest 写入冻结测试计划；缺少兼容版本时整笔审批回滚，数据库触发器也拒绝任何旁路写入的不兼容绑定。
 - “接受并发布”生产路由只接受空 POST、幂等键和绑定方法/路径的短期平台会话；它不会接受客户端 main SHA、证据状态或 `x-mfa-proof`，而是跳转到固定 HTTPS MFA broker。Broker 在租户 RLS 下重新确认请求者仍是活跃 `ProjectOwner`/`TenantAdmin` 且就是该工作流已完成不可变候选验收的 actor，再查询权威发布快照并续跑 Temporal；审计员或另一账号不能复用已知 Release ID。反馈、验收服务本身也在数据库内复核同一写权限，不依赖 Web 进程代传的 actor。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；为固定样例创建隔离 Git 提交，执行真实 import/boot/TestKit/导出检查并生成 manifest、JUnit 和日志证据。
-- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`local:dev` 每次启动生成只供 Web/sidecar 使用的随机 HMAC 会话，所有预检和运行请求绑定精确方法、路径、正文摘要、时间与单次 nonce，不能靠伪造一个固定本机请求头启动 Agent。`/v1/runs` 必须复用预检，默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
+- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`/v1/runs` 必须复用预检，默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
+- 三个本地 sidecar 分别使用 `local:dev` 每次启动生成的独立 256-bit HMAC 会话。规格读写、Godot 执行/证据读取和 Agent 预检/运行全部绑定精确受众、方法、路径、正文摘要、时间与单次 nonce；知道 loopback 端口或伪造旧固定请求头均不能取得 sidecar 权限，任一服务的 Key 也不能跨受众使用。
 - `lib/observability`：所有 Web、控制面、工作流、Agent、Runner、SCM、证据与 Steam 生产启动入口在应用模块加载前注册固定服务身份的 OpenTelemetry SDK，通过 OTLP/protobuf 导出追踪并自动传播 W3C `tracecontext`。生产不能关闭追踪；URL query、Cookie、认证头、提示词、源码和凭据不会进入 span，静态 OTLP Header 凭据也被禁止。
 - `IsolatedLocalAgentExecutor`：把 Claude/Codex Adapter、短期 token broker、Agent Worker 监督器和 SCM 代理组合成一次尝试；完成回执固定租户、测试计划、turn/cost/token 预算、超时和 base/candidate 提交。服务端只有在注入可信 workspace provisioner 与 token broker 后才能启用它。
 - 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。完成回执必须再次绑定全部锁定字段以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态。
@@ -95,7 +96,7 @@ npm install
 npm run local:dev
 ```
 
-打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为 Agent sidecar 生成临时 HMAC Key；Key 只进入两个服务端进程，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时删除。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
+打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为三个 sidecar 分别生成临时 HMAC Key；每个 Key 只进入 Web 与对应 sidecar，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时全部删除。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
 
 管理员页的本地写操作会进入 `/api/admin/**`，执行角色检查、幂等处理并生成脱敏审计事件。没有签名/hash/SBOM/扫描证据时版本批准返回 `SUPPLY_CHAIN_GATES_FAILED`；没有受信 Provider Connector 时“测试并激活”返回 `PROVIDER_PROBE_NOT_CONFIGURED`，草稿和原生效配置均保留。
 
