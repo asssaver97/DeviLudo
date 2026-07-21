@@ -7,6 +7,7 @@ import { S3ImmutableObjectStore } from "../../evidence-archive/src/s3-store";
 import { postgresWorkflowPoolFromEnv, type ClosablePostgresWorkflowPool } from "../../temporal/src/node-postgres";
 import type { SteamInstallEvidenceGate } from "./contracts";
 import { SteamReleaseCoordinator } from "./coordinator";
+import { MtlsSteamDepotFinalizer } from "./depot-finalization";
 import { LockedNativeSteamPublisherConnector } from "./locked-native-publisher";
 import { PostgresSteamCleanInstallDispatcher } from "./postgres-clean-install-dispatch";
 import { PostgresSteamPublishOperationStore } from "./postgres-publish-operations";
@@ -43,6 +44,11 @@ export interface SteamWorkflowExecutorConfig {
     tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>;
     timeoutMs: number;
   }>;
+  readonly depotFinalizer: Readonly<{
+    endpoint: string;
+    tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>;
+    timeoutMs: number;
+  }>;
   readonly authorization: Readonly<{ keyId: string; publicKey: KeyObject }>;
   readonly s3: Readonly<{
     endpoint: string;
@@ -59,17 +65,26 @@ export interface SteamWorkflowExecutorConfig {
 export async function steamWorkflowExecutorConfigFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<SteamWorkflowExecutorConfig> {
-  const [rcPublicKeyPem, authorizationPublicKeyPem, signerKey, signerCertificate, signerCa, s3SecretFile, s3Ca] = await Promise.all([
+  const [
+    rcPublicKeyPem, authorizationPublicKeyPem, signerKey, signerCertificate, signerCa,
+    finalizerKey, finalizerCertificate, finalizerCa, s3SecretFile, s3Ca,
+  ] = await Promise.all([
     secret(env, "DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_PUBLIC_KEY_FILE", 32, MAX_SECRET_BYTES),
     secret(env, "DEVILUDO_STEAM_EXECUTOR_AUTHORIZATION_PUBLIC_KEY_FILE", 32, MAX_SECRET_BYTES),
     secret(env, "DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_KEY_FILE", 32, MAX_SECRET_BYTES),
     secret(env, "DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_CERT_FILE", 32, MAX_SECRET_BYTES),
     secret(env, "DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_CA_FILE", 32, MAX_SECRET_BYTES),
+    secret(env, "DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_KEY_FILE", 32, MAX_SECRET_BYTES),
+    secret(env, "DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_CERT_FILE", 32, MAX_SECRET_BYTES),
+    secret(env, "DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_CA_FILE", 32, MAX_SECRET_BYTES),
     secret(env, "DEVILUDO_STEAM_EXECUTOR_S3_SECRET_KEY_FILE", 16, 256),
     secret(env, "DEVILUDO_STEAM_EXECUTOR_S3_CA_FILE", 32, MAX_SECRET_BYTES),
   ]);
   const rcPublicKey = ed25519PublicKey(rcPublicKeyPem, "RC signer");
   const authorizationPublicKey = ed25519PublicKey(authorizationPublicKeyPem, "authorization");
+  if (signerKey.equals(finalizerKey) || signerCertificate.equals(finalizerCertificate)) {
+    throw new Error("Steam RC signer and depot finalizer must use distinct mTLS identities");
+  }
   const secretAccessKey = Buffer.from(s3SecretFile.toString("utf8").trim(), "utf8");
   s3SecretFile.fill(0);
   if (secretAccessKey.byteLength < 16 || secretAccessKey.byteLength > 256) {
@@ -91,6 +106,11 @@ export async function steamWorkflowExecutorConfigFromEnv(
       publicKey: rcPublicKey,
       tls: Object.freeze({ key: signerKey, certificate: signerCertificate, ca: signerCa }),
       timeoutMs: seconds(env.DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TIMEOUT_SECONDS, 30, 1, 60) * 1_000,
+    }),
+    depotFinalizer: Object.freeze({
+      endpoint: required(env, "DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_URL"),
+      tls: Object.freeze({ key: finalizerKey, certificate: finalizerCertificate, ca: finalizerCa }),
+      timeoutMs: seconds(env.DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TIMEOUT_SECONDS, 1_800, 1, 3_600) * 1_000,
     }),
     authorization: Object.freeze({
       keyId: safeId(env, "DEVILUDO_STEAM_EXECUTOR_AUTHORIZATION_KEY_ID"),
@@ -116,6 +136,7 @@ export function composeSteamWorkflowExecutor(
   const objects = new S3ImmutableObjectStore(config.s3);
   config.s3.secretAccessKey.fill(0);
   const objectInspector = new S3SteamRcObjectInspector(objects, config.s3.bucket);
+  const depotFinalizer = new MtlsSteamDepotFinalizer(config.depotFinalizer);
   const signer = new MtlsSteamRcArtifactSigner(config.rcSigner);
   const connector = new LockedNativeSteamPublisherConnector(config.nativePublisher);
   const releaseEvidence = new PostgresSteamReleaseEvidenceGate(pool);
@@ -140,6 +161,7 @@ export function composeSteamWorkflowExecutor(
   });
   const rcIssuer = new SteamRcIssuer(
     new PostgresSteamRcIssuanceAuthority(pool),
+    depotFinalizer,
     objectInspector,
     signer,
     new PostgresSteamRcArtifactArchive(pool),
@@ -153,7 +175,7 @@ export function composeSteamWorkflowExecutor(
     connector,
     new PostgresSteamDefaultBranchReceiptArchive(pool),
   );
-  return Object.freeze({ executor, connector, coordinator, rcIssuer, objects });
+  return Object.freeze({ executor, connector, coordinator, rcIssuer, depotFinalizer, objects });
 }
 
 export async function steamWorkflowExecutorServiceFromEnv(

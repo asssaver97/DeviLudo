@@ -6,6 +6,11 @@ import type {
   SteamRcDepot,
   SteamTargetPlatform,
 } from "./contracts";
+import {
+  validateFinalizedSteamDepot,
+  type SteamDepotFinalizer,
+  type SteamDepotFinalizationInput,
+} from "./depot-finalization";
 import type { SteamPrivateBetaOperationRequest } from "./workflow-broker-http";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -91,6 +96,7 @@ export class SteamRcIssuer {
 
   constructor(
     private readonly authority: SteamRcIssuanceAuthority,
+    private readonly finalizer: SteamDepotFinalizer,
     private readonly objects: SteamRcObjectInspector,
     private readonly signer: SteamRcArtifactSigner,
     private readonly archive: SteamRcArtifactArchive,
@@ -108,27 +114,68 @@ export class SteamRcIssuer {
       return existing.artifact;
     }
     const depots = await Promise.all(snapshot.depots.map(async (depot): Promise<SteamRcDepot> => {
+      const finalizationInput: SteamDepotFinalizationInput = Object.freeze({
+        tenantId: snapshot.tenantId,
+        projectId: snapshot.projectId,
+        releaseId: snapshot.releaseId,
+        mainCommitSha: snapshot.mainCommitSha,
+        evidenceBundleDigest: snapshot.evidenceBundleDigest,
+        platform: depot.platform,
+        sourceObjectKey: depot.objectKey,
+        sourceArtifactDigest: depot.artifactDigest,
+      });
+      const finalized = validateFinalizedSteamDepot(
+        await this.finalizer.finalize(finalizationInput), finalizationInput,
+      );
       const inspected = await this.objects.inspect({
         tenantId: snapshot.tenantId,
         projectId: snapshot.projectId,
         releaseId: snapshot.releaseId,
         platform: depot.platform,
-        objectKey: depot.objectKey,
-        artifactDigest: depot.artifactDigest,
+        objectKey: finalized.artifactObjectKey,
+        artifactDigest: finalized.artifactDigest,
       });
-      validateObject(inspected, depot.objectKey);
+      validateObject(inspected, finalized.artifactObjectKey);
+      const signingEvidence = await this.objects.inspect({
+        tenantId: snapshot.tenantId,
+        projectId: snapshot.projectId,
+        releaseId: snapshot.releaseId,
+        platform: depot.platform,
+        objectKey: finalized.signingEvidenceObjectKey,
+        artifactDigest: finalized.signingEvidenceDigest,
+      });
+      validateObject(signingEvidence, finalized.signingEvidenceObjectKey);
+      let notarizationEvidence: Readonly<{ objectRef: string; sizeBytes: number }> | null = null;
+      if (finalized.notarizationEvidenceObjectKey && finalized.notarizationEvidenceDigest) {
+        notarizationEvidence = await this.objects.inspect({
+          tenantId: snapshot.tenantId,
+          projectId: snapshot.projectId,
+          releaseId: snapshot.releaseId,
+          platform: depot.platform,
+          objectKey: finalized.notarizationEvidenceObjectKey,
+          artifactDigest: finalized.notarizationEvidenceDigest,
+        });
+        validateObject(notarizationEvidence, finalized.notarizationEvidenceObjectKey);
+      }
       return Object.freeze({
         depotId: depot.depotId,
         platform: depot.platform,
         objectRef: inspected.objectRef,
-        artifactDigest: depot.artifactDigest,
+        sourceArtifactDigest: finalized.sourceArtifactDigest,
+        artifactDigest: finalized.artifactDigest,
         sizeBytes: inspected.sizeBytes,
+        signingScheme: finalized.signingScheme,
+        signingIdentityDigest: finalized.signingIdentityDigest,
+        signingEvidenceRef: signingEvidence.objectRef,
+        signingEvidenceDigest: finalized.signingEvidenceDigest,
+        notarizationEvidenceRef: notarizationEvidence?.objectRef ?? null,
+        notarizationEvidenceDigest: finalized.notarizationEvidenceDigest,
       });
     }));
     const issuedAt = validNow(this.#now()).toISOString();
     const claims: SteamRcArtifactClaims = deepFreeze({
       kind: "deviludo-steam-rc" as const,
-      version: 1 as const,
+      version: 2 as const,
       tenantId: snapshot.tenantId,
       projectId: snapshot.projectId,
       releaseId: snapshot.releaseId,
@@ -160,7 +207,9 @@ export class SteamRcIssuer {
   }
 
   async probe(): Promise<void> {
-    await Promise.all([this.authority.probe(), this.objects.probe(), this.signer.probe(), this.archive.probe()]);
+    await Promise.all([
+      this.authority.probe(), this.finalizer.probe(), this.objects.probe(), this.signer.probe(), this.archive.probe(),
+    ]);
   }
 }
 
@@ -172,10 +221,10 @@ function validateArchived(value: SteamRcArchivedArtifact, snapshot: SteamRcIssua
   validateArtifact(value.artifact, snapshot);
   if (steamCanonicalDigest(value.artifact) !== value.artifactDigest) invalid();
   const expectedDepots = snapshot.depots.map((entry) => ({
-    platform: entry.platform, depotId: entry.depotId, artifactDigest: entry.artifactDigest,
+    platform: entry.platform, depotId: entry.depotId, sourceArtifactDigest: entry.artifactDigest,
   }));
   const actualDepots = value.artifact.claims.depots.map((entry) => ({
-    platform: entry.platform, depotId: entry.depotId, artifactDigest: entry.artifactDigest,
+    platform: entry.platform, depotId: entry.depotId, sourceArtifactDigest: entry.sourceArtifactDigest,
   }));
   if (steamCanonicalDigest(actualDepots) !== steamCanonicalDigest(expectedDepots)) invalid();
 }
@@ -190,7 +239,7 @@ export function validateSignedSteamRcArtifact(value: unknown): SignedSteamRcArti
     "specRevisionId", "specDigest", "testPlanDigest", "evidenceBundleDigest", "steamAppId", "targetMatrix", "depots",
     "issuedAt", "expiresAt"]);
   const matrix = matrixValue(claims.targetMatrix);
-  if (claims.kind !== "deviludo-steam-rc" || claims.version !== 1
+  if (claims.kind !== "deviludo-steam-rc" || claims.version !== 2
     || typeof claims.tenantId !== "string" || !UUID.test(claims.tenantId)
     || typeof claims.projectId !== "string" || !UUID.test(claims.projectId)
     || typeof claims.releaseId !== "string" || !UUID.test(claims.releaseId)
@@ -212,7 +261,7 @@ export function validateSignedSteamRcArtifact(value: unknown): SignedSteamRcArti
     signature: body.signature,
     claims: {
       kind: "deviludo-steam-rc",
-      version: 1,
+      version: 2,
       tenantId: claims.tenantId,
       projectId: claims.projectId,
       releaseId: claims.releaseId,
@@ -276,19 +325,45 @@ function validateObject(value: Readonly<{ objectRef: string; sizeBytes: number }
 
 function depotValue(value: unknown): SteamRcDepot {
   const body = record(value);
-  exactKeys(body, ["depotId", "platform", "objectRef", "artifactDigest", "sizeBytes"]);
+  exactKeys(body, [
+    "depotId", "platform", "objectRef", "sourceArtifactDigest", "artifactDigest", "sizeBytes",
+    "signingScheme", "signingIdentityDigest", "signingEvidenceRef", "signingEvidenceDigest",
+    "notarizationEvidenceRef", "notarizationEvidenceDigest",
+  ]);
   if (typeof body.depotId !== "string" || !NUMERIC_ID.test(body.depotId)
     || !isPlatform(body.platform) || typeof body.objectRef !== "string"
     || !/^s3:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{1,1000}$/.test(body.objectRef) || body.objectRef.includes("..")
+    || typeof body.sourceArtifactDigest !== "string" || !SHA256.test(body.sourceArtifactDigest)
     || typeof body.artifactDigest !== "string" || !SHA256.test(body.artifactDigest)
+    || typeof body.signingIdentityDigest !== "string" || !SHA256.test(body.signingIdentityDigest)
+    || typeof body.signingEvidenceRef !== "string"
+    || !/^s3:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{1,1000}$/.test(body.signingEvidenceRef)
+    || body.signingEvidenceRef.includes("..")
+    || typeof body.signingEvidenceDigest !== "string" || !SHA256.test(body.signingEvidenceDigest)
     || !Number.isSafeInteger(body.sizeBytes) || (body.sizeBytes as number) < 1
     || (body.sizeBytes as number) > 8 * 1024 * 1024 * 1024) invalid();
+  const expectedScheme = body.platform === "windows" ? "WINDOWS_AUTHENTICODE"
+    : body.platform === "macos" ? "MACOS_DEVELOPER_ID" : "LINUX_SIGSTORE";
+  if (body.signingScheme !== expectedScheme) invalid();
+  if (body.platform === "macos") {
+    if (typeof body.notarizationEvidenceRef !== "string"
+      || !/^s3:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{1,1000}$/.test(body.notarizationEvidenceRef)
+      || body.notarizationEvidenceRef.includes("..")
+      || typeof body.notarizationEvidenceDigest !== "string" || !SHA256.test(body.notarizationEvidenceDigest)) invalid();
+  } else if (body.notarizationEvidenceRef !== null || body.notarizationEvidenceDigest !== null) invalid();
   return Object.freeze({
     depotId: body.depotId,
     platform: body.platform,
     objectRef: body.objectRef,
+    sourceArtifactDigest: body.sourceArtifactDigest,
     artifactDigest: body.artifactDigest,
     sizeBytes: body.sizeBytes as number,
+    signingScheme: expectedScheme,
+    signingIdentityDigest: body.signingIdentityDigest,
+    signingEvidenceRef: body.signingEvidenceRef,
+    signingEvidenceDigest: body.signingEvidenceDigest,
+    notarizationEvidenceRef: body.notarizationEvidenceRef as string | null,
+    notarizationEvidenceDigest: body.notarizationEvidenceDigest as string | null,
   });
 }
 

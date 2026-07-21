@@ -204,7 +204,7 @@ function validateEnvelope<T>(
 
 function validateRc(rc: SignedSteamRcArtifact["claims"], at: string, allowExpired = false): void {
   for (const id of [rc.tenantId, rc.projectId, rc.releaseId, rc.specRevisionId]) if (!ID.test(id)) throw new Error("Steam RC identity is invalid");
-  if (rc.kind !== "deviludo-steam-rc" || rc.version !== 1 || !SHA1.test(rc.mainCommitSha)
+  if (rc.kind !== "deviludo-steam-rc" || rc.version !== 2 || !SHA1.test(rc.mainCommitSha)
     || ![rc.sourceDigest, rc.specDigest, rc.testPlanDigest, rc.evidenceBundleDigest].every((value) => SHA256.test(value))
     || !NUMERIC_ID.test(rc.steamAppId) || rc.steamAppId === "0") throw new Error("Steam RC binding is invalid");
   validateTimeWindow(rc.issuedAt, rc.expiresAt, at, 60 * 60_000, allowExpired);
@@ -216,7 +216,17 @@ function validateRc(rc: SignedSteamRcArtifact["claims"], at: string, allowExpire
     if (!NUMERIC_ID.test(depot.depotId) || depot.depotId === "0" || depots.has(depot.depotId)
       || !rc.targetMatrix.includes(depot.platform) || platforms.has(depot.platform)
       || !/^s3:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{1,1000}$/.test(depot.objectRef)
-      || !SHA256.test(depot.artifactDigest) || !Number.isSafeInteger(depot.sizeBytes) || depot.sizeBytes <= 0) {
+      || !SHA256.test(depot.sourceArtifactDigest) || !SHA256.test(depot.artifactDigest)
+      || !SHA256.test(depot.signingIdentityDigest) || !SHA256.test(depot.signingEvidenceDigest)
+      || !/^s3:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{1,1000}$/.test(depot.signingEvidenceRef)
+      || !Number.isSafeInteger(depot.sizeBytes) || depot.sizeBytes <= 0
+      || depot.signingScheme !== (depot.platform === "windows" ? "WINDOWS_AUTHENTICODE"
+        : depot.platform === "macos" ? "MACOS_DEVELOPER_ID" : "LINUX_SIGSTORE")
+      || (depot.platform === "macos"
+        ? typeof depot.notarizationEvidenceRef !== "string"
+          || !/^s3:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{1,1000}$/.test(depot.notarizationEvidenceRef)
+          || typeof depot.notarizationEvidenceDigest !== "string" || !SHA256.test(depot.notarizationEvidenceDigest)
+        : depot.notarizationEvidenceRef !== null || depot.notarizationEvidenceDigest !== null)) {
       throw new Error("Steam RC depot binding is invalid");
     }
     depots.add(depot.depotId);

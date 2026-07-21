@@ -21,6 +21,9 @@ async function fixture(t: { after(callback: () => Promise<void>): void }) {
     tlsKey: join(root, "tls.key"),
     tlsCertificate: join(root, "tls.crt"),
     tlsCa: join(root, "tls-ca.crt"),
+    finalizerTlsKey: join(root, "finalizer-tls.key"),
+    finalizerTlsCertificate: join(root, "finalizer-tls.crt"),
+    finalizerTlsCa: join(root, "finalizer-ca.crt"),
     s3Secret: join(root, "s3-secret"),
     s3Ca: join(root, "s3-ca.crt"),
   };
@@ -32,6 +35,9 @@ async function fixture(t: { after(callback: () => Promise<void>): void }) {
     writeFile(files.tlsKey, "k".repeat(64), { mode: 0o400 }),
     writeFile(files.tlsCertificate, "c".repeat(64), { mode: 0o400 }),
     writeFile(files.tlsCa, "a".repeat(64), { mode: 0o400 }),
+    writeFile(files.finalizerTlsKey, "f".repeat(64), { mode: 0o400 }),
+    writeFile(files.finalizerTlsCertificate, "d".repeat(64), { mode: 0o400 }),
+    writeFile(files.finalizerTlsCa, "q".repeat(64), { mode: 0o400 }),
     writeFile(files.s3Secret, "s".repeat(32), { mode: 0o400 }),
     writeFile(files.s3Ca, "r".repeat(64), { mode: 0o400 }),
   ]);
@@ -47,6 +53,10 @@ async function fixture(t: { after(callback: () => Promise<void>): void }) {
     DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_KEY_FILE: files.tlsKey,
     DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_CERT_FILE: files.tlsCertificate,
     DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_CA_FILE: files.tlsCa,
+    DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_URL: "https://steam-depot-finalizer.internal",
+    DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_KEY_FILE: files.finalizerTlsKey,
+    DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_CERT_FILE: files.finalizerTlsCertificate,
+    DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_CA_FILE: files.finalizerTlsCa,
     DEVILUDO_STEAM_EXECUTOR_AUTHORIZATION_KEY_ID: "steam-authorization-key-2026-07",
     DEVILUDO_STEAM_EXECUTOR_AUTHORIZATION_PUBLIC_KEY_FILE: files.authorizationPublicKey,
     DEVILUDO_STEAM_EXECUTOR_S3_ENDPOINT: "https://s3.internal",
@@ -66,6 +76,8 @@ test("isolated Steam executor loads pinned native, KMS, verification and S3 iden
   assert.equal(config.nativePublisher.configDigest, "b".repeat(64));
   assert.equal(config.rcSigner.keyId, "steam-rc-key-2026-07");
   assert.equal(config.rcSigner.publicKey.asymmetricKeyType, "ed25519");
+  assert.equal(config.depotFinalizer.endpoint, "https://steam-depot-finalizer.internal");
+  assert.equal(config.depotFinalizer.tls.key.toString("utf8"), "f".repeat(64));
   assert.equal(config.authorization.publicKey.asymmetricKeyType, "ed25519");
   assert.equal(config.s3.secretAccessKey.toString("utf8"), "s".repeat(32));
   assert.doesNotMatch(JSON.stringify(env), /configVdf|accountPassword|guardCode|branchPassword/i);
@@ -86,4 +98,8 @@ test("isolated Steam executor rejects missing, floating and inline secret config
     ...env,
     DEVILUDO_STEAM_EXECUTOR_S3_SECRET_KEY_FILE: "inline-secret-value",
   }), /path is invalid/);
+  await assert.rejects(steamWorkflowExecutorConfigFromEnv({
+    ...env,
+    DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_CERT_FILE: env.DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_CERT_FILE,
+  }), /must use distinct mTLS identities/);
 });

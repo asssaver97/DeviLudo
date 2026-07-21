@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { signSteamRcArtifact, steamCanonicalDigest, verifySteamRcArtifact } from "../src/artifacts";
+import { signedDepotObjectKey, signingEvidenceObjectKey } from "../src/depot-finalization";
 import type { SteamRcArchivedArtifact, SteamRcIssuanceSnapshot } from "../src/rc-issuance";
 import { SteamRcIssuer, validateSignedSteamRcArtifact } from "../src/rc-issuance";
 import type { SteamPrivateBetaOperationRequest } from "../src/workflow-broker-http";
@@ -61,6 +62,25 @@ const snapshot: SteamRcIssuanceSnapshot = Object.freeze({
   ]),
 });
 
+function finalized(platform: "linux" | "windows", sourceArtifactDigest: string) {
+  const artifactDigest = (platform === "linux" ? "4" : "5").repeat(64);
+  const signingEvidenceDigest = (platform === "linux" ? "6" : "7").repeat(64);
+  return Object.freeze({
+    platform,
+    sourceArtifactDigest,
+    artifactObjectKey: signedDepotObjectKey(tenantId, projectId, releaseId, platform, artifactDigest),
+    artifactDigest,
+    signingScheme: platform === "linux" ? "LINUX_SIGSTORE" as const : "WINDOWS_AUTHENTICODE" as const,
+    signingIdentityDigest: "8".repeat(64),
+    signingEvidenceObjectKey: signingEvidenceObjectKey(
+      tenantId, projectId, releaseId, platform, signingEvidenceDigest,
+    ),
+    signingEvidenceDigest,
+    notarizationEvidenceObjectKey: null,
+    notarizationEvidenceDigest: null,
+  });
+}
+
 test("Steam RC issuer inspects exact exports, signs once and replays the append-only artifact", async () => {
   const key = generateKeyPairSync("ed25519");
   const inspected: string[] = [];
@@ -70,10 +90,14 @@ test("Steam RC issuer inspects exact exports, signs once and replays the append-
     async resolve(value) { assert.equal(value, request); return snapshot; },
     async probe() {},
   }, {
+    async finalize(input) { return finalized(input.platform as "linux" | "windows", input.sourceArtifactDigest); },
+    async probe() {},
+  }, {
     async inspect(input) {
       inspected.push(input.objectKey);
-      assert.equal(input.artifactDigest, snapshot.depots.find((item) => item.platform === input.platform)?.artifactDigest);
-      return { objectRef: `s3://deviludo-evidence/${input.objectKey}`, sizeBytes: input.platform === "linux" ? 1_024 : 2_048 };
+      const artifact = input.objectKey.includes("/artifact/");
+      return { objectRef: `s3://deviludo-evidence/${input.objectKey}`,
+        sizeBytes: artifact ? input.platform === "linux" ? 1_024 : 2_048 : 512 };
     },
     async probe() {},
   }, {
@@ -106,12 +130,15 @@ test("Steam RC issuer inspects exact exports, signs once and replays the append-
   ]);
   assert.equal(first.claims.expiresAt, "2030-01-01T01:00:00.000Z");
   assert.equal(signs, 1);
-  assert.deepEqual(inspected, snapshot.depots.map((depot) => depot.objectKey));
+  assert.deepEqual([...inspected].sort(), snapshot.depots.flatMap((depot) => {
+    const result = finalized(depot.platform as "linux" | "windows", depot.artifactDigest);
+    return [result.artifactObjectKey, result.signingEvidenceObjectKey];
+  }).sort());
 
   const replay = await issuer.ensure(request);
   assert.equal(replay, first);
   assert.equal(signs, 1);
-  assert.equal(inspected.length, 2);
+  assert.equal(inspected.length, 4);
   assert.doesNotMatch(JSON.stringify(first), /private.?key|accountPassword|configVdf/i);
 });
 
@@ -119,7 +146,7 @@ test("Steam RC issuer rejects archived evidence or depot drift before signing or
   const key = generateKeyPairSync("ed25519");
   const claims = {
     kind: "deviludo-steam-rc" as const,
-    version: 1 as const,
+    version: 2 as const,
     tenantId,
     projectId,
     releaseId,
@@ -131,13 +158,23 @@ test("Steam RC issuer rejects archived evidence or depot drift before signing or
     evidenceBundleDigest: snapshot.evidenceBundleDigest,
     steamAppId: snapshot.steamAppId,
     targetMatrix: snapshot.targetMatrix,
-    depots: Object.freeze(snapshot.depots.map((depot) => Object.freeze({
-      depotId: depot.depotId,
-      platform: depot.platform,
-      objectRef: `s3://deviludo-evidence/${depot.objectKey}`,
-      artifactDigest: depot.artifactDigest,
-      sizeBytes: 1_024,
-    }))),
+    depots: Object.freeze(snapshot.depots.map((depot) => {
+      const result = finalized(depot.platform as "linux" | "windows", depot.artifactDigest);
+      return Object.freeze({
+        depotId: depot.depotId,
+        platform: depot.platform,
+        objectRef: `s3://deviludo-evidence/${result.artifactObjectKey}`,
+        sourceArtifactDigest: result.sourceArtifactDigest,
+        artifactDigest: result.artifactDigest,
+        sizeBytes: 1_024,
+        signingScheme: result.signingScheme,
+        signingIdentityDigest: result.signingIdentityDigest,
+        signingEvidenceRef: `s3://deviludo-evidence/${result.signingEvidenceObjectKey}`,
+        signingEvidenceDigest: result.signingEvidenceDigest,
+        notarizationEvidenceRef: null,
+        notarizationEvidenceDigest: null,
+      });
+    })),
     issuedAt: "2030-01-01T00:00:00.000Z",
     expiresAt: "2030-01-01T01:00:00.000Z",
   };
@@ -145,6 +182,9 @@ test("Steam RC issuer rejects archived evidence or depot drift before signing or
   let objects = 0;
   const issuer = new SteamRcIssuer({
     async resolve() { return { ...snapshot, depotConfigurationDigest: "9".repeat(64) }; },
+    async probe() {},
+  }, {
+    async finalize() { throw new Error("must not finalize"); },
     async probe() {},
   }, {
     async inspect() { objects += 1; throw new Error("must not inspect"); },

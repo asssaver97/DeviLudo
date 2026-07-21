@@ -17,6 +17,13 @@ const buildReceiptId = "44444444-4444-4444-8444-444444444444";
 const requestDigest = "a".repeat(64);
 const steamAppId = "2841930";
 const buildId = "91234567";
+const signedLinuxDepot = Object.freeze({
+  depotId: "2841931", platform: "linux" as const, objectRef: "s3://evidence/tenants/release/linux.signed",
+  sourceArtifactDigest: "1".repeat(64), artifactDigest: "2".repeat(64), sizeBytes: 1024,
+  signingScheme: "LINUX_SIGSTORE" as const, signingIdentityDigest: "3".repeat(64),
+  signingEvidenceRef: "s3://evidence/tenants/release/linux.signing.json",
+  signingEvidenceDigest: "4".repeat(64), notarizationEvidenceRef: null, notarizationEvidenceDigest: null,
+});
 const session: SteamBuildSession = Object.freeze({
   id: "steam-session-001", tenantId, accountId: "build-account-001", accountName: "deviludo_build",
   configVdfSecretRef: "vault://steam/config-vdf/versions/3", credentialVersionId: buildReceiptId,
@@ -25,13 +32,12 @@ const session: SteamBuildSession = Object.freeze({
   state: "ACTIVE", verifiedAt: "2030-01-01T00:00:00.000Z", expiresAt: "2030-02-01T00:00:00.000Z",
 });
 const rc: SteamRcArtifactClaims = Object.freeze({
-  kind: "deviludo-steam-rc", version: 1, tenantId, projectId, releaseId,
+  kind: "deviludo-steam-rc", version: 2, tenantId, projectId, releaseId,
   mainCommitSha: "b".repeat(40), sourceDigest: "c".repeat(64),
   specRevisionId: "55555555-5555-4555-8555-555555555555",
   specDigest: "d".repeat(64), testPlanDigest: "e".repeat(64), evidenceBundleDigest: "f".repeat(64),
   steamAppId, targetMatrix: Object.freeze(["linux"] as const),
-  depots: Object.freeze([{ depotId: "2841931", platform: "linux" as const,
-    objectRef: "s3://evidence/tenants/release/linux.tar", artifactDigest: "1".repeat(64), sizeBytes: 1024 }]),
+  depots: Object.freeze([signedLinuxDepot]),
   issuedAt: "2030-01-01T00:00:00.000Z", expiresAt: "2030-01-01T01:00:00.000Z",
 });
 

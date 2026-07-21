@@ -4,13 +4,22 @@ export interface SteamRcDepot {
   readonly depotId: string;
   readonly platform: SteamTargetPlatform;
   readonly objectRef: string;
+  /** Digest of the immutable Runner export before native release signing. */
+  readonly sourceArtifactDigest: string;
+  /** Digest of the finalized, signed artifact uploaded to Steam. */
   readonly artifactDigest: string;
   readonly sizeBytes: number;
+  readonly signingScheme: "LINUX_SIGSTORE" | "MACOS_DEVELOPER_ID" | "WINDOWS_AUTHENTICODE";
+  readonly signingIdentityDigest: string;
+  readonly signingEvidenceRef: string;
+  readonly signingEvidenceDigest: string;
+  readonly notarizationEvidenceRef: string | null;
+  readonly notarizationEvidenceDigest: string | null;
 }
 
 export interface SteamRcArtifactClaims {
   readonly kind: "deviludo-steam-rc";
-  readonly version: 1;
+  readonly version: 2;
   readonly tenantId: string;
   readonly projectId: string;
   readonly releaseId: string;

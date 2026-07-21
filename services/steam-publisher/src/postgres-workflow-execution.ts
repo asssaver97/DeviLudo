@@ -19,6 +19,7 @@ import type {
   SteamDefaultBranchOperationRequest,
   SteamPrivateBetaOperationRequest,
 } from "./workflow-broker-http";
+import { validateSignedSteamRcArtifact } from "./rc-issuance";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -431,10 +432,8 @@ export class PostgresSteamDefaultBranchReceiptArchive implements SteamDefaultBra
 }
 
 function parseSignedRc(value: unknown): SignedSteamRcArtifact {
-  const body = envelope(value);
-  const claims = record(body.claims);
-  if (claims.kind !== "deviludo-steam-rc" || claims.version !== 1) invalid();
-  return Object.freeze({ keyId: body.keyId, claims: Object.freeze({ ...claims }) as unknown as SignedSteamRcArtifact["claims"], signature: body.signature });
+  try { return validateSignedSteamRcArtifact(jsonValue(value)); }
+  catch { invalid(); }
 }
 
 function parseSignedAuthorization(value: unknown): SignedSteamPublishAuthorization {

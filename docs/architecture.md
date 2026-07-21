@@ -25,7 +25,9 @@ There are four isolated execution identities:
    It accepts signed, fenced jobs and uploads evidence through outbound mTLS.
 4. **Steam publisher** — a narrow release identity with no Agent or source-write
    access. It decrypts a build-account Steam session only for a bound release and
-   uploads a signed RC to a password-protected Beta branch.
+   finalizes every depot through platform-native signing (and macOS
+   notarization), then uploads a signed RC v2 to a password-protected Beta
+   branch.
 
 ```mermaid
 flowchart LR
@@ -201,7 +203,10 @@ commit, source digest, and exact matrix.
 ## Steam boundary and external approvals
 
 “Accept and publish” requires a fresh MFA assertion. The publisher creates a
-signed RC from the verified main SHA, uploads it with a least-privilege Steam
+signed RC v2 from the verified main SHA. Each depot binds the original Runner
+export to a separately verified Linux Sigstore, Windows Authenticode or macOS
+Developer ID artifact; macOS also binds mandatory notarization evidence. The
+publisher uploads it with a least-privilege Steam
 build account to a password-protected Beta, then clean Steam clients install and
 run the same platform gate. The platform stores only encrypted `config.vdf`
 session material, never the user's master password. Valve review, first-release

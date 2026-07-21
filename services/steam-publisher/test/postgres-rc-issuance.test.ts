@@ -152,7 +152,7 @@ test("PostgreSQL RC archive replays only the exact signed artifact and frozen de
   const key = generateKeyPairSync("ed25519");
   const artifact = signSteamRcArtifact("steam-rc-kms-9", key.privateKey, {
     kind: "deviludo-steam-rc",
-    version: 1,
+    version: 2,
     tenantId,
     projectId,
     releaseId,
@@ -167,9 +167,17 @@ test("PostgreSQL RC archive replays only the exact signed artifact and frozen de
     depots: Object.freeze(snapshot.depots.map((depot) => Object.freeze({
       depotId: depot.depotId,
       platform: depot.platform,
-      objectRef: `s3://deviludo-evidence/${depot.objectKey}`,
-      artifactDigest: depot.artifactDigest,
+      objectRef: `s3://deviludo-evidence/signed/${depot.platform}`,
+      sourceArtifactDigest: depot.artifactDigest,
+      artifactDigest: (depot.platform === "linux" ? "8" : "9").repeat(64),
       sizeBytes: 4_096,
+      signingScheme: depot.platform === "windows" ? "WINDOWS_AUTHENTICODE" as const
+        : depot.platform === "macos" ? "MACOS_DEVELOPER_ID" as const : "LINUX_SIGSTORE" as const,
+      signingIdentityDigest: "a".repeat(64),
+      signingEvidenceRef: `s3://deviludo-evidence/signing/${depot.platform}.json`,
+      signingEvidenceDigest: "b".repeat(64),
+      notarizationEvidenceRef: depot.platform === "macos" ? "s3://deviludo-evidence/notary/macos.json" : null,
+      notarizationEvidenceDigest: depot.platform === "macos" ? "c".repeat(64) : null,
     }))),
     issuedAt: "2030-01-01T00:00:00.000Z",
     expiresAt: "2030-01-01T01:00:00.000Z",

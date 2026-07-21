@@ -1,5 +1,6 @@
 export * from "./artifacts";
 export * from "./contracts";
+export * from "./depot-finalization";
 export * from "./clean-install-preparation";
 export * from "./clean-install-http";
 export * from "./postgres-clean-install-authority";

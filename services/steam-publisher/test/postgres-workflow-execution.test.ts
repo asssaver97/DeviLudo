@@ -46,14 +46,18 @@ const publishRequest: SteamDefaultBranchOperationRequest = Object.freeze({
 const rc = Object.freeze({
   keyId: "steam-rc-key-1",
   claims: Object.freeze({
-    kind: "deviludo-steam-rc" as const, version: 1 as const, tenantId, projectId, releaseId,
+    kind: "deviludo-steam-rc" as const, version: 2 as const, tenantId, projectId, releaseId,
     mainCommitSha, sourceDigest, specRevisionId: defaultReceiptId,
     specDigest: "1".repeat(64), testPlanDigest: "2".repeat(64), evidenceBundleDigest: evidenceDigest,
     steamAppId, targetMatrix: uploadRequest.targetMatrix,
-    depots: Object.freeze([{ depotId: "2841931", platform: "linux" as const, objectRef: "s3://rc/linux.tar", artifactDigest: "3".repeat(64), sizeBytes: 1024 }]),
+    depots: Object.freeze([{ depotId: "2841931", platform: "linux" as const, objectRef: "s3://rc/linux.signed",
+      sourceArtifactDigest: "3".repeat(64), artifactDigest: "4".repeat(64), sizeBytes: 1024,
+      signingScheme: "LINUX_SIGSTORE" as const, signingIdentityDigest: "5".repeat(64),
+      signingEvidenceRef: "s3://rc/linux.signing.json", signingEvidenceDigest: "6".repeat(64),
+      notarizationEvidenceRef: null, notarizationEvidenceDigest: null }]),
     issuedAt: "2030-01-01T00:00:00.000Z", expiresAt: "2030-01-01T01:00:00.000Z",
   }),
-  signature: "signed-rc",
+  signature: "s".repeat(86),
 });
 const authorization = Object.freeze({
   keyId: "steam-auth-key-1",

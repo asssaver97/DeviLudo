@@ -59,8 +59,9 @@ behind the web console:
   repository binding, repository-scoped installation tokens, Git Data/Draft PR
   APIs, evidence-gated merge and lease-claimed idempotency keep credentials and
   branch authority outside Agent workers.
-- `steam-publisher`: verifies signed main-SHA RCs and fresh MFA publish
-  authorizations, consumes only an exact-App encrypted `config.vdf` SecretRef,
+- `steam-publisher`: finalizes raw Runner exports through a credential-isolated
+  native signing/notarization Broker, verifies signed main-SHA RC v2 artifacts
+  and fresh MFA publish authorizations, consumes only an exact-App encrypted `config.vdf` SecretRef,
   plans a shell-free SteamCMD private-Beta upload, and dispatches clean Steam
   Client reinstall E2E across the selected matrix before external release gates.
 - `steam-approval-monitor`: accepts only allow-listed mTLS Steam verifier

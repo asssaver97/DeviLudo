@@ -43,13 +43,21 @@ const uploadRequest: SteamPrivateBetaOperationRequest = Object.freeze({
   targetMatrix: Object.freeze(["linux", "windows"] as const),
 });
 const rcClaims = Object.freeze({
-  kind: "deviludo-steam-rc" as const, version: 1 as const, tenantId, projectId, releaseId,
+  kind: "deviludo-steam-rc" as const, version: 2 as const, tenantId, projectId, releaseId,
   mainCommitSha, sourceDigest, specRevisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
   specDigest: "1".repeat(64), testPlanDigest: "2".repeat(64), evidenceBundleDigest: evidenceDigest,
   steamAppId, targetMatrix: uploadRequest.targetMatrix,
   depots: Object.freeze([
-    { depotId: "2841931", platform: "linux" as const, objectRef: "s3://rc/linux.tar", artifactDigest: "3".repeat(64), sizeBytes: 1_024 },
-    { depotId: "2841932", platform: "windows" as const, objectRef: "s3://rc/windows.zip", artifactDigest: "4".repeat(64), sizeBytes: 2_048 },
+    { depotId: "2841931", platform: "linux" as const, objectRef: "s3://rc/linux.signed",
+      sourceArtifactDigest: "3".repeat(64), artifactDigest: "4".repeat(64), sizeBytes: 1_024,
+      signingScheme: "LINUX_SIGSTORE" as const, signingIdentityDigest: "5".repeat(64),
+      signingEvidenceRef: "s3://rc/linux.signing.json", signingEvidenceDigest: "6".repeat(64),
+      notarizationEvidenceRef: null, notarizationEvidenceDigest: null },
+    { depotId: "2841932", platform: "windows" as const, objectRef: "s3://rc/windows.signed",
+      sourceArtifactDigest: "7".repeat(64), artifactDigest: "8".repeat(64), sizeBytes: 2_048,
+      signingScheme: "WINDOWS_AUTHENTICODE" as const, signingIdentityDigest: "9".repeat(64),
+      signingEvidenceRef: "s3://rc/windows.signing.json", signingEvidenceDigest: "a".repeat(64),
+      notarizationEvidenceRef: null, notarizationEvidenceDigest: null },
   ]),
   issuedAt: "2030-01-01T00:00:00.000Z", expiresAt: "2030-01-01T01:00:00.000Z",
 });

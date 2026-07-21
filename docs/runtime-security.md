@@ -257,7 +257,7 @@ broker; only the encrypted `config.vdf` Vault reference, build-account identity,
 credential revision, exact allowed App IDs, verified minimal permissions and
 expiry are persisted.
 
-The Agent-free publisher accepts an Ed25519-signed RC bound to the merged main
+The Agent-free publisher accepts an Ed25519-signed RC v2 bound to the merged main
 SHA and full release evidence plus an independent ten-minute MFA publish
 authorization. SteamCMD is invoked without a shell and with `+login <account>`
 but no password; the session file is materialized into its private runtime.

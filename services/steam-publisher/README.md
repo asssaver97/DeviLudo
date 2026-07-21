@@ -165,8 +165,12 @@ from `PENDING` or an expired `RUNNING` lease rather than an in-memory message.
 
 The isolated executor image starts with `npm run start:steam-workflow-executor`.
 It composes an audited, digest-pinned native publisher, tenant-RLS PostgreSQL
-authority, checksum-verifying immutable S3 reads and an mTLS Vault/KMS RC
-signer with `steamWorkflowWorkerFromEnv()`. Its sorted tenant scope is explicit,
+authority, checksum-verifying immutable S3 reads, an mTLS platform-native depot
+finalizer and an mTLS Vault/KMS RC signer with `steamWorkflowWorkerFromEnv()`.
+The finalizer uses a distinct workload identity and is the only component that
+may access Windows Authenticode, Apple Developer ID/notary or Linux Sigstore
+credentials. Its response contains only content addresses and public evidence.
+Its sorted tenant scope is explicit,
 startup probes every dependency before polling, and its logs contain only
 bounded lifecycle events. The native adapter has a fixed argv contract, uses
 `execFile` without a shell, and rechecks both executable and configuration
@@ -188,10 +192,16 @@ append-only and enforces tenant/project/run foreign keys. Only Vault SecretRefs
 are stored for `config.vdf` and Beta passwords.
 
 RC creation is itself an authoritative pre-upload step. `SteamRcIssuer`
-re-resolves the passed `MAIN_RELEASE_GATE` evidence, verifies every immutable
-production-export object, fixes a one-hour claim window, delegates Ed25519
-signing to a Vault/KMS boundary and persists the exact signed JSON before the
-execution authority is read. `PostgresSteamRcIssuanceAuthority` derives object
+re-resolves the passed `MAIN_RELEASE_GATE` evidence, sends each immutable raw
+production export to the fixed mTLS depot finalizer, then independently verifies
+the finalized artifact and signing-evidence objects in S3. Windows requires
+Authenticode evidence, Linux requires Sigstore evidence, and macOS requires
+both Developer ID signing and a notarization evidence object. RC schema v2
+binds the raw digest, finalized digest, signing identity and all evidence
+digests; a raw Runner export can no longer be uploaded directly. Only then does
+the issuer fix a one-hour claim window, delegate Ed25519 JSON signing to a
+separate Vault/KMS boundary and persist the exact RC before execution authority
+is read. `PostgresSteamRcIssuanceAuthority` derives source object
 keys instead of accepting them from a request. Migration
 `023_steam_rc_issuance.sql` stores one immutable, tenant-RLS depot configuration
 revision and freezes its ID and canonical digest into the append-only RC row.

@@ -686,10 +686,11 @@ test("Steam Workflow Broker production host uses a recoverable RLS outbox and cr
   assert.doesNotMatch(worker, /import\(|exec\(|spawn\(|shell:/);
 });
 
-test("isolated Steam execution worker pins native, PostgreSQL, S3 and KMS authority", () => {
+test("isolated Steam execution worker pins native signing, PostgreSQL, S3 and KMS authority", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/026_steam_clean_install_reservations.sql", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/steam-publisher/src/run-workflow-executor-service.ts", import.meta.url), "utf8");
+  const finalization = readFileSync(new URL("../services/steam-publisher/src/depot-finalization.ts", import.meta.url), "utf8");
   const native = readFileSync(new URL("../services/steam-publisher/src/locked-native-publisher.ts", import.meta.url), "utf8");
   const evidence = readFileSync(new URL("../services/steam-publisher/src/postgres-release-evidence.ts", import.meta.url), "utf8");
   const reservations = readFileSync(new URL("../services/steam-publisher/src/postgres-clean-install-dispatch.ts", import.meta.url), "utf8");
@@ -699,10 +700,18 @@ test("isolated Steam execution worker pins native, PostgreSQL, S3 and KMS author
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
   assert.match(runtime, /new LockedNativeSteamPublisherConnector/);
   assert.match(runtime, /new MtlsSteamRcArtifactSigner/);
+  assert.match(runtime, /new MtlsSteamDepotFinalizer/);
   assert.match(runtime, /new S3SteamRcObjectInspector/);
   assert.match(runtime, /new PostgresSteamWorkflowExecutionAuthority/);
   assert.match(runtime, /steamWorkflowWorkerFromEnv\(composition\.executor, env, pool\)/);
   assert.match(runtime, /O_NOFOLLOW/);
+  assert.match(finalization, /WINDOWS_AUTHENTICODE/);
+  assert.match(finalization, /MACOS_DEVELOPER_ID/);
+  assert.match(finalization, /LINUX_SIGSTORE/);
+  assert.match(finalization, /macOS notarization/);
+  assert.match(finalization, /steam-depot-finalize:/);
+  assert.match(finalization, /sourceArtifactDigest/);
+  assert.doesNotMatch(finalization, /accountPassword|guardCode|configVdf|applePassword|certificateBytes/);
   assert.doesNotMatch(runtime, /accountPassword|guardCode|configVdfBytes|curl \| sh/);
   assert.match(native, /execFile\(executable/);
   assert.match(native, /shell: false/);
@@ -751,6 +760,7 @@ test("Steam execution re-resolves signed release authority and archives the test
   assert.match(controlHandler, /this\.releases\.ensure/);
   assert.match(controlRuntime, /new PostgresSteamReleasePreparation\(pool\)/);
   assert.match(issuance, /runnerArtifactObjectKey/);
+  assert.match(issuance, /artifactDigest: platformEvidence\.exportDigest/);
   assert.match(issuance, /depot\.id = release_configuration\.depot_configuration_id/);
   assert.match(issuance, /ON CONFLICT \(tenant_id, release_id\) DO NOTHING/);
   assert.match(issuance, /set_config\('app\.tenant_id'/);

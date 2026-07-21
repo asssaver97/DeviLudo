@@ -16,9 +16,22 @@ const authorizationKey = generateKeyPairSync("ed25519");
 const now = new Date("2099-01-01T00:05:00.000Z");
 const digest = (character: string) => character.repeat(64);
 
+function releaseDepot(depotId: string, platform: "windows" | "linux" | "macos", character: string, sizeBytes: number) {
+  const scheme = platform === "windows" ? "WINDOWS_AUTHENTICODE" as const
+    : platform === "macos" ? "MACOS_DEVELOPER_ID" as const : "LINUX_SIGSTORE" as const;
+  return Object.freeze({
+    depotId, platform, objectRef: `s3://rc/${platform}.signed`, sourceArtifactDigest: digest(character),
+    artifactDigest: digest(character === "f" ? "9" : character), sizeBytes, signingScheme: scheme,
+    signingIdentityDigest: digest("a"), signingEvidenceRef: `s3://rc/${platform}.signing.json`,
+    signingEvidenceDigest: digest("b"),
+    notarizationEvidenceRef: platform === "macos" ? "s3://rc/macos.notarization.json" : null,
+    notarizationEvidenceDigest: platform === "macos" ? digest("c") : null,
+  });
+}
+
 const rcClaims: SteamRcArtifactClaims = Object.freeze({
   kind: "deviludo-steam-rc",
-  version: 1,
+  version: 2,
   tenantId: "tenant-north-dock",
   projectId: "project-ember",
   releaseId: "release-9",
@@ -31,9 +44,9 @@ const rcClaims: SteamRcArtifactClaims = Object.freeze({
   steamAppId: "2841930",
   targetMatrix: Object.freeze(["linux", "macos", "windows"] as const),
   depots: Object.freeze([
-    { depotId: "2841931", platform: "windows", objectRef: "s3://rc/windows.zip", artifactDigest: digest("1"), sizeBytes: 1_000 },
-    { depotId: "2841932", platform: "linux", objectRef: "s3://rc/linux.zip", artifactDigest: digest("2"), sizeBytes: 2_000 },
-    { depotId: "2841933", platform: "macos", objectRef: "s3://rc/macos.zip", artifactDigest: digest("3"), sizeBytes: 3_000 },
+    releaseDepot("2841931", "windows", "1", 1_000),
+    releaseDepot("2841932", "linux", "2", 2_000),
+    releaseDepot("2841933", "macos", "3", 3_000),
   ] as const),
   issuedAt: "2099-01-01T00:00:00.000Z",
   expiresAt: "2099-01-01T00:30:00.000Z",
