@@ -40,6 +40,18 @@ test("production browser surface is documented with trusted cookie authenticatio
   assert.match(operationBlock("/health", "get"), /^      security: \[\]$/m);
 });
 
+test("session contract separates invited GitHub logout from the trusted administrator shell projection", () => {
+  const readSession = operationBlock("/auth/session", "get");
+  assert.match(readSession, /security: \[\{ cookieAuth: \[\] \}, \{ trustedAdminAssertion: \[\] \}\]/);
+  assert.match(readSession, /PlatformSessionProjection/);
+  assert.match(operationBlock("/auth/session", "delete"), /security: \[\{ cookieAuth: \[\] \}\]/);
+  const projection = schemaBlock("PlatformSessionProjection");
+  for (const field of ["authMode", "canSignOut", "capabilities", "platform-agents:manage", "tenant-agents:view"]) {
+    assert.match(projection, new RegExp(escapeRegex(field)));
+  }
+  assert.match(contract, /^    trustedAdminAssertion:$/m);
+});
+
 test("Agent settings contract uses immutable credential revisions and governance fields", () => {
   const tenantProfile = schemaBlock("TenantAgentProfileDraft");
   for (const field of [

@@ -5,7 +5,9 @@
 - explicit loopback test mode uses the isolated local catalog and may display a role selector for RBAC testing;
 - production accepts only a fresh HMAC assertion injected by the trusted administrator ingress and forwards an allow-listed operation to the NestJS control plane.
 
-The browser cannot select its production role. Every assertion binds the HTTP method, exact `/api/admin/...` path, actor, role, session and issue time. The Web route verifies that assertion, rejects cross-origin browser mutations, strips caller authority headers, and creates a second assertion bound to the downstream `/admin/...` path.
+The browser cannot select its production role. Every assertion binds the HTTP method, exact path, actor, role, session and issue time. Management operations are limited to `/api/admin/...`; the same ingress may sign a separate read-only assertion for exactly `GET /api/auth/session` so the shell can display the trusted operator and capability-filter its navigation. An assertion for either path cannot be replayed on the other. The Web route verifies that assertion, rejects cross-origin browser mutations, strips caller authority headers, and creates a second assertion bound to the downstream `/admin/...` path.
+
+The public session projection never returns the administrator session identifier or signature. It returns only actor display metadata, `authMode=trusted-admin`, `canSignOut=false`, and the navigation capabilities implied by the verified role. Platform logout remains the responsibility of the trusted administrator ingress; the application does not pretend that clearing invited-user cookies terminates that external session.
 
 ## Deployment boundary
 

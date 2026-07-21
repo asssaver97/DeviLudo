@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Session = { tenantId: string; tenantName: string; role: string; displayName: string };
+type Session = { tenantId: string | null; tenantName: string; role: string; displayName: string };
 type InviteRole = "TenantAdmin" | "ProjectOwner" | "Auditor";
 type Receipt = { invitationId: string; invitationUrl: string; tenantId: string; role: InviteRole; expiresAt: string; displayOnce: true };
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -26,13 +26,15 @@ export default function InvitationAdmin() {
       .then(async (response) => response.ok ? (await response.json() as { data: Session }).data : null)
       .then((value) => {
         setSession(value);
-        if (value && UUID.test(value.tenantId)) setTenantId(value.tenantId);
+        if (value && typeof value.tenantId === "string" && UUID.test(value.tenantId)) setTenantId(value.tenantId);
       })
       .catch(() => undefined);
     return () => controller.abort();
   }, []);
 
-  const tenantBound = session?.role === "TenantAdmin" && UUID.test(session.tenantId);
+  const tenantBound = session?.role === "TenantAdmin"
+    && typeof session.tenantId === "string"
+    && UUID.test(session.tenantId);
   const roles = useMemo<InviteRole[]>(() => tenantBound ? ["ProjectOwner", "Auditor"] : ["TenantAdmin", "ProjectOwner", "Auditor"], [tenantBound]);
 
   async function issue(event: React.FormEvent) {

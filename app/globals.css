@@ -406,6 +406,20 @@ button {
   width: 6px;
 }
 
+.system-pill.is-checking i {
+  background: #a4a79f;
+  box-shadow: 0 0 0 3px #e8e9e4;
+}
+
+.system-pill.is-degraded {
+  color: #8b5a22;
+}
+
+.system-pill.is-degraded i {
+  background: #d58a33;
+  box-shadow: 0 0 0 3px #f4e4cf;
+}
+
 .icon-button {
   align-items: center;
   background: transparent;
@@ -451,6 +465,10 @@ button {
 
 .profile-button small {
   color: var(--muted);
+}
+
+.profile-session {
+  cursor: default;
 }
 
 .shell-content {

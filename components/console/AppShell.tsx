@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
+import type { ShellCapability } from "@/lib/auth/shell-capabilities";
 import {
   BellIcon,
   FileIcon,
@@ -14,21 +15,34 @@ import {
   SparkIcon,
 } from "./Icons";
 
-const navigation = [
+type NavigationItem = { href: string; label: string; icon: typeof GridIcon };
+type SettingsItem = NavigationItem & { capabilities: readonly ShellCapability[] };
+type ShellAccount = {
+  tenantName: string;
+  displayName: string;
+  githubLogin: string;
+  role: string;
+  authMode: "github-invite" | "trusted-admin" | "local-fixture";
+  canSignOut: boolean;
+  capabilities: readonly ShellCapability[];
+};
+type HealthState = "checking" | "ok" | "degraded";
+
+const navigation: readonly NavigationItem[] = [
   { href: "/", label: "工作台", icon: GridIcon },
   { href: "/projects", label: "游戏项目", icon: GamepadIcon },
   { href: "/runners", label: "运行节点", icon: ServerIcon },
   { href: "/evidence", label: "证据中心", icon: FileIcon },
 ];
 
-const settings = [
-  { href: "/settings/connections", label: "账号连接", icon: LinkIcon },
-  { href: "/settings/agents", label: "开发 Agent", icon: SparkIcon },
-  { href: "/admin/invitations", label: "受邀账号", icon: ShieldIcon },
-  { href: "/admin/agents", label: "平台 Agent", icon: ShieldIcon },
+const settings: readonly SettingsItem[] = [
+  { href: "/settings/connections", label: "账号连接", icon: LinkIcon, capabilities: ["connections:manage"] },
+  { href: "/settings/agents", label: "开发 Agent", icon: SparkIcon, capabilities: ["tenant-agents:manage", "tenant-agents:view"] },
+  { href: "/admin/invitations", label: "受邀账号", icon: ShieldIcon, capabilities: ["invitations:manage"] },
+  { href: "/admin/agents", label: "平台 Agent", icon: ShieldIcon, capabilities: ["platform-agents:manage", "platform-agents:view"] },
 ];
 
-function NavItem({ href, label, icon: Icon }: (typeof navigation)[number]) {
+function NavItem({ href, label, icon: Icon }: NavigationItem) {
   const pathname = usePathname();
   const active = href === "/" ? pathname === href : pathname.startsWith(href);
 
@@ -42,24 +56,32 @@ function NavItem({ href, label, icon: Icon }: (typeof navigation)[number]) {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const [account, setAccount] = useState<{
-    tenantName: string; displayName: string; githubLogin: string; role: string; local?: boolean;
-  } | null | undefined>(undefined);
+  const [account, setAccount] = useState<ShellAccount | null | undefined>(undefined);
+  const [health, setHealth] = useState<HealthState>("checking");
 
   useEffect(() => {
     const controller = new AbortController();
     fetch("/api/auth/session", { headers: { accept: "application/json" }, signal: controller.signal })
-      .then(async (response) => response.ok ? (await response.json() as { data: NonNullable<typeof account> }).data : null)
+      .then(async (response) => response.ok ? (await response.json() as { data: ShellAccount }).data : null)
       .then(setAccount)
       .catch(() => { if (!controller.signal.aborted) setAccount(null); });
+    fetch("/api/health", { headers: { accept: "application/json" }, signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { status?: string };
+        if (!controller.signal.aborted) setHealth(response.ok && payload.status === "ok" ? "ok" : "degraded");
+      })
+      .catch(() => { if (!controller.signal.aborted) setHealth("degraded"); });
     return () => controller.abort();
   }, []);
 
   const tenantName = account?.tenantName ?? (account === undefined ? "正在验证…" : "未登录");
   const tenantInitials = account ? initialsFor(account.tenantName) : "—";
   const initials = account ? account.displayName.slice(0, 2).toUpperCase() : "—";
+  const visibleSettings = account ? settings.filter((item) => item.capabilities.some((capability) => account.capabilities.includes(capability))) : [];
+  const healthLabel = health === "ok" ? "系统正常" : health === "degraded" ? "系统受限" : "正在检查";
 
   async function signOut() {
+    if (!account?.canSignOut) return;
     await fetch("/api/auth/session", { method: "DELETE" }).catch(() => undefined);
     window.location.assign("/login");
   }
@@ -82,7 +104,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <p>构建</p>
           {navigation.map((item) => <NavItem key={item.href} {...item} />)}
           <p>设置</p>
-          {settings.map((item) => <NavItem key={item.href} {...item} />)}
+          {visibleSettings.map((item) => <NavItem key={item.href} {...item} />)}
         </nav>
 
         <div className="shell-security-note">
@@ -99,12 +121,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             <strong>生产空间</strong>
           </div>
           <div className="topbar-actions">
-            <span className="system-pill"><i /> 系统正常</span>
+            <span aria-live="polite" className={`system-pill is-${health}`}><i /> {healthLabel}</span>
             <button aria-label="通知" className="icon-button" type="button"><BellIcon /></button>
-            {account ? (
+            {account?.canSignOut ? (
               <button aria-label="退出当前账号" className="profile-button" onClick={signOut} title={`@${account.githubLogin} · ${account.role}`} type="button">
                 <span>{initials}</span><b>{account.displayName}</b><small>退出</small>
               </button>
+            ) : account ? (
+              <div aria-label={`当前会话 ${account.displayName} ${account.role}`} className="profile-button profile-session" title={`${account.authMode} · ${account.role}`}>
+                <span>{initials}</span><b>{account.displayName}</b><small>{account.role}</small>
+              </div>
             ) : account === null ? (
               <Link className="profile-login" href="/login">受邀登录</Link>
             ) : <span className="profile-loading">验证会话…</span>}

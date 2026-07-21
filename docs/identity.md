@@ -65,8 +65,10 @@ approved secret-sharing channel. The database cannot reconstruct the link.
   otherwise-unexpired invitation.
 - A suspended tenant, user or membership invalidates every session on its next
   request.
-- `DELETE /api/auth/session` revokes the session digest and clears both browser
-  cookies. A copied session cookie is insufficient without its separately bound
-  browser cookie.
+- `DELETE /api/auth/session` revokes an invited GitHub session digest and clears
+  both browser cookies. A copied session cookie is insufficient without its
+  separately bound browser cookie. A trusted platform administrator session is
+  owned and terminated by the administrator ingress; its read-only shell
+  projection therefore advertises `canSignOut=false`.
 - Identity service logs must remain disabled or metadata-only; request bodies
   contain one-use credentials.

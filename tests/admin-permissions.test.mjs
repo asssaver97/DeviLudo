@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { agentAdminCapabilities } from "../lib/admin/agent-permissions.ts";
 import { trustedAgentVersionUrl } from "../lib/admin/agent-ui.ts";
+import {
+  LOCAL_SHELL_CAPABILITIES,
+  adminShellCapabilities,
+  tenantShellCapabilities,
+} from "../lib/auth/shell-capabilities.ts";
 
 test("Agent admin UI capabilities mirror the platform-scoped RBAC boundary", () => {
   const platform = agentAdminCapabilities("PlatformAgentAdmin");
@@ -29,6 +34,24 @@ test("Agent admin UI capabilities mirror the platform-scoped RBAC boundary", () 
       manageGlobalCredentials: false,
     });
   }
+});
+
+test("application shell navigation is derived from authenticated capabilities and live health", () => {
+  assert.deepEqual(tenantShellCapabilities("TenantAdmin"), ["connections:manage", "tenant-agents:manage", "invitations:manage"]);
+  assert.deepEqual(tenantShellCapabilities("ProjectOwner"), ["connections:manage"]);
+  assert.deepEqual(tenantShellCapabilities("Auditor"), ["connections:manage", "tenant-agents:view"]);
+  assert.deepEqual(adminShellCapabilities("PlatformAgentAdmin"), ["platform-agents:manage", "invitations:manage"]);
+  assert.deepEqual(adminShellCapabilities("SecurityAdmin"), ["platform-agents:manage", "invitations:manage"]);
+  assert.deepEqual(adminShellCapabilities("Auditor"), ["platform-agents:view"]);
+  assert.equal(LOCAL_SHELL_CAPABILITIES.includes("platform-agents:manage"), true);
+
+  const source = readFileSync(new URL("../components/console/AppShell.tsx", import.meta.url), "utf8");
+  assert.match(source, /settings\.filter\(\(item\) => item\.capabilities\.some\(\(capability\) => account\.capabilities\.includes\(capability\)\)\)/);
+  assert.match(source, /fetch\("\/api\/health"/);
+  assert.match(source, /response\.ok && payload\.status === "ok" \? "ok" : "degraded"/);
+  assert.match(source, /className=\{`system-pill is-\$\{health\}`\}/);
+  assert.match(source, /account\?\.canSignOut/);
+  assert.doesNotMatch(source, /className="system-pill"><i \/> 系统正常/);
 });
 
 test("new Provider opens an explicit blank draft without mutating the active snapshot", () => {

@@ -16,6 +16,7 @@ import { SteamEnrollmentBrokerClient } from "../lib/connections/steam-broker.ts"
 import { ReleaseAuthorizationBrokerClient } from "../lib/releases/publish-broker.ts";
 import { POST as acceptAndPublish } from "../app/api/releases/[releaseId]/accept-and-publish/route.ts";
 import { POST as issueInvitation } from "../app/api/admin/invitations/route.ts";
+import { GET as readBrowserSession } from "../app/api/auth/session/route.ts";
 import { GET as proxyAdminGet, POST as proxyAdminPost } from "../app/api/admin/[...segments]/route.ts";
 import { AdminControlPlaneBrokerClient, resolveAdminControlPlanePath } from "../lib/admin/control-plane-broker.ts";
 import { isLoopbackTestRequest } from "../lib/security/local-test-mode.ts";
@@ -306,6 +307,39 @@ test("platform administrator invitation issuance requires the existing signed ad
   } finally {
     globalThis.fetch = originalFetch;
     restoreEnv("DEVILUDO_IDENTITY_ADMIN_BROKER_URL", originalEndpoint); restoreEnv("DEVILUDO_ADMIN_SESSION_HMAC_KEY", originalAdminKey);
+  }
+});
+
+test("trusted platform administrator session is route-bound and exposes only shell capabilities", async () => {
+  const key = Buffer.alloc(32, 49);
+  const issuedAt = new Date().toISOString();
+  const previous = process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY;
+  const assertion = { method: "GET", path: "/api/auth/session", actorId: "security-admin-49", role: "SecurityAdmin",
+    tenantId: null, projectId: null, sessionId: "admin-session-49", issuedAt };
+  const headers = { "x-deviludo-role": assertion.role, "x-deviludo-actor": assertion.actorId,
+    "x-deviludo-admin-session": assertion.sessionId, "x-deviludo-admin-issued-at": issuedAt,
+    "x-deviludo-admin-signature": createAdminPrincipalSignature(assertion, key) };
+  try {
+    process.env.DEVILUDO_ADMIN_SESSION_HMAC_KEY = key.toString("base64");
+    const response = await readBrowserSession(new Request("https://deviludo.example/api/auth/session", { headers }));
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.deepEqual({ role: payload.data.role, tenantId: payload.data.tenantId, authMode: payload.data.authMode,
+      canSignOut: payload.data.canSignOut }, {
+      role: "SecurityAdmin", tenantId: null, authMode: "trusted-admin", canSignOut: false,
+    });
+    assert.deepEqual(payload.data.capabilities.sort(), ["invitations:manage", "platform-agents:manage"]);
+    assert.equal(payload.data.githubLogin, assertion.actorId);
+    assert.equal(JSON.stringify(payload.data).includes(assertion.sessionId), false);
+
+    const wrongRoute = { ...assertion, path: "/api/admin/agents" };
+    const rejected = await readBrowserSession(new Request("https://deviludo.example/api/auth/session", { headers: {
+      ...headers, "x-deviludo-admin-signature": createAdminPrincipalSignature(wrongRoute, key),
+    } }));
+    assert.equal(rejected.status, 401);
+    assert.equal((await rejected.json()).error.code, "ADMIN_SESSION_INVALID");
+  } finally {
+    restoreEnv("DEVILUDO_ADMIN_SESSION_HMAC_KEY", previous);
   }
 });
 

@@ -48,9 +48,18 @@ paths:
   /auth/session:
     get:
       operationId: getPlatformSession
-      security: [{ cookieAuth: [] }]
+      description: Returns either the invited GitHub tenant session or a separately route-bound, read-only trusted administrator shell projection.
+      security: [{ cookieAuth: [] }, { trustedAdminAssertion: [] }]
       responses:
-        "200": { $ref: "#/components/responses/Ok" }
+        "200":
+          description: Public session metadata and capability-derived navigation authority. No session token, HMAC, or administrator session identifier is returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/PlatformSessionProjection" } }
         "401": { description: Session is absent, expired, revoked, or suspended. }
     delete:
       operationId: revokePlatformSession
@@ -906,6 +915,11 @@ components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
     cookieAuth: { type: apiKey, in: cookie, name: __Host-deviludo-session }
+    trustedAdminAssertion:
+      type: apiKey
+      in: header
+      name: X-DeviLudo-Admin-Signature
+      description: One component of the trusted ingress assertion; it is accepted only with the bound role, actor, session and issue-time headers for the exact method and path.
   parameters:
     ProjectId:
       name: projectId
@@ -969,6 +983,26 @@ components:
             properties:
               data: { $ref: "#/components/schemas/AgentHealthProjection" }
   schemas:
+    PlatformSessionProjection:
+      type: object
+      additionalProperties: false
+      required: [tenantId, tenantSlug, tenantName, userId, role, githubUserId, githubLogin, displayName, avatarUrl, authMode, canSignOut, capabilities]
+      properties:
+        tenantId: { type: [string, "null"] }
+        tenantSlug: { type: string }
+        tenantName: { type: string }
+        userId: { type: string }
+        role: { type: string, enum: [PlatformAgentAdmin, SecurityAdmin, TenantAdmin, ProjectOwner, Auditor] }
+        githubUserId: { type: [integer, string, "null"] }
+        githubLogin: { type: string }
+        displayName: { type: string }
+        avatarUrl: { type: [string, "null"], format: uri }
+        authMode: { type: string, enum: [github-invite, trusted-admin, local-fixture] }
+        canSignOut: { type: boolean }
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { type: string, enum: [connections:manage, tenant-agents:manage, tenant-agents:view, invitations:manage, platform-agents:manage, platform-agents:view] }
     EmptyObject:
       type: object
       additionalProperties: false

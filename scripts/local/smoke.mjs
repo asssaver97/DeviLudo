@@ -556,7 +556,10 @@ try {
   }
   const sessionPayload = await localSession.response.json();
   if (!localSession.response.ok || sessionPayload.data?.tenantId !== "tenant-local"
-    || sessionPayload.data?.githubLogin !== "local-developer" || sessionPayload.data?.role !== "TenantAdmin") {
+    || sessionPayload.data?.githubLogin !== "local-developer" || sessionPayload.data?.role !== "TenantAdmin"
+    || sessionPayload.data?.authMode !== "local-fixture" || sessionPayload.data?.canSignOut !== false
+    || !["connections:manage", "tenant-agents:manage", "invitations:manage", "platform-agents:manage"]
+      .every((capability) => sessionPayload.data?.capabilities?.includes(capability))) {
     throw new Error("local browser session fixture contract failed");
   }
   const runtimeHealth = await runtime.response.json();

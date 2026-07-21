@@ -4,6 +4,7 @@ const SAFE_SUBJECT = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{43}$/;
 const ADMIN_PATH = /^\/api\/admin\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,1023}$/;
+const ADMIN_SESSION_PATH = "/api/auth/session";
 
 export interface TrustedAdminPrincipal {
   readonly role: "PlatformAgentAdmin" | "SecurityAdmin" | "Auditor";
@@ -21,6 +22,26 @@ export async function verifyTrustedAdminPrincipal(
 ): Promise<TrustedAdminPrincipal> {
   const url = new URL(request.url);
   if (url.search || !ADMIN_PATH.test(url.pathname) || url.pathname.includes("..") || url.pathname.includes("//")) invalid();
+  return verifyTrustedAdminAssertion(request, env, now, url.pathname);
+}
+
+/** Projects a trusted platform administrator into the browser shell on one exact read-only route. */
+export async function verifyTrustedAdminBrowserSession(
+  request: Request,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  now = new Date(),
+): Promise<TrustedAdminPrincipal> {
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.search || url.pathname !== ADMIN_SESSION_PATH) invalid();
+  return verifyTrustedAdminAssertion(request, env, now, ADMIN_SESSION_PATH);
+}
+
+async function verifyTrustedAdminAssertion(
+  request: Request,
+  env: Readonly<Record<string, string | undefined>>,
+  now: Date,
+  pathname: string,
+): Promise<TrustedAdminPrincipal> {
   const role = header(request, "x-deviludo-role");
   const actorId = header(request, "x-deviludo-actor");
   const sessionId = header(request, "x-deviludo-admin-session");
@@ -36,7 +57,7 @@ export async function verifyTrustedAdminPrincipal(
   if (!encoded) throw new Error("Administrator authentication is unavailable");
   const key = Buffer.from(encoded, "base64");
   if (key.byteLength < 32 || key.byteLength > 64) throw new Error("Administrator authentication is unavailable");
-  const canonical = ["deviludo.admin-principal.v1", request.method.toUpperCase(), url.pathname,
+  const canonical = ["deviludo.admin-principal.v1", request.method.toUpperCase(), pathname,
     actorId, role, "", "", sessionId, issuedAt].join("\n");
   const cryptoKey = await crypto.subtle.importKey("raw", arrayBuffer(key), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
   if (!await crypto.subtle.verify("HMAC", cryptoKey, arrayBuffer(Buffer.from(signature, "base64url")), new TextEncoder().encode(canonical))) invalid();
