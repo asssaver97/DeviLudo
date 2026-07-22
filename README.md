@@ -107,6 +107,8 @@ npm run local:dev
 
 生产部署应把 `GET /api/health` 配置为 Web 流量就绪探针。它会先用与业务路由相同的客户端契约校验构想、验收、GitHub、身份、管理、投影与 Steam 发布所需的全部 Broker，再并发请求各唯一 Origin 的 `/healthz`；两秒超时、重定向、非 JSON、超限正文、非 2xx 或精确服务/schema 身份不匹配都会返回 `503`。规格对话的探针还会递归验证精确 Spec Model 身份、审批 Bridge 和 Temporal，而用户验收会递归验证同一模型边界及三类决定的权威表。响应只公开 `READY`、`NOT_CONFIGURED`、`INVALID_CONFIGURATION`、`UNAVAILABLE` 或 `IDENTITY_MISMATCH`，不会暴露内部 URL、凭据或上游正文。Agent 管理控制面的 `/healthz` 会实际探测权威目录存储和 Agent 供应链。
 
+生产 PostgreSQL 适配器把网络连通与 schema 就绪分开：Secret Broker、规格模型、Agent 供应链、Provider 恢复、Steam 签名/外部审批和发布链均声明完整、排序且不可重复的关系集合，并用共享 `to_regclass` 门禁逐表验证。缺少业务表、工作流 signal outbox 或审批回执表时服务必须在监听前失败，普通 `SELECT 1` 只证明连接池可通信，不能令业务服务进入 READY。
+
 若缺少与 Godot 版本匹配的 export templates，本机脚本检查即使全部通过，聚合状态仍为 `WAITING_DEPENDENCY`，发布门禁停在 `WAITING_EXPORT_TEMPLATES`，目标矩阵不能启动；安装模板后可重新验证同一锁定运行。Windows/Linux 保持未连接，直到真实 mTLS Runner 可用。
 
 保持测试站运行时，可在另一个终端检查关键页面和健康 API：

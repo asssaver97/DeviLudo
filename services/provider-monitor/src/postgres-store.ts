@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { WorkflowActionCompletionReceipt } from "../../control-plane/src/workflow-action-completion-postgres";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import {
   parseProviderRecoveryRequest,
   providerRecoveryRequest,
@@ -217,8 +218,11 @@ export class PostgresProviderRecoveryStore implements ProviderRecoveryStore {
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS provider_recovery_store_probe"); } finally { client.release(); }
+    await probePostgresRelations(this.pool, [
+      "agent_execution_operations", "agent_run_provider_failovers", "agent_runs", "inference_provider_revisions",
+      "inference_request_claims", "inference_run_authorizations", "provider_recovery_checks",
+      "workflow_control_actions", "workflow_signal_outbox",
+    ], () => new ProviderRecoveryConflict("PROVIDER_RECOVERY_CONFLICT"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

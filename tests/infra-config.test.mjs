@@ -87,6 +87,7 @@ test("project Steam release configuration is one-time, tenant-isolated and secre
   const coordinator = readFileSync(new URL("../services/steam-publisher/src/project-configuration.ts", import.meta.url), "utf8");
   const store = readFileSync(new URL("../services/steam-publisher/src/project-configuration-postgres.ts", import.meta.url), "utf8");
   const readiness = readFileSync(new URL("../services/steam-publisher/src/postgres-readiness.ts", import.meta.url), "utf8");
+  const sharedReadiness = readFileSync(new URL("../services/temporal/src/postgres-readiness.ts", import.meta.url), "utf8");
   const secureUi = readFileSync(new URL("../services/steam-publisher/src/steam-secure-ui.ts", import.meta.url), "utf8");
   const webRoute = readFileSync(new URL("../app/api/projects/[projectId]/steam-settings/route.ts", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE deviludo\.steam_project_configuration_intents/);
@@ -107,8 +108,9 @@ test("project Steam release configuration is one-time, tenant-isolated and secre
   assert.match(store, /"steam_project_configuration_intents"/);
   assert.match(store, /"steam_project_depot_configurations"/);
   assert.match(store, /"steam_project_release_configurations"/);
-  assert.match(readiness, /to_regclass\('deviludo\.\$\{table\}'\)::text AS \$\{table\}/);
-  assert.match(readiness, /row\[table\] !== `deviludo\.\$\{table\}`/);
+  assert.match(readiness, /probePostgresRelations as probeSteamPostgresTables/);
+  assert.match(sharedReadiness, /to_regclass\('deviludo\.\$\{relation\}'\)::text AS \$\{relation\}/);
+  assert.match(sharedReadiness, /row\[relation\] !== `deviludo\.\$\{relation\}`/);
   assert.match(store, /INSERT INTO deviludo\.steam_project_depot_configurations/);
   assert.match(store, /INSERT INTO deviludo\.steam_project_release_configurations/);
   assert.match(secureUi, /SUBMIT_PROJECT_CONFIGURATION/);

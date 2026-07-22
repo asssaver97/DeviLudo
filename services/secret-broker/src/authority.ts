@@ -1,4 +1,5 @@
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import { SecretBrokerConflictError, SecretBrokerValidationError, type InferenceCredentialAuthority } from "./contracts";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -144,9 +145,10 @@ export class PostgresInferenceCredentialAuthority implements InferenceCredential
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try { const result = await client.query<{ ready: number }>("SELECT 1 AS ready"); if (result.rows[0]?.ready !== 1) conflict(); }
-    finally { client.release(); }
+    await probePostgresRelations(this.pool, [
+      "admin_catalog_state", "agent_run_provider_failovers", "inference_provider_revisions",
+      "inference_run_authorizations", "projects",
+    ], () => new SecretBrokerConflictError("Inference credential authority schema is unavailable"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

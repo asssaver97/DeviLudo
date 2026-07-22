@@ -7,6 +7,7 @@ import type {
   PostgresWorkflowClient,
   PostgresWorkflowPool,
 } from "../../temporal/src/postgres-inbox";
+import { PostgresReadinessFixture } from "../../temporal/test/postgres-readiness-fixture";
 import { parseSteamDepotFinalizationRequest, steamDepotFinalizationReceiptDigest } from "../src/contract";
 import type { SteamDepotFinalizationRequest } from "../src/contracts";
 import { PostgresSteamDepotFinalizationOperations } from "../src/postgres-operations";
@@ -117,7 +118,6 @@ class FixtureClient implements PostgresWorkflowClient {
       this.row.claim_expires_at = null;
       return result<Row>(1, []);
     }
-    if (text === "SELECT 1 AS ready") return result<Row>(1, [{ ready: 1 } as unknown as Row]);
     throw new Error(`Unexpected SQL: ${text}`);
   }
 
@@ -177,3 +177,14 @@ function receipt(request: SteamDepotFinalizationRequest) {
     notarizationEvidenceDigest: null,
   };
 }
+
+test("Steam depot finalizer readiness requires its durable operation ledger", async () => {
+  const ready = new PostgresReadinessFixture();
+  await new PostgresSteamDepotFinalizationOperations(ready).probe();
+  assert.deepEqual(ready.observedRelations(), ["steam_depot_finalization_operations"]);
+  assert.equal(ready.releases, 1);
+
+  const missing = new PostgresReadinessFixture("steam_depot_finalization_operations");
+  await assert.rejects(new PostgresSteamDepotFinalizationOperations(missing).probe());
+  assert.equal(missing.releases, 1);
+});

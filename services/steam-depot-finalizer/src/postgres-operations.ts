@@ -1,4 +1,5 @@
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import {
   parseSteamDepotFinalizationRequest,
   steamDepotFinalizationReceiptDigest,
@@ -122,11 +123,8 @@ export class PostgresSteamDepotFinalizationOperations implements SteamDepotFinal
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows[0]?.ready !== 1) invalid();
-    } finally { client.release(); }
+    await probePostgresRelations(this.pool, ["steam_depot_finalization_operations"],
+      () => new Error("PostgreSQL Steam depot finalization operation is invalid"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

@@ -351,12 +351,15 @@ export class PostgresUserFeedbackStore implements UserFeedbackStore {
                 to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
                 to_regclass('deviludo.spec_conversations')::text AS spec_conversations,
                 to_regclass('deviludo.spec_dialogue_operations')::text AS spec_dialogue_operations,
-                to_regclass('deviludo.spec_conversation_messages')::text AS spec_conversation_messages`,
+                to_regclass('deviludo.spec_conversation_messages')::text AS spec_conversation_messages,
+                to_regclass('deviludo.workflow_feedback_invalidations')::text AS workflow_feedback_invalidations,
+                to_regclass('deviludo.workflow_signal_outbox')::text AS workflow_signal_outbox`,
       );
       const row = result.rows[0];
       for (const table of [
         "users", "tenant_memberships", "workflow_control_actions", "user_feedback_operations",
         "immutable_revisions", "spec_conversations", "spec_dialogue_operations", "spec_conversation_messages",
+        "workflow_feedback_invalidations", "workflow_signal_outbox",
       ]) {
         if (row?.[table] !== `deviludo.${table}`) invalid();
       }

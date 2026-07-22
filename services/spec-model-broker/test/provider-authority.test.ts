@@ -67,7 +67,6 @@ function pool(payload: unknown) {
     async query<Row extends Record<string, unknown>>(text: string): Promise<PostgresQueryResult<Row>> {
       queries.push(text);
       if (text.includes("admin_catalog_state")) return result(1, [{ payload }] as unknown as Row[]);
-      if (text === "SELECT 1 AS ready") return result(1, [{ ready: 1 }] as unknown as Row[]);
       return result(1, []);
     },
     release() {},

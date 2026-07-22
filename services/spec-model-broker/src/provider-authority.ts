@@ -1,4 +1,5 @@
 import type { PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import { providerPolicyDigest, validateProviderBinding } from "./contract";
 import type { SpecModelProviderAuthority, SpecModelProviderBinding } from "./contracts";
 import { SpecModelProviderUnavailableError } from "./contracts";
@@ -62,11 +63,8 @@ export class PostgresSpecModelProviderAuthority implements SpecModelProviderAuth
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const selected = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (selected.rows.length !== 1 || selected.rows[0]?.ready !== 1) invalid();
-    } finally { client.release(); }
+    await probePostgresRelations(this.pool, ["admin_catalog_state"],
+      () => new SpecModelProviderUnavailableError("Specification model Provider authority schema is unavailable"));
   }
 }
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { WorkflowActionCompletionReceipt } from "../../control-plane/src/workflow-action-completion-postgres";
 import type { PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
+import { PostgresReadinessFixture } from "../../temporal/test/postgres-readiness-fixture";
 import {
   parseProviderRecoveryRequest,
   providerRecoveryOperationKey,
@@ -229,6 +230,22 @@ test("mTLS ingress accepts only allow-listed schedulers", async () => {
   const forbidden = await handler({ method: "POST", path: "/v1/provider-recovery-checks",
     headers: { "content-type": "application/json" }, socket: "spiffe://evil.invalid/scheduler", rawBody: JSON.stringify(request()) });
   assert.equal(forbidden.status, 403); assert.equal(checksRun, 1);
+});
+
+test("Provider recovery readiness covers immutable authority, claims and signal delivery relations", async () => {
+  const relations = [
+    "agent_execution_operations", "agent_run_provider_failovers", "agent_runs", "inference_provider_revisions",
+    "inference_request_claims", "inference_run_authorizations", "provider_recovery_checks",
+    "workflow_control_actions", "workflow_signal_outbox",
+  ];
+  const ready = new PostgresReadinessFixture();
+  await new PostgresProviderRecoveryStore(ready).probe();
+  assert.deepEqual(ready.observedRelations(), relations);
+  assert.equal(ready.releases, 1);
+
+  const missing = new PostgresReadinessFixture("workflow_signal_outbox");
+  await assert.rejects(new PostgresProviderRecoveryStore(missing).probe());
+  assert.equal(missing.releases, 1);
 });
 
 function claimFor(input: ProviderRecoveryRequest): ProviderRecoveryClaim {

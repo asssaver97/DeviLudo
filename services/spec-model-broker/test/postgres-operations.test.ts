@@ -157,7 +157,6 @@ class FixtureClient implements PostgresWorkflowClient {
       this.row.dispatch_generation = Number(this.row.dispatch_generation) + 1;
       return result(1, []);
     }
-    if (text === "SELECT 1 AS ready") return result(1, [{ ready: 1 }] as unknown as Row[]);
     throw new Error(`Unexpected SQL: ${text}`);
   }
   release(): void {}

@@ -7,11 +7,11 @@ const tables = [
   "workflow_control_actions", "agent_configuration_resolutions", "immutable_revisions",
   "approved_test_plan_bindings", "runner_toolchain_revisions", "github_source_baseline_receipts",
   "admin_catalog_state", "agent_runs", "inference_run_authorizations", "agent_execution_operations",
-  "evidence_bundles", "e2e_attempts", "inference_provider_revisions",
+  "evidence_bundles", "e2e_attempts", "inference_provider_revisions", "workflow_signal_outbox",
 ] as const;
 
 test("Agent configuration readiness requires every relation used by development and repair locking", async () => {
-  for (const missing of [null, "evidence_bundles"] as const) {
+  for (const missing of [null, "evidence_bundles", "workflow_signal_outbox"] as const) {
     let released = 0;
     const client: PostgresWorkflowClient = {
       async query<Row extends Record<string, unknown>>(sql: string) {

@@ -160,7 +160,6 @@ class Client implements PostgresWorkflowClient {
     if (text.includes("FROM deviludo.steam_releases")) {
       return result([{ id: releaseId, state: this.lifecycleState, external_gate: this.lifecycleGate }] as unknown as Row[]);
     }
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return result([]);
   }
 

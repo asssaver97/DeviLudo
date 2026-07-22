@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import {
   SecretBrokerConflictError,
   type BrokerAuditPurpose,
@@ -219,9 +220,8 @@ export class PostgresSecretBrokerStore implements SecretBrokerStore {
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try { const result = await client.query<{ ready: number }>("SELECT 1 AS ready"); if (result.rows[0]?.ready !== 1) conflict(); }
-    finally { client.release(); }
+    await probePostgresRelations(this.pool, ["secret_broker_audit", "secret_broker_records"],
+      () => new SecretBrokerConflictError("Secret Broker persistence schema is unavailable"));
   }
 
   async #transaction<T>(operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

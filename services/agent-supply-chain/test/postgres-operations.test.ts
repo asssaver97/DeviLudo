@@ -3,6 +3,7 @@ import test from "node:test";
 import { DevelopmentAgentSupplyChain } from "../../control-plane/src/agent-supply-chain";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { PostgresReadinessFixture } from "../../temporal/test/postgres-readiness-fixture";
 import type {
   AgentSupplyChainTerminalFailureReceipt,
   AgentVersionDiscoveryRequest,
@@ -162,6 +163,17 @@ test("PostgreSQL Agent supply-chain operations replay a terminal receipt as comp
     claimExpiresAt: "2026-07-18T08:10:00.000Z",
   });
   assert.deepEqual(replay, { kind: "REPLAY", response: failure });
+});
+
+test("PostgreSQL Agent supply-chain readiness requires its durable operation ledger", async () => {
+  const ready = new PostgresReadinessFixture();
+  await new PostgresAgentSupplyChainOperations(ready).probe();
+  assert.deepEqual(ready.observedRelations(), ["agent_supply_chain_operations"]);
+  assert.equal(ready.releases, 1);
+
+  const missing = new PostgresReadinessFixture("agent_supply_chain_operations");
+  await assert.rejects(new PostgresAgentSupplyChainOperations(missing).probe(), /invalid/);
+  assert.equal(missing.releases, 1);
 });
 
 function result<Row extends Record<string, unknown>>(rows: Row[], rowCount = rows.length) {

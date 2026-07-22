@@ -110,7 +110,6 @@ class Client implements PostgresWorkflowClient {
     if (text.includes("FROM deviludo.steam_rc_artifacts")) {
       return this.artifactRow ? result([this.artifactRow] as Row[]) : result([]);
     }
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return result([]);
   }
 

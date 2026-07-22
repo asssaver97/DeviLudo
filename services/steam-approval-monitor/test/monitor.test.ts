@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { WorkflowActionCompletionPort, WorkflowActionCompletionReceipt } from "../../control-plane/src/workflow-action-completion-postgres";
 import type { PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
+import { PostgresReadinessFixture } from "../../temporal/test/postgres-readiness-fixture";
 import {
   parseSteamExternalApprovalAttestation,
   steamExternalApprovalRequestDigest,
@@ -147,6 +148,21 @@ test("mTLS ingress accepts only allow-listed Steam verifier identities", async (
     headers: { "content-type": "application/json" }, socket: "spiffe://evil.invalid/verifier", rawBody: JSON.stringify(attestation()) });
   assert.equal(rejected.status, 403);
   assert.equal(approvals, 1);
+});
+
+test("Steam approval readiness covers observation, release, evidence and signal delivery relations", async () => {
+  const relations = [
+    "e2e_attempts", "evidence_bundles", "steam_build_receipts", "steam_external_approval_observations",
+    "steam_releases", "workflow_control_actions", "workflow_external_approval_receipts", "workflow_signal_outbox",
+  ];
+  const ready = new PostgresReadinessFixture();
+  await new PostgresSteamExternalApprovalStore(ready).probe();
+  assert.deepEqual(ready.observedRelations(), relations);
+  assert.equal(ready.releases, 1);
+
+  const missing = new PostgresReadinessFixture("workflow_signal_outbox");
+  await assert.rejects(new PostgresSteamExternalApprovalStore(missing).probe());
+  assert.equal(missing.releases, 1);
 });
 
 function claimFor(input: SteamExternalApprovalAttestation): SteamExternalApprovalClaim {

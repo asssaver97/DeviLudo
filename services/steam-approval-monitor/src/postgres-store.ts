@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { WorkflowActionCompletionReceipt } from "../../control-plane/src/workflow-action-completion-postgres";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import {
   parseSteamExternalApprovalAttestation,
   steamExternalApprovalRequestDigest,
@@ -183,9 +184,10 @@ export class PostgresSteamExternalApprovalStore implements SteamExternalApproval
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS steam_external_approval_store_probe"); }
-    finally { client.release(); }
+    await probePostgresRelations(this.pool, [
+      "e2e_attempts", "evidence_bundles", "steam_build_receipts", "steam_external_approval_observations",
+      "steam_releases", "workflow_control_actions", "workflow_external_approval_receipts", "workflow_signal_outbox",
+    ], () => new SteamExternalApprovalConflict("STEAM_EXTERNAL_APPROVAL_CONFLICT"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

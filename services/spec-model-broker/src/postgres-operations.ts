@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseSpecModelResult } from "../../spec-dialogue/src/contracts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import { canonical, resultDigest, validateProviderBinding, validateUsage } from "./contract";
 import type {
   SpecModelOperationClaim,
@@ -171,11 +172,9 @@ export class PostgresSpecModelOperationStore implements SpecModelOperationStore,
     await this.transition(input, "INDETERMINATE");
   }
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
-    } finally { client.release(); }
+    await probePostgresRelations(this.pool, [
+      "spec_conversations", "spec_model_generation_operations", "spec_model_generation_reconciliations",
+    ], () => new SpecModelRequestError("Specification model operation schema is unavailable"));
   }
 
   async lookupReconciliation(tenantId: string, generationOperationKey: string) {

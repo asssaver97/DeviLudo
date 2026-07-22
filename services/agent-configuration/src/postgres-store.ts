@@ -485,13 +485,14 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
                 to_regclass('deviludo.agent_execution_operations')::text AS agent_execution_operations,
                 to_regclass('deviludo.evidence_bundles')::text AS evidence_bundles,
                 to_regclass('deviludo.e2e_attempts')::text AS e2e_attempts,
-                to_regclass('deviludo.inference_provider_revisions')::text AS inference_provider_revisions`,
+                to_regclass('deviludo.inference_provider_revisions')::text AS inference_provider_revisions,
+                to_regclass('deviludo.workflow_signal_outbox')::text AS workflow_signal_outbox`,
       );
       assertReadyTables(result.rows[0], [
         "workflow_control_actions", "agent_configuration_resolutions", "immutable_revisions",
         "approved_test_plan_bindings", "runner_toolchain_revisions", "github_source_baseline_receipts",
         "admin_catalog_state", "agent_runs", "inference_run_authorizations", "agent_execution_operations",
-        "evidence_bundles", "e2e_attempts", "inference_provider_revisions",
+        "evidence_bundles", "e2e_attempts", "inference_provider_revisions", "workflow_signal_outbox",
       ]);
     }
     finally { client.release(); }

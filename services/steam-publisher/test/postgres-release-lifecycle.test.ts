@@ -143,7 +143,6 @@ class Client implements PostgresWorkflowClient {
     if (text.includes("FROM deviludo.steam_releases") && text.includes("workflow_id = $2")) {
       return this.releaseRow?.workflow_id === values[1] ? result([this.releaseRow] as Row[]) : result([]);
     }
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return result([]);
   }
 

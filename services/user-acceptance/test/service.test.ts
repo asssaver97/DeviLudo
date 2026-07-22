@@ -320,6 +320,7 @@ test("PostgreSQL feedback readiness requires every actor, workflow and immutable
   const tables = [
     "users", "tenant_memberships", "workflow_control_actions", "user_feedback_operations",
     "immutable_revisions", "spec_conversations", "spec_dialogue_operations", "spec_conversation_messages",
+    "workflow_feedback_invalidations", "workflow_signal_outbox",
   ] as const;
   let missing: string | null = null;
   let released = 0;
@@ -336,7 +337,11 @@ test("PostgreSQL feedback readiness requires every actor, workflow and immutable
   await store.probe();
   missing = "spec_dialogue_operations";
   await assert.rejects(store.probe(), /authority is invalid/);
-  assert.equal(released, 2);
+  missing = "workflow_feedback_invalidations";
+  await assert.rejects(store.probe(), /authority is invalid/);
+  missing = "workflow_signal_outbox";
+  await assert.rejects(store.probe(), /authority is invalid/);
+  assert.equal(released, 4);
 });
 
 function buildFixture(options: {
