@@ -5,6 +5,12 @@ const SAFE_MOUNT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const SAFE_PATH = /^(?:records\/[a-f0-9-]{36}|static\/[A-Za-z0-9][A-Za-z0-9._-]{0,159})$/;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_SECRET_BYTES = 64 * 1024;
+const READINESS_RECORD_ID = "00000000-0000-4000-8000-000000000000";
+
+type VaultCapabilityRequirement = Readonly<{
+  path: string;
+  capabilities: readonly string[];
+}>;
 
 export interface VaultBackendTls {
   readonly ca: Buffer;
@@ -32,12 +38,14 @@ export class VaultKvV2SecretBackend implements SecretBackend {
   readonly #tls: VaultBackendTls;
   readonly #timeoutMs: number;
   readonly #http: VaultHttp;
+  readonly #readinessCapabilities: readonly VaultCapabilityRequirement[];
 
   constructor(options: Readonly<{
     endpoint: string | URL;
     mount: string;
     token: Buffer;
     tls: VaultBackendTls;
+    staticReadPaths?: readonly string[];
     timeoutMs?: number;
     http?: VaultHttp;
   }>) {
@@ -46,11 +54,31 @@ export class VaultKvV2SecretBackend implements SecretBackend {
     if (!Buffer.isBuffer(options.token) || options.token.byteLength < 8 || options.token.byteLength > 4_096
       || /[\u0000-\u0020]/.test(options.token.toString("utf8"))) throw new Error("Vault token is invalid");
     validateTls(options.tls);
+    const staticReadPaths = [...new Set(options.staticReadPaths ?? [])].sort();
+    if (staticReadPaths.length > 20
+      || staticReadPaths.some((path) => !SAFE_PATH.test(path) || !path.startsWith("static/"))) {
+      throw new Error("Vault static readiness path is invalid");
+    }
     this.#mount = options.mount;
     this.#token = Buffer.from(options.token);
     this.#tls = Object.freeze({ ...options.tls });
     this.#timeoutMs = integer(options.timeoutMs ?? 10_000, 1_000, 60_000);
     this.#http = options.http ?? vaultHttps;
+    this.#readinessCapabilities = Object.freeze([
+      Object.freeze({ path: `${this.#mount}/config`, capabilities: Object.freeze(["read"]) }),
+      Object.freeze({
+        path: `${this.#mount}/data/deviludo/records/${READINESS_RECORD_ID}`,
+        capabilities: Object.freeze(["create", "read"]),
+      }),
+      ...staticReadPaths.map((path) => Object.freeze({
+        path: `${this.#mount}/data/deviludo/${path}`,
+        capabilities: Object.freeze(["read"]),
+      })),
+      Object.freeze({
+        path: `${this.#mount}/metadata/deviludo/records/${READINESS_RECORD_ID}`,
+        capabilities: Object.freeze(["delete"]),
+      }),
+    ].sort((left, right) => left.path.localeCompare(right.path)));
   }
 
   async create(path: string, plaintext: Uint8Array): Promise<void> {
@@ -94,11 +122,53 @@ export class VaultKvV2SecretBackend implements SecretBackend {
   }
 
   async probe(): Promise<void> {
+    await this.#probeActiveVault();
+    await this.#probeKvV2Mount();
+    await this.#probeTokenCapabilities();
+  }
+
+  async #probeActiveVault(): Promise<void> {
     const url = new URL(this.#origin);
     url.pathname = "/v1/sys/health";
     const response = await this.#request("GET", url);
-    response.payload.fill(0);
-    if (![200, 429, 472, 473].includes(response.statusCode)) throw new Error("Vault readiness probe failed");
+    try {
+      const body = jsonRecord(response.payload);
+      if (response.statusCode !== 200 || body.initialized !== true || body.sealed !== false
+        || body.standby !== false || typeof body.version !== "string" || !/^\d+\.\d+\.\d+/.test(body.version)) {
+        invalidReadiness();
+      }
+    } catch { invalidReadiness(); }
+    finally { response.payload.fill(0); }
+  }
+
+  async #probeKvV2Mount(): Promise<void> {
+    const url = new URL(this.#origin);
+    url.pathname = `/v1/${this.#mount}/config`;
+    const response = await this.#request("GET", url);
+    try {
+      const body = jsonRecord(response.payload);
+      const data = record(body.data);
+      if (response.statusCode !== 200 || typeof data.cas_required !== "boolean"
+        || !Number.isSafeInteger(data.max_versions) || (data.max_versions as number) < 0
+        || typeof data.delete_version_after !== "string") invalidReadiness();
+    } catch { invalidReadiness(); }
+    finally { response.payload.fill(0); }
+  }
+
+  async #probeTokenCapabilities(): Promise<void> {
+    const url = new URL(this.#origin);
+    url.pathname = "/v1/sys/capabilities-self";
+    const body = Buffer.from(JSON.stringify({ paths: this.#readinessCapabilities.map((item) => item.path) }));
+    let response: VaultHttpResponse | null = null;
+    try {
+      response = await this.#request("POST", url, body);
+      if (response.statusCode !== 200) invalidReadiness();
+      const envelope = jsonRecord(response.payload);
+      for (const requirement of this.#readinessCapabilities) {
+        if (!exactCapabilities(envelope[requirement.path], requirement.capabilities)) invalidReadiness();
+      }
+    } catch { invalidReadiness(); }
+    finally { body.fill(0); response?.payload.fill(0); }
   }
 
   async #request(method: "GET" | "POST" | "DELETE", url: URL, body?: Buffer): Promise<VaultHttpResponse> {
@@ -197,5 +267,16 @@ function validateTls(tls: VaultBackendTls): void {
 }
 function canonicalBase64(value: string): boolean { try { return Buffer.from(value, "base64").toString("base64") === value; } catch { return false; } }
 function record(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) invalidVault(); return value as Record<string, unknown>; }
+function jsonRecord(value: Buffer): Record<string, unknown> {
+  try { return record(JSON.parse(value.toString("utf8")) as unknown); }
+  catch { invalidReadiness(); }
+}
+function exactCapabilities(value: unknown, expected: readonly string[]): boolean {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return false;
+  const actual = [...new Set(value as string[])].sort();
+  return actual.length === value.length && actual.length === expected.length
+    && actual.every((item, index) => item === expected[index]);
+}
 function invalidVault(): never { throw new Error("Vault response is invalid"); }
+function invalidReadiness(): never { throw new Error("Vault readiness probe failed"); }
 function integer(value: number, minimum: number, maximum: number): number { if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error("Vault timeout is invalid"); return value; }

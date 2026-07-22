@@ -31,9 +31,10 @@ releases the claim so the next sweep can retry.
 ## Production startup
 
 Apply `infra/postgres/045_secret_broker.sql`, provision a least-privilege
-PostgreSQL role and a Vault policy restricted to the configured KV mount and
-`records/` plus approved `static/` paths, then configure the file-mounted values
-in `.env.example`.
+PostgreSQL role and adapt `infra/vault/deviludo-secret-broker.hcl` to the
+configured KV v2 mount plus every exact approved `static/` path, then configure
+the file-mounted values in `.env.example`. Do not bind Vault's default policy or
+replace the exact static-secret stanzas with a wildcard.
 
 The Vault token should be a short-lived Vault Agent token. Server keys, client
 CA, Vault CA and optional Vault mTLS identity must be mounted as regular files;
@@ -48,6 +49,13 @@ The listener defaults to port `4762`, requires TLS 1.3 client certificates and
 has no plaintext HTTP mode. The service is intentionally absent from the
 loopback product demo: local UI tests use isolated in-process fixtures and do
 not create real credentials.
+
+Startup and authenticated `/healthz` requests require an initialized, unsealed,
+active Vault node, a readable KV v2 engine configuration, and the exact minimal
+capabilities needed for immutable record create/read/destruction and each
+allow-listed static secret. Standby, DR-secondary, sealed, wrong-mount, expired
+token, missing capability and over-privileged capability responses all fail
+closed without reading any secret value.
 
 ## Verification
 

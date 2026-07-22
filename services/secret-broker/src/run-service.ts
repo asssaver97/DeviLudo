@@ -7,7 +7,7 @@ import { PostgresInferenceCredentialAuthority } from "./authority";
 import { createSecretBrokerHandler, createSecretBrokerHttpsServer } from "./http";
 import { SecretBrokerService } from "./service";
 import { PostgresSecretBrokerStore } from "./store";
-import { VaultKvV2SecretBackend } from "./vault-backend";
+import { backendPathFromStaticSecretRef, VaultKvV2SecretBackend } from "./vault-backend";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
@@ -35,6 +35,9 @@ export async function secretBrokerRuntimeFromEnv(
     : [undefined, undefined];
   const pool = postgresWorkflowPoolFromEnv({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "secret-broker" });
   try {
+    const githubStaticSecretRefs = staticSecretRefs(
+      required(env, "DEVILUDO_SECRET_BROKER_GITHUB_STATIC_SECRET_REFS"),
+    );
     const store = new PostgresSecretBrokerStore(pool);
     const authority = new PostgresInferenceCredentialAuthority(pool);
     const backend = new VaultKvV2SecretBackend({
@@ -42,11 +45,12 @@ export async function secretBrokerRuntimeFromEnv(
       mount: required(env, "DEVILUDO_SECRET_BROKER_VAULT_KV_MOUNT"),
       token: vaultToken,
       tls: { ca: vaultCa, ...(vaultKey && vaultCertificate ? { key: vaultKey, certificate: vaultCertificate } : {}) },
+      staticReadPaths: [...githubStaticSecretRefs].map(backendPathFromStaticSecretRef),
       timeoutMs: integer(env.DEVILUDO_SECRET_BROKER_VAULT_TIMEOUT_MS, 10_000, 1_000, 60_000),
     });
     vaultToken.fill(0);
     const service = new SecretBrokerService({ store, backend, authority,
-      staticGitHubSecretRefs: staticSecretRefs(required(env, "DEVILUDO_SECRET_BROKER_GITHUB_STATIC_SECRET_REFS")) });
+      staticGitHubSecretRefs: githubStaticSecretRefs });
     const handler = createSecretBrokerHandler({
       service,
       controlPlaneSpiffeIds: spiffeSet(required(env, "DEVILUDO_SECRET_BROKER_CONTROL_PLANE_SPIFFE_IDS")),
@@ -119,10 +123,11 @@ function spiffeSet(value: string): ReadonlySet<string> {
 function staticSecretRefs(value: string): ReadonlySet<string> {
   const values = value.split(",").map((item) => item.trim());
   const pattern = /^vault:\/\/kv\/deviludo\/static\/[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
-  if (!values.length || values.some((item) => !pattern.test(item)) || new Set(values).size !== values.length) {
+  if (!values.length || values.length > 20 || values.some((item) => !pattern.test(item))
+    || new Set(values).size !== values.length) {
     throw new Error("Secret Broker GitHub static SecretRef allow-list is invalid");
   }
-  return new Set(values);
+  return new Set(values.sort());
 }
 function bindHost(value: string | undefined): string { const result = value?.trim() || "0.0.0.0"; if (result !== "0.0.0.0" && result !== "::") throw new Error("Secret Broker host is invalid"); return result; }
 function integer(value: string | undefined, fallback: number, minimum: number, maximum: number): number { if (value === undefined) return fallback; const result = Number(value); if (!Number.isInteger(result) || result < minimum || result > maximum || String(result) !== value) throw new Error("Secret Broker numeric configuration is invalid"); return result; }
