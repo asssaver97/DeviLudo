@@ -207,6 +207,32 @@ export class PostgresRunnerIngressStore {
     }
   }
 
+  async probe(): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.runner_registrations')::text AS runner_registrations,
+                to_regclass('deviludo.runner_native_install_operations')::text AS runner_native_install_operations,
+                to_regclass('deviludo.runner_native_install_grants')::text AS runner_native_install_grants,
+                to_regclass('deviludo.runner_native_install_rollbacks')::text AS runner_native_install_rollbacks,
+                to_regclass('deviludo.e2e_platform_leases')::text AS e2e_platform_leases,
+                to_regclass('deviludo.e2e_attempts')::text AS e2e_attempts,
+                to_regclass('deviludo.agent_runs')::text AS agent_runs,
+                to_regclass('deviludo.runner_execution_locks')::text AS runner_execution_locks,
+                to_regclass('deviludo.platform_runner_events')::text AS platform_runner_events,
+                to_regclass('deviludo.evidence_bundles')::text AS evidence_bundles`,
+      );
+      const row = result.rows[0];
+      for (const table of [
+        "runner_registrations", "runner_native_install_operations", "runner_native_install_grants",
+        "runner_native_install_rollbacks", "e2e_platform_leases", "e2e_attempts", "agent_runs",
+        "runner_execution_locks", "platform_runner_events", "evidence_bundles",
+      ]) {
+        if (row?.[table] !== `deviludo.${table}`) throw new Error("Runner ingress database is not ready");
+      }
+    } finally { client.release(); }
+  }
+
   async register(
     identity: TlsRunnerIdentity,
     capabilities: RunnerCapabilities,

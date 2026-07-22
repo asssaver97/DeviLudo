@@ -68,6 +68,19 @@ export class PostgresFrozenTestPlanPort implements FrozenTestPlanPort {
     });
   }
 
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions`,
+      );
+      const row = result.rows[0];
+      if (row?.approved_test_plan_bindings !== "deviludo.approved_test_plan_bindings"
+        || row.immutable_revisions !== "deviludo.immutable_revisions") invalid();
+    } finally { client.release(); }
+  }
+
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {

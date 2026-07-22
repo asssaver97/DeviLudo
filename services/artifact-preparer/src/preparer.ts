@@ -57,6 +57,8 @@ export interface RunnerExecutionLockPort {
   }): Promise<Readonly<{ executionLockId: string; payloadDigest: string; created: boolean }>>;
 }
 
+type ReadyPort<T> = T & Readonly<{ probe(): Promise<void> }>;
+
 export interface SourceExecutionPreparationResult {
   readonly executionLockId: string;
   readonly executionLockDigest: string;
@@ -70,18 +72,18 @@ export interface SourceExecutionPreparationResult {
 
 /** Freezes and publishes every source-mode Runner input before an attempt may be queued. */
 export class SourceExecutionPreparer {
-  readonly #sources: AuthoritativeSourceSnapshotPort;
-  readonly #plans: FrozenTestPlanPort;
-  readonly #objects: PreparedInputObjectPort;
-  readonly #locks: RunnerExecutionLockPort;
+  readonly #sources: ReadyPort<AuthoritativeSourceSnapshotPort>;
+  readonly #plans: ReadyPort<FrozenTestPlanPort>;
+  readonly #objects: ReadyPort<PreparedInputObjectPort>;
+  readonly #locks: ReadyPort<RunnerExecutionLockPort>;
   readonly #workRoot: string;
   readonly #now: () => Date;
 
   constructor(options: {
-    readonly sources: AuthoritativeSourceSnapshotPort;
-    readonly plans: FrozenTestPlanPort;
-    readonly objects: PreparedInputObjectPort;
-    readonly locks: RunnerExecutionLockPort;
+    readonly sources: ReadyPort<AuthoritativeSourceSnapshotPort>;
+    readonly plans: ReadyPort<FrozenTestPlanPort>;
+    readonly objects: ReadyPort<PreparedInputObjectPort>;
+    readonly locks: ReadyPort<RunnerExecutionLockPort>;
     readonly workRoot: string;
     readonly now?: () => Date;
   }) {
@@ -91,6 +93,15 @@ export class SourceExecutionPreparer {
     this.#locks = options.locks;
     this.#workRoot = absolute(options.workRoot, "work root");
     this.#now = options.now ?? (() => new Date());
+  }
+
+  async probe(): Promise<void> {
+    await Promise.all([
+      this.#sources.probe(),
+      this.#plans.probe(),
+      this.#objects.probe(),
+      this.#locks.probe(),
+    ]);
   }
 
   async prepare(value: unknown): Promise<SourceExecutionPreparationResult> {

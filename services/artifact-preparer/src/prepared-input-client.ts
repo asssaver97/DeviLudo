@@ -117,6 +117,23 @@ export class MtlsPreparedInputObjectClient implements PreparedInputObjectPort {
     return parseReceipt(receipt, input, grant.bindingDigest);
   }
 
+  async probe(): Promise<void> {
+    const url = new URL(this.#endpoint.href);
+    url.pathname = "/healthz";
+    const response = await this.#brokerHttp({
+      url,
+      method: "GET",
+      body: "",
+      tls: this.#tls,
+      timeoutMs: this.#requestTimeoutMs,
+    });
+    const body = record(response.payload);
+    exactKeys(body, ["status", "service"]);
+    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-evidence-archive") {
+      invalidResponse();
+    }
+  }
+
   async #post(path: string, body: Readonly<Record<string, unknown>>): Promise<unknown> {
     const url = new URL(this.#endpoint.href);
     url.pathname = path;

@@ -70,12 +70,22 @@ test("source execution preparer rejects plan, source and receipt drift before pe
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("source execution preparer readiness recursively probes every executable input authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-artifact-preparer-"));
+  try {
+    const fixture = createFixture(root);
+    await fixture.preparer.probe();
+    assert.deepEqual(new Set(fixture.probes), new Set(["sources", "plans", "objects", "locks"]));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 function createFixture(root: string, options: {
   readonly corruptPlan?: boolean;
   readonly invalidSourceDigest?: boolean;
   readonly mismatchedSourceDigest?: boolean;
   readonly driftReceipt?: boolean;
 } = {}) {
+  const probes: string[] = [];
   const plan = testPlan();
   const planBytes = Buffer.from(canonicalJson(plan), "utf8");
   const toolchain = {
@@ -105,7 +115,8 @@ function createFixture(root: string, options: {
     targetMatrix: ["linux", "macos"] as const,
     toolchain,
   };
-  const sources: AuthoritativeSourceSnapshotPort = {
+  const sources: AuthoritativeSourceSnapshotPort & Readonly<{ probe(): Promise<void> }> = {
+    async probe() { probes.push("sources"); },
     async materialize(input) {
       await mkdir(join(input.destinationPath, "scripts"), { recursive: true });
       await Promise.all([
@@ -115,7 +126,8 @@ function createFixture(root: string, options: {
       return { sourceDigest: options.invalidSourceDigest ? "invalid" : options.mismatchedSourceDigest ? sha("f") : sha("a") };
     },
   };
-  const plans: FrozenTestPlanPort = {
+  const plans: FrozenTestPlanPort & Readonly<{ probe(): Promise<void> }> = {
+    async probe() { probes.push("plans"); },
     async read() { return options.corruptPlan ? Buffer.concat([planBytes, Buffer.from("\n")]) : planBytes; },
   };
   const objects = new Map<string, { digest: string; bytes: Buffer }>();
@@ -130,11 +142,13 @@ function createFixture(root: string, options: {
       sizeBytes: bytes.byteLength,
     };
   };
-  const objectPort: PreparedInputObjectPort = {
+  const objectPort: PreparedInputObjectPort & Readonly<{ probe(): Promise<void> }> = {
+    async probe() { probes.push("objects"); },
     async publishFile(input) { return publish(input.objectKey, input.artifactDigest, await readFile(input.path)); },
   };
   const locks = new Map<string, { payload: RunnerExecutionLock; digest: string }>();
-  const lockPort: RunnerExecutionLockPort = {
+  const lockPort: RunnerExecutionLockPort & Readonly<{ probe(): Promise<void> }> = {
+    async probe() { probes.push("locks"); },
     async persist(input) {
       const existing = locks.get(input.lockKey);
       if (existing) {
@@ -158,6 +172,7 @@ function createFixture(root: string, options: {
     request,
     objects,
     locks,
+    probes,
   };
 }
 

@@ -103,6 +103,22 @@ test("PostgreSQL execution-lock store binds the exact Steam BuildID", async () =
   assert.equal(JSON.parse(insertValues[9] as string).execution.installGrantId, "install-grant-9");
 });
 
+test("PostgreSQL execution-lock readiness requires the append-only lock table", async () => {
+  let ready = true;
+  let releases = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>() {
+      return { rowCount: 1, rows: [{ runner_execution_locks: ready ? "deviludo.runner_execution_locks" : null } as unknown as Row] };
+    },
+    release() { releases += 1; },
+  };
+  const store = new PostgresRunnerExecutionLockPort({ async connect() { return client; } });
+  await store.probe();
+  ready = false;
+  await assert.rejects(store.probe(), /persistence is invalid/);
+  assert.equal(releases, 2);
+});
+
 function executionLock(): RunnerExecutionLock {
   return {
     schemaVersion: "deviludo.runner-execution-lock.v1",

@@ -51,6 +51,7 @@ test("Artifact Preparer authorizes the caller before resolving and executing ser
       async probe() { calls.push("authority-probe"); },
     },
     preparer: {
+      async probe() { calls.push("preparer-probe"); },
       async prepare(value) {
         calls.push("prepare");
         assert.deepEqual(value, authorityRequest);
@@ -61,7 +62,7 @@ test("Artifact Preparer authorizes the caller before resolving and executing ser
   assert.deepEqual(await service.prepare(identity, trigger), receipt);
   assert.deepEqual(calls, ["authorize", "resolve", "prepare"]);
   await service.probe();
-  assert.deepEqual(new Set(calls.slice(3)), new Set(["tenant-probe", "authority-probe"]));
+  assert.deepEqual(new Set(calls.slice(3)), new Set(["tenant-probe", "authority-probe", "preparer-probe"]));
 });
 
 test("Artifact Preparer rejects extra trigger fields before tenant or database access", async () => {
@@ -69,7 +70,7 @@ test("Artifact Preparer rejects extra trigger fields before tenant or database a
   const service = new ArtifactPreparationService({
     tenants: { async authorize() { touched = true; }, async probe() {} },
     authority: { async resolve() { touched = true; return authorityRequest as never; }, async probe() {} },
-    preparer: { async prepare() { touched = true; return receipt; } },
+    preparer: { async prepare() { touched = true; return receipt; }, async probe() {} },
   });
   await assert.rejects(service.prepare(identity, { ...trigger, sourceDigest: "a".repeat(64) }), /trigger fields is invalid/);
   assert.equal(touched, false);

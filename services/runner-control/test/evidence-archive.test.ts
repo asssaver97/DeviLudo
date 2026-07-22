@@ -110,6 +110,16 @@ test("evidence archive verifies health and every immutable receipt binding", asy
     archive.persistBundle({ tenantId, projectId, bundle: bundle() }),
     /invalid receipt/,
   );
+
+  const drifted = new MtlsRunnerEvidenceArchive({
+    endpoint: "https://evidence.internal/v1/runner-evidence",
+    tls,
+    http: async () => ({
+      statusCode: 200,
+      payload: { status: "ok", service: "deviludo-evidence-archive", diagnostic: "unexpected" },
+    }),
+  });
+  await assert.rejects(drifted.probe(), /readiness probe failed/);
 });
 
 test("evidence archive rejects insecure or ambiguous endpoints and malformed TLS", () => {

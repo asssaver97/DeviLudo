@@ -98,6 +98,28 @@ test("prepared-input client refuses local file or receipt drift", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("prepared-input readiness requires the exact Evidence Archive health contract", async () => {
+  let method: string | undefined;
+  let drift = false;
+  const client = new MtlsPreparedInputObjectClient({
+    endpoint: "https://archive.internal",
+    tls: { key: Buffer.alloc(32), certificate: Buffer.alloc(32), ca: Buffer.alloc(32) },
+    transferCa: Buffer.alloc(32),
+    allowedTransferOrigins: ["https://s3.internal"],
+    brokerHttp: async (request) => {
+      method = request.method;
+      return { statusCode: 200, payload: {
+        status: "ok", service: "deviludo-evidence-archive", ...(drift ? { diagnostic: "unexpected" } : {}),
+      } };
+    },
+    transferHttp: { async download() { throw new Error("unused"); }, async upload() { throw new Error("unused"); } },
+  });
+  await client.probe();
+  assert.equal(method, "GET");
+  drift = true;
+  await assert.rejects(client.probe(), /Broker response is invalid/);
+});
+
 test("prepared-input environment accepts only normalized file-mounted transport configuration", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-prepared-input-env-"));
   try {

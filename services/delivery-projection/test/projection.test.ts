@@ -126,6 +126,15 @@ test("projection replay preserves a terminal cancellation history", () => {
   );
 });
 
+test("delivery projection readiness requires every workflow, Runner and evidence table", async () => {
+  const database = new ProjectionDatabase();
+  const store = new PostgresDeliveryProjectionStore({ async connect() { return database.client(); } });
+  await store.probe();
+  database.missingReadyTable = "evidence_bundles";
+  await assert.rejects(store.probe(), /database is not ready/);
+  assert.equal(database.releases, 2);
+});
+
 function repairHistoryMachine(automaticRepairLimit: number | null = 3) {
   const machine = new GameDeliveryWorkflow({
     workflowId, tenantId, projectId, targetMatrix: ["linux"], automaticRepairLimit,
@@ -428,11 +437,23 @@ class ProjectionDatabase {
   readonly statements: string[] = [];
   readonly events = new Map<string, Record<string, unknown>>();
   current: Record<string, unknown> | null = null;
+  missingReadyTable: string | null = null;
+  releases = 0;
   client(): PostgresWorkflowClient {
     return {
       query: async <Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: readonly unknown[]) => {
         const cast = (rowCount: number, rows: readonly Record<string, unknown>[]) => ({ rowCount, rows }) as unknown as PostgresQueryResult<Row>;
         this.statements.push(text);
+        if (text.includes("to_regclass('deviludo.spec_delivery_workflows')")) {
+          const tables = [
+            "spec_delivery_workflows", "delivery_state_projection_events", "delivery_state_projections",
+            "projects", "e2e_platform_leases", "runner_registrations", "evidence_bundles",
+          ];
+          return cast(1, [Object.fromEntries(tables.map((table) => [
+            table,
+            table === this.missingReadyTable ? null : `deviludo.${table}`,
+          ]))]);
+        }
         if (text.includes("FROM deviludo.spec_delivery_workflows")) {
           return cast(1, [{ target_matrix: ["linux", "macos", "windows"] }]);
         }
@@ -474,10 +495,9 @@ class ProjectionDatabase {
           };
           return cast(1, [{ projection_key: values?.[4] }]);
         }
-        if (text === "SELECT 1 AS ready") return cast(1, [{ ready: 1 }]);
         return cast(0, []);
       },
-      release() {},
+      release: () => { this.releases += 1; },
     };
   }
 }

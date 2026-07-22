@@ -680,3 +680,33 @@ test("PostgreSQL Runner ingress rejects tenant assignment, capability drift and 
   assert.equal(tamperedClient.leaseInserts, 0);
   assert.ok(tamperedClient.sql.includes("ROLLBACK"));
 });
+
+test("PostgreSQL Runner ingress readiness requires every scheduling and evidence table", async () => {
+  const tables = [
+    "runner_registrations", "runner_native_install_operations", "runner_native_install_grants",
+    "runner_native_install_rollbacks", "e2e_platform_leases", "e2e_attempts", "agent_runs",
+    "runner_execution_locks", "platform_runner_events", "evidence_bundles",
+  ] as const;
+  let missing: string | null = null;
+  let releases = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>() {
+      return result([Object.fromEntries(tables.map((table) => [
+        table,
+        table === missing ? null : `deviludo.${table}`,
+      ])) as Row]);
+    },
+    release() { releases += 1; },
+  };
+  const ingress = new PostgresRunnerIngressStore({
+    pool: { async connect() { return client; } },
+    signer: { keyId: "runner-jobs-2030-q1", privateKey },
+    admission: { async authorize() { return true; } },
+    assignments: { async authorize() { return true; } },
+    evidenceArchive: { async persistBundle() { throw new Error("unused"); } },
+  });
+  await ingress.probe();
+  missing = "evidence_bundles";
+  await assert.rejects(ingress.probe(), /database is not ready/);
+  assert.equal(releases, 2);
+});

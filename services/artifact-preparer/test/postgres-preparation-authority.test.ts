@@ -149,3 +149,23 @@ test("preparation trigger rejects caller-supplied executable configuration", asy
   await assert.rejects(authority.resolve({ ...trigger(), sourceDigest }), /trigger fields is invalid/);
   assert.equal(client.sql.length, 0);
 });
+
+test("PostgreSQL preparation authority readiness requires every queried authority table", async () => {
+  const tables = [
+    "agent_runs", "immutable_revisions", "approved_test_plan_bindings", "runner_toolchain_revisions",
+    "github_candidate_receipts", "github_merge_receipts",
+  ] as const;
+  let releases = 0;
+  let missing: string | null = null;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>() {
+      return result([Object.fromEntries(tables.map((table) => [table, table === missing ? null : `deviludo.${table}`])) as Row]);
+    },
+    release() { releases += 1; },
+  };
+  const authority = new PostgresSourceExecutionPreparationAuthority({ async connect() { return client; } });
+  await authority.probe();
+  missing = "github_merge_receipts";
+  await assert.rejects(authority.probe(), /authority receipt is invalid/);
+  assert.equal(releases, 2);
+});

@@ -114,8 +114,18 @@ export class PostgresSourceExecutionPreparationAuthority implements SourceExecut
   async probe(): Promise<void> {
     const client = await this.pool.connect();
     try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.agent_runs')::text AS agent_runs,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings,
+                to_regclass('deviludo.runner_toolchain_revisions')::text AS runner_toolchain_revisions,
+                to_regclass('deviludo.github_candidate_receipts')::text AS github_candidate_receipts,
+                to_regclass('deviludo.github_merge_receipts')::text AS github_merge_receipts`,
+      );
+      assertReadyTables(result.rows[0], [
+        "agent_runs", "immutable_revisions", "approved_test_plan_bindings", "runner_toolchain_revisions",
+        "github_candidate_receipts", "github_merge_receipts",
+      ]);
     } finally { client.release(); }
   }
 
@@ -132,6 +142,10 @@ export class PostgresSourceExecutionPreparationAuthority implements SourceExecut
       throw error;
     } finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) invalid();
 }
 
 function resolveSource(client: PostgresWorkflowClient, trigger: SourceExecutionPreparationTrigger) {

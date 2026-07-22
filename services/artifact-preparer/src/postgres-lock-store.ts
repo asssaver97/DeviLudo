@@ -75,6 +75,16 @@ export class PostgresRunnerExecutionLockPort implements RunnerExecutionLockPort 
     });
   }
 
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{ runner_execution_locks?: unknown }>(
+        "SELECT to_regclass('deviludo.runner_execution_locks')::text AS runner_execution_locks",
+      );
+      if (result.rows[0]?.runner_execution_locks !== "deviludo.runner_execution_locks") invalid();
+    } finally { client.release(); }
+  }
+
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {

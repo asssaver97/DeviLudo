@@ -336,8 +336,22 @@ export class PostgresDeliveryProjectionStore implements DeliveryProjectionStore 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
     try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows[0]?.ready !== 1) throw new Error("Delivery projection database is not ready");
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.spec_delivery_workflows')::text AS spec_delivery_workflows,
+                to_regclass('deviludo.delivery_state_projection_events')::text AS delivery_state_projection_events,
+                to_regclass('deviludo.delivery_state_projections')::text AS delivery_state_projections,
+                to_regclass('deviludo.projects')::text AS projects,
+                to_regclass('deviludo.e2e_platform_leases')::text AS e2e_platform_leases,
+                to_regclass('deviludo.runner_registrations')::text AS runner_registrations,
+                to_regclass('deviludo.evidence_bundles')::text AS evidence_bundles`,
+      );
+      const row = result.rows[0];
+      for (const table of [
+        "spec_delivery_workflows", "delivery_state_projection_events", "delivery_state_projections",
+        "projects", "e2e_platform_leases", "runner_registrations", "evidence_bundles",
+      ]) {
+        if (row?.[table] !== `deviludo.${table}`) throw new Error("Delivery projection database is not ready");
+      }
     } finally { client.release(); }
   }
 

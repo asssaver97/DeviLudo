@@ -38,6 +38,13 @@ test("PostgreSQL test-plan reader rejects missing binding, payload drift and rec
   await assert.rejects(readerFixture().reader.read({ ...input(), specRevisionId: "not-a-uuid" }), /frozen test plan/);
 });
 
+test("PostgreSQL test-plan readiness requires both binding and immutable revision tables", async () => {
+  const ready = readerFixture();
+  await ready.reader.probe();
+  assert.equal(ready.releases, 1);
+  await assert.rejects(readerFixture({ missingReadyTable: true }).reader.probe(), /frozen test plan/);
+});
+
 function input() {
   return { tenantId, projectId, specRevisionId, testPlanDigest };
 }
@@ -46,6 +53,7 @@ function readerFixture(options: {
   readonly missing?: boolean;
   readonly payload?: unknown;
   readonly boundDigest?: string;
+  readonly missingReadyTable?: boolean;
 } = {}) {
   const sql: string[] = [];
   let queryValues: readonly unknown[] = [];
@@ -56,6 +64,15 @@ function readerFixture(options: {
       values: readonly unknown[] = [],
     ): Promise<PostgresQueryResult<Row>> {
       sql.push(statement);
+      if (statement.includes("to_regclass('deviludo.approved_test_plan_bindings')")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            approved_test_plan_bindings: "deviludo.approved_test_plan_bindings",
+            immutable_revisions: options.missingReadyTable ? null : "deviludo.immutable_revisions",
+          } as unknown as Row],
+        };
+      }
       if (statement.includes("FROM deviludo.approved_test_plan_bindings")) {
         queryValues = values;
         return {

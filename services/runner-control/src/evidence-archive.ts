@@ -94,7 +94,9 @@ export class MtlsRunnerEvidenceArchive implements RunnerEvidenceArchive {
       headers: Object.freeze({ accept: "application/json" }),
     });
     const body = record(response.payload);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-evidence-archive") {
+    const fields = Object.keys(body).sort();
+    if (fields.length !== 2 || fields[0] !== "service" || fields[1] !== "status"
+      || response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-evidence-archive") {
       throw new Error("Runner evidence archive readiness probe failed");
     }
   }

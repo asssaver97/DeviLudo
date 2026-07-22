@@ -43,7 +43,7 @@ export async function runRunnerIngressService(options: {
       leaseDurationSeconds: config.leaseDurationSeconds,
     });
     const readiness = async () => {
-      await Promise.all([pool.probe(), fleet.probe(), archive.probe()]);
+      await Promise.all([store.probe(), fleet.probe(), archive.probe()]);
     };
     const handler = createRunnerIngressHandler({ operations: store, readiness });
     server = createRunnerIngressHttpsServer({

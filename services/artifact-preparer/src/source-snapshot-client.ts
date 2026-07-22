@@ -114,6 +114,7 @@ export class MtlsAuthoritativeSourceSnapshotClient implements AuthoritativeSourc
     const response = await this.#brokerHttp({ url, method: "GET", body: "", tls: this.#tls,
       timeoutMs: this.#requestTimeoutMs });
     const body = record(response.payload);
+    exactKeys(body, ["status", "service"]);
     if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-source-snapshot") invalidResponse();
   }
 

@@ -68,6 +68,13 @@ test("SCM snapshot client readiness requires the exact source Broker identity", 
       return { statusCode: 200, payload: { status: "ok", service: "deviludo-source-snapshot" } }; },
     transferHttp: { async upload() { throw new Error("unused"); }, async download() { throw new Error("unused"); } } });
   await client.probe(); assert.equal(method, "GET");
+
+  const drifted = new MtlsAuthoritativeSourceSnapshotClient({ endpoint: "https://scm-snapshot.internal",
+    tls: { key: Buffer.alloc(32), certificate: Buffer.alloc(32), ca: Buffer.alloc(32) }, transferCa: Buffer.alloc(32),
+    allowedTransferOrigins: ["https://s3.internal"], brokerHttp: async () => ({
+      statusCode: 200, payload: { status: "ok", service: "deviludo-source-snapshot", diagnostic: "unexpected" },
+    }), transferHttp: { async upload() { throw new Error("unused"); }, async download() { throw new Error("unused"); } } });
+  await assert.rejects(drifted.probe(), /Broker response is invalid/);
 });
 
 function input(destinationPath: string) {

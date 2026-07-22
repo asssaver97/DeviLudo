@@ -9,7 +9,7 @@ export class ArtifactPreparationService {
   constructor(private readonly options: {
     readonly tenants: PreparedInputTenantAuthorizer;
     readonly authority: SourceExecutionPreparationAuthority;
-    readonly preparer: Pick<SourceExecutionPreparer, "prepare">;
+    readonly preparer: Pick<SourceExecutionPreparer, "prepare" | "probe">;
   }) {}
 
   async prepare(identity: EvidenceArchiveWorkloadIdentity, value: unknown): Promise<SourceExecutionPreparationResult> {
@@ -20,6 +20,10 @@ export class ArtifactPreparationService {
   }
 
   async probe(): Promise<void> {
-    await Promise.all([this.options.tenants.probe(), this.options.authority.probe()]);
+    await Promise.all([
+      this.options.tenants.probe(),
+      this.options.authority.probe(),
+      this.options.preparer.probe(),
+    ]);
   }
 }
