@@ -17,6 +17,7 @@ const evidenceDigest = "b".repeat(64);
 test("successful inference reconciliation commits one exact SecurityAdmin audit record", async () => {
   let received: unknown;
   const reconciler = new class extends InferenceRequestReconciler {
+    async probe() {}
     async lookup() { return null; }
     async reconcile(input: Parameters<InferenceRequestReconciler["reconcile"]>[0]) {
       received = input;
@@ -90,6 +91,7 @@ test("runtime Provider failover audit remains tenant and project isolated", asyn
     new InferenceGatewayProviderProbe(),
     new DevelopmentAgentSupplyChain(),
     new class extends InferenceRequestReconciler {
+      async probe() {}
       async lookup() { return null; }
       async reconcile(): Promise<never> { throw new Error("not used"); }
     }(),

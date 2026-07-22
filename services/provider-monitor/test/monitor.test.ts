@@ -49,6 +49,7 @@ test("monitor probes the store-derived Provider and emits one exact recovery sig
   const input = request(); const claim = claimFor(input); const completed: unknown[] = [];
   const store = memoryStore({ claim });
   const service = new ProviderRecoveryService(store, {
+    async probe() {},
     async run(provider) { assert.equal(provider.id, providerId); assert.equal(provider.agent, "claude-code"); return checks; },
   }, { async complete(value) { completed.push(value); return delivery(); } }, () => new Date(probedAt));
   const receipt = await service.check(input, scheduler);
@@ -61,7 +62,7 @@ test("monitor probes the store-derived Provider and emits one exact recovery sig
 
 test("failed probe keeps the action waiting and defers its durable claim", async () => {
   const input = request(); const store = memoryStore({ claim: claimFor(input) }); let completions = 0;
-  const service = new ProviderRecoveryService(store, { async run() { throw new Error("offline"); } },
+  const service = new ProviderRecoveryService(store, { async probe() {}, async run() { throw new Error("offline"); } },
     { async complete() { completions += 1; return delivery(); } });
   await assert.rejects(service.check(input, scheduler), /offline/);
   assert.equal(store.deferred, 1); assert.equal(store.released, 0);
@@ -71,10 +72,28 @@ test("failed probe keeps the action waiting and defers its durable claim", async
 test("completed replay never probes or sends another workflow signal", async () => {
   const input = request(); let probes = 0; let completions = 0;
   const service = new ProviderRecoveryService(memoryStore({ completed: receiptFor(input, delivery()) }),
-    { async run() { probes += 1; return checks; } },
+    { async probe() {}, async run() { probes += 1; return checks; } },
     { async complete() { completions += 1; return delivery(); } });
   const replay = await service.check(input, scheduler);
   assert.equal(replay.replayed, true); assert.equal(probes, 0); assert.equal(completions, 0);
+});
+
+test("Provider recovery readiness proves both durable state and the live Inference Gateway", async () => {
+  const store = memoryStore({});
+  let storeProbes = 0; let gatewayProbes = 0;
+  store.probe = async () => { storeProbes += 1; };
+  const service = new ProviderRecoveryService(store, {
+    async probe() { gatewayProbes += 1; },
+    async run() { return checks; },
+  }, { async complete() { return delivery(); } });
+  await service.probe();
+  assert.equal(storeProbes, 1); assert.equal(gatewayProbes, 1);
+
+  const unavailable = new ProviderRecoveryService(store, {
+    async probe() { throw new Error("gateway unavailable"); },
+    async run() { return checks; },
+  }, { async complete() { return delivery(); } });
+  await assert.rejects(unavailable.probe(), /gateway unavailable/);
 });
 
 test("request cannot supply Agent, model, endpoint, credential or Provider authority", () => {

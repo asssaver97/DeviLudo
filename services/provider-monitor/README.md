@@ -1,5 +1,7 @@
 # Provider monitor
 
+`/healthz` 只有在权威 PostgreSQL schema 与实时 Inference Gateway 同时就绪时才返回成功；Gateway 必须精确声明 Provider 探针和请求协调能力，避免恢复监视器在无法安全复测 Provider 时误报 READY。
+
 `provider-monitor` automatically recovers a delivery paused in
 `WAITING_PROVIDER`. Its background Worker reloads and verifies a short-lived,
 control-plane-signed tenant assignment on every cycle, then performs a bounded

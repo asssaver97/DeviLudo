@@ -37,6 +37,7 @@ export interface ProviderRecoveryStore {
 }
 
 export interface ProviderRecoveryProbe {
+  probe(): Promise<void>;
   run(provider: ProviderProbeConfiguration): Promise<Readonly<Record<string, "PASS" | "FAIL">>>;
 }
 
@@ -95,7 +96,7 @@ export class ProviderRecoveryService {
     }
   }
 
-  async probe(): Promise<void> { await this.store.probe(); }
+  async probe(): Promise<void> { await Promise.all([this.store.probe(), this.providerProbe.probe()]); }
 }
 
 function exactDate(value: Date): Date {

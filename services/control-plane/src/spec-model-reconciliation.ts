@@ -11,6 +11,7 @@ import { ServiceProblem } from "./contracts";
 import { providerProbeHttpsJson, type ProviderProbeHttp } from "./provider-probe";
 
 export abstract class SpecModelGenerationReconciler {
+  abstract probe(): Promise<void>;
   abstract lookup(tenantId: string, generationOperationKey: string): Promise<SpecModelReconciliationStatus | null>;
   abstract reconcile(input: SpecModelReconciliationRequest): Promise<SpecModelReconciliationReceipt>;
 }
@@ -20,6 +21,22 @@ export class SpecModelBrokerReconciliationClient extends SpecModelGenerationReco
     private readonly env: Readonly<Record<string, string | undefined>> = process.env,
     private readonly http: ProviderProbeHttp = providerProbeHttpsJson,
   ) { super(); }
+
+  async probe(): Promise<void> {
+    if (!this.env.DEVILUDO_SPEC_MODEL_RECONCILIATION_URL && this.env.NODE_ENV !== "production") return;
+    const url = this.endpoint();
+    url.pathname = "/healthz";
+    const tls = await reconciliationTls(this.env);
+    try {
+      const response = await this.http(url, { method: "GET", ...tls, timeoutMs: 10_000 });
+      const health = exact(response.payload, ["schemaVersion", "service", "status"]);
+      if (response.statusCode !== 200 || health.schemaVersion !== "deviludo.spec-model-health.v1"
+        || health.status !== "ok" || health.service !== "deviludo-spec-model-broker") unavailable("readiness");
+    } catch (error) {
+      if (error instanceof ServiceProblem) throw error;
+      unavailable("readiness");
+    } finally { wipeTls(tls); }
+  }
 
   async lookup(tenantId: string, generationOperationKey: string): Promise<SpecModelReconciliationStatus | null> {
     const url = this.endpoint();
@@ -62,12 +79,9 @@ export class SpecModelBrokerReconciliationClient extends SpecModelGenerationReco
   }
 
   private async call(url: URL, body: string) {
-    const [key, certificate, ca] = await Promise.all([
-      secretFile(this.env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_TLS_KEY_FILE"),
-      secretFile(this.env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_TLS_CERT_FILE"),
-      secretFile(this.env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_CA_FILE"),
-    ]);
-    return this.http(url, { key, certificate, ca, timeoutMs: 30_000, body });
+    const tls = await reconciliationTls(this.env);
+    try { return await this.http(url, { method: "POST", ...tls, timeoutMs: 30_000, body }); }
+    finally { wipeTls(tls); }
   }
 }
 
@@ -86,6 +100,18 @@ async function secretFile(env: Readonly<Record<string, string | undefined>>, nam
     if (!metadata.isFile() || metadata.size < 32 || metadata.size > 1024 * 1024) throw new Error(`${name} file is invalid`);
     return await file.readFile();
   } finally { await file.close(); }
+}
+
+async function reconciliationTls(env: Readonly<Record<string, string | undefined>>) {
+  const [key, certificate, ca] = await Promise.all([
+    secretFile(env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_TLS_KEY_FILE"),
+    secretFile(env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_TLS_CERT_FILE"),
+    secretFile(env, "DEVILUDO_SPEC_MODEL_RECONCILIATION_CA_FILE"),
+  ]);
+  return { key, certificate, ca };
+}
+function wipeTls(tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>): void {
+  tls.key.fill(0); tls.certificate.fill(0); tls.ca.fill(0);
 }
 
 function parseStatus(raw: unknown, tenantId: string, generationOperationKey: string): SpecModelReconciliationStatus | null {

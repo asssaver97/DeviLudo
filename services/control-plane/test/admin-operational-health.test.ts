@@ -99,6 +99,7 @@ function service(store: InMemoryAdminStore): AdminService {
     new InferenceGatewayProviderProbe(),
     new DevelopmentAgentSupplyChain(),
     new class extends InferenceRequestReconciler {
+      async probe() {}
       async lookup() { return null; }
       async reconcile(): Promise<never> { throw new Error("not used"); }
     }(),

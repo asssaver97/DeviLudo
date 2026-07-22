@@ -8,7 +8,8 @@ import { ServiceProblem, type ProviderRevisionRecord } from "./contracts";
 const MAX_RESPONSE_BYTES = 128 * 1024;
 
 export interface ProviderProbeHttpRequest {
-  readonly body: string;
+  readonly method: "GET" | "POST";
+  readonly body?: string;
   readonly key: Buffer;
   readonly certificate: Buffer;
   readonly ca: Buffer;
@@ -18,6 +19,7 @@ export interface ProviderProbeHttpResponse { readonly statusCode: number; readon
 export type ProviderProbeHttp = (url: URL, request: ProviderProbeHttpRequest) => Promise<ProviderProbeHttpResponse>;
 
 export abstract class ProviderProbe {
+  abstract probe(): Promise<void>;
   abstract run(provider: ProviderRevisionRecord): Promise<Readonly<Record<string, "PASS" | "FAIL">>>;
 }
 
@@ -36,6 +38,24 @@ export class InferenceGatewayProviderProbeClient {
     private readonly http: ProviderProbeHttp = providerProbeHttpsJson,
   ) {}
 
+  async probe(): Promise<void> {
+    const endpoint = this.env.DEVILUDO_INFERENCE_PROBE_URL;
+    if (!endpoint) {
+      if (this.env.NODE_ENV === "production") {
+        throw new ServiceProblem(503, "PROBE_GATEWAY_UNAVAILABLE", "The inference gateway probe service is not configured");
+      }
+      return;
+    }
+    const url = new URL(validateProbeEndpoint(endpoint));
+    const tls = await providerProbeTls(this.env);
+    try {
+      await probeInferenceGatewayHealth(url, tls, this.http);
+    } catch (error) {
+      if (error instanceof ServiceProblem) throw error;
+      throw new ServiceProblem(503, "PROBE_GATEWAY_UNAVAILABLE", "The inference gateway probe service is unavailable");
+    } finally { wipeTls(tls); }
+  }
+
   async run(provider: ProviderProbeConfiguration): Promise<Readonly<Record<string, "PASS" | "FAIL">>> {
     const endpoint = this.env.DEVILUDO_INFERENCE_PROBE_URL;
     if (!endpoint) {
@@ -45,14 +65,10 @@ export class InferenceGatewayProviderProbeClient {
       return developmentContractProbe();
     }
     const url = validateProbeEndpoint(endpoint);
+    const tls = await providerProbeTls(this.env);
     try {
-      const [key, certificate, ca] = await Promise.all([
-        secretFile(this.env, "DEVILUDO_INFERENCE_PROBE_TLS_KEY_FILE"),
-        secretFile(this.env, "DEVILUDO_INFERENCE_PROBE_TLS_CERT_FILE"),
-        secretFile(this.env, "DEVILUDO_INFERENCE_PROBE_CA_FILE"),
-      ]);
       const response = await this.http(new URL(url), {
-        key, certificate, ca, timeoutMs: 30_000,
+        method: "POST", ...tls, timeoutMs: 30_000,
         body: JSON.stringify({
           providerRevisionId: provider.id,
           agent: provider.agent,
@@ -74,12 +90,13 @@ export class InferenceGatewayProviderProbeClient {
     } catch (error) {
       if (error instanceof ServiceProblem) throw error;
       throw new ServiceProblem(409, "PROVIDER_PROBE_FAILED", "The inference gateway Provider probe did not complete");
-    }
+    } finally { wipeTls(tls); }
   }
 }
 
 export class InferenceGatewayProviderProbe extends ProviderProbe {
   readonly #client = new InferenceGatewayProviderProbeClient();
+  async probe(): Promise<void> { await this.#client.probe(); }
   async run(provider: ProviderRevisionRecord): Promise<Readonly<Record<string, "PASS" | "FAIL">>> {
     return this.#client.run(provider);
   }
@@ -116,8 +133,9 @@ function validateProbeEndpoint(raw: string): string {
 
 export async function providerProbeHttpsJson(url: URL, input: ProviderProbeHttpRequest): Promise<ProviderProbeHttpResponse> {
   return new Promise((accept, reject) => {
+    const body = input.body;
     const options: RequestOptions = {
-      method: "POST",
+      method: input.method,
       key: input.key,
       cert: input.certificate,
       ca: input.ca,
@@ -126,8 +144,10 @@ export async function providerProbeHttpsJson(url: URL, input: ProviderProbeHttpR
       servername: url.hostname,
       headers: {
         accept: "application/json",
-        "content-type": "application/json",
-        "content-length": String(Buffer.byteLength(input.body)),
+        ...(body === undefined ? {} : {
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(body)),
+        }),
       },
     };
     const request = httpsRequest(url, options, (response) => {
@@ -135,19 +155,55 @@ export async function providerProbeHttpsJson(url: URL, input: ProviderProbeHttpR
       response.on("data", (chunk: Buffer | string) => {
         const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         size += value.byteLength;
-        if (size > MAX_RESPONSE_BYTES) { response.destroy(new Error("Inference probe response exceeded its bound")); return; }
+        if (size > MAX_RESPONSE_BYTES) {
+          for (const chunk of chunks) chunk.fill(0);
+          value.fill(0);
+          response.destroy(new Error("Inference probe response exceeded its bound"));
+          return;
+        }
         chunks.push(value);
       });
       response.once("error", reject);
       response.once("end", () => {
-        try { accept(Object.freeze({ statusCode: response.statusCode ?? 503, payload: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown })); }
+        let payload: Buffer | null = null;
+        try {
+          payload = Buffer.concat(chunks);
+          accept(Object.freeze({ statusCode: response.statusCode ?? 503, payload: JSON.parse(payload.toString("utf8")) as unknown }));
+        }
         catch { reject(new Error("Inference probe returned invalid JSON")); }
+        finally { payload?.fill(0); for (const chunk of chunks) chunk.fill(0); }
       });
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Inference probe timed out")));
     request.once("error", reject);
-    request.end(input.body);
+    request.end(body);
   });
+}
+
+export async function probeInferenceGatewayHealth(
+  endpoint: URL,
+  tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>,
+  http: ProviderProbeHttp = providerProbeHttpsJson,
+): Promise<void> {
+  const url = new URL(endpoint);
+  url.pathname = "/healthz";
+  url.search = "";
+  url.hash = "";
+  const response = await http(url, { method: "GET", ...tls, timeoutMs: 10_000 });
+  const health = exactObject(response.payload);
+  const expected = Object.freeze({
+    schemaVersion: "deviludo.inference-gateway-health.v1",
+    status: "ok",
+    service: "deviludo-inference-gateway",
+    connector: "CONFIGURED",
+    providerProbe: "CONFIGURED",
+    reconciliation: "CONFIGURED",
+  });
+  if (response.statusCode !== 200
+    || JSON.stringify(Object.keys(health).sort()) !== JSON.stringify(Object.keys(expected).sort())
+    || Object.entries(expected).some(([key, value]) => health[key] !== value)) {
+    throw new Error("Inference Gateway readiness identity is invalid");
+  }
 }
 
 async function secretFile(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> {
@@ -161,6 +217,26 @@ async function secretFile(env: Readonly<Record<string, string | undefined>>, nam
     if (!metadata.isFile() || metadata.size < 32 || metadata.size > 1024 * 1024) throw new Error(`${name} file is invalid`);
     return await file.readFile();
   } finally { await file.close(); }
+}
+
+async function providerProbeTls(env: Readonly<Record<string, string | undefined>>) {
+  const [key, certificate, ca] = await Promise.all([
+    secretFile(env, "DEVILUDO_INFERENCE_PROBE_TLS_KEY_FILE"),
+    secretFile(env, "DEVILUDO_INFERENCE_PROBE_TLS_CERT_FILE"),
+    secretFile(env, "DEVILUDO_INFERENCE_PROBE_CA_FILE"),
+  ]);
+  return { key, certificate, ca };
+}
+
+function wipeTls(tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>): void {
+  tls.key.fill(0); tls.certificate.fill(0); tls.ca.fill(0);
+}
+
+function exactObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Inference Gateway readiness identity is invalid");
+  }
+  return value as Record<string, unknown>;
 }
 
 function parseChecks(raw: unknown, providerRevisionId: string): Readonly<Record<string, "PASS" | "FAIL">> {

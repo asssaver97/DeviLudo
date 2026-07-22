@@ -9,12 +9,14 @@ import { ProviderProbe } from "../src/provider-probe";
 import { ProcessIsolatedSecretVault } from "../src/secret-vault";
 
 class FailingRotationProbe extends ProviderProbe {
+  async probe(): Promise<void> {}
   async run(): Promise<Readonly<Record<string, "PASS" | "FAIL">>> {
     throw new ServiceProblem(409, "PROVIDER_PROBE_FAILED", "replacement key was rejected");
   }
 }
 
 class PassingRotationProbe extends ProviderProbe {
+  async probe(): Promise<void> {}
   async run(): Promise<Readonly<Record<string, "PASS">>> {
     return passingChecks();
   }
@@ -31,6 +33,8 @@ class DeferredRotationProbe extends ProviderProbe {
     this.started = new Promise((resolve) => { this.#announce = resolve; });
     this.#result = new Promise((resolve) => { this.#complete = resolve; });
   }
+
+  async probe(): Promise<void> {}
 
   async run(): Promise<Readonly<Record<string, "PASS">>> {
     this.#announce();

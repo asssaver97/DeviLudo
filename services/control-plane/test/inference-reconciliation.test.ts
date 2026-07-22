@@ -34,6 +34,16 @@ test("control-plane reconciliation client uses fixed mTLS route and verifies the
       DEVILUDO_INFERENCE_RECONCILIATION_CA_FILE: ca,
     }, async (url, request) => {
       calls.push({ url: url.href, request });
+      if (request.method === "GET") {
+        return {
+          statusCode: 200,
+          payload: {
+            schemaVersion: "deviludo.inference-gateway-health.v1", status: "ok",
+            service: "deviludo-inference-gateway", connector: "CONFIGURED",
+            providerProbe: "CONFIGURED", reconciliation: "CONFIGURED",
+          },
+        };
+      }
       if (url.pathname.endsWith("/lookup")) {
         return {
           statusCode: 200,
@@ -64,15 +74,20 @@ test("control-plane reconciliation client uses fixed mTLS route and verifies the
         },
       };
     });
+    await client.probe();
     const receipt = await client.reconcile(input);
     assert.equal(receipt.usage.costUsd, 0.00048);
-    assert.equal(calls[0]?.url, "https://inference-gateway.internal/v1/inference-reconciliations");
-    assert.deepEqual(JSON.parse(calls[0]?.request.body ?? "null"), input);
-    assert.equal(calls[0]?.request.key.byteLength, 64);
+    assert.equal(calls[0]?.url, "https://inference-gateway.internal/healthz");
+    assert.equal(calls[0]?.request.method, "GET");
+    assert.equal(calls[1]?.url, "https://inference-gateway.internal/v1/inference-reconciliations");
+    assert.deepEqual(JSON.parse(calls[1]?.request.body ?? "null"), input);
+    assert.equal(calls[1]?.request.key.byteLength, 64);
     const status = await client.lookup(input.tenantId, input.runId);
     assert.equal(status?.requestId, input.requestId);
-    assert.equal(calls[1]?.url, "https://inference-gateway.internal/v1/inference-reconciliations/lookup");
-    assert.deepEqual(JSON.parse(calls[1]?.request.body ?? "null"), { tenantId: input.tenantId, runId: input.runId });
+    assert.equal(calls[2]?.url, "https://inference-gateway.internal/v1/inference-reconciliations/lookup");
+    assert.deepEqual(JSON.parse(calls[2]?.request.body ?? "null"), { tenantId: input.tenantId, runId: input.runId });
+    assert.equal(calls.every(({ request }) => [request.key, request.certificate, request.ca]
+      .every((value) => value.every((byte) => byte === 0))), true);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -111,4 +126,15 @@ test("control-plane reconciliation client rejects route and receipt drift", asyn
       return true;
     });
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("control-plane reconciliation readiness fails closed with a stable error when production endpoint is absent", async () => {
+  const client = new InferenceGatewayReconciliationClient({ NODE_ENV: "production" }, async () => {
+    throw new Error("must not connect");
+  });
+  await assert.rejects(client.probe(), (error: unknown) => {
+    assert.equal((error as { status?: number }).status, 503);
+    assert.equal((error as { code?: string }).code, "INFERENCE_RECONCILIATION_UNAVAILABLE");
+    return true;
+  });
 });

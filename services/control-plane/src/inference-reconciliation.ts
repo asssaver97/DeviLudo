@@ -7,10 +7,11 @@ import type {
   InferenceReconciliationRequest,
   InferenceReconciliationStatus,
 } from "../../inference-gateway/src/contracts";
-import { providerProbeHttpsJson, type ProviderProbeHttp } from "./provider-probe";
+import { probeInferenceGatewayHealth, providerProbeHttpsJson, type ProviderProbeHttp } from "./provider-probe";
 import { ServiceProblem } from "./contracts";
 
 export abstract class InferenceRequestReconciler {
+  abstract probe(): Promise<void>;
   abstract lookup(tenantId: string, runId: string): Promise<InferenceReconciliationStatus | null>;
   abstract reconcile(input: InferenceReconciliationRequest): Promise<InferenceReconciliationReceipt>;
 }
@@ -20,6 +21,21 @@ export class InferenceGatewayReconciliationClient extends InferenceRequestReconc
     private readonly env: Readonly<Record<string, string | undefined>> = process.env,
     private readonly http: ProviderProbeHttp = providerProbeHttpsJson,
   ) { super(); }
+
+  async probe(): Promise<void> {
+    const endpoint = this.env.DEVILUDO_INFERENCE_RECONCILIATION_URL;
+    if (!endpoint) {
+      if (this.env.NODE_ENV !== "production") return;
+      throw new ServiceProblem(503, "INFERENCE_RECONCILIATION_UNAVAILABLE", "Inference reconciliation is not configured");
+    }
+    const url = validateEndpoint(endpoint);
+    const tls = await reconciliationTls(this.env);
+    try { await probeInferenceGatewayHealth(url, tls, this.http); }
+    catch (error) {
+      if (error instanceof ServiceProblem) throw error;
+      throw new ServiceProblem(503, "INFERENCE_RECONCILIATION_UNAVAILABLE", "Inference reconciliation readiness did not complete");
+    } finally { wipeTls(tls); }
+  }
 
   async lookup(tenantId: string, runId: string): Promise<InferenceReconciliationStatus | null> {
     const endpoint = this.env.DEVILUDO_INFERENCE_RECONCILIATION_URL;
@@ -62,12 +78,9 @@ export class InferenceGatewayReconciliationClient extends InferenceRequestReconc
   }
 
   async #call(url: URL, body: string) {
-    const [key, certificate, ca] = await Promise.all([
-      secretFile(this.env, "DEVILUDO_INFERENCE_RECONCILIATION_TLS_KEY_FILE"),
-      secretFile(this.env, "DEVILUDO_INFERENCE_RECONCILIATION_TLS_CERT_FILE"),
-      secretFile(this.env, "DEVILUDO_INFERENCE_RECONCILIATION_CA_FILE"),
-    ]);
-    return this.http(url, { key, certificate, ca, timeoutMs: 30_000, body });
+    const tls = await reconciliationTls(this.env);
+    try { return await this.http(url, { method: "POST", ...tls, timeoutMs: 30_000, body }); }
+    finally { wipeTls(tls); }
   }
 }
 
@@ -98,6 +111,18 @@ async function secretFile(env: Readonly<Record<string, string | undefined>>, nam
     if (!metadata.isFile() || metadata.size < 32 || metadata.size > 1024 * 1024) throw new Error(`${name} file is invalid`);
     return await file.readFile();
   } finally { await file.close(); }
+}
+
+async function reconciliationTls(env: Readonly<Record<string, string | undefined>>) {
+  const [key, certificate, ca] = await Promise.all([
+    secretFile(env, "DEVILUDO_INFERENCE_RECONCILIATION_TLS_KEY_FILE"),
+    secretFile(env, "DEVILUDO_INFERENCE_RECONCILIATION_TLS_CERT_FILE"),
+    secretFile(env, "DEVILUDO_INFERENCE_RECONCILIATION_CA_FILE"),
+  ]);
+  return { key, certificate, ca };
+}
+function wipeTls(tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>): void {
+  tls.key.fill(0); tls.certificate.fill(0); tls.ca.fill(0);
 }
 
 function parseReceipt(raw: unknown, input: InferenceReconciliationRequest): InferenceReconciliationReceipt {

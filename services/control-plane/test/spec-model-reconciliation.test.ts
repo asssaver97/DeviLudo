@@ -36,16 +36,26 @@ test("control-plane client pins the specification reconciliation mTLS routes and
       DEVILUDO_SPEC_MODEL_RECONCILIATION_CA_FILE: ca,
     }, async (url, request) => {
       calls.push({ url: url.href, request });
+      if (request.method === "GET") {
+        return { statusCode: 200, payload: {
+          schemaVersion: "deviludo.spec-model-health.v1", status: "ok", service: "deviludo-spec-model-broker",
+        } };
+      }
       if (url.pathname.endsWith("/lookup")) return { statusCode: 200, payload: status() };
       return { statusCode: 200, payload: receipt() };
     });
+    await client.probe();
     assert.equal((await client.reconcile(input)).dispatchGeneration, 1);
-    assert.equal(calls[0]?.url, "https://spec-model.internal/v1/spec-generation-reconciliations");
-    assert.deepEqual(JSON.parse(calls[0]?.request.body ?? "null"), input);
+    assert.equal(calls[0]?.url, "https://spec-model.internal/healthz");
+    assert.equal(calls[0]?.request.method, "GET");
+    assert.equal(calls[1]?.url, "https://spec-model.internal/v1/spec-generation-reconciliations");
+    assert.deepEqual(JSON.parse(calls[1]?.request.body ?? "null"), input);
     const lookup = await client.lookup(tenantId, generationOperationKey);
     assert.equal(lookup?.conversationId, conversationId);
-    assert.equal(calls[1]?.url, "https://spec-model.internal/v1/spec-generation-reconciliations/lookup");
-    assert.deepEqual(JSON.parse(calls[1]?.request.body ?? "null"), { tenantId, generationOperationKey });
+    assert.equal(calls[2]?.url, "https://spec-model.internal/v1/spec-generation-reconciliations/lookup");
+    assert.deepEqual(JSON.parse(calls[2]?.request.body ?? "null"), { tenantId, generationOperationKey });
+    assert.equal(calls.every(({ request }) => [request.key, request.certificate, request.ca]
+      .every((value) => value.every((byte) => byte === 0))), true);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -72,13 +82,14 @@ test("control-plane client rejects alternate routes and reconciliation receipt d
 test("SecurityAdmin specification reconciliation emits an exact tenant audit record", async () => {
   let received: unknown;
   const reconciler = new class extends SpecModelGenerationReconciler {
+    async probe() {}
     async lookup() { return status(); }
     async reconcile(value: Parameters<SpecModelGenerationReconciler["reconcile"]>[0]) { received = value; return receipt(); }
   }();
   const store = new InMemoryAdminStore();
   const service = new AdminService(
     store, new ProcessIsolatedSecretVault(), new InferenceGatewayProviderProbe(), new DevelopmentAgentSupplyChain(),
-    new class extends InferenceRequestReconciler { async lookup() { return null; } async reconcile(): Promise<never> { throw new Error("not used"); } }(),
+    new class extends InferenceRequestReconciler { async probe() {} async lookup() { return null; } async reconcile(): Promise<never> { throw new Error("not used"); } }(),
     reconciler,
   );
   const actor: RequestActor = {

@@ -17,12 +17,15 @@ export interface SecretWriteResult {
  * responses.
  */
 export abstract class SecretVault {
+  abstract probe(): Promise<void>;
   abstract write(path: string, plaintext: Uint8Array): Promise<SecretWriteResult>;
   abstract revoke(secretRef: string): Promise<void>;
 }
 
 export class ProcessIsolatedSecretVault extends SecretVault {
   readonly #paths = new Map<string, Readonly<{ secretRef: string; digest: string }>>();
+
+  async probe(): Promise<void> {}
 
   async write(path: string, plaintext: Uint8Array): Promise<SecretWriteResult> {
     if (plaintext.byteLength < 8) throw new Error("Credential must contain at least 8 bytes");
@@ -80,6 +83,23 @@ export class VaultIngressSecretVault extends SecretVault {
     this.#http = options.http ?? vaultIngressRequest;
   }
 
+  async probe(): Promise<void> {
+    let response: VaultIngressHttpResponse | undefined;
+    try {
+      response = await this.#http(route(this.#origin, "/healthz"), {
+        method: "GET", tls: this.#tls, headers: { accept: "application/json" }, timeoutMs: 10_000,
+      });
+      if (response.statusCode !== 200) throw new Error("Vault ingress is not ready");
+      const body: unknown = JSON.parse(response.payload.toString("utf8"));
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["service", "status"])
+        || (body as Record<string, unknown>).status !== "ok"
+        || (body as Record<string, unknown>).service !== "deviludo-secret-broker") {
+        throw new Error("Vault ingress readiness identity is invalid");
+      }
+    } finally { response?.payload.fill(0); }
+  }
+
   async write(path: string, plaintext: Uint8Array): Promise<SecretWriteResult> {
     if (!/^credential-[a-f0-9-]{36}\/[1-9][0-9]{0,8}$/.test(path)
       || plaintext.byteLength < 8 || plaintext.byteLength > 64 * 1024) throw new Error("Credential write is invalid");
@@ -135,9 +155,9 @@ export async function createSecretVault(): Promise<SecretVault> {
 
 export interface VaultIngressHttpResponse { readonly statusCode: number; readonly payload: Buffer }
 export type VaultIngressHttp = (url: URL, input: Readonly<{
-  method: "POST";
+  method: "GET" | "POST";
   headers: Readonly<Record<string, string>>;
-  body: Buffer;
+  body?: Buffer;
   timeoutMs: number;
   tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>;
 }>) => Promise<VaultIngressHttpResponse>;
@@ -145,17 +165,25 @@ export type VaultIngressHttp = (url: URL, input: Readonly<{
 async function vaultIngressRequest(url: URL, input: Parameters<VaultIngressHttp>[1]): Promise<VaultIngressHttpResponse> {
   return new Promise((resolveRequest, reject) => {
     const options: RequestOptions = { method: input.method,
-      headers: { ...input.headers, "content-length": String(input.body.byteLength) },
+      headers: { ...input.headers, ...(input.body ? { "content-length": String(input.body.byteLength) } : {}) },
       key: input.tls.key, cert: input.tls.certificate, ca: input.tls.ca,
       rejectUnauthorized: true, minVersion: "TLSv1.3", servername: url.hostname };
     const request = httpsRequest(url, options, (response) => {
       const chunks: Buffer[] = []; let size = 0;
       response.on("data", (chunk: Buffer | string) => {
         const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += value.byteLength;
-        if (size > 64 * 1024) response.destroy(new Error("Vault ingress response exceeded its bound")); else chunks.push(value);
+        if (size > 64 * 1024) {
+          value.fill(0);
+          for (const buffered of chunks) buffered.fill(0);
+          chunks.length = 0;
+          response.destroy(new Error("Vault ingress response exceeded its bound"));
+        } else chunks.push(value);
       });
       response.once("error", reject);
-      response.once("end", () => resolveRequest({ statusCode: response.statusCode ?? 503, payload: Buffer.concat(chunks) }));
+      response.once("end", () => {
+        try { resolveRequest({ statusCode: response.statusCode ?? 503, payload: Buffer.concat(chunks) }); }
+        finally { for (const chunk of chunks) chunk.fill(0); }
+      });
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Vault ingress timed out")));
     request.once("error", reject); request.end(input.body);
