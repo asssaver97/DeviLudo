@@ -38,6 +38,9 @@ export async function inferenceGatewayServiceFromEnv(
       timeoutMs: seconds(env.DEVILUDO_INFERENCE_CREDENTIAL_BROKER_TIMEOUT_SECONDS, 10, 1, 60) * 1_000,
     });
     const connector = new ProductionGatewayConnector({ credentials, usage: registries.usage, dns });
+    const readiness = Object.freeze({
+      async probe(): Promise<void> { await Promise.all([store.probe(), connector.probe()]); },
+    });
     const providerProbe = new StrictGatewayProviderProbe({ credentials, dns });
     const probeAuthorizer = new GatewayProbeSpiffeAuthorizer(
       spiffeIds(required(env, "DEVILUDO_INFERENCE_GATEWAY_PROBE_SPIFFE_IDS")),
@@ -51,6 +54,7 @@ export async function inferenceGatewayServiceFromEnv(
       ...registries,
       dns,
       connector,
+      readiness,
       providerProbe,
       authorizeProviderProbe: (request) => probeAuthorizer.authorize(request),
       reconciliation,
@@ -68,6 +72,7 @@ export async function inferenceGatewayServiceFromEnv(
       store,
       credentials,
       connector,
+      readiness,
       providerProbe,
       reconciliation,
       server,
@@ -84,7 +89,7 @@ export async function runInferenceGatewayService(
 ): Promise<void> {
   const runtime = await inferenceGatewayServiceFromEnv(env);
   try {
-    await Promise.all([runtime.pool.probe(), runtime.store.probe(), runtime.connector.probe()]);
+    await Promise.all([runtime.pool.probe(), runtime.readiness.probe()]);
     await runtime.server.listen({ host: runtime.host, port: runtime.port });
     diagnostic("READY");
     const shutdown = new AbortController();

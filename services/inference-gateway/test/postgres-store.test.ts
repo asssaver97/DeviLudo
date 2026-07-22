@@ -240,6 +240,28 @@ test("PostgreSQL reconciliation lookup presents an expired lease as indeterminat
     < calls.findIndex((text) => text.includes("inference_request_claims")));
 });
 
+test("PostgreSQL Gateway readiness requires every authorization, failover, usage and claim relation", async () => {
+  const tables = [
+    "inference_run_authorizations", "agent_run_provider_failovers", "inference_provider_revisions",
+    "inference_usage_events", "inference_request_claims",
+  ] as const;
+  for (const missing of [null, "inference_request_claims"] as const) {
+    let released = 0;
+    const pool: PostgresWorkflowPool = { async connect() { return {
+      async query<Row extends Record<string, unknown>>(sql: string) {
+        for (const table of tables) assert.match(sql, new RegExp(`to_regclass\\('deviludo\\.${table}'\\)`));
+        const row = Object.fromEntries(tables.map((table) => [table, table === missing ? null : `deviludo.${table}`]));
+        return result<Row>([row]);
+      },
+      release() { released += 1; },
+    }; } };
+    const probe = new PostgresInferenceGatewayStore(pool).probe();
+    if (missing) await assert.rejects(probe, /invalid/);
+    else await probe;
+    assert.equal(released, 1);
+  }
+});
+
 function claimBinding() {
   return { requestId, claimToken, tenantId, projectId, runId, providerRevisionId, credentialVersionId, model, leaseSeconds: 660 };
 }

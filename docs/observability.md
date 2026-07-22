@@ -64,6 +64,11 @@ Secret Broker；Project Repository Broker 会检查项目、installation、仓�
 Bridge；Bridge 还会检查八张 workflow/outbox 表，并调用 Temporal `GetSystemInfo`、
 核对部署锁定的 namespace 身份。
 User Acceptance 会同时检查反馈模型与反馈、候选证据、验收和取消的完整 schema。
+Agent Configuration 会检查配置锁、不可变规格、源码基线、工具链、运行授权和修复证据
+所需的全部关系，并递归验证 Source Snapshot Broker 的精确身份；Agent Execution
+Broker 会检查运行、Provider failover、事件和队列表，开发 Worker 还会验证冻结规格包。
+Inference Gateway 的 `/healthz` 会检查授权、Provider、usage、request claim 等完整关系，
+并递归访问 mTLS Secret Broker；仅有监听端口或启动时连接成功不再被视为可接流量。
 任何内部错误只折叠为稳定的 `503`，不会向 Web 传播数据库、Vault、KMS、模型或
 Temporal 诊断文本。
 

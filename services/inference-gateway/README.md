@@ -5,6 +5,11 @@ with a short-lived `DLRT` run token. It is deliberately fail-closed: creating
 the Fastify application without a trusted `GatewayConnector` exposes health and
 authorization behavior, but every valid inference request returns
 `CONNECTOR_NOT_CONFIGURED` instead of falling back to ordinary `fetch`.
+`GET /healthz` (and the compatibility alias `GET /health`) returns `200` only
+when the exact Gateway database schema is present and the connector can reach
+the mTLS Secret Broker with its fixed service identity. Missing migrations,
+identity drift or a dependency failure returns a bounded `503` without its
+diagnostic text.
 
 Before a connector can see a request, the gateway verifies:
 

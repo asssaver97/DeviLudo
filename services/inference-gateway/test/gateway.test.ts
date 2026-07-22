@@ -167,7 +167,9 @@ test("HTTP boundary strips the run token, forwards only after authorization and 
 test("HTTP boundary fails closed without a connector and never echoes invalid credentials", async () => {
   const server = buildInferenceGateway(options());
   const health = await server.inject({ method: "GET", url: "/health" });
-  assert.equal(health.statusCode, 200);
+  assert.equal(health.statusCode, 503);
+  assert.equal(health.json().schemaVersion, "deviludo.inference-gateway-health.v1");
+  assert.equal(health.json().status, "unavailable");
   assert.equal(health.json().connector, "NOT_CONFIGURED");
 
   const issuedAt = Math.floor(Date.now() / 1000);
@@ -191,6 +193,44 @@ test("HTTP boundary fails closed without a connector and never echoes invalid cr
   assert.equal(response.statusCode, 401);
   assert.equal(response.body.includes(invalid), false);
   await server.close();
+});
+
+test("Inference Gateway readiness recursively probes dependencies and returns a bounded identity", async () => {
+  let probes = 0;
+  const connector = { async forward() { throw new Error("not used"); } };
+  const server = buildInferenceGateway({
+    ...options(), connector,
+    readiness: { async probe() { probes += 1; } },
+  });
+  for (const url of ["/health", "/healthz"]) {
+    const response = await server.inject({ method: "GET", url });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["cache-control"], "no-store");
+    assert.deepEqual(response.json(), {
+      schemaVersion: "deviludo.inference-gateway-health.v1",
+      status: "ok",
+      service: "deviludo-inference-gateway",
+      connector: "CONFIGURED",
+      providerProbe: "NOT_CONFIGURED",
+      reconciliation: "NOT_CONFIGURED",
+    });
+  }
+  assert.equal(probes, 2);
+  await server.close();
+
+  const secret = "postgres-password-must-not-leak";
+  const unavailable = buildInferenceGateway({
+    ...options(), connector,
+    readiness: { async probe() { throw new Error(secret); } },
+  });
+  const response = await unavailable.inject({ method: "GET", url: "/healthz" });
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.json().status, "unavailable");
+  assert.equal(response.body.includes(secret), false);
+  assert.deepEqual(Object.keys(response.json()).sort(), [
+    "connector", "providerProbe", "reconciliation", "schemaVersion", "service", "status",
+  ]);
+  await unavailable.close();
 });
 
 test("Provider probe HTTP boundary requires its workload authorizer and returns only fixed checks", async () => {

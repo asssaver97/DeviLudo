@@ -287,7 +287,20 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS agent_execution_broker_probe"); } finally { client.release(); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.agent_execution_operations')::text AS agent_execution_operations,
+                to_regclass('deviludo.agent_runs')::text AS agent_runs,
+                to_regclass('deviludo.inference_run_authorizations')::text AS inference_run_authorizations,
+                to_regclass('deviludo.agent_run_provider_failovers')::text AS agent_run_provider_failovers,
+                to_regclass('deviludo.inference_provider_revisions')::text AS inference_provider_revisions,
+                to_regclass('deviludo.agent_execution_events')::text AS agent_execution_events`,
+      );
+      assertReadyTables(result.rows[0], [
+        "agent_execution_operations", "agent_runs", "inference_run_authorizations",
+        "agent_run_provider_failovers", "inference_provider_revisions", "agent_execution_events",
+      ]);
+    } finally { client.release(); }
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
@@ -303,6 +316,10 @@ export class PostgresAgentExecutionOperations implements AgentExecutionOperation
       throw error;
     } finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) invalid();
 }
 
 async function selectAuthority(client: PostgresWorkflowClient, tenantId: string, projectId: string, runId: string, lock: string): Promise<AuthorityRow> {

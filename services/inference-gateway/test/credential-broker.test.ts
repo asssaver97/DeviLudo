@@ -139,6 +139,15 @@ test("mTLS credential resolver readiness verifies the exact workload and rejects
   await resolver.probe();
   assert.deepEqual(urls, ["https://credential-broker.internal/healthz"]);
 
+  const drifted = new MtlsGatewayCredentialResolver({
+    endpoint: "https://credential-broker.internal/v1/inference-credentials/resolve",
+    tls,
+    http: async () => ({ statusCode: 200, payload: {
+      status: "ok", service: "deviludo-secret-broker", diagnostic: "must-not-be-trusted",
+    } }),
+  });
+  await assert.rejects(drifted.probe(), /readiness probe failed/);
+
   for (const endpoint of [
     "http://credential-broker.internal/v1/inference-credentials/resolve",
     "https://user:key@credential-broker.internal/v1/inference-credentials/resolve",

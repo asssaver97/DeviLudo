@@ -52,7 +52,15 @@ export class PostgresAgentExecutionDispatch implements AgentExecutionOperationDi
     });
   }
 
-  async probe(): Promise<void> { const client = await this.pool.connect(); try { await client.query("SELECT 1 AS agent_execution_dispatch_probe"); } finally { client.release(); } }
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{ agent_execution_operations?: unknown }>(
+        "SELECT to_regclass('deviludo.agent_execution_operations')::text AS agent_execution_operations",
+      );
+      if (result.rows[0]?.agent_execution_operations !== "deviludo.agent_execution_operations") invalid();
+    } finally { client.release(); }
+  }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();

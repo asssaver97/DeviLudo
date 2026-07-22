@@ -466,7 +466,19 @@ export class PostgresInferenceGatewayStore implements InferenceReconciliationSto
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS inference_gateway_store_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.inference_run_authorizations')::text AS inference_run_authorizations,
+                to_regclass('deviludo.agent_run_provider_failovers')::text AS agent_run_provider_failovers,
+                to_regclass('deviludo.inference_provider_revisions')::text AS inference_provider_revisions,
+                to_regclass('deviludo.inference_usage_events')::text AS inference_usage_events,
+                to_regclass('deviludo.inference_request_claims')::text AS inference_request_claims`,
+      );
+      assertReadyTables(result.rows[0], [
+        "inference_run_authorizations", "agent_run_provider_failovers", "inference_provider_revisions",
+        "inference_usage_events", "inference_request_claims",
+      ]);
+    }
     finally { client.release(); }
   }
 
@@ -483,6 +495,10 @@ export class PostgresInferenceGatewayStore implements InferenceReconciliationSto
       throw error;
     } finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) invalid();
 }
 
 /** Explicit interface views avoid ambiguous two-argument overload resolution. */

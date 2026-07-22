@@ -108,7 +108,15 @@ export class PostgresAgentDevelopmentWorkPackage implements AgentDevelopmentWork
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS agent_work_package_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings`,
+      );
+      const row = result.rows[0];
+      if (row?.immutable_revisions !== "deviludo.immutable_revisions"
+        || row.approved_test_plan_bindings !== "deviludo.approved_test_plan_bindings") invalid();
+    }
     finally { client.release(); }
   }
 

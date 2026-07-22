@@ -88,7 +88,9 @@ export class MtlsSourceBaselineClient implements SourceBaselinePort {
       timeoutMs: this.#timeoutMs,
     });
     const payload = record(response.payload);
-    if (response.statusCode !== 200 || payload.status !== "ok"
+    if (response.statusCode !== 200
+      || JSON.stringify(Object.keys(payload).sort()) !== JSON.stringify(["service", "status"])
+      || payload.status !== "ok"
       || payload.service !== "deviludo-source-snapshot") invalidResponse();
   }
 }

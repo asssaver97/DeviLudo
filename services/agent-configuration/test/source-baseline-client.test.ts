@@ -37,6 +37,15 @@ test("source baseline client rejects receipt drift and status/replay mismatch", 
   assert.throws(() => clientWith(async () => ({ statusCode: 200, payload: {} }), "http://localhost:4543"), /configuration/);
 });
 
+test("source baseline readiness rejects health identity drift", async () => {
+  for (const payload of [
+    { status: "ok", service: "another-service" },
+    { status: "ok", service: "deviludo-source-snapshot", detail: "must-not-be-accepted" },
+  ]) {
+    await assert.rejects(clientWith(async () => ({ statusCode: 200, payload })).probe(), /response/);
+  }
+});
+
 function clientWith(http: SourceBaselineBrokerHttp, endpoint = "https://source-snapshot.internal:4543") {
   return new MtlsSourceBaselineClient({
     endpoint,

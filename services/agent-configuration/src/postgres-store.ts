@@ -471,7 +471,29 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS agent_configuration_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.workflow_control_actions')::text AS workflow_control_actions,
+                to_regclass('deviludo.agent_configuration_resolutions')::text AS agent_configuration_resolutions,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings,
+                to_regclass('deviludo.runner_toolchain_revisions')::text AS runner_toolchain_revisions,
+                to_regclass('deviludo.github_source_baseline_receipts')::text AS github_source_baseline_receipts,
+                to_regclass('deviludo.admin_catalog_state')::text AS admin_catalog_state,
+                to_regclass('deviludo.agent_runs')::text AS agent_runs,
+                to_regclass('deviludo.inference_run_authorizations')::text AS inference_run_authorizations,
+                to_regclass('deviludo.agent_execution_operations')::text AS agent_execution_operations,
+                to_regclass('deviludo.evidence_bundles')::text AS evidence_bundles,
+                to_regclass('deviludo.e2e_attempts')::text AS e2e_attempts,
+                to_regclass('deviludo.inference_provider_revisions')::text AS inference_provider_revisions`,
+      );
+      assertReadyTables(result.rows[0], [
+        "workflow_control_actions", "agent_configuration_resolutions", "immutable_revisions",
+        "approved_test_plan_bindings", "runner_toolchain_revisions", "github_source_baseline_receipts",
+        "admin_catalog_state", "agent_runs", "inference_run_authorizations", "agent_execution_operations",
+        "evidence_bundles", "e2e_attempts", "inference_provider_revisions",
+      ]);
+    }
     finally { client.release(); }
   }
 
@@ -488,6 +510,10 @@ export class PostgresAgentConfigurationStore implements AgentConfigurationStore 
       throw error;
     } finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) invalid();
 }
 
 async function resolveRepairSeed(client: PostgresWorkflowClient, claim: AgentConfigurationClaim) {

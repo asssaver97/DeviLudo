@@ -120,7 +120,9 @@ export class MtlsGatewayCredentialResolver implements GatewayCredentialResolver,
       headers: Object.freeze({ accept: "application/json" }),
     });
     const body = record(response.payload);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-secret-broker") {
+    if (response.statusCode !== 200
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["service", "status"])
+      || body.status !== "ok" || body.service !== "deviludo-secret-broker") {
       throw new Error("Inference credential Broker readiness probe failed");
     }
   }

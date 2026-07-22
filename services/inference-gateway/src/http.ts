@@ -21,8 +21,13 @@ export interface InferenceGatewayTlsOptions {
   readonly rejectUnauthorized: true;
 }
 
+export interface InferenceGatewayReadiness {
+  probe(): Promise<void>;
+}
+
 export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions & {
   readonly connector?: GatewayConnector;
+  readonly readiness?: InferenceGatewayReadiness;
   readonly https?: InferenceGatewayTlsOptions;
   readonly providerProbe?: GatewayProviderProbeService;
   readonly authorizeProviderProbe?: (request: FastifyRequest) => void | Promise<void>;
@@ -32,13 +37,18 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
   const server = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, ...(options.https ? { https: options.https } : {}) });
   const authorizer = new InferenceGatewayAuthorizer(options);
 
-  server.get("/health", async () => Object.freeze({
-    status: options.connector ? "ok" : "degraded",
-    service: "deviludo-inference-gateway",
-    connector: options.connector ? "CONFIGURED" : "NOT_CONFIGURED",
-    providerProbe: options.providerProbe && options.authorizeProviderProbe ? "CONFIGURED" : "NOT_CONFIGURED",
-    reconciliation: options.reconciliation && options.authorizeReconciliation ? "CONFIGURED" : "NOT_CONFIGURED",
-  }));
+  const health = async (_request: FastifyRequest, reply: FastifyReply) => {
+    reply.header("cache-control", "no-store");
+    try {
+      if (!options.connector || !options.readiness) throw new Error("not ready");
+      await options.readiness.probe();
+      return reply.code(200).send(healthBody("ok", options));
+    } catch {
+      return reply.code(503).send(healthBody("unavailable", options));
+    }
+  };
+  server.get("/health", health);
+  server.get("/healthz", health);
 
   server.post("/v1/responses", async (request, reply) => {
     return forward(request, reply, "openai-responses", authorizer, options.connector);
@@ -96,6 +106,26 @@ export function buildInferenceGateway(options: InferenceGatewayAuthorizerOptions
     void reply.code(500).send({ error: { code: "GATEWAY_REQUEST_FAILED", message: "Inference Gateway request failed" } });
   });
   return server;
+}
+
+function healthBody(
+  status: "ok" | "unavailable",
+  options: Readonly<{
+    connector?: GatewayConnector;
+    providerProbe?: GatewayProviderProbeService;
+    authorizeProviderProbe?: (request: FastifyRequest) => void | Promise<void>;
+    reconciliation?: GatewayInferenceReconciliationService;
+    authorizeReconciliation?: (request: FastifyRequest) => void | Promise<void>;
+  }>,
+) {
+  return Object.freeze({
+    schemaVersion: "deviludo.inference-gateway-health.v1",
+    status,
+    service: "deviludo-inference-gateway",
+    connector: options.connector ? "CONFIGURED" : "NOT_CONFIGURED",
+    providerProbe: options.providerProbe && options.authorizeProviderProbe ? "CONFIGURED" : "NOT_CONFIGURED",
+    reconciliation: options.reconciliation && options.authorizeReconciliation ? "CONFIGURED" : "NOT_CONFIGURED",
+  });
 }
 
 async function forward(
