@@ -58,8 +58,10 @@ Steam 注册与项目配置共享同一个 Access Broker 时只发一次探针�
 Broker；GitHub Authorization Broker 会检查授权表、installation 表、防重放账本和
 Secret Broker；Project Repository Broker 会检查项目、installation、仓库绑定、操作
 账本，并要求 GitHub App KMS 返回绑定精确 key ID 与 `RS256` 的
-`deviludo.github-app-signer-health.v1`。候选发布和合并服务的自身 `/healthz` 也包含
-同一个 KMS 探针。Spec Dialogue 会检查其九张授权/对话/不可变 revision/toolchain 表，
+`deviludo.github-app-signer-health.v1`。候选发布会检查 Run、源码基线、仓库和 Draft PR
+回执表，验收合并会检查已投递用户决定、有效 E2E 证据和 merge 回执的完整关系；两者
+还会检查外部操作 claim 账本并递归探测 KMS。Source Snapshot 同时覆盖 Agent baseline、
+candidate 和 merged-main 三套权威回执。Spec Dialogue 会检查其九张授权/对话/不可变 revision/toolchain 表，
 再要求 Spec Model Broker 返回精确 `deviludo.spec-model-health.v1`，并递归检查审批
 Bridge；Bridge 还会检查八张 workflow/outbox 表，并调用 Temporal `GetSystemInfo`、
 核对部署锁定的 namespace 身份。

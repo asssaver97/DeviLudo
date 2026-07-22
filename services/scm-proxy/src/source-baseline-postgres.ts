@@ -195,7 +195,22 @@ export class PostgresSourceBaselineStore {
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS source_baseline_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.github_source_baseline_operations')::text AS github_source_baseline_operations,
+                to_regclass('deviludo.github_source_baseline_receipts')::text AS github_source_baseline_receipts,
+                to_regclass('deviludo.github_repository_bindings')::text AS github_repository_bindings,
+                to_regclass('deviludo.github_installations')::text AS github_installations,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings,
+                to_regclass('deviludo.spec_dialogue_operations')::text AS spec_dialogue_operations`,
+      );
+      assertReadyTables(result.rows[0], [
+        "github_source_baseline_operations", "github_source_baseline_receipts",
+        "github_repository_bindings", "github_installations", "immutable_revisions",
+        "approved_test_plan_bindings", "spec_dialogue_operations",
+      ]);
+    }
     finally { client.release(); }
   }
 
@@ -212,6 +227,10 @@ export class PostgresSourceBaselineStore {
       throw error;
     } finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) conflict();
 }
 
 async function sourceAuthority(client: PostgresWorkflowClient, request: SourceBaselineRequest) {

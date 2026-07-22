@@ -66,7 +66,7 @@ test("PostgreSQL source authority rejects missing, cross-binding and malformed r
 test("PostgreSQL source authority readiness probe releases its connection", async () => {
   const fixture = authorityFixture();
   await fixture.authority.probe();
-  assert.ok(fixture.sql.includes("SELECT 1 AS ready"));
+  assert.ok(fixture.sql.some((statement) => statement.includes("to_regclass('deviludo.github_merge_receipts')")));
   assert.equal(fixture.releases, 1);
 });
 
@@ -99,7 +99,14 @@ function authorityFixture(options: {
       values: readonly unknown[] = [],
     ): Promise<PostgresQueryResult<Row>> {
       sql.push(statement);
-      if (statement === "SELECT 1 AS ready") return { rowCount: 1, rows: [{ ready: 1 } as unknown as Row] };
+      if (statement.includes("to_regclass('deviludo.github_candidate_receipts')")) return { rowCount: 1, rows: [{
+        github_candidate_receipts: "deviludo.github_candidate_receipts",
+        github_repository_bindings: "deviludo.github_repository_bindings",
+        github_installations: "deviludo.github_installations",
+        agent_runs: "deviludo.agent_runs",
+        github_source_baseline_receipts: "deviludo.github_source_baseline_receipts",
+        github_merge_receipts: "deviludo.github_merge_receipts",
+      } as unknown as Row] };
       if (statement.includes("github_candidate_receipts candidate") || statement.includes("github_merge_receipts merge")
         || statement.includes("github_source_baseline_receipts baseline")) {
         queryValues = values;

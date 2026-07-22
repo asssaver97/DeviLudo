@@ -116,11 +116,19 @@ test("mTLS SCM Broker pins its endpoint and exact health identity", async () => 
     endpoint: "https://scm-merge.internal/v1/merges", tls,
     http: async (url) => {
       calls.push(url.href);
-      return { statusCode: 200, payload: { status: "ok", service: "deviludo-scm-merge-broker" } };
+      return { statusCode: 200, payload: { schemaVersion: "deviludo.scm-merge-health.v1",
+        status: "ok", service: "deviludo-scm-merge-broker" } };
     },
   });
   await broker.probe();
   assert.deepEqual(calls, ["https://scm-merge.internal/healthz"]);
+
+  const drifted = new MtlsScmMergeBroker({
+    endpoint: "https://scm-merge.internal/v1/merges", tls,
+    http: async () => ({ statusCode: 200, payload: { schemaVersion: "deviludo.scm-merge-health.v1",
+      status: "ok", service: "deviludo-scm-merge-broker", detail: "not part of the contract" } }),
+  });
+  await assert.rejects(drifted.probe(), /readiness probe failed/);
 
   for (const endpoint of [
     "http://scm-merge.internal/v1/merges",

@@ -140,7 +140,10 @@ export class MtlsScmMergeBroker implements ScmMergeWorkflowPort {
       headers: Object.freeze({ accept: "application/json" }),
     });
     const body = record(response.payload);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-scm-merge-broker") {
+    if (response.statusCode !== 200
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["schemaVersion", "service", "status"])
+      || body.schemaVersion !== "deviludo.scm-merge-health.v1"
+      || body.status !== "ok" || body.service !== "deviludo-scm-merge-broker") {
       throw new Error("SCM merge Broker readiness probe failed");
     }
   }

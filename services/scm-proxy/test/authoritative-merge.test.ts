@@ -89,6 +89,10 @@ test("SCM merge HTTP boundary requires mTLS and exact workflow headers", async (
   const drift = await handler({ method: "POST", path: "/v1/merges", socket: {}, rawBody: JSON.stringify(request),
     headers: { "content-type": "application/json", "idempotency-key": request.operationKey, "x-deviludo-request-digest": "0".repeat(64) } });
   assert.equal(drift.status, 400);
+  assert.deepEqual(await handler({ method: "GET", path: "/healthz", socket: {}, rawBody: "", headers: {} }), {
+    status: 200,
+    body: { schemaVersion: "deviludo.scm-merge-health.v1", status: "ok", service: "deviludo-scm-merge-broker" },
+  });
 });
 
 test("PostgreSQL merge authority joins the delivered acceptance and non-invalidated evidence under RLS", async () => {

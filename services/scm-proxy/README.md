@@ -93,6 +93,15 @@ baseline, repository binding and active GitHub App installation under tenant
 RLS, then creates and archives the Draft PR. The Worker receives only the
 archived receipt; it never receives a GitHub installation token or App key.
 
+Every production SCM `/healthz` is a traffic-readiness gate rather than a
+socket liveness response. Candidate publication verifies all Run, baseline,
+repository and receipt relations plus its external-operation claim ledger;
+merge verifies the complete delivered-acceptance and non-invalidated E2E
+authority; source snapshots verify baseline, candidate and merged-main receipt
+relations. Missing migrations or a downstream KMS identity failure returns a
+bounded `503`. Clients accept only the fixed health schema and reject extra
+diagnostic fields or floating candidate Broker versions.
+
 The App private key remains behind the injected `GitHubAppJwtSigner` (normally
 Vault/KMS transit signing). Agent workers never receive an installation token.
 GitHub Enterprise Server/custom API origins are intentionally unsupported in v1

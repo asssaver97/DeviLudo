@@ -115,7 +115,22 @@ export class PostgresCandidatePublicationStore implements CandidatePublicationAu
     });
   }
 
-  async probe(): Promise<void> { const client = await this.pool.connect(); try { await client.query("SELECT 1 AS candidate_publication_probe"); } finally { client.release(); } }
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.agent_runs')::text AS agent_runs,
+                to_regclass('deviludo.github_source_baseline_receipts')::text AS github_source_baseline_receipts,
+                to_regclass('deviludo.github_repository_bindings')::text AS github_repository_bindings,
+                to_regclass('deviludo.github_installations')::text AS github_installations,
+                to_regclass('deviludo.github_candidate_receipts')::text AS github_candidate_receipts`,
+      );
+      assertReadyTables(result.rows[0], [
+        "agent_runs", "github_source_baseline_receipts", "github_repository_bindings",
+        "github_installations", "github_candidate_receipts",
+      ]);
+    } finally { client.release(); }
+  }
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try { await client.query("BEGIN"); await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
@@ -123,6 +138,10 @@ export class PostgresCandidatePublicationStore implements CandidatePublicationAu
     } catch (error) { try { await client.query("ROLLBACK"); } catch { /* preserve original */ } throw error; }
     finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) invalid();
 }
 
 function authorizedCandidateBase(lock: Readonly<Record<string, unknown>>, row: AuthorityRow): boolean {

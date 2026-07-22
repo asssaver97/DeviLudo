@@ -30,7 +30,8 @@ export function createScmMergeHandler(options: Readonly<{
     if (request.method === "GET" && request.path === "/healthz") {
       if (request.rawBody) return failure(400, "SCM_MERGE_REQUEST_INVALID");
       try { await options.service.probe(); } catch { return failure(503, "SCM_MERGE_NOT_READY"); }
-      return { status: 200, body: { status: "ok", service: "deviludo-scm-merge-broker" } };
+      return { status: 200, body: { schemaVersion: "deviludo.scm-merge-health.v1",
+        status: "ok", service: "deviludo-scm-merge-broker" } };
     }
     if (request.method !== "POST" || request.path !== "/v1/merges") return failure(404, "SCM_MERGE_ROUTE_NOT_FOUND");
     if (contentType(request.headers["content-type"]) !== "application/json") return failure(415, "SCM_MERGE_JSON_REQUIRED");

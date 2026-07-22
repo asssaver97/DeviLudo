@@ -195,7 +195,30 @@ export class PostgresScmMergeStore implements ScmMergeAuthority, ScmMergeReceipt
     });
   }
 
-  async probe(): Promise<void> { const client = await this.pool.connect(); try { await client.query("SELECT 1 AS scm_merge_store_probe"); } finally { client.release(); } }
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.workflow_command_jobs')::text AS workflow_command_jobs,
+                to_regclass('deviludo.user_candidate_acceptances')::text AS user_candidate_acceptances,
+                to_regclass('deviludo.workflow_control_actions')::text AS workflow_control_actions,
+                to_regclass('deviludo.workflow_signal_outbox')::text AS workflow_signal_outbox,
+                to_regclass('deviludo.github_candidate_receipts')::text AS github_candidate_receipts,
+                to_regclass('deviludo.github_repository_bindings')::text AS github_repository_bindings,
+                to_regclass('deviludo.github_installations')::text AS github_installations,
+                to_regclass('deviludo.evidence_bundles')::text AS evidence_bundles,
+                to_regclass('deviludo.e2e_attempts')::text AS e2e_attempts,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.github_merge_receipts')::text AS github_merge_receipts`,
+      );
+      assertReadyTables(result.rows[0], [
+        "workflow_command_jobs", "user_candidate_acceptances", "workflow_control_actions",
+        "workflow_signal_outbox", "github_candidate_receipts", "github_repository_bindings",
+        "github_installations", "evidence_bundles", "e2e_attempts", "immutable_revisions",
+        "github_merge_receipts",
+      ]);
+    } finally { client.release(); }
+  }
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try { await client.query("BEGIN"); await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
@@ -203,6 +226,10 @@ export class PostgresScmMergeStore implements ScmMergeAuthority, ScmMergeReceipt
     catch (error) { try { await client.query("ROLLBACK"); } catch { /* preserve primary error */ } throw error; }
     finally { client.release(); }
   }
+}
+
+function assertReadyTables(row: Record<string, unknown> | undefined, tables: readonly string[]): void {
+  if (!row || tables.some((table) => row[table] !== `deviludo.${table}`)) invalid();
 }
 
 function authority(row: AuthorityRow, request: ScmMergeCommand): AuthoritativeMergeContext {

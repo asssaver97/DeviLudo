@@ -6,6 +6,8 @@ import type { AgentCandidatePublisher } from "./operations";
 import { createCandidatePublicationRequest, validateCandidatePublicationReceipt } from "../../scm-proxy/src/candidate-publication-contracts";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
+const SHA256 = /^[a-f0-9]{64}$/;
+const VERSION = /^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+){0,5}$/;
 
 export interface ScmCandidateHttpResponse { readonly statusCode: number; readonly payload: unknown }
 export type ScmCandidateHttp = (url: URL, input: Readonly<{ method: "GET" | "POST"; headers: Readonly<Record<string, string>>;
@@ -44,7 +46,14 @@ export class MtlsScmCandidatePublisher implements AgentCandidatePublisher {
     const response = await this.#http(url, { method: "GET", timeoutMs: this.#timeoutMs, tls: this.#tls,
       headers: Object.freeze({ accept: "application/json" }) });
     const body = record(response.payload);
-    if (response.statusCode !== 200 || body.status !== "ok" || body.service !== "deviludo-scm-candidate-broker") {
+    if (response.statusCode !== 200
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify([
+        "binaryDigest", "schemaVersion", "service", "status", "version",
+      ])
+      || body.schemaVersion !== "deviludo.scm-candidate-health.v1"
+      || body.status !== "ok" || body.service !== "deviludo-scm-candidate-broker"
+      || typeof body.version !== "string" || !VERSION.test(body.version) || /latest|stable|default/i.test(body.version)
+      || typeof body.binaryDigest !== "string" || !SHA256.test(body.binaryDigest)) {
       throw new Error("SCM candidate Broker readiness probe failed");
     }
   }

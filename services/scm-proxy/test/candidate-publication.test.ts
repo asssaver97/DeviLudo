@@ -149,6 +149,29 @@ test("Agent Worker mTLS client accepts only the exact authoritative candidate re
   assert.equal("githubToken" in (observed[0] as object), false); assert.equal("installationToken" in (observed[0] as object), false);
 });
 
+test("Agent Worker accepts only the exact immutable candidate Broker health identity", async () => {
+  const calls: string[] = [];
+  const tls = { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) };
+  const publisher = new MtlsScmCandidatePublisher({ endpoint: "https://scm.internal/v1/candidates", tls,
+    http: async (url) => { calls.push(url.href); return { statusCode: 200, payload: {
+      schemaVersion: "deviludo.scm-candidate-health.v1", status: "ok", service: "deviludo-scm-candidate-broker",
+      version: "1.0.0", binaryDigest: "1".repeat(64),
+    } }; } });
+  await publisher.probe();
+  assert.deepEqual(calls, ["https://scm.internal/healthz"]);
+
+  for (const payload of [
+    { schemaVersion: "deviludo.scm-candidate-health.v1", status: "ok", service: "deviludo-scm-candidate-broker",
+      version: "latest", binaryDigest: "1".repeat(64) },
+    { schemaVersion: "deviludo.scm-candidate-health.v1", status: "ok", service: "deviludo-scm-candidate-broker",
+      version: "1.0.0", binaryDigest: "1".repeat(64), diagnostic: "must not be accepted" },
+  ]) {
+    const drifted = new MtlsScmCandidatePublisher({ endpoint: "https://scm.internal/v1/candidates", tls,
+      http: async () => ({ statusCode: 200, payload }) });
+    await assert.rejects(drifted.probe(), /readiness probe failed/);
+  }
+});
+
 test("candidate HTTP ingress requires the exact mTLS workload and immutable headers", async () => {
   const service = new AuthoritativeCandidatePublicationService({ async resolve() { return { repositoryBindingId: receiptId,
       binding: binding(), specRevisionId }; }, async probe() {} },
