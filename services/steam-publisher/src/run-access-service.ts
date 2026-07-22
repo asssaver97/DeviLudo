@@ -31,6 +31,32 @@ import { SteamAccessUiSessionVerifier, type SteamAccessUiAction, type SteamAcces
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 
+type ReadyDependency = Readonly<{ probe(): Promise<void> }>;
+
+export function steamAccessReadiness(dependencies: Readonly<{
+  enrollment: ReadyDependency;
+  login: ReadyDependency;
+  mfa: ReadyDependency;
+  projectConfigurations: ReadyDependency;
+  releaseAuthorizations: ReadyDependency;
+  releaseSnapshots: ReadyDependency;
+  signer: ReadyDependency;
+  vault: ReadyDependency;
+}>): () => Promise<void> {
+  return async () => {
+    await Promise.all([
+      dependencies.enrollment.probe(),
+      dependencies.login.probe(),
+      dependencies.mfa.probe(),
+      dependencies.projectConfigurations.probe(),
+      dependencies.releaseAuthorizations.probe(),
+      dependencies.releaseSnapshots.probe(),
+      dependencies.signer.probe(),
+      dependencies.vault.probe(),
+    ]);
+  };
+}
+
 /** Parses all production identities without opening a database or network connection. */
 export async function steamAccessServiceConfigFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -121,8 +147,9 @@ export async function steamAccessRuntimeFromEnv(
       publicOrigin,
     });
     const releaseStore = new PostgresReleaseAuthorizationStore(pool);
+    const releaseSnapshots = new PostgresReleaseSnapshotResolver(pool);
     const releases = new ReleaseAuthorizationCoordinator({
-      snapshots: new PostgresReleaseSnapshotResolver(pool),
+      snapshots: releaseSnapshots,
       store: releaseStore,
       challenges: new FixedReleaseMfaChallengeIssuer(publicOrigin),
       verifier: mfa,
@@ -130,6 +157,16 @@ export async function steamAccessRuntimeFromEnv(
       archive: new PostgresSteamPublishAuthorizationArchive(releaseStore),
       workflow: new TemporalReleaseMfaWorkflowSignal(temporal.client),
       publicOrigin,
+    });
+    const readiness = steamAccessReadiness({
+      enrollment: enrollmentStore,
+      login,
+      mfa,
+      projectConfigurations,
+      releaseAuthorizations: releaseStore,
+      releaseSnapshots,
+      signer,
+      vault,
     });
     const uiSessions = new SteamAccessUiSessionVerifier(
       config.uiSessionKeyId,
@@ -204,14 +241,7 @@ export async function steamAccessRuntimeFromEnv(
         return reply.status(401).send({ error: { code: "WORKLOAD_IDENTITY_REQUIRED" } });
       }
       try {
-        await Promise.all([
-          pool.probe(),
-          login.probe(),
-          vault.probe(),
-          mfa.probe(),
-          signer.probe(),
-          projectConfigurations.probe(),
-        ]);
+        await readiness();
         return reply.send({ schemaVersion: "deviludo.steam-access-health.v1", status: "ok" });
       } catch {
         return reply.status(503).send({ schemaVersion: "deviludo.steam-access-health.v1", status: "unavailable" });
@@ -229,6 +259,7 @@ export async function steamAccessRuntimeFromEnv(
       enrollment,
       projectConfigurations,
       releases,
+      readiness,
       server,
     });
   } catch (error) {
@@ -243,14 +274,7 @@ export async function runSteamAccessService(
 ): Promise<void> {
   const runtime = await steamAccessRuntimeFromEnv(env);
   try {
-    await Promise.all([
-      runtime.pool.probe(),
-      runtime.login.probe(),
-      runtime.vault.probe(),
-      runtime.mfa.probe(),
-      runtime.signer.probe(),
-      runtime.projectConfigurations.probe(),
-    ]);
+    await runtime.readiness();
     await runtime.server.listen({ host: runtime.host, port: runtime.port });
     console.log(`[steam-access] READY ${runtime.host}:${runtime.port}`);
     const shutdown = new AbortController();

@@ -3,6 +3,7 @@ import test from "node:test";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import type { SteamWorkflowOperationRequest } from "../src/workflow-broker-http";
 import { PostgresSteamWorkflowOperationPersistence } from "../src/postgres-workflow-operations";
+import { postgresReadinessResult } from "./postgres-readiness-fixture";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -56,6 +57,8 @@ class Client implements PostgresWorkflowClient {
     values: readonly unknown[] = [],
   ): Promise<PostgresQueryResult<ResultRow>> {
     this.calls.push({ text, values });
+    const readiness = postgresReadinessResult<ResultRow>(text);
+    if (readiness) return readiness;
     if (text.includes("INSERT INTO deviludo.steam_workflow_operations")) {
       if (this.row !== null) return result([], 0);
       this.row = {
@@ -125,7 +128,6 @@ class Client implements PostgresWorkflowClient {
       this.row.available_at = String(values[4]);
       return result([], 1);
     }
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as ResultRow[]);
     return result([]);
   }
 

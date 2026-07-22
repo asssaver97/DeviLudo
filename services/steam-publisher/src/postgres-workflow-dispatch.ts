@@ -1,4 +1,5 @@
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 import type { SteamWorkflowOperationDispatcher } from "./workflow-broker-operations";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -68,11 +69,8 @@ implements SteamWorkflowOperationDispatcher, SteamWorkflowOperationSource {
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
-    } finally { client.release(); }
+    await probeSteamPostgresTables(this.pool, ["steam_workflow_operations"],
+      () => new Error("PostgreSQL Steam workflow dispatch is invalid"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import { PostgresSteamWorkflowOperationDispatch } from "../src/postgres-workflow-dispatch";
+import { postgresReadinessResult } from "./postgres-readiness-fixture";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const operationId = "22222222-2222-4222-8222-222222222222";
@@ -19,13 +20,14 @@ class Client implements PostgresWorkflowClient {
     values: readonly unknown[] = [],
   ): Promise<PostgresQueryResult<Row>> {
     this.calls.push({ text, values });
+    const readiness = postgresReadinessResult<Row>(text);
+    if (readiness) return readiness;
     if (text.includes("SET enqueue_count")) {
       return this.enqueueMatches ? result([{ id: operationId }] as unknown as Row[]) : result([]);
     }
     if (text.includes("FOR UPDATE SKIP LOCKED")) {
       return this.row ? result([this.row] as unknown as Row[]) : result([]);
     }
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return result([]);
   }
 

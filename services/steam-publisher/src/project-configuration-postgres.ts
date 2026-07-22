@@ -6,6 +6,7 @@ import type {
   SteamProjectReleaseConfiguration,
 } from "./project-configuration-contracts";
 import type { SteamPostgresClient, SteamPostgresPool } from "./enrollment-postgres";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 
 type IntentRow = Record<string, unknown> & {
   id: string; tenant_id: string; project_id: string; user_subject: string; session_binding_digest: string;
@@ -46,22 +47,10 @@ export class PostgresSteamProjectConfigurationStore implements SteamProjectConfi
   constructor(private readonly pool: SteamPostgresPool) {}
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<{
-        intents_ready: boolean;
-        depots_ready: boolean;
-        releases_ready: boolean;
-      }>(`SELECT to_regclass('deviludo.steam_project_configuration_intents') IS NOT NULL AS intents_ready,
-                to_regclass('deviludo.steam_project_depot_configurations') IS NOT NULL AS depots_ready,
-                to_regclass('deviludo.steam_project_release_configurations') IS NOT NULL AS releases_ready`);
-      const readiness = result.rows[0];
-      if (!readiness?.intents_ready || !readiness.depots_ready || !readiness.releases_ready) {
-        throw new Error("Steam project configuration schema is unavailable");
-      }
-    } finally {
-      client.release();
-    }
+    await probeSteamPostgresTables(this.pool, [
+      "projects", "steam_build_sessions", "steam_enrollments", "steam_project_configuration_intents",
+      "steam_project_depot_configurations", "steam_project_release_configurations", "tenant_memberships", "users",
+    ], () => new Error("Steam project configuration schema is unavailable"));
   }
 
   async findStatus(input: Parameters<SteamProjectConfigurationStore["findStatus"]>[0]) {

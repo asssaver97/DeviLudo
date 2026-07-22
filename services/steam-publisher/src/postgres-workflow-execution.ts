@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 import type {
   SignedSteamPublishAuthorization,
   SignedSteamRcArtifact,
@@ -268,7 +269,13 @@ export class PostgresSteamWorkflowExecutionAuthority implements SteamWorkflowExe
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, [
+      "e2e_attempts", "evidence_bundles", "steam_build_receipts", "steam_build_sessions",
+      "steam_rc_artifacts", "steam_release_authorizations", "steam_releases",
+      "workflow_external_approval_receipts",
+    ], () => new Error("PostgreSQL Steam workflow authority is invalid"));
+  }
 }
 
 type BuildReceiptRow = {
@@ -349,7 +356,10 @@ export class PostgresSteamBuildReceiptArchive implements SteamBuildReceiptArchiv
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, ["steam_build_receipts", "steam_releases"],
+      () => new Error("PostgreSQL Steam workflow authority is invalid"));
+  }
 }
 
 type PublicationRow = {
@@ -428,7 +438,10 @@ export class PostgresSteamDefaultBranchReceiptArchive implements SteamDefaultBra
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, ["steam_default_branch_receipts", "steam_releases"],
+      () => new Error("PostgreSQL Steam workflow authority is invalid"));
+  }
 }
 
 function parseSignedRc(value: unknown): SignedSteamRcArtifact {
@@ -637,14 +650,6 @@ async function withTenant<T>(
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch { /* preserve authority failure */ }
     throw error;
-  } finally { client.release(); }
-}
-
-async function probe(pool: PostgresWorkflowPool): Promise<void> {
-  const client = await pool.connect();
-  try {
-    const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-    if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
   } finally { client.release(); }
 }
 

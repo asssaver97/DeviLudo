@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import { PostgresSteamCleanInstallDispatcher } from "../src/postgres-clean-install-dispatch";
+import { postgresReadinessResult } from "./postgres-readiness-fixture";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -31,6 +32,8 @@ class Client implements PostgresWorkflowClient {
     values: readonly unknown[] = [],
   ): Promise<PostgresQueryResult<Row>> {
     this.calls.push({ text, values });
+    const readiness = postgresReadinessResult<Row>(text);
+    if (readiness) return readiness;
     if (text.includes("FROM deviludo.steam_releases")) return result([{
       id: releaseId, main_commit_sha: input.mainCommitSha, steam_app_id: input.steamAppId,
       beta_branch: input.betaBranch, branch_password_secret_ref: input.branchPasswordSecretRef,
@@ -50,7 +53,6 @@ class Client implements PostgresWorkflowClient {
     if (text.includes("FROM deviludo.steam_clean_install_reservations")) {
       return result([...this.reservations.values()].sort((left, right) => String(left.platform).localeCompare(String(right.platform))) as Row[]);
     }
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return result([]);
   }
 

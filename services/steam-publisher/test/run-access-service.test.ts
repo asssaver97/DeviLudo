@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { steamAccessServiceConfigFromEnv } from "../src/run-access-service";
+import { steamAccessReadiness, steamAccessServiceConfigFromEnv } from "../src/run-access-service";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "deviludo-steam-access-"));
@@ -67,4 +67,41 @@ test("Steam access production config rejects shared identities, non-HTTPS depend
     ...env,
     DEVILUDO_STEAM_UI_SESSION_PUBLIC_KEY_FILE: env.DEVILUDO_STEAM_ACCESS_TLS_KEY_FILE,
   }), /DECODER routines|unsupported|invalid/i);
+});
+
+test("Steam access readiness includes enrollment, release authority and every external dependency", async () => {
+  const calls: string[] = [];
+  const dependency = (name: string, failure = false) => ({
+    async probe() {
+      calls.push(name);
+      if (failure) throw new Error("unavailable");
+    },
+  });
+  const readiness = steamAccessReadiness({
+    enrollment: dependency("enrollment"),
+    login: dependency("login"),
+    mfa: dependency("mfa"),
+    projectConfigurations: dependency("project-configurations"),
+    releaseAuthorizations: dependency("release-authorizations"),
+    releaseSnapshots: dependency("release-snapshots"),
+    signer: dependency("signer"),
+    vault: dependency("vault"),
+  });
+  await readiness();
+  assert.deepEqual(new Set(calls), new Set([
+    "enrollment", "login", "mfa", "project-configurations", "release-authorizations",
+    "release-snapshots", "signer", "vault",
+  ]));
+
+  const unavailable = steamAccessReadiness({
+    enrollment: dependency("enrollment-failed", true),
+    login: dependency("login-ok"),
+    mfa: dependency("mfa-ok"),
+    projectConfigurations: dependency("project-configurations-ok"),
+    releaseAuthorizations: dependency("release-authorizations-ok"),
+    releaseSnapshots: dependency("release-snapshots-ok"),
+    signer: dependency("signer-ok"),
+    vault: dependency("vault-ok"),
+  });
+  await assert.rejects(unavailable(), /unavailable/);
 });

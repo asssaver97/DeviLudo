@@ -1,5 +1,6 @@
 import type { SteamBuildSession } from "./contracts";
 import type { SteamEnrollmentRecord, SteamEnrollmentStore } from "./enrollment-contracts";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 
 export interface SteamPostgresQueryResult<Row extends Record<string, unknown> = Record<string, unknown>> {
   readonly rowCount: number | null;
@@ -216,6 +217,12 @@ export class PostgresSteamEnrollmentStore implements SteamEnrollmentStore {
       if (!row) throw new Error("Steam enrollment completion was rejected");
       return parseEnrollment(row);
     });
+  }
+
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, [
+      "credential_versions", "steam_build_sessions", "steam_enrollments",
+    ], () => new Error("Steam enrollment schema is unavailable"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: SteamPostgresClient) => Promise<T>): Promise<T> {

@@ -1,6 +1,7 @@
 import { parseRunnerToolchainRevision } from "../../artifact-preparer/src/contracts";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 import {
   parseSteamCleanInstallPreparationTrigger,
   type SteamCleanInstallAuthorityResolution,
@@ -189,11 +190,11 @@ export class PostgresSteamCleanInstallPreparationAuthority implements SteamClean
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
-    } finally { client.release(); }
+    await probeSteamPostgresTables(this.pool, [
+      "agent_runs", "approved_test_plan_bindings", "e2e_attempts", "evidence_bundles",
+      "immutable_revisions", "runner_toolchain_revisions", "steam_build_receipts",
+      "steam_clean_install_reservations", "steam_releases",
+    ], () => new Error("PostgreSQL Steam clean-install authority is invalid"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

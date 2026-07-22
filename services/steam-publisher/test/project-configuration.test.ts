@@ -9,6 +9,7 @@ import type {
 } from "../src/project-configuration-contracts";
 import { PostgresSteamProjectConfigurationStore } from "../src/project-configuration-postgres";
 import type { SteamPostgresClient, SteamPostgresPool } from "../src/enrollment-postgres";
+import { postgresReadinessResult } from "./postgres-readiness-fixture";
 
 const now = new Date("2099-01-01T00:00:00.000Z");
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -68,17 +69,15 @@ class ProbePool implements SteamPostgresPool {
   released = 0;
   query = "";
 
-  constructor(private readonly readiness: Readonly<{
-    intents_ready: boolean;
-    depots_ready: boolean;
-    releases_ready: boolean;
-  }>) {}
+  constructor(private readonly missingTable: string | null = null) {}
 
   async connect(): Promise<SteamPostgresClient> {
     return {
       query: async <Row extends Record<string, unknown>>(query: string) => {
         this.query = query;
-        return { rowCount: 1, rows: [this.readiness as unknown as Row] };
+        const readiness = postgresReadinessResult<Row>(query, this.missingTable);
+        if (!readiness) throw new Error("Unexpected probe query");
+        return readiness;
       },
       release: () => { this.released += 1; },
     };
@@ -86,14 +85,17 @@ class ProbePool implements SteamPostgresPool {
 }
 
 test("project Steam configuration readiness requires every immutable schema table", async () => {
-  const ready = new ProbePool({ intents_ready: true, depots_ready: true, releases_ready: true });
+  const ready = new ProbePool();
   await new PostgresSteamProjectConfigurationStore(ready).probe();
   assert.match(ready.query, /steam_project_configuration_intents/);
   assert.match(ready.query, /steam_project_depot_configurations/);
   assert.match(ready.query, /steam_project_release_configurations/);
+  assert.match(ready.query, /steam_build_sessions/);
+  assert.match(ready.query, /steam_enrollments/);
+  assert.match(ready.query, /tenant_memberships/);
   assert.equal(ready.released, 1);
 
-  const incomplete = new ProbePool({ intents_ready: true, depots_ready: false, releases_ready: true });
+  const incomplete = new ProbePool("steam_project_depot_configurations");
   await assert.rejects(new PostgresSteamProjectConfigurationStore(incomplete).probe(), /schema is unavailable/);
   assert.equal(incomplete.released, 1);
 });

@@ -1,5 +1,6 @@
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 import {
   parseSteamWorkflowOperationRequest,
   validateSteamWorkflowOperationStatus,
@@ -222,11 +223,8 @@ export class PostgresSteamWorkflowOperationPersistence implements SteamWorkflowO
   }
 
   async probe(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-      if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
-    } finally { client.release(); }
+    await probeSteamPostgresTables(this.pool, ["steam_workflow_operations"],
+      () => new Error("PostgreSQL Steam workflow operation is invalid"));
   }
 
   async #transaction<T>(tenantId: string, operation: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {

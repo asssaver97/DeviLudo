@@ -1,6 +1,7 @@
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { runnerArtifactObjectKey } from "../../evidence-archive/src/runner-artifacts";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 import type { SteamTargetPlatform } from "./contracts";
 import type { SteamPrivateBetaOperationRequest } from "./workflow-broker-http";
 import {
@@ -118,7 +119,12 @@ export class PostgresSteamRcIssuanceAuthority implements SteamRcIssuanceAuthorit
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, [
+      "e2e_attempts", "evidence_bundles", "steam_project_depot_configurations",
+      "steam_project_release_configurations", "steam_rc_artifacts", "steam_releases",
+    ], () => new Error("PostgreSQL Steam RC issuance is invalid"));
+  }
 
   async #transaction<T>(tenantId: string, action: (client: PostgresWorkflowClient) => Promise<T>): Promise<T> {
     return transaction(this.pool, tenantId, action);
@@ -177,7 +183,10 @@ export class PostgresSteamRcArtifactArchive implements SteamRcArtifactArchive {
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, ["steam_rc_artifacts"],
+      () => new Error("PostgreSQL Steam RC issuance is invalid"));
+  }
 }
 
 function snapshotFromRow(row: AuthorityRow, request: SteamPrivateBetaOperationRequest): SteamRcIssuanceSnapshot {
@@ -365,14 +374,6 @@ async function transaction<T>(
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch { /* preserve issuance failure */ }
     throw error;
-  } finally { client.release(); }
-}
-
-async function probe(pool: PostgresWorkflowPool): Promise<void> {
-  const client = await pool.connect();
-  try {
-    const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-    if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
   } finally { client.release(); }
 }
 

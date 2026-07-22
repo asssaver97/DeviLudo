@@ -7,6 +7,7 @@ import type {
   SteamPostgresClient,
   SteamPostgresPool,
 } from "./enrollment-postgres";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 
 type AuthorizationRow = Record<string, unknown> & {
   approval_id: string;
@@ -133,6 +134,11 @@ export class PostgresReleaseAuthorizationStore implements ReleaseAuthorizationSt
         [input.approvalId, input.tenantId],
       );
     });
+  }
+
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, ["steam_release_authorizations"],
+      () => new Error("Steam release authorization schema is unavailable"));
   }
 
   async #update(

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probeSteamPostgresTables } from "./postgres-readiness";
 import type { ReleaseSnapshotResolver } from "./release-authorization-contracts";
 import type { SteamPrivateBetaReleasePreparer } from "./workflow-broker-executor";
 import type { SteamPrivateBetaOperationRequest } from "./workflow-broker-http";
@@ -188,7 +189,12 @@ export class PostgresSteamReleasePreparation implements SteamReleasePreparationP
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, [
+      "e2e_attempts", "evidence_bundles", "projects", "steam_build_sessions",
+      "steam_project_depot_configurations", "steam_project_release_configurations", "steam_releases",
+    ], () => new Error("PostgreSQL Steam release lifecycle is invalid"));
+  }
 }
 
 /** Resolves only the release created for the still-waiting control-plane MFA action. */
@@ -279,6 +285,13 @@ export class PostgresReleaseSnapshotResolver implements ReleaseSnapshotResolver 
       });
     });
   }
+
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, [
+      "e2e_attempts", "evidence_bundles", "steam_releases", "tenant_memberships",
+      "user_candidate_acceptances", "users", "workflow_control_actions",
+    ], () => new Error("PostgreSQL Steam release lifecycle is invalid"));
+  }
 }
 
 /** One-way WAITING_MFA -> STEAM_PRIVATE_BETA projection after a dispatched authorization. */
@@ -352,7 +365,11 @@ export class PostgresSteamPrivateBetaReleasePreparer implements SteamPrivateBeta
     });
   }
 
-  async probe(): Promise<void> { await probe(this.pool); }
+  async probe(): Promise<void> {
+    await probeSteamPostgresTables(this.pool, [
+      "evidence_bundles", "steam_release_authorizations", "steam_releases",
+    ], () => new Error("PostgreSQL Steam release lifecycle is invalid"));
+  }
 }
 
 function preparationAuthority(row: PreparationAuthorityRow, input: SteamReleasePreparationInput, now: string) {
@@ -504,14 +521,6 @@ async function transaction<T>(
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch { /* preserve lifecycle failure */ }
     throw error;
-  } finally { client.release(); }
-}
-
-async function probe(pool: PostgresWorkflowPool): Promise<void> {
-  const client = await pool.connect();
-  try {
-    const result = await client.query<{ ready: number }>("SELECT 1 AS ready");
-    if (result.rows.length !== 1 || result.rows[0]?.ready !== 1) invalid();
   } finally { client.release(); }
 }
 

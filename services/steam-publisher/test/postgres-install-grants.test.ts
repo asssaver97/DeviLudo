@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import { PostgresSteamCleanInstallGrantStore } from "../src/postgres-install-grants";
+import { postgresReadinessResult } from "./postgres-readiness-fixture";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -17,6 +18,8 @@ class Client implements PostgresWorkflowClient {
   redemptionDrift = false;
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values: readonly unknown[] = []): Promise<PostgresQueryResult<Row>> {
     this.calls.push({ text, values });
+    const readiness = postgresReadinessResult<Row>(text);
+    if (readiness) return readiness;
     if (text.includes("SELECT redemption.grant_id::text")) return result([{
       grant_id: grantId, platform: "linux", runner_id: "runner-linux-1",
       job_digest: this.redemptionDrift ? "f".repeat(64) : "b".repeat(64),
@@ -31,7 +34,6 @@ class Client implements PostgresWorkflowClient {
       beta_branch: "deviludo_private_9", target_matrix: ["linux", "macos", "windows"],
       issued_at: now, expires_at: "2030-01-01T03:00:00.000Z", revoked_at: null,
     }] as unknown as Row[]);
-    if (text === "SELECT 1 AS ready") return result([{ ready: 1 }] as unknown as Row[]);
     return { rowCount: text.includes("INSERT INTO") ? 1 : 0, rows: [] };
   }
   release() { this.releases += 1; }

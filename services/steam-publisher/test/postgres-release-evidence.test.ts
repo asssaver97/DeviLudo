@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PostgresQueryResult, PostgresWorkflowClient } from "../../temporal/src/postgres-inbox";
 import { PostgresSteamReleaseEvidenceGate } from "../src/postgres-release-evidence";
+import { postgresReadinessResult } from "./postgres-readiness-fixture";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -55,8 +56,9 @@ function clientFor(row: Record<string, unknown>, calls: string[]): PostgresWorkf
   return {
     async query<Row extends Record<string, unknown>>(text: string): Promise<PostgresQueryResult<Row>> {
       calls.push(text);
+      const readiness = postgresReadinessResult<Row>(text);
+      if (readiness) return readiness;
       if (text.includes("FROM deviludo.evidence_bundles")) return { rows: [row as Row], rowCount: 1 };
-      if (text === "SELECT 1 AS ready") return { rows: [{ ready: 1 } as unknown as Row], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     },
     release() {},
