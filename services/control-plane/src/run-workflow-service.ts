@@ -35,6 +35,12 @@ export async function runControlPlaneWorkflowService(
         `${workerId}:signal-outbox`,
       ),
     ],
+    createReadinessProbes: ({ pool }) => [
+      () => new PostgresControlPlaneWorkflowActionStore(pool).probe(),
+      () => new PostgresWorkflowActionCompletionStore(pool).probe(),
+      () => new PostgresWorkflowSignalOutbox(pool).probe(),
+      () => new PostgresSteamReleasePreparation(pool).probe(),
+    ],
   });
 }
 

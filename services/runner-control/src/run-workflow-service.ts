@@ -11,11 +11,20 @@ export async function runRunnerControlWorkflowService(
   await runWorkflowDestinationService({
     destination: "runner-control",
     env,
-    createHandler: async (pool) => new RunnerControlWorkflowHandler(
-      postgresRunnerWorkflowFromEnv(pool, env),
-      await runnerArtifactPreparationClientFromEnv(env),
-      await runnerSteamInstallPreparationClientFromEnv(env),
-    ),
+    createHandler: async (pool) => {
+      const runner = postgresRunnerWorkflowFromEnv(pool, env);
+      const artifacts = await runnerArtifactPreparationClientFromEnv(env);
+      const steamInstalls = await runnerSteamInstallPreparationClientFromEnv(env);
+      return new RunnerControlWorkflowHandler(runner, artifacts, steamInstalls, {
+        readiness: [runner, artifacts, steamInstalls],
+      });
+    },
+    createReadinessProbes: ({ handler }) => {
+      if (!(handler instanceof RunnerControlWorkflowHandler)) {
+        throw new Error("Runner workflow handler readiness binding is invalid");
+      }
+      return [() => handler.probe()];
+    },
   });
 }
 

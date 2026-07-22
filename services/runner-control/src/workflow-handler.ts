@@ -48,17 +48,27 @@ export interface RunnerWorkflowPort {
 
 export class RunnerControlWorkflowHandler implements WorkflowJobHandler {
   readonly #heartbeatIntervalMs: number;
+  readonly #readiness: readonly Readonly<{ probe(): Promise<void> }>[];
 
   constructor(
     private readonly runner: RunnerWorkflowPort,
     private readonly artifacts: RunnerArtifactPreparationPort,
     private readonly steamInstalls: RunnerSteamInstallPreparationPort,
-    options: { readonly heartbeatIntervalMs?: number } = {},
+    options: {
+      readonly heartbeatIntervalMs?: number;
+      readonly readiness?: readonly Readonly<{ probe(): Promise<void> }>[];
+    } = {},
   ) {
     this.#heartbeatIntervalMs = options.heartbeatIntervalMs ?? 60_000;
     if (!Number.isInteger(this.#heartbeatIntervalMs) || this.#heartbeatIntervalMs < 10 || this.#heartbeatIntervalMs > 240_000) {
       throw new Error("Runner workflow heartbeat interval is invalid");
     }
+    this.#readiness = Object.freeze([...(options.readiness ?? [])]);
+  }
+
+  async probe(): Promise<void> {
+    if (this.#readiness.length !== 3) throw new Error("Runner workflow readiness dependencies are not configured");
+    await Promise.all(this.#readiness.map(async (dependency) => dependency.probe()));
   }
 
   async execute(job: ClaimedWorkflowJob, context: WorkflowJobExecutionContext): Promise<{

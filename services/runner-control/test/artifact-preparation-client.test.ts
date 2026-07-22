@@ -79,3 +79,27 @@ test("Runner Artifact Preparer client rejects route, receipt and authority failu
     return true;
   });
 });
+
+test("Runner Artifact Preparer readiness pins the exact authenticated service identity", async () => {
+  const calls: string[] = [];
+  const client = new MtlsRunnerArtifactPreparationClient({
+    endpoint: "https://artifact.internal",
+    tls,
+    async http(request) {
+      calls.push(`${request.method} ${request.url.href} ${request.body}`);
+      return { statusCode: 200, payload: { service: "deviludo-artifact-preparer", status: "ok" } };
+    },
+  });
+  await client.probe();
+  assert.deepEqual(calls, ["GET https://artifact.internal/healthz {}"]);
+
+  for (const payload of [
+    { status: "ok", service: "another-service" },
+    { status: "ok", service: "deviludo-artifact-preparer", detail: "unexpected" },
+  ]) {
+    const drifted = new MtlsRunnerArtifactPreparationClient({
+      endpoint: "https://artifact.internal", tls, async http() { return { statusCode: 200, payload }; },
+    });
+    await assert.rejects(drifted.probe(), /readiness probe failed/);
+  }
+});

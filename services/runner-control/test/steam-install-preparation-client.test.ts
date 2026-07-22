@@ -78,3 +78,26 @@ test("Runner Steam Preparer rejects BuildID, branch, receipt and endpoint drift"
     return true;
   });
 });
+
+test("Runner Steam Preparer readiness pins the exact clean-install service identity", async () => {
+  const calls: string[] = [];
+  const client = new MtlsRunnerSteamInstallPreparationClient({
+    endpoint: "https://steam.internal",
+    tls,
+    async http(request) {
+      calls.push(`${request.method} ${request.url.href} ${request.body}`);
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-steam-clean-install-preparer" } };
+    },
+  });
+  await client.probe();
+  assert.deepEqual(calls, ["GET https://steam.internal/healthz {}"]);
+
+  const drifted = new MtlsRunnerSteamInstallPreparationClient({
+    endpoint: "https://steam.internal",
+    tls,
+    async http() {
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-steam-clean-install-preparer", extra: true } };
+    },
+  });
+  await assert.rejects(drifted.probe(), /readiness probe failed/);
+});

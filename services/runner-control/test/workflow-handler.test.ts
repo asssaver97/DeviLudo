@@ -130,3 +130,26 @@ test("Runner workflow handler gates main SHA and Steam clean-install evidence se
     repairPromptId: "steam_clean_install-repair-prompt",
   });
 });
+
+test("Runner workflow readiness recursively checks persistence and both preparation boundaries", async () => {
+  const probes: string[] = [];
+  const handler = new RunnerControlWorkflowHandler(
+    { async execute() { throw new Error("unused"); } },
+    preparationPort(),
+    steamPreparationPort(),
+    { readiness: [
+      { async probe() { probes.push("postgres"); } },
+      { async probe() { probes.push("artifact-preparer"); } },
+      { async probe() { probes.push("steam-preparer"); } },
+    ] },
+  );
+  await handler.probe();
+  assert.deepEqual(probes.sort(), ["artifact-preparer", "postgres", "steam-preparer"]);
+
+  const unbound = new RunnerControlWorkflowHandler(
+    { async execute() { throw new Error("unused"); } },
+    preparationPort(),
+    steamPreparationPort(),
+  );
+  await assert.rejects(unbound.probe(), /readiness dependencies are not configured/);
+});

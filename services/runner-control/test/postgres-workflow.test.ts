@@ -73,6 +73,38 @@ const input = Object.freeze({
   async heartbeat() { return "renewed"; },
 });
 
+test("Runner workflow readiness requires every source, lock, attempt, evidence and Steam relation", async () => {
+  const relations = [
+    "agent_runs", "e2e_attempts", "evidence_bundles", "github_candidate_receipts", "github_merge_receipts",
+    "runner_execution_locks", "steam_build_receipts", "steam_release_revocations", "steam_releases",
+  ] as const;
+  for (const missing of [null, "runner_execution_locks", "steam_releases"] as const) {
+    let releases = 0;
+    const client: PostgresWorkflowClient = {
+      async query<Row extends Record<string, unknown>>(statement: string) {
+        for (const relation of relations) {
+          assert.match(statement, new RegExp(`to_regclass\\('deviludo\\.${relation}'\\)`));
+        }
+        return {
+          rowCount: 1,
+          rows: [Object.fromEntries(relations.map((relation) => [
+            relation,
+            relation === missing ? null : `deviludo.${relation}`,
+          ])) as unknown as Row],
+        };
+      },
+      release() { releases += 1; },
+    };
+    const store = new PostgresRunnerWorkflowPort({
+      pool: { async connect() { return client; } },
+    });
+    const result = store.probe();
+    if (missing) await assert.rejects(result, /schema is not ready/);
+    else await result;
+    assert.equal(releases, 1);
+  }
+});
+
 function binding() {
   return {
     schemaVersion: "deviludo.e2e-attempt.v1",

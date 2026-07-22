@@ -56,6 +56,27 @@ export class MtlsRunnerArtifactPreparationClient implements RunnerArtifactPrepar
     this.#http = options.http ?? testKitArtifactBrokerHttpsJson;
   }
 
+  async probe(): Promise<void> {
+    const url = new URL(this.#endpoint.href);
+    url.pathname = "/healthz";
+    let response: Awaited<ReturnType<TestKitArtifactBrokerHttp>>;
+    try {
+      response = await this.#http({
+        url,
+        method: "GET",
+        body: "{}",
+        tls: this.#tls,
+        timeoutMs: Math.min(this.#timeoutMs, 30_000),
+      });
+    } catch {
+      throw new Error("Runner Artifact Preparer readiness probe failed");
+    }
+    if (response.statusCode !== 200
+      || !exactHealth(response.payload, "deviludo-artifact-preparer")) {
+      throw new Error("Runner Artifact Preparer readiness probe failed");
+    }
+  }
+
   async prepare(input: Parameters<RunnerArtifactPreparationPort["prepare"]>[0]): Promise<RunnerArtifactPreparationReceipt> {
     validateInput(input);
     const url = new URL(this.#endpoint.href);
@@ -187,6 +208,13 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
   const actual = Object.keys(value).sort();
   const sorted = [...expected].sort();
   if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) invalid();
+}
+
+function exactHealth(value: unknown, service: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  return Object.keys(body).sort().join(",") === "service,status"
+    && body.status === "ok" && body.service === service;
 }
 
 function required(value: unknown, pattern: RegExp): string {

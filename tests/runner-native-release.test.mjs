@@ -202,7 +202,10 @@ test("target host accepts only a signed release bound to final files, candidate 
     { ...release, claims: { ...release.claims, sourceRevision: "b".repeat(40) } },
     { ...release, claims: { ...release.claims, artifacts: release.claims.artifacts.map((artifact, index) =>
       index ? artifact : { ...artifact, releasedDigest: `sha256:${"f".repeat(64)}` }) } },
-    { ...release, signature: { ...release.signature, value: `A${release.signature.value.slice(1)}` } },
+    { ...release, signature: {
+      ...release.signature,
+      value: `${release.signature.value.startsWith("A") ? "B" : "A"}${release.signature.value.slice(1)}`,
+    } },
   ]) {
     await assert.rejects(verifyRunnerNativeRelease(invalid, buildReceipt, policy, policyDigest, {
       artifactDirectory,

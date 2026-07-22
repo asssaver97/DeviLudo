@@ -28,6 +28,11 @@ export async function runWorkflowDestinationService(options: {
     pool: ClosablePostgresWorkflowPool,
     env: Readonly<Record<string, string | undefined>>,
   ) => void | Promise<void>;
+  readonly createReadinessProbes?: (input: Readonly<{
+    pool: ClosablePostgresWorkflowPool;
+    env: Readonly<Record<string, string | undefined>>;
+    handler: WorkflowJobHandler;
+  }>) => readonly (() => Promise<void>)[] | Promise<readonly (() => Promise<void>)[]>;
   readonly probes?: readonly (() => Promise<void>)[];
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<void> {
@@ -62,6 +67,9 @@ export async function runWorkflowDestinationService(options: {
     const auxiliaryProcessors = options.createAuxiliaryProcessors
       ? await options.createAuxiliaryProcessors(pool, signals, config.workerId)
       : [];
+    const serviceProbes = options.createReadinessProbes
+      ? await options.createReadinessProbes(Object.freeze({ pool, env, handler }))
+      : [];
     const authorize = (request: FastifyRequest) => authorizeTemporalWorkerTls(request, config.allowedDispatcherSpiffeIds);
     const runtime = createWorkflowDestinationRuntime({
       server,
@@ -76,6 +84,7 @@ export async function runWorkflowDestinationService(options: {
       probes: [
         () => pool.probe(),
         () => assignments.listTenantIds(options.destination).then(() => undefined),
+        ...serviceProbes,
         ...(options.probes ?? []),
       ],
       onDiagnostic: (diagnostic) => process.stderr.write(`${JSON.stringify(diagnostic)}\n`),

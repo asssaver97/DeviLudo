@@ -35,7 +35,10 @@ import {
   parseWorkflowSpiffeId,
   registerWorkflowCommandRoute,
 } from "../src/receiver-http";
-import { createWorkflowDestinationRuntime } from "../src/destination-runtime";
+import {
+  createWorkflowDestinationRuntime,
+  probeWorkflowDestinationPersistence,
+} from "../src/destination-runtime";
 import {
   SignedWorkflowTenantAssignmentSource,
   signWorkflowTenantAssignments,
@@ -659,6 +662,7 @@ test("destination runtime becomes ready only after probes and durably accepts co
     async fail() { throw new Error("must not fail"); },
   };
   const server = Fastify({ logger: false });
+  let dependencyReady = true;
   const runtime = createWorkflowDestinationRuntime({
     server,
     destination: "agent-worker",
@@ -675,7 +679,9 @@ test("destination runtime becomes ready only after probes and durably accepts co
       },
     }],
     authorize() {},
-    probes: [async () => undefined],
+    probes: [async () => {
+      if (!dependencyReady) throw new Error("runtime dependency unavailable");
+    }],
   });
   await runtime.start(async () => { await server.ready(); });
   assert.equal(runtime.state, "READY");
@@ -686,6 +692,15 @@ test("destination runtime becomes ready only after probes and durably accepts co
     destination: "agent-worker",
     state: "READY",
     ready: true,
+  });
+  dependencyReady = false;
+  const degraded = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(degraded.statusCode, 503);
+  assert.deepEqual(degraded.json(), {
+    service: "deviludo-workflow-destination",
+    destination: "agent-worker",
+    state: "READY",
+    ready: false,
   });
   const accepted = await server.inject({
     method: "POST",
@@ -704,6 +719,34 @@ test("destination runtime becomes ready only after probes and durably accepts co
   assert.ok(auxiliaryCalls > 0);
   await runtime.stop();
   assert.equal(runtime.state, "STOPPED");
+});
+
+test("destination persistence readiness requires both the durable inbox and work queue", async () => {
+  for (const missing of [null, "workflow_command_inbox", "workflow_command_jobs"] as const) {
+    let releases = 0;
+    const pool = {
+      async connect() {
+        return {
+          async query<Row extends Record<string, unknown>>(statement: string) {
+            assert.match(statement, /to_regclass\('deviludo\.workflow_command_inbox'\)/);
+            assert.match(statement, /to_regclass\('deviludo\.workflow_command_jobs'\)/);
+            return {
+              rowCount: 1,
+              rows: [{
+                workflow_command_inbox: missing === "workflow_command_inbox" ? null : "deviludo.workflow_command_inbox",
+                workflow_command_jobs: missing === "workflow_command_jobs" ? null : "deviludo.workflow_command_jobs",
+              } as unknown as Row],
+            };
+          },
+          release() { releases += 1; },
+        };
+      },
+    };
+    const result = probeWorkflowDestinationPersistence(pool);
+    if (missing) await assert.rejects(result, /schema is not ready/);
+    else await result;
+    assert.equal(releases, 1);
+  }
 });
 
 test("destination runtime fails closed when a readiness dependency is unavailable", async () => {

@@ -14,6 +14,7 @@ import {
 } from "./job-worker-host";
 import { PostgresWorkflowCommandInbox, type PostgresWorkflowPool } from "./postgres-inbox";
 import { PostgresWorkflowCommandQueue } from "./postgres-queue";
+import { probePostgresRelations } from "./postgres-readiness";
 import { WorkflowCommandReceiver, type WorkflowCommandHandler, type WorkflowCommandInbox } from "./receiver";
 import { registerWorkflowCommandRoute } from "./receiver-http";
 
@@ -106,7 +107,16 @@ export class WorkflowDestinationRuntime {
   #registerHealthRoute(): void {
     this.#server.get("/healthz", async (_request, reply) => {
       reply.header("cache-control", "no-store");
-      const ready = this.#state === "READY";
+      let ready = this.#state === "READY";
+      if (ready) {
+        try {
+          for (const probe of this.#probes) await probe();
+          ready = this.#state === "READY";
+        } catch {
+          ready = false;
+          this.#diagnostic("DEPENDENCY_PROBE_FAILED");
+        }
+      }
       return reply.status(ready ? 200 : 503).send(Object.freeze({
         service: "deviludo-workflow-destination",
         destination: this.#destination,
@@ -154,6 +164,9 @@ export function createWorkflowDestinationRuntime(options: {
   }
   const inbox = options.inbox ?? new PostgresWorkflowCommandInbox(options.pool as PostgresWorkflowPool);
   const queue = options.queue ?? new PostgresWorkflowCommandQueue(options.pool as PostgresWorkflowPool);
+  const persistenceProbes = options.pool
+    ? [() => probeWorkflowDestinationPersistence(options.pool as PostgresWorkflowPool)]
+    : [];
   const receiver = new WorkflowCommandReceiver(options.destination, inbox, queue);
   registerWorkflowCommandRoute(options.server, {
     destination: options.destination,
@@ -183,7 +196,16 @@ export function createWorkflowDestinationRuntime(options: {
     server: options.server,
     workers: [worker, ...auxiliaryWorkers],
     destination: options.destination,
-    probes: options.probes,
+    probes: [...persistenceProbes, ...(options.probes ?? [])],
     onDiagnostic: options.onDiagnostic,
   });
+}
+
+/** Proves the durable inbox and work queue needed by every destination. */
+export async function probeWorkflowDestinationPersistence(pool: PostgresWorkflowPool): Promise<void> {
+  await probePostgresRelations(
+    pool,
+    ["workflow_command_inbox", "workflow_command_jobs"],
+    () => new Error("Workflow destination PostgreSQL schema is not ready"),
+  );
 }

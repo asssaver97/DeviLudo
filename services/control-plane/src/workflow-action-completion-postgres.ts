@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import { DEFAULT_AUTOMATIC_REPAIR_LIMIT } from "../../../lib/orchestration/game-delivery";
 import type { DeliverySignal } from "../../temporal/src/contracts";
 import { assertDeliverySignal } from "../../temporal/src/contracts";
@@ -209,6 +210,31 @@ type ExternalApprovalReceiptRow = {
  */
 export class PostgresWorkflowActionCompletionStore implements WorkflowActionCompletionPort {
   constructor(private readonly pool: ControlPlaneWorkflowSqlPool) {}
+
+  async probe(): Promise<void> {
+    await probePostgresRelations(this.pool, [
+      "agent_execution_operations",
+      "agent_run_provider_failovers",
+      "agent_runs",
+      "approved_test_plan_bindings",
+      "e2e_attempts",
+      "evidence_bundles",
+      "github_candidate_receipts",
+      "immutable_revisions",
+      "inference_provider_revisions",
+      "inference_request_claims",
+      "inference_run_authorizations",
+      "spec_conversations",
+      "spec_dialogue_operations",
+      "steam_build_receipts",
+      "steam_releases",
+      "user_feedback_operations",
+      "workflow_control_actions",
+      "workflow_external_approval_receipts",
+      "workflow_feedback_invalidations",
+      "workflow_signal_outbox",
+    ], () => new Error("Workflow action completion PostgreSQL schema is not ready"));
+  }
 
   async complete(input: {
     readonly tenantId: string;

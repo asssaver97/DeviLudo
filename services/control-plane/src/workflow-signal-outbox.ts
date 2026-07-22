@@ -10,6 +10,7 @@ import type {
   PostgresWorkflowClient,
   PostgresWorkflowPool,
 } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 
 type OutboxRow = {
   id: string;
@@ -55,6 +56,14 @@ export interface WorkflowSignalOutboxPort {
 
 export class PostgresWorkflowSignalOutbox implements WorkflowSignalOutboxPort {
   constructor(private readonly pool: PostgresWorkflowPool) {}
+
+  async probe(): Promise<void> {
+    await probePostgresRelations(
+      this.pool,
+      ["workflow_signal_outbox"],
+      () => new Error("Workflow signal outbox PostgreSQL schema is not ready"),
+    );
+  }
 
   async claimNext(input: {
     readonly tenantId: string;

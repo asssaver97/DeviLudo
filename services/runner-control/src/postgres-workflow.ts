@@ -2,6 +2,7 @@ import { createEvidenceBundle, type EvidenceBundle, type PlatformEvidence } from
 import type { TargetPlatform } from "../../../lib/domain/types";
 import { WorkflowJobError } from "../../temporal/src/job-processor";
 import type { PostgresWorkflowClient, PostgresWorkflowPool } from "../../temporal/src/postgres-inbox";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 import { sha256Canonical } from "./canonical";
 import { parseRunnerExecutionLock, runnerExecutionLockDigest, type RunnerExecutionLock } from "./execution-lock";
 import type { RunnerWorkflowPort, RunnerWorkflowReceipt } from "./workflow-handler";
@@ -120,6 +121,20 @@ export class PostgresRunnerWorkflowPort implements RunnerWorkflowPort {
     this.#maxWaitMs = boundedInteger(options.maxWaitMs ?? 2 * 60 * 60_000, 30_000, 24 * 60 * 60_000, "maximum wait");
     this.#pause = options.pause ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
     this.#now = options.now ?? Date.now;
+  }
+
+  async probe(): Promise<void> {
+    await probePostgresRelations(this.#pool, [
+      "agent_runs",
+      "e2e_attempts",
+      "evidence_bundles",
+      "github_candidate_receipts",
+      "github_merge_receipts",
+      "runner_execution_locks",
+      "steam_build_receipts",
+      "steam_release_revocations",
+      "steam_releases",
+    ], () => new Error("Runner workflow PostgreSQL schema is not ready"));
   }
 
   async execute(input: WorkflowInput): Promise<RunnerWorkflowReceipt> {

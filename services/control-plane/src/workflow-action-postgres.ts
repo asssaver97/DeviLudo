@@ -5,6 +5,7 @@ import type {
   ControlPlaneWorkflowBinding,
   ControlPlaneWorkflowPort,
 } from "./workflow-handler";
+import { probePostgresRelations } from "../../temporal/src/postgres-readiness";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -54,6 +55,14 @@ type CancellationRevocationRow = {
 /** PostgreSQL/RLS implementation for durable, idempotent UI and approval waits. */
 export class PostgresControlPlaneWorkflowActionStore implements ControlPlaneWorkflowPort {
   constructor(private readonly pool: ControlPlaneWorkflowSqlPool) {}
+
+  async probe(): Promise<void> {
+    await probePostgresRelations(
+      this.pool,
+      ["delivery_cancellation_revocations", "workflow_control_actions"],
+      () => new Error("Control-plane workflow action PostgreSQL schema is not ready"),
+    );
+  }
 
   async ensureAction(input: Parameters<ControlPlaneWorkflowPort["ensureAction"]>[0]): Promise<ControlPlaneWorkflowActionReceipt> {
     validateInput(input);
