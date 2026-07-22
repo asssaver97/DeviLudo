@@ -171,7 +171,21 @@ export class PostgresDeliveryCancellationStore implements DeliveryCancellationSt
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS delivery_cancellation_store_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.delivery_state_projections')::text AS delivery_state_projections,
+                to_regclass('deviludo.spec_delivery_workflows')::text AS spec_delivery_workflows,
+                to_regclass('deviludo.tenant_memberships')::text AS tenant_memberships,
+                to_regclass('deviludo.delivery_cancellation_requests')::text AS delivery_cancellation_requests`,
+      );
+      const row = result.rows[0];
+      for (const table of [
+        "delivery_state_projections", "spec_delivery_workflows", "tenant_memberships",
+        "delivery_cancellation_requests",
+      ]) {
+        if (row?.[table] !== `deviludo.${table}`) invalid();
+      }
+    }
     finally { client.release(); }
   }
 

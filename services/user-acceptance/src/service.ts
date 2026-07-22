@@ -65,5 +65,5 @@ export class UserAcceptanceService {
     return this.store.complete(draft, delivery);
   }
 
-  async probe(): Promise<void> { await this.store.probe(); }
+  async probe(): Promise<void> { await Promise.all([this.store.probe(), this.model.probe()]); }
 }

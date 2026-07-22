@@ -88,9 +88,11 @@ export async function runUserAcceptanceService(
 ): Promise<void> {
   const runtime = await userAcceptanceRuntimeFromEnv(env);
   try {
-    await runtime.pool.probe();
-    await runtime.service.probe();
-    await runtime.cancellation.probe();
+    await Promise.all([
+      runtime.service.probe(),
+      runtime.acceptance.probe(),
+      runtime.cancellation.probe(),
+    ]);
     await new Promise<void>((resolveListen, reject) => {
       const fail = (error: Error) => reject(error);
       runtime.server.once("error", fail);

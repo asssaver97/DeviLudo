@@ -221,6 +221,30 @@ test("PostgreSQL approval rejects a read-only actor before creating an operation
   assert.equal(client.released, true);
 });
 
+test("PostgreSQL dialogue readiness requires every authorization, revision and toolchain table", async () => {
+  const tables = [
+    "projects", "users", "tenant_memberships", "spec_conversations", "spec_dialogue_operations",
+    "spec_conversation_messages", "immutable_revisions", "runner_toolchain_revisions",
+    "approved_test_plan_bindings",
+  ] as const;
+  let missing: string | null = null;
+  let released = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(sql: string) {
+      assert.match(sql, /to_regclass\('deviludo\.approved_test_plan_bindings'\)/);
+      const row = Object.fromEntries(tables.map((table) => [table, `deviludo.${table}`])) as Record<string, unknown>;
+      if (missing) row[missing] = null;
+      return response<Row>([row]);
+    },
+    release() { released += 1; },
+  };
+  const store = new PostgresSpecDialogueStore({ async connect() { return client; } });
+  await store.probe();
+  missing = "runner_toolchain_revisions";
+  await assert.rejects(store.probe(), /PostgreSQL binding is invalid/);
+  assert.equal(released, 2);
+});
+
 function response<Row extends Record<string, unknown>>(
   rows: readonly Record<string, unknown>[],
   rowCount = rows.length,

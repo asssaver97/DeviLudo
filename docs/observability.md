@@ -59,8 +59,13 @@ Broker；GitHub Authorization Broker 会检查授权表、installation 表、防
 Secret Broker；Project Repository Broker 会检查项目、installation、仓库绑定、操作
 账本，并要求 GitHub App KMS 返回绑定精确 key ID 与 `RS256` 的
 `deviludo.github-app-signer-health.v1`。候选发布和合并服务的自身 `/healthz` 也包含
-同一个 KMS 探针。任何内部错误只折叠为稳定的 `503`，不会向 Web 传播数据库、Vault
-或 KMS 诊断文本。
+同一个 KMS 探针。Spec Dialogue 会检查其九张授权/对话/不可变 revision/toolchain 表，
+再要求 Spec Model Broker 返回精确 `deviludo.spec-model-health.v1`，并递归检查审批
+Bridge；Bridge 还会检查八张 workflow/outbox 表，并调用 Temporal `GetSystemInfo`、
+核对部署锁定的 namespace 身份。
+User Acceptance 会同时检查反馈模型与反馈、候选证据、验收和取消的完整 schema。
+任何内部错误只折叠为稳定的 `503`，不会向 Web 传播数据库、Vault、KMS、模型或
+Temporal 诊断文本。
 
 ## 本地验证
 

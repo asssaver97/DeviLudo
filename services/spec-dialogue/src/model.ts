@@ -2,6 +2,7 @@ import type { SpecDialogueMessage, SpecModelResult } from "./contracts";
 import { parseSpecModelResult } from "./contracts";
 
 export interface SpecDialogueModel {
+  probe(): Promise<void>;
   generate(input: {
     readonly operationKey: string;
     readonly tenantId: string;
@@ -15,6 +16,8 @@ export interface SpecDialogueModel {
 
 /** Deterministic loopback-only model. Production composition never instantiates it. */
 export class DeterministicLocalSpecModel implements SpecDialogueModel {
+  async probe(): Promise<void> { /* explicit loopback-only model is always ready */ }
+
   async generate(input: Parameters<SpecDialogueModel["generate"]>[0]): Promise<SpecModelResult> {
     const turn = input.history.filter((message) => message.role === "user").length + 1;
     const source = `${input.current?.spec.elevatorPitch ?? ""} ${input.userMessage}`.trim();

@@ -56,6 +56,16 @@ configured key ID and `RS256`; the same signer probe participates in candidate
 publication and merge readiness. Failures return only a bounded unavailable
 identity and never upstream diagnostics.
 
+Specification readiness is recursive as well. Spec Dialogue verifies every
+authorization, conversation, immutable revision, test-plan binding and Runner
+toolchain table, then authenticates the exact Spec Model health schema and the
+fixed approval Bridge. The Bridge verifies its workflow/outbox schema, a live
+Temporal `GetSystemInfo` response and the exact configured namespace identity. User Acceptance includes the same model
+boundary plus the complete feedback, candidate evidence, acceptance and
+cancellation schema. A database connection without those contracts is not
+considered ready, and downstream model or Temporal diagnostics are never
+returned to Web.
+
 ## Specification model boundary
 
 Idea refinement and feedback drafting never run Claude Code or Codex CLI. The

@@ -50,5 +50,11 @@ export class SpecDialogueService {
     return receipt;
   }
 
-  probe(): Promise<void> { return this.store.probe(); }
+  async probe(): Promise<void> {
+    await Promise.all([
+      this.store.probe(),
+      this.model.probe(),
+      ...(this.workflow ? [this.workflow.probe()] : []),
+    ]);
+  }
 }

@@ -13,7 +13,13 @@ export interface SpecModelBrokerTls {
 export interface SpecModelBrokerHttpResponse { readonly statusCode: number; readonly payload: unknown }
 export type SpecModelBrokerHttp = (
   url: URL,
-  input: { readonly body: string; readonly operationKey: string; readonly timeoutMs: number; readonly tls: SpecModelBrokerTls },
+  input: {
+    readonly method?: "GET" | "POST";
+    readonly body: string;
+    readonly operationKey: string | null;
+    readonly timeoutMs: number;
+    readonly tls: SpecModelBrokerTls;
+  },
 ) => Promise<SpecModelBrokerHttpResponse>;
 
 /**
@@ -46,6 +52,20 @@ export class MtlsSpecDialogueModel implements SpecDialogueModel {
     this.#http = options.http ?? specModelBrokerHttpsJson;
   }
 
+  async probe(): Promise<void> {
+    const url = new URL(this.#endpoint.href);
+    url.pathname = "/healthz";
+    const response = await this.#http(url, {
+      method: "GET", body: "", operationKey: null, timeoutMs: this.#timeoutMs, tls: this.#tls,
+    });
+    const body = record(response.payload);
+    exactKeys(body, ["schemaVersion", "status", "service"]);
+    if (response.statusCode !== 200 || body.schemaVersion !== "deviludo.spec-model-health.v1"
+      || body.status !== "ok" || body.service !== "deviludo-spec-model-broker") {
+      throw new Error("Specification model Broker health identity is invalid");
+    }
+  }
+
   async generate(input: Parameters<SpecDialogueModel["generate"]>[0]): Promise<SpecModelResult> {
     const response = await this.#http(this.#endpoint, {
       operationKey: input.operationKey,
@@ -70,17 +90,29 @@ export class MtlsSpecDialogueModel implements SpecDialogueModel {
 
 export function specModelBrokerHttpsJson(
   url: URL,
-  input: { readonly body: string; readonly operationKey: string; readonly timeoutMs: number; readonly tls: SpecModelBrokerTls },
+  input: {
+    readonly method?: "GET" | "POST";
+    readonly body: string;
+    readonly operationKey: string | null;
+    readonly timeoutMs: number;
+    readonly tls: SpecModelBrokerTls;
+  },
 ): Promise<SpecModelBrokerHttpResponse> {
   return new Promise((resolve, reject) => {
+    const method = input.method ?? "POST";
+    if (method === "POST" && !input.operationKey) {
+      reject(new Error("Specification model Broker operation key is required"));
+      return;
+    }
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (method === "POST") {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(Buffer.byteLength(input.body));
+      headers["idempotency-key"] = input.operationKey!;
+    }
     const options: RequestOptions = {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "content-length": String(Buffer.byteLength(input.body)),
-        "idempotency-key": input.operationKey,
-      },
+      method,
+      headers,
       key: input.tls.key,
       cert: input.tls.certificate,
       ca: input.tls.ca,
@@ -112,6 +144,21 @@ export function specModelBrokerHttpsJson(
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Specification model Broker timed out")));
     request.once("error", reject);
-    request.end(input.body);
+    request.end(method === "POST" ? input.body : undefined);
   });
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Specification model Broker health identity is invalid");
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) {
+    throw new Error("Specification model Broker health identity is invalid");
+  }
 }

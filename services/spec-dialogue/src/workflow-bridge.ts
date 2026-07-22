@@ -6,6 +6,7 @@ const WORKFLOW_ID = /^delivery-[a-f0-9-]{36}$/;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
 export interface SpecWorkflowApprovalSink {
+  probe(): Promise<void>;
   publish(command: SpecApprovalCommand, receipt: SpecApprovalReceipt): Promise<void>;
 }
 
@@ -17,7 +18,13 @@ export interface SpecWorkflowBridgeTls {
 export interface SpecWorkflowBridgeHttpResponse { readonly statusCode: number; readonly payload: unknown }
 export type SpecWorkflowBridgeHttp = (
   url: URL,
-  input: { readonly body: string; readonly operationKey: string; readonly timeoutMs: number; readonly tls: SpecWorkflowBridgeTls },
+  input: {
+    readonly method?: "GET" | "POST";
+    readonly body: string;
+    readonly operationKey: string | null;
+    readonly timeoutMs: number;
+    readonly tls: SpecWorkflowBridgeTls;
+  },
 ) => Promise<SpecWorkflowBridgeHttpResponse>;
 
 /** Publishes only the already-committed approval authority over fixed mTLS. */
@@ -48,6 +55,19 @@ export class MtlsSpecWorkflowApprovalSink implements SpecWorkflowApprovalSink {
     this.#tls = Object.freeze({ ...options.tls });
     this.#timeoutMs = timeoutMs;
     this.#http = options.http ?? specWorkflowBridgeHttpsJson;
+  }
+
+  async probe(): Promise<void> {
+    const url = new URL(this.#endpoint.href);
+    url.pathname = "/healthz";
+    const response = await this.#http(url, {
+      method: "GET", body: "", operationKey: null, timeoutMs: this.#timeoutMs, tls: this.#tls,
+    });
+    const body = record(response.payload);
+    if (response.statusCode !== 200 || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["service", "status"])
+      || body.status !== "ok" || body.service !== "deviludo-spec-workflow-bridge") {
+      throw new Error("Specification workflow Bridge health identity is invalid");
+    }
   }
 
   async publish(command: SpecApprovalCommand, receipt: SpecApprovalReceipt): Promise<void> {
@@ -92,16 +112,29 @@ export class MtlsSpecWorkflowApprovalSink implements SpecWorkflowApprovalSink {
 
 export function specWorkflowBridgeHttpsJson(
   url: URL,
-  input: { readonly body: string; readonly operationKey: string; readonly timeoutMs: number; readonly tls: SpecWorkflowBridgeTls },
+  input: {
+    readonly method?: "GET" | "POST";
+    readonly body: string;
+    readonly operationKey: string | null;
+    readonly timeoutMs: number;
+    readonly tls: SpecWorkflowBridgeTls;
+  },
 ): Promise<SpecWorkflowBridgeHttpResponse> {
   return new Promise((resolve, reject) => {
+    const method = input.method ?? "POST";
+    if (method === "POST" && !input.operationKey) {
+      reject(new Error("Specification workflow Bridge operation key is required"));
+      return;
+    }
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (method === "POST") {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(Buffer.byteLength(input.body));
+      headers["idempotency-key"] = input.operationKey!;
+    }
     const options: RequestOptions = {
-      method: "POST",
-      headers: {
-        accept: "application/json", "content-type": "application/json",
-        "content-length": String(Buffer.byteLength(input.body)),
-        "idempotency-key": input.operationKey,
-      },
+      method,
+      headers,
       key: input.tls.key, cert: input.tls.certificate, ca: input.tls.ca,
       rejectUnauthorized: true, minVersion: "TLSv1.3", servername: url.hostname,
     };
@@ -129,7 +162,7 @@ export function specWorkflowBridgeHttpsJson(
     });
     request.setTimeout(input.timeoutMs, () => request.destroy(new Error("Specification workflow Bridge timed out")));
     request.once("error", reject);
-    request.end(input.body);
+    request.end(method === "POST" ? input.body : undefined);
   });
 }
 

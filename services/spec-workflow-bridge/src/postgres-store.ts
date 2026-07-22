@@ -283,7 +283,25 @@ export class PostgresSpecWorkflowBridgeStore {
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS spec_workflow_bridge_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.spec_conversations')::text AS spec_conversations,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings,
+                to_regclass('deviludo.spec_dialogue_operations')::text AS spec_dialogue_operations,
+                to_regclass('deviludo.spec_delivery_workflows')::text AS spec_delivery_workflows,
+                to_regclass('deviludo.spec_workflow_events')::text AS spec_workflow_events,
+                to_regclass('deviludo.workflow_control_actions')::text AS workflow_control_actions,
+                to_regclass('deviludo.workflow_signal_outbox')::text AS workflow_signal_outbox`,
+      );
+      const row = result.rows[0];
+      for (const table of [
+        "spec_conversations", "immutable_revisions", "approved_test_plan_bindings", "spec_dialogue_operations",
+        "spec_delivery_workflows", "spec_workflow_events", "workflow_control_actions", "workflow_signal_outbox",
+      ]) {
+        if (row?.[table] !== `deviludo.${table}`) conflict();
+      }
+    }
     finally { client.release(); }
   }
 

@@ -112,7 +112,7 @@ test("local feedback forks an approved conversation without reopening or mutatin
 test("a pending model call fences concurrent duplicates", async () => {
   let release!: (value: ReturnType<typeof parseSpecModelResult>) => void;
   const pending = new Promise<ReturnType<typeof parseSpecModelResult>>((resolve) => { release = resolve; });
-  const model = { generate: async () => pending };
+  const model = { async probe() {}, generate: async () => pending };
   const service = new SpecDialogueService(new InMemorySpecDialogueStore(), model);
   const first = service.send(command);
   await assert.rejects(
@@ -163,6 +163,33 @@ test("mTLS model Broker receives no tool permission or credential material and o
   assert.equal(JSON.stringify(body).includes("baseUrl"), false);
 });
 
+test("mTLS model Broker readiness pins the exact health schema and service identity", async () => {
+  const calls: string[] = [];
+  const model = new MtlsSpecDialogueModel({
+    endpoint: "https://spec-model.internal/v1/spec-generations",
+    tls: { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) },
+    async http(url, input) {
+      calls.push(`${input.method ?? "POST"} ${url.pathname} ${String(input.operationKey)}`);
+      return { statusCode: 200, payload: {
+        schemaVersion: "deviludo.spec-model-health.v1",
+        status: "ok",
+        service: "deviludo-spec-model-broker",
+      } };
+    },
+  });
+  await model.probe();
+  assert.deepEqual(calls, ["GET /healthz null"]);
+
+  const drifted = new MtlsSpecDialogueModel({
+    endpoint: "https://spec-model.internal/v1/spec-generations",
+    tls: { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) },
+    async http() { return { statusCode: 200, payload: {
+      schemaVersion: "deviludo.spec-model-health.v1", status: "ok", service: "another-service",
+    } }; },
+  });
+  await assert.rejects(drifted.probe(), /health identity/);
+});
+
 test("production dialogue ingress requires an allow-listed mTLS workload", async () => {
   const identity = { spiffeId: "spiffe://deviludo.internal/web", certificateFingerprint: "b".repeat(64), certificateSerial: "01", certificateNotAfter: "2030-01-01T00:00:00.000Z" };
   const service = new SpecDialogueService(new InMemorySpecDialogueStore(), new DeterministicLocalSpecModel());
@@ -174,6 +201,36 @@ test("production dialogue ingress requires an allow-listed mTLS workload", async
   assert.equal((await missing({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 401);
   const forbidden = createSpecDialogueHandler({ service, allowedSpiffeIds: new Set(["spiffe://deviludo.internal/other"]), extractIdentity: () => identity });
   assert.equal((await forbidden({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 403);
+});
+
+test("production dialogue readiness recursively checks storage, model and approval delivery", async () => {
+  const probes: string[] = [];
+  let modelFailed = false;
+  const store = new InMemorySpecDialogueStore();
+  store.probe = async () => { probes.push("store"); };
+  const deterministic = new DeterministicLocalSpecModel();
+  const model = {
+    async probe() { probes.push("model"); if (modelFailed) throw new Error("private model diagnostic"); },
+    generate: deterministic.generate.bind(deterministic),
+  };
+  const workflow = {
+    async probe() { probes.push("workflow"); },
+    async publish() { throw new Error("unused"); },
+  };
+  const identity = { spiffeId: "spiffe://deviludo.internal/web", certificateFingerprint: "b".repeat(64), certificateSerial: "01", certificateNotAfter: "2030-01-01T00:00:00.000Z" };
+  const handler = createSpecDialogueHandler({
+    service: new SpecDialogueService(store, model, workflow),
+    allowedSpiffeIds: new Set([identity.spiffeId]),
+    extractIdentity: () => identity,
+  });
+  const request = { method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" };
+  const ready = await handler(request);
+  assert.deepEqual(ready, { status: 200, body: { status: "ok", service: "deviludo-spec-dialogue" } });
+  assert.deepEqual(probes.sort(), ["model", "store", "workflow"]);
+  modelFailed = true;
+  const unavailable = await handler(request);
+  assert.deepEqual(unavailable, { status: 503, body: { error: { code: "SPEC_DIALOGUE_NOT_READY" } } });
+  assert.equal(JSON.stringify(unavailable).includes("private model diagnostic"), false);
 });
 
 test("production approval reports an explicit unavailable gate when no compatible Runner toolchain exists", async () => {

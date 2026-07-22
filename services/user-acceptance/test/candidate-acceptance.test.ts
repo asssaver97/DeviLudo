@@ -117,6 +117,29 @@ test("PostgreSQL candidate acceptance derives candidate, PR and evidence under t
   assert.deepEqual(authorityValues, [command.tenantId, command.projectId, command.actorId]);
 });
 
+test("PostgreSQL candidate readiness requires exact actor, candidate and E2E evidence tables", async () => {
+  const tables = [
+    "workflow_control_actions", "users", "tenant_memberships", "immutable_revisions",
+    "github_candidate_receipts", "e2e_attempts", "evidence_bundles", "user_candidate_acceptances",
+  ] as const;
+  let missing: string | null = null;
+  let released = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(sql: string) {
+      assert.match(sql, /to_regclass\('deviludo\.evidence_bundles'\)/);
+      const row = Object.fromEntries(tables.map((table) => [table, `deviludo.${table}`])) as Record<string, unknown>;
+      if (missing) row[missing] = null;
+      return rows<Row>([row]);
+    },
+    release() { released += 1; },
+  };
+  const store = new PostgresCandidateAcceptanceStore({ async connect() { return client; } });
+  await store.probe();
+  missing = "github_candidate_receipts";
+  await assert.rejects(store.probe(), /authority is invalid/);
+  assert.equal(released, 2);
+});
+
 const command = Object.freeze({
   operationKey: decision.operationKey,
   tenantId: decision.tenantId,

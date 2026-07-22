@@ -57,11 +57,35 @@ test("workflow publisher rejects response extension and approval drift", async (
   await assert.rejects(extended.publish(command, { ...receipt, operationKey: "0".repeat(64) }), /receipt drifted/);
 });
 
+test("workflow publisher readiness pins the exact Bridge identity", async () => {
+  const calls: string[] = [];
+  const tls = { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) };
+  const sink = new MtlsSpecWorkflowApprovalSink({
+    endpoint: "https://spec-workflow.internal/v1/spec-approvals",
+    tls,
+    async http(url, input) {
+      calls.push(`${input.method ?? "POST"} ${url.pathname} ${String(input.operationKey)}`);
+      return { statusCode: 200, payload: { status: "ok", service: "deviludo-spec-workflow-bridge" } };
+    },
+  });
+  await sink.probe();
+  assert.deepEqual(calls, ["GET /healthz null"]);
+
+  const drifted = new MtlsSpecWorkflowApprovalSink({
+    endpoint: "https://spec-workflow.internal/v1/spec-approvals", tls,
+    async http() { return { statusCode: 200, payload: {
+      status: "ok", service: "deviludo-spec-workflow-bridge", extra: true,
+    } }; },
+  });
+  await assert.rejects(drifted.probe(), /health identity/);
+});
+
 test("a failed publish leaves the approval committed and an exact retry republishes it", async () => {
   const store = new InMemorySpecDialogueStore();
   let calls = 0;
   const published = [] as string[];
   const workflow: SpecWorkflowApprovalSink = {
+    async probe() {},
     async publish(_command, receipt) {
       calls += 1;
       published.push(receipt.specRevisionId);

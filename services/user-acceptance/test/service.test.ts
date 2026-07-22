@@ -152,6 +152,38 @@ test("production feedback ingress requires an allow-listed mTLS workload", async
   assert.equal((await forbidden({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 403);
 });
 
+test("user acceptance readiness includes the low-latency model Broker without leaking failures", async () => {
+  const identity = {
+    spiffeId: "spiffe://deviludo.internal/web",
+    certificateFingerprint: "a".repeat(64),
+    certificateSerial: "01",
+    certificateNotAfter: "2030-01-01T00:00:00.000Z",
+  };
+  const request = { method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" };
+  const readyFixture = buildFixture();
+  const ready = createUserAcceptanceHandler({
+    service: readyFixture.service,
+    acceptance: unusedAcceptance(),
+    cancellation: unusedCancellation(),
+    allowedSpiffeIds: new Set([identity.spiffeId]),
+    extractIdentity: () => identity,
+  });
+  assert.equal((await ready(request)).status, 200);
+  assert.equal(readyFixture.modelProbes, 1);
+
+  const failedFixture = buildFixture({ modelProbeFailure: true });
+  const failed = createUserAcceptanceHandler({
+    service: failedFixture.service,
+    acceptance: unusedAcceptance(),
+    cancellation: unusedCancellation(),
+    allowedSpiffeIds: new Set([identity.spiffeId]),
+    extractIdentity: () => identity,
+  });
+  const unavailable = await failed(request);
+  assert.deepEqual(unavailable, { status: 503, body: { error: { code: "USER_ACCEPTANCE_NOT_READY" } } });
+  assert.equal(JSON.stringify(unavailable).includes("private model diagnostic"), false);
+});
+
 test("PostgreSQL begin derives action and previous revisions under tenant RLS", async () => {
   let insertedValues: readonly unknown[] | undefined;
   const authority = authorityRow();
@@ -284,8 +316,32 @@ test("PostgreSQL begin permits exhausted and immediate post-merge human revision
   }
 });
 
+test("PostgreSQL feedback readiness requires every actor, workflow and immutable-draft table", async () => {
+  const tables = [
+    "users", "tenant_memberships", "workflow_control_actions", "user_feedback_operations",
+    "immutable_revisions", "spec_conversations", "spec_dialogue_operations", "spec_conversation_messages",
+  ] as const;
+  let missing: string | null = null;
+  let released = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(sql: string) {
+      assert.match(sql, /to_regclass\('deviludo\.user_feedback_operations'\)/);
+      const row = Object.fromEntries(tables.map((table) => [table, `deviludo.${table}`])) as Record<string, unknown>;
+      if (missing) row[missing] = null;
+      return rows<Row>([row]);
+    },
+    release() { released += 1; },
+  };
+  const store = new PostgresUserFeedbackStore({ async connect() { return client; } });
+  await store.probe();
+  missing = "spec_dialogue_operations";
+  await assert.rejects(store.probe(), /authority is invalid/);
+  assert.equal(released, 2);
+});
+
 function buildFixture(options: {
   readonly modelFailure?: boolean;
+  readonly modelProbeFailure?: boolean;
   readonly beginWithDraft?: boolean;
   readonly beginKind?: "BUSY" | "CONFLICT";
 } = {}) {
@@ -293,7 +349,12 @@ function buildFixture(options: {
   const draft = feedbackDraft();
   const store = new TestStore(claim, draft, options);
   let modelCalls = 0;
+  let modelProbes = 0;
   const model: SpecDialogueModel = {
+    async probe() {
+      modelProbes += 1;
+      if (options.modelProbeFailure) throw new Error("private model diagnostic");
+    },
     async generate(input) {
       modelCalls += 1;
       assert.equal(input.current, current);
@@ -331,6 +392,7 @@ function buildFixture(options: {
     store,
     completionInputs,
     get modelCalls() { return modelCalls; },
+    get modelProbes() { return modelProbes; },
   };
 }
 

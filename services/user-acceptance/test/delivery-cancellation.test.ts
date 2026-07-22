@@ -145,6 +145,29 @@ test("PostgreSQL cancellation derives active workflow and exact projection under
   assert.match(authorityQuery, /FOR SHARE OF projection, delivery, membership/);
 });
 
+test("PostgreSQL cancellation readiness requires projection, workflow, membership and request tables", async () => {
+  const tables = [
+    "delivery_state_projections", "spec_delivery_workflows", "tenant_memberships",
+    "delivery_cancellation_requests",
+  ] as const;
+  let missing: string | null = null;
+  let released = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(sql: string) {
+      assert.match(sql, /to_regclass\('deviludo\.delivery_cancellation_requests'\)/);
+      const row = Object.fromEntries(tables.map((table) => [table, `deviludo.${table}`])) as Record<string, unknown>;
+      if (missing) row[missing] = null;
+      return rows<Row>([row]);
+    },
+    release() { released += 1; },
+  };
+  const store = new PostgresDeliveryCancellationStore({ async connect() { return client; } });
+  await store.probe();
+  missing = "delivery_state_projections";
+  await assert.rejects(store.probe(), /authority is invalid/);
+  assert.equal(released, 2);
+});
+
 test("mTLS ingress exposes the cancellation command without accepting workflow authority", async () => {
   const identity = {
     spiffeId: "spiffe://deviludo.internal/web",

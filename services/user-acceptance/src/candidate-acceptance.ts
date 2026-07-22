@@ -205,7 +205,25 @@ export class PostgresCandidateAcceptanceStore implements CandidateAcceptanceStor
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS candidate_acceptance_store_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.workflow_control_actions')::text AS workflow_control_actions,
+                to_regclass('deviludo.users')::text AS users,
+                to_regclass('deviludo.tenant_memberships')::text AS tenant_memberships,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.github_candidate_receipts')::text AS github_candidate_receipts,
+                to_regclass('deviludo.e2e_attempts')::text AS e2e_attempts,
+                to_regclass('deviludo.evidence_bundles')::text AS evidence_bundles,
+                to_regclass('deviludo.user_candidate_acceptances')::text AS user_candidate_acceptances`,
+      );
+      const row = result.rows[0];
+      for (const table of [
+        "workflow_control_actions", "users", "tenant_memberships", "immutable_revisions",
+        "github_candidate_receipts", "e2e_attempts", "evidence_bundles", "user_candidate_acceptances",
+      ]) {
+        if (row?.[table] !== `deviludo.${table}`) invalid();
+      }
+    }
     finally { client.release(); }
   }
 

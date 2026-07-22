@@ -11,7 +11,7 @@ import {
 } from "../src/contracts";
 import { createSpecWorkflowHandler } from "../src/ingress-http";
 import { PostgresSpecWorkflowBridgeStore, type SpecDeliveryWorkflow } from "../src/postgres-store";
-import { SpecWorkflowBridgeService } from "../src/service";
+import { SpecWorkflowBridgeService, TemporalSpecWorkflowPort } from "../src/service";
 import { SpecWorkflowBridgeWorker } from "../src/worker";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -161,7 +161,10 @@ test("bridge starts one workflow then completes the exact control action through
     async release() { calls.push("release"); },
     async enqueue() { throw new Error("unused"); }, async probe() {},
   } as unknown as PostgresSpecWorkflowBridgeStore;
-  const temporal = { async ensureStarted() { calls.push("temporal"); return { temporalRunId: "temporal-run-001" }; } };
+  const temporal = {
+    async probe() {},
+    async ensureStarted() { calls.push("temporal"); return { temporalRunId: "temporal-run-001" }; },
+  };
   const completionInputs: Parameters<WorkflowActionCompletionPort["complete"]>[0][] = [];
   const completions: WorkflowActionCompletionPort = {
     async complete(input) {
@@ -191,7 +194,9 @@ test("bridge releases a claim while Temporal has not exposed the matching wait",
     async claimNext() { return event; }, async workflow() { return activeWorkflow(); },
     async findWaitingAction() { return null; }, async release() { released += 1; },
   } as unknown as PostgresSpecWorkflowBridgeStore;
-  const service = new SpecWorkflowBridgeService(store, { async ensureStarted() { throw new Error("unused"); } }, {
+  const service = new SpecWorkflowBridgeService(store, {
+    async probe() {}, async ensureStarted() { throw new Error("unused"); },
+  }, {
     async complete() { throw new Error("unused"); },
   });
   assert.equal(await service.processTenantOnce(tenantId), "WAITING_ACTION");
@@ -220,6 +225,65 @@ test("ingress accepts only the allow-listed mTLS specification workload", async 
   assert.equal((await handler({ method: "POST", path: "/v1/spec-approvals", headers: { "content-type": "application/json", "idempotency-key": "0".repeat(64) }, socket: {}, rawBody: JSON.stringify(approval) })).status, 400);
   const forbidden = createSpecWorkflowHandler({ service, allowedSpiffeIds: new Set(["spiffe://deviludo.internal/other"]), extractIdentity: () => identity });
   assert.equal((await forbidden({ method: "GET", path: "/healthz", headers: {}, socket: {}, rawBody: "" })).status, 403);
+});
+
+test("Bridge readiness requires its complete schema and live Temporal transport", async () => {
+  const tables = [
+    "spec_conversations", "immutable_revisions", "approved_test_plan_bindings", "spec_dialogue_operations",
+    "spec_delivery_workflows", "spec_workflow_events", "workflow_control_actions", "workflow_signal_outbox",
+  ] as const;
+  let missing: string | null = null;
+  let temporalAvailable = true;
+  let temporalProbes = 0;
+  const client: PostgresWorkflowClient = {
+    async query<Row extends Record<string, unknown>>(sql: string) {
+      assert.match(sql, /to_regclass\('deviludo\.workflow_signal_outbox'\)/);
+      const row = Object.fromEntries(tables.map((table) => [table, `deviludo.${table}`])) as Record<string, unknown>;
+      if (missing) row[missing] = null;
+      return rows<Row>([row]);
+    },
+    release() {},
+  };
+  const service = new SpecWorkflowBridgeService(
+    new PostgresSpecWorkflowBridgeStore(pool(client)),
+    {
+      async probe() { temporalProbes += 1; if (!temporalAvailable) throw new Error("private Temporal failure"); },
+      async ensureStarted() { throw new Error("unused"); },
+    },
+    { async complete() { throw new Error("unused"); } },
+  );
+  await service.probe();
+  assert.equal(temporalProbes, 1);
+  missing = "spec_workflow_events";
+  await assert.rejects(service.probe(), /conflicts/);
+  missing = null;
+  temporalAvailable = false;
+  await assert.rejects(service.probe(), /private Temporal failure/);
+});
+
+test("Temporal readiness binds transport and the configured namespace identity", async () => {
+  const calls: string[] = [];
+  const port = new TemporalSpecWorkflowPort({
+    options: { namespace: "deviludo-production" },
+    workflowService: {
+      async getSystemInfo() { calls.push("system"); return {}; },
+      async describeNamespace(input: { namespace: string }) {
+        calls.push(`namespace:${input.namespace}`);
+        return { namespaceInfo: { name: "deviludo-production" } };
+      },
+    },
+  } as never);
+  await port.probe();
+  assert.deepEqual(calls.sort(), ["namespace:deviludo-production", "system"]);
+
+  const drifted = new TemporalSpecWorkflowPort({
+    options: { namespace: "deviludo-production" },
+    workflowService: {
+      async getSystemInfo() { return {}; },
+      async describeNamespace() { return { namespaceInfo: { name: "another-namespace" } }; },
+    },
+  } as never);
+  await assert.rejects(drifted.probe(), /namespace identity/);
 });
 
 function pendingWorkflow(): SpecDeliveryWorkflow {

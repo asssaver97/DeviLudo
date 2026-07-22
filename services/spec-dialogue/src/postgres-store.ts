@@ -382,7 +382,27 @@ export class PostgresSpecDialogueStore extends SpecDialogueStore {
 
   async probe(): Promise<void> {
     const client = await this.pool.connect();
-    try { await client.query("SELECT 1 AS spec_dialogue_store_probe"); }
+    try {
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT to_regclass('deviludo.projects')::text AS projects,
+                to_regclass('deviludo.users')::text AS users,
+                to_regclass('deviludo.tenant_memberships')::text AS tenant_memberships,
+                to_regclass('deviludo.spec_conversations')::text AS spec_conversations,
+                to_regclass('deviludo.spec_dialogue_operations')::text AS spec_dialogue_operations,
+                to_regclass('deviludo.spec_conversation_messages')::text AS spec_conversation_messages,
+                to_regclass('deviludo.immutable_revisions')::text AS immutable_revisions,
+                to_regclass('deviludo.runner_toolchain_revisions')::text AS runner_toolchain_revisions,
+                to_regclass('deviludo.approved_test_plan_bindings')::text AS approved_test_plan_bindings`,
+      );
+      const row = result.rows[0];
+      for (const table of [
+        "projects", "users", "tenant_memberships", "spec_conversations", "spec_dialogue_operations",
+        "spec_conversation_messages", "immutable_revisions", "runner_toolchain_revisions",
+        "approved_test_plan_bindings",
+      ]) {
+        if (row?.[table] !== `deviludo.${table}`) invalid();
+      }
+    }
     finally { client.release(); }
   }
 

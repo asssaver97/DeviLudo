@@ -6,11 +6,23 @@ import type { SpecWorkflowEvent } from "./contracts";
 import type { PostgresSpecWorkflowBridgeStore, SpecDeliveryWorkflow } from "./postgres-store";
 
 export interface SpecWorkflowTemporalPort {
+  probe(): Promise<void>;
   ensureStarted(workflow: SpecDeliveryWorkflow): Promise<{ readonly temporalRunId: string }>;
 }
 
 export class TemporalSpecWorkflowPort implements SpecWorkflowTemporalPort {
   constructor(private readonly client: Client) {}
+
+  async probe(): Promise<void> {
+    const namespace = this.client.options.namespace;
+    const [, described] = await Promise.all([
+      this.client.workflowService.getSystemInfo({}),
+      this.client.workflowService.describeNamespace({ namespace }),
+    ]);
+    if (described.namespaceInfo?.name !== namespace) {
+      throw new Error("Specification workflow Temporal namespace identity is invalid");
+    }
+  }
 
   async ensureStarted(workflow: SpecDeliveryWorkflow): Promise<{ readonly temporalRunId: string }> {
     try {
@@ -83,7 +95,7 @@ export class SpecWorkflowBridgeService {
     }
   }
 
-  probe(): Promise<void> { return this.store.probe(); }
+  async probe(): Promise<void> { await Promise.all([this.store.probe(), this.temporal.probe()]); }
 }
 
 function signalFor(event: SpecWorkflowEvent) {

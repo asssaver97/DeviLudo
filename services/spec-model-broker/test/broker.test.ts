@@ -41,6 +41,7 @@ test("production dialogue client and model Broker share one exact replayable wir
     endpoint: "https://spec-model.internal/v1/spec-generations",
     tls,
     http: async (url, input) => {
+      assert.ok(input.operationKey);
       const response = await handler({
         method: "POST",
         path: url.pathname,
