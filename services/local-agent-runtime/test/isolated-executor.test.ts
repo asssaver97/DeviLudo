@@ -80,6 +80,7 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
     const input = request(agent, agent === "claude-code" ? "claude" : "codex");
     let supervisorCalls = 0;
     let tokenCalls = 0;
+    let tokenRevocations = 0;
     const executor = new IsolatedLocalAgentExecutor({
       storageRoot,
       gatewayUrl: "https://inference.internal.example/v1",
@@ -95,7 +96,10 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
           tokenCalls += 1;
           assert.equal(issued.runId, input.runId);
           assert.match(baseCommitSha, /^[a-f0-9]{40}$/);
-          return { secretRef: `secret://run-token/${issued.runId}/${issued.attemptId}` };
+          return {
+            secretRef: `secret://run-token/${issued.runId}/${issued.attemptId}`,
+            async revoke() { tokenRevocations += 1; },
+          };
         },
       },
       supervisor: {
@@ -133,6 +137,7 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
     assert.deepEqual(replay, receipt);
     assert.equal(supervisorCalls, 1);
     assert.equal(tokenCalls, 1);
+    assert.equal(tokenRevocations, 1);
   });
 }
 
@@ -148,7 +153,7 @@ test("isolated executor fails before process launch when the token broker return
         await writeFile(path.join(workspaceRoot, "project.godot"), "[application]\n", "utf8");
       },
     },
-    runTokenBroker: { async issue() { return { secretRef: "raw-upstream-key" }; } },
+    runTokenBroker: { async issue() { return { secretRef: "raw-upstream-key", async revoke() {} }; } },
     supervisor: { async start() { supervisorCalls += 1; throw new Error("must not start"); } },
   });
   await assert.rejects(executor.execute(request("claude-code", "bad-token")), /invalid SecretRef/);
@@ -173,7 +178,7 @@ test("isolated executor propagates cancellation to the supervised CLI before can
       },
     },
     runTokenBroker: {
-      async issue() { return { secretRef: `secret://run-token/${input.runId}/${input.attemptId}` }; },
+      async issue() { return { secretRef: `secret://run-token/${input.runId}/${input.attemptId}`, async revoke() {} }; },
     },
     supervisor: {
       async start(supervised) {

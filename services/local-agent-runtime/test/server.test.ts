@@ -99,6 +99,30 @@ test("standalone local Agent host stays fail-closed when trusted dependencies ar
   assert.equal(result.state, "BLOCKED");
 });
 
+test("explicit local launcher mode composes the loopback Gateway and real executor without dependency injection", async () => {
+  const runtime = localAgentRuntimeFromEnvironment({
+    DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: Buffer.from(key).toString("base64url"),
+    DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: "4312",
+    DEVILUDO_LOCAL_TEST_MODE: "1",
+    DEVILUDO_LOCAL_PROVIDER_CONTROL: "1",
+    DEVILUDO_LOCAL_AGENT_EXECUTION: "1",
+    DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: "http://127.0.0.1:4314/v1",
+    DEVILUDO_LOCAL_AGENT_STORAGE_ROOT: `${process.cwd()}/.deviludo/local-agent-runtime-test`,
+    DEVILUDO_LOCAL_AGENT_FIXTURE_ROOT: `${process.cwd()}/fixtures/godot-smoke`,
+    DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION: "1",
+  }, {
+    cliVersionInspector: { async inspect(executable) { return executable === "claude" ? "2.1.14" : "0.91.0"; } },
+  });
+  assert.ok(runtime.executionStack);
+  assert.equal(runtime.executionStack.gatewayPort, 4314);
+  const health = await runtime.readiness.health();
+  assert.equal(health.executionEnabled, true);
+  assert.equal(health.inferenceGateway, "CONFIGURED");
+  assert.equal(health.providerBindingProbe, "CONFIGURED");
+  runtime.executionStack.authority.close();
+  runtime.providerControl?.close();
+});
+
 test("standalone local Agent request contract rejects caller-controlled workspace fields", () => {
   assert.throws(
     () => parseLocalAgentExecutionRequest({ ...request, workspaceRoot: "/tmp/caller-selected" }),

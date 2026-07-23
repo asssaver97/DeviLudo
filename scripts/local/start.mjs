@@ -14,6 +14,7 @@ const DEFAULT_PORT = 3000;
 const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const DEFAULT_LOCAL_AGENT_RUNTIME_PORT = 4312;
 const DEFAULT_LOCAL_SPEC_RUNTIME_PORT = 4313;
+const DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT = 4314;
 const FORCE_STOP_AFTER_MS = 5_000;
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -31,6 +32,7 @@ Environment:
   DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})
   DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
   DEVILUDO_LOCAL_SPEC_RUNTIME_PORT  Local specification dialogue port (default: ${DEFAULT_LOCAL_SPEC_RUNTIME_PORT})
+  DEVILUDO_LOCAL_INFERENCE_GATEWAY_PORT  Internal loopback inference Gateway port (default: ${DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT})
   DEVILUDO_LOCAL_SPEC_STATE_FILE  Absolute durable specification state file (default: .deviludo/local-spec-state.json)
   DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable
   DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT  Verified export_templates root`);
@@ -116,24 +118,27 @@ let port;
 let localRuntimePort;
 let localAgentRuntimePort;
 let localSpecRuntimePort;
+let localInferenceGatewayPort;
 try {
   port = parsePort(process.argv.slice(2));
   if (port !== null) {
     localRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_RUNTIME_PORT", DEFAULT_LOCAL_RUNTIME_PORT);
     localAgentRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT", DEFAULT_LOCAL_AGENT_RUNTIME_PORT);
     localSpecRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_SPEC_RUNTIME_PORT", DEFAULT_LOCAL_SPEC_RUNTIME_PORT);
-    if (new Set([port, localRuntimePort, localAgentRuntimePort, localSpecRuntimePort]).size !== 4) throw new Error("Web and local sidecar ports must be different");
+    localInferenceGatewayPort = parseEnvironmentPort("DEVILUDO_LOCAL_INFERENCE_GATEWAY_PORT", DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT);
+    if (new Set([port, localRuntimePort, localAgentRuntimePort, localSpecRuntimePort, localInferenceGatewayPort]).size !== 5) throw new Error("Web and local sidecar ports must be different");
   }
 } catch (error) {
   port = undefined;
   localRuntimePort = undefined;
   localAgentRuntimePort = undefined;
   localSpecRuntimePort = undefined;
+  localInferenceGatewayPort = undefined;
   fail(error instanceof Error ? error.message : String(error));
   usage();
 }
 
-if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined || localSpecRuntimePort === undefined) {
+if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined || localSpecRuntimePort === undefined || localInferenceGatewayPort === undefined) {
   process.exit();
 }
 
@@ -168,6 +173,7 @@ try {
   await assertPortAvailable(localRuntimePort);
   await assertPortAvailable(localAgentRuntimePort);
   await assertPortAvailable(localSpecRuntimePort);
+  await assertPortAvailable(localInferenceGatewayPort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
   await mkdir(path.join(workspaceRoot, ".deviludo"), { recursive: true, mode: 0o700 });
   const session = await installLocalSidecarSession({
@@ -189,6 +195,7 @@ console.log(`[local:dev] Starting DeviLudo at http://${HOST}:${port}`);
 console.log(`[local:dev] Starting the constrained local runtime at http://${HOST}:${localRuntimePort}`);
 console.log(`[local:dev] Starting Agent readiness at http://${HOST}:${localAgentRuntimePort}`);
 console.log(`[local:dev] Starting specification dialogue at http://${HOST}:${localSpecRuntimePort}`);
+console.log(`[local:dev] Starting the internal inference Gateway at http://${HOST}:${localInferenceGatewayPort}/v1`);
 console.log("[local:dev] Press Ctrl-C to stop the server and its child processes.");
 
 function supervisedArguments(childArguments) {
@@ -234,6 +241,10 @@ const localAgentRuntimeChild = spawn(
       DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: localAgentRuntimeHmacKey,
       DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION: "1",
       DEVILUDO_LOCAL_PROVIDER_CONTROL: "1",
+      DEVILUDO_LOCAL_AGENT_EXECUTION: "1",
+      DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: `http://${HOST}:${localInferenceGatewayPort}/v1`,
+      DEVILUDO_LOCAL_AGENT_STORAGE_ROOT: path.join(workspaceRoot, ".deviludo", "local-agent-runtime"),
+      DEVILUDO_LOCAL_AGENT_FIXTURE_ROOT: path.join(workspaceRoot, "fixtures", "godot-smoke"),
     },
     stdio: "inherit",
   },

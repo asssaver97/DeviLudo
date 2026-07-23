@@ -80,6 +80,28 @@ test("adapters pin safe CLI arguments and route only through the internal gatewa
   assert.equal(codexRuntime.secretEnv.DEVILUDO_RUN_TOKEN, context.runTokenSecretRef);
 });
 
+test("adapters permit plain HTTP only for an explicit 127.0.0.1 local Worker context", () => {
+  const localContext = {
+    ...context,
+    inferenceGatewayUrl: "http://127.0.0.1:4314/v1",
+    allowLocalLoopbackInferenceGateway: true,
+  };
+  const claude = new ClaudeCodeAdapter();
+  const claudeRuntime = claude.start(claude.prepare(localContext, profile("claude-code")), "Implement", "/workspace");
+  assert.equal(claudeRuntime.env.ANTHROPIC_BASE_URL, localContext.inferenceGatewayUrl);
+  const codex = new CodexCliAdapter();
+  const codexRuntime = codex.start(codex.prepare(localContext, profile("codex-cli")), "Implement", "/workspace");
+  assert.match(codexRuntime.files[0].contents, /http:\/\/127\.0\.0\.1:4314\/v1/);
+  assert.throws(() => claude.start(claude.prepare({
+    ...context,
+    inferenceGatewayUrl: "http://127.0.0.1:4314/v1",
+  }, profile("claude-code")), "Implement", "/workspace"), /HTTPS/);
+  assert.throws(() => codex.prepare({
+    ...localContext,
+    inferenceGatewayUrl: "http://localhost:4314/v1",
+  }, profile("codex-cli")), /HTTPS/);
+});
+
 test("provider validation blocks static and DNS-based SSRF", async () => {
   for (const url of ["http://api.example.com", "https://127.0.0.1", "https://169.254.169.254", "https://user:pass@api.example.com", "https://api.example.com?key=secret", "https://api.example.com:8443"]) {
     assert.throws(() => validateProviderBaseUrl(url), /HTTPS|non-public|user|query|approved/);

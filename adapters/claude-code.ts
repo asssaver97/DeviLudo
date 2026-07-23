@@ -107,7 +107,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     ]);
     assertSafeArgv(args);
 
-    const gateway = validateInternalGatewayUrl(runtime.context.inferenceGatewayUrl);
+    const gateway = validateInternalGatewayUrl(runtime.context.inferenceGatewayUrl, {
+      allowLocalLoopbackHttp: runtime.context.allowLocalLoopbackInferenceGateway === true,
+    });
     return Object.freeze({
       executable: "claude",
       args,

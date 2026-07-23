@@ -25,6 +25,7 @@ import {
   LocalAgentRuntimeRequestVerifier,
   localAgentRuntimeKeyFromEnvironment,
 } from "./request-auth";
+import { localExecutionStackFromEnvironment, type LocalExecutionStack } from "./local-execution-stack";
 
 const HOST = "127.0.0.1";
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -42,6 +43,7 @@ export interface LocalAgentRuntime {
   readonly readiness: LocalAgentReadinessService;
   readonly execution: LocalAgentExecutionService;
   readonly providerControl: LocalProviderControl | null;
+  readonly executionStack: LocalExecutionStack | null;
   readonly server: Server;
 }
 
@@ -55,6 +57,9 @@ export function localAgentRuntimeFromEnvironment(
     ?? (env.DEVILUDO_LOCAL_TEST_MODE === "1" && env.DEVILUDO_LOCAL_PROVIDER_CONTROL === "1"
       ? new LocalProviderControl()
       : null);
+  const executionStack = dependencies.executor
+    ? null
+    : localExecutionStackFromEnvironment(env, providerControl);
   const readiness = new LocalAgentReadinessService({
     inspector: dependencies.cliVersionInspector,
     claudeVersion: env.DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION,
@@ -65,11 +70,15 @@ export function localAgentRuntimeFromEnvironment(
     expectedWorkerImageIdentity: env.DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST,
     localDeterministicWorkerAttestation: env.DEVILUDO_LOCAL_TEST_MODE === "1"
       && env.DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION === "1",
+    allowLocalLoopbackInferenceGateway: executionStack !== null,
     providerBindingVerifier: dependencies.providerBindingVerifier ?? providerControl ?? undefined,
   });
-  const execution = new LocalAgentExecutionService({ readiness, executor: dependencies.executor });
+  const execution = new LocalAgentExecutionService({
+    readiness,
+    executor: dependencies.executor ?? executionStack?.executor,
+  });
   const server = createServer((request, response) => route(request, response, { requestVerifier, readiness, execution, providerControl }));
-  return Object.freeze({ host: HOST, port, readiness, execution, providerControl, server });
+  return Object.freeze({ host: HOST, port, readiness, execution, providerControl, executionStack, server });
 }
 
 export async function runLocalAgentRuntime(
@@ -77,7 +86,22 @@ export async function runLocalAgentRuntime(
   dependencies: LocalAgentRuntimeDependencies = {},
 ): Promise<void> {
   const runtime = localAgentRuntimeFromEnvironment(env, dependencies);
-  await listen(runtime.server, runtime.port, runtime.host);
+  try {
+    if (runtime.executionStack) {
+      await runtime.executionStack.gateway.listen({
+        host: runtime.executionStack.gatewayHost,
+        port: runtime.executionStack.gatewayPort,
+      });
+    }
+    await listen(runtime.server, runtime.port, runtime.host);
+  } catch (error) {
+    if (runtime.executionStack) {
+      try { await runtime.executionStack.gateway.close(); }
+      catch { /* The Gateway may have failed before it acquired a listener. */ }
+      runtime.executionStack.authority.close();
+    }
+    throw error;
+  }
   console.log(`[local-agent-runtime] Ready at http://${runtime.host}:${runtime.port}`);
   const shutdown = new AbortController();
   const stop = () => shutdown.abort();
@@ -91,6 +115,10 @@ export async function runLocalAgentRuntime(
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     runtime.execution.cancelAll();
+    if (runtime.executionStack) {
+      await runtime.executionStack.gateway.close();
+      runtime.executionStack.authority.close();
+    }
     runtime.providerControl?.close();
     await close(runtime.server);
   }
@@ -165,6 +193,18 @@ async function route(
       requireProviderControl(runtime.providerControl);
       const command = await readObject(request, "/v1/provider-probes", runtime.requestVerifier);
       json(response, 200, { data: await runtime.providerControl!.probe(command) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/provider-bindings/activate" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-bindings/activate", runtime.requestVerifier);
+      json(response, 200, { data: runtime.providerControl!.activate(command) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/provider-bindings/disable" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-bindings/disable", runtime.requestVerifier);
+      json(response, 200, { data: runtime.providerControl!.disable(command) });
       return;
     }
     json(response, 404, { error: { code: "NOT_FOUND", message: "Local Agent runtime route not found" } });
@@ -264,7 +304,8 @@ export function parseLocalAgentCancellationRequest(value: unknown): LocalAgentCa
 }
 
 type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel"
-  | "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes";
+  | "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
+  | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
 
 async function readCancellationRequest(
   request: IncomingMessage,

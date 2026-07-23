@@ -10,6 +10,8 @@ import { localWorkerImageDigest } from "@/lib/agent/local-worker-identity";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
 import {
+  activateLocalProviderBinding,
+  disableLocalProviderBinding,
   localProviderControlRequired,
   probeLocalProvider,
   putLocalProviderCredential,
@@ -972,6 +974,11 @@ export async function POST(request: Request, context: RouteContext) {
           models: provider.models,
           credentialVersionId: provider.credentialVersionId,
           requiredChecks: PROVIDER_REQUIRED_CHECKS,
+        }, {
+          profileRevisionId: profile.id,
+          scope: profile.scope,
+          scopeId: profile.scopeId,
+          pricing: provider.pricing,
         });
         return await mutate(lease, operationId, () => {
           const currentStore = getDemoStore();
@@ -998,7 +1005,31 @@ export async function POST(request: Request, context: RouteContext) {
           };
         });
       }
-      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+      const operationId = `admin:${key}:${idempotency}`;
+      if (Object.prototype.hasOwnProperty.call(getDemoStore().idempotency, operationId)) {
+        return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
+      }
+      const currentProvider = getDemoStore().providers.find((item) => item.id === authorizedProfile.providerRevisionId);
+      if (!currentProvider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
+      if (action === "activate") {
+        if (authorizedProfile.state !== "READY" || !["READY", "ACTIVE"].includes(currentProvider.state)
+          || !demoProviderProbePassed(currentProvider)) {
+          throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
+        }
+        if (localProviderControlRequired()) {
+          await activateLocalProviderBinding({
+            providerRevisionId: currentProvider.id,
+            profileRevisionId: authorizedProfile.id,
+            credentialVersionId: currentProvider.credentialVersionId,
+          });
+        }
+      } else if (localProviderControlRequired()) {
+        await disableLocalProviderBinding({
+          providerRevisionId: currentProvider.id,
+          profileRevisionId: authorizedProfile.id,
+        });
+      }
+      return await mutate(lease, operationId, () => {
         const store = getDemoStore();
         const profile = store.profiles.find((item) => item.id === profileId);
         if (!profile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");

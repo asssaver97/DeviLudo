@@ -21,7 +21,13 @@ export interface LocalWorkspaceProvisioner {
 }
 
 export interface LocalRunTokenBroker {
-  issue(input: { readonly request: LocalAgentExecutionRequest; readonly baseCommitSha: string }): Promise<{ readonly secretRef: string }>;
+  issue(input: { readonly request: LocalAgentExecutionRequest; readonly baseCommitSha: string }): Promise<PreparedLocalRunToken>;
+}
+
+export interface PreparedLocalRunToken {
+  readonly secretRef: string;
+  readonly expiresAt?: string;
+  revoke(): Promise<void>;
 }
 
 export interface LocalAgentSupervisor {
@@ -36,6 +42,7 @@ export interface LocalAgentSupervisor {
 export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
   readonly #storageRoot: string;
   readonly #gatewayUrl: string;
+  readonly #allowLocalLoopbackGateway: boolean;
   readonly #workspaceProvisioner: LocalWorkspaceProvisioner;
   readonly #runTokenBroker: LocalRunTokenBroker;
   readonly #supervisor: LocalAgentSupervisor;
@@ -48,14 +55,18 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     runTokenBroker: LocalRunTokenBroker;
     supervisor: LocalAgentSupervisor;
     scmProxy?: LocalGitScmProxy;
+    allowLocalLoopbackGateway?: boolean;
   }) {
     if (!path.isAbsolute(options.storageRoot)) throw new Error("Local Agent executor storageRoot must be absolute");
     const gateway = new URL(options.gatewayUrl);
-    if (gateway.protocol !== "https:" || gateway.username || gateway.password || gateway.search || gateway.hash) {
+    const localLoopback = options.allowLocalLoopbackGateway === true
+      && gateway.protocol === "http:" && gateway.hostname === "127.0.0.1";
+    if ((!localLoopback && gateway.protocol !== "https:") || gateway.username || gateway.password || gateway.search || gateway.hash) {
       throw new Error("Local Agent executor requires a credential-free HTTPS Gateway origin");
     }
     this.#storageRoot = path.normalize(options.storageRoot);
     this.#gatewayUrl = gateway.toString().replace(/\/$/, "");
+    this.#allowLocalLoopbackGateway = localLoopback;
     this.#workspaceProvisioner = options.workspaceProvisioner;
     this.#runTokenBroker = options.runTokenBroker;
     this.#supervisor = options.supervisor;
@@ -96,6 +107,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     const base = await this.#scmProxy.prepare(scmBinding);
     throwIfAborted(signal);
     const token = await this.#runTokenBroker.issue({ request, baseCommitSha: base.baseCommitSha });
+    try {
     if (!/^(?:vault|kms|secret):\/\/[^\s?#]{1,480}$/.test(token.secretRef)) {
       throw new Error("Local token broker returned an invalid SecretRef");
     }
@@ -114,6 +126,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
       runRoot,
       inferenceGatewayUrl: this.#gatewayUrl,
       runTokenSecretRef: token.secretRef,
+      ...(this.#allowLocalLoopbackGateway ? { allowLocalLoopbackInferenceGateway: true as const } : {}),
     });
     const runtime = adapter.prepare(context, profile);
     const runtimeSpec = adapter.start(runtime, reviewPrompt(request.prompt), workspaceRoot);
@@ -154,6 +167,9 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     const receipt = buildReceipt(request, completion.result, candidate, codeReviewReceipt);
     await writeFile(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return receipt;
+    } finally {
+      await token.revoke();
+    }
   }
 }
 

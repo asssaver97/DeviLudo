@@ -41,6 +41,16 @@ const preflight: LocalAgentPreflightRequest = Object.freeze({
   modelRoles: provider.models,
 });
 
+const probeCommand = Object.freeze({
+  provider,
+  binding: Object.freeze({
+    profileRevisionId: preflight.profileRevisionId,
+    scope: "platform" as const,
+    scopeId: "global",
+    pricing: Object.freeze({ inputUsdPerMillionTokens: 3, outputUsdPerMillionTokens: 15 }),
+  }),
+});
+
 test("local Provider control retains only sidecar secret bytes and binds a passed probe exactly", async () => {
   let probes = 0;
   const control = new LocalProviderControl({
@@ -65,16 +75,22 @@ test("local Provider control retains only sidecar secret bytes and binds a passe
     secret: "different-secret-material",
   }), LocalProviderControlConflictError);
 
-  const receipt = await control.probe(provider);
+  const receipt = await control.probe(probeCommand);
   assert.equal(receipt.state, "READY");
   assert.equal(probes, 1);
+  assert.equal(await control.verify(preflight), false);
+  assert.equal(control.activate({
+    providerRevisionId: provider.providerRevisionId,
+    profileRevisionId: preflight.profileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+  }).state, "ACTIVE");
   assert.equal(await control.verify(preflight), true);
   assert.equal(await control.verify({ ...preflight, model: "claude-sonnet-4-6-20250515" }), false);
   assert.equal(await control.verify({ ...preflight, credentialVersionId: "credential-claude-v8" }), false);
 
   control.revokeCredential({ credentialVersionId: provider.credentialVersionId });
   assert.equal(await control.verify(preflight), false);
-  await assert.rejects(async () => control.probe(provider), LocalProviderProbeError);
+  await assert.rejects(async () => control.probe(probeCommand), LocalProviderProbeError);
 });
 
 test("local Provider control fails closed on invalid or incomplete probe receipts", async () => {
@@ -87,7 +103,7 @@ test("local Provider control fails closed on invalid or incomplete probe receipt
     },
   });
   control.putCredential({ credentialVersionId: provider.credentialVersionId, secret: "sk-local-secret-material" });
-  await assert.rejects(async () => control.probe(provider), LocalProviderProbeError);
+  await assert.rejects(async () => control.probe(probeCommand), LocalProviderProbeError);
   assert.equal(await control.verify(preflight), false);
   control.close();
 });

@@ -30,6 +30,7 @@ export class LocalAgentReadinessService {
     readonly workerImageIdentity?: string;
     readonly expectedWorkerImageIdentity?: string;
     readonly localDeterministicWorkerAttestation?: boolean;
+    readonly allowLocalLoopbackInferenceGateway?: boolean;
     readonly providerBindingVerifier?: LocalProviderBindingVerifier;
   } = {}) {
     const claudeVersion = options.claudeVersion ?? "2.1.14";
@@ -43,7 +44,10 @@ export class LocalAgentReadinessService {
       Object.freeze({ agent: "codex-cli" as const, executable: "codex" as const, expectedVersion: codexVersion }),
     ]);
     this.#executionEnabled = options.executionEnabled === true;
-    this.#gatewayConfigured = isSecureGatewayOrigin(options.inferenceGatewayUrl);
+    this.#gatewayConfigured = isSecureGatewayOrigin(
+      options.inferenceGatewayUrl,
+      options.allowLocalLoopbackInferenceGateway === true,
+    );
     this.#workerImageIdentity = exactDigest(options.workerImageIdentity);
     this.#expectedWorkerImageIdentity = exactDigest(options.expectedWorkerImageIdentity);
     this.#localDeterministicWorkerAttestation = options.localDeterministicWorkerAttestation === true;
@@ -180,11 +184,13 @@ function exactDigest(value: string | undefined): string | null {
   return value && /^sha256:[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
-function isSecureGatewayOrigin(value: string | undefined): boolean {
+function isSecureGatewayOrigin(value: string | undefined, allowLocalLoopback: boolean): boolean {
   if (!value) return false;
   try {
     const url = new URL(value);
-    return url.protocol === "https:"
+    const permittedProtocol = url.protocol === "https:"
+      || (allowLocalLoopback && url.protocol === "http:" && url.hostname === "127.0.0.1");
+    return permittedProtocol
       && Boolean(url.hostname)
       && !url.username
       && !url.password

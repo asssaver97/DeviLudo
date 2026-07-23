@@ -1,6 +1,7 @@
 import { HttpProblem } from "@/lib/control-plane/http";
 import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { PROVIDER_PROBE_CHECKS, type GatewayProviderProbeRequest } from "@/services/inference-gateway/src/provider-probe";
+import type { LocalProviderScope } from "@/services/local-agent-runtime/src/provider-control";
 
 type LocalCredentialReceipt = Readonly<{
   credentialVersionId: string;
@@ -40,8 +41,16 @@ export async function revokeLocalProviderCredential(credentialVersionId: string)
   }
 }
 
-export async function probeLocalProvider(value: GatewayProviderProbeRequest): Promise<Readonly<Record<string, "PASS">>> {
-  const data = await post("/v1/provider-probes", value, "PROVIDER_PROBE_UNAVAILABLE");
+export async function probeLocalProvider(
+  value: GatewayProviderProbeRequest,
+  binding: Readonly<{
+    profileRevisionId: string;
+    scope: LocalProviderScope;
+    scopeId: string;
+    pricing: Readonly<{ inputUsdPerMillionTokens: number; outputUsdPerMillionTokens: number }>;
+  }>,
+): Promise<Readonly<Record<string, "PASS">>> {
+  const data = await post("/v1/provider-probes", { provider: value, binding }, "PROVIDER_PROBE_UNAVAILABLE");
   const item = record(data);
   const checks = record(item.checks);
   if (item.providerRevisionId !== value.providerRevisionId
@@ -55,7 +64,35 @@ export async function probeLocalProvider(value: GatewayProviderProbeRequest): Pr
   return Object.freeze({ ...checks } as Record<string, "PASS">);
 }
 
-async function post(path: "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes", value: unknown, unavailableCode: string): Promise<unknown> {
+export async function activateLocalProviderBinding(value: Readonly<{
+  providerRevisionId: string;
+  profileRevisionId: string;
+  credentialVersionId: string;
+}>): Promise<void> {
+  const data = await post("/v1/provider-bindings/activate", value, "LOCAL_PROVIDER_ACTIVATION_UNAVAILABLE");
+  const item = record(data);
+  if (item.providerRevisionId !== value.providerRevisionId || item.profileRevisionId !== value.profileRevisionId
+    || item.state !== "ACTIVE" || !exactKeys(item, ["profileRevisionId", "providerRevisionId", "state"])) {
+    throw new HttpProblem(502, "LOCAL_PROVIDER_ACTIVATION_INVALID", "本机 Provider 激活回执无效");
+  }
+}
+
+export async function disableLocalProviderBinding(value: Readonly<{
+  providerRevisionId: string;
+  profileRevisionId: string;
+}>): Promise<void> {
+  const data = await post("/v1/provider-bindings/disable", value, "LOCAL_PROVIDER_DISABLE_UNAVAILABLE");
+  const item = record(data);
+  if (item.providerRevisionId !== value.providerRevisionId || item.profileRevisionId !== value.profileRevisionId
+    || item.state !== "DISABLED" || !exactKeys(item, ["profileRevisionId", "providerRevisionId", "state"])) {
+    throw new HttpProblem(502, "LOCAL_PROVIDER_DISABLE_INVALID", "本机 Provider 停用回执无效");
+  }
+}
+
+type LocalProviderControlPath = "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
+  | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
+
+async function post(path: LocalProviderControlPath, value: unknown, unavailableCode: string): Promise<unknown> {
   const body = JSON.stringify(value);
   let response: Response;
   try {

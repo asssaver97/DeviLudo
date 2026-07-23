@@ -79,6 +79,8 @@ export interface RunContext {
   readonly testPlanRevisionId: string;
   readonly runRoot: string;
   readonly inferenceGatewayUrl: string;
+  /** Explicit localhost-only concession for the deterministic local Worker. */
+  readonly allowLocalLoopbackInferenceGateway?: true;
   /** Reference to a short-lived, run-bound token; never the token itself. */
   readonly runTokenSecretRef: string;
 }

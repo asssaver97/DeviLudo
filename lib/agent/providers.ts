@@ -137,8 +137,9 @@ export function providerSupportsAgent(
 export function renderCodexProviderConfig(
   gatewayUrl: string,
   providerName = "deviludo_gateway",
+  options: Readonly<{ allowLocalLoopbackHttp?: boolean }> = {},
 ): string {
-  const gateway = validateInternalGatewayUrl(gatewayUrl);
+  const gateway = validateInternalGatewayUrl(gatewayUrl, options);
   return [
     `model_provider = "${escapeToml(providerName)}"`,
     "",
@@ -150,9 +151,14 @@ export function renderCodexProviderConfig(
   ].join("\n");
 }
 
-export function validateInternalGatewayUrl(raw: string): string {
+export function validateInternalGatewayUrl(
+  raw: string,
+  options: Readonly<{ allowLocalLoopbackHttp?: boolean }> = {},
+): string {
   const url = new URL(raw);
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search) {
+  const localLoopback = options.allowLocalLoopbackHttp === true
+    && url.protocol === "http:" && url.hostname === "127.0.0.1";
+  if ((!localLoopback && url.protocol !== "https:") || url.username || url.password || url.hash || url.search) {
     throw new Error("Inference gateway URL must be a credential-free HTTPS URL");
   }
   return url.toString().replace(/\/$/, "");

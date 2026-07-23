@@ -64,7 +64,9 @@ export class CodexCliAdapter implements RuntimeAdapter {
     const files: readonly RuntimeFile[] = Object.freeze([
       Object.freeze({
         relativePath: "codex-home/config.toml",
-        contents: renderCodexProviderConfig(context.inferenceGatewayUrl),
+        contents: renderCodexProviderConfig(context.inferenceGatewayUrl, "deviludo_gateway", {
+          allowLocalLoopbackHttp: context.allowLocalLoopbackInferenceGateway === true,
+        }),
         mode: 0o600 as const,
       }),
       Object.freeze({
