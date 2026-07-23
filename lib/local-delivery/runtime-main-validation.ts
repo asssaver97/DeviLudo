@@ -77,7 +77,8 @@ export function validateLocalMainValidationEvidence(
     || item.runId !== delivery.runId
     || item.specRevisionId !== delivery.specRevisionId
     || JSON.stringify(item.targetMatrix) !== JSON.stringify(delivery.targetMatrix)
-    || item.platform !== "macos" || item.fixtureOnly !== true
+    || item.platform !== "macos" || item.fixtureOnly !== candidate.fixtureOnly
+    || JSON.stringify(item.sourceAuthority) !== JSON.stringify(candidate.sourceAuthority)
     || item.candidateEvidenceId !== candidate.evidenceId
     || item.candidateBundleDigest !== candidate.bundleDigest
     || item.candidateSha !== candidate.candidateSha
@@ -130,7 +131,8 @@ export function validateLocalMainValidationEvidence(
     godotVersion: String(item.godotVersion),
     targetMatrix: Object.freeze([...delivery.targetMatrix]),
     platform: "macos",
-    fixtureOnly: true,
+    fixtureOnly: candidate.fixtureOnly,
+    sourceAuthority: candidate.sourceAuthority,
     buildArtifact,
     checks,
     createdAt: String(item.createdAt),

@@ -428,10 +428,14 @@ export function LocalDeliveryPanel({
           <div className={`local-real-validation ${snapshot.localValidation?.valid ? "ready" : "pending"}`}>
             <div className="local-real-validation-copy">
               <span className="eyebrow">真实本机执行</span>
-              <h3>{snapshot.localValidation?.valid ? snapshot.localValidation.evidenceId : "Git fixture + Godot macOS headless"}</h3>
+              <h3>{snapshot.localValidation?.valid
+                ? snapshot.localValidation.evidenceId
+                : snapshot.agentExecution?.valid ? "Agent 候选 + Godot macOS headless" : "固定样例 + Godot macOS headless"}</h3>
               <p>{snapshot.localValidation?.valid
-                ? `${snapshot.localValidation.godotVersion} · macOS 本机 · ${snapshot.localValidation.checks.filter((check) => check.status === "PASSED").length} 项通过`
-                : "创建隔离 Git 候选提交，运行项目导入、核心循环、存档回读、导出，以及交付 ZIP 内应用的启动/退出检查。"}</p>
+                ? `${snapshot.localValidation.sourceAuthority.kind === "AGENT_CANDIDATE" ? "Agent 候选" : "平台固定样例"} · ${snapshot.localValidation.godotVersion} · macOS 本机 · ${snapshot.localValidation.checks.filter((check) => check.status === "PASSED").length} 项通过`
+                : snapshot.agentExecution?.valid
+                  ? "从受控 SCM 独立检出锁定的 Agent 提交，复核源码摘要后运行导入、核心循环、存档、导出和成品启动检查。"
+                  : "创建隔离固定样例提交，运行导入、核心循环、存档回读、导出和成品启动检查。"}</p>
             </div>
             {snapshot.localValidation?.valid ? (
               <div className="local-real-validation-result">

@@ -804,6 +804,8 @@ try {
     || localValidationPayload.data?.status !== expectedLocalValidationStatus
     || localValidationPayload.data?.platform !== "macos"
     || localValidationPayload.data?.fixtureOnly !== true
+    || localValidationPayload.data?.sourceAuthority?.kind !== "FIXTURE"
+    || localValidationPayload.data?.sourceAuthority?.fixtureId !== "godot-smoke-v1"
     || !/^[a-f0-9]{64}$/.test(String(localValidationPayload.data?.bundleDigest))
     || (expectedLocalValidationStatus === "TESTS_PASSED"
       && (localAutomationPayload.data?.stage !== "AWAITING_ACCEPTANCE"
@@ -827,6 +829,7 @@ try {
     || localManifestPayload.projectId !== smokeValidationProject
     || localManifestPayload.runId !== validationApprovalPayload.data.run.id
     || localManifestPayload.schemaVersion !== 4
+    || JSON.stringify(localManifestPayload.sourceAuthority) !== JSON.stringify(localValidationPayload.data?.sourceAuthority)
     || JSON.stringify(localManifestPayload.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || JSON.stringify(localValidationPayload.data?.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || localManifestPayload.bundleDigest !== localValidationPayload.data.bundleDigest) {

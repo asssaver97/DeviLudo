@@ -54,13 +54,14 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 
 真实 Godot 侧车会：
 
-1. 将固定 Godot 样例复制到 `.deviludo/local-runtime/<project>/<run>/workspace`；
-2. 通过 SCM 代理在工作区外初始化 base Git 元数据，再由代理提交样例候选并生成 base/candidate SHA 与 tree digest；
-3. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
-4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml`、`godot.log` 和通过门禁后可下载的 `DeviLudoLocal.zip`。
-5. 用户验收后把精确候选快进到本地 `main`，在独立 main 门禁目录重复上述真实检查，并生成单独可下载的 `DeviLudoMain.zip`；候选构建物不能替代 main 构建物。
+1. 接收显式 `sourceAuthority`：没有 Agent 回执时只能使用 `godot-smoke-v1` 固定样例；存在有效 Agent 回执时只能使用该回执绑定的候选；
+2. 固定样例由 SCM 代理创建候选提交；Agent 候选则从 `.deviludo/local-agent-runtime` 的受控 SCM 按 project/run/attempt 定位，不接受网页传入路径；
+3. 独立复核 Agent candidate manifest、分支 ref、base/candidate SHA 和完整 Git tree digest，再导出到无 Git 元数据的一次性验证工作区；
+4. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
+5. 尝试 macOS 导出，并生成绑定 source authority 的 `manifest.json`、`junit.xml`、`godot.log` 和通过门禁后可下载的 `DeviLudoLocal.zip`；
+6. 用户验收后把同一来源的精确候选快进到本地 `main`，在独立 main 门禁目录重复上述真实检查，并生成单独可下载的 `DeviLudoMain.zip`；候选构建物不能替代 main 构建物。
 
-每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。候选证据 v4 包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本、逐项检查结果、批准规格中保持顺序的目标矩阵，以及成功导出的 macOS zip 文件名、内容类型、SHA-256 与字节数；main 证据 v1 还绑定候选 evidence/bundle、合并回执与实际 main tree。下载前侧车重新检查文件类型、大小、摘要和写入时间，Web 再将响应元数据与 D1 中的不可变证据逐项比对；旧版通过证据会被归档并重新执行，不能授权构建物。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移、夹带未选系统或通过状态缺少构建物时只能审计，不能满足当前 Run。
+每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。候选证据 v4 包含完整 Git SHA、source digest、bundle digest、source authority、精确 Godot 版本、逐项检查结果、批准规格中保持顺序的目标矩阵，以及成功导出的 macOS zip 文件名、内容类型、SHA-256 与字节数；main 证据 v1 还绑定候选 evidence/bundle、同一 source authority、合并回执与实际 main tree。下载前侧车重新检查文件类型、大小、摘要和写入时间，Web 再将响应元数据与 D1 中的不可变证据逐项比对；缺少来源绑定的旧证据会被归档并重新执行，不能授权构建物。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移、夹带未选系统或通过状态缺少构建物时只能审计，不能满足当前 Run。
 
 如果本机没有通过上述固定安装器安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 

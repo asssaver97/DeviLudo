@@ -38,6 +38,14 @@ export interface MergeLocalCandidateRequest extends LocalScmBinding {
   readonly expectedSourceDigest: string;
 }
 
+export interface MaterializeLocalCandidateRequest extends LocalScmBinding {
+  readonly expectedBranch: string;
+  readonly expectedBaseCommitSha: string;
+  readonly expectedCandidateCommitSha: string;
+  readonly expectedSourceDigest: string;
+  readonly destinationRoot: string;
+}
+
 export interface LocalScmMergeReceipt {
   readonly scmProxy: "local-git-proxy-v1";
   readonly branch: "main";

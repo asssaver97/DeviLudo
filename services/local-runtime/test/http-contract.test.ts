@@ -14,7 +14,13 @@ import {
 } from "../src/http-contract";
 
 function parse(value: unknown) {
-  return parseLocalRuntimeRequest(Buffer.from(JSON.stringify(value)));
+  const item = value as Record<string, unknown>;
+  return parseLocalRuntimeRequest(Buffer.from(JSON.stringify({
+    ...item,
+    sourceAuthority: item.sourceAuthority ?? {
+      kind: "FIXTURE", fixtureId: "godot-smoke-v1", attemptId: "fixture-attempt-1",
+    },
+  })));
 }
 
 test("parses an exact immutable local runtime request", () => {
@@ -27,7 +33,33 @@ test("parses an exact immutable local runtime request", () => {
   assert.deepEqual(request.targetMatrix, ["macos", "linux"]);
   assert.equal(
     localRuntimeRunBinding(request),
-    '["project-http","RUN-HTTP-001","SPEC-HTTP-001","macos","linux"]',
+    '["project-http","RUN-HTTP-001","SPEC-HTTP-001","macos","linux",{"kind":"FIXTURE","fixtureId":"godot-smoke-v1","attemptId":"fixture-attempt-1"}]',
+  );
+});
+
+test("parses an exact Agent candidate source authority and rejects ambiguous fields", () => {
+  const sourceAuthority = {
+    kind: "AGENT_CANDIDATE",
+    attemptId: "ATT-RUN-HTTP-001",
+    branch: "deviludo/project-http/attempt-1",
+    baseCommitSha: "a".repeat(40),
+    candidateSha: "b".repeat(40),
+    sourceDigest: "c".repeat(64),
+  } as const;
+  const request = parse({
+    projectId: "project-http",
+    runId: "RUN-HTTP-001",
+    specRevisionId: "SPEC-HTTP-001",
+    targetMatrix: ["macos"],
+    sourceAuthority,
+  });
+  assert.deepEqual(request.sourceAuthority, sourceAuthority);
+  assert.throws(
+    () => parse({
+      ...request,
+      sourceAuthority: { ...sourceAuthority, workspaceRoot: "/tmp/untrusted" },
+    }),
+    (error) => error instanceof LocalRuntimeRequestError && error.code === "INVALID_REQUEST",
   );
 });
 

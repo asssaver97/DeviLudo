@@ -27,6 +27,7 @@ const runner = new LocalFixtureRunner({
   repositoryRoot,
   godotBinary: process.env.DEVILUDO_GODOT_BINARY,
   exportTemplatesRoot: process.env.DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT,
+  agentStorageRoot: process.env.DEVILUDO_LOCAL_AGENT_STORAGE_ROOT || undefined,
 });
 const requestVerifier = new LocalRuntimeRequestVerifier(localRuntimeKeyFromEnvironment());
 const runCoordinator = new LocalRuntimeRunCoordinator();

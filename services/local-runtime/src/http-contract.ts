@@ -7,16 +7,17 @@ import type {
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/;
 const TARGET_PLATFORMS = new Set(["linux", "windows", "macos"]);
-const REQUEST_KEYS = ["projectId", "runId", "specRevisionId", "targetMatrix"];
+const BINDING_KEYS = ["projectId", "runId", "specRevisionId", "targetMatrix"];
+const REQUEST_KEYS = [...BINDING_KEYS, "sourceAuthority"];
 const MAIN_GATE_REQUEST_KEYS = [
-  ...REQUEST_KEYS,
+  ...BINDING_KEYS,
   "candidateEvidenceId",
   "candidateBundleDigest",
   "candidateSha",
   "sourceDigest",
 ];
 const STEAM_REINSTALL_REQUEST_KEYS = [
-  ...REQUEST_KEYS,
+  ...BINDING_KEYS,
   "mainEvidenceId",
   "mainBundleDigest",
   "mainSha",
@@ -25,7 +26,7 @@ const STEAM_REINSTALL_REQUEST_KEYS = [
   "mfaApprovalId",
 ];
 const EXTERNAL_APPROVAL_REQUEST_KEYS = [
-  ...REQUEST_KEYS,
+  ...BINDING_KEYS,
   "mainSha",
   "steamBuildId",
   "steamReinstallEvidenceId",
@@ -61,11 +62,12 @@ export function parseLocalRuntimeRequest(rawBody: Buffer): LocalRuntimeRequest {
     || !validIdentifier(body.projectId)
     || !validIdentifier(body.runId)
     || !validIdentifier(body.specRevisionId)
-    || !validTargetMatrix(body.targetMatrix)) {
+    || !validTargetMatrix(body.targetMatrix)
+    || !validSourceAuthority(body.sourceAuthority)) {
     throw new LocalRuntimeRequestError(
       400,
       "INVALID_REQUEST",
-      "projectId, runId, specRevisionId and a unique 1-3 platform targetMatrix are required",
+      "projectId, runId, specRevisionId, sourceAuthority and a unique 1-3 platform targetMatrix are required",
     );
   }
   return body as LocalRuntimeRequest;
@@ -157,6 +159,7 @@ export function localRuntimeRunBinding(request: LocalRuntimeRequest) {
     request.runId,
     request.specRevisionId,
     ...request.targetMatrix,
+    request.sourceAuthority,
   ]);
 }
 
@@ -288,4 +291,34 @@ function validTargetMatrix(value: unknown): value is LocalRuntimeRequest["target
     && value.length <= 3
     && new Set(value).size === value.length
     && value.every((platform) => typeof platform === "string" && TARGET_PLATFORMS.has(platform));
+}
+
+function validSourceAuthority(value: unknown): value is LocalRuntimeRequest["sourceAuthority"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  if (item.kind === "FIXTURE") {
+    return exactKeys(item, ["kind", "fixtureId", "attemptId"])
+      && item.fixtureId === "godot-smoke-v1"
+      && item.attemptId === "fixture-attempt-1";
+  }
+  return item.kind === "AGENT_CANDIDATE"
+    && exactKeys(item, ["kind", "attemptId", "branch", "baseCommitSha", "candidateSha", "sourceDigest"])
+    && validIdentifier(item.attemptId)
+    && typeof item.branch === "string"
+    && validCandidateBranch(item.branch)
+    && typeof item.baseCommitSha === "string" && /^[a-f0-9]{40}$/.test(item.baseCommitSha)
+    && typeof item.candidateSha === "string" && /^[a-f0-9]{40}$/.test(item.candidateSha)
+    && item.candidateSha !== item.baseCommitSha
+    && typeof item.sourceDigest === "string" && /^[a-f0-9]{64}$/.test(item.sourceDigest);
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+
+function validCandidateBranch(value: string): boolean {
+  return value.length <= 128
+    && /^deviludo\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/i.test(value)
+    && !value.includes("..")
+    && !value.endsWith(".lock");
 }

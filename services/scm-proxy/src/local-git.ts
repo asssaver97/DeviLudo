@@ -8,6 +8,7 @@ import type {
   LocalScmBinding,
   LocalScmCandidateReceipt,
   LocalScmMergeReceipt,
+  MaterializeLocalCandidateRequest,
   MergeLocalCandidateRequest,
   PreparedLocalRepository,
 } from "./contracts";
@@ -186,6 +187,63 @@ export class LocalGitScmProxy {
     });
     await writeExclusiveJson(paths.mergeManifest, manifest);
     return publicMerge(manifest);
+  }
+
+  /**
+   * Independently checks an immutable candidate manifest/ref/tree and exports
+   * exactly that Git tree into a new metadata-free validation workspace.
+   */
+  async materializeCandidate(request: MaterializeLocalCandidateRequest): Promise<LocalScmCandidateReceipt> {
+    validateBinding(request);
+    validateBranch(request.expectedBranch);
+    if (!SHA1.test(request.expectedBaseCommitSha) || !SHA1.test(request.expectedCandidateCommitSha)) {
+      throw new Error("SCM materialization commit binding is invalid");
+    }
+    if (!/^[a-f0-9]{64}$/.test(request.expectedSourceDigest)) {
+      throw new Error("SCM materialization source digest is invalid");
+    }
+    if (!path.isAbsolute(request.destinationRoot)) throw new Error("SCM materialization destination must be absolute");
+    const paths = await this.#resolvePaths(request);
+    const candidate = await readJson<CandidateManifest>(paths.candidateManifest);
+    if (!candidate
+      || candidate.projectId !== request.projectId
+      || candidate.runId !== request.runId
+      || candidate.attemptId !== request.attemptId
+      || candidate.specRevisionId !== request.specRevisionId
+      || candidate.workspaceRoot !== path.resolve(request.workspaceRoot)
+      || candidate.scmProxy !== "local-git-proxy-v1"
+      || candidate.branch !== request.expectedBranch
+      || candidate.baseCommitSha !== request.expectedBaseCommitSha
+      || candidate.commitSha !== request.expectedCandidateCommitSha
+      || candidate.sourceDigest !== request.expectedSourceDigest) {
+      throw new Error("SCM candidate does not match the validation authority");
+    }
+    const candidateRef = (await this.#repo(paths, ["rev-parse", `refs/heads/${candidate.branch}`])).trim();
+    if (candidateRef !== candidate.commitSha) throw new Error("SCM candidate branch drifted before materialization");
+    const tree = await this.#repo(paths, ["ls-tree", "-r", "-z", "--full-tree", candidate.commitSha]);
+    if (createHash("sha256").update(tree, "utf8").digest("hex") !== candidate.sourceDigest) {
+      throw new Error("SCM candidate tree drifted before materialization");
+    }
+
+    const destination = path.resolve(request.destinationRoot);
+    if (destination === paths.workspace || destination.startsWith(`${paths.controlDirectory}${path.sep}`)) {
+      throw new Error("SCM materialization destination overlaps protected source state");
+    }
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    if ((await lstat(destination)).isSymbolicLink() || (await readdir(destination)).length !== 0) {
+      throw new Error("SCM materialization destination must be an empty non-symlink directory");
+    }
+    await this.#git([
+      `--git-dir=${paths.gitDirectory}`,
+      `--work-tree=${destination}`,
+      "-c", "core.hooksPath=/dev/null",
+      "-c", "core.fsmonitor=false",
+      "-c", "credential.helper=",
+      "-c", "protocol.file.allow=never",
+      "checkout", "--force", candidate.commitSha, "--", ".",
+    ], destination);
+    await scanWorkspace(destination);
+    return publicCandidate(candidate);
   }
 
   async #resolvePaths(binding: LocalScmBinding) {

@@ -573,6 +573,25 @@ test("a completed Agent receipt must match every immutable lock before becoming 
   assert.equal(state.candidateSha, receipt.candidate.commitSha);
   assert.equal(state.agentExecution.valid, true);
   assert.equal(state.events[0].type, "AGENT_CANDIDATE_RECORDED");
+  assert.throws(() => passingCandidate(state), /真实执行平台绑定/);
+  state = recordLocalValidation(state, {
+    schemaVersion: 4, evidenceId: "EV-LOCAL-AGENT123456",
+    status: "TESTS_PASSED", releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: receipt.candidate.commitSha,
+    sourceDigest: receipt.candidate.sourceDigest,
+    bundleDigest: "d".repeat(64), godotVersion: "4.6.2.stable",
+    targetMatrix: state.targetMatrix, platform: "macos", fixtureOnly: false,
+    sourceAuthority: {
+      kind: "AGENT_CANDIDATE", attemptId: receipt.attemptId,
+      branch: receipt.candidate.branch, baseCommitSha: receipt.candidate.baseCommitSha,
+      candidateSha: receipt.candidate.commitSha, sourceDigest: receipt.candidate.sourceDigest,
+    },
+    buildArtifact: macosBuild,
+    checks: [{ name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "agent export booted" }],
+    createdAt: "2026-07-18T00:01:00.000Z",
+  });
+  assert.equal(state.localValidation.fixtureOnly, false);
+  assert.equal(state.localValidation.sourceAuthority.attemptId, receipt.attemptId);
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");

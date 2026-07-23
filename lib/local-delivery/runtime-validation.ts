@@ -2,6 +2,7 @@ import { HttpProblem } from "@/lib/control-plane/http";
 import type { LocalDeliverySnapshot, LocalValidationSnapshot } from "@/lib/local-delivery/model";
 import { saveLocalValidation } from "@/lib/local-delivery/store";
 import { createLocalRuntimeHeaders } from "@/services/local-runtime/src/request-auth";
+import type { LocalRuntimeSourceAuthority } from "@/services/local-runtime/src/contracts";
 
 export async function runAndSaveLocalValidation(
   projectId: string,
@@ -15,11 +16,13 @@ export async function runAndSaveLocalValidation(
     throw new HttpProblem(409, "INVALID_DELIVERY_STAGE", "当前交付阶段不能运行本机验证");
   }
 
+  const sourceAuthority = sourceAuthorityFor(delivery);
   const command = JSON.stringify({
     projectId,
     runId: delivery.runId,
     specRevisionId: delivery.specRevisionId,
     targetMatrix: delivery.targetMatrix,
+    sourceAuthority,
   });
   let runtimeResponse: Response;
   try {
@@ -54,6 +57,7 @@ export async function runAndSaveLocalValidation(
     delivery.runId,
     delivery.specRevisionId,
     delivery.targetMatrix,
+    sourceAuthority,
   );
   return saveLocalValidation(projectId, validation, commandKey);
 }
@@ -64,6 +68,7 @@ export function validateLocalValidationEvidence(
   runId: string,
   specRevisionId: string,
   targetMatrix: LocalValidationSnapshot["targetMatrix"],
+  expectedSourceAuthority: LocalRuntimeSourceAuthority,
 ): Omit<LocalValidationSnapshot, "valid"> {
   if (!value || typeof value !== "object") throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据响应无效");
   const item = value as Record<string, unknown>;
@@ -73,7 +78,9 @@ export function validateLocalValidationEvidence(
   if (item.schemaVersion !== 4 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据目标矩阵与锁定运行不一致");
   }
-  if (item.platform !== "macos" || item.fixtureOnly !== true) {
+  if (item.platform !== "macos"
+    || item.fixtureOnly !== (expectedSourceAuthority.kind === "FIXTURE")
+    || !sameSourceAuthority(item.sourceAuthority, expectedSourceAuthority)) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据缺少真实 macOS 执行平台绑定");
   }
   if (!validEvidenceStatus(item.status)) {
@@ -87,6 +94,11 @@ export function validateLocalValidationEvidence(
   }
   if (!/^[a-f0-9]{64}$/.test(String(item.sourceDigest)) || !/^EV-LOCAL-[A-F0-9]{12}$/.test(String(item.evidenceId))) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据标识或源码摘要无效");
+  }
+  if (expectedSourceAuthority.kind === "AGENT_CANDIDATE"
+    && (item.candidateSha !== expectedSourceAuthority.candidateSha
+      || item.sourceDigest !== expectedSourceAuthority.sourceDigest)) {
+    throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据未绑定锁定的 Agent 候选提交");
   }
   if (typeof item.godotVersion !== "string" || !item.godotVersion.startsWith("4.")) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机 Godot 版本无效");
@@ -129,11 +141,32 @@ export function validateLocalValidationEvidence(
     godotVersion: String(item.godotVersion),
     targetMatrix: Object.freeze([...targetMatrix]),
     platform: "macos",
-    fixtureOnly: true,
+    fixtureOnly: expectedSourceAuthority.kind === "FIXTURE",
+    sourceAuthority: expectedSourceAuthority,
     buildArtifact,
     checks: item.checks as LocalValidationSnapshot["checks"],
     createdAt: String(item.createdAt),
   };
+}
+
+function sourceAuthorityFor(delivery: LocalDeliverySnapshot): LocalRuntimeSourceAuthority {
+  const execution = delivery.agentExecution;
+  if (!execution?.valid) {
+    return Object.freeze({ kind: "FIXTURE", fixtureId: "godot-smoke-v1", attemptId: "fixture-attempt-1" });
+  }
+  return Object.freeze({
+    kind: "AGENT_CANDIDATE",
+    attemptId: execution.attemptId,
+    branch: execution.candidate.branch,
+    baseCommitSha: execution.candidate.baseCommitSha,
+    candidateSha: execution.candidate.commitSha,
+    sourceDigest: execution.candidate.sourceDigest,
+  });
+}
+
+function sameSourceAuthority(value: unknown, expected: LocalRuntimeSourceAuthority): boolean {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && JSON.stringify(value) === JSON.stringify(expected);
 }
 
 function parseBuildArtifact(value: unknown): LocalValidationSnapshot["buildArtifact"] {

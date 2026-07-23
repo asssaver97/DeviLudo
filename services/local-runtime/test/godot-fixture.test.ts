@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { LocalFixtureRunner } from "../src/fixture-runner";
 import type { LocalExternalApprovalRequest } from "../src/contracts";
+import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const godotBinary = "/Applications/Godot.app/Contents/MacOS/Godot";
@@ -26,6 +27,7 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
       runId: "RUN-INTEGRATION-001",
       specRevisionId: "SPEC-TEST-001",
       targetMatrix: ["macos"] as const,
+      sourceAuthority: { kind: "FIXTURE", fixtureId: "godot-smoke-v1", attemptId: "fixture-attempt-1" } as const,
     };
     const result = await runner.run(request);
     assert.equal(
@@ -153,6 +155,7 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
       runId: "RUN-INTEGRATION-002",
       specRevisionId: "SPEC-TEST-002",
       targetMatrix: ["linux"] as const,
+      sourceAuthority: { kind: "FIXTURE", fixtureId: "godot-smoke-v1", attemptId: "fixture-attempt-1" } as const,
     });
     assert.equal(
       successor.status,
@@ -181,6 +184,100 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
       await assert.rejects(runner.readBuildArtifact(request, "DeviLudoLocal.zip"), /does not match/);
       await assert.rejects(runner.run(request), /does not match/);
     }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("materializes and validates the exact Agent SCM candidate instead of the fixture", async (context) => {
+  try {
+    await access(godotBinary);
+  } catch {
+    context.skip("Godot is not installed on this runner");
+    return;
+  }
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "deviludo-agent-candidate-runtime-"));
+  const runtimeStorage = path.join(temporary, "runtime");
+  const agentStorage = path.join(temporary, "agent");
+  const projectId = "agent-project";
+  const runId = "RUN-AGENT-E2E-001";
+  const attemptId = "ATT-RUN-AGENT-E2E-001";
+  const specRevisionId = "SPEC-AGENT-E2E-001";
+  const sourceWorkspace = path.join(agentStorage, projectId, runId, attemptId, "workspace");
+  try {
+    await mkdir(sourceWorkspace, { recursive: true });
+    const proxy = new LocalGitScmProxy({ storageRoot: agentStorage });
+    const binding = { projectId, runId, attemptId, specRevisionId, workspaceRoot: sourceWorkspace };
+    const base = await proxy.prepare(binding);
+    await cp(path.join(repositoryRoot, "fixtures", "godot-smoke"), sourceWorkspace, { recursive: true });
+    await writeFile(path.join(sourceWorkspace, "AGENT-CANDIDATE.txt"), "candidate-owned\n", "utf8");
+    const candidate = await proxy.finalize({
+      ...binding,
+      expectedBaseCommitSha: base.baseCommitSha,
+      candidateBranch: "deviludo/agent-project/attempt-1",
+      commitMessage: "agent: candidate binding test",
+    });
+    const runner = new LocalFixtureRunner({
+      repositoryRoot,
+      storageRoot: runtimeStorage,
+      agentStorageRoot: agentStorage,
+      godotBinary,
+    });
+    const result = await runner.run({
+      projectId,
+      runId,
+      specRevisionId,
+      targetMatrix: ["macos"],
+      sourceAuthority: {
+        kind: "AGENT_CANDIDATE",
+        attemptId,
+        branch: candidate.branch,
+        baseCommitSha: candidate.baseCommitSha,
+        candidateSha: candidate.commitSha,
+        sourceDigest: candidate.sourceDigest,
+      },
+    });
+    assert.equal(result.fixtureOnly, false);
+    assert.equal(result.sourceAuthority.kind, "AGENT_CANDIDATE");
+    assert.equal(result.candidateSha, candidate.commitSha);
+    assert.equal(result.sourceDigest, candidate.sourceDigest);
+    assert.equal(
+      await readFile(path.join(runtimeStorage, projectId, runId, "workspace", "AGENT-CANDIDATE.txt"), "utf8"),
+      "candidate-owned\n",
+    );
+    if (result.releaseGate === "LOCAL_VALIDATION_PASSED") {
+      const main = await runner.runMainGate({
+        projectId, runId, specRevisionId, targetMatrix: ["macos"],
+        candidateEvidenceId: result.evidenceId,
+        candidateBundleDigest: result.bundleDigest,
+        candidateSha: result.candidateSha,
+        sourceDigest: result.sourceDigest,
+      });
+      assert.equal(main.fixtureOnly, false);
+      assert.deepEqual(main.sourceAuthority, result.sourceAuthority);
+      assert.equal(main.mainSha, candidate.commitSha);
+      assert.equal(main.mainSourceDigest, candidate.sourceDigest);
+    }
+    const driftRunner = new LocalFixtureRunner({
+      repositoryRoot,
+      storageRoot: path.join(temporary, "runtime-drift"),
+      agentStorageRoot: agentStorage,
+      godotBinary,
+    });
+    await assert.rejects(driftRunner.run({
+      projectId,
+      runId,
+      specRevisionId,
+      targetMatrix: ["macos"],
+      sourceAuthority: {
+        kind: "AGENT_CANDIDATE",
+        attemptId,
+        branch: candidate.branch,
+        baseCommitSha: candidate.baseCommitSha,
+        candidateSha: candidate.commitSha,
+        sourceDigest: "f".repeat(64),
+      },
+    }), /validation authority/);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

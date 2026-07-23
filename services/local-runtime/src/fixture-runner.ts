@@ -11,6 +11,7 @@ import type {
   LocalMainGateEvidence,
   LocalMainGateRequest,
   LocalRuntimeCheck,
+  LocalRuntimeBinding,
   LocalRuntimeEvidence,
   LocalRuntimeRequest,
   LocalSteamReinstallEvidence,
@@ -39,15 +40,18 @@ export class LocalFixtureRunner {
   readonly #repositoryRoot: string;
   readonly #fixtureRoot: string;
   readonly #storageRoot: string;
+  readonly #agentStorageRoot: string;
   readonly #godotBinary: string;
   readonly #gitBinary: string;
   readonly #exportTemplatesRoot: string;
   readonly #scmProxy: LocalGitScmProxy;
+  readonly #agentScmProxy: LocalGitScmProxy;
 
   constructor(options: {
     repositoryRoot: string;
     fixtureRoot?: string;
     storageRoot?: string;
+    agentStorageRoot?: string;
     godotBinary?: string;
     gitBinary?: string;
     exportTemplatesRoot?: string;
@@ -55,13 +59,16 @@ export class LocalFixtureRunner {
     this.#repositoryRoot = path.resolve(options.repositoryRoot);
     this.#fixtureRoot = path.resolve(options.fixtureRoot ?? path.join(this.#repositoryRoot, "fixtures/godot-smoke"));
     this.#storageRoot = path.resolve(options.storageRoot ?? path.join(this.#repositoryRoot, ".deviludo/local-runtime"));
+    this.#agentStorageRoot = path.resolve(options.agentStorageRoot ?? path.join(this.#repositoryRoot, ".deviludo/local-agent-runtime"));
     this.#godotBinary = path.resolve(options.godotBinary ?? "/Applications/Godot.app/Contents/MacOS/Godot");
     this.#gitBinary = path.resolve(options.gitBinary ?? "/usr/bin/git");
     this.#exportTemplatesRoot = path.resolve(options.exportTemplatesRoot ?? defaultGodotExportTemplatesRoot());
     this.#scmProxy = new LocalGitScmProxy({ storageRoot: this.#storageRoot, gitBinary: this.#gitBinary });
+    this.#agentScmProxy = new LocalGitScmProxy({ storageRoot: this.#agentStorageRoot, gitBinary: this.#gitBinary });
   }
 
   get storageRoot() { return this.#storageRoot; }
+  get agentStorageRoot() { return this.#agentStorageRoot; }
   get godotBinary() { return this.#godotBinary; }
   get exportTemplatesRoot() { return this.#exportTemplatesRoot; }
 
@@ -294,6 +301,7 @@ export class LocalFixtureRunner {
 
   async run(request: LocalRuntimeRequest): Promise<LocalRuntimeEvidence> {
     validateRequest(request);
+    validateSourceAuthority(request);
     try {
       const existing = await this.readEvidence(request);
       assertEvidenceBinding(existing, request);
@@ -312,7 +320,6 @@ export class LocalFixtureRunner {
       // fresh v4 evidence bundle is created.
     }
 
-    await access(this.#fixtureRoot);
     await access(this.#godotBinary);
     await access(this.#gitBinary);
     await mkdir(this.#storageRoot, { recursive: true });
@@ -328,21 +335,9 @@ export class LocalFixtureRunner {
     await mkdir(runtimeTemp, { recursive: true });
     await mkdir(workspace, { recursive: true });
 
-    const scmBinding = {
-      projectId: request.projectId,
-      runId: request.runId,
-      attemptId: "fixture-attempt-1",
-      specRevisionId: request.specRevisionId,
-      workspaceRoot: workspace,
-    };
-    const base = await this.#scmProxy.prepare(scmBinding);
-    await cp(this.#fixtureRoot, workspace, { recursive: true, force: false });
-    const candidate = await this.#scmProxy.finalize({
-      ...scmBinding,
-      expectedBaseCommitSha: base.baseCommitSha,
-      candidateBranch: `deviludo/local/${sha256(`${request.projectId}:${request.runId}`).slice(0, 16)}`,
-      commitMessage: `fixture: implement ${request.specRevisionId}`,
-    });
+    const candidate = request.sourceAuthority.kind === "FIXTURE"
+      ? await this.#prepareFixtureCandidate(request, workspace)
+      : await this.#materializeAgentCandidate(request, workspace);
 
     const environment: NodeJS.ProcessEnv = {
       NODE_ENV: "test",
@@ -351,7 +346,10 @@ export class LocalFixtureRunner {
       HOME: runtimeHome,
       TMPDIR: runtimeTemp,
     };
-    const log: string[] = [`[scm-proxy] base=${base.baseCommitSha} candidate=${candidate.commitSha} source=${candidate.sourceDigest}`];
+    const log: string[] = [
+      `[source-authority] kind=${request.sourceAuthority.kind} attempt=${request.sourceAuthority.attemptId}`,
+      `[scm-proxy] base=${candidate.baseCommitSha} candidate=${candidate.commitSha} source=${candidate.sourceDigest}`,
+    ];
     const candidateSha = candidate.commitSha;
     const sourceDigest = candidate.sourceDigest;
     const godotVersion = await this.godotVersion();
@@ -482,7 +480,8 @@ export class LocalFixtureRunner {
       artifactDigests,
       buildArtifact,
       testPlan: "deviludo-local-testkit-1.0.0" as const,
-      fixtureOnly: true as const,
+      fixtureOnly: request.sourceAuthority.kind === "FIXTURE",
+      sourceAuthority: request.sourceAuthority,
       createdAt,
     };
     const bundleDigest = sha256(JSON.stringify(unsigned));
@@ -495,6 +494,47 @@ export class LocalFixtureRunner {
     await writeFile(path.join(evidence, "godot.log"), godotLog, "utf8");
     await writeFile(path.join(evidence, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     return manifest;
+  }
+
+  async #prepareFixtureCandidate(request: LocalRuntimeRequest, workspace: string) {
+    await access(this.#fixtureRoot);
+    const scmBinding = {
+      projectId: request.projectId,
+      runId: request.runId,
+      attemptId: request.sourceAuthority.attemptId,
+      specRevisionId: request.specRevisionId,
+      workspaceRoot: workspace,
+    };
+    const base = await this.#scmProxy.prepare(scmBinding);
+    await cp(this.#fixtureRoot, workspace, { recursive: true, force: false });
+    return this.#scmProxy.finalize({
+      ...scmBinding,
+      expectedBaseCommitSha: base.baseCommitSha,
+      candidateBranch: `deviludo/local/${sha256(`${request.projectId}:${request.runId}`).slice(0, 16)}`,
+      commitMessage: `fixture: implement ${request.specRevisionId}`,
+    });
+  }
+
+  async #materializeAgentCandidate(request: LocalRuntimeRequest, destinationRoot: string) {
+    if (request.sourceAuthority.kind !== "AGENT_CANDIDATE") throw new Error("Agent candidate authority is required");
+    const sourceWorkspace = this.#agentWorkspace(request.projectId, request.runId, request.sourceAuthority.attemptId);
+    await access(sourceWorkspace);
+    return this.#agentScmProxy.materializeCandidate({
+      projectId: request.projectId,
+      runId: request.runId,
+      attemptId: request.sourceAuthority.attemptId,
+      specRevisionId: request.specRevisionId,
+      workspaceRoot: sourceWorkspace,
+      expectedBranch: request.sourceAuthority.branch,
+      expectedBaseCommitSha: request.sourceAuthority.baseCommitSha,
+      expectedCandidateCommitSha: request.sourceAuthority.candidateSha,
+      expectedSourceDigest: request.sourceAuthority.sourceDigest,
+      destinationRoot,
+    });
+  }
+
+  #agentWorkspace(projectId: string, runId: string, attemptId: string) {
+    return path.join(this.#agentStorageRoot, projectId, runId, attemptId, "workspace");
   }
 
   async runMainGate(request: LocalMainGateRequest): Promise<LocalMainGateEvidence> {
@@ -533,12 +573,17 @@ export class LocalFixtureRunner {
     await mkdir(runtimeHome, { recursive: true });
     await mkdir(runtimeTemp, { recursive: true });
 
-    const merge = await this.#scmProxy.merge({
+    const sourceAuthority = candidate.evidence.sourceAuthority;
+    const sourceWorkspace = sourceAuthority.kind === "FIXTURE"
+      ? workspace
+      : this.#agentWorkspace(request.projectId, request.runId, sourceAuthority.attemptId);
+    const sourceProxy = sourceAuthority.kind === "FIXTURE" ? this.#scmProxy : this.#agentScmProxy;
+    const merge = await sourceProxy.merge({
       projectId: request.projectId,
       runId: request.runId,
-      attemptId: "fixture-attempt-1",
+      attemptId: sourceAuthority.attemptId,
       specRevisionId: request.specRevisionId,
-      workspaceRoot: workspace,
+      workspaceRoot: sourceWorkspace,
       expectedCandidateCommitSha: request.candidateSha,
       expectedSourceDigest: request.sourceDigest,
     });
@@ -671,7 +716,8 @@ export class LocalFixtureRunner {
       artifactDigests,
       buildArtifact,
       testPlan: "deviludo-local-testkit-1.0.0" as const,
-      fixtureOnly: true as const,
+      fixtureOnly: candidate.evidence.fixtureOnly,
+      sourceAuthority,
       createdAt,
     };
     const bundleDigest = sha256(JSON.stringify(unsigned));
@@ -992,7 +1038,7 @@ export class LocalFixtureRunner {
   }
 }
 
-function validateRequest(request: LocalRuntimeRequest) {
+function validateRequest(request: LocalRuntimeBinding) {
   validateIdentifier(request.projectId, "projectId");
   validateIdentifier(request.runId, "runId");
   validateIdentifier(request.specRevisionId, "specRevisionId");
@@ -1000,6 +1046,25 @@ function validateRequest(request: LocalRuntimeRequest) {
     || new Set(request.targetMatrix).size !== request.targetMatrix.length
     || request.targetMatrix.some((platform) => platform !== "linux" && platform !== "windows" && platform !== "macos")) {
     throw new Error("targetMatrix is invalid");
+  }
+}
+
+function validateSourceAuthority(request: LocalRuntimeRequest) {
+  const authority = request.sourceAuthority;
+  if (authority.kind === "FIXTURE") {
+    if (authority.fixtureId !== "godot-smoke-v1" || authority.attemptId !== "fixture-attempt-1") {
+      throw new Error("fixture source authority is invalid");
+    }
+    return;
+  }
+  validateIdentifier(authority.attemptId, "sourceAuthority.attemptId");
+  if (!/^deviludo\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/i.test(authority.branch)
+    || authority.branch.includes("..") || authority.branch.endsWith(".lock")
+    || !/^[a-f0-9]{40}$/.test(authority.baseCommitSha)
+    || !/^[a-f0-9]{40}$/.test(authority.candidateSha)
+    || authority.baseCommitSha === authority.candidateSha
+    || !/^[a-f0-9]{64}$/.test(authority.sourceDigest)) {
+    throw new Error("Agent candidate source authority is invalid");
   }
 }
 
@@ -1044,10 +1109,12 @@ function validateExternalApprovalRequest(request: LocalExternalApprovalRequest) 
 }
 
 function assertEvidenceBinding(evidence: LocalRuntimeEvidence, request: LocalRuntimeRequest) {
-  if (evidence.schemaVersion !== 4) throw new StaleLocalEvidenceError();
+  if (evidence.schemaVersion !== 4 || !evidence.sourceAuthority) throw new StaleLocalEvidenceError();
   if (evidence.projectId !== request.projectId
     || evidence.runId !== request.runId
     || evidence.specRevisionId !== request.specRevisionId
+    || JSON.stringify(evidence.sourceAuthority) !== JSON.stringify(request.sourceAuthority)
+    || evidence.fixtureOnly !== (request.sourceAuthority.kind === "FIXTURE")
     || JSON.stringify(evidence.targetMatrix) !== JSON.stringify(request.targetMatrix)) {
     throw new Error("Stored local evidence does not match the immutable run lock");
   }

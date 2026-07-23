@@ -42,6 +42,9 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
     });
     const command = JSON.parse(body);
     assert.deepEqual(command.targetMatrix, ["macos"]);
+    assert.deepEqual(command.sourceAuthority, {
+      kind: "FIXTURE", fixtureId: "godot-smoke-v1", attemptId: "fixture-attempt-1",
+    });
     return Response.json({ data: {
       schemaVersion: 4,
       projectId,
@@ -50,6 +53,7 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
       targetMatrix: ["macos"],
       platform: "macos",
       fixtureOnly: true,
+      sourceAuthority: command.sourceAuthority,
       buildArtifact: {
         fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
         sha256: "f".repeat(64), sizeBytes: 4096,

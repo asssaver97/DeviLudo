@@ -214,6 +214,7 @@ const localRuntimeChild = spawn(
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_RUNTIME_PORT: String(localRuntimePort),
       DEVILUDO_LOCAL_RUNTIME_HMAC_KEY: localRuntimeHmacKey,
+      DEVILUDO_LOCAL_AGENT_STORAGE_ROOT: path.join(workspaceRoot, ".deviludo", "local-agent-runtime"),
     },
     stdio: "inherit",
   },

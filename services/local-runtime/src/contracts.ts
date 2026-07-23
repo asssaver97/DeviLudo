@@ -1,18 +1,37 @@
-export type LocalRuntimeRequest = {
+export type LocalRuntimeBinding = {
   projectId: string;
   runId: string;
   specRevisionId: string;
   targetMatrix: readonly ("linux" | "windows" | "macos")[];
 };
 
-export type LocalMainGateRequest = LocalRuntimeRequest & {
+export type LocalRuntimeSourceAuthority =
+  | {
+    readonly kind: "FIXTURE";
+    readonly fixtureId: "godot-smoke-v1";
+    readonly attemptId: "fixture-attempt-1";
+  }
+  | {
+    readonly kind: "AGENT_CANDIDATE";
+    readonly attemptId: string;
+    readonly branch: string;
+    readonly baseCommitSha: string;
+    readonly candidateSha: string;
+    readonly sourceDigest: string;
+  };
+
+export type LocalRuntimeRequest = LocalRuntimeBinding & {
+  readonly sourceAuthority: LocalRuntimeSourceAuthority;
+};
+
+export type LocalMainGateRequest = LocalRuntimeBinding & {
   candidateEvidenceId: string;
   candidateBundleDigest: string;
   candidateSha: string;
   sourceDigest: string;
 };
 
-export type LocalSteamReinstallRequest = LocalRuntimeRequest & {
+export type LocalSteamReinstallRequest = LocalRuntimeBinding & {
   mainEvidenceId: string;
   mainBundleDigest: string;
   mainSha: string;
@@ -23,7 +42,7 @@ export type LocalSteamReinstallRequest = LocalRuntimeRequest & {
 
 export type LocalRuntimeExternalGate = "VALVE_REVIEW" | "FIRST_RELEASE" | "DEFAULT_BRANCH_CONFIRMATION";
 
-export type LocalExternalApprovalRequest = LocalRuntimeRequest & {
+export type LocalExternalApprovalRequest = LocalRuntimeBinding & {
   mainSha: string;
   steamBuildId: string;
   steamReinstallEvidenceId: string;
@@ -65,7 +84,8 @@ export type LocalRuntimeEvidence = {
     sizeBytes: number;
   } | null;
   testPlan: "deviludo-local-testkit-1.0.0";
-  fixtureOnly: true;
+  fixtureOnly: boolean;
+  sourceAuthority: LocalRuntimeSourceAuthority;
   createdAt: string;
 };
 
@@ -107,7 +127,8 @@ export type LocalMainGateEvidence = {
     sizeBytes: number;
   } | null;
   testPlan: "deviludo-local-testkit-1.0.0";
-  fixtureOnly: true;
+  fixtureOnly: boolean;
+  sourceAuthority: LocalRuntimeSourceAuthority;
   createdAt: string;
 };
 

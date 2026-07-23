@@ -116,6 +116,7 @@ export function EvidencePage() {
         targetMatrix?: readonly string[];
         platform?: string;
         fixtureOnly?: boolean;
+        sourceAuthority?: unknown;
         artifactDigests?: Record<string, string>;
         buildArtifact?: {
           fileName?: string;
@@ -134,9 +135,9 @@ export function EvidencePage() {
         && JSON.stringify(manifest.targetMatrix) === JSON.stringify(delivery?.targetMatrix)
         && JSON.stringify(evidence.targetMatrix) === JSON.stringify(delivery?.targetMatrix)
         && manifest.platform === "macos"
-        && manifest.fixtureOnly === true
+        && manifest.fixtureOnly === evidence.fixtureOnly
+        && JSON.stringify(manifest.sourceAuthority) === JSON.stringify(evidence.sourceAuthority)
         && evidence.platform === "macos"
-        && evidence.fixtureOnly === true
         && bundleDigest === evidence.bundleDigest
         && evidenceId === `EV-LOCAL-${String(bundleDigest).slice(0, 12).toUpperCase()}`
         && bundleDigest === await sha256(JSON.stringify(unsigned))

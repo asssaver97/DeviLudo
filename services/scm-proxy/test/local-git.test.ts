@@ -57,6 +57,27 @@ test("SCM proxy keeps Git metadata outside the workspace and creates an idempote
     commitMessage: "agent: implement SPEC-001",
   }), candidate);
 
+  const materialized = path.join(value.root, "validation-workspace");
+  const checked = await proxy.materializeCandidate({
+    ...value.binding,
+    expectedBranch: candidate.branch,
+    expectedBaseCommitSha: candidate.baseCommitSha,
+    expectedCandidateCommitSha: candidate.commitSha,
+    expectedSourceDigest: candidate.sourceDigest,
+    destinationRoot: materialized,
+  });
+  assert.equal(checked.commitSha, candidate.commitSha);
+  assert.match(await readFile(path.join(materialized, "scripts", "main.gd"), "utf8"), /candidate/);
+  await assert.rejects(readFile(path.join(materialized, ".git"), "utf8"), /ENOENT/);
+  await assert.rejects(proxy.materializeCandidate({
+    ...value.binding,
+    expectedBranch: candidate.branch,
+    expectedBaseCommitSha: candidate.baseCommitSha,
+    expectedCandidateCommitSha: candidate.commitSha,
+    expectedSourceDigest: "f".repeat(64),
+    destinationRoot: path.join(value.root, "wrong-validation-workspace"),
+  }), /validation authority/);
+
   const merged = await proxy.merge({
     ...value.binding,
     expectedCandidateCommitSha: candidate.commitSha,

@@ -1,4 +1,5 @@
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
+import type { LocalRuntimeSourceAuthority } from "@/services/local-runtime/src/contracts";
 import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "@/lib/agent/adapter-registry";
 
 const SAFE_ATTESTATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -44,7 +45,8 @@ export type LocalValidationSnapshot = {
   godotVersion: string;
   targetMatrix: readonly LocalTargetPlatform[];
   platform: "macos";
-  fixtureOnly: true;
+  fixtureOnly: boolean;
+  sourceAuthority: LocalRuntimeSourceAuthority;
   buildArtifact: {
     fileName: "DeviLudoLocal.zip";
     platform: "macos";
@@ -72,7 +74,8 @@ export type LocalMainValidationSnapshot = {
   godotVersion: string;
   targetMatrix: readonly LocalTargetPlatform[];
   platform: "macos";
-  fixtureOnly: true;
+  fixtureOnly: boolean;
+  sourceAuthority: LocalRuntimeSourceAuthority;
   buildArtifact: {
     fileName: "DeviLudoMain.zip";
     platform: "macos";
@@ -319,7 +322,8 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     schemaVersion?: number;
     targetMatrix?: readonly LocalTargetPlatform[];
     platform?: "macos";
-    fixtureOnly?: true;
+    fixtureOnly?: boolean;
+    sourceAuthority?: LocalRuntimeSourceAuthority;
     buildArtifact?: LocalValidationSnapshot["buildArtifact"];
   }) | null | undefined;
   const validationMatrix = historicalValidation?.targetMatrix
@@ -332,6 +336,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
       targetMatrix: validationMatrix ?? targetMatrix,
       platform: historicalValidation.platform ?? "macos" as const,
       fixtureOnly: historicalValidation.fixtureOnly ?? true as const,
+      sourceAuthority: historicalValidation.sourceAuthority ?? fixtureSourceAuthority(),
       buildArtifact: historicalValidation.buildArtifact ?? null,
       // Evidence created before target-matrix binding remains readable but can
       // never satisfy a current selected-platform gate.
@@ -339,7 +344,8 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
         && validationMatrix !== null
         && sameTargetMatrix(validationMatrix, targetMatrix)
         && historicalValidation.platform === "macos"
-        && historicalValidation.fixtureOnly === true
+        && historicalValidation.sourceAuthority !== undefined
+        && validValidationSourceAuthority(historicalValidation, agentExecution)
         && (historicalValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
           ? validLocalBuildArtifact(historicalValidation.buildArtifact) && hasPassedExportBoot(historicalValidation.checks)
           : historicalValidation.buildArtifact == null)
@@ -352,12 +358,14 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   const historicalMainValidation = snapshot.mainValidation as (LocalMainValidationSnapshot & {
     schemaVersion?: number;
     buildArtifact?: LocalMainValidationSnapshot["buildArtifact"];
+    sourceAuthority?: LocalRuntimeSourceAuthority;
   }) | null | undefined;
   const mainValidation = historicalMainValidation
     ? {
       ...historicalMainValidation,
       schemaVersion: historicalMainValidation.schemaVersion ?? 0,
       buildArtifact: historicalMainValidation.buildArtifact ?? null,
+      sourceAuthority: historicalMainValidation.sourceAuthority ?? fixtureSourceAuthority(),
       valid: historicalMainValidation.schemaVersion === 1
         && historicalMainValidation.releaseGate === "MAIN_VALIDATION_PASSED"
         && historicalMainValidation.status === "TESTS_PASSED"
@@ -368,7 +376,9 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
         && historicalMainValidation.mainSha === historicalMainValidation.candidateSha
         && historicalMainValidation.mainSourceDigest === historicalMainValidation.sourceDigest
         && historicalMainValidation.platform === "macos"
-        && historicalMainValidation.fixtureOnly === true
+        && historicalMainValidation.sourceAuthority !== undefined
+        && historicalMainValidation.fixtureOnly === localValidation?.fixtureOnly
+        && sameSourceAuthority(historicalMainValidation.sourceAuthority, localValidation?.sourceAuthority)
         && sameTargetMatrix(historicalMainValidation.targetMatrix, targetMatrix)
         && validLocalMainBuildArtifact(historicalMainValidation.buildArtifact)
         && hasPassedExportBoot(historicalMainValidation.checks)
@@ -726,7 +736,15 @@ export function recordLocalValidation(
   if (!sameTargetMatrix(validation.targetMatrix, current.targetMatrix)) {
     throw new Error("本机验证证据与锁定目标矩阵不一致");
   }
-  if (validation.platform !== "macos" || validation.fixtureOnly !== true) {
+  // Compatibility is limited to internal fixture callers created before the
+  // authority field existed. Agent-backed evidence always requires an exact,
+  // explicit authority and the authenticated runtime API never omits it.
+  const sourceAuthority = validation.sourceAuthority
+    ?? (current.agentExecution?.valid ? null : fixtureSourceAuthority());
+  if (validation.platform !== "macos"
+    || !sourceAuthority
+    || validation.fixtureOnly !== (sourceAuthority.kind === "FIXTURE")
+    || !validValidationSourceAuthority({ ...validation, sourceAuthority }, current.agentExecution)) {
     throw new Error("本机验证证据缺少真实执行平台绑定");
   }
   if (gatePassed && !validLocalBuildArtifact(validation.buildArtifact)) {
@@ -752,6 +770,7 @@ export function recordLocalValidation(
       steamReinstall: null,
       localValidation: {
         ...validation,
+        sourceAuthority,
         targetMatrix: Object.freeze([...validation.targetMatrix]),
         valid: true,
       },
@@ -786,6 +805,7 @@ export function recordLocalMainValidation(
   const waiting = validation.status === "WAITING_DEPENDENCY" && validation.releaseGate === "WAITING_EXPORT_TEMPLATES";
   const failed = validation.status === "FAILED" && validation.releaseGate === "TESTS_FAILED";
   if (!passed && !waiting && !failed) throw new Error("main SHA 门禁状态与证据不一致");
+  const sourceAuthority = validation.sourceAuthority ?? current.localValidation.sourceAuthority;
   if (validation.schemaVersion !== 1
     || validation.candidateEvidenceId !== current.localValidation.evidenceId
     || validation.candidateBundleDigest !== current.localValidation.bundleDigest
@@ -796,7 +816,8 @@ export function recordLocalMainValidation(
     || !/^[a-f0-9]{40}$/.test(validation.mainSha)
     || !/^[a-f0-9]{64}$/.test(validation.bundleDigest)
     || validation.platform !== "macos"
-    || validation.fixtureOnly !== true
+    || validation.fixtureOnly !== current.localValidation.fixtureOnly
+    || !sameSourceAuthority(sourceAuthority, current.localValidation.sourceAuthority)
     || !sameTargetMatrix(validation.targetMatrix, current.targetMatrix)) {
     throw new Error("main SHA 门禁证据与已接受候选绑定不一致");
   }
@@ -806,6 +827,7 @@ export function recordLocalMainValidation(
   if (!passed && validation.buildArtifact !== null) throw new Error("未通过的 main SHA 门禁不能授权构建物");
   const mainValidation: LocalMainValidationSnapshot = {
     ...validation,
+    sourceAuthority,
     targetMatrix: Object.freeze([...validation.targetMatrix]),
     valid: true,
   };
@@ -831,6 +853,39 @@ export function recordLocalMainValidation(
     mainValidation,
     steamReleaseId: `RELEASE-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
   }, "MAIN_GATE_PASSED", "实际 main SHA 已重新导出、启动并通过完整门禁，等待 MFA。 ");
+}
+
+function fixtureSourceAuthority(): LocalRuntimeSourceAuthority {
+  return Object.freeze({ kind: "FIXTURE", fixtureId: "godot-smoke-v1", attemptId: "fixture-attempt-1" });
+}
+
+function validValidationSourceAuthority(
+  validation: Pick<LocalValidationSnapshot, "candidateSha" | "sourceDigest" | "fixtureOnly" | "sourceAuthority">,
+  execution: LocalAgentExecutionSnapshot | null | undefined,
+): boolean {
+  const authority = validation.sourceAuthority;
+  if (execution?.valid) {
+    return authority.kind === "AGENT_CANDIDATE"
+      && validation.fixtureOnly === false
+      && authority.attemptId === execution.attemptId
+      && authority.branch === execution.candidate.branch
+      && authority.baseCommitSha === execution.candidate.baseCommitSha
+      && authority.candidateSha === execution.candidate.commitSha
+      && authority.sourceDigest === execution.candidate.sourceDigest
+      && validation.candidateSha === execution.candidate.commitSha
+      && validation.sourceDigest === execution.candidate.sourceDigest;
+  }
+  return authority.kind === "FIXTURE"
+    && authority.fixtureId === "godot-smoke-v1"
+    && authority.attemptId === "fixture-attempt-1"
+    && validation.fixtureOnly === true;
+}
+
+function sameSourceAuthority(
+  left: LocalRuntimeSourceAuthority | null | undefined,
+  right: LocalRuntimeSourceAuthority | null | undefined,
+): boolean {
+  return !!left && !!right && JSON.stringify(left) === JSON.stringify(right);
 }
 
 export function recordLocalSteamReinstall(
