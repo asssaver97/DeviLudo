@@ -1248,6 +1248,9 @@ test("isolated Agent supply-chain Broker persists and fences fixed native execut
   assert.doesNotMatch(native, /curl\s*\||npm install|@latest|dangerously-skip-permissions|--yolo/);
   assert.match(runtime, /NODE_ENV !== "production"/);
   assert.match(runtime, /DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST/);
+  assert.match(runtime, /DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_RELEASE_MANIFEST_FILE/);
+  assert.match(runtime, /DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TRUST_POLICY_DIGEST/);
+  assert.match(runtime, /verifySignedAgentSupplyChainNativeRelease/);
   assert.match(request, /registry\.npmjs\.org\/\@anthropic-ai\/claude-code/);
   assert.match(request, /registry\.npmjs\.org\/\@openai\/codex/);
 });

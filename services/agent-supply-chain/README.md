@@ -12,9 +12,14 @@ fixed argv and immutable request/response files. The native policy file pins the
 official sources, trust roots, scanners, internal registry and development
 Worker pools. It must not contain tenant source code or upstream inference keys.
 
-Production requires file-mounted TLS material, exact server/native/config
-SHA-256 values, a sorted SPIFFE allow-list and TLS PostgreSQL. CLI self-update is
-disabled, and E2E/Steam nodes are outside this service's deployment authority.
+Production requires file-mounted TLS material, a KMS-signed native release
+manifest, its exact build receipt, a digest-pinned Ed25519 trust policy, the
+exact server/native/config SHA-256 values, a sorted SPIFFE allow-list and TLS
+PostgreSQL. Startup rehashes the native bytes and build receipt, verifies the
+release signature and rejects revoked keys before the executable can be probed.
+CLI self-update is disabled, and E2E/Steam nodes are outside this service's
+deployment authority. See `docs/agent-supply-chain.md` for the fixed build and
+finalization commands.
 
 ## Terminal policy failures
 

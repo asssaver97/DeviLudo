@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { Server as HttpsServer } from "node:https";
@@ -7,11 +8,13 @@ import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { DurableAgentSupplyChainBrokerService } from "./broker-service";
 import { createAgentSupplyChainHandler, createAgentSupplyChainHttpsServer } from "./ingress-http";
 import { LockedNativeAgentSupplyChainExecutor } from "./locked-native-executor";
+import { verifySignedAgentSupplyChainNativeRelease } from "./native-release-manifest";
 import { PostgresAgentSupplyChainOperations } from "./postgres-operations";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const MAX_JSON_BYTES = 1024 * 1024;
 
 export async function agentSupplyChainServiceFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -61,6 +64,30 @@ export async function agentSupplyChainServiceConfigFromEnv(
   const binaryDigest = digest(required(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_BINARY_DIGEST"), "server binary digest");
   const nativeTimeoutMs = integer(env.DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TIMEOUT_MS, 8 * 60_000, 30_000, 9 * 60_000);
   const leaseMs = integer(env.DEVILUDO_AGENT_SUPPLY_CHAIN_LEASE_MS, 10 * 60_000, nativeTimeoutMs + 1_000, 10 * 60_000);
+  const nativeExecutable = absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE");
+  const nativeExecutableDigest = digest(required(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST"), "native executable digest");
+  const nativeBuildReceiptFile = absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_BUILD_RECEIPT_FILE");
+  const nativeReleaseManifestFile = absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_RELEASE_MANIFEST_FILE");
+  const nativeTrustPolicyFile = absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TRUST_POLICY_FILE");
+  const nativeTrustPolicyDigest = digest(required(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TRUST_POLICY_DIGEST"), "native trust policy digest");
+  const nativePlatformVersion = exactVersion(required(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_PLATFORM_VERSION"), "native platform version");
+  const [actualExecutable, buildReceipt, releaseManifest, trustPolicy] = await Promise.all([
+    immutableFile(nativeExecutable, 1024 * 1024 * 1024, false),
+    immutableJson(nativeBuildReceiptFile),
+    immutableJson(nativeReleaseManifestFile),
+    immutableJson(nativeTrustPolicyFile),
+  ]);
+  if (actualExecutable.digest !== nativeExecutableDigest) throw new Error("Agent supply-chain native executable digest is invalid");
+  const nativeRelease = verifySignedAgentSupplyChainNativeRelease(releaseManifest.value, {
+    trustPolicy: trustPolicy.value,
+    trustPolicyDigest: nativeTrustPolicyDigest,
+    platformVersion: nativePlatformVersion,
+    artifactDigest: actualExecutable.digest,
+    buildReceiptDigest: buildReceipt.digest,
+  });
+  if (nativeRelease.artifactSizeBytes !== actualExecutable.sizeBytes) {
+    throw new Error("Agent supply-chain native executable size is invalid");
+  }
   return Object.freeze({
     host: bindHost(env.DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_HOST),
     port: integer(env.DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_PORT, 4_755, 1_024, 65_535),
@@ -72,14 +99,61 @@ export async function agentSupplyChainServiceConfigFromEnv(
     tlsKey,
     tlsCertificate,
     clientCa,
-    nativeExecutable: absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE"),
-    nativeExecutableDigest: digest(required(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST"), "native executable digest"),
+    nativeExecutable,
+    nativeExecutableDigest,
+    nativeBuildReceiptFile,
+    nativeReleaseManifestFile,
+    nativeTrustPolicyFile,
+    nativeTrustPolicyDigest,
+    nativePlatformVersion,
+    nativeRelease,
     nativeConfigFile: absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_CONFIG_FILE"),
     nativeConfigDigest: digest(required(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_CONFIG_DIGEST"), "native config digest"),
     workRoot: absolute(env, "DEVILUDO_AGENT_SUPPLY_CHAIN_WORK_ROOT"),
     nativeTimeoutMs,
     leaseMs,
   });
+}
+
+async function immutableJson(path: string): Promise<Readonly<{ value: unknown; digest: string }>> {
+  const file = await immutableFile(path, MAX_JSON_BYTES, true);
+  let value: unknown;
+  try { value = JSON.parse((file.contents as Buffer).toString("utf8")) as unknown; }
+  catch { throw new Error("Agent supply-chain native release JSON is invalid"); }
+  return Object.freeze({ value, digest: file.digest });
+}
+
+async function immutableFile(path: string, maximumBytes: number, captureContents: boolean): Promise<Readonly<{
+  contents: Buffer | null; digest: string; sizeBytes: number;
+}>> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.size < 1 || before.size > maximumBytes) {
+      throw new Error("Agent supply-chain native release file is invalid");
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, before.size));
+    const chunks: Buffer[] = [];
+    let position = 0;
+    while (position < before.size) {
+      const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, before.size - position), position);
+      if (bytesRead < 1) throw new Error("Agent supply-chain native release file is invalid");
+      const chunk = buffer.subarray(0, bytesRead);
+      hash.update(chunk);
+      if (captureContents) chunks.push(Buffer.from(chunk));
+      position += bytesRead;
+    }
+    const after = await file.stat();
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+      throw new Error("Agent supply-chain native release file changed during verification");
+    }
+    return Object.freeze({
+      contents: captureContents ? Buffer.concat(chunks, before.size) : null,
+      digest: hash.digest("hex"),
+      sizeBytes: before.size,
+    });
+  } finally { await file.close(); }
 }
 
 export async function runAgentSupplyChainService(

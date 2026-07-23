@@ -14,7 +14,7 @@ are exposed only on `127.0.0.1`. Host-started DeviLudo services therefore use
 the same loopback `DATABASE_URL`, authenticated `REDIS_URL`, `TEMPORAL_ADDRESS`,
 `S3_ENDPOINT`, `VAULT_ADDR` and telemetry values as the Compose stack.
 `infra:up` follows dependency startup with the repository migration runner. The
-status command authenticates to PostgreSQL and Redis, proves migration `061` is
+status command authenticates to PostgreSQL and Redis, proves migration `062` is
 present, and checks every other dependency without printing credentials. Stop
 the containers with `npm run infra:down`.
 
@@ -118,9 +118,11 @@ fallback lock, and permits proof-free repair descendants only when a database
 trigger verifies the same immutable runtime identity against a historical
 predecessor in the same tenant/project. Migration `061` creates a
 privilege-revoked, update/delete-protected ledger and baselines the exact
-SHA-256 of migrations `001`–`060`. All sixty-one migrations remain mounted in
-numeric order for a newly initialized local PostgreSQL volume; the post-start
-migrator then records `061` itself. Every later migration is executed under one
+SHA-256 of migrations `001`–`060`. Migration `062` adds the immutable,
+zero-live-lease authorization ledger used by signed native Runner upgrades.
+Migrations `001`–`061` remain mounted in numeric order for a newly initialized
+local PostgreSQL volume; the post-start migrator records `061` and applies
+`062`. Every later migration is executed under one
 PostgreSQL advisory lock and writes its version, filename and digest in the same
 transaction as its schema change. A gap, edited historical file, unknown future
 row, concurrent migrator or failed statement aborts startup.

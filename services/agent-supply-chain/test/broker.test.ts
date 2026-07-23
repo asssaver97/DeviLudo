@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DevelopmentAgentSupplyChain } from "../../control-plane/src/agent-supply-chain";
-import { sha256Canonical } from "../../runner-control/src/canonical";
+import { canonicalJson, sha256Canonical } from "../../runner-control/src/canonical";
 import { AgentSupplyChainTerminalError, DurableAgentSupplyChainBrokerService } from "../src/broker-service";
 import type {
   AgentSupplyChainNativeExecutor,
@@ -14,6 +14,7 @@ import type {
 } from "../src/contracts";
 import { createAgentSupplyChainHandler, createAgentSupplyChainHttpsServer } from "../src/ingress-http";
 import { LockedNativeAgentSupplyChainExecutor } from "../src/locked-native-executor";
+import { agentSupplyChainNativeTrustPolicyDigest } from "../src/native-release-manifest";
 import { InMemoryAgentSupplyChainOperations } from "../src/operation-memory";
 import { agentSupplyChainServiceConfigFromEnv } from "../src/run-service";
 
@@ -339,6 +340,54 @@ test("production service config accepts only file-mounted mTLS and pinned native
     await writeFile(path, name.repeat(32));
     return [name, path];
   })));
+  const native = join(root, "native");
+  const buildReceipt = join(root, "build-receipt.json");
+  const manifest = join(root, "release.json");
+  const trustPolicyFile = join(root, "trust-policy.json");
+  const nativeBytes = Buffer.from("signed-native-agent-supply-chain");
+  const buildBytes = Buffer.from('{"schemaVersion":"fixture-build-receipt"}\n');
+  const nativeDigest = digest(nativeBytes);
+  const buildDigest = digest(buildBytes);
+  const keys = generateKeyPairSync("ed25519");
+  const trustPolicy = {
+    schemaVersion: "deviludo.agent-supply-chain-native-trust-policy.v1",
+    policyId: "agent-supply-chain-native-production",
+    policyRevision: 1,
+    keys: [{
+      keyId: "agent-native-release-1",
+      algorithm: "Ed25519",
+      publicKeySpkiBase64: keys.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+      notBefore: "2020-01-01T00:00:00.000Z",
+      notAfter: "2030-01-01T00:00:00.000Z",
+      status: "ACTIVE",
+    }],
+  } as const;
+  const claims = {
+    kind: "deviludo-agent-supply-chain-native",
+    version: 1,
+    releaseId: "11111111-1111-4111-8111-111111111111",
+    platformVersion: "1.0.0",
+    sourceRevision: "a".repeat(40),
+    nodeTarget: "22.13",
+    artifactDigest: nativeDigest,
+    artifactSizeBytes: nativeBytes.byteLength,
+    buildReceiptDigest: buildDigest,
+    sbomDigest: "1".repeat(64),
+    malwareScanDigest: "2".repeat(64),
+    vulnerabilityScanDigest: "3".repeat(64),
+    provenanceDigest: "4".repeat(64),
+    publishedAt: "2026-07-23T00:00:00.000Z",
+  } as const;
+  await Promise.all([
+    writeFile(native, nativeBytes),
+    writeFile(buildReceipt, buildBytes),
+    writeFile(trustPolicyFile, JSON.stringify(trustPolicy)),
+    writeFile(manifest, JSON.stringify({
+      keyId: trustPolicy.keys[0].keyId,
+      claims,
+      signature: sign(null, Buffer.from(canonicalJson(claims)), keys.privateKey).toString("base64url"),
+    })),
+  ]);
   const env = {
     NODE_ENV: "production",
     DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_TLS_KEY_FILE: files.key,
@@ -347,17 +396,26 @@ test("production service config accepts only file-mounted mTLS and pinned native
     DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_VERSION: "1.0.0",
     DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_BINARY_DIGEST: "a".repeat(64),
     DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_ALLOWED_SPIFFE_IDS: '["spiffe://deviludo.internal/control-plane"]',
-    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE: join(root, "native"),
-    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST: "b".repeat(64),
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE: native,
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST: nativeDigest,
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_PLATFORM_VERSION: "1.0.0",
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_BUILD_RECEIPT_FILE: buildReceipt,
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_RELEASE_MANIFEST_FILE: manifest,
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TRUST_POLICY_FILE: trustPolicyFile,
+    DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TRUST_POLICY_DIGEST: agentSupplyChainNativeTrustPolicyDigest(trustPolicy),
     DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_CONFIG_FILE: join(root, "policy.json"),
     DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_CONFIG_DIGEST: "c".repeat(64),
     DEVILUDO_AGENT_SUPPLY_CHAIN_WORK_ROOT: join(root, "work"),
   };
   const config = await agentSupplyChainServiceConfigFromEnv(env);
   assert.equal(config.port, 4755);
+  assert.equal(config.nativeRelease.releaseId, claims.releaseId);
   assert.equal(config.allowedSpiffeIds.has("spiffe://deviludo.internal/control-plane"), true);
   await assert.rejects(agentSupplyChainServiceConfigFromEnv({ ...env, DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_VERSION: "latest" }), /version is invalid/);
   await assert.rejects(agentSupplyChainServiceConfigFromEnv({ ...env, DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_TLS_KEY_FILE: undefined }), /TLS_KEY_FILE is required/);
+  await assert.rejects(agentSupplyChainServiceConfigFromEnv({
+    ...env, DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST: "b".repeat(64),
+  }), /executable digest is invalid/);
 });
 
 async function post(

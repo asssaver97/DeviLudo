@@ -147,6 +147,8 @@ npm run infra:status
 
 生产 Secret/ConfigMap 必须使用带修订后缀且 `immutable: true` 的完整资源集；`npm run lock:control-runtime` 只读取其 kind、name、UID、resourceVersion 和 immutable 元数据，生成集群绑定的运行时锁，绝不读取 Secret data。`npm run deploy:control -- --receipt /绝对路径/receipt.json --runtime-lock /绝对路径/runtime-lock.json --render` 在本地校验回执和锁并生成无副作用的三阶段 Kubernetes 发布包。真实 apply 还必须提供由独立 Vault/KMS Broker 签发、最长 30 分钟且绑定镜像、运行时锁、集群、namespace、服务和 replica 的 Ed25519 v2 授权及精确 trust-policy digest；验签发生在首次 `kubectl` 之前，随后每个写阶段重新核对全部资源身份。通过后才会依次应用 Namespace、等待摘要绑定的数据库迁移 Job 完成、发布 31 个控制面进程并等待可用。发布器不接受当前默认 context，不执行 shell/delete/prune，也不会把 Agent、E2E、签名或 Steam 原生节点混入共享镜像。生产授权、密钥轮换、分阶段命令与 Pod 安全约束见 [控制面发布手册](docs/production-control-release.md)。
 
+高权限 Agent 供应链策略执行器另走固定源码构建、SBOM/恶意软件/漏洞/provenance 证据和专用 KMS Ed25519 发布封装。Broker 启动前会重新验证信任策略、签名、构建回执与实际执行器字节；仅配置一个看似正确的 hash 已不能启动。完整命令见 [Agent 供应链运维说明](docs/agent-supply-chain.md)。
+
 ## API
 
 生产 API 使用独立域名，因此 UI 的 `GET /admin/agents` 与 API 的 `GET /admin/agents` 不冲突。本地单进程预览将 API 映射到 `/api/admin/agents`。

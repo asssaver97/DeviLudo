@@ -2,15 +2,83 @@
 
 生产 Agent 供应链由 mTLS Broker 和单文件策略执行器组成。Broker 负责持久 claim、幂等重放和终态回执；策略执行器是唯一可以访问官方 NPM、内部 OCI、扫描器、BuildKit、KMS 签名和开发 Worker Fleet 的进程。E2E Runner 与 Steam 节点不安装该执行器或自主 Agent。
 
-## 构建与安装
+## 构建、签名与安装
 
 ```bash
-npm run build:agent-supply-chain-native
+npm run build:agent-supply-chain-native -- \
+  --source-revision 0123456789abcdef0123456789abcdef01234567 \
+  --output-directory /absolute/private/agent-supply-chain-native-candidate
 ```
 
-命令生成 `dist/agent-supply-chain-native/deviludo-agent-supply-chain-native.mjs` 与包含 SHA-256、输入清单的 `build-metadata.json`。发布流水线必须在受控 Node 22.13+ 镜像中执行、生成 SBOM/扫描和签名证明，再将只读产物安装为 Broker 的 `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE`；产物 SHA-256 填入 `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE_DIGEST`。执行镜像必须在 `/usr/bin/node` 提供固定且签名验证过的 Node runtime。
+构建器拒绝相对输出路径、脏工作树、非当前 HEAD、浮动平台版本和未由
+`package-lock.json` 固定的 esbuild。它原子生成：
 
-不要把源码入口、`tsx`、包管理器或 `node_modules` 挂到生产 Broker。不要在生产运行 `npm install`、浮动版本、自更新、管理员 shell 或外部脚本。新执行器与新策略都作为新制品灰度，已运行任务继续使用原 digest。
+- `deviludo-agent-supply-chain-native.mjs`：权限为 `0500` 的单文件策略执行器；
+- `agent-supply-chain-native-build-receipt.json`：绑定平台版本、40 位源码 revision、
+  Node 22.13 target、lockfile、esbuild、完整 bundle 输入集合和最终字节。
+
+在隔离发布流水线中对这两个文件生成 SPDX SBOM、恶意软件扫描、漏洞扫描和
+构建 provenance。最终证据文件只接受以下精确结构，所有 digest 均为 64 位
+小写 SHA-256；`artifactDigest` 和 `buildReceiptDigest` 必须等于文件实际字节：
+
+```json
+{
+  "schemaVersion": "deviludo.agent-supply-chain-native-evidence.v1",
+  "scanState": "PASS",
+  "artifactDigest": "...",
+  "buildReceiptDigest": "...",
+  "sbomDigest": "...",
+  "malwareScanDigest": "...",
+  "vulnerabilityScanDigest": "...",
+  "provenanceDigest": "..."
+}
+```
+
+从 [`infra/agent-supply-chain-native-trust-policy.example.json`](../infra/agent-supply-chain-native-trust-policy.example.json)
+建立独立评审的 Ed25519 信任策略。示例 key 故意是 `REVOKED`，不能用于生产。
+先检查不含公钥材料的语义摘要：
+
+```bash
+npm run inspect:agent-supply-chain-native-trust -- \
+  --trust-policy /absolute/reviewed/agent-supply-chain-native-trust.json
+```
+
+配置专用 TLS 1.3 mTLS KMS Broker 的五个
+`DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_SIGNER_*`/`_SIGNING_KEY_ID` 变量后，请求一份
+只绑定公开 claims 的签名封装：
+
+```bash
+npm run finalize:agent-supply-chain-native -- \
+  --artifact /absolute/private/candidate/deviludo-agent-supply-chain-native.mjs \
+  --build-receipt /absolute/private/candidate/agent-supply-chain-native-build-receipt.json \
+  --evidence /absolute/private/evidence/agent-supply-chain-native-evidence.json \
+  --output /absolute/private/release/agent-supply-chain-native-release.json \
+  --published-at 2026-07-24T00:00:00.000Z \
+  --release-id 11111111-1111-4111-8111-111111111111 \
+  --source-revision 0123456789abcdef0123456789abcdef01234567 \
+  --trust-policy /absolute/reviewed/agent-supply-chain-native-trust.json \
+  --trust-policy-digest REVIEWED_64_CHARACTER_SHA256
+```
+
+Finalizer 固定调用 `/v1/agent-supply-chain-native/sign-ed25519`，本地验证 KMS
+签名后才以 `0400` 写入结果；相同输入可幂等重放，已有文件内容不同则失败。
+私钥不离开 KMS。
+
+将执行器、构建回执、发布封装和评审后的信任策略作为四个只读文件挂载给
+Broker，并配置：
+
+- `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_EXECUTABLE` 与 `_DIGEST`；
+- `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_PLATFORM_VERSION`；
+- `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_BUILD_RECEIPT_FILE`；
+- `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_RELEASE_MANIFEST_FILE`；
+- `DEVILUDO_AGENT_SUPPLY_CHAIN_NATIVE_TRUST_POLICY_FILE` 与 `_DIGEST`。
+
+Broker 在创建数据库连接、探针或子进程之前重新读取文件，验证 Ed25519 key
+仍为 `ACTIVE`、策略摘要、平台版本、源码/Node 合同、构建回执摘要、执行器
+摘要与大小。撤销 key、替换任一文件或仅修改环境 digest 都会使启动失败。
+执行镜像必须在 `/usr/bin/node` 提供固定且签名验证过的 Node 22.13+ runtime。
+
+不要把源码入口、`tsx`、包管理器或 `node_modules` 挂到生产 Broker。不要在生产运行 `npm install`、浮动版本、自更新、管理员 shell 或外部脚本。新执行器与新策略都作为新制品灰度，已运行任务继续使用原 digest。信任策略与业务策略是两个独立对象：前者只决定哪些平台发布签名可启动，后者决定官方 Agent 源、扫描器、镜像与 Fleet 权限，不能用一个 digest 代替另一个。
 
 ## 策略配置
 
