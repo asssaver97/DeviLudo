@@ -819,7 +819,7 @@ try {
   if (!localManifest.response.ok
     || localManifestPayload.projectId !== smokeValidationProject
     || localManifestPayload.runId !== validationApprovalPayload.data.run.id
-    || localManifestPayload.schemaVersion !== 3
+    || localManifestPayload.schemaVersion !== 4
     || JSON.stringify(localManifestPayload.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || JSON.stringify(localValidationPayload.data?.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || localManifestPayload.bundleDigest !== localValidationPayload.data.bundleDigest) {
@@ -828,13 +828,15 @@ try {
   let localBuild = null;
   if (expectedLocalValidationStatus === "TESTS_PASSED") {
     const buildBinding = localManifestPayload.buildArtifact;
+    const exportBootCheck = localManifestPayload.checks?.find((check) => check.name === "macos-export-boot");
     if (buildBinding?.fileName !== "DeviLudoLocal.zip"
       || buildBinding.platform !== "macos"
       || buildBinding.contentType !== "application/zip"
       || !/^[a-f0-9]{64}$/.test(String(buildBinding.sha256))
       || !Number.isSafeInteger(buildBinding.sizeBytes)
       || buildBinding.sizeBytes < 1
-      || JSON.stringify(buildBinding) !== JSON.stringify(localValidationPayload.data?.buildArtifact)) {
+      || JSON.stringify(buildBinding) !== JSON.stringify(localValidationPayload.data?.buildArtifact)
+      || exportBootCheck?.status !== "PASSED") {
       throw new Error("passed local evidence did not bind its macOS build artifact");
     }
     localBuild = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation/artifact/${buildBinding.fileName}`, {}, 30_000);

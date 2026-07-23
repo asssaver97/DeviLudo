@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, cp, lstat, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
 import type { LocalRuntimeCheck, LocalRuntimeEvidence, LocalRuntimeRequest } from "./contracts";
 import { defaultGodotExportTemplatesRoot, mountExportTemplates } from "./export-templates";
+import { inspectExtractedMacosBuild, validateMacosBuildArchive } from "./macos-export";
 
 const execFileAsync = promisify(execFile);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/;
@@ -86,7 +87,7 @@ export class LocalFixtureRunner {
     if (fileName !== BUILD_ARTIFACT_FILE) throw new Error("Local build artifact does not exist");
     const evidence = await this.readEvidence(request);
     const binding = evidence.buildArtifact;
-    if (evidence.schemaVersion !== 3
+    if (evidence.schemaVersion !== 4
       || evidence.releaseGate !== "LOCAL_VALIDATION_PASSED"
       || evidence.status !== "TESTS_PASSED"
       || !binding
@@ -139,7 +140,7 @@ export class LocalFixtureRunner {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof StaleLocalEvidenceError)) throw error;
       // A missing or older-schema manifest cannot satisfy the current gate.
       // The partial-run archive below preserves it for local audit before a
-      // fresh v3 evidence bundle is created.
+      // fresh v4 evidence bundle is created.
     }
 
     await access(this.#fixtureRoot);
@@ -246,6 +247,76 @@ export class LocalFixtureRunner {
           : "Godot macOS export failed for a reason other than missing templates",
     });
 
+    const exportSmokeRoot = path.join(runRoot, "export-smoke");
+    let exportBootPassed = false;
+    let exportBootDetail = exportTemplatesMissing
+      ? "Production export startup is waiting for the pinned macOS export templates"
+      : "Production export startup was not attempted because export failed";
+    let exportBootDurationMs = 0;
+    if (exportPassed) {
+      const exportBootStarted = performance.now();
+      try {
+        if (process.platform !== "darwin") throw new Error("macOS exported builds can only be launched on a macOS runner");
+        const archiveInfo = await lstat(exportPath);
+        if (!archiveInfo.isFile() || archiveInfo.isSymbolicLink() || archiveInfo.size < 1 || archiveInfo.size > MAX_BUILD_ARTIFACT_BYTES) {
+          throw new Error("macOS build artifact size or type is invalid");
+        }
+        const archiveEntries = await this.#command(
+          "/usr/bin/unzip",
+          ["-Z1", exportPath],
+          runRoot,
+          environment,
+        );
+        log.push("$ unzip -Z1 <artifact>", sanitize(archiveEntries, runRoot, runtimeHome, runtimeTemp));
+        if (archiveEntries.exitCode !== 0) throw new Error("macOS build archive listing failed");
+        const archiveMetadata = await this.#command(
+          "/usr/bin/unzip",
+          ["-Z", "-l", exportPath],
+          runRoot,
+          environment,
+        );
+        log.push("$ unzip -Z -l <artifact>", sanitize(archiveMetadata, runRoot, runtimeHome, runtimeTemp));
+        if (archiveMetadata.exitCode !== 0) throw new Error("macOS build archive metadata inspection failed");
+        validateMacosBuildArchive(
+          archiveEntries.stdout.split(/\r?\n/).filter(Boolean),
+          archiveMetadata.stdout,
+        );
+        await mkdir(exportSmokeRoot, { mode: 0o700 });
+        const extracted = await this.#command(
+          "/usr/bin/unzip",
+          ["-q", exportPath, "-d", exportSmokeRoot],
+          runRoot,
+          environment,
+        );
+        log.push("$ unzip -q <artifact> -d <export-smoke>", sanitize(extracted, runRoot, runtimeHome, runtimeTemp));
+        if (extracted.exitCode !== 0) throw new Error("macOS build archive extraction failed");
+        const exportedExecutable = await inspectExtractedMacosBuild(exportSmokeRoot);
+        const launched = await this.#command(
+          exportedExecutable,
+          ["--headless", "--quit-after", "120"],
+          exportSmokeRoot,
+          environment,
+        );
+        log.push("$ <exported-app> --headless --quit-after 120", sanitize(launched, runRoot, runtimeHome, runtimeTemp));
+        if (launched.exitCode !== 0) throw new Error(`Exported macOS game exited with code ${launched.exitCode}`);
+        if (!launched.stdout.includes("DEVILUDO_FIXTURE_BOOT:")) throw new Error("Exported macOS game boot marker is missing");
+        exportBootPassed = true;
+        exportBootDetail = "Manifest-bound macOS app payload started from the exported ZIP and exited cleanly";
+      } catch (error) {
+        exportBootDetail = error instanceof Error ? error.message : "Exported macOS game startup failed";
+        log.push(`[macos-export-boot] FAILED ${exportBootDetail}`);
+      } finally {
+        exportBootDurationMs = Math.round(performance.now() - exportBootStarted);
+        await rm(exportSmokeRoot, { recursive: true, force: true });
+      }
+    }
+    checks.push({
+      name: "macos-export-boot",
+      status: exportBootPassed ? "PASSED" : exportTemplatesMissing ? "WAITING_DEPENDENCY" : "FAILED",
+      durationMs: exportBootDurationMs,
+      detail: exportBootDetail,
+    });
+
     const createdAt = new Date().toISOString();
     const junit = junitXml(e2e, tested.durationMs);
     const godotLog = `${log.join("\n\n")}\n`;
@@ -253,17 +324,17 @@ export class LocalFixtureRunner {
       "junit.xml": sha256(junit),
       "godot.log": sha256(godotLog),
     };
-    const status = exportPassed
+    const status = exportPassed && exportBootPassed
       ? "TESTS_PASSED" as const
       : exportTemplatesMissing
         ? "WAITING_DEPENDENCY" as const
         : "FAILED" as const;
-    const releaseGate = exportPassed
+    const releaseGate = exportPassed && exportBootPassed
       ? "LOCAL_VALIDATION_PASSED" as const
       : exportTemplatesMissing
         ? "WAITING_EXPORT_TEMPLATES" as const
         : "TESTS_FAILED" as const;
-    const exportedBytes = exportPassed ? await readFile(exportPath) : null;
+    const exportedBytes = exportPassed && exportBootPassed ? await readFile(exportPath) : null;
     const buildArtifact = exportedBytes ? {
       fileName: BUILD_ARTIFACT_FILE,
       platform: "macos" as const,
@@ -272,7 +343,7 @@ export class LocalFixtureRunner {
       sizeBytes: exportedBytes.byteLength,
     } : null;
     const unsigned = {
-      schemaVersion: 3 as const,
+      schemaVersion: 4 as const,
       projectId: request.projectId,
       runId: request.runId,
       specRevisionId: request.specRevisionId,
@@ -357,7 +428,7 @@ function validateRequest(request: LocalRuntimeRequest) {
 }
 
 function assertEvidenceBinding(evidence: LocalRuntimeEvidence, request: LocalRuntimeRequest) {
-  if (evidence.schemaVersion !== 3) throw new StaleLocalEvidenceError();
+  if (evidence.schemaVersion !== 4) throw new StaleLocalEvidenceError();
   if (evidence.projectId !== request.projectId
     || evidence.runId !== request.runId
     || evidence.specRevisionId !== request.specRevisionId

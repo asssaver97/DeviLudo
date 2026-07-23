@@ -117,6 +117,7 @@ test("a selected matrix keeps its frozen order and rejects evidence from another
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
   assert.throws(() => recordLocalValidation(state, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-WRONG-MATRIX",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -143,6 +144,7 @@ test("a selected matrix keeps its frozen order and rejects evidence from another
 test("feedback invalidates all local evidence and requires a new immutable approval", () => {
   let state = approveLocalSpec(createLocalDelivery("project-feedback"), "SPEC-008", "RUN-LOCAL-2");
   state = recordLocalValidation(state, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-TEST",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -154,7 +156,10 @@ test("feedback invalidates all local evidence and requires a new immutable appro
     platform: "macos",
     fixtureOnly: true,
     buildArtifact: macosBuild,
-    checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
+    checks: [
+      { name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" },
+      { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
+    ],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
   assert.equal(state.stage, "CANDIDATE_READY");
@@ -231,6 +236,7 @@ test("local Steam reinstall failure clears Beta authority before human revision"
 test("failed local validation is auditable but cannot advance the candidate gate", () => {
   let state = approveLocalSpec(createLocalDelivery("project-failed"), "SPEC-010", "RUN-LOCAL-FAILED");
   state = recordLocalValidation(state, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-FAILED",
     status: "FAILED",
     releaseGate: "TESTS_FAILED",
@@ -254,6 +260,7 @@ test("failed local validation is auditable but cannot advance the candidate gate
 test("local validation without an explicit execution-platform binding fails closed", () => {
   const state = approveLocalSpec(createLocalDelivery("project-missing-platform"), "SPEC-011", "RUN-MISSING-PLATFORM");
   assert.throws(() => recordLocalValidation(state, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-MISSING-PLATFORM",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -270,6 +277,7 @@ test("local validation without an explicit execution-platform binding fails clos
 test("a passed local validation without a manifest-bound build cannot authorize delivery", () => {
   const state = approveLocalSpec(createLocalDelivery("project-missing-build"), "SPEC-012", "RUN-MISSING-BUILD");
   assert.throws(() => recordLocalValidation(state, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-MISSING-BUILD",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -281,9 +289,25 @@ test("a passed local validation without a manifest-bound build cannot authorize 
   }), /缺少绑定的 macOS 构建物/);
 });
 
+test("a passed v4 validation without an exported-app boot result cannot authorize delivery", () => {
+  const state = approveLocalSpec(createLocalDelivery("project-missing-export-boot"), "SPEC-013", "RUN-MISSING-EXPORT-BOOT");
+  assert.throws(() => recordLocalValidation(state, {
+    schemaVersion: 4,
+    evidenceId: "EV-LOCAL-MISSING-EXPORT-BOOT",
+    status: "TESTS_PASSED",
+    releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: "a".repeat(40), sourceDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+    godotVersion: "4.6.2.stable", targetMatrix: state.targetMatrix,
+    platform: "macos", fixtureOnly: true, buildArtifact: macosBuild,
+    checks: [{ name: "macos-export", status: "PASSED", durationMs: 3, detail: "archive created" }],
+    createdAt: "2026-07-23T00:00:00.000Z",
+  }), /缺少导出交付包的启动与退出证据/);
+});
+
 test("missing export templates remain auditable but cannot authorize target E2E", () => {
   let state = approveLocalSpec(createLocalDelivery("project-export-wait"), "SPEC-EXPORT-001", "RUN-EXPORT-WAIT");
   state = recordLocalValidation(state, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-WAITING",
     status: "WAITING_DEPENDENCY",
     releaseGate: "WAITING_EXPORT_TEMPLATES",
@@ -451,7 +475,7 @@ test("historical delivery snapshots derive the legacy matrix but fail old eviden
   assert.equal(normalized.localValidation.valid, false);
 });
 
-test("a pre-v3 passed snapshot rewinds to candidate validation instead of retaining acceptance authority", () => {
+test("a pre-v4 passed snapshot rewinds to candidate validation instead of retaining acceptance authority", () => {
   let candidate = approveLocalSpec(createLocalDelivery("project-legacy-build"), "SPEC-LEGACY-BUILD", "RUN-LEGACY-BUILD", undefined, ["macos"]);
   for (let index = 0; index < 4; index += 1) candidate = applyLocalDeliveryAction(candidate, "advance");
   assert.equal(candidate.stage, "AWAITING_ACCEPTANCE");

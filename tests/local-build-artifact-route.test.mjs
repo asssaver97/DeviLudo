@@ -21,6 +21,7 @@ test("local build download streams only the manifest-bound macOS artifact", asyn
   const bytes = Buffer.from("signed local macOS Godot build bytes");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   await saveLocalValidation(projectId, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-BUILD123456",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -37,6 +38,7 @@ test("local build download streams only the manifest-bound macOS artifact", asyn
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "core-loop", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "macos-export", status: "PASSED", durationMs: 1, detail: "fixture" },
+      { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
     ],
     createdAt: "2026-07-23T00:00:00.000Z",
   }, `validation:${projectId}`);
@@ -83,6 +85,7 @@ test("local build download rejects sidecar metadata drift before streaming bytes
   const bytes = Buffer.from("manifest-bound bytes");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   await saveLocalValidation(projectId, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-BUILD654321",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -95,6 +98,7 @@ test("local build download rejects sidecar metadata drift before streaming bytes
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "core-loop", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "macos-export", status: "PASSED", durationMs: 1, detail: "fixture" },
+      { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
     ],
     createdAt: "2026-07-23T00:00:00.000Z",
   }, `validation:${projectId}`);

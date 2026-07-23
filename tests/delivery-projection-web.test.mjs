@@ -352,6 +352,7 @@ test("local delivery route exposes a stable conflict when real export evidence i
   await ensureLocalProject(localProjectId);
   const started = await startLocalDelivery(localProjectId, "SPEC-EXPORT-001", "RUN-EXPORT-001", `start:${localProjectId}`);
   await saveLocalValidation(localProjectId, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-EXPORT-WAIT",
     status: "WAITING_DEPENDENCY",
     releaseGate: "WAITING_EXPORT_TEMPLATES",

@@ -43,7 +43,7 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
     const command = JSON.parse(body);
     assert.deepEqual(command.targetMatrix, ["macos"]);
     return Response.json({ data: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       projectId,
       runId: started.snapshot.runId,
       specRevisionId: started.snapshot.specRevisionId,
@@ -66,6 +66,7 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
         { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
         { name: "core-loop", status: "PASSED", durationMs: 1, detail: "fixture" },
         { name: "save-load", status: "PASSED", durationMs: 1, detail: "fixture" },
+        { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
       ],
       artifactDigests: { "junit.xml": "d".repeat(64), "godot.log": "e".repeat(64) },
       createdAt: "2026-07-23T00:00:00.000Z",

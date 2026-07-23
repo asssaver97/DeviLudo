@@ -409,12 +409,12 @@ export function LocalDeliveryPanel({
               <h3>{snapshot.localValidation?.valid ? snapshot.localValidation.evidenceId : "Git fixture + Godot macOS headless"}</h3>
               <p>{snapshot.localValidation?.valid
                 ? `${snapshot.localValidation.godotVersion} · macOS 本机 · ${snapshot.localValidation.checks.filter((check) => check.status === "PASSED").length} 项通过`
-                : "创建隔离 Git 候选提交，运行项目导入、启动、核心循环、存档回读和性能检查。"}</p>
+                : "创建隔离 Git 候选提交，运行项目导入、核心循环、存档回读、导出，以及交付 ZIP 内应用的启动/退出检查。"}</p>
             </div>
             {snapshot.localValidation?.valid ? (
               <div className="local-real-validation-result">
                 <span className={snapshot.localValidation.status === "FAILED" ? "failed" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "passed" : "waiting"}>
-                  {snapshot.localValidation.status === "FAILED" ? "macOS 本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "macOS 本机门禁通过" : "等待依赖 · 导出模板"}
+                  {snapshot.localValidation.status === "FAILED" ? "macOS 本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "导出应用已启动并正常退出" : "等待依赖 · 导出模板"}
                 </span>
                 <div>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>

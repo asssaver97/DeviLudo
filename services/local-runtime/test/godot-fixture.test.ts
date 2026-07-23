@@ -51,7 +51,10 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
     assert.match(result.artifactDigests["junit.xml"], /^[a-f0-9]{64}$/);
     assert.match(result.artifactDigests["godot.log"], /^[a-f0-9]{64}$/);
     if (result.releaseGate === "LOCAL_VALIDATION_PASSED") {
-      assert.equal(result.schemaVersion, 3);
+      assert.equal(result.schemaVersion, 4);
+      assert.equal(result.checks.find((check) => check.name === "macos-export-boot")?.status, "PASSED");
+      assert.match(log, /\$ <exported-app> --headless --quit-after 120/);
+      assert.match(log, /DEVILUDO_FIXTURE_BOOT:/);
       assert.equal(result.buildArtifact?.fileName, "DeviLudoLocal.zip");
       assert.equal(result.buildArtifact?.platform, "macos");
       assert.equal(result.buildArtifact?.contentType, "application/zip");

@@ -70,7 +70,7 @@ export function validateLocalValidationEvidence(
   if (item.projectId !== projectId || item.runId !== runId || item.specRevisionId !== specRevisionId) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据绑定与锁定运行不一致");
   }
-  if (item.schemaVersion !== 3 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
+  if (item.schemaVersion !== 4 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据目标矩阵与锁定运行不一致");
   }
   if (item.platform !== "macos" || item.fixtureOnly !== true) {
@@ -108,6 +108,9 @@ export function validateLocalValidationEvidence(
   if (!validTerminal && !validWait && !validFailure) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据状态与检查结果不一致");
   }
+  if (validTerminal && !(item.checks as Array<Record<string, unknown>>).some((check) => check.name === "macos-export-boot" && check.status === "PASSED")) {
+    throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据缺少导出交付包的启动与退出结果");
+  }
   const buildArtifact = parseBuildArtifact(item.buildArtifact);
   if (item.buildArtifact !== null && !buildArtifact) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据构建物绑定无效");
@@ -116,6 +119,7 @@ export function validateLocalValidationEvidence(
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据状态与构建物授权不一致");
   }
   return {
+    schemaVersion: 4,
     evidenceId: String(item.evidenceId),
     status: item.status,
     releaseGate: item.releaseGate,
@@ -174,7 +178,7 @@ function validReleaseGate(value: unknown): value is LocalValidationSnapshot["rel
 function validCheck(value: unknown) {
   if (!value || typeof value !== "object") return false;
   const check = value as Record<string, unknown>;
-  return ["import", "boot", "core-loop", "save-load", "performance", "macos-export"].includes(String(check.name))
+  return ["import", "boot", "core-loop", "save-load", "performance", "macos-export", "macos-export-boot"].includes(String(check.name))
     && ["PASSED", "FAILED", "WAITING_DEPENDENCY"].includes(String(check.status))
     && typeof check.durationMs === "number"
     && Number.isFinite(check.durationMs)

@@ -6,14 +6,14 @@ export type LocalRuntimeRequest = {
 };
 
 export type LocalRuntimeCheck = {
-  name: "import" | "boot" | "core-loop" | "save-load" | "performance" | "macos-export";
+  name: "import" | "boot" | "core-loop" | "save-load" | "performance" | "macos-export" | "macos-export-boot";
   status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY";
   durationMs: number;
   detail: string;
 };
 
 export type LocalRuntimeEvidence = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   evidenceId: string;
   projectId: string;
   runId: string;

@@ -11,6 +11,7 @@ const macosBuild = Object.freeze({
 
 function passingValidation(projectId, delivery, commandKey) {
   return saveLocalValidation(projectId, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-AABBCCDDEEFF",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -27,6 +28,7 @@ function passingValidation(projectId, delivery, commandKey) {
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "core-loop", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "save-load", status: "PASSED", durationMs: 1, detail: "fixture" },
+      { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
     ],
     createdAt: "2026-07-23T00:00:00.000Z",
   }, commandKey);
@@ -77,6 +79,7 @@ test("local automation persists a dependency wait and cannot bypass it", async (
   const projectId = `auto-wait-${crypto.randomUUID()}`;
   await startLocalDelivery(projectId, "SPEC-AUTO-WAIT", "RUN-AUTO-WAIT", `start:${projectId}`);
   const waitingValidation = (id, delivery, commandKey) => saveLocalValidation(id, {
+    schemaVersion: 4,
     evidenceId: "EV-LOCAL-112233445566",
     status: "WAITING_DEPENDENCY",
     releaseGate: "WAITING_EXPORT_TEMPLATES",

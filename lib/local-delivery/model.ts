@@ -34,6 +34,7 @@ export type LocalDeliveryEvent = {
 };
 
 export type LocalValidationSnapshot = {
+  schemaVersion: number;
   evidenceId: string;
   status: "TESTS_PASSED" | "WAITING_DEPENDENCY" | "FAILED";
   releaseGate: "WAITING_EXPORT_TEMPLATES" | "LOCAL_VALIDATION_PASSED" | "TESTS_FAILED";
@@ -220,6 +221,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   const targetMatrix = normalizeTargetMatrix(snapshot.targetMatrix ?? Object.keys(snapshot.targetResults ?? {}));
   const targetResults = normalizeTargetResults(snapshot.targetResults, targetMatrix);
   const historicalValidation = snapshot.localValidation as (LocalValidationSnapshot & {
+    schemaVersion?: number;
     targetMatrix?: readonly LocalTargetPlatform[];
     platform?: "macos";
     fixtureOnly?: true;
@@ -231,18 +233,20 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   const localValidation = historicalValidation
     ? {
       ...historicalValidation,
+      schemaVersion: historicalValidation.schemaVersion ?? 0,
       targetMatrix: validationMatrix ?? targetMatrix,
       platform: historicalValidation.platform ?? "macos" as const,
       fixtureOnly: historicalValidation.fixtureOnly ?? true as const,
       buildArtifact: historicalValidation.buildArtifact ?? null,
       // Evidence created before target-matrix binding remains readable but can
       // never satisfy a current selected-platform gate.
-      valid: validationMatrix !== null
+      valid: historicalValidation.schemaVersion === 4
+        && validationMatrix !== null
         && sameTargetMatrix(validationMatrix, targetMatrix)
         && historicalValidation.platform === "macos"
         && historicalValidation.fixtureOnly === true
         && (historicalValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
-          ? validLocalBuildArtifact(historicalValidation.buildArtifact)
+          ? validLocalBuildArtifact(historicalValidation.buildArtifact) && hasPassedExportBoot(historicalValidation.checks)
           : historicalValidation.buildArtifact == null)
         && historicalValidation.valid,
       status: historicalValidation.releaseGate === "WAITING_EXPORT_TEMPLATES"
@@ -504,6 +508,7 @@ export function recordLocalValidation(
     && validation.releaseGate === "WAITING_EXPORT_TEMPLATES";
   const failed = validation.status === "FAILED" && validation.releaseGate === "TESTS_FAILED";
   if (!gatePassed && !waitingForTemplates && !failed) throw new Error("本机验证状态与发布门禁不一致");
+  if (validation.schemaVersion !== 4) throw new Error("本机验证证据版本不是当前受支持的 v4");
   if (!sameTargetMatrix(validation.targetMatrix, current.targetMatrix)) {
     throw new Error("本机验证证据与锁定目标矩阵不一致");
   }
@@ -512,6 +517,9 @@ export function recordLocalValidation(
   }
   if (gatePassed && !validLocalBuildArtifact(validation.buildArtifact)) {
     throw new Error("本机验证通过但缺少绑定的 macOS 构建物");
+  }
+  if (gatePassed && !hasPassedExportBoot(validation.checks)) {
+    throw new Error("本机验证通过但缺少导出交付包的启动与退出证据");
   }
   if (!gatePassed && validation.buildArtifact !== null) {
     throw new Error("未通过的本机验证不能授权构建物");
@@ -552,6 +560,10 @@ function validLocalBuildArtifact(value: LocalValidationSnapshot["buildArtifact"]
     && Number.isSafeInteger(value.sizeBytes)
     && value.sizeBytes > 0
     && value.sizeBytes <= 512 * 1024 * 1024;
+}
+
+function hasPassedExportBoot(checks: LocalValidationSnapshot["checks"]): boolean {
+  return checks.some((check) => check.name === "macos-export-boot" && check.status === "PASSED");
 }
 
 export function applyLocalDeliveryAction(
