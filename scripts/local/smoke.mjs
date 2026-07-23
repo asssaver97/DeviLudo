@@ -999,7 +999,7 @@ try {
     throw new Error("local Provider recovery changed the immutable Agent lock");
   }
   const failureActions = [
-    "advance", "advance", "advance", "advance", "advance", "advance", "accept", "advance", "main-gate-fail",
+    "advance", "advance", "advance", "advance", "advance", "advance", "accept",
   ];
   let acceptanceBypass;
   let acceptanceReplay;
@@ -1036,9 +1036,7 @@ try {
     }
   }
   const postMergeFailurePayload = await postMergeFailure.response.json();
-  if (postMergeFailurePayload.data?.stage !== "AWAITING_SPEC_APPROVAL"
-    || postMergeFailurePayload.data?.repairHandoff?.reason !== "MAIN_GATE_FAILURE"
-    || postMergeFailurePayload.data?.repairHandoff?.baselineMainSha !== "f21c0de"
+  if (postMergeFailurePayload.data?.stage !== "MERGING"
     || postMergeFailurePayload.data?.mainSha !== null
     || postMergeFailurePayload.data?.steamBranch !== null
     || postMergeFailurePayload.data?.mfaApprovalId !== null
@@ -1046,8 +1044,8 @@ try {
     || postMergeFailurePayload.data?.steamReleaseId !== null
     || !Array.isArray(postMergeFailurePayload.data?.externalApprovals)
     || postMergeFailurePayload.data.externalApprovals.length !== 0
-    || postMergeFailurePayload.data?.evidenceValid !== false) {
-    throw new Error("local post-merge failure did not revoke release authority");
+    || postMergeFailurePayload.data?.evidenceValid !== true) {
+    throw new Error("formal acceptance did not remain at the real main merge boundary");
   }
   const cancellation = await request(baseUrl, `/api/projects/${smokeSpecProject}/delivery`, {
     method: "POST",
@@ -1064,7 +1062,7 @@ try {
   const releaseDialogue = await request(baseUrl, `/api/projects/${smokeReleaseProject}/conversation`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-release-dialogue-1" },
-    body: JSON.stringify({ expectedRevision: 0, message: "制作一款可完整演练 Steam 顺序发布门禁的桌面单机游戏" }),
+    body: JSON.stringify({ expectedRevision: 0, message: "制作一款仅面向 macOS、可完整演练 Steam 顺序发布门禁的桌面单机游戏" }),
   });
   const releaseDialoguePayload = await releaseDialogue.response.json();
   if (![200, 201].includes(releaseDialogue.response.status) || releaseDialoguePayload.data?.revision !== 1) {
@@ -1085,14 +1083,63 @@ try {
   if (![200, 201].includes(releaseApproval.response.status)
     || releaseApprovalPayload.data?.run?.agent !== "claude-code"
     || releaseApprovalPayload.data?.run?.profileRevisionId !== "profile-claude-platform-r5"
-    || releaseApprovalPayload.data?.run?.configurationSource !== `project:${smokeReleaseProject}`) {
+    || releaseApprovalPayload.data?.run?.configurationSource !== `project:${smokeReleaseProject}`
+    || JSON.stringify(releaseApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["macos"])) {
     throw new Error("local release-gate approval did not lock the selected Claude Profile");
   }
-  const releaseActions = [
-    "advance", "advance", "advance", "advance", "advance", "advance",
-    "accept", "advance", "advance", "confirm-mfa", "advance", "advance",
-    "external-approve", "external-approve", "external-approve",
-  ];
+  const releaseCandidate = await request(baseUrl, `/api/projects/${smokeReleaseProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-release-candidate-auto" },
+    body: "{}",
+  }, 90_000);
+  const releaseCandidatePayload = await releaseCandidate.response.json();
+  if (!releaseCandidate.response.ok || releaseCandidatePayload.data?.stage !== "AWAITING_ACCEPTANCE") {
+    throw new Error("local release candidate did not reach formal acceptance");
+  }
+  const releaseAcceptance = await localWorkflowAction(baseUrl, smokeReleaseProject, "smoke-release-accept", "accept");
+  if (releaseAcceptance.response.status !== 201) throw new Error("local release candidate acceptance failed");
+  const releaseMainGate = await request(baseUrl, `/api/projects/${smokeReleaseProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-release-main-auto" },
+    body: "{}",
+  }, 90_000);
+  const releaseMainGatePayload = await releaseMainGate.response.json();
+  if (!releaseMainGate.response.ok || releaseMainGatePayload.data?.stage !== "MFA_REQUIRED"
+    || releaseMainGatePayload.meta?.mainValidationExecuted !== true
+    || releaseMainGatePayload.data?.mainValidation?.releaseGate !== "MAIN_VALIDATION_PASSED"
+    || releaseMainGatePayload.data?.mainValidation?.mainSha !== releaseMainGatePayload.data?.mainSha
+    || releaseMainGatePayload.data?.mainSha !== releaseMainGatePayload.data?.localValidation?.candidateSha) {
+    throw new Error("actual merged main SHA did not complete the release-grade Godot gate");
+  }
+  const mainManifest = await request(baseUrl, `/api/projects/${smokeReleaseProject}/main-validation/evidence/manifest.json`);
+  const mainManifestPayload = await mainManifest.response.json();
+  const mainBuildBinding = mainManifestPayload.buildArtifact;
+  if (!mainManifest.response.ok || mainManifestPayload.evidenceId !== releaseMainGatePayload.data.mainValidation.evidenceId
+    || mainManifestPayload.mainSha !== releaseMainGatePayload.data.mainSha
+    || mainManifestPayload.candidateEvidenceId !== releaseMainGatePayload.data.localValidation.evidenceId
+    || mainBuildBinding?.fileName !== "DeviLudoMain.zip") {
+    throw new Error("main SHA evidence download lost its accepted-candidate binding");
+  }
+  const mainBuild = await request(baseUrl, `/api/projects/${smokeReleaseProject}/main-validation/artifact/${mainBuildBinding.fileName}`, {}, 30_000);
+  const mainBuildBytes = Buffer.from(await mainBuild.response.arrayBuffer());
+  if (!mainBuild.response.ok
+    || mainBuild.response.headers.get("x-deviludo-artifact-sha256") !== mainBuildBinding.sha256
+    || mainBuildBytes.byteLength !== mainBuildBinding.sizeBytes
+    || createHash("sha256").update(mainBuildBytes).digest("hex") !== mainBuildBinding.sha256) {
+    throw new Error("downloaded main build did not match the release-grade evidence manifest");
+  }
+  const releaseMfa = await localWorkflowAction(baseUrl, smokeReleaseProject, "smoke-release-mfa", "confirm-mfa");
+  if (!releaseMfa.response.ok) throw new Error("local release MFA confirmation failed");
+  const releaseBeta = await request(baseUrl, `/api/projects/${smokeReleaseProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-release-beta-auto" },
+    body: "{}",
+  });
+  const releaseBetaPayload = await releaseBeta.response.json();
+  if (!releaseBeta.response.ok || releaseBetaPayload.data?.stage !== "EXTERNAL_APPROVAL_REQUIRED") {
+    throw new Error("local release did not stop at ordered external approvals");
+  }
+  const releaseActions = ["external-approve", "external-approve", "external-approve"];
   let completedRelease;
   for (const [index, action] of releaseActions.entries()) {
     completedRelease = await localWorkflowAction(
@@ -1153,25 +1200,10 @@ try {
     || codexPhysicalRunnerGatePayload.data?.localValidation?.platform !== "macos") {
     throw new Error("macOS local evidence incorrectly satisfied the Linux physical Runner gate");
   }
-  const codexReleaseActions = [
-    "advance", "advance",
-    "accept", "advance", "advance", "confirm-mfa", "advance", "advance",
-    "external-approve", "external-approve", "external-approve",
-  ];
-  let completedCodexRelease;
-  for (const [index, action] of codexReleaseActions.entries()) {
-    completedCodexRelease = await localWorkflowAction(
-      baseUrl, smokeCodexProject, `smoke-codex-release-${index + 1}`, action,
-    );
-    if (!completedCodexRelease.response.ok) throw new Error(`local Codex release action ${action} was rejected`);
-  }
-  const completedCodexPayload = await completedCodexRelease.response.json();
-  if (completedCodexPayload.data?.stage !== "RELEASED"
-    || completedCodexPayload.data?.lockedProfile?.agent !== "codex-cli"
-    || completedCodexPayload.data?.lockedProfile?.profileRevisionId !== "profile-codex-platform-r2"
-    || JSON.stringify(completedCodexPayload.data?.targetMatrix) !== JSON.stringify(["linux"])
-    || JSON.stringify(completedCodexPayload.data?.targetResults) !== JSON.stringify({ linux: "PASSED" })) {
-    throw new Error("local Codex Profile did not remain locked through the complete release chain");
+  if (codexPhysicalRunnerGatePayload.data?.lockedProfile?.agent !== "codex-cli"
+    || codexPhysicalRunnerGatePayload.data?.lockedProfile?.profileRevisionId !== "profile-codex-platform-r2"
+    || JSON.stringify(codexPhysicalRunnerGatePayload.data?.targetMatrix) !== JSON.stringify(["linux"])) {
+    throw new Error("local Codex Profile changed while waiting for the required Linux Runner");
   }
   const preflightPayload = await agentPreflight.response.json();
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
@@ -1263,11 +1295,12 @@ try {
   console.log(`✓ Provider recovery ${providerResume.response.status} (${providerResume.elapsedMs}ms) · same immutable Profile`);
   console.log(`✓ Acceptance bypass ${acceptanceBypass.response.status} (${acceptanceBypass.elapsedMs}ms) · generic delivery rejected`);
   console.log(`✓ Acceptance replay 201/${acceptanceReplay.response.status} (${acceptanceReplay.elapsedMs}ms) · formal empty-body decision`);
-  console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
+  console.log(`✓ Merge boundary   ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · no client-forged main SHA`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
   console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);
+  console.log(`✓ Actual main gate ${releaseMainGate.response.status} (${releaseMainGate.elapsedMs}ms) · ${releaseMainGatePayload.data.mainSha.slice(0, 12)} + manifest-bound build`);
   console.log(`✓ Physical Runner gate ${codexPhysicalRunnerGate.response.status} (${codexPhysicalRunnerGate.elapsedMs}ms) · macOS evidence cannot pass Linux`);
-  console.log(`✓ Dual Agent release ${completedCodexRelease.response.status} (${completedCodexRelease.elapsedMs}ms) · Claude Code + Codex CLI locked end-to-end`);
+  console.log(`✓ Dual Agent lock   Claude Code released · Codex CLI safely stopped at Linux Runner gate`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Agent auth gate   ${forgedAgentRequest.response.status} (${forgedAgentRequest.elapsedMs}ms) · ${forgedAgentRequestPayload.error.code}`);

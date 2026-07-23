@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runLocalDeliveryUntilHumanGate } from "../lib/local-delivery/automatic.ts";
-import { commandLocalDelivery, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
+import { commandLocalDelivery, saveLocalMainValidation, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
 
 const macosBuild = Object.freeze({
   fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
   sha256: "9".repeat(64), sizeBytes: 4096,
+});
+
+const macosMainBuild = Object.freeze({
+  fileName: "DeviLudoMain.zip", platform: "macos", contentType: "application/zip",
+  sha256: "8".repeat(64), sizeBytes: 8192,
 });
 
 function passingValidation(projectId, delivery, commandKey) {
@@ -31,6 +36,30 @@ function passingValidation(projectId, delivery, commandKey) {
       { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
     ],
     createdAt: "2026-07-23T00:00:00.000Z",
+  }, commandKey);
+}
+
+function passingMainValidation(projectId, delivery, commandKey) {
+  const candidate = delivery.localValidation;
+  return saveLocalMainValidation(projectId, {
+    schemaVersion: 1,
+    evidenceId: "EV-MAIN-AABBCCDDEEFF",
+    status: "TESTS_PASSED",
+    releaseGate: "MAIN_VALIDATION_PASSED",
+    candidateEvidenceId: candidate.evidenceId,
+    candidateBundleDigest: candidate.bundleDigest,
+    candidateSha: candidate.candidateSha,
+    sourceDigest: candidate.sourceDigest,
+    mainSha: candidate.candidateSha,
+    mainSourceDigest: candidate.sourceDigest,
+    bundleDigest: "d".repeat(64),
+    godotVersion: "4.6.2.stable",
+    targetMatrix: delivery.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
+    buildArtifact: macosMainBuild,
+    checks: [{ name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "main export booted" }],
+    createdAt: "2026-07-23T00:01:00.000Z",
   }, commandKey);
 }
 
@@ -60,10 +89,12 @@ test("local automation runs selected-target E2E and stops at every human authori
   assert.equal(replayAtGate.validationExecuted, false);
 
   await commandLocalDelivery(projectId, "accept", `accept:${projectId}`);
-  const releaseCandidate = await runLocalDeliveryUntilHumanGate(projectId, `auto:${projectId}:main`, passingValidation);
+  const releaseCandidate = await runLocalDeliveryUntilHumanGate(projectId, `auto:${projectId}:main`, passingValidation, passingMainValidation);
   assert.equal(releaseCandidate.stopReason, "MFA_REQUIRED");
   assert.equal(releaseCandidate.snapshot.stage, "MFA_REQUIRED");
-  assert.equal(releaseCandidate.automaticTransitions, 2);
+  assert.equal(releaseCandidate.automaticTransitions, 0);
+  assert.equal(releaseCandidate.mainValidationExecuted, true);
+  assert.equal(releaseCandidate.snapshot.mainSha, "a".repeat(40));
   assert.equal(releaseCandidate.snapshot.mfaApprovalId, null);
 
   await commandLocalDelivery(projectId, "confirm-mfa", `mfa:${projectId}`);

@@ -7,6 +7,8 @@ import type {
   FinalizeLocalCandidateRequest,
   LocalScmBinding,
   LocalScmCandidateReceipt,
+  LocalScmMergeReceipt,
+  MergeLocalCandidateRequest,
   PreparedLocalRepository,
 } from "./contracts";
 
@@ -20,6 +22,7 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 type BaseManifest = PreparedLocalRepository & { readonly workspaceRoot: string };
 type CandidateManifest = LocalScmCandidateReceipt & Pick<LocalScmBinding, "projectId" | "runId" | "attemptId" | "specRevisionId" | "workspaceRoot">;
+type MergeManifest = LocalScmMergeReceipt & Pick<LocalScmBinding, "projectId" | "runId" | "attemptId" | "specRevisionId" | "workspaceRoot">;
 type ScmPaths = {
   workspace: string;
   workspaceBinding: string;
@@ -28,6 +31,7 @@ type ScmPaths = {
   gitDirectory: string;
   baseManifest: string;
   candidateManifest: string;
+  mergeManifest: string;
 };
 
 /**
@@ -131,6 +135,59 @@ export class LocalGitScmProxy {
     return publicCandidate(manifest);
   }
 
+  async merge(request: MergeLocalCandidateRequest): Promise<LocalScmMergeReceipt> {
+    validateBinding(request);
+    if (!SHA1.test(request.expectedCandidateCommitSha)) {
+      throw new Error("SCM merge commit binding is invalid");
+    }
+    if (!/^[a-f0-9]{64}$/.test(request.expectedSourceDigest)) throw new Error("SCM merge source digest is invalid");
+    const paths = await this.#resolvePaths(request);
+    const replay = await readJson<MergeManifest>(paths.mergeManifest);
+    if (replay) {
+      assertMergeBinding(replay, request);
+      return publicMerge(replay);
+    }
+    const candidate = await readJson<CandidateManifest>(paths.candidateManifest);
+    if (!candidate) throw new Error("SCM candidate is missing before merge");
+    if (candidate.commitSha !== request.expectedCandidateCommitSha
+      || candidate.sourceDigest !== request.expectedSourceDigest) {
+      throw new Error("SCM candidate does not match the accepted evidence");
+    }
+    const candidateRef = (await this.#repo(paths, ["rev-parse", `refs/heads/${candidate.branch}`])).trim();
+    if (candidateRef !== candidate.commitSha) throw new Error("SCM candidate branch drifted before merge");
+    const currentMain = (await this.#repo(paths, ["rev-parse", "refs/heads/main"])).trim();
+    if (currentMain === candidate.baseCommitSha) {
+      await this.#repo(paths, ["update-ref", "refs/heads/main", candidate.commitSha, candidate.baseCommitSha]);
+    } else if (currentMain !== candidate.commitSha) {
+      throw new Error("SCM main branch drifted before merge");
+    }
+    await this.#repo(paths, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+    await this.#repo(paths, ["reset", "--hard", "refs/heads/main"]);
+    const mainCommitSha = (await this.#repo(paths, ["rev-parse", "HEAD"])).trim();
+    const tree = await this.#repo(paths, ["ls-tree", "-r", "-z", "--full-tree", mainCommitSha]);
+    const sourceDigest = createHash("sha256").update(tree, "utf8").digest("hex");
+    if (mainCommitSha !== candidate.commitSha || sourceDigest !== candidate.sourceDigest) {
+      throw new Error("SCM merged main does not match the accepted candidate tree");
+    }
+    const manifest: MergeManifest = Object.freeze({
+      projectId: request.projectId,
+      runId: request.runId,
+      attemptId: request.attemptId,
+      specRevisionId: request.specRevisionId,
+      workspaceRoot: paths.workspaceBinding,
+      scmProxy: "local-git-proxy-v1",
+      branch: "main",
+      candidateBranch: candidate.branch,
+      baseCommitSha: candidate.baseCommitSha,
+      candidateCommitSha: candidate.commitSha,
+      mainCommitSha,
+      sourceDigest,
+      mergedAt: new Date().toISOString(),
+    });
+    await writeExclusiveJson(paths.mergeManifest, manifest);
+    return publicMerge(manifest);
+  }
+
   async #resolvePaths(binding: LocalScmBinding) {
     await mkdir(this.#storageRoot, { recursive: true, mode: 0o700 });
     const storageReal = await realpath(this.#storageRoot);
@@ -151,6 +208,7 @@ export class LocalGitScmProxy {
       gitDirectory: path.join(controlDirectory, "repository", ".git"),
       baseManifest: path.join(controlDirectory, "base.json"),
       candidateManifest: path.join(controlDirectory, "candidate.json"),
+      mergeManifest: path.join(controlDirectory, "merge.json"),
     };
   }
 
@@ -313,6 +371,21 @@ function assertCandidateBinding(manifest: CandidateManifest, request: FinalizeLo
   }
 }
 
+function assertMergeBinding(manifest: MergeManifest, request: MergeLocalCandidateRequest): void {
+  if (manifest.projectId !== request.projectId
+    || manifest.runId !== request.runId
+    || manifest.attemptId !== request.attemptId
+    || manifest.specRevisionId !== request.specRevisionId
+    || manifest.workspaceRoot !== path.resolve(request.workspaceRoot)
+    || manifest.scmProxy !== "local-git-proxy-v1"
+    || manifest.branch !== "main"
+    || manifest.candidateCommitSha !== request.expectedCandidateCommitSha
+    || manifest.mainCommitSha !== request.expectedCandidateCommitSha
+    || manifest.sourceDigest !== request.expectedSourceDigest) {
+    throw new Error("SCM merge manifest binding mismatch");
+  }
+}
+
 function publicBase(manifest: BaseManifest): PreparedLocalRepository {
   return Object.freeze({
     projectId: manifest.projectId,
@@ -335,5 +408,18 @@ function publicCandidate(manifest: CandidateManifest): LocalScmCandidateReceipt 
     draftPullRequest: null,
     baseCommitSha: manifest.baseCommitSha,
     createdAt: manifest.createdAt,
+  });
+}
+
+function publicMerge(manifest: MergeManifest): LocalScmMergeReceipt {
+  return Object.freeze({
+    scmProxy: "local-git-proxy-v1",
+    branch: "main",
+    candidateBranch: manifest.candidateBranch,
+    baseCommitSha: manifest.baseCommitSha,
+    candidateCommitSha: manifest.candidateCommitSha,
+    mainCommitSha: manifest.mainCommitSha,
+    sourceDigest: manifest.sourceDigest,
+    mergedAt: manifest.mergedAt,
   });
 }

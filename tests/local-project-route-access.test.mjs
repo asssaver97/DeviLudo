@@ -12,6 +12,8 @@ import { GET as readEvidence } from "../app/api/projects/[projectId]/evidence/ro
 import { GET as readFeedback, POST as submitFeedback } from "../app/api/projects/[projectId]/feedback/route.ts";
 import { GET as readValidationEvidence } from "../app/api/projects/[projectId]/local-validation/evidence/[file]/route.ts";
 import { GET as readValidationArtifact } from "../app/api/projects/[projectId]/local-validation/artifact/[file]/route.ts";
+import { GET as readMainEvidence } from "../app/api/projects/[projectId]/main-validation/evidence/[file]/route.ts";
+import { GET as readMainArtifact } from "../app/api/projects/[projectId]/main-validation/artifact/[file]/route.ts";
 import { GET as readValidation, POST as runValidation } from "../app/api/projects/[projectId]/local-validation/route.ts";
 import { GET as readRunners } from "../app/api/projects/[projectId]/runners/route.ts";
 import { GET as readSpec, POST as approveSpec } from "../app/api/projects/[projectId]/spec-revisions/route.ts";
@@ -62,6 +64,12 @@ test("every localhost project surface rejects a syntactically valid project miss
       }),
       await readValidationArtifact(request(`${base}/local-validation/artifact/DeviLudoLocal.zip`), {
         params: Promise.resolve({ projectId, file: "DeviLudoLocal.zip" }),
+      }),
+      await readMainEvidence(request(`${base}/main-validation/evidence/manifest.json`), {
+        params: Promise.resolve({ projectId, file: "manifest.json" }),
+      }),
+      await readMainArtifact(request(`${base}/main-validation/artifact/DeviLudoMain.zip`), {
+        params: Promise.resolve({ projectId, file: "DeviLudoMain.zip" }),
       }),
       await preflightAgent(post(`${base}/agent-preflight`, {}, "missing-preflight"), context),
       await runAgent(post(`${base}/agent-run`, {}, "missing-agent-run"), context),

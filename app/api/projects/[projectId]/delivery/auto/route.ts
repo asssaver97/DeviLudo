@@ -9,6 +9,7 @@ const GATE_STATUS = new Set([
   "WAITING_PROVIDER",
   "LOCAL_EXPORT_TEMPLATES_REQUIRED",
   "LOCAL_VALIDATION_FAILED",
+  "LOCAL_MAIN_VALIDATION_FAILED",
   "PHYSICAL_RUNNERS_REQUIRED",
 ]);
 
@@ -50,6 +51,7 @@ export async function POST(
         stopReason: result.stopReason,
         automaticTransitions: result.automaticTransitions,
         validationExecuted: result.validationExecuted,
+        mainValidationExecuted: result.mainValidationExecuted,
         requiredPhysicalPlatforms: result.requiredPhysicalPlatforms,
         idempotentReplay: saved.replayed,
       },
@@ -76,5 +78,6 @@ function stopMessage(stopReason: string, requiredPhysicalPlatforms: readonly str
     const labels = requiredPhysicalPlatforms.map((platform) => platform === "linux" ? "Linux" : "Windows");
     return `本机证据只证明 macOS；仍需 ${labels.join("、")} 实体 Runner 的 mTLS E2E 证据。`;
   }
+  if (stopReason === "LOCAL_MAIN_VALIDATION_FAILED") return "合并后的 main SHA 发布级门禁失败，已撤销发布权限并创建修复接管点。";
   return "本机 Godot 验证失败，修复后才能继续自动 E2E。";
 }

@@ -57,6 +57,34 @@ export type LocalValidationSnapshot = {
   valid: boolean;
 };
 
+export type LocalMainValidationSnapshot = {
+  schemaVersion: number;
+  evidenceId: string;
+  status: "TESTS_PASSED" | "WAITING_DEPENDENCY" | "FAILED";
+  releaseGate: "WAITING_EXPORT_TEMPLATES" | "MAIN_VALIDATION_PASSED" | "TESTS_FAILED";
+  candidateEvidenceId: string;
+  candidateBundleDigest: string;
+  candidateSha: string;
+  sourceDigest: string;
+  mainSha: string;
+  mainSourceDigest: string;
+  bundleDigest: string;
+  godotVersion: string;
+  targetMatrix: readonly LocalTargetPlatform[];
+  platform: "macos";
+  fixtureOnly: true;
+  buildArtifact: {
+    fileName: "DeviLudoMain.zip";
+    platform: "macos";
+    contentType: "application/zip";
+    sha256: string;
+    sizeBytes: number;
+  } | null;
+  checks: Array<{ name: string; status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY"; durationMs: number; detail: string }>;
+  createdAt: string;
+  valid: boolean;
+};
+
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
 export type LocalAgentVersionAttestation = {
@@ -136,6 +164,7 @@ export type LocalDeliverySnapshot = {
   repairHandoff: LocalPostMergeFailure | null;
   agentExecution: LocalAgentExecutionSnapshot | null;
   localValidation: LocalValidationSnapshot | null;
+  mainValidation: LocalMainValidationSnapshot | null;
   events: LocalDeliveryEvent[];
   updatedAt: string;
 };
@@ -153,7 +182,7 @@ export type LocalDeliveryAction =
   | "reset";
 
 export class LocalDeliveryGateError extends Error {
-  constructor(readonly code: "LOCAL_EXPORT_TEMPLATES_REQUIRED" | "LOCAL_VALIDATION_FAILED" | "LOCAL_VALIDATION_INVALIDATED", message: string) {
+  constructor(readonly code: "LOCAL_EXPORT_TEMPLATES_REQUIRED" | "LOCAL_VALIDATION_FAILED" | "LOCAL_VALIDATION_INVALIDATED" | "LOCAL_MAIN_GATE_REQUIRED", message: string) {
     super(message);
   }
 }
@@ -254,30 +283,66 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
         : historicalValidation.status,
     }
     : null;
+  const historicalMainValidation = snapshot.mainValidation as (LocalMainValidationSnapshot & {
+    schemaVersion?: number;
+    buildArtifact?: LocalMainValidationSnapshot["buildArtifact"];
+  }) | null | undefined;
+  const mainValidation = historicalMainValidation
+    ? {
+      ...historicalMainValidation,
+      schemaVersion: historicalMainValidation.schemaVersion ?? 0,
+      buildArtifact: historicalMainValidation.buildArtifact ?? null,
+      valid: historicalMainValidation.schemaVersion === 1
+        && historicalMainValidation.releaseGate === "MAIN_VALIDATION_PASSED"
+        && historicalMainValidation.status === "TESTS_PASSED"
+        && historicalMainValidation.candidateEvidenceId === localValidation?.evidenceId
+        && historicalMainValidation.candidateBundleDigest === localValidation?.bundleDigest
+        && historicalMainValidation.candidateSha === localValidation?.candidateSha
+        && historicalMainValidation.sourceDigest === localValidation?.sourceDigest
+        && historicalMainValidation.mainSha === historicalMainValidation.candidateSha
+        && historicalMainValidation.mainSourceDigest === historicalMainValidation.sourceDigest
+        && historicalMainValidation.platform === "macos"
+        && historicalMainValidation.fixtureOnly === true
+        && sameTargetMatrix(historicalMainValidation.targetMatrix, targetMatrix)
+        && validLocalMainBuildArtifact(historicalMainValidation.buildArtifact)
+        && hasPassedExportBoot(historicalMainValidation.checks)
+        && historicalMainValidation.valid,
+    }
+    : null;
   const stalePassedBuildEvidence = historicalValidation?.valid === true
     && historicalValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
     && localValidation?.valid === false;
   const rewindForBuildEvidence = stalePassedBuildEvidence
     && !["AWAITING_SPEC_APPROVAL", "AGENT_QUEUED", "AGENT_RUNNING", "CANCELLED", "RELEASED"].includes(snapshot.stage);
+  const rewindForMainEvidence = !rewindForBuildEvidence
+    && localValidation?.valid === true
+    && targetMatrix.length === 1
+    && targetMatrix[0] === "macos"
+    && snapshot.mainSha !== null
+    && (mainValidation === null
+      || (mainValidation.releaseGate === "MAIN_VALIDATION_PASSED" && mainValidation.valid !== true))
+    && !["AWAITING_SPEC_APPROVAL", "AGENT_QUEUED", "AGENT_RUNNING", "CANDIDATE_READY", "E2E_RUNNING", "AWAITING_ACCEPTANCE", "MERGING", "CANCELLED"].includes(snapshot.stage);
+  const rewindReleaseAuthority = rewindForBuildEvidence || rewindForMainEvidence;
 
   return {
     ...snapshot,
     targetMatrix,
     targetResults: rewindForBuildEvidence ? createTargetResults(targetMatrix, "QUEUED") : targetResults,
-    stage: rewindForBuildEvidence ? "CANDIDATE_READY" : snapshot.stage,
+    stage: rewindForBuildEvidence ? "CANDIDATE_READY" : rewindForMainEvidence ? "MERGING" : snapshot.stage,
     evidenceValid: rewindForBuildEvidence ? false : snapshot.evidenceValid,
-    mainSha: rewindForBuildEvidence ? null : snapshot.mainSha,
-    steamBranch: rewindForBuildEvidence ? null : snapshot.steamBranch,
+    mainSha: rewindReleaseAuthority ? null : snapshot.mainSha,
+    steamBranch: rewindReleaseAuthority ? null : snapshot.steamBranch,
     agentExecution,
     repairHandoff: snapshot.repairHandoff ?? null,
-    mfaApprovalId: rewindForBuildEvidence ? null : snapshot.mfaApprovalId ?? null,
-    steamBuildId: rewindForBuildEvidence ? null : snapshot.steamBuildId ?? null,
-    steamReleaseId: rewindForBuildEvidence ? null : snapshot.steamReleaseId ?? null,
-    externalApprovals: rewindForBuildEvidence ? [] : snapshot.externalApprovals ?? [],
-    externalGate: rewindForBuildEvidence ? null : snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
+    mfaApprovalId: rewindReleaseAuthority ? null : snapshot.mfaApprovalId ?? null,
+    steamBuildId: rewindReleaseAuthority ? null : snapshot.steamBuildId ?? null,
+    steamReleaseId: rewindReleaseAuthority ? null : snapshot.steamReleaseId ?? null,
+    externalApprovals: rewindReleaseAuthority ? [] : snapshot.externalApprovals ?? [],
+    externalGate: rewindReleaseAuthority ? null : snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
       ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
       : null),
     localValidation,
+    mainValidation: rewindForBuildEvidence ? null : mainValidation,
     lockedProfile,
   };
 }
@@ -324,6 +389,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     repairHandoff: null,
     agentExecution: null,
     localValidation: null,
+    mainValidation: null,
     events: [{ id: "LOCAL-EVT-0001", type: "PROJECT_CREATED", message: "本地项目已创建，等待批准规格。", at }],
     updatedAt: at,
   };
@@ -360,6 +426,7 @@ export function approveLocalSpec(
       repairHandoff: null,
       agentExecution: null,
       localValidation: null,
+      mainValidation: null,
     },
     "SPEC_APPROVED",
     `${specRevisionId} 已冻结；${agentLabel(lockedProfile.agent)} Profile、配置来源与 ${lockedTargetMatrix.join(" / ")} 目标矩阵已锁定。`,
@@ -410,6 +477,7 @@ export function invalidateLocalDelivery(
       externalApprovals: [],
       repairHandoff: null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+      mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
     },
     "FEEDBACK_CREATED",
@@ -463,6 +531,7 @@ export function recordLocalAgentExecution(
       evidenceValid: false,
       agentExecution: { ...receipt, valid: true },
       localValidation: null,
+      mainValidation: null,
       targetResults: createTargetResults(current.targetMatrix, "QUEUED"),
     },
     "AGENT_CANDIDATE_RECORDED",
@@ -531,9 +600,10 @@ export function recordLocalValidation(
     {
       ...current,
       stage: "CANDIDATE_READY",
-      candidateSha: validation.candidateSha.slice(0, 7),
+      candidateSha: validation.candidateSha,
       evidenceValid: gatePassed ? current.evidenceValid : false,
       targetResults,
+      mainValidation: null,
       localValidation: {
         ...validation,
         targetMatrix: Object.freeze([...validation.targetMatrix]),
@@ -551,9 +621,86 @@ export function recordLocalValidation(
   );
 }
 
+export function recordLocalMainValidation(
+  current: LocalDeliverySnapshot,
+  validation: Omit<LocalMainValidationSnapshot, "valid">,
+): LocalDeliverySnapshot {
+  if (current.stage !== "MERGING" && current.stage !== "MAIN_GATE_RUNNING") {
+    throw new Error("当前交付阶段不能写入 main SHA 门禁证据");
+  }
+  if (!current.runId || !current.localValidation?.valid
+    || current.localValidation.status !== "TESTS_PASSED"
+    || current.localValidation.releaseGate !== "LOCAL_VALIDATION_PASSED") {
+    throw new Error("main SHA 门禁缺少已接受的候选证据");
+  }
+  if (current.targetMatrix.length !== 1 || current.targetMatrix[0] !== "macos") {
+    throw new Error("本地主门禁只能证明 macOS-only 目标矩阵");
+  }
+  const passed = validation.status === "TESTS_PASSED" && validation.releaseGate === "MAIN_VALIDATION_PASSED";
+  const waiting = validation.status === "WAITING_DEPENDENCY" && validation.releaseGate === "WAITING_EXPORT_TEMPLATES";
+  const failed = validation.status === "FAILED" && validation.releaseGate === "TESTS_FAILED";
+  if (!passed && !waiting && !failed) throw new Error("main SHA 门禁状态与证据不一致");
+  if (validation.schemaVersion !== 1
+    || validation.candidateEvidenceId !== current.localValidation.evidenceId
+    || validation.candidateBundleDigest !== current.localValidation.bundleDigest
+    || validation.candidateSha !== current.localValidation.candidateSha
+    || validation.sourceDigest !== current.localValidation.sourceDigest
+    || validation.mainSha !== validation.candidateSha
+    || validation.mainSourceDigest !== validation.sourceDigest
+    || !/^[a-f0-9]{40}$/.test(validation.mainSha)
+    || !/^[a-f0-9]{64}$/.test(validation.bundleDigest)
+    || validation.platform !== "macos"
+    || validation.fixtureOnly !== true
+    || !sameTargetMatrix(validation.targetMatrix, current.targetMatrix)) {
+    throw new Error("main SHA 门禁证据与已接受候选绑定不一致");
+  }
+  if (passed && (!validLocalMainBuildArtifact(validation.buildArtifact) || !hasPassedExportBoot(validation.checks))) {
+    throw new Error("main SHA 门禁缺少重新导出的可启动构建物");
+  }
+  if (!passed && validation.buildArtifact !== null) throw new Error("未通过的 main SHA 门禁不能授权构建物");
+  const mainValidation: LocalMainValidationSnapshot = {
+    ...validation,
+    targetMatrix: Object.freeze([...validation.targetMatrix]),
+    valid: true,
+  };
+  if (failed) {
+    return handoffLocalPostMergeFailure(
+      { ...current, stage: "MAIN_GATE_RUNNING", mainSha: validation.mainSha, mainValidation },
+      "MAIN_GATE_FAILURE",
+      validation.evidenceId,
+    );
+  }
+  if (waiting) {
+    return event({
+      ...current,
+      stage: "MAIN_GATE_RUNNING",
+      mainSha: validation.mainSha,
+      mainValidation,
+    }, "MAIN_GATE_DEPENDENCY_WAIT", "候选已合并到实际 main；发布级重新导出正在等待固定模板。 ");
+  }
+  return event({
+    ...current,
+    stage: "MFA_REQUIRED",
+    mainSha: validation.mainSha,
+    mainValidation,
+    steamReleaseId: `RELEASE-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
+  }, "MAIN_GATE_PASSED", "实际 main SHA 已重新导出、启动并通过完整门禁，等待 MFA。 ");
+}
+
 function validLocalBuildArtifact(value: LocalValidationSnapshot["buildArtifact"] | undefined): value is NonNullable<LocalValidationSnapshot["buildArtifact"]> {
   return !!value
     && value.fileName === "DeviLudoLocal.zip"
+    && value.platform === "macos"
+    && value.contentType === "application/zip"
+    && /^[a-f0-9]{64}$/.test(value.sha256)
+    && Number.isSafeInteger(value.sizeBytes)
+    && value.sizeBytes > 0
+    && value.sizeBytes <= 512 * 1024 * 1024;
+}
+
+function validLocalMainBuildArtifact(value: LocalMainValidationSnapshot["buildArtifact"] | undefined): value is NonNullable<LocalMainValidationSnapshot["buildArtifact"]> {
+  return !!value
+    && value.fileName === "DeviLudoMain.zip"
     && value.platform === "macos"
     && value.contentType === "application/zip"
     && /^[a-f0-9]{64}$/.test(value.sha256)
@@ -597,6 +744,7 @@ export function applyLocalDeliveryAction(
         externalGate: null,
         externalApprovals: [],
         localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+        mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
         agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
       },
       "DELIVERY_CANCELLED",
@@ -746,17 +894,8 @@ export function applyLocalDeliveryAction(
       );
     }
     case "MERGING":
-      return event(
-        { ...current, stage: "MAIN_GATE_RUNNING", mainSha: "f21c0de" },
-        "MAIN_SHA_LOCKED",
-        "Draft PR 已在本地 SCM 合并；发布门禁锁定实际 main SHA。",
-      );
     case "MAIN_GATE_RUNNING":
-      return event({
-        ...current,
-        stage: "MFA_REQUIRED",
-        steamReleaseId: `RELEASE-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
-      }, "MAIN_GATE_PASSED", "main SHA 完整门禁通过，等待 MFA。 ");
+      throw new LocalDeliveryGateError("LOCAL_MAIN_GATE_REQUIRED", "main SHA 必须由本机执行服务完成真实合并、重新导出和启动门禁");
     case "STEAM_BETA_UPLOADING":
       return event(
         {
@@ -795,6 +934,7 @@ export function applyLocalDeliveryAction(
 function handoffLocalPostMergeFailure(
   current: LocalDeliverySnapshot,
   reason: LocalPostMergeFailure["reason"],
+  evidenceId?: string,
 ): LocalDeliverySnapshot {
   const expectedStage = reason === "MAIN_GATE_FAILURE" ? "MAIN_GATE_RUNNING" : "STEAM_REINSTALL_E2E";
   if (current.stage !== expectedStage || !current.mainSha || !current.runId) {
@@ -807,7 +947,7 @@ function handoffLocalPostMergeFailure(
   const repairHandoff: LocalPostMergeFailure = Object.freeze({
     reason,
     attempt: 1,
-    evidenceId: `EV-LOCAL-FAILED-${sequence}`,
+    evidenceId: evidenceId ?? `EV-LOCAL-FAILED-${sequence}`,
     repairPromptId: `repair:local-post-merge-${sequence}`,
     baselineMainSha: current.mainSha,
     previousRunId: current.runId,
@@ -835,6 +975,7 @@ function handoffLocalPostMergeFailure(
       repairHandoff,
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+      mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
     },
     reason === "MAIN_GATE_FAILURE" ? "MAIN_GATE_FAILED" : "STEAM_REINSTALL_FAILED",
     `${label} 的失败证据已冻结；旧发布权限已撤销，等待用户创建并批准新规格。`,

@@ -50,7 +50,7 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 
 `/settings/agents` 使用租户作用域的本地代理验证 BYOK 只写响应、Provider 草稿和默认 Profile；`/projects/ember-archipelago/agent-settings` 验证项目从 ACTIVE 继承 Profile 中选择。规格批准会按项目、租户、平台顺序解析最高优先级配置，并把 Profile 来源与全部精确运行字段复制到不可变 D1 快照；若该覆盖的 Installation 或 Provider 已失效，审批返回 `AGENT_PROFILE_NOT_READY`，不会静默回退或在 Claude/Codex 间切换。两条本地路径与生产页面相同，但只对真实 loopback URL 且显式 `DEVILUDO_LOCAL_TEST_MODE=1` 生效，不会联系第三方 Provider。
 
-在项目页批准规格后，浏览器会调用仅限 loopback 的 `POST /api/projects/{projectId}/delivery/auto`。服务端只接收空 JSON，不接受客户端提交阶段、SHA 或证据；它自动推进 Fixture 开发并调用真实 Godot 侧车。只有目标矩阵为 macOS 时，本机证据才可完成该目标并停在用户验收；若选择 Linux 或 Windows，响应会以 `409 PHYSICAL_RUNNERS_REQUIRED` 列出缺失平台，保持候选与矩阵结果未通过，绝不把 macOS Fixture 证据扩张为其他系统的通过结果。页面关闭或请求中断后可安全重试，同一幂等键不会重复写入已完成步骤。候选验收后自动合并并重跑 main SHA 门禁，停在 MFA；MFA 确认后自动推进 Beta 与回装演练，停在第一道 Steam 外部批准。Provider 恢复、候选验收、MFA 和每一道外部批准始终要求显式操作，自动入口不能跨越。
+在项目页批准规格后，浏览器会调用仅限 loopback 的 `POST /api/projects/{projectId}/delivery/auto`。服务端只接收空 JSON，不接受客户端提交阶段、SHA 或证据；它自动推进 Fixture 开发并调用真实 Godot 侧车。只有目标矩阵为 macOS 时，本机证据才可完成该目标并停在用户验收；若选择 Linux 或 Windows，响应会以 `409 PHYSICAL_RUNNERS_REQUIRED` 列出缺失平台，保持候选与矩阵结果未通过，绝不把 macOS Fixture 证据扩张为其他系统的通过结果。页面关闭或请求中断后可安全重试，同一幂等键不会重复写入已完成步骤。候选验收后，侧车校验 candidate evidence v4、构建物、完整 Git SHA 与 source digest，原子快进本地 `main`，再以实际 main SHA 独立重跑导入、E2E、macOS 导出和导出应用启动，生成 main evidence v1 及 `DeviLudoMain.zip` 后才停在 MFA；手工 `advance` 无权跳过这一步。MFA 确认后自动推进 Beta 与回装演练，停在第一道 Steam 外部批准。Provider 恢复、候选验收、MFA 和每一道外部批准始终要求显式操作，自动入口不能跨越。
 
 真实 Godot 侧车会：
 
@@ -58,12 +58,13 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 2. 通过 SCM 代理在工作区外初始化 base Git 元数据，再由代理提交样例候选并生成 base/candidate SHA 与 tree digest；
 3. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
 4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml`、`godot.log` 和通过门禁后可下载的 `DeviLudoLocal.zip`。
+5. 用户验收后把精确候选快进到本地 `main`，在独立 main 门禁目录重复上述真实检查，并生成单独可下载的 `DeviLudoMain.zip`；候选构建物不能替代 main 构建物。
 
-每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。证据 v3 包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本、逐项检查结果、批准规格中保持顺序的目标矩阵，以及成功导出的 macOS zip 文件名、内容类型、SHA-256 与字节数。下载前侧车重新检查文件类型、大小、摘要和写入时间，Web 再将响应元数据与 D1 中的不可变证据逐项比对；旧 v2 通过证据会被归档并重新执行，不能授权构建物。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移、夹带未选系统或通过状态缺少构建物时只能审计，不能满足当前 Run。
+每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。候选证据 v4 包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本、逐项检查结果、批准规格中保持顺序的目标矩阵，以及成功导出的 macOS zip 文件名、内容类型、SHA-256 与字节数；main 证据 v1 还绑定候选 evidence/bundle、合并回执与实际 main tree。下载前侧车重新检查文件类型、大小、摘要和写入时间，Web 再将响应元数据与 D1 中的不可变证据逐项比对；旧版通过证据会被归档并重新执行，不能授权构建物。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移、夹带未选系统或通过状态缺少构建物时只能审计，不能满足当前 Run。
 
 如果本机没有通过上述固定安装器安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 
-Fixture 成功链走到 `main SHA 发布门禁` 或 `Steam 回装测试` 时，可以分别点击“模拟 main 门禁失败”或“模拟 Steam 回装失败”。本地 D1 会持久化失败 evidence、冻结修复指令和失败 main 基线，同时清空旧 main、MFA、Steam Build/Release 与外部批准授权。项目页随后只显示人工修改入口；创建不同的新规格草稿并再次批准后才会签发新运行。该演练完全在 loopback Fixture 内完成，不会请求 GitHub、Steam 或开发模型。
+main SHA 真实门禁返回失败，或成功链走到 `Steam 回装测试` 后触发失败演练时，本地 D1 会持久化失败 evidence、冻结修复指令和失败 main 基线，同时清空旧 main、MFA、Steam Build/Release 与外部批准授权。项目页随后只显示人工修改入口；创建不同的新规格草稿并再次批准后才会签发新运行。该演练完全在 loopback Fixture 内完成，不会请求 GitHub、Steam 或开发模型。
 
 ## Smoke check
 

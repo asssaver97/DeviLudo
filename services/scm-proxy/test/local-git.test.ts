@@ -57,6 +57,20 @@ test("SCM proxy keeps Git metadata outside the workspace and creates an idempote
     commitMessage: "agent: implement SPEC-001",
   }), candidate);
 
+  const merged = await proxy.merge({
+    ...value.binding,
+    expectedCandidateCommitSha: candidate.commitSha,
+    expectedSourceDigest: candidate.sourceDigest,
+  });
+  assert.equal(merged.mainCommitSha, candidate.commitSha);
+  assert.equal(merged.sourceDigest, candidate.sourceDigest);
+  assert.equal(merged.branch, "main");
+  assert.deepEqual(await proxy.merge({
+    ...value.binding,
+    expectedCandidateCommitSha: candidate.commitSha,
+    expectedSourceDigest: candidate.sourceDigest,
+  }), merged);
+
   const gitDirectory = path.join(value.storageRoot, ".scm", "project-1", "run-1", "attempt-1", "repository", ".git");
   await execFileAsync("/usr/bin/git", [`--git-dir=${gitDirectory}`, "cat-file", "-e", `${candidate.commitSha}^{commit}`]);
 });
@@ -69,6 +83,29 @@ test("SCM proxy rejects no-op runs, lock drift and unsafe branch names", async (
   await assert.rejects(proxy.finalize({ ...common, candidateBranch: "deviludo/no-op" }), /without a candidate file change/);
   await assert.rejects(proxy.finalize({ ...common, expectedBaseCommitSha: "f".repeat(40), candidateBranch: "deviludo/drift" }), /base commit lock/);
   await assert.rejects(proxy.finalize({ ...common, candidateBranch: "deviludo/../escape" }), /branch is invalid/);
+});
+
+test("SCM merge rejects candidate evidence drift before moving main", async () => {
+  const value = await fixture("merge-drift");
+  const proxy = new LocalGitScmProxy({ storageRoot: value.storageRoot });
+  const base = await proxy.prepare(value.binding);
+  await writeFile(path.join(value.workspaceRoot, "scripts", "main.gd"), "extends Node\nfunc _ready():\n\tprint(\"candidate\")\n", "utf8");
+  const candidate = await proxy.finalize({
+    ...value.binding,
+    expectedBaseCommitSha: base.baseCommitSha,
+    candidateBranch: "deviludo/run-1/attempt-1",
+    commitMessage: "agent: implement SPEC-001",
+  });
+  await assert.rejects(proxy.merge({
+    ...value.binding,
+    expectedCandidateCommitSha: "f".repeat(40),
+    expectedSourceDigest: candidate.sourceDigest,
+  }), /accepted evidence/);
+  await assert.rejects(proxy.merge({
+    ...value.binding,
+    expectedCandidateCommitSha: candidate.commitSha,
+    expectedSourceDigest: "e".repeat(64),
+  }), /accepted evidence/);
 });
 
 test("SCM proxy rejects symlinks, nested Git metadata and workspaces outside its storage root", async () => {

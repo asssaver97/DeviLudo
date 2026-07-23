@@ -7,6 +7,7 @@ import {
   invalidateLocalDelivery,
   normalizeLocalDeliverySnapshot,
   recordLocalAgentExecution,
+  recordLocalMainValidation,
   recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
 
@@ -15,20 +16,60 @@ const macosBuild = Object.freeze({
   sha256: "9".repeat(64), sizeBytes: 4096,
 });
 
-function localDeliveryAtMainGate(projectId) {
-  let state = approveLocalSpec(createLocalDelivery(projectId), "SPEC-POST-MERGE-001", `RUN-${projectId}`);
+const macosMainBuild = Object.freeze({
+  fileName: "DeviLudoMain.zip", platform: "macos", contentType: "application/zip",
+  sha256: "8".repeat(64), sizeBytes: 8192,
+});
+
+function passingCandidate(state) {
+  return recordLocalValidation(state, {
+    schemaVersion: 4, evidenceId: "EV-LOCAL-AABBCCDDEEFF",
+    status: "TESTS_PASSED", releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: "a".repeat(40), sourceDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+    godotVersion: "4.6.2.stable", targetMatrix: state.targetMatrix,
+    platform: "macos", fixtureOnly: true, buildArtifact: macosBuild,
+    checks: [
+      { name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" },
+      { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
+    ],
+    createdAt: "2026-07-23T00:00:00.000Z",
+  });
+}
+
+function mainEvidence(state, status = "passed") {
+  const candidate = state.localValidation;
+  const passed = status === "passed";
+  return {
+    schemaVersion: 1,
+    evidenceId: passed ? "EV-MAIN-AABBCCDDEEFF" : "EV-MAIN-112233445566",
+    status: passed ? "TESTS_PASSED" : "WAITING_DEPENDENCY",
+    releaseGate: passed ? "MAIN_VALIDATION_PASSED" : "WAITING_EXPORT_TEMPLATES",
+    candidateEvidenceId: candidate.evidenceId, candidateBundleDigest: candidate.bundleDigest,
+    candidateSha: candidate.candidateSha, sourceDigest: candidate.sourceDigest,
+    mainSha: candidate.candidateSha, mainSourceDigest: candidate.sourceDigest,
+    bundleDigest: "d".repeat(64), godotVersion: "4.6.2.stable", targetMatrix: state.targetMatrix,
+    platform: "macos", fixtureOnly: true, buildArtifact: passed ? macosMainBuild : null,
+    checks: passed
+      ? [{ name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "main export booted" }]
+      : [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 1, detail: "templates missing" }],
+    createdAt: "2026-07-23T00:01:00.000Z",
+  };
+}
+
+function localDeliveryAtAcceptedCandidate(projectId) {
+  const initial = createLocalDelivery(projectId);
+  let state = approveLocalSpec(initial, "SPEC-POST-MERGE-001", `RUN-${projectId}`, initial.lockedProfile, ["macos"]);
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
+  state = passingCandidate(state);
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
-  state = applyLocalDeliveryAction(state, "advance");
-  state = applyLocalDeliveryAction(state, "advance");
-  state = applyLocalDeliveryAction(state, "accept");
-  return applyLocalDeliveryAction(state, "advance");
+  return applyLocalDeliveryAction(state, "accept");
 }
 
 test("local delivery fixture exercises the complete gated chain without external calls", () => {
-  let state = approveLocalSpec(createLocalDelivery("project-local"), "SPEC-004", "RUN-LOCAL-1");
+  const initial = createLocalDelivery("project-local");
+  let state = approveLocalSpec(initial, "SPEC-004", "RUN-LOCAL-1", initial.lockedProfile, ["macos"]);
   assert.equal(state.stage, "AGENT_QUEUED");
   assert.equal(state.lockedProfile.agent, "claude-code");
 
@@ -40,22 +81,20 @@ test("local delivery fixture exercises the complete gated chain without external
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "CANDIDATE_READY");
+  state = passingCandidate(state);
   state = applyLocalDeliveryAction(state, "advance");
-  assert.equal(state.targetResults.linux, "RUNNING");
+  assert.equal(state.targetResults.macos, "RUNNING");
 
   state = applyLocalDeliveryAction(state, "advance");
-  state = applyLocalDeliveryAction(state, "advance");
-  state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "AWAITING_ACCEPTANCE");
-  assert.deepEqual(state.targetResults, { linux: "PASSED", windows: "PASSED", macos: "PASSED" });
+  assert.deepEqual(state.targetResults, { macos: "PASSED" });
   assert.equal(state.evidenceValid, true);
 
   state = applyLocalDeliveryAction(state, "accept");
-  state = applyLocalDeliveryAction(state, "advance");
-  assert.equal(state.stage, "MAIN_GATE_RUNNING");
-  assert.equal(state.mainSha, "f21c0de");
-  state = applyLocalDeliveryAction(state, "advance");
+  assert.throws(() => applyLocalDeliveryAction(state, "advance"), /本机执行服务/);
+  state = recordLocalMainValidation(state, mainEvidence(state));
   assert.equal(state.stage, "MFA_REQUIRED");
+  assert.equal(state.mainSha, "a".repeat(40));
   assert.match(state.steamReleaseId, /^RELEASE-LOCAL-/);
   state = applyLocalDeliveryAction(state, "confirm-mfa");
   assert.match(state.mfaApprovalId, /^MFA-LOCAL-/);
@@ -182,9 +221,10 @@ test("feedback invalidates all local evidence and requires a new immutable appro
 
 test("local main-gate failure freezes evidence, revokes release authority and requires a new spec", () => {
   const originalRunId = "RUN-project-main-failure";
-  let state = localDeliveryAtMainGate("project-main-failure");
+  let state = localDeliveryAtAcceptedCandidate("project-main-failure");
+  state = recordLocalMainValidation(state, mainEvidence(state, "waiting"));
   assert.equal(state.stage, "MAIN_GATE_RUNNING");
-  assert.equal(state.mainSha, "f21c0de");
+  assert.equal(state.mainSha, "a".repeat(40));
 
   state = applyLocalDeliveryAction(state, "main-gate-fail");
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
@@ -193,9 +233,9 @@ test("local main-gate failure freezes evidence, revokes release authority and re
   assert.equal(state.candidateSha, null);
   assert.equal(state.steamBranch, null);
   assert.equal(state.evidenceValid, false);
-  assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
+  assert.deepEqual(state.targetResults, { macos: "INVALIDATED" });
   assert.equal(state.repairHandoff.reason, "MAIN_GATE_FAILURE");
-  assert.equal(state.repairHandoff.baselineMainSha, "f21c0de");
+  assert.equal(state.repairHandoff.baselineMainSha, "a".repeat(40));
   assert.equal(state.repairHandoff.previousRunId, originalRunId);
   assert.deepEqual(state.repairHandoff.revokedAuthorities, [
     "MAIN_SHA", "MFA", "STEAM_BUILD", "STEAM_RELEASE", "EXTERNAL_APPROVALS",
@@ -210,8 +250,8 @@ test("local main-gate failure freezes evidence, revokes release authority and re
 });
 
 test("local Steam reinstall failure clears Beta authority before human revision", () => {
-  let state = localDeliveryAtMainGate("project-steam-failure");
-  state = applyLocalDeliveryAction(state, "advance");
+  let state = localDeliveryAtAcceptedCandidate("project-steam-failure");
+  state = recordLocalMainValidation(state, mainEvidence(state));
   state = applyLocalDeliveryAction(state, "confirm-mfa");
   state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "STEAM_REINSTALL_E2E");
@@ -223,7 +263,7 @@ test("local Steam reinstall failure clears Beta authority before human revision"
   state = applyLocalDeliveryAction(state, "steam-reinstall-fail");
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
   assert.equal(state.repairHandoff.reason, "STEAM_INSTALL_FAILURE");
-  assert.equal(state.repairHandoff.baselineMainSha, "f21c0de");
+  assert.equal(state.repairHandoff.baselineMainSha, "a".repeat(40));
   assert.equal(state.steamBranch, null);
   assert.equal(state.mfaApprovalId, null);
   assert.equal(state.steamBuildId, null);

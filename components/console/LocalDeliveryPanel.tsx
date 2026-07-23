@@ -437,6 +437,29 @@ export function LocalDeliveryPanel({
             ) : <span className="local-real-validation-wait">批准规格后可运行</span>}
           </div>
 
+          {snapshot.mainValidation ? (
+            <div className={`local-real-validation ${snapshot.mainValidation.valid ? "ready" : "pending"}`}>
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">实际 main SHA 发布级复验</span>
+                <h3>{snapshot.mainValidation.evidenceId}</h3>
+                <p><code>{snapshot.mainValidation.mainSha}</code> · 从已接受候选快进合并后，独立重跑 Godot、重新导出并启动 ZIP 内应用。</p>
+              </div>
+              <div className="local-real-validation-result">
+                <span className={snapshot.mainValidation.status === "FAILED" ? "failed" : snapshot.mainValidation.releaseGate === "MAIN_VALIDATION_PASSED" ? "passed" : "waiting"}>
+                  {snapshot.mainValidation.status === "FAILED" ? "main 门禁失败" : snapshot.mainValidation.releaseGate === "MAIN_VALIDATION_PASSED" ? "实际 main 已通过" : "等待依赖 · 导出模板"}
+                </span>
+                <div>
+                  <a href={`/api/projects/${projectId}/main-validation/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>
+                  <a href={`/api/projects/${projectId}/main-validation/evidence/junit.xml`} rel="noreferrer" target="_blank">JUnit</a>
+                  <a href={`/api/projects/${projectId}/main-validation/evidence/godot.log`} rel="noreferrer" target="_blank">日志</a>
+                  {snapshot.mainValidation.valid && snapshot.mainValidation.buildArtifact ? (
+                    <a href={`/api/projects/${projectId}/main-validation/artifact/${snapshot.mainValidation.buildArtifact.fileName}`}>下载 main 构建</a>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED" && snapshot.externalGate ? (
             <div className="local-real-validation pending">
               <div className="local-real-validation-copy">

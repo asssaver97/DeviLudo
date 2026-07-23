@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  LocalMainGateCoordinator,
   LocalRuntimeRequestError,
   LocalRuntimeRunCoordinator,
   localRuntimeRunBinding,
+  parseLocalMainGateRequest,
   parseLocalRuntimeRequest,
 } from "../src/http-contract";
 
@@ -91,4 +93,31 @@ test("an active run deduplicates the exact binding and rejects a conflicting cla
 
   assert.equal(await coordinator.start({ ...request, targetMatrix: ["windows"] }, async () => "successor"), "successor");
   assert.equal(executions, 1);
+});
+
+test("main gate parsing and coordination bind the exact accepted candidate evidence", async () => {
+  const request = parseLocalMainGateRequest(Buffer.from(JSON.stringify({
+    projectId: "project-http",
+    runId: "RUN-HTTP-001",
+    specRevisionId: "SPEC-HTTP-001",
+    targetMatrix: ["macos"],
+    candidateEvidenceId: "EV-LOCAL-ABCDEF123456",
+    candidateBundleDigest: "a".repeat(64),
+    candidateSha: "b".repeat(40),
+    sourceDigest: "c".repeat(64),
+  })));
+  const coordinator = new LocalMainGateCoordinator<string>();
+  let finish!: (value: string) => void;
+  const first = coordinator.start(request, () => new Promise<string>((resolve) => { finish = resolve; }));
+  assert.equal(coordinator.start(request, async () => "wrong"), first);
+  assert.throws(
+    () => coordinator.start({ ...request, candidateSha: "d".repeat(40) }, async () => "wrong"),
+    (error) => error instanceof LocalRuntimeRequestError && error.code === "RUN_BINDING_CONFLICT",
+  );
+  finish("complete");
+  assert.equal(await first, "complete");
+  assert.throws(
+    () => parseLocalMainGateRequest(Buffer.from(JSON.stringify({ ...request, candidateSha: "short" }))),
+    (error) => error instanceof LocalRuntimeRequestError && error.code === "INVALID_REQUEST",
+  );
 });

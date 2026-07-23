@@ -5,6 +5,13 @@ export type LocalRuntimeRequest = {
   targetMatrix: readonly ("linux" | "windows" | "macos")[];
 };
 
+export type LocalMainGateRequest = LocalRuntimeRequest & {
+  candidateEvidenceId: string;
+  candidateBundleDigest: string;
+  candidateSha: string;
+  sourceDigest: string;
+};
+
 export type LocalRuntimeCheck = {
   name: "import" | "boot" | "core-loop" | "save-load" | "performance" | "macos-export" | "macos-export-boot";
   status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY";
@@ -31,6 +38,48 @@ export type LocalRuntimeEvidence = {
   artifactDigests: Record<"junit.xml" | "godot.log", string>;
   buildArtifact: {
     fileName: "DeviLudoLocal.zip";
+    platform: "macos";
+    contentType: "application/zip";
+    sha256: string;
+    sizeBytes: number;
+  } | null;
+  testPlan: "deviludo-local-testkit-1.0.0";
+  fixtureOnly: true;
+  createdAt: string;
+};
+
+export type LocalMainGateEvidence = {
+  schemaVersion: 1;
+  phase: "MAIN_SHA_GATE";
+  evidenceId: string;
+  projectId: string;
+  runId: string;
+  specRevisionId: string;
+  targetMatrix: readonly ("linux" | "windows" | "macos")[];
+  platform: "macos";
+  status: "TESTS_PASSED" | "WAITING_DEPENDENCY" | "FAILED";
+  releaseGate: "WAITING_EXPORT_TEMPLATES" | "MAIN_VALIDATION_PASSED" | "TESTS_FAILED";
+  candidateEvidenceId: string;
+  candidateBundleDigest: string;
+  candidateSha: string;
+  sourceDigest: string;
+  mainSha: string;
+  mainSourceDigest: string;
+  mergeReceipt: {
+    scmProxy: "local-git-proxy-v1";
+    branch: "main";
+    candidateCommitSha: string;
+    mainCommitSha: string;
+    sourceDigest: string;
+    mergedAt: string;
+  };
+  bundleDigest: string;
+  godotVersion: string;
+  checks: LocalRuntimeCheck[];
+  artifacts: Array<"manifest.json" | "junit.xml" | "godot.log">;
+  artifactDigests: Record<"junit.xml" | "godot.log", string>;
+  buildArtifact: {
+    fileName: "DeviLudoMain.zip";
     platform: "macos";
     contentType: "application/zip";
     sha256: string;

@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { GET as downloadBuild } from "../app/api/projects/[projectId]/local-validation/artifact/[file]/route.ts";
-import { saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
+import { GET as downloadMainBuild } from "../app/api/projects/[projectId]/main-validation/artifact/[file]/route.ts";
+import { commandLocalDelivery, saveLocalMainValidation, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
 import { LocalRuntimeRequestVerifier } from "../services/local-runtime/src/request-auth.ts";
 import { ensureLocalProject } from "./helpers/local-project.mjs";
 
@@ -113,6 +114,63 @@ test("local build download rejects sidecar metadata drift before streaming bytes
     });
     assert.equal(response.status, 502);
     assert.equal((await response.json()).error.code, "BUILD_ARTIFACT_UNAVAILABLE");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("main build download streams only the independently revalidated merged-main artifact", async () => {
+  const projectId = `main-build-download-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
+  const started = await startLocalDelivery(projectId, "SPEC-MAIN-BUILD", "RUN-MAIN-BUILD", `start:${projectId}`, undefined, ["macos"]);
+  await commandLocalDelivery(projectId, "advance", `agent-start:${projectId}`);
+  await commandLocalDelivery(projectId, "advance", `candidate:${projectId}`);
+  const candidateSha = "a".repeat(40);
+  const sourceDigest = "b".repeat(64);
+  const candidateBundleDigest = "c".repeat(64);
+  const candidate = await saveLocalValidation(projectId, {
+    schemaVersion: 4, evidenceId: "EV-LOCAL-MAIN123456", status: "TESTS_PASSED", releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha, sourceDigest, bundleDigest: candidateBundleDigest, godotVersion: "4.6.2.stable",
+    targetMatrix: started.snapshot.targetMatrix, platform: "macos", fixtureOnly: true,
+    buildArtifact: { fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip", sha256: "9".repeat(64), sizeBytes: 42 },
+    checks: [{ name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "candidate booted" }],
+    createdAt: "2026-07-23T00:00:00.000Z",
+  }, `candidate-evidence:${projectId}`);
+  await commandLocalDelivery(projectId, "advance", `e2e-start:${projectId}`);
+  await commandLocalDelivery(projectId, "advance", `e2e-pass:${projectId}`);
+  await commandLocalDelivery(projectId, "accept", `accept:${projectId}`);
+
+  const bytes = Buffer.from("independently revalidated merged main bytes");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  await saveLocalMainValidation(projectId, {
+    schemaVersion: 1, evidenceId: "EV-MAIN-BUILD123456", status: "TESTS_PASSED", releaseGate: "MAIN_VALIDATION_PASSED",
+    candidateEvidenceId: candidate.snapshot.localValidation.evidenceId, candidateBundleDigest,
+    candidateSha, sourceDigest, mainSha: candidateSha, mainSourceDigest: sourceDigest,
+    bundleDigest: "d".repeat(64), godotVersion: "4.6.2.stable", targetMatrix: started.snapshot.targetMatrix,
+    platform: "macos", fixtureOnly: true,
+    buildArtifact: { fileName: "DeviLudoMain.zip", platform: "macos", contentType: "application/zip", sha256, sizeBytes: bytes.byteLength },
+    checks: [{ name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "main booted" }],
+    createdAt: "2026-07-23T00:01:00.000Z",
+  }, `main-evidence:${projectId}`);
+
+  const verifier = new LocalRuntimeRequestVerifier(sidecarKey);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    assert.equal(path, `/v1/main-gates/${projectId}/RUN-MAIN-BUILD/artifacts/DeviLudoMain.zip`);
+    verifier.verify({ method: "GET", path, body: "", headers: Object.fromEntries(new Headers(init?.headers).entries()) });
+    return new Response(bytes, { headers: {
+      "content-type": "application/zip", "content-length": String(bytes.byteLength),
+      "x-deviludo-artifact-sha256": sha256,
+    } });
+  };
+  try {
+    const response = await downloadMainBuild(request(projectId, "DeviLudoMain.zip"), {
+      params: Promise.resolve({ projectId, file: "DeviLudoMain.zip" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="DeviLudoMain.zip"');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
   } finally {
     globalThis.fetch = originalFetch;
   }

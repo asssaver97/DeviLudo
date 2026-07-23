@@ -83,6 +83,7 @@ export function EvidencePage() {
   const [verification, setVerification] = useState<{ projectId: string; evidenceId: string; message: string; ok: boolean } | null>(null);
   const error = projectError || deliveryError || catalogError;
   const evidence = delivery?.localValidation ?? null;
+  const mainEvidence = delivery?.mainValidation ?? null;
   const productionEntries = catalog?.entries ?? [];
   const currentEvidenceIds = new Set([
     productionDelivery?.evidenceBundleId,
@@ -157,17 +158,20 @@ export function EvidencePage() {
     <AppShell>
       <section className="page-heading resource-heading">
         <div><span className="eyebrow">可追溯交付 · {mode === "LOCAL_FIXTURE" ? "本地实况" : "生产投影"}</span><h1>证据中心</h1><p>{error ? `状态读取失败：${error}` : project ? `${project.name} 的证据绑定冻结规格、锁定提交与目标矩阵；Web 进程不读取生产制品库。` : projectsLoading ? "正在读取可访问项目…" : "创建或绑定项目后查看交付证据。"}</p></div>
-        <div className="resource-heading-actions"><ProjectScopeSelector projects={projects} selectedProjectId={selectedProjectId} onChange={selectProject} /><span className="resource-stat"><b>{project ? evidence?.valid ? 1 : validProductionEvidence : 0}</b><small>有效证据包</small></span></div>
+        <div className="resource-heading-actions"><ProjectScopeSelector projects={projects} selectedProjectId={selectedProjectId} onChange={selectProject} /><span className="resource-stat"><b>{project ? (evidence?.valid ? 1 : 0) + (mainEvidence?.valid ? 1 : 0) || validProductionEvidence : 0}</b><small>有效证据包</small></span></div>
       </section>
       {!project ? <EmptyProjectResource loading={projectsLoading} noun="交付证据" /> : <>
       {verification?.projectId === selectedProjectId ? <div className={`inline-notice ${verification.ok ? "" : "danger"}`}><CheckIcon /> {verification.evidenceId}：{verification.message}</div> : null}
       <section className="evidence-table-panel">
         <div className="evidence-head"><span>证据包</span><span>平台</span><span>提交</span><span>测试</span><span>签名</span><span>生成时间</span><span /></div>
-        {evidence ? (
+        {evidence ? (<>
           <div className="evidence-row" key={evidence.evidenceId}>
             <span><FileIcon /><b>{evidence.evidenceId}</b></span><span>macOS 本机 Fixture</span><span className="mono" title={evidence.candidateSha}>{evidence.candidateSha.slice(0, 7)}</span><span>{evidence.checks.filter((check) => check.status === "PASSED").length} / {evidence.checks.length}</span><span className={evidence.valid ? "signed" : "invalid"}>{evidence.valid ? "有效" : "已失效"}</span><span>{new Date(evidence.createdAt).toLocaleString("zh-CN")}</span><button disabled={!evidence.valid} onClick={() => void verifyEvidence()} type="button">验证</button>
           </div>
-        ) : productionEntries.length ? (
+          {mainEvidence ? <div className="evidence-row" key={mainEvidence.evidenceId}>
+            <span><FileIcon /><b>{mainEvidence.evidenceId}</b></span><span>macOS main 复验</span><span className="mono" title={mainEvidence.mainSha}>{mainEvidence.mainSha.slice(0, 7)}</span><span>{mainEvidence.checks.filter((check) => check.status === "PASSED").length} / {mainEvidence.checks.length}</span><span className={mainEvidence.valid ? "signed" : "invalid"}>{mainEvidence.valid ? "有效" : "已失效"}</span><span>{new Date(mainEvidence.createdAt).toLocaleString("zh-CN")}</span><button disabled type="button">main 门禁</button>
+          </div> : null}
+        </>) : productionEntries.length ? (
           productionEntries.map((entry) => {
           const passed = entry.bundle.platformEvidence.filter((platform) => platform.status === "PASSED").length;
           const valid = entry.invalidatedAt === null && entry.bundle.status === "PASSED";
@@ -186,6 +190,7 @@ export function EvidencePage() {
         ) : <div className="evidence-empty"><FileIcon /><b>尚无真实证据</b><span>完成锁定目标矩阵后，权威投影会显示证据引用。</span></div>}
       </section>
       {evidence && selectedProjectId ? <div className="evidence-artifacts"><b>{evidence.buildArtifact ? "交付与原始证据" : "原始证据"}</b>{evidence.buildArtifact ? <a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/artifact/${evidence.buildArtifact.fileName}`}>下载 macOS 游戏 · {formatBytes(evidence.buildArtifact.sizeBytes)}</a> : null}<a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{evidence.godotVersion} · {evidence.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待导出模板" : "ZIP 内导出应用已启动并正常退出"}</span></div> : null}
+      {mainEvidence && selectedProjectId ? <div className="evidence-artifacts"><b>实际 main SHA 复验证据</b>{mainEvidence.valid && mainEvidence.buildArtifact ? <a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/main-validation/artifact/${mainEvidence.buildArtifact.fileName}`}>下载 main 构建 · {formatBytes(mainEvidence.buildArtifact.sizeBytes)}</a> : null}<a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/main-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/main-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/main-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{mainEvidence.mainSha.slice(0, 12)} · {mainEvidence.releaseGate === "MAIN_VALIDATION_PASSED" ? "重导出应用已启动并正常退出" : "门禁未通过"}</span></div> : null}
       {!evidence && catalog ? <div className="evidence-artifacts"><b>权威目录</b><span>{catalog.entries.length} 个不可变 manifest</span><span>读取时间 {new Date(catalog.observedAt).toLocaleString("zh-CN")}</span><span>S3 对象键与下载授权保持隔离</span></div> : null}
       </>}
     </AppShell>

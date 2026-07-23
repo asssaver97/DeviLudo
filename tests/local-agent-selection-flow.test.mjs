@@ -8,10 +8,9 @@ import { POST as approveSpec } from "../app/api/projects/[projectId]/spec-revisi
 import { getDemoStore, resetDemoStore } from "../lib/control-plane/demo-store.ts";
 import { ensureLocalProject } from "./helpers/local-project.mjs";
 
-const releaseActions = [
+const acceptedCandidateActions = [
   "advance", "advance", "advance", "advance", "advance", "advance",
-  "accept", "advance", "advance", "confirm-mfa", "advance", "advance",
-  "external-approve", "external-approve", "external-approve",
+  "accept",
 ];
 
 test("new local runs lock the inherited Claude Profile while later configuration changes cannot mutate them", async () => {
@@ -42,12 +41,13 @@ test("new local runs lock the inherited Claude Profile while later configuration
   getDemoStore().defaults[`project:${projectId}`] = "profile-codex-platform-r2";
   const firstStep = await action(projectId, "advance", "claude-first-step");
   assert.deepEqual(firstStep.lockedProfile, originalLock);
-  const released = await finish(projectId, "claude", releaseActions.slice(1));
-  assert.equal(released.stage, "RELEASED");
-  assert.deepEqual(released.lockedProfile, originalLock);
+  const accepted = await finish(projectId, "claude", acceptedCandidateActions.slice(1));
+  assert.equal(accepted.stage, "MERGING");
+  assert.deepEqual(accepted.lockedProfile, originalLock);
+  await assertMainGateCannotBeForged(projectId, "claude-main-forgery");
 });
 
-test("an explicit project Codex selection is frozen into the same complete local delivery chain", async () => {
+test("an explicit project Codex selection stays frozen through acceptance and the real main boundary", async () => {
   resetDemoStore();
   const projectId = `codex-lock-${crypto.randomUUID()}`;
   await ensureLocalProject(projectId);
@@ -71,11 +71,12 @@ test("an explicit project Codex selection is frozen into the same complete local
   assert.equal(approved.run.modelRoles.smallFastModel, "gpt-5.3-mini-2026-06-12");
   assert.equal(approved.delivery.events[0].message.includes("Codex CLI"), true);
 
-  const released = await finish(projectId, "codex", releaseActions);
-  assert.equal(released.stage, "RELEASED");
-  assert.equal(released.lockedProfile.agent, "codex-cli");
-  assert.equal(released.lockedProfile.profileRevisionId, "profile-codex-platform-r2");
-  assert.deepEqual(released.targetResults, { linux: "PASSED", windows: "PASSED", macos: "PASSED" });
+  const accepted = await finish(projectId, "codex", acceptedCandidateActions);
+  assert.equal(accepted.stage, "MERGING");
+  assert.equal(accepted.lockedProfile.agent, "codex-cli");
+  assert.equal(accepted.lockedProfile.profileRevisionId, "profile-codex-platform-r2");
+  assert.deepEqual(accepted.targetResults, { linux: "PASSED", windows: "PASSED", macos: "PASSED" });
+  await assertMainGateCannotBeForged(projectId, "codex-main-forgery");
 });
 
 test("local approval freezes the dialogue-selected target matrix and gates only those systems", { concurrency: false }, async (context) => {
@@ -274,6 +275,14 @@ async function action(projectId, next, key) {
     ), { params: Promise.resolve({ projectId }) });
   assert.equal(response.status, 201, `${next} should advance ${projectId}`);
   return (await response.json()).data;
+}
+
+async function assertMainGateCannotBeForged(projectId, key) {
+  const response = await mutateDelivery(localRequest(
+    `/api/projects/${projectId}/delivery`, "POST", { action: "advance" }, key,
+  ), { params: Promise.resolve({ projectId }) });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "LOCAL_MAIN_GATE_REQUIRED");
 }
 
 function localRequest(pathname, method, body, key) {

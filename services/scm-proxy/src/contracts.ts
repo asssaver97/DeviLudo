@@ -32,3 +32,19 @@ export interface FinalizeLocalCandidateRequest extends LocalScmBinding {
   readonly candidateBranch: string;
   readonly commitMessage: string;
 }
+
+export interface MergeLocalCandidateRequest extends LocalScmBinding {
+  readonly expectedCandidateCommitSha: string;
+  readonly expectedSourceDigest: string;
+}
+
+export interface LocalScmMergeReceipt {
+  readonly scmProxy: "local-git-proxy-v1";
+  readonly branch: "main";
+  readonly candidateBranch: string;
+  readonly baseCommitSha: string;
+  readonly candidateCommitSha: string;
+  readonly mainCommitSha: string;
+  readonly sourceDigest: string;
+  readonly mergedAt: string;
+}

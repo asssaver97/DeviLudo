@@ -24,7 +24,7 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
       projectId: "test-project",
       runId: "RUN-INTEGRATION-001",
       specRevisionId: "SPEC-TEST-001",
-      targetMatrix: ["macos", "windows"] as const,
+      targetMatrix: ["macos"] as const,
     };
     const result = await runner.run(request);
     assert.equal(
@@ -63,6 +63,29 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
       const artifact = await runner.readBuildArtifact(request, "DeviLudoLocal.zip");
       assert.equal(artifact.bytes.byteLength, result.buildArtifact?.sizeBytes);
       assert.equal(artifact.evidence.bundleDigest, result.bundleDigest);
+      const main = await runner.runMainGate({
+        ...request,
+        candidateEvidenceId: result.evidenceId,
+        candidateBundleDigest: result.bundleDigest,
+        candidateSha: result.candidateSha,
+        sourceDigest: result.sourceDigest,
+      });
+      assert.equal(main.phase, "MAIN_SHA_GATE");
+      assert.equal(main.releaseGate, "MAIN_VALIDATION_PASSED");
+      assert.equal(main.mainSha, result.candidateSha);
+      assert.equal(main.mainSourceDigest, result.sourceDigest);
+      assert.equal(main.mergeReceipt.mainCommitSha, main.mainSha);
+      assert.equal(main.checks.find((check) => check.name === "macos-export-boot")?.status, "PASSED");
+      assert.equal(main.buildArtifact?.fileName, "DeviLudoMain.zip");
+      const mainArtifact = await runner.readMainBuildArtifact(request, "DeviLudoMain.zip");
+      assert.equal(mainArtifact.bytes.byteLength, main.buildArtifact?.sizeBytes);
+      assert.equal((await runner.runMainGate({
+        ...request,
+        candidateEvidenceId: result.evidenceId,
+        candidateBundleDigest: result.bundleDigest,
+        candidateSha: result.candidateSha,
+        sourceDigest: result.sourceDigest,
+      })).evidenceId, main.evidenceId);
     } else {
       assert.equal(result.buildArtifact, null);
     }

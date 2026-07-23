@@ -4,8 +4,10 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { LocalFixtureRunner } from "./fixture-runner";
 import {
+  LocalMainGateCoordinator,
   LocalRuntimeRequestError,
   LocalRuntimeRunCoordinator,
+  parseLocalMainGateRequest,
   parseLocalRuntimeRequest,
 } from "./http-contract";
 import {
@@ -24,6 +26,7 @@ const runner = new LocalFixtureRunner({
 });
 const requestVerifier = new LocalRuntimeRequestVerifier(localRuntimeKeyFromEnvironment());
 const runCoordinator = new LocalRuntimeRunCoordinator();
+const mainGateCoordinator = new LocalMainGateCoordinator();
 
 const server = createServer(async (request, response) => {
   try {
@@ -70,6 +73,19 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/v1/main-gates" && !url.search) {
+    if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      json(response, 415, { error: { code: "JSON_REQUIRED", message: "Local main gate request requires JSON" } });
+      return;
+    }
+    const rawBody = await readBody(request);
+    requestVerifier.verify({ method: "POST", path: "/v1/main-gates", body: rawBody, headers: request.headers });
+    const body = parseLocalMainGateRequest(rawBody);
+    const operation = mainGateCoordinator.start(body, () => runner.runMainGate(body));
+    json(response, 201, { data: await operation });
+    return;
+  }
+
   const evidenceMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/([^/]+)\/evidence\/(manifest\.json|junit\.xml|godot\.log)$/);
   if (request.method === "GET" && evidenceMatch && !url.search) {
     requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
@@ -89,6 +105,34 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
     const [, projectId, runId, file] = artifactMatch;
     const artifact = await runner.readBuildArtifact({ projectId, runId }, file);
+    response.statusCode = 200;
+    response.setHeader("content-type", artifact.evidence.buildArtifact!.contentType);
+    response.setHeader("content-length", artifact.bytes.byteLength);
+    response.setHeader("x-deviludo-artifact-sha256", artifact.evidence.buildArtifact!.sha256);
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("x-content-type-options", "nosniff");
+    response.end(artifact.bytes);
+    return;
+  }
+
+  const mainEvidenceMatch = url.pathname.match(/^\/v1\/main-gates\/([^/]+)\/([^/]+)\/evidence\/(manifest\.json|junit\.xml|godot\.log)$/);
+  if (request.method === "GET" && mainEvidenceMatch && !url.search) {
+    requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
+    const [, projectId, runId, file] = mainEvidenceMatch;
+    const target = path.join(runner.mainEvidenceDirectory({ projectId, runId }), file);
+    await access(target);
+    response.statusCode = 200;
+    response.setHeader("content-type", file.endsWith(".json") ? "application/json; charset=utf-8" : file.endsWith(".xml") ? "application/xml; charset=utf-8" : "text/plain; charset=utf-8");
+    response.setHeader("cache-control", "no-store");
+    response.end(await readFile(target));
+    return;
+  }
+
+  const mainArtifactMatch = url.pathname.match(/^\/v1\/main-gates\/([^/]+)\/([^/]+)\/artifacts\/(DeviLudoMain\.zip)$/);
+  if (request.method === "GET" && mainArtifactMatch && !url.search) {
+    requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
+    const [, projectId, runId, file] = mainArtifactMatch;
+    const artifact = await runner.readMainBuildArtifact({ projectId, runId }, file);
     response.statusCode = 200;
     response.setHeader("content-type", artifact.evidence.buildArtifact!.contentType);
     response.setHeader("content-length", artifact.bytes.byteLength);
