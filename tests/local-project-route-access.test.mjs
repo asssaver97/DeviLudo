@@ -7,6 +7,7 @@ import { POST as preflightAgent } from "../app/api/projects/[projectId]/agent-pr
 import { GET as readAgentSettings } from "../app/api/projects/[projectId]/agent-settings/route.ts";
 import { GET as readConversation, POST as sendConversation } from "../app/api/projects/[projectId]/conversation/route.ts";
 import { GET as readDelivery, POST as mutateDelivery } from "../app/api/projects/[projectId]/delivery/route.ts";
+import { POST as automateDelivery } from "../app/api/projects/[projectId]/delivery/auto/route.ts";
 import { GET as readEvidence } from "../app/api/projects/[projectId]/evidence/route.ts";
 import { GET as readFeedback, POST as submitFeedback } from "../app/api/projects/[projectId]/feedback/route.ts";
 import { GET as readValidationEvidence } from "../app/api/projects/[projectId]/local-validation/evidence/[file]/route.ts";
@@ -51,6 +52,7 @@ test("every localhost project surface rejects a syntactically valid project miss
       await submitFeedback(post(`${base}/feedback`, { feedback: "不应保存" }, "missing-feedback"), context),
       await readDelivery(request(`${base}/delivery`), context),
       await mutateDelivery(post(`${base}/delivery`, { action: "advance" }, "missing-delivery"), context),
+      await automateDelivery(post(`${base}/delivery/auto`, {}, "missing-delivery-auto"), context),
       await acceptCandidate(post(`${base}/acceptance`, {}, "missing-acceptance"), context),
       await readValidation(request(`${base}/local-validation`), context),
       await runValidation(post(`${base}/local-validation`, {}, "missing-validation"), context),

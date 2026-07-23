@@ -12,7 +12,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `/projects`：经 PostgreSQL RLS 与独立 Project Repository Broker 列出当前账号仍可访问的项目；项目创建者或仍控制对应 GitHub App installation 的用户才能看到条目，侧栏不再固定到示例项目。本地测试模式展示明确标记的隔离 fixture。
 - `/projects/new`：生产环境先从当前已验证 GitHub App installation 实时列出可见仓库，并以数值 installation/repository ID 原子创建项目和仓库绑定；浏览器不能指定 owner、仓库名或默认分支。绑定后进入可交互多轮构想、实时 `GameSpecRevision`、验收标准、冻结测试计划和明确批准动作。本地测试模式提供服务器派生的隔离仓库目录，并把每个新项目与幂等创建回执持久写入 D1；项目会出现在目录中，刷新或重启后可继续同一构想，不再复用固定 `new-project-draft`。
 - `/projects/{projectId}`：按签名租户会话读取权威项目/仓库资料和当前规格快照；空项目从 revision 0 冷启动，不复用演示规格。候选验收门禁显示反馈与合并动作；自动修复预算耗尽时只显示人工修改入口，新反馈创建不可变规格，必须重新批准后才恢复开发。
-- 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件，可完整验证 Provider 暂停/恢复、Fixture Agent、规格所选 1–3 个桌面目标、验收、main SHA、MFA、Steam Beta 回装和外部批准门禁；未选择的平台不会被伪造成硬门禁。候选接受只走空正文、独立幂等的正式验收端点，通用交付动作不能代替用户决定。项目选择按“项目→租户→平台”解析，规格批准时冻结 Claude Code 或 Codex CLI 的精确 Profile、配置来源、安装、镜像、CLI/Adapter、Provider、凭据版本、模型、预算、测试计划与目标矩阵，随后管理配置变化不会改写运行中任务。真实本机 Godot evidence v2 同时绑定同一目标矩阵，旧版或矩阵漂移证据只可审计、不能满足当前门禁。main 发布门禁与 Steam 回装阶段还可演练失败证据冻结、旧发布授权撤销、人工修改说明和新规格批准。页面刷新和服务重启后状态仍保留。
+- 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件。规格批准后，服务端自动推进 Fixture 开发、真实 Godot 验证和规格所选 1–3 个桌面目标，并停在候选验收；验收后自动完成合并与 main SHA 门禁并停在 MFA，MFA 后自动完成 Beta/回装演练并停在 Steam 外部批准。Provider 恢复、候选验收、MFA 和每一道外部批准均不能被自动入口跨越。未选择的平台不会被伪造成硬门禁。候选接受只走空正文、独立幂等的正式验收端点，通用交付动作不能代替用户决定。项目选择按“项目→租户→平台”解析，规格批准时冻结 Claude Code 或 Codex CLI 的精确 Profile、配置来源、安装、镜像、CLI/Adapter、Provider、凭据版本、模型、预算、测试计划与目标矩阵，随后管理配置变化不会改写运行中任务。真实本机 Godot evidence v2 同时绑定同一目标矩阵，旧版或矩阵漂移证据只可审计、不能满足当前门禁。main 发布门禁与 Steam 回装阶段还可演练失败证据冻结、旧发布授权撤销、人工修改说明和新规格批准。页面刷新和服务重启后状态仍保留。
 - `/admin/agents`：Claude Code（初始全局默认）与 Codex CLI 可分别发现官方候选，并管理版本、安装、灰度、回滚、Provider、凭据、三级继承、健康和审计；Provider revision 完整保留四类精确模型角色、输入/输出计价、数据地域、保留与训练政策及管理员确认，Profile revision 完整保留预算、turn、超时、凭据与 fallback。“健康与审计”直接消费角色作用域的权威健康投影，展示最近 24 小时追加式推理使用记录、配置 before/after 差异和由 Installation/Provider/Profile 绑定推导的告警。平台级读取要求数据库角色能显式关闭 RLS，租户/项目读取先设置 RLS 上下文；无法证明作用域时只报告账本不可用，不返回部分聚合。版本、SBOM、漏洞与安装状态只显示当前控制面投影，加载或失败时不会回退到预置结果。本地测试使用隔离 D1 夹具，生产 Web 则验证路由绑定的管理员断言并经独立 HTTPS/mTLS Connector 转发到 NestJS 控制面。生产角色由可信入口注入，浏览器不能模拟或覆盖；主站会话只接受另一个绑定 `GET /api/auth/session` 的只读管理员断言，并据此裁剪平台入口，普通租户不会看到越权导航。
 - `/settings/agents`：TenantAdmin 写入租户 BYOK、创建第三方 Provider/Profile 草稿并选择租户默认；API Key 明文仅进入 Vault，第三方端点通过探针且由 SecurityAdmin 激活前不会生效。
 - 本地 Agent Worker 会把后台批准并构建的精确 CLI/Adapter 版本重新绑定到确定性的逻辑 WorkerImage digest；该 `LOCAL_DETERMINISTIC` 模式仅在 `npm run local:dev` 的显式 loopback 测试部署中生效，仍需独立 Provider 探针、执行授权与隔离执行器，不能冒充生产 microVM 镜像证明。
@@ -48,7 +48,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - `lib/observability`：所有 Web、控制面、工作流、Agent、Runner、SCM、证据与 Steam 生产启动入口在应用模块加载前注册固定服务身份的 OpenTelemetry SDK，通过 OTLP/protobuf 导出追踪并自动传播 W3C `tracecontext`。生产不能关闭追踪；URL query、Cookie、认证头、提示词、源码和凭据不会进入 span，静态 OTLP Header 凭据也被禁止。
 - `IsolatedLocalAgentExecutor`：把 Claude/Codex Adapter、短期 token broker、Agent Worker 监督器和 SCM 代理组合成一次尝试；完成回执固定租户、测试计划、turn/cost/token 预算、超时和 base/candidate 提交。服务端只有在注入可信 workspace provisioner 与 token broker 后才能启用它。
 - 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。完成回执必须再次绑定全部锁定字段以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态。
-- `db`、`drizzle`：39 张 D1 Beta 表、不可变绑定触发器、GitHub 安装授权/SCM 回执、Steam 会话/上传 claim/Build 回执、分平台 Runner、本地交付事件与本地 Agent 管理修订迁移。
+- `db`、`drizzle`：42 张 D1 Beta 表、不可变绑定触发器、GitHub 安装授权/SCM 回执、Steam 会话/上传 claim/Build 回执、分平台 Runner、本地交付事件、自动编排幂等回执与本地 Agent 管理修订迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。
 

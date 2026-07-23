@@ -20,6 +20,14 @@ type MutationResult = { snapshot: LocalDeliverySnapshot; replayed: boolean };
 type MemoryState = {
   snapshots: Map<string, LocalDeliverySnapshot>;
   commands: Map<string, LocalDeliverySnapshot>;
+  automationCommands?: Map<string, { projectId: string; response: LocalAutomationCommandResult }>;
+};
+
+export type LocalAutomationCommandResult = {
+  readonly snapshot: LocalDeliverySnapshot;
+  readonly stopReason: string;
+  readonly automaticTransitions: number;
+  readonly validationExecuted: boolean;
 };
 
 const globalMemory = globalThis as typeof globalThis & { __deviludoLocalDelivery?: MemoryState };
@@ -28,6 +36,7 @@ let bindingPromise: Promise<D1Database | null> | null = null;
 
 function memory(): MemoryState {
   globalMemory.__deviludoLocalDelivery ??= { snapshots: new Map(), commands: new Map() };
+  globalMemory.__deviludoLocalDelivery.automationCommands ??= new Map();
   return globalMemory.__deviludoLocalDelivery;
 }
 
@@ -60,6 +69,12 @@ async function ensureStore(db: D1Database) {
     db.prepare(`CREATE INDEX IF NOT EXISTS local_delivery_event_project_time_idx
       ON local_delivery_events (project_id, created_at)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS local_delivery_commands (
+      key TEXT PRIMARY KEY NOT NULL,
+      project_id TEXT NOT NULL,
+      response TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS local_delivery_automation_commands (
       key TEXT PRIMARY KEY NOT NULL,
       project_id TEXT NOT NULL,
       response TEXT NOT NULL,
@@ -261,4 +276,60 @@ export async function saveLocalAgentExecution(
   commandKey: string,
 ): Promise<MutationResult> {
   return mutate(projectId, commandKey, (current) => recordLocalAgentExecution(current, receipt));
+}
+
+export async function readLocalAutomationCommand(
+  projectId: string,
+  commandKey: string,
+): Promise<LocalAutomationCommandResult | null> {
+  const db = await resolveDb();
+  if (!db) return memory().automationCommands?.get(commandKey)?.projectId === projectId
+    ? memory().automationCommands!.get(commandKey)!.response
+    : null;
+  await ensureStore(db);
+  const row = await db.prepare(
+    "SELECT response FROM local_delivery_automation_commands WHERE key = ? AND project_id = ?",
+  ).bind(commandKey, projectId).first<CommandRow>();
+  return row ? parseAutomationResult(row.response, projectId) : null;
+}
+
+export async function saveLocalAutomationCommand(
+  projectId: string,
+  commandKey: string,
+  response: LocalAutomationCommandResult,
+): Promise<{ response: LocalAutomationCommandResult; replayed: boolean }> {
+  const db = await resolveDb();
+  if (!db) {
+    const commands = memory().automationCommands!;
+    const previous = commands.get(commandKey);
+    if (previous) {
+      if (previous.projectId !== projectId) throw new Error("本地自动编排幂等键已绑定到另一个项目");
+      return { response: previous.response, replayed: true };
+    }
+    commands.set(commandKey, { projectId, response });
+    return { response, replayed: false };
+  }
+  await ensureStore(db);
+  const inserted = await db.prepare(`INSERT OR IGNORE INTO local_delivery_automation_commands
+    (key, project_id, response, created_at) VALUES (?, ?, ?, ?)`)
+    .bind(commandKey, projectId, JSON.stringify(response), new Date().toISOString())
+    .run();
+  const stored = await readLocalAutomationCommand(projectId, commandKey);
+  if (!stored) throw new Error("无法保存本地自动编排幂等回执");
+  return { response: stored, replayed: inserted.meta.changes !== 1 };
+}
+
+function parseAutomationResult(value: string, projectId: string): LocalAutomationCommandResult {
+  const parsed = JSON.parse(value) as LocalAutomationCommandResult;
+  const snapshot = normalizeLocalDeliverySnapshot(parsed.snapshot);
+  if (snapshot.projectId !== projectId
+    || ![
+      "USER_ACCEPTANCE_REQUIRED", "MFA_REQUIRED", "EXTERNAL_APPROVAL_REQUIRED", "WAITING_PROVIDER",
+      "SPEC_APPROVAL_REQUIRED", "LOCAL_EXPORT_TEMPLATES_REQUIRED", "LOCAL_VALIDATION_FAILED", "TERMINAL",
+    ].includes(parsed.stopReason)
+    || !Number.isSafeInteger(parsed.automaticTransitions) || parsed.automaticTransitions < 0
+    || typeof parsed.validationExecuted !== "boolean") {
+    throw new Error("本地自动编排回执已损坏");
+  }
+  return { ...parsed, snapshot };
 }

@@ -51,6 +51,26 @@ export function ProjectStudio({
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
   const completion = useMemo(() => generated?.completeness ?? 0, [generated]);
 
+  async function runLocalAutomation(commandId: string) {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/delivery/auto`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": commandId },
+      body: "{}",
+    });
+    const payload = await response.json() as {
+      data?: { stage?: string };
+      meta?: { stopReason?: string };
+      error?: { message?: string };
+    };
+    setDeliveryRefresh((value) => value + 1);
+    return {
+      ok: response.ok,
+      stage: payload.data?.stage,
+      stopReason: payload.meta?.stopReason,
+      message: payload.error?.message,
+    };
+  }
+
   useEffect(() => {
     if (mode === "new") return;
     const controller = new AbortController();
@@ -161,6 +181,7 @@ export function ProjectStudio({
   async function approveSpec() {
     setBusy(true);
     approvalCommandRef.current ??= crypto.randomUUID();
+    const approvalCommandId = approvalCommandRef.current;
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/spec-revisions`, {
         method: "POST",
@@ -178,14 +199,26 @@ export function ProjectStudio({
       });
       const payload = await response.json() as { data?: { authority?: { revision?: number } }; error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "规格批准失败");
-      approvalCommandRef.current = null;
       const authorityRevision = Number.isSafeInteger(payload.data?.authority?.revision)
         ? payload.data!.authority!.revision!
         : revision;
+      approvalCommandRef.current = null;
       setApproved(true);
       setRevision(authorityRevision);
       setDeliveryRefresh((value) => value + 1);
-      setNotice(`SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结，开发 Agent 配置已锁定并入队。`);
+      if (localFixture && mode === "existing") {
+        setNotice(`SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结；正在自动开发并运行真实 Godot 验证…`);
+        try {
+          const automatic = await runLocalAutomation(`auto-after-approval-${approvalCommandId}`);
+          setNotice(automatic.ok
+            ? `SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结；本地开发与真实 Godot 验证已自动运行到${automatic.stage === "AWAITING_ACCEPTANCE" ? "用户验收" : "下一人工门禁"}。`
+            : `SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结；自动链路已安全暂停：${automatic.message ?? automatic.stopReason ?? "请查看交付控制台"}`);
+        } catch (reason) {
+          setNotice(`SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结；自动链路暂不可用：${reason instanceof Error ? reason.message : "请查看交付控制台"}`);
+        }
+      } else {
+        setNotice(`SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结，开发 Agent 配置已锁定并入队。`);
+      }
     } catch (reason) {
       setNotice(reason instanceof Error ? `批准失败：${reason.message}` : "规格批准失败");
     } finally {
@@ -261,9 +294,22 @@ export function ProjectStudio({
       });
       const payload = await response.json() as { error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "候选版本验收失败");
+      const acceptanceKey = acceptanceCommandRef.current;
       acceptanceCommandRef.current = null;
       setDeliveryRefresh((value) => value + 1);
-      setNotice("候选版本已验收；系统正在合并固定的 Draft PR，随后会基于实际 main SHA 重跑发布门禁。");
+      if (localFixture) {
+        setNotice("候选版本已验收；正在自动合并并运行 main SHA 发布门禁…");
+        try {
+          const automatic = await runLocalAutomation(`auto-after-acceptance-${acceptanceKey ?? crypto.randomUUID()}`);
+          setNotice(automatic.ok
+            ? "候选版本已验收；合并与 main SHA 发布门禁已自动完成，现在等待 MFA。"
+            : `候选版本已验收；后续自动门禁已安全暂停：${automatic.message ?? automatic.stopReason ?? "请查看交付控制台"}`);
+        } catch (reason) {
+          setNotice(`候选版本已验收；后续自动门禁暂不可用：${reason instanceof Error ? reason.message : "请查看交付控制台"}`);
+        }
+      } else {
+        setNotice("候选版本已验收；系统正在合并固定的 Draft PR，随后会基于实际 main SHA 重跑发布门禁。");
+      }
     } catch (reason) {
       setNotice(reason instanceof Error ? `验收失败：${reason.message}` : "候选版本验收失败");
     } finally {

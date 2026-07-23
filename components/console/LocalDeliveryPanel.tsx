@@ -79,7 +79,9 @@ type ProductionProjection = {
   readonly snapshotDigest: string;
 };
 
-function primaryAction(stage: LocalDeliveryStage, externalApprovalCount = 0): { action: LocalDeliveryAction; label: string } | null {
+type LocalPanelAction = LocalDeliveryAction | "auto";
+
+function primaryAction(stage: LocalDeliveryStage, externalApprovalCount = 0): { action: LocalPanelAction; label: string } | null {
   if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED" || stage === "CANCELLED") return null;
   if (stage === "WAITING_PROVIDER") return { action: "provider-resume", label: "恢复原 Provider" };
   if (stage === "AWAITING_ACCEPTANCE") return null;
@@ -88,7 +90,7 @@ function primaryAction(stage: LocalDeliveryStage, externalApprovalCount = 0): { 
     action: "external-approve",
     label: ["模拟 Valve 审核通过", "模拟首次发行完成", "模拟默认分支确认"][externalApprovalCount] ?? "模拟外部批准",
   };
-  return { action: "advance", label: "推进 Fixture 演示" };
+  return { action: "auto", label: "自动运行到下一人工门禁" };
 }
 
 export function LocalDeliveryPanel({
@@ -184,11 +186,40 @@ export function LocalDeliveryPanel({
       const payload = await response.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
       if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "本地交付动作失败");
       publish(payload.data);
+      if (nextAction === "confirm-mfa" || nextAction === "provider-resume") {
+        const automatic = await requestAutomatic(`local-auto-after-${nextAction}-${crypto.randomUUID()}`);
+        if (automatic.data) publish(automatic.data);
+        if (!automatic.ok) throw new Error(automatic.message ?? "自动交付链路已暂停");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "本地交付动作失败");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function runAutomatic() {
+    setBusy(true);
+    setError("");
+    try {
+      const automatic = await requestAutomatic(`local-auto-${snapshot?.runId ?? "pending"}-${crypto.randomUUID()}`);
+      if (automatic.data) publish(automatic.data);
+      if (!automatic.ok) throw new Error(automatic.message ?? "自动交付链路已暂停");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "自动交付链路已暂停");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function requestAutomatic(commandId: string) {
+    const response = await fetch(`/api/projects/${projectId}/delivery/auto`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": commandId },
+      body: "{}",
+    });
+    const payload = await response.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
+    return { ok: response.ok, data: payload.data, message: payload.error?.message };
   }
 
   async function runLocalValidation() {
@@ -255,7 +286,7 @@ export function LocalDeliveryPanel({
         <div>
           <span className="eyebrow">{localFixture ? "Localhost · D1 持久状态" : "Production · Temporal 权威投影"}</span>
           <h2>{localFixture ? "本地交付控制台" : "交付工作流"}</h2>
-          <p>{localFixture ? "Fixture 验证编排；真实 Agent 必须先通过独立预检，本地默认不会调用模型、GitHub 或 Steam。" : "规格获批后会创建确定性工作流；Web 只读取租户隔离投影，不能直接推进状态。"}</p>
+          <p>{localFixture ? "规格批准后自动运行 Fixture 开发与真实 Godot 验证，并停在人工门禁；真实 Agent 必须先通过独立预检，本地默认不会调用模型、GitHub 或 Steam。" : "规格获批后会创建确定性工作流；Web 只读取租户隔离投影，不能直接推进状态。"}</p>
         </div>
         {snapshot ? <span className={`local-stage local-stage-${snapshot.stage.toLowerCase()}`}><i /> {stageLabels[snapshot.stage]}</span> : null}
       </div>
@@ -397,7 +428,7 @@ export function LocalDeliveryPanel({
 
           <div className="local-delivery-actions">
             <div>
-              {action ? <button className="button button-acid" disabled={busy} onClick={() => runAction(action.action)} type="button">{action.label}</button> : null}
+              {action ? <button className="button button-acid" disabled={busy} onClick={() => action.action === "auto" ? runAutomatic() : runAction(action.action)} type="button">{action.label}</button> : null}
               {snapshot.stage === "AGENT_QUEUED" || snapshot.stage === "AGENT_RUNNING" ? (
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("provider-fail")} type="button">模拟 Provider 故障</button>
               ) : null}

@@ -762,6 +762,13 @@ export const localDeliveryCommands = sqliteTable("local_delivery_commands", {
   createdAt: text("created_at").notNull(),
 });
 
+export const localDeliveryAutomationCommands = sqliteTable("local_delivery_automation_commands", {
+  key: text("key").primaryKey(),
+  projectId: text("project_id").notNull(),
+  response: text("response", { mode: "json" }).$type<JsonRecord>().notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 /**
  * Local Agent-admin state is stored as immutable, monotonically increasing
  * revisions. The production control plane continues to use the normalized

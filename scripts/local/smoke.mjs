@@ -771,18 +771,44 @@ try {
   if (![200, 201].includes(validationApproval.response.status) || validationApprovalPayload.data?.run?.state !== "QUEUED") {
     throw new Error("local validation specification approval failed");
   }
-  const localValidation = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation`, {
+  const earlyFeedback = await request(baseUrl, `/api/projects/${smokeValidationProject}/feedback`, {
     method: "POST",
-    headers: { "idempotency-key": "smoke-local-validation-1" },
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-feedback-too-early" },
+    body: JSON.stringify({ feedback: "新手前五分钟最多出现一次风暴" }),
+  });
+  const earlyFeedbackPayload = await earlyFeedback.response.json();
+  if (earlyFeedback.response.status !== 409 || earlyFeedbackPayload.error?.code !== "LOCAL_FEEDBACK_NOT_ALLOWED") {
+    throw new Error("local feedback bypassed the candidate E2E acceptance gate");
+  }
+  const localValidation = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-local-automation-1" },
+    body: "{}",
   }, 90_000);
-  const localValidationPayload = await localValidation.response.json();
+  const localAutomationPayload = await localValidation.response.json();
+  const localValidationPayload = { data: localAutomationPayload.data?.localValidation };
   const expectedLocalValidationStatus = localValidationPayload.data?.releaseGate === "WAITING_EXPORT_TEMPLATES"
     ? "WAITING_DEPENDENCY"
     : "TESTS_PASSED";
-  if (![200, 201].includes(localValidation.response.status)
+  const expectedAutomationHttpStatus = expectedLocalValidationStatus === "WAITING_DEPENDENCY" ? 409 : 200;
+  if (localValidation.response.status !== expectedAutomationHttpStatus
     || localValidationPayload.data?.status !== expectedLocalValidationStatus
-    || !/^[a-f0-9]{64}$/.test(String(localValidationPayload.data?.bundleDigest))) {
-    throw new Error("authenticated local Godot validation did not produce bound evidence");
+    || !/^[a-f0-9]{64}$/.test(String(localValidationPayload.data?.bundleDigest))
+    || (expectedLocalValidationStatus === "TESTS_PASSED"
+      && (localAutomationPayload.data?.stage !== "AWAITING_ACCEPTANCE"
+        || localAutomationPayload.meta?.stopReason !== "USER_ACCEPTANCE_REQUIRED"))) {
+    throw new Error("automatic local delivery did not produce bound Godot evidence and stop at the human gate");
+  }
+  const localAutomationReplay = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-local-automation-1" },
+    body: "{}",
+  });
+  const localAutomationReplayPayload = await localAutomationReplay.response.json();
+  if (localAutomationReplay.response.status !== expectedAutomationHttpStatus
+    || localAutomationReplayPayload.meta?.idempotentReplay !== true
+    || JSON.stringify(localAutomationReplayPayload.data) !== JSON.stringify(localAutomationPayload.data)) {
+    throw new Error("automatic local delivery did not replay its exact durable orchestration receipt");
   }
   const localManifest = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation/evidence/manifest.json`);
   const localManifestPayload = await localManifest.response.json();
@@ -795,26 +821,13 @@ try {
     || localManifestPayload.bundleDigest !== localValidationPayload.data.bundleDigest) {
     throw new Error("authenticated local evidence download did not preserve the validation binding");
   }
-  const earlyFeedback = await request(baseUrl, `/api/projects/${smokeValidationProject}/feedback`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-feedback-too-early" },
-    body: JSON.stringify({ feedback: "新手前五分钟最多出现一次风暴" }),
-  });
-  const earlyFeedbackPayload = await earlyFeedback.response.json();
-  if (earlyFeedback.response.status !== 409 || earlyFeedbackPayload.error?.code !== "LOCAL_FEEDBACK_NOT_ALLOWED") {
-    throw new Error("local feedback bypassed the candidate E2E acceptance gate");
-  }
   let feedbackProject = smokeValidationProject;
   let feedbackDialoguePayload = validationDialoguePayload.data;
   let validationGateBlock = null;
   let validationAcceptance;
   if (localValidationPayload.data?.releaseGate === "WAITING_EXPORT_TEMPLATES") {
-    validationGateBlock = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-validation-export-gate" },
-      body: JSON.stringify({ action: "advance" }),
-    });
-    const gatePayload = await validationGateBlock.response.json();
+    validationGateBlock = localValidation;
+    const gatePayload = localAutomationPayload;
     if (validationGateBlock.response.status !== 409
       || gatePayload.error?.code !== "LOCAL_EXPORT_TEMPLATES_REQUIRED") {
       throw new Error("missing Godot export templates did not block target-matrix E2E");
@@ -851,16 +864,7 @@ try {
       });
       if (!validationAcceptance.response.ok) throw new Error("local feedback fixture could not reach user acceptance");
     }
-  } else {
-    for (let index = 0; index < 4; index += 1) {
-      validationAcceptance = await request(baseUrl, `/api/projects/${smokeValidationProject}/delivery`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `smoke-validation-e2e-${index + 1}` },
-        body: JSON.stringify({ action: "advance" }),
-      });
-      if (!validationAcceptance.response.ok) throw new Error("local validation candidate could not reach user acceptance");
-    }
-  }
+  } else validationAcceptance = { response: Response.json(localAutomationPayload) };
   const validationAcceptancePayload = await validationAcceptance.response.json();
   if (validationAcceptancePayload.data?.stage !== "AWAITING_ACCEPTANCE"
     || validationAcceptancePayload.data?.evidenceValid !== true) {
@@ -1193,7 +1197,9 @@ try {
   console.log(`✓ Agent discovery   ${exactAgentDiscovery.response.status}/${floatingAgentDiscovery.response.status} · ${installedAgent.agent}@${installedAgent.observedVersion} exact, latest rejected`);
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
-  console.log(`✓ Godot validation ${localValidation.response.status} (${localValidation.elapsedMs}ms) · ${localValidationPayload.data.releaseGate}`);
+  console.log(`✓ Auto delivery      ${localValidation.response.status} (${localValidation.elapsedMs}ms) · ${localAutomationPayload.meta?.stopReason}`);
+  console.log(`✓ Auto replay        ${localAutomationReplay.response.status} (${localAutomationReplay.elapsedMs}ms) · exact D1 receipt`);
+  console.log(`✓ Godot validation   ${localValidationPayload.data.releaseGate} · bound evidence`);
   console.log(validationGateBlock
     ? `✓ Export dependency ${validationGateBlock.response.status} (${validationGateBlock.elapsedMs}ms) · target E2E blocked`
     : "✓ Export dependency ready · production export authorized target E2E");

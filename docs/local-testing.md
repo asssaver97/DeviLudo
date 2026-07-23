@@ -50,7 +50,9 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 
 `/settings/agents` 使用租户作用域的本地代理验证 BYOK 只写响应、Provider 草稿和默认 Profile；`/projects/ember-archipelago/agent-settings` 验证项目从 ACTIVE 继承 Profile 中选择。规格批准会按项目、租户、平台顺序解析最高优先级配置，并把 Profile 来源与全部精确运行字段复制到不可变 D1 快照；若该覆盖的 Installation 或 Provider 已失效，审批返回 `AGENT_PROFILE_NOT_READY`，不会静默回退或在 Claude/Codex 间切换。两条本地路径与生产页面相同，但只对真实 loopback URL 且显式 `DEVILUDO_LOCAL_TEST_MODE=1` 生效，不会联系第三方 Provider。
 
-在项目页批准规格后，点击“运行真实本机验证”。侧车会：
+在项目页批准规格后，浏览器会调用仅限 loopback 的 `POST /api/projects/{projectId}/delivery/auto`。服务端只接收空 JSON，不接受客户端提交阶段、SHA 或证据；它自动推进 Fixture 开发、调用真实 Godot 侧车并完成规格所选目标矩阵，然后停在用户验收。页面关闭或请求中断后可安全重试，同一幂等键不会重复写入已完成步骤。候选验收后自动合并并重跑 main SHA 门禁，停在 MFA；MFA 确认后自动推进 Beta 与回装演练，停在第一道 Steam 外部批准。Provider 恢复、候选验收、MFA 和每一道外部批准始终要求显式操作，自动入口不能跨越。
+
+真实 Godot 侧车会：
 
 1. 将固定 Godot 样例复制到 `.deviludo/local-runtime/<project>/<run>/workspace`；
 2. 通过 SCM 代理在工作区外初始化 base Git 元数据，再由代理提交样例候选并生成 base/candidate SHA 与 tree digest；
@@ -93,7 +95,7 @@ npm run local:smoke
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`，并公开 `PINNED_ENV`、`LOCAL_DETERMINISTIC` 或 `NOT_CONFIGURED` 身份模式；`degraded` 是未启用执行时的预期状态。
 - Agent 探针 `/v1/preflight` 使用固定测试运行锁，验证 CLI、镜像、Provider/Gateway 与执行开关；它只返回阻塞原因或 `READY`，不会启动 Agent。
 - Agent `/v1/runs` 在默认测试栈必须以明确门禁码返回 409/503，证明没有执行器时失败关闭。
-- 通过 Web API 真实运行固定 Godot 样例并下载同一 bundle 的 `manifest.json`，覆盖签名后的执行和证据读取链路。
+- 通过本地自动编排 API 真实运行固定 Godot 样例、完成所选目标矩阵并停在候选验收，再下载同一 bundle 的 `manifest.json`，覆盖签名后的执行、证据读取和人工门禁边界。
 - 在候选 E2E 前拒绝反馈；若导出模板缺失，确认真实候选不能启动目标矩阵。独立的完整 Fixture 候选在待验收后创建、精确重放并批准新反馈草稿，再对后继 Run 运行真实 Godot，证明旧验收权限不能被复用。
 - 候选接受只通过空 JSON 的 `/api/projects/{projectId}/acceptance` 提交，精确重放同一个幂等决定；通用 `/delivery` 的 `accept` 动作必须返回 400，不能绕过正式验收门禁。
 - 直接向 Godot、Agent、规格三个 sidecar 发送旧固定请求头，必须全部返回 403，证明 loopback 本身不构成权限。

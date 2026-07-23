@@ -102,7 +102,7 @@ test("Agent administration mutations publish exact request-body contracts", () =
 });
 
 test("production OpenAPI omits localhost fixture authorities and resolves component references", () => {
-  for (const localOnly of ["agent-preflight", "agent-run", "local-validation", "/runner/events"]) {
+  for (const localOnly of ["agent-preflight", "agent-run", "local-validation", "delivery/auto", "/runner/events"]) {
     assert.equal(contract.includes(localOnly), false, `${localOnly} must stay outside the production contract`);
   }
 
