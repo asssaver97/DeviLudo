@@ -1,4 +1,10 @@
 import { json } from "@/lib/control-plane/http";
+import {
+  applyDemoSmokeAdminCleanup,
+  planDemoSmokeAdminCleanup,
+} from "@/lib/control-plane/demo-store";
+import { acquireLocalAdminState, type LocalAdminStateLease } from "@/lib/control-plane/local-admin-state";
+import { localProviderControlRequired, revokeLocalProviderCredential } from "@/lib/admin/local-provider-control";
 import { cleanupLocalSmokeDeliveries } from "@/lib/local-delivery/store";
 import { isEphemeralSmokeProjectId, parseLocalSmokeCleanupRequest } from "@/lib/local-smoke-project";
 import { cleanupLocalSmokeProjects } from "@/lib/projects/local-project-catalog";
@@ -15,6 +21,7 @@ let verifier: LocalSmokeMaintenanceRequestVerifier | null = null;
 let verifierKey = "";
 
 export async function POST(request: Request): Promise<Response> {
+  let adminLease: LocalAdminStateLease | null = null;
   if (!isLoopbackTestRequest(request)) {
     return json({ error: { code: "NOT_FOUND", message: "Route not found" } }, { status: 404 });
   }
@@ -45,15 +52,33 @@ export async function POST(request: Request): Promise<Response> {
     return json({ error: { code: "INVALID_LOCAL_SMOKE_CLEANUP", message: "Local smoke cleanup request is invalid" } }, { status: 400 });
   }
   try {
+    adminLease = await acquireLocalAdminState();
+    const adminPlan = planDemoSmokeAdminCleanup(projectIds);
+    if (localProviderControlRequired()) {
+      await Promise.all(adminPlan.credentialVersionIds.map(revokeLocalProviderCredential));
+    }
+    const admin = applyDemoSmokeAdminCleanup(adminPlan);
+    if (admin.changed) {
+      await adminLease.persist(await cleanupCommandKey(adminLease.revision, projectIds));
+    }
+    adminLease.release();
+    adminLease = null;
     const delivery = await cleanupLocalSmokeDeliveries(projectIds);
     const ephemeral = projectIds.filter(isEphemeralSmokeProjectId);
     const catalog = ephemeral.length
       ? await cleanupLocalSmokeProjects(ephemeral)
       : Object.freeze({ projects: 0, commands: 0 });
-    return json({ data: { projectIds, delivery, catalog } });
+    return json({ data: { projectIds, admin, delivery, catalog } });
   } catch {
     return json({ error: { code: "LOCAL_SMOKE_CLEANUP_FAILED", message: "Local smoke state cleanup failed" } }, { status: 503 });
+  } finally {
+    adminLease?.release();
   }
+}
+
+async function cleanupCommandKey(revision: number, projectIds: readonly string[]): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([...projectIds].sort())));
+  return `local-smoke-cleanup:${revision}:${[...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function maintenanceVerifier(): LocalSmokeMaintenanceRequestVerifier {

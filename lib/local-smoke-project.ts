@@ -1,4 +1,5 @@
 const EPHEMERAL_SMOKE_PROJECT = /^smoke-(?:spec|validation|feedback|release-gates|codex-release)-[1-9][0-9]{0,9}-[a-z0-9]{6,16}$/;
+const EPHEMERAL_SMOKE_RUN = /^smoke-(?:spec|validation|feedback|release-gates|codex-release)-([1-9][0-9]{0,9}-[a-z0-9]{6,16})$/;
 const PERSISTENT_SMOKE_PROJECT = "smoke-local-project";
 const MAX_CLEANUP_PROJECTS = 20;
 
@@ -8,6 +9,10 @@ export function isEphemeralSmokeProjectId(value: unknown): value is string {
 
 export function isManagedSmokeProjectId(value: unknown): value is string {
   return value === PERSISTENT_SMOKE_PROJECT || isEphemeralSmokeProjectId(value);
+}
+
+export function localSmokeRunId(value: unknown): string | null {
+  return typeof value === "string" ? EPHEMERAL_SMOKE_RUN.exec(value)?.[1] ?? null : null;
 }
 
 /**

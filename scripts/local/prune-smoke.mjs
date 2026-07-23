@@ -21,14 +21,31 @@ try {
 } catch (error) {
   if (error?.code !== "ENOENT") throw error;
 }
-const catalogResponse = await fetch(`http://${HOST}:${WEB_PORT}/api/projects`, {
-  headers: { accept: "application/json" },
-  signal: AbortSignal.timeout(30_000),
-});
+const [catalogResponse, adminResponse] = await Promise.all([
+  fetch(`http://${HOST}:${WEB_PORT}/api/projects`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(30_000),
+  }),
+  fetch(`http://${HOST}:${WEB_PORT}/api/admin/agents`, {
+    headers: { accept: "application/json", "x-deviludo-role": "PlatformAgentAdmin" },
+    signal: AbortSignal.timeout(30_000),
+  }),
+]);
 if (!catalogResponse.ok) throw new Error(`Local project catalog returned HTTP ${catalogResponse.status}`);
+if (!adminResponse.ok) throw new Error(`Local Agent administrator state returned HTTP ${adminResponse.status}`);
 const catalog = await catalogResponse.json();
 for (const project of catalog.data ?? []) {
   if (GENERATED.test(project?.projectId)) projects.add(project.projectId);
+}
+const admin = await adminResponse.json();
+for (const scope of Object.keys(admin.meta?.defaults ?? {})) {
+  const projectId = scope.startsWith("project:") ? scope.slice("project:".length) : "";
+  if (GENERATED.test(projectId) || projectId === "smoke-local-project") projects.add(projectId);
+}
+if ((admin.meta?.credentials ?? []).some((credential) =>
+  credential?.label === "Smoke tenant Provider" || credential?.label?.startsWith("Smoke tenant Provider / ")
+  || credential?.label === "local-sidecar-live-check")) {
+  projects.add("smoke-local-project");
 }
 
 const projectIds = [...projects].sort();

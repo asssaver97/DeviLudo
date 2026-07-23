@@ -4,6 +4,7 @@
  * (see infra/postgres/001_core.sql) and use Temporal for durable execution.
  */
 import { builtInAdapterVersion, exactAdapterCompatibility, isAdapterVersionAttested } from "../agent/adapter-registry";
+import { isManagedSmokeProjectId, localSmokeRunId } from "../local-smoke-project";
 
 export type DemoAuditEvent = {
   id: string;
@@ -146,6 +147,12 @@ export type DemoStoreState = {
   audit: DemoAuditEvent[];
   usage: DemoUsageRecord[];
   idempotency: Record<string, unknown>;
+  resourceSequences: {
+    credential: number;
+    provider: number;
+    profile: number;
+    audit: number;
+  };
 };
 
 const initialState = (): DemoStoreState => {
@@ -366,6 +373,7 @@ const initialState = (): DemoStoreState => {
     },
   ],
   idempotency: {},
+  resourceSequences: { credential: 0, provider: 2, profile: 4, audit: 0 },
   });
 };
 
@@ -378,6 +386,7 @@ export function getDemoStore(): DemoStoreState {
   backfillFeedbackProjectScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
+  backfillResourceSequences(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
 }
 
@@ -398,6 +407,7 @@ export function restoreDemoStore(snapshot: DemoStoreState): DemoStoreState {
   backfillFeedbackProjectScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
+  backfillResourceSequences(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
 }
 
@@ -413,6 +423,7 @@ export function migrateDemoStoreState(snapshot: unknown): DemoStoreState {
   backfillVersionMetadata(migrated);
   requireLegacyVersionRevalidation(migrated);
   backfillCredentialTimestamps(migrated);
+  backfillResourceSequences(migrated);
   return migrated;
 }
 
@@ -556,6 +567,27 @@ function backfillCredentialTimestamps(store: DemoStoreState): void {
   }
 }
 
+function backfillResourceSequences(store: DemoStoreState): void {
+  const current = (store as DemoStoreState & { resourceSequences?: Partial<DemoStoreState["resourceSequences"]> }).resourceSequences ?? {};
+  store.resourceSequences = {
+    credential: Math.max(safeSequence(current.credential), maxNumericId(store.credentials, /^credential-(\d+)-v\d+$/)),
+    provider: Math.max(safeSequence(current.provider), maxNumericId(store.providers, /^provider-(?:claude-code|codex-cli)-(\d+)$/), 2),
+    profile: Math.max(safeSequence(current.profile), maxNumericId(store.profiles, /^profile-(?:claude-code|codex-cli)-(\d+)-r\d+$/), 4),
+    audit: Math.max(safeSequence(current.audit), maxNumericId(store.audit, /^AUD-(\d+)$/)),
+  };
+}
+
+function maxNumericId(rows: readonly { id: string }[], pattern: RegExp, floor = 0): number {
+  return rows.reduce((maximum, row) => {
+    const value = Number(pattern.exec(row.id)?.[1] ?? 0);
+    return Number.isSafeInteger(value) ? Math.max(maximum, value) : maximum;
+  }, floor);
+}
+
+function safeSequence(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+}
+
 function fixtureVersionMetadata(
   agent: "claude-code" | "codex-cli",
   version: string,
@@ -590,6 +622,126 @@ function fixtureVersionMetadata(
   };
 }
 
+export type DemoSmokeAdminCleanupPlan = Readonly<{
+  projectIds: readonly string[];
+  credentialVersionIds: readonly string[];
+  providerRevisionIds: readonly string[];
+  profileRevisionIds: readonly string[];
+}>;
+
+export type DemoSmokeAdminCleanupResult = Readonly<{
+  changed: boolean;
+  credentials: number;
+  providers: number;
+  profiles: number;
+  defaults: number;
+  feedback: number;
+  audit: number;
+  idempotency: number;
+}>;
+
+/**
+ * Builds an exact cleanup plan for resources created by the authenticated
+ * localhost smoke suite. Ordinary tenant resources are never selected by a
+ * prefix: credentials must carry the per-run label written by smoke.mjs.
+ * The un-suffixed label is retained only to reclaim snapshots produced before
+ * run labels were introduced.
+ */
+export function planDemoSmokeAdminCleanup(projectIds: readonly string[]): DemoSmokeAdminCleanupPlan {
+  if (!projectIds.length || projectIds.some((projectId) => !isManagedSmokeProjectId(projectId))) {
+    throw new Error("Local smoke administrator cleanup target is invalid");
+  }
+  const store = getDemoStore();
+  const runIds = new Set(projectIds.map(localSmokeRunId).filter((value): value is string => value !== null));
+  const labels = new Set([...runIds].map((runId) => `Smoke tenant Provider / ${runId}`));
+  const families = new Set(store.credentials
+    .filter((credential) => (credential.scope === "tenant" && credential.scopeId === "tenant-local" && labels.has(credential.label))
+      // v1 snapshots predated credential ownership and were migrated to the
+      // fail-closed platform scope. These two exact labels were reserved by
+      // local integration checks and are therefore safe to reclaim.
+      || credential.label === "Smoke tenant Provider"
+      || credential.label === "local-sidecar-live-check")
+    .map((credential) => credential.familyId));
+  const credentialVersionIds = store.credentials
+    .filter((credential) => families.has(credential.familyId))
+    .map((credential) => credential.id);
+  const credentials = new Set(credentialVersionIds);
+  const providerRevisionIds = store.providers
+    .filter((provider) => credentials.has(provider.credentialVersionId))
+    .map((provider) => provider.id);
+  const providers = new Set(providerRevisionIds);
+  const profileRevisionIds = store.profiles
+    .filter((profile) => providers.has(profile.providerRevisionId) || credentials.has(profile.credentialVersionId))
+    .map((profile) => profile.id);
+  return Object.freeze({
+    projectIds: Object.freeze([...projectIds]),
+    credentialVersionIds: Object.freeze(credentialVersionIds),
+    providerRevisionIds: Object.freeze(providerRevisionIds),
+    profileRevisionIds: Object.freeze(profileRevisionIds),
+  });
+}
+
+/** Applies a previously computed plan without rewinding the monotonic IDs. */
+export function applyDemoSmokeAdminCleanup(plan: DemoSmokeAdminCleanupPlan): DemoSmokeAdminCleanupResult {
+  const store = getDemoStore();
+  const projects = new Set(plan.projectIds);
+  const credentials = new Set(plan.credentialVersionIds);
+  const providers = new Set(plan.providerRevisionIds);
+  const profiles = new Set(plan.profileRevisionIds);
+  const removableProject = (value: string) => projects.has(value) || isManagedSmokeProjectId(value);
+  const removed = {
+    credentials: removeRows(store.credentials, (item) => credentials.has(item.id)),
+    providers: removeRows(store.providers, (item) => providers.has(item.id)),
+    profiles: removeRows(store.profiles, (item) => profiles.has(item.id)),
+    defaults: removeRecordEntries(store.defaults, (scope, profileId) => {
+      const projectId = scope.startsWith("project:") ? scope.slice("project:".length) : "";
+      return profiles.has(profileId) || (projectId !== "" && removableProject(projectId));
+    }),
+    feedback: removeRows(store.feedback, (item) => removableProject(item.projectId)),
+    audit: 0,
+    idempotency: 0,
+  };
+  const references = new Set([
+    ...plan.projectIds,
+    ...plan.credentialVersionIds,
+    ...plan.providerRevisionIds,
+    ...plan.profileRevisionIds,
+  ]);
+  removed.audit = removeRows(store.audit, (event) => profiles.has(event.resource)
+    || providers.has(event.resource)
+    || credentials.has(event.resource)
+    || (typeof event.metadata.projectId === "string" && removableProject(event.metadata.projectId))
+    || (event.resource.startsWith("project:") && removableProject(event.resource.slice("project:".length))));
+  removed.idempotency = removeRecordEntries(store.idempotency, (key, value) =>
+    [...projects].some((projectId) => key.includes(projectId)) || referencesValue(value, references));
+  const changed = Object.values(removed).some((count) => count > 0);
+  return Object.freeze({ changed, ...removed });
+}
+
+function removeRows<T>(rows: T[], predicate: (item: T) => boolean): number {
+  const retained = rows.filter((item) => !predicate(item));
+  const removed = rows.length - retained.length;
+  if (removed) rows.splice(0, rows.length, ...retained);
+  return removed;
+}
+
+function removeRecordEntries<T>(record: Record<string, T>, predicate: (key: string, value: T) => boolean): number {
+  let removed = 0;
+  for (const [key, value] of Object.entries(record)) {
+    if (!predicate(key, value)) continue;
+    delete record[key];
+    removed += 1;
+  }
+  return removed;
+}
+
+function referencesValue(value: unknown, references: ReadonlySet<string>): boolean {
+  if (typeof value === "string") return references.has(value) || isManagedSmokeProjectId(value);
+  if (Array.isArray(value)) return value.some((item) => referencesValue(item, references));
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).some((item) => referencesValue(item, references));
+}
+
 export function withIdempotency<T>(key: string, operation: () => T): { replayed: boolean; value: T } {
   const store = getDemoStore();
   if (Object.prototype.hasOwnProperty.call(store.idempotency, key)) {
@@ -607,8 +759,9 @@ export function appendDemoAudit(
   metadata: Record<string, string | number | boolean> = {},
 ): DemoAuditEvent {
   const store = getDemoStore();
+  store.resourceSequences.audit += 1;
   const event: DemoAuditEvent = {
-    id: `AUD-${String(store.audit.length + 1).padStart(5, "0")}`,
+    id: `AUD-${String(store.resourceSequences.audit).padStart(5, "0")}`,
     action,
     resource,
     actor,

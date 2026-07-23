@@ -5,11 +5,12 @@ import {
   type DemoStoreState,
 } from "./demo-store";
 
-const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v4";
+const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v5";
 const LEGACY_SNAPSHOT_SCHEMAS = new Set([
   "deviludo.local-admin-state.v1",
   "deviludo.local-admin-state.v2",
   "deviludo.local-admin-state.v3",
+  "deviludo.local-admin-state.v4",
 ]);
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const COMMAND_KEY = /^[A-Za-z0-9][A-Za-z0-9:._@/-]{0,511}$/;
@@ -199,7 +200,8 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
     || !Array.isArray(value.installations) || !record(value.rollouts)
     || !Array.isArray(value.providers) || !Array.isArray(value.profiles)
     || !Array.isArray(value.credentials) || !record(value.defaults)
-    || !Array.isArray(value.audit) || !Array.isArray(value.usage) || !record(value.idempotency)) {
+    || !Array.isArray(value.audit) || !Array.isArray(value.usage) || !record(value.idempotency)
+    || !validResourceSequences(value.resourceSequences)) {
     throw new Error("本地 Agent 管理状态结构无效");
   }
   for (const state of Object.values(value.agentVersions)) {
@@ -254,6 +256,12 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
       throw new Error("本地 Agent Profile 投影无效");
     }
   }
+}
+
+function validResourceSequences(value: unknown): boolean {
+  if (!record(value)) return false;
+  return ["credential", "provider", "profile", "audit"].every((key) =>
+    Number.isSafeInteger(value[key]) && Number(value[key]) >= 0);
 }
 
 function hasForbiddenPersistedKey(value: unknown): boolean {

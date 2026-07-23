@@ -98,6 +98,7 @@ npm run local:smoke
 - 新 WorkerImage 到达健康 `100% ACTIVE` 后，可从当前 ACTIVE Profile 生成只更换 Installation 的 `READY` 升级 Profile；Provider 与凭据不复制，SecurityAdmin 激活和 PlatformAgentAdmin 精确切换默认保持为两个独立步骤，旧默认与已锁定任务在切换前后均不漂移；
 - 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
 - 租户 BYOK 通过真实页面 API 创建新不可变版本、停止旧版本签发并撤销指定旧版本；响应和投影均不包含明文或 SecretRef；
+- Smoke 创建的租户凭据、Provider、Profile 与项目默认都带本次运行标记；退出前会先撤销 Agent sidecar 中的对应密钥，再追加 D1 清理修订并回收测试投影。单调资源序号不会回退，测试数据不会污染正在演示的管理员后台；进程异常退出后可运行 `npm run local:prune-smoke` 完成同一套受签名维护清理；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
 - 侧车 `/health` 返回 `deviludo-local-runtime` 和实际 Godot 版本。
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`，并公开 `PINNED_ENV`、`LOCAL_DETERMINISTIC` 或 `NOT_CONFIGURED` 身份模式；`degraded` 是未启用执行时的预期状态。
@@ -133,6 +134,8 @@ DEVILUDO_LOCAL_PORT=4310 npm run local:smoke
 Godot 侧车、Agent 探针和规格侧车端口默认分别是 `4311`、`4312`、`4313`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT`、`DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`、`DEVILUDO_LOCAL_SPEC_RUNTIME_PORT`。启动器默认把不含认证 Key 的规格历史写入 `.deviludo/local-spec-state.json`；可用 `DEVILUDO_LOCAL_SPEC_STATE_FILE` 改到另一个绝对路径。写入采用同目录临时文件、`fsync` 与原子替换，文件权限固定为 `0600`；损坏、超限、宽权限或符号链接状态会失败关闭。已完成的对话与批准保留精确幂等回放，进程崩溃时尚未完成的 claim 不持久化，可安全重试。
 
 `npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。Agent 管理写操作使用 D1 不可变 revision log；只有缺少 D1 绑定的纯 Node 合同测试才回退到进程内存。
+
+Smoke 维护接口只接受严格生成的 `smoke-*` 项目标识和 sidecar HMAC 断言，不接受前缀、通配符、路径或普通用户项目。清理写入新的管理状态 revision，不修改或删除历史 D1 revision；快照 v5 额外保存 Credential、Provider、Profile 与审计事件的单调序号，因此回收当前测试投影后也不会复用历史资源 ID。
 
 ## 本地生产依赖
 

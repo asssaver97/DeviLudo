@@ -772,9 +772,11 @@ export async function POST(request: Request, context: RouteContext) {
       }
       return await mutate(lease, `admin:${key}:${scope}:${scopeId}:${idempotency}`, () => {
         const store = getDemoStore();
-        const providerId = `provider-${agent}-${store.providers.length + 1}`;
+        store.resourceSequences.provider += 1;
+        store.resourceSequences.profile += 1;
+        const providerId = `provider-${agent}-${store.resourceSequences.provider}`;
         const profile: DemoProfile = {
-          id: `profile-${agent}-${store.profiles.length + 1}-r1`,
+          id: `profile-${agent}-${store.resourceSequences.profile}-r1`,
           revision: 1,
           scope,
           scopeId,
@@ -1076,7 +1078,8 @@ export async function POST(request: Request, context: RouteContext) {
         body.apiKey = "[DESTROYED_ON_IDEMPOTENT_REPLAY]";
         return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
       }
-      const familyId = `credential-${getDemoStore().credentials.length + 1}`;
+      const credentialSequence = getDemoStore().resourceSequences.credential + 1;
+      const familyId = `credential-${credentialSequence}`;
       const id = `${familyId}-v1`;
       const bytes = new TextEncoder().encode(secret);
       let fingerprint: `sha256:${string}`;
@@ -1093,6 +1096,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
       return await mutate(lease, operationId, () => {
         const store = getDemoStore();
+        store.resourceSequences.credential = Math.max(store.resourceSequences.credential, credentialSequence);
         const credential = {
           id,
           familyId,

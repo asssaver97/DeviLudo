@@ -540,7 +540,7 @@ try {
   }
   const codexSelection = await request(baseUrl, `/api/projects/${smokeCodexProject}/agent-settings`, {
     method: "PUT",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-select-codex-catalog-v1" },
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-select-codex-catalog-${smokeNonce}` },
     body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
   });
   if (!codexSelection.response.ok) {
@@ -612,8 +612,8 @@ try {
   }
   const tenantCredential = await request(baseUrl, "/api/settings/agents/credentials", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-v1" },
-    body: JSON.stringify({ label: "Smoke tenant Provider", apiKey: "smoke-local-provider-key-material" }),
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-${smokeNonce}` },
+    body: JSON.stringify({ label: `Smoke tenant Provider / ${smokeNonce}`, apiKey: "smoke-local-provider-key-material" }),
   });
   const tenantCredentialText = await tenantCredential.response.text();
   const tenantCredentialPayload = JSON.parse(tenantCredentialText);
@@ -627,7 +627,7 @@ try {
     `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/rotate`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-rotate-v1" },
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-rotate-${smokeNonce}` },
       body: JSON.stringify({ apiKey: rotatedCredentialSecret }),
     },
   );
@@ -645,7 +645,7 @@ try {
     `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/revoke`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-revoke-v1" },
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-revoke-${smokeNonce}` },
       body: "{}",
     },
   );
@@ -664,7 +664,7 @@ try {
   }
   const tenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-v1" },
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-profile-${smokeNonce}` },
     body: JSON.stringify({
       agent: "claude-code",
       installationId: "claude-installation-214",
@@ -703,7 +703,7 @@ try {
     `/api/settings/agents/profiles/${encodeURIComponent(tenantProfilePayload.data.profile.id)}/validate`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-probe-v1" },
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-profile-probe-${smokeNonce}` },
       body: "{}",
     },
   );
