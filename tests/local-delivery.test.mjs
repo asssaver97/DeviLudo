@@ -500,12 +500,42 @@ test("local cancellation invalidates evidence and revokes unreleased authority",
   state = { ...state, evidenceValid: true, mainSha: "f21c0de", steamBranch: "local-password-beta" };
   state = applyLocalDeliveryAction(state, "cancel");
   assert.equal(state.stage, "CANCELLED");
+  assert.equal(state.cancellation.reason, "项目所有者取消了本地交付。");
+  assert.equal(state.cancellation.requestedAt, state.events[0].at);
+  assert.deepEqual(state.cancellation.agentCancellation, {
+    tenantId: "tenant-local",
+    projectId: "project-cancel",
+    runId: "RUN-CANCEL-001",
+    attemptId: "ATT-RUN-CANCEL-001",
+    state: "NOT_RUNNING",
+  });
   assert.equal(state.evidenceValid, false);
   assert.equal(state.steamBranch, null);
   assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
   assert.equal(state.events[0].type, "DELIVERY_CANCELLED");
+  assert.match(state.events[0].message, /项目所有者取消了本地交付/);
   assert.throws(() => applyLocalDeliveryAction(state, "advance"), /已取消/);
   assert.throws(() => applyLocalDeliveryAction(state, "cancel"), /越过可取消边界/);
+});
+
+test("historical cancelled snapshots remain readable without inventing a cancellation receipt", () => {
+  let state = approveLocalSpec(createLocalDelivery("project-legacy-cancel"), "SPEC-LEGACY-CANCEL", "RUN-LEGACY-CANCEL");
+  state = applyLocalDeliveryAction(state, "cancel");
+  const historical = { ...state };
+  delete historical.cancellation;
+  const normalized = normalizeLocalDeliverySnapshot(historical);
+  assert.equal(normalized.stage, "CANCELLED");
+  assert.equal(normalized.cancellation, null);
+  assert.throws(
+    () => normalizeLocalDeliverySnapshot({
+      ...state,
+      cancellation: {
+        ...state.cancellation,
+        agentCancellation: { ...state.cancellation.agentCancellation, projectId: "different-project" },
+      },
+    }),
+    /取消回执已损坏/,
+  );
 });
 
 test("a completed Agent receipt must match every immutable lock before becoming a candidate", () => {

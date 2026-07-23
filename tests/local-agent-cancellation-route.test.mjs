@@ -55,12 +55,37 @@ test("local delivery cancellation stops the exact active Agent attempt before co
     const response = await mutateDelivery(new Request(`http://127.0.0.1:3000/api/projects/${projectId}/delivery`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `cancel:${projectId}` },
-      body: JSON.stringify({ action: "cancel", reason: "用户决定停止本轮开发。" }),
+      body: JSON.stringify({ action: "cancel", reason: "  用户决定停止本轮开发。  " }),
     }), { params: Promise.resolve({ projectId }) });
     const payload = await response.json();
     assert.equal(response.status, 201);
     assert.equal(payload.data.stage, "CANCELLED");
     assert.equal(payload.meta.agentCancellation.state, "CANCELLATION_REQUESTED");
+    assert.equal(payload.data.cancellation.reason, "用户决定停止本轮开发。");
+    assert.equal(payload.data.cancellation.requestedAt, payload.data.events[0].at);
+    assert.deepEqual(payload.data.cancellation.agentCancellation, payload.meta.agentCancellation);
+    assert.match(payload.data.events[0].message, /用户决定停止本轮开发/);
+    assert.equal(cancellationCalls, 1);
+
+    const replay = await mutateDelivery(new Request(`http://127.0.0.1:3000/api/projects/${projectId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `cancel:${projectId}` },
+      body: JSON.stringify({ action: "cancel", reason: "用户决定停止本轮开发。" }),
+    }), { params: Promise.resolve({ projectId }) });
+    const replayPayload = await replay.json();
+    assert.equal(replay.status, 200);
+    assert.equal(replayPayload.meta.idempotentReplay, true);
+    assert.deepEqual(replayPayload.data.cancellation, payload.data.cancellation);
+    assert.deepEqual(replayPayload.meta.agentCancellation, payload.meta.agentCancellation);
+    assert.equal(cancellationCalls, 1);
+
+    const conflict = await mutateDelivery(new Request(`http://127.0.0.1:3000/api/projects/${projectId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `cancel:${projectId}` },
+      body: JSON.stringify({ action: "cancel", reason: "尝试用同一幂等键替换取消原因。" }),
+    }), { params: Promise.resolve({ projectId }) });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).error.code, "IDEMPOTENCY_KEY_REUSED");
     assert.equal(cancellationCalls, 1);
   } finally {
     globalThis.fetch = previousFetch;
@@ -104,15 +129,26 @@ test("local delivery remains active when the Agent cancellation receipt drifts",
     assert.equal((await widened.json()).error.code, "INVALID_LOCAL_DELIVERY_REQUEST");
     assert.equal(cancellationCalls, 0);
 
+    const missingReason = await mutateDelivery(new Request(`http://127.0.0.1:3000/api/projects/${projectId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `missing-reason:${projectId}` },
+      body: JSON.stringify({ action: "cancel" }),
+    }), { params: Promise.resolve({ projectId }) });
+    assert.equal(missingReason.status, 400);
+    assert.equal((await missingReason.json()).error.code, "INVALID_LOCAL_DELIVERY_REQUEST");
+    assert.equal(cancellationCalls, 0);
+
     const response = await mutateDelivery(new Request(`http://127.0.0.1:3000/api/projects/${projectId}/delivery`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `cancel:${projectId}` },
-      body: JSON.stringify({ action: "cancel" }),
+      body: JSON.stringify({ action: "cancel", reason: "回执绑定验证失败时不能提交取消。" }),
     }), { params: Promise.resolve({ projectId }) });
     const payload = await response.json();
     assert.equal(response.status, 502);
     assert.equal(payload.error.code, "LOCAL_AGENT_CANCELLATION_INVALID");
-    assert.equal((await readLocalDelivery(projectId)).stage, started.snapshot.stage);
+    const preserved = await readLocalDelivery(projectId);
+    assert.equal(preserved.stage, started.snapshot.stage);
+    assert.equal(preserved.cancellation, null);
     assert.equal(cancellationCalls, 1);
   } finally {
     globalThis.fetch = previousFetch;

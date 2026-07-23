@@ -1119,6 +1119,11 @@ try {
   if (!cancellation.response.ok || cancellationPayload.data?.stage !== "CANCELLED"
     || cancellationPayload.data?.evidenceValid !== false
     || cancellationPayload.data?.steamBranch !== null
+    || cancellationPayload.data?.cancellation?.reason !== "local smoke cancellation"
+    || cancellationPayload.data?.cancellation?.requestedAt !== cancellationPayload.data?.events?.[0]?.at
+    || cancellationPayload.data?.cancellation?.agentCancellation?.projectId !== smokeSpecProject
+    || cancellationPayload.data?.cancellation?.agentCancellation?.runId !== cancellationPayload.data?.runId
+    || !["CANCELLATION_REQUESTED", "NOT_RUNNING"].includes(cancellationPayload.data?.cancellation?.agentCancellation?.state)
     || cancellationPayload.data?.events?.[0]?.type !== "DELIVERY_CANCELLED") {
     throw new Error("local cancellation did not revoke delivery authority");
   }

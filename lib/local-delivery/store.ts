@@ -4,12 +4,14 @@ import {
   createLocalDelivery,
   invalidateLocalDelivery,
   normalizeLocalDeliverySnapshot,
+  recordLocalDeliveryCancellation,
   recordLocalAgentExecution,
   recordLocalExternalApproval,
   recordLocalMainValidation,
   recordLocalSteamReinstall,
   recordLocalValidation,
   type LocalDeliveryAction,
+  type LocalDeliveryCancellation,
   type LocalDeliverySnapshot,
   type LocalExternalApprovalEvidenceSnapshot,
   type LocalLockedAgentProfile,
@@ -393,6 +395,19 @@ async function replay(db: D1Database | null, commandKey: string): Promise<LocalD
   return row ? parseSnapshot(row.response) : null;
 }
 
+export async function replayLocalDeliveryCommand(
+  projectId: string,
+  commandKey: string,
+): Promise<LocalDeliverySnapshot | null> {
+  const db = await resolveDb();
+  if (db) await ensureStore(db);
+  const snapshot = await replay(db, commandKey);
+  if (snapshot && snapshot.projectId !== projectId) {
+    throw new Error("本地交付命令重放绑定冲突");
+  }
+  return snapshot;
+}
+
 async function mutate(
   projectId: string,
   commandKey: string,
@@ -419,6 +434,19 @@ export async function commandLocalDelivery(
   commandKey: string,
 ): Promise<MutationResult> {
   return mutate(projectId, commandKey, (current) => applyLocalDeliveryAction(current, action));
+}
+
+export async function cancelLocalDelivery(
+  projectId: string,
+  reason: string,
+  agentCancellation: LocalDeliveryCancellation["agentCancellation"],
+  commandKey: string,
+): Promise<MutationResult> {
+  return mutate(
+    projectId,
+    commandKey,
+    (current) => recordLocalDeliveryCancellation(current, reason, agentCancellation),
+  );
 }
 
 export async function startLocalDelivery(

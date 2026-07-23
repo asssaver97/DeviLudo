@@ -1,5 +1,10 @@
 import { bodyObject, HttpProblem, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
-import { commandLocalDelivery, readLocalDelivery } from "@/lib/local-delivery/store";
+import {
+  cancelLocalDelivery,
+  commandLocalDelivery,
+  readLocalDelivery,
+  replayLocalDeliveryCommand,
+} from "@/lib/local-delivery/store";
 import { LocalDeliveryGateError, type LocalDeliveryAction } from "@/lib/local-delivery/model";
 import {
   DeliveryProjectionBrokerError,
@@ -112,14 +117,27 @@ export async function POST(
       return json({ error: { code: "UNSUPPORTED_ACTION", message: "不支持的本地交付动作" } }, { status: 400 });
     }
     const allowedFields = action === "cancel" ? ["action", "reason"] : ["action"];
-    if (Object.keys(body).some((field) => !allowedFields.includes(field))) {
-      return json({ error: { code: "INVALID_LOCAL_DELIVERY_REQUEST", message: "本地交付请求包含不允许的字段" } }, { status: 400 });
+    if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(allowedFields.sort())) {
+      return json({ error: { code: "INVALID_LOCAL_DELIVERY_REQUEST", message: "本地交付请求字段不完整或包含不允许的字段" } }, { status: 400 });
     }
-    const cancellationReason = body.reason === undefined
-      ? "项目所有者取消了本地交付。"
-      : requireString(body, "reason", 2_000);
-    if (action === "cancel" && !cancellationReason.trim()) {
+    const cancellationReason = action === "cancel" ? requireString(body, "reason", 2_000).trim() : "";
+    if (action === "cancel" && !cancellationReason) {
       throw new HttpProblem(400, "INVALID_LOCAL_DELIVERY_REQUEST", "取消原因不能为空");
+    }
+    const commandKey = `delivery:${projectId}:${idempotencyKey(request)}`;
+    const replay = action === "cancel" ? await replayLocalDeliveryCommand(projectId, commandKey) : null;
+    if (replay) {
+      if (replay.stage !== "CANCELLED" || replay.cancellation?.reason !== cancellationReason) {
+        throw new HttpProblem(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已绑定另一条本地交付命令");
+      }
+      return json({
+        data: replay,
+        meta: {
+          mode: "LOCAL_D1",
+          idempotentReplay: true,
+          ...(replay.cancellation ? { agentCancellation: replay.cancellation.agentCancellation } : {}),
+        },
+      });
     }
     const agentCancellation = action === "cancel"
       ? await cancelLocalAgentExecution(
@@ -128,11 +146,9 @@ export async function POST(
           cancellationReason,
         )
       : null;
-    const result = await commandLocalDelivery(
-      projectId,
-      action,
-      `delivery:${projectId}:${idempotencyKey(request)}`,
-    );
+    const result = action === "cancel" && agentCancellation
+      ? await cancelLocalDelivery(projectId, cancellationReason, agentCancellation, commandKey)
+      : await commandLocalDelivery(projectId, action, commandKey);
     return json(
       {
         data: result.snapshot,

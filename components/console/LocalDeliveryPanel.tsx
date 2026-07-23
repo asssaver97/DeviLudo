@@ -110,6 +110,9 @@ export function LocalDeliveryPanel({
   const [error, setError] = useState("");
   const [agentPreflight, setAgentPreflight] = useState<LocalAgentPreflightResult | null>(null);
   const [automationAuthority, setAutomationAuthority] = useState<string | null>(null);
+  const [localCancelReason, setLocalCancelReason] = useState("");
+  const [localCancelling, setLocalCancelling] = useState(false);
+  const localCancelCommandRef = useRef<string | null>(null);
 
   const publish = useCallback((value: LocalDeliverySnapshot) => {
     setSnapshot(value);
@@ -203,6 +206,35 @@ export function LocalDeliveryPanel({
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "本地交付动作失败");
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runLocalCancellation() {
+    const reason = localCancelReason.trim();
+    if (!snapshot || busy || !reason || snapshot.stage === "RELEASED" || snapshot.stage === "CANCELLED") return;
+    setBusy(true);
+    setLocalCancelling(true);
+    setError("");
+    localCancelCommandRef.current ??= `local-cancel-${crypto.randomUUID()}`;
+    try {
+      const response = await fetch(`/api/projects/${projectId}/delivery`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": localCancelCommandRef.current,
+        },
+        body: JSON.stringify({ action: "cancel", reason }),
+      });
+      const payload = await response.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "本地交付取消失败");
+      publish(payload.data);
+      setLocalCancelReason("");
+      localCancelCommandRef.current = null;
+    } catch (reasonValue) {
+      setError(reasonValue instanceof Error ? reasonValue.message : "本地交付取消失败");
+    } finally {
+      setLocalCancelling(false);
       setBusy(false);
     }
   }
@@ -541,6 +573,53 @@ export function LocalDeliveryPanel({
             </div>
           ) : null}
 
+          {snapshot.cancellation ? (
+            <div className="local-real-validation pending delivery-cancel-controls">
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">Localhost · 不可变取消记录</span>
+                <h3>交付权限已撤销</h3>
+                <p>{snapshot.cancellation.reason}</p>
+              </div>
+              <div className="local-real-validation-result">
+                <span>{snapshot.cancellation.agentCancellation.state}</span>
+                <div><code>{snapshot.cancellation.agentCancellation.attemptId}</code></div>
+              </div>
+            </div>
+          ) : snapshot.stage === "CANCELLED" ? (
+            <div className="local-real-validation pending delivery-cancel-controls">
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">Localhost · 历史取消记录</span>
+                <h3>交付权限已撤销</h3>
+                <p>该记录创建于结构化取消回执上线前；不会补造原因或 Agent 撤销证明。</p>
+              </div>
+            </div>
+          ) : snapshot.stage !== "RELEASED" ? (
+            <div className="local-real-validation pending delivery-cancel-controls">
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">停止本地交付</span>
+                <h3>撤销运行权限</h3>
+                <p>取消会先终止精确的 Agent 尝试，再持久化原因并使 Runner、证据和未发布的 Steam 权限失效。</p>
+                <label>
+                  <span>取消原因</span>
+                  <textarea
+                    disabled={busy}
+                    maxLength={2_000}
+                    onChange={(event) => {
+                      setLocalCancelReason(event.target.value);
+                      localCancelCommandRef.current = null;
+                    }}
+                    placeholder="说明为什么停止这次本地交付（必填）"
+                    rows={2}
+                    value={localCancelReason}
+                  />
+                </label>
+              </div>
+              <button className="button button-secondary" disabled={busy || !localCancelReason.trim()} onClick={runLocalCancellation} type="button">
+                {localCancelling ? "正在安全撤销…" : "取消本地交付"}
+              </button>
+            </div>
+          ) : null}
+
           <div className="local-delivery-actions">
             <div>
               {action ? <button className="button button-acid" disabled={busy} onClick={() => action.action === "auto" ? runAutomatic() : action.action === "external-approve" ? runExternalApproval() : runAction(action.action)} type="button">{action.label}</button> : null}
@@ -552,9 +631,6 @@ export function LocalDeliveryPanel({
               ) : null}
               {snapshot.stage === "STEAM_REINSTALL_E2E" ? (
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("steam-reinstall-fail")} type="button">模拟本地 Beta 回装失败</button>
-              ) : null}
-              {snapshot.stage !== "RELEASED" && snapshot.stage !== "CANCELLED" ? (
-                <button className="button button-secondary" disabled={busy} onClick={() => runAction("cancel")} type="button">取消本地交付</button>
               ) : null}
             </div>
             <button className="local-reset" disabled={busy} onClick={() => runAction("reset")} type="button">重置本地流程</button>

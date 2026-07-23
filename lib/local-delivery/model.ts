@@ -150,6 +150,18 @@ export type LocalExternalApprovalEvidenceSnapshot = {
 
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
+export type LocalDeliveryCancellation = {
+  readonly reason: string;
+  readonly requestedAt: string;
+  readonly agentCancellation: {
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly runId: string;
+    readonly attemptId: string;
+    readonly state: "CANCELLATION_REQUESTED" | "NOT_RUNNING";
+  };
+};
+
 export type LocalAgentVersionAttestation = {
   validationReceiptId: string;
   validationReceiptDigest: string;
@@ -226,6 +238,7 @@ export type LocalDeliverySnapshot = {
   externalApprovals: readonly string[];
   externalApprovalEvidence: readonly LocalExternalApprovalEvidenceSnapshot[];
   repairHandoff: LocalPostMergeFailure | null;
+  cancellation: LocalDeliveryCancellation | null;
   agentExecution: LocalAgentExecutionSnapshot | null;
   localValidation: LocalValidationSnapshot | null;
   mainValidation: LocalMainValidationSnapshot | null;
@@ -317,6 +330,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
       valid: historicalExecution.modelRoles ? historicalExecution.valid : false,
     }
     : null;
+  const cancellation = normalizeCancellation(snapshot.cancellation, snapshot);
   const targetMatrix = normalizeTargetMatrix(snapshot.targetMatrix ?? Object.keys(snapshot.targetResults ?? {}));
   const targetResults = normalizeTargetResults(snapshot.targetResults, targetMatrix);
   const historicalValidation = snapshot.localValidation as (LocalValidationSnapshot & {
@@ -480,6 +494,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     steamBranch: rewindReleaseAuthority ? null : snapshot.steamBranch,
     agentExecution,
     repairHandoff: snapshot.repairHandoff ?? null,
+    cancellation,
     mfaApprovalId: rewindReleaseAuthority ? null : snapshot.mfaApprovalId ?? null,
     steamBuildId: rewindReleaseAuthority || rewindForSteamEvidence ? null : snapshot.steamBuildId ?? null,
     steamReleaseId: rewindReleaseAuthority ? null : snapshot.steamReleaseId ?? null,
@@ -500,8 +515,7 @@ function now() {
   return new Date().toISOString();
 }
 
-function event(snapshot: LocalDeliverySnapshot, type: string, message: string): LocalDeliverySnapshot {
-  const at = now();
+function event(snapshot: LocalDeliverySnapshot, type: string, message: string, at = now()): LocalDeliverySnapshot {
   return {
     ...snapshot,
     revision: snapshot.revision + 1,
@@ -537,6 +551,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     externalApprovals: [],
     externalApprovalEvidence: [],
     repairHandoff: null,
+    cancellation: null,
     agentExecution: null,
     localValidation: null,
     mainValidation: null,
@@ -568,6 +583,7 @@ export function approveLocalSpec(
       evidenceValid: false,
       targetMatrix: lockedTargetMatrix,
       targetResults: createTargetResults(lockedTargetMatrix, "QUEUED"),
+      cancellation: null,
       steamBranch: null,
       mfaApprovalId: null,
       steamBuildId: null,
@@ -1051,6 +1067,33 @@ function validLocalBetaArtifact(value: LocalSteamReinstallSnapshot["betaArtifact
     && value.sizeBytes <= 512 * 1024 * 1024;
 }
 
+function normalizeCancellation(
+  value: LocalDeliveryCancellation | null | undefined,
+  snapshot: Pick<LocalDeliverySnapshot, "projectId" | "runId" | "stage">,
+): LocalDeliveryCancellation | null {
+  if (value === undefined || value === null) return null;
+  const expectedRunId = snapshot.runId ?? "not-started";
+  const expectedAttemptId = snapshot.runId ? `ATT-${snapshot.runId}` : "not-started";
+  const receipt = value.agentCancellation;
+  if (snapshot.stage !== "CANCELLED"
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["agentCancellation", "reason", "requestedAt"])
+    || typeof value.reason !== "string" || value.reason !== value.reason.trim()
+    || value.reason.length < 1 || value.reason.length > 2_000 || value.reason.includes("\0")
+    || typeof value.requestedAt !== "string" || value.requestedAt.length > 64 || !Number.isFinite(Date.parse(value.requestedAt))
+    || !receipt || typeof receipt !== "object" || Array.isArray(receipt)
+    || JSON.stringify(Object.keys(receipt).sort()) !== JSON.stringify(["attemptId", "projectId", "runId", "state", "tenantId"])
+    || receipt.tenantId !== "tenant-local" || receipt.projectId !== snapshot.projectId
+    || receipt.runId !== expectedRunId || receipt.attemptId !== expectedAttemptId
+    || (receipt.state !== "CANCELLATION_REQUESTED" && receipt.state !== "NOT_RUNNING")) {
+    throw new Error("本地交付取消回执已损坏");
+  }
+  return Object.freeze({
+    reason: value.reason,
+    requestedAt: value.requestedAt,
+    agentCancellation: Object.freeze({ ...receipt }),
+  });
+}
+
 function hasPassedExportBoot(checks: LocalValidationSnapshot["checks"]): boolean {
   return checks.some((check) => check.name === "macos-export-boot" && check.status === "PASSED");
 }
@@ -1058,6 +1101,48 @@ function hasPassedExportBoot(checks: LocalValidationSnapshot["checks"]): boolean
 function hasPassedSteamReinstallBoot(checks: LocalSteamReinstallSnapshot["checks"]): boolean {
   return checks.some((check) => check.name === "beta-package-integrity" && check.status === "PASSED")
     && checks.some((check) => check.name === "clean-reinstall-boot" && check.status === "PASSED");
+}
+
+export function recordLocalDeliveryCancellation(
+  current: LocalDeliverySnapshot,
+  reason: string,
+  agentCancellation: LocalDeliveryCancellation["agentCancellation"],
+): LocalDeliverySnapshot {
+  if (current.stage === "RELEASED" || current.stage === "CANCELLED") {
+    throw new Error("当前交付已越过可取消边界");
+  }
+  const requestedAt = now();
+  const cancellation = normalizeCancellation({
+    reason: reason.trim(),
+    requestedAt,
+    agentCancellation,
+  }, { ...current, stage: "CANCELLED" });
+  if (!cancellation) throw new Error("本地交付取消回执无效");
+  const auditReason = cancellation.reason.replace(/\s+/g, " ");
+  return event(
+    {
+      ...current,
+      stage: "CANCELLED",
+      resumeStage: null,
+      evidenceValid: false,
+      targetResults: createTargetResults(current.targetMatrix, "INVALIDATED"),
+      steamBranch: null,
+      mfaApprovalId: null,
+      steamBuildId: null,
+      steamReleaseId: null,
+      externalGate: null,
+      externalApprovals: [],
+      externalApprovalEvidence: current.externalApprovalEvidence.map((evidence) => ({ ...evidence, valid: false })),
+      cancellation,
+      localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
+      mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
+      steamReinstall: current.steamReinstall ? { ...current.steamReinstall, valid: false } : null,
+      agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
+    },
+    "DELIVERY_CANCELLED",
+    `项目所有者已取消交付：${auditReason} 本地 Agent、Runner、证据与 Steam 权限均视为撤销。`,
+    requestedAt,
+  );
 }
 
 export function applyLocalDeliveryAction(
@@ -1074,31 +1159,13 @@ export function applyLocalDeliveryAction(
   }
 
   if (action === "cancel") {
-    if (current.stage === "RELEASED" || current.stage === "CANCELLED") {
-      throw new Error("当前交付已越过可取消边界");
-    }
-    return event(
-      {
-        ...current,
-        stage: "CANCELLED",
-        resumeStage: null,
-        evidenceValid: false,
-        targetResults: createTargetResults(current.targetMatrix, "INVALIDATED"),
-        steamBranch: null,
-        mfaApprovalId: null,
-        steamBuildId: null,
-        steamReleaseId: null,
-        externalGate: null,
-        externalApprovals: [],
-        externalApprovalEvidence: current.externalApprovalEvidence.map((evidence) => ({ ...evidence, valid: false })),
-        localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
-        mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
-        steamReinstall: current.steamReinstall ? { ...current.steamReinstall, valid: false } : null,
-        agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
-      },
-      "DELIVERY_CANCELLED",
-      "项目所有者已取消交付；本地 Agent、Runner、证据与 Steam 权限均视为撤销。",
-    );
+    return recordLocalDeliveryCancellation(current, "项目所有者取消了本地交付。", {
+      tenantId: "tenant-local",
+      projectId: current.projectId,
+      runId: current.runId ?? "not-started",
+      attemptId: current.runId ? `ATT-${current.runId}` : "not-started",
+      state: "NOT_RUNNING",
+    });
   }
 
   if (action === "provider-fail") {
