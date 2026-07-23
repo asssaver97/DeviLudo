@@ -7,6 +7,7 @@ import { ProductionGatewayConnector } from "../../inference-gateway/src/producti
 import { FixtureWorkspaceProvisioner } from "./fixture-workspace";
 import { IsolatedLocalAgentExecutor } from "./isolated-executor";
 import { LocalInferenceAuthority } from "./local-inference-authority";
+import { LoopbackLocalInferenceRelay } from "./local-inference-relay";
 import { LocalProviderControl } from "./provider-control";
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -17,6 +18,7 @@ export interface LocalExecutionStack {
   readonly gatewayHost: "127.0.0.1";
   readonly gatewayPort: number;
   readonly authority: LocalInferenceAuthority;
+  readonly relay: LoopbackLocalInferenceRelay;
 }
 
 /** Compose the real local CLI path only under the explicit loopback test launcher. */
@@ -54,16 +56,18 @@ export function localExecutionStackFromEnvironment(
     readiness: { async probe() { await connector.probe(); } },
   });
   signingKey.fill(0);
-  const supervisor = new AgentExecutionSupervisor({ secretResolver: authority.secrets });
+  const relay = new LoopbackLocalInferenceRelay({ gatewayUrl, tokenResolver: authority.secrets });
+  const supervisor = new AgentExecutionSupervisor({ secretResolver: relay.secrets });
   const executor = new IsolatedLocalAgentExecutor({
     storageRoot,
     gatewayUrl: gatewayUrl.toString(),
     allowLocalLoopbackGateway: true,
     workspaceProvisioner: new FixtureWorkspaceProvisioner(fixtureRoot),
     runTokenBroker: authority,
+    inferenceRelay: relay,
     supervisor,
   });
-  return Object.freeze({ executor, gateway, gatewayHost: "127.0.0.1", gatewayPort, authority });
+  return Object.freeze({ executor, gateway, gatewayHost: "127.0.0.1", gatewayPort, authority, relay });
 }
 
 function absolute(value: string | undefined, label: string): string {

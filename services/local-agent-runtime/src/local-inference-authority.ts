@@ -111,6 +111,7 @@ export class LocalInferenceAuthority implements LocalRunTokenBroker {
     if (existing?.state === "ACTIVE") throw new Error("Local run authorization is already active");
     const nowSeconds = Math.floor(this.#now().getTime() / 1_000);
     if (!Number.isSafeInteger(nowSeconds)) throw new Error("Local run clock is invalid");
+    const authorizationExpiresAtEpochSeconds = nowSeconds + request.timeoutSeconds + 60;
     const models = Object.freeze([...new Set(Object.values(request.modelRoles))]);
     const budget = Object.freeze({
       maxCostUsd: request.budget.maxCostUsd,
@@ -133,7 +134,7 @@ export class LocalInferenceAuthority implements LocalRunTokenBroker {
       models,
       budget,
       iat: nowSeconds,
-      exp: nowSeconds + TOKEN_TTL_SECONDS,
+      exp: Math.min(nowSeconds + TOKEN_TTL_SECONDS, authorizationExpiresAtEpochSeconds),
       nonce,
     });
     const authorization: ActiveRunAuthorization = Object.freeze({
@@ -162,12 +163,33 @@ export class LocalInferenceAuthority implements LocalRunTokenBroker {
       expiresAtEpochSeconds: claims.exp,
     }));
     let revoked = false;
+    let currentExpiry = claims.exp;
+    let renewal: Promise<Readonly<{ expiresAt: string; renewed: boolean }>> | null = null;
     return Object.freeze({
       secretRef,
       expiresAt: new Date(claims.exp * 1_000).toISOString(),
+      renew: async () => {
+        if (revoked) throw new Error("Local run authorization is unavailable");
+        const remaining = currentExpiry - Math.floor(this.#now().getTime() / 1_000);
+        if (Number.isFinite(remaining) && remaining > 5 * 60) {
+          return Object.freeze({ expiresAt: new Date(currentExpiry * 1_000).toISOString(), renewed: false });
+        }
+        renewal ??= this.#renew(secretRef, request, claims, authorizationExpiresAtEpochSeconds).then((expiresAtEpochSeconds) => {
+          currentExpiry = expiresAtEpochSeconds;
+          return Object.freeze({
+            expiresAt: new Date(expiresAtEpochSeconds * 1_000).toISOString(),
+            renewed: true,
+          });
+        }).finally(() => { renewal = null; });
+        return renewal;
+      },
       revoke: async () => {
         if (revoked) return;
         revoked = true;
+        if (renewal) {
+          try { await renewal; }
+          catch { /* Revocation still wins over a failed concurrent renewal. */ }
+        }
         this.#revoke(secretRef, key);
       },
     });
@@ -199,6 +221,49 @@ export class LocalInferenceAuthority implements LocalRunTokenBroker {
       throw new Error("Local run authorization is unavailable");
     }
     return stored.value.toString("utf8");
+  }
+
+  async #renew(
+    secretRef: string,
+    request: LocalAgentExecutionRequest,
+    previous: RunTokenClaims,
+    authorizationExpiresAtEpochSeconds: number,
+  ): Promise<number> {
+    const stored = this.#tokens.get(secretRef);
+    const provider = this.#providerControl.authorizeExecution(request);
+    const nowSeconds = Math.floor(this.#now().getTime() / 1_000);
+    if (!stored || !provider || provider.protocol !== request.providerProtocol
+      || !Number.isSafeInteger(nowSeconds)) {
+      throw new Error("Local run authorization cannot be renewed");
+    }
+    const run = this.#runs.get(runKey(request.tenantId, request.runId));
+    if (!run || run.state !== "ACTIVE" || run.nonce !== previous.nonce
+      || stored.tenantId !== request.tenantId || stored.projectId !== request.projectId
+      || stored.runId !== request.runId || stored.attemptId !== request.attemptId) {
+      throw new Error("Local run authorization cannot be renewed");
+    }
+    const expiresAtEpochSeconds = Math.min(nowSeconds + TOKEN_TTL_SECONDS, authorizationExpiresAtEpochSeconds);
+    if (expiresAtEpochSeconds <= nowSeconds + 30) {
+      throw new Error("Local run authorization cannot be renewed");
+    }
+    const claims: RunTokenClaims = Object.freeze({
+      ...previous,
+      iat: nowSeconds,
+      exp: expiresAtEpochSeconds,
+    });
+    const value = Buffer.from(await issueRunToken(this.#signingKey, claims), "utf8");
+    const current = this.#tokens.get(secretRef);
+    if (current !== stored) {
+      value.fill(0);
+      throw new Error("Local run authorization changed during renewal");
+    }
+    stored.value.fill(0);
+    this.#tokens.set(secretRef, Object.freeze({
+      ...stored,
+      value,
+      expiresAtEpochSeconds: claims.exp,
+    }));
+    return claims.exp;
   }
 
   #claim(input: GatewayUsageClaimBinding): "ACQUIRED" | "BUSY" | "INDETERMINATE" | "BUDGET_EXHAUSTED" {

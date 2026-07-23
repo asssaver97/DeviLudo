@@ -253,6 +253,15 @@ Protected secret environment entries contain only the relay's attempt-local
 SecretRef in persisted launch plans. The executor resolves it at process start
 and redacts it from logs, errors and evidence.
 
+The explicit localhost test launcher mirrors this boundary with an ephemeral
+plain-HTTP listener on literal `127.0.0.1`; that exception is accepted only by
+the local-test adapter flag and can forward solely to the fixed loopback
+Gateway. It rotates the stable DLRT SecretRef inside the five-minute renewal
+window, caps every replacement at 15 minutes and at the immutable attempt
+authorization expiry, and zeroes the attempt credential before revoking the
+run. Production never enables this HTTP exception and continues to require the
+microVM HTTPS relay plus mTLS Gateway hop described above.
+
 The service implementation also compares the token against the active run
 registry (including nonce, exact model order and budget), checks the locked
 Provider/credential revision and cumulative usage, caps the outgoing request by

@@ -96,6 +96,7 @@ export async function runLocalAgentRuntime(
     await listen(runtime.server, runtime.port, runtime.host);
   } catch (error) {
     if (runtime.executionStack) {
+      await runtime.executionStack.relay.close();
       try { await runtime.executionStack.gateway.close(); }
       catch { /* The Gateway may have failed before it acquired a listener. */ }
       runtime.executionStack.authority.close();
@@ -116,6 +117,7 @@ export async function runLocalAgentRuntime(
     process.removeListener("SIGTERM", stop);
     runtime.execution.cancelAll();
     if (runtime.executionStack) {
+      await runtime.executionStack.relay.close();
       await runtime.executionStack.gateway.close();
       runtime.executionStack.authority.close();
     }

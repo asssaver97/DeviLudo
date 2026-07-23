@@ -81,6 +81,8 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
     let supervisorCalls = 0;
     let tokenCalls = 0;
     let tokenRevocations = 0;
+    let relayCalls = 0;
+    let relayClosures = 0;
     const executor = new IsolatedLocalAgentExecutor({
       storageRoot,
       gatewayUrl: "https://inference.internal.example/v1",
@@ -98,7 +100,20 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
           assert.match(baseCommitSha, /^[a-f0-9]{40}$/);
           return {
             secretRef: `secret://run-token/${issued.runId}/${issued.attemptId}`,
+            async renew() { return { expiresAt: new Date(Date.now() + 60_000).toISOString(), renewed: false }; },
             async revoke() { tokenRevocations += 1; },
+          };
+        },
+      },
+      inferenceRelay: {
+        async start({ request: relayed, token }) {
+          relayCalls += 1;
+          assert.equal(relayed.attemptId, input.attemptId);
+          assert.equal(token.secretRef, `secret://run-token/${input.runId}/${input.attemptId}`);
+          return {
+            gatewayUrl: "https://attempt-relay.internal.example",
+            runTokenSecretRef: `secret://local-inference-relay/${input.runId}/${input.attemptId}`,
+            async close() { relayClosures += 1; },
           };
         },
       },
@@ -109,7 +124,8 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
           assert.equal(supervised.installationProbe.expectedVersion, input.expectedVersion);
           assert.equal(supervised.runtimeSpec.cwd, supervised.workspaceRoot);
           assert.equal(JSON.stringify(supervised.runtimeSpec).includes("raw-upstream-key"), false);
-          assert.equal(Object.values(supervised.runtimeSpec.secretEnv)[0]?.startsWith("secret://run-token/"), true);
+          assert.equal(Object.values(supervised.runtimeSpec.secretEnv)[0]?.startsWith("secret://local-inference-relay/"), true);
+          assert.equal(JSON.stringify(supervised.runtimeSpec).includes("attempt-relay.internal.example"), true);
           if (agent === "claude-code") assert.equal(supervised.runtimeSpec.args.includes("--no-session-persistence"), true);
           else assert.equal(supervised.runtimeSpec.args.includes("--ephemeral"), true);
           await writeFile(path.join(supervised.workspaceRoot, "scripts", "main.gd"), "extends Node\nfunc _ready():\n\tprint(\"agent\")\n", "utf8");
@@ -138,6 +154,8 @@ for (const agent of ["claude-code", "codex-cli"] as const) {
     assert.equal(supervisorCalls, 1);
     assert.equal(tokenCalls, 1);
     assert.equal(tokenRevocations, 1);
+    assert.equal(relayCalls, 1);
+    assert.equal(relayClosures, 1);
   });
 }
 
@@ -153,7 +171,9 @@ test("isolated executor fails before process launch when the token broker return
         await writeFile(path.join(workspaceRoot, "project.godot"), "[application]\n", "utf8");
       },
     },
-    runTokenBroker: { async issue() { return { secretRef: "raw-upstream-key", async revoke() {} }; } },
+    runTokenBroker: { async issue() { return { secretRef: "raw-upstream-key",
+      async renew() { return { expiresAt: new Date(Date.now() + 60_000).toISOString(), renewed: false }; },
+      async revoke() {} }; } },
     supervisor: { async start() { supervisorCalls += 1; throw new Error("must not start"); } },
   });
   await assert.rejects(executor.execute(request("claude-code", "bad-token")), /invalid SecretRef/);
@@ -178,7 +198,9 @@ test("isolated executor propagates cancellation to the supervised CLI before can
       },
     },
     runTokenBroker: {
-      async issue() { return { secretRef: `secret://run-token/${input.runId}/${input.attemptId}`, async revoke() {} }; },
+      async issue() { return { secretRef: `secret://run-token/${input.runId}/${input.attemptId}`,
+        async renew() { return { expiresAt: new Date(Date.now() + 60_000).toISOString(), renewed: false }; },
+        async revoke() {} }; },
     },
     supervisor: {
       async start(supervised) {

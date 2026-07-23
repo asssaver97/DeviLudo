@@ -27,7 +27,21 @@ export interface LocalRunTokenBroker {
 export interface PreparedLocalRunToken {
   readonly secretRef: string;
   readonly expiresAt?: string;
+  renew(): Promise<Readonly<{ expiresAt: string; renewed: boolean }>>;
   revoke(): Promise<void>;
+}
+
+export interface LocalInferenceRelayHandle {
+  readonly gatewayUrl: string;
+  readonly runTokenSecretRef: string;
+  close(): Promise<void>;
+}
+
+export interface LocalInferenceRelay {
+  start(input: Readonly<{
+    request: LocalAgentExecutionRequest;
+    token: PreparedLocalRunToken;
+  }>): Promise<LocalInferenceRelayHandle>;
 }
 
 export interface LocalAgentSupervisor {
@@ -45,6 +59,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
   readonly #allowLocalLoopbackGateway: boolean;
   readonly #workspaceProvisioner: LocalWorkspaceProvisioner;
   readonly #runTokenBroker: LocalRunTokenBroker;
+  readonly #inferenceRelay: LocalInferenceRelay | null;
   readonly #supervisor: LocalAgentSupervisor;
   readonly #scmProxy: LocalGitScmProxy;
 
@@ -53,6 +68,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     gatewayUrl: string;
     workspaceProvisioner: LocalWorkspaceProvisioner;
     runTokenBroker: LocalRunTokenBroker;
+    inferenceRelay?: LocalInferenceRelay;
     supervisor: LocalAgentSupervisor;
     scmProxy?: LocalGitScmProxy;
     allowLocalLoopbackGateway?: boolean;
@@ -69,6 +85,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     this.#allowLocalLoopbackGateway = localLoopback;
     this.#workspaceProvisioner = options.workspaceProvisioner;
     this.#runTokenBroker = options.runTokenBroker;
+    this.#inferenceRelay = options.inferenceRelay ?? null;
     this.#supervisor = options.supervisor;
     this.#scmProxy = options.scmProxy ?? new LocalGitScmProxy({ storageRoot: this.#storageRoot });
   }
@@ -107,10 +124,12 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     const base = await this.#scmProxy.prepare(scmBinding);
     throwIfAborted(signal);
     const token = await this.#runTokenBroker.issue({ request, baseCommitSha: base.baseCommitSha });
+    let relay: LocalInferenceRelayHandle | null = null;
     try {
     if (!/^(?:vault|kms|secret):\/\/[^\s?#]{1,480}$/.test(token.secretRef)) {
       throw new Error("Local token broker returned an invalid SecretRef");
     }
+    if (this.#inferenceRelay) relay = await this.#inferenceRelay.start({ request, token });
     throwIfAborted(signal);
 
     const adapter = getRuntimeAdapter(request.agent);
@@ -124,8 +143,8 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
       specificationRevisionId: request.specRevisionId,
       testPlanRevisionId: request.testPlanRevisionId,
       runRoot,
-      inferenceGatewayUrl: this.#gatewayUrl,
-      runTokenSecretRef: token.secretRef,
+      inferenceGatewayUrl: relay?.gatewayUrl ?? this.#gatewayUrl,
+      runTokenSecretRef: relay?.runTokenSecretRef ?? token.secretRef,
       ...(this.#allowLocalLoopbackGateway ? { allowLocalLoopbackInferenceGateway: true as const } : {}),
     });
     const runtime = adapter.prepare(context, profile);
@@ -168,7 +187,8 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     await writeFile(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return receipt;
     } finally {
-      await token.revoke();
+      try { await relay?.close(); }
+      finally { await token.revoke(); }
     }
   }
 }

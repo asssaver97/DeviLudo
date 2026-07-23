@@ -179,6 +179,40 @@ test("local usage ledger serializes inference and records priced budget consumpt
   control.close();
 });
 
+test("local inference authority renews the stable SecretRef with independently capped DLRTs", async () => {
+  const control = await activeControl();
+  let now = new Date("2026-07-24T00:00:00.000Z");
+  const authority = new LocalInferenceAuthority(control, {
+    signingKey: new Uint8Array(32).fill(41),
+    now: () => now,
+  });
+  const prepared = await authority.issue({ request, baseCommitSha: "e".repeat(40) });
+  const context = {
+    runId: request.runId,
+    attemptId: request.attemptId,
+    environmentVariable: "ANTHROPIC_API_KEY",
+  } as const;
+  const initial = await authority.secrets.resolve(prepared.secretRef, context);
+  assert.equal((await prepared.renew()).renewed, false);
+
+  now = new Date("2026-07-24T00:11:00.000Z");
+  const renewed = await prepared.renew();
+  assert.equal(renewed.renewed, true);
+  assert.equal(renewed.expiresAt, "2026-07-24T00:26:00.000Z");
+  const replacement = await authority.secrets.resolve(prepared.secretRef, context);
+  assert.notEqual(replacement, initial);
+  assert.equal(replacement.includes("sk-upstream"), false);
+  assert.equal((await prepared.renew()).renewed, false);
+
+  now = new Date("2026-07-24T02:01:00.000Z");
+  await assert.rejects(prepared.renew(), /cannot be renewed/);
+  await prepared.revoke();
+  await assert.rejects(prepared.renew(), /unavailable/);
+  await assert.rejects(authority.secrets.resolve(prepared.secretRef, context), /unavailable/);
+  authority.close();
+  control.close();
+});
+
 test("local run issuance rejects a Provider activated for another project scope", async () => {
   const control = await activeControl("project", "project-other");
   const authority = new LocalInferenceAuthority(control, { signingKey: new Uint8Array(32).fill(37) });
