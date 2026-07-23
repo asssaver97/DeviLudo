@@ -89,6 +89,38 @@ test("authenticated feedback creates a new approvable draft and replays without 
   assert.equal((JSON.parse(forged.body) as { error: { code: string } }).error.code, "LOCAL_SPEC_RUNTIME_AUTH_REQUIRED");
 });
 
+test("authenticated smoke cleanup removes exact project dialogue state and permits a fresh run", async () => {
+  const key = new Uint8Array(Buffer.alloc(32, 6));
+  const server = createLocalSpecRuntimeServer({ authenticationKey: key });
+  const projectId = `smoke-spec-${process.pid}-${Date.now().toString(36)}`;
+  const conversationPath = `/v1/projects/${projectId}/conversation`;
+  const draftBody = { expectedRevision: 0, message: "清理后应可重新运行的 smoke 规格" };
+  const first = await authenticatedPost<SpecDialogueSnapshot>(server, key, conversationPath, "repeatable-smoke", draftBody);
+  assert.equal(first.response.statusCode, 201);
+  assert.equal(first.data?.revision, 1);
+
+  const cleanupPath = "/v1/smoke-cleanup";
+  const cleanupBody = JSON.stringify({ projectIds: [projectId] });
+  const cleanup = await invoke(server, {
+    method: "POST",
+    path: cleanupPath,
+    headers: {
+      "content-type": "application/json",
+      ...createLocalSpecRuntimeHeaders({ method: "POST", path: cleanupPath, body: cleanupBody }, { key }),
+    },
+    body: cleanupBody,
+  });
+  assert.equal(cleanup.statusCode, 200);
+  assert.equal((JSON.parse(cleanup.body) as { data: { store: { conversations: number } } }).data.store.conversations, 1);
+
+  const missing = await authenticatedGet<SpecDialogueSnapshot>(server, key, conversationPath);
+  assert.equal(missing.response.statusCode, 200);
+  assert.equal(missing.data, null);
+  const repeated = await authenticatedPost<SpecDialogueSnapshot>(server, key, conversationPath, "repeatable-smoke", draftBody);
+  assert.equal(repeated.response.statusCode, 201);
+  assert.equal(repeated.data?.revision, 1);
+});
+
 test("durable state preserves the current feedback branch and exact replays across process recreation", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "deviludo-local-spec-"));
   try {

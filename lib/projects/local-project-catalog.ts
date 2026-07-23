@@ -1,3 +1,5 @@
+import { isEphemeralSmokeProjectId } from "@/lib/local-smoke-project";
+
 export type LocalProjectCatalogItem = Readonly<{
   projectId: string;
   tenantId: "tenant-local";
@@ -127,6 +129,49 @@ export async function createLocalProject(
   return database
     ? createD1Project(database, normalized, commandKey, requestDigest)
     : withMemoryLock(() => createMemoryProject(normalized, commandKey, requestDigest));
+}
+
+export async function cleanupLocalSmokeProjects(projectIds: readonly string[]): Promise<Readonly<{
+  projects: number;
+  commands: number;
+}>> {
+  if (!projectIds.length || projectIds.some((projectId) => !isEphemeralSmokeProjectId(projectId))
+    || new Set(projectIds).size !== projectIds.length) {
+    throw new Error("Local project cleanup target is invalid");
+  }
+  const database = await resolveDatabase();
+  if (!database) {
+    return withMemoryLock(() => {
+      const state = memory();
+      let projects = 0;
+      let commands = 0;
+      for (const projectId of projectIds) {
+        if (state.projects.delete(projectId)) projects += 1;
+      }
+      for (const [commandKey, command] of state.commands) {
+        if (projectIds.includes(command.project.projectId)) {
+          state.commands.delete(commandKey);
+          commands += 1;
+        }
+      }
+      return Object.freeze({ projects, commands });
+    });
+  }
+  await ensureStore(database);
+  const rows = await database.prepare("SELECT command_key, response_json FROM local_project_commands")
+    .all<{ command_key: string; response_json: string }>();
+  const selected = new Set(projectIds);
+  const commandKeys = rows.results
+    .filter((row) => selected.has(parseProject(JSON.parse(row.response_json)).projectId))
+    .map((row) => row.command_key);
+  const results = await database.batch([
+    ...commandKeys.map((commandKey) => database.prepare("DELETE FROM local_project_commands WHERE command_key = ?").bind(commandKey)),
+    ...projectIds.map((projectId) => database.prepare("DELETE FROM local_projects WHERE project_id = ?").bind(projectId)),
+  ]);
+  return Object.freeze({
+    commands: results.slice(0, commandKeys.length).reduce((count, result) => count + resultChanges(result), 0),
+    projects: results.slice(commandKeys.length).reduce((count, result) => count + resultChanges(result), 0),
+  });
 }
 
 async function createD1Project(
@@ -320,4 +365,10 @@ function sortedProjects(projects: Iterable<LocalProjectCatalogItem>) {
 async function sha256(value: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function resultChanges(result: Readonly<{ meta: Readonly<{ changes?: unknown }> }>): number {
+  return typeof result.meta.changes === "number" && Number.isSafeInteger(result.meta.changes)
+    ? result.meta.changes
+    : 0;
 }

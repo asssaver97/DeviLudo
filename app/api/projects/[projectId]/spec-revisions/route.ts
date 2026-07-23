@@ -113,34 +113,14 @@ export async function POST(
     lease = await acquireLocalAdminState();
     const approvedRevision = authority ? `SPEC-${String(authority.revision).padStart(3, "0")}` : revision;
     const commandKey = `spec:${projectId}:${requestKey}`;
-    const result = withIdempotency(commandKey, () => {
+    const createRun = () => {
       const store = getDemoStore();
-      const expected = `SPEC-${String(store.specRevision).padStart(3, "0")}`;
-      const isNewProjectDraft = projectId === "new-project-draft";
-      if (!authority && !isNewProjectDraft && revision !== expected) {
-        throw new Error(`Optimistic revision mismatch: expected ${expected}`);
-      }
-      if (isNewProjectDraft || authority) {
-        const parsedRevision = Number.parseInt(approvedRevision.replace(/^SPEC-/, ""), 10);
-        if (!Number.isInteger(parsedRevision) || parsedRevision < 1) {
-          throw new Error("Invalid specification revision");
-        }
-        store.specRevision = parsedRevision;
-      }
-      store.specState = "APPROVED";
       const runId = stableRunId(`${projectId}:${approvedRevision}:${requestKey}`);
       const lockedProfile = resolveLocalAgentProfile(
         projectId,
         authority?.testPlanRevisionId ?? "godot-testkit-1.0.0",
         store,
       );
-      appendDemoAudit("SPEC_APPROVED", approvedRevision, "ProjectOwner", {
-        projectId,
-        runId,
-        agent: lockedProfile.agent,
-        profileRevisionId: lockedProfile.profileRevisionId,
-        configurationSource: lockedProfile.configurationSource,
-      });
       return {
         specRevisionId: approvedRevision,
         state: "APPROVED",
@@ -154,8 +134,31 @@ export async function POST(
           locked: true,
         },
       };
-    });
-    if (!result.replayed) await lease.persist(commandKey);
+    };
+    const result = authority
+      ? { replayed: false, value: createRun() }
+      : withIdempotency(commandKey, () => {
+        const store = getDemoStore();
+        const expected = `SPEC-${String(store.specRevision).padStart(3, "0")}`;
+        const isNewProjectDraft = projectId === "new-project-draft";
+        if (!isNewProjectDraft && revision !== expected) {
+          throw new Error(`Optimistic revision mismatch: expected ${expected}`);
+        }
+        const parsedRevision = Number.parseInt(approvedRevision.replace(/^SPEC-/, ""), 10);
+        if (!Number.isInteger(parsedRevision) || parsedRevision < 1) throw new Error("Invalid specification revision");
+        store.specRevision = parsedRevision;
+        store.specState = "APPROVED";
+        const value = createRun();
+        appendDemoAudit("SPEC_APPROVED", approvedRevision, "ProjectOwner", {
+          projectId,
+          runId: value.run.id,
+          agent: value.lockedProfile.agent,
+          profileRevisionId: value.lockedProfile.profileRevisionId,
+          configurationSource: value.lockedProfile.configurationSource,
+        });
+        return value;
+      });
+    if (!authority && !result.replayed) await lease.persist(commandKey);
     const delivery = await startLocalDelivery(
       projectId,
       approvedRevision,

@@ -32,6 +32,37 @@ function readRequest(role, scope = {}) {
   } });
 }
 
+function tenantCredentialRequest(tenantId, idempotency) {
+  return new Request("http://127.0.0.1:3000/api/admin/credentials", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": idempotency,
+      "x-deviludo-role": "TenantAdmin",
+      "x-deviludo-tenant-id": tenantId,
+    },
+    body: JSON.stringify({ label: `Credential for ${tenantId}`, apiKey: `secret-${tenantId}-material` }),
+  });
+}
+
+test("tenant credential idempotency is isolated by authenticated scope", async () => {
+  resetDemoStore();
+  const operationKey = "shared-tenant-credential-operation";
+  const first = await POST(tenantCredentialRequest("tenant-alpha", operationKey), context("credentials"));
+  const second = await POST(tenantCredentialRequest("tenant-beta", operationKey), context("credentials"));
+  const replay = await POST(tenantCredentialRequest("tenant-alpha", operationKey), context("credentials"));
+  const firstPayload = await first.json();
+  const secondPayload = await second.json();
+  const replayPayload = await replay.json();
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 201);
+  assert.equal(replay.status, 200);
+  assert.equal(firstPayload.data.scopeId, "tenant-alpha");
+  assert.equal(secondPayload.data.scopeId, "tenant-beta");
+  assert.notEqual(firstPayload.data.id, secondPayload.data.id);
+  assert.deepEqual(replayPayload.data, firstPayload.data);
+});
+
 test("local Agent admin mutations persist behind RBAC and emit audit records", async () => {
   resetDemoStore();
   const initial = await GET(new Request("http://127.0.0.1:3000/api/admin/agents"), context("agents"));

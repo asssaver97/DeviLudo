@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { parseLocalSmokeCleanupRequest } from "../../../lib/local-smoke-project";
 import { LocalFixtureRunner } from "./fixture-runner";
 import {
   LocalExternalApprovalCoordinator,
@@ -116,6 +117,18 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     const body = parseLocalExternalApprovalRequest(rawBody);
     const operation = externalApprovalCoordinator.start(body, () => runner.recordExternalApproval(body));
     json(response, 201, { data: await operation });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/smoke-cleanup" && !url.search) {
+    if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      json(response, 415, { error: { code: "JSON_REQUIRED", message: "Local smoke cleanup requires JSON" } });
+      return;
+    }
+    const rawBody = await readBody(request);
+    requestVerifier.verify({ method: "POST", path: "/v1/smoke-cleanup", body: rawBody, headers: request.headers });
+    const projectIds = parseLocalSmokeCleanupRequest(JSON.parse(rawBody.toString("utf8")));
+    json(response, 200, { data: await runner.cleanupSmokeProjects(projectIds) });
     return;
   }
 

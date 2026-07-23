@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { pathToFileURL } from "node:url";
+import { parseLocalSmokeCleanupRequest } from "../../../lib/local-smoke-project";
 import { DeterministicLocalSpecModel } from "../../spec-dialogue/src/model";
 import { SpecDialogueConflict, SpecDialogueService } from "../../spec-dialogue/src/service";
 import { InMemorySpecDialogueStore } from "../../spec-dialogue/src/store";
@@ -74,6 +75,28 @@ async function dispatch(
     return json(response, 200, { status: "ok", service: "deviludo-local-spec-runtime", mode: "deterministic-loopback" });
   }
   if (url.search) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
+  if (request.method === "POST" && url.pathname === "/v1/smoke-cleanup") {
+    if (contentType(request.headers["content-type"]) !== "application/json") {
+      return json(response, 415, { error: { code: "JSON_REQUIRED", message: "Local smoke cleanup requires JSON" } });
+    }
+    const rawBody = await readBody(request);
+    requestVerifier.verify({ method: "POST", path: url.pathname, body: rawBody, headers: request.headers });
+    const projectIds = parseLocalSmokeCleanupRequest(JSON.parse(rawBody));
+    const store = runtime.store.deleteProjects(projectIds);
+    let conversations = 0;
+    for (const projectId of projectIds) {
+      if (runtime.currentConversationIds.delete(projectId)) conversations += 1;
+    }
+    let feedbackClaims = 0;
+    for (const [operationKey, claim] of runtime.feedbackClaims) {
+      if (projectIds.some((projectId) => claim.conversationId.startsWith(`local:${projectId}:feedback:`))) {
+        runtime.feedbackClaims.delete(operationKey);
+        feedbackClaims += 1;
+      }
+    }
+    await persist(runtime);
+    return json(response, 200, { data: { projectIds, store, conversations, feedbackClaims } });
+  }
   const match = /^\/v1\/projects\/([^/]+)\/(conversation|feedback|spec-approval)$/.exec(url.pathname);
   if (!match) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
   const projectId = decodeURIComponent(match[1]!);

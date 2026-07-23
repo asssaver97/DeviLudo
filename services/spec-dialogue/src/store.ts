@@ -116,6 +116,37 @@ export class InMemorySpecDialogueStore extends SpecDialogueStore {
     });
   }
 
+  /** Removes local/test state for exact projects after an authenticated smoke run. */
+  deleteProjects(projectIds: readonly string[]): Readonly<{
+    conversations: number;
+    operations: number;
+    approvals: number;
+  }> {
+    const selected = new Set(projectIds);
+    let conversations = 0;
+    let operations = 0;
+    let approvals = 0;
+    for (const [key, conversation] of this.#conversations) {
+      if (selected.has(conversation.projectId)) {
+        this.#conversations.delete(key);
+        conversations += 1;
+      }
+    }
+    for (const [operationKey, operation] of this.#operations) {
+      if (operation.snapshot && selected.has(operation.snapshot.projectId)) {
+        this.#operations.delete(operationKey);
+        operations += 1;
+      }
+    }
+    for (const [operationKey, approval] of this.#approvals) {
+      if (selected.has(approval.receipt.projectId)) {
+        this.#approvals.delete(operationKey);
+        approvals += 1;
+      }
+    }
+    return Object.freeze({ conversations, operations, approvals });
+  }
+
   /**
    * Local/test-only immutable successor creation. Production feedback uses the
    * user-acceptance PostgreSQL transaction, which creates a distinct

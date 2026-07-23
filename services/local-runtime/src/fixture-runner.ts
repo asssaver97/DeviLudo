@@ -19,6 +19,7 @@ import type {
 } from "./contracts";
 import { defaultGodotExportTemplatesRoot, mountExportTemplates } from "./export-templates";
 import { inspectExtractedMacosBuild, validateMacosBuildArchive } from "./macos-export";
+import { cleanupLocalSmokeStorage } from "./smoke-cleanup";
 
 const execFileAsync = promisify(execFile);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/;
@@ -71,6 +72,10 @@ export class LocalFixtureRunner {
   get agentStorageRoot() { return this.#agentStorageRoot; }
   get godotBinary() { return this.#godotBinary; }
   get exportTemplatesRoot() { return this.#exportTemplatesRoot; }
+
+  async cleanupSmokeProjects(projectIds: readonly string[]) {
+    return cleanupLocalSmokeStorage([this.#storageRoot, this.#agentStorageRoot], projectIds);
+  }
 
   async godotVersion(): Promise<string> {
     const result = await this.#command(this.#godotBinary, ["--version"], this.#repositoryRoot, {

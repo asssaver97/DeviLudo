@@ -762,7 +762,7 @@ export async function POST(request: Request, context: RouteContext) {
           throw new HttpProblem(409, "FALLBACK_NOT_SELECTABLE", "Fallback must be an active immutable Profile for the same Agent and scope");
         }
       }
-      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${scope}:${scopeId}:${idempotency}`, () => {
         const store = getDemoStore();
         const providerId = `provider-${agent}-${store.providers.length + 1}`;
         const profile: DemoProfile = {
@@ -994,7 +994,7 @@ export async function POST(request: Request, context: RouteContext) {
         bytes.fill(0);
         body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
       }
-      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, `admin:${key}:${credentialScope.scope}:${credentialScope.scopeId}:${idempotency}`, () => {
         const store = getDemoStore();
         const familyId = `credential-${store.credentials.length + 1}`;
         const id = `${familyId}-v1`;

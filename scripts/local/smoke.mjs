@@ -202,6 +202,44 @@ function localSidecarHeaders(audience, method, route, body, key) {
   };
 }
 
+async function cleanupSmokeState({ baseUrl, runtimeUrl, specRuntimeUrl, projectIds, runtimeKey, specKey }) {
+  const body = JSON.stringify({ projectIds });
+  const requests = [
+    request(baseUrl, "/api/local/smoke-cleanup", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...localSidecarHeaders("smoke-maintenance", "POST", "/api/local/smoke-cleanup", body, runtimeKey),
+      },
+      body,
+    }),
+    request(runtimeUrl, "/v1/smoke-cleanup", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...localSidecarHeaders("godot-runtime", "POST", "/v1/smoke-cleanup", body, runtimeKey),
+      },
+      body,
+    }),
+    request(specRuntimeUrl, "/v1/smoke-cleanup", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...localSidecarHeaders("spec-runtime", "POST", "/v1/smoke-cleanup", body, specKey),
+      },
+      body,
+    }),
+  ];
+  const results = await Promise.all(requests);
+  for (const [index, result] of results.entries()) {
+    if (!result.response.ok) {
+      const payload = await result.response.text();
+      throw new Error(`cleanup endpoint ${index + 1} returned HTTP ${result.response.status}: ${payload.slice(0, 300)}`);
+    }
+  }
+  return results;
+}
+
 let port;
 let localRuntimePort;
 let localAgentRuntimePort;
@@ -237,7 +275,14 @@ const smokeSpecProject = `smoke-spec-${smokeNonce}`;
 const smokeValidationProject = `smoke-validation-${smokeNonce}`;
 const smokeFeedbackProject = `smoke-feedback-${smokeNonce}`;
 const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
-const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
+const smokeCodexProject = smokeCatalogProject;
+const smokeCleanupProjects = Object.freeze([
+  smokeSpecProject,
+  smokeValidationProject,
+  smokeFeedbackProject,
+  smokeReleaseProject,
+  smokeCatalogProject,
+]);
 const smokeClaudeModels = Object.freeze({
   primaryModel: "claude-sonnet-4-6-20250514",
   planningModel: "claude-sonnet-4-6-20250514",
@@ -245,9 +290,12 @@ const smokeClaudeModels = Object.freeze({
   subagentModel: "claude-sonnet-4-6-20250514",
 });
 
+let runtimeSidecarKey;
+let specSidecarKey;
 try {
   const health = await waitForHealth(baseUrl);
-  const [runtimeSidecarKey, agentSidecarKey, specSidecarKey] = await Promise.all([
+  let agentSidecarKey;
+  [runtimeSidecarKey, agentSidecarKey, specSidecarKey] = await Promise.all([
     localSidecarKey("local-runtime"),
     localSidecarKey("local-agent-runtime"),
     localSidecarKey("local-spec-runtime"),
@@ -301,7 +349,6 @@ try {
     smokeValidationProject,
     smokeFeedbackProject,
     smokeReleaseProject,
-    smokeCodexProject,
   ];
   for (const projectId of workflowProjects) {
     const created = await request(baseUrl, "/api/projects", {
@@ -467,7 +514,7 @@ try {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "idempotency-key": `smoke-revalidate-${versionId}-${smokeNonce}`,
+        "idempotency-key": `smoke-revalidate-${versionId}-v1`,
         "x-deviludo-role": "PlatformAgentAdmin",
       },
       body: JSON.stringify({ id: versionId }),
@@ -479,20 +526,13 @@ try {
       throw new Error(`active Agent version ${versionId} did not complete trusted Adapter revalidation`);
     }
   }
-  const [claudeSelection, codexSelection] = await Promise.all([
-    request(baseUrl, `/api/projects/${smokeReleaseProject}/agent-settings`, {
-      method: "PUT",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-select-claude-${smokeNonce}` },
-      body: JSON.stringify({ profileRevisionId: "profile-claude-platform-r5" }),
-    }),
-    request(baseUrl, `/api/projects/${smokeCodexProject}/agent-settings`, {
-      method: "PUT",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-select-codex-${smokeNonce}` },
-      body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
-    }),
-  ]);
-  if (!claudeSelection.response.ok || !codexSelection.response.ok) {
-    throw new Error("local project Agent selection did not persist both approved Profiles");
+  const codexSelection = await request(baseUrl, `/api/projects/${smokeCodexProject}/agent-settings`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-select-codex-catalog-v1" },
+    body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
+  });
+  if (!codexSelection.response.ok) {
+    throw new Error("local project Agent selection did not persist the approved Codex Profile");
   }
   const tenantAgentPayload = await tenantAgentState.response.json();
   if (!tenantAgentState.response.ok || !Array.isArray(tenantAgentPayload.data)
@@ -560,7 +600,7 @@ try {
   }
   const tenantCredential = await request(baseUrl, "/api/settings/agents/credentials", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-${smokeNonce}` },
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-v1" },
     body: JSON.stringify({ label: "Smoke tenant Provider", apiKey: "smoke-local-provider-key-material" }),
   });
   const tenantCredentialText = await tenantCredential.response.text();
@@ -575,7 +615,7 @@ try {
     `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/rotate`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-rotate-${smokeNonce}` },
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-rotate-v1" },
       body: JSON.stringify({ apiKey: rotatedCredentialSecret }),
     },
   );
@@ -593,7 +633,7 @@ try {
     `/api/settings/agents/credentials/${encodeURIComponent(tenantCredentialPayload.data.id)}/revoke`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-credential-revoke-${smokeNonce}` },
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-credential-revoke-v1" },
       body: "{}",
     },
   );
@@ -612,7 +652,7 @@ try {
   }
   const tenantProfile = await request(baseUrl, "/api/settings/agents/profiles", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-profile-${smokeNonce}` },
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-v1" },
     body: JSON.stringify({
       agent: "claude-code",
       installationId: "claude-installation-214",
@@ -651,7 +691,7 @@ try {
     `/api/settings/agents/profiles/${encodeURIComponent(tenantProfilePayload.data.profile.id)}/validate`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `smoke-tenant-agent-profile-probe-${smokeNonce}` },
+      headers: { "content-type": "application/json", "idempotency-key": "smoke-tenant-agent-profile-probe-v1" },
       body: "{}",
     },
   );
@@ -1093,8 +1133,8 @@ try {
   const releaseApprovalPayload = await releaseApproval.response.json();
   if (![200, 201].includes(releaseApproval.response.status)
     || releaseApprovalPayload.data?.run?.agent !== "claude-code"
-    || releaseApprovalPayload.data?.run?.profileRevisionId !== "profile-claude-platform-r5"
-    || releaseApprovalPayload.data?.run?.configurationSource !== `project:${smokeReleaseProject}`
+    || releaseApprovalPayload.data?.run?.profileRevisionId !== "profile-claude-tenant-r2"
+    || releaseApprovalPayload.data?.run?.configurationSource !== "tenant:tenant-local"
     || JSON.stringify(releaseApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["macos"])) {
     throw new Error("local release-gate approval did not lock the selected Claude Profile");
   }
@@ -1394,4 +1434,21 @@ try {
   console.error(`[local:smoke] ${error instanceof Error ? error.message : String(error)}`);
   console.error(`[local:smoke] Confirm that \`npm run local:dev -- --port ${port}\` is still running.`);
   process.exitCode = 1;
+} finally {
+  if (runtimeSidecarKey && specSidecarKey) {
+    try {
+      await cleanupSmokeState({
+        baseUrl,
+        runtimeUrl,
+        specRuntimeUrl,
+        projectIds: smokeCleanupProjects,
+        runtimeKey: runtimeSidecarKey,
+        specKey: specSidecarKey,
+      });
+      console.log(`[local:smoke] Reclaimed ${smokeCleanupProjects.length} generated smoke project states and artifacts.`);
+    } catch (error) {
+      console.error(`[local:smoke] Cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  }
 }

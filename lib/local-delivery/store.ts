@@ -19,6 +19,7 @@ import {
   type LocalValidationSnapshot,
 } from "./model";
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
+import { isManagedSmokeProjectId } from "@/lib/local-smoke-project";
 
 type SnapshotRow = { snapshot: string };
 type CommandRow = { response: string };
@@ -27,7 +28,13 @@ type MemoryState = {
   snapshots: Map<string, LocalDeliverySnapshot>;
   commands: Map<string, LocalDeliverySnapshot>;
   automationCommands?: Map<string, { projectId: string; response: LocalAutomationCommandResult }>;
+  feedbackCommands?: Map<string, { projectId: string; requestDigest: string; response: string | null }>;
 };
+
+export type LocalFeedbackCommandState = Readonly<{
+  kind: "MISSING" | "CLAIMED" | "REPLAY" | "CONFLICT";
+  response: string | null;
+}>;
 
 export type LocalAutomationCommandResult = {
   readonly snapshot: LocalDeliverySnapshot;
@@ -49,6 +56,7 @@ let bindingPromise: Promise<D1Database | null> | null = null;
 function memory(): MemoryState {
   globalMemory.__deviludoLocalDelivery ??= { snapshots: new Map(), commands: new Map() };
   globalMemory.__deviludoLocalDelivery.automationCommands ??= new Map();
+  globalMemory.__deviludoLocalDelivery.feedbackCommands ??= new Map();
   return globalMemory.__deviludoLocalDelivery;
 }
 
@@ -92,8 +100,182 @@ async function ensureStore(db: D1Database) {
       response TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS local_feedback_commands (
+      key TEXT PRIMARY KEY NOT NULL,
+      project_id TEXT NOT NULL,
+      request_digest TEXT NOT NULL,
+      response TEXT,
+      created_at TEXT NOT NULL
+    )`),
   ]);
   initializedDb = db;
+}
+
+export async function cleanupLocalSmokeDeliveries(projectIds: readonly string[]): Promise<Readonly<{
+  snapshots: number;
+  events: number;
+  commands: number;
+  automationCommands: number;
+  feedbackCommands: number;
+}>> {
+  if (!projectIds.length || projectIds.some((projectId) => !isManagedSmokeProjectId(projectId))
+    || new Set(projectIds).size !== projectIds.length) {
+    throw new Error("Local delivery cleanup target is invalid");
+  }
+  const db = await resolveDb();
+  if (!db) {
+    const state = memory();
+    let snapshots = 0;
+    let commands = 0;
+    let automationCommands = 0;
+    let feedbackCommands = 0;
+    for (const projectId of projectIds) {
+      if (state.snapshots.delete(projectId)) snapshots += 1;
+    }
+    for (const [key, snapshot] of state.commands) {
+      if (projectIds.includes(snapshot.projectId)) {
+        state.commands.delete(key);
+        commands += 1;
+      }
+    }
+    for (const [key, command] of state.automationCommands ?? []) {
+      if (projectIds.includes(command.projectId)) {
+        state.automationCommands!.delete(key);
+        automationCommands += 1;
+      }
+    }
+    for (const [key, command] of state.feedbackCommands ?? []) {
+      if (projectIds.includes(command.projectId)) {
+        state.feedbackCommands!.delete(key);
+        feedbackCommands += 1;
+      }
+    }
+    return Object.freeze({ snapshots, events: 0, commands, automationCommands, feedbackCommands });
+  }
+  await ensureStore(db);
+  const statements = projectIds.flatMap((projectId) => [
+    db.prepare("DELETE FROM local_feedback_commands WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM local_delivery_automation_commands WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM local_delivery_commands WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM local_delivery_events WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM local_delivery_snapshots WHERE project_id = ?").bind(projectId),
+  ]);
+  const results = await db.batch(statements);
+  const totals = { snapshots: 0, events: 0, commands: 0, automationCommands: 0, feedbackCommands: 0 };
+  for (let index = 0; index < results.length; index += 1) {
+    const rawChanges = results[index]?.meta.changes;
+    const changes = typeof rawChanges === "number" && Number.isSafeInteger(rawChanges) ? rawChanges : 0;
+    if (index % 5 === 0) totals.feedbackCommands += changes;
+    else if (index % 5 === 1) totals.automationCommands += changes;
+    else if (index % 5 === 2) totals.commands += changes;
+    else if (index % 5 === 3) totals.events += changes;
+    else totals.snapshots += changes;
+  }
+  return Object.freeze(totals);
+}
+
+export async function readLocalFeedbackCommand(
+  projectId: string,
+  commandKey: string,
+  requestDigest: string,
+): Promise<LocalFeedbackCommandState> {
+  validateFeedbackCommand(projectId, commandKey, requestDigest);
+  const db = await resolveDb();
+  if (!db) return feedbackCommandState(memory().feedbackCommands!.get(commandKey), projectId, requestDigest);
+  await ensureStore(db);
+  const row = await db.prepare(`SELECT project_id, request_digest, response
+    FROM local_feedback_commands WHERE key = ?`).bind(commandKey)
+    .first<{ project_id: string; request_digest: string; response: string | null }>();
+  return feedbackCommandState(row ? {
+    projectId: row.project_id,
+    requestDigest: row.request_digest,
+    response: row.response,
+  } : undefined, projectId, requestDigest);
+}
+
+export async function claimLocalFeedbackCommand(
+  projectId: string,
+  commandKey: string,
+  requestDigest: string,
+): Promise<LocalFeedbackCommandState> {
+  validateFeedbackCommand(projectId, commandKey, requestDigest);
+  const db = await resolveDb();
+  if (!db) {
+    const state = memory();
+    state.feedbackCommands!.set(commandKey, state.feedbackCommands!.get(commandKey) ?? {
+      projectId, requestDigest, response: null,
+    });
+    return feedbackCommandState(state.feedbackCommands!.get(commandKey), projectId, requestDigest);
+  }
+  await ensureStore(db);
+  await db.prepare(`INSERT OR IGNORE INTO local_feedback_commands
+    (key, project_id, request_digest, response, created_at) VALUES (?, ?, ?, NULL, ?)`)
+    .bind(commandKey, projectId, requestDigest, new Date().toISOString()).run();
+  return readLocalFeedbackCommand(projectId, commandKey, requestDigest);
+}
+
+export async function completeLocalFeedbackCommand(
+  projectId: string,
+  commandKey: string,
+  requestDigest: string,
+  response: string,
+): Promise<void> {
+  validateFeedbackCommand(projectId, commandKey, requestDigest);
+  if (!response || new TextEncoder().encode(response).byteLength > 256 * 1024) {
+    throw new Error("Local feedback command response is invalid");
+  }
+  const db = await resolveDb();
+  if (!db) {
+    const state = memory();
+    const command = state.feedbackCommands!.get(commandKey);
+    if (!command || command.projectId !== projectId || command.requestDigest !== requestDigest
+      || (command.response !== null && command.response !== response)) {
+      throw new Error("Local feedback command completion conflict");
+    }
+    command.response = response;
+    return;
+  }
+  await ensureStore(db);
+  await db.prepare(`UPDATE local_feedback_commands SET response = ?
+    WHERE key = ? AND project_id = ? AND request_digest = ? AND response IS NULL`)
+    .bind(response, commandKey, projectId, requestDigest).run();
+  const state = await readLocalFeedbackCommand(projectId, commandKey, requestDigest);
+  if (state.kind !== "REPLAY" || state.response !== response) throw new Error("Local feedback command completion conflict");
+}
+
+export async function listLocalFeedbackCommandResponses(projectId: string): Promise<readonly string[]> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(projectId)) throw new Error("Local feedback project is invalid");
+  const db = await resolveDb();
+  if (!db) {
+    return Object.freeze([...memory().feedbackCommands!.values()]
+      .filter((command) => command.projectId === projectId && command.response !== null)
+      .map((command) => command.response!));
+  }
+  await ensureStore(db);
+  const rows = await db.prepare(`SELECT response FROM local_feedback_commands
+    WHERE project_id = ? AND response IS NOT NULL ORDER BY created_at ASC, key ASC`)
+    .bind(projectId).all<{ response: string }>();
+  return Object.freeze(rows.results.map((row) => row.response));
+}
+
+function feedbackCommandState(
+  command: { projectId: string; requestDigest: string; response: string | null } | undefined,
+  projectId: string,
+  requestDigest: string,
+): LocalFeedbackCommandState {
+  if (!command) return Object.freeze({ kind: "MISSING", response: null });
+  if (command.projectId !== projectId || command.requestDigest !== requestDigest) {
+    return Object.freeze({ kind: "CONFLICT", response: null });
+  }
+  return Object.freeze({ kind: command.response === null ? "CLAIMED" : "REPLAY", response: command.response });
+}
+
+function validateFeedbackCommand(projectId: string, commandKey: string, requestDigest: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(projectId)
+    || commandKey.length < 1 || commandKey.length > 320 || /[\0-\x1f\x7f]/.test(commandKey)
+    || !/^[a-f0-9]{64}$/.test(requestDigest)) {
+    throw new Error("Local feedback command is invalid");
+  }
 }
 
 function parseSnapshot(value: string): LocalDeliverySnapshot {

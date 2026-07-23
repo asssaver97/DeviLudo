@@ -1,8 +1,15 @@
-import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
+import { getDemoStore } from "@/lib/control-plane/demo-store";
 import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
-import { acquireLocalAdminState, type LocalAdminStateLease } from "@/lib/control-plane/local-admin-state";
+import { acquireLocalAdminState } from "@/lib/control-plane/local-admin-state";
 import { canCreateLocalFeedback } from "@/lib/local-delivery/model";
-import { invalidateLocalEvidence, readLocalDelivery } from "@/lib/local-delivery/store";
+import {
+  claimLocalFeedbackCommand,
+  completeLocalFeedbackCommand,
+  invalidateLocalEvidence,
+  listLocalFeedbackCommandResponses,
+  readLocalDelivery,
+  readLocalFeedbackCommand,
+} from "@/lib/local-delivery/store";
 import {
   authorizeLocalProjectAccess,
   authorizeProjectAccess,
@@ -35,7 +42,14 @@ export async function GET(
     try {
       await authorizeLocalProjectAccess(projectId);
       const lease = await acquireLocalAdminState();
-      try { return json({ data: getDemoStore().feedback.filter((item) => item.projectId === projectId), meta: { projectId } }); }
+      try {
+        const legacy = getDemoStore().feedback.filter((item) => item.projectId === projectId);
+        const durable = (await listLocalFeedbackCommandResponses(projectId)).map((response) => ({
+          projectId,
+          ...parseLocalFeedbackResult(response, projectId).iteration,
+        }));
+        return json({ data: [...legacy, ...durable], meta: { projectId } });
+      }
       finally { lease.release(); }
     } catch (error) { return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error); }
   }
@@ -49,7 +63,6 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
-  let lease: LocalAdminStateLease | null = null;
   try {
     const { projectId } = await context.params;
     if (!PROJECT.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效" } }, { status: 400 });
@@ -79,13 +92,13 @@ export async function POST(
       return json({ data: receipt, meta: { idempotentReplay: receipt.delivery.replayed } }, { status: 201 });
     }
     await authorizeLocalProjectAccess(projectId);
-    lease = await acquireLocalAdminState();
     const operationKey = `feedback:${projectId}:${requestKey}`;
-    const store = getDemoStore();
-    const cached = Object.prototype.hasOwnProperty.call(store.idempotency, operationKey)
-      ? store.idempotency[operationKey] as LocalFeedbackResult
-      : null;
-    if (!cached) {
+    const requestDigest = await sha256(feedback);
+    let command = await readLocalFeedbackCommand(projectId, operationKey, requestDigest);
+    if (command.kind === "CONFLICT") {
+      return json({ error: { code: "LOCAL_FEEDBACK_IDEMPOTENCY_CONFLICT", message: "该反馈操作键已用于不同请求。" } }, { status: 409 });
+    }
+    if (command.kind === "MISSING") {
       const current = await readLocalDelivery(projectId);
       if (!canCreateLocalFeedback(current)) {
         return json({
@@ -95,50 +108,69 @@ export async function POST(
           },
         }, { status: 409 });
       }
+      command = await claimLocalFeedbackCommand(projectId, operationKey, requestDigest);
+      if (command.kind === "CONFLICT") {
+        return json({ error: { code: "LOCAL_FEEDBACK_IDEMPOTENCY_CONFLICT", message: "该反馈操作键已用于不同请求。" } }, { status: 409 });
+      }
     }
-    const snapshot = cached?.snapshot ?? await createLocalFeedbackDraft(request, projectId, requestKey, feedback);
-    const result = withIdempotency<LocalFeedbackResult>(operationKey, () => {
-      const store = getDemoStore();
-      store.specRevision = snapshot.revision;
-      store.specState = "DRAFT";
+    const replayed = command.kind === "REPLAY";
+    let result: LocalFeedbackResult;
+    if (replayed) {
+      result = parseLocalFeedbackResult(command.response, projectId, feedback);
+    } else {
+      const snapshot = await createLocalFeedbackDraft(request, projectId, requestKey, feedback);
+      const createdAt = snapshot.messages.at(-1)?.createdAt;
+      if (!createdAt || !Number.isFinite(Date.parse(createdAt))) throw new Error("Local feedback snapshot timestamp is invalid");
       const iteration = {
-        projectId,
-        id: `ITER-${String(store.feedback.length + 8).padStart(3, "0")}`,
+        id: `ITER-${String(snapshot.revision).padStart(3, "0")}`,
         text: feedback,
         revision: snapshot.revision,
-        at: new Date().toISOString(),
+        at: createdAt,
       };
-      store.feedback.push(iteration);
-      store.invalidatedEvidence.push("EV-007-LNX");
-      appendDemoAudit("ITERATION_CREATED", iteration.id, "ProjectOwner", {
-        projectId,
-        evidenceInvalidated: true,
-        draftPullRequest: 18,
-      });
-      return {
+      result = Object.freeze({
         iteration,
         specRevisionId: `SPEC-${String(snapshot.revision).padStart(3, "0")}`,
         invalidatedEvidence: Object.freeze(["EV-007-LNX"]),
         candidatePullRequest: 18,
         state: "AWAITING_SPEC_APPROVAL" as const,
         snapshot,
-      };
-    });
-    if (!result.replayed) await lease.persist(operationKey);
+      });
+      await completeLocalFeedbackCommand(projectId, operationKey, requestDigest, JSON.stringify(result));
+    }
     const delivery = await invalidateLocalEvidence(
       projectId,
-      result.value.specRevisionId,
+      result.specRevisionId,
       `feedback-delivery:${projectId}:${requestKey}`,
     );
     return json(
-      { data: { ...result.value, delivery: delivery.snapshot }, meta: { idempotentReplay: result.replayed || delivery.replayed } },
-      { status: result.replayed || delivery.replayed ? 200 : 201 },
+      { data: { ...result, delivery: delivery.snapshot }, meta: { idempotentReplay: replayed || delivery.replayed } },
+      { status: replayed || delivery.replayed ? 200 : 201 },
     );
   } catch (error) {
     return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error);
-  } finally {
-    lease?.release();
   }
+}
+
+function parseLocalFeedbackResult(value: string | null, projectId: string, feedback?: string): LocalFeedbackResult {
+  if (!value) throw new Error("Local feedback replay is incomplete");
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new Error("Local feedback replay is invalid"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Local feedback replay is invalid");
+  const result = parsed as LocalFeedbackResult;
+  if ((feedback !== undefined && result.iteration?.text !== feedback) || !Number.isSafeInteger(result.iteration?.revision)
+    || result.iteration.revision < 1 || !Number.isFinite(Date.parse(result.iteration.at))
+    || result.state !== "AWAITING_SPEC_APPROVAL" || result.snapshot?.projectId !== projectId
+    || result.snapshot.tenantId !== "tenant-local" || result.snapshot.state !== "DRAFT"
+    || result.snapshot.revision !== result.iteration.revision
+    || result.specRevisionId !== `SPEC-${String(result.snapshot.revision).padStart(3, "0")}`) {
+    throw new Error("Local feedback replay is invalid");
+  }
+  return Object.freeze(structuredClone(result));
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function createLocalFeedbackDraft(
