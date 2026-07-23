@@ -30,6 +30,8 @@ npm run local:dev
 
 启动器会为 Godot、Agent 和规格 sidecar 分别生成独立 256-bit 会话 Key。Web 到 sidecar 的每个非健康请求都签名绑定服务受众、方法、路径、正文摘要、时间戳和单次 nonce；Key 以 `0600` 写入被 Git 忽略的 `.deviludo/` 仅供 smoke 验证，并在退出时删除。固定请求头、跨服务 Key、过期请求、正文或路径篡改都会被拒绝。
 
+`.deviludo/local-deployment.json` 是不含密钥的原子所有权租约，只记录 schema、launcher PID、随机 deployment ID 和创建时间。Web 与三个 sidecar 均由独立监督进程托管，每 500ms 同时核对 PID 存活和精确租约；launcher 遭到 `SIGKILL`、租约被替换或删除时，四个服务会在五秒强制上限内退出并释放 loopback 端口。新启动器绝不复用旧 Key：只有成功原子接管一个已死亡的合法租约（或确认没有租约），并且格式正确的遗留 Key 已超过五秒安全窗口后，才删除旧会话文件并生成新 Key。活跃 PID、近期不明确文件、符号链接、权限/格式错误或并发接管都保持失败关闭。
+
 项目页的构想消息会真实经过规格对话 sidecar，返回完整规格、验收标准和 TestKit 计划；批准会创建独立的已批准/已冻结后继修订。该本地模型明确报告为 `deterministic-loopback`，生产环境不会启用它或假装第三方模型已配置。
 
 候选反馈不会重新打开已批准会话。只有候选 E2E 已进入待验收状态，或 main/Steam 失败已冻结并交给人工修订时，反馈端点才会让规格 sidecar 创建一个新的 DRAFT 会话。旧会话保持 `APPROVED`，旧本地验证与 Agent 回执仍可审计但 `valid=false`；新草稿再次批准后获得不同 Run ID，不能复用上一轮证据。

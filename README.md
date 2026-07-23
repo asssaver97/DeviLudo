@@ -99,7 +99,7 @@ npm run local:install-export-templates
 npm run local:dev
 ```
 
-打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为三个 sidecar 分别生成临时 HMAC Key；每个 Key 只进入 Web 与对应 sidecar，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时全部删除。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
+打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为三个 sidecar 分别生成临时 HMAC Key；每个 Key 只进入 Web 与对应 sidecar，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时全部删除。启动器还持有不含密钥的原子部署租约；四个受监督子进程持续核对 launcher PID 和随机 deployment ID。即使 launcher 被强制终止，子进程也会自行退出释放端口，下一次启动在安全窗口后自动废弃旧会话文件并生成全新密钥，不需要人工清理。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
 
 模板安装器只接受版本目录中固定的 Godot 官方构建，下载固定 URL 后校验归档大小、SHA-256 和全部压缩路径，再原子发布只读文件清单。验证侧车不会直接复用可变的编辑器 HOME；它会重验安装清单和 `macos.zip` 摘要，并只把精确版本目录挂载到本次运行的隔离 HOME。已有未验证目录不会被覆盖。
 

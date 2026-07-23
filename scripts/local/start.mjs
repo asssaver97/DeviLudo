@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { installLocalSidecarCredentials } from "./sidecar-credentials.mjs";
+import { installLocalSidecarSession } from "./sidecar-credentials.mjs";
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
@@ -144,15 +144,19 @@ const localSidecarCredentials = Object.freeze([
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-agent-runtime.hmac"), key: localAgentRuntimeHmacKey }),
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-spec-runtime.hmac"), key: localSpecRuntimeHmacKey }),
 ]);
+const localDeploymentOwnerFile = path.join(workspaceRoot, ".deviludo", "local-deployment.json");
 
 let removeLocalSidecarKeys = () => {};
+let localDeploymentId;
 
 const vinextCli = path.join(workspaceRoot, "node_modules", "vinext", "dist", "cli.js");
+const supervisedChildEntry = path.join(workspaceRoot, "scripts", "local", "supervised-child.mjs");
 const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
 const localAgentRuntimeEntry = path.join(workspaceRoot, "services", "local-agent-runtime", "src", "server.ts");
 const localSpecRuntimeEntry = path.join(workspaceRoot, "services", "local-spec-runtime", "src", "server.ts");
 try {
   await access(vinextCli);
+  await access(supervisedChildEntry);
   await access(localRuntimeEntry);
   await access(localAgentRuntimeEntry);
   await access(localSpecRuntimeEntry);
@@ -162,7 +166,12 @@ try {
   await assertPortAvailable(localSpecRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
   await mkdir(path.join(workspaceRoot, ".deviludo"), { recursive: true, mode: 0o700 });
-  removeLocalSidecarKeys = await installLocalSidecarCredentials(localSidecarCredentials);
+  const session = await installLocalSidecarSession({
+    credentials: localSidecarCredentials,
+    ownerFile: localDeploymentOwnerFile,
+  });
+  removeLocalSidecarKeys = session.cleanup;
+  localDeploymentId = session.deploymentId;
 } catch (error) {
   removeLocalSidecarKeys();
   fail(error instanceof Error ? error.message : String(error));
@@ -178,9 +187,20 @@ console.log(`[local:dev] Starting Agent readiness at http://${HOST}:${localAgent
 console.log(`[local:dev] Starting specification dialogue at http://${HOST}:${localSpecRuntimePort}`);
 console.log("[local:dev] Press Ctrl-C to stop the server and its child processes.");
 
+function supervisedArguments(childArguments) {
+  return [
+    supervisedChildEntry,
+    "--parent-pid", String(process.pid),
+    "--owner-file", localDeploymentOwnerFile,
+    "--deployment-id", localDeploymentId,
+    "--",
+    ...childArguments,
+  ];
+}
+
 const localRuntimeChild = spawn(
   process.execPath,
-  ["--import", "tsx", localRuntimeEntry],
+  supervisedArguments(["--import", "tsx", localRuntimeEntry]),
   {
     cwd: workspaceRoot,
     detached: process.platform !== "win32",
@@ -197,7 +217,7 @@ const localRuntimeChild = spawn(
 
 const localAgentRuntimeChild = spawn(
   process.execPath,
-  ["--import", "tsx", localAgentRuntimeEntry],
+  supervisedArguments(["--import", "tsx", localAgentRuntimeEntry]),
   {
     cwd: workspaceRoot,
     detached: process.platform !== "win32",
@@ -215,7 +235,7 @@ const localAgentRuntimeChild = spawn(
 
 const localSpecRuntimeChild = spawn(
   process.execPath,
-  ["--import", "tsx", localSpecRuntimeEntry],
+  supervisedArguments(["--import", "tsx", localSpecRuntimeEntry]),
   {
     cwd: workspaceRoot,
     detached: process.platform !== "win32",
@@ -232,7 +252,7 @@ const localSpecRuntimeChild = spawn(
 
 const siteChild = spawn(
   process.execPath,
-  [vinextCli, "dev", "--hostname", HOST, "--port", String(port)],
+  supervisedArguments([vinextCli, "dev", "--hostname", HOST, "--port", String(port)]),
   {
     cwd: workspaceRoot,
     detached: process.platform !== "win32",
