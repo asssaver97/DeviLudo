@@ -1082,7 +1082,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         method: "POST", role, body: { apiKey },
       });
       onChanged();
-      notify("凭据新版本已通过探针并切换；旧版本不再签发给新任务", "success");
+      notify("凭据新版本已写入安全连接器；请为新版本创建 Provider revision 并完成探针后再切换", "success");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "凭据轮换失败");
       notify("凭据未轮换；当前 Provider 与默认 Profile 保持不变", "warning");
@@ -1148,7 +1148,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
       </section>
 
       <form className={`${styles.section} ${styles.providerForm}`} onSubmit={saveDraft} noValidate>
-        <SectionHeading eyebrow="DRAFT" title={editorMode === "new" ? "新建 Provider" : "编辑 Provider"} description="保存草稿与测试激活分离；本地 API 不会在缺少受信 Connector 时访问上游。" />
+        <SectionHeading eyebrow="DRAFT" title={editorMode === "new" ? "新建 Provider" : "编辑 Provider"} description="保存草稿与测试激活分离；本地站仅通过受认证 Agent sidecar 执行上游探针。" />
         <div className={styles.formGroup}>
           <label>Agent</label>
           <div className={styles.segmented}>
@@ -1180,7 +1180,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         <div className={styles.formGroup}><label htmlFor="apiKey">替换 API Key</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="留空以沿用当前凭据版本" autoComplete="new-password" disabled={!permissions.manageGlobalCredentials} /></div><small>写入后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。平台凭据仅由 SecurityAdmin 替换。</small></div>
         <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} disabled={!permissions.editPlatformProvider} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>
         {error && <div className={styles.formError}><AdminIcon name="alert" />{error}</div>}
-        <div className={styles.probeList}><span>激活探针</span><div>{["认证", "模型", "流式", "工具", "取消", "Usage", "超时", "无工具"].map((probe) => <em key={probe}>{probe}</em>)}</div></div>
+        <div className={styles.probeList}><span>激活探针</span><div>{["认证", "模型", "流式", "工具", "取消", "Usage", "超时", "无工具", "DNS 固定", "跳转重验"].map((probe) => <em key={probe}>{probe}</em>)}</div></div>
         <div className={styles.formActions}><button className={styles.secondaryButton} type="submit" disabled={testing || !permissions.editPlatformProvider}>保存草稿</button><button className={styles.primaryButton} type="button" disabled={testing || !permissions.activatePlatformProvider} title={permissions.activatePlatformProvider ? undefined : "需要 SecurityAdmin 权限"} onClick={testAndActivate}>{testing ? "正在校验门禁…" : "测试并激活"}</button></div>
       </form>
     </div>

@@ -10,6 +10,12 @@ import { localWorkerImageDigest } from "@/lib/agent/local-worker-identity";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
 import {
+  localProviderControlRequired,
+  probeLocalProvider,
+  putLocalProviderCredential,
+  revokeLocalProviderCredential,
+} from "@/lib/admin/local-provider-control";
+import {
   appendDemoAudit,
   getDemoStore,
   withIdempotency,
@@ -50,7 +56,7 @@ const LOCAL_SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
 const PROVIDER_REQUIRED_CHECKS = Object.freeze([
   "authentication", "modelExistence", "streaming", "toolCalling", "cancellation",
   "usage", "timeout", "minimalReasoning", "dnsPinning", "redirectRevalidation",
-]);
+] as const);
 const PROFILE_DRAFT_FIELDS = Object.freeze([
   "agent", "installationId", "credentialVersionId", "scope", "scopeId", "baseUrl", "authentication",
   "primaryModel", "planningModel", "smallFastModel", "subagentModel",
@@ -938,11 +944,59 @@ export async function POST(request: Request, context: RouteContext) {
       if (!authorizedProfile) throw new HttpProblem(404, "PROFILE_NOT_FOUND", "Profile revision does not exist");
       assertLocalProfileActor(actor, authorizedProfile.scope, authorizedProfile.scopeId);
       if (action === "validate") {
-        throw new HttpProblem(
-          503,
-          "PROVIDER_PROBE_NOT_CONFIGURED",
-          "本地测试站尚未配置受信 Provider Connector；草稿已保留，不能伪造探针通过或覆盖当前生效配置",
-        );
+        const operationId = `admin:${key}:${idempotency}`;
+        if (Object.prototype.hasOwnProperty.call(getDemoStore().idempotency, operationId)) {
+          return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
+        }
+        if (!localProviderControlRequired()) {
+          throw new HttpProblem(
+            503,
+            "PROVIDER_PROBE_NOT_CONFIGURED",
+            "本地测试站尚未配置受信 Provider Connector；草稿已保留，不能伪造探针通过或覆盖当前生效配置",
+          );
+        }
+        const store = getDemoStore();
+        const profile = store.profiles.find((item) => item.id === profileId);
+        const provider = profile && store.providers.find((item) => item.id === profile.providerRevisionId);
+        if (!profile || !provider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
+        if (!["DRAFT", "DEGRADED"].includes(profile.state) || !["DRAFT", "READY"].includes(provider.state)) {
+          throw new HttpProblem(409, "PROFILE_NOT_VALIDATABLE", "Only a draft or degraded Profile can run a new Provider probe");
+        }
+        const checks = await probeLocalProvider({
+          providerRevisionId: provider.id,
+          agent: provider.agent,
+          protocol: provider.protocol,
+          baseUrl: provider.baseUrl,
+          approvedPorts: provider.approvedPorts,
+          authentication: provider.authentication,
+          models: provider.models,
+          credentialVersionId: provider.credentialVersionId,
+          requiredChecks: PROVIDER_REQUIRED_CHECKS,
+        });
+        return await mutate(lease, operationId, () => {
+          const currentStore = getDemoStore();
+          const currentProfile = currentStore.profiles.find((item) => item.id === profileId);
+          const currentProvider = currentProfile && currentStore.providers.find((item) => item.id === currentProfile.providerRevisionId);
+          if (!currentProfile || !currentProvider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
+          const previousState = currentProfile.state;
+          const previousProviderState = currentProvider.state;
+          currentProvider.probe = { ...checks };
+          currentProvider.state = "READY";
+          currentProfile.state = "READY";
+          appendDemoAudit("AGENT_PROFILE_VALIDATE", currentProfile.id, actor.actorId, {
+            providerRevisionId: currentProvider.id,
+            previousState,
+            state: currentProfile.state,
+            previousProviderState,
+            providerState: currentProvider.state,
+            requiredChecks: PROVIDER_REQUIRED_CHECKS.length,
+          });
+          return {
+            profile: currentProfile,
+            provider: { id: currentProvider.id, state: currentProvider.state, probe: currentProvider.probe },
+            previousActivePreserved: true,
+          };
+        });
       }
       return await mutate(lease, `admin:${key}:${idempotency}`, () => {
         const store = getDemoStore();
@@ -986,24 +1040,34 @@ export async function POST(request: Request, context: RouteContext) {
       const label = requireString(body, "label", 120);
       const secret = requireString(body, "apiKey", 8192);
       if (secret.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Credential must be at least 8 characters");
+      const operationId = `admin:${key}:${credentialScope.scope}:${credentialScope.scopeId}:${idempotency}`;
+      if (Object.prototype.hasOwnProperty.call(getDemoStore().idempotency, operationId)) {
+        body.apiKey = "[DESTROYED_ON_IDEMPOTENT_REPLAY]";
+        return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
+      }
+      const familyId = `credential-${getDemoStore().credentials.length + 1}`;
+      const id = `${familyId}-v1`;
       const bytes = new TextEncoder().encode(secret);
       let fingerprint: `sha256:${string}`;
+      let secretRef = `vault://kv/data/deviludo/${id}#1`;
       try {
         fingerprint = await fingerprintSecret(bytes);
+        if (localProviderControlRequired()) {
+          const receipt = await putLocalProviderCredential(id, secret, fingerprint);
+          secretRef = receipt.secretRef;
+        }
       } finally {
         bytes.fill(0);
         body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
       }
-      return await mutate(lease, `admin:${key}:${credentialScope.scope}:${credentialScope.scopeId}:${idempotency}`, () => {
+      return await mutate(lease, operationId, () => {
         const store = getDemoStore();
-        const familyId = `credential-${store.credentials.length + 1}`;
-        const id = `${familyId}-v1`;
         const credential = {
           id,
           familyId,
           label,
           ...credentialScope,
-          secretRef: `vault://kv/data/deviludo/${id}#1`,
+          secretRef,
           fingerprint,
           masked: maskFingerprint(fingerprint),
           version: 1,
@@ -1032,17 +1096,16 @@ export async function POST(request: Request, context: RouteContext) {
       const authorizedCredential = getDemoStore().credentials.find((item) => item.id === credentialId);
       if (!authorizedCredential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
       assertLocalCredentialActor(actor, authorizedCredential);
+      const operationId = `admin:${key}:${idempotency}`;
+      if (Object.prototype.hasOwnProperty.call(getDemoStore().idempotency, operationId)) {
+        if (action === "rotate") body.apiKey = "[DESTROYED_ON_IDEMPOTENT_REPLAY]";
+        return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
+      }
       let replacementFingerprint: `sha256:${string}` | null = null;
+      let replacementSecretRef: string | null = null;
       if (action === "rotate") {
         const replacement = requireString(body, "apiKey", 8192);
         if (replacement.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Replacement credential must be at least 8 characters");
-        const bytes = new TextEncoder().encode(replacement);
-        try {
-          replacementFingerprint = await fingerprintSecret(bytes);
-        } finally {
-          bytes.fill(0);
-          body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
-        }
         const localStore = getDemoStore();
         const activeProviderIds = new Set(localStore.providers
           .filter((provider) => provider.credentialVersionId === credentialId && provider.state === "ACTIVE")
@@ -1054,8 +1117,29 @@ export async function POST(request: Request, context: RouteContext) {
             "本地测试站不会为生效 Provider 伪造新 Key 探针；当前凭据和默认 Profile 保持不变",
           );
         }
+        if (authorizedCredential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
+        const nextVersion = authorizedCredential.version + 1;
+        const replacementId = authorizedCredential.id.replace(/-v\d+$/, `-v${nextVersion}`);
+        const bytes = new TextEncoder().encode(replacement);
+        try {
+          replacementFingerprint = await fingerprintSecret(bytes);
+          if (replacementFingerprint === authorizedCredential.fingerprint) {
+            throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+          }
+          if (localProviderControlRequired()) {
+            const receipt = await putLocalProviderCredential(replacementId, replacement, replacementFingerprint);
+            replacementSecretRef = receipt.secretRef;
+          } else {
+            replacementSecretRef = authorizedCredential.secretRef.replace(/#\d+$/, `#${nextVersion}`);
+          }
+        } finally {
+          bytes.fill(0);
+          body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
+        }
+      } else if (localProviderControlRequired()) {
+        await revokeLocalProviderCredential(credentialId);
       }
-      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+      return await mutate(lease, operationId, () => {
         const store = getDemoStore();
         const credential = store.credentials.find((item) => item.id === credentialId);
         if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
@@ -1063,14 +1147,29 @@ export async function POST(request: Request, context: RouteContext) {
         if (action === "revoke") {
           const previousState = credential.state;
           credential.state = "REVOKED";
+          const affectedProviderIds = new Set(store.providers
+            .filter((provider) => provider.credentialVersionId === credential.id)
+            .map((provider) => {
+              provider.state = "DISABLED";
+              provider.probe = {};
+              return provider.id;
+            }));
+          let degradedProfiles = 0;
+          for (const profile of store.profiles) {
+            if (affectedProviderIds.has(profile.providerRevisionId) && profile.state === "ACTIVE") {
+              profile.state = "DEGRADED";
+              degradedProfiles += 1;
+            }
+          }
           appendDemoAudit("CREDENTIAL_REVOKE", credential.id, actor.actorId, {
-            previousState, state: credential.state, newTokensIssued: false,
+            previousState, state: credential.state, newTokensIssued: false, degradedProfiles,
           });
-          return { id: credential.id, state: credential.state, newTokensIssued: false, plaintextRecoverable: false };
+          return { id: credential.id, state: credential.state, newTokensIssued: false, degradedProfiles, plaintextRecoverable: false };
         }
         if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
         if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
         if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+        if (!replacementSecretRef) throw new HttpProblem(500, "CREDENTIAL_STORE_RECEIPT_MISSING", "Credential store receipt is missing");
         const rotatedAt = new Date().toISOString();
         credential.state = "PREVIOUS";
         credential.rotatedAt = rotatedAt;
@@ -1078,7 +1177,7 @@ export async function POST(request: Request, context: RouteContext) {
         const replacement = {
           ...credential,
           id: credential.id.replace(/-v\d+$/, `-v${nextVersion}`),
-          secretRef: credential.secretRef.replace(/#\d+$/, `#${nextVersion}`),
+          secretRef: replacementSecretRef,
           fingerprint: replacementFingerprint,
           masked: maskFingerprint(replacementFingerprint),
           version: nextVersion,

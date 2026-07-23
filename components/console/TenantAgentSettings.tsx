@@ -118,7 +118,7 @@ export function TenantAgentSettings() {
     const form = new FormData(event.currentTarget);
     const replaced = await mutate(`/api/settings/agents/credentials/${encodeURIComponent(credentialId)}/rotate`, "POST", {
       apiKey: String(form.get("apiKey") ?? ""),
-    }, "凭据新版本已通过探针并切换；旧版本不再签发给新任务。", event.currentTarget);
+    }, "凭据新版本已写入；完成新 Provider revision 探针后方可切换。", event.currentTarget);
     if (replaced) setRotatingCredentialId("");
   }
 

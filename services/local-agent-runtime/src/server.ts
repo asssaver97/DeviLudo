@@ -15,6 +15,12 @@ import {
 } from "./execution";
 import { LocalAgentReadinessService } from "./readiness";
 import {
+  LocalProviderControl,
+  LocalProviderControlConflictError,
+  LocalProviderControlInputError,
+  LocalProviderProbeError,
+} from "./provider-control";
+import {
   LocalAgentRuntimeAuthenticationError,
   LocalAgentRuntimeRequestVerifier,
   localAgentRuntimeKeyFromEnvironment,
@@ -26,6 +32,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 export interface LocalAgentRuntimeDependencies {
   readonly cliVersionInspector?: CliVersionInspector;
   readonly providerBindingVerifier?: LocalProviderBindingVerifier;
+  readonly providerControl?: LocalProviderControl;
   readonly executor?: LocalAgentExecutor;
 }
 
@@ -34,6 +41,7 @@ export interface LocalAgentRuntime {
   readonly port: number;
   readonly readiness: LocalAgentReadinessService;
   readonly execution: LocalAgentExecutionService;
+  readonly providerControl: LocalProviderControl | null;
   readonly server: Server;
 }
 
@@ -43,6 +51,10 @@ export function localAgentRuntimeFromEnvironment(
 ): LocalAgentRuntime {
   const port = environmentPort(env.DEVILUDO_LOCAL_AGENT_RUNTIME_PORT);
   const requestVerifier = new LocalAgentRuntimeRequestVerifier(localAgentRuntimeKeyFromEnvironment(env));
+  const providerControl = dependencies.providerControl
+    ?? (env.DEVILUDO_LOCAL_TEST_MODE === "1" && env.DEVILUDO_LOCAL_PROVIDER_CONTROL === "1"
+      ? new LocalProviderControl()
+      : null);
   const readiness = new LocalAgentReadinessService({
     inspector: dependencies.cliVersionInspector,
     claudeVersion: env.DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION,
@@ -53,11 +65,11 @@ export function localAgentRuntimeFromEnvironment(
     expectedWorkerImageIdentity: env.DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST,
     localDeterministicWorkerAttestation: env.DEVILUDO_LOCAL_TEST_MODE === "1"
       && env.DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION === "1",
-    providerBindingVerifier: dependencies.providerBindingVerifier,
+    providerBindingVerifier: dependencies.providerBindingVerifier ?? providerControl ?? undefined,
   });
   const execution = new LocalAgentExecutionService({ readiness, executor: dependencies.executor });
-  const server = createServer((request, response) => route(request, response, { requestVerifier, readiness, execution }));
-  return Object.freeze({ host: HOST, port, readiness, execution, server });
+  const server = createServer((request, response) => route(request, response, { requestVerifier, readiness, execution, providerControl }));
+  return Object.freeze({ host: HOST, port, readiness, execution, providerControl, server });
 }
 
 export async function runLocalAgentRuntime(
@@ -79,6 +91,7 @@ export async function runLocalAgentRuntime(
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     runtime.execution.cancelAll();
+    runtime.providerControl?.close();
     await close(runtime.server);
   }
 }
@@ -90,6 +103,7 @@ async function route(
     requestVerifier: LocalAgentRuntimeRequestVerifier;
     readiness: LocalAgentReadinessService;
     execution: LocalAgentExecutionService;
+    providerControl: LocalProviderControl | null;
   }>,
 ): Promise<void> {
   try {
@@ -135,6 +149,24 @@ async function route(
       json(response, outcome.state === "CANCELLATION_REQUESTED" ? 202 : 200, { data: outcome });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/v1/provider-credentials" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-credentials", runtime.requestVerifier);
+      json(response, 201, { data: runtime.providerControl!.putCredential(command) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/provider-credentials/revoke" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-credentials/revoke", runtime.requestVerifier);
+      json(response, 200, { data: runtime.providerControl!.revokeCredential(command) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/provider-probes" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-probes", runtime.requestVerifier);
+      json(response, 200, { data: await runtime.providerControl!.probe(command) });
+      return;
+    }
     json(response, 404, { error: { code: "NOT_FOUND", message: "Local Agent runtime route not found" } });
   } catch (error) {
     if (error instanceof LocalAgentRuntimeAuthenticationError) {
@@ -145,12 +177,28 @@ async function route(
       json(response, 409, { error: { code: "LOCAL_AGENT_RUN_CANCELLED", message: "Local Agent run was cancelled" } });
       return;
     }
+    if (error instanceof LocalProviderControlInputError) {
+      json(response, 400, { error: { code: "INVALID_LOCAL_PROVIDER_REQUEST", message: "Local Provider request is invalid" } });
+      return;
+    }
+    if (error instanceof LocalProviderControlConflictError) {
+      json(response, 409, { error: { code: "LOCAL_CREDENTIAL_VERSION_CONFLICT", message: "Credential version already exists with different material" } });
+      return;
+    }
+    if (error instanceof LocalProviderProbeError) {
+      json(response, 422, { error: { code: "LOCAL_PROVIDER_PROBE_FAILED", message: "Provider compatibility probe failed" } });
+      return;
+    }
     const invalidRequest = error instanceof LocalRequestError || error instanceof LocalAgentExecutionRequestError;
     json(response, invalidRequest ? 400 : 500, { error: { code: invalidRequest ? "INVALID_LOCAL_AGENT_REQUEST" : "LOCAL_AGENT_RUNTIME_FAILED", message: invalidRequest ? "Local Agent request is invalid" : "Local Agent runtime request failed" } });
   }
 }
 
 class LocalRequestError extends Error {}
+
+function requireProviderControl(value: LocalProviderControl | null): asserts value is LocalProviderControl {
+  if (!value) throw new LocalProviderProbeError("Local Provider control is not enabled");
+}
 
 async function readPreflightRequest(
   request: IncomingMessage,
@@ -215,7 +263,8 @@ export function parseLocalAgentCancellationRequest(value: unknown): LocalAgentCa
   };
 }
 
-type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel";
+type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel"
+  | "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes";
 
 async function readCancellationRequest(
   request: IncomingMessage,

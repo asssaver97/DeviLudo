@@ -136,9 +136,13 @@ behind the web console:
   factory is the only composition point for the Provider-binding verifier,
   CLI-version inspector and isolated executor, allowing a development Worker
   host to inject those authorities without making them environment-selected
-  plugins or Web-owned callbacks. The normal standalone launcher injects none
-  and therefore remains fail-closed. The explicit loopback test launcher alone
-  may enable a deterministic logical Worker identity derived from the exact
+  plugins or Web-owned callbacks. The explicit loopback test launcher enables
+  a process-local Provider credential authority for admin ingress and strict
+  production-equivalent compatibility probes. It retains secret bytes only in
+  the sidecar process, returns only a SecretRef and fingerprint, clears them on
+  restart, and never supplies them to a CLI. Production continues to require
+  the mTLS Secret Broker and Vault/KMS. The same test launcher alone may enable
+  a deterministic logical Worker identity derived from the exact
   installed CLI and Adapter versions. This keeps localhost admin upgrades bound
   to the same immutable image digest without representing host execution as a
   production container or microVM attestation.
