@@ -28,7 +28,7 @@ export function ProjectStudio({
   const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [workspaceReady, setWorkspaceReady] = useState(false);
-  const [projectName, setProjectName] = useState(mode === "new" ? "新构想" : localFixture ? "余烬群岛" : "游戏项目");
+  const [projectName, setProjectName] = useState(mode === "new" ? "新构想" : "游戏项目");
   const [repositoryLabel, setRepositoryLabel] = useState("");
   const [notice, setNotice] = useState("");
   const [feedback, setFeedback] = useState("");
