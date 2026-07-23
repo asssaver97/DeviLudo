@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,7 @@ import { AGENT_CODE_REVIEW_OUTPUT_PATH } from "../../../lib/agent/code-review";
 
 function request(agent: "claude-code" | "codex-cli", suffix: string): LocalAgentExecutionRequest {
   const claude = agent === "claude-code";
+  const prompt = "Implement the immutable test specification.";
   return {
     tenantId: "tenant-1",
     projectId: `project-${suffix}`,
@@ -40,7 +42,8 @@ function request(agent: "claude-code" | "codex-cli", suffix: string): LocalAgent
     },
     budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 },
     timeoutSeconds: 7200,
-    prompt: "Implement the immutable test specification.",
+    promptDigest: createHash("sha256").update(prompt).digest("hex"),
+    prompt,
   };
 }
 

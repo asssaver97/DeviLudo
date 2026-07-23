@@ -217,6 +217,7 @@ function buildReceipt(
     agent: request.agent,
     budget: Object.freeze({ ...request.budget }),
     timeoutSeconds: request.timeoutSeconds,
+    promptDigest: request.promptDigest,
     status: "completed",
     ...(result.sessionId && result.sessionId.length <= 256 ? { sessionId: result.sessionId } : {}),
     summary: (result.summary?.trim() || "Agent completed and SCM proxy created a candidate commit.").slice(0, 4_000),

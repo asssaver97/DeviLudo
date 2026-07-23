@@ -132,7 +132,12 @@ async function readPreflightRequest(
   path: LocalAgentRuntimeAssertionPath,
   verifier: LocalAgentRuntimeRequestVerifier,
 ): Promise<LocalAgentPreflightRequest> {
-  return preflightFrom(await readObject(request, path, verifier));
+  const item = await readObject(request, path, verifier);
+  exactKeys(item, [
+    "adapterVersion", "agent", "credentialVersionId", "expectedVersion", "imageDigest", "installationId",
+    "model", "modelRoles", "profileRevisionId", "projectId", "providerRevisionId", "runId",
+  ]);
+  return preflightFrom(item);
 }
 
 async function readExecutionRequest(
@@ -140,7 +145,20 @@ async function readExecutionRequest(
   path: LocalAgentRuntimeAssertionPath,
   verifier: LocalAgentRuntimeRequestVerifier,
 ): Promise<LocalAgentExecutionRequest> {
-  const item = await readObject(request, path, verifier);
+  return parseLocalAgentExecutionRequest(await readObject(request, path, verifier));
+}
+
+export function parseLocalAgentExecutionRequest(value: unknown): LocalAgentExecutionRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new LocalRequestError("Local Agent execution request is invalid");
+  }
+  const item = value as Record<string, unknown>;
+  exactKeys(item, [
+    "adapterVersion", "agent", "attemptId", "budget", "credentialVersionId", "expectedVersion",
+    "imageDigest", "installationId", "model", "modelRoles", "profileRevisionId", "projectId",
+    "prompt", "promptDigest", "providerProtocol", "providerRevisionId", "runId", "specRevisionId",
+    "tenantId", "testPlanRevisionId", "timeoutSeconds",
+  ]);
   return {
     ...preflightFrom(item),
     tenantId: requireString(item.tenantId),
@@ -152,6 +170,7 @@ async function readExecutionRequest(
     providerProtocol: requireProtocol(item.providerProtocol),
     budget: requireBudget(item.budget),
     timeoutSeconds: requireInteger(item.timeoutSeconds),
+    promptDigest: requireSha256(item.promptDigest),
     prompt: requireString(item.prompt, 64 * 1024),
   };
 }
@@ -232,12 +251,19 @@ function requireProtocol(value: unknown): LocalAgentExecutionRequest["providerPr
 function requireBudget(value: unknown): LocalAgentExecutionRequest["budget"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new LocalRequestError("Local Agent budget is invalid");
   const budget = value as Record<string, unknown>;
+  exactKeys(budget, ["maxCostUsd", "maxInputTokens", "maxOutputTokens", "maxTurns"]);
   return {
     maxTurns: requireInteger(budget.maxTurns),
     maxCostUsd: requireNumber(budget.maxCostUsd),
     maxInputTokens: requireInteger(budget.maxInputTokens),
     maxOutputTokens: requireInteger(budget.maxOutputTokens),
   };
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expected].sort())) {
+    throw new LocalRequestError("Local Agent request shape is invalid");
+  }
 }
 
 function requireInteger(value: unknown): number {
@@ -247,6 +273,13 @@ function requireInteger(value: unknown): number {
 
 function requireNumber(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new LocalRequestError("Local Agent number field is invalid");
+  return value;
+}
+
+function requireSha256(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new LocalRequestError("Local Agent digest field is invalid");
+  }
   return value;
 }
 

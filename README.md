@@ -42,12 +42,12 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 - 规格批准会在同一 PostgreSQL RLS 事务中解析与 Godot 版本、目标矩阵完全兼容的最新项目 Runner Toolchain，并把其不可变 revision/digest 写入冻结测试计划；缺少兼容版本时整笔审批回滚，数据库触发器也拒绝任何旁路写入的不兼容绑定。
 - “接受并发布”生产路由只接受空 POST、幂等键和绑定方法/路径的短期平台会话；它不会接受客户端 main SHA、证据状态或 `x-mfa-proof`，而是跳转到固定 HTTPS MFA broker。Broker 在租户 RLS 下重新确认请求者仍是活跃 `ProjectOwner`/`TenantAdmin` 且就是该工作流已完成不可变候选验收的 actor，再查询权威发布快照并续跑 Temporal；审计员或另一账号不能复用已知 Release ID。反馈、验收服务本身也在数据库内复核同一写权限，不依赖 Web 进程代传的 actor。
 - `services/local-runtime`：仅 loopback 的 Godot 验证侧车；请求必须明确选择平台固定样例或已冻结的 Agent 候选。Agent 模式不接受调用方文件路径，而是从独立 Agent SCM 存储复核 attempt、branch、base/candidate commit 与 Git tree digest，再把精确提交导出到无 `.git` 的隔离工作区执行真实 import/boot/TestKit/导出检查。证据持续携带同一 source authority，固定样例不能在已有 Agent 回执时冒充其 E2E。
-- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`/v1/runs` 必须复用预检，默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
+- `services/local-agent-runtime`：仅 loopback 的 Agent 就绪与执行边界；读取本机 Claude Code/Codex CLI 的精确版本，并把版本、WorkerImage、Gateway、锁定 Provider 绑定探针和显式启用状态作为联合门禁。`/v1/runs` 必须复用预检，拒绝未知字段和调用方工作区路径；Web 只能从已批准规格侧车读取并复核 GameSpec/TestPlan 双摘要，再生成带 SHA-256 的完整提示词。请求、执行器和完成回执共同绑定该提示词摘要。默认未注入隔离执行器时返回 503，绝不回退为直接启动 CLI。
 - 三个本地 sidecar 分别使用 `local:dev` 每次启动生成的独立 256-bit HMAC 会话。规格读写、Godot 执行/证据读取和 Agent 预检/运行全部绑定精确受众、方法、路径、正文摘要、时间与单次 nonce；知道 loopback 端口或伪造旧固定请求头均不能取得 sidecar 权限，任一服务的 Key 也不能跨受众使用。
 - 本地候选反馈走与生产相同的不可变语义：只有目标矩阵已通过并等待用户验收，或 post-main/Steam 失败已进入人工修复接管时才能提交；规格 sidecar 从已批准会话派生新的 DRAFT 会话，旧批准 authority 和证据保留但立即失效。新草稿必须再次明确批准并取得新 Run；本地 smoke 会对后继 Run 再次运行真实 Godot，并单独证明缺少导出模板的真实候选不能越过目标矩阵门禁。
 - `lib/observability`：所有 Web、控制面、工作流、Agent、Runner、SCM、证据与 Steam 生产启动入口在应用模块加载前注册固定服务身份的 OpenTelemetry SDK，通过 OTLP/protobuf 导出追踪并自动传播 W3C `tracecontext`。生产不能关闭追踪；URL query、Cookie、认证头、提示词、源码和凭据不会进入 span，静态 OTLP Header 凭据也被禁止。
 - `IsolatedLocalAgentExecutor`：把 Claude/Codex Adapter、短期 token broker、Agent Worker 监督器和 SCM 代理组合成一次尝试；完成回执固定租户、测试计划、turn/cost/token 预算、超时和 base/candidate 提交。服务端只有在注入可信 workspace provisioner 与 token broker 后才能启用它。
-- 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。完成回执必须再次绑定全部锁定字段以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态；随后的本机验证必须命中这张回执的同一 attempt、分支、提交和源码摘要。
+- 项目页“真实 Agent 启动预检”：将持久快照中的 Profile、CLI、镜像、Provider、凭据版本和模型锁提交给本机探针，显示准确阻塞原因；只有 `READY` 才显示启动入口。自动编排同样优先运行满足全部门禁的真实 Agent，再对其 SCM 候选执行 Godot；只有 CLI/镜像/本机执行开关等明确的 localhost 能力阻塞才显示原因并使用平台固定样例，Provider 失效或预检通过但隔离执行器缺失会保持阻塞。完成回执必须再次绑定全部锁定字段、批准规格提示词摘要、通过的代码评审，以及 SCM 候选 SHA、source digest、changed-files 和 usage，之后才写入候选状态；随后的本机验证必须命中这张回执的同一 attempt、分支、提交和源码摘要。
 - `db`、`drizzle`：42 张 D1 Beta 表、不可变绑定触发器、GitHub 安装授权/SCM 回执、Steam 会话/上传 claim/Build 回执、分平台 Runner、本地交付事件、自动编排幂等回执与本地 Agent 管理修订迁移。
 - `infra`：PostgreSQL 强制 RLS、Temporal、Redis、MinIO、Vault、OpenTelemetry 的本地集成骨架。
 - `openapi/deviludo.yaml`：生产 API 合同；站点预览在 `/api/admin/**` 暴露同等演示操作。

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runLocalDeliveryUntilHumanGate } from "../lib/local-delivery/automatic.ts";
-import { commandLocalDelivery, saveLocalMainValidation, saveLocalSteamReinstall, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
+import { commandLocalDelivery, saveLocalAgentExecution, saveLocalMainValidation, saveLocalSteamReinstall, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
 
 const macosBuild = Object.freeze({
   fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
@@ -36,6 +36,74 @@ function passingValidation(projectId, delivery, commandKey) {
       { name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "exported app booted" },
     ],
     createdAt: "2026-07-23T00:00:00.000Z",
+  }, commandKey);
+}
+
+function agentReceipt(delivery) {
+  const candidate = {
+    scmProxy: "local-git-proxy-v1",
+    branch: "deviludo/automatic/agent-candidate",
+    baseCommitSha: "1".repeat(40),
+    commitSha: "2".repeat(40),
+    sourceDigest: "3".repeat(64),
+    changedFiles: ["project.godot", "scripts/main.gd"],
+    draftPullRequest: null,
+  };
+  return {
+    schemaVersion: 1,
+    tenantId: "tenant-local",
+    projectId: delivery.projectId,
+    runId: delivery.runId,
+    attemptId: `ATT-${delivery.runId}`,
+    specRevisionId: delivery.specRevisionId,
+    testPlanRevisionId: delivery.lockedProfile.testPlanRevisionId,
+    profileRevisionId: delivery.lockedProfile.profileRevisionId,
+    installationId: delivery.lockedProfile.installationId,
+    imageDigest: delivery.lockedProfile.imageDigest,
+    adapterVersion: delivery.lockedProfile.adapterVersion,
+    providerRevisionId: delivery.lockedProfile.providerRevisionId,
+    credentialVersionId: delivery.lockedProfile.credentialVersionId,
+    model: delivery.lockedProfile.model,
+    modelRoles: delivery.lockedProfile.modelRoles,
+    agent: delivery.lockedProfile.agent,
+    budget: delivery.lockedProfile.budget,
+    timeoutSeconds: delivery.lockedProfile.timeoutSeconds,
+    promptDigest: "4".repeat(64),
+    status: "completed",
+    summary: "Implemented the exact approved specification.",
+    usage: { inputTokens: 120, outputTokens: 40, costUsd: 0.2 },
+    warnings: [],
+    codeReviewReceipt: {
+      schemaVersion: "deviludo.agent-code-review-receipt.v1", receiptId: `review-ATT-${delivery.runId}`,
+      runId: delivery.runId, attemptId: `ATT-${delivery.runId}`,
+      profileRevisionId: delivery.lockedProfile.profileRevisionId,
+      installationId: delivery.lockedProfile.installationId,
+      imageDigest: delivery.lockedProfile.imageDigest, model: delivery.lockedProfile.model,
+      specRevisionId: delivery.specRevisionId, testPlanRevisionId: delivery.lockedProfile.testPlanRevisionId,
+      sourceDigest: candidate.sourceDigest, verdict: "PASSED", reviewDigest: "5".repeat(64),
+      findingCount: 0, warningCount: 0, reviewedAt: "2026-07-23T00:00:00.000Z",
+    },
+    candidate,
+    completedAt: "2026-07-23T00:00:00.000Z",
+  };
+}
+
+function passingAgentValidation(projectId, delivery, commandKey) {
+  const receipt = delivery.agentExecution;
+  return saveLocalValidation(projectId, {
+    schemaVersion: 4, evidenceId: "EV-LOCAL-AGENTABC1234",
+    status: "TESTS_PASSED", releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: receipt.candidate.commitSha, sourceDigest: receipt.candidate.sourceDigest,
+    bundleDigest: "6".repeat(64), godotVersion: "4.6.2.stable",
+    targetMatrix: delivery.targetMatrix, platform: "macos", fixtureOnly: false,
+    sourceAuthority: {
+      kind: "AGENT_CANDIDATE", attemptId: receipt.attemptId, branch: receipt.candidate.branch,
+      baseCommitSha: receipt.candidate.baseCommitSha, candidateSha: receipt.candidate.commitSha,
+      sourceDigest: receipt.candidate.sourceDigest,
+    },
+    buildArtifact: macosBuild,
+    checks: [{ name: "macos-export-boot", status: "PASSED", durationMs: 1, detail: "agent export booted" }],
+    createdAt: "2026-07-23T00:01:00.000Z",
   }, commandKey);
 }
 
@@ -139,6 +207,73 @@ test("local automation runs selected-target E2E and stops at every human authori
   assert.equal(beta.snapshot.steamReinstall.releaseGate, "LOCAL_STEAM_REINSTALL_PASSED");
   assert.equal(beta.snapshot.externalGate, "VALVE_REVIEW");
   assert.deepEqual(beta.snapshot.externalApprovals, []);
+});
+
+test("local automation executes a READY Agent candidate before Godot E2E", async () => {
+  const projectId = `auto-real-agent-${crypto.randomUUID()}`;
+  await startLocalDelivery(projectId, "SPEC-040", "RUN-AUTO-REAL-AGENT", `start:${projectId}`, undefined, ["macos"]);
+  let agentCalls = 0;
+  const agentRunner = async (id, delivery, commandKey) => {
+    agentCalls += 1;
+    const receipt = agentReceipt(delivery);
+    const saved = await saveLocalAgentExecution(id, receipt, commandKey);
+    return { kind: "COMPLETED", receipt, snapshot: saved.snapshot, replayed: saved.replayed };
+  };
+  const result = await runLocalDeliveryUntilHumanGate(
+    projectId,
+    `auto:${projectId}`,
+    passingAgentValidation,
+    undefined,
+    undefined,
+    agentRunner,
+  );
+  assert.equal(agentCalls, 1);
+  assert.equal(result.stopReason, "USER_ACCEPTANCE_REQUIRED");
+  assert.equal(result.snapshot.stage, "AWAITING_ACCEPTANCE");
+  assert.equal(result.agentExecutionAttempted, true);
+  assert.equal(result.developmentMode, "REAL_AGENT");
+  assert.equal(result.fixtureFallbackCode, null);
+  assert.equal(result.snapshot.agentExecution.valid, true);
+  assert.equal(result.snapshot.localValidation.fixtureOnly, false);
+  assert.equal(result.snapshot.localValidation.sourceAuthority.kind, "AGENT_CANDIDATE");
+});
+
+test("local automation waits for the locked Provider and refuses a silent Fixture fallback", async () => {
+  const projectId = `auto-provider-probe-${crypto.randomUUID()}`;
+  const started = await startLocalDelivery(projectId, "SPEC-041", "RUN-AUTO-PROVIDER-PROBE", `start:${projectId}`);
+  const result = await runLocalDeliveryUntilHumanGate(
+    projectId,
+    `auto:${projectId}`,
+    passingValidation,
+    undefined,
+    undefined,
+    async () => ({ kind: "BLOCKED", code: "WAITING_PROVIDER", message: "provider unavailable", status: 409 }),
+  );
+  assert.equal(result.stopReason, "WAITING_PROVIDER");
+  assert.equal(result.snapshot.stage, "WAITING_PROVIDER");
+  assert.equal(result.snapshot.runId, started.snapshot.runId);
+  assert.equal(result.developmentMode, null);
+  assert.equal(result.fixtureFallbackCode, "WAITING_PROVIDER");
+});
+
+test("local automation refuses Fixture fallback after a READY preflight without an executor", async () => {
+  const projectId = `auto-executor-gate-${crypto.randomUUID()}`;
+  await startLocalDelivery(projectId, "SPEC-042", "RUN-AUTO-EXECUTOR-GATE", `start:${projectId}`);
+  const result = await runLocalDeliveryUntilHumanGate(
+    projectId,
+    `auto:${projectId}`,
+    passingValidation,
+    undefined,
+    undefined,
+    async () => ({
+      kind: "BLOCKED", code: "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED",
+      message: "executor unavailable", status: 503,
+    }),
+  );
+  assert.equal(result.stopReason, "LOCAL_AGENT_EXECUTOR_REQUIRED");
+  assert.equal(result.snapshot.stage, "AGENT_QUEUED");
+  assert.equal(result.automaticTransitions, 0);
+  assert.equal(result.fixtureFallbackCode, "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED");
 });
 
 test("local automation persists a dependency wait and cannot bypass it", async () => {

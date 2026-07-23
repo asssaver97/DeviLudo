@@ -109,6 +109,7 @@ export function LocalDeliveryPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [agentPreflight, setAgentPreflight] = useState<LocalAgentPreflightResult | null>(null);
+  const [automationAuthority, setAutomationAuthority] = useState<string | null>(null);
 
   const publish = useCallback((value: LocalDeliverySnapshot) => {
     setSnapshot(value);
@@ -248,7 +249,19 @@ export function LocalDeliveryPanel({
       headers: { "content-type": "application/json", "idempotency-key": commandId },
       body: "{}",
     });
-    const payload = await response.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
+    const payload = await response.json() as {
+      data?: LocalDeliverySnapshot;
+      error?: { message?: string };
+      meta?: {
+        developmentMode?: "REAL_AGENT" | "FIXTURE" | null;
+        fixtureFallbackCode?: string | null;
+      };
+    };
+    if (payload.meta?.developmentMode === "REAL_AGENT") {
+      setAutomationAuthority("最近一次自动开发使用了锁定的真实 Agent 候选。");
+    } else if (payload.meta?.developmentMode === "FIXTURE") {
+      setAutomationAuthority(`最近一次自动开发使用平台固定样例；真实 Agent 阻塞原因：${payload.meta.fixtureFallbackCode ?? "本地测试模式"}。`);
+    }
     return { ok: response.ok, data: payload.data, message: payload.error?.message };
   }
 
@@ -316,7 +329,7 @@ export function LocalDeliveryPanel({
         <div>
           <span className="eyebrow">{localFixture ? "Localhost · D1 持久状态" : "Production · Temporal 权威投影"}</span>
           <h2>{localFixture ? "本地交付控制台" : "交付工作流"}</h2>
-          <p>{localFixture ? "规格批准后自动运行 Fixture 开发与真实 Godot 验证，并停在人工门禁；真实 Agent 必须先通过独立预检，本地默认不会调用模型、GitHub 或 Steam。" : "规格获批后会创建确定性工作流；Web 只读取租户隔离投影，不能直接推进状态。"}</p>
+          <p>{localFixture ? "规格批准后优先运行通过全部门禁的锁定 Agent；本机能力未就绪时会明确标记固定样例，再执行真实 Godot 验证并停在人工门禁。默认不会调用模型、GitHub 或 Steam。" : "规格获批后会创建确定性工作流；Web 只读取租户隔离投影，不能直接推进状态。"}</p>
         </div>
         {snapshot ? <span className={`local-stage local-stage-${snapshot.stage.toLowerCase()}`}><i /> {stageLabels[snapshot.stage]}</span> : null}
       </div>
@@ -397,6 +410,7 @@ export function LocalDeliveryPanel({
               <p>{agentPreflight
                 ? `${agentPreflight.message} 本机版本：${agentPreflight.observedVersion ?? "不可用"}`
                 : "只检查精确 CLI、WorkerImage、Gateway/Provider 和显式执行开关；预检本身不启动 Agent。"}</p>
+              {automationAuthority ? <p>{automationAuthority}</p> : null}
             </div>
             {agentPreflight ? (
               <div className="local-real-validation-result">

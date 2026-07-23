@@ -326,7 +326,6 @@ try {
   }
   const preflightCommand = JSON.stringify({
     projectId: "smoke-project",
-    tenantId: "tenant-local",
     runId: "smoke-run",
     profileRevisionId: "profile-claude-platform-r5",
     installationId: "claude-installation-214",
@@ -339,6 +338,7 @@ try {
     model: "claude-sonnet-4-6-20250514",
     modelRoles: smokeClaudeModels,
   });
+  const executionPrompt = "Smoke contract only; execution must remain gated.";
   const executionCommand = JSON.stringify({
     tenantId: "tenant-local",
     projectId: "smoke-project",
@@ -359,7 +359,8 @@ try {
     modelRoles: smokeClaudeModels,
     budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200000, maxOutputTokens: 50000 },
     timeoutSeconds: 7200,
-    prompt: "Smoke contract only; execution must remain gated.",
+    promptDigest: createHash("sha256").update(executionPrompt).digest("hex"),
+    prompt: executionPrompt,
   });
   const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, projectAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, forgedRuntimeRequest, forgedSpecRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),

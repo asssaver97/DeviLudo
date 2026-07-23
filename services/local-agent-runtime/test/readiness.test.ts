@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { LocalAgentExecutionReceipt } from "../src/contracts";
 import { LocalAgentExecutionService } from "../src/execution";
@@ -34,6 +35,7 @@ const execution = {
   providerProtocol: "anthropic-messages" as const,
   budget: { maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 },
   timeoutSeconds: 7200,
+  promptDigest: createHash("sha256").update("Implement the approved immutable game specification.").digest("hex"),
   prompt: "Implement the approved immutable game specification.",
 };
 
@@ -68,6 +70,7 @@ function receipt(overrides: Partial<LocalAgentExecutionReceipt> = {}): LocalAgen
     agent: execution.agent,
     budget: execution.budget,
     timeoutSeconds: execution.timeoutSeconds,
+    promptDigest: execution.promptDigest,
     status: "completed" as const,
     sessionId: "session-1",
     summary: "Implemented the approved fixture.",
@@ -256,6 +259,11 @@ test("execution accepts only a complete receipt bound to the immutable lock", as
     executor: { async execute() { return receipt({ modelRoles: { ...execution.modelRoles, smallFastModel: "claude-haiku-other-20260101" } }); } },
   });
   await assert.rejects(roleDrift.execute(execution), /immutable run lock/);
+
+  await assert.rejects(
+    service.execute({ ...execution, promptDigest: "f".repeat(64) }),
+    /prompt digest/,
+  );
 });
 
 test("preflight rejects a primary/model-role mismatch before Provider verification", async () => {

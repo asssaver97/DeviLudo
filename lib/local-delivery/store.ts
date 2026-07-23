@@ -36,6 +36,9 @@ export type LocalAutomationCommandResult = {
   readonly validationExecuted: boolean;
   readonly mainValidationExecuted: boolean;
   readonly steamReinstallExecuted: boolean;
+  readonly agentExecutionAttempted: boolean;
+  readonly developmentMode: "REAL_AGENT" | "FIXTURE" | null;
+  readonly fixtureFallbackCode: string | null;
   readonly requiredPhysicalPlatforms: readonly ("linux" | "windows")[];
 };
 
@@ -373,6 +376,9 @@ function parseAutomationResult(value: string, projectId: string): LocalAutomatio
     requiredPhysicalPlatforms?: readonly ("linux" | "windows")[];
     mainValidationExecuted?: boolean;
     steamReinstallExecuted?: boolean;
+    agentExecutionAttempted?: boolean;
+    developmentMode?: "REAL_AGENT" | "FIXTURE" | null;
+    fixtureFallbackCode?: string | null;
   };
   const snapshot = normalizeLocalDeliverySnapshot(parsed.snapshot);
   const requiredPhysicalPlatforms = parsed.requiredPhysicalPlatforms ?? [];
@@ -381,11 +387,17 @@ function parseAutomationResult(value: string, projectId: string): LocalAutomatio
       "USER_ACCEPTANCE_REQUIRED", "MFA_REQUIRED", "EXTERNAL_APPROVAL_REQUIRED", "WAITING_PROVIDER",
       "SPEC_APPROVAL_REQUIRED", "LOCAL_EXPORT_TEMPLATES_REQUIRED", "LOCAL_VALIDATION_FAILED", "TERMINAL",
       "LOCAL_MAIN_VALIDATION_FAILED", "LOCAL_STEAM_REINSTALL_FAILED", "PHYSICAL_RUNNERS_REQUIRED",
+      "LOCAL_AGENT_EXECUTOR_REQUIRED",
     ].includes(parsed.stopReason)
     || !Number.isSafeInteger(parsed.automaticTransitions) || parsed.automaticTransitions < 0
     || typeof parsed.validationExecuted !== "boolean"
     || (parsed.mainValidationExecuted !== undefined && typeof parsed.mainValidationExecuted !== "boolean")
     || (parsed.steamReinstallExecuted !== undefined && typeof parsed.steamReinstallExecuted !== "boolean")
+    || (parsed.agentExecutionAttempted !== undefined && typeof parsed.agentExecutionAttempted !== "boolean")
+    || (parsed.developmentMode !== undefined && parsed.developmentMode !== null
+      && parsed.developmentMode !== "REAL_AGENT" && parsed.developmentMode !== "FIXTURE")
+    || (parsed.fixtureFallbackCode !== undefined && parsed.fixtureFallbackCode !== null
+      && (typeof parsed.fixtureFallbackCode !== "string" || parsed.fixtureFallbackCode.length > 100))
     || !Array.isArray(requiredPhysicalPlatforms)
     || requiredPhysicalPlatforms.some((platform) => platform !== "linux" && platform !== "windows")
     || new Set(requiredPhysicalPlatforms).size !== requiredPhysicalPlatforms.length) {
@@ -396,6 +408,9 @@ function parseAutomationResult(value: string, projectId: string): LocalAutomatio
     snapshot,
     mainValidationExecuted: parsed.mainValidationExecuted ?? false,
     steamReinstallExecuted: parsed.steamReinstallExecuted ?? false,
+    agentExecutionAttempted: parsed.agentExecutionAttempted ?? false,
+    developmentMode: parsed.developmentMode ?? null,
+    fixtureFallbackCode: parsed.fixtureFallbackCode ?? null,
     requiredPhysicalPlatforms,
   };
 }

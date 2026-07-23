@@ -6,6 +6,7 @@ import type {
 } from "./contracts";
 import { LocalAgentReadinessService } from "./readiness";
 import { validateAgentCodeReviewReceipt } from "../../../lib/agent/code-review";
+import { createHash } from "node:crypto";
 
 export type LocalAgentExecutionOutcome =
   | { readonly state: "BLOCKED"; readonly preflight: LocalAgentPreflightResult }
@@ -46,6 +47,10 @@ function validateExecutionRequest(request: LocalAgentExecutionRequest): void {
   if (request.prompt.length < 1 || request.prompt.length > 64 * 1024 || request.prompt.includes("\0")) {
     throw new LocalAgentExecutionRequestError("Local Agent execution prompt is invalid");
   }
+  if (!/^[a-f0-9]{64}$/.test(request.promptDigest)
+    || createHash("sha256").update(request.prompt, "utf8").digest("hex") !== request.promptDigest) {
+    throw new LocalAgentExecutionRequestError("Local Agent execution prompt digest is invalid");
+  }
   const expectedProtocol = request.agent === "claude-code" ? "anthropic-messages" : "openai-responses";
   if (request.providerProtocol !== expectedProtocol) throw new LocalAgentExecutionRequestError("Local Agent execution protocol does not match the locked Agent");
   if (!validBudget(request.budget)
@@ -75,6 +80,7 @@ function validateReceipt(receipt: LocalAgentExecutionReceipt, request: LocalAgen
     || !sameModelRoles(receipt.modelRoles, request.modelRoles)
     || receipt.agent !== request.agent
     || receipt.timeoutSeconds !== request.timeoutSeconds
+    || receipt.promptDigest !== request.promptDigest
     || !sameBudget(receipt.budget, request.budget)) {
     throw new Error("Local Agent execution receipt does not match the immutable run lock");
   }

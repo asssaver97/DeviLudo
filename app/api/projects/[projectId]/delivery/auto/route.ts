@@ -1,5 +1,5 @@
 import { bodyObject, idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
-import { runLocalDeliveryUntilHumanGate } from "@/lib/local-delivery/automatic";
+import { localAgentAutomationRunner, runLocalDeliveryUntilHumanGate } from "@/lib/local-delivery/automatic";
 import { readLocalAutomationCommand, saveLocalAutomationCommand } from "@/lib/local-delivery/store";
 import { authorizeLocalProjectAccess } from "@/lib/projects/project-read-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -11,6 +11,7 @@ const GATE_STATUS = new Set([
   "LOCAL_VALIDATION_FAILED",
   "LOCAL_MAIN_VALIDATION_FAILED",
   "LOCAL_STEAM_REINSTALL_FAILED",
+  "LOCAL_AGENT_EXECUTOR_REQUIRED",
   "PHYSICAL_RUNNERS_REQUIRED",
 ]);
 
@@ -42,18 +43,28 @@ export async function POST(
       : await saveLocalAutomationCommand(
         projectId,
         commandKey,
-        await runLocalDeliveryUntilHumanGate(projectId, commandKey),
+        await runLocalDeliveryUntilHumanGate(
+          projectId,
+          commandKey,
+          undefined,
+          undefined,
+          undefined,
+          localAgentAutomationRunner,
+        ),
       );
     const result = saved.response;
     return json({
       data: result.snapshot,
       meta: {
-        mode: "LOCAL_FIXTURE_AUTOMATION",
+        mode: "LOCAL_AUTOMATION",
         stopReason: result.stopReason,
         automaticTransitions: result.automaticTransitions,
         validationExecuted: result.validationExecuted,
         mainValidationExecuted: result.mainValidationExecuted,
         steamReinstallExecuted: result.steamReinstallExecuted,
+        agentExecutionAttempted: result.agentExecutionAttempted,
+        developmentMode: result.developmentMode,
+        fixtureFallbackCode: result.fixtureFallbackCode,
         requiredPhysicalPlatforms: result.requiredPhysicalPlatforms,
         idempotentReplay: saved.replayed,
       },
@@ -82,5 +93,6 @@ function stopMessage(stopReason: string, requiredPhysicalPlatforms: readonly str
   }
   if (stopReason === "LOCAL_MAIN_VALIDATION_FAILED") return "合并后的 main SHA 发布级门禁失败，已撤销发布权限并创建修复接管点。";
   if (stopReason === "LOCAL_STEAM_REINSTALL_FAILED") return "本地 Beta 摘要复核或干净回装启动失败，已撤销发布权限并创建修复接管点。";
+  if (stopReason === "LOCAL_AGENT_EXECUTOR_REQUIRED") return "本机 Agent 已满足启动门禁，但隔离执行器未配置；为避免静默改用固定样例，自动开发保持阻塞。";
   return "本机 Godot 验证失败，修复后才能继续自动 E2E。";
 }

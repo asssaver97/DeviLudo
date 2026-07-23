@@ -82,6 +82,7 @@ export interface LocalAgentExecutionRequest extends LocalAgentPreflightRequest {
     readonly maxOutputTokens: number;
   };
   readonly timeoutSeconds: number;
+  readonly promptDigest: string;
   readonly prompt: string;
 }
 
@@ -104,6 +105,7 @@ export interface LocalAgentExecutionReceipt {
   readonly agent: AgentKind;
   readonly budget: LocalAgentExecutionRequest["budget"];
   readonly timeoutSeconds: number;
+  readonly promptDigest: string;
   readonly status: "completed";
   readonly sessionId?: string;
   readonly summary: string;

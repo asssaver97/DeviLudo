@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { LocalAgentExecutionReceipt, LocalAgentExecutionRequest } from "../src/contracts";
-import { localAgentRuntimeFromEnvironment } from "../src/server";
+import { localAgentRuntimeFromEnvironment, parseLocalAgentExecutionRequest } from "../src/server";
 
 const key = new Uint8Array(Buffer.alloc(32, 11));
 const imageDigest = `sha256:${"c".repeat(64)}`;
@@ -30,6 +31,7 @@ const request: LocalAgentExecutionRequest = Object.freeze({
   }),
   budget: Object.freeze({ maxTurns: 64, maxCostUsd: 25, maxInputTokens: 200_000, maxOutputTokens: 50_000 }),
   timeoutSeconds: 7200,
+  promptDigest: createHash("sha256").update("Implement the approved immutable game specification.").digest("hex"),
   prompt: "Implement the approved immutable game specification.",
 });
 
@@ -93,6 +95,14 @@ test("standalone local Agent host stays fail-closed when trusted dependencies ar
   assert.equal(result.state, "BLOCKED");
 });
 
+test("standalone local Agent request contract rejects caller-controlled workspace fields", () => {
+  assert.throws(
+    () => parseLocalAgentExecutionRequest({ ...request, workspaceRoot: "/tmp/caller-selected" }),
+    /request shape/,
+  );
+  assert.deepEqual(parseLocalAgentExecutionRequest(request), request);
+});
+
 test("deterministic Worker attestation can only be enabled by the explicit localhost test deployment", async () => {
   const base = {
     DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: Buffer.from(key).toString("base64url"),
@@ -131,6 +141,7 @@ function receipt(command: LocalAgentExecutionRequest): LocalAgentExecutionReceip
     agent: command.agent,
     budget: command.budget,
     timeoutSeconds: command.timeoutSeconds,
+    promptDigest: command.promptDigest,
     status: "completed",
     sessionId: "session-1",
     summary: "Implemented the approved fixture.",

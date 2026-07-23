@@ -16,6 +16,9 @@ export async function POST(
     assertLoopbackTestRequest(request, "本机 Agent 预检只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
     await authorizeLocalProjectAccess(projectId);
+    if ((await request.text()).length !== 0) {
+      return json({ error: { code: "INVALID_LOCAL_AGENT_PREFLIGHT", message: "Agent 预检不接受浏览器配置正文" } }, { status: 400 });
+    }
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId) {
       return json({ error: { code: "SPEC_APPROVAL_REQUIRED", message: "请先批准规格并锁定 Agent 运行" } }, { status: 409 });

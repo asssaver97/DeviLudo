@@ -1,6 +1,7 @@
 import type { LocalAgentExecutionReceipt } from "@/services/local-agent-runtime/src/contracts";
 import type { LocalRuntimeSourceAuthority } from "@/services/local-runtime/src/contracts";
 import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "@/lib/agent/adapter-registry";
+import { validateAgentCodeReviewReceipt } from "@/lib/agent/code-review";
 
 const SAFE_ATTESTATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -675,6 +676,17 @@ export function recordLocalAgentExecution(
     || receipt.budget.maxInputTokens !== locked.budget.maxInputTokens
     || receipt.budget.maxOutputTokens !== locked.budget.maxOutputTokens) {
     throw new Error("Agent 运行回执预算与不可变任务锁不一致");
+  }
+  if (!/^[a-f0-9]{64}$/.test(receipt.promptDigest)) {
+    throw new Error("Agent 运行回执缺少批准规格提示词摘要");
+  }
+  const review = validateAgentCodeReviewReceipt(receipt.codeReviewReceipt);
+  if (review.runId !== current.runId || review.attemptId !== receipt.attemptId
+    || review.profileRevisionId !== locked.profileRevisionId || review.installationId !== locked.installationId
+    || review.imageDigest !== locked.imageDigest || review.model !== locked.model
+    || review.specRevisionId !== current.specRevisionId || review.testPlanRevisionId !== locked.testPlanRevisionId
+    || review.sourceDigest !== receipt.candidate.sourceDigest) {
+    throw new Error("Agent 代码评审回执与不可变任务锁或候选源码不一致");
   }
   return event(
     {
