@@ -9,6 +9,12 @@ import {
   LocalSpecRuntimeRequestVerifier,
   localSpecRuntimeKeyFromEnvironment,
 } from "./request-auth";
+import {
+  LocalSpecRuntimePersistenceError,
+  LocalSpecRuntimeStateFile,
+  type LocalSpecRuntimeState,
+  type PersistedFeedbackClaim,
+} from "./persistent-state";
 
 const HOST = "127.0.0.1";
 const PORT = parsePort(process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_PORT ?? "4313");
@@ -16,26 +22,30 @@ const BODY_LIMIT = 16 * 1024;
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 
-type FeedbackClaim = Readonly<{ conversationId: string; expectedRevision: number }>;
+type FeedbackClaim = PersistedFeedbackClaim;
 type LocalSpecRuntime = Readonly<{
   service: SpecDialogueService;
   store: InMemorySpecDialogueStore;
   currentConversationIds: Map<string, string>;
   feedbackClaims: Map<string, FeedbackClaim>;
+  persistence: LocalSpecRuntimeStateFile | null;
 }>;
 
 export function createLocalSpecRuntimeServer(
-  options: Readonly<{ authenticationKey?: Uint8Array }> = {},
+  options: Readonly<{ authenticationKey?: Uint8Array; stateFile?: string }> = {},
 ) {
   const requestVerifier = new LocalSpecRuntimeRequestVerifier(
     options.authenticationKey ?? localSpecRuntimeKeyFromEnvironment(),
   );
-  const store = new InMemorySpecDialogueStore();
+  const persistence = options.stateFile ? new LocalSpecRuntimeStateFile(options.stateFile) : null;
+  const persisted = persistence?.load() ?? null;
+  const store = new InMemorySpecDialogueStore(persisted?.store);
   const runtime: LocalSpecRuntime = {
     store,
     service: new SpecDialogueService(store, new DeterministicLocalSpecModel()),
-    currentConversationIds: new Map(),
-    feedbackClaims: new Map(),
+    currentConversationIds: new Map(persisted?.currentConversationIds ?? []),
+    feedbackClaims: new Map(persisted?.feedbackClaims ?? []),
+    persistence,
   };
   return createServer(async (request, response) => {
     secure(response);
@@ -45,6 +55,7 @@ export function createLocalSpecRuntimeServer(
       if (error instanceof LocalSpecRuntimeAuthenticationError) return json(response, 403, { error: { code: "LOCAL_SPEC_RUNTIME_AUTH_REQUIRED", message: "Authenticated local specification runtime request is required" } });
       if (error instanceof BodyLimitError) return json(response, 413, { error: { code: "LOCAL_SPEC_REQUEST_TOO_LARGE", message: "Local specification message is too large" } });
       if (error instanceof SpecDialogueConflict) return json(response, 409, { error: { code: error.code, message: "Specification revision changed; refresh before retrying" } });
+      if (error instanceof LocalSpecRuntimePersistenceError) return json(response, 503, { error: { code: error.code, message: "Local specification persistence is temporarily unavailable; retry the same operation" } });
       return json(response, 400, { error: { code: "INVALID_LOCAL_SPEC_REQUEST", message: "Local specification request is invalid" } });
     }
   });
@@ -59,6 +70,7 @@ async function dispatch(
   const url = new URL(request.url ?? "/", `http://${HOST}`);
   if (request.method === "GET" && url.pathname === "/health") {
     await runtime.service.probe();
+    await runtime.persistence?.probe();
     return json(response, 200, { status: "ok", service: "deviludo-local-spec-runtime", mode: "deterministic-loopback" });
   }
   if (url.search) return json(response, 404, { error: { code: "NOT_FOUND", message: "Local specification runtime route not found" } });
@@ -85,6 +97,7 @@ async function dispatch(
   if (operation === "spec-approval") {
     if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "specRevisionId", "testPlanRevisionId"])) throw new Error("shape");
     const receipt = await runtime.service.approve({ ...binding, actorId: "local-user", operationKey, ...body });
+    await persist(runtime);
     return json(response, 201, { data: receipt });
   }
   if (operation === "feedback") {
@@ -104,12 +117,28 @@ async function dispatch(
       actorId: "local-user", operationKey, expectedRevision: claim.expectedRevision, message: body.feedback,
     });
     runtime.currentConversationIds.set(projectId, claim.conversationId);
+    await persist(runtime);
     return json(response, 201, { data: snapshot });
   }
   if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(["expectedRevision", "message"])) throw new Error("shape");
   const snapshot = await runtime.service.send({ ...binding, actorId: "local-user", operationKey, expectedRevision: body.expectedRevision, message: body.message });
   runtime.currentConversationIds.set(projectId, conversationId);
+  await persist(runtime);
   return json(response, 201, { data: snapshot });
+}
+
+async function persist(runtime: LocalSpecRuntime): Promise<void> {
+  if (!runtime.persistence) return;
+  const state: LocalSpecRuntimeState = Object.freeze({
+    schema: "deviludo.local-spec-state.v1",
+    store: runtime.store.exportState(),
+    currentConversationIds: Object.freeze([...runtime.currentConversationIds.entries()].map((entry) => Object.freeze(entry))),
+    feedbackClaims: Object.freeze([...runtime.feedbackClaims.entries()].map(([operationKey, claim]) => Object.freeze([
+      operationKey,
+      Object.freeze({ ...claim }),
+    ] as const))),
+  });
+  await runtime.persistence.save(state);
 }
 
 function readBody(request: IncomingMessage): Promise<string> {
@@ -157,7 +186,9 @@ function parsePort(raw: string): number {
 class BodyLimitError extends Error {}
 
 export async function runLocalSpecRuntime(): Promise<void> {
-  const server = createLocalSpecRuntimeServer();
+  const stateFile = process.env.DEVILUDO_LOCAL_SPEC_STATE_FILE;
+  if (!stateFile) throw new Error("DEVILUDO_LOCAL_SPEC_STATE_FILE is required");
+  const server = createLocalSpecRuntimeServer({ stateFile });
   server.listen(PORT, HOST, () => console.log(`[local-spec-runtime] READY http://${HOST}:${PORT}`));
 }
 

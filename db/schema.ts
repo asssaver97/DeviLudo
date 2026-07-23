@@ -775,3 +775,29 @@ export const localAdminStateRevisions = sqliteTable("local_admin_state_revisions
   state: text("state_json", { mode: "json" }).$type<JsonRecord>().notNull(),
   createdAt: text("created_at").notNull(),
 });
+
+/**
+ * Local-only project/repository projection. It mirrors the public project
+ * catalog shape without pretending that a real GitHub App installation exists.
+ */
+export const localProjects = sqliteTable("local_projects", {
+  projectId: text("project_id").primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  repositoryBindingId: text("repository_binding_id").notNull().unique(),
+  installationId: text("installation_id").notNull(),
+  repositoryId: integer("repository_id").notNull(),
+  repositoryNodeId: text("repository_node_id").notNull().unique(),
+  owner: text("owner").notNull(),
+  repositoryName: text("repository_name").notNull(),
+  defaultBranch: text("default_branch").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const localProjectCommands = sqliteTable("local_project_commands", {
+  commandKey: text("command_key").primaryKey(),
+  requestDigest: text("request_digest").notNull(),
+  response: text("response_json", { mode: "json" }).$type<JsonRecord>().notNull(),
+  createdAt: text("created_at").notNull(),
+});

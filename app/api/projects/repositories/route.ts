@@ -1,8 +1,13 @@
 import { json } from "@/lib/control-plane/http";
 import { trustedGitHubSessionKeyFromEnvironment, verifyTrustedPlatformSession } from "@/lib/connections/github-broker";
 import { projectRepositoryBrokerFromEnvironment } from "@/lib/projects/repository-broker";
+import { localRepositoryCatalog } from "@/lib/projects/local-project-catalog";
+import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 export async function GET(request: Request) {
+  if (isLoopbackTestRequest(request)) {
+    return json({ data: localRepositoryCatalog(), meta: { mode: "LOCAL_FIXTURE" } });
+  }
   let broker: NonNullable<ReturnType<typeof projectRepositoryBrokerFromEnvironment>>;
   let sessionKey: Uint8Array;
   try {

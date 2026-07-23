@@ -31,6 +31,7 @@ Environment:
   DEVILUDO_LOCAL_RUNTIME_PORT  Local Godot sidecar port (default: ${DEFAULT_LOCAL_RUNTIME_PORT})
   DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
   DEVILUDO_LOCAL_SPEC_RUNTIME_PORT  Local specification dialogue port (default: ${DEFAULT_LOCAL_SPEC_RUNTIME_PORT})
+  DEVILUDO_LOCAL_SPEC_STATE_FILE  Absolute durable specification state file (default: .deviludo/local-spec-state.json)
   DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable
   DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT  Verified export_templates root`);
 }
@@ -145,6 +146,9 @@ const localSidecarCredentials = Object.freeze([
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-spec-runtime.hmac"), key: localSpecRuntimeHmacKey }),
 ]);
 const localDeploymentOwnerFile = path.join(workspaceRoot, ".deviludo", "local-deployment.json");
+const localSpecStateFile = process.env.DEVILUDO_LOCAL_SPEC_STATE_FILE
+  ? path.resolve(process.env.DEVILUDO_LOCAL_SPEC_STATE_FILE)
+  : path.join(workspaceRoot, ".deviludo", "local-spec-state.json");
 
 let removeLocalSidecarKeys = () => {};
 let localDeploymentId;
@@ -245,6 +249,7 @@ const localSpecRuntimeChild = spawn(
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_SPEC_RUNTIME_PORT: String(localSpecRuntimePort),
       DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY: localSpecRuntimeHmacKey,
+      DEVILUDO_LOCAL_SPEC_STATE_FILE: localSpecStateFile,
     },
     stdio: "inherit",
   },

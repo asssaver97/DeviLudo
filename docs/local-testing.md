@@ -34,6 +34,8 @@ npm run local:dev
 
 项目页的构想消息会真实经过规格对话 sidecar，返回完整规格、验收标准和 TestKit 计划；批准会创建独立的已批准/已冻结后继修订。该本地模型明确报告为 `deterministic-loopback`，生产环境不会启用它或假装第三方模型已配置。
 
+`/projects/new` 会从本地服务器读取唯一的隔离仓库能力；浏览器仍只能提交项目名称、slug 和服务器发出的数值仓库选择，不能指定 owner、仓库名、默认分支或绑定 ID。创建命令以请求摘要和幂等键原子写入 `local_projects`/`local_project_commands`，相同命令精确重放，不同正文复用键或 slug 冲突均失败关闭。成功项目立即进入项目目录，详情、构想历史和交付状态在刷新及本地服务重启后保持可恢复。
+
 候选反馈不会重新打开已批准会话。只有候选 E2E 已进入待验收状态，或 main/Steam 失败已冻结并交给人工修订时，反馈端点才会让规格 sidecar 创建一个新的 DRAFT 会话。旧会话保持 `APPROVED`，旧本地验证与 Agent 回执仍可审计但 `valid=false`；新草稿再次批准后获得不同 Run ID，不能复用上一轮证据。
 
 Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 版本匹配、工作负载上报的 `DEVILUDO_WORKER_IMAGE_DIGEST` 等于批准的 `DEVILUDO_LOCAL_EXPECTED_WORKER_IMAGE_DIGEST`、无凭据的 HTTPS Inference Gateway 已配置、锁定 Provider/凭据/四类模型角色通过受信探针且 `DEVILUDO_LOCAL_AGENT_EXECUTION=1` 全部满足时，开发 Worker 才会报告 `READY`。`npm run local:dev` 会在同时启用显式 loopback 测试模式时使用 `LOCAL_DETERMINISTIC` Worker 身份：它根据管理员本地供应链 Broker 已批准的精确 Agent 版本和 Adapter 版本重新计算逻辑 WorkerImage digest，使后台构建/灰度后的新 Profile 可以通过同一不可变镜像绑定；该模式不声称具备生产容器或 microVM 隔离，也不能在非测试部署中仅靠环境开关启用。Primary、Planning、Small/Fast 与 Subagent 模型会随 Profile revision 一起进入不可变运行锁；Primary 与实际 CLI `--model` 不一致时预检直接拒绝。默认配置仍没有受信 Provider 绑定探针，也没有隔离执行器，会安全地报告 `BLOCKED`；这不是测试栈故障。
@@ -75,6 +77,7 @@ npm run local:smoke
 - `/admin/agents` 返回 Agent 管理台；
 - `/settings/agents` 返回租户 BYOK、Provider 与默认 Agent 页面；
 - `/projects/ember-archipelago/agent-settings` 返回项目 Profile 选择页；
+- `/projects/new` 创建独立本地项目，验证 D1 目录、详情与幂等回执后直接以该项目继续构想；
 - `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
 - 本地 Agent 管理写入追加到不可修改的 D1 修订；停止并重新启动 `local:dev` 后，版本、安装、Profile、默认选择、幂等响应与脱敏审计仍可恢复；
 - `/api/admin/agent-versions/discover` 接受精确稳定版或预发布版本、拒绝浮动别名，且发现候选不会自动激活；
@@ -115,7 +118,7 @@ DEVILUDO_LOCAL_PORT=4310 npm run local:smoke
 
 脚本不读取通用 `PORT` 变量，避免被其他开发工具的环境配置意外影响。
 
-Godot 侧车、Agent 探针和规格侧车端口默认分别是 `4311`、`4312`、`4313`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT`、`DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`、`DEVILUDO_LOCAL_SPEC_RUNTIME_PORT`。
+Godot 侧车、Agent 探针和规格侧车端口默认分别是 `4311`、`4312`、`4313`。如需修改，启动与 smoke 命令应同时设置 `DEVILUDO_LOCAL_RUNTIME_PORT`、`DEVILUDO_LOCAL_AGENT_RUNTIME_PORT`、`DEVILUDO_LOCAL_SPEC_RUNTIME_PORT`。启动器默认把不含认证 Key 的规格历史写入 `.deviludo/local-spec-state.json`；可用 `DEVILUDO_LOCAL_SPEC_STATE_FILE` 改到另一个绝对路径。写入采用同目录临时文件、`fsync` 与原子替换，文件权限固定为 `0600`；损坏、超限、宽权限或符号链接状态会失败关闭。已完成的对话与批准保留精确幂等回放，进程崩溃时尚未完成的 claim 不持久化，可安全重试。
 
 `npm run local:dev` 会在所有本地进程上显式设置 `DEVILUDO_LOCAL_TEST_MODE=1`，并只监听 loopback。Web 本地样例 API 同时要求该开关、非生产 `NODE_ENV` 和 loopback 请求 URL；伪造 `Host` 头或在生产进程误设本地开关都不会启用 D1/内存演示控制面。Agent 管理写操作使用 D1 不可变 revision log；只有缺少 D1 绑定的纯 Node 合同测试才回退到进程内存。
 

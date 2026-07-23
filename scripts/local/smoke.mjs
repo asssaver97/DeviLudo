@@ -225,6 +225,7 @@ const runtimeUrl = `http://${HOST}:${localRuntimePort}`;
 const agentRuntimeUrl = `http://${HOST}:${localAgentRuntimePort}`;
 const specRuntimeUrl = `http://${HOST}:${localSpecRuntimePort}`;
 const smokeNonce = `${process.pid}-${Date.now().toString(36)}`;
+const smokeCatalogProject = "smoke-local-project";
 const smokeSpecProject = `smoke-spec-${smokeNonce}`;
 const smokeValidationProject = `smoke-validation-${smokeNonce}`;
 const smokeFeedbackProject = `smoke-feedback-${smokeNonce}`;
@@ -247,6 +248,46 @@ try {
   if (runtimeSidecarKey.equals(agentSidecarKey) || runtimeSidecarKey.equals(specSidecarKey)
     || agentSidecarKey.equals(specSidecarKey)) {
     throw new Error("local sidecars unexpectedly share an authentication key");
+  }
+  const localRepositoryDirectory = await request(baseUrl, "/api/projects/repositories");
+  const localRepositoryPayload = await localRepositoryDirectory.response.json();
+  const localRepository = localRepositoryPayload.data?.installations?.[0]?.repositories?.[0];
+  if (!localRepositoryDirectory.response.ok || localRepositoryPayload.meta?.mode !== "LOCAL_FIXTURE"
+    || localRepository?.installationId !== "local-fixture-9001" || localRepository?.repositoryId !== 7001
+    || localRepository.owner !== "local-sandbox") {
+    throw new Error("local repository catalog contract failed");
+  }
+  const localProjectRequest = {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-create-project-v1" },
+    body: JSON.stringify({
+      slug: smokeCatalogProject,
+      name: "Smoke 本地新游戏",
+      installationId: localRepository.installationId,
+      repositoryId: localRepository.repositoryId,
+    }),
+  };
+  const localProjectCreation = await request(baseUrl, "/api/projects", localProjectRequest);
+  const localProjectCreationPayload = await localProjectCreation.response.json();
+  const catalogCreatedNow = localProjectCreation.response.status === 201;
+  if (![200, 201].includes(localProjectCreation.response.status)
+    || localProjectCreationPayload.meta?.idempotentReplay !== !catalogCreatedNow
+    || localProjectCreationPayload.data?.projectId !== smokeCatalogProject
+    || localProjectCreationPayload.data?.repositoryName !== smokeCatalogProject
+    || localProjectCreationPayload.data?.owner !== "local-sandbox") {
+    throw new Error("local project creation contract failed");
+  }
+  const localProjectReplay = await request(baseUrl, "/api/projects", localProjectRequest);
+  const localProjectReplayPayload = await localProjectReplay.response.json();
+  if (localProjectReplay.response.status !== 200 || localProjectReplayPayload.meta?.idempotentReplay !== true
+    || JSON.stringify(localProjectReplayPayload.data) !== JSON.stringify(localProjectCreationPayload.data)) {
+    throw new Error("local project creation did not replay its exact durable receipt");
+  }
+  const localProjectDetail = await request(baseUrl, `/api/projects/${smokeCatalogProject}`);
+  const localProjectDetailPayload = await localProjectDetail.response.json();
+  if (!localProjectDetail.response.ok
+    || JSON.stringify(localProjectDetailPayload.data) !== JSON.stringify(localProjectCreationPayload.data)) {
+    throw new Error("local project detail did not recover the created catalog record");
   }
   const preflightCommand = JSON.stringify({
     projectId: "smoke-project",
@@ -354,9 +395,11 @@ try {
   ]);
   const projectCatalogPayload = await projectCatalog.response.json();
   if (!projectCatalog.response.ok || projectCatalogPayload.meta?.mode !== "LOCAL_FIXTURE"
-    || !Array.isArray(projectCatalogPayload.data) || projectCatalogPayload.data.length !== 1
-    || projectCatalogPayload.data[0]?.projectId !== "ember-archipelago"
-    || projectCatalogPayload.data[0]?.owner !== "north-dock") {
+    || projectCatalogPayload.meta?.authoritativeSource !== "loopback-local-project-catalog"
+    || !Array.isArray(projectCatalogPayload.data)
+    || !projectCatalogPayload.data.some((project) => project.projectId === "ember-archipelago" && project.owner === "north-dock")
+    || !projectCatalogPayload.data.some((project) => project.projectId === smokeCatalogProject
+      && project.repositoryName === smokeCatalogProject && project.owner === "local-sandbox")) {
     throw new Error("local project catalog contract failed");
   }
   const adminPayload = await adminState.response.json();
@@ -1090,6 +1133,7 @@ try {
   console.log(`✓ GET /runners       ${runnersPage.response.status} (${runnersPage.elapsedMs}ms) · project-scoped runners`);
   console.log(`✓ GET /evidence      ${evidencePage.response.status} (${evidencePage.elapsedMs}ms) · project-scoped evidence`);
   console.log(`✓ Project catalog    ${projectCatalog.response.status} (${projectCatalog.elapsedMs}ms) · ${projectCatalogPayload.data.length} accessible`);
+  console.log(`✓ Local project create ${localProjectCreation.response.status}/${localProjectReplay.response.status} · durable catalog + exact replay`);
   console.log(`✓ GET /admin/agents  ${admin.response.status} (${admin.elapsedMs}ms) · Agent console`);
   console.log(`✓ GET /admin/invitations ${invitations.response.status} (${invitations.elapsedMs}ms) · invite console`);
   console.log(`✓ GET /settings/agents ${tenantAgents.response.status} (${tenantAgents.elapsedMs}ms) · tenant Agent settings`);

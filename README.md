@@ -10,7 +10,7 @@ DeviLudo 是一个受邀制、多租户的游戏 AI 开发控制面。首版面�
 
 - `/`：从当前租户的权威项目目录选择项目，并展示对应候选版本流水线、跨平台状态、审计流和 Runner 集群；无项目时明确为空，不以演示数据回退。
 - `/projects`：经 PostgreSQL RLS 与独立 Project Repository Broker 列出当前账号仍可访问的项目；项目创建者或仍控制对应 GitHub App installation 的用户才能看到条目，侧栏不再固定到示例项目。本地测试模式展示明确标记的隔离 fixture。
-- `/projects/new`：生产环境先从当前已验证 GitHub App installation 实时列出可见仓库，并以数值 installation/repository ID 原子创建项目和仓库绑定；浏览器不能指定 owner、仓库名或默认分支。绑定后进入可交互多轮构想、实时 `GameSpecRevision`、验收标准、冻结测试计划和明确批准动作。本地测试模式继续使用隔离草稿夹具。
+- `/projects/new`：生产环境先从当前已验证 GitHub App installation 实时列出可见仓库，并以数值 installation/repository ID 原子创建项目和仓库绑定；浏览器不能指定 owner、仓库名或默认分支。绑定后进入可交互多轮构想、实时 `GameSpecRevision`、验收标准、冻结测试计划和明确批准动作。本地测试模式提供服务器派生的隔离仓库目录，并把每个新项目与幂等创建回执持久写入 D1；项目会出现在目录中，刷新或重启后可继续同一构想，不再复用固定 `new-project-draft`。
 - `/projects/{projectId}`：按签名租户会话读取权威项目/仓库资料和当前规格快照；空项目从 revision 0 冷启动，不复用演示规格。候选验收门禁显示反馈与合并动作；自动修复预算耗尽时只显示人工修改入口，新反馈创建不可变规格，必须重新批准后才恢复开发。
 - 项目页“本地交付控制台”：使用本地 D1 持久化流程快照与事件，可完整验证 Provider 暂停/恢复、Fixture Agent、三平台矩阵、验收、main SHA、MFA、Steam Beta 回装和外部批准门禁；候选接受只走空正文、独立幂等的正式验收端点，通用交付动作不能代替用户决定。项目选择按“项目→租户→平台”解析，规格批准时冻结 Claude Code 或 Codex CLI 的精确 Profile、配置来源、安装、镜像、CLI/Adapter、Provider、凭据版本、模型、预算与测试计划，随后管理配置变化不会改写运行中任务。main 发布门禁与 Steam 回装阶段还可演练失败证据冻结、旧发布授权撤销、人工修改说明和新规格批准。页面刷新和服务重启后状态仍保留。
 - `/admin/agents`：Claude Code（初始全局默认）与 Codex CLI 可分别发现官方候选，并管理版本、安装、灰度、回滚、Provider、凭据、三级继承、健康和审计；Provider revision 完整保留四类精确模型角色、输入/输出计价、数据地域、保留与训练政策及管理员确认，Profile revision 完整保留预算、turn、超时、凭据与 fallback。“健康与审计”直接消费角色作用域的权威健康投影，展示最近 24 小时追加式推理使用记录、配置 before/after 差异和由 Installation/Provider/Profile 绑定推导的告警。平台级读取要求数据库角色能显式关闭 RLS，租户/项目读取先设置 RLS 上下文；无法证明作用域时只报告账本不可用，不返回部分聚合。版本、SBOM、漏洞与安装状态只显示当前控制面投影，加载或失败时不会回退到预置结果。本地测试使用隔离 D1 夹具，生产 Web 则验证路由绑定的管理员断言并经独立 HTTPS/mTLS Connector 转发到 NestJS 控制面。生产角色由可信入口注入，浏览器不能模拟或覆盖；主站会话只接受另一个绑定 `GET /api/auth/session` 的只读管理员断言，并据此裁剪平台入口，普通租户不会看到越权导航。
@@ -99,7 +99,7 @@ npm run local:install-export-templates
 npm run local:dev
 ```
 
-打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为三个 sidecar 分别生成临时 HMAC Key；每个 Key 只进入 Web 与对应 sidecar，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时全部删除。启动器还持有不含密钥的原子部署租约；四个受监督子进程持续核对 launcher PID 和随机 deployment ID。即使 launcher 被强制终止，子进程也会自行退出释放端口，下一次启动在安全窗口后自动废弃旧会话文件并生成全新密钥，不需要人工清理。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
+打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 就绪探针和 `127.0.0.1:4313` 确定性规格对话侧车，四个进程都只绑定 loopback。启动器为三个 sidecar 分别生成临时 HMAC Key；每个 Key 只进入 Web 与对应 sidecar，并以 `0600` 权限写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时全部删除。规格对话、批准、反馈分支和已完成幂等回执另存为不含 Key 的 `0600` 原子状态文件，服务重启后恢复；文件损坏、权限放宽或符号链接替换会令规格侧车拒绝启动。启动器还持有不含密钥的原子部署租约；四个受监督子进程持续核对 launcher PID 和随机 deployment ID。即使 launcher 被强制终止，子进程也会自行退出释放端口，下一次启动在安全窗口后自动废弃旧会话文件并生成全新密钥，不需要人工清理。产品页面和 D1 持久状态不会调用真实模型、GitHub 或 Steam；项目页的“真实本机验证”会运行已安装的 Godot，并把证据写入被忽略的 `.deviludo/`。Agent 探针只读取 `claude --version` / `codex --version`；若版本不等于任务锁定值，管理员页会如实显示 `VERSION_MISMATCH` 并阻止执行。
 
 模板安装器只接受版本目录中固定的 Godot 官方构建，下载固定 URL 后校验归档大小、SHA-256 和全部压缩路径，再原子发布只读文件清单。验证侧车不会直接复用可变的编辑器 HOME；它会重验安装清单和 `macos.zip` 摘要，并只把精确版本目录挂载到本次运行的隔离 HOME。已有未验证目录不会被覆盖。
 

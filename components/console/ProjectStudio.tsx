@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SpecDialogueMessage, SpecDialogueSnapshot, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
 import { AppShell } from "./AppShell";
-import { ArrowIcon, CheckIcon, FileIcon, GithubIcon, SparkIcon, SteamIcon } from "./Icons";
+import { ArrowIcon, CheckIcon, FileIcon, SparkIcon, SteamIcon } from "./Icons";
 import { LocalDeliveryPanel, type DeliveryPanelStatus } from "./LocalDeliveryPanel";
 
 type Message = {
@@ -13,16 +13,6 @@ type Message = {
   text: string;
   meta?: string;
 };
-
-const acceptance = [
-  "从新游戏进入核心循环不超过 45 秒",
-  "20 分钟内可完成收集、返港与结算闭环",
-  "暂停、设置、保存与读取均支持键鼠和手柄",
-  "Windows / Linux / macOS 生产导出无崩溃",
-  "失败后保留 20% 材料，且不会破坏存档",
-];
-
-const frozenTests = ["启动与退出", "核心循环", "胜负条件", "存档回读", "暂停设置", "性能基线", "崩溃捕获", "视觉快照"];
 
 export function ProjectStudio({
   mode = "existing",
@@ -42,7 +32,7 @@ export function ProjectStudio({
   const [repositoryLabel, setRepositoryLabel] = useState("");
   const [notice, setNotice] = useState("");
   const [feedback, setFeedback] = useState("");
-  const [feedbackCount, setFeedbackCount] = useState(localFixture ? 2 : 0);
+  const [feedbackCount, setFeedbackCount] = useState(localFixture && projectId === "ember-archipelago" ? 2 : 0);
   const [generated, setGenerated] = useState<SpecModelResult | null>(null);
   const [dialogueAuthority, setDialogueAuthority] = useState<{
     conversationId: string;
@@ -53,14 +43,16 @@ export function ProjectStudio({
   const [candidateAcceptanceReady, setCandidateAcceptanceReady] = useState(false);
   const [humanRepairTakeover, setHumanRepairTakeover] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const dialogueCommandRef = useRef<{ message: string; id: string } | null>(null);
   const approvalCommandRef = useRef<string | null>(null);
+  const feedbackCommandRef = useRef<{ feedback: string; id: string } | null>(null);
   const acceptanceCommandRef = useRef<string | null>(null);
 
   const specId = `SPEC-${String(revision).padStart(3, "0")}`;
-  const completion = useMemo(() => generated?.completeness ?? Math.min(92, 44 + messages.length * 6), [generated, messages.length]);
+  const completion = useMemo(() => generated?.completeness ?? 0, [generated]);
 
   useEffect(() => {
-    if (mode === "new" || localFixture) return;
+    if (mode === "new") return;
     const controller = new AbortController();
     void fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store", signal: controller.signal })
       .then(async (response) => {
@@ -105,14 +97,17 @@ export function ProjectStudio({
     const clean = text.trim();
     if (!clean || busy) return;
     const localId = `pending-${crypto.randomUUID()}`;
-    const commandId = crypto.randomUUID();
+    const command = dialogueCommandRef.current?.message === clean
+      ? dialogueCommandRef.current
+      : { message: clean, id: crypto.randomUUID() };
+    dialogueCommandRef.current = command;
     setMessages((current) => [...current, { id: localId, role: "user", text: clean, meta: "刚刚" }]);
     setDraft("");
     setBusy(true);
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversation`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `spec-chat-${commandId}` },
+        headers: { "content-type": "application/json", "idempotency-key": `spec-chat-${command.id}` },
         body: JSON.stringify({
           expectedRevision: revision,
           message: clean,
@@ -133,6 +128,7 @@ export function ProjectStudio({
       if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "构想服务未返回有效修订");
       setMessages((current) => mergeMessages(current.filter((message) => message.id !== localId), payload.data!.messages));
       setGenerated(payload.data.result);
+      dialogueCommandRef.current = null;
       setDialogueAuthority({
         conversationId: payload.data.conversationId,
         specRevisionId: payload.data.specRevisionId,
@@ -143,6 +139,7 @@ export function ProjectStudio({
       window.setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }), 50);
     } catch (reason) {
       setMessages((current) => current.filter((message) => message.id !== localId));
+      setDraft((current) => current || clean);
       setNotice(reason instanceof Error ? `构想服务失败：${reason.message}` : "构想服务失败");
     } finally { setBusy(false); }
   }
@@ -168,10 +165,13 @@ export function ProjectStudio({
       const payload = await response.json() as { data?: { authority?: { revision?: number } }; error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "规格批准失败");
       approvalCommandRef.current = null;
+      const authorityRevision = Number.isSafeInteger(payload.data?.authority?.revision)
+        ? payload.data!.authority!.revision!
+        : revision;
       setApproved(true);
-      if (Number.isSafeInteger(payload.data?.authority?.revision)) setRevision(payload.data!.authority!.revision!);
+      setRevision(authorityRevision);
       setDeliveryRefresh((value) => value + 1);
-      setNotice(`${specId} 已冻结，Claude Code 开发任务已锁定并入队。`);
+      setNotice(`SPEC-${String(authorityRevision).padStart(3, "0")} 已冻结，开发 Agent 配置已锁定并入队。`);
     } catch (reason) {
       setNotice(reason instanceof Error ? `批准失败：${reason.message}` : "规格批准失败");
     } finally {
@@ -180,13 +180,18 @@ export function ProjectStudio({
   }
 
   async function submitFeedback() {
-    if (!feedback.trim()) return;
+    const clean = feedback.trim();
+    if (!clean) return;
+    const command = feedbackCommandRef.current?.feedback === clean
+      ? feedbackCommandRef.current
+      : { feedback: clean, id: crypto.randomUUID() };
+    feedbackCommandRef.current = command;
     setBusy(true);
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/feedback`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `feedback-${Date.now()}` },
-        body: JSON.stringify({ feedback }),
+        headers: { "content-type": "application/json", "idempotency-key": `feedback-${command.id}` },
+        body: JSON.stringify({ feedback: clean }),
       });
       const payload = await response.json() as {
         data?: {
@@ -202,6 +207,7 @@ export function ProjectStudio({
         error?: { message?: string };
       };
       if (!response.ok) throw new Error(payload.error?.message ?? "创建反馈迭代失败");
+      feedbackCommandRef.current = null;
       setFeedback("");
       setFeedbackCount((count) => count + 1);
       if (payload.data?.snapshot) {
@@ -262,10 +268,6 @@ export function ProjectStudio({
       ? status.stage === "AWAITING_SPEC_APPROVAL"
       : status.stage === "IDEATION" || status.stage === "WAITING_SPEC_APPROVAL";
     setApproved(!awaitingApproval);
-    if (status.mode === "LOCAL_D1") {
-      const persistedRevision = Number.parseInt(status.specRevisionId.replace(/^SPEC-/, ""), 10);
-      if (Number.isInteger(persistedRevision)) setRevision(persistedRevision);
-    }
   }, []);
 
   return (
@@ -281,7 +283,6 @@ export function ProjectStudio({
         <div className="project-header-actions">
           <span className={`spec-state ${approved ? "approved" : "draft"}`}><i /> {approved ? `${specId} 已批准` : `${specId} 草稿`}</span>
           {mode === "existing" ? <Link className="button button-secondary" href={`/projects/${encodeURIComponent(projectId)}/steam-settings`}><SteamIcon /> Steam 设置</Link> : null}
-          {mode === "existing" && localFixture ? <a className="button button-secondary" href="https://github.com" rel="noreferrer" target="_blank"><GithubIcon /> Draft PR #18</a> : null}
         </div>
       </section>
 
@@ -338,36 +339,41 @@ export function ProjectStudio({
           <div className="spec-completeness">
             <div><span>规格完整度</span><b>{completion}%</b></div>
             <div className="spec-track"><span style={{ width: `${completion}%` }} /></div>
-            <p>{completion < 80 ? "还需确认 2 个关键决定" : "已具备冻结测试计划的条件"}</p>
+            <p>{!generated ? "完成首轮构想后生成可审阅规格" : completion < 80 ? "仍有关键决定需要确认" : "已具备冻结测试计划的条件"}</p>
           </div>
 
-          <div className="spec-section">
-            <span className="spec-section-label">游戏支柱</span>
-            <div className="pillar-list"><span>轻量航海压力</span><span>20 分钟闭环</span><span>船只成长</span></div>
-          </div>
+          {generated ? <>
+            <div className="spec-section">
+              <span className="spec-section-label">游戏支柱</span>
+              <div className="pillar-list">{generated.spec.features.map((feature) => <span key={feature}>{feature}</span>)}</div>
+            </div>
 
-          <div className="spec-section spec-facts">
-            <span className="spec-section-label">范围</span>
-            <dl>
-              <div><dt>引擎</dt><dd>Godot {generated?.spec.godotVersion ?? "4.5.0"} · 2D</dd></div>
-              <div><dt>玩家</dt><dd>桌面单机</dd></div>
-              <div><dt>输入</dt><dd>键鼠 + 手柄</dd></div>
-              <div><dt>目标</dt><dd>{generated?.spec.targetPlatforms.join(" · ") ?? "Win · Linux · macOS"}</dd></div>
-              <div><dt>局长</dt><dd>约 20 分钟</dd></div>
-            </dl>
-          </div>
+            <div className="spec-section spec-facts">
+              <span className="spec-section-label">范围</span>
+              <dl>
+                <div><dt>标题</dt><dd>{generated.spec.title}</dd></div>
+                <div><dt>类型</dt><dd>{generated.spec.genre}</dd></div>
+                <div><dt>引擎</dt><dd>Godot {generated.spec.godotVersion}</dd></div>
+                <div><dt>玩家</dt><dd>桌面单机</dd></div>
+                <div><dt>目标</dt><dd>{generated.spec.targetPlatforms.join(" · ")}</dd></div>
+              </dl>
+            </div>
 
-          <div className="spec-section">
-            <span className="spec-section-label">验收标准</span>
-            <ul className="acceptance-list">
-              {(generated?.spec.acceptanceCriteria.map((item) => item.description) ?? acceptance).map((item) => <li key={item}><CheckIcon /><span>{item}</span></li>)}
-            </ul>
-          </div>
+            <div className="spec-section">
+              <span className="spec-section-label">验收标准</span>
+              <ul className="acceptance-list">
+                {generated.spec.acceptanceCriteria.map((item) => <li key={item.id}><CheckIcon /><span>{item.description}</span></li>)}
+              </ul>
+            </div>
 
-          <div className="spec-section">
-            <span className="spec-section-label">冻结测试计划</span>
-            <div className="test-chip-list">{(generated?.testPlan.scenarios ?? frozenTests).map((test) => <span key={test}>{test}</span>)}</div>
-          </div>
+            <div className="spec-section">
+              <span className="spec-section-label">{approved ? "冻结测试计划" : "测试计划草稿"}</span>
+              <div className="test-chip-list">{generated.testPlan.scenarios.map((test) => <span key={test}>{test}</span>)}</div>
+            </div>
+          </> : <div className="spec-section">
+            <span className="spec-section-label">等待构想</span>
+            <p>这里不会预填演示游戏。发送第一条构想后，平台才会生成项目专属的游戏支柱、范围、验收标准和测试计划。</p>
+          </div>}
 
           <div className="spec-footer">
             {approved ? (
@@ -375,7 +381,9 @@ export function ProjectStudio({
             ) : (
               <button className="button button-acid approve-button" disabled={!workspaceReady || busy || completion < 68 || !dialogueAuthority} onClick={approveSpec} type="button"><CheckIcon /> 批准 {specId} 并启动开发</button>
             )}
-            <p>批准会锁定规格、Agent Profile、提交和目标矩阵。之后的配置变化不会影响本次任务。</p>
+            <p>{generated
+              ? "批准会锁定规格、Agent Profile、提交和目标矩阵。之后的配置变化不会影响本次任务。"
+              : "首轮构想尚未生成规格，因此当前没有可批准或开发的内容。"}</p>
           </div>
         </aside>
       </div>
@@ -401,12 +409,12 @@ export function ProjectStudio({
         </section>
       ) : null}
 
-      <LocalDeliveryPanel
+      {mode === "existing" && (!localFixture || approved || projectId === "ember-archipelago") ? <LocalDeliveryPanel
         localFixture={localFixture}
         onStatus={syncDelivery}
         projectId={projectId}
         refreshToken={deliveryRefresh}
-      />
+      /> : null}
     </AppShell>
   );
 }
