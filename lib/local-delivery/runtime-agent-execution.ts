@@ -5,6 +5,7 @@ import { isLocalAgentProfileAttested, type LocalDeliverySnapshot } from "@/lib/l
 import { saveLocalAgentExecution } from "@/lib/local-delivery/store";
 import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import type {
+  LocalAgentCancellationResult,
   LocalAgentExecutionReceipt,
   LocalAgentExecutionRequest,
   LocalAgentPreflightCode,
@@ -13,7 +14,11 @@ import { createLocalSpecRuntimeHeaders } from "@/services/local-spec-runtime/src
 import { parseSpecModelResult, type SpecDialogueSnapshot } from "@/services/spec-dialogue/src/contracts";
 import { canonicalSpecJson, specDigest } from "@/services/spec-dialogue/src/store";
 
-const BLOCKED_CODES = new Set<LocalAgentPreflightCode | "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED">([
+type LocalAgentExecutionBlockedCode = LocalAgentPreflightCode
+  | "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"
+  | "LOCAL_AGENT_RUN_CANCELLED";
+
+const BLOCKED_CODES = new Set<LocalAgentExecutionBlockedCode>([
   "INSTALLATION_UNAVAILABLE",
   "INSTALLATION_MISMATCH",
   "ADAPTER_MISMATCH",
@@ -21,6 +26,7 @@ const BLOCKED_CODES = new Set<LocalAgentPreflightCode | "LOCAL_AGENT_EXECUTOR_NO
   "WAITING_PROVIDER",
   "EXECUTION_DISABLED",
   "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED",
+  "LOCAL_AGENT_RUN_CANCELLED",
 ]);
 
 export type LocalAgentExecutionAttempt =
@@ -32,7 +38,7 @@ export type LocalAgentExecutionAttempt =
     }>
   | Readonly<{
       kind: "BLOCKED";
-      code: LocalAgentPreflightCode | "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED";
+      code: LocalAgentExecutionBlockedCode;
       message: string;
       status: 409 | 503;
     }>;
@@ -92,7 +98,7 @@ export async function runAndSaveLocalAgentExecution(
         ...createLocalAgentRuntimeHeaders({ method: "POST", path: "/v1/runs", body: command }),
       },
       body: command,
-      signal: AbortSignal.timeout(15 * 60_000),
+      signal: AbortSignal.timeout((executionRequest.timeoutSeconds + 30) * 1_000),
     });
   } catch {
     throw new HttpProblem(503, "LOCAL_AGENT_RUNTIME_UNAVAILABLE", "本机 Agent 运行服务未启动；请使用 npm run local:dev");
@@ -121,6 +127,66 @@ export async function runAndSaveLocalAgentExecution(
   }
   const saved = await saveLocalAgentExecution(projectId, receipt, `agent-run:${projectId}:${commandKey}`);
   return Object.freeze({ kind: "COMPLETED", receipt, snapshot: saved.snapshot, replayed: saved.replayed });
+}
+
+/** Cancels only the exact active Agent attempt locked into the local delivery snapshot. */
+export async function cancelLocalAgentExecution(
+  projectId: string,
+  delivery: LocalDeliverySnapshot,
+  reason: string,
+): Promise<LocalAgentCancellationResult> {
+  if (!delivery.runId || !["AGENT_QUEUED", "AGENT_RUNNING", "WAITING_PROVIDER"].includes(delivery.stage)) {
+    return Object.freeze({
+      tenantId: "tenant-local",
+      projectId,
+      runId: delivery.runId ?? "not-started",
+      attemptId: delivery.runId ? `ATT-${delivery.runId}` : "not-started",
+      state: "NOT_RUNNING",
+    });
+  }
+  const cancellation = Object.freeze({
+    tenantId: "tenant-local",
+    projectId,
+    runId: delivery.runId,
+    attemptId: `ATT-${delivery.runId}`,
+    reason,
+  });
+  const command = JSON.stringify(cancellation);
+  let response: Response;
+  try {
+    response = await fetch(new URL("/v1/runs/cancel", localAgentRuntimeUrl()), {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "content-type": "application/json",
+        ...createLocalAgentRuntimeHeaders({ method: "POST", path: "/v1/runs/cancel", body: command }),
+      },
+      body: command,
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new HttpProblem(503, "LOCAL_AGENT_CANCELLATION_UNAVAILABLE", "无法确认本机 Agent 已停止；交付状态尚未取消");
+  }
+  if (response.status >= 300 && response.status < 400) {
+    throw new HttpProblem(502, "LOCAL_AGENT_CANCELLATION_INVALID", "本机 Agent 取消服务返回了不安全的重定向");
+  }
+  const payload = await responseObject(response, "本机 Agent 取消响应无效");
+  if (!response.ok) {
+    throw new HttpProblem(502, "LOCAL_AGENT_CANCELLATION_FAILED", "本机 Agent 取消请求未被接受");
+  }
+  const result = objectOrNull(payload.data);
+  if (!result
+    || result.tenantId !== cancellation.tenantId
+    || result.projectId !== cancellation.projectId
+    || result.runId !== cancellation.runId
+    || result.attemptId !== cancellation.attemptId
+    || (result.state !== "CANCELLATION_REQUESTED" && result.state !== "NOT_RUNNING")
+    || JSON.stringify(Object.keys(result).sort()) !== JSON.stringify([
+      "attemptId", "projectId", "runId", "state", "tenantId",
+    ])) {
+    throw new HttpProblem(502, "LOCAL_AGENT_CANCELLATION_INVALID", "本机 Agent 取消回执与当前运行不一致");
+  }
+  return Object.freeze(result as unknown as LocalAgentCancellationResult);
 }
 
 async function approvedPrompt(projectId: string, delivery: LocalDeliverySnapshot): Promise<string> {

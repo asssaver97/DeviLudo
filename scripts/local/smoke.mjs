@@ -409,7 +409,14 @@ try {
     promptDigest: createHash("sha256").update(executionPrompt).digest("hex"),
     prompt: executionPrompt,
   });
-  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, projectAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, forgedAgentRequest, forgedRuntimeRequest, forgedSpecRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
+  const cancellationCommand = JSON.stringify({
+    tenantId: "tenant-local",
+    projectId: "smoke-project",
+    runId: "smoke-run",
+    attemptId: "smoke-attempt",
+    reason: "Smoke verifies an idempotent non-running cancellation.",
+  });
+  const [home, login, projects, runnersPage, evidencePage, admin, invitations, tenantAgents, projectAgents, steamSettingsPage, projectCatalog, adminState, tenantAgentState, projectAgentState, invitationGate, localSession, runtime, agentRuntime, specRuntime, specDialogue, agentPreflight, agentExecutionGate, agentCancellationGate, forgedAgentRequest, forgedRuntimeRequest, forgedSpecRequest, runnerIngress, githubAuthorization, steamEnrollment, steamProjectConfiguration, steamPublish] = await Promise.all([
     checkHtmlRoute(baseUrl, "/", "DeviLudo"),
     checkHtmlRoute(baseUrl, "/login", "受邀登录"),
     checkHtmlRoute(baseUrl, "/projects", "游戏项目"),
@@ -443,6 +450,11 @@ try {
       method: "POST",
       headers: { "content-type": "application/json", ...localSidecarHeaders("agent-runtime", "POST", "/v1/runs", executionCommand, agentSidecarKey) },
       body: executionCommand,
+    }),
+    request(agentRuntimeUrl, "/v1/runs/cancel", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...localSidecarHeaders("agent-runtime", "POST", "/v1/runs/cancel", cancellationCommand, agentSidecarKey) },
+      body: cancellationCommand,
     }),
     request(agentRuntimeUrl, "/v1/preflight", {
       method: "POST",
@@ -1328,8 +1340,15 @@ try {
   }
   const executionGatePayload = await agentExecutionGate.response.json();
   if (![409, 503].includes(agentExecutionGate.response.status)
-    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "ADAPTER_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED"].includes(executionGatePayload.error?.code)) {
+    || !["INSTALLATION_UNAVAILABLE", "INSTALLATION_MISMATCH", "ADAPTER_MISMATCH", "WORKER_IMAGE_MISMATCH", "WAITING_PROVIDER", "EXECUTION_DISABLED", "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED", "LOCAL_AGENT_RUN_CANCELLED"].includes(executionGatePayload.error?.code)) {
     throw new Error("local Agent execution gate did not fail closed");
+  }
+  const agentCancellationGatePayload = await agentCancellationGate.response.json();
+  if (![200, 202].includes(agentCancellationGate.response.status)
+    || !["NOT_RUNNING", "CANCELLATION_REQUESTED"].includes(agentCancellationGatePayload.data?.state)
+    || agentCancellationGatePayload.data?.runId !== "smoke-run"
+    || agentCancellationGatePayload.data?.attemptId !== "smoke-attempt") {
+    throw new Error("local Agent cancellation route did not return an exact non-running receipt");
   }
   const forgedAgentRequestPayload = await forgedAgentRequest.response.json();
   if (forgedAgentRequest.response.status !== 403
@@ -1421,6 +1440,7 @@ try {
   console.log(`✓ Dual Agent lock   Claude Code released · Codex CLI safely stopped at Linux Runner gate`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
+  console.log(`✓ Agent cancellation ${agentCancellationGate.response.status} (${agentCancellationGate.elapsedMs}ms) · exact non-running receipt`);
   console.log(`✓ Agent auth gate   ${forgedAgentRequest.response.status} (${forgedAgentRequest.elapsedMs}ms) · ${forgedAgentRequestPayload.error.code}`);
   console.log(`✓ Godot auth gate   ${forgedRuntimeRequest.response.status} (${forgedRuntimeRequest.elapsedMs}ms) · ${forgedRuntimeRequestPayload.error.code}`);
   console.log(`✓ Spec auth gate    ${forgedSpecRequest.response.status} (${forgedSpecRequest.elapsedMs}ms) · ${forgedSpecRequestPayload.error.code}`);

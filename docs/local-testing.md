@@ -44,6 +44,8 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 
 `POST /v1/runs` 会先执行同一预检。预检未通过时返回原始门禁码；全部通过但没有隔离执行器时返回 `LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED`。启用隔离执行器后，Claude Code/Codex 还必须按严格 schema 写入保留的 `.deviludo-agent-code-review.json`；执行器以禁止符号链接和限长方式读取后立即删除它，只在没有阻断项时生成绑定当前 Run、Attempt、镜像、固定模型、规格、测试计划和候选 source digest 的不可变评审回执。缺失、畸形、浮动模型或阻断评审均失败关闭，候选不能进入 E2E。项目 API 只接受逐项匹配锁定运行的完成回执，并保存 SCM 代理产生的完整候选 SHA、源码摘要、评审回执、changed-files、usage 和警告；浏览器不能直接提交或伪造回执。
 
+真实 Agent 请求使用 Profile 的完整 `timeoutSeconds`，不会被 Web 的固定短超时提前遗弃。用户取消交付时，Web 先向 Agent sidecar 的独立签名 `POST /v1/runs/cancel` 发送 `tenant + project + run + attempt` 精确绑定；sidecar 对活跃请求发送 AbortSignal，进程监督器按 Adapter 策略先 `SIGTERM`、超时后 `SIGKILL`。取消先于预检完成到达时会留下最长四小时的有界 tombstone，迟到请求不能在交付已经取消后启动 CLI。只有取消回执与当前锁完全一致，D1 才提交 `CANCELLED`；断连、跨租户、回执漂移或取消服务不可用均保持原状态。重复的同一运行请求共享一个执行，不能并发重复计费；Web 请求断开和本地服务退出也会传播取消。
+
 `/admin/agents` 的管理按钮调用本地 `/api/admin/**`，携带当前模拟角色和幂等键。版本发现可以填写精确版本；在本地测试环境留空时，页面会复用只读探针实际看到的 CLI 版本，方便把已经安装的 Claude Code 或 Codex CLI 写入候选目录，但仍不会自动批准、安装、灰度或激活。版本目录同时显示精确官方包来源、发现时间、发行说明、完整性、SBOM 和扫描状态；可点击链接必须与 Agent、精确版本和固定官方域名/路径一致。版本阻止、弃用、灰度/回滚、平台默认与 Provider 草稿会写入本地控制面状态和审计；Provider 草稿会完整保存四类模型、计价、数据地域/保留/训练政策和确认时间，Profile 保存预算、turn、超时、凭据及同作用域 fallback，刷新或重启后不会回落到 UI 默认值。旧 v1/v2/v3 D1 快照会升级到 v4；凭据新增不可变的 platform/tenant 所有权，无法证明归属的旧凭据按平台范围失败关闭。v3 中缺少 Adapter 证明的已批准版本会降回 `DISCOVERED`，必须由管理员重新触发受信批准，迁移不会根据当前 Registry 补造证明。租户/项目代理把认证 tenant/project 绑定传入本地控制面，因此响应、轮换、撤销和默认选择都不能跨作用域；项目页面不返回任何凭据版本目录。弃用只阻止新镜像构建，已有安装与运行任务保持锁定。凭据列表显示创建时间和原子轮换完成时间，并从本地追加式用量记录计算最后使用时间。本地供应链按钮只消费明确标记为 `LOCAL_DETERMINISTIC_BROKER`、且不接受管理员自报签名/hash 的隔离夹具回执；它不等于生产扫描证据。Provider 激活仍要求受信 Connector 的完整真实探针，默认测试栈不会伪造上游通过。
 
 任务预检以不可变 Run 中锁定的精确版本直接核对实际 CLI。服务启动时的版本基线只用于健康投影和提示，不会把已经由管理员更新并锁入新任务的精确版本误判为旧版本；WorkerImage、Provider、凭据、预算和显式执行开关仍逐项校验。
@@ -99,6 +101,7 @@ npm run local:smoke
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`，并公开 `PINNED_ENV`、`LOCAL_DETERMINISTIC` 或 `NOT_CONFIGURED` 身份模式；`degraded` 是未启用执行时的预期状态。
 - Agent 探针 `/v1/preflight` 使用固定测试运行锁，验证 CLI、镜像、Provider/Gateway 与执行开关；它只返回阻塞原因或 `READY`，不会启动 Agent。
 - Agent `/v1/runs` 在默认测试栈必须以明确门禁码返回 409/503，证明没有执行器时失败关闭。
+- Agent `/v1/runs/cancel` 必须验证独立签名路径，并返回绑定同一 Run/Attempt 的 `CANCELLATION_REQUESTED` 或 `NOT_RUNNING`；并发取消不能让迟到预检启动 CLI。
 - 通过本地自动编排 API 真实运行 macOS 固定 Godot 样例、完成仅含 macOS 的目标矩阵并停在候选验收，再下载同一 bundle 的 `manifest.json` 与 macOS zip，逐字节重算并核对构建物摘要；另以 Linux/Windows 矩阵验证 `PHYSICAL_RUNNERS_REQUIRED`，覆盖签名执行、证据读取、构建交付、平台真实性和人工门禁边界。
 - 在候选 E2E 前拒绝反馈；若导出模板缺失，确认真实候选不能启动目标矩阵。独立的完整 Fixture 候选在待验收后创建、精确重放并批准新反馈草稿，再对后继 Run 运行真实 Godot，证明旧验收权限不能被复用。
 - 候选接受只通过空 JSON 的 `/api/projects/{projectId}/acceptance` 提交，精确重放同一个幂等决定；通用 `/delivery` 的 `accept` 动作必须返回 400，不能绕过正式验收门禁。

@@ -121,6 +121,14 @@ export async function runLocalDeliveryUntilHumanGate(
             fixtureFallbackCode = attempt.code;
             return finish("LOCAL_AGENT_EXECUTOR_REQUIRED");
           }
+          if (attempt.code === "LOCAL_AGENT_RUN_CANCELLED") {
+            snapshot = await readLocalDelivery(projectId);
+            if (snapshot.stage !== "CANCELLED") {
+              throw new Error("本机 Agent 已停止，但交付取消状态尚未持久化");
+            }
+            fixtureFallbackCode = attempt.code;
+            return finish("TERMINAL");
+          }
           fixtureFallbackSelected = true;
           fixtureFallbackCode = attempt.code;
           developmentMode = "FIXTURE";

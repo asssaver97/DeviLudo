@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import type { LocalAgentExecutionReceipt } from "../src/contracts";
-import { LocalAgentExecutionService } from "../src/execution";
+import { LocalAgentExecutionService, LocalAgentRunCancelledError } from "../src/execution";
 import { LocalAgentReadinessService } from "../src/readiness";
 import { localWorkerImageDigest } from "../../../lib/agent/local-worker-identity";
 
@@ -264,6 +264,125 @@ test("execution accepts only a complete receipt bound to the immutable lock", as
     service.execute({ ...execution, promptDigest: "f".repeat(64) }),
     /prompt digest/,
   );
+});
+
+test("active execution is coalesced and an exact cancellation aborts every waiter", async () => {
+  let calls = 0;
+  let observedSignal: AbortSignal | undefined;
+  const service = new LocalAgentExecutionService({
+    readiness: readyService(),
+    executor: {
+      async execute(_request, signal) {
+        calls += 1;
+        observedSignal = signal;
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(new Error("executor observed cancellation"));
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+        return receipt();
+      },
+    },
+  });
+  const first = service.execute(execution);
+  const second = service.execute(execution);
+  const settled = Promise.allSettled([first, second]);
+  while (calls === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  const cancellation = service.cancel({
+    tenantId: execution.tenantId,
+    projectId: execution.projectId,
+    runId: execution.runId,
+    attemptId: execution.attemptId,
+    reason: "The project owner cancelled this delivery.",
+  });
+  assert.equal(cancellation.state, "CANCELLATION_REQUESTED");
+  assert.equal(observedSignal?.aborted, true);
+  const results = await settled;
+  assert.equal(calls, 1);
+  assert.ok(results.every((result) => result.status === "rejected" && result.reason instanceof LocalAgentRunCancelledError));
+  assert.equal(service.cancel({
+    tenantId: execution.tenantId,
+    projectId: execution.projectId,
+    runId: execution.runId,
+    attemptId: execution.attemptId,
+    reason: "Idempotent cancellation replay.",
+  }).state, "NOT_RUNNING");
+});
+
+test("active execution rejects attempt rebinding and propagates caller disconnect", async () => {
+  let calls = 0;
+  const service = new LocalAgentExecutionService({
+    readiness: readyService(),
+    executor: {
+      async execute(_request, signal) {
+        calls += 1;
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(new Error("disconnected"));
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+        return receipt();
+      },
+    },
+  });
+  const disconnected = new AbortController();
+  const pending = service.execute(execution, disconnected.signal);
+  const settled = Promise.allSettled([pending]);
+  while (calls === 0) await new Promise((resolve) => setImmediate(resolve));
+  const changedPrompt = "Implement a different specification.";
+  await assert.rejects(service.execute({
+    ...execution,
+    prompt: changedPrompt,
+    promptDigest: createHash("sha256").update(changedPrompt).digest("hex"),
+  }), /already owns this immutable attempt/);
+  assert.throws(() => service.cancel({
+    tenantId: "tenant-other",
+    projectId: execution.projectId,
+    runId: execution.runId,
+    attemptId: execution.attemptId,
+    reason: "Cross-tenant cancellation.",
+  }), /binding does not match/);
+  disconnected.abort();
+  const [result] = await settled;
+  assert.equal(result?.status, "rejected");
+  if (result?.status === "rejected") assert.ok(result.reason instanceof LocalAgentRunCancelledError);
+});
+
+test("cancellation arriving during preflight tombstones the attempt before any CLI can start", async () => {
+  let releasePreflight!: () => void;
+  const preflightHeld = new Promise<void>((resolve) => { releasePreflight = resolve; });
+  let executorCalls = 0;
+  const service = new LocalAgentExecutionService({
+    readiness: new LocalAgentReadinessService({
+      inspector: {
+        async inspect(executable) {
+          await preflightHeld;
+          return executable === "claude" ? "2.1.14" : "0.91.0";
+        },
+      },
+      executionEnabled: true,
+      inferenceGatewayUrl: "https://inference.internal.example/v1",
+      workerImageIdentity: digest,
+      expectedWorkerImageIdentity: digest,
+      providerBindingVerifier: { async verify() { return true; } },
+    }),
+    executor: { async execute() { executorCalls += 1; return receipt(); } },
+  });
+  const pending = service.execute(execution);
+  const settled = Promise.allSettled([pending]);
+  assert.equal(service.cancel({
+    tenantId: execution.tenantId,
+    projectId: execution.projectId,
+    runId: execution.runId,
+    attemptId: execution.attemptId,
+    reason: "Cancellation raced with preflight.",
+  }).state, "NOT_RUNNING");
+  releasePreflight();
+  const [result] = await settled;
+  assert.equal(result?.status, "rejected");
+  if (result?.status === "rejected") assert.ok(result.reason instanceof LocalAgentRunCancelledError);
+  assert.equal(executorCalls, 0);
 });
 
 test("preflight rejects a primary/model-role mismatch before Provider verification", async () => {

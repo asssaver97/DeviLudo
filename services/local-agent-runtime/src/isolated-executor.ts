@@ -62,7 +62,8 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     this.#scmProxy = options.scmProxy ?? new LocalGitScmProxy({ storageRoot: this.#storageRoot });
   }
 
-  async execute(request: LocalAgentExecutionRequest): Promise<LocalAgentExecutionReceipt> {
+  async execute(request: LocalAgentExecutionRequest, signal?: AbortSignal): Promise<LocalAgentExecutionReceipt> {
+    throwIfAborted(signal);
     const runRoot = path.join(this.#storageRoot, request.projectId, request.runId, request.attemptId);
     const workspaceRoot = path.join(runRoot, "workspace");
     const controlRoot = path.join(this.#storageRoot, ".executions", request.projectId, request.runId, request.attemptId);
@@ -82,6 +83,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     await this.#workspaceProvisioner.provision(request, workspaceRoot);
+    throwIfAborted(signal);
     await assertReviewOutputAbsent(workspaceRoot);
 
     const scmBinding = {
@@ -92,10 +94,12 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
       workspaceRoot,
     };
     const base = await this.#scmProxy.prepare(scmBinding);
+    throwIfAborted(signal);
     const token = await this.#runTokenBroker.issue({ request, baseCommitSha: base.baseCommitSha });
     if (!/^(?:vault|kms|secret):\/\/[^\s?#]{1,480}$/.test(token.secretRef)) {
       throw new Error("Local token broker returned an invalid SecretRef");
     }
+    throwIfAborted(signal);
 
     const adapter = getRuntimeAdapter(request.agent);
     const profile = profileFrom(request);
@@ -126,6 +130,7 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
       runtimeSpec,
       workerRunRoot: runRoot,
       workspaceRoot,
+      ...(signal ? { abortSignal: signal } : {}),
     });
     const completion = await supervised.completion;
     if (completion.status !== "completed" || completion.result.status !== "completed") {
@@ -150,6 +155,10 @@ export class IsolatedLocalAgentExecutor implements LocalAgentExecutor {
     await writeFile(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return receipt;
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("Local Agent attempt was cancelled");
 }
 
 function profileFrom(request: LocalAgentExecutionRequest): AgentProfileRevision {

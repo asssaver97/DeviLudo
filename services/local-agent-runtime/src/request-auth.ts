@@ -13,7 +13,7 @@ const PROTOCOL = Object.freeze({
 
 export interface LocalAgentRuntimeAssertion {
   readonly method: "POST";
-  readonly path: "/v1/preflight" | "/v1/runs";
+  readonly path: "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel";
   readonly body: string | Uint8Array;
 }
 

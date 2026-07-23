@@ -28,6 +28,16 @@ test("local Agent sidecar authenticates one exact method, path and body only onc
   assert.throws(() => pathVerifier.verify({ ...assertion, path: "/v1/preflight", headers }, now), /authentication failed/);
 });
 
+test("local Agent cancellation has its own signed route and cannot replay as execution", () => {
+  const assertion = { method: "POST" as const, path: "/v1/runs/cancel" as const, body };
+  const headers = createLocalAgentRuntimeHeaders(assertion, { key, now, nonce });
+  new LocalAgentRuntimeRequestVerifier(key).verify({ ...assertion, headers }, now);
+  assert.throws(
+    () => new LocalAgentRuntimeRequestVerifier(key).verify({ ...assertion, path: "/v1/runs", headers }, now),
+    /authentication failed/,
+  );
+});
+
 test("local Agent sidecar rejects stale assertions and non-canonical deployment keys", () => {
   const assertion = { method: "POST" as const, path: "/v1/preflight" as const, body };
   const headers = createLocalAgentRuntimeHeaders(assertion, { key, now, nonce });

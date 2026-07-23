@@ -128,7 +128,23 @@ export interface LocalAgentExecutionReceipt {
   readonly completedAt: string;
 }
 
+export interface LocalAgentCancellationRequest {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly reason: string;
+}
+
+export interface LocalAgentCancellationResult {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly state: "CANCELLATION_REQUESTED" | "NOT_RUNNING";
+}
+
 /** Implemented only inside an isolated development Worker, never in the Web process. */
 export interface LocalAgentExecutor {
-  execute(request: LocalAgentExecutionRequest): Promise<LocalAgentExecutionReceipt>;
+  execute(request: LocalAgentExecutionRequest, signal?: AbortSignal): Promise<LocalAgentExecutionReceipt>;
 }

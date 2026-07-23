@@ -2,12 +2,17 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { pathToFileURL } from "node:url";
 import type { CliVersionInspector } from "./readiness";
 import type {
+  LocalAgentCancellationRequest,
   LocalAgentExecutionRequest,
   LocalAgentExecutor,
   LocalAgentPreflightRequest,
   LocalProviderBindingVerifier,
 } from "./contracts";
-import { LocalAgentExecutionRequestError, LocalAgentExecutionService } from "./execution";
+import {
+  LocalAgentExecutionRequestError,
+  LocalAgentExecutionService,
+  LocalAgentRunCancelledError,
+} from "./execution";
 import { LocalAgentReadinessService } from "./readiness";
 import {
   LocalAgentRuntimeAuthenticationError,
@@ -73,6 +78,7 @@ export async function runLocalAgentRuntime(
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+    runtime.execution.cancelAll();
     await close(runtime.server);
   }
 }
@@ -102,7 +108,16 @@ async function route(
     }
     if (request.method === "POST" && url.pathname === "/v1/runs" && !url.search) {
       const command = await readExecutionRequest(request, "/v1/runs", runtime.requestVerifier);
-      const outcome = await runtime.execution.execute(command);
+      const disconnected = new AbortController();
+      const abort = () => {
+        if (!response.writableEnded) disconnected.abort();
+      };
+      request.once("aborted", abort);
+      response.once("close", abort);
+      const outcome = await runtime.execution.execute(command, disconnected.signal).finally(() => {
+        request.removeListener("aborted", abort);
+        response.removeListener("close", abort);
+      });
       if (outcome.state === "BLOCKED") {
         json(response, 409, { error: { code: outcome.preflight.code, message: outcome.preflight.message }, data: { preflight: outcome.preflight } });
         return;
@@ -114,10 +129,20 @@ async function route(
       json(response, 201, { data: outcome.receipt });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/v1/runs/cancel" && !url.search) {
+      const command = await readCancellationRequest(request, "/v1/runs/cancel", runtime.requestVerifier);
+      const outcome = runtime.execution.cancel(command);
+      json(response, outcome.state === "CANCELLATION_REQUESTED" ? 202 : 200, { data: outcome });
+      return;
+    }
     json(response, 404, { error: { code: "NOT_FOUND", message: "Local Agent runtime route not found" } });
   } catch (error) {
     if (error instanceof LocalAgentRuntimeAuthenticationError) {
       json(response, 403, { error: { code: "LOCAL_AGENT_RUNTIME_AUTH_REQUIRED", message: "Authenticated local Agent runtime request is required" } });
+      return;
+    }
+    if (error instanceof LocalAgentRunCancelledError) {
+      json(response, 409, { error: { code: "LOCAL_AGENT_RUN_CANCELLED", message: "Local Agent run was cancelled" } });
       return;
     }
     const invalidRequest = error instanceof LocalRequestError || error instanceof LocalAgentExecutionRequestError;
@@ -175,7 +200,30 @@ export function parseLocalAgentExecutionRequest(value: unknown): LocalAgentExecu
   };
 }
 
-type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs";
+export function parseLocalAgentCancellationRequest(value: unknown): LocalAgentCancellationRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new LocalRequestError("Local Agent cancellation request is invalid");
+  }
+  const item = value as Record<string, unknown>;
+  exactKeys(item, ["attemptId", "projectId", "reason", "runId", "tenantId"]);
+  return {
+    tenantId: requireString(item.tenantId),
+    projectId: requireString(item.projectId),
+    runId: requireString(item.runId),
+    attemptId: requireString(item.attemptId),
+    reason: requireString(item.reason, 2_000),
+  };
+}
+
+type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel";
+
+async function readCancellationRequest(
+  request: IncomingMessage,
+  path: "/v1/runs/cancel",
+  verifier: LocalAgentRuntimeRequestVerifier,
+): Promise<LocalAgentCancellationRequest> {
+  return parseLocalAgentCancellationRequest(await readObject(request, path, verifier));
+}
 
 async function readObject(
   request: IncomingMessage,

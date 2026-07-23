@@ -154,3 +154,53 @@ test("isolated executor fails before process launch when the token broker return
   await assert.rejects(executor.execute(request("claude-code", "bad-token")), /invalid SecretRef/);
   assert.equal(supervisorCalls, 0);
 });
+
+test("isolated executor propagates cancellation to the supervised CLI before candidate finalization", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "deviludo-executor-cancel-"));
+  const input = request("claude-code", "cancelled");
+  const controller = new AbortController();
+  let started!: () => void;
+  const supervisorStarted = new Promise<void>((resolve) => { started = resolve; });
+  let observedAbort = false;
+  const executor = new IsolatedLocalAgentExecutor({
+    storageRoot: path.join(root, "storage"),
+    gatewayUrl: "https://inference.internal.example/v1",
+    workspaceProvisioner: {
+      async provision(_request, workspaceRoot) {
+        await mkdir(path.join(workspaceRoot, "scripts"), { recursive: true });
+        await writeFile(path.join(workspaceRoot, "project.godot"), "[application]\n", "utf8");
+        await writeFile(path.join(workspaceRoot, "scripts", "main.gd"), "extends Node\n", "utf8");
+      },
+    },
+    runTokenBroker: {
+      async issue() { return { secretRef: `secret://run-token/${input.runId}/${input.attemptId}` }; },
+    },
+    supervisor: {
+      async start(supervised) {
+        assert.equal(supervised.abortSignal, controller.signal);
+        const baseline = await completed(supervised).completion;
+        const completion = new Promise<SupervisedExecutionResult>((resolve) => {
+          const abort = () => {
+            observedAbort = true;
+            resolve(Object.freeze({
+              ...baseline,
+              status: "cancelled",
+              result: Object.freeze({ ...baseline.result, status: "cancelled" }),
+              diagnostics: Object.freeze({ ...baseline.diagnostics, cancelled: true }),
+            }));
+          };
+          supervised.abortSignal?.addEventListener("abort", abort, { once: true });
+          if (supervised.abortSignal?.aborted) abort();
+        });
+        started();
+        return Object.freeze({ completion, cancel: () => false });
+      },
+    },
+  });
+
+  const pending = executor.execute(input, controller.signal);
+  await supervisorStarted;
+  controller.abort();
+  await assert.rejects(pending, /did not complete \(cancelled\)/);
+  assert.equal(observedAbort, true);
+});

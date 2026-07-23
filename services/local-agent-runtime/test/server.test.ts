@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import type { LocalAgentExecutionReceipt, LocalAgentExecutionRequest } from "../src/contracts";
-import { localAgentRuntimeFromEnvironment, parseLocalAgentExecutionRequest } from "../src/server";
+import {
+  localAgentRuntimeFromEnvironment,
+  parseLocalAgentCancellationRequest,
+  parseLocalAgentExecutionRequest,
+} from "../src/server";
 
 const key = new Uint8Array(Buffer.alloc(32, 11));
 const imageDigest = `sha256:${"c".repeat(64)}`;
@@ -101,6 +105,25 @@ test("standalone local Agent request contract rejects caller-controlled workspac
     /request shape/,
   );
   assert.deepEqual(parseLocalAgentExecutionRequest(request), request);
+});
+
+test("standalone local Agent cancellation contract accepts only the exact active binding", () => {
+  const cancellation = {
+    tenantId: request.tenantId,
+    projectId: request.projectId,
+    runId: request.runId,
+    attemptId: request.attemptId,
+    reason: "Project owner cancelled delivery.",
+  };
+  assert.deepEqual(parseLocalAgentCancellationRequest(cancellation), cancellation);
+  assert.throws(
+    () => parseLocalAgentCancellationRequest({ ...cancellation, signal: "SIGKILL" }),
+    /request shape/,
+  );
+  assert.throws(
+    () => parseLocalAgentCancellationRequest({ ...cancellation, reason: "" }),
+    /request field/,
+  );
 });
 
 test("deterministic Worker attestation can only be enabled by the explicit localhost test deployment", async () => {

@@ -276,6 +276,31 @@ test("local automation refuses Fixture fallback after a READY preflight without 
   assert.equal(result.fixtureFallbackCode, "LOCAL_AGENT_EXECUTOR_NOT_CONFIGURED");
 });
 
+test("local automation converges to the authoritative cancelled state when an active Agent is stopped", async () => {
+  const projectId = `auto-agent-cancel-${crypto.randomUUID()}`;
+  await startLocalDelivery(projectId, "SPEC-043", "RUN-AUTO-AGENT-CANCEL", `start:${projectId}`);
+  const result = await runLocalDeliveryUntilHumanGate(
+    projectId,
+    `auto:${projectId}`,
+    passingValidation,
+    undefined,
+    undefined,
+    async () => {
+      await commandLocalDelivery(projectId, "cancel", `cancel:${projectId}`);
+      return {
+        kind: "BLOCKED",
+        code: "LOCAL_AGENT_RUN_CANCELLED",
+        message: "active Agent stopped",
+        status: 409,
+      };
+    },
+  );
+  assert.equal(result.stopReason, "TERMINAL");
+  assert.equal(result.snapshot.stage, "CANCELLED");
+  assert.equal(result.developmentMode, null);
+  assert.equal(result.fixtureFallbackCode, "LOCAL_AGENT_RUN_CANCELLED");
+});
+
 test("local automation persists a dependency wait and cannot bypass it", async () => {
   const projectId = `auto-wait-${crypto.randomUUID()}`;
   await startLocalDelivery(projectId, "SPEC-AUTO-WAIT", "RUN-AUTO-WAIT", `start:${projectId}`);

@@ -1,4 +1,4 @@
-import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
+import { bodyObject, HttpProblem, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { commandLocalDelivery, readLocalDelivery } from "@/lib/local-delivery/store";
 import { LocalDeliveryGateError, type LocalDeliveryAction } from "@/lib/local-delivery/model";
 import {
@@ -11,6 +11,7 @@ import {
   userAcceptanceBrokerFromEnvironment,
 } from "@/lib/user-acceptance/broker";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { cancelLocalAgentExecution } from "@/lib/local-delivery/runtime-agent-execution";
 
 const actions = new Set<LocalDeliveryAction>([
   "advance",
@@ -110,13 +111,33 @@ export async function POST(
     if (!actions.has(action)) {
       return json({ error: { code: "UNSUPPORTED_ACTION", message: "不支持的本地交付动作" } }, { status: 400 });
     }
+    const allowedFields = action === "cancel" ? ["action", "reason"] : ["action"];
+    if (Object.keys(body).some((field) => !allowedFields.includes(field))) {
+      return json({ error: { code: "INVALID_LOCAL_DELIVERY_REQUEST", message: "本地交付请求包含不允许的字段" } }, { status: 400 });
+    }
+    const cancellationReason = body.reason === undefined
+      ? "项目所有者取消了本地交付。"
+      : requireString(body, "reason", 2_000);
+    if (action === "cancel" && !cancellationReason.trim()) {
+      throw new HttpProblem(400, "INVALID_LOCAL_DELIVERY_REQUEST", "取消原因不能为空");
+    }
+    const agentCancellation = action === "cancel"
+      ? await cancelLocalAgentExecution(
+          projectId,
+          await readLocalDelivery(projectId),
+          cancellationReason,
+        )
+      : null;
     const result = await commandLocalDelivery(
       projectId,
       action,
       `delivery:${projectId}:${idempotencyKey(request)}`,
     );
     return json(
-      { data: result.snapshot, meta: { mode: "LOCAL_D1", idempotentReplay: result.replayed } },
+      {
+        data: result.snapshot,
+        meta: { mode: "LOCAL_D1", idempotentReplay: result.replayed, ...(agentCancellation ? { agentCancellation } : {}) },
+      },
       { status: result.replayed ? 200 : 201 },
     );
   } catch (error) {

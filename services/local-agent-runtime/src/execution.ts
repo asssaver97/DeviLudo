@@ -1,4 +1,6 @@
 import type {
+  LocalAgentCancellationRequest,
+  LocalAgentCancellationResult,
   LocalAgentExecutionReceipt,
   LocalAgentExecutionRequest,
   LocalAgentExecutor,
@@ -14,30 +16,191 @@ export type LocalAgentExecutionOutcome =
   | { readonly state: "COMPLETED"; readonly receipt: LocalAgentExecutionReceipt };
 
 export class LocalAgentExecutionRequestError extends Error {}
+export class LocalAgentRunCancelledError extends Error {}
+
+type CompletedOutcome = Extract<LocalAgentExecutionOutcome, { readonly state: "COMPLETED" }>;
+type ActiveRun = Readonly<{
+  request: LocalAgentExecutionRequest;
+  requestDigest: string;
+  controller: AbortController;
+  completion: Promise<CompletedOutcome>;
+}>;
+type CancelledAttempt = Readonly<{
+  tenantId: string;
+  projectId: string;
+  expiresAt: number;
+}>;
+
+const CANCELLATION_TOMBSTONE_TTL_MS = 4 * 60 * 60 * 1_000;
+const MAX_CANCELLATION_TOMBSTONES = 10_000;
 
 export class LocalAgentExecutionService {
   readonly #readiness: LocalAgentReadinessService;
   readonly #executor: LocalAgentExecutor | null;
+  readonly #activeRuns = new Map<string, ActiveRun>();
+  readonly #cancelledAttempts = new Map<string, CancelledAttempt>();
 
   constructor(options: { readiness: LocalAgentReadinessService; executor?: LocalAgentExecutor }) {
     this.#readiness = options.readiness;
     this.#executor = options.executor ?? null;
   }
 
-  async execute(request: LocalAgentExecutionRequest): Promise<LocalAgentExecutionOutcome> {
+  async execute(request: LocalAgentExecutionRequest, externalSignal?: AbortSignal): Promise<LocalAgentExecutionOutcome> {
     validateExecutionRequest(request);
+    const frozenRequest = freezeRequest(request);
+    const key = activeRunKey(request.runId, request.attemptId);
+    const requestDigest = executionRequestDigest(frozenRequest);
+    this.#pruneCancellationTombstones();
+    this.#assertNotCancelled(key, frozenRequest);
+    const running = this.#activeRuns.get(key);
+    if (running) {
+      if (running.requestDigest !== requestDigest) {
+        throw new LocalAgentExecutionRequestError("An active local Agent run already owns this immutable attempt");
+      }
+      return running.completion;
+    }
     let preflight: LocalAgentPreflightResult;
     try {
       preflight = await this.#readiness.preflight(request);
     } catch {
       throw new LocalAgentExecutionRequestError("Local Agent execution lock is invalid");
     }
+    this.#pruneCancellationTombstones();
+    this.#assertNotCancelled(key, frozenRequest);
     if (preflight.status !== "READY") return Object.freeze({ state: "BLOCKED", preflight });
     if (!this.#executor) return Object.freeze({ state: "EXECUTOR_NOT_CONFIGURED" });
-    const receipt = await this.#executor.execute(Object.freeze({ ...request }));
-    validateReceipt(receipt, request);
-    return Object.freeze({ state: "COMPLETED", receipt: freezeReceipt(receipt) });
+    const active = this.#activeRuns.get(key);
+    if (active) {
+      if (active.requestDigest !== requestDigest) {
+        throw new LocalAgentExecutionRequestError("An active local Agent run already owns this immutable attempt");
+      }
+      return active.completion;
+    }
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    externalSignal?.addEventListener("abort", abort, { once: true });
+    if (externalSignal?.aborted) controller.abort();
+    const completion = this.#complete(frozenRequest, controller.signal).finally(() => {
+      externalSignal?.removeEventListener("abort", abort);
+      const current = this.#activeRuns.get(key);
+      if (current?.completion === completion) this.#activeRuns.delete(key);
+    });
+    this.#activeRuns.set(key, Object.freeze({ request: frozenRequest, requestDigest, controller, completion }));
+    return completion;
   }
+
+  cancel(request: LocalAgentCancellationRequest): LocalAgentCancellationResult {
+    validateCancellationRequest(request);
+    const key = activeRunKey(request.runId, request.attemptId);
+    this.#pruneCancellationTombstones();
+    const cancelled = this.#cancelledAttempts.get(key);
+    if (cancelled && (cancelled.tenantId !== request.tenantId || cancelled.projectId !== request.projectId)) {
+      throw new LocalAgentExecutionRequestError("Local Agent cancellation binding conflicts with an existing tombstone");
+    }
+    const active = this.#activeRuns.get(key);
+    if (active && (active.request.tenantId !== request.tenantId || active.request.projectId !== request.projectId)) {
+      throw new LocalAgentExecutionRequestError("Local Agent cancellation binding does not match the active run");
+    }
+    if (!cancelled && this.#cancelledAttempts.size >= MAX_CANCELLATION_TOMBSTONES) {
+      throw new LocalAgentExecutionRequestError("Local Agent cancellation capacity is exhausted");
+    }
+    this.#cancelledAttempts.set(key, Object.freeze({
+      tenantId: request.tenantId,
+      projectId: request.projectId,
+      expiresAt: Date.now() + CANCELLATION_TOMBSTONE_TTL_MS,
+    }));
+    active?.controller.abort();
+    return cancellationResult(request, active ? "CANCELLATION_REQUESTED" : "NOT_RUNNING");
+  }
+
+  cancelAll(): void {
+    for (const active of this.#activeRuns.values()) active.controller.abort();
+  }
+
+  #pruneCancellationTombstones(): void {
+    const now = Date.now();
+    for (const [key, value] of this.#cancelledAttempts) {
+      if (value.expiresAt <= now) this.#cancelledAttempts.delete(key);
+    }
+  }
+
+  #assertNotCancelled(key: string, request: LocalAgentExecutionRequest): void {
+    const cancellation = this.#cancelledAttempts.get(key);
+    if (!cancellation) return;
+    if (cancellation.tenantId !== request.tenantId || cancellation.projectId !== request.projectId) {
+      throw new LocalAgentExecutionRequestError("Local Agent execution conflicts with a cancelled attempt binding");
+    }
+    throw new LocalAgentRunCancelledError("Local Agent run was cancelled");
+  }
+
+  async #complete(request: LocalAgentExecutionRequest, signal: AbortSignal): Promise<CompletedOutcome> {
+    try {
+      const receipt = await this.#executor!.execute(request, signal);
+      if (signal.aborted) throw new LocalAgentRunCancelledError("Local Agent run was cancelled");
+      validateReceipt(receipt, request);
+      return Object.freeze({ state: "COMPLETED", receipt: freezeReceipt(receipt) });
+    } catch (error) {
+      if (signal.aborted && !(error instanceof LocalAgentRunCancelledError)) {
+        throw new LocalAgentRunCancelledError("Local Agent run was cancelled");
+      }
+      throw error;
+    }
+  }
+}
+
+function validateCancellationRequest(request: LocalAgentCancellationRequest): void {
+  for (const value of [request.tenantId, request.projectId, request.runId, request.attemptId]) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
+      throw new LocalAgentExecutionRequestError("Local Agent cancellation binding is invalid");
+    }
+  }
+  if (!request.reason.trim() || request.reason.length > 2_000 || request.reason.includes("\0")) {
+    throw new LocalAgentExecutionRequestError("Local Agent cancellation reason is invalid");
+  }
+}
+
+function cancellationResult(
+  request: LocalAgentCancellationRequest,
+  state: LocalAgentCancellationResult["state"],
+): LocalAgentCancellationResult {
+  return Object.freeze({
+    tenantId: request.tenantId,
+    projectId: request.projectId,
+    runId: request.runId,
+    attemptId: request.attemptId,
+    state,
+  });
+}
+
+function activeRunKey(runId: string, attemptId: string): string {
+  return `${runId}\0${attemptId}`;
+}
+
+function executionRequestDigest(request: LocalAgentExecutionRequest): string {
+  return createHash("sha256").update(canonicalJson(request)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new LocalAgentExecutionRequestError("Local Agent execution binding is not canonical");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const item = value as Record<string, unknown>;
+    return `{${Object.keys(item).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(item[key])}`).join(",")}}`;
+  }
+  throw new LocalAgentExecutionRequestError("Local Agent execution binding is not canonical");
+}
+
+function freezeRequest(request: LocalAgentExecutionRequest): LocalAgentExecutionRequest {
+  return Object.freeze({
+    ...request,
+    modelRoles: Object.freeze({ ...request.modelRoles }),
+    budget: Object.freeze({ ...request.budget }),
+  });
 }
 
 function validateExecutionRequest(request: LocalAgentExecutionRequest): void {
