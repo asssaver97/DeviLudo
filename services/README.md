@@ -258,7 +258,15 @@ catalog aggregate. Mutations lock the latest row and must advance exactly one
 revision, preventing lost updates across control-plane replicas. Audit entries
 are committed in the same PostgreSQL transaction to a separate append-only
 ledger; scoped TenantAdmin and ProjectOwner reads are filtered to their signed
-tenant/project. Non-production tests use the seeded in-memory implementation.
+tenant/project. Catalog deserialization rejects unknown fields at every public
+and nested record boundary before any administrator projection is produced.
+Every production mutation revalidates Installation→Version,
+Provider→Credential, Profile→Installation/Provider/Credential, default,
+rotation and acyclic fallback edges before commit. `/healthz` repeats the same
+proof in a repeatable-read transaction and joins every project-scoped Profile
+or default to the authoritative `projects.tenant_id`; a missing project or
+cross-tenant credential binding keeps the control plane unready. Non-production
+tests use the seeded in-memory implementation.
 
 `SecretVault` intentionally exposes `write` and `revoke`, but no `read` method.
 The bundled implementation is process-isolated for tests; production startup

@@ -19,6 +19,7 @@ import {
   type AdminCatalogState,
   type AdminMutationCompletion,
 } from "./admin.store";
+import { assertAdminCatalogReferences, assertAdminCatalogSchema } from "./admin-catalog-integrity";
 import { validatePayload } from "./admin-idempotency";
 
 interface CatalogPayload {
@@ -74,6 +75,21 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
     super();
   }
 
+  async probe(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const catalog = await this.#catalog(client, false);
+      const state = deserializeCatalog(catalog.payload, []);
+      const projectTenants = await authoritativeProjectTenants(client, state);
+      assertAdminCatalogReferences(state, projectTenants, true);
+      await client.query("COMMIT");
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* preserve original error */ }
+      throw error;
+    } finally { client.release(); }
+  }
+
   async read<T>(operation: (state: AdminCatalogState) => T): Promise<T> {
     const client = await this.pool.connect();
     try {
@@ -87,6 +103,8 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
           LIMIT 5000`,
       );
       const state = deserializeCatalog(catalog.payload, audit.rows.map(parseAudit));
+      const projectTenants = await authoritativeProjectTenants(client, state);
+      assertAdminCatalogReferences(state, projectTenants, true);
       const result = operation(state);
       await client.query("COMMIT");
       return result;
@@ -228,6 +246,8 @@ export class PostgresAdminStore extends AdminStore implements OnApplicationShutd
       const catalog = await this.#catalog(client, true);
       const state = deserializeCatalog(catalog.payload, []);
       const result = operation(state);
+      const projectTenants = await authoritativeProjectTenants(client, state);
+      assertAdminCatalogReferences(state, projectTenants, true);
       const completionPayload = completion ? completion.payload(result) : undefined;
       if (completion) validatePayload(completionPayload);
       const payload = serializeCatalog(state);
@@ -335,7 +355,36 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
     state.defaults.set(entry[0], entry[1]);
   }
   state.audit.push(...audit);
+  assertAdminCatalogSchema(state);
   return state;
+}
+
+async function authoritativeProjectTenants(
+  client: PoolClient,
+  state: AdminCatalogState,
+): Promise<ReadonlyMap<string, string>> {
+  const projectIds = new Set<string>();
+  for (const profile of state.profiles.values()) if (profile.scope === "project") projectIds.add(profile.scopeId);
+  for (const scope of state.defaults.keys()) if (scope.startsWith("project:")) projectIds.add(scope.slice("project:".length));
+  if (projectIds.size === 0) return new Map();
+  if ([...projectIds].some((id) => !UUID_PATTERN.test(id))) throw new Error("Administrator catalog project identifier is invalid");
+  await client.query("SET LOCAL row_security = off");
+  const selected = await client.query<{ id: string; tenant_id: string }>(
+    `SELECT id::text, tenant_id::text
+       FROM deviludo.projects
+      WHERE id = ANY($1::uuid[])
+      ORDER BY id`,
+    [[...projectIds].sort()],
+  );
+  const result = new Map<string, string>();
+  for (const row of selected.rows) {
+    if (!UUID_PATTERN.test(row.id) || !UUID_PATTERN.test(row.tenant_id) || !projectIds.has(row.id) || result.has(row.id)) {
+      throw new Error("Administrator catalog project tenant binding is invalid");
+    }
+    result.set(row.id, row.tenant_id);
+  }
+  if (result.size !== projectIds.size) throw new Error("Administrator catalog project tenant binding is unavailable");
+  return result;
 }
 
 function normalizeAgentVersionCompatibility(version: AgentVersionRecord): void {

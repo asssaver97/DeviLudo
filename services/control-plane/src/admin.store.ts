@@ -13,6 +13,7 @@ import type {
   ProviderRevisionRecord,
   RequestActor,
 } from "./contracts";
+import { assertAdminCatalogReferences, assertAdminCatalogSchema } from "./admin-catalog-integrity";
 
 export interface AdminCatalogState {
   readonly versions: Map<string, AgentVersionRecord>;
@@ -30,6 +31,7 @@ export interface AdminMutationCompletion<T> extends AdminMutationClaimBinding {
 }
 
 export abstract class AdminStore {
+  abstract probe(): Promise<void>;
   abstract read<T>(operation: (state: AdminCatalogState) => T): Promise<T>;
   /** Tenant/project-scoped immutable inference usage projection for administrators. */
   abstract readUsage(actor: RequestActor): Promise<AgentUsageSummary>;
@@ -44,7 +46,10 @@ export abstract class AdminStore {
 export class InMemoryAdminStore extends AdminStore {
   readonly #state = seededState();
 
+  async probe(): Promise<void> { assertAdminCatalogReferences(this.#state); }
+
   async read<T>(operation: (state: AdminCatalogState) => T): Promise<T> {
+    assertAdminCatalogSchema(this.#state);
     return operation(this.#state);
   }
 

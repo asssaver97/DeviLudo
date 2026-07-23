@@ -22,10 +22,9 @@ function readinessController(failing: string | null = null) {
     },
   });
   const store = {
-    async read(callback: (state: unknown) => unknown) {
+    async probe() {
       calls.push("admin-store");
       if (failing === "admin-store") throw new Error("admin-store unavailable");
-      return callback(Object.freeze({}));
     },
   };
   return {

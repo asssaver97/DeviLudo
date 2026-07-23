@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Pool, PoolClient, QueryResult } from "pg";
 import { PostgresAdminStore } from "../src/admin-store-postgres";
-import { recordAdminAudit } from "../src/admin.store";
+import { InMemoryAdminStore, recordAdminAudit } from "../src/admin.store";
 
 const emptyPayload = {
   versions: [],
@@ -81,6 +81,20 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
       discoveredAt: "2026-07-18T00:00:00.000Z",
     };
     state.versions.set(version.id, version);
+    state.credentials.set("credential-platform-recovery-v1", {
+      id: "credential-platform-recovery-v1",
+      familyId: "credential-platform-recovery",
+      version: 1,
+      label: "recovery fixture",
+      scope: "platform",
+      scopeId: "global",
+      secretRef: "vault://kv/deviludo/records/00000000-0000-4000-8000-000000000001",
+      maskedFingerprint: "sha256:12345678…abcdee",
+      state: "PREVIOUS",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      rotatedAt: "2026-07-18T00:00:00.000Z",
+      lastUsedAt: null,
+    });
     state.credentials.set("credential-platform-recovery-v2", {
       id: "credential-platform-recovery-v2",
       familyId: "credential-platform-recovery",
@@ -119,7 +133,7 @@ test("Postgres admin catalog serializes mutations, advances one revision and app
   assert.equal(created, "codex-cli@1.2.3");
   assert.equal(revision, 1);
   assert.equal((payload as { versions: unknown[] }).versions.length, 1);
-  assert.equal((payload as { credentials: unknown[] }).credentials.length, 1);
+  assert.equal((payload as { credentials: unknown[] }).credentials.length, 2);
   assert.equal(audits.length, 1);
   assert.equal(audits[0]?.[5], "tenant-1");
   assert.deepEqual(idempotencyPayload, { versionId: "codex-cli@1.2.3" });
@@ -153,6 +167,94 @@ test("Postgres admin catalog rolls back a failed mutation without writing state 
   await assert.rejects(store.mutate(() => { throw new Error("mutation failed"); }), /mutation failed/);
   assert.equal(statements.includes("ROLLBACK"), true);
   assert.equal(statements.some((text) => text.includes("UPDATE deviludo.admin_catalog_state")), false);
+});
+
+test("Postgres admin readiness binds project Profiles to the authoritative project tenant", async () => {
+  const tenantId = "11111111-1111-4111-8111-111111111111";
+  const wrongTenantId = "22222222-2222-4222-8222-222222222222";
+  const projectId = "33333333-3333-4333-8333-333333333333";
+  const source = new InMemoryAdminStore();
+  await source.mutate((state) => {
+    const platformCredential = state.credentials.get("credential-platform-claude-v1")!;
+    const platformProvider = state.providers.get("provider-platform-claude-r1")!;
+    const platformProfile = state.profiles.get("profile-platform-claude-r1")!;
+    state.credentials.set("credential-tenant-readiness-v1", {
+      ...platformCredential,
+      id: "credential-tenant-readiness-v1",
+      familyId: "credential-tenant-readiness",
+      label: "Tenant readiness key",
+      scope: "tenant",
+      scopeId: tenantId,
+      secretRef: "vault://kv/deviludo/records/44444444-4444-4444-8444-444444444444",
+    });
+    state.providers.set("provider-project-readiness-r1", {
+      ...platformProvider,
+      id: "provider-project-readiness-r1",
+      credentialVersionId: "credential-tenant-readiness-v1",
+      state: "DRAFT",
+      probe: Object.freeze({}),
+    });
+    state.profiles.set("profile-project-readiness-r1", {
+      ...platformProfile,
+      id: "profile-project-readiness-r1",
+      scope: "project",
+      scopeId: projectId,
+      providerRevisionId: "provider-project-readiness-r1",
+      credentialVersionId: "credential-tenant-readiness-v1",
+      state: "DRAFT",
+    });
+  });
+  const payload = await source.read((state) => ({
+    versions: [...state.versions.values()],
+    installations: [...state.installations.values()],
+    providers: [...state.providers.values()],
+    profiles: [...state.profiles.values()],
+    credentials: [...state.credentials.values()],
+    defaults: [...state.defaults.entries()],
+  }));
+
+  function readinessStore(authoritativeTenant: string): {
+    readonly store: PostgresAdminStore;
+    readonly statements: string[];
+    readonly released: () => number;
+  } {
+    const statements: string[] = [];
+    let releaseCount = 0;
+    const client = {
+      async query(text: string, values?: unknown[]) {
+        statements.push(text);
+        if (text.includes("SELECT revision, payload")) return result([{ revision: 5, payload }]);
+        if (text.includes("FROM deviludo.projects")) {
+          assert.deepEqual(values, [[projectId]]);
+          return result([{ id: projectId, tenant_id: authoritativeTenant }]);
+        }
+        return result([]);
+      },
+      release() { releaseCount += 1; },
+    } as unknown as PoolClient;
+    return {
+      store: new PostgresAdminStore({ async connect() { return client; }, async end() {} } as unknown as Pool),
+      statements,
+      released: () => releaseCount,
+    };
+  }
+
+  const matching = readinessStore(tenantId);
+  await matching.store.probe();
+  assert.equal(matching.statements.includes("SET LOCAL row_security = off"), true);
+  assert.equal(matching.statements.includes("COMMIT"), true);
+  assert.equal(matching.released(), 1);
+
+  const mismatched = readinessStore(wrongTenantId);
+  await assert.rejects(mismatched.store.probe(), /Project Profile credential scope is invalid/);
+  assert.equal(mismatched.statements.includes("ROLLBACK"), true);
+  assert.equal(mismatched.statements.includes("COMMIT"), false);
+  assert.equal(mismatched.released(), 1);
+
+  const mutationMismatch = readinessStore(wrongTenantId);
+  await assert.rejects(mutationMismatch.store.mutate(() => undefined), /Project Profile credential scope is invalid/);
+  assert.equal(mutationMismatch.statements.some((text) => text.includes("UPDATE deviludo.admin_catalog_state")), false);
+  assert.equal(mutationMismatch.statements.includes("ROLLBACK"), true);
 });
 
 test("Postgres admin retirement guard counts every non-terminal run with RLS fail-closed", async () => {

@@ -20,7 +20,7 @@ export class HealthController {
   async readiness(): Promise<Readonly<Record<string, string>>> {
     try {
       await Promise.all([
-        this.store.read(() => undefined),
+        this.store.probe(),
         this.vault.probe(),
         this.providerProbe.probe(),
         this.supplyChain.probe(),
