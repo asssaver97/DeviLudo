@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runLocalDeliveryUntilHumanGate } from "../lib/local-delivery/automatic.ts";
-import { commandLocalDelivery, saveLocalMainValidation, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
+import { commandLocalDelivery, saveLocalMainValidation, saveLocalSteamReinstall, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
 
 const macosBuild = Object.freeze({
   fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
@@ -63,6 +63,37 @@ function passingMainValidation(projectId, delivery, commandKey) {
   }, commandKey);
 }
 
+function passingSteamReinstall(projectId, delivery, commandKey) {
+  const main = delivery.mainValidation;
+  return saveLocalSteamReinstall(projectId, {
+    schemaVersion: 1,
+    evidenceId: "EV-STEAM-AABBCCDDEEFF",
+    bundleDigest: "e".repeat(64),
+    status: "TESTS_PASSED",
+    releaseGate: "LOCAL_STEAM_REINSTALL_PASSED",
+    localOnly: true,
+    branch: "local-password-beta",
+    buildId: "BUILD-LOCAL-AABBCCDDEEFF",
+    mainEvidenceId: main.evidenceId,
+    mainBundleDigest: main.bundleDigest,
+    mainSha: main.mainSha,
+    mainSourceDigest: main.mainSourceDigest,
+    mainArtifactSha256: main.buildArtifact.sha256,
+    mfaApprovalId: delivery.mfaApprovalId,
+    targetMatrix: ["macos"],
+    platform: "macos",
+    checks: [
+      { name: "beta-package-integrity", status: "PASSED", durationMs: 1, detail: "matched" },
+      { name: "clean-reinstall-boot", status: "PASSED", durationMs: 1, detail: "booted" },
+    ],
+    betaArtifact: {
+      fileName: "DeviLudoLocalBeta.zip", platform: "macos", contentType: "application/zip",
+      sha256: main.buildArtifact.sha256, sizeBytes: main.buildArtifact.sizeBytes,
+    },
+    createdAt: "2026-07-23T00:02:00.000Z",
+  }, commandKey);
+}
+
 test("local automation runs selected-target E2E and stops at every human authority gate", async () => {
   const projectId = `auto-gates-${crypto.randomUUID()}`;
   const initial = await startLocalDelivery(
@@ -98,10 +129,14 @@ test("local automation runs selected-target E2E and stops at every human authori
   assert.equal(releaseCandidate.snapshot.mfaApprovalId, null);
 
   await commandLocalDelivery(projectId, "confirm-mfa", `mfa:${projectId}`);
-  const beta = await runLocalDeliveryUntilHumanGate(projectId, `auto:${projectId}:beta`, passingValidation);
+  const beta = await runLocalDeliveryUntilHumanGate(
+    projectId, `auto:${projectId}:beta`, passingValidation, passingMainValidation, passingSteamReinstall,
+  );
   assert.equal(beta.stopReason, "EXTERNAL_APPROVAL_REQUIRED");
   assert.equal(beta.snapshot.stage, "EXTERNAL_APPROVAL_REQUIRED");
-  assert.equal(beta.automaticTransitions, 2);
+  assert.equal(beta.automaticTransitions, 1);
+  assert.equal(beta.steamReinstallExecuted, true);
+  assert.equal(beta.snapshot.steamReinstall.releaseGate, "LOCAL_STEAM_REINSTALL_PASSED");
   assert.equal(beta.snapshot.externalGate, "VALVE_REVIEW");
   assert.deepEqual(beta.snapshot.externalApprovals, []);
 });

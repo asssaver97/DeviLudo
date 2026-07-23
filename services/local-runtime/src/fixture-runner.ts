@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, cp, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, cp, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
@@ -11,6 +11,8 @@ import type {
   LocalRuntimeCheck,
   LocalRuntimeEvidence,
   LocalRuntimeRequest,
+  LocalSteamReinstallEvidence,
+  LocalSteamReinstallRequest,
 } from "./contracts";
 import { defaultGodotExportTemplatesRoot, mountExportTemplates } from "./export-templates";
 import { inspectExtractedMacosBuild, validateMacosBuildArchive } from "./macos-export";
@@ -21,6 +23,7 @@ const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 60_000;
 const BUILD_ARTIFACT_FILE = "DeviLudoLocal.zip" as const;
 const MAIN_BUILD_ARTIFACT_FILE = "DeviLudoMain.zip" as const;
+const LOCAL_BETA_ARTIFACT_FILE = "DeviLudoLocalBeta.zip" as const;
 const MAX_BUILD_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
 type CommandResult = {
@@ -94,6 +97,18 @@ export class LocalFixtureRunner {
     return path.join(this.#storageRoot, request.projectId, request.runId, "main-gate", "artifacts");
   }
 
+  steamReinstallEvidenceDirectory(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
+    validateIdentifier(request.projectId, "projectId");
+    validateIdentifier(request.runId, "runId");
+    return path.join(this.#storageRoot, request.projectId, request.runId, "steam-reinstall", "evidence");
+  }
+
+  steamBetaArtifactDirectory(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
+    validateIdentifier(request.projectId, "projectId");
+    validateIdentifier(request.runId, "runId");
+    return path.join(this.#storageRoot, request.projectId, request.runId, "steam-reinstall", "artifacts");
+  }
+
   async readEvidence(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
     const file = path.join(this.evidenceDirectory(request), "manifest.json");
     return JSON.parse(await readFile(file, "utf8")) as LocalRuntimeEvidence;
@@ -102,6 +117,19 @@ export class LocalFixtureRunner {
   async readMainEvidence(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
     const file = path.join(this.mainEvidenceDirectory(request), "manifest.json");
     return JSON.parse(await readFile(file, "utf8")) as LocalMainGateEvidence;
+  }
+
+  async readSteamReinstallEvidence(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
+    const file = path.join(this.steamReinstallEvidenceDirectory(request), "manifest.json");
+    const evidence = JSON.parse(await readFile(file, "utf8")) as LocalSteamReinstallEvidence;
+    const { evidenceId, bundleDigest, ...unsigned } = evidence;
+    if (!/^EV-STEAM-[A-F0-9]{12}$/.test(evidenceId)
+      || !/^[a-f0-9]{64}$/.test(bundleDigest)
+      || sha256(JSON.stringify(unsigned)) !== bundleDigest
+      || evidenceId !== `EV-STEAM-${bundleDigest.slice(0, 12).toUpperCase()}`) {
+      throw new Error("Local Steam reinstall evidence digest is invalid");
+    }
+    return evidence;
   }
 
   async readBuildArtifact(
@@ -184,6 +212,51 @@ export class LocalFixtureRunner {
         || bytes.byteLength !== binding.sizeBytes
         || sha256(bytes) !== binding.sha256) {
         throw new Error("Local main build artifact bytes do not match their evidence manifest");
+      }
+      return { evidence, bytes };
+    } finally {
+      await file.close();
+    }
+  }
+
+  async readSteamBetaArtifact(
+    request: Pick<LocalRuntimeRequest, "projectId" | "runId">,
+    fileName: string,
+  ): Promise<{ evidence: LocalSteamReinstallEvidence; bytes: Buffer }> {
+    if (fileName !== LOCAL_BETA_ARTIFACT_FILE) throw new Error("Local Beta artifact does not exist");
+    const evidence = await this.readSteamReinstallEvidence(request);
+    const binding = evidence.betaArtifact;
+    if (evidence.schemaVersion !== 1
+      || evidence.phase !== "LOCAL_STEAM_REINSTALL"
+      || evidence.localOnly !== true
+      || evidence.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
+      || evidence.status !== "TESTS_PASSED"
+      || !binding
+      || binding.fileName !== fileName
+      || binding.platform !== "macos"
+      || binding.contentType !== "application/zip"
+      || !/^[a-f0-9]{64}$/.test(binding.sha256)
+      || !Number.isSafeInteger(binding.sizeBytes)
+      || binding.sizeBytes < 1
+      || binding.sizeBytes > MAX_BUILD_ARTIFACT_BYTES) {
+      throw new Error("Local Beta artifact is not authorized by its reinstall evidence");
+    }
+    const artifactPath = path.join(this.steamBetaArtifactDirectory(request), LOCAL_BETA_ARTIFACT_FILE);
+    const before = await lstat(artifactPath);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== binding.sizeBytes) {
+      throw new Error("Local Beta artifact metadata does not match its reinstall evidence");
+    }
+    const file = await open(artifactPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const bytes = await file.readFile();
+      const after = await file.stat();
+      if (!after.isFile()
+        || after.size !== before.size
+        || after.mtimeMs !== before.mtimeMs
+        || after.ctimeMs !== before.ctimeMs
+        || bytes.byteLength !== binding.sizeBytes
+        || sha256(bytes) !== binding.sha256) {
+        throw new Error("Local Beta artifact bytes do not match their reinstall evidence");
       }
       return { evidence, bytes };
     } finally {
@@ -585,6 +658,137 @@ export class LocalFixtureRunner {
     return manifest;
   }
 
+  async runSteamReinstall(request: LocalSteamReinstallRequest): Promise<LocalSteamReinstallEvidence> {
+    validateSteamReinstallRequest(request);
+    const main = await this.readMainBuildArtifact(request, MAIN_BUILD_ARTIFACT_FILE);
+    if (main.evidence.evidenceId !== request.mainEvidenceId
+      || main.evidence.bundleDigest !== request.mainBundleDigest
+      || main.evidence.mainSha !== request.mainSha
+      || main.evidence.mainSourceDigest !== request.mainSourceDigest
+      || main.evidence.buildArtifact?.sha256 !== request.mainArtifactSha256
+      || main.evidence.specRevisionId !== request.specRevisionId
+      || JSON.stringify(main.evidence.targetMatrix) !== JSON.stringify(request.targetMatrix)) {
+      throw new Error("Local Beta request does not match the passed main evidence");
+    }
+    try {
+      const existing = await this.readSteamReinstallEvidence(request);
+      assertSteamReinstallEvidenceBinding(existing, request);
+      if (existing.releaseGate === "LOCAL_STEAM_REINSTALL_PASSED") {
+        await this.readSteamBetaArtifact(request, LOCAL_BETA_ARTIFACT_FILE);
+      }
+      return existing;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+
+    const runRoot = path.join(this.#storageRoot, request.projectId, request.runId);
+    const steamRoot = path.join(runRoot, "steam-reinstall");
+    const evidenceRoot = path.join(steamRoot, "evidence");
+    const artifactRoot = path.join(steamRoot, "artifacts");
+    const runtimeHome = path.join(steamRoot, "home");
+    const runtimeTemp = path.join(steamRoot, "tmp");
+    await archiveDirectory(steamRoot);
+    await mkdir(evidenceRoot, { recursive: true });
+    await mkdir(artifactRoot, { recursive: true });
+    await mkdir(runtimeHome, { recursive: true });
+    await mkdir(runtimeTemp, { recursive: true });
+
+    const environment: NodeJS.ProcessEnv = {
+      NODE_ENV: "test",
+      PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      LANG: "C.UTF-8",
+      HOME: runtimeHome,
+      TMPDIR: runtimeTemp,
+    };
+    const betaPath = path.join(artifactRoot, LOCAL_BETA_ARTIFACT_FILE);
+    const packageStarted = performance.now();
+    await writeFile(betaPath, main.bytes, { mode: 0o600 });
+    const copied = await readFile(betaPath);
+    const packagePassed = copied.byteLength === main.bytes.byteLength
+      && sha256(copied) === request.mainArtifactSha256;
+    if (packagePassed) await chmod(betaPath, 0o400);
+    const checks: LocalSteamReinstallEvidence["checks"] = [{
+      name: "beta-package-integrity",
+      status: packagePassed ? "PASSED" : "FAILED",
+      durationMs: Math.round(performance.now() - packageStarted),
+      detail: packagePassed
+        ? "Immutable local Beta package exactly matches the main-gate artifact digest"
+        : "Local Beta package digest did not match the main-gate artifact",
+    }];
+    const log = [
+      "[local-only] No Steam endpoint or credential was used.",
+      `[main] evidence=${request.mainEvidenceId} sha=${request.mainSha} artifact=${request.mainArtifactSha256}`,
+      `[mfa] approval=${request.mfaApprovalId}`,
+      `[beta] branch=local-password-beta bytes=${copied.byteLength} digest=${sha256(copied)}`,
+    ];
+    const reinstall = packagePassed
+      ? await this.#launchMacosArtifact({
+        exportPath: betaPath,
+        exportSmokeRoot: path.join(steamRoot, "clean-install"),
+        runRoot: steamRoot,
+        environment,
+        runtimeHome,
+        runtimeTemp,
+        log,
+      })
+      : { passed: false, durationMs: 0, detail: "Clean reinstall was not attempted because the Beta package failed integrity verification" };
+    checks.push({
+      name: "clean-reinstall-boot",
+      status: reinstall.passed ? "PASSED" : "FAILED",
+      durationMs: reinstall.durationMs,
+      detail: reinstall.passed
+        ? "Cleanly extracted local Beta app started from an isolated install root and exited cleanly"
+        : reinstall.detail,
+    });
+
+    const passed = packagePassed && reinstall.passed;
+    if (!passed) await rm(betaPath, { force: true });
+    const createdAt = new Date().toISOString();
+    const reinstallLog = `${log.join("\n\n")}\n`;
+    const betaArtifact = passed ? {
+      fileName: LOCAL_BETA_ARTIFACT_FILE,
+      platform: "macos" as const,
+      contentType: "application/zip" as const,
+      sha256: request.mainArtifactSha256,
+      sizeBytes: main.bytes.byteLength,
+    } : null;
+    const buildId = `BUILD-LOCAL-${sha256(JSON.stringify(request)).slice(0, 12).toUpperCase()}`;
+    const unsigned = {
+      schemaVersion: 1 as const,
+      phase: "LOCAL_STEAM_REINSTALL" as const,
+      localOnly: true as const,
+      projectId: request.projectId,
+      runId: request.runId,
+      specRevisionId: request.specRevisionId,
+      targetMatrix: Object.freeze(["macos"] as const),
+      platform: "macos" as const,
+      status: passed ? "TESTS_PASSED" as const : "FAILED" as const,
+      releaseGate: passed ? "LOCAL_STEAM_REINSTALL_PASSED" as const : "TESTS_FAILED" as const,
+      branch: "local-password-beta" as const,
+      buildId,
+      mainEvidenceId: request.mainEvidenceId,
+      mainBundleDigest: request.mainBundleDigest,
+      mainSha: request.mainSha,
+      mainSourceDigest: request.mainSourceDigest,
+      mainArtifactSha256: request.mainArtifactSha256,
+      mfaApprovalId: request.mfaApprovalId,
+      checks,
+      artifacts: ["manifest.json", "reinstall.log"] as LocalSteamReinstallEvidence["artifacts"],
+      artifactDigests: { "reinstall.log": sha256(reinstallLog) },
+      betaArtifact,
+      createdAt,
+    };
+    const bundleDigest = sha256(JSON.stringify(unsigned));
+    const manifest: LocalSteamReinstallEvidence = {
+      ...unsigned,
+      evidenceId: `EV-STEAM-${bundleDigest.slice(0, 12).toUpperCase()}`,
+      bundleDigest,
+    };
+    await writeFile(path.join(evidenceRoot, "reinstall.log"), reinstallLog, "utf8");
+    await writeFile(path.join(evidenceRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    return manifest;
+  }
+
   async #launchMacosArtifact(options: {
     exportPath: string;
     exportSmokeRoot: string;
@@ -705,6 +909,19 @@ function validateMainGateRequest(request: LocalMainGateRequest) {
   }
 }
 
+function validateSteamReinstallRequest(request: LocalSteamReinstallRequest) {
+  validateRequest(request);
+  if (request.targetMatrix.length !== 1 || request.targetMatrix[0] !== "macos"
+    || !/^EV-MAIN-[A-F0-9]{12}$/.test(request.mainEvidenceId)
+    || !/^[a-f0-9]{64}$/.test(request.mainBundleDigest)
+    || !/^[a-f0-9]{40}$/.test(request.mainSha)
+    || !/^[a-f0-9]{64}$/.test(request.mainSourceDigest)
+    || !/^[a-f0-9]{64}$/.test(request.mainArtifactSha256)
+    || !/^MFA-LOCAL-[0-9]{4,}$/.test(request.mfaApprovalId)) {
+    throw new Error("Local Steam reinstall binding is invalid");
+  }
+}
+
 function assertEvidenceBinding(evidence: LocalRuntimeEvidence, request: LocalRuntimeRequest) {
   if (evidence.schemaVersion !== 4) throw new StaleLocalEvidenceError();
   if (evidence.projectId !== request.projectId
@@ -729,6 +946,27 @@ function assertMainEvidenceBinding(evidence: LocalMainGateEvidence, request: Loc
     || evidence.mainSha !== request.candidateSha
     || evidence.mainSourceDigest !== request.sourceDigest) {
     throw new Error("Stored main gate evidence does not match the accepted candidate binding");
+  }
+}
+
+function assertSteamReinstallEvidenceBinding(
+  evidence: LocalSteamReinstallEvidence,
+  request: LocalSteamReinstallRequest,
+) {
+  if (evidence.schemaVersion !== 1
+    || evidence.phase !== "LOCAL_STEAM_REINSTALL"
+    || evidence.localOnly !== true
+    || evidence.projectId !== request.projectId
+    || evidence.runId !== request.runId
+    || evidence.specRevisionId !== request.specRevisionId
+    || JSON.stringify(evidence.targetMatrix) !== JSON.stringify(request.targetMatrix)
+    || evidence.mainEvidenceId !== request.mainEvidenceId
+    || evidence.mainBundleDigest !== request.mainBundleDigest
+    || evidence.mainSha !== request.mainSha
+    || evidence.mainSourceDigest !== request.mainSourceDigest
+    || evidence.mainArtifactSha256 !== request.mainArtifactSha256
+    || evidence.mfaApprovalId !== request.mfaApprovalId) {
+    throw new Error("Stored local Steam reinstall evidence does not match its immutable request");
   }
 }
 

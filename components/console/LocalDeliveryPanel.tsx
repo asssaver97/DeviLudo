@@ -22,8 +22,8 @@ const stageLabels: Record<LocalDeliveryStage, string> = {
   MERGING: "合并候选 PR",
   MAIN_GATE_RUNNING: "main SHA 发布门禁",
   MFA_REQUIRED: "等待 MFA",
-  STEAM_BETA_UPLOADING: "Steam 私有 Beta",
-  STEAM_REINSTALL_E2E: "Steam 回装测试",
+  STEAM_BETA_UPLOADING: "本地 Beta 打包",
+  STEAM_REINSTALL_E2E: "本地 Beta 干净回装",
   EXTERNAL_APPROVAL_REQUIRED: "等待外部批准",
   CANCELLED: "已取消",
   RELEASED: "本地闭环完成",
@@ -460,6 +460,26 @@ export function LocalDeliveryPanel({
             </div>
           ) : null}
 
+          {snapshot.steamReinstall ? (
+            <div className={`local-real-validation ${snapshot.steamReinstall.valid ? "ready" : "pending"}`}>
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">Localhost · 私有 Beta 回装演练</span>
+                <h3>{snapshot.steamReinstall.evidenceId}</h3>
+                <p><code>{snapshot.steamReinstall.buildId}</code> · 安装包与 main 构建摘要一致，并已在独立目录解压、实际启动和正常退出。未连接 Steam。</p>
+              </div>
+              <div className="local-real-validation-result">
+                <span className={snapshot.steamReinstall.valid ? "passed" : "failed"}>{snapshot.steamReinstall.valid ? "干净回装已通过" : "回装证据已失效"}</span>
+                <div>
+                  <a href={`/api/projects/${projectId}/steam-reinstall/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>
+                  <a href={`/api/projects/${projectId}/steam-reinstall/evidence/reinstall.log`} rel="noreferrer" target="_blank">回装日志</a>
+                  {snapshot.steamReinstall.valid && snapshot.steamReinstall.betaArtifact ? (
+                    <a href={`/api/projects/${projectId}/steam-reinstall/artifact/${snapshot.steamReinstall.betaArtifact.fileName}`}>下载本地 Beta</a>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED" && snapshot.externalGate ? (
             <div className="local-real-validation pending">
               <div className="local-real-validation-copy">
@@ -484,7 +504,7 @@ export function LocalDeliveryPanel({
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("main-gate-fail")} type="button">模拟 main 门禁失败</button>
               ) : null}
               {snapshot.stage === "STEAM_REINSTALL_E2E" ? (
-                <button className="button button-secondary" disabled={busy} onClick={() => runAction("steam-reinstall-fail")} type="button">模拟 Steam 回装失败</button>
+                <button className="button button-secondary" disabled={busy} onClick={() => runAction("steam-reinstall-fail")} type="button">模拟本地 Beta 回装失败</button>
               ) : null}
               {snapshot.stage !== "RELEASED" && snapshot.stage !== "CANCELLED" ? (
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("cancel")} type="button">取消本地交付</button>

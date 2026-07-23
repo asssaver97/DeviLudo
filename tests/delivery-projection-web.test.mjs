@@ -336,7 +336,7 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   assert.match(source, /Production · Temporal 权威投影/);
   assert.match(source, /if \(production\) return <ProductionDeliveryProjection/);
   assert.match(source, /模拟 main 门禁失败/);
-  assert.match(source, /模拟 Steam 回装失败/);
+  assert.match(source, /模拟本地 Beta 回装失败/);
   assert.match(source, /snapshot\.repairHandoff/);
   assert.doesNotMatch(source.slice(source.indexOf("function ProductionDeliveryProjection")), /runAction\(/);
   assert.match(source, /expected.*Temporal|取消请求已送达 Temporal/);

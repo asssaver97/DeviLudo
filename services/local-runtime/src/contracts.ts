@@ -12,6 +12,15 @@ export type LocalMainGateRequest = LocalRuntimeRequest & {
   sourceDigest: string;
 };
 
+export type LocalSteamReinstallRequest = LocalRuntimeRequest & {
+  mainEvidenceId: string;
+  mainBundleDigest: string;
+  mainSha: string;
+  mainSourceDigest: string;
+  mainArtifactSha256: string;
+  mfaApprovalId: string;
+};
+
 export type LocalRuntimeCheck = {
   name: "import" | "boot" | "core-loop" | "save-load" | "performance" | "macos-export" | "macos-export-boot";
   status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY";
@@ -87,6 +96,45 @@ export type LocalMainGateEvidence = {
   } | null;
   testPlan: "deviludo-local-testkit-1.0.0";
   fixtureOnly: true;
+  createdAt: string;
+};
+
+export type LocalSteamReinstallEvidence = {
+  schemaVersion: 1;
+  phase: "LOCAL_STEAM_REINSTALL";
+  localOnly: true;
+  evidenceId: string;
+  bundleDigest: string;
+  projectId: string;
+  runId: string;
+  specRevisionId: string;
+  targetMatrix: readonly ["macos"];
+  platform: "macos";
+  status: "TESTS_PASSED" | "FAILED";
+  releaseGate: "LOCAL_STEAM_REINSTALL_PASSED" | "TESTS_FAILED";
+  branch: "local-password-beta";
+  buildId: string;
+  mainEvidenceId: string;
+  mainBundleDigest: string;
+  mainSha: string;
+  mainSourceDigest: string;
+  mainArtifactSha256: string;
+  mfaApprovalId: string;
+  checks: Array<{
+    name: "beta-package-integrity" | "clean-reinstall-boot";
+    status: "PASSED" | "FAILED";
+    durationMs: number;
+    detail: string;
+  }>;
+  artifacts: Array<"manifest.json" | "reinstall.log">;
+  artifactDigests: Record<"reinstall.log", string>;
+  betaArtifact: {
+    fileName: "DeviLudoLocalBeta.zip";
+    platform: "macos";
+    contentType: "application/zip";
+    sha256: string;
+    sizeBytes: number;
+  } | null;
   createdAt: string;
 };
 

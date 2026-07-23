@@ -79,6 +79,37 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
       assert.equal(main.buildArtifact?.fileName, "DeviLudoMain.zip");
       const mainArtifact = await runner.readMainBuildArtifact(request, "DeviLudoMain.zip");
       assert.equal(mainArtifact.bytes.byteLength, main.buildArtifact?.sizeBytes);
+      const reinstall = await runner.runSteamReinstall({
+        ...request,
+        mainEvidenceId: main.evidenceId,
+        mainBundleDigest: main.bundleDigest,
+        mainSha: main.mainSha,
+        mainSourceDigest: main.mainSourceDigest,
+        mainArtifactSha256: main.buildArtifact!.sha256,
+        mfaApprovalId: "MFA-LOCAL-0012",
+      });
+      assert.equal(reinstall.phase, "LOCAL_STEAM_REINSTALL");
+      assert.equal(reinstall.localOnly, true);
+      assert.equal(reinstall.releaseGate, "LOCAL_STEAM_REINSTALL_PASSED");
+      assert.equal(reinstall.mainEvidenceId, main.evidenceId);
+      assert.equal(reinstall.mainArtifactSha256, main.buildArtifact?.sha256);
+      assert.equal(reinstall.betaArtifact?.sha256, main.buildArtifact?.sha256);
+      assert.equal(reinstall.checks.find((check) => check.name === "clean-reinstall-boot")?.status, "PASSED");
+      const betaArtifact = await runner.readSteamBetaArtifact(request, "DeviLudoLocalBeta.zip");
+      assert.equal(betaArtifact.bytes.byteLength, mainArtifact.bytes.byteLength);
+      assert.equal(betaArtifact.evidence.evidenceId, reinstall.evidenceId);
+      const reinstallLog = await readFile(path.join(runner.steamReinstallEvidenceDirectory(request), "reinstall.log"), "utf8");
+      assert.match(reinstallLog, /No Steam endpoint or credential was used/);
+      assert.match(reinstallLog, /\$ <exported-app> --headless --quit-after 120/);
+      assert.equal((await runner.runSteamReinstall({
+        ...request,
+        mainEvidenceId: main.evidenceId,
+        mainBundleDigest: main.bundleDigest,
+        mainSha: main.mainSha,
+        mainSourceDigest: main.mainSourceDigest,
+        mainArtifactSha256: main.buildArtifact!.sha256,
+        mfaApprovalId: "MFA-LOCAL-0012",
+      })).evidenceId, reinstall.evidenceId);
       assert.equal((await runner.runMainGate({
         ...request,
         candidateEvidenceId: result.evidenceId,

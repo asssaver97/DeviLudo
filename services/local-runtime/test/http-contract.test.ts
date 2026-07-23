@@ -4,9 +4,11 @@ import {
   LocalMainGateCoordinator,
   LocalRuntimeRequestError,
   LocalRuntimeRunCoordinator,
+  LocalSteamReinstallCoordinator,
   localRuntimeRunBinding,
   parseLocalMainGateRequest,
   parseLocalRuntimeRequest,
+  parseLocalSteamReinstallRequest,
 } from "../src/http-contract";
 
 function parse(value: unknown) {
@@ -118,6 +120,35 @@ test("main gate parsing and coordination bind the exact accepted candidate evide
   assert.equal(await first, "complete");
   assert.throws(
     () => parseLocalMainGateRequest(Buffer.from(JSON.stringify({ ...request, candidateSha: "short" }))),
+    (error) => error instanceof LocalRuntimeRequestError && error.code === "INVALID_REQUEST",
+  );
+});
+
+test("local Steam reinstall parsing and coordination freeze main, artifact and MFA bindings", async () => {
+  const request = parseLocalSteamReinstallRequest(Buffer.from(JSON.stringify({
+    projectId: "project-http",
+    runId: "RUN-HTTP-001",
+    specRevisionId: "SPEC-HTTP-001",
+    targetMatrix: ["macos"],
+    mainEvidenceId: "EV-MAIN-ABCDEF123456",
+    mainBundleDigest: "a".repeat(64),
+    mainSha: "b".repeat(40),
+    mainSourceDigest: "c".repeat(64),
+    mainArtifactSha256: "d".repeat(64),
+    mfaApprovalId: "MFA-LOCAL-0012",
+  })));
+  const coordinator = new LocalSteamReinstallCoordinator<string>();
+  let finish!: (value: string) => void;
+  const first = coordinator.start(request, () => new Promise<string>((resolve) => { finish = resolve; }));
+  assert.equal(coordinator.start(request, async () => "wrong"), first);
+  assert.throws(
+    () => coordinator.start({ ...request, mainArtifactSha256: "e".repeat(64) }, async () => "wrong"),
+    (error) => error instanceof LocalRuntimeRequestError && error.code === "RUN_BINDING_CONFLICT",
+  );
+  finish("complete");
+  assert.equal(await first, "complete");
+  assert.throws(
+    () => parseLocalSteamReinstallRequest(Buffer.from(JSON.stringify({ ...request, targetMatrix: ["linux"] }))),
     (error) => error instanceof LocalRuntimeRequestError && error.code === "INVALID_REQUEST",
   );
 });

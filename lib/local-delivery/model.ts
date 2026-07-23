@@ -85,6 +85,40 @@ export type LocalMainValidationSnapshot = {
   valid: boolean;
 };
 
+export type LocalSteamReinstallSnapshot = {
+  schemaVersion: 1;
+  evidenceId: string;
+  bundleDigest: string;
+  status: "TESTS_PASSED" | "FAILED";
+  releaseGate: "LOCAL_STEAM_REINSTALL_PASSED" | "TESTS_FAILED";
+  localOnly: true;
+  branch: "local-password-beta";
+  buildId: string;
+  mainEvidenceId: string;
+  mainBundleDigest: string;
+  mainSha: string;
+  mainSourceDigest: string;
+  mainArtifactSha256: string;
+  mfaApprovalId: string;
+  targetMatrix: readonly ["macos"];
+  platform: "macos";
+  checks: Array<{
+    name: "beta-package-integrity" | "clean-reinstall-boot";
+    status: "PASSED" | "FAILED";
+    durationMs: number;
+    detail: string;
+  }>;
+  betaArtifact: {
+    fileName: "DeviLudoLocalBeta.zip";
+    platform: "macos";
+    contentType: "application/zip";
+    sha256: string;
+    sizeBytes: number;
+  } | null;
+  createdAt: string;
+  valid: boolean;
+};
+
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
 export type LocalAgentVersionAttestation = {
@@ -165,6 +199,7 @@ export type LocalDeliverySnapshot = {
   agentExecution: LocalAgentExecutionSnapshot | null;
   localValidation: LocalValidationSnapshot | null;
   mainValidation: LocalMainValidationSnapshot | null;
+  steamReinstall: LocalSteamReinstallSnapshot | null;
   events: LocalDeliveryEvent[];
   updatedAt: string;
 };
@@ -182,7 +217,7 @@ export type LocalDeliveryAction =
   | "reset";
 
 export class LocalDeliveryGateError extends Error {
-  constructor(readonly code: "LOCAL_EXPORT_TEMPLATES_REQUIRED" | "LOCAL_VALIDATION_FAILED" | "LOCAL_VALIDATION_INVALIDATED" | "LOCAL_MAIN_GATE_REQUIRED", message: string) {
+  constructor(readonly code: "LOCAL_EXPORT_TEMPLATES_REQUIRED" | "LOCAL_VALIDATION_FAILED" | "LOCAL_VALIDATION_INVALIDATED" | "LOCAL_MAIN_GATE_REQUIRED" | "LOCAL_STEAM_REINSTALL_REQUIRED", message: string) {
     super(message);
   }
 }
@@ -309,6 +344,31 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
         && historicalMainValidation.valid,
     }
     : null;
+  const historicalSteamReinstall = snapshot.steamReinstall as (LocalSteamReinstallSnapshot & {
+    schemaVersion?: number;
+  }) | null | undefined;
+  const steamReinstall = historicalSteamReinstall
+    ? {
+      ...historicalSteamReinstall,
+      schemaVersion: historicalSteamReinstall.schemaVersion ?? 0,
+      valid: historicalSteamReinstall.schemaVersion === 1
+        && historicalSteamReinstall.status === "TESTS_PASSED"
+        && historicalSteamReinstall.releaseGate === "LOCAL_STEAM_REINSTALL_PASSED"
+        && historicalSteamReinstall.localOnly === true
+        && historicalSteamReinstall.branch === "local-password-beta"
+        && historicalSteamReinstall.mainEvidenceId === mainValidation?.evidenceId
+        && historicalSteamReinstall.mainBundleDigest === mainValidation?.bundleDigest
+        && historicalSteamReinstall.mainSha === mainValidation?.mainSha
+        && historicalSteamReinstall.mainSourceDigest === mainValidation?.mainSourceDigest
+        && historicalSteamReinstall.mainArtifactSha256 === mainValidation?.buildArtifact?.sha256
+        && historicalSteamReinstall.mfaApprovalId === snapshot.mfaApprovalId
+        && historicalSteamReinstall.platform === "macos"
+        && sameTargetMatrix(historicalSteamReinstall.targetMatrix, ["macos"])
+        && validLocalBetaArtifact(historicalSteamReinstall.betaArtifact)
+        && hasPassedSteamReinstallBoot(historicalSteamReinstall.checks)
+        && historicalSteamReinstall.valid,
+    }
+    : null;
   const stalePassedBuildEvidence = historicalValidation?.valid === true
     && historicalValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
     && localValidation?.valid === false;
@@ -323,26 +383,32 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
       || (mainValidation.releaseGate === "MAIN_VALIDATION_PASSED" && mainValidation.valid !== true))
     && !["AWAITING_SPEC_APPROVAL", "AGENT_QUEUED", "AGENT_RUNNING", "CANDIDATE_READY", "E2E_RUNNING", "AWAITING_ACCEPTANCE", "MERGING", "CANCELLED"].includes(snapshot.stage);
   const rewindReleaseAuthority = rewindForBuildEvidence || rewindForMainEvidence;
+  const rewindForSteamEvidence = !rewindReleaseAuthority
+    && ["EXTERNAL_APPROVAL_REQUIRED", "RELEASED"].includes(snapshot.stage)
+    && steamReinstall?.valid !== true;
 
   return {
     ...snapshot,
     targetMatrix,
     targetResults: rewindForBuildEvidence ? createTargetResults(targetMatrix, "QUEUED") : targetResults,
-    stage: rewindForBuildEvidence ? "CANDIDATE_READY" : rewindForMainEvidence ? "MERGING" : snapshot.stage,
+    stage: rewindForBuildEvidence ? "CANDIDATE_READY"
+      : rewindForMainEvidence ? "MERGING"
+        : rewindForSteamEvidence ? "STEAM_BETA_UPLOADING" : snapshot.stage,
     evidenceValid: rewindForBuildEvidence ? false : snapshot.evidenceValid,
     mainSha: rewindReleaseAuthority ? null : snapshot.mainSha,
     steamBranch: rewindReleaseAuthority ? null : snapshot.steamBranch,
     agentExecution,
     repairHandoff: snapshot.repairHandoff ?? null,
     mfaApprovalId: rewindReleaseAuthority ? null : snapshot.mfaApprovalId ?? null,
-    steamBuildId: rewindReleaseAuthority ? null : snapshot.steamBuildId ?? null,
+    steamBuildId: rewindReleaseAuthority || rewindForSteamEvidence ? null : snapshot.steamBuildId ?? null,
     steamReleaseId: rewindReleaseAuthority ? null : snapshot.steamReleaseId ?? null,
-    externalApprovals: rewindReleaseAuthority ? [] : snapshot.externalApprovals ?? [],
-    externalGate: rewindReleaseAuthority ? null : snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
+    externalApprovals: rewindReleaseAuthority || rewindForSteamEvidence ? [] : snapshot.externalApprovals ?? [],
+    externalGate: rewindReleaseAuthority || rewindForSteamEvidence ? null : snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
       ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
       : null),
     localValidation,
     mainValidation: rewindForBuildEvidence ? null : mainValidation,
+    steamReinstall: rewindReleaseAuthority ? null : steamReinstall,
     lockedProfile,
   };
 }
@@ -390,6 +456,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     agentExecution: null,
     localValidation: null,
     mainValidation: null,
+    steamReinstall: null,
     events: [{ id: "LOCAL-EVT-0001", type: "PROJECT_CREATED", message: "本地项目已创建，等待批准规格。", at }],
     updatedAt: at,
   };
@@ -427,6 +494,7 @@ export function approveLocalSpec(
       agentExecution: null,
       localValidation: null,
       mainValidation: null,
+      steamReinstall: null,
     },
     "SPEC_APPROVED",
     `${specRevisionId} 已冻结；${agentLabel(lockedProfile.agent)} Profile、配置来源与 ${lockedTargetMatrix.join(" / ")} 目标矩阵已锁定。`,
@@ -478,6 +546,7 @@ export function invalidateLocalDelivery(
       repairHandoff: null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
       mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
+      steamReinstall: current.steamReinstall ? { ...current.steamReinstall, valid: false } : null,
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
     },
     "FEEDBACK_CREATED",
@@ -532,6 +601,7 @@ export function recordLocalAgentExecution(
       agentExecution: { ...receipt, valid: true },
       localValidation: null,
       mainValidation: null,
+      steamReinstall: null,
       targetResults: createTargetResults(current.targetMatrix, "QUEUED"),
     },
     "AGENT_CANDIDATE_RECORDED",
@@ -604,6 +674,7 @@ export function recordLocalValidation(
       evidenceValid: gatePassed ? current.evidenceValid : false,
       targetResults,
       mainValidation: null,
+      steamReinstall: null,
       localValidation: {
         ...validation,
         targetMatrix: Object.freeze([...validation.targetMatrix]),
@@ -687,6 +758,72 @@ export function recordLocalMainValidation(
   }, "MAIN_GATE_PASSED", "实际 main SHA 已重新导出、启动并通过完整门禁，等待 MFA。 ");
 }
 
+export function recordLocalSteamReinstall(
+  current: LocalDeliverySnapshot,
+  validation: Omit<LocalSteamReinstallSnapshot, "valid">,
+): LocalDeliverySnapshot {
+  const main = current.mainValidation;
+  if (current.stage !== "STEAM_REINSTALL_E2E") {
+    throw new Error("当前交付阶段不能写入本地 Beta 回装证据");
+  }
+  if (!current.runId || !current.mainSha || !main?.valid
+    || main.status !== "TESTS_PASSED" || main.releaseGate !== "MAIN_VALIDATION_PASSED"
+    || !main.buildArtifact || !current.mfaApprovalId || current.steamBranch !== "local-password-beta") {
+    throw new Error("本地 Beta 回装缺少有效 main、构建物或 MFA 权限");
+  }
+  const passed = validation.status === "TESTS_PASSED"
+    && validation.releaseGate === "LOCAL_STEAM_REINSTALL_PASSED";
+  const failed = validation.status === "FAILED" && validation.releaseGate === "TESTS_FAILED";
+  if (!passed && !failed) throw new Error("本地 Beta 回装状态与证据不一致");
+  if (validation.schemaVersion !== 1
+    || !/^EV-STEAM-[A-F0-9]{12}$/.test(validation.evidenceId)
+    || !/^[a-f0-9]{64}$/.test(validation.bundleDigest)
+    || validation.localOnly !== true
+    || validation.branch !== "local-password-beta"
+    || !/^BUILD-LOCAL-[A-F0-9]{12}$/.test(validation.buildId)
+    || validation.mainEvidenceId !== main.evidenceId
+    || validation.mainBundleDigest !== main.bundleDigest
+    || validation.mainSha !== current.mainSha
+    || validation.mainSourceDigest !== main.mainSourceDigest
+    || validation.mainArtifactSha256 !== main.buildArtifact.sha256
+    || validation.mfaApprovalId !== current.mfaApprovalId
+    || validation.platform !== "macos"
+    || !sameTargetMatrix(validation.targetMatrix, ["macos"])
+    || !Array.isArray(validation.checks)
+    || validation.checks.length !== 2) {
+    throw new Error("本地 Beta 回装证据与 main、构建物或 MFA 绑定不一致");
+  }
+  if (passed && (!validLocalBetaArtifact(validation.betaArtifact)
+    || validation.betaArtifact.sha256 !== main.buildArtifact.sha256
+    || !hasPassedSteamReinstallBoot(validation.checks))) {
+    throw new Error("本地 Beta 回装缺少摘要一致且可启动的干净安装包");
+  }
+  if (failed && (validation.betaArtifact !== null
+    || !validation.checks.some((check) => check.status === "FAILED"))) {
+    throw new Error("失败的本地 Beta 回装不能授权安装包");
+  }
+  const steamReinstall: LocalSteamReinstallSnapshot = {
+    ...validation,
+    targetMatrix: Object.freeze(["macos"] as const),
+    valid: true,
+  };
+  if (failed) {
+    return handoffLocalPostMergeFailure(
+      { ...current, steamReinstall },
+      "STEAM_INSTALL_FAILURE",
+      validation.evidenceId,
+    );
+  }
+  return event({
+    ...current,
+    stage: "EXTERNAL_APPROVAL_REQUIRED",
+    steamBuildId: validation.buildId,
+    externalGate: "VALVE_REVIEW",
+    externalApprovals: [],
+    steamReinstall,
+  }, "STEAM_REINSTALL_PASSED", "本地 Beta 包已完成摘要复核、隔离回装与实际启动；未连接 Steam，继续等待外部批准演练。 ");
+}
+
 function validLocalBuildArtifact(value: LocalValidationSnapshot["buildArtifact"] | undefined): value is NonNullable<LocalValidationSnapshot["buildArtifact"]> {
   return !!value
     && value.fileName === "DeviLudoLocal.zip"
@@ -709,8 +846,24 @@ function validLocalMainBuildArtifact(value: LocalMainValidationSnapshot["buildAr
     && value.sizeBytes <= 512 * 1024 * 1024;
 }
 
+function validLocalBetaArtifact(value: LocalSteamReinstallSnapshot["betaArtifact"] | undefined): value is NonNullable<LocalSteamReinstallSnapshot["betaArtifact"]> {
+  return !!value
+    && value.fileName === "DeviLudoLocalBeta.zip"
+    && value.platform === "macos"
+    && value.contentType === "application/zip"
+    && /^[a-f0-9]{64}$/.test(value.sha256)
+    && Number.isSafeInteger(value.sizeBytes)
+    && value.sizeBytes > 0
+    && value.sizeBytes <= 512 * 1024 * 1024;
+}
+
 function hasPassedExportBoot(checks: LocalValidationSnapshot["checks"]): boolean {
   return checks.some((check) => check.name === "macos-export-boot" && check.status === "PASSED");
+}
+
+function hasPassedSteamReinstallBoot(checks: LocalSteamReinstallSnapshot["checks"]): boolean {
+  return checks.some((check) => check.name === "beta-package-integrity" && check.status === "PASSED")
+    && checks.some((check) => check.name === "clean-reinstall-boot" && check.status === "PASSED");
 }
 
 export function applyLocalDeliveryAction(
@@ -745,6 +898,7 @@ export function applyLocalDeliveryAction(
         externalApprovals: [],
         localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
         mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
+        steamReinstall: current.steamReinstall ? { ...current.steamReinstall, valid: false } : null,
         agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
       },
       "DELIVERY_CANCELLED",
@@ -795,7 +949,7 @@ export function applyLocalDeliveryAction(
         mfaApprovalId: `MFA-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
       },
       "MFA_CONFIRMED",
-      "本地测试 MFA 已确认；开始模拟上传密码保护 Beta。",
+      "本地测试 MFA 已确认；开始生成绑定 main SHA 的本地密码保护 Beta 演练包。",
     );
   }
 
@@ -808,7 +962,10 @@ export function applyLocalDeliveryAction(
   }
 
   if (action === "external-approve") {
-    if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED" || !current.externalGate) {
+    if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED" || !current.externalGate
+      || !current.steamReinstall?.valid
+      || current.steamReinstall.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
+      || current.steamBuildId !== current.steamReinstall.buildId) {
       throw new Error("当前没有外部发布批准待处理");
     }
     const transition = {
@@ -901,17 +1058,12 @@ export function applyLocalDeliveryAction(
         {
           ...current,
           stage: "STEAM_REINSTALL_E2E",
-          steamBuildId: `BUILD-LOCAL-${String(current.revision + 1).padStart(4, "0")}`,
         },
-        "STEAM_BETA_READY",
-        "本地模拟 Beta 已激活；开始干净客户端回装测试。",
+        "LOCAL_BETA_REINSTALL_STARTED",
+        "本地 Beta 演练任务已锁定；开始摘要复核、独立目录回装与实际应用启动。",
       );
     case "STEAM_REINSTALL_E2E":
-      return event(
-        { ...current, stage: "EXTERNAL_APPROVAL_REQUIRED", externalGate: "VALVE_REVIEW", externalApprovals: [] },
-        "STEAM_REINSTALL_PASSED",
-        "回装测试通过；按顺序等待 Valve 审核、首次发行与默认分支确认。",
-      );
+      throw new LocalDeliveryGateError("LOCAL_STEAM_REINSTALL_REQUIRED", "本地 Beta 必须由本机执行服务完成摘要复核、干净回装和实际启动");
     case "AWAITING_SPEC_APPROVAL":
       throw new Error("请先批准当前规格修订");
     case "AWAITING_ACCEPTANCE":
@@ -976,6 +1128,7 @@ function handoffLocalPostMergeFailure(
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
       mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
+      steamReinstall: current.steamReinstall ? { ...current.steamReinstall, valid: false } : null,
     },
     reason === "MAIN_GATE_FAILURE" ? "MAIN_GATE_FAILED" : "STEAM_REINSTALL_FAILED",
     `${label} 的失败证据已冻结；旧发布权限已撤销，等待用户创建并批准新规格。`,

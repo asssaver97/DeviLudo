@@ -8,6 +8,7 @@ import {
   normalizeLocalDeliverySnapshot,
   recordLocalAgentExecution,
   recordLocalMainValidation,
+  recordLocalSteamReinstall,
   recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
 
@@ -56,6 +57,37 @@ function mainEvidence(state, status = "passed") {
   };
 }
 
+function steamEvidence(state, passed = true) {
+  const main = state.mainValidation;
+  return {
+    schemaVersion: 1,
+    evidenceId: passed ? "EV-STEAM-AABBCCDDEEFF" : "EV-STEAM-112233445566",
+    bundleDigest: "e".repeat(64),
+    status: passed ? "TESTS_PASSED" : "FAILED",
+    releaseGate: passed ? "LOCAL_STEAM_REINSTALL_PASSED" : "TESTS_FAILED",
+    localOnly: true,
+    branch: "local-password-beta",
+    buildId: "BUILD-LOCAL-AABBCCDDEEFF",
+    mainEvidenceId: main.evidenceId,
+    mainBundleDigest: main.bundleDigest,
+    mainSha: main.mainSha,
+    mainSourceDigest: main.mainSourceDigest,
+    mainArtifactSha256: main.buildArtifact.sha256,
+    mfaApprovalId: state.mfaApprovalId,
+    targetMatrix: ["macos"],
+    platform: "macos",
+    checks: [
+      { name: "beta-package-integrity", status: "PASSED", durationMs: 1, detail: "digest matched" },
+      { name: "clean-reinstall-boot", status: passed ? "PASSED" : "FAILED", durationMs: 1, detail: passed ? "booted" : "failed" },
+    ],
+    betaArtifact: passed ? {
+      fileName: "DeviLudoLocalBeta.zip", platform: "macos", contentType: "application/zip",
+      sha256: main.buildArtifact.sha256, sizeBytes: main.buildArtifact.sizeBytes,
+    } : null,
+    createdAt: "2026-07-23T00:02:00.000Z",
+  };
+}
+
 function localDeliveryAtAcceptedCandidate(projectId) {
   const initial = createLocalDelivery(projectId);
   let state = approveLocalSpec(initial, "SPEC-POST-MERGE-001", `RUN-${projectId}`, initial.lockedProfile, ["macos"]);
@@ -99,8 +131,10 @@ test("local delivery fixture exercises the complete gated chain without external
   state = applyLocalDeliveryAction(state, "confirm-mfa");
   assert.match(state.mfaApprovalId, /^MFA-LOCAL-/);
   state = applyLocalDeliveryAction(state, "advance");
+  assert.equal(state.stage, "STEAM_REINSTALL_E2E");
+  assert.throws(() => applyLocalDeliveryAction(state, "advance"), /本机执行服务/);
+  state = recordLocalSteamReinstall(state, steamEvidence(state));
   assert.match(state.steamBuildId, /^BUILD-LOCAL-/);
-  state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
   assert.equal(state.externalGate, "VALVE_REVIEW");
   state = applyLocalDeliveryAction(state, "external-approve");
@@ -257,10 +291,10 @@ test("local Steam reinstall failure clears Beta authority before human revision"
   assert.equal(state.stage, "STEAM_REINSTALL_E2E");
   assert.equal(state.steamBranch, "local-password-beta");
   assert.match(state.mfaApprovalId, /^MFA-LOCAL-/);
-  assert.match(state.steamBuildId, /^BUILD-LOCAL-/);
+  assert.equal(state.steamBuildId, null);
   assert.match(state.steamReleaseId, /^RELEASE-LOCAL-/);
 
-  state = applyLocalDeliveryAction(state, "steam-reinstall-fail");
+  state = recordLocalSteamReinstall(state, steamEvidence(state, false));
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
   assert.equal(state.repairHandoff.reason, "STEAM_INSTALL_FAILURE");
   assert.equal(state.repairHandoff.baselineMainSha, "a".repeat(40));
@@ -268,9 +302,31 @@ test("local Steam reinstall failure clears Beta authority before human revision"
   assert.equal(state.mfaApprovalId, null);
   assert.equal(state.steamBuildId, null);
   assert.equal(state.steamReleaseId, null);
+  assert.equal(state.steamReinstall.valid, false);
+  assert.equal(state.repairHandoff.evidenceId, "EV-STEAM-112233445566");
   assert.deepEqual(state.externalApprovals, []);
   assert.equal(state.events[0].type, "STEAM_REINSTALL_FAILED");
   assert.match(state.events[0].message, /旧发布权限已撤销/);
+});
+
+test("historical external approval authority without local Beta reinstall evidence fails closed", () => {
+  let state = localDeliveryAtAcceptedCandidate("project-steam-legacy");
+  state = recordLocalMainValidation(state, mainEvidence(state));
+  state = applyLocalDeliveryAction(state, "confirm-mfa");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = recordLocalSteamReinstall(state, steamEvidence(state));
+  assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
+
+  const legacy = structuredClone(state);
+  delete legacy.steamReinstall;
+  const normalized = normalizeLocalDeliverySnapshot(legacy);
+  assert.equal(normalized.stage, "STEAM_BETA_UPLOADING");
+  assert.equal(normalized.steamBuildId, null);
+  assert.equal(normalized.externalGate, null);
+  assert.deepEqual(normalized.externalApprovals, []);
+  assert.match(normalized.mfaApprovalId, /^MFA-LOCAL-/);
+  assert.equal(normalized.mainValidation.valid, true);
+  assert.throws(() => applyLocalDeliveryAction(normalized, "external-approve"), /没有外部发布批准/);
 });
 
 test("failed local validation is auditable but cannot advance the candidate gate", () => {

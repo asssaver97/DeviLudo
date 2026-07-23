@@ -2,6 +2,7 @@ import type { LocalDeliverySnapshot } from "@/lib/local-delivery/model";
 import { commandLocalDelivery, readLocalDelivery } from "@/lib/local-delivery/store";
 import { runAndSaveLocalMainValidation } from "@/lib/local-delivery/runtime-main-validation";
 import { runAndSaveLocalValidation } from "@/lib/local-delivery/runtime-validation";
+import { runAndSaveLocalSteamReinstall } from "@/lib/local-delivery/runtime-steam-reinstall";
 
 export type LocalAutomationStopReason =
   | "USER_ACCEPTANCE_REQUIRED"
@@ -12,6 +13,7 @@ export type LocalAutomationStopReason =
   | "LOCAL_EXPORT_TEMPLATES_REQUIRED"
   | "LOCAL_VALIDATION_FAILED"
   | "LOCAL_MAIN_VALIDATION_FAILED"
+  | "LOCAL_STEAM_REINSTALL_FAILED"
   | "PHYSICAL_RUNNERS_REQUIRED"
   | "TERMINAL";
 
@@ -21,11 +23,13 @@ export type LocalAutomationResult = {
   readonly automaticTransitions: number;
   readonly validationExecuted: boolean;
   readonly mainValidationExecuted: boolean;
+  readonly steamReinstallExecuted: boolean;
   readonly requiredPhysicalPlatforms: readonly ("linux" | "windows")[];
 };
 
 type ValidationRunner = typeof runAndSaveLocalValidation;
 type MainValidationRunner = typeof runAndSaveLocalMainValidation;
+type SteamReinstallRunner = typeof runAndSaveLocalSteamReinstall;
 
 /**
  * Advances only server-owned fixture stages. It deliberately cannot cross a
@@ -36,19 +40,20 @@ export async function runLocalDeliveryUntilHumanGate(
   operationKey: string,
   validationRunner: ValidationRunner = runAndSaveLocalValidation,
   mainValidationRunner: MainValidationRunner = runAndSaveLocalMainValidation,
+  steamReinstallRunner: SteamReinstallRunner = runAndSaveLocalSteamReinstall,
 ): Promise<LocalAutomationResult> {
   let snapshot = await readLocalDelivery(projectId);
   let automaticTransitions = 0;
   let validationExecuted = false;
   let mainValidationExecuted = false;
+  let steamReinstallExecuted = false;
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
     switch (snapshot.stage) {
       case "AGENT_QUEUED":
       case "AGENT_RUNNING":
       case "E2E_RUNNING":
-      case "STEAM_BETA_UPLOADING":
-      case "STEAM_REINSTALL_E2E": {
+      case "STEAM_BETA_UPLOADING": {
         const transition = await commandLocalDelivery(
           projectId,
           "advance",
@@ -56,6 +61,22 @@ export async function runLocalDeliveryUntilHumanGate(
         );
         snapshot = transition.snapshot;
         automaticTransitions += transition.replayed ? 0 : 1;
+        break;
+      }
+      case "STEAM_REINSTALL_E2E": {
+        const reinstall = await steamReinstallRunner(
+          projectId,
+          snapshot,
+          `${operationKey}:steam-reinstall:${snapshot.revision}`,
+        );
+        snapshot = reinstall.snapshot;
+        steamReinstallExecuted = true;
+        if (snapshot.repairHandoff?.reason === "STEAM_INSTALL_FAILURE") {
+          return result(snapshot, "LOCAL_STEAM_REINSTALL_FAILED", automaticTransitions, validationExecuted, mainValidationExecuted, [], steamReinstallExecuted);
+        }
+        if (snapshot.stage !== "EXTERNAL_APPROVAL_REQUIRED") {
+          throw new Error("本地 Beta 回装没有产生可用于自动编排的终态证据");
+        }
         break;
       }
       case "CANDIDATE_READY": {
@@ -134,7 +155,7 @@ export async function runLocalDeliveryUntilHumanGate(
       case "MFA_REQUIRED":
         return result(snapshot, "MFA_REQUIRED", automaticTransitions, validationExecuted, mainValidationExecuted);
       case "EXTERNAL_APPROVAL_REQUIRED":
-        return result(snapshot, "EXTERNAL_APPROVAL_REQUIRED", automaticTransitions, validationExecuted, mainValidationExecuted);
+        return result(snapshot, "EXTERNAL_APPROVAL_REQUIRED", automaticTransitions, validationExecuted, mainValidationExecuted, [], steamReinstallExecuted);
       case "WAITING_PROVIDER":
         return result(snapshot, "WAITING_PROVIDER", automaticTransitions, validationExecuted, mainValidationExecuted);
       case "AWAITING_SPEC_APPROVAL":
@@ -157,6 +178,15 @@ function result(
   validationExecuted: boolean,
   mainValidationExecuted: boolean,
   requiredPhysicalPlatforms: readonly ("linux" | "windows")[] = [],
+  steamReinstallExecuted = false,
 ): LocalAutomationResult {
-  return { snapshot, stopReason, automaticTransitions, validationExecuted, mainValidationExecuted, requiredPhysicalPlatforms };
+  return {
+    snapshot,
+    stopReason,
+    automaticTransitions,
+    validationExecuted,
+    mainValidationExecuted,
+    steamReinstallExecuted,
+    requiredPhysicalPlatforms,
+  };
 }

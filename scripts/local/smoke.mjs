@@ -1134,10 +1134,40 @@ try {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-release-beta-auto" },
     body: "{}",
-  });
+  }, 60_000);
   const releaseBetaPayload = await releaseBeta.response.json();
-  if (!releaseBeta.response.ok || releaseBetaPayload.data?.stage !== "EXTERNAL_APPROVAL_REQUIRED") {
+  const steamReinstall = releaseBetaPayload.data?.steamReinstall;
+  if (!releaseBeta.response.ok || releaseBetaPayload.data?.stage !== "EXTERNAL_APPROVAL_REQUIRED"
+    || releaseBetaPayload.meta?.steamReinstallExecuted !== true
+    || steamReinstall?.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
+    || steamReinstall?.mainEvidenceId !== mainManifestPayload.evidenceId
+    || steamReinstall?.mainSha !== mainManifestPayload.mainSha
+    || steamReinstall?.mainArtifactSha256 !== mainBuildBinding.sha256
+    || steamReinstall?.mfaApprovalId !== releaseBetaPayload.data?.mfaApprovalId
+    || steamReinstall?.betaArtifact?.fileName !== "DeviLudoLocalBeta.zip") {
     throw new Error("local release did not stop at ordered external approvals");
+  }
+  const [steamManifest, steamLog, steamBuild] = await Promise.all([
+    request(baseUrl, `/api/projects/${smokeReleaseProject}/steam-reinstall/evidence/manifest.json`),
+    request(baseUrl, `/api/projects/${smokeReleaseProject}/steam-reinstall/evidence/reinstall.log`),
+    request(baseUrl, `/api/projects/${smokeReleaseProject}/steam-reinstall/artifact/${steamReinstall.betaArtifact.fileName}`, {}, 30_000),
+  ]);
+  const steamManifestPayload = await steamManifest.response.json();
+  const steamLogText = await steamLog.response.text();
+  const steamBuildBytes = Buffer.from(await steamBuild.response.arrayBuffer());
+  const { evidenceId: steamEvidenceId, bundleDigest: steamBundleDigest, ...steamUnsigned } = steamManifestPayload;
+  if (!steamManifest.response.ok || !steamLog.response.ok || !steamBuild.response.ok
+    || steamEvidenceId !== steamReinstall.evidenceId
+    || steamBundleDigest !== steamReinstall.bundleDigest
+    || createHash("sha256").update(JSON.stringify(steamUnsigned)).digest("hex") !== steamBundleDigest
+    || steamManifestPayload.artifactDigests?.["reinstall.log"] !== createHash("sha256").update(steamLogText).digest("hex")
+    || !steamLogText.includes("No Steam endpoint or credential was used")
+    || !steamLogText.includes("$ <exported-app> --headless --quit-after 120")
+    || steamBuild.response.headers.get("x-deviludo-artifact-sha256") !== steamReinstall.betaArtifact.sha256
+    || steamBuildBytes.byteLength !== steamReinstall.betaArtifact.sizeBytes
+    || createHash("sha256").update(steamBuildBytes).digest("hex") !== steamReinstall.betaArtifact.sha256
+    || !steamBuildBytes.equals(mainBuildBytes)) {
+    throw new Error("local Beta clean reinstall evidence or artifact binding is invalid");
   }
   const releaseActions = ["external-approve", "external-approve", "external-approve"];
   let completedRelease;
@@ -1299,6 +1329,7 @@ try {
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
   console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);
   console.log(`✓ Actual main gate ${releaseMainGate.response.status} (${releaseMainGate.elapsedMs}ms) · ${releaseMainGatePayload.data.mainSha.slice(0, 12)} + manifest-bound build`);
+  console.log(`✓ Local Beta reinstall ${releaseBeta.response.status} (${releaseBeta.elapsedMs}ms) · immutable package + clean launch, no Steam call`);
   console.log(`✓ Physical Runner gate ${codexPhysicalRunnerGate.response.status} (${codexPhysicalRunnerGate.elapsedMs}ms) · macOS evidence cannot pass Linux`);
   console.log(`✓ Dual Agent lock   Claude Code released · Codex CLI safely stopped at Linux Runner gate`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);

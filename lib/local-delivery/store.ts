@@ -6,11 +6,13 @@ import {
   normalizeLocalDeliverySnapshot,
   recordLocalAgentExecution,
   recordLocalMainValidation,
+  recordLocalSteamReinstall,
   recordLocalValidation,
   type LocalDeliveryAction,
   type LocalDeliverySnapshot,
   type LocalLockedAgentProfile,
   type LocalMainValidationSnapshot,
+  type LocalSteamReinstallSnapshot,
   type LocalTargetPlatform,
   type LocalValidationSnapshot,
 } from "./model";
@@ -31,6 +33,7 @@ export type LocalAutomationCommandResult = {
   readonly automaticTransitions: number;
   readonly validationExecuted: boolean;
   readonly mainValidationExecuted: boolean;
+  readonly steamReinstallExecuted: boolean;
   readonly requiredPhysicalPlatforms: readonly ("linux" | "windows")[];
 };
 
@@ -282,6 +285,14 @@ export async function saveLocalMainValidation(
   return mutate(projectId, commandKey, (current) => recordLocalMainValidation(current, validation));
 }
 
+export async function saveLocalSteamReinstall(
+  projectId: string,
+  validation: Omit<LocalSteamReinstallSnapshot, "valid">,
+  commandKey: string,
+): Promise<MutationResult> {
+  return mutate(projectId, commandKey, (current) => recordLocalSteamReinstall(current, validation));
+}
+
 export async function saveLocalAgentExecution(
   projectId: string,
   receipt: LocalAgentExecutionReceipt,
@@ -335,6 +346,7 @@ function parseAutomationResult(value: string, projectId: string): LocalAutomatio
   const parsed = JSON.parse(value) as LocalAutomationCommandResult & {
     requiredPhysicalPlatforms?: readonly ("linux" | "windows")[];
     mainValidationExecuted?: boolean;
+    steamReinstallExecuted?: boolean;
   };
   const snapshot = normalizeLocalDeliverySnapshot(parsed.snapshot);
   const requiredPhysicalPlatforms = parsed.requiredPhysicalPlatforms ?? [];
@@ -342,15 +354,22 @@ function parseAutomationResult(value: string, projectId: string): LocalAutomatio
     || ![
       "USER_ACCEPTANCE_REQUIRED", "MFA_REQUIRED", "EXTERNAL_APPROVAL_REQUIRED", "WAITING_PROVIDER",
       "SPEC_APPROVAL_REQUIRED", "LOCAL_EXPORT_TEMPLATES_REQUIRED", "LOCAL_VALIDATION_FAILED", "TERMINAL",
-      "LOCAL_MAIN_VALIDATION_FAILED", "PHYSICAL_RUNNERS_REQUIRED",
+      "LOCAL_MAIN_VALIDATION_FAILED", "LOCAL_STEAM_REINSTALL_FAILED", "PHYSICAL_RUNNERS_REQUIRED",
     ].includes(parsed.stopReason)
     || !Number.isSafeInteger(parsed.automaticTransitions) || parsed.automaticTransitions < 0
     || typeof parsed.validationExecuted !== "boolean"
     || (parsed.mainValidationExecuted !== undefined && typeof parsed.mainValidationExecuted !== "boolean")
+    || (parsed.steamReinstallExecuted !== undefined && typeof parsed.steamReinstallExecuted !== "boolean")
     || !Array.isArray(requiredPhysicalPlatforms)
     || requiredPhysicalPlatforms.some((platform) => platform !== "linux" && platform !== "windows")
     || new Set(requiredPhysicalPlatforms).size !== requiredPhysicalPlatforms.length) {
     throw new Error("本地自动编排回执已损坏");
   }
-  return { ...parsed, snapshot, mainValidationExecuted: parsed.mainValidationExecuted ?? false, requiredPhysicalPlatforms };
+  return {
+    ...parsed,
+    snapshot,
+    mainValidationExecuted: parsed.mainValidationExecuted ?? false,
+    steamReinstallExecuted: parsed.steamReinstallExecuted ?? false,
+    requiredPhysicalPlatforms,
+  };
 }
