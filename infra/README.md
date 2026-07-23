@@ -157,8 +157,8 @@ The image installs production dependencies from the lockfile with lifecycle
 scripts disabled, runs as the base image's unprivileged `node` user and accepts
 no runtime arguments. `DEVILUDO_SERVICE` selects one explicitly classified
 control workload. The entrypoint fails closed when local-test authority is
-present and never admits Agent execution workers or guests, native supply-chain
-policy, Artifact Preparer, physical Runner, Godot TestKit, Steam executor,
+present and never admits Agent execution workers or guests, the privileged
+Agent supply-chain Broker or native policy, Artifact Preparer, physical Runner, Godot TestKit, Steam executor,
 signing finalizer, Steam Client connector, install services, hosted Web, or
 localhost sidecars. These external workloads require separately signed images
 and node pools. Overriding this entrypoint is therefore a deployment-policy

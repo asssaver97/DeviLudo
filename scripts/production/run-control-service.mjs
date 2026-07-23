@@ -12,7 +12,6 @@ import { runObservedService, SERVICE_ENTRYPOINTS } from "../observability/run-se
 export const CONTROL_PLANE_CONTAINER_SERVICES = Object.freeze([
   "agent-configuration",
   "agent-execution-broker",
-  "agent-supply-chain",
   "agent-worker-workflow",
   "control-plane",
   "control-plane-workflow",
@@ -46,6 +45,7 @@ export const CONTROL_PLANE_CONTAINER_SERVICES = Object.freeze([
 export const EXTERNAL_WORKLOAD_SERVICES = Object.freeze([
   "agent-execution-worker",
   "agent-microvm-guest",
+  "agent-supply-chain",
   "agent-supply-chain-native",
   "artifact-preparer",
   "godot-testkit",

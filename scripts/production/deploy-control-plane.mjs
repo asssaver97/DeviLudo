@@ -43,7 +43,6 @@ const MAX_JSON_BYTES = 1024 * 1024;
 // neither a Kubernetes Service nor a misleading TCP readiness probe.
 export const CONTROL_SERVICE_PORTS = Object.freeze({
   "agent-execution-broker": 4_746,
-  "agent-supply-chain": 4_755,
   "agent-worker-workflow": 4_200,
   "control-plane": 4_100,
   "control-plane-workflow": 4_200,
@@ -75,7 +74,6 @@ export const CONTROL_SERVICE_PORTS = Object.freeze({
 
 const CONTROL_SERVICE_PORT_ENVIRONMENT = Object.freeze({
   "agent-execution-broker": "DEVILUDO_AGENT_EXECUTION_BROKER_SERVER_PORT",
-  "agent-supply-chain": "DEVILUDO_AGENT_SUPPLY_CHAIN_SERVER_PORT",
   "agent-worker-workflow": "DEVILUDO_WORKFLOW_SERVICE_PORT",
   "control-plane": "DEVILUDO_CONTROL_PLANE_PORT",
   "control-plane-workflow": "DEVILUDO_WORKFLOW_SERVICE_PORT",

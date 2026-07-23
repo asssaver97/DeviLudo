@@ -155,10 +155,10 @@ npm run deploy:control -- \
 ```
 
 The output is a `deviludo.kubernetes-control-release.v2` bundle with three
-ordered stages: Namespace, migration, and workloads. It contains all 31 admitted
+ordered stages: Namespace, migration, and workloads. It contains all 30 admitted
 control processes by default. `--services` accepts a comma-separated allow-listed
 subset, and `--replicas` accepts 1 through 10. Agent execution, Godot/E2E,
-signing, Steam Client and local preview processes cannot be selected because they
+the privileged Agent supply-chain Broker, signing, Steam Client and local preview processes cannot be selected because they
 are not present in the shared control image. Rendering has no cluster side
 effect, but the supplied lock must cover exactly the same namespace and services.
 
