@@ -162,6 +162,35 @@ export type LocalDeliveryCancellation = {
   };
 };
 
+export type LocalFeedbackInvalidationAuthority = Readonly<
+  | {
+    schemaVersion: 1;
+    kind: "CANDIDATE";
+    projectId: string;
+    deliveryRevision: number;
+    specRevisionId: string;
+    runId: string;
+    targetMatrix: readonly LocalTargetPlatform[];
+    candidatePr: number | null;
+    candidateSha: string;
+    codeReviewReceiptId: string | null;
+    evidenceId: string | null;
+    evidenceBundleDigest: string | null;
+  }
+  | {
+    schemaVersion: 1;
+    kind: "POST_MERGE_REPAIR";
+    projectId: string;
+    deliveryRevision: number;
+    specRevisionId: string;
+    failureReason: LocalPostMergeFailure["reason"];
+    failureEvidenceId: string;
+    repairPromptId: string;
+    baselineMainSha: string;
+    previousRunId: string;
+  }
+>;
+
 export type LocalAgentVersionAttestation = {
   validationReceiptId: string;
   validationReceiptDigest: string;
@@ -619,13 +648,76 @@ function agentLabel(agent: LocalLockedAgentProfile["agent"]): string {
   return agent === "claude-code" ? "Claude Code" : "Codex CLI";
 }
 
+function hasLocalScmCandidateAuthority(current: LocalDeliverySnapshot): boolean {
+  return current.agentExecution?.valid === true
+    && current.agentExecution.candidate.scmProxy === "local-git-proxy-v1"
+    && current.agentExecution.candidate.draftPullRequest === null
+    && current.agentExecution.candidate.commitSha === current.candidateSha
+    && current.localValidation?.valid === true
+    && current.localValidation.fixtureOnly === false
+    && current.localValidation.sourceDigest === current.agentExecution.candidate.sourceDigest
+    && current.localValidation.sourceAuthority.kind === "AGENT_CANDIDATE"
+    && current.localValidation.sourceAuthority.attemptId === current.agentExecution.attemptId;
+}
+
+export function captureLocalFeedbackInvalidationAuthority(
+  current: LocalDeliverySnapshot,
+): LocalFeedbackInvalidationAuthority {
+  if (current.stage === "AWAITING_ACCEPTANCE") {
+    const candidatePr = current.candidatePr;
+    const localScmCandidate = hasLocalScmCandidateAuthority(current);
+    if (!current.runId || !(typeof candidatePr === "number" && Number.isSafeInteger(candidatePr) && candidatePr >= 1 || localScmCandidate)
+      || !current.candidateSha || current.evidenceValid !== true
+      || current.targetMatrix.some((platform) => current.targetResults[platform] !== "PASSED")
+      || (current.localValidation?.valid === true && current.localValidation.candidateSha !== current.candidateSha)) {
+      throw new Error("等待验收的候选版本缺少精确的运行、提交、SCM 候选或证据绑定");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      kind: "CANDIDATE",
+      projectId: current.projectId,
+      deliveryRevision: current.revision,
+      specRevisionId: current.specRevisionId,
+      runId: current.runId,
+      targetMatrix: Object.freeze([...current.targetMatrix]),
+      candidatePr,
+      candidateSha: current.candidateSha,
+      codeReviewReceiptId: current.agentExecution?.valid === true
+        ? current.agentExecution.codeReviewReceipt.receiptId
+        : null,
+      evidenceId: current.localValidation?.valid === true ? current.localValidation.evidenceId : null,
+      evidenceBundleDigest: current.localValidation?.valid === true ? current.localValidation.bundleDigest : null,
+    });
+  }
+  if (current.stage === "AWAITING_SPEC_APPROVAL" && current.repairHandoff) {
+    return Object.freeze({
+      schemaVersion: 1,
+      kind: "POST_MERGE_REPAIR",
+      projectId: current.projectId,
+      deliveryRevision: current.revision,
+      specRevisionId: current.specRevisionId,
+      failureReason: current.repairHandoff.reason,
+      failureEvidenceId: current.repairHandoff.evidenceId,
+      repairPromptId: current.repairHandoff.repairPromptId,
+      baselineMainSha: current.repairHandoff.baselineMainSha,
+      previousRunId: current.repairHandoff.previousRunId,
+    });
+  }
+  throw new Error("只有等待用户验收的候选版本或失败后的人工修复接管可以创建反馈修订");
+}
+
 export function invalidateLocalDelivery(
   current: LocalDeliverySnapshot,
   nextSpecRevisionId: string,
+  expectedAuthority: LocalFeedbackInvalidationAuthority = captureLocalFeedbackInvalidationAuthority(current),
 ): LocalDeliverySnapshot {
-  if (!canCreateLocalFeedback(current)) {
-    throw new Error("只有等待用户验收的候选版本或失败后的人工修复接管可以创建反馈修订");
+  const authority = captureLocalFeedbackInvalidationAuthority(current);
+  if (JSON.stringify(authority) !== JSON.stringify(expectedAuthority)) {
+    throw new Error("反馈失效权威与当前候选版本不一致");
   }
+  const authorityLabel = authority.kind === "CANDIDATE"
+    ? `${authority.candidatePr === null ? "本地 SCM 候选" : `候选 PR #${authority.candidatePr}`}、提交 ${authority.candidateSha.slice(0, 12)}${authority.evidenceId ? ` 与证据 ${authority.evidenceId}` : " 的矩阵结果"}`
+    : `${authority.failureReason === "MAIN_GATE_FAILURE" ? "main 门禁" : "Steam 回装"}失败证据 ${authority.failureEvidenceId}`;
   return event(
     {
       ...current,
@@ -652,7 +744,7 @@ export function invalidateLocalDelivery(
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
     },
     "FEEDBACK_CREATED",
-    "用户反馈已创建新规格修订，旧候选证据立即失效。",
+    `用户反馈已创建新规格修订；${authorityLabel}立即失效。`,
   );
 }
 
@@ -1191,14 +1283,21 @@ export function applyLocalDeliveryAction(
   }
 
   if (action === "accept") {
+    const localScmCandidate = hasLocalScmCandidateAuthority(current);
     if (current.stage !== "AWAITING_ACCEPTANCE"
       || current.evidenceValid !== true
-      || !Number.isSafeInteger(current.candidatePr) || (current.candidatePr ?? 0) < 1
+      || !(Number.isSafeInteger(current.candidatePr) && (current.candidatePr ?? 0) >= 1 || localScmCandidate)
       || !current.candidateSha
       || current.targetMatrix.some((platform) => current.targetResults[platform] !== "PASSED")) {
-      throw new Error("当前候选版本缺少可验收的提交、PR 或完整目标矩阵证据");
+      throw new Error("当前候选版本缺少可验收的提交、SCM 候选权威或完整目标矩阵证据");
     }
-    return event({ ...current, stage: "MERGING" }, "CANDIDATE_ACCEPTED", "用户已接受候选版本，开始合并 Draft PR。 ");
+    return event(
+      { ...current, stage: "MERGING" },
+      "CANDIDATE_ACCEPTED",
+      localScmCandidate
+        ? "用户已接受本地 SCM 候选，开始快进合并固定提交。"
+        : "用户已接受候选版本，开始合并 Draft PR。",
+    );
   }
 
   if (action === "confirm-mfa") {

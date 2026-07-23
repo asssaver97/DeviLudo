@@ -977,6 +977,15 @@ try {
   const feedbackIteration = await request(baseUrl, `/api/projects/${feedbackProject}/feedback`, feedbackRequest);
   const feedbackIterationPayload = await feedbackIteration.response.json();
   const feedbackSnapshot = feedbackIterationPayload.data?.snapshot;
+  const feedbackAuthority = feedbackIterationPayload.data?.invalidationAuthority;
+  const expectedFeedbackEvidence = [
+    validationAcceptancePayload.data?.agentExecution?.valid === true
+      ? validationAcceptancePayload.data.agentExecution.codeReviewReceipt?.receiptId
+      : null,
+    validationAcceptancePayload.data?.localValidation?.valid === true
+      ? validationAcceptancePayload.data.localValidation.evidenceId
+      : null,
+  ].filter(Boolean);
   if (feedbackIteration.response.status !== 201
     || feedbackSnapshot?.state !== "DRAFT" || feedbackSnapshot.revision !== 3
     || feedbackSnapshot.conversationId === feedbackDialoguePayload.conversationId
@@ -985,6 +994,15 @@ try {
       ? feedbackIterationPayload.data?.delivery?.localValidation?.valid !== false
       : feedbackIterationPayload.data?.delivery?.localValidation !== null)
     || feedbackIterationPayload.data?.delivery?.evidenceValid !== false
+    || feedbackAuthority?.kind !== "CANDIDATE"
+    || feedbackAuthority.projectId !== feedbackProject
+    || feedbackAuthority.deliveryRevision !== validationAcceptancePayload.data.revision
+    || feedbackAuthority.runId !== validationAcceptancePayload.data.runId
+    || feedbackAuthority.candidatePr !== validationAcceptancePayload.data.candidatePr
+    || feedbackAuthority.candidateSha !== validationAcceptancePayload.data.candidateSha
+    || JSON.stringify(feedbackAuthority.targetMatrix) !== JSON.stringify(feedbackTargetMatrix)
+    || feedbackIterationPayload.data?.candidatePullRequest !== validationAcceptancePayload.data.candidatePr
+    || JSON.stringify(feedbackIterationPayload.data?.invalidatedEvidence) !== JSON.stringify(expectedFeedbackEvidence)
     || JSON.stringify(feedbackIterationPayload.data?.delivery?.targetResults) !== JSON.stringify(
       Object.fromEntries(feedbackTargetMatrix.map((platform) => [platform, "INVALIDATED"])),
     )) {
@@ -994,7 +1012,7 @@ try {
   const feedbackReplayPayload = await feedbackReplay.response.json();
   if (feedbackReplay.response.status !== 200
     || feedbackReplayPayload.meta?.idempotentReplay !== true
-    || JSON.stringify(feedbackReplayPayload.data?.snapshot) !== JSON.stringify(feedbackSnapshot)) {
+    || JSON.stringify(feedbackReplayPayload.data) !== JSON.stringify(feedbackIterationPayload.data)) {
     throw new Error("local feedback idempotency did not replay the exact successor draft");
   }
   const iterationApproval = await request(baseUrl, `/api/projects/${feedbackProject}/spec-revisions`, {

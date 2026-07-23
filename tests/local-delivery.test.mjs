@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyLocalDeliveryAction,
   approveLocalSpec,
+  captureLocalFeedbackInvalidationAuthority,
   createLocalDelivery,
   invalidateLocalDelivery,
   normalizeLocalDeliverySnapshot,
@@ -249,12 +250,14 @@ test("a selected matrix keeps its frozen order and rejects evidence from another
 
 test("feedback invalidates all local evidence and requires a new immutable approval", () => {
   let state = approveLocalSpec(createLocalDelivery("project-feedback"), "SPEC-008", "RUN-LOCAL-2");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
   state = recordLocalValidation(state, {
     schemaVersion: 4,
     evidenceId: "EV-LOCAL-TEST",
     status: "TESTS_PASSED",
     releaseGate: "LOCAL_VALIDATION_PASSED",
-    candidateSha: "a".repeat(40),
+    candidateSha: state.candidateSha,
     sourceDigest: "b".repeat(64),
     bundleDigest: "c".repeat(64),
     godotVersion: "4.6.2.stable",
@@ -275,7 +278,26 @@ test("feedback invalidates all local evidence and requires a new immutable appro
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
   assert.equal(state.stage, "AWAITING_ACCEPTANCE");
-  state = invalidateLocalDelivery(state, "SPEC-009");
+  const authority = captureLocalFeedbackInvalidationAuthority(state);
+  assert.deepEqual(authority, {
+    schemaVersion: 1,
+    kind: "CANDIDATE",
+    projectId: "project-feedback",
+    deliveryRevision: state.revision,
+    specRevisionId: "SPEC-008",
+    runId: "RUN-LOCAL-2",
+    targetMatrix: ["linux", "windows", "macos"],
+    candidatePr: 18,
+    candidateSha: "8b7e4a2",
+    codeReviewReceiptId: null,
+    evidenceId: "EV-LOCAL-TEST",
+    evidenceBundleDigest: "c".repeat(64),
+  });
+  assert.throws(
+    () => invalidateLocalDelivery(state, "SPEC-009", { ...authority, deliveryRevision: authority.deliveryRevision + 1 }),
+    /失效权威与当前候选版本不一致/,
+  );
+  state = invalidateLocalDelivery(state, "SPEC-009", authority);
   assert.equal(state.stage, "AWAITING_SPEC_APPROVAL");
   assert.equal(state.evidenceValid, false);
   assert.deepEqual(state.targetResults, { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" });
@@ -283,6 +305,7 @@ test("feedback invalidates all local evidence and requires a new immutable appro
   assert.equal(state.candidateSha, null);
   assert.equal(state.candidatePr, null);
   assert.equal(state.localValidation.valid, false);
+  assert.match(state.events[0].message, /候选 PR #18.*EV-LOCAL-TEST.*立即失效/);
   assert.throws(() => applyLocalDeliveryAction(state, "advance"), /先批准/);
 });
 
@@ -309,7 +332,10 @@ test("local main-gate failure freezes evidence, revokes release authority and re
   ]);
   assert.throws(() => applyLocalDeliveryAction(state, "advance"), /先批准/);
 
-  state = invalidateLocalDelivery(state, "SPEC-POST-MERGE-002");
+  const repairAuthority = captureLocalFeedbackInvalidationAuthority(state);
+  assert.equal(repairAuthority.kind, "POST_MERGE_REPAIR");
+  assert.equal(repairAuthority.failureEvidenceId, state.repairHandoff.evidenceId);
+  state = invalidateLocalDelivery(state, "SPEC-POST-MERGE-002", repairAuthority);
   assert.equal(state.repairHandoff, null);
   state = approveLocalSpec(state, "SPEC-POST-MERGE-002", "RUN-project-main-failure-2");
   assert.equal(state.stage, "AGENT_QUEUED");
@@ -645,6 +671,11 @@ test("a completed Agent receipt must match every immutable lock before becoming 
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
   state = applyLocalDeliveryAction(state, "advance");
+  const localAgentAuthority = captureLocalFeedbackInvalidationAuthority(state);
+  assert.equal(localAgentAuthority.kind, "CANDIDATE");
+  assert.equal(localAgentAuthority.candidatePr, null);
+  assert.equal(localAgentAuthority.codeReviewReceiptId, receipt.codeReviewReceipt.receiptId);
+  assert.equal(applyLocalDeliveryAction(state, "accept").stage, "MERGING");
   state = invalidateLocalDelivery(state, "SPEC-013");
   assert.equal(state.agentExecution.valid, false);
 });
@@ -736,21 +767,21 @@ test("candidate acceptance revalidates the PR, commit and complete target eviden
   assert.equal(applyLocalDeliveryAction(candidate, "accept").stage, "MERGING");
   assert.throws(
     () => applyLocalDeliveryAction({ ...candidate, evidenceValid: false }, "accept"),
-    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+    /缺少可验收的提交、SCM 候选权威或完整目标矩阵证据/,
   );
   assert.throws(
     () => applyLocalDeliveryAction({ ...candidate, candidatePr: null }, "accept"),
-    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+    /缺少可验收的提交、SCM 候选权威或完整目标矩阵证据/,
   );
   assert.throws(
     () => applyLocalDeliveryAction({ ...candidate, candidateSha: null }, "accept"),
-    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+    /缺少可验收的提交、SCM 候选权威或完整目标矩阵证据/,
   );
   assert.throws(
     () => applyLocalDeliveryAction({
       ...candidate,
       targetResults: { ...candidate.targetResults, windows: "INVALIDATED" },
     }, "accept"),
-    /缺少可验收的提交、PR 或完整目标矩阵证据/,
+    /缺少可验收的提交、SCM 候选权威或完整目标矩阵证据/,
   );
 });

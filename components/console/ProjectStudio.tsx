@@ -242,6 +242,9 @@ export function ProjectStudio({
       });
       const payload = await response.json() as {
         data?: {
+          invalidationAuthority?:
+            | { kind: "CANDIDATE"; candidatePr: number | null; candidateSha: string; evidenceId: string | null }
+            | { kind: "POST_MERGE_REPAIR"; failureReason: "MAIN_GATE_FAILURE" | "STEAM_INSTALL_FAILURE"; failureEvidenceId: string };
           snapshot?: {
             conversationId: string;
             revision: number;
@@ -273,9 +276,14 @@ export function ProjectStudio({
       setApproved(false);
       setHumanRepairTakeover(false);
       setDeliveryRefresh((value) => value + 1);
-      setNotice(humanRepairTakeover
-        ? "人工修订草稿已创建；请检查并批准新规格后恢复自动开发。"
-        : "反馈已创建为新的不可变迭代；旧候选版本的测试证据已失效。");
+      const authority = payload.data?.invalidationAuthority;
+      setNotice(authority?.kind === "CANDIDATE"
+        ? `反馈已创建为新的不可变迭代；${authority.candidatePr === null ? "本地 SCM 候选" : `候选 PR #${authority.candidatePr}`}、提交 ${authority.candidateSha.slice(0, 12)}${authority.evidenceId ? ` 与证据 ${authority.evidenceId}` : " 的矩阵结果"}已失效。`
+        : authority?.kind === "POST_MERGE_REPAIR"
+          ? `${authority.failureReason === "MAIN_GATE_FAILURE" ? "main 门禁" : "Steam 回装"}失败证据 ${authority.failureEvidenceId} 已绑定到人工修订草稿；批准后恢复自动开发。`
+          : humanRepairTakeover
+            ? "人工修订草稿已创建；请检查并批准新规格后恢复自动开发。"
+            : "反馈已创建为新的不可变迭代；旧候选版本的测试证据已失效。");
     } catch (reason) {
       setNotice(reason instanceof Error ? `反馈失败：${reason.message}` : "创建反馈迭代失败");
     } finally {

@@ -14,6 +14,7 @@ import {
   type LocalDeliveryCancellation,
   type LocalDeliverySnapshot,
   type LocalExternalApprovalEvidenceSnapshot,
+  type LocalFeedbackInvalidationAuthority,
   type LocalLockedAgentProfile,
   type LocalMainValidationSnapshot,
   type LocalSteamReinstallSnapshot,
@@ -475,11 +476,12 @@ export async function invalidateLocalEvidence(
   projectId: string,
   nextSpecRevisionId: string,
   commandKey: string,
+  authority: LocalFeedbackInvalidationAuthority,
 ): Promise<MutationResult> {
   return mutate(
     projectId,
     commandKey,
-    (current) => invalidateLocalDelivery(current, nextSpecRevisionId),
+    (current) => invalidateLocalDelivery(current, nextSpecRevisionId, authority),
     nextSpecRevisionId,
   );
 }
