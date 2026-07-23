@@ -7,6 +7,7 @@ import {
   invalidateLocalDelivery,
   normalizeLocalDeliverySnapshot,
   recordLocalAgentExecution,
+  recordLocalExternalApproval,
   recordLocalMainValidation,
   recordLocalSteamReinstall,
   recordLocalValidation,
@@ -88,6 +89,36 @@ function steamEvidence(state, passed = true) {
   };
 }
 
+function approvalEvidence(state) {
+  const sequence = state.externalApprovalEvidence.length + 1;
+  const gate = ["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"][sequence - 1];
+  const observedState = ["LOCAL_VALVE_REVIEW_CONFIRMED", "LOCAL_FIRST_RELEASE_CONFIRMED", "LOCAL_DEFAULT_BRANCH_CONFIRMED"][sequence - 1];
+  const suffix = ["AABBCCDDEEFF", "112233445566", "778899AABBCC"][sequence - 1];
+  return {
+    schemaVersion: 1,
+    phase: "LOCAL_EXTERNAL_APPROVAL",
+    localOnly: true,
+    evidenceId: `EV-APPROVAL-${suffix}`,
+    bundleDigest: String(sequence).repeat(64),
+    projectId: state.projectId,
+    runId: state.runId,
+    specRevisionId: state.specRevisionId,
+    targetMatrix: ["macos"],
+    mainSha: state.mainSha,
+    steamBuildId: state.steamBuildId,
+    steamReinstallEvidenceId: state.steamReinstall.evidenceId,
+    steamReinstallBundleDigest: state.steamReinstall.bundleDigest,
+    gate,
+    sequence,
+    previousApprovalEvidenceId: state.externalApprovalEvidence.at(-1)?.evidenceId ?? null,
+    approvalId: `APPROVAL-LOCAL-${suffix}`,
+    observedState,
+    status: "APPROVED",
+    checks: [{ name: "authority-binding", status: "PASSED", durationMs: 0, detail: "bound" }],
+    createdAt: `2026-07-23T00:0${sequence + 2}:00.000Z`,
+  };
+}
+
 function localDeliveryAtAcceptedCandidate(projectId) {
   const initial = createLocalDelivery(projectId);
   let state = approveLocalSpec(initial, "SPEC-POST-MERGE-001", `RUN-${projectId}`, initial.lockedProfile, ["macos"]);
@@ -137,20 +168,22 @@ test("local delivery fixture exercises the complete gated chain without external
   assert.match(state.steamBuildId, /^BUILD-LOCAL-/);
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
   assert.equal(state.externalGate, "VALVE_REVIEW");
-  state = applyLocalDeliveryAction(state, "external-approve");
+  state = recordLocalExternalApproval(state, approvalEvidence(state));
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
   assert.equal(state.externalGate, "FIRST_RELEASE");
-  assert.deepEqual(state.externalApprovals, ["LOCAL_VALVE_REVIEW_APPROVED"]);
-  state = applyLocalDeliveryAction(state, "external-approve");
+  assert.deepEqual(state.externalApprovals, ["APPROVAL-LOCAL-AABBCCDDEEFF"]);
+  state = recordLocalExternalApproval(state, approvalEvidence(state));
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
   assert.equal(state.externalGate, "DEFAULT_BRANCH_CONFIRMATION");
-  assert.deepEqual(state.externalApprovals, ["LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED"]);
-  state = applyLocalDeliveryAction(state, "external-approve");
+  assert.deepEqual(state.externalApprovals, ["APPROVAL-LOCAL-AABBCCDDEEFF", "APPROVAL-LOCAL-112233445566"]);
+  state = recordLocalExternalApproval(state, approvalEvidence(state));
   assert.equal(state.stage, "RELEASED");
   assert.equal(state.externalGate, null);
   assert.deepEqual(state.externalApprovals, [
-    "LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED", "LOCAL_DEFAULT_BRANCH_CONFIRMED",
+    "APPROVAL-LOCAL-AABBCCDDEEFF", "APPROVAL-LOCAL-112233445566", "APPROVAL-LOCAL-778899AABBCC",
   ]);
+  assert.equal(state.externalApprovalEvidence.length, 3);
+  assert.equal(state.externalApprovalEvidence[2].previousApprovalEvidenceId, state.externalApprovalEvidence[1].evidenceId);
   assert.match(state.events[0].message, /未调用真实 Steam/);
 });
 
@@ -318,6 +351,9 @@ test("historical external approval authority without local Beta reinstall eviden
   assert.equal(state.stage, "EXTERNAL_APPROVAL_REQUIRED");
 
   const legacy = structuredClone(state);
+  legacy.externalApprovals = ["LOCAL_VALVE_REVIEW_APPROVED"];
+  legacy.externalGate = "FIRST_RELEASE";
+  delete legacy.externalApprovalEvidence;
   delete legacy.steamReinstall;
   const normalized = normalizeLocalDeliverySnapshot(legacy);
   assert.equal(normalized.stage, "STEAM_BETA_UPLOADING");
@@ -326,7 +362,25 @@ test("historical external approval authority without local Beta reinstall eviden
   assert.deepEqual(normalized.externalApprovals, []);
   assert.match(normalized.mfaApprovalId, /^MFA-LOCAL-/);
   assert.equal(normalized.mainValidation.valid, true);
-  assert.throws(() => applyLocalDeliveryAction(normalized, "external-approve"), /没有外部发布批准/);
+  assert.deepEqual(normalized.externalApprovalEvidence, []);
+  assert.throws(() => applyLocalDeliveryAction(normalized, "external-approve"), /不支持/);
+});
+
+test("historical approval strings without authority manifests rewind to the first external gate", () => {
+  let state = localDeliveryAtAcceptedCandidate("project-approval-legacy");
+  state = recordLocalMainValidation(state, mainEvidence(state));
+  state = applyLocalDeliveryAction(state, "confirm-mfa");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = recordLocalSteamReinstall(state, steamEvidence(state));
+  const legacy = structuredClone(state);
+  legacy.externalApprovals = ["LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED"];
+  legacy.externalGate = "DEFAULT_BRANCH_CONFIRMATION";
+  delete legacy.externalApprovalEvidence;
+  const normalized = normalizeLocalDeliverySnapshot(legacy);
+  assert.equal(normalized.stage, "EXTERNAL_APPROVAL_REQUIRED");
+  assert.equal(normalized.externalGate, "VALVE_REVIEW");
+  assert.deepEqual(normalized.externalApprovals, []);
+  assert.deepEqual(normalized.externalApprovalEvidence, []);
 });
 
 test("failed local validation is auditable but cannot advance the candidate gate", () => {

@@ -19,7 +19,6 @@ const actions = new Set<LocalDeliveryAction>([
   "confirm-mfa",
   "main-gate-fail",
   "steam-reinstall-fail",
-  "external-approve",
   "cancel",
   "reset",
 ]);

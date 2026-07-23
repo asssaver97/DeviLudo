@@ -79,7 +79,7 @@ type ProductionProjection = {
   readonly snapshotDigest: string;
 };
 
-type LocalPanelAction = LocalDeliveryAction | "auto";
+type LocalPanelAction = LocalDeliveryAction | "auto" | "external-approve";
 
 function primaryAction(stage: LocalDeliveryStage, externalApprovalCount = 0): { action: LocalPanelAction; label: string } | null {
   if (stage === "AWAITING_SPEC_APPROVAL" || stage === "RELEASED" || stage === "CANCELLED") return null;
@@ -215,6 +215,28 @@ export function LocalDeliveryPanel({
       if (!automatic.ok) throw new Error(automatic.message ?? "自动交付链路已暂停");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "自动交付链路已暂停");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runExternalApproval() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/external-approvals`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `local-external-approval-${snapshot?.externalApprovalEvidence.length ?? 0}-${crypto.randomUUID()}`,
+        },
+        body: "{}",
+      });
+      const payload = await response.json() as { data?: LocalDeliverySnapshot; error?: { message?: string } };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "本地外部批准证据生成失败");
+      publish(payload.data);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "本地外部批准证据生成失败");
     } finally {
       setBusy(false);
     }
@@ -488,15 +510,22 @@ export function LocalDeliveryPanel({
                 <p>本地按钮只模拟这一道门禁；生产环境必须由白名单 mTLS Steam 验证连接器提交摘要证据。</p>
               </div>
               <div className="local-real-validation-result">
-                <span>{snapshot.externalApprovals.length} / 3 已确认</span>
-                <div>BuildID {snapshot.steamBuildId ?? "本地模拟"}</div>
+                <span>{snapshot.externalApprovalEvidence.length} / 3 份权威回执</span>
+                <div>
+                  {snapshot.externalApprovalEvidence.map((evidence) => (
+                    <a key={evidence.evidenceId} href={`/api/projects/${projectId}/external-approvals/${evidence.sequence}/evidence/manifest.json`} rel="noreferrer" target="_blank">
+                      回执 {evidence.sequence}
+                    </a>
+                  ))}
+                  <span>BuildID {snapshot.steamBuildId ?? "本地模拟"}</span>
+                </div>
               </div>
             </div>
           ) : null}
 
           <div className="local-delivery-actions">
             <div>
-              {action ? <button className="button button-acid" disabled={busy} onClick={() => action.action === "auto" ? runAutomatic() : runAction(action.action)} type="button">{action.label}</button> : null}
+              {action ? <button className="button button-acid" disabled={busy} onClick={() => action.action === "auto" ? runAutomatic() : action.action === "external-approve" ? runExternalApproval() : runAction(action.action)} type="button">{action.label}</button> : null}
               {snapshot.stage === "AGENT_QUEUED" || snapshot.stage === "AGENT_RUNNING" ? (
                 <button className="button button-secondary" disabled={busy} onClick={() => runAction("provider-fail")} type="button">模拟 Provider 故障</button>
               ) : null}

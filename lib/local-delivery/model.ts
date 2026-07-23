@@ -119,6 +119,31 @@ export type LocalSteamReinstallSnapshot = {
   valid: boolean;
 };
 
+export type LocalExternalApprovalEvidenceSnapshot = {
+  schemaVersion: 1;
+  phase: "LOCAL_EXTERNAL_APPROVAL";
+  localOnly: true;
+  evidenceId: string;
+  bundleDigest: string;
+  projectId: string;
+  runId: string;
+  specRevisionId: string;
+  targetMatrix: readonly ["macos"];
+  mainSha: string;
+  steamBuildId: string;
+  steamReinstallEvidenceId: string;
+  steamReinstallBundleDigest: string;
+  gate: LocalExternalApprovalGate;
+  sequence: 1 | 2 | 3;
+  previousApprovalEvidenceId: string | null;
+  approvalId: string;
+  observedState: "LOCAL_VALVE_REVIEW_CONFIRMED" | "LOCAL_FIRST_RELEASE_CONFIRMED" | "LOCAL_DEFAULT_BRANCH_CONFIRMED";
+  status: "APPROVED";
+  checks: readonly [{ name: "authority-binding"; status: "PASSED"; durationMs: number; detail: string }];
+  createdAt: string;
+  valid: boolean;
+};
+
 export type LocalAgentExecutionSnapshot = LocalAgentExecutionReceipt & { readonly valid: boolean };
 
 export type LocalAgentVersionAttestation = {
@@ -195,6 +220,7 @@ export type LocalDeliverySnapshot = {
   steamReleaseId: string | null;
   externalGate: LocalExternalApprovalGate | null;
   externalApprovals: readonly string[];
+  externalApprovalEvidence: readonly LocalExternalApprovalEvidenceSnapshot[];
   repairHandoff: LocalPostMergeFailure | null;
   agentExecution: LocalAgentExecutionSnapshot | null;
   localValidation: LocalValidationSnapshot | null;
@@ -212,7 +238,6 @@ export type LocalDeliveryAction =
   | "confirm-mfa"
   | "main-gate-fail"
   | "steam-reinstall-fail"
-  | "external-approve"
   | "cancel"
   | "reset";
 
@@ -259,6 +284,12 @@ const profile = {
 
 const DEFAULT_TARGET_MATRIX = Object.freeze(["linux", "windows", "macos"] as const);
 const TARGET_PLATFORM_ORDER = Object.freeze(["linux", "windows", "macos"] as const);
+const EXTERNAL_APPROVAL_GATES = Object.freeze(["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const);
+const EXTERNAL_APPROVAL_STATES = Object.freeze([
+  "LOCAL_VALVE_REVIEW_CONFIRMED",
+  "LOCAL_FIRST_RELEASE_CONFIRMED",
+  "LOCAL_DEFAULT_BRANCH_CONFIRMED",
+] as const);
 
 /** Add newly locked fields when reading an older localhost JSON snapshot. */
 export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
@@ -386,6 +417,44 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   const rewindForSteamEvidence = !rewindReleaseAuthority
     && ["EXTERNAL_APPROVAL_REQUIRED", "RELEASED"].includes(snapshot.stage)
     && steamReinstall?.valid !== true;
+  const historicalApprovalEvidence = snapshot.externalApprovalEvidence ?? [];
+  const normalizedApprovalEvidence: LocalExternalApprovalEvidenceSnapshot[] = [];
+  let previousApprovalEvidenceId: string | null = null;
+  for (let index = 0; index < Math.min(historicalApprovalEvidence.length, 3); index += 1) {
+    const historical = historicalApprovalEvidence[index]!;
+    const valid = !rewindReleaseAuthority && !rewindForSteamEvidence
+      && historical.valid === true
+      && historical.schemaVersion === 1
+      && historical.phase === "LOCAL_EXTERNAL_APPROVAL"
+      && historical.localOnly === true
+      && historical.projectId === snapshot.projectId
+      && historical.runId === snapshot.runId
+      && historical.specRevisionId === snapshot.specRevisionId
+      && sameTargetMatrix(historical.targetMatrix, ["macos"])
+      && historical.mainSha === snapshot.mainSha
+      && historical.steamBuildId === snapshot.steamBuildId
+      && historical.steamReinstallEvidenceId === steamReinstall?.evidenceId
+      && historical.steamReinstallBundleDigest === steamReinstall?.bundleDigest
+      && historical.gate === EXTERNAL_APPROVAL_GATES[index]
+      && historical.sequence === index + 1
+      && historical.previousApprovalEvidenceId === previousApprovalEvidenceId
+      && historical.approvalId === snapshot.externalApprovals?.[index]
+      && historical.observedState === EXTERNAL_APPROVAL_STATES[index]
+      && historical.status === "APPROVED"
+      && /^EV-APPROVAL-[A-F0-9]{12}$/.test(historical.evidenceId)
+      && /^[a-f0-9]{64}$/.test(historical.bundleDigest)
+      && /^APPROVAL-LOCAL-[A-F0-9]{12}$/.test(historical.approvalId)
+      && historical.checks.length === 1
+      && historical.checks[0]?.name === "authority-binding"
+      && historical.checks[0]?.status === "PASSED";
+    normalizedApprovalEvidence.push({ ...historical, valid });
+    if (!valid) break;
+    previousApprovalEvidenceId = historical.evidenceId;
+  }
+  const validApprovalEvidence = normalizedApprovalEvidence.filter((evidence) => evidence.valid);
+  const inExternalReleaseStages = ["EXTERNAL_APPROVAL_REQUIRED", "RELEASED"].includes(snapshot.stage);
+  const derivedExternalStage: LocalDeliveryStage = validApprovalEvidence.length === 3 ? "RELEASED" : "EXTERNAL_APPROVAL_REQUIRED";
+  const derivedExternalGate = EXTERNAL_APPROVAL_GATES[validApprovalEvidence.length] ?? null;
 
   return {
     ...snapshot,
@@ -393,7 +462,8 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     targetResults: rewindForBuildEvidence ? createTargetResults(targetMatrix, "QUEUED") : targetResults,
     stage: rewindForBuildEvidence ? "CANDIDATE_READY"
       : rewindForMainEvidence ? "MERGING"
-        : rewindForSteamEvidence ? "STEAM_BETA_UPLOADING" : snapshot.stage,
+        : rewindForSteamEvidence ? "STEAM_BETA_UPLOADING"
+          : inExternalReleaseStages ? derivedExternalStage : snapshot.stage,
     evidenceValid: rewindForBuildEvidence ? false : snapshot.evidenceValid,
     mainSha: rewindReleaseAuthority ? null : snapshot.mainSha,
     steamBranch: rewindReleaseAuthority ? null : snapshot.steamBranch,
@@ -402,10 +472,12 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     mfaApprovalId: rewindReleaseAuthority ? null : snapshot.mfaApprovalId ?? null,
     steamBuildId: rewindReleaseAuthority || rewindForSteamEvidence ? null : snapshot.steamBuildId ?? null,
     steamReleaseId: rewindReleaseAuthority ? null : snapshot.steamReleaseId ?? null,
-    externalApprovals: rewindReleaseAuthority || rewindForSteamEvidence ? [] : snapshot.externalApprovals ?? [],
-    externalGate: rewindReleaseAuthority || rewindForSteamEvidence ? null : snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
-      ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
-      : null),
+    externalApprovals: rewindReleaseAuthority || rewindForSteamEvidence ? []
+      : inExternalReleaseStages ? validApprovalEvidence.map((evidence) => evidence.approvalId) : snapshot.externalApprovals ?? [],
+    externalApprovalEvidence: rewindReleaseAuthority || rewindForSteamEvidence ? []
+      : inExternalReleaseStages ? validApprovalEvidence : normalizedApprovalEvidence,
+    externalGate: rewindReleaseAuthority || rewindForSteamEvidence ? null
+      : inExternalReleaseStages ? derivedExternalGate : snapshot.externalGate ?? null,
     localValidation,
     mainValidation: rewindForBuildEvidence ? null : mainValidation,
     steamReinstall: rewindReleaseAuthority ? null : steamReinstall,
@@ -452,6 +524,7 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     steamReleaseId: null,
     externalGate: null,
     externalApprovals: [],
+    externalApprovalEvidence: [],
     repairHandoff: null,
     agentExecution: null,
     localValidation: null,
@@ -490,6 +563,7 @@ export function approveLocalSpec(
       steamReleaseId: null,
       externalGate: null,
       externalApprovals: [],
+      externalApprovalEvidence: [],
       repairHandoff: null,
       agentExecution: null,
       localValidation: null,
@@ -543,6 +617,7 @@ export function invalidateLocalDelivery(
       steamReleaseId: null,
       externalGate: null,
       externalApprovals: [],
+      externalApprovalEvidence: current.externalApprovalEvidence.map((evidence) => ({ ...evidence, valid: false })),
       repairHandoff: null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
       mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
@@ -820,8 +895,60 @@ export function recordLocalSteamReinstall(
     steamBuildId: validation.buildId,
     externalGate: "VALVE_REVIEW",
     externalApprovals: [],
+    externalApprovalEvidence: [],
     steamReinstall,
   }, "STEAM_REINSTALL_PASSED", "本地 Beta 包已完成摘要复核、隔离回装与实际启动；未连接 Steam，继续等待外部批准演练。 ");
+}
+
+export function recordLocalExternalApproval(
+  current: LocalDeliverySnapshot,
+  evidence: Omit<LocalExternalApprovalEvidenceSnapshot, "valid">,
+): LocalDeliverySnapshot {
+  const sequence = current.externalApprovalEvidence.length + 1;
+  const expectedGate = EXTERNAL_APPROVAL_GATES[sequence - 1];
+  const expectedState = EXTERNAL_APPROVAL_STATES[sequence - 1];
+  const previousEvidenceId = current.externalApprovalEvidence.at(-1)?.evidenceId ?? null;
+  if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED" || !current.externalGate || !expectedGate
+    || !current.runId || !current.mainSha || !current.steamBuildId
+    || current.externalGate !== expectedGate
+    || !current.steamReinstall?.valid
+    || current.steamReinstall.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
+    || current.steamBuildId !== current.steamReinstall.buildId) {
+    throw new Error("当前没有可由权威回执确认的外部发布门禁");
+  }
+  if (evidence.schemaVersion !== 1 || evidence.phase !== "LOCAL_EXTERNAL_APPROVAL" || evidence.localOnly !== true
+    || evidence.projectId !== current.projectId || evidence.runId !== current.runId
+    || evidence.specRevisionId !== current.specRevisionId || !sameTargetMatrix(evidence.targetMatrix, ["macos"])
+    || evidence.mainSha !== current.mainSha || evidence.steamBuildId !== current.steamBuildId
+    || evidence.steamReinstallEvidenceId !== current.steamReinstall.evidenceId
+    || evidence.steamReinstallBundleDigest !== current.steamReinstall.bundleDigest
+    || evidence.gate !== expectedGate || evidence.sequence !== sequence
+    || evidence.previousApprovalEvidenceId !== previousEvidenceId
+    || evidence.observedState !== expectedState || evidence.status !== "APPROVED"
+    || !/^EV-APPROVAL-[A-F0-9]{12}$/.test(evidence.evidenceId)
+    || !/^[a-f0-9]{64}$/.test(evidence.bundleDigest)
+    || !/^APPROVAL-LOCAL-[A-F0-9]{12}$/.test(evidence.approvalId)
+    || evidence.checks.length !== 1 || evidence.checks[0]?.name !== "authority-binding"
+    || evidence.checks[0]?.status !== "PASSED") {
+    throw new Error("本地外部批准回执与 main、BuildID、回装证据或前序回执不一致");
+  }
+  const nextGate: LocalExternalApprovalGate | null = sequence === 1
+    ? "FIRST_RELEASE"
+    : sequence === 2 ? "DEFAULT_BRANCH_CONFIRMATION" : null;
+  const snapshotEvidence: LocalExternalApprovalEvidenceSnapshot = {
+    ...evidence,
+    targetMatrix: Object.freeze(["macos"] as const),
+    valid: true,
+  };
+  return event({
+    ...current,
+    stage: nextGate ? "EXTERNAL_APPROVAL_REQUIRED" : "RELEASED",
+    externalGate: nextGate,
+    externalApprovals: [...current.externalApprovals, evidence.approvalId],
+    externalApprovalEvidence: [...current.externalApprovalEvidence, snapshotEvidence],
+  }, `${expectedGate}_APPROVED`, nextGate
+    ? `本地权威回执已确认 ${expectedGate}；继续等待 ${nextGate}。`
+    : "三道本地外部批准回执已形成完整证据链；未调用真实 Steam 发布接口。");
 }
 
 function validLocalBuildArtifact(value: LocalValidationSnapshot["buildArtifact"] | undefined): value is NonNullable<LocalValidationSnapshot["buildArtifact"]> {
@@ -896,6 +1023,7 @@ export function applyLocalDeliveryAction(
         steamReleaseId: null,
         externalGate: null,
         externalApprovals: [],
+        externalApprovalEvidence: current.externalApprovalEvidence.map((evidence) => ({ ...evidence, valid: false })),
         localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,
         mainValidation: current.mainValidation ? { ...current.mainValidation, valid: false } : null,
         steamReinstall: current.steamReinstall ? { ...current.steamReinstall, valid: false } : null,
@@ -959,41 +1087,6 @@ export function applyLocalDeliveryAction(
 
   if (action === "steam-reinstall-fail") {
     return handoffLocalPostMergeFailure(current, "STEAM_INSTALL_FAILURE");
-  }
-
-  if (action === "external-approve") {
-    if (current.stage !== "EXTERNAL_APPROVAL_REQUIRED" || !current.externalGate
-      || !current.steamReinstall?.valid
-      || current.steamReinstall.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
-      || current.steamBuildId !== current.steamReinstall.buildId) {
-      throw new Error("当前没有外部发布批准待处理");
-    }
-    const transition = {
-      VALVE_REVIEW: {
-        approvalId: "LOCAL_VALVE_REVIEW_APPROVED",
-        nextGate: "FIRST_RELEASE" as const,
-        eventType: "VALVE_REVIEW_APPROVED",
-        message: "本地模拟 Valve 审核通过；继续等待首次发行操作。",
-      },
-      FIRST_RELEASE: {
-        approvalId: "LOCAL_FIRST_RELEASE_COMPLETED",
-        nextGate: "DEFAULT_BRANCH_CONFIRMATION" as const,
-        eventType: "FIRST_RELEASE_COMPLETED",
-        message: "本地模拟首次发行操作完成；继续等待默认分支手机／短信确认。",
-      },
-      DEFAULT_BRANCH_CONFIRMATION: {
-        approvalId: "LOCAL_DEFAULT_BRANCH_CONFIRMED",
-        nextGate: null,
-        eventType: "DEFAULT_BRANCH_CONFIRMED",
-        message: "本地模拟默认分支确认完成；未调用真实 Steam 发布接口。",
-      },
-    }[current.externalGate];
-    return event({
-      ...current,
-      stage: transition.nextGate ? "EXTERNAL_APPROVAL_REQUIRED" : "RELEASED",
-      externalGate: transition.nextGate,
-      externalApprovals: [...current.externalApprovals, transition.approvalId],
-    }, transition.eventType, transition.message);
   }
 
   if (action !== "advance") throw new Error("不支持的本地交付动作");
@@ -1124,6 +1217,7 @@ function handoffLocalPostMergeFailure(
       steamReleaseId: null,
       externalGate: null,
       externalApprovals: [],
+      externalApprovalEvidence: current.externalApprovalEvidence.map((evidence) => ({ ...evidence, valid: false })),
       repairHandoff,
       agentExecution: current.agentExecution ? { ...current.agentExecution, valid: false } : null,
       localValidation: current.localValidation ? { ...current.localValidation, valid: false } : null,

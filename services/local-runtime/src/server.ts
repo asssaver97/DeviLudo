@@ -4,10 +4,12 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { LocalFixtureRunner } from "./fixture-runner";
 import {
+  LocalExternalApprovalCoordinator,
   LocalMainGateCoordinator,
   LocalRuntimeRequestError,
   LocalRuntimeRunCoordinator,
   LocalSteamReinstallCoordinator,
+  parseLocalExternalApprovalRequest,
   parseLocalMainGateRequest,
   parseLocalRuntimeRequest,
   parseLocalSteamReinstallRequest,
@@ -30,6 +32,7 @@ const requestVerifier = new LocalRuntimeRequestVerifier(localRuntimeKeyFromEnvir
 const runCoordinator = new LocalRuntimeRunCoordinator();
 const mainGateCoordinator = new LocalMainGateCoordinator();
 const steamReinstallCoordinator = new LocalSteamReinstallCoordinator();
+const externalApprovalCoordinator = new LocalExternalApprovalCoordinator();
 
 const server = createServer(async (request, response) => {
   try {
@@ -98,6 +101,19 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     requestVerifier.verify({ method: "POST", path: "/v1/steam-reinstalls", body: rawBody, headers: request.headers });
     const body = parseLocalSteamReinstallRequest(rawBody);
     const operation = steamReinstallCoordinator.start(body, () => runner.runSteamReinstall(body));
+    json(response, 201, { data: await operation });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/external-approvals" && !url.search) {
+    if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      json(response, 415, { error: { code: "JSON_REQUIRED", message: "Local external approval request requires JSON" } });
+      return;
+    }
+    const rawBody = await readBody(request);
+    requestVerifier.verify({ method: "POST", path: "/v1/external-approvals", body: rawBody, headers: request.headers });
+    const body = parseLocalExternalApprovalRequest(rawBody);
+    const operation = externalApprovalCoordinator.start(body, () => runner.recordExternalApproval(body));
     json(response, 201, { data: await operation });
     return;
   }
@@ -184,6 +200,20 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     response.setHeader("cache-control", "no-store");
     response.setHeader("x-content-type-options", "nosniff");
     response.end(artifact.bytes);
+    return;
+  }
+
+  const approvalEvidenceMatch = url.pathname.match(/^\/v1\/external-approvals\/([^/]+)\/([^/]+)\/([1-3])\/evidence\/(manifest\.json)$/);
+  if (request.method === "GET" && approvalEvidenceMatch && !url.search) {
+    requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
+    const [, projectId, runId, sequence, file] = approvalEvidenceMatch;
+    const target = path.join(runner.externalApprovalEvidenceDirectory({ projectId, runId }, Number(sequence)), file);
+    await access(target);
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json; charset=utf-8");
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("x-content-type-options", "nosniff");
+    response.end(await readFile(target));
     return;
   }
 

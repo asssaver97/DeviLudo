@@ -6,6 +6,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
 import type {
+  LocalExternalApprovalEvidence,
+  LocalExternalApprovalRequest,
   LocalMainGateEvidence,
   LocalMainGateRequest,
   LocalRuntimeCheck,
@@ -128,6 +130,32 @@ export class LocalFixtureRunner {
       || sha256(JSON.stringify(unsigned)) !== bundleDigest
       || evidenceId !== `EV-STEAM-${bundleDigest.slice(0, 12).toUpperCase()}`) {
       throw new Error("Local Steam reinstall evidence digest is invalid");
+    }
+    return evidence;
+  }
+
+  externalApprovalEvidenceDirectory(
+    request: Pick<LocalRuntimeRequest, "projectId" | "runId">,
+    sequence: number,
+  ) {
+    validateIdentifier(request.projectId, "projectId");
+    validateIdentifier(request.runId, "runId");
+    if (!Number.isInteger(sequence) || sequence < 1 || sequence > 3) throw new Error("Local approval sequence is invalid");
+    return path.join(this.#storageRoot, request.projectId, request.runId, "external-approvals", String(sequence), "evidence");
+  }
+
+  async readExternalApprovalEvidence(
+    request: Pick<LocalRuntimeRequest, "projectId" | "runId">,
+    sequence: number,
+  ) {
+    const file = path.join(this.externalApprovalEvidenceDirectory(request, sequence), "manifest.json");
+    const evidence = JSON.parse(await readFile(file, "utf8")) as LocalExternalApprovalEvidence;
+    const { evidenceId, bundleDigest, ...unsigned } = evidence;
+    if (!/^EV-APPROVAL-[A-F0-9]{12}$/.test(evidenceId)
+      || !/^[a-f0-9]{64}$/.test(bundleDigest)
+      || sha256(JSON.stringify(unsigned)) !== bundleDigest
+      || evidenceId !== `EV-APPROVAL-${bundleDigest.slice(0, 12).toUpperCase()}`) {
+      throw new Error("Local external approval evidence digest is invalid");
     }
     return evidence;
   }
@@ -789,6 +817,83 @@ export class LocalFixtureRunner {
     return manifest;
   }
 
+  async recordExternalApproval(request: LocalExternalApprovalRequest): Promise<LocalExternalApprovalEvidence> {
+    validateExternalApprovalRequest(request);
+    const reinstall = await this.readSteamReinstallEvidence(request);
+    if (reinstall.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
+      || reinstall.status !== "TESTS_PASSED"
+      || reinstall.evidenceId !== request.steamReinstallEvidenceId
+      || reinstall.bundleDigest !== request.steamReinstallBundleDigest
+      || reinstall.mainSha !== request.mainSha
+      || reinstall.buildId !== request.steamBuildId
+      || reinstall.specRevisionId !== request.specRevisionId
+      || JSON.stringify(reinstall.targetMatrix) !== JSON.stringify(request.targetMatrix)) {
+      throw new Error("Local external approval does not match the passed Beta reinstall evidence");
+    }
+    if (request.sequence > 1) {
+      const previous = await this.readExternalApprovalEvidence(request, request.sequence - 1);
+      if (previous.evidenceId !== request.previousApprovalEvidenceId
+        || previous.sequence !== request.sequence - 1
+        || previous.mainSha !== request.mainSha
+        || previous.steamBuildId !== request.steamBuildId
+        || previous.steamReinstallEvidenceId !== request.steamReinstallEvidenceId) {
+        throw new Error("Local external approval chain does not match its prior evidence");
+      }
+    }
+    try {
+      const existing = await this.readExternalApprovalEvidence(request, request.sequence);
+      assertExternalApprovalEvidenceBinding(existing, request);
+      return existing;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+
+    const approvalRoot = path.dirname(this.externalApprovalEvidenceDirectory(request, request.sequence));
+    await archiveDirectory(approvalRoot);
+    const evidenceRoot = this.externalApprovalEvidenceDirectory(request, request.sequence);
+    await mkdir(evidenceRoot, { recursive: true });
+    const observedState = {
+      VALVE_REVIEW: "LOCAL_VALVE_REVIEW_CONFIRMED",
+      FIRST_RELEASE: "LOCAL_FIRST_RELEASE_CONFIRMED",
+      DEFAULT_BRANCH_CONFIRMATION: "LOCAL_DEFAULT_BRANCH_CONFIRMED",
+    }[request.gate] as LocalExternalApprovalEvidence["observedState"];
+    const approvalId = `APPROVAL-LOCAL-${sha256(JSON.stringify(request)).slice(0, 12).toUpperCase()}`;
+    const unsigned = {
+      schemaVersion: 1 as const,
+      phase: "LOCAL_EXTERNAL_APPROVAL" as const,
+      localOnly: true as const,
+      projectId: request.projectId,
+      runId: request.runId,
+      specRevisionId: request.specRevisionId,
+      targetMatrix: Object.freeze(["macos"] as const),
+      mainSha: request.mainSha,
+      steamBuildId: request.steamBuildId,
+      steamReinstallEvidenceId: request.steamReinstallEvidenceId,
+      steamReinstallBundleDigest: request.steamReinstallBundleDigest,
+      gate: request.gate,
+      sequence: request.sequence,
+      previousApprovalEvidenceId: request.previousApprovalEvidenceId,
+      approvalId,
+      observedState,
+      status: "APPROVED" as const,
+      checks: Object.freeze([{
+        name: "authority-binding" as const,
+        status: "PASSED" as const,
+        durationMs: 0,
+        detail: "Local-only confirmation is bound to the exact main SHA, BuildID, reinstall evidence and prior approval",
+      }] as const),
+      createdAt: new Date().toISOString(),
+    };
+    const bundleDigest = sha256(JSON.stringify(unsigned));
+    const manifest: LocalExternalApprovalEvidence = {
+      ...unsigned,
+      evidenceId: `EV-APPROVAL-${bundleDigest.slice(0, 12).toUpperCase()}`,
+      bundleDigest,
+    };
+    await writeFile(path.join(evidenceRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o400 });
+    return manifest;
+  }
+
   async #launchMacosArtifact(options: {
     exportPath: string;
     exportSmokeRoot: string;
@@ -922,6 +1027,22 @@ function validateSteamReinstallRequest(request: LocalSteamReinstallRequest) {
   }
 }
 
+function validateExternalApprovalRequest(request: LocalExternalApprovalRequest) {
+  validateRequest(request);
+  const expectedGate = (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[request.sequence - 1];
+  if (request.targetMatrix.length !== 1 || request.targetMatrix[0] !== "macos"
+    || !/^[a-f0-9]{40}$/.test(request.mainSha)
+    || !/^BUILD-LOCAL-[A-F0-9]{12}$/.test(request.steamBuildId)
+    || !/^EV-STEAM-[A-F0-9]{12}$/.test(request.steamReinstallEvidenceId)
+    || !/^[a-f0-9]{64}$/.test(request.steamReinstallBundleDigest)
+    || !Number.isInteger(request.sequence) || request.sequence < 1 || request.sequence > 3
+    || request.gate !== expectedGate
+    || (request.sequence === 1 ? request.previousApprovalEvidenceId !== null
+      : !/^EV-APPROVAL-[A-F0-9]{12}$/.test(request.previousApprovalEvidenceId ?? ""))) {
+    throw new Error("Local external approval binding is invalid");
+  }
+}
+
 function assertEvidenceBinding(evidence: LocalRuntimeEvidence, request: LocalRuntimeRequest) {
   if (evidence.schemaVersion !== 4) throw new StaleLocalEvidenceError();
   if (evidence.projectId !== request.projectId
@@ -967,6 +1088,32 @@ function assertSteamReinstallEvidenceBinding(
     || evidence.mainArtifactSha256 !== request.mainArtifactSha256
     || evidence.mfaApprovalId !== request.mfaApprovalId) {
     throw new Error("Stored local Steam reinstall evidence does not match its immutable request");
+  }
+}
+
+function assertExternalApprovalEvidenceBinding(
+  evidence: LocalExternalApprovalEvidence,
+  request: LocalExternalApprovalRequest,
+) {
+  if (evidence.schemaVersion !== 1
+    || evidence.phase !== "LOCAL_EXTERNAL_APPROVAL"
+    || evidence.localOnly !== true
+    || evidence.projectId !== request.projectId
+    || evidence.runId !== request.runId
+    || evidence.specRevisionId !== request.specRevisionId
+    || JSON.stringify(evidence.targetMatrix) !== JSON.stringify(request.targetMatrix)
+    || evidence.mainSha !== request.mainSha
+    || evidence.steamBuildId !== request.steamBuildId
+    || evidence.steamReinstallEvidenceId !== request.steamReinstallEvidenceId
+    || evidence.steamReinstallBundleDigest !== request.steamReinstallBundleDigest
+    || evidence.gate !== request.gate
+    || evidence.sequence !== request.sequence
+    || evidence.previousApprovalEvidenceId !== request.previousApprovalEvidenceId
+    || evidence.status !== "APPROVED"
+    || evidence.checks.length !== 1
+    || evidence.checks[0]?.name !== "authority-binding"
+    || evidence.checks[0]?.status !== "PASSED") {
+    throw new Error("Stored local external approval evidence does not match its immutable request");
   }
 }
 

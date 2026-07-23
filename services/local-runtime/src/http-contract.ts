@@ -1,4 +1,9 @@
-import type { LocalMainGateRequest, LocalRuntimeRequest, LocalSteamReinstallRequest } from "./contracts";
+import type {
+  LocalExternalApprovalRequest,
+  LocalMainGateRequest,
+  LocalRuntimeRequest,
+  LocalSteamReinstallRequest,
+} from "./contracts";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/;
 const TARGET_PLATFORMS = new Set(["linux", "windows", "macos"]);
@@ -18,6 +23,16 @@ const STEAM_REINSTALL_REQUEST_KEYS = [
   "mainSourceDigest",
   "mainArtifactSha256",
   "mfaApprovalId",
+];
+const EXTERNAL_APPROVAL_REQUEST_KEYS = [
+  ...REQUEST_KEYS,
+  "mainSha",
+  "steamBuildId",
+  "steamReinstallEvidenceId",
+  "steamReinstallBundleDigest",
+  "gate",
+  "sequence",
+  "previousApprovalEvidenceId",
 ];
 
 export class LocalRuntimeRequestError extends Error {
@@ -113,6 +128,29 @@ export function parseLocalSteamReinstallRequest(rawBody: Buffer): LocalSteamRein
   return body as LocalSteamReinstallRequest;
 }
 
+export function parseLocalExternalApprovalRequest(rawBody: Buffer): LocalExternalApprovalRequest {
+  const body = parseObject(rawBody, "Local external approval request");
+  const expectedGate = ["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"][Number(body.sequence) - 1];
+  if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify([...EXTERNAL_APPROVAL_REQUEST_KEYS].sort())
+    || !validIdentifier(body.projectId)
+    || !validIdentifier(body.runId)
+    || !validIdentifier(body.specRevisionId)
+    || !validTargetMatrix(body.targetMatrix)
+    || body.targetMatrix.length !== 1
+    || body.targetMatrix[0] !== "macos"
+    || typeof body.mainSha !== "string" || !/^[a-f0-9]{40}$/.test(body.mainSha)
+    || typeof body.steamBuildId !== "string" || !/^BUILD-LOCAL-[A-F0-9]{12}$/.test(body.steamBuildId)
+    || typeof body.steamReinstallEvidenceId !== "string" || !/^EV-STEAM-[A-F0-9]{12}$/.test(body.steamReinstallEvidenceId)
+    || typeof body.steamReinstallBundleDigest !== "string" || !/^[a-f0-9]{64}$/.test(body.steamReinstallBundleDigest)
+    || !Number.isInteger(body.sequence) || Number(body.sequence) < 1 || Number(body.sequence) > 3
+    || body.gate !== expectedGate
+    || (body.sequence === 1 ? body.previousApprovalEvidenceId !== null
+      : typeof body.previousApprovalEvidenceId !== "string" || !/^EV-APPROVAL-[A-F0-9]{12}$/.test(body.previousApprovalEvidenceId))) {
+    throw new LocalRuntimeRequestError(400, "INVALID_REQUEST", "Local external approval request requires the exact ordered release authority binding");
+  }
+  return body as LocalExternalApprovalRequest;
+}
+
 export function localRuntimeRunBinding(request: LocalRuntimeRequest) {
   return JSON.stringify([
     request.projectId,
@@ -194,6 +232,29 @@ export class LocalSteamReinstallCoordinator<Result> {
     const active = this.#running.get(key);
     if (active && active.binding !== binding) {
       throw new LocalRuntimeRequestError(409, "RUN_BINDING_CONFLICT", "An active local Steam reinstall owns a different immutable binding");
+    }
+    if (active) return active.operation;
+    const operation = execute().finally(() => {
+      if (this.#running.get(key)?.operation === operation) this.#running.delete(key);
+    });
+    this.#running.set(key, { binding, operation });
+    return operation;
+  }
+}
+
+export class LocalExternalApprovalCoordinator<Result> {
+  readonly #running = new Map<string, { binding: string; operation: Promise<Result> }>();
+
+  start(request: LocalExternalApprovalRequest, execute: () => Promise<Result>): Promise<Result> {
+    const key = `${request.projectId}:${request.runId}:approval:${request.sequence}`;
+    const binding = JSON.stringify([
+      request.projectId, request.runId, request.specRevisionId, ...request.targetMatrix,
+      request.mainSha, request.steamBuildId, request.steamReinstallEvidenceId,
+      request.steamReinstallBundleDigest, request.gate, request.sequence, request.previousApprovalEvidenceId,
+    ]);
+    const active = this.#running.get(key);
+    if (active && active.binding !== binding) {
+      throw new LocalRuntimeRequestError(409, "RUN_BINDING_CONFLICT", "An active local external approval owns a different immutable binding");
     }
     if (active) return active.operation;
     const operation = execute().finally(() => {

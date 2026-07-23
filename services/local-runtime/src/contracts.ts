@@ -21,6 +21,18 @@ export type LocalSteamReinstallRequest = LocalRuntimeRequest & {
   mfaApprovalId: string;
 };
 
+export type LocalRuntimeExternalGate = "VALVE_REVIEW" | "FIRST_RELEASE" | "DEFAULT_BRANCH_CONFIRMATION";
+
+export type LocalExternalApprovalRequest = LocalRuntimeRequest & {
+  mainSha: string;
+  steamBuildId: string;
+  steamReinstallEvidenceId: string;
+  steamReinstallBundleDigest: string;
+  gate: LocalRuntimeExternalGate;
+  sequence: 1 | 2 | 3;
+  previousApprovalEvidenceId: string | null;
+};
+
 export type LocalRuntimeCheck = {
   name: "import" | "boot" | "core-loop" | "save-load" | "performance" | "macos-export" | "macos-export-boot";
   status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY";
@@ -135,6 +147,35 @@ export type LocalSteamReinstallEvidence = {
     sha256: string;
     sizeBytes: number;
   } | null;
+  createdAt: string;
+};
+
+export type LocalExternalApprovalEvidence = {
+  schemaVersion: 1;
+  phase: "LOCAL_EXTERNAL_APPROVAL";
+  localOnly: true;
+  evidenceId: string;
+  bundleDigest: string;
+  projectId: string;
+  runId: string;
+  specRevisionId: string;
+  targetMatrix: readonly ["macos"];
+  mainSha: string;
+  steamBuildId: string;
+  steamReinstallEvidenceId: string;
+  steamReinstallBundleDigest: string;
+  gate: LocalRuntimeExternalGate;
+  sequence: 1 | 2 | 3;
+  previousApprovalEvidenceId: string | null;
+  approvalId: string;
+  observedState: "LOCAL_VALVE_REVIEW_CONFIRMED" | "LOCAL_FIRST_RELEASE_CONFIRMED" | "LOCAL_DEFAULT_BRANCH_CONFIRMED";
+  status: "APPROVED";
+  checks: readonly [{
+    name: "authority-binding";
+    status: "PASSED";
+    durationMs: number;
+    detail: string;
+  }];
   createdAt: string;
 };
 

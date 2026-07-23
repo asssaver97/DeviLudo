@@ -112,6 +112,13 @@ async function localWorkflowAction(baseUrl, projectId, operationKey, action) {
       body: "{}",
     });
   }
+  if (action === "external-approve") {
+    return request(baseUrl, `/api/projects/${projectId}/external-approvals`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": operationKey },
+      body: "{}",
+    });
+  }
   return request(baseUrl, `/api/projects/${projectId}/delivery`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": operationKey },
@@ -1171,19 +1178,55 @@ try {
   }
   const releaseActions = ["external-approve", "external-approve", "external-approve"];
   let completedRelease;
+  let completedReleasePayload;
+  let previousApprovalEvidenceId = null;
+  const approvalEvidenceIds = [];
   for (const [index, action] of releaseActions.entries()) {
+    const operationKey = `smoke-release-gate-${index + 1}`;
     completedRelease = await localWorkflowAction(
-      baseUrl, smokeReleaseProject, `smoke-release-gate-${index + 1}`, action,
+      baseUrl, smokeReleaseProject, operationKey, action,
     );
     if (!completedRelease.response.ok) throw new Error(`local release-gate action ${action} was rejected`);
+    completedReleasePayload = await completedRelease.response.json();
+    const approval = completedReleasePayload.data?.externalApprovalEvidence?.[index];
+    const expectedGate = ["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"][index];
+    if (!approval?.valid || approval.sequence !== index + 1 || approval.gate !== expectedGate
+      || approval.previousApprovalEvidenceId !== previousApprovalEvidenceId
+      || approval.mainSha !== mainManifestPayload.mainSha
+      || approval.steamBuildId !== steamReinstall.buildId
+      || approval.steamReinstallEvidenceId !== steamReinstall.evidenceId
+      || approval.steamReinstallBundleDigest !== steamReinstall.bundleDigest) {
+      throw new Error(`local release-gate ${index + 1} lost its immutable authority binding`);
+    }
+    const approvalManifest = await request(
+      baseUrl,
+      `/api/projects/${smokeReleaseProject}/external-approvals/${index + 1}/evidence/manifest.json`,
+    );
+    const approvalManifestPayload = await approvalManifest.response.json();
+    const { evidenceId: approvalEvidenceId, bundleDigest: approvalBundleDigest, ...approvalUnsigned } = approvalManifestPayload;
+    if (!approvalManifest.response.ok
+      || approvalEvidenceId !== approval.evidenceId
+      || approvalBundleDigest !== approval.bundleDigest
+      || approvalEvidenceId !== `EV-APPROVAL-${approvalBundleDigest.slice(0, 12).toUpperCase()}`
+      || createHash("sha256").update(JSON.stringify(approvalUnsigned)).digest("hex") !== approvalBundleDigest
+      || approvalManifestPayload.approvalId !== approval.approvalId) {
+      throw new Error(`local release-gate ${index + 1} manifest digest is invalid`);
+    }
+    approvalEvidenceIds.push(approvalEvidenceId);
+    previousApprovalEvidenceId = approvalEvidenceId;
+    const replay = await localWorkflowAction(baseUrl, smokeReleaseProject, operationKey, action);
+    const replayPayload = await replay.response.json();
+    if (replay.response.status !== 200 || replayPayload.meta?.idempotentReplay !== true
+      || replayPayload.data?.revision !== completedReleasePayload.data?.revision
+      || replayPayload.data?.externalApprovalEvidence?.length !== index + 1) {
+      throw new Error(`local release-gate ${index + 1} did not replay without advancing the next gate`);
+    }
   }
-  const completedReleasePayload = await completedRelease.response.json();
   if (completedReleasePayload.data?.stage !== "RELEASED"
     || completedReleasePayload.data?.externalGate !== null
-    || JSON.stringify(completedReleasePayload.data?.externalApprovals) !== JSON.stringify([
-      "LOCAL_VALVE_REVIEW_APPROVED", "LOCAL_FIRST_RELEASE_COMPLETED", "LOCAL_DEFAULT_BRANCH_CONFIRMED",
-    ])
-    || completedReleasePayload.data?.events?.[0]?.type !== "DEFAULT_BRANCH_CONFIRMED") {
+    || completedReleasePayload.data?.externalApprovals?.length !== 3
+    || completedReleasePayload.data?.externalApprovalEvidence?.length !== 3
+    || completedReleasePayload.data?.events?.[0]?.type !== "DEFAULT_BRANCH_CONFIRMATION_APPROVED") {
     throw new Error("local release did not preserve all three ordered external approvals");
   }
   const codexDialogue = await request(baseUrl, `/api/projects/${smokeCodexProject}/conversation`, {
@@ -1327,7 +1370,7 @@ try {
   console.log(`✓ Acceptance replay 201/${acceptanceReplay.response.status} (${acceptanceReplay.elapsedMs}ms) · formal empty-body decision`);
   console.log(`✓ Merge boundary   ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · no client-forged main SHA`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
-  console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);
+  console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${approvalEvidenceIds.length}/3 immutable receipts → ${completedReleasePayload.data.stage}`);
   console.log(`✓ Actual main gate ${releaseMainGate.response.status} (${releaseMainGate.elapsedMs}ms) · ${releaseMainGatePayload.data.mainSha.slice(0, 12)} + manifest-bound build`);
   console.log(`✓ Local Beta reinstall ${releaseBeta.response.status} (${releaseBeta.elapsedMs}ms) · immutable package + clean launch, no Steam call`);
   console.log(`✓ Physical Runner gate ${codexPhysicalRunnerGate.response.status} (${codexPhysicalRunnerGate.elapsedMs}ms) · macOS evidence cannot pass Linux`);

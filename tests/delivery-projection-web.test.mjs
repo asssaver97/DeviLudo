@@ -323,6 +323,14 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   assert.equal(localAcceptanceBypass.status, 400);
   assert.equal((await localAcceptanceBypass.json()).error.code, "UNSUPPORTED_ACTION");
 
+  const localApprovalBypass = await POST(new Request("http://127.0.0.1:3000/api/projects/test-project/delivery", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "must-use-authority-evidence" },
+    body: JSON.stringify({ action: "external-approve" }),
+  }), { params: Promise.resolve({ projectId: "test-project" }) });
+  assert.equal(localApprovalBypass.status, 400);
+  assert.equal((await localApprovalBypass.json()).error.code, "UNSUPPORTED_ACTION");
+
   const productionMutation = await POST(new Request(`https://app.deviludo.example/api/projects/${projectId}/delivery`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "must-not-run-local-fixture" },
@@ -344,6 +352,7 @@ test("delivery route keeps localhost fixture mode and production mutations read-
   assert.match(routeSource, /isLoopbackTestRequest\(request\)/);
   assert.match(routeSource, /"main-gate-fail"/);
   assert.match(routeSource, /"steam-reinstall-fail"/);
+  assert.doesNotMatch(routeSource.slice(routeSource.indexOf("const actions"), routeSource.indexOf("const UUID")), /"external-approve"/);
   assert.doesNotMatch(routeSource.slice(routeSource.indexOf("const actions"), routeSource.indexOf("const UUID")), /"accept"/);
 });
 

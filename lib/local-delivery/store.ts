@@ -5,11 +5,13 @@ import {
   invalidateLocalDelivery,
   normalizeLocalDeliverySnapshot,
   recordLocalAgentExecution,
+  recordLocalExternalApproval,
   recordLocalMainValidation,
   recordLocalSteamReinstall,
   recordLocalValidation,
   type LocalDeliveryAction,
   type LocalDeliverySnapshot,
+  type LocalExternalApprovalEvidenceSnapshot,
   type LocalLockedAgentProfile,
   type LocalMainValidationSnapshot,
   type LocalSteamReinstallSnapshot,
@@ -291,6 +293,30 @@ export async function saveLocalSteamReinstall(
   commandKey: string,
 ): Promise<MutationResult> {
   return mutate(projectId, commandKey, (current) => recordLocalSteamReinstall(current, validation));
+}
+
+export async function saveLocalExternalApproval(
+  projectId: string,
+  evidence: Omit<LocalExternalApprovalEvidenceSnapshot, "valid">,
+  commandKey: string,
+): Promise<MutationResult> {
+  return mutate(projectId, commandKey, (current) => recordLocalExternalApproval(current, evidence));
+}
+
+export async function readLocalDeliveryCommand(
+  projectId: string,
+  commandKey: string,
+): Promise<LocalDeliverySnapshot | null> {
+  const db = await resolveDb();
+  if (!db) {
+    const snapshot = memory().commands.get(commandKey);
+    return snapshot?.projectId === projectId ? normalizeLocalDeliverySnapshot(snapshot) : null;
+  }
+  await ensureStore(db);
+  const row = await db.prepare(
+    "SELECT response FROM local_delivery_commands WHERE key = ? AND project_id = ?",
+  ).bind(commandKey, projectId).first<CommandRow>();
+  return row ? parseSnapshot(row.response) : null;
 }
 
 export async function saveLocalAgentExecution(

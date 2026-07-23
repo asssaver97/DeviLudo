@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { LocalFixtureRunner } from "../src/fixture-runner";
+import type { LocalExternalApprovalRequest } from "../src/contracts";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const godotBinary = "/Applications/Godot.app/Contents/MacOS/Godot";
@@ -110,6 +111,28 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
         mainArtifactSha256: main.buildArtifact!.sha256,
         mfaApprovalId: "MFA-LOCAL-0012",
       })).evidenceId, reinstall.evidenceId);
+      let previousApprovalEvidenceId: string | null = null;
+      for (const [index, gate] of (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const).entries()) {
+        const approvalRequest: LocalExternalApprovalRequest = {
+          ...request,
+          mainSha: main.mainSha,
+          steamBuildId: reinstall.buildId,
+          steamReinstallEvidenceId: reinstall.evidenceId,
+          steamReinstallBundleDigest: reinstall.bundleDigest,
+          gate,
+          sequence: (index + 1) as 1 | 2 | 3,
+          previousApprovalEvidenceId,
+        };
+        const approval = await runner.recordExternalApproval(approvalRequest);
+        assert.equal(approval.gate, gate);
+        assert.equal(approval.sequence, index + 1);
+        assert.equal(approval.previousApprovalEvidenceId, previousApprovalEvidenceId);
+        assert.equal(approval.status, "APPROVED");
+        assert.equal(approval.checks[0].status, "PASSED");
+        assert.equal((await runner.recordExternalApproval(approvalRequest)).evidenceId, approval.evidenceId);
+        assert.equal((await runner.readExternalApprovalEvidence(request, index + 1)).evidenceId, approval.evidenceId);
+        previousApprovalEvidenceId = approval.evidenceId;
+      }
       assert.equal((await runner.runMainGate({
         ...request,
         candidateEvidenceId: result.evidenceId,
