@@ -12,6 +12,8 @@ export * from "./baseline-source";
 export * from "./native-microvm-executor";
 export * from "./native-microvm-contracts";
 export * from "./native-microvm-guest";
+export * from "./native-microvm-launcher";
+export * from "./native-microvm-launcher-release";
 export * from "./run-native-microvm-guest-service";
 export * from "./run-native-worker";
 export * from "./ephemeral-secret-client";

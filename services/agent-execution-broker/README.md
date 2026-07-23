@@ -42,6 +42,16 @@ consumer with `npm run start:agent-execution-worker`; it deposits DLRT bytes as
 and receives only an opaque SecretRef. There is no in-memory production
 fallback.
 
+The native launcher is built from this repository and uses the Firecracker
+Jailer with one pre-provisioned network namespace and one ext4 data disk per
+attempt. Before the Worker opens PostgreSQL or any Broker connection it verifies
+a distinct Ed25519 release manifest binding the launcher, configuration,
+Firecracker/Jailer, kernel, guest rootfs and e2fs tool digests. Runtime probing
+and every attempt hash the actual files again. Arbitrary VMM argv, shell
+templates, `--no-seccomp`, non-Linux hosts and non-root launch are rejected.
+Build, scan, signing, namespace and deployment requirements are documented in
+[`docs/agent-microvm-launcher.md`](../../docs/agent-microvm-launcher.md).
+
 The immutable guest image runs `npm run start:agent-microvm-guest`. Its request
 parser rejects extra fields (including Provider Base URLs and credentials),
 reconstructs all four exact model roles from the locked Profile, and invokes the

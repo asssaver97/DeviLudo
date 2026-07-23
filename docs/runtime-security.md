@@ -249,6 +249,16 @@ relay URL uses literal `127.0.0.1` with a matching certificate IP SAN, and its
 CA is fixed in the immutable image. Lease heartbeat or renewal failure aborts the native launcher,
 so a stale Worker cannot continue and later commit a result.
 
+The production Launcher is a source-built, scanned and separately Ed25519-signed
+artifact rather than an operator-supplied executable. Its signed configuration
+binds exact Firecracker/Jailer, guest kernel/rootfs and filesystem-tool digests.
+The Worker authenticates this complete release before opening PostgreSQL or an
+internal Broker, then re-hashes the files per attempt. Firecracker runs only
+through Jailer in a new PID namespace, with default seccomp, cgroup v2 bounds,
+a read-only rootfs and an exclusive pre-filtered network namespace. Full build
+and node requirements are in
+[`agent-microvm-launcher.md`](./agent-microvm-launcher.md).
+
 Protected secret environment entries contain only the relay's attempt-local
 SecretRef in persisted launch plans. The executor resolves it at process start
 and redacts it from logs, errors and evidence.
