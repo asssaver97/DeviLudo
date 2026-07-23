@@ -358,6 +358,8 @@ test("local delivery route exposes a stable conflict when real export evidence i
     candidateSha: "1".repeat(40), sourceDigest: "2".repeat(64), bundleDigest: "3".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: started.snapshot.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
     checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 4, detail: "templates missing" }],
     createdAt: "2026-07-21T00:00:00.000Z",
   }, `validation:${localProjectId}`);

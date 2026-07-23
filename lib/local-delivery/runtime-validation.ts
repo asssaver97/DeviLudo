@@ -73,6 +73,9 @@ export function validateLocalValidationEvidence(
   if (item.schemaVersion !== 2 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据目标矩阵与锁定运行不一致");
   }
+  if (item.platform !== "macos" || item.fixtureOnly !== true) {
+    throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据缺少真实 macOS 执行平台绑定");
+  }
   if (!validEvidenceStatus(item.status)) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据状态无效");
   }
@@ -114,6 +117,8 @@ export function validateLocalValidationEvidence(
     bundleDigest: String(item.bundleDigest),
     godotVersion: String(item.godotVersion),
     targetMatrix: Object.freeze([...targetMatrix]),
+    platform: "macos",
+    fixtureOnly: true,
     checks: item.checks as LocalValidationSnapshot["checks"],
     createdAt: String(item.createdAt),
   };

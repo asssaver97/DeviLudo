@@ -42,6 +42,8 @@ export type LocalValidationSnapshot = {
   bundleDigest: string;
   godotVersion: string;
   targetMatrix: readonly LocalTargetPlatform[];
+  platform: "macos";
+  fixtureOnly: true;
   checks: Array<{ name: string; status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY"; durationMs: number; detail: string }>;
   createdAt: string;
   valid: boolean;
@@ -212,6 +214,8 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
   const targetResults = normalizeTargetResults(snapshot.targetResults, targetMatrix);
   const historicalValidation = snapshot.localValidation as (LocalValidationSnapshot & {
     targetMatrix?: readonly LocalTargetPlatform[];
+    platform?: "macos";
+    fixtureOnly?: true;
   }) | null | undefined;
   const validationMatrix = historicalValidation?.targetMatrix
     ? normalizeTargetMatrix(historicalValidation.targetMatrix)
@@ -220,10 +224,14 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     ? {
       ...historicalValidation,
       targetMatrix: validationMatrix ?? targetMatrix,
+      platform: historicalValidation.platform ?? "macos" as const,
+      fixtureOnly: historicalValidation.fixtureOnly ?? true as const,
       // Evidence created before target-matrix binding remains readable but can
       // never satisfy a current selected-platform gate.
       valid: validationMatrix !== null
         && sameTargetMatrix(validationMatrix, targetMatrix)
+        && historicalValidation.platform === "macos"
+        && historicalValidation.fixtureOnly === true
         && historicalValidation.valid,
       status: historicalValidation.releaseGate === "WAITING_EXPORT_TEMPLATES"
         ? "WAITING_DEPENDENCY" as const
@@ -477,6 +485,9 @@ export function recordLocalValidation(
   if (!gatePassed && !waitingForTemplates && !failed) throw new Error("本机验证状态与发布门禁不一致");
   if (!sameTargetMatrix(validation.targetMatrix, current.targetMatrix)) {
     throw new Error("本机验证证据与锁定目标矩阵不一致");
+  }
+  if (validation.platform !== "macos" || validation.fixtureOnly !== true) {
+    throw new Error("本机验证证据缺少真实执行平台绑定");
   }
   const targetResults = gatePassed
     ? current.targetResults

@@ -9,6 +9,7 @@ const GATE_STATUS = new Set([
   "WAITING_PROVIDER",
   "LOCAL_EXPORT_TEMPLATES_REQUIRED",
   "LOCAL_VALIDATION_FAILED",
+  "PHYSICAL_RUNNERS_REQUIRED",
 ]);
 
 export async function POST(
@@ -49,10 +50,17 @@ export async function POST(
         stopReason: result.stopReason,
         automaticTransitions: result.automaticTransitions,
         validationExecuted: result.validationExecuted,
+        requiredPhysicalPlatforms: result.requiredPhysicalPlatforms,
         idempotentReplay: saved.replayed,
       },
       ...(GATE_STATUS.has(result.stopReason) ? {
-        error: { code: result.stopReason, message: stopMessage(result.stopReason) },
+        error: {
+          code: result.stopReason,
+          message: stopMessage(result.stopReason, result.requiredPhysicalPlatforms),
+          details: result.requiredPhysicalPlatforms.length > 0
+            ? { requiredPhysicalPlatforms: result.requiredPhysicalPlatforms }
+            : null,
+        },
       } : {}),
     }, { status: GATE_STATUS.has(result.stopReason) ? 409 : 200 });
   } catch (error) {
@@ -60,9 +68,13 @@ export async function POST(
   }
 }
 
-function stopMessage(stopReason: string) {
+function stopMessage(stopReason: string, requiredPhysicalPlatforms: readonly string[]) {
   if (stopReason === "SPEC_APPROVAL_REQUIRED") return "请先批准当前规格修订。";
   if (stopReason === "WAITING_PROVIDER") return "原 Provider 尚未恢复，自动开发保持暂停。";
   if (stopReason === "LOCAL_EXPORT_TEMPLATES_REQUIRED") return "Godot 导出模板尚未安装，自动 E2E 保持阻塞。";
+  if (stopReason === "PHYSICAL_RUNNERS_REQUIRED") {
+    const labels = requiredPhysicalPlatforms.map((platform) => platform === "linux" ? "Linux" : "Windows");
+    return `本机证据只证明 macOS；仍需 ${labels.join("、")} 实体 Runner 的 mTLS E2E 证据。`;
+  }
   return "本机 Godot 验证失败，修复后才能继续自动 E2E。";
 }

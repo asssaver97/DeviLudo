@@ -14,6 +14,8 @@ function passingValidation(projectId, delivery, commandKey) {
     bundleDigest: "c".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: delivery.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
     checks: [
       { name: "import", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
@@ -32,7 +34,7 @@ test("local automation runs selected-target E2E and stops at every human authori
     "RUN-AUTO-001",
     `start:${projectId}`,
     undefined,
-    ["windows"],
+    ["macos"],
   );
   assert.equal(initial.snapshot.stage, "AGENT_QUEUED");
 
@@ -41,7 +43,7 @@ test("local automation runs selected-target E2E and stops at every human authori
   assert.equal(candidate.snapshot.stage, "AWAITING_ACCEPTANCE");
   assert.equal(candidate.validationExecuted, true);
   assert.equal(candidate.automaticTransitions, 4);
-  assert.deepEqual(candidate.snapshot.targetResults, { windows: "PASSED" });
+  assert.deepEqual(candidate.snapshot.targetResults, { macos: "PASSED" });
   assert.equal(candidate.snapshot.evidenceValid, true);
 
   const replayAtGate = await runLocalDeliveryUntilHumanGate(projectId, `auto:${projectId}:candidate`, passingValidation);
@@ -77,6 +79,8 @@ test("local automation persists a dependency wait and cannot bypass it", async (
     bundleDigest: "f".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: delivery.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
     checks: [
       { name: "import", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
@@ -92,6 +96,29 @@ test("local automation persists a dependency wait and cannot bypass it", async (
   assert.equal(result.snapshot.evidenceValid, false);
   assert.equal(result.snapshot.localValidation.releaseGate, "WAITING_EXPORT_TEMPLATES");
   assert.ok(Object.values(result.snapshot.targetResults).every((status) => status === "INVALIDATED"));
+});
+
+test("local automation never converts macOS fixture evidence into Linux or Windows passes", async () => {
+  const projectId = `auto-physical-runner-${crypto.randomUUID()}`;
+  await startLocalDelivery(
+    projectId,
+    "SPEC-AUTO-PHYSICAL",
+    "RUN-AUTO-PHYSICAL",
+    `start:${projectId}`,
+    undefined,
+    ["linux", "macos", "windows"],
+  );
+  const result = await runLocalDeliveryUntilHumanGate(projectId, `auto:${projectId}`, passingValidation);
+  assert.equal(result.stopReason, "PHYSICAL_RUNNERS_REQUIRED");
+  assert.equal(result.snapshot.stage, "CANDIDATE_READY");
+  assert.deepEqual(result.requiredPhysicalPlatforms, ["linux", "windows"]);
+  assert.deepEqual(result.snapshot.targetResults, {
+    linux: "QUEUED",
+    macos: "QUEUED",
+    windows: "QUEUED",
+  });
+  assert.equal(result.snapshot.evidenceValid, false);
+  assert.equal(result.snapshot.localValidation.platform, "macos");
 });
 
 test("local automation preserves the locked run while its Provider is waiting", async () => {

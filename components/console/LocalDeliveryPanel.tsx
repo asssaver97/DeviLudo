@@ -170,6 +170,14 @@ export function LocalDeliveryPanel({
     () => snapshot ? Object.values(snapshot.targetResults).filter((value) => value === "PASSED").length : 0,
     [snapshot],
   );
+  const missingPhysicalTargets = useMemo(
+    () => snapshot?.stage === "CANDIDATE_READY"
+      && snapshot.localValidation?.valid
+      && snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
+      ? snapshot.targetMatrix.filter((platform) => platform !== snapshot.localValidation?.platform)
+      : [],
+    [snapshot],
+  );
 
   async function runAction(nextAction: LocalDeliveryAction) {
     setBusy(true);
@@ -322,6 +330,20 @@ export function LocalDeliveryPanel({
             })}
           </div>
 
+          {missingPhysicalTargets.length > 0 ? (
+            <div className="local-real-validation pending">
+              <div className="local-real-validation-copy">
+                <span className="eyebrow">实体 Runner 硬门禁</span>
+                <h3>等待 {missingPhysicalTargets.map((platform) => platformLabels[platform]).join("、")} mTLS Runner</h3>
+                <p>当前证据只来自 macOS 本机 Fixture；候选版本保持未验收，其他系统不会被标记为通过。</p>
+              </div>
+              <div className="local-real-validation-result">
+                <span className="waiting">PHYSICAL_RUNNERS_REQUIRED</span>
+                <div><a href="/runners">查看运行节点</a></div>
+              </div>
+            </div>
+          ) : null}
+
           {snapshot.repairHandoff ? (
             <section
               className="delivery-repair-notice"
@@ -386,13 +408,13 @@ export function LocalDeliveryPanel({
               <span className="eyebrow">真实本机执行</span>
               <h3>{snapshot.localValidation?.valid ? snapshot.localValidation.evidenceId : "Git fixture + Godot macOS headless"}</h3>
               <p>{snapshot.localValidation?.valid
-                ? `${snapshot.localValidation.godotVersion} · ${snapshot.localValidation.checks.filter((check) => check.status === "PASSED").length} 项通过`
+                ? `${snapshot.localValidation.godotVersion} · macOS 本机 · ${snapshot.localValidation.checks.filter((check) => check.status === "PASSED").length} 项通过`
                 : "创建隔离 Git 候选提交，运行项目导入、启动、核心循环、存档回读和性能检查。"}</p>
             </div>
             {snapshot.localValidation?.valid ? (
               <div className="local-real-validation-result">
                 <span className={snapshot.localValidation.status === "FAILED" ? "failed" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "passed" : "waiting"}>
-                  {snapshot.localValidation.status === "FAILED" ? "本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "本机门禁通过" : "等待依赖 · 导出模板"}
+                  {snapshot.localValidation.status === "FAILED" ? "macOS 本机验证失败" : snapshot.localValidation.releaseGate === "LOCAL_VALIDATION_PASSED" ? "macOS 本机门禁通过" : "等待依赖 · 导出模板"}
                 </span>
                 <div>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>

@@ -26,7 +26,7 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
     "RUN-AUTO-ROUTE",
     `start:${projectId}`,
     undefined,
-    ["linux", "macos"],
+    ["macos"],
   );
   const verifier = new LocalRuntimeRequestVerifier(sidecarKey);
   const originalFetch = globalThis.fetch;
@@ -41,13 +41,15 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
       headers: Object.fromEntries(new Headers(init?.headers).entries()),
     });
     const command = JSON.parse(body);
-    assert.deepEqual(command.targetMatrix, ["linux", "macos"]);
+    assert.deepEqual(command.targetMatrix, ["macos"]);
     return Response.json({ data: {
       schemaVersion: 2,
       projectId,
       runId: started.snapshot.runId,
       specRevisionId: started.snapshot.specRevisionId,
-      targetMatrix: ["linux", "macos"],
+      targetMatrix: ["macos"],
+      platform: "macos",
+      fixtureOnly: true,
       evidenceId: "EV-LOCAL-ABCDEF123456",
       status: "TESTS_PASSED",
       releaseGate: "LOCAL_VALIDATION_PASSED",
@@ -74,7 +76,7 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
     assert.equal(firstPayload.meta.stopReason, "USER_ACCEPTANCE_REQUIRED");
     assert.equal(firstPayload.meta.validationExecuted, true);
     assert.equal(firstPayload.meta.idempotentReplay, false);
-    assert.deepEqual(firstPayload.data.targetResults, { linux: "PASSED", macos: "PASSED" });
+    assert.deepEqual(firstPayload.data.targetResults, { macos: "PASSED" });
 
     const replay = await automateDelivery(request(projectId, "auto-route-command"), context);
     const replayPayload = await replay.json();

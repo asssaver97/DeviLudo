@@ -10,6 +10,7 @@ export type LocalAutomationStopReason =
   | "SPEC_APPROVAL_REQUIRED"
   | "LOCAL_EXPORT_TEMPLATES_REQUIRED"
   | "LOCAL_VALIDATION_FAILED"
+  | "PHYSICAL_RUNNERS_REQUIRED"
   | "TERMINAL";
 
 export type LocalAutomationResult = {
@@ -17,6 +18,7 @@ export type LocalAutomationResult = {
   readonly stopReason: LocalAutomationStopReason;
   readonly automaticTransitions: number;
   readonly validationExecuted: boolean;
+  readonly requiredPhysicalPlatforms: readonly ("linux" | "windows")[];
 };
 
 type ValidationRunner = typeof runAndSaveLocalValidation;
@@ -75,6 +77,18 @@ export async function runLocalDeliveryUntilHumanGate(
           }
           break;
         }
+        const requiredPhysicalPlatforms = snapshot.targetMatrix.filter(
+          (platform): platform is "linux" | "windows" => platform !== snapshot.localValidation?.platform,
+        );
+        if (requiredPhysicalPlatforms.length > 0) {
+          return result(
+            snapshot,
+            "PHYSICAL_RUNNERS_REQUIRED",
+            automaticTransitions,
+            validationExecuted,
+            requiredPhysicalPlatforms,
+          );
+        }
         const transition = await commandLocalDelivery(
           projectId,
           "advance",
@@ -110,6 +124,7 @@ function result(
   stopReason: LocalAutomationStopReason,
   automaticTransitions: number,
   validationExecuted: boolean,
+  requiredPhysicalPlatforms: readonly ("linux" | "windows")[] = [],
 ): LocalAutomationResult {
-  return { snapshot, stopReason, automaticTransitions, validationExecuted };
+  return { snapshot, stopReason, automaticTransitions, validationExecuted, requiredPhysicalPlatforms };
 }

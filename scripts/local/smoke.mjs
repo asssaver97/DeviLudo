@@ -749,7 +749,7 @@ try {
   const validationDialogue = await request(baseUrl, `/api/projects/${smokeValidationProject}/conversation`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-validation-dialogue-1" },
-    body: JSON.stringify({ expectedRevision: 0, message: "制作一个用于真实 Godot 验证的固定桌面单机样例" }),
+    body: JSON.stringify({ expectedRevision: 0, message: "制作一个仅面向 macOS、用于真实 Godot 验证的固定桌面单机样例" }),
   });
   const validationDialoguePayload = await validationDialogue.response.json();
   if (validationDialogue.response.status !== 201 || validationDialoguePayload.data?.revision !== 1) {
@@ -768,7 +768,9 @@ try {
     }),
   });
   const validationApprovalPayload = await validationApproval.response.json();
-  if (![200, 201].includes(validationApproval.response.status) || validationApprovalPayload.data?.run?.state !== "QUEUED") {
+  if (![200, 201].includes(validationApproval.response.status)
+    || validationApprovalPayload.data?.run?.state !== "QUEUED"
+    || JSON.stringify(validationApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["macos"])) {
     throw new Error("local validation specification approval failed");
   }
   const earlyFeedback = await request(baseUrl, `/api/projects/${smokeValidationProject}/feedback`, {
@@ -793,6 +795,8 @@ try {
   const expectedAutomationHttpStatus = expectedLocalValidationStatus === "WAITING_DEPENDENCY" ? 409 : 200;
   if (localValidation.response.status !== expectedAutomationHttpStatus
     || localValidationPayload.data?.status !== expectedLocalValidationStatus
+    || localValidationPayload.data?.platform !== "macos"
+    || localValidationPayload.data?.fixtureOnly !== true
     || !/^[a-f0-9]{64}$/.test(String(localValidationPayload.data?.bundleDigest))
     || (expectedLocalValidationStatus === "TESTS_PASSED"
       && (localAutomationPayload.data?.stage !== "AWAITING_ACCEPTANCE"
@@ -823,6 +827,7 @@ try {
   }
   let feedbackProject = smokeValidationProject;
   let feedbackDialoguePayload = validationDialoguePayload.data;
+  let feedbackTargetMatrix = validationApprovalPayload.data.run.targetMatrix;
   let validationGateBlock = null;
   let validationAcceptance;
   if (localValidationPayload.data?.releaseGate === "WAITING_EXPORT_TEMPLATES") {
@@ -855,7 +860,11 @@ try {
         testPlanRevisionId: feedbackDialoguePayload.testPlanRevisionId,
       }),
     });
-    if (fixtureApproval.response.status !== 201) throw new Error("local feedback fixture approval failed");
+    const fixtureApprovalPayload = await fixtureApproval.response.json();
+    if (fixtureApproval.response.status !== 201 || !Array.isArray(fixtureApprovalPayload.data?.run?.targetMatrix)) {
+      throw new Error("local feedback fixture approval failed");
+    }
+    feedbackTargetMatrix = fixtureApprovalPayload.data.run.targetMatrix;
     for (let index = 0; index < 6; index += 1) {
       validationAcceptance = await request(baseUrl, `/api/projects/${feedbackProject}/delivery`, {
         method: "POST",
@@ -886,9 +895,9 @@ try {
       ? feedbackIterationPayload.data?.delivery?.localValidation?.valid !== false
       : feedbackIterationPayload.data?.delivery?.localValidation !== null)
     || feedbackIterationPayload.data?.delivery?.evidenceValid !== false
-    || JSON.stringify(feedbackIterationPayload.data?.delivery?.targetResults) !== JSON.stringify({
-      linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED",
-    })) {
+    || JSON.stringify(feedbackIterationPayload.data?.delivery?.targetResults) !== JSON.stringify(
+      Object.fromEntries(feedbackTargetMatrix.map((platform) => [platform, "INVALIDATED"])),
+    )) {
     throw new Error("local feedback did not create a distinct immutable draft and invalidate old evidence");
   }
   const feedbackReplay = await request(baseUrl, `/api/projects/${feedbackProject}/feedback`, feedbackRequest);
@@ -1103,8 +1112,22 @@ try {
     || JSON.stringify(codexApprovalPayload.data?.delivery?.targetMatrix) !== JSON.stringify(["linux"])) {
     throw new Error("local Codex specification approval did not freeze the selected Profile");
   }
+  const codexPhysicalRunnerGate = await request(baseUrl, `/api/projects/${smokeCodexProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-physical-runner-gate" },
+    body: "{}",
+  }, 90_000);
+  const codexPhysicalRunnerGatePayload = await codexPhysicalRunnerGate.response.json();
+  if (codexPhysicalRunnerGate.response.status !== 409
+    || codexPhysicalRunnerGatePayload.error?.code !== "PHYSICAL_RUNNERS_REQUIRED"
+    || JSON.stringify(codexPhysicalRunnerGatePayload.meta?.requiredPhysicalPlatforms) !== JSON.stringify(["linux"])
+    || codexPhysicalRunnerGatePayload.data?.stage !== "CANDIDATE_READY"
+    || codexPhysicalRunnerGatePayload.data?.targetResults?.linux !== "QUEUED"
+    || codexPhysicalRunnerGatePayload.data?.localValidation?.platform !== "macos") {
+    throw new Error("macOS local evidence incorrectly satisfied the Linux physical Runner gate");
+  }
   const codexReleaseActions = [
-    "advance", "advance", "advance", "advance",
+    "advance", "advance",
     "accept", "advance", "advance", "confirm-mfa", "advance", "advance",
     "external-approve", "external-approve", "external-approve",
   ];
@@ -1213,6 +1236,7 @@ try {
   console.log(`✓ Failure handoff  ${postMergeFailure.response.status} (${postMergeFailure.elapsedMs}ms) · ${postMergeFailurePayload.data.repairHandoff.reason}`);
   console.log(`✓ Delivery cancel ${cancellation.response.status} (${cancellation.elapsedMs}ms) · ${cancellationPayload.data.stage}`);
   console.log(`✓ Ordered Steam gates ${completedRelease.response.status} (${completedRelease.elapsedMs}ms) · ${completedReleasePayload.data.externalApprovals.length}/3 → ${completedReleasePayload.data.stage}`);
+  console.log(`✓ Physical Runner gate ${codexPhysicalRunnerGate.response.status} (${codexPhysicalRunnerGate.elapsedMs}ms) · macOS evidence cannot pass Linux`);
   console.log(`✓ Dual Agent release ${completedCodexRelease.response.status} (${completedCodexRelease.elapsedMs}ms) · Claude Code + Codex CLI locked end-to-end`);
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);

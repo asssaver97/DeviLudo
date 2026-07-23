@@ -120,6 +120,8 @@ test("a selected matrix keeps its frozen order and rejects evidence from another
     bundleDigest: "c".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: ["linux", "macos"],
+    platform: "macos",
+    fixtureOnly: true,
     checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
     createdAt: "2026-07-23T00:00:00.000Z",
   }), /目标矩阵不一致/);
@@ -143,6 +145,8 @@ test("feedback invalidates all local evidence and requires a new immutable appro
     bundleDigest: "c".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: state.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
     checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -228,6 +232,8 @@ test("failed local validation is auditable but cannot advance the candidate gate
     bundleDigest: "f".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: state.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
     checks: [{ name: "macos-export", status: "FAILED", durationMs: 3, detail: "configuration error" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -235,6 +241,22 @@ test("failed local validation is auditable but cannot advance the candidate gate
   assert.equal(state.localValidation.valid, true);
   assert.equal(state.events[0].type, "LOCAL_GODOT_VALIDATION_FAILED");
   assert.throws(() => applyLocalDeliveryAction(state, "advance"), /验证失败/);
+});
+
+test("local validation without an explicit execution-platform binding fails closed", () => {
+  const state = approveLocalSpec(createLocalDelivery("project-missing-platform"), "SPEC-011", "RUN-MISSING-PLATFORM");
+  assert.throws(() => recordLocalValidation(state, {
+    evidenceId: "EV-LOCAL-MISSING-PLATFORM",
+    status: "TESTS_PASSED",
+    releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: "a".repeat(40),
+    sourceDigest: "b".repeat(64),
+    bundleDigest: "c".repeat(64),
+    godotVersion: "4.6.2.stable",
+    targetMatrix: state.targetMatrix,
+    checks: [{ name: "core-loop", status: "PASSED", durationMs: 3, detail: "unbound fixture" }],
+    createdAt: "2026-07-23T00:00:00.000Z",
+  }), /缺少真实执行平台绑定/);
 });
 
 test("missing export templates remain auditable but cannot authorize target E2E", () => {
@@ -248,6 +270,8 @@ test("missing export templates remain auditable but cannot authorize target E2E"
     bundleDigest: "3".repeat(64),
     godotVersion: "4.6.2.stable",
     targetMatrix: state.targetMatrix,
+    platform: "macos",
+    fixtureOnly: true,
     checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 3, detail: "templates missing" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
