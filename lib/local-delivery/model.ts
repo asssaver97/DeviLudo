@@ -22,6 +22,8 @@ export type LocalDeliveryStage =
   | "RELEASED";
 
 export type LocalPlatformStatus = "QUEUED" | "RUNNING" | "PASSED" | "INVALIDATED";
+export type LocalTargetPlatform = "linux" | "windows" | "macos";
+export type LocalTargetResults = Partial<Record<LocalTargetPlatform, LocalPlatformStatus>>;
 export type LocalExternalApprovalGate = "VALVE_REVIEW" | "FIRST_RELEASE" | "DEFAULT_BRANCH_CONFIRMATION";
 
 export type LocalDeliveryEvent = {
@@ -39,6 +41,7 @@ export type LocalValidationSnapshot = {
   sourceDigest: string;
   bundleDigest: string;
   godotVersion: string;
+  targetMatrix: readonly LocalTargetPlatform[];
   checks: Array<{ name: string; status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY"; durationMs: number; detail: string }>;
   createdAt: string;
   valid: boolean;
@@ -112,7 +115,8 @@ export type LocalDeliverySnapshot = {
   candidateSha: string | null;
   mainSha: string | null;
   evidenceValid: boolean;
-  targetResults: Record<"linux" | "windows" | "macos", LocalPlatformStatus>;
+  targetMatrix: readonly LocalTargetPlatform[];
+  targetResults: LocalTargetResults;
   steamBranch: "local-password-beta" | null;
   mfaApprovalId: string | null;
   steamBuildId: string | null;
@@ -179,6 +183,9 @@ const profile = {
   timeoutSeconds: 7200 as const,
 } satisfies LocalLockedAgentProfile;
 
+const DEFAULT_TARGET_MATRIX = Object.freeze(["linux", "windows", "macos"] as const);
+const TARGET_PLATFORM_ORDER = Object.freeze(["linux", "windows", "macos"] as const);
+
 /** Add newly locked fields when reading an older localhost JSON snapshot. */
 export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot): LocalDeliverySnapshot {
   const lockedProfile: LocalLockedAgentProfile = {
@@ -201,9 +208,33 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
       valid: historicalExecution.modelRoles ? historicalExecution.valid : false,
     }
     : null;
+  const targetMatrix = normalizeTargetMatrix(snapshot.targetMatrix ?? Object.keys(snapshot.targetResults ?? {}));
+  const targetResults = normalizeTargetResults(snapshot.targetResults, targetMatrix);
+  const historicalValidation = snapshot.localValidation as (LocalValidationSnapshot & {
+    targetMatrix?: readonly LocalTargetPlatform[];
+  }) | null | undefined;
+  const validationMatrix = historicalValidation?.targetMatrix
+    ? normalizeTargetMatrix(historicalValidation.targetMatrix)
+    : null;
+  const localValidation = historicalValidation
+    ? {
+      ...historicalValidation,
+      targetMatrix: validationMatrix ?? targetMatrix,
+      // Evidence created before target-matrix binding remains readable but can
+      // never satisfy a current selected-platform gate.
+      valid: validationMatrix !== null
+        && sameTargetMatrix(validationMatrix, targetMatrix)
+        && historicalValidation.valid,
+      status: historicalValidation.releaseGate === "WAITING_EXPORT_TEMPLATES"
+        ? "WAITING_DEPENDENCY" as const
+        : historicalValidation.status,
+    }
+    : null;
 
   return {
     ...snapshot,
+    targetMatrix,
+    targetResults,
     agentExecution,
     repairHandoff: snapshot.repairHandoff ?? null,
     mfaApprovalId: snapshot.mfaApprovalId ?? null,
@@ -213,14 +244,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     externalGate: snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
       ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
       : null),
-    localValidation: snapshot.localValidation
-      ? {
-        ...snapshot.localValidation,
-        status: snapshot.localValidation.releaseGate === "WAITING_EXPORT_TEMPLATES"
-          ? "WAITING_DEPENDENCY"
-          : snapshot.localValidation.status,
-      }
-      : null,
+    localValidation,
     lockedProfile,
   };
 }
@@ -256,7 +280,8 @@ export function createLocalDelivery(projectId: string, specRevisionId = "SPEC-00
     candidateSha: null,
     mainSha: null,
     evidenceValid: false,
-    targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
+    targetMatrix: DEFAULT_TARGET_MATRIX,
+    targetResults: createTargetResults(DEFAULT_TARGET_MATRIX, "QUEUED"),
     steamBranch: null,
     mfaApprovalId: null,
     steamBuildId: null,
@@ -276,7 +301,9 @@ export function approveLocalSpec(
   specRevisionId: string,
   runId: string,
   lockedProfile: LocalLockedAgentProfile = current.lockedProfile,
+  targetMatrix: readonly LocalTargetPlatform[] = DEFAULT_TARGET_MATRIX,
 ): LocalDeliverySnapshot {
+  const lockedTargetMatrix = normalizeTargetMatrix(targetMatrix);
   const started = event(
     {
       ...current,
@@ -289,7 +316,8 @@ export function approveLocalSpec(
       candidateSha: null,
       mainSha: null,
       evidenceValid: false,
-      targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
+      targetMatrix: lockedTargetMatrix,
+      targetResults: createTargetResults(lockedTargetMatrix, "QUEUED"),
       steamBranch: null,
       mfaApprovalId: null,
       steamBuildId: null,
@@ -301,7 +329,7 @@ export function approveLocalSpec(
       localValidation: null,
     },
     "SPEC_APPROVED",
-    `${specRevisionId} 已冻结；${agentLabel(lockedProfile.agent)} Profile、配置来源与目标矩阵已锁定。`,
+    `${specRevisionId} 已冻结；${agentLabel(lockedProfile.agent)} Profile、配置来源与 ${lockedTargetMatrix.join(" / ")} 目标矩阵已锁定。`,
   );
   return started;
 }
@@ -340,9 +368,7 @@ export function invalidateLocalDelivery(
       candidateSha: null,
       mainSha: null,
       evidenceValid: false,
-      targetResults: Object.fromEntries(
-        Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
-      ) as LocalDeliverySnapshot["targetResults"],
+      targetResults: createTargetResults(current.targetMatrix, "INVALIDATED"),
       steamBranch: null,
       mfaApprovalId: null,
       steamBuildId: null,
@@ -404,7 +430,7 @@ export function recordLocalAgentExecution(
       evidenceValid: false,
       agentExecution: { ...receipt, valid: true },
       localValidation: null,
-      targetResults: { linux: "QUEUED", windows: "QUEUED", macos: "QUEUED" },
+      targetResults: createTargetResults(current.targetMatrix, "QUEUED"),
     },
     "AGENT_CANDIDATE_RECORDED",
     `${receipt.agent} 已完成；SCM 代理冻结候选提交 ${receipt.candidate.commitSha.slice(0, 7)}，等待 E2E。`,
@@ -449,9 +475,12 @@ export function recordLocalValidation(
     && validation.releaseGate === "WAITING_EXPORT_TEMPLATES";
   const failed = validation.status === "FAILED" && validation.releaseGate === "TESTS_FAILED";
   if (!gatePassed && !waitingForTemplates && !failed) throw new Error("本机验证状态与发布门禁不一致");
+  if (!sameTargetMatrix(validation.targetMatrix, current.targetMatrix)) {
+    throw new Error("本机验证证据与锁定目标矩阵不一致");
+  }
   const targetResults = gatePassed
     ? current.targetResults
-    : Object.fromEntries(Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"])) as LocalDeliverySnapshot["targetResults"];
+    : createTargetResults(current.targetMatrix, "INVALIDATED");
   return event(
     {
       ...current,
@@ -459,7 +488,11 @@ export function recordLocalValidation(
       candidateSha: validation.candidateSha.slice(0, 7),
       evidenceValid: gatePassed ? current.evidenceValid : false,
       targetResults,
-      localValidation: { ...validation, valid: true },
+      localValidation: {
+        ...validation,
+        targetMatrix: Object.freeze([...validation.targetMatrix]),
+        valid: true,
+      },
     },
     gatePassed ? "LOCAL_GODOT_EVIDENCE_CREATED"
       : waitingForTemplates ? "LOCAL_GODOT_DEPENDENCY_WAIT"
@@ -495,9 +528,7 @@ export function applyLocalDeliveryAction(
         stage: "CANCELLED",
         resumeStage: null,
         evidenceValid: false,
-        targetResults: Object.fromEntries(
-          Object.keys(current.targetResults).map((platform) => [platform, "INVALIDATED"]),
-        ) as LocalDeliverySnapshot["targetResults"],
+        targetResults: createTargetResults(current.targetMatrix, "INVALIDATED"),
         steamBranch: null,
         mfaApprovalId: null,
         steamBuildId: null,
@@ -539,7 +570,7 @@ export function applyLocalDeliveryAction(
       || current.evidenceValid !== true
       || !Number.isSafeInteger(current.candidatePr) || (current.candidatePr ?? 0) < 1
       || !current.candidateSha
-      || Object.values(current.targetResults).some((status) => status !== "PASSED")) {
+      || current.targetMatrix.some((platform) => current.targetResults[platform] !== "PASSED")) {
       throw new Error("当前候选版本缺少可验收的提交、PR 或完整目标矩阵证据");
     }
     return event({ ...current, stage: "MERGING" }, "CANDIDATE_ACCEPTED", "用户已接受候选版本，开始合并 Draft PR。 ");
@@ -623,7 +654,11 @@ export function applyLocalDeliveryAction(
         throw new LocalDeliveryGateError("LOCAL_VALIDATION_INVALIDATED", "本机验证证据已失效，不能启动目标矩阵 E2E");
       }
       return event(
-        { ...current, stage: "E2E_RUNNING", targetResults: { linux: "RUNNING", windows: "QUEUED", macos: "QUEUED" } },
+        {
+          ...current,
+          stage: "E2E_RUNNING",
+          targetResults: startTargetMatrix(current.targetMatrix),
+        },
         "E2E_STARTED",
         "已冻结同一提交、规格与 TestKit，开始目标矩阵测试。",
       );
@@ -631,20 +666,17 @@ export function applyLocalDeliveryAction(
       const targets = { ...current.targetResults };
       let message = "";
       let stage: LocalDeliveryStage = current.stage;
-      if (targets.linux === "RUNNING") {
-        targets.linux = "PASSED";
-        targets.windows = "RUNNING";
-        message = "Linux 证据通过；Windows Runner 开始执行。";
-      } else if (targets.windows === "RUNNING") {
-        targets.windows = "PASSED";
-        targets.macos = "RUNNING";
-        message = "Windows 证据通过；macOS Runner 开始执行。";
-      } else if (targets.macos === "RUNNING") {
-        targets.macos = "PASSED";
-        stage = "AWAITING_ACCEPTANCE";
-        message = "所选三个目标全部通过，候选证据包已冻结。";
+      const runningIndex = current.targetMatrix.findIndex((platform) => targets[platform] === "RUNNING");
+      if (runningIndex < 0) throw new Error("E2E 状态缺少正在运行的平台");
+      const completed = current.targetMatrix[runningIndex]!;
+      targets[completed] = "PASSED";
+      const next = current.targetMatrix[runningIndex + 1];
+      if (next) {
+        targets[next] = "RUNNING";
+        message = `${platformLabel(completed)} 证据通过；${platformLabel(next)} Runner 开始执行。`;
       } else {
-        throw new Error("E2E 状态缺少正在运行的平台");
+        stage = "AWAITING_ACCEPTANCE";
+        message = `所选 ${current.targetMatrix.length} 个目标全部通过，候选证据包已冻结。`;
       }
       return event(
         { ...current, stage, targetResults: targets, evidenceValid: stage === "AWAITING_ACCEPTANCE" },
@@ -732,7 +764,7 @@ function handoffLocalPostMergeFailure(
       candidateSha: null,
       mainSha: null,
       evidenceValid: false,
-      targetResults: { linux: "INVALIDATED", windows: "INVALIDATED", macos: "INVALIDATED" },
+      targetResults: createTargetResults(current.targetMatrix, "INVALIDATED"),
       steamBranch: null,
       mfaApprovalId: null,
       steamBuildId: null,
@@ -746,4 +778,58 @@ function handoffLocalPostMergeFailure(
     reason === "MAIN_GATE_FAILURE" ? "MAIN_GATE_FAILED" : "STEAM_REINSTALL_FAILED",
     `${label} 的失败证据已冻结；旧发布权限已撤销，等待用户创建并批准新规格。`,
   );
+}
+
+function normalizeTargetMatrix(value: readonly unknown[]): readonly LocalTargetPlatform[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > TARGET_PLATFORM_ORDER.length) {
+    throw new Error("本地目标矩阵无效");
+  }
+  const matrix = value.map((platform) => {
+    if (platform !== "linux" && platform !== "windows" && platform !== "macos") {
+      throw new Error("本地目标矩阵包含不支持的平台");
+    }
+    return platform;
+  });
+  if (new Set(matrix).size !== matrix.length) throw new Error("本地目标矩阵不能包含重复平台");
+  return Object.freeze(matrix);
+}
+
+function normalizeTargetResults(
+  value: LocalTargetResults | null | undefined,
+  targetMatrix: readonly LocalTargetPlatform[],
+): LocalTargetResults {
+  const results: LocalTargetResults = {};
+  for (const platform of TARGET_PLATFORM_ORDER) {
+    if (!targetMatrix.includes(platform)) continue;
+    const status = value?.[platform];
+    results[platform] = status === "QUEUED" || status === "RUNNING" || status === "PASSED" || status === "INVALIDATED"
+      ? status
+      : "INVALIDATED";
+  }
+  return Object.freeze(results);
+}
+
+function createTargetResults(
+  targetMatrix: readonly LocalTargetPlatform[],
+  status: LocalPlatformStatus,
+): LocalTargetResults {
+  const results: LocalTargetResults = {};
+  for (const platform of TARGET_PLATFORM_ORDER) {
+    if (targetMatrix.includes(platform)) results[platform] = status;
+  }
+  return results;
+}
+
+function startTargetMatrix(targetMatrix: readonly LocalTargetPlatform[]): LocalTargetResults {
+  const results = createTargetResults(targetMatrix, "QUEUED");
+  results[targetMatrix[0]!] = "RUNNING";
+  return results;
+}
+
+function sameTargetMatrix(left: readonly LocalTargetPlatform[], right: readonly LocalTargetPlatform[]): boolean {
+  return left.length === right.length && left.every((platform, index) => platform === right[index]);
+}
+
+function platformLabel(platform: LocalTargetPlatform): string {
+  return platform === "linux" ? "Linux" : platform === "windows" ? "Windows" : "macOS";
 }

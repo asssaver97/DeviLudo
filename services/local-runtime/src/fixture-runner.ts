@@ -74,10 +74,12 @@ export class LocalFixtureRunner {
     validateRequest(request);
     try {
       const existing = await this.readEvidence(request);
+      assertEvidenceBinding(existing, request);
       if (existing.releaseGate !== "WAITING_EXPORT_TEMPLATES") return existing;
       // Dependency waits are not terminal and may be retried after the exact
       // matching export templates are installed.
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       // A missing manifest means the exact run has not completed yet.
     }
 
@@ -203,10 +205,11 @@ export class LocalFixtureRunner {
         ? "WAITING_EXPORT_TEMPLATES" as const
         : "TESTS_FAILED" as const;
     const unsigned = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       projectId: request.projectId,
       runId: request.runId,
       specRevisionId: request.specRevisionId,
+      targetMatrix: Object.freeze([...request.targetMatrix]),
       platform: "macos" as const,
       status,
       releaseGate,
@@ -278,6 +281,21 @@ function validateRequest(request: LocalRuntimeRequest) {
   validateIdentifier(request.projectId, "projectId");
   validateIdentifier(request.runId, "runId");
   validateIdentifier(request.specRevisionId, "specRevisionId");
+  if (!Array.isArray(request.targetMatrix) || request.targetMatrix.length < 1 || request.targetMatrix.length > 3
+    || new Set(request.targetMatrix).size !== request.targetMatrix.length
+    || request.targetMatrix.some((platform) => platform !== "linux" && platform !== "windows" && platform !== "macos")) {
+    throw new Error("targetMatrix is invalid");
+  }
+}
+
+function assertEvidenceBinding(evidence: LocalRuntimeEvidence, request: LocalRuntimeRequest) {
+  if (evidence.schemaVersion !== 2
+    || evidence.projectId !== request.projectId
+    || evidence.runId !== request.runId
+    || evidence.specRevisionId !== request.specRevisionId
+    || JSON.stringify(evidence.targetMatrix) !== JSON.stringify(request.targetMatrix)) {
+    throw new Error("Stored local evidence does not match the immutable run lock");
+  }
 }
 
 function validateIdentifier(value: string, name: string) {

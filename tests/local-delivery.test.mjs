@@ -76,6 +76,62 @@ test("local delivery fixture exercises the complete gated chain without external
   assert.match(state.events[0].message, /未调用真实 Steam/);
 });
 
+test("a one-platform local run completes E2E without inventing unselected gates", () => {
+  const initial = createLocalDelivery("project-windows-only");
+  let state = approveLocalSpec(
+    initial,
+    "SPEC-WINDOWS-001",
+    "RUN-WINDOWS-001",
+    initial.lockedProfile,
+    ["windows"],
+  );
+  assert.deepEqual(state.targetMatrix, ["windows"]);
+  assert.deepEqual(state.targetResults, { windows: "QUEUED" });
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.deepEqual(state.targetResults, { windows: "RUNNING" });
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.equal(state.stage, "AWAITING_ACCEPTANCE");
+  assert.deepEqual(state.targetResults, { windows: "PASSED" });
+  state = invalidateLocalDelivery(state, "SPEC-WINDOWS-002");
+  assert.deepEqual(state.targetMatrix, ["windows"]);
+  assert.deepEqual(state.targetResults, { windows: "INVALIDATED" });
+});
+
+test("a selected matrix keeps its frozen order and rejects evidence from another matrix", () => {
+  const initial = createLocalDelivery("project-ordered-matrix");
+  let state = approveLocalSpec(
+    initial,
+    "SPEC-MATRIX-001",
+    "RUN-MATRIX-001",
+    initial.lockedProfile,
+    ["macos", "linux"],
+  );
+  assert.deepEqual(state.targetMatrix, ["macos", "linux"]);
+  state = applyLocalDeliveryAction(state, "advance");
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.throws(() => recordLocalValidation(state, {
+    evidenceId: "EV-LOCAL-WRONG-MATRIX",
+    status: "TESTS_PASSED",
+    releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: "a".repeat(40),
+    sourceDigest: "b".repeat(64),
+    bundleDigest: "c".repeat(64),
+    godotVersion: "4.6.2.stable",
+    targetMatrix: ["linux", "macos"],
+    checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
+    createdAt: "2026-07-23T00:00:00.000Z",
+  }), /目标矩阵不一致/);
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.deepEqual(state.targetResults, { linux: "QUEUED", macos: "RUNNING" });
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.deepEqual(state.targetResults, { linux: "RUNNING", macos: "PASSED" });
+  state = applyLocalDeliveryAction(state, "advance");
+  assert.equal(state.stage, "AWAITING_ACCEPTANCE");
+  assert.deepEqual(state.targetResults, { linux: "PASSED", macos: "PASSED" });
+});
+
 test("feedback invalidates all local evidence and requires a new immutable approval", () => {
   let state = approveLocalSpec(createLocalDelivery("project-feedback"), "SPEC-008", "RUN-LOCAL-2");
   state = recordLocalValidation(state, {
@@ -86,6 +142,7 @@ test("feedback invalidates all local evidence and requires a new immutable appro
     sourceDigest: "b".repeat(64),
     bundleDigest: "c".repeat(64),
     godotVersion: "4.6.2.stable",
+    targetMatrix: state.targetMatrix,
     checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -170,6 +227,7 @@ test("failed local validation is auditable but cannot advance the candidate gate
     sourceDigest: "e".repeat(64),
     bundleDigest: "f".repeat(64),
     godotVersion: "4.6.2.stable",
+    targetMatrix: state.targetMatrix,
     checks: [{ name: "macos-export", status: "FAILED", durationMs: 3, detail: "configuration error" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -189,6 +247,7 @@ test("missing export templates remain auditable but cannot authorize target E2E"
     sourceDigest: "2".repeat(64),
     bundleDigest: "3".repeat(64),
     godotVersion: "4.6.2.stable",
+    targetMatrix: state.targetMatrix,
     checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 3, detail: "templates missing" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -318,6 +377,31 @@ test("legacy Agent evidence without a complete model-role lock fails closed", ()
   const normalized = normalizeLocalDeliverySnapshot(legacy);
   assert.equal(normalized.agentExecution.valid, false);
   assert.deepEqual(normalized.agentExecution.modelRoles, state.lockedProfile.modelRoles);
+});
+
+test("historical delivery snapshots derive the legacy matrix but fail old evidence closed", () => {
+  const current = approveLocalSpec(createLocalDelivery("project-legacy-matrix"), "SPEC-LEGACY-002", "RUN-LEGACY-002");
+  const legacy = {
+    ...current,
+    targetMatrix: undefined,
+    localValidation: {
+      evidenceId: "EV-LOCAL-LEGACY",
+      status: "TESTS_PASSED",
+      releaseGate: "LOCAL_VALIDATION_PASSED",
+      candidateSha: "a".repeat(40),
+      sourceDigest: "b".repeat(64),
+      bundleDigest: "c".repeat(64),
+      godotVersion: "4.6.2.stable",
+      checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "legacy fixture" }],
+      createdAt: "2026-07-18T00:00:00.000Z",
+      valid: true,
+    },
+  };
+
+  const normalized = normalizeLocalDeliverySnapshot(legacy);
+  assert.deepEqual(normalized.targetMatrix, ["linux", "windows", "macos"]);
+  assert.deepEqual(normalized.localValidation.targetMatrix, normalized.targetMatrix);
+  assert.equal(normalized.localValidation.valid, false);
 });
 
 test("feedback cannot bypass candidate E2E or invent an early revision", () => {

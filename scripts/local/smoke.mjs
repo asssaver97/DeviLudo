@@ -789,6 +789,9 @@ try {
   if (!localManifest.response.ok
     || localManifestPayload.projectId !== smokeValidationProject
     || localManifestPayload.runId !== validationApprovalPayload.data.run.id
+    || localManifestPayload.schemaVersion !== 2
+    || JSON.stringify(localManifestPayload.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
+    || JSON.stringify(localValidationPayload.data?.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || localManifestPayload.bundleDigest !== localValidationPayload.data.bundleDigest) {
     throw new Error("authenticated local evidence download did not preserve the validation binding");
   }
@@ -1069,7 +1072,7 @@ try {
   const codexDialogue = await request(baseUrl, `/api/projects/${smokeCodexProject}/conversation`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-dialogue-1" },
-    body: JSON.stringify({ expectedRevision: 0, message: "使用 Codex Profile 开发同一套 Godot 桌面交付样例" }),
+    body: JSON.stringify({ expectedRevision: 0, message: "使用 Codex Profile 开发仅面向 Linux 的 Godot 桌面交付样例" }),
   });
   const codexDialoguePayload = await codexDialogue.response.json();
   if (![200, 201].includes(codexDialogue.response.status) || codexDialoguePayload.data?.revision !== 1) {
@@ -1091,11 +1094,18 @@ try {
     || codexApprovalPayload.data?.run?.agent !== "codex-cli"
     || codexApprovalPayload.data?.run?.profileRevisionId !== "profile-codex-platform-r2"
     || codexApprovalPayload.data?.run?.configurationSource !== `project:${smokeCodexProject}`
-    || codexApprovalPayload.data?.run?.providerProtocol !== "openai-responses") {
+    || codexApprovalPayload.data?.run?.providerProtocol !== "openai-responses"
+    || JSON.stringify(codexApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["linux"])
+    || JSON.stringify(codexApprovalPayload.data?.delivery?.targetMatrix) !== JSON.stringify(["linux"])) {
     throw new Error("local Codex specification approval did not freeze the selected Profile");
   }
+  const codexReleaseActions = [
+    "advance", "advance", "advance", "advance",
+    "accept", "advance", "advance", "confirm-mfa", "advance", "advance",
+    "external-approve", "external-approve", "external-approve",
+  ];
   let completedCodexRelease;
-  for (const [index, action] of releaseActions.entries()) {
+  for (const [index, action] of codexReleaseActions.entries()) {
     completedCodexRelease = await localWorkflowAction(
       baseUrl, smokeCodexProject, `smoke-codex-release-${index + 1}`, action,
     );
@@ -1105,7 +1115,8 @@ try {
   if (completedCodexPayload.data?.stage !== "RELEASED"
     || completedCodexPayload.data?.lockedProfile?.agent !== "codex-cli"
     || completedCodexPayload.data?.lockedProfile?.profileRevisionId !== "profile-codex-platform-r2"
-    || JSON.stringify(completedCodexPayload.data?.targetResults) !== JSON.stringify({ linux: "PASSED", windows: "PASSED", macos: "PASSED" })) {
+    || JSON.stringify(completedCodexPayload.data?.targetMatrix) !== JSON.stringify(["linux"])
+    || JSON.stringify(completedCodexPayload.data?.targetResults) !== JSON.stringify({ linux: "PASSED" })) {
     throw new Error("local Codex Profile did not remain locked through the complete release chain");
   }
   const preflightPayload = await agentPreflight.response.json();

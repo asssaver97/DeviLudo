@@ -162,6 +162,7 @@ export async function POST(
       result.value.run.id,
       `spec-delivery:${projectId}:${requestKey}`,
       result.value.lockedProfile,
+      result.value.run.targetMatrix,
     );
     return json(
       { data: { ...result.value, delivery: delivery.snapshot }, meta: { idempotentReplay: result.replayed || delivery.replayed } },

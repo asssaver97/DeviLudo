@@ -350,13 +350,14 @@ test("delivery route keeps localhost fixture mode and production mutations read-
 test("local delivery route exposes a stable conflict when real export evidence is dependency-blocked", async () => {
   const localProjectId = `export-gate-${crypto.randomUUID()}`;
   await ensureLocalProject(localProjectId);
-  await startLocalDelivery(localProjectId, "SPEC-EXPORT-001", "RUN-EXPORT-001", `start:${localProjectId}`);
+  const started = await startLocalDelivery(localProjectId, "SPEC-EXPORT-001", "RUN-EXPORT-001", `start:${localProjectId}`);
   await saveLocalValidation(localProjectId, {
     evidenceId: "EV-LOCAL-EXPORT-WAIT",
     status: "WAITING_DEPENDENCY",
     releaseGate: "WAITING_EXPORT_TEMPLATES",
     candidateSha: "1".repeat(40), sourceDigest: "2".repeat(64), bundleDigest: "3".repeat(64),
     godotVersion: "4.6.2.stable",
+    targetMatrix: started.snapshot.targetMatrix,
     checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 4, detail: "templates missing" }],
     createdAt: "2026-07-21T00:00:00.000Z",
   }, `validation:${localProjectId}`);

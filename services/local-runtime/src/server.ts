@@ -2,8 +2,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import type { LocalRuntimeRequest } from "./contracts";
 import { LocalFixtureRunner } from "./fixture-runner";
+import {
+  LocalRuntimeRequestError,
+  LocalRuntimeRunCoordinator,
+  parseLocalRuntimeRequest,
+} from "./http-contract";
 import {
   LocalRuntimeAuthenticationError,
   LocalRuntimeRequestVerifier,
@@ -19,7 +23,7 @@ const runner = new LocalFixtureRunner({
   exportTemplatesRoot: process.env.DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT,
 });
 const requestVerifier = new LocalRuntimeRequestVerifier(localRuntimeKeyFromEnvironment());
-const running = new Map<string, Promise<unknown>>();
+const runCoordinator = new LocalRuntimeRunCoordinator();
 
 const server = createServer(async (request, response) => {
   try {
@@ -27,6 +31,10 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     if (error instanceof LocalRuntimeAuthenticationError) {
       json(response, 403, { error: { code: "LOCAL_RUNTIME_AUTH_REQUIRED", message: "Authenticated local Godot runtime request is required" } });
+      return;
+    }
+    if (error instanceof LocalRuntimeRequestError) {
+      json(response, error.status, { error: { code: error.code, message: error.message } });
       return;
     }
     json(response, 500, { error: { code: "LOCAL_RUNTIME_FAILED", message: "Local runtime request failed" } });
@@ -56,17 +64,8 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     }
     const rawBody = await readBody(request);
     requestVerifier.verify({ method: "POST", path: "/v1/runs", body: rawBody, headers: request.headers });
-    const body = JSON.parse(rawBody.toString("utf8")) as Partial<LocalRuntimeRequest>;
-    if (!body.projectId || !body.runId || !body.specRevisionId) {
-      json(response, 400, { error: { code: "INVALID_REQUEST", message: "projectId, runId and specRevisionId are required" } });
-      return;
-    }
-    const key = `${body.projectId}:${body.runId}`;
-    let operation = running.get(key);
-    if (!operation) {
-      operation = runner.run(body as LocalRuntimeRequest).finally(() => running.delete(key));
-      running.set(key, operation);
-    }
+    const body = parseLocalRuntimeRequest(rawBody);
+    const operation = runCoordinator.start(body, () => runner.run(body));
     json(response, 201, { data: await operation });
     return;
   }

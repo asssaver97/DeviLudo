@@ -274,18 +274,21 @@ export function LocalDeliveryPanel({
               <code>{snapshot.runId ?? "等待规格批准"}</code>
             </div>
             <div className="local-delivery-metric"><small>规格</small><b>{snapshot.specRevisionId}</b><span>rev {snapshot.revision}</span></div>
-            <div className="local-delivery-metric"><small>目标矩阵</small><b>{completedTargets} / 3</b><span>{snapshot.evidenceValid ? "证据有效" : "尚未形成有效证据"}</span></div>
+            <div className="local-delivery-metric"><small>目标矩阵</small><b>{completedTargets} / {snapshot.targetMatrix.length}</b><span>{snapshot.evidenceValid ? "证据有效" : "尚未形成有效证据"}</span></div>
             <div className="local-delivery-metric"><small>提交</small><b>{snapshot.mainSha ?? snapshot.candidateSha ?? "—"}</b><span>{snapshot.mainSha ? "main SHA" : snapshot.candidateSha ? "候选 SHA" : "尚未产出"}</span></div>
           </div>
 
           <div className="local-platform-row">
-            {(Object.keys(platformLabels) as Array<keyof typeof platformLabels>).map((platform) => (
-              <div className={`local-platform local-platform-${snapshot.targetResults[platform].toLowerCase()}`} key={platform}>
+            {snapshot.targetMatrix.map((platform) => {
+              const status = snapshot.targetResults[platform] ?? "INVALIDATED";
+              return (
+              <div className={`local-platform local-platform-${status.toLowerCase()}`} key={platform}>
                 <span>{platform === "linux" ? "L" : platform === "windows" ? "W" : "m"}</span>
-                <div><b>{platformLabels[platform]}</b><small>{statusLabels[snapshot.targetResults[platform]]}</small></div>
-                {snapshot.targetResults[platform] === "PASSED" ? <CheckIcon /> : <ClockIcon />}
+                <div><b>{platformLabels[platform]}</b><small>{statusLabels[status]}</small></div>
+                {status === "PASSED" ? <CheckIcon /> : <ClockIcon />}
               </div>
-            ))}
+              );
+            })}
           </div>
 
           {snapshot.repairHandoff ? (

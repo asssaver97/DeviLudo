@@ -78,6 +78,62 @@ test("an explicit project Codex selection is frozen into the same complete local
   assert.deepEqual(released.targetResults, { linux: "PASSED", windows: "PASSED", macos: "PASSED" });
 });
 
+test("local approval freezes the dialogue-selected target matrix and gates only those systems", { concurrency: false }, async (context) => {
+  resetDemoStore();
+  const projectId = `windows-only-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
+  const previousKey = process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY;
+  process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY = Buffer.alloc(32, 19).toString("base64url");
+  context.after(() => {
+    if (previousKey === undefined) delete process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY;
+    else process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY = previousKey;
+  });
+  context.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    assert.equal(url.pathname, `/v1/projects/${projectId}/spec-approval`);
+    assert.equal(init?.method, "POST");
+    assert.ok(new Headers(init?.headers).get("x-deviludo-local-sidecar-signature"));
+    return new Response(JSON.stringify({
+      data: {
+        conversationId: "conversation-windows-only",
+        revision: 4,
+        specRevisionId: "spec-windows-only-approved",
+        testPlanRevisionId: "test-plan-windows-only-frozen",
+        state: "APPROVED",
+        specDigest: "a".repeat(64),
+        testPlanDigest: "b".repeat(64),
+        targetMatrix: ["windows"],
+        godotVersion: "4.5.0",
+        approvedAt: "2026-07-23T00:00:00.000Z",
+      },
+    }), { status: 201, headers: { "content-type": "application/json" } });
+  });
+
+  const response = await approveSpec(localRequest(
+    `/api/projects/${projectId}/spec-revisions`,
+    "POST",
+    {
+      action: "approve",
+      revision: "SPEC-004",
+      conversationId: "conversation-windows-only",
+      expectedRevision: 3,
+      specRevisionId: "spec-windows-only-draft",
+      testPlanRevisionId: "test-plan-windows-only-draft",
+    },
+    "windows-only-approval",
+  ), { params: Promise.resolve({ projectId }) });
+  assert.equal(response.status, 201);
+  const approved = (await response.json()).data;
+  assert.deepEqual(approved.run.targetMatrix, ["windows"]);
+  assert.deepEqual(approved.delivery.targetMatrix, ["windows"]);
+  assert.deepEqual(approved.delivery.targetResults, { windows: "QUEUED" });
+
+  const releasedCandidate = await finish(projectId, "windows-only", ["advance", "advance", "advance", "advance"]);
+  assert.equal(releasedCandidate.stage, "AWAITING_ACCEPTANCE");
+  assert.deepEqual(releasedCandidate.targetMatrix, ["windows"]);
+  assert.deepEqual(releasedCandidate.targetResults, { windows: "PASSED" });
+});
+
 test("a project may explicitly pin its current tenant Profile but not another project's Profile", async () => {
   resetDemoStore();
   const projectId = `tenant-lock-${crypto.randomUUID()}`;

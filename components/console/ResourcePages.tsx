@@ -106,6 +106,7 @@ export function EvidencePage() {
         evidenceId?: string;
         candidateSha?: string;
         bundleDigest?: string;
+        targetMatrix?: readonly string[];
         artifactDigests?: Record<string, string>;
       };
       const junit = await junitResponse.text();
@@ -113,6 +114,8 @@ export function EvidencePage() {
       const { evidenceId, bundleDigest, ...unsigned } = manifest;
       const ok = manifest.evidenceId === evidence.evidenceId
         && manifest.candidateSha === evidence.candidateSha
+        && JSON.stringify(manifest.targetMatrix) === JSON.stringify(delivery?.targetMatrix)
+        && JSON.stringify(evidence.targetMatrix) === JSON.stringify(delivery?.targetMatrix)
         && bundleDigest === evidence.bundleDigest
         && evidenceId === `EV-LOCAL-${String(bundleDigest).slice(0, 12).toUpperCase()}`
         && bundleDigest === await sha256(JSON.stringify(unsigned))

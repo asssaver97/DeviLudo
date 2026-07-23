@@ -152,7 +152,10 @@ test("short-lived authorization binds the image, cluster, runtime lock, namespac
   assert.throws(
     () => verifyControlReleaseAuthorization({
       ...authorization,
-      signature: { ...authorization.signature, value: `A${authorization.signature.value.slice(1)}` },
+      signature: {
+        ...authorization.signature,
+        value: `${authorization.signature.value.startsWith("A") ? "B" : "A"}${authorization.signature.value.slice(1)}`,
+      },
     }, policy, policyDigest, { bundle, clusterContext: context, now }),
     /authorization is invalid/,
   );

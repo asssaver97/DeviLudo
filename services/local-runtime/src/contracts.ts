@@ -2,6 +2,7 @@ export type LocalRuntimeRequest = {
   projectId: string;
   runId: string;
   specRevisionId: string;
+  targetMatrix: readonly ("linux" | "windows" | "macos")[];
 };
 
 export type LocalRuntimeCheck = {
@@ -12,11 +13,12 @@ export type LocalRuntimeCheck = {
 };
 
 export type LocalRuntimeEvidence = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   evidenceId: string;
   projectId: string;
   runId: string;
   specRevisionId: string;
+  targetMatrix: readonly ("linux" | "windows" | "macos")[];
   platform: "macos";
   status: "TESTS_PASSED" | "WAITING_DEPENDENCY" | "FAILED";
   releaseGate: "WAITING_EXPORT_TEMPLATES" | "LOCAL_VALIDATION_PASSED" | "TESTS_FAILED";

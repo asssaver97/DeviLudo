@@ -57,7 +57,7 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 3. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
 4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml` 和 `godot.log`。
 
-每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。证据包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本和逐项检查结果。`.deviludo/` 已被 Git 忽略。
+每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。证据 v2 包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本、逐项检查结果和批准规格中保持顺序的目标矩阵。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移或夹带未选系统时只能审计，不能满足当前 Run。
 
 如果本机没有通过上述固定安装器安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 
@@ -97,7 +97,7 @@ npm run local:smoke
 - 在候选 E2E 前拒绝反馈；若导出模板缺失，确认真实候选不能启动目标矩阵。独立的完整 Fixture 候选在待验收后创建、精确重放并批准新反馈草稿，再对后继 Run 运行真实 Godot，证明旧验收权限不能被复用。
 - 候选接受只通过空 JSON 的 `/api/projects/{projectId}/acceptance` 提交，精确重放同一个幂等决定；通用 `/delivery` 的 `accept` 动作必须返回 400，不能绕过正式验收门禁。
 - 直接向 Godot、Agent、规格三个 sidecar 发送旧固定请求头，必须全部返回 403，证明 loopback 本身不构成权限。
-- 两个隔离项目分别选择 Claude Code 与 Codex CLI Profile，从规格批准一直推进到三平台通过和 `RELEASED`，并确认整个链路保持最初的不可变 Agent 锁。
+- 两个隔离项目分别选择 Claude Code 与 Codex CLI Profile：Claude 样例完成三平台闭环，Codex 样例只选择 Linux 并证明 Windows/macOS 不会成为隐藏门禁；两者都推进到 `RELEASED`，并确认整个链路保持最初的不可变 Agent 与目标矩阵锁。
 
 任何路由超时、非 2xx、错误内容类型或内容标记缺失都会以非零状态退出，适合本地脚本和 CI 调用。
 

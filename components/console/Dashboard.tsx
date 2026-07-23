@@ -54,7 +54,7 @@ const pipelineTemplate = [
 function pipelineFor(delivery: LocalDeliverySnapshot) {
   const rank = delivery.stage === "CANCELLED" ? -1 : stageOrder.indexOf(delivery.stage);
   const points = [1, 4, 4, 5, 6, 10];
-  const meta = [delivery.specRevisionId, delivery.runId ?? "等待", delivery.localValidation ? "本机已验证" : "等待证据", `${Object.values(delivery.targetResults).filter((value) => value === "PASSED").length} / 3`, delivery.stage === "AWAITING_ACCEPTANCE" ? "待确认" : rank > 6 ? "已确认" : "等待", delivery.stage === "RELEASED" ? "完成" : "门禁"];
+  const meta = [delivery.specRevisionId, delivery.runId ?? "等待", delivery.localValidation ? "本机已验证" : "等待证据", `${Object.values(delivery.targetResults).filter((value) => value === "PASSED").length} / ${delivery.targetMatrix.length}`, delivery.stage === "AWAITING_ACCEPTANCE" ? "待确认" : rank > 6 ? "已确认" : "等待", delivery.stage === "RELEASED" ? "完成" : "门禁"];
   return pipelineTemplate.map((stage, index) => ({
     ...stage,
     state: rank > points[index] ? "complete" : rank === points[index] ? "active" : "pending",
@@ -113,11 +113,11 @@ export function Dashboard() {
   const passedTargets = delivery
     ? Object.values(delivery.targetResults).filter((value) => value === "PASSED").length
     : productionDelivery?.candidateEvidenceBundleId ? productionDelivery.targetMatrix.length : 0;
-  const targetCount = delivery ? 3 : productionDelivery?.targetMatrix.length ?? 0;
+  const targetCount = delivery ? delivery.targetMatrix.length : productionDelivery?.targetMatrix.length ?? 0;
   const stageName = delivery ? stageNames[delivery.stage]
     : productionDelivery ? productionStageNames[productionDelivery.state] : null;
   const platforms = delivery
-    ? (["linux", "windows", "macos"] as const).map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: delivery.targetResults[id] }))
+    ? delivery.targetMatrix.map((id) => ({ id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS", state: delivery.targetResults[id] ?? "INVALIDATED" }))
     : productionDelivery ? productionDelivery.targetMatrix.map((id) => ({
       id, label: id === "linux" ? "Linux" : id === "windows" ? "Windows" : "macOS",
       state: productionDelivery.candidateEvidenceBundleId ? "PASSED" : productionDelivery.state === "CROSS_PLATFORM_E2E" ? "RUNNING" : "QUEUED",

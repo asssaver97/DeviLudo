@@ -38,7 +38,12 @@ export async function POST(
       return json({ error: { code: "INVALID_DELIVERY_STAGE", message: "当前交付阶段不能运行本机验证" } }, { status: 409 });
     }
 
-    const command = JSON.stringify({ projectId, runId: delivery.runId, specRevisionId: delivery.specRevisionId });
+    const command = JSON.stringify({
+      projectId,
+      runId: delivery.runId,
+      specRevisionId: delivery.specRevisionId,
+      targetMatrix: delivery.targetMatrix,
+    });
     let runtimeResponse: Response;
     try {
       runtimeResponse = await fetch(`${RUNTIME_URL}/v1/runs`, {
@@ -56,7 +61,13 @@ export async function POST(
     if (!runtimeResponse.ok) {
       return json({ error: { code: "LOCAL_RUNTIME_FAILED", message: payload.error?.message ?? "本机 Godot 验证失败" } }, { status: 502 });
     }
-    const validation = validateEvidence(payload.data, projectId, delivery.runId, delivery.specRevisionId);
+    const validation = validateEvidence(
+      payload.data,
+      projectId,
+      delivery.runId,
+      delivery.specRevisionId,
+      delivery.targetMatrix,
+    );
     const saved = await saveLocalValidation(
       projectId,
       validation,
@@ -84,11 +95,15 @@ function validateEvidence(
   projectId: string,
   runId: string,
   specRevisionId: string,
+  targetMatrix: LocalValidationSnapshot["targetMatrix"],
 ): Omit<LocalValidationSnapshot, "valid"> {
   if (!value || typeof value !== "object") throw new Error("本机证据响应无效");
   const item = value as Record<string, unknown>;
   if (item.projectId !== projectId || item.runId !== runId || item.specRevisionId !== specRevisionId) {
     throw new Error("本机证据绑定与锁定运行不一致");
+  }
+  if (item.schemaVersion !== 2 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
+    throw new Error("本机证据目标矩阵与锁定运行不一致");
   }
   if (!validEvidenceStatus(item.status)) {
     throw new Error("本机证据状态无效");
@@ -124,6 +139,7 @@ function validateEvidence(
     sourceDigest: String(item.sourceDigest),
     bundleDigest: String(item.bundleDigest),
     godotVersion: String(item.godotVersion),
+    targetMatrix: Object.freeze([...targetMatrix]),
     checks: item.checks as LocalValidationSnapshot["checks"],
     createdAt: String(item.createdAt),
   };
