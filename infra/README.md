@@ -188,3 +188,32 @@ managed least-privilege allow rules before migration or service startup.
 The target namespace's registry, migration and per-service ConfigMap/Secret
 objects are revision-suffixed, immutable external production inputs; see
 [`docs/production-control-release.md`](../docs/production-control-release.md).
+
+## Privileged Agent supply-chain release
+
+The Agent supply-chain Broker is never admitted to the shared control image. A
+dedicated `Dockerfile.agent-supply-chain` is built only by
+`npm run image:build-agent-supply-chain`; it requires digest-pinned Node 22.13+
+and internal `agent-supply-chain-toolchain` bases, an exact platform version and
+a source-derived destination tag. Its fixed entrypoint starts only the Broker,
+rejects arguments and local-test authority, and disables CLI self-updates.
+
+The target namespace must pre-provision four revision-suffixed immutable
+objects (registry Secret, runtime ConfigMap, environment Secret and file Secret)
+plus a revision-suffixed PVC containing the signed native executable and release
+files. `npm run lock:agent-supply-chain-runtime` reads metadata only and binds
+all five UID/resourceVersion pairs to one explicit kube context. The PVC is
+mounted read-only; the platform-owned work directory is a bounded ephemeral
+volume and must never be a host path or runtime socket.
+
+`npm run deploy:agent-supply-chain -- --render` is side-effect free. A real
+apply additionally needs a maximum-30-minute authorization from a distinct mTLS
+KMS route and the exact digest of the separately reviewed Agent supply-chain
+release trust policy. Authorization binds the image receipt, toolchain base,
+runtime lock, context, namespace and replicas. Before each of the three writes,
+the deployer re-verifies both signature and live resource identities. It applies
+only a restricted namespace, tokenless ServiceAccount, default-deny policy,
+ClusterIP Service and one dedicated Deployment; it never deletes, prunes, execs
+or uses the current context. SecurityAdmin-managed ingress/egress allow policies
+and remote mTLS endpoints for BuildKit, registry, KMS and Fleet are external
+prerequisites; the generated default-deny policy intentionally fails closed.

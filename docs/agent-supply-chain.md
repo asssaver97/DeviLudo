@@ -78,7 +78,97 @@ Broker 在创建数据库连接、探针或子进程之前重新读取文件，�
 摘要与大小。撤销 key、替换任一文件或仅修改环境 digest 都会使启动失败。
 执行镜像必须在 `/usr/bin/node` 提供固定且签名验证过的 Node 22.13+ runtime。
 
-不要把源码入口、`tsx`、包管理器或 `node_modules` 挂到生产 Broker。不要在生产运行 `npm install`、浮动版本、自更新、管理员 shell 或外部脚本。新执行器与新策略都作为新制品灰度，已运行任务继续使用原 digest。信任策略与业务策略是两个独立对象：前者只决定哪些平台发布签名可启动，后者决定官方 Agent 源、扫描器、镜像与 Fleet 权限，不能用一个 digest 代替另一个。
+不要把主机源码、`tsx`、包管理器或主机 `node_modules` 挂到生产 Broker。镜像只包含 lockfile 安装且关闭生命周期脚本的生产依赖；不要在生产运行 `npm install`、浮动版本、自更新、管理员 shell 或外部脚本。新执行器与新策略都作为新制品灰度，已运行任务继续使用原 digest。信任策略与业务策略是两个独立对象：前者只决定哪些平台发布签名可启动，后者决定官方 Agent 源、扫描器、镜像与 Fleet 权限，不能用一个 digest 代替另一个。
+
+## 专用 Broker 镜像与 Kubernetes 发布
+
+Broker 不得运行在共享控制面镜像。先在受控流水线准备一个内部工具链基础镜像；
+其仓库名必须以 `/agent-supply-chain-toolchain` 结尾，tag 必须精确等于当前平台
+版本，并以 digest 固定。该基础镜像预装并锁定 Node runtime、ClamAV、Trivy、
+Syft、ORAS、BuildKit client、Cosign、nerdctl 和 Fleet client；不得内置长期凭据、
+Docker socket 或自更新器。然后构建专用镜像：
+
+```bash
+npm run image:build-agent-supply-chain -- \
+  --node-base-image registry.internal/base/node:22.13.1-bookworm-slim@sha256:NODE_DIGEST \
+  --toolchain-base-image registry.internal/deviludo/agent-supply-chain-toolchain:0.1.0-beta.1@sha256:TOOLCHAIN_DIGEST \
+  --destination registry.internal/deviludo/agent-supply-chain:0.1.0-beta.1-0123456789ab \
+  --source-revision 0123456789abcdef0123456789abcdef01234567
+```
+
+构建命令固定使用单平台 BuildKit、`--pull --no-cache --push`、最大 provenance
+和 SBOM，输出 `deviludo.agent-supply-chain-image-receipt.v1`。回执绑定最终镜像
+digest、两个基础镜像、Dockerfile、lockfile、平台版本与源码 revision；生产部署
+只接受当前仓库字节和当前平台版本对应的回执。
+
+在独立 namespace 预先创建以下外部输入，其中 Secret/ConfigMap 都必须设置
+`immutable: true`，后缀 revision 是 12 位小写十六进制：
+
+- `deviludo-agent-supply-chain-registry-REVISION` Secret；
+- `deviludo-agent-supply-chain-config-REVISION` ConfigMap；
+- `deviludo-agent-supply-chain-environment-REVISION` Secret；
+- `deviludo-agent-supply-chain-files-REVISION` Secret；
+- `deviludo-agent-supply-chain-release-REVISION` PVC，包含 `/bin` 和 `/release`
+  下经签名验证的 native 制品，只以只读方式挂载到 `/opt/deviludo`。
+
+创建元数据锁；命令不会读取 Secret data：
+
+```bash
+NODE_ENV=production npm run lock:agent-supply-chain-runtime -- \
+  --context production-ap-east-1/admin \
+  --namespace deviludo-agent-supply-chain \
+  --configuration-revision abcdef012345 \
+  > /absolute/private/agent-supply-chain-runtime-lock.json
+```
+
+从故意默认撤销的
+[`infra/agent-supply-chain-release-trust-policy.example.json`](../infra/agent-supply-chain-release-trust-policy.example.json)
+建立第二套发布信任策略。它不能复用 native artifact key 或 control-plane release
+key。检查评审摘要后，配置五个
+`DEVILUDO_AGENT_SUPPLY_CHAIN_RELEASE_SIGNER_*`/`_SIGNING_KEY_ID` 变量：
+
+```bash
+npm run inspect:agent-supply-chain-release-trust -- \
+  --trust-policy /absolute/reviewed/agent-supply-chain-release-trust.json
+
+NODE_ENV=production npm run authorize:agent-supply-chain -- \
+  --context production-ap-east-1/admin \
+  --receipt /absolute/private/agent-supply-chain-image-receipt.json \
+  --runtime-lock /absolute/private/agent-supply-chain-runtime-lock.json \
+  --trust-policy /absolute/reviewed/agent-supply-chain-release-trust.json \
+  --trust-policy-digest sha256:REVIEWED_DIGEST \
+  > /absolute/private/agent-supply-chain-release-authorization.json
+```
+
+客户端固定调用 `/v1/agent-supply-chain-releases/sign-ed25519`。授权最长 30 分钟，
+绑定镜像、工具链基础镜像、运行时锁、集群、namespace 和 replicas。先离线渲染：
+
+```bash
+npm run deploy:agent-supply-chain -- \
+  --receipt /absolute/private/agent-supply-chain-image-receipt.json \
+  --runtime-lock /absolute/private/agent-supply-chain-runtime-lock.json \
+  --render
+```
+
+完成 SecurityAdmin 审核后才显式 apply：
+
+```bash
+npm run deploy:agent-supply-chain -- \
+  --apply \
+  --context production-ap-east-1/admin \
+  --receipt /absolute/private/agent-supply-chain-image-receipt.json \
+  --runtime-lock /absolute/private/agent-supply-chain-runtime-lock.json \
+  --authorization /absolute/private/agent-supply-chain-release-authorization.json \
+  --trust-policy /absolute/reviewed/agent-supply-chain-release-trust.json \
+  --trust-policy-digest sha256:REVIEWED_DIGEST
+```
+
+发布器将工作负载固定到标签为 `deviludo.io/workload=agent-supply-chain` 的
+Linux 节点，使用只读根文件系统、无 ServiceAccount token、去除全部 capabilities、
+有界 `/tmp` 和有界临时 work volume。它不会挂载 hostPath、容器 runtime socket
+或执行 shell/delete/prune/exec。namespace 默认拒绝全部网络；集群外部的受评审
+NetworkPolicy 必须只放行 mTLS 控制入口、DNS 以及策略中固定的 Registry、KMS、
+BuildKit 和 Fleet 连接器，否则 Broker 会保持不可用而不会放宽权限。
 
 ## 策略配置
 

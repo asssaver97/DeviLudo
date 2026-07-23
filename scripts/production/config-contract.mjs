@@ -19,6 +19,7 @@ const EXACT_PLATFORM_ENVIRONMENT_NAMES = new Set([
 // image build arguments. Operators must not inject them into a service
 // deployment or copy them into an environment file.
 const PROCESS_OWNED_ENVIRONMENT_NAMES = new Set([
+  "DEVILUDO_CONTAINER_KIND",
   "DEVILUDO_PLATFORM_VERSION",
   "DEVILUDO_SOURCE_REVISION",
   "DEVILUDO_WORKFLOW_DESTINATION",
@@ -125,7 +126,10 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     }
   }
   for (const utility of [
+    "scripts/production/agent-supply-chain-release-authorization.mjs",
+    "scripts/production/authorize-agent-supply-chain-release.mjs",
     "scripts/production/authorize-control-plane-release.mjs",
+    "scripts/production/build-agent-supply-chain-image.mjs",
     "scripts/production/build-control-plane-image.mjs",
     "scripts/production/build-runner-native.mjs",
     "scripts/production/apply-runner-native-service-transaction.mjs",
@@ -149,10 +153,14 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/verify-runner-native-release.mjs",
     "scripts/production/control-release-authorization.mjs",
     "scripts/production/deploy-control-plane.mjs",
+    "scripts/production/deploy-agent-supply-chain.mjs",
+    "scripts/production/inspect-agent-supply-chain-release-trust-policy.mjs",
     "scripts/production/inspect-control-release-trust-policy.mjs",
     "scripts/production/lock-control-runtime.mjs",
+    "scripts/production/lock-agent-supply-chain-runtime.mjs",
     "scripts/production/migrate-postgres.mjs",
     "scripts/production/run-control-service.mjs",
+    "scripts/production/run-agent-supply-chain-container.mjs",
   ]) {
     const path = resolve(root, utility);
     try {

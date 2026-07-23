@@ -1,0 +1,46 @@
+ARG NODE_BASE_IMAGE
+FROM ${NODE_BASE_IMAGE} AS dependencies
+
+WORKDIR /workspace
+ENV NODE_ENV=production \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
+ARG TOOLCHAIN_BASE_IMAGE
+FROM ${TOOLCHAIN_BASE_IMAGE} AS runtime
+
+ARG DEVILUDO_PLATFORM_VERSION
+ARG DEVILUDO_SOURCE_REVISION
+
+LABEL org.opencontainers.image.title="DeviLudo Agent supply-chain" \
+      org.opencontainers.image.version="${DEVILUDO_PLATFORM_VERSION}" \
+      org.opencontainers.image.revision="${DEVILUDO_SOURCE_REVISION}" \
+      org.opencontainers.image.source="https://github.com/asssaver97/DeviLudo" \
+      deviludo.io/workload="agent-supply-chain"
+
+WORKDIR /workspace
+ENV NODE_ENV=production \
+    NODE_OPTIONS=--enable-source-maps \
+    NODE_PATH="" \
+    HOME=/nonexistent \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH="" \
+    LD_PRELOAD="" \
+    DEVILUDO_CONTAINER_KIND=agent-supply-chain \
+    DISABLE_UPDATES=1
+
+COPY --from=dependencies --chown=1000:1000 /workspace/node_modules ./node_modules
+COPY --chown=1000:1000 package.json tsconfig.json ./
+COPY --chown=1000:1000 adapters ./adapters
+COPY --chown=1000:1000 lib ./lib
+COPY --chown=1000:1000 scripts/observability ./scripts/observability
+COPY --chown=1000:1000 scripts/production/run-agent-supply-chain-container.mjs ./scripts/production/run-agent-supply-chain-container.mjs
+COPY --chown=1000:1000 services ./services
+
+USER 1000:1000
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/bin/node", "scripts/production/run-agent-supply-chain-container.mjs"]
