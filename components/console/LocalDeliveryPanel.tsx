@@ -420,6 +420,9 @@ export function LocalDeliveryPanel({
                   <a href={`/api/projects/${projectId}/local-validation/evidence/manifest.json`} rel="noreferrer" target="_blank">Manifest</a>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/junit.xml`} rel="noreferrer" target="_blank">JUnit</a>
                   <a href={`/api/projects/${projectId}/local-validation/evidence/godot.log`} rel="noreferrer" target="_blank">日志</a>
+                  {snapshot.localValidation.buildArtifact ? (
+                    <a href={`/api/projects/${projectId}/local-validation/artifact/${snapshot.localValidation.buildArtifact.fileName}`}>下载 macOS 构建</a>
+                  ) : null}
                   {snapshot.localValidation.releaseGate === "WAITING_EXPORT_TEMPLATES" ? (
                     <button className="button button-secondary" disabled={busy} onClick={runLocalValidation} type="button">
                       {busy ? "正在重试…" : "安装模板后重试"}

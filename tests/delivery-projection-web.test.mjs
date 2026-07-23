@@ -360,6 +360,7 @@ test("local delivery route exposes a stable conflict when real export evidence i
     targetMatrix: started.snapshot.targetMatrix,
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: null,
     checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 4, detail: "templates missing" }],
     createdAt: "2026-07-21T00:00:00.000Z",
   }, `validation:${localProjectId}`);

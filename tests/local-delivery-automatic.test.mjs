@@ -4,6 +4,11 @@ import test from "node:test";
 import { runLocalDeliveryUntilHumanGate } from "../lib/local-delivery/automatic.ts";
 import { commandLocalDelivery, saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
 
+const macosBuild = Object.freeze({
+  fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
+  sha256: "9".repeat(64), sizeBytes: 4096,
+});
+
 function passingValidation(projectId, delivery, commandKey) {
   return saveLocalValidation(projectId, {
     evidenceId: "EV-LOCAL-AABBCCDDEEFF",
@@ -16,6 +21,7 @@ function passingValidation(projectId, delivery, commandKey) {
     targetMatrix: delivery.targetMatrix,
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: macosBuild,
     checks: [
       { name: "import", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },
@@ -81,6 +87,7 @@ test("local automation persists a dependency wait and cannot bypass it", async (
     targetMatrix: delivery.targetMatrix,
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: null,
     checks: [
       { name: "import", status: "PASSED", durationMs: 1, detail: "fixture" },
       { name: "boot", status: "PASSED", durationMs: 1, detail: "fixture" },

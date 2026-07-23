@@ -819,11 +819,36 @@ try {
   if (!localManifest.response.ok
     || localManifestPayload.projectId !== smokeValidationProject
     || localManifestPayload.runId !== validationApprovalPayload.data.run.id
-    || localManifestPayload.schemaVersion !== 2
+    || localManifestPayload.schemaVersion !== 3
     || JSON.stringify(localManifestPayload.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || JSON.stringify(localValidationPayload.data?.targetMatrix) !== JSON.stringify(validationApprovalPayload.data.run.targetMatrix)
     || localManifestPayload.bundleDigest !== localValidationPayload.data.bundleDigest) {
     throw new Error("authenticated local evidence download did not preserve the validation binding");
+  }
+  let localBuild = null;
+  if (expectedLocalValidationStatus === "TESTS_PASSED") {
+    const buildBinding = localManifestPayload.buildArtifact;
+    if (buildBinding?.fileName !== "DeviLudoLocal.zip"
+      || buildBinding.platform !== "macos"
+      || buildBinding.contentType !== "application/zip"
+      || !/^[a-f0-9]{64}$/.test(String(buildBinding.sha256))
+      || !Number.isSafeInteger(buildBinding.sizeBytes)
+      || buildBinding.sizeBytes < 1
+      || JSON.stringify(buildBinding) !== JSON.stringify(localValidationPayload.data?.buildArtifact)) {
+      throw new Error("passed local evidence did not bind its macOS build artifact");
+    }
+    localBuild = await request(baseUrl, `/api/projects/${smokeValidationProject}/local-validation/artifact/${buildBinding.fileName}`, {}, 30_000);
+    const buildBytes = Buffer.from(await localBuild.response.arrayBuffer());
+    if (!localBuild.response.ok
+      || localBuild.response.headers.get("content-type") !== buildBinding.contentType
+      || localBuild.response.headers.get("content-disposition") !== 'attachment; filename="DeviLudoLocal.zip"'
+      || localBuild.response.headers.get("x-deviludo-artifact-sha256") !== buildBinding.sha256
+      || buildBytes.byteLength !== buildBinding.sizeBytes
+      || createHash("sha256").update(buildBytes).digest("hex") !== buildBinding.sha256) {
+      throw new Error("downloaded local build bytes did not match the immutable evidence manifest");
+    }
+  } else if (localManifestPayload.buildArtifact !== null || localValidationPayload.data?.buildArtifact !== null) {
+    throw new Error("dependency-blocked local evidence incorrectly authorized a build artifact");
   }
   let feedbackProject = smokeValidationProject;
   let feedbackDialoguePayload = validationDialoguePayload.data;
@@ -1227,6 +1252,9 @@ try {
     ? `✓ Export dependency ${validationGateBlock.response.status} (${validationGateBlock.elapsedMs}ms) · target E2E blocked`
     : "✓ Export dependency ready · production export authorized target E2E");
   console.log(`✓ Evidence download ${localManifest.response.status} (${localManifest.elapsedMs}ms) · signed sidecar request`);
+  console.log(localBuild
+    ? `✓ Build delivery    ${localBuild.response.status} (${localBuild.elapsedMs}ms) · manifest-bound macOS zip`
+    : "✓ Build delivery    blocked · export dependency has no downloadable artifact");
   console.log(`✓ Feedback gate     ${earlyFeedback.response.status} (${earlyFeedback.elapsedMs}ms) · ${earlyFeedbackPayload.error.code}`);
   console.log(`✓ Feedback draft    ${feedbackIteration.response.status} (${feedbackIteration.elapsedMs}ms) · revision ${feedbackSnapshot.revision} → approved ${iterationApprovalPayload.data.authority.revision}`);
   console.log(`✓ Iteration E2E     ${iterationValidation.response.status} (${iterationValidation.elapsedMs}ms) · distinct signed Godot evidence`);

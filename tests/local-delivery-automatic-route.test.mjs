@@ -43,13 +43,17 @@ test("localhost automatic delivery persists an exact replay and invokes Godot on
     const command = JSON.parse(body);
     assert.deepEqual(command.targetMatrix, ["macos"]);
     return Response.json({ data: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       projectId,
       runId: started.snapshot.runId,
       specRevisionId: started.snapshot.specRevisionId,
       targetMatrix: ["macos"],
       platform: "macos",
       fixtureOnly: true,
+      buildArtifact: {
+        fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
+        sha256: "f".repeat(64), sizeBytes: 4096,
+      },
       evidenceId: "EV-LOCAL-ABCDEF123456",
       status: "TESTS_PASSED",
       releaseGate: "LOCAL_VALIDATION_PASSED",

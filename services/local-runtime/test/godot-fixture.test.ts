@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -50,6 +50,19 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
     assert.doesNotMatch(log, new RegExp(temporary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(result.artifactDigests["junit.xml"], /^[a-f0-9]{64}$/);
     assert.match(result.artifactDigests["godot.log"], /^[a-f0-9]{64}$/);
+    if (result.releaseGate === "LOCAL_VALIDATION_PASSED") {
+      assert.equal(result.schemaVersion, 3);
+      assert.equal(result.buildArtifact?.fileName, "DeviLudoLocal.zip");
+      assert.equal(result.buildArtifact?.platform, "macos");
+      assert.equal(result.buildArtifact?.contentType, "application/zip");
+      assert.match(result.buildArtifact?.sha256 ?? "", /^[a-f0-9]{64}$/);
+      assert.ok((result.buildArtifact?.sizeBytes ?? 0) > 0);
+      const artifact = await runner.readBuildArtifact(request, "DeviLudoLocal.zip");
+      assert.equal(artifact.bytes.byteLength, result.buildArtifact?.sizeBytes);
+      assert.equal(artifact.evidence.bundleDigest, result.bundleDigest);
+    } else {
+      assert.equal(result.buildArtifact, null);
+    }
     await assert.rejects(
       runner.run({ ...request, targetMatrix: ["linux"] }),
       /immutable run lock/,
@@ -83,6 +96,10 @@ test("creates a real macOS Godot evidence bundle and retries dependency waits", 
     } else {
       assert.equal(replay.evidenceId, result.evidenceId);
       assert.equal(replay.candidateSha, result.candidateSha);
+      const artifactPath = path.join(runner.artifactDirectory(request), "DeviLudoLocal.zip");
+      await writeFile(artifactPath, "tampered build bytes", "utf8");
+      await assert.rejects(runner.readBuildArtifact(request, "DeviLudoLocal.zip"), /does not match/);
+      await assert.rejects(runner.run(request), /does not match/);
     }
   } finally {
     await rm(temporary, { recursive: true, force: true });

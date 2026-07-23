@@ -13,7 +13,7 @@ export type LocalRuntimeCheck = {
 };
 
 export type LocalRuntimeEvidence = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   evidenceId: string;
   projectId: string;
   runId: string;
@@ -29,6 +29,13 @@ export type LocalRuntimeEvidence = {
   checks: LocalRuntimeCheck[];
   artifacts: Array<"manifest.json" | "junit.xml" | "godot.log">;
   artifactDigests: Record<"junit.xml" | "godot.log", string>;
+  buildArtifact: {
+    fileName: "DeviLudoLocal.zip";
+    platform: "macos";
+    contentType: "application/zip";
+    sha256: string;
+    sizeBytes: number;
+  } | null;
   testPlan: "deviludo-local-testkit-1.0.0";
   fixtureOnly: true;
   createdAt: string;

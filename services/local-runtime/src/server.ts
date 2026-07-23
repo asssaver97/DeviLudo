@@ -84,6 +84,21 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return;
   }
 
+  const artifactMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/([^/]+)\/artifacts\/(DeviLudoLocal\.zip)$/);
+  if (request.method === "GET" && artifactMatch && !url.search) {
+    requestVerifier.verify({ method: "GET", path: url.pathname, body: "", headers: request.headers });
+    const [, projectId, runId, file] = artifactMatch;
+    const artifact = await runner.readBuildArtifact({ projectId, runId }, file);
+    response.statusCode = 200;
+    response.setHeader("content-type", artifact.evidence.buildArtifact!.contentType);
+    response.setHeader("content-length", artifact.bytes.byteLength);
+    response.setHeader("x-deviludo-artifact-sha256", artifact.evidence.buildArtifact!.sha256);
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("x-content-type-options", "nosniff");
+    response.end(artifact.bytes);
+    return;
+  }
+
   json(response, 404, { error: { code: "NOT_FOUND", message: "Local runtime route not found" } });
 }
 

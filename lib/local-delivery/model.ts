@@ -44,6 +44,13 @@ export type LocalValidationSnapshot = {
   targetMatrix: readonly LocalTargetPlatform[];
   platform: "macos";
   fixtureOnly: true;
+  buildArtifact: {
+    fileName: "DeviLudoLocal.zip";
+    platform: "macos";
+    contentType: "application/zip";
+    sha256: string;
+    sizeBytes: number;
+  } | null;
   checks: Array<{ name: string; status: "PASSED" | "FAILED" | "WAITING_DEPENDENCY"; durationMs: number; detail: string }>;
   createdAt: string;
   valid: boolean;
@@ -216,6 +223,7 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
     targetMatrix?: readonly LocalTargetPlatform[];
     platform?: "macos";
     fixtureOnly?: true;
+    buildArtifact?: LocalValidationSnapshot["buildArtifact"];
   }) | null | undefined;
   const validationMatrix = historicalValidation?.targetMatrix
     ? normalizeTargetMatrix(historicalValidation.targetMatrix)
@@ -226,30 +234,43 @@ export function normalizeLocalDeliverySnapshot(snapshot: LocalDeliverySnapshot):
       targetMatrix: validationMatrix ?? targetMatrix,
       platform: historicalValidation.platform ?? "macos" as const,
       fixtureOnly: historicalValidation.fixtureOnly ?? true as const,
+      buildArtifact: historicalValidation.buildArtifact ?? null,
       // Evidence created before target-matrix binding remains readable but can
       // never satisfy a current selected-platform gate.
       valid: validationMatrix !== null
         && sameTargetMatrix(validationMatrix, targetMatrix)
         && historicalValidation.platform === "macos"
         && historicalValidation.fixtureOnly === true
+        && (historicalValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
+          ? validLocalBuildArtifact(historicalValidation.buildArtifact)
+          : historicalValidation.buildArtifact == null)
         && historicalValidation.valid,
       status: historicalValidation.releaseGate === "WAITING_EXPORT_TEMPLATES"
         ? "WAITING_DEPENDENCY" as const
         : historicalValidation.status,
     }
     : null;
+  const stalePassedBuildEvidence = historicalValidation?.valid === true
+    && historicalValidation.releaseGate === "LOCAL_VALIDATION_PASSED"
+    && localValidation?.valid === false;
+  const rewindForBuildEvidence = stalePassedBuildEvidence
+    && !["AWAITING_SPEC_APPROVAL", "AGENT_QUEUED", "AGENT_RUNNING", "CANCELLED", "RELEASED"].includes(snapshot.stage);
 
   return {
     ...snapshot,
     targetMatrix,
-    targetResults,
+    targetResults: rewindForBuildEvidence ? createTargetResults(targetMatrix, "QUEUED") : targetResults,
+    stage: rewindForBuildEvidence ? "CANDIDATE_READY" : snapshot.stage,
+    evidenceValid: rewindForBuildEvidence ? false : snapshot.evidenceValid,
+    mainSha: rewindForBuildEvidence ? null : snapshot.mainSha,
+    steamBranch: rewindForBuildEvidence ? null : snapshot.steamBranch,
     agentExecution,
     repairHandoff: snapshot.repairHandoff ?? null,
-    mfaApprovalId: snapshot.mfaApprovalId ?? null,
-    steamBuildId: snapshot.steamBuildId ?? null,
-    steamReleaseId: snapshot.steamReleaseId ?? null,
-    externalApprovals: snapshot.externalApprovals ?? [],
-    externalGate: snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
+    mfaApprovalId: rewindForBuildEvidence ? null : snapshot.mfaApprovalId ?? null,
+    steamBuildId: rewindForBuildEvidence ? null : snapshot.steamBuildId ?? null,
+    steamReleaseId: rewindForBuildEvidence ? null : snapshot.steamReleaseId ?? null,
+    externalApprovals: rewindForBuildEvidence ? [] : snapshot.externalApprovals ?? [],
+    externalGate: rewindForBuildEvidence ? null : snapshot.externalGate ?? (snapshot.stage === "EXTERNAL_APPROVAL_REQUIRED"
       ? (["VALVE_REVIEW", "FIRST_RELEASE", "DEFAULT_BRANCH_CONFIRMATION"] as const)[Math.min(snapshot.externalApprovals?.length ?? 0, 2)]
       : null),
     localValidation,
@@ -489,6 +510,12 @@ export function recordLocalValidation(
   if (validation.platform !== "macos" || validation.fixtureOnly !== true) {
     throw new Error("本机验证证据缺少真实执行平台绑定");
   }
+  if (gatePassed && !validLocalBuildArtifact(validation.buildArtifact)) {
+    throw new Error("本机验证通过但缺少绑定的 macOS 构建物");
+  }
+  if (!gatePassed && validation.buildArtifact !== null) {
+    throw new Error("未通过的本机验证不能授权构建物");
+  }
   const targetResults = gatePassed
     ? current.targetResults
     : createTargetResults(current.targetMatrix, "INVALIDATED");
@@ -514,6 +541,17 @@ export function recordLocalValidation(
       ? "本机 Git 候选提交与 macOS Godot 测试、导出证据已生成。"
       : "本机 Git 候选提交与 macOS Godot 测试证据已生成；生产导出等待模板，目标矩阵保持阻塞。",
   );
+}
+
+function validLocalBuildArtifact(value: LocalValidationSnapshot["buildArtifact"] | undefined): value is NonNullable<LocalValidationSnapshot["buildArtifact"]> {
+  return !!value
+    && value.fileName === "DeviLudoLocal.zip"
+    && value.platform === "macos"
+    && value.contentType === "application/zip"
+    && /^[a-f0-9]{64}$/.test(value.sha256)
+    && Number.isSafeInteger(value.sizeBytes)
+    && value.sizeBytes > 0
+    && value.sizeBytes <= 512 * 1024 * 1024;
 }
 
 export function applyLocalDeliveryAction(

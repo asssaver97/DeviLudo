@@ -70,7 +70,7 @@ export function validateLocalValidationEvidence(
   if (item.projectId !== projectId || item.runId !== runId || item.specRevisionId !== specRevisionId) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据绑定与锁定运行不一致");
   }
-  if (item.schemaVersion !== 2 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
+  if (item.schemaVersion !== 3 || JSON.stringify(item.targetMatrix) !== JSON.stringify(targetMatrix)) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_BINDING_MISMATCH", "本机证据目标矩阵与锁定运行不一致");
   }
   if (item.platform !== "macos" || item.fixtureOnly !== true) {
@@ -108,6 +108,13 @@ export function validateLocalValidationEvidence(
   if (!validTerminal && !validWait && !validFailure) {
     throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据状态与检查结果不一致");
   }
+  const buildArtifact = parseBuildArtifact(item.buildArtifact);
+  if (item.buildArtifact !== null && !buildArtifact) {
+    throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据构建物绑定无效");
+  }
+  if ((validTerminal && !buildArtifact) || (!validTerminal && buildArtifact)) {
+    throw new HttpProblem(502, "LOCAL_RUNTIME_INVALID", "本机证据状态与构建物授权不一致");
+  }
   return {
     evidenceId: String(item.evidenceId),
     status: item.status,
@@ -119,9 +126,30 @@ export function validateLocalValidationEvidence(
     targetMatrix: Object.freeze([...targetMatrix]),
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact,
     checks: item.checks as LocalValidationSnapshot["checks"],
     createdAt: String(item.createdAt),
   };
+}
+
+function parseBuildArtifact(value: unknown): LocalValidationSnapshot["buildArtifact"] {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const artifact = value as Record<string, unknown>;
+  if (artifact.fileName !== "DeviLudoLocal.zip"
+    || artifact.platform !== "macos"
+    || artifact.contentType !== "application/zip"
+    || !/^[a-f0-9]{64}$/.test(String(artifact.sha256))
+    || !Number.isSafeInteger(artifact.sizeBytes)
+    || Number(artifact.sizeBytes) < 1
+    || Number(artifact.sizeBytes) > 512 * 1024 * 1024) return null;
+  return Object.freeze({
+    fileName: "DeviLudoLocal.zip",
+    platform: "macos",
+    contentType: "application/zip",
+    sha256: String(artifact.sha256),
+    sizeBytes: Number(artifact.sizeBytes),
+  });
 }
 
 function loopbackRuntimeUrl() {

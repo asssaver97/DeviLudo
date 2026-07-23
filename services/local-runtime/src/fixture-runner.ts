@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, cp, lstat, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { LocalGitScmProxy } from "../../scm-proxy/src/local-git";
@@ -11,6 +12,8 @@ const execFileAsync = promisify(execFile);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/;
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 60_000;
+const BUILD_ARTIFACT_FILE = "DeviLudoLocal.zip" as const;
+const MAX_BUILD_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
 type CommandResult = {
   exitCode: number;
@@ -65,9 +68,58 @@ export class LocalFixtureRunner {
     return path.join(this.#storageRoot, request.projectId, request.runId, "evidence");
   }
 
+  artifactDirectory(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
+    validateIdentifier(request.projectId, "projectId");
+    validateIdentifier(request.runId, "runId");
+    return path.join(this.#storageRoot, request.projectId, request.runId, "artifacts");
+  }
+
   async readEvidence(request: Pick<LocalRuntimeRequest, "projectId" | "runId">) {
     const file = path.join(this.evidenceDirectory(request), "manifest.json");
     return JSON.parse(await readFile(file, "utf8")) as LocalRuntimeEvidence;
+  }
+
+  async readBuildArtifact(
+    request: Pick<LocalRuntimeRequest, "projectId" | "runId">,
+    fileName: string,
+  ): Promise<{ evidence: LocalRuntimeEvidence; bytes: Buffer }> {
+    if (fileName !== BUILD_ARTIFACT_FILE) throw new Error("Local build artifact does not exist");
+    const evidence = await this.readEvidence(request);
+    const binding = evidence.buildArtifact;
+    if (evidence.schemaVersion !== 3
+      || evidence.releaseGate !== "LOCAL_VALIDATION_PASSED"
+      || evidence.status !== "TESTS_PASSED"
+      || !binding
+      || binding.fileName !== fileName
+      || binding.platform !== "macos"
+      || binding.contentType !== "application/zip"
+      || !/^[a-f0-9]{64}$/.test(binding.sha256)
+      || !Number.isSafeInteger(binding.sizeBytes)
+      || binding.sizeBytes < 1
+      || binding.sizeBytes > MAX_BUILD_ARTIFACT_BYTES) {
+      throw new Error("Local build artifact is not authorized by the evidence manifest");
+    }
+    const artifactPath = path.join(this.artifactDirectory(request), BUILD_ARTIFACT_FILE);
+    const before = await lstat(artifactPath);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== binding.sizeBytes) {
+      throw new Error("Local build artifact metadata does not match its evidence manifest");
+    }
+    const file = await open(artifactPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const bytes = await file.readFile();
+      const after = await file.stat();
+      if (!after.isFile()
+        || after.size !== before.size
+        || after.mtimeMs !== before.mtimeMs
+        || after.ctimeMs !== before.ctimeMs
+        || bytes.byteLength !== binding.sizeBytes
+        || sha256(bytes) !== binding.sha256) {
+        throw new Error("Local build artifact bytes do not match their evidence manifest");
+      }
+      return { evidence, bytes };
+    } finally {
+      await file.close();
+    }
   }
 
   async run(request: LocalRuntimeRequest): Promise<LocalRuntimeEvidence> {
@@ -75,12 +127,19 @@ export class LocalFixtureRunner {
     try {
       const existing = await this.readEvidence(request);
       assertEvidenceBinding(existing, request);
-      if (existing.releaseGate !== "WAITING_EXPORT_TEMPLATES") return existing;
+      if (existing.releaseGate !== "WAITING_EXPORT_TEMPLATES") {
+        if (existing.releaseGate === "LOCAL_VALIDATION_PASSED") {
+          await this.readBuildArtifact(request, BUILD_ARTIFACT_FILE);
+        }
+        return existing;
+      }
       // Dependency waits are not terminal and may be retried after the exact
       // matching export templates are installed.
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      // A missing manifest means the exact run has not completed yet.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof StaleLocalEvidenceError)) throw error;
+      // A missing or older-schema manifest cannot satisfy the current gate.
+      // The partial-run archive below preserves it for local audit before a
+      // fresh v3 evidence bundle is created.
     }
 
     await access(this.#fixtureRoot);
@@ -164,7 +223,7 @@ export class LocalFixtureRunner {
     checks.push({ name: "save-load", status: "PASSED", durationMs: e2e.duration_ms, detail: "JSON save was written, read and restored exactly" });
     checks.push({ name: "performance", status: "PASSED", durationMs: e2e.duration_ms, detail: "Headless core loop stayed below the 250ms fixture budget" });
 
-    const exportPath = path.join(runRoot, "artifacts", "DeviLudoLocal.zip");
+    const exportPath = path.join(runRoot, "artifacts", BUILD_ARTIFACT_FILE);
     await mkdir(path.dirname(exportPath), { recursive: true });
     const exported = await this.#command(
       this.#godotBinary,
@@ -204,8 +263,16 @@ export class LocalFixtureRunner {
       : exportTemplatesMissing
         ? "WAITING_EXPORT_TEMPLATES" as const
         : "TESTS_FAILED" as const;
+    const exportedBytes = exportPassed ? await readFile(exportPath) : null;
+    const buildArtifact = exportedBytes ? {
+      fileName: BUILD_ARTIFACT_FILE,
+      platform: "macos" as const,
+      contentType: "application/zip" as const,
+      sha256: sha256(exportedBytes),
+      sizeBytes: exportedBytes.byteLength,
+    } : null;
     const unsigned = {
-      schemaVersion: 2 as const,
+      schemaVersion: 3 as const,
       projectId: request.projectId,
       runId: request.runId,
       specRevisionId: request.specRevisionId,
@@ -219,6 +286,7 @@ export class LocalFixtureRunner {
       checks,
       artifacts: ["manifest.json", "junit.xml", "godot.log"] as LocalRuntimeEvidence["artifacts"],
       artifactDigests,
+      buildArtifact,
       testPlan: "deviludo-local-testkit-1.0.0" as const,
       fixtureOnly: true as const,
       createdAt,
@@ -289,14 +357,16 @@ function validateRequest(request: LocalRuntimeRequest) {
 }
 
 function assertEvidenceBinding(evidence: LocalRuntimeEvidence, request: LocalRuntimeRequest) {
-  if (evidence.schemaVersion !== 2
-    || evidence.projectId !== request.projectId
+  if (evidence.schemaVersion !== 3) throw new StaleLocalEvidenceError();
+  if (evidence.projectId !== request.projectId
     || evidence.runId !== request.runId
     || evidence.specRevisionId !== request.specRevisionId
     || JSON.stringify(evidence.targetMatrix) !== JSON.stringify(request.targetMatrix)) {
     throw new Error("Stored local evidence does not match the immutable run lock");
   }
 }
+
+class StaleLocalEvidenceError extends Error {}
 
 function validateIdentifier(value: string, name: string) {
   if (!IDENTIFIER.test(value)) throw new Error(`${name} is invalid`);
@@ -318,7 +388,7 @@ async function archivePartialRun(runRoot: string, scmRunRoot: string) {
   }
 }
 
-function sha256(value: string) { return createHash("sha256").update(value).digest("hex"); }
+function sha256(value: string | Buffer) { return createHash("sha256").update(value).digest("hex"); }
 
 function check(name: LocalRuntimeCheck["name"], result: CommandResult, detail: string): LocalRuntimeCheck {
   return { name, status: "PASSED", durationMs: result.durationMs, detail };

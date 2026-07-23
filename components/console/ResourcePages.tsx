@@ -96,12 +96,16 @@ export function EvidencePage() {
     if (!evidence || !selectedProjectId) return;
     try {
       const base = `/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence`;
-      const [manifestResponse, junitResponse, logResponse] = await Promise.all([
+      const artifactUrl = evidence.buildArtifact
+        ? `/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/artifact/${evidence.buildArtifact.fileName}`
+        : null;
+      const [manifestResponse, junitResponse, logResponse, buildResponse] = await Promise.all([
         fetch(`${base}/manifest.json`, { cache: "no-store" }),
         fetch(`${base}/junit.xml`, { cache: "no-store" }),
         fetch(`${base}/godot.log`, { cache: "no-store" }),
+        artifactUrl ? fetch(artifactUrl, { cache: "no-store" }) : Promise.resolve(null),
       ]);
-      if (!manifestResponse.ok || !junitResponse.ok || !logResponse.ok) throw new Error("无法读取完整证据包");
+      if (!manifestResponse.ok || !junitResponse.ok || !logResponse.ok || (buildResponse && !buildResponse.ok)) throw new Error("无法读取完整证据包与构建物");
       const manifest = JSON.parse(await manifestResponse.text()) as Record<string, unknown> & {
         evidenceId?: string;
         candidateSha?: string;
@@ -110,9 +114,17 @@ export function EvidencePage() {
         platform?: string;
         fixtureOnly?: boolean;
         artifactDigests?: Record<string, string>;
+        buildArtifact?: {
+          fileName?: string;
+          platform?: string;
+          contentType?: string;
+          sha256?: string;
+          sizeBytes?: number;
+        } | null;
       };
       const junit = await junitResponse.text();
       const log = await logResponse.text();
+      const buildBytes = buildResponse ? await buildResponse.arrayBuffer() : null;
       const { evidenceId, bundleDigest, ...unsigned } = manifest;
       const ok = manifest.evidenceId === evidence.evidenceId
         && manifest.candidateSha === evidence.candidateSha
@@ -126,8 +138,16 @@ export function EvidencePage() {
         && evidenceId === `EV-LOCAL-${String(bundleDigest).slice(0, 12).toUpperCase()}`
         && bundleDigest === await sha256(JSON.stringify(unsigned))
         && manifest.artifactDigests?.["junit.xml"] === await sha256(junit)
-        && manifest.artifactDigests?.["godot.log"] === await sha256(log);
-      setVerification({ projectId: selectedProjectId, evidenceId: evidence.evidenceId, ok, message: ok ? "清单、Git 提交、bundle、JUnit 与日志摘要一致。" : "证据内容摘要不一致，已拒绝验证。" });
+        && manifest.artifactDigests?.["godot.log"] === await sha256(log)
+        && (evidence.buildArtifact
+          ? !!buildResponse
+            && !!buildBytes
+            && JSON.stringify(manifest.buildArtifact) === JSON.stringify(evidence.buildArtifact)
+            && buildResponse.headers.get("x-deviludo-artifact-sha256") === evidence.buildArtifact.sha256
+            && buildBytes.byteLength === evidence.buildArtifact.sizeBytes
+            && await sha256(buildBytes) === evidence.buildArtifact.sha256
+          : manifest.buildArtifact === null);
+      setVerification({ projectId: selectedProjectId, evidenceId: evidence.evidenceId, ok, message: ok ? "清单、Git 提交、bundle、JUnit、日志与游戏构建物摘要一致。" : "证据或构建物摘要不一致，已拒绝验证。" });
     } catch (reason) {
       setVerification({ projectId: selectedProjectId, evidenceId: evidence.evidenceId, ok: false, message: reason instanceof Error ? reason.message : "证据验证失败" });
     }
@@ -165,7 +185,7 @@ export function EvidencePage() {
           })
         ) : <div className="evidence-empty"><FileIcon /><b>尚无真实证据</b><span>完成锁定目标矩阵后，权威投影会显示证据引用。</span></div>}
       </section>
-      {evidence && selectedProjectId ? <div className="evidence-artifacts"><b>原始证据</b><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{evidence.godotVersion} · {evidence.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待导出模板" : "仅 macOS 本机门禁通过"}</span></div> : null}
+      {evidence && selectedProjectId ? <div className="evidence-artifacts"><b>{evidence.buildArtifact ? "交付与原始证据" : "原始证据"}</b>{evidence.buildArtifact ? <a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/artifact/${evidence.buildArtifact.fileName}`}>下载 macOS 游戏 · {formatBytes(evidence.buildArtifact.sizeBytes)}</a> : null}<a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/manifest.json`} target="_blank" rel="noreferrer">manifest.json</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/junit.xml`} target="_blank" rel="noreferrer">JUnit XML</a><a href={`/api/projects/${encodeURIComponent(selectedProjectId)}/local-validation/evidence/godot.log`} target="_blank" rel="noreferrer">Godot 日志</a><span>{evidence.godotVersion} · {evidence.releaseGate === "WAITING_EXPORT_TEMPLATES" ? "等待导出模板" : "仅 macOS 本机门禁通过"}</span></div> : null}
       {!evidence && catalog ? <div className="evidence-artifacts"><b>权威目录</b><span>{catalog.entries.length} 个不可变 manifest</span><span>读取时间 {new Date(catalog.observedAt).toLocaleString("zh-CN")}</span><span>S3 对象键与下载授权保持隔离</span></div> : null}
       </>}
     </AppShell>
@@ -176,8 +196,13 @@ function EmptyProjectResource({ loading, noun }: { loading: boolean; noun: strin
   return <section className="resource-empty-project"><FileIcon /><h2>{loading ? "正在同步项目目录" : `还没有可用于${noun}的项目`}</h2><p>此页面不会以固定演示项目替代当前租户的真实项目。</p>{!loading ? <Link className="button button-acid" href="/projects/new">创建第一个项目</Link> : null}</section>;
 }
 
-async function sha256(value: string) {
-  const bytes = new TextEncoder().encode(value);
+async function sha256(value: string | ArrayBuffer) {
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function formatBytes(value: number) {
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }

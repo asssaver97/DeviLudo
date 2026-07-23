@@ -10,6 +10,11 @@ import {
   recordLocalValidation,
 } from "../lib/local-delivery/model.ts";
 
+const macosBuild = Object.freeze({
+  fileName: "DeviLudoLocal.zip", platform: "macos", contentType: "application/zip",
+  sha256: "9".repeat(64), sizeBytes: 4096,
+});
+
 function localDeliveryAtMainGate(projectId) {
   let state = approveLocalSpec(createLocalDelivery(projectId), "SPEC-POST-MERGE-001", `RUN-${projectId}`);
   state = applyLocalDeliveryAction(state, "advance");
@@ -122,6 +127,7 @@ test("a selected matrix keeps its frozen order and rejects evidence from another
     targetMatrix: ["linux", "macos"],
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: macosBuild,
     checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
     createdAt: "2026-07-23T00:00:00.000Z",
   }), /目标矩阵不一致/);
@@ -147,6 +153,7 @@ test("feedback invalidates all local evidence and requires a new immutable appro
     targetMatrix: state.targetMatrix,
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: macosBuild,
     checks: [{ name: "core-loop", status: "PASSED", durationMs: 4, detail: "fixture" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -234,6 +241,7 @@ test("failed local validation is auditable but cannot advance the candidate gate
     targetMatrix: state.targetMatrix,
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: null,
     checks: [{ name: "macos-export", status: "FAILED", durationMs: 3, detail: "configuration error" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -259,6 +267,20 @@ test("local validation without an explicit execution-platform binding fails clos
   }), /缺少真实执行平台绑定/);
 });
 
+test("a passed local validation without a manifest-bound build cannot authorize delivery", () => {
+  const state = approveLocalSpec(createLocalDelivery("project-missing-build"), "SPEC-012", "RUN-MISSING-BUILD");
+  assert.throws(() => recordLocalValidation(state, {
+    evidenceId: "EV-LOCAL-MISSING-BUILD",
+    status: "TESTS_PASSED",
+    releaseGate: "LOCAL_VALIDATION_PASSED",
+    candidateSha: "a".repeat(40), sourceDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+    godotVersion: "4.6.2.stable", targetMatrix: state.targetMatrix,
+    platform: "macos", fixtureOnly: true, buildArtifact: null,
+    checks: [{ name: "macos-export", status: "PASSED", durationMs: 3, detail: "unbound export" }],
+    createdAt: "2026-07-23T00:00:00.000Z",
+  }), /缺少绑定的 macOS 构建物/);
+});
+
 test("missing export templates remain auditable but cannot authorize target E2E", () => {
   let state = approveLocalSpec(createLocalDelivery("project-export-wait"), "SPEC-EXPORT-001", "RUN-EXPORT-WAIT");
   state = recordLocalValidation(state, {
@@ -272,6 +294,7 @@ test("missing export templates remain auditable but cannot authorize target E2E"
     targetMatrix: state.targetMatrix,
     platform: "macos",
     fixtureOnly: true,
+    buildArtifact: null,
     checks: [{ name: "macos-export", status: "WAITING_DEPENDENCY", durationMs: 3, detail: "templates missing" }],
     createdAt: "2026-07-18T00:00:00.000Z",
   });
@@ -426,6 +449,28 @@ test("historical delivery snapshots derive the legacy matrix but fail old eviden
   assert.deepEqual(normalized.targetMatrix, ["linux", "windows", "macos"]);
   assert.deepEqual(normalized.localValidation.targetMatrix, normalized.targetMatrix);
   assert.equal(normalized.localValidation.valid, false);
+});
+
+test("a pre-v3 passed snapshot rewinds to candidate validation instead of retaining acceptance authority", () => {
+  let candidate = approveLocalSpec(createLocalDelivery("project-legacy-build"), "SPEC-LEGACY-BUILD", "RUN-LEGACY-BUILD", undefined, ["macos"]);
+  for (let index = 0; index < 4; index += 1) candidate = applyLocalDeliveryAction(candidate, "advance");
+  assert.equal(candidate.stage, "AWAITING_ACCEPTANCE");
+  const normalized = normalizeLocalDeliverySnapshot({
+    ...candidate,
+    localValidation: {
+      evidenceId: "EV-LOCAL-LEGACY-BUILD", status: "TESTS_PASSED", releaseGate: "LOCAL_VALIDATION_PASSED",
+      candidateSha: "a".repeat(40), sourceDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+      godotVersion: "4.6.2.stable", targetMatrix: ["macos"], platform: "macos", fixtureOnly: true,
+      checks: [{ name: "macos-export", status: "PASSED", durationMs: 4, detail: "legacy export" }],
+      createdAt: "2026-07-22T00:00:00.000Z", valid: true,
+    },
+  });
+  assert.equal(normalized.stage, "CANDIDATE_READY");
+  assert.equal(normalized.evidenceValid, false);
+  assert.equal(normalized.localValidation.valid, false);
+  assert.equal(normalized.localValidation.buildArtifact, null);
+  assert.deepEqual(normalized.targetResults, { macos: "QUEUED" });
+  assert.throws(() => applyLocalDeliveryAction(normalized, "accept"), /缺少可验收/);
 });
 
 test("feedback cannot bypass candidate E2E or invent an early revision", () => {

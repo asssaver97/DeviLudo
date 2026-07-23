@@ -57,9 +57,9 @@ Agent 探针只运行固定的版本命令。普通独立部署只有精确 CLI 
 1. 将固定 Godot 样例复制到 `.deviludo/local-runtime/<project>/<run>/workspace`；
 2. 通过 SCM 代理在工作区外初始化 base Git 元数据，再由代理提交样例候选并生成 base/candidate SHA 与 tree digest；
 3. 执行 Godot import、生产场景 headless 启动和 TestKit 核心循环/保存读取/性能检查；
-4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml` 和 `godot.log`。
+4. 尝试 macOS 导出，并生成 `manifest.json`、`junit.xml`、`godot.log` 和通过门禁后可下载的 `DeviLudoLocal.zip`。
 
-每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。证据 v2 包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本、逐项检查结果和批准规格中保持顺序的目标矩阵。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移或夹带未选系统时只能审计，不能满足当前 Run。
+每个不可变 Run 都拥有独立的 HOME 与临时目录，连续反馈迭代不会共享 Godot 的导出暂存包；这些绝对路径也会从证据日志中脱敏。证据 v3 包含完整 Git SHA、source digest、bundle digest、精确 Godot 版本、逐项检查结果、批准规格中保持顺序的目标矩阵，以及成功导出的 macOS zip 文件名、内容类型、SHA-256 与字节数。下载前侧车重新检查文件类型、大小、摘要和写入时间，Web 再将响应元数据与 D1 中的不可变证据逐项比对；旧 v2 通过证据会被归档并重新执行，不能授权构建物。规格选择一个或两个系统时，本地交付状态只创建这些系统的门禁；证据缺少矩阵、顺序漂移、夹带未选系统或通过状态缺少构建物时只能审计，不能满足当前 Run。
 
 如果本机没有通过上述固定安装器安装对应 Godot export templates，验证会如实记录为 `WAITING_DEPENDENCY + WAITING_EXPORT_TEMPLATES`。这份证据仍可下载审计，但目标矩阵入口返回 `409 LOCAL_EXPORT_TEMPLATES_REQUIRED`，不能进入候选验收或授权发布；安装完全匹配的模板后可对同一锁定运行重新验证。Windows/Linux 也只有真实 Runner 注册并返回有效 evidence 后才会通过。
 
@@ -95,7 +95,7 @@ npm run local:smoke
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`，并公开 `PINNED_ENV`、`LOCAL_DETERMINISTIC` 或 `NOT_CONFIGURED` 身份模式；`degraded` 是未启用执行时的预期状态。
 - Agent 探针 `/v1/preflight` 使用固定测试运行锁，验证 CLI、镜像、Provider/Gateway 与执行开关；它只返回阻塞原因或 `READY`，不会启动 Agent。
 - Agent `/v1/runs` 在默认测试栈必须以明确门禁码返回 409/503，证明没有执行器时失败关闭。
-- 通过本地自动编排 API 真实运行 macOS 固定 Godot 样例、完成仅含 macOS 的目标矩阵并停在候选验收，再下载同一 bundle 的 `manifest.json`；另以 Linux/Windows 矩阵验证 `PHYSICAL_RUNNERS_REQUIRED`，覆盖签名执行、证据读取、平台真实性和人工门禁边界。
+- 通过本地自动编排 API 真实运行 macOS 固定 Godot 样例、完成仅含 macOS 的目标矩阵并停在候选验收，再下载同一 bundle 的 `manifest.json` 与 macOS zip，逐字节重算并核对构建物摘要；另以 Linux/Windows 矩阵验证 `PHYSICAL_RUNNERS_REQUIRED`，覆盖签名执行、证据读取、构建交付、平台真实性和人工门禁边界。
 - 在候选 E2E 前拒绝反馈；若导出模板缺失，确认真实候选不能启动目标矩阵。独立的完整 Fixture 候选在待验收后创建、精确重放并批准新反馈草稿，再对后继 Run 运行真实 Godot，证明旧验收权限不能被复用。
 - 候选接受只通过空 JSON 的 `/api/projects/{projectId}/acceptance` 提交，精确重放同一个幂等决定；通用 `/delivery` 的 `accept` 动作必须返回 400，不能绕过正式验收门禁。
 - 直接向 Godot、Agent、规格三个 sidecar 发送旧固定请求头，必须全部返回 403，证明 loopback 本身不构成权限。

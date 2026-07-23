@@ -114,7 +114,11 @@ behind the web console:
 - `local-runtime`: a loopback-only development sidecar. It creates an isolated
   Git repository from the pinned Godot fixture, runs the installed Godot binary
   for import/boot/TestKit/export checks, and writes content-bound manifest,
-  JUnit and log evidence below the ignored `.deviludo/` directory. Missing
+  JUnit and log evidence below the ignored `.deviludo/` directory. A passed v3
+  manifest additionally binds the exported macOS zip by exact name, media type,
+  byte length and SHA-256; the authenticated download path revalidates the file
+  before streaming it, while failed or dependency-waiting runs authorize no
+  build. Missing
   export templates remain an explicit release gate. The version-pinned local
   installer verifies the official archive digest and every extracted file;
   the sidecar then rechecks the macOS template and mounts only that exact
