@@ -78,6 +78,7 @@ npm run local:smoke
 - `/settings/agents` 返回租户 BYOK、Provider 与默认 Agent 页面；
 - `/projects/ember-archipelago/agent-settings` 返回项目 Profile 选择页；
 - `/projects/new` 创建独立本地项目，验证 D1 目录、详情与幂等回执后直接以该项目继续构想；
+- 任意未进入 D1 项目目录的合法 slug 在规格、批准、反馈、验收、交付、Agent、Runner、证据和 Steam 设置入口统一返回 `PROJECT_ACCESS_NOT_FOUND`，且不会访问任何 sidecar；不同项目的规格快照和反馈历史互不串用；
 - `/api/admin/agents` 返回服务端默认 Agent、精确版本和部署状态，且不暴露 SecretRef；
 - 本地 Agent 管理写入追加到不可修改的 D1 修订；停止并重新启动 `local:dev` 后，版本、安装、Profile、默认选择、幂等响应与脱敏审计仍可恢复；
 - `/api/admin/agent-versions/discover` 接受精确稳定版或预发布版本、拒绝浮动别名，且发现候选不会自动激活；

@@ -9,6 +9,7 @@ import {
 import { GameDeliveryWorkflow } from "../lib/orchestration/game-delivery.ts";
 import { GET, POST } from "../app/api/projects/[projectId]/delivery/route.ts";
 import { saveLocalValidation, startLocalDelivery } from "../lib/local-delivery/store.ts";
+import { ensureLocalProject } from "./helpers/local-project.mjs";
 import { GET as GET_EVIDENCE } from "../app/api/projects/[projectId]/evidence/route.ts";
 import { GET as GET_RUNNERS } from "../app/api/projects/[projectId]/runners/route.ts";
 import { signTrustedGitHubSession } from "../lib/connections/github-broker.ts";
@@ -307,6 +308,7 @@ test("a valid same-tenant session cannot read projections after project access i
 });
 
 test("delivery route keeps localhost fixture mode and production mutations read-only", async () => {
+  await ensureLocalProject("test-project");
   const local = await GET(new Request("http://127.0.0.1:3000/api/projects/test-project/delivery"), {
     params: Promise.resolve({ projectId: "test-project" }),
   });
@@ -347,6 +349,7 @@ test("delivery route keeps localhost fixture mode and production mutations read-
 
 test("local delivery route exposes a stable conflict when real export evidence is dependency-blocked", async () => {
   const localProjectId = `export-gate-${crypto.randomUUID()}`;
+  await ensureLocalProject(localProjectId);
   await startLocalDelivery(localProjectId, "SPEC-EXPORT-001", "RUN-EXPORT-001", `start:${localProjectId}`);
   await saveLocalValidation(localProjectId, {
     evidenceId: "EV-LOCAL-EXPORT-WAIT",

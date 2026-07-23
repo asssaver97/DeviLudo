@@ -4,6 +4,7 @@ import { acquireLocalAdminState, type LocalAdminStateLease } from "@/lib/control
 import { canCreateLocalFeedback } from "@/lib/local-delivery/model";
 import { invalidateLocalEvidence, readLocalDelivery } from "@/lib/local-delivery/store";
 import {
+  authorizeLocalProjectAccess,
   authorizeProjectAccess,
   ProjectAccessError,
   projectAccessResponse,
@@ -31,9 +32,12 @@ export async function GET(
 ) {
   const { projectId } = await context.params;
   if (isLoopbackTestRequest(request)) {
-    const lease = await acquireLocalAdminState();
-    try { return json({ data: getDemoStore().feedback, meta: { projectId } }); }
-    finally { lease.release(); }
+    try {
+      await authorizeLocalProjectAccess(projectId);
+      const lease = await acquireLocalAdminState();
+      try { return json({ data: getDemoStore().feedback.filter((item) => item.projectId === projectId), meta: { projectId } }); }
+      finally { lease.release(); }
+    } catch (error) { return error instanceof ProjectAccessError ? projectAccessResponse(error) : problemResponse(error); }
   }
   return json({ error: { code: "METHOD_NOT_ALLOWED", message: "生产反馈历史由项目迭代视图读取" } }, {
     status: 405,
@@ -74,6 +78,7 @@ export async function POST(
       });
       return json({ data: receipt, meta: { idempotentReplay: receipt.delivery.replayed } }, { status: 201 });
     }
+    await authorizeLocalProjectAccess(projectId);
     lease = await acquireLocalAdminState();
     const operationKey = `feedback:${projectId}:${requestKey}`;
     const store = getDemoStore();
@@ -97,6 +102,7 @@ export async function POST(
       store.specRevision = snapshot.revision;
       store.specState = "DRAFT";
       const iteration = {
+        projectId,
         id: `ITER-${String(store.feedback.length + 8).padStart(3, "0")}`,
         text: feedback,
         revision: snapshot.revision,

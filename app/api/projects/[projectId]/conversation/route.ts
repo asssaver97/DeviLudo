@@ -1,5 +1,6 @@
 import { bodyObject, idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import {
+  authorizeLocalProjectAccess,
   authorizeProjectAccess,
   ProjectAccessError,
   projectAccessResponse,
@@ -22,7 +23,10 @@ export async function GET(
   try {
     const { projectId } = await context.params;
     const local = localRuntimeUrl(request);
-    if (local) return await proxyLocal(local, projectId, { method: "GET" });
+    if (local) {
+      await authorizeLocalProjectAccess(projectId);
+      return await proxyLocal(local, projectId, { method: "GET" });
+    }
     if (!UUID.test(projectId)) return invalidProject();
     const runtime = specDialogueBrokerRuntimeFromEnvironment();
     if (!runtime) return brokerRequired();
@@ -47,11 +51,14 @@ export async function POST(
       return json({ error: { code: "INVALID_SPEC_DIALOGUE_REQUEST", message: "构想消息格式无效" } }, { status: 400 });
     }
     const local = localRuntimeUrl(request);
-    if (local) return await proxyLocal(local, projectId, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": idempotencyKey(request) },
-      body: JSON.stringify({ expectedRevision: body.expectedRevision, message: body.message }),
-    });
+    if (local) {
+      await authorizeLocalProjectAccess(projectId);
+      return await proxyLocal(local, projectId, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey(request) },
+        body: JSON.stringify({ expectedRevision: body.expectedRevision, message: body.message }),
+      });
+    }
     if (!UUID.test(projectId)) return invalidProject();
     const runtime = specDialogueBrokerRuntimeFromEnvironment();
     if (!runtime) return brokerRequired();

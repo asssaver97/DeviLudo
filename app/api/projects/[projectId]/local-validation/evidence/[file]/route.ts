@@ -1,5 +1,6 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
+import { authorizeLocalProjectAccess } from "@/lib/projects/project-read-access";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 import { createLocalRuntimeHeaders } from "@/services/local-runtime/src/request-auth";
 
@@ -13,6 +14,7 @@ export async function GET(
   try {
     assertLoopbackTestRequest(request, "证据文件只在显式启用的 loopback 测试站可用");
     const { projectId, file } = await context.params;
+    await authorizeLocalProjectAccess(projectId);
     if (!allowedFiles.has(file)) return json({ error: { code: "NOT_FOUND", message: "证据文件不存在" } }, { status: 404 });
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId || !delivery.localValidation) {

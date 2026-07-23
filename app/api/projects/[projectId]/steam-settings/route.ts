@@ -2,6 +2,7 @@ import { json } from "@/lib/control-plane/http";
 import { projectAgentPrincipal } from "@/lib/admin/scoped-agent-access";
 import { scopedAccessProblem } from "@/lib/admin/scoped-agent-proxy";
 import { steamEnrollmentRuntimeFromEnvironment, type SteamBrokerPrincipal } from "@/lib/connections/steam-broker";
+import { authorizeLocalProjectAccess } from "@/lib/projects/project-read-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 type Context = { params: Promise<{ projectId: string }> };
@@ -9,7 +10,10 @@ type Context = { params: Promise<{ projectId: string }> };
 export async function GET(request: Request, context: Context) {
   try {
     const { projectId } = await context.params;
-    if (isLoopbackTestRequest(request)) return localSafetyBoundary(projectId);
+    if (isLoopbackTestRequest(request)) {
+      await authorizeLocalProjectAccess(projectId);
+      return localSafetyBoundary(projectId);
+    }
     const runtime = runtimeOrProblem();
     if (runtime instanceof Response) return runtime;
     const principal = await projectAgentPrincipal(request, projectId);
@@ -28,7 +32,10 @@ export async function GET(request: Request, context: Context) {
 export async function POST(request: Request, context: Context) {
   try {
     const { projectId } = await context.params;
-    if (isLoopbackTestRequest(request)) return localSafetyBoundary(projectId);
+    if (isLoopbackTestRequest(request)) {
+      await authorizeLocalProjectAccess(projectId);
+      return localSafetyBoundary(projectId);
+    }
     if (!sameOrigin(request)) {
       return json({ error: { code: "CROSS_ORIGIN_MUTATION_REJECTED", message: "Steam 配置操作必须来自当前站点。" } }, { status: 403 });
     }

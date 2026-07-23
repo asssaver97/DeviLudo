@@ -1,6 +1,7 @@
 import { bodyObject, idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { commandLocalDelivery } from "@/lib/local-delivery/store";
 import {
+  authorizeLocalProjectAccess,
   authorizeProjectAccess,
   ProjectAccessError,
   projectAccessResponse,
@@ -27,6 +28,7 @@ export async function POST(
     }
     const requestKey = idempotencyKey(request);
     if (isLoopbackTestRequest(request)) {
+      await authorizeLocalProjectAccess(projectId);
       const result = await commandLocalDelivery(projectId, "accept", `acceptance:${projectId}:${requestKey}`);
       return json(
         { data: result.snapshot, meta: { mode: "LOCAL_D1", idempotentReplay: result.replayed } },

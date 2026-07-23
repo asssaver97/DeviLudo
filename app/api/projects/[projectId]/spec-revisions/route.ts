@@ -1,9 +1,10 @@
 import { appendDemoAudit, getDemoStore, withIdempotency } from "@/lib/control-plane/demo-store";
-import { bodyObject, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
+import { bodyObject, HttpProblem, idempotencyKey, json, problemResponse, requireString } from "@/lib/control-plane/http";
 import { acquireLocalAdminState, type LocalAdminStateLease } from "@/lib/control-plane/local-admin-state";
 import { startLocalDelivery } from "@/lib/local-delivery/store";
 import { resolveLocalAgentProfile } from "@/lib/local-delivery/profile-resolution";
 import {
+  authorizeLocalProjectAccess,
   authorizeProjectAccess,
   ProjectAccessError,
   projectAccessResponse,
@@ -14,7 +15,7 @@ import {
   specDialogueBrokerRuntimeFromEnvironment,
   specOperationKey,
 } from "@/lib/spec-dialogue/broker";
-import type { SpecApprovalReceipt } from "@/services/spec-dialogue/src/contracts";
+import type { SpecApprovalReceipt, SpecDialogueSnapshot } from "@/services/spec-dialogue/src/contracts";
 import { createLocalSpecRuntimeHeaders } from "@/services/local-spec-runtime/src/request-auth";
 
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -47,23 +48,28 @@ export async function GET(
       });
     } catch (error) { return accessProblem(error); }
   }
-  const lease = await acquireLocalAdminState();
   try {
-    const store = getDemoStore();
+    await authorizeLocalProjectAccess(projectId);
+    const snapshot = await readLocalSpecSnapshot(request, projectId);
+    if (!snapshot) {
+      return json({ error: { code: "SPEC_REVISION_NOT_FOUND", message: "项目尚未生成规格修订。" } }, { status: 404 });
+    }
     return json({
       data: {
-        id: `SPEC-${String(store.specRevision).padStart(3, "0")}`,
+        id: snapshot.specRevisionId,
         projectId,
-        revision: store.specRevision,
-        state: store.specState,
+        revision: snapshot.revision,
+        state: snapshot.state,
         immutable: true,
-        targetMatrix: ["windows", "linux", "macos"],
-        testPlan: { version: "godot-testkit-1.0.0", frozen: store.specState === "APPROVED" },
+        targetMatrix: snapshot.result?.spec.targetPlatforms ?? [],
+        testPlan: snapshot.result ? {
+          id: snapshot.testPlanRevisionId,
+          version: snapshot.result.testPlan.version,
+          frozen: snapshot.state === "APPROVED",
+        } : null,
       },
     });
-  } finally {
-    lease.release();
-  }
+  } catch (error) { return accessProblem(error); }
 }
 
 export async function POST(
@@ -100,6 +106,7 @@ export async function POST(
         },
       }, { status: 201 });
     }
+    await authorizeLocalProjectAccess(projectId);
     const authority = hasDialogueAuthority(body)
       ? await approveDialogue(request, projectId, requestKey, body)
       : null;
@@ -229,6 +236,35 @@ function localSpecRuntimeUrl(request: Request): URL | null {
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/"
     || url.username || url.password || url.search || url.hash) throw new Error("Local specification runtime URL is invalid");
   return url;
+}
+
+async function readLocalSpecSnapshot(request: Request, projectId: string): Promise<SpecDialogueSnapshot | null> {
+  const endpoint = localSpecRuntimeUrl(request);
+  if (!endpoint) throw new HttpProblem(503, "LOCAL_SPEC_RUNTIME_UNAVAILABLE", "本机构想服务未启动；请使用 npm run local:dev");
+  const path = `/v1/projects/${encodeURIComponent(projectId)}/conversation`;
+  let upstream: Response;
+  try {
+    upstream = await fetch(new URL(path, endpoint), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "application/json", ...createLocalSpecRuntimeHeaders({ method: "GET", path, body: "" }) },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new HttpProblem(503, "LOCAL_SPEC_RUNTIME_UNAVAILABLE", "本机构想服务未启动；请使用 npm run local:dev");
+  }
+  if (upstream.status >= 300 && upstream.status < 400) {
+    throw new HttpProblem(502, "LOCAL_SPEC_RUNTIME_INVALID", "本机构想服务返回了不安全的重定向");
+  }
+  const payload = await upstream.json() as { data?: SpecDialogueSnapshot | null };
+  if (!upstream.ok || !("data" in payload)) {
+    throw new HttpProblem(502, "LOCAL_SPEC_RUNTIME_INVALID", "本机构想服务未返回有效规格快照");
+  }
+  const snapshot = payload.data ?? null;
+  if (snapshot && (snapshot.tenantId !== "tenant-local" || snapshot.projectId !== projectId)) {
+    throw new HttpProblem(502, "LOCAL_SPEC_RUNTIME_INVALID", "本机构想服务返回的项目绑定无效");
+  }
+  return snapshot;
 }
 
 function productionBrokerRequired(): Response {

@@ -289,6 +289,34 @@ try {
     || JSON.stringify(localProjectDetailPayload.data) !== JSON.stringify(localProjectCreationPayload.data)) {
     throw new Error("local project detail did not recover the created catalog record");
   }
+  const workflowProjects = [
+    smokeSpecProject,
+    smokeValidationProject,
+    smokeFeedbackProject,
+    smokeReleaseProject,
+    smokeCodexProject,
+  ];
+  for (const projectId of workflowProjects) {
+    const created = await request(baseUrl, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-create:${projectId}` },
+      body: JSON.stringify({
+        slug: projectId,
+        name: `Smoke ${projectId}`.slice(0, 120),
+        installationId: localRepository.installationId,
+        repositoryId: localRepository.repositoryId,
+      }),
+    });
+    const payload = await created.response.json();
+    if (created.response.status !== 201 || payload.data?.projectId !== projectId) {
+      throw new Error(`local workflow project ${projectId} was not created through the authoritative catalog`);
+    }
+  }
+  const missingProject = await request(baseUrl, "/api/projects/smoke-phantom-project/delivery");
+  const missingProjectPayload = await missingProject.response.json();
+  if (missingProject.response.status !== 404 || missingProjectPayload.error?.code !== "PROJECT_ACCESS_NOT_FOUND") {
+    throw new Error("local project-scoped state accepted a project outside the authoritative catalog");
+  }
   const preflightCommand = JSON.stringify({
     projectId: "smoke-project",
     tenantId: "tenant-local",

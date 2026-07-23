@@ -4,6 +4,7 @@ import { POST as runAgent } from "../app/api/projects/[projectId]/agent-run/rout
 import { POST as preflightAgent } from "../app/api/projects/[projectId]/agent-preflight/route.ts";
 import { readLocalDelivery, startLocalDelivery } from "../lib/local-delivery/store.ts";
 import { LocalAgentRuntimeRequestVerifier } from "../services/local-agent-runtime/src/request-auth.ts";
+import { ensureLocalProject } from "./helpers/local-project.mjs";
 
 const sidecarKey = new Uint8Array(Buffer.alloc(32, 11));
 process.env.DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY = Buffer.from(sidecarKey).toString("base64url");
@@ -62,6 +63,7 @@ function request(projectId, key) {
 
 test("project Agent route persists only a sidecar receipt bound to the locked run", async () => {
   const projectId = "agent-api-success";
+  await ensureLocalProject(projectId);
   const started = await startLocalDelivery(projectId, "SPEC-020", "RUN-AGENT-API-1", "start-agent-api-success");
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -82,6 +84,7 @@ test("project Agent route persists only a sidecar receipt bound to the locked ru
 
 test("project Agent route rejects a drifted receipt and does not advance delivery", async () => {
   const projectId = "agent-api-drift";
+  await ensureLocalProject(projectId);
   const started = await startLocalDelivery(projectId, "SPEC-021", "RUN-AGENT-API-2", "start-agent-api-drift");
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -100,6 +103,7 @@ test("project Agent route rejects a drifted receipt and does not advance deliver
 
 test("project Agent route preserves the exact sidecar gate code", async () => {
   const projectId = "agent-api-blocked";
+  await ensureLocalProject(projectId);
   await startLocalDelivery(projectId, "SPEC-022", "RUN-AGENT-API-3", "start-agent-api-blocked");
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -121,6 +125,7 @@ test("project Agent route preserves the exact sidecar gate code", async () => {
 
 test("project Agent preflight binds Installation and Adapter identity before trusting readiness", async () => {
   const projectId = "agent-api-preflight";
+  await ensureLocalProject(projectId);
   const started = await startLocalDelivery(projectId, "SPEC-023", "RUN-AGENT-API-4", "start-agent-api-preflight");
   const locked = started.snapshot.lockedProfile;
   const originalFetch = globalThis.fetch;

@@ -6,6 +6,7 @@ import { POST as acceptCandidate } from "../app/api/projects/[projectId]/accepta
 import { POST as mutateDelivery } from "../app/api/projects/[projectId]/delivery/route.ts";
 import { POST as approveSpec } from "../app/api/projects/[projectId]/spec-revisions/route.ts";
 import { getDemoStore, resetDemoStore } from "../lib/control-plane/demo-store.ts";
+import { ensureLocalProject } from "./helpers/local-project.mjs";
 
 const releaseActions = [
   "advance", "advance", "advance", "advance", "advance", "advance",
@@ -16,6 +17,7 @@ const releaseActions = [
 test("new local runs lock the inherited Claude Profile while later configuration changes cannot mutate them", async () => {
   resetDemoStore();
   const projectId = `claude-lock-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
   const approved = await approve(projectId, "claude-approval");
   assert.equal(approved.run.agent, "claude-code");
   assert.equal(approved.run.profileRevisionId, "profile-claude-tenant-r2");
@@ -48,6 +50,7 @@ test("new local runs lock the inherited Claude Profile while later configuration
 test("an explicit project Codex selection is frozen into the same complete local delivery chain", async () => {
   resetDemoStore();
   const projectId = `codex-lock-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
   const selection = await selectProjectAgent(localRequest(
     `/api/projects/${projectId}/agent-settings`,
     "PUT",
@@ -78,6 +81,7 @@ test("an explicit project Codex selection is frozen into the same complete local
 test("a project may explicitly pin its current tenant Profile but not another project's Profile", async () => {
   resetDemoStore();
   const projectId = `tenant-lock-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
   const accepted = await selectProjectAgent(localRequest(
     `/api/projects/${projectId}/agent-settings`,
     "PUT",
@@ -102,6 +106,7 @@ test("a project may explicitly pin its current tenant Profile but not another pr
 test("an unhealthy higher-precedence override blocks enqueue instead of silently changing Agent", async () => {
   const store = resetDemoStore();
   const projectId = `blocked-lock-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
   store.defaults[`project:${projectId}`] = "profile-codex-platform-r2";
   const installation = store.installations.find((item) => item.id === "codex-installation-091");
   assert.ok(installation);
@@ -120,6 +125,7 @@ test("an unhealthy higher-precedence override blocks enqueue instead of silently
 test("a locally revoked credential blocks new runs instead of reusing the active Profile", async () => {
   const store = resetDemoStore();
   const projectId = `revoked-credential-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
   store.credentials.push({
     id: "cred-claude-platform-v4",
     label: "Revoked Claude fixture",
@@ -145,6 +151,7 @@ test("a locally revoked credential blocks new runs instead of reusing the active
 test("a missing or incompatible local AgentVersion attestation blocks enqueue", async () => {
   const missingStore = resetDemoStore();
   const projectId = `unattested-agent-${crypto.randomUUID()}`;
+  await ensureLocalProject(projectId);
   missingStore.agentVersionMetadata["claude-code@2.1.14"].validatedAdapterVersion = null;
   missingStore.agentVersionMetadata["claude-code@2.1.14"].adapterCompatibility = null;
   const missing = await approveSpec(localRequest(

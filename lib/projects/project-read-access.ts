@@ -3,15 +3,35 @@ import {
   verifyTrustedPlatformSession,
   type TrustedPlatformSession,
 } from "@/lib/connections/github-broker";
-import { json } from "@/lib/control-plane/http";
+import { HttpProblem, json } from "@/lib/control-plane/http";
+import { readLocalProject, type LocalProjectCatalogItem } from "@/lib/projects/local-project-catalog";
 import { projectRepositoryBrokerFromEnvironment } from "@/lib/projects/repository-broker";
 
-export class ProjectAccessError extends Error {
+export class ProjectAccessError extends HttpProblem {
   constructor(
-    readonly status: 401 | 404 | 502 | 503,
-    readonly code: "PROJECT_ACCESS_BROKER_REQUIRED" | "PROJECT_ACCESS_SESSION_REQUIRED" | "PROJECT_ACCESS_NOT_FOUND" | "PROJECT_ACCESS_UNAVAILABLE",
+    status: 401 | 404 | 502 | 503,
+    code: "PROJECT_ACCESS_BROKER_REQUIRED" | "PROJECT_ACCESS_SESSION_REQUIRED" | "PROJECT_ACCESS_NOT_FOUND" | "PROJECT_ACCESS_UNAVAILABLE",
     message: string,
-  ) { super(message); }
+  ) { super(status, code, message); }
+}
+
+/**
+ * The localhost product uses a durable project catalog instead of GitHub.
+ * Every project-scoped preview route must still resolve its exact catalog row
+ * before it reads or creates specification, delivery, Runner, or evidence
+ * state. A syntactically valid slug is not project authority.
+ */
+export async function authorizeLocalProjectAccess(projectId: string): Promise<LocalProjectCatalogItem> {
+  try {
+    const project = await readLocalProject(projectId);
+    if (!project) {
+      throw new ProjectAccessError(404, "PROJECT_ACCESS_NOT_FOUND", "本地项目不存在或当前账号无权访问。");
+    }
+    return project;
+  } catch (error) {
+    if (error instanceof ProjectAccessError) throw error;
+    throw new ProjectAccessError(503, "PROJECT_ACCESS_UNAVAILABLE", "暂时无法验证本地项目访问权。");
+  }
 }
 
 /**

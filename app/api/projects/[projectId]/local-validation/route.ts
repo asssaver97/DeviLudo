@@ -1,6 +1,7 @@
 import { idempotencyKey, json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery, saveLocalValidation } from "@/lib/local-delivery/store";
 import type { LocalValidationSnapshot } from "@/lib/local-delivery/model";
+import { authorizeLocalProjectAccess } from "@/lib/projects/project-read-access";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
 import { createLocalRuntimeHeaders } from "@/services/local-runtime/src/request-auth";
 
@@ -13,6 +14,7 @@ export async function GET(
   try {
     assertLoopbackTestRequest(request, "本机验证 API 只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
+    await authorizeLocalProjectAccess(projectId);
     const delivery = await readLocalDelivery(projectId);
     return json({ data: delivery.localValidation, meta: { runId: delivery.runId, stage: delivery.stage } });
   } catch (error) {
@@ -27,6 +29,7 @@ export async function POST(
   try {
     assertLoopbackTestRequest(request, "本机验证 API 只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
+    await authorizeLocalProjectAccess(projectId);
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId) {
       return json({ error: { code: "SPEC_APPROVAL_REQUIRED", message: "请先批准规格并锁定本地运行" } }, { status: 409 });

@@ -205,6 +205,15 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
   for (const state of Object.values(value.agentVersions)) {
     if (typeof state !== "string" || !VERSION_STATES.has(state)) throw new Error("本地 Agent 版本状态无效");
   }
+  for (const feedback of value.feedback) {
+    if (!record(feedback) || typeof feedback.projectId !== "string"
+      || !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(feedback.projectId)
+      || typeof feedback.id !== "string" || typeof feedback.text !== "string"
+      || !Number.isInteger(feedback.revision) || (feedback.revision as number) < 1
+      || typeof feedback.at !== "string" || !Number.isFinite(Date.parse(feedback.at))) {
+      throw new Error("本地项目反馈投影无效");
+    }
+  }
   for (const installation of value.installations) {
     if (!record(installation) || typeof installation.id !== "string"
       || (installation.agent !== "claude-code" && installation.agent !== "codex-cli")

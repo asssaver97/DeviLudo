@@ -1,6 +1,7 @@
 import type { ControlPlaneAdminPrincipal } from "@/lib/admin/control-plane-broker";
 import { trustedGitHubSessionKeyFromEnvironment, verifyBrowserSession } from "@/lib/connections/github-broker";
 import { projectRepositoryBrokerFromEnvironment } from "@/lib/projects/repository-broker";
+import { readLocalProject } from "@/lib/projects/local-project-catalog";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -31,9 +32,13 @@ export async function projectAgentPrincipal(
 ): Promise<ControlPlaneAdminPrincipal> {
   if (isLoopbackTestRequest(request)) {
     if (!LOCAL_PROJECT.test(projectId)) invalidProject();
+    let project;
+    try { project = await readLocalProject(projectId); }
+    catch { throw new ScopedAgentAccessProblem(503, "PROJECT_AUTHORITY_UNAVAILABLE", "暂时无法校验本地项目权限。"); }
+    if (!project) throw new ScopedAgentAccessProblem(404, "PROJECT_NOT_FOUND", "本地项目不存在或当前账号无权访问。");
     return Object.freeze({
       role: "ProjectOwner", actorId: "user-local", sessionId: "local-project-agent-settings",
-      tenantId: "tenant-local", projectId,
+      tenantId: project.tenantId, projectId: project.projectId,
     });
   }
   if (!UUID.test(projectId)) invalidProject();

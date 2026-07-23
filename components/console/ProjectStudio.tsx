@@ -68,6 +68,20 @@ export function ProjectStudio({
   }, [localFixture, mode, projectId]);
 
   useEffect(() => {
+    if (!localFixture || mode === "new") return;
+    const controller = new AbortController();
+    void fetch(`/api/projects/${encodeURIComponent(projectId)}/feedback`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { data?: readonly unknown[] };
+        if (response.ok && Array.isArray(payload.data)) {
+          setFeedbackCount((current) => Math.max(current, payload.data!.length));
+        }
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [localFixture, mode, projectId]);
+
+  useEffect(() => {
     const controller = new AbortController();
     void fetch(`/api/projects/${encodeURIComponent(projectId)}/conversation`, { cache: "no-store", signal: controller.signal })
       .then(async (response) => {

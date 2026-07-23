@@ -1,6 +1,7 @@
 import { json, problemResponse } from "@/lib/control-plane/http";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
 import { isLocalAgentProfileAttested, type LocalLockedAgentProfile } from "@/lib/local-delivery/model";
+import { authorizeLocalProjectAccess } from "@/lib/projects/project-read-access";
 import type { LocalAgentPreflightResult } from "@/services/local-agent-runtime/src/contracts";
 import { createLocalAgentRuntimeHeaders } from "@/services/local-agent-runtime/src/request-auth";
 import { assertLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -14,6 +15,7 @@ export async function POST(
   try {
     assertLoopbackTestRequest(request, "本机 Agent 预检只在显式启用的 loopback 测试站可用");
     const { projectId } = await context.params;
+    await authorizeLocalProjectAccess(projectId);
     const delivery = await readLocalDelivery(projectId);
     if (!delivery.runId) {
       return json({ error: { code: "SPEC_APPROVAL_REQUIRED", message: "请先批准规格并锁定 Agent 运行" } }, { status: 409 });

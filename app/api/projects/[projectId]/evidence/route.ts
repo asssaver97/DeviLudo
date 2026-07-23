@@ -3,7 +3,7 @@ import {
   DeliveryProjectionBrokerError,
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
-import { authorizeProjectAccess, projectAccessResponse } from "@/lib/projects/project-read-access";
+import { authorizeLocalProjectAccess, authorizeProjectAccess, projectAccessResponse } from "@/lib/projects/project-read-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -15,6 +15,7 @@ export async function GET(
   try {
     const { projectId } = await context.params;
     if (isLoopbackTestRequest(request)) {
+      await authorizeLocalProjectAccess(projectId);
       return json({ data: null, meta: { mode: "LOCAL_HEALTH" } }, { headers: { "cache-control": "no-store" } });
     }
     if (!UUID.test(projectId)) {

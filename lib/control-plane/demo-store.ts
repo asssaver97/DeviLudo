@@ -133,7 +133,7 @@ export type DemoAgentVersionMetadata = {
 export type DemoStoreState = {
   specRevision: number;
   specState: "DRAFT" | "APPROVED";
-  feedback: Array<{ id: string; text: string; revision: number; at: string }>;
+  feedback: Array<{ projectId: string; id: string; text: string; revision: number; at: string }>;
   invalidatedEvidence: string[];
   agentVersions: Record<string, DemoAgentVersionState>;
   agentVersionMetadata: Record<string, DemoAgentVersionMetadata>;
@@ -154,8 +154,8 @@ const initialState = (): DemoStoreState => {
   specRevision: 8,
   specState: "APPROVED",
   feedback: [
-    { id: "ITER-006", text: "降低开局风暴频率", revision: 6, at: "2026-07-16T09:20:00.000Z" },
-    { id: "ITER-007", text: "修复返港结算后的存档回读", revision: 7, at: "2026-07-17T02:14:00.000Z" },
+    { projectId: "ember-archipelago", id: "ITER-006", text: "降低开局风暴频率", revision: 6, at: "2026-07-16T09:20:00.000Z" },
+    { projectId: "ember-archipelago", id: "ITER-007", text: "修复返港结算后的存档回读", revision: 7, at: "2026-07-17T02:14:00.000Z" },
   ],
   invalidatedEvidence: [],
   agentVersions: {
@@ -375,6 +375,7 @@ export function getDemoStore(): DemoStoreState {
   globalStore.__deviludoDemoStore ??= initialState();
   backfillProviderProfileShapes(globalStore.__deviludoDemoStore);
   backfillLocalFixtureTenantScope(globalStore.__deviludoDemoStore);
+  backfillFeedbackProjectScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
@@ -394,6 +395,7 @@ export function restoreDemoStore(snapshot: DemoStoreState): DemoStoreState {
   globalStore.__deviludoDemoStore = structuredClone(snapshot);
   backfillProviderProfileShapes(globalStore.__deviludoDemoStore);
   backfillLocalFixtureTenantScope(globalStore.__deviludoDemoStore);
+  backfillFeedbackProjectScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
@@ -407,6 +409,7 @@ export function migrateDemoStoreState(snapshot: unknown): DemoStoreState {
   const migrated = structuredClone(snapshot) as DemoStoreState;
   backfillProviderProfileShapes(migrated);
   backfillLocalFixtureTenantScope(migrated);
+  backfillFeedbackProjectScope(migrated);
   backfillVersionMetadata(migrated);
   requireLegacyVersionRevalidation(migrated);
   backfillCredentialTimestamps(migrated);
@@ -479,6 +482,16 @@ function backfillLocalFixtureTenantScope(store: DemoStoreState): void {
   if (store.defaults["tenant:north-dock"] === "profile-claude-tenant-r2") {
     store.defaults["tenant:tenant-local"] ??= "profile-claude-tenant-r2";
     delete store.defaults["tenant:north-dock"];
+  }
+}
+
+function backfillFeedbackProjectScope(store: DemoStoreState): void {
+  if (!Array.isArray(store.feedback)) return;
+  for (const feedback of store.feedback as unknown as Record<string, unknown>[]) {
+    // v1-v3 localhost snapshots contained only the bundled fixture history.
+    // Bind those legacy rows to that exact project instead of exposing them to
+    // every newly created project.
+    feedback.projectId ??= "ember-archipelago";
   }
 }
 

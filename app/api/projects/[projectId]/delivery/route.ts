@@ -5,7 +5,7 @@ import {
   DeliveryProjectionBrokerError,
   deliveryProjectionBrokerFromEnvironment,
 } from "@/lib/delivery-projection/broker";
-import { authorizeProjectAccess, projectAccessResponse } from "@/lib/projects/project-read-access";
+import { authorizeLocalProjectAccess, authorizeProjectAccess, projectAccessResponse } from "@/lib/projects/project-read-access";
 import {
   deliveryCancellationOperationKey,
   userAcceptanceBrokerFromEnvironment,
@@ -32,6 +32,7 @@ export async function GET(
   try {
     const { projectId } = await context.params;
     if (isLoopbackTestRequest(request)) {
+      await authorizeLocalProjectAccess(projectId);
       return json({ data: await readLocalDelivery(projectId), meta: { mode: "LOCAL_D1" } });
     }
     if (!UUID.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效。" } }, { status: 400 });
@@ -104,6 +105,7 @@ export async function POST(
       });
       return json({ data: receipt, meta: { mode: "PRODUCTION" } }, { status: 202 });
     }
+    await authorizeLocalProjectAccess(projectId);
     const body = await bodyObject(request);
     const action = requireString(body, "action", 64) as LocalDeliveryAction;
     if (!actions.has(action)) {
