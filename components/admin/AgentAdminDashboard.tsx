@@ -682,12 +682,14 @@ function OverviewTab({ catalog, versions, installations, defaultAgent, localAgen
 }) {
   const exactMatches = localAgents.filter((agent) => agent.state === "READY").length;
   const workerReady = localHealth?.dependencies?.developmentWorker === "READY";
+  const providerBindings = localHealth?.dependencies?.activeProviderBindings ?? [];
+  const verifiedProviderBindings = providerBindings.filter((binding) => binding.state === "VERIFIED").length;
   return (
     <>
       <div className={styles.metricRail}>
         <div><span>本机 Agent 发现</span><strong>{localAgents.length} / 2</strong><small>只读版本探针</small></div>
         <div><span>精确版本匹配</span><strong>{exactMatches} / 2</strong><small>{exactMatches === 2 ? "均匹配锁定版本" : "不匹配时禁止启动"}</small></div>
-        <div><span>Inference Gateway</span><strong>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</strong><small>长期 Key 不下发 Worker</small></div>
+        <div><span>Gateway / Provider</span><strong>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</strong><small>{verifiedProviderBindings} / {providerBindings.length} 个可运行绑定已验证</small></div>
         <div><span>开发 Worker</span><strong>{workerReady ? "READY" : "BLOCKED"}</strong><small>{workerReady ? "镜像与执行门禁已满足" : localHealth?.dependencies?.workerIdentityMode === "LOCAL_DETERMINISTIC" ? "本机安装可校验，等待 Provider 与执行授权" : "等待版本、镜像与 Gateway"}</small></div>
       </div>
       {localHealth?.dependencies?.agentCatalogVerified === false ? <div className={styles.permissionNotice}><AdminIcon name="shield" />生效默认 Profile 与版本、安装或 Provider 证据不一致；开发 Worker 已阻断。</div> : null}
@@ -1161,15 +1163,24 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
       <section className={styles.section}>
         <SectionHeading title="生效 Provider" description="每种 Agent 使用独立协议 Schema，不执行静默跨 Agent 切换。" />
         {localHealth?.dependencies?.providerBindingProbe !== "CONFIGURED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />下列为控制面配置快照；本机没有受信 Provider 绑定探针，不能用于 Agent 执行。</div> : null}
-        {localHealth?.dependencies?.providerBindingProbe === "CONFIGURED" && localHealth.dependencies.activeProviderBinding !== "VERIFIED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />安全连接器已就绪，但没有与生效 Profile、精确模型和凭据版本一致的 ACTIVE Provider 绑定；开发 Worker 保持阻断。</div> : null}
+        {localHealth?.dependencies?.providerBindingProbe === "CONFIGURED" && localHealth.dependencies.activeProviderBinding === "PARTIAL" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />只有部分可运行 Profile 的本机 Provider 绑定有效；下方会精确标出待恢复的 Agent/Profile，其他已验证绑定不会掩盖它。</div> : null}
+        {localHealth?.dependencies?.providerBindingProbe === "CONFIGURED" && localHealth.dependencies.activeProviderBinding === "BLOCKED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />安全连接器已就绪，但没有与可运行 Profile、精确模型和凭据版本一致的 ACTIVE Provider 绑定；开发 Worker 保持阻断。</div> : null}
         {!permissions.editPlatformProvider ? <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看平台 Provider。租户和项目覆盖应在对应作用域页面配置。</div> : null}
         <div className={styles.providerRows}>
-          {activeProviders.map(({ kind, provider }) => <button type="button" key={kind}
-            className={`${styles.providerRow} ${agent === kind && editorMode === "existing" ? styles.providerRowSelected : ""}`} onClick={() => chooseAgent(kind)}>
-            <AgentMark kind={kind} small /><div><strong>{kind === "claude-code" ? "Anthropic Messages" : "OpenAI Responses"} · {provider ? providerHost(provider.baseUrl) : "未配置"}</strong>
-              <span>{provider ? `${provider.protocol} · ${provider.primaryModel}` : "尚无 ACTIVE 平台 Provider"}</span></div>
-            <StatusPill tone={provider?.state === "ACTIVE" ? "success" : "warning"}>{provider?.state ?? "NOT CONFIGURED"}</StatusPill><AdminIcon name="chevron" />
-          </button>)}
+          {activeProviders.map(({ kind, provider }) => {
+            const bindings = localHealth?.dependencies?.activeProviderBindings?.filter((binding) => binding.agent === kind) ?? [];
+            const verified = bindings.filter((binding) => binding.state === "VERIFIED").length;
+            const localState = bindings.length === 0 ? "NOT RUNNABLE"
+              : verified === bindings.length ? "LOCAL ACTIVE"
+                : verified > 0 ? "PARTIAL" : "RESTORE";
+            const localTone = localState === "LOCAL ACTIVE" ? "success" : localState === "PARTIAL" ? "info" : "warning";
+            return <button type="button" key={kind}
+              className={`${styles.providerRow} ${agent === kind && editorMode === "existing" ? styles.providerRowSelected : ""}`} onClick={() => chooseAgent(kind)}>
+              <AgentMark kind={kind} small /><div><strong>{kind === "claude-code" ? "Anthropic Messages" : "OpenAI Responses"} · {provider ? providerHost(provider.baseUrl) : "未配置"}</strong>
+                <span>{provider ? `${provider.protocol} · ${provider.primaryModel}` : "尚无 ACTIVE 平台 Provider"}{production ? "" : ` · 本机绑定 ${verified}/${bindings.length}`}</span></div>
+              <StatusPill tone={production ? provider?.state === "ACTIVE" ? "success" : "warning" : localTone}>{production ? provider?.state ?? "NOT CONFIGURED" : localState}</StatusPill><AdminIcon name="chevron" />
+            </button>;
+          })}
         </div>
         <div className={styles.credentialPanel}>
           <div className={styles.credentialIcon}><AdminIcon name="key" /></div>
@@ -1666,11 +1677,13 @@ function AuditTab({ events, filter, localHealth, agentHealth, setFilter }: { eve
   const alerts = agentHealth?.alerts ?? [];
   const diffs = agentHealth?.configurationDiffs ?? [];
   const operationalHealthy = agentHealth?.status === "HEALTHY";
+  const providerBindings = localHealth?.dependencies?.activeProviderBindings ?? [];
+  const verifiedProviderBindings = providerBindings.filter((binding) => binding.state === "VERIFIED").length;
   return (
     <>
       <div className={styles.healthBanner}>
         <div><span className={`${styles.pulseRing} ${operationalHealthy ? "" : styles.pulseRingWarning}`}><i /></span><div><strong>{operationalHealthy ? "Agent 控制面健康" : agentHealth ? "Agent 控制面存在门禁告警" : "正在读取 Agent 控制面健康"}</strong><small>运营数据来自 `/api/admin/agent-health`；本机执行状态独立来自 `/api/health`</small></div></div>
-        <dl><div><dt>精确 CLI</dt><dd>{readyAgents} / 2</dd></div><div><dt>Inference Gateway</dt><dd>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</dd></div><div><dt>运营告警</dt><dd>{alerts.length}</dd></div><div><dt>开发 Worker</dt><dd>{workerReady ? "READY" : "BLOCKED"}</dd></div></dl>
+        <dl><div><dt>精确 CLI</dt><dd>{readyAgents} / 2</dd></div><div><dt>Provider 绑定</dt><dd>{verifiedProviderBindings} / {providerBindings.length}</dd></div><div><dt>运营告警</dt><dd>{alerts.length}</dd></div><div><dt>开发 Worker</dt><dd>{workerReady ? "READY" : "BLOCKED"}</dd></div></dl>
       </div>
       <div className={styles.metricRail}>
         <div><span>24h 推理请求</span><strong>{usage?.available ? usage.totals.requests.toLocaleString("zh-CN") : "—"}</strong><small>append-only</small></div>

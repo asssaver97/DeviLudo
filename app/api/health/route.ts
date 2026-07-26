@@ -2,8 +2,10 @@ import { json } from "@/lib/control-plane/http";
 import { getDemoStore } from "@/lib/control-plane/demo-store";
 import { acquireLocalAdminState } from "@/lib/control-plane/local-admin-state";
 import {
+  inspectLocalProviderBindings,
   isLocalDevelopmentWorkerReady,
   reconcileLocalAgentHealth,
+  summarizeLocalProviderBindings,
   type LocalAgentRuntimeProbe,
 } from "@/lib/admin/local-agent-health";
 import { checkLocalProviderBinding } from "@/lib/admin/local-provider-control";
@@ -31,7 +33,18 @@ export async function GET(request: Request) {
       if (response.ok) localAgentRuntime = await response.json() as LocalAgentRuntimeProbe;
     } catch { /* Agent discovery is optional and never enables execution by itself */ }
     const agentHealth = reconcileLocalAgentHealth(localAgentRuntime, getDemoStore());
-    const activeProviderBindingVerified = await verifyOneActiveProviderBinding(agentHealth.bindingCandidates);
+    const activeProviderBindings = await inspectLocalProviderBindings(
+      agentHealth.bindingCandidates,
+      (candidate) => checkLocalProviderBinding({
+        providerRevisionId: candidate.providerRevisionId,
+        profileRevisionId: candidate.profileRevisionId,
+        credentialVersionId: candidate.credentialVersionId,
+        agent: candidate.agent,
+        modelRoles: candidate.modelRoles,
+      }),
+    );
+    const activeProviderBinding = summarizeLocalProviderBindings(activeProviderBindings);
+    const hasRunnableProviderBinding = activeProviderBindings.some((binding) => binding.state === "VERIFIED");
     return json({
       status: "ok",
       service: "deviludo-control-plane-preview",
@@ -42,13 +55,14 @@ export async function GET(request: Request) {
         d1: "READY",
         fixtureExecutor: localRuntime.status === "ok" ? "READY" : "NOT_CONNECTED",
         localGodot: localRuntime.godotVersion ?? null,
-        developmentWorker: isLocalDevelopmentWorkerReady(localAgentRuntime, agentHealth, activeProviderBindingVerified) ? "READY" : "BLOCKED",
+        developmentWorker: isLocalDevelopmentWorkerReady(localAgentRuntime, agentHealth, hasRunnableProviderBinding) ? "READY" : "BLOCKED",
         localAgentRuntime: localAgentRuntime.status === "NOT_CONNECTED" ? "NOT_CONNECTED" : "CONNECTED",
         localAgents: agentHealth.agents,
         agentCatalogVerified: agentHealth.catalogVerified && agentHealth.probeVerified,
         inferenceGateway: localAgentRuntime.inferenceGateway ?? "NOT_CONFIGURED",
         providerBindingProbe: localAgentRuntime.providerBindingProbe ?? "NOT_CONFIGURED",
-        activeProviderBinding: activeProviderBindingVerified ? "VERIFIED" : "BLOCKED",
+        activeProviderBinding,
+        activeProviderBindings,
         workerImageIdentity: localAgentRuntime.workerImageIdentity ?? null,
         expectedWorkerImageIdentity: localAgentRuntime.expectedWorkerImageIdentity ?? null,
         workerImageVerified: localAgentRuntime.workerImageVerified === true,
@@ -71,29 +85,6 @@ export async function GET(request: Request) {
   } finally {
     adminLease?.release();
   }
-}
-
-async function verifyOneActiveProviderBinding(
-  candidates: ReturnType<typeof reconcileLocalAgentHealth>["bindingCandidates"],
-): Promise<boolean> {
-  const selected = (["claude-code", "codex-cli"] as const).flatMap((agent) => {
-    const candidate = candidates.find((item) => item.agent === agent);
-    return candidate ? [candidate] : [];
-  });
-  if (selected.length === 0) return false;
-  const results = await Promise.all(selected.map(async (candidate) => {
-    try {
-      return await checkLocalProviderBinding({
-        providerRevisionId: candidate.providerRevisionId,
-        profileRevisionId: candidate.profileRevisionId,
-        credentialVersionId: candidate.credentialVersionId,
-        agent: candidate.agent,
-        modelRoles: candidate.modelRoles,
-      });
-    }
-    catch { return false; }
-  }));
-  return results.some(Boolean);
 }
 
 async function productionHealth(): Promise<Response> {

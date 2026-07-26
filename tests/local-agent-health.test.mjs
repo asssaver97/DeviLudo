@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  inspectLocalProviderBindings,
   isLocalDevelopmentWorkerReady,
   reconcileLocalAgentHealth,
+  summarizeLocalProviderBindings,
 } from "../lib/admin/local-agent-health.ts";
 import { resetDemoStore } from "../lib/control-plane/demo-store.ts";
 
@@ -93,4 +95,41 @@ test("local health fails closed on incomplete supply-chain evidence or a forged 
   const forged = reconcileLocalAgentHealth(duplicateProbe, resetDemoStore());
   assert.equal(forged.probeVerified, false);
   assert.equal(isLocalDevelopmentWorkerReady(duplicateProbe, forged, true), false);
+});
+
+test("local health verifies every runnable Provider binding without one Agent masking another", async () => {
+  const models = Object.freeze({
+    primaryModel: "model-primary-20260726",
+    planningModel: "model-planning-20260726",
+    smallFastModel: "model-fast-20260726",
+    subagentModel: "model-subagent-20260726",
+  });
+  const candidates = Object.freeze([
+    Object.freeze({
+      agent: "claude-code", version: "2.1.201", providerRevisionId: "provider-claude-r1",
+      profileRevisionId: "profile-claude-r1", credentialVersionId: "credential-claude-v1", modelRoles: models,
+    }),
+    Object.freeze({
+      agent: "claude-code", version: "2.1.201", providerRevisionId: "provider-claude-r2",
+      profileRevisionId: "profile-claude-r2", credentialVersionId: "credential-claude-v2", modelRoles: models,
+    }),
+    Object.freeze({
+      agent: "codex-cli", version: "0.146.0-alpha.3.1", providerRevisionId: "provider-codex-r1",
+      profileRevisionId: "profile-codex-r1", credentialVersionId: "credential-codex-v1", modelRoles: models,
+    }),
+  ]);
+  const checked = [];
+  const health = await inspectLocalProviderBindings(candidates, async (candidate) => {
+    checked.push(candidate.profileRevisionId);
+    if (candidate.profileRevisionId === "profile-claude-r2") throw new Error("connector unavailable");
+    return candidate.agent === "claude-code";
+  });
+
+  assert.deepEqual(checked, candidates.map((candidate) => candidate.profileRevisionId));
+  assert.deepEqual(health.map((binding) => binding.state), ["VERIFIED", "BLOCKED", "BLOCKED"]);
+  assert.equal(summarizeLocalProviderBindings(health), "PARTIAL");
+  assert.equal(JSON.stringify(health).includes("credential-"), false);
+  assert.equal(summarizeLocalProviderBindings(health.filter((binding) => binding.state === "VERIFIED")), "VERIFIED");
+  assert.equal(summarizeLocalProviderBindings(health.filter((binding) => binding.state === "BLOCKED")), "BLOCKED");
+  assert.equal(summarizeLocalProviderBindings([]), "BLOCKED");
 });

@@ -57,6 +57,51 @@ export type LocalAgentBindingCandidate = Readonly<{
   }>;
 }>;
 
+export type LocalProviderBindingHealth = Readonly<{
+  agent: AgentKind;
+  version: string;
+  providerRevisionId: string;
+  profileRevisionId: string;
+  state: "VERIFIED" | "BLOCKED";
+}>;
+
+export type LocalProviderBindingSummary = "VERIFIED" | "PARTIAL" | "BLOCKED";
+
+/**
+ * Verifies every runnable immutable Profile binding independently. A passing
+ * Claude binding must never hide a missing Codex binding (or another Profile
+ * of the same Agent) in the public localhost health projection.
+ */
+export async function inspectLocalProviderBindings(
+  candidates: readonly LocalAgentBindingCandidate[],
+  verify: (candidate: LocalAgentBindingCandidate) => Promise<boolean>,
+): Promise<readonly LocalProviderBindingHealth[]> {
+  const ordered = [...candidates].toSorted((left, right) =>
+    left.agent.localeCompare(right.agent) || left.profileRevisionId.localeCompare(right.profileRevisionId));
+  const results = await Promise.all(ordered.map(async (candidate) => {
+    let active = false;
+    try { active = await verify(candidate); }
+    catch { /* A connector failure is an exact blocked binding, never a global pass. */ }
+    return Object.freeze({
+      agent: candidate.agent,
+      version: candidate.version,
+      providerRevisionId: candidate.providerRevisionId,
+      profileRevisionId: candidate.profileRevisionId,
+      state: active ? "VERIFIED" as const : "BLOCKED" as const,
+    });
+  }));
+  return Object.freeze(results);
+}
+
+export function summarizeLocalProviderBindings(
+  bindings: readonly LocalProviderBindingHealth[],
+): LocalProviderBindingSummary {
+  const verified = bindings.filter((binding) => binding.state === "VERIFIED").length;
+  if (bindings.length > 0 && verified === bindings.length) return "VERIFIED";
+  if (verified > 0) return "PARTIAL";
+  return "BLOCKED";
+}
+
 /**
  * Joins an untrusted, read-only CLI observation with the persisted local Agent
  * control-plane authority. Neither side can manufacture READY on its own.

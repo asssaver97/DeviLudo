@@ -299,6 +299,10 @@ let runtimeSidecarKey;
 let specSidecarKey;
 try {
   const health = await waitForHealth(baseUrl);
+  if (!Array.isArray(health.payload.dependencies?.activeProviderBindings)
+    || !new Set(["VERIFIED", "PARTIAL", "BLOCKED"]).has(health.payload.dependencies?.activeProviderBinding)) {
+    throw new Error("local health does not expose exact per-Profile Provider binding status");
+  }
   let agentSidecarKey;
   [runtimeSidecarKey, agentSidecarKey, specSidecarKey] = await Promise.all([
     localSidecarKey("local-runtime"),

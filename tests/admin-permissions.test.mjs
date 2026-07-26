@@ -74,8 +74,13 @@ test("new Provider opens an explicit blank draft without mutating the active sna
 
 test("Agent console distinguishes Provider probe capability from an exact active binding", () => {
   const source = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
-  assert.match(source, /providerBindingProbe === "CONFIGURED" && localHealth\.dependencies\.activeProviderBinding !== "VERIFIED"/);
-  assert.match(source, /没有与生效 Profile、精确模型和凭据版本一致的 ACTIVE Provider 绑定/);
+  assert.match(source, /activeProviderBinding === "PARTIAL"/);
+  assert.match(source, /activeProviderBinding === "BLOCKED"/);
+  assert.match(source, /activeProviderBindings\?\.filter\(\(binding\) => binding\.agent === kind\)/);
+  assert.match(source, /部分可运行 Profile 的本机 Provider 绑定有效/);
+  assert.match(source, /没有与可运行 Profile、精确模型和凭据版本一致的 ACTIVE Provider 绑定/);
+  assert.match(source, /` · 本机绑定 \$\{verified\}\/\$\{bindings\.length\}`/);
+  assert.match(source, /production \? ""/);
   assert.match(source, /agentCatalogVerified === false/);
 });
 
