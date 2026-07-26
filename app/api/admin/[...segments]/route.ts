@@ -1046,6 +1046,17 @@ export async function POST(request: Request, context: RouteContext) {
           || !demoProviderProbePassed(currentProvider)) {
           throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
         }
+        const installation = getDemoStore().installations.find((item) => item.id === authorizedProfile.installationId);
+        if (!installationServingReady(getDemoStore(), installation, authorizedProfile.agent)) {
+          throw new HttpProblem(
+            409,
+            "INSTALLATION_NOT_SERVING_READY",
+            "Profile activation requires a healthy 100% active WorkerImage with complete Agent/Adapter attestation",
+          );
+        }
+        if (!fixtureCredential && currentCredential?.state !== "ACTIVE") {
+          throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Profile activation requires its active managed credential version");
+        }
         if (localProviderControlRequired() && currentCredential?.state === "ACTIVE") {
           await activateLocalProviderBinding({
             providerRevisionId: currentProvider.id,
@@ -1309,8 +1320,9 @@ export async function POST(request: Request, context: RouteContext) {
         const bytes = new TextEncoder().encode(replacement);
         try {
           replacementFingerprint = await fingerprintSecret(bytes);
-          if (replacementFingerprint === authorizedCredential.fingerprint) {
-            throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+          if (localStore.credentials.some((candidate) => candidate.familyId === authorizedCredential.familyId
+            && candidate.fingerprint === replacementFingerprint)) {
+            throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must not reuse any historical family version");
           }
           if (localProviderControlRequired()) {
             const receipt = await putLocalProviderCredential(replacementId, replacement, replacementFingerprint);
@@ -1352,7 +1364,8 @@ export async function POST(request: Request, context: RouteContext) {
               }));
             let degradedProfiles = 0;
             for (const profile of store.profiles) {
-              if (affectedProviderIds.has(profile.providerRevisionId) && profile.state === "ACTIVE") {
+              if (affectedProviderIds.has(profile.providerRevisionId)
+                && ["ACTIVE", "READY", "VALIDATING"].includes(profile.state)) {
                 profile.state = "DEGRADED";
                 degradedProfiles += 1;
               }
@@ -1364,7 +1377,10 @@ export async function POST(request: Request, context: RouteContext) {
           }
           if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
           if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
-          if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+          if (store.credentials.some((candidate) => candidate.familyId === credential.familyId
+            && candidate.fingerprint === replacementFingerprint)) {
+            throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must not reuse any historical family version");
+          }
           if (!replacementSecretRef) throw new HttpProblem(500, "CREDENTIAL_STORE_RECEIPT_MISSING", "Credential store receipt is missing");
           const rotatedAt = new Date().toISOString();
           const nextVersion = Math.max(credential.version, ...store.credentials
@@ -1513,6 +1529,26 @@ function providerConfigurationComplete(provider: DemoProvider): boolean {
   } catch {
     return false;
   }
+}
+
+function installationServingReady(
+  store: DemoStoreState,
+  installation: DemoInstallation | undefined,
+  agent: DemoInstallation["agent"],
+): installation is DemoInstallation {
+  if (!installation || installation.agent !== agent || installation.state !== "ACTIVE"
+    || installation.health !== "HEALTHY" || installation.rolloutPercent !== 100 || !installation.activatedAt) return false;
+  const versionKey = `${installation.agent}@${installation.version}`;
+  const metadata = store.agentVersionMetadata[versionKey];
+  return ["APPROVED", "DEPRECATED"].includes(store.agentVersions[versionKey])
+    && metadata?.signatureVerified === true && metadata.scan === "PASS"
+    && Boolean(metadata.validationReceiptId && metadata.validationReceiptDigest && metadata.supplyChainEvidenceDigest
+      && metadata.validatedAdapterVersion && metadata.adapterCompatibility)
+    && isAdapterVersionAttested(
+      installation.adapterVersion,
+      metadata.validatedAdapterVersion!,
+      metadata.adapterCompatibility!,
+    );
 }
 
 function rollbackDemoProfiles(store: DemoStoreState, installation: DemoInstallation): readonly string[] {

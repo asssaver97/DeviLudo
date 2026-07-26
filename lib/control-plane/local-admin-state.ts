@@ -328,6 +328,7 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
       throw new Error("本地 Agent 凭据投影无效");
     }
   }
+  assertCredentialFamilies(validatedState);
   assertUniqueIds(value.providers, "本地 Agent Provider 投影");
   for (const provider of value.providers) {
     if (!record(provider) || !exactFieldsMatch(provider, PROVIDER_FIELDS)
@@ -409,6 +410,7 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
     }
   }
   assertProfileReferences(validatedState);
+  assertCredentialLifecycle(validatedState);
   assertDefaults(validatedState);
   assertAudit(value.audit);
   assertUsage(value.usage);
@@ -488,7 +490,7 @@ function assertProfileReferences(state: DemoStoreState): void {
     const provider = providers.get(profile.providerRevisionId);
     const installation = installations.get(profile.installationId);
     const credential = credentials.get(profile.credentialVersionId);
-    const fixtureCredential = provider ? fixtureProviderCredential(provider.id, provider.credentialVersionId) : false;
+    const fixtureCredential = provider ? fixtureProviderCredential(provider) : false;
     if (!provider || !installation || provider.agent !== profile.agent || installation.agent !== profile.agent
       || provider.credentialVersionId !== profile.credentialVersionId || (!credential && !fixtureCredential)) {
       throw new Error("本地 Agent Profile 权限绑定无效");
@@ -517,6 +519,79 @@ function assertProfileReferences(state: DemoStoreState): void {
   }
 }
 
+function assertCredentialFamilies(state: DemoStoreState): void {
+  const families = new Map<string, {
+    label: string;
+    scope: "platform" | "tenant";
+    scopeId: string;
+    active: number;
+    highestVersion: number;
+    activeVersion: number | null;
+    versions: Set<number>;
+    fingerprints: Set<string>;
+  }>();
+  const secretRefs = new Set<string>();
+  for (const credential of state.credentials) {
+    if (secretRefs.has(credential.secretRef)) throw new Error("本地 Agent 凭据 SecretRef 重复");
+    secretRefs.add(credential.secretRef);
+    const family = families.get(credential.familyId) ?? {
+      label: credential.label,
+      scope: credential.scope,
+      scopeId: credential.scopeId,
+      active: 0,
+      highestVersion: 0,
+      activeVersion: null,
+      versions: new Set<number>(),
+      fingerprints: new Set<string>(),
+    };
+    if (family.label !== credential.label || family.scope !== credential.scope || family.scopeId !== credential.scopeId
+      || family.versions.has(credential.version) || family.fingerprints.has(credential.fingerprint)) {
+      throw new Error("本地 Agent 凭据家族修订无效");
+    }
+    family.versions.add(credential.version);
+    family.fingerprints.add(credential.fingerprint);
+    family.highestVersion = Math.max(family.highestVersion, credential.version);
+    if (credential.state === "ACTIVE") {
+      family.active += 1;
+      family.activeVersion = credential.version;
+    }
+    families.set(credential.familyId, family);
+  }
+  for (const family of families.values()) {
+    if (family.active > 1 || (family.activeVersion !== null && family.activeVersion !== family.highestVersion)) {
+      throw new Error("本地 Agent 凭据家族活动版本无效");
+    }
+  }
+}
+
+function assertCredentialLifecycle(state: DemoStoreState): void {
+  const credentials = new Map(state.credentials.map((credential) => [credential.id, credential]));
+  const providers = new Map(state.providers.map((provider) => [provider.id, provider]));
+  for (const provider of state.providers) {
+    const credential = credentials.get(provider.credentialVersionId);
+    const fixtureCredential = fixtureProviderCredential(provider);
+    if (!credential && !fixtureCredential) throw new Error("本地 Agent Provider 凭据引用无效");
+    if (provider.state !== "DISABLED" && credential?.state !== "ACTIVE" && !fixtureCredential) {
+      throw new Error("本地 Agent Provider 凭据生命周期无效");
+    }
+  }
+  for (const profile of state.profiles) {
+    const provider = providers.get(profile.providerRevisionId);
+    const credential = credentials.get(profile.credentialVersionId);
+    const fixtureCredential = provider ? fixtureProviderCredential(provider) : false;
+    if (profile.state === "ACTIVE" && provider?.state !== "ACTIVE") {
+      throw new Error("本地 Agent ACTIVE Profile 的 Provider 生命周期无效");
+    }
+    if (profile.state === "READY" && provider?.state !== "READY" && provider?.state !== "ACTIVE") {
+      throw new Error("本地 Agent READY Profile 的 Provider 生命周期无效");
+    }
+    if ((profile.state === "ACTIVE" || profile.state === "READY")
+      && credential?.state !== "ACTIVE" && !fixtureCredential) {
+      throw new Error("本地 Agent Profile 凭据生命周期无效");
+    }
+  }
+}
+
 function assertDefaults(state: DemoStoreState): void {
   const profiles = new Map(state.profiles.map((profile) => [profile.id, profile]));
   for (const [scope, profileId] of Object.entries(state.defaults)) {
@@ -526,6 +601,13 @@ function assertDefaults(state: DemoStoreState): void {
     if (typeof profileId !== "string") throw new Error("本地 Agent 默认选择无效");
     const profile = profiles.get(profileId);
     if (!profile) throw new Error("本地 Agent 默认选择引用不存在的 Profile");
+    // A degraded selection intentionally remains authoritative so a broken
+    // higher-precedence override fails closed instead of silently inheriting a
+    // different Agent. Draft, disabled and superseded revisions can never be
+    // selected by a durable default.
+    if (profile.state !== "ACTIVE" && profile.state !== "DEGRADED") {
+      throw new Error("本地 Agent 默认选择 Profile 生命周期无效");
+    }
     if (scope === "platform") {
       if (profile.scope !== "platform" || profile.scopeId !== "global") throw new Error("本地 Agent 平台默认作用域无效");
       continue;
@@ -586,9 +668,11 @@ function exactVersion(value: string): boolean {
   return EXACT_VERSION.test(value) && !/(?:^|[._-])(latest|stable|default)(?:$|[._-])/i.test(value);
 }
 
-function fixtureProviderCredential(providerId: string, credentialVersionId: string): boolean {
-  return (providerId === "provider-claude-platform-r3" && credentialVersionId === "cred-claude-platform-v4")
-    || (providerId === "provider-codex-platform-r2" && credentialVersionId === "cred-codex-platform-v2");
+function fixtureProviderCredential(provider: DemoStoreState["providers"][number]): boolean {
+  return (provider.agent === "claude-code" && provider.id === "provider-claude-platform-r3"
+      && provider.credentialVersionId === "cred-claude-platform-v4")
+    || (provider.agent === "codex-cli" && provider.id === "provider-codex-platform-r2"
+      && provider.credentialVersionId === "cred-codex-platform-v2");
 }
 
 function validProviderProbe(value: unknown, state: string): boolean {

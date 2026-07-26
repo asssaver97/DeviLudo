@@ -261,6 +261,81 @@ test("current v5 snapshots reject cross-record authority, fallback, rollout, and
   })), /ID 重复/);
 });
 
+test("current v5 snapshots enforce credential families and serving configuration lifecycles", () => {
+  const credential = (overrides = {}) => ({
+    id: "credential-family-v1",
+    familyId: "credential-family",
+    label: "Credential family",
+    scope: "platform",
+    scopeId: "global",
+    secretRef: "secret://local-agent-runtime/credential-family-v1",
+    fingerprint: `sha256:${"a".repeat(64)}`,
+    masked: "sha256:aaaaaaaa…aaaaaa",
+    version: 1,
+    state: "PREVIOUS",
+    createdAt: "2026-07-25T00:00:00.000Z",
+    rotatedAt: "2026-07-26T00:00:00.000Z",
+    ...overrides,
+  });
+  const snapshot = (mutate) => {
+    const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+    mutate(envelope.state);
+    return JSON.stringify(envelope);
+  };
+
+  const validHistory = snapshot((state) => {
+    state.credentials.push(credential(), credential({
+      id: "credential-family-v2",
+      secretRef: "secret://local-agent-runtime/credential-family-v2",
+      fingerprint: `sha256:${"b".repeat(64)}`,
+      version: 2,
+      state: "ACTIVE",
+      createdAt: "2026-07-26T00:00:00.000Z",
+    }));
+  });
+  assert.equal(parseLocalAdminState(validHistory).credentials.length, 2);
+
+  assert.throws(() => parseLocalAdminState(snapshot((state) => {
+    state.credentials.push(credential(), credential({
+      id: "credential-family-v2",
+      secretRef: "secret://local-agent-runtime/credential-family-v2",
+      version: 2,
+      state: "ACTIVE",
+    }));
+  })), /凭据家族修订无效/);
+
+  assert.throws(() => parseLocalAdminState(snapshot((state) => {
+    state.credentials.push(credential({ state: "ACTIVE" }), credential({
+      id: "credential-family-v2",
+      secretRef: "secret://local-agent-runtime/credential-family-v2",
+      fingerprint: `sha256:${"b".repeat(64)}`,
+      version: 2,
+      state: "ACTIVE",
+    }));
+  })), /活动版本无效/);
+
+  assert.throws(() => parseLocalAdminState(snapshot((state) => {
+    state.credentials.push(credential({ state: "REVOKED" }));
+    state.providers.push({
+      ...structuredClone(state.providers[0]),
+      id: "provider-revoked-credential-r1",
+      revision: 1,
+      credentialVersionId: "credential-family-v1",
+    });
+  })), /Provider 凭据生命周期无效/);
+
+  assert.throws(() => parseLocalAdminState(snapshot((state) => {
+    state.providers[0].state = "DISABLED";
+  })), /ACTIVE Profile 的 Provider 生命周期无效/);
+
+  assert.throws(() => parseLocalAdminState(snapshot((state) => {
+    state.profiles[0].state = "DRAFT";
+  })), /默认选择 Profile 生命周期无效/);
+
+  const degradedDefault = snapshot((state) => { state.profiles[0].state = "DEGRADED"; });
+  assert.equal(parseLocalAdminState(degradedDefault).defaults.platform, "profile-claude-platform-r5");
+});
+
 test("local Agent administrator migration makes every persisted revision immutable", async () => {
   const migration = await readFile(new URL("../drizzle/0007_wakeful_freak.sql", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE `local_admin_state_revisions`/);

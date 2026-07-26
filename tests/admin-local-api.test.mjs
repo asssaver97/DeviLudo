@@ -3,6 +3,7 @@ import test from "node:test";
 import { GET, POST, PUT } from "../app/api/admin/[...segments]/route.ts";
 import { localWorkerImageDigest } from "../lib/agent/local-worker-identity.ts";
 import { getDemoStore, resetDemoStore } from "../lib/control-plane/demo-store.ts";
+import { fingerprintSecret } from "../lib/security/credentials.ts";
 
 function context(path) {
   return { params: Promise.resolve({ segments: path.split("/") }) };
@@ -126,6 +127,54 @@ test("local Agent admin mutations persist behind RBAC and emit audit records", a
     context("agent-installations"),
   );
   assert.equal(deniedInstallation.status, 409);
+});
+
+test("profile activation rechecks the serving Installation after Provider validation", async () => {
+  const store = resetDemoStore();
+  const profile = store.profiles.find((item) => item.id === "profile-claude-platform-r5");
+  const installation = store.installations.find((item) => item.id === profile?.installationId);
+  assert.ok(profile && installation);
+  profile.state = "READY";
+  installation.state = "DRAINING";
+  store.rollouts[installation.id].state = "DRAINING";
+
+  const response = await POST(
+    request(`agent-profiles/${profile.id}/activate`, "POST", "SecurityAdmin"),
+    context(`agent-profiles/${profile.id}/activate`),
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "INSTALLATION_NOT_SERVING_READY");
+  assert.equal(profile.state, "READY");
+});
+
+test("credential rotation cannot reuse any historical family secret", async () => {
+  const firstSecret = "historical-secret-one";
+  const secondSecret = "historical-secret-two";
+  const firstFingerprint = await fingerprintSecret(new TextEncoder().encode(firstSecret));
+  const secondFingerprint = await fingerprintSecret(new TextEncoder().encode(secondSecret));
+  const store = resetDemoStore();
+  store.credentials.push({
+    id: "credential-history-v1", familyId: "credential-history", label: "History key",
+    scope: "platform", scopeId: "global",
+    secretRef: "secret://local-agent-runtime/credential-history-v1",
+    fingerprint: firstFingerprint, masked: "sha256:history1…000001", version: 1, state: "PREVIOUS",
+    createdAt: "2026-07-24T00:00:00.000Z", rotatedAt: "2026-07-25T00:00:00.000Z",
+  }, {
+    id: "credential-history-v2", familyId: "credential-history", label: "History key",
+    scope: "platform", scopeId: "global",
+    secretRef: "secret://local-agent-runtime/credential-history-v2",
+    fingerprint: secondFingerprint, masked: "sha256:history2…000002", version: 2, state: "ACTIVE",
+    createdAt: "2026-07-25T00:00:00.000Z", rotatedAt: "2026-07-25T00:00:00.000Z",
+  });
+
+  const response = await POST(
+    request("credentials/credential-history-v2/rotate", "POST", "SecurityAdmin", { apiKey: firstSecret }),
+    context("credentials/credential-history-v2/rotate"),
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "CREDENTIAL_REUSED");
+  assert.equal(store.credentials.length, 2);
+  assert.equal(store.credentials[1].state, "ACTIVE");
 });
 
 test("local installation rejects an exact SemVer outside the immutable Agent Registry", async () => {
