@@ -1006,6 +1006,18 @@ test("isolated Steam execution worker pins native signing, PostgreSQL, S3 and KM
   assert.match(reservations, /set_config\('app\.tenant_id'/);
 });
 
+test("local launcher pins the installed Agent versions and passes them only to the Agent sidecar", () => {
+  const launcher = readFileSync(new URL("../scripts/local/start.mjs", import.meta.url), "utf8");
+  const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+  assert.match(launcher, /DEFAULT_LOCAL_CLAUDE_VERSION = "2\.1\.201"/);
+  assert.match(launcher, /DEFAULT_LOCAL_CODEX_VERSION = "0\.146\.0-alpha\.3\.1"/);
+  assert.match(launcher, /DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION: localClaudeVersion/);
+  assert.match(launcher, /DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION: localCodexVersion/);
+  assert.match(launcher, /must be an exact non-floating version/);
+  assert.match(example, /DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION=2\.1\.201/);
+  assert.match(example, /DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION=0\.146\.0-alpha\.3\.1/);
+});
+
 test("Steam depot finalization is a durable credential-isolated mTLS service", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const migration = readFileSync(new URL("../infra/postgres/054_steam_depot_finalization_operations.sql", import.meta.url), "utf8");

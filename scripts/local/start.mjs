@@ -15,6 +15,8 @@ const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const DEFAULT_LOCAL_AGENT_RUNTIME_PORT = 4312;
 const DEFAULT_LOCAL_SPEC_RUNTIME_PORT = 4313;
 const DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT = 4314;
+const DEFAULT_LOCAL_CLAUDE_VERSION = "2.1.201";
+const DEFAULT_LOCAL_CODEX_VERSION = "0.146.0-alpha.3.1";
 const FORCE_STOP_AFTER_MS = 5_000;
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -33,6 +35,8 @@ Environment:
   DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
   DEVILUDO_LOCAL_SPEC_RUNTIME_PORT  Local specification dialogue port (default: ${DEFAULT_LOCAL_SPEC_RUNTIME_PORT})
   DEVILUDO_LOCAL_INFERENCE_GATEWAY_PORT  Internal loopback inference Gateway port (default: ${DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT})
+  DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION  Exact trusted Claude Code version (default: ${DEFAULT_LOCAL_CLAUDE_VERSION})
+  DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION  Exact trusted Codex CLI version (default: ${DEFAULT_LOCAL_CODEX_VERSION})
   DEVILUDO_LOCAL_SPEC_STATE_FILE  Absolute durable specification state file (default: .deviludo/local-spec-state.json)
   DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable
   DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT  Verified export_templates root`);
@@ -92,6 +96,14 @@ function parseEnvironmentPort(name, fallback) {
   return value;
 }
 
+function parseExactAgentVersion(name, fallback) {
+  const value = process.env[name]?.trim() || fallback;
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value) || /latest|stable|default/i.test(value)) {
+    throw new Error(`${name} must be an exact non-floating version`);
+  }
+  return value;
+}
+
 function assertPortAvailable(port) {
   return new Promise((resolve, reject) => {
     const probe = createServer();
@@ -119,6 +131,8 @@ let localRuntimePort;
 let localAgentRuntimePort;
 let localSpecRuntimePort;
 let localInferenceGatewayPort;
+let localClaudeVersion;
+let localCodexVersion;
 try {
   port = parsePort(process.argv.slice(2));
   if (port !== null) {
@@ -126,6 +140,8 @@ try {
     localAgentRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT", DEFAULT_LOCAL_AGENT_RUNTIME_PORT);
     localSpecRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_SPEC_RUNTIME_PORT", DEFAULT_LOCAL_SPEC_RUNTIME_PORT);
     localInferenceGatewayPort = parseEnvironmentPort("DEVILUDO_LOCAL_INFERENCE_GATEWAY_PORT", DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT);
+    localClaudeVersion = parseExactAgentVersion("DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION", DEFAULT_LOCAL_CLAUDE_VERSION);
+    localCodexVersion = parseExactAgentVersion("DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION", DEFAULT_LOCAL_CODEX_VERSION);
     if (new Set([port, localRuntimePort, localAgentRuntimePort, localSpecRuntimePort, localInferenceGatewayPort]).size !== 5) throw new Error("Web and local sidecar ports must be different");
   }
 } catch (error) {
@@ -134,11 +150,15 @@ try {
   localAgentRuntimePort = undefined;
   localSpecRuntimePort = undefined;
   localInferenceGatewayPort = undefined;
+  localClaudeVersion = undefined;
+  localCodexVersion = undefined;
   fail(error instanceof Error ? error.message : String(error));
   usage();
 }
 
-if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined || localSpecRuntimePort === undefined || localInferenceGatewayPort === undefined) {
+if (port === null || port === undefined || localRuntimePort === undefined || localAgentRuntimePort === undefined
+  || localSpecRuntimePort === undefined || localInferenceGatewayPort === undefined
+  || localClaudeVersion === undefined || localCodexVersion === undefined) {
   process.exit();
 }
 
@@ -239,6 +259,8 @@ const localAgentRuntimeChild = spawn(
       DEVILUDO_LOCAL_TEST_MODE: "1",
       DEVILUDO_LOCAL_AGENT_RUNTIME_PORT: String(localAgentRuntimePort),
       DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY: localAgentRuntimeHmacKey,
+      DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION: localClaudeVersion,
+      DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION: localCodexVersion,
       DEVILUDO_LOCAL_DETERMINISTIC_WORKER_ATTESTATION: "1",
       DEVILUDO_LOCAL_PROVIDER_CONTROL: "1",
       DEVILUDO_LOCAL_AGENT_EXECUTION: "1",
