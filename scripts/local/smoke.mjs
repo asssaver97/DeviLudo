@@ -275,12 +275,14 @@ const smokeSpecProject = `smoke-spec-${smokeNonce}`;
 const smokeValidationProject = `smoke-validation-${smokeNonce}`;
 const smokeFeedbackProject = `smoke-feedback-${smokeNonce}`;
 const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
-const smokeCodexProject = smokeCatalogProject;
+const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
+const smokePhysicalRunnerProject = smokeCatalogProject;
 const smokeCleanupProjects = Object.freeze([
   smokeSpecProject,
   smokeValidationProject,
   smokeFeedbackProject,
   smokeReleaseProject,
+  smokeCodexProject,
   smokeCatalogProject,
 ]);
 const smokeClaudeModels = Object.freeze({
@@ -349,6 +351,7 @@ try {
     smokeValidationProject,
     smokeFeedbackProject,
     smokeReleaseProject,
+    smokeCodexProject,
   ];
   for (const projectId of workflowProjects) {
     const created = await request(baseUrl, "/api/projects", {
@@ -538,13 +541,15 @@ try {
       throw new Error(`active Agent version ${versionId} did not complete trusted Adapter revalidation`);
     }
   }
-  const codexSelection = await request(baseUrl, `/api/projects/${smokeCodexProject}/agent-settings`, {
-    method: "PUT",
-    headers: { "content-type": "application/json", "idempotency-key": `smoke-select-codex-catalog-${smokeNonce}` },
-    body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
-  });
-  if (!codexSelection.response.ok) {
-    throw new Error("local project Agent selection did not persist the approved Codex Profile");
+  for (const projectId of [smokeCodexProject, smokePhysicalRunnerProject]) {
+    const codexSelection = await request(baseUrl, `/api/projects/${projectId}/agent-settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-select-codex:${projectId}:${smokeNonce}` },
+      body: JSON.stringify({ profileRevisionId: "profile-codex-platform-r2" }),
+    });
+    if (!codexSelection.response.ok) {
+      throw new Error(`local project ${projectId} did not persist the approved Codex Profile`);
+    }
   }
   const tenantAgentPayload = await tenantAgentState.response.json();
   if (!tenantAgentState.response.ok || !Array.isArray(tenantAgentPayload.data)
@@ -1308,37 +1313,37 @@ try {
     || completedReleasePayload.data?.events?.[0]?.type !== "DEFAULT_BRANCH_CONFIRMATION_APPROVED") {
     throw new Error("local release did not preserve all three ordered external approvals");
   }
-  const codexDialogue = await request(baseUrl, `/api/projects/${smokeCodexProject}/conversation`, {
+  const physicalRunnerDialogue = await request(baseUrl, `/api/projects/${smokePhysicalRunnerProject}/conversation`, {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-dialogue-1" },
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-physical-runner-dialogue-1" },
     body: JSON.stringify({ expectedRevision: 0, message: "使用 Codex Profile 开发仅面向 Linux 的 Godot 桌面交付样例" }),
   });
-  const codexDialoguePayload = await codexDialogue.response.json();
-  if (![200, 201].includes(codexDialogue.response.status) || codexDialoguePayload.data?.revision !== 1) {
-    throw new Error("local Codex specification dialogue contract failed");
+  const physicalRunnerDialoguePayload = await physicalRunnerDialogue.response.json();
+  if (![200, 201].includes(physicalRunnerDialogue.response.status) || physicalRunnerDialoguePayload.data?.revision !== 1) {
+    throw new Error("local physical Runner specification dialogue contract failed");
   }
-  const codexApproval = await request(baseUrl, `/api/projects/${smokeCodexProject}/spec-revisions`, {
+  const physicalRunnerApproval = await request(baseUrl, `/api/projects/${smokePhysicalRunnerProject}/spec-revisions`, {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-approval-1" },
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-physical-runner-approval-1" },
     body: JSON.stringify({
       action: "approve", revision: "SPEC-001",
-      conversationId: codexDialoguePayload.data.conversationId,
-      expectedRevision: codexDialoguePayload.data.revision,
-      specRevisionId: codexDialoguePayload.data.specRevisionId,
-      testPlanRevisionId: codexDialoguePayload.data.testPlanRevisionId,
+      conversationId: physicalRunnerDialoguePayload.data.conversationId,
+      expectedRevision: physicalRunnerDialoguePayload.data.revision,
+      specRevisionId: physicalRunnerDialoguePayload.data.specRevisionId,
+      testPlanRevisionId: physicalRunnerDialoguePayload.data.testPlanRevisionId,
     }),
   });
-  const codexApprovalPayload = await codexApproval.response.json();
-  if (![200, 201].includes(codexApproval.response.status)
-    || codexApprovalPayload.data?.run?.agent !== "codex-cli"
-    || codexApprovalPayload.data?.run?.profileRevisionId !== "profile-codex-platform-r2"
-    || codexApprovalPayload.data?.run?.configurationSource !== `project:${smokeCodexProject}`
-    || codexApprovalPayload.data?.run?.providerProtocol !== "openai-responses"
-    || JSON.stringify(codexApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["linux"])
-    || JSON.stringify(codexApprovalPayload.data?.delivery?.targetMatrix) !== JSON.stringify(["linux"])) {
-    throw new Error("local Codex specification approval did not freeze the selected Profile");
+  const physicalRunnerApprovalPayload = await physicalRunnerApproval.response.json();
+  if (![200, 201].includes(physicalRunnerApproval.response.status)
+    || physicalRunnerApprovalPayload.data?.run?.agent !== "codex-cli"
+    || physicalRunnerApprovalPayload.data?.run?.profileRevisionId !== "profile-codex-platform-r2"
+    || physicalRunnerApprovalPayload.data?.run?.configurationSource !== `project:${smokePhysicalRunnerProject}`
+    || physicalRunnerApprovalPayload.data?.run?.providerProtocol !== "openai-responses"
+    || JSON.stringify(physicalRunnerApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["linux"])
+    || JSON.stringify(physicalRunnerApprovalPayload.data?.delivery?.targetMatrix) !== JSON.stringify(["linux"])) {
+    throw new Error("local physical Runner approval did not freeze the selected Codex Profile");
   }
-  const codexPhysicalRunnerGate = await request(baseUrl, `/api/projects/${smokeCodexProject}/delivery/auto`, {
+  const codexPhysicalRunnerGate = await request(baseUrl, `/api/projects/${smokePhysicalRunnerProject}/delivery/auto`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-physical-runner-gate" },
     body: "{}",
@@ -1356,6 +1361,112 @@ try {
     || codexPhysicalRunnerGatePayload.data?.lockedProfile?.profileRevisionId !== "profile-codex-platform-r2"
     || JSON.stringify(codexPhysicalRunnerGatePayload.data?.targetMatrix) !== JSON.stringify(["linux"])) {
     throw new Error("local Codex Profile changed while waiting for the required Linux Runner");
+  }
+
+  const codexDialogue = await request(baseUrl, `/api/projects/${smokeCodexProject}/conversation`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-release-dialogue-1" },
+    body: JSON.stringify({ expectedRevision: 0, message: "使用 Codex Profile 开发仅面向 macOS、可完整验收并发布的 Godot 桌面单机样例" }),
+  });
+  const codexDialoguePayload = await codexDialogue.response.json();
+  if (![200, 201].includes(codexDialogue.response.status) || codexDialoguePayload.data?.revision !== 1) {
+    throw new Error("local Codex release specification dialogue contract failed");
+  }
+  const codexApproval = await request(baseUrl, `/api/projects/${smokeCodexProject}/spec-revisions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-release-approval-1" },
+    body: JSON.stringify({
+      action: "approve", revision: "SPEC-001",
+      conversationId: codexDialoguePayload.data.conversationId,
+      expectedRevision: codexDialoguePayload.data.revision,
+      specRevisionId: codexDialoguePayload.data.specRevisionId,
+      testPlanRevisionId: codexDialoguePayload.data.testPlanRevisionId,
+    }),
+  });
+  const codexApprovalPayload = await codexApproval.response.json();
+  if (![200, 201].includes(codexApproval.response.status)
+    || codexApprovalPayload.data?.run?.agent !== "codex-cli"
+    || codexApprovalPayload.data?.run?.profileRevisionId !== "profile-codex-platform-r2"
+    || codexApprovalPayload.data?.run?.configurationSource !== `project:${smokeCodexProject}`
+    || codexApprovalPayload.data?.run?.providerProtocol !== "openai-responses"
+    || JSON.stringify(codexApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["macos"])
+    || JSON.stringify(codexApprovalPayload.data?.delivery?.targetMatrix) !== JSON.stringify(["macos"])) {
+    throw new Error("local Codex release approval did not freeze the selected Profile and macOS matrix");
+  }
+  const codexCandidate = await request(baseUrl, `/api/projects/${smokeCodexProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-release-candidate-auto" },
+    body: "{}",
+  }, 90_000);
+  const codexCandidatePayload = await codexCandidate.response.json();
+  const codexLock = JSON.stringify(codexCandidatePayload.data?.lockedProfile);
+  const codexRunId = codexCandidatePayload.data?.runId;
+  if (!codexCandidate.response.ok || codexCandidatePayload.data?.stage !== "AWAITING_ACCEPTANCE"
+    || codexCandidatePayload.data?.evidenceValid !== true
+    || codexCandidatePayload.data?.localValidation?.valid !== true
+    || codexCandidatePayload.data?.lockedProfile?.agent !== "codex-cli"
+    || codexCandidatePayload.data?.lockedProfile?.profileRevisionId !== "profile-codex-platform-r2"
+    || codexCandidatePayload.data?.lockedProfile?.providerProtocol !== "openai-responses"
+    || JSON.stringify(codexCandidatePayload.data?.targetMatrix) !== JSON.stringify(["macos"])) {
+    throw new Error("local Codex candidate did not reach acceptance with its immutable Agent lock");
+  }
+  const codexAcceptance = await localWorkflowAction(baseUrl, smokeCodexProject, "smoke-codex-release-accept", "accept");
+  const codexAcceptancePayload = await codexAcceptance.response.json();
+  if (codexAcceptance.response.status !== 201 || codexAcceptancePayload.data?.stage !== "MERGING"
+    || codexAcceptancePayload.data?.runId !== codexRunId
+    || JSON.stringify(codexAcceptancePayload.data?.lockedProfile) !== codexLock) {
+    throw new Error("local Codex acceptance changed its frozen run or Profile");
+  }
+  const codexMainGate = await request(baseUrl, `/api/projects/${smokeCodexProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-release-main-auto" },
+    body: "{}",
+  }, 90_000);
+  const codexMainGatePayload = await codexMainGate.response.json();
+  if (!codexMainGate.response.ok || codexMainGatePayload.data?.stage !== "MFA_REQUIRED"
+    || codexMainGatePayload.meta?.mainValidationExecuted !== true
+    || codexMainGatePayload.data?.mainValidation?.releaseGate !== "MAIN_VALIDATION_PASSED"
+    || codexMainGatePayload.data?.mainValidation?.mainSha !== codexMainGatePayload.data?.mainSha
+    || codexMainGatePayload.data?.runId !== codexRunId
+    || JSON.stringify(codexMainGatePayload.data?.lockedProfile) !== codexLock) {
+    throw new Error("local Codex merged main did not pass the release gate with the same lock");
+  }
+  const codexMfa = await localWorkflowAction(baseUrl, smokeCodexProject, "smoke-codex-release-mfa", "confirm-mfa");
+  if (!codexMfa.response.ok) throw new Error("local Codex release MFA confirmation failed");
+  const codexBeta = await request(baseUrl, `/api/projects/${smokeCodexProject}/delivery/auto`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "smoke-codex-release-beta-auto" },
+    body: "{}",
+  }, 60_000);
+  const codexBetaPayload = await codexBeta.response.json();
+  if (!codexBeta.response.ok || codexBetaPayload.data?.stage !== "EXTERNAL_APPROVAL_REQUIRED"
+    || codexBetaPayload.meta?.steamReinstallExecuted !== true
+    || codexBetaPayload.data?.steamReinstall?.releaseGate !== "LOCAL_STEAM_REINSTALL_PASSED"
+    || codexBetaPayload.data?.runId !== codexRunId
+    || JSON.stringify(codexBetaPayload.data?.lockedProfile) !== codexLock) {
+    throw new Error("local Codex Beta reinstall lost its immutable Agent lock");
+  }
+  let codexReleasedPayload = codexBetaPayload;
+  for (let index = 0; index < 3; index += 1) {
+    const codexApprovalGate = await localWorkflowAction(
+      baseUrl, smokeCodexProject, `smoke-codex-release-gate-${index + 1}`, "external-approve",
+    );
+    if (!codexApprovalGate.response.ok) throw new Error(`local Codex external approval ${index + 1} failed`);
+    codexReleasedPayload = await codexApprovalGate.response.json();
+    if (codexReleasedPayload.data?.externalApprovalEvidence?.length !== index + 1
+      || codexReleasedPayload.data?.runId !== codexRunId
+      || JSON.stringify(codexReleasedPayload.data?.lockedProfile) !== codexLock) {
+      throw new Error(`local Codex external approval ${index + 1} changed the frozen authority`);
+    }
+  }
+  if (codexReleasedPayload.data?.stage !== "RELEASED"
+    || codexReleasedPayload.data?.externalGate !== null
+    || codexReleasedPayload.data?.externalApprovals?.length !== 3
+    || codexReleasedPayload.data?.externalApprovalEvidence?.every((evidence) => evidence.valid) !== true
+    || codexReleasedPayload.data?.lockedProfile?.agent !== "codex-cli"
+    || codexReleasedPayload.data?.runId !== codexRunId
+    || JSON.stringify(codexReleasedPayload.data?.targetMatrix) !== JSON.stringify(["macos"])) {
+    throw new Error("local Codex release did not complete all immutable gates");
   }
   const preflightPayload = await agentPreflight.response.json();
   if (!agentPreflight.response.ok || !preflightPayload.data || !["BLOCKED", "READY"].includes(preflightPayload.data.status)) {
@@ -1460,7 +1571,8 @@ try {
   console.log(`✓ Actual main gate ${releaseMainGate.response.status} (${releaseMainGate.elapsedMs}ms) · ${releaseMainGatePayload.data.mainSha.slice(0, 12)} + manifest-bound build`);
   console.log(`✓ Local Beta reinstall ${releaseBeta.response.status} (${releaseBeta.elapsedMs}ms) · immutable package + clean launch, no Steam call`);
   console.log(`✓ Physical Runner gate ${codexPhysicalRunnerGate.response.status} (${codexPhysicalRunnerGate.elapsedMs}ms) · macOS evidence cannot pass Linux`);
-  console.log(`✓ Dual Agent lock   Claude Code released · Codex CLI safely stopped at Linux Runner gate`);
+  console.log(`✓ Codex release      ${codexBeta.response.status} (${codexBeta.elapsedMs}ms) · main + Beta reinstall + 3 approvals`);
+  console.log("✓ Dual Agent closure Claude Code RELEASED · Codex CLI RELEASED · isolated immutable locks");
   console.log(`✓ Agent preflight   ${agentPreflight.response.status} (${agentPreflight.elapsedMs}ms) · ${preflightPayload.data.code}`);
   console.log(`✓ Agent execution   ${agentExecutionGate.response.status} (${agentExecutionGate.elapsedMs}ms) · ${executionGatePayload.error.code}`);
   console.log(`✓ Agent cancellation ${agentCancellationGate.response.status} (${agentCancellationGate.elapsedMs}ms) · exact non-running receipt`);

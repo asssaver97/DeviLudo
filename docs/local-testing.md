@@ -109,7 +109,7 @@ npm run local:smoke
 - 在候选 E2E 前拒绝反馈；若导出模板缺失，确认真实候选不能启动目标矩阵。独立的完整 Fixture 候选在待验收后创建、精确重放并批准新反馈草稿，再对后继 Run 运行真实 Godot，证明旧验收权限不能被复用。
 - 候选接受只通过空 JSON 的 `/api/projects/{projectId}/acceptance` 提交，精确重放同一个幂等决定；通用 `/delivery` 的 `accept` 动作必须返回 400，不能绕过正式验收门禁。
 - 直接向 Godot、Agent、规格三个 sidecar 发送旧固定请求头，必须全部返回 403，证明 loopback 本身不构成权限。
-- 两个隔离项目分别选择 Claude Code 与 Codex CLI Profile：Claude 样例完成三平台闭环，Codex 样例只选择 Linux 并证明 Windows/macOS 不会成为隐藏门禁；两者都推进到 `RELEASED`，并确认整个链路保持最初的不可变 Agent 与目标矩阵锁。
+- 两个隔离的 macOS 项目分别选择 Claude Code 与 Codex CLI Profile，从规格批准、候选 Godot E2E、正式验收、实际 main SHA 复测、MFA、Beta 回装到三道外部批准都推进到 `RELEASED`，并逐阶段确认最初的 Agent/Profile/Run/目标矩阵锁没有变化。另一个 Codex Linux 项目停在 `PHYSICAL_RUNNERS_REQUIRED`，证明本机 macOS 证据不能越过实体 Linux Runner 门禁，Windows/macOS 也不会成为未选择的隐藏门禁。
 
 任何路由超时、非 2xx、错误内容类型或内容标记缺失都会以非零状态退出，适合本地脚本和 CI 调用。
 
