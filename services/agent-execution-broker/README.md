@@ -46,8 +46,12 @@ read-only source-snapshot Broker, and invokes one digest-pinned native launcher
 with fixed argv and an empty secret-free environment. The guest receives the
 internal inference Gateway URL and an opaque expiring SecretRef, never the
 third-party Provider URL. A completed response is accepted only when its
-candidate artifact has the configured Ed25519 attestation. Start the production
-consumer with `npm run start:agent-execution-worker`; it deposits DLRT bytes as
+candidate artifact has the configured Ed25519 attestation. The repository source
+consumer can be exercised locally with `npm run start:agent-execution-worker`;
+production executes only the signed single-file host bundle documented in
+[`docs/agent-execution-worker-native-release.md`](../../docs/agent-execution-worker-native-release.md).
+Before opening PostgreSQL, Vault or any Broker connection, that bundle hashes
+itself and its build receipt and verifies a distinct Ed25519 release. It deposits DLRT bytes as
 `application/octet-stream` through the configured mTLS ephemeral-secret Broker
 and receives only an opaque SecretRef. There is no in-memory production
 fallback.

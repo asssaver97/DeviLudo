@@ -214,6 +214,17 @@ The target namespace's registry, migration and per-service ConfigMap/Secret
 objects are revision-suffixed, immutable external production inputs; see
 [`docs/production-control-release.md`](../docs/production-control-release.md).
 
+## Agent Execution Worker native boundary
+
+The Linux KVM host Worker is released separately from the control image, the
+microVM Launcher and the Guest rootfs. Build and finalize it only through
+`build:agent-execution-worker-native` and `finalize:agent-execution-worker-native`;
+the revoked-by-default trust template is
+`agent-execution-worker-native-trust-policy.example.json`. Production executes
+the resulting single-file bundle directly. It verifies its own bytes, build
+receipt and distinct Ed25519 release before creating any external client. See
+[`docs/agent-execution-worker-native-release.md`](../docs/agent-execution-worker-native-release.md).
+
 ## Artifact Preparer image boundary
 
 Runner source input preparation is not admitted to the shared control image.

@@ -1,10 +1,12 @@
 import { pathToFileURL } from "node:url";
 import { ephemeralRunTokenSecretStoreFromEnv } from "./ephemeral-secret-client";
+import { verifyAgentExecutionWorkerNativeRuntime } from "./native-worker-release";
 import { nativeAgentExecutionWorkerFromEnv } from "./run-native-worker";
 
 export async function runNativeAgentExecutionWorkerService(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<void> {
+  await verifyAgentExecutionWorkerNativeRuntime(env);
   const secrets = await ephemeralRunTokenSecretStoreFromEnv(env);
   const runtime = await nativeAgentExecutionWorkerFromEnv(secrets, env);
   const shutdown = new AbortController(); const stop = () => shutdown.abort();

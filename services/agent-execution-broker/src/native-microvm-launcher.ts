@@ -629,7 +629,8 @@ async function main(): Promise<void> {
     responseFile: args.responseFile as string, credentialImage: args.credentialImage as string });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if ((globalThis as Record<string, unknown>).__DEVILUDO_AGENT_EXECUTION_WORKER_BUNDLE__ !== true
+  && process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(() => {
     process.stderr.write("[agent-microvm-launcher] execution failed\n");
     process.exitCode = 1;
