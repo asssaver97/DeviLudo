@@ -11,7 +11,7 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "bcrypt.lib")
 
-#define DEVILUDO_BRIDGE_VERSION L"1.0.0"
+#define DEVILUDO_BRIDGE_VERSION L"1.1.0"
 #define DEVILUDO_BRIDGE_CONTRACT_VERSION 1UL
 #define DEVILUDO_MAX_PATH_CHARS 32767UL
 #define DEVILUDO_MAX_ENV_BYTES (256UL * 1024UL)
@@ -23,9 +23,15 @@ static const wchar_t *PHYSICAL_RUNNER_SERVICE = L"DeviLudoPhysicalRunner";
 static const wchar_t *STEAM_CONNECTOR_SERVICE = L"DeviLudoSteamConnector";
 static const wchar_t *PHYSICAL_RUNNER_FILE = L"deviludo-physical-runner.exe";
 static const wchar_t *STEAM_CONNECTOR_FILE = L"deviludo-steam-client-connector.exe";
+static const wchar_t *STEAM_FINALIZER_SERVICE = L"DeviLudoSteamDepotFinalizer";
+static const wchar_t *STEAM_FINALIZER_RUNTIME_FILE = L"node.exe";
+static const wchar_t *STEAM_FINALIZER_ARTIFACT_FILE = L"deviludo-steam-depot-finalizer-service.mjs";
 
 typedef struct bridge_configuration {
   wchar_t *target_executable;
+  wchar_t *target_argument;
+  wchar_t *target_argument_digest;
+  wchar_t *working_directory;
   wchar_t target_digest[DEVILUDO_HASH_HEX_CHARS + 1];
   wchar_t descriptor_digest[DEVILUDO_HASH_HEX_CHARS + 1];
   wchar_t *environment;
@@ -73,13 +79,19 @@ static DWORD WINAPI service_control(DWORD control, DWORD event_type, void *event
   return NO_ERROR;
 }
 
-static int is_allowed_service(const wchar_t *service_name, const wchar_t **expected_file) {
+static int is_allowed_service(const wchar_t *service_name, const wchar_t **expected_file, int *requires_argument) {
+  *requires_argument = 0;
   if (service_name != NULL && wcscmp(service_name, PHYSICAL_RUNNER_SERVICE) == 0) {
     *expected_file = PHYSICAL_RUNNER_FILE;
     return 1;
   }
   if (service_name != NULL && wcscmp(service_name, STEAM_CONNECTOR_SERVICE) == 0) {
     *expected_file = STEAM_CONNECTOR_FILE;
+    return 1;
+  }
+  if (service_name != NULL && wcscmp(service_name, STEAM_FINALIZER_SERVICE) == 0) {
+    *expected_file = STEAM_FINALIZER_RUNTIME_FILE;
+    *requires_argument = 1;
     return 1;
   }
   return 0;
@@ -214,7 +226,12 @@ cleanup:
   return valid;
 }
 
-static LONG load_configuration(const wchar_t *service_name, const wchar_t *expected_file, bridge_configuration *configuration) {
+static LONG load_configuration(
+  const wchar_t *service_name,
+  const wchar_t *expected_file,
+  int requires_argument,
+  bridge_configuration *configuration
+) {
   wchar_t registry_path[512];
   HKEY key = NULL;
   DWORD contract = 0;
@@ -240,6 +257,29 @@ static LONG load_configuration(const wchar_t *service_name, const wchar_t *expec
   wmemcpy(configuration->target_digest, target_digest, DEVILUDO_HASH_HEX_CHARS + 1);
   wmemcpy(configuration->descriptor_digest, descriptor_digest, DEVILUDO_HASH_HEX_CHARS + 1);
   result = read_registry_environment(key, &configuration->environment, &configuration->environment_bytes);
+  if (result == ERROR_SUCCESS && requires_argument) {
+    wchar_t *separator;
+    result = read_registry_string(key, L"TargetArgument", &configuration->target_argument, DEVILUDO_MAX_PATH_CHARS);
+    if (result != ERROR_SUCCESS
+      || !canonical_target_path(configuration->target_argument, STEAM_FINALIZER_ARTIFACT_FILE)) {
+      result = ERROR_INVALID_DATA; goto cleanup;
+    }
+    result = read_registry_string(key, L"TargetArgumentDigest", &configuration->target_argument_digest,
+      DEVILUDO_HASH_HEX_CHARS + 1);
+    if (result != ERROR_SUCCESS || !lowercase_hex_digest(configuration->target_argument_digest)) {
+      result = ERROR_INVALID_DATA; goto cleanup;
+    }
+    result = read_registry_string(key, L"WorkingDirectory", &configuration->working_directory, DEVILUDO_MAX_PATH_CHARS);
+    if (result != ERROR_SUCCESS || configuration->working_directory == NULL) {
+      result = ERROR_INVALID_DATA; goto cleanup;
+    }
+    separator = wcsrchr(configuration->target_argument, L'\\');
+    if (separator == NULL || (size_t) (separator - configuration->target_argument) != wcslen(configuration->working_directory)
+      || _wcsnicmp(configuration->target_argument, configuration->working_directory,
+        wcslen(configuration->working_directory)) != 0) {
+      result = ERROR_INVALID_DATA; goto cleanup;
+    }
+  }
 cleanup:
   secure_free(target_digest, target_digest == NULL ? 0 : (wcslen(target_digest) + 1) * sizeof(wchar_t));
   secure_free(descriptor_digest, descriptor_digest == NULL ? 0 : (wcslen(descriptor_digest) + 1) * sizeof(wchar_t));
@@ -356,6 +396,7 @@ static DWORD create_target_process(const bridge_configuration *configuration, co
   wchar_t *working_directory = NULL;
   wchar_t *separator;
   SIZE_T path_chars;
+  SIZE_T command_chars;
   DWORD result = ERROR_INVALID_DATA;
   if (verified_executable == NULL) return ERROR_INVALID_PARAMETER;
   path_chars = wcslen(verified_executable);
@@ -363,14 +404,24 @@ static DWORD create_target_process(const bridge_configuration *configuration, co
   ZeroMemory(&process, sizeof(process));
   ZeroMemory(&limits, sizeof(limits));
   startup.cb = sizeof(startup);
-  command_line = (wchar_t *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (path_chars + 3) * sizeof(wchar_t));
-  working_directory = (wchar_t *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (path_chars + 1) * sizeof(wchar_t));
+  command_chars = path_chars + 3 + (configuration->target_argument == NULL
+    ? 0 : wcslen(configuration->target_argument) + 3);
+  command_line = (wchar_t *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, command_chars * sizeof(wchar_t));
+  working_directory = (wchar_t *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+    (configuration->working_directory == NULL ? path_chars + 1
+      : wcslen(configuration->working_directory) + 1) * sizeof(wchar_t));
   if (command_line == NULL || working_directory == NULL) { result = ERROR_NOT_ENOUGH_MEMORY; goto cleanup; }
-  if (_snwprintf_s(command_line, path_chars + 3, _TRUNCATE, L"\"%ls\"", verified_executable) < 0) goto cleanup;
-  wcscpy_s(working_directory, path_chars + 1, verified_executable);
-  separator = wcsrchr(working_directory, L'\\');
-  if (separator == NULL || separator == working_directory + 2) goto cleanup;
-  *separator = L'\0';
+  if (configuration->target_argument == NULL) {
+    if (_snwprintf_s(command_line, command_chars, _TRUNCATE, L"\"%ls\"", verified_executable) < 0) goto cleanup;
+    wcscpy_s(working_directory, path_chars + 1, verified_executable);
+    separator = wcsrchr(working_directory, L'\\');
+    if (separator == NULL || separator == working_directory + 2) goto cleanup;
+    *separator = L'\0';
+  } else {
+    if (_snwprintf_s(command_line, command_chars, _TRUNCATE, L"\"%ls\" \"%ls\"",
+      verified_executable, configuration->target_argument) < 0) goto cleanup;
+    wcscpy_s(working_directory, wcslen(configuration->working_directory) + 1, configuration->working_directory);
+  }
   child_job = CreateJobObjectW(NULL, NULL);
   if (child_job == NULL) { result = GetLastError(); goto cleanup; }
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
@@ -393,8 +444,10 @@ static DWORD create_target_process(const bridge_configuration *configuration, co
   child_process = process.hProcess;
   result = ERROR_SUCCESS;
 cleanup:
-  secure_free(command_line, command_line == NULL ? 0 : (path_chars + 3) * sizeof(wchar_t));
-  secure_free(working_directory, working_directory == NULL ? 0 : (path_chars + 1) * sizeof(wchar_t));
+  secure_free(command_line, command_line == NULL ? 0 : command_chars * sizeof(wchar_t));
+  secure_free(working_directory, working_directory == NULL ? 0
+    : (configuration->working_directory == NULL ? path_chars + 1
+      : wcslen(configuration->working_directory) + 1) * sizeof(wchar_t));
   return result;
 }
 
@@ -402,39 +455,60 @@ static void free_configuration(bridge_configuration *configuration) {
   if (configuration == NULL) return;
   secure_free(configuration->target_executable,
     configuration->target_executable == NULL ? 0 : (wcslen(configuration->target_executable) + 1) * sizeof(wchar_t));
+  secure_free(configuration->target_argument,
+    configuration->target_argument == NULL ? 0 : (wcslen(configuration->target_argument) + 1) * sizeof(wchar_t));
+  secure_free(configuration->target_argument_digest,
+    configuration->target_argument_digest == NULL ? 0
+      : (wcslen(configuration->target_argument_digest) + 1) * sizeof(wchar_t));
+  secure_free(configuration->working_directory,
+    configuration->working_directory == NULL ? 0 : (wcslen(configuration->working_directory) + 1) * sizeof(wchar_t));
   secure_free(configuration->environment, configuration->environment_bytes + sizeof(wchar_t) * 2);
   SecureZeroMemory(configuration, sizeof(*configuration));
 }
 
 static VOID WINAPI service_main(DWORD argc, LPWSTR *argv) {
   const wchar_t *expected_file = NULL;
+  int requires_argument = 0;
   bridge_configuration configuration;
   HANDLE waits[2];
   DWORD status;
   DWORD wait_result;
   DWORD child_exit = ERROR_PROCESS_ABORTED;
   HANDLE verified_target = INVALID_HANDLE_VALUE;
+  HANDLE verified_argument = INVALID_HANDLE_VALUE;
   wchar_t *verified_executable = NULL;
+  wchar_t *verified_argument_path = NULL;
   ZeroMemory(&configuration, sizeof(configuration));
-  if (argc < 1 || !is_allowed_service(argv[0], &expected_file)) return;
+  if (argc < 1 || !is_allowed_service(argv[0], &expected_file, &requires_argument)) return;
   service_status_handle = RegisterServiceCtrlHandlerExW(argv[0], service_control, NULL);
   if (service_status_handle == NULL) return;
   report_status(SERVICE_START_PENDING, NO_ERROR, 30000);
   stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
   if (stop_event == NULL) { report_status(SERVICE_STOPPED, GetLastError(), 0); return; }
-  status = load_configuration(argv[0], expected_file, &configuration);
+  status = load_configuration(argv[0], expected_file, requires_argument, &configuration);
   if (status == ERROR_SUCCESS) {
     status = verify_target_digest(configuration.target_executable, configuration.target_digest,
       &verified_target, &verified_executable);
+  }
+  if (status == ERROR_SUCCESS && requires_argument) {
+    status = verify_target_digest(configuration.target_argument, configuration.target_argument_digest,
+      &verified_argument, &verified_argument_path);
   }
   if (status == ERROR_SUCCESS) status = create_target_process(&configuration, verified_executable);
   if (verified_target != INVALID_HANDLE_VALUE) {
     CloseHandle(verified_target);
     verified_target = INVALID_HANDLE_VALUE;
   }
+  if (verified_argument != INVALID_HANDLE_VALUE) {
+    CloseHandle(verified_argument);
+    verified_argument = INVALID_HANDLE_VALUE;
+  }
   secure_free(verified_executable,
     verified_executable == NULL ? 0 : (wcslen(verified_executable) + 1) * sizeof(wchar_t));
   verified_executable = NULL;
+  secure_free(verified_argument_path,
+    verified_argument_path == NULL ? 0 : (wcslen(verified_argument_path) + 1) * sizeof(wchar_t));
+  verified_argument_path = NULL;
   if (status != ERROR_SUCCESS) {
     free_configuration(&configuration);
     report_status(SERVICE_STOPPED, status, 0);
@@ -464,9 +538,9 @@ static VOID WINAPI service_main(DWORD argc, LPWSTR *argv) {
 
 static int write_identity(void) {
 #if defined(_M_ARM64) || defined(__aarch64__)
-  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-service-bridge-identity.v1\",\"component\":\"deviludo-windows-scm-service-bridge\",\"version\":\"1.0.0\",\"contractVersion\":1,\"platform\":\"windows\",\"architecture\":\"arm64\"}\n";
+  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-service-bridge-identity.v1\",\"component\":\"deviludo-windows-scm-service-bridge\",\"version\":\"1.1.0\",\"contractVersion\":1,\"platform\":\"windows\",\"architecture\":\"arm64\"}\n";
 #elif defined(_M_X64) || defined(__x86_64__)
-  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-service-bridge-identity.v1\",\"component\":\"deviludo-windows-scm-service-bridge\",\"version\":\"1.0.0\",\"contractVersion\":1,\"platform\":\"windows\",\"architecture\":\"x86_64\"}\n";
+  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-service-bridge-identity.v1\",\"component\":\"deviludo-windows-scm-service-bridge\",\"version\":\"1.1.0\",\"contractVersion\":1,\"platform\":\"windows\",\"architecture\":\"x86_64\"}\n";
 #else
 #error Unsupported Windows SCM bridge architecture
 #endif

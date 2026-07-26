@@ -1,15 +1,19 @@
 # Windows SCM native components
 
 The Physical Runner and Steam Client Connector are Node single-executable
-applications, not native Windows services. Windows hosts therefore run them
-only through `deviludo-windows-scm-service-bridge.exe`.
+applications, not native Windows services. The Steam Depot Finalizer is a
+signed Node service artifact. Windows hosts run all three only through
+`deviludo-windows-scm-service-bridge.exe` 1.1 or newer.
 
 The bridge implements `StartServiceCtrlDispatcherW`, reports SCM state, accepts
-only the two built-in DeviLudo service names, reads a fixed registry contract,
+only the three built-in DeviLudo service names, reads a fixed registry contract,
 rehashes the exact target with Windows CNG SHA-256, launches it without a shell
 inside a kill-on-close Job Object, and destroys the child when SCM stops the
 service. It rejects inline credential-like environment names and accepts no
-runtime command arguments. `--identity` is the sole offline inspection mode.
+runtime command arguments for Runner services. The Finalizer has exactly one
+argument: the release-addressed service artifact whose path and SHA-256 digest
+are derived from the signed transaction environment. `--identity` is the sole
+offline inspection mode.
 
 Production builds run only on the approved Windows MSVC builder. The CMake
 configuration enables control-flow guard, CET compatibility, ASLR, DEP, stack
@@ -25,6 +29,8 @@ The privileged host actuator writes these fixed values below
 - `TargetDigest` (`REG_SZ`, 64 lowercase SHA-256 hex)
 - `DescriptorDigest` (`REG_SZ`, the signed transaction descriptor digest)
 - `Environment` (`REG_MULTI_SZ`, sorted, unique, secret-free entries)
+- `TargetArgument`, `TargetArgumentDigest`, `WorkingDirectory` (Finalizer only;
+  exact immutable service artifact, digest, and its parent release directory)
 
 No administrator-supplied script, executable name, service name or argument is
 accepted by the bridge.
@@ -37,6 +43,9 @@ shell. The actuator reads only
 little-endian v1 format contains the exact transaction, bridge, target,
 descriptor and sorted environment digests. It rehashes each PE while holding a
 non-delete/non-write shared handle, then calls SCM and Registry APIs directly.
+For the Finalizer it also rehashes the service artifact, applies a restricted
+service SID with an empty required-privilege set, and starts only the fixed
+`node.exe <signed-service-artifact>` command.
 
 Actuation is crash recoverable. Before mutation the actuator creates
 `pending-request.v1.bin`; the last successful request remains

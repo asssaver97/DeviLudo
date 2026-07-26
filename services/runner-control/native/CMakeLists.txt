@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(deviludo_windows_native_services VERSION 1.0.0 LANGUAGES C)
+project(deviludo_windows_native_services VERSION 1.1.0 LANGUAGES C)
 
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "The DeviLudo Windows native service components must be built by the approved MSVC Windows builder")

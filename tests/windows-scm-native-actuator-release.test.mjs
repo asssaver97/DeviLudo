@@ -79,6 +79,36 @@ test("Windows SCM actuator request is canonical, bounded and round-trips empty e
   }), /actuation request is invalid/);
 });
 
+test("Windows SCM actuator request admits only the fixed Finalizer Node service contract", () => {
+  const transaction = windowsFinalizerTransaction();
+  const request = createWindowsScmActuationRequest(transaction);
+  const encoded = encodeWindowsScmActuationRequest(request);
+  assert.deepEqual(decodeWindowsScmActuationRequest(encoded), request);
+  assert.equal(request.services.length, 1);
+  assert.equal(request.services[0].component, "steam-depot-finalizer");
+  assert.equal(request.services[0].targetPath, "C:\\Program Files\\DeviLudo\\runtime\\node.exe");
+  assert.equal(request.services[0].environment.DEVILUDO_STEAM_DEPOT_FINALIZER_BINARY_DIGEST, "8".repeat(64));
+
+  const oldBridge = { ...transaction, windowsBridge: { ...transaction.windowsBridge, bridgeVersion: "1.0.0" } };
+  oldBridge.transactionDigest = sha256Canonical(Object.fromEntries(
+    Object.entries(oldBridge).filter(([key]) => key !== "transactionDigest"),
+  ));
+  assert.throws(() => createWindowsScmActuationRequest(oldBridge), /actuation request is invalid/);
+
+  const descriptor = JSON.parse(transaction.definition.rendered);
+  descriptor.arguments = ["C:\\Program Files\\DeviLudo\\other\\unbound.mjs"];
+  const rendered = canonicalJson(descriptor);
+  const unboundCore = {
+    ...transaction,
+    definition: { ...transaction.definition, rendered, renderedDigest: digest(rendered) },
+  };
+  delete unboundCore.transactionDigest;
+  assert.throws(() => createWindowsScmActuationRequest({
+    ...unboundCore,
+    transactionDigest: sha256Canonical(unboundCore),
+  }), /actuation request is invalid/);
+});
+
 test("Windows SCM request compiler is transaction-bound and create-only", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-windows-scm-request-"));
   try {
@@ -230,6 +260,8 @@ test("Windows SCM actuator source is a fixed ProgramData Win32 authority with no
     "GetSecurityInfo", "GetEffectiveRightsFromAclW", "BCryptOpenAlgorithmProvider", "OpenSCManagerW", "CreateServiceW", "ChangeServiceConfigW",
     "ChangeServiceConfig2W", "RegSetValueExW", "StartServiceW", "QueryServiceStatusEx",
     "actuation-request.v1.bin", "pending-request.v1.bin", "active-request.v1.bin", "verify_service_parameters",
+    "DeviLudoSteamDepotFinalizer", "TargetArgumentDigest", "SERVICE_CONFIG_SERVICE_SID_INFO",
+    "SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO",
     "--apply", "--restore", "--probe", "--identity",
   ]) assert.match(source, new RegExp(required.replaceAll("(", "\\(")));
   assert.doesNotMatch(source, /\bsystem\s*\(|ShellExecute|cmd\.exe|powershell|sc\.exe|reg\.exe/i);
@@ -291,6 +323,70 @@ function windowsTransaction() {
     }],
   };
   return Object.freeze({ ...core, transactionDigest: sha256Canonical(core) });
+}
+
+function windowsFinalizerTransaction() {
+  const bridgePath = "C:\\Program Files\\DeviLudo\\deviludo-windows-scm-service-bridge.exe";
+  const actuatorPath = "C:\\Program Files\\DeviLudo\\deviludo-windows-scm-native-actuator.exe";
+  const targetPath = "C:\\Program Files\\DeviLudo\\runtime\\node.exe";
+  const workingDirectory = "C:\\Program Files\\DeviLudo\\releases\\release-1";
+  const artifactPath = `${workingDirectory}\\deviludo-steam-depot-finalizer-service.mjs`;
+  const bridgeDigest = "1".repeat(64);
+  const targetDigest = "2".repeat(64);
+  const environment = {
+    DEVILUDO_STEAM_DEPOT_FINALIZER_BINARY_DIGEST: "8".repeat(64),
+    DEVILUDO_STEAM_DEPOT_FINALIZER_SERVICE_ARTIFACT_FILE: artifactPath,
+    NODE_ENV: "production",
+  };
+  const descriptor = {
+    schemaVersion: "deviludo.windows-scm-service-definition.v1",
+    serviceId: "DeviLudoSteamDepotFinalizer",
+    account: "NT SERVICE\\DeviLudoSteamDepotFinalizer",
+    serviceSidType: "RESTRICTED",
+    interactive: false,
+    bridgeExecutable: bridgePath,
+    bridgeDigest,
+    targetExecutable: targetPath,
+    targetExecutableDigest: targetDigest,
+    arguments: [artifactPath],
+    workingDirectory,
+    environment,
+    requiredPrivileges: [],
+    failureActions: [{ action: "RESTART", delayMs: 5_000 }],
+  };
+  const rendered = canonicalJson(descriptor);
+  const definition = {
+    serviceId: "DeviLudoSteamDepotFinalizer",
+    account: "NT SERVICE\\DeviLudoSteamDepotFinalizer",
+    manager: "WINDOWS_SCM",
+    format: "WINDOWS_SCM_DESCRIPTOR",
+    destination: "SCM:DeviLudoSteamDepotFinalizer",
+    executable: bridgePath,
+    executableDigest: bridgeDigest,
+    targetExecutable: targetPath,
+    targetExecutableDigest: targetDigest,
+    rendered,
+    renderedDigest: digest(rendered),
+  };
+  const core = {
+    schemaVersion: "deviludo.steam-depot-finalizer-host-transaction.v1",
+    status: "READY",
+    platform: "windows",
+    manager: "WINDOWS_SCM",
+    managerTool: actuatorPath,
+    windowsBridge: {
+      verified: true, component: "deviludo-windows-scm-service-bridge", path: bridgePath,
+      bridgeVersion: "1.1.0", contractVersion: 1, binaryDigest: bridgeDigest,
+      manifestDigest: "3".repeat(64), trustPolicyDigest: "4".repeat(64),
+    },
+    windowsActuator: {
+      verified: true, component: "deviludo-windows-scm-native-actuator", path: actuatorPath,
+      actuatorVersion: "1.1.0", requestContractVersion: 1, binaryDigest: "5".repeat(64),
+      manifestDigest: "6".repeat(64), trustPolicyDigest: "7".repeat(64),
+    },
+    definition,
+  };
+  return { ...core, transactionDigest: sha256Canonical(core) };
 }
 
 function digest(value) {

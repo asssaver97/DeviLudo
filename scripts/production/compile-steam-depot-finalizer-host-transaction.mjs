@@ -139,7 +139,7 @@ export async function verifyWindowsHostHelpers(options, planValue, now = new Dat
       path: options.windowsActuatorPath,
       architecture: actuatorClaims.architecture,
       actuatorVersion: actuatorClaims.actuatorVersion,
-      contractVersion: actuatorClaims.requestContractVersion,
+      requestContractVersion: actuatorClaims.requestContractVersion,
       binaryDigest: actuatorClaims.binaryDigest,
       sourceDigest: actuatorClaims.sourceDigest,
       supplyChainEvidenceDigest: actuatorClaims.supplyChainEvidenceDigest,
@@ -392,16 +392,17 @@ function rollbackActions(plan, definition, managerTool) {
 function windowsAuthorization(value, plan, kind) {
   if (value === null) return null;
   const versionName = kind === "bridge" ? "bridgeVersion" : "actuatorVersion";
+  const contractName = kind === "bridge" ? "contractVersion" : "requestContractVersion";
   const component = kind === "bridge" ? "deviludo-windows-scm-service-bridge" : "deviludo-windows-scm-native-actuator";
   if (plan.platform !== "windows" || !plainRecord(value) || !exactKeys(value, [
-    "architecture", "binaryDigest", "component", "contractVersion", "manifestDigest", "path", "sourceDigest",
+    "architecture", "binaryDigest", "component", contractName, "manifestDigest", "path", "sourceDigest",
     "supplyChainEvidenceDigest", "trustPolicyDigest", "verified", versionName,
   ])
     || value.verified !== true || value.architecture !== plan.architecture || !absolute(value.path)
-    || value.component !== component || !fixedVersion(value[versionName]) || !SHA256.test(value.binaryDigest)
+    || value.component !== component || !fixedVersionAtLeast(value[versionName], 1, 1, 0) || !SHA256.test(value.binaryDigest)
     || !SHA256.test(value.sourceDigest) || !SHA256.test(value.supplyChainEvidenceDigest)
     || !SHA256.test(value.manifestDigest) || !SHA256.test(value.trustPolicyDigest)
-    || value.contractVersion !== 1) invalid();
+    || value[contractName] !== 1) invalid();
   return Object.freeze({ ...value, kind });
 }
 function artifact(plan, component) { const value = plan.artifacts.find((entry) => entry.component === component); if (!value) invalid(); return value; }
@@ -438,6 +439,12 @@ function xml(value) { return String(value).replaceAll("&", "&amp;").replaceAll("
 function withoutDigest(value) { return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "transactionDigest")); }
 function absolute(value) { return typeof value === "string" && isAbsolute(value) && resolve(value) === value && value.length <= 4_096; }
 function fixedVersion(value) { return typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value) && !/(latest|stable|default)/i.test(value); }
+function fixedVersionAtLeast(value, major, minor, patch) {
+  if (!fixedVersion(value)) return false;
+  const observed = value.split("-", 1)[0].split(".").map(Number);
+  return observed[0] > major || observed[0] === major
+    && (observed[1] > minor || observed[1] === minor && observed[2] >= patch);
+}
 function requiredAbsolute(value) { if (!absolute(value)) invalid(); return value; }
 function exactKeys(value, expected) { return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort()); }
 function plainRecord(value) { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }

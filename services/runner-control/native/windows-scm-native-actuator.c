@@ -37,10 +37,14 @@ static const wchar_t *ACTUATOR_MUTEX = L"Global\\DeviLudoWindowsScmNativeActuato
 static const wchar_t *BRIDGE_FILE = L"deviludo-windows-scm-service-bridge.exe";
 static const wchar_t *PHYSICAL_FILE = L"deviludo-physical-runner.exe";
 static const wchar_t *CONNECTOR_FILE = L"deviludo-steam-client-connector.exe";
+static const wchar_t *FINALIZER_RUNTIME_FILE = L"node.exe";
+static const wchar_t *FINALIZER_ARTIFACT_FILE = L"deviludo-steam-depot-finalizer-service.mjs";
 static const wchar_t *PHYSICAL_SERVICE = L"DeviLudoPhysicalRunner";
 static const wchar_t *CONNECTOR_SERVICE = L"DeviLudoSteamConnector";
+static const wchar_t *FINALIZER_SERVICE = L"DeviLudoSteamDepotFinalizer";
 static const wchar_t *PHYSICAL_ACCOUNT = L"NT SERVICE\\DeviLudoPhysicalRunner";
 static const wchar_t *CONNECTOR_ACCOUNT = L"NT SERVICE\\DeviLudoSteamConnector";
+static const wchar_t *FINALIZER_ACCOUNT = L"NT SERVICE\\DeviLudoSteamDepotFinalizer";
 
 typedef struct request_cursor {
   const unsigned char *data;
@@ -54,6 +58,9 @@ typedef struct service_request {
   const wchar_t *account;
   const wchar_t *expected_file;
   wchar_t *target_path;
+  wchar_t *target_argument;
+  wchar_t *target_argument_digest;
+  wchar_t *working_directory;
   unsigned char target_digest[DIGEST_BYTES];
   unsigned char descriptor_digest[DIGEST_BYTES];
   wchar_t *environment;
@@ -286,6 +293,12 @@ static void free_service_request(service_request *service) {
   if (service->verified_target != NULL && service->verified_target != INVALID_HANDLE_VALUE) CloseHandle(service->verified_target);
   secure_free(service->target_path,
     service->target_path == NULL ? 0 : (wcslen(service->target_path) + 1) * sizeof(wchar_t));
+  secure_free(service->target_argument,
+    service->target_argument == NULL ? 0 : (wcslen(service->target_argument) + 1) * sizeof(wchar_t));
+  secure_free(service->target_argument_digest,
+    service->target_argument_digest == NULL ? 0 : (wcslen(service->target_argument_digest) + 1) * sizeof(wchar_t));
+  secure_free(service->working_directory,
+    service->working_directory == NULL ? 0 : (wcslen(service->working_directory) + 1) * sizeof(wchar_t));
   secure_free(service->environment, service->environment_bytes);
   SecureZeroMemory(service, sizeof(*service));
 }
@@ -316,7 +329,31 @@ static int initialize_component(service_request *service, unsigned char componen
     service->expected_file = CONNECTOR_FILE;
     return 1;
   }
+  if (component == 3) {
+    service->service_name = FINALIZER_SERVICE;
+    service->account = FINALIZER_ACCOUNT;
+    service->expected_file = FINALIZER_RUNTIME_FILE;
+    return 1;
+  }
   return 0;
+}
+
+static wchar_t *duplicate_wide(const wchar_t *value, size_t chars) {
+  wchar_t *copy;
+  if (value == NULL || chars > MAX_PATH_CHARS) return NULL;
+  copy = (wchar_t *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (chars + 1) * sizeof(wchar_t));
+  if (copy != NULL) wmemcpy(copy, value, chars);
+  return copy;
+}
+
+static int lowercase_hex_wide(const wchar_t *value) {
+  size_t index;
+  if (value == NULL || wcslen(value) != DIGEST_HEX_CHARS) return 0;
+  for (index = 0; index < DIGEST_HEX_CHARS; index++) {
+    if (!((value[index] >= L'0' && value[index] <= L'9')
+      || (value[index] >= L'a' && value[index] <= L'f'))) return 0;
+  }
+  return 1;
 }
 
 static int parse_service(request_cursor *cursor, service_request *service) {
@@ -356,11 +393,40 @@ static int parse_service(request_cursor *cursor, service_request *service) {
     }
     service->environment = environment;
     service->environment_bytes = (DWORD) (environment_capacity * sizeof(wchar_t));
+    if (service->component == 3
+      && strcmp(name, "DEVILUDO_STEAM_DEPOT_FINALIZER_SERVICE_ARTIFACT_FILE") == 0) {
+      if (service->target_argument != NULL || value_length < 4
+        || (service->target_argument = duplicate_wide(value, value_length)) == NULL) {
+        secure_free(value, ((size_t) value_length + 1) * sizeof(wchar_t));
+        return 0;
+      }
+    }
+    if (service->component == 3
+      && strcmp(name, "DEVILUDO_STEAM_DEPOT_FINALIZER_BINARY_DIGEST") == 0) {
+      if (service->target_argument_digest != NULL || value_length != DIGEST_HEX_CHARS
+        || !lowercase_hex_wide(value)
+        || (service->target_argument_digest = duplicate_wide(value, value_length)) == NULL) {
+        secure_free(value, ((size_t) value_length + 1) * sizeof(wchar_t));
+        return 0;
+      }
+    }
     strcpy_s(previous_name, sizeof(previous_name), name);
     secure_free(value, ((size_t) value_length + 1) * sizeof(wchar_t));
   }
   service->environment = environment;
   service->environment_bytes = (DWORD) ((environment_chars + 1) * sizeof(wchar_t));
+  if (service->component == 3) {
+    wchar_t *separator;
+    size_t argument_chars;
+    if (service->target_argument == NULL || service->target_argument_digest == NULL
+      || !canonical_path(service->target_argument, FINALIZER_ARTIFACT_FILE)) return 0;
+    argument_chars = wcslen(service->target_argument);
+    service->working_directory = duplicate_wide(service->target_argument, argument_chars);
+    if (service->working_directory == NULL) return 0;
+    separator = wcsrchr(service->working_directory, L'\\');
+    if (separator == NULL || separator <= service->working_directory + 2) return 0;
+    *separator = L'\0';
+  }
   return 1;
 }
 
@@ -394,7 +460,8 @@ static int parse_request(unsigned char *bytes, DWORD byte_count, actuation_reque
     if (!parse_service(&cursor, &request->services[index])) return 0;
   }
   if (cursor.offset != cursor.length) return 0;
-  if ((request->service_count == 1 && request->services[0].component != 1)
+  if ((request->service_count == 1
+      && request->services[0].component != 1 && request->services[0].component != 3)
     || (request->service_count == 2
       && (request->services[0].component != 2 || request->services[1].component != 1))) return 0;
   return 1;
@@ -560,6 +627,15 @@ static DWORD write_service_parameters(const service_request *definition) {
     (const BYTE *) descriptor_digest, sizeof(descriptor_digest));
   if (result == ERROR_SUCCESS) result = RegSetValueExW(key, L"Environment", 0, REG_MULTI_SZ,
     (const BYTE *) definition->environment, definition->environment_bytes);
+  if (result == ERROR_SUCCESS && definition->component == 3) result = RegSetValueExW(key, L"TargetArgument", 0, REG_SZ,
+    (const BYTE *) definition->target_argument,
+    (DWORD) ((wcslen(definition->target_argument) + 1) * sizeof(wchar_t)));
+  if (result == ERROR_SUCCESS && definition->component == 3) result = RegSetValueExW(key, L"TargetArgumentDigest", 0, REG_SZ,
+    (const BYTE *) definition->target_argument_digest,
+    (DWORD) ((wcslen(definition->target_argument_digest) + 1) * sizeof(wchar_t)));
+  if (result == ERROR_SUCCESS && definition->component == 3) result = RegSetValueExW(key, L"WorkingDirectory", 0, REG_SZ,
+    (const BYTE *) definition->working_directory,
+    (DWORD) ((wcslen(definition->working_directory) + 1) * sizeof(wchar_t)));
   RegCloseKey(key);
   return (DWORD) result;
 }
@@ -608,6 +684,13 @@ static DWORD verify_service_parameters(const service_request *definition) {
     descriptor_digest, sizeof(descriptor_digest));
   if (result == ERROR_SUCCESS) result = registry_value_equals(key, L"Environment", RRF_RT_REG_MULTI_SZ,
     definition->environment, definition->environment_bytes);
+  if (result == ERROR_SUCCESS && definition->component == 3) result = registry_value_equals(key, L"TargetArgument", RRF_RT_REG_SZ,
+    definition->target_argument, (DWORD) ((wcslen(definition->target_argument) + 1) * sizeof(wchar_t)));
+  if (result == ERROR_SUCCESS && definition->component == 3) result = registry_value_equals(key, L"TargetArgumentDigest", RRF_RT_REG_SZ,
+    definition->target_argument_digest,
+    (DWORD) ((wcslen(definition->target_argument_digest) + 1) * sizeof(wchar_t)));
+  if (result == ERROR_SUCCESS && definition->component == 3) result = registry_value_equals(key, L"WorkingDirectory", RRF_RT_REG_SZ,
+    definition->working_directory, (DWORD) ((wcslen(definition->working_directory) + 1) * sizeof(wchar_t)));
   RegCloseKey(key);
   return result;
 }
@@ -617,6 +700,9 @@ static DWORD configure_service(SC_HANDLE manager, const actuation_request *reque
   wchar_t *quoted_bridge;
   size_t quoted_chars = wcslen(request->bridge_path) + 3;
   SERVICE_FAILURE_ACTIONSW failures;
+  SERVICE_SID_INFO sid_information;
+  SERVICE_REQUIRED_PRIVILEGES_INFOW privileges;
+  wchar_t empty_privileges[2] = { L'\0', L'\0' };
   SC_ACTION action;
   DWORD result;
   quoted_bridge = (wchar_t *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, quoted_chars * sizeof(wchar_t));
@@ -650,6 +736,12 @@ static DWORD configure_service(SC_HANDLE manager, const actuation_request *reque
   failures.cActions = 1;
   failures.lpsaActions = &action;
   if (result == ERROR_SUCCESS && !ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS, &failures)) result = GetLastError();
+  sid_information.dwServiceSidType = SERVICE_SID_TYPE_RESTRICTED;
+  if (result == ERROR_SUCCESS && definition->component == 3
+    && !ChangeServiceConfig2W(service, SERVICE_CONFIG_SERVICE_SID_INFO, &sid_information)) result = GetLastError();
+  privileges.pmszRequiredPrivileges = empty_privileges;
+  if (result == ERROR_SUCCESS && definition->component == 3
+    && !ChangeServiceConfig2W(service, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, &privileges)) result = GetLastError();
   if (result == ERROR_SUCCESS) result = write_service_parameters(definition);
   CloseServiceHandle(service);
   secure_free(quoted_bridge, quoted_chars * sizeof(wchar_t));
@@ -681,7 +773,9 @@ static DWORD apply_services(const actuation_request *request) {
   for (index = 0; index < request->service_count && result == ERROR_SUCCESS; index++) {
     result = configure_service(manager, request, &request->services[index]);
   }
-  if (result == ERROR_SUCCESS && request->service_count == 1) result = remove_service(manager, CONNECTOR_SERVICE);
+  if (result == ERROR_SUCCESS && request->service_count == 1 && request->services[0].component == 1) {
+    result = remove_service(manager, CONNECTOR_SERVICE);
+  }
   for (index = 0; index < request->service_count && result == ERROR_SUCCESS; index++) {
     SC_HANDLE service = OpenServiceW(manager, request->services[index].service_name, SERVICE_START | SERVICE_QUERY_STATUS);
     if (service == NULL) { result = GetLastError(); break; }
@@ -743,11 +837,17 @@ static DWORD restore_active(const wchar_t *active_path, const wchar_t *pending_p
   SC_HANDLE manager;
   DWORD result = load_request(active_path, &previous, 1);
   if (result == ERROR_FILE_NOT_FOUND) {
+    actuation_request pending;
+    unsigned char index;
+    result = load_request(pending_path, &pending, 0);
+    if (result != ERROR_SUCCESS) return result;
     manager = OpenSCManagerW(NULL, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CONNECT);
-    if (manager == NULL) return GetLastError();
-    result = remove_service(manager, PHYSICAL_SERVICE);
-    if (result == ERROR_SUCCESS) result = remove_service(manager, CONNECTOR_SERVICE);
+    if (manager == NULL) { result = GetLastError(); free_actuation_request(&pending); return result; }
+    for (index = 0; index < pending.service_count && result == ERROR_SUCCESS; index++) {
+      result = remove_service(manager, pending.services[index].service_name);
+    }
     CloseServiceHandle(manager);
+    free_actuation_request(&pending);
   } else if (result == ERROR_SUCCESS) {
     result = apply_services(&previous);
     free_actuation_request(&previous);
@@ -840,9 +940,9 @@ static DWORD actuator_paths(
 
 static int write_identity(void) {
 #if defined(_M_ARM64) || defined(__aarch64__)
-  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.0.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"arm64\"}\n";
+  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.1.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"arm64\"}\n";
 #elif defined(_M_X64) || defined(__x86_64__)
-  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.0.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"x86_64\"}\n";
+  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.1.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"x86_64\"}\n";
 #else
 #error Unsupported Windows SCM actuator architecture
 #endif

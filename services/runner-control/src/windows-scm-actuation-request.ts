@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { win32 } from "node:path";
 import { sha256Canonical } from "./canonical";
 
 const MAGIC = Buffer.from("DEVILUDO_SCM_V1\0", "ascii");
@@ -9,25 +10,35 @@ const MAX_ENVIRONMENT_ENTRIES = 128;
 const MAX_ENVIRONMENT_VALUE_CHARS = 8_192;
 const INLINE_CREDENTIAL_NAME = /(?:API_KEY|PASSWORD|TOKEN|SECRET|SESSION|PRIVATE_KEY)$/;
 const SAFE_CREDENTIAL_REFERENCE = /(?:_FILE|_KEY_ID|_PUBLIC_KEY|_DIGEST)$/;
-const COMPONENT_IDS = Object.freeze({ "physical-runner": 1, "steam-client-connector": 2 });
-const COMPONENT_NAMES = Object.freeze({ 1: "physical-runner", 2: "steam-client-connector" });
+const COMPONENT_IDS = Object.freeze({ "physical-runner": 1, "steam-client-connector": 2, "steam-depot-finalizer": 3 });
+const COMPONENT_NAMES = Object.freeze({ 1: "physical-runner", 2: "steam-client-connector", 3: "steam-depot-finalizer" });
 const SERVICE_NAMES = Object.freeze({
   "physical-runner": "DeviLudoPhysicalRunner",
   "steam-client-connector": "DeviLudoSteamConnector",
+  "steam-depot-finalizer": "DeviLudoSteamDepotFinalizer",
 });
 const SERVICE_ACCOUNTS = Object.freeze({
   "physical-runner": "NT SERVICE\\DeviLudoPhysicalRunner",
   "steam-client-connector": "NT SERVICE\\DeviLudoSteamConnector",
+  "steam-depot-finalizer": "NT SERVICE\\DeviLudoSteamDepotFinalizer",
 });
 const TARGET_FILES = Object.freeze({
   "physical-runner": "deviludo-physical-runner.exe",
   "steam-client-connector": "deviludo-steam-client-connector.exe",
+  "steam-depot-finalizer": "node.exe",
 });
 const DESCRIPTOR_KEYS = Object.freeze([
   "account", "arguments", "binaryPathDigest", "binaryPathName", "bridgeContractVersion", "bridgeManifestDigest",
   "bridgeTrustPolicyDigest", "environment", "failureActions", "requiresServiceBridgeContractVersion", "schemaVersion",
   "serviceName", "startType", "targetDigest", "targetExecutable",
 ]);
+const FINALIZER_DESCRIPTOR_KEYS = Object.freeze([
+  "account", "arguments", "bridgeDigest", "bridgeExecutable", "environment", "failureActions", "interactive",
+  "requiredPrivileges", "schemaVersion", "serviceId", "serviceSidType", "targetExecutable",
+  "targetExecutableDigest", "workingDirectory",
+]);
+
+type WindowsScmComponent = keyof typeof COMPONENT_IDS;
 
 export interface WindowsScmActuationRequest {
   readonly schemaVersion: "deviludo.windows-scm-actuation-request.v1";
@@ -35,7 +46,7 @@ export interface WindowsScmActuationRequest {
   readonly bridgePath: string;
   readonly bridgeDigest: string;
   readonly services: readonly Readonly<{
-    component: "physical-runner" | "steam-client-connector";
+    component: WindowsScmComponent;
     targetPath: string;
     targetDigest: string;
     descriptorDigest: string;
@@ -65,6 +76,9 @@ export function encodeWindowsScmActuationRequest(value: unknown): Buffer {
 export function createWindowsScmActuationRequest(transactionValue: unknown): WindowsScmActuationRequest {
   const transaction = record(transactionValue);
   const core = { ...transaction }; delete core.transactionDigest;
+  if (transaction.schemaVersion === "deviludo.steam-depot-finalizer-host-transaction.v1") {
+    return createFinalizerRequest(transaction, core);
+  }
   if (transaction.schemaVersion !== "deviludo.runner-native-service-transaction.v1" || transaction.status !== "READY"
     || transaction.platform !== "windows" || typeof transaction.transactionDigest !== "string"
     || transaction.transactionDigest !== sha256Canonical(core) || !Array.isArray(transaction.definitions)
@@ -129,6 +143,73 @@ export function createWindowsScmActuationRequest(transactionValue: unknown): Win
       descriptorDigest: service.descriptorDigest,
       environment: service.environment,
     })),
+  }) as WindowsScmActuationRequest;
+}
+
+function createFinalizerRequest(
+  transaction: Record<string, unknown>,
+  core: Record<string, unknown>,
+): WindowsScmActuationRequest {
+  if (transaction.status !== "READY" || transaction.platform !== "windows"
+    || typeof transaction.transactionDigest !== "string" || transaction.transactionDigest !== sha256Canonical(core)) invalid();
+  const actuator = record(transaction.windowsActuator);
+  const bridge = record(transaction.windowsBridge);
+  if (actuator.verified !== true || actuator.component !== "deviludo-windows-scm-native-actuator"
+    || actuator.requestContractVersion !== 1 || !atLeastVersion(actuator.actuatorVersion, 1, 1, 0)
+    || !SHA256.test(string(actuator.binaryDigest)) || !SHA256.test(string(actuator.manifestDigest))
+    || !SHA256.test(string(actuator.trustPolicyDigest))
+    || !canonicalWindowsPath(string(actuator.path), "deviludo-windows-scm-native-actuator.exe")
+    || transaction.managerTool !== actuator.path || transaction.manager !== "WINDOWS_SCM"
+    || bridge.verified !== true || bridge.component !== "deviludo-windows-scm-service-bridge"
+    || bridge.contractVersion !== 1 || !atLeastVersion(bridge.bridgeVersion, 1, 1, 0)
+    || !SHA256.test(string(bridge.binaryDigest)) || !SHA256.test(string(bridge.manifestDigest))
+    || !SHA256.test(string(bridge.trustPolicyDigest))
+    || !canonicalWindowsPath(string(bridge.path), "deviludo-windows-scm-service-bridge.exe")) invalid();
+  const definition = record(transaction.definition);
+  if (typeof definition.rendered !== "string" || !SHA256.test(string(definition.renderedDigest))
+    || createHash("sha256").update(definition.rendered).digest("hex") !== definition.renderedDigest) invalid();
+  let descriptor: Record<string, unknown>;
+  try { descriptor = record(JSON.parse(definition.rendered)); } catch { invalid(); }
+  exactKeys(descriptor, FINALIZER_DESCRIPTOR_KEYS);
+  const targetPath = string(descriptor.targetExecutable);
+  const bridgePath = string(descriptor.bridgeExecutable);
+  const argumentsValue = descriptor.arguments;
+  const workingDirectory = string(descriptor.workingDirectory);
+  if (descriptor.schemaVersion !== "deviludo.windows-scm-service-definition.v1"
+    || descriptor.serviceId !== SERVICE_NAMES["steam-depot-finalizer"]
+    || definition.serviceId !== SERVICE_NAMES["steam-depot-finalizer"]
+    || descriptor.account !== SERVICE_ACCOUNTS["steam-depot-finalizer"]
+    || definition.account !== SERVICE_ACCOUNTS["steam-depot-finalizer"]
+    || descriptor.serviceSidType !== "RESTRICTED" || descriptor.interactive !== false
+    || definition.manager !== "WINDOWS_SCM" || definition.format !== "WINDOWS_SCM_DESCRIPTOR"
+    || definition.destination !== `SCM:${SERVICE_NAMES["steam-depot-finalizer"]}`
+    || !canonicalWindowsPath(bridgePath, "deviludo-windows-scm-service-bridge.exe")
+    || bridgePath !== bridge.path || descriptor.bridgeDigest !== bridge.binaryDigest
+    || !canonicalWindowsPath(targetPath, TARGET_FILES["steam-depot-finalizer"])
+    || !SHA256.test(string(descriptor.targetExecutableDigest))
+    || descriptor.targetExecutableDigest !== definition.targetExecutableDigest
+    || definition.executable !== bridgePath || definition.executableDigest !== bridge.binaryDigest
+    || definition.targetExecutable !== targetPath || !Array.isArray(argumentsValue) || argumentsValue.length !== 1
+    || !canonicalWindowsPath(string(argumentsValue[0]), "deviludo-steam-depot-finalizer-service.mjs")
+    || win32.dirname(string(argumentsValue[0])).toLowerCase() !== workingDirectory.toLowerCase()
+    || !canonicalWindowsDirectory(workingDirectory)
+    || !Array.isArray(descriptor.requiredPrivileges) || descriptor.requiredPrivileges.length !== 0
+    || !Array.isArray(descriptor.failureActions) || descriptor.failureActions.length !== 1
+    || JSON.stringify(descriptor.failureActions[0]) !== JSON.stringify({ action: "RESTART", delayMs: 5_000 })) invalid();
+  const environment = normalizeEnvironment(descriptor.environment);
+  if (environment.DEVILUDO_STEAM_DEPOT_FINALIZER_SERVICE_ARTIFACT_FILE !== argumentsValue[0]) invalid();
+  return deepFreeze({
+    schemaVersion: "deviludo.windows-scm-actuation-request.v1",
+    transactionDigest: transaction.transactionDigest,
+    bridgePath,
+    bridgeDigest: bridge.binaryDigest,
+    services: [{
+      component: "steam-depot-finalizer",
+      targetPath,
+      targetDigest: descriptor.targetExecutableDigest,
+      descriptorDigest: definition.renderedDigest,
+      environment,
+    }],
   }) as WindowsScmActuationRequest;
 }
 
@@ -205,7 +286,8 @@ function normalizeRequest(value: unknown): WindowsScmActuationRequest {
     return Object.freeze({ component, targetPath: service.targetPath as string, targetDigest: service.targetDigest as string,
       descriptorDigest: service.descriptorDigest as string, environment: normalizeEnvironment(service.environment) });
   });
-  const expected = services.length === 2 ? ["steam-client-connector", "physical-runner"] : ["physical-runner"];
+  const expected = services.length === 2 ? ["steam-client-connector", "physical-runner"]
+    : services[0]?.component === "steam-depot-finalizer" ? ["steam-depot-finalizer"] : ["physical-runner"];
   if (JSON.stringify(services.map(({ component }) => component)) !== JSON.stringify(expected)) invalid();
   return deepFreeze({ ...request, services }) as unknown as WindowsScmActuationRequest;
 }
@@ -230,6 +312,18 @@ function canonicalWindowsPath(value: string, expectedFile: string): boolean {
   return value.length >= 4 && value.length <= MAX_PATH_CHARS && /^[A-Za-z]:\\[^:*?"<>|/]+$/.test(value)
     && !/(?:^|\\)\.\.?(?:\\|$)/.test(value)
     && value.slice(value.lastIndexOf("\\") + 1).toLowerCase() === expectedFile.toLowerCase();
+}
+function canonicalWindowsDirectory(value: string): boolean {
+  return value.length >= 3 && value.length <= MAX_PATH_CHARS && /^[A-Za-z]:\\[^:*?"<>|/]*$/.test(value)
+    && !/(?:^|\\)\.\.?(?:\\|$)/.test(value) && !value.endsWith("\\");
+}
+function atLeastVersion(value: unknown, major: number, minor: number, patch: number): boolean {
+  if (typeof value !== "string") return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/.exec(value);
+  if (!match || /(latest|stable|default)/i.test(value)) return false;
+  const observed = match.slice(1, 4).map(Number);
+  return observed[0] > major || observed[0] === major && (observed[1] > minor
+    || observed[1] === minor && observed[2] >= patch);
 }
 function utf16(value: string): Buffer { const bytes = Buffer.from(value, "utf16le"); if (bytes.length !== value.length * 2) invalid(); return bytes; }
 function digestBytes(value: string): Buffer { if (!SHA256.test(value)) invalid(); return Buffer.from(value, "hex"); }

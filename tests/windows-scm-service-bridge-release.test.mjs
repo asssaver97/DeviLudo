@@ -175,7 +175,8 @@ test("Windows SCM bridge source is a fixed fail-closed SCM host without shell ex
     "StartServiceCtrlDispatcherW", "RegisterServiceCtrlHandlerExW", "BCryptOpenAlgorithmProvider",
     "FILE_FLAG_OPEN_REPARSE_POINT", "GetFinalPathNameByHandleW", "CreateProcessW(verified_executable",
     "CREATE_SUSPENDED", "AssignProcessToJobObject", "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
-    "DeviLudoPhysicalRunner", "DeviLudoSteamConnector", "--identity",
+    "DeviLudoPhysicalRunner", "DeviLudoSteamConnector", "DeviLudoSteamDepotFinalizer",
+    "TargetArgumentDigest", "deviludo-steam-depot-finalizer-service.mjs", "--identity",
   ]) assert.match(source, new RegExp(required.replaceAll("(", "\\(")));
   assert.doesNotMatch(source, /\bsystem\s*\(|ShellExecute|cmd\.exe|powershell/i);
   assert.match(cmake, /NOT WIN32 OR NOT MSVC/);
