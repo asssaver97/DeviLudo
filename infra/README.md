@@ -231,6 +231,15 @@ documented in `services/artifact-preparer/.env.example`. Building a receipt does
 not authorize deployment; runtime resource locking and signed deployment
 authorization remain a separate required release stage.
 
+The first release-stage boundary is implemented by
+`npm run lock:artifact-preparer-runtime`. It requires an explicit kube context
+and exact 12-character configuration revision, reads only custom-column
+metadata and binds the UID/resourceVersion of four revision-suffixed immutable
+objects: registry Secret, runtime ConfigMap, environment Secret and file Secret.
+It never reads Secret contents or falls back to the current context. The lock is
+digestible and its live identities must be rechecked by the deployer; a lock by
+itself grants no mutation authority.
+
 ## Privileged Agent supply-chain release
 
 The Agent supply-chain Broker is never admitted to the shared control image. A

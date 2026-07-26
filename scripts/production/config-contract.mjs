@@ -170,6 +170,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/inspect-agent-microvm-credential-issuer-release-trust-policy.mjs",
     "scripts/production/inspect-control-release-trust-policy.mjs",
     "scripts/production/lock-control-runtime.mjs",
+    "scripts/production/lock-artifact-preparer-runtime.mjs",
     "scripts/production/lock-agent-supply-chain-runtime.mjs",
     "scripts/production/lock-agent-microvm-credential-issuer-runtime.mjs",
     "scripts/production/migrate-postgres.mjs",

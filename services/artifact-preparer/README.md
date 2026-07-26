@@ -77,3 +77,12 @@ backed by a bounded ephemeral volume and the container root filesystem should
 be read-only. The image receipt is a supply-chain artifact, not deployment
 authorization; a production scheduler must additionally bind it to live
 ConfigMap/Secret identities and an explicit release approval.
+
+Before release, pre-provision the revision-suffixed immutable registry Secret,
+runtime ConfigMap, environment Secret and file Secret in the explicit target
+cluster. `NODE_ENV=production npm run lock:artifact-preparer-runtime --
+--context <context> --configuration-revision <sha12>` reads Kubernetes metadata
+only and emits a lock containing each object's UID and resourceVersion. It never
+reads Secret data or uses the implicit current context. Deployment must re-run
+the same metadata probe before every mutation and reject replacement, mutation
+or revision drift.
