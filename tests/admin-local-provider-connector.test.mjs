@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GET, POST } from "../app/api/admin/[...segments]/route.ts";
-import { resetDemoStore } from "../lib/control-plane/demo-store.ts";
+import { getDemoStore, resetDemoStore } from "../lib/control-plane/demo-store.ts";
 import { PROVIDER_PROBE_CHECKS } from "../services/inference-gateway/src/provider-probe.ts";
 import { LocalProviderControl } from "../services/local-agent-runtime/src/provider-control.ts";
 import { LocalAgentRuntimeRequestVerifier } from "../services/local-agent-runtime/src/request-auth.ts";
@@ -54,6 +54,9 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
     }
     if (url.pathname === "/v1/provider-probes") {
       return jsonResponse(200, await providerControl.probe(command));
+    }
+    if (url.pathname === "/v1/provider-bindings/rebind") {
+      return jsonResponse(200, providerControl.rebind(command));
     }
     if (url.pathname === "/v1/provider-bindings/activate") {
       return jsonResponse(200, providerControl.activate(command));
@@ -114,9 +117,39 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
     assert.equal(activateResponse.status, 201);
     assert.equal((await activateResponse.json()).data.profile.state, "ACTIVE");
 
+    const store = getDemoStore();
+    const sourceInstallation = store.installations.find((item) => item.id === profile.installationId);
+    assert.ok(sourceInstallation);
+    const successorInstallationId = "claude-installation-provider-rebind-test";
+    store.installations.push({
+      ...sourceInstallation,
+      id: successorInstallationId,
+      workerPool: "development-provider-rebind-test",
+      imageDigest: `sha256:${"d".repeat(64)}`,
+      buildReceiptId: "build-provider-rebind-test",
+      buildReceiptDigest: `sha256:${"e".repeat(64)}`,
+      activatedAt: new Date().toISOString(),
+    });
+    const rebindPath = `agent-profiles/${profile.id}/rebind-installation`;
+    const rebindResponse = await POST(command(rebindPath, "PlatformAgentAdmin", {
+      installationId: successorInstallationId,
+    }, "rebind"), context(rebindPath));
+    assert.equal(rebindResponse.status, 201);
+    const successor = (await rebindResponse.json()).data.profile;
+    assert.equal(successor.state, "READY");
+    assert.equal(successor.providerRevisionId, profile.providerRevisionId);
+    assert.equal(store.profiles.find((item) => item.id === profile.id)?.state, "ACTIVE");
+
+    const successorActivation = await POST(command(
+      `agent-profiles/${successor.id}/activate`, "SecurityAdmin", {}, "activate-successor",
+    ), context(`agent-profiles/${successor.id}/activate`));
+    assert.equal(successorActivation.status, 201);
+    assert.equal((await successorActivation.json()).data.profile.state, "ACTIVE");
+    assert.equal(store.profiles.find((item) => item.id === profile.id)?.state, "ACTIVE");
+
     const revokeResponse = await POST(command(`credentials/${credential.id}/revoke`, "SecurityAdmin", {}, "revoke"), context(`credentials/${credential.id}/revoke`));
     assert.equal(revokeResponse.status, 201);
-    assert.equal((await revokeResponse.json()).data.degradedProfiles, 1);
+    assert.equal((await revokeResponse.json()).data.degradedProfiles, 2);
     const projection = await GET(new Request("http://127.0.0.1:3000/api/admin/agents", {
       headers: { "x-deviludo-role": "SecurityAdmin" },
     }), context("agents"));

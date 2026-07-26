@@ -4,6 +4,7 @@ import test from "node:test";
 import { PROVIDER_PROBE_CHECKS, type GatewayProviderProbeRequest } from "../../inference-gateway/src/provider-probe";
 import {
   LocalProviderControl,
+  LocalProviderBindingConflictError,
   LocalProviderControlConflictError,
   LocalProviderProbeError,
 } from "../src/provider-control";
@@ -87,6 +88,55 @@ test("local Provider control retains only sidecar secret bytes and binds a passe
   assert.equal(await control.verify(preflight), true);
   assert.equal(await control.verify({ ...preflight, model: "claude-sonnet-4-6-20250515" }), false);
   assert.equal(await control.verify({ ...preflight, credentialVersionId: "credential-claude-v8" }), false);
+
+  const targetProfileRevisionId = "profile-claude-r8";
+  const rebindCommand = Object.freeze({
+    providerRevisionId: provider.providerRevisionId,
+    sourceProfileRevisionId: preflight.profileRevisionId,
+    targetProfileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+    scope: "platform" as const,
+    scopeId: "global",
+  });
+  const targetPreflight = Object.freeze({
+    ...preflight,
+    profileRevisionId: targetProfileRevisionId,
+    installationId: "installation-claude-216",
+  });
+  const rebound = control.rebind(rebindCommand);
+  assert.equal(rebound.state, "READY");
+  assert.equal(rebound.sourceRemainsActive, true);
+  assert.deepEqual(control.rebind(rebindCommand), rebound);
+  assert.equal(await control.verify(preflight), true);
+  assert.equal(await control.verify(targetPreflight), false);
+  assert.equal(control.activate({
+    providerRevisionId: provider.providerRevisionId,
+    profileRevisionId: targetProfileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+  }).state, "ACTIVE");
+  assert.equal(await control.verify(preflight), true);
+  assert.equal(await control.verify(targetPreflight), true);
+  assert.equal(control.rebind(rebindCommand).state, "ACTIVE");
+
+  const alternateSourceProfileRevisionId = "profile-claude-alternate-r7";
+  await control.probe({
+    ...probeCommand,
+    binding: { ...probeCommand.binding, profileRevisionId: alternateSourceProfileRevisionId },
+  });
+  control.activate({
+    providerRevisionId: provider.providerRevisionId,
+    profileRevisionId: alternateSourceProfileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+  });
+  assert.throws(() => control.rebind({
+    ...rebindCommand,
+    sourceProfileRevisionId: alternateSourceProfileRevisionId,
+  }), LocalProviderBindingConflictError);
+  assert.throws(() => control.rebind({
+    ...rebindCommand,
+    sourceProfileRevisionId: "profile-claude-missing-r7",
+    targetProfileRevisionId: "profile-claude-r9",
+  }), LocalProviderProbeError);
 
   control.revokeCredential({ credentialVersionId: provider.credentialVersionId });
   assert.equal(await control.verify(preflight), false);

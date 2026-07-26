@@ -77,6 +77,28 @@ export async function activateLocalProviderBinding(value: Readonly<{
   }
 }
 
+export async function rebindLocalProviderBinding(value: Readonly<{
+  providerRevisionId: string;
+  sourceProfileRevisionId: string;
+  targetProfileRevisionId: string;
+  credentialVersionId: string;
+  scope: LocalProviderScope;
+  scopeId: string;
+}>): Promise<void> {
+  const data = await post("/v1/provider-bindings/rebind", value, "LOCAL_PROVIDER_REBIND_UNAVAILABLE");
+  const item = record(data);
+  if (item.providerRevisionId !== value.providerRevisionId
+    || item.sourceProfileRevisionId !== value.sourceProfileRevisionId
+    || item.targetProfileRevisionId !== value.targetProfileRevisionId
+    || (item.state !== "READY" && item.state !== "ACTIVE")
+    || item.sourceRemainsActive !== true
+    || !exactKeys(item, [
+      "providerRevisionId", "sourceProfileRevisionId", "sourceRemainsActive", "state", "targetProfileRevisionId",
+    ])) {
+    throw new HttpProblem(502, "LOCAL_PROVIDER_REBIND_INVALID", "本机 Provider 绑定迁移回执无效");
+  }
+}
+
 export async function disableLocalProviderBinding(value: Readonly<{
   providerRevisionId: string;
   profileRevisionId: string;
@@ -90,7 +112,7 @@ export async function disableLocalProviderBinding(value: Readonly<{
 }
 
 type LocalProviderControlPath = "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
-  | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
+  | "/v1/provider-bindings/rebind" | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
 
 async function post(path: LocalProviderControlPath, value: unknown, unavailableCode: string): Promise<unknown> {
   const body = JSON.stringify(value);

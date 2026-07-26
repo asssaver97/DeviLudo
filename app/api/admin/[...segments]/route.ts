@@ -15,6 +15,7 @@ import {
   localProviderControlRequired,
   probeLocalProvider,
   putLocalProviderCredential,
+  rebindLocalProviderBinding,
   revokeLocalProviderCredential,
 } from "@/lib/admin/local-provider-control";
 import {
@@ -875,7 +876,25 @@ export async function POST(request: Request, context: RouteContext) {
         `profile-installation-rebind\0${source.id}\0${source.installationId}\0${installationId}`,
       ));
       const successorId = `profile-installation-rebind-${digest.slice(7, 31)}-r${source.revision + 1}`;
-      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+      const operationId = `admin:${key}:${idempotency}`;
+      if (Object.prototype.hasOwnProperty.call(getDemoStore().idempotency, operationId)) {
+        return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
+      }
+      // Fixture catalog Profiles intentionally have no BYOK material. Real
+      // credentials must prepare an immutable sidecar binding before the
+      // successor is persisted, otherwise SecurityAdmin activation would
+      // create a READY Profile that can never execute.
+      if (credential && localProviderControlRequired()) {
+        await rebindLocalProviderBinding({
+          providerRevisionId: provider.id,
+          sourceProfileRevisionId: source.id,
+          targetProfileRevisionId: successorId,
+          credentialVersionId: credential.id,
+          scope: source.scope,
+          scopeId: source.scopeId,
+        });
+      }
+      return await mutate(lease, operationId, () => {
         const store = getDemoStore();
         const currentSource = store.profiles.find((item) => item.id === sourceProfileId);
         const currentProvider = currentSource

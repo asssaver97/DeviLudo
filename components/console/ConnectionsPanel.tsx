@@ -185,7 +185,7 @@ export function ConnectionsPanel() {
               ) : <p className="connection-empty">{githubStatus.state === "unavailable" ? "本地站点不会伪造连接；配置生产 GitHub Authorization Broker 后可验证。" : "连接后，代码修改只会进入工作分支和 Draft PR。"}</p>}
               <div className="connection-actions">
                 <button className="button button-secondary" disabled={githubBusy} onClick={connectGithub} type="button">{githubBusy ? "正在创建授权…" : githubConnected ? "重新授权" : "使用 GitHub 授权"}</button>
-                {githubConnected ? <button className="quiet-button" onClick={() => setNotice("仓库范围选择器将在 GitHub App 安装页打开。") } type="button">管理仓库范围</button> : null}
+                {githubConnected ? <button className="quiet-button" disabled={githubBusy} onClick={connectGithub} type="button">重新选择仓库</button> : null}
               </div>
             </div>
           </article>

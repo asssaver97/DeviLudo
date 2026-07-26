@@ -1302,6 +1302,8 @@ test("public API contract covers authoritative account connection and MFA releas
   assert.match(connections, /loadSteamStatus\(\)/);
   assert.match(connections, /steamLeastPrivilegeProof\(payload\.data\)/);
   assert.match(connections, /fetch\("\/api\/connections\/steam", \{ cache: "no-store" \}\)/);
+  assert.match(connections, /重新选择仓库/);
+  assert.doesNotMatch(connections, /仓库范围选择器将在 GitHub App 安装页打开/);
   assert.doesNotMatch(connections, /该账号不能访问商店财务和所有者设置/);
   assert.doesNotMatch(connections, /initialGitHubConnected|useState\(initialGitHubConnected\)/);
 });

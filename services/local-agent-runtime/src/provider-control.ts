@@ -16,6 +16,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 export class LocalProviderControlInputError extends Error {}
 export class LocalProviderControlConflictError extends Error {}
+export class LocalProviderBindingConflictError extends Error {}
 export class LocalProviderProbeError extends Error {}
 
 export interface LocalCredentialPutReceipt {
@@ -32,10 +33,19 @@ export interface LocalProviderProbeReceipt {
   readonly state: "READY";
 }
 
+export interface LocalProviderBindingRebindReceipt {
+  readonly providerRevisionId: string;
+  readonly sourceProfileRevisionId: string;
+  readonly targetProfileRevisionId: string;
+  readonly state: "READY" | "ACTIVE";
+  readonly sourceRemainsActive: true;
+}
+
 export type LocalProviderScope = "platform" | "tenant" | "project";
 
 type VerifiedBinding = Readonly<{
   profileRevisionId: string;
+  sourceProfileRevisionId: string | null;
   scope: LocalProviderScope;
   scopeId: string;
   provider: GatewayProviderRevision;
@@ -110,6 +120,7 @@ export class LocalProviderControl implements LocalProviderBindingVerifier {
     }
     this.#bindings.set(bindingKey(provider.providerRevisionId, binding.profileRevisionId), Object.freeze({
       profileRevisionId: binding.profileRevisionId,
+      sourceProfileRevisionId: null,
       scope: binding.scope,
       scopeId: binding.scopeId,
       // Gateway revisions intentionally have no READY state; a passed probe is
@@ -122,6 +133,42 @@ export class LocalProviderControl implements LocalProviderBindingVerifier {
       checks: result.checks,
       state: "READY",
     });
+  }
+
+  rebind(value: unknown): LocalProviderBindingRebindReceipt {
+    const body = bindingRebind(value);
+    if (body.sourceProfileRevisionId === body.targetProfileRevisionId) {
+      throw new LocalProviderControlInputError("Provider binding successor must have a new Profile revision identifier");
+    }
+    const source = this.#bindings.get(bindingKey(body.providerRevisionId, body.sourceProfileRevisionId));
+    if (!source || source.profileRevisionId !== body.sourceProfileRevisionId
+      || source.provider.state !== "ACTIVE"
+      || source.provider.credentialVersionId !== body.credentialVersionId
+      || source.scope !== body.scope || source.scopeId !== body.scopeId
+      || !this.#credentials.has(body.credentialVersionId)) {
+      throw new LocalProviderProbeError("Active source Provider binding is unavailable");
+    }
+    const targetKey = bindingKey(body.providerRevisionId, body.targetProfileRevisionId);
+    const target = this.#bindings.get(targetKey);
+    if (target) {
+      if (target.profileRevisionId !== body.targetProfileRevisionId
+        || target.sourceProfileRevisionId !== body.sourceProfileRevisionId
+        || target.provider.credentialVersionId !== body.credentialVersionId
+        || target.scope !== body.scope || target.scopeId !== body.scopeId) {
+        throw new LocalProviderBindingConflictError("Provider binding successor already has different immutable lineage");
+      }
+      return bindingRebindReceipt(body, target.provider.state === "ACTIVE" ? "ACTIVE" : "READY");
+    }
+    this.#bindings.set(targetKey, Object.freeze({
+      profileRevisionId: body.targetProfileRevisionId,
+      sourceProfileRevisionId: body.sourceProfileRevisionId,
+      scope: source.scope,
+      scopeId: source.scopeId,
+      // Installation rebinding never grants execution by itself. The new
+      // immutable Profile still requires the separate SecurityAdmin gate.
+      provider: Object.freeze({ ...snapshotProvider(source.provider), state: "DISABLED" }),
+    }));
+    return bindingRebindReceipt(body, "READY");
   }
 
   async verify(request: LocalAgentPreflightRequest): Promise<boolean> {
@@ -310,6 +357,45 @@ function activation(value: unknown, requireCredential = true): Readonly<{
     providerRevisionId: safeId(body.providerRevisionId),
     profileRevisionId: safeId(body.profileRevisionId),
     credentialVersionId: requireCredential ? safeId(body.credentialVersionId) : "disabled",
+  });
+}
+
+function bindingRebind(value: unknown): Readonly<{
+  providerRevisionId: string;
+  sourceProfileRevisionId: string;
+  targetProfileRevisionId: string;
+  credentialVersionId: string;
+  scope: LocalProviderScope;
+  scopeId: string;
+}> {
+  const body = record(value);
+  exactKeys(body, [
+    "credentialVersionId", "providerRevisionId", "scope", "scopeId",
+    "sourceProfileRevisionId", "targetProfileRevisionId",
+  ]);
+  if (body.scope !== "platform" && body.scope !== "tenant" && body.scope !== "project") {
+    throw new LocalProviderControlInputError("Provider binding scope is invalid");
+  }
+  return Object.freeze({
+    providerRevisionId: safeId(body.providerRevisionId),
+    sourceProfileRevisionId: safeId(body.sourceProfileRevisionId),
+    targetProfileRevisionId: safeId(body.targetProfileRevisionId),
+    credentialVersionId: safeId(body.credentialVersionId),
+    scope: body.scope,
+    scopeId: safeId(body.scopeId),
+  });
+}
+
+function bindingRebindReceipt(
+  body: ReturnType<typeof bindingRebind>,
+  state: LocalProviderBindingRebindReceipt["state"],
+): LocalProviderBindingRebindReceipt {
+  return Object.freeze({
+    providerRevisionId: body.providerRevisionId,
+    sourceProfileRevisionId: body.sourceProfileRevisionId,
+    targetProfileRevisionId: body.targetProfileRevisionId,
+    state,
+    sourceRemainsActive: true,
   });
 }
 

@@ -16,6 +16,7 @@ import {
 import { LocalAgentReadinessService } from "./readiness";
 import {
   LocalProviderControl,
+  LocalProviderBindingConflictError,
   LocalProviderControlConflictError,
   LocalProviderControlInputError,
   LocalProviderProbeError,
@@ -197,6 +198,12 @@ async function route(
       json(response, 200, { data: await runtime.providerControl!.probe(command) });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/v1/provider-bindings/rebind" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-bindings/rebind", runtime.requestVerifier);
+      json(response, 200, { data: runtime.providerControl!.rebind(command) });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/v1/provider-bindings/activate" && !url.search) {
       requireProviderControl(runtime.providerControl);
       const command = await readObject(request, "/v1/provider-bindings/activate", runtime.requestVerifier);
@@ -225,6 +232,10 @@ async function route(
     }
     if (error instanceof LocalProviderControlConflictError) {
       json(response, 409, { error: { code: "LOCAL_CREDENTIAL_VERSION_CONFLICT", message: "Credential version already exists with different material" } });
+      return;
+    }
+    if (error instanceof LocalProviderBindingConflictError) {
+      json(response, 409, { error: { code: "LOCAL_PROVIDER_BINDING_CONFLICT", message: "Provider binding successor conflicts with existing immutable lineage" } });
       return;
     }
     if (error instanceof LocalProviderProbeError) {
@@ -307,7 +318,7 @@ export function parseLocalAgentCancellationRequest(value: unknown): LocalAgentCa
 
 type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel"
   | "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
-  | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
+  | "/v1/provider-bindings/rebind" | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
 
 async function readCancellationRequest(
   request: IncomingMessage,
