@@ -278,6 +278,9 @@ invokes only an executable and non-secret signing policy with fixed SHA-256
 digests. Signing authority remains in the host keystore/HSM, and its receipt is
 insufficient by itself: the publisher independently verifies the finalized
 artifact and evidence objects in S3 before RC signing. The
+Windows, Linux and macOS finalizers are separate mTLS origins; each advertises
+only its local scheme, while the isolated Steam executor probes all three and
+routes the immutable target without fallback. The
 publisher uploads it with a least-privilege Steam
 build account to a password-protected Beta, then clean Steam clients install and
 run the same platform gate. The platform stores only encrypted `config.vdf`

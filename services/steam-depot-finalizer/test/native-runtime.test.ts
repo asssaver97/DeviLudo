@@ -120,6 +120,7 @@ test("production configuration loads only file-mounted TLS and fixed native arti
   ]);
   const env = {
     NODE_ENV: "production",
+    DEVILUDO_STEAM_DEPOT_FINALIZER_PLATFORM: "linux",
     DATABASE_URL: "postgresql://deviludo@postgres.internal/deviludo",
     DEVILUDO_STEAM_DEPOT_FINALIZER_VERSION: "1.0.0",
     DEVILUDO_STEAM_DEPOT_FINALIZER_BINARY_DIGEST: "1".repeat(64),
@@ -135,6 +136,8 @@ test("production configuration loads only file-mounted TLS and fixed native arti
   };
   const config = await steamDepotFinalizerConfigFromEnv(env);
   assert.equal(config.port, 4855);
+  assert.equal(config.platform, "linux");
+  assert.deepEqual(config.supportedSchemes, ["LINUX_SIGSTORE"]);
   assert.deepEqual([...config.allowedSpiffeIds], ["spiffe://deviludo.internal/steam-workflow-executor"]);
   assert.equal(config.tlsKey.toString(), "k".repeat(64));
   assert.equal(config.nativeTimeoutMs, 3_000_000);

@@ -53,7 +53,9 @@ async function fixture(t: { after(callback: () => Promise<void>): void }) {
     DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_KEY_FILE: files.tlsKey,
     DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_CERT_FILE: files.tlsCertificate,
     DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_CA_FILE: files.tlsCa,
-    DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_URL: "https://steam-depot-finalizer.internal",
+    DEVILUDO_STEAM_EXECUTOR_WINDOWS_DEPOT_FINALIZER_URL: "https://steam-depot-finalizer-windows.internal/",
+    DEVILUDO_STEAM_EXECUTOR_LINUX_DEPOT_FINALIZER_URL: "https://steam-depot-finalizer-linux.internal/",
+    DEVILUDO_STEAM_EXECUTOR_MACOS_DEPOT_FINALIZER_URL: "https://steam-depot-finalizer-macos.internal/",
     DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_KEY_FILE: files.finalizerTlsKey,
     DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_CERT_FILE: files.finalizerTlsCertificate,
     DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_CA_FILE: files.finalizerTlsCa,
@@ -76,7 +78,11 @@ test("isolated Steam executor loads pinned native, KMS, verification and S3 iden
   assert.equal(config.nativePublisher.configDigest, "b".repeat(64));
   assert.equal(config.rcSigner.keyId, "steam-rc-key-2026-07");
   assert.equal(config.rcSigner.publicKey.asymmetricKeyType, "ed25519");
-  assert.equal(config.depotFinalizer.endpoint, "https://steam-depot-finalizer.internal");
+  assert.deepEqual(config.depotFinalizer.endpoints, {
+    windows: "https://steam-depot-finalizer-windows.internal/",
+    linux: "https://steam-depot-finalizer-linux.internal/",
+    macos: "https://steam-depot-finalizer-macos.internal/",
+  });
   assert.equal(config.depotFinalizer.tls.key.toString("utf8"), "f".repeat(64));
   assert.equal(config.authorization.publicKey.asymmetricKeyType, "ed25519");
   assert.equal(config.s3.secretAccessKey.toString("utf8"), "s".repeat(32));
@@ -102,6 +108,10 @@ test("isolated Steam executor rejects missing, floating and inline secret config
     ...env,
     DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_CERT_FILE: env.DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_CERT_FILE,
   }), /must use distinct mTLS identities/);
+  await assert.rejects(steamWorkflowExecutorConfigFromEnv({
+    ...env,
+    DEVILUDO_STEAM_EXECUTOR_MACOS_DEPOT_FINALIZER_URL: env.DEVILUDO_STEAM_EXECUTOR_LINUX_DEPOT_FINALIZER_URL,
+  }), /endpoints must be distinct/);
 });
 
 test("Steam executor readiness marker exists only after dependency probes report READY", async (t) => {

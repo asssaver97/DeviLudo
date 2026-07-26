@@ -351,6 +351,15 @@ forbidden from requests, PostgreSQL and receipts. A failed invocation releases
 the fenced lease for exact retry, while completion becomes append-only. macOS
 cannot complete without a content-addressed notarization receipt.
 
+The signing service is deployed once per native OS. Its health response contains
+exactly one scheme, and the Steam executor accepts three distinct HTTPS origins
+only; same-origin consolidation and cross-platform fallback are rejected. The
+native policy contains only fixed tool and public identity metadata plus paths
+to file-mounted S3 material. Before each operation the node re-hashes every tool
+and the Linux verification key, verifies the checksum-bound Runner object, and
+uses conditional content-addressed writes for the final artifact and public
+evidence.
+
 ## Failure behavior and audit requirements
 
 `selectRunnableProfile()` returns `WAITING_PROVIDER` when the primary provider is

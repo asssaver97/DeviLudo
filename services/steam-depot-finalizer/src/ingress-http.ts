@@ -23,9 +23,11 @@ export interface SteamDepotFinalizerIngressResponse {
 export function createSteamDepotFinalizerHandler(options: Readonly<{
   service: Pick<DurableSteamDepotFinalizerService, "finalize" | "probe">;
   allowedSpiffeIds: ReadonlySet<string>;
+  supportedSchemes?: readonly string[];
   extractIdentity?: (socket: unknown) => EvidenceArchiveWorkloadIdentity;
 }>): (request: SteamDepotFinalizerIngressRequest) => Promise<SteamDepotFinalizerIngressResponse> {
   if (!options.allowedSpiffeIds.size) invalidConfig();
+  const supportedSchemes = normalizeSchemes(options.supportedSchemes ?? STEAM_DEPOT_SIGNING_SCHEMES);
   const extractIdentity = options.extractIdentity ?? evidenceArchiveIdentityFromTlsSocket;
   return async (request) => {
     let identity: EvidenceArchiveWorkloadIdentity;
@@ -51,7 +53,7 @@ export function createSteamDepotFinalizerHandler(options: Readonly<{
           schemaVersion: "deviludo.steam-depot-finalizer-health.v1",
           status: "ok",
           service: "deviludo-steam-depot-finalizer",
-          supportedSchemes: STEAM_DEPOT_SIGNING_SCHEMES,
+          supportedSchemes,
         }),
       };
     }
@@ -154,6 +156,13 @@ function failure(status: number, code: string): SteamDepotFinalizerIngressRespon
 function integer(value: number, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) invalidConfig();
   return value;
+}
+
+function normalizeSchemes(value: readonly string[]): readonly string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > STEAM_DEPOT_SIGNING_SCHEMES.length
+    || value.some((scheme) => !STEAM_DEPOT_SIGNING_SCHEMES.includes(scheme as typeof STEAM_DEPOT_SIGNING_SCHEMES[number]))
+    || new Set(value).size !== value.length || JSON.stringify(value) !== JSON.stringify([...value].sort())) invalidConfig();
+  return Object.freeze([...value]);
 }
 
 function invalidConfig(): never { throw new Error("Steam depot finalizer ingress configuration is invalid"); }

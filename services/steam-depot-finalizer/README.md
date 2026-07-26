@@ -12,6 +12,14 @@ release, main SHA, evidence bundle, target platform and raw Runner export. A
 tenant-RLS operation ledger fences retries and replays the same receipt after a
 process or network interruption.
 
+Each deployment is bound by `DEVILUDO_STEAM_DEPOT_FINALIZER_PLATFORM` to exactly
+one native OS and advertises only that platform's signing scheme. Windows,
+Linux and macOS therefore run as three distinct release-signing services with
+different DNS names and host credentials. The Steam Workflow Executor requires
+all three distinct mTLS endpoints at startup and routes each depot by its frozen
+target platform; no node or load balancer may claim capabilities it cannot
+execute locally.
+
 `LockedNativeSteamDepotFinalizer` verifies the exact executable and policy file
 digests, uses a fixed `finalize --policy-file ... --request-file ...
 --receipt-file ...` argv without a shell, and supplies a minimal environment.
@@ -49,6 +57,22 @@ are written only to deterministic, content-addressed object keys; the returned
 receipt is validated against the original request before it crosses the mTLS
 service boundary. Tests run the same controller contract for Windows, Linux
 and macOS and prove digest drift and manifest traversal stop before signing.
+
+`run-native-controller.ts` implements the exact child-process CLI accepted by
+`LockedNativeSteamDepotFinalizer`. Its canonical, immutable policy selects one
+platform, fixed tool paths/digests/versions, host keystore or KMS identity,
+content-addressed S3 bucket and file-mounted S3 secret/CA. The CLI rejects
+additional arguments, cross-platform requests, non-canonical policy bytes and
+request/receipt files outside the parent-created working directory.
+
+`LockedSteamDepotPlatformSigner` invokes only fixed no-shell argv. Windows uses
+`signtool sign` plus `verify` and a fixed HTTPS timestamp authority; Linux uses
+`cosign sign-blob` plus `verify-blob`, a fixed KMS reference, public-key digest
+and transparency bundle; macOS uses `codesign`, `notarytool`, `stapler` and
+`spctl` with a fixed Developer ID and Keychain profile. Tool binaries are
+re-hashed before every probe and operation. The dedicated S3 adapter requires
+TLS 1.3, SigV4, server checksum metadata and conditional immutable writes, and
+byte-verifies an existing object before accepting a replay.
 
 Production configuration is documented in `.env.example`. This service must be
 deployed only to release-signing hosts; it is not installed on Agent workers,

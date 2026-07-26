@@ -102,17 +102,21 @@ export function validateFinalizedSteamDepot(
  */
 export class MtlsSteamDepotFinalizer implements SteamDepotFinalizer {
   readonly #endpoint: URL;
+  readonly #platform: SteamTargetPlatform | null;
   readonly #tls: TestKitArtifactBrokerTls;
   readonly #timeoutMs: number;
   readonly #http: TestKitArtifactBrokerHttp;
 
   constructor(options: Readonly<{
     endpoint: string | URL;
+    platform?: SteamTargetPlatform;
     tls: TestKitArtifactBrokerTls;
     timeoutMs?: number;
     http?: TestKitArtifactBrokerHttp;
   }>) {
     this.#endpoint = strictOrigin(options.endpoint);
+    this.#platform = options.platform ?? null;
+    if (options.platform !== undefined && !isPlatform(options.platform)) invalid("platform");
     validateTls(options.tls);
     this.#tls = Object.freeze({ ...options.tls });
     this.#timeoutMs = integer(options.timeoutMs ?? 30 * 60_000, 1_000, 60 * 60_000);
@@ -121,6 +125,7 @@ export class MtlsSteamDepotFinalizer implements SteamDepotFinalizer {
 
   async finalize(input: SteamDepotFinalizationInput): Promise<FinalizedSteamDepot> {
     validateInput(input);
+    if (this.#platform !== null && input.platform !== this.#platform) invalid("platform route");
     const operationKey = `steam-depot-finalize:${input.releaseId}:${input.platform}`;
     const requestCore = Object.freeze({
       schemaVersion: "deviludo.steam-depot-finalization.v1" as const,
@@ -157,9 +162,38 @@ export class MtlsSteamDepotFinalizer implements SteamDepotFinalizer {
     exactKeys(body, ["schemaVersion", "status", "service", "supportedSchemes"]);
     if (response.statusCode !== 200 || body.schemaVersion !== "deviludo.steam-depot-finalizer-health.v1"
       || body.status !== "ok" || body.service !== "deviludo-steam-depot-finalizer"
-      || JSON.stringify(body.supportedSchemes) !== JSON.stringify([
-        "LINUX_SIGSTORE", "MACOS_DEVELOPER_ID", "WINDOWS_AUTHENTICODE",
-      ])) invalid("health");
+      || JSON.stringify(body.supportedSchemes) !== JSON.stringify(this.#platform === null
+        ? ["LINUX_SIGSTORE", "MACOS_DEVELOPER_ID", "WINDOWS_AUTHENTICODE"]
+        : [expectedScheme(this.#platform)])) invalid("health");
+  }
+}
+
+/** Routes each target to a distinct platform-native mTLS signing service. */
+export class PlatformSteamDepotFinalizer implements SteamDepotFinalizer {
+  readonly #finalizers: Readonly<Record<SteamTargetPlatform, SteamDepotFinalizer>>;
+
+  constructor(finalizers: Readonly<Record<SteamTargetPlatform, SteamDepotFinalizer>>) {
+    if (!finalizers || typeof finalizers !== "object" || Array.isArray(finalizers)
+      || JSON.stringify(Object.keys(finalizers).sort()) !== JSON.stringify(["linux", "macos", "windows"])) {
+      invalid("platform finalizers");
+    }
+    for (const platform of ["windows", "linux", "macos"] as const) {
+      const finalizer = finalizers[platform];
+      if (!finalizer || typeof finalizer.finalize !== "function" || typeof finalizer.probe !== "function") {
+        invalid("platform finalizer");
+      }
+    }
+    this.#finalizers = Object.freeze({ ...finalizers });
+  }
+
+  async finalize(input: SteamDepotFinalizationInput): Promise<FinalizedSteamDepot> {
+    validateInput(input);
+    return validateFinalizedSteamDepot(await this.#finalizers[input.platform].finalize(input), input);
+  }
+
+  async probe(): Promise<void> {
+    await Promise.all(["windows", "linux", "macos"].map((platform) =>
+      this.#finalizers[platform as SteamTargetPlatform].probe()));
   }
 }
 

@@ -84,10 +84,12 @@ test("production publisher client and finalizer server share the exact wire cont
   const handler = createSteamDepotFinalizerHandler({
     service,
     allowedSpiffeIds: new Set([identity.spiffeId]),
+    supportedSchemes: ["LINUX_SIGSTORE"],
     extractIdentity: () => identity,
   });
   const client = new MtlsSteamDepotFinalizer({
     endpoint: "https://steam-depot-finalizer.internal",
+    platform: "linux",
     tls: { key: Buffer.alloc(64, 1), certificate: Buffer.alloc(64, 2), ca: Buffer.alloc(64, 3) },
     http: async (input) => {
       const response = await handler({
@@ -115,6 +117,16 @@ test("production publisher client and finalizer server share the exact wire cont
   assert.equal(finalized.signingScheme, "LINUX_SIGSTORE");
   assert.equal(finalized.sourceArtifactDigest, request.sourceArtifactDigest);
   assert.equal(native.executions, 1);
+  await assert.rejects(client.finalize({
+    tenantId: request.tenantId,
+    projectId: request.projectId,
+    releaseId: request.releaseId,
+    mainCommitSha: request.mainCommitSha,
+    evidenceBundleDigest: request.evidenceBundleDigest,
+    platform: "macos",
+    sourceObjectKey: request.sourceObjectKey,
+    sourceArtifactDigest: request.sourceArtifactDigest,
+  }), /platform route is invalid/);
 });
 
 test("ingress rejects identity, authority drift and credential fields before native execution", async () => {

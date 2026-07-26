@@ -246,6 +246,12 @@ It uses migration `054_steam_depot_finalization_operations.sql` for tenant-RLS,
 lease-fenced exact replay and a digest-pinned native controller. The publisher
 and finalizer must have disjoint certificates and deployment identities; the
 native signing host is not part of the Steam executor, Agent or Runner pools.
+The executor requires three distinct origins through
+`DEVILUDO_STEAM_EXECUTOR_WINDOWS_DEPOT_FINALIZER_URL`,
+`DEVILUDO_STEAM_EXECUTOR_LINUX_DEPOT_FINALIZER_URL` and
+`DEVILUDO_STEAM_EXECUTOR_MACOS_DEPOT_FINALIZER_URL`. Each endpoint's health
+contract advertises only its native signing scheme, and the platform router
+rejects a request sent to the wrong OS before network dispatch.
 
 The control-plane `REQUEST_FRESH_MFA` action now first calls
 `PostgresSteamReleasePreparation`. It accepts no App ID, session or branch from

@@ -43,6 +43,7 @@ export class LockedNativeSteamDepotFinalizer implements SteamDepotNativeFinalize
   readonly #workRoot: string;
   readonly #timeoutMs: number;
   readonly #process: NativeSteamDepotProcess;
+  readonly #supportedSchemes: readonly string[];
 
   constructor(options: Readonly<{
     executable: string;
@@ -50,6 +51,7 @@ export class LockedNativeSteamDepotFinalizer implements SteamDepotNativeFinalize
     policyFile: string;
     policyDigest: string;
     workRoot: string;
+    supportedSchemes?: readonly string[];
     timeoutMs?: number;
     process?: NativeSteamDepotProcess;
   }>) {
@@ -61,6 +63,7 @@ export class LockedNativeSteamDepotFinalizer implements SteamDepotNativeFinalize
     this.#policyDigest = options.policyDigest;
     this.#timeoutMs = integer(options.timeoutMs ?? 50 * 60_000, 60_000, 55 * 60_000);
     this.#process = options.process ?? executeNativeSteamDepotFinalizer;
+    this.#supportedSchemes = supportedSchemes(options.supportedSchemes ?? STEAM_DEPOT_SIGNING_SCHEMES);
   }
 
   async probe(): Promise<void> {
@@ -75,7 +78,7 @@ export class LockedNativeSteamDepotFinalizer implements SteamDepotNativeFinalize
     exactKeys(body, ["schemaVersion", "status", "policyDigest", "supportedSchemes"]);
     if (body.schemaVersion !== "deviludo.native-steam-depot-finalizer-probe.v1"
       || body.status !== "READY" || body.policyDigest !== this.#policyDigest
-      || JSON.stringify(body.supportedSchemes) !== JSON.stringify(STEAM_DEPOT_SIGNING_SCHEMES)) invalid("probe");
+      || JSON.stringify(body.supportedSchemes) !== JSON.stringify(this.#supportedSchemes)) invalid("probe");
   }
 
   async finalize(request: SteamDepotFinalizationRequest): Promise<SteamDepotFinalizationReceipt> {
@@ -215,6 +218,13 @@ function integer(value: number, minimum: number, maximum: number): number {
 }
 
 function bounded(value: string): string { return value.length <= MAX_OUTPUT_BYTES ? value : value.slice(0, MAX_OUTPUT_BYTES); }
+function supportedSchemes(value: readonly string[]): readonly string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > STEAM_DEPOT_SIGNING_SCHEMES.length
+    || value.some((scheme) => !STEAM_DEPOT_SIGNING_SCHEMES.includes(scheme as typeof STEAM_DEPOT_SIGNING_SCHEMES[number]))
+    || new Set(value).size !== value.length
+    || JSON.stringify(value) !== JSON.stringify([...value].sort())) invalid("supported schemes");
+  return Object.freeze([...value]);
+}
 function nativeExitCode(error: Error | null): number {
   if (!error) return 0;
   const code = (error as Error & { code?: unknown }).code;

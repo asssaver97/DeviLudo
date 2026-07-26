@@ -7,7 +7,7 @@ import { S3ImmutableObjectStore } from "../../evidence-archive/src/s3-store";
 import { postgresWorkflowPoolFromEnv, type ClosablePostgresWorkflowPool } from "../../temporal/src/node-postgres";
 import type { SteamInstallEvidenceGate } from "./contracts";
 import { SteamReleaseCoordinator } from "./coordinator";
-import { MtlsSteamDepotFinalizer } from "./depot-finalization";
+import { MtlsSteamDepotFinalizer, PlatformSteamDepotFinalizer } from "./depot-finalization";
 import { LockedNativeSteamPublisherConnector } from "./locked-native-publisher";
 import { PostgresSteamCleanInstallDispatcher } from "./postgres-clean-install-dispatch";
 import { PostgresSteamPublishOperationStore } from "./postgres-publish-operations";
@@ -45,7 +45,7 @@ export interface SteamWorkflowExecutorConfig {
     timeoutMs: number;
   }>;
   readonly depotFinalizer: Readonly<{
-    endpoint: string;
+    endpoints: Readonly<Record<"windows" | "linux" | "macos", string>>;
     tls: Readonly<{ key: Buffer; certificate: Buffer; ca: Buffer }>;
     timeoutMs: number;
   }>;
@@ -108,7 +108,7 @@ export async function steamWorkflowExecutorConfigFromEnv(
       timeoutMs: seconds(env.DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TIMEOUT_SECONDS, 30, 1, 60) * 1_000,
     }),
     depotFinalizer: Object.freeze({
-      endpoint: required(env, "DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_URL"),
+      endpoints: finalizerEndpoints(env),
       tls: Object.freeze({ key: finalizerKey, certificate: finalizerCertificate, ca: finalizerCa }),
       timeoutMs: seconds(env.DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TIMEOUT_SECONDS, 1_800, 1, 3_600) * 1_000,
     }),
@@ -136,7 +136,14 @@ export function composeSteamWorkflowExecutor(
   const objects = new S3ImmutableObjectStore(config.s3);
   config.s3.secretAccessKey.fill(0);
   const objectInspector = new S3SteamRcObjectInspector(objects, config.s3.bucket);
-  const depotFinalizer = new MtlsSteamDepotFinalizer(config.depotFinalizer);
+  const depotFinalizer = new PlatformSteamDepotFinalizer(Object.freeze(Object.fromEntries(
+    (["windows", "linux", "macos"] as const).map((platform) => [platform, new MtlsSteamDepotFinalizer({
+      endpoint: config.depotFinalizer.endpoints[platform],
+      platform,
+      tls: config.depotFinalizer.tls,
+      timeoutMs: config.depotFinalizer.timeoutMs,
+    })]),
+  )) as Readonly<Record<"windows" | "linux" | "macos", MtlsSteamDepotFinalizer>>);
   const signer = new MtlsSteamRcArtifactSigner(config.rcSigner);
   const connector = new LockedNativeSteamPublisherConnector(config.nativePublisher);
   const releaseEvidence = new PostgresSteamReleaseEvidenceGate(pool);
@@ -302,6 +309,28 @@ function seconds(value: string | undefined, fallback: number, minimum: number, m
     throw new Error("Steam executor timeout is invalid");
   }
   return parsed;
+}
+
+function finalizerEndpoints(env: Readonly<Record<string, string | undefined>>) {
+  const endpoints = Object.freeze({
+    windows: strictEndpoint(required(env, "DEVILUDO_STEAM_EXECUTOR_WINDOWS_DEPOT_FINALIZER_URL")),
+    linux: strictEndpoint(required(env, "DEVILUDO_STEAM_EXECUTOR_LINUX_DEPOT_FINALIZER_URL")),
+    macos: strictEndpoint(required(env, "DEVILUDO_STEAM_EXECUTOR_MACOS_DEPOT_FINALIZER_URL")),
+  });
+  if (new Set(Object.values(endpoints)).size !== 3) {
+    throw new Error("Steam executor platform depot finalizer endpoints must be distinct");
+  }
+  return endpoints;
+}
+
+function strictEndpoint(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("Steam executor depot finalizer endpoint is invalid"); }
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.pathname !== "/"
+    || url.search || url.hash || !new Set(["", "443", "8443"]).has(url.port) || url.href !== value) {
+    throw new Error("Steam executor depot finalizer endpoint is invalid");
+  }
+  return url.href;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

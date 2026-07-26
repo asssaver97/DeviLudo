@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { createSteamDepotFinalizerHandler, createSteamDepotFinalizerHttpsServer } from "./ingress-http";
 import { LockedNativeSteamDepotFinalizer } from "./locked-native-finalizer";
+import { signingSchemeForPlatform } from "./native-policy";
 import { verifySteamDepotFinalizerServiceRuntime } from "./native-service-release";
 import { PostgresSteamDepotFinalizationOperations } from "./postgres-operations";
 import { DurableSteamDepotFinalizerService } from "./service";
@@ -29,10 +30,15 @@ export async function steamDepotFinalizerFromEnv(
       policyFile: config.nativePolicyFile,
       policyDigest: config.nativePolicyDigest,
       workRoot: config.workRoot,
+      supportedSchemes: config.supportedSchemes,
       timeoutMs: config.nativeTimeoutMs,
     });
     const service = new DurableSteamDepotFinalizerService(operations, native, { leaseMs: config.leaseMs });
-    const handler = createSteamDepotFinalizerHandler({ service, allowedSpiffeIds: config.allowedSpiffeIds });
+    const handler = createSteamDepotFinalizerHandler({
+      service,
+      allowedSpiffeIds: config.allowedSpiffeIds,
+      supportedSchemes: config.supportedSchemes,
+    });
     const server = createSteamDepotFinalizerHttpsServer({
       tls: { key: config.tlsKey, cert: config.tlsCertificate, ca: config.clientCa },
       handler,
@@ -61,7 +67,9 @@ export async function steamDepotFinalizerConfigFromEnv(
   const leaseMs = integer(
     env.DEVILUDO_STEAM_DEPOT_FINALIZER_LEASE_MS, 55 * 60_000, nativeTimeoutMs + 1_000, 60 * 60_000,
   );
+  const selectedPlatform = platform(required(env, "DEVILUDO_STEAM_DEPOT_FINALIZER_PLATFORM"));
   return Object.freeze({
+    platform: selectedPlatform,
     host: bindHost(env.DEVILUDO_STEAM_DEPOT_FINALIZER_HOST),
     port: integer(env.DEVILUDO_STEAM_DEPOT_FINALIZER_PORT, 4_855, 1_024, 65_535),
     version: exactVersion(required(env, "DEVILUDO_STEAM_DEPOT_FINALIZER_VERSION")),
@@ -81,6 +89,7 @@ export async function steamDepotFinalizerConfigFromEnv(
     requestTimeoutMs: integer(
       env.DEVILUDO_STEAM_DEPOT_FINALIZER_REQUEST_TIMEOUT_MS, 60 * 60_000, nativeTimeoutMs, 60 * 60_000,
     ),
+    supportedSchemes: Object.freeze([signingSchemeForPlatform(selectedPlatform)]),
   });
 }
 
@@ -172,6 +181,13 @@ function bindHost(value: string | undefined): string {
   const selected = value?.trim() || "0.0.0.0";
   if (selected !== "0.0.0.0" && selected !== "::") throw new Error("Steam depot finalizer bind host is invalid");
   return selected;
+}
+
+function platform(value: string): "windows" | "linux" | "macos" {
+  if (value !== "windows" && value !== "linux" && value !== "macos") {
+    throw new Error("Steam depot finalizer platform is invalid");
+  }
+  return value;
 }
 
 function integer(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
