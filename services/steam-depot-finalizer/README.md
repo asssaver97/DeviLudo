@@ -90,6 +90,19 @@ native release envelope, then executes only `--identity` in an empty production
 environment and binds its embedded version, source commit, Node version,
 platform and architecture to the release claims.
 
+`createSteamDepotFinalizerHostInstallPlan` composes the independently verified
+service and controller authorizations into one immutable per-host plan. The
+plan copies both artifacts, both build receipts, both signed release envelopes,
+both trust policies, the native policy and the reference-only environment lock
+into one release directory. That tree is root-owned and read-only; only the
+separate work root is writable by the service account. The generated service
+definition uses a dedicated non-interactive systemd, launchd or Windows SCM
+identity, fixes the Node runtime digest, forbids Agent installation, credential
+export and automatic updates, and requires an explicit egress allow-list.
+Upgrades must first drain the durable operation ledger to zero and retain the
+previous plan/release digests for automatic rollback after a failed signed
+release, identity, native probe or mTLS readiness check.
+
 `LockedSteamDepotPlatformSigner` invokes only fixed no-shell argv. Windows uses
 `signtool sign` plus `verify` and a fixed HTTPS timestamp authority; Linux uses
 `cosign sign-blob` plus `verify-blob`, a fixed KMS reference, public-key digest

@@ -359,6 +359,12 @@ the released digest and native-signature evidence. Its trust policy is
 independent from the finalizer service bundle and every Runner key. At startup,
 the service verifies the signed native release and invokes only the controller's
 embedded `--identity` before any database, listener or signing initialization.
+The host install plan binds both independently signed releases and every runtime
+policy/configuration digest into one root-owned read-only release directory.
+Only the operation work root is writable. Each OS uses a dedicated
+non-interactive service identity with no Agent, no credential export and no
+self-update capability; upgrades require a drained zero-operation ledger and
+retain the exact previous plan as the rollback authority.
 
 The signing service is deployed once per native OS. Its health response contains
 exactly one scheme, and the Steam executor accepts three distinct HTTPS origins
