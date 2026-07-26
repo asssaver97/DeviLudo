@@ -150,6 +150,7 @@
     "start:steam-workflow-broker": "node --import tsx scripts/observability/run-service.mjs steam-workflow-broker",
     "start:steam-workflow-executor": "node --import tsx scripts/observability/run-service.mjs steam-workflow-executor",
     "start:steam-depot-finalizer": "node --import tsx scripts/observability/run-service.mjs steam-depot-finalizer",
+    "start:steam-depot-finalizer-host-activation": "node --import tsx scripts/observability/run-service.mjs steam-depot-finalizer-host-activation",
     "start:steam-client-connector": "node --import tsx scripts/observability/run-service.mjs steam-client-connector",
     "start:steam-install-services": "node --import tsx scripts/observability/run-service.mjs steam-install-services",
     "start:temporal-worker": "node --import tsx scripts/observability/run-service.mjs temporal-worker",

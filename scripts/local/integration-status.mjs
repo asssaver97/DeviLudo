@@ -12,10 +12,10 @@ const { Client } = pg;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const LATEST_MIGRATION = Object.freeze({
-  version: 63,
-  filename: "063_agent_microvm_credential_issuances.sql",
+  version: 64,
+  filename: "064_steam_depot_finalizer_host_activations.sql",
   digest: createHash("sha256").update(readFileSync(
-    new URL("../../infra/postgres/063_agent_microvm_credential_issuances.sql", import.meta.url),
+    new URL("../../infra/postgres/064_steam_depot_finalizer_host_activations.sql", import.meta.url),
   )).digest("hex"),
 });
 
@@ -35,7 +35,7 @@ export function resolveIntegrationConfig(env = process.env) {
 export async function inspectLocalIntegration(env = process.env, probes = defaultProbes()) {
   const config = resolveIntegrationConfig(env);
   const checks = [
-    ["PostgreSQL schema 063", () => probes.postgres(config.database)],
+    ["PostgreSQL schema 064", () => probes.postgres(config.database)],
     ["Redis authenticated PING", () => probes.redis(config.redis)],
     ["Temporal transport", () => probes.tcp(config.temporal)],
     ["MinIO health", () => probes.http(new URL("/minio/health/live", config.minio))],
@@ -74,6 +74,7 @@ async function postgresProbe(url) {
         'deviludo.agent_profile_version_attestation_is_valid(jsonb)'
       ) IS NOT NULL
       AND to_regclass('deviludo.agent_microvm_credential_issuances') IS NOT NULL
+      AND to_regclass('deviludo.steam_depot_finalizer_host_activation_operations') IS NOT NULL
       AND to_regclass('public.deviludo_schema_migrations') IS NOT NULL AS latest_schema`);
     if (schema.rows[0]?.latest_schema !== true) throw new Error("latest migration is missing");
     const ledger = await client.query(`SELECT

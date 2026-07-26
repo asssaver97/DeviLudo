@@ -43,6 +43,7 @@ export const SERVICE_ENTRYPOINTS = Object.freeze({
   "steam-workflow-broker": Object.freeze({ entry: "services/steam-publisher/src/run-workflow-broker-service.ts" }),
   "steam-workflow-executor": Object.freeze({ entry: "services/steam-publisher/src/run-workflow-executor-service.ts" }),
   "steam-depot-finalizer": Object.freeze({ entry: "services/steam-depot-finalizer/src/run-service.ts" }),
+  "steam-depot-finalizer-host-activation": Object.freeze({ entry: "services/steam-depot-finalizer/src/run-host-activation-authority.ts" }),
   "steam-client-connector": Object.freeze({ entry: "services/steam-client-connector/src/run-service.ts" }),
   "steam-install-services": Object.freeze({ entry: "services/steam-publisher/src/run-clean-install-services.ts" }),
   "temporal-worker": Object.freeze({ entry: "services/temporal/src/run-worker.ts" }),

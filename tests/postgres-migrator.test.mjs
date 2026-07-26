@@ -16,8 +16,8 @@ import {
 
 test("PostgreSQL migrations are contiguous and migration 061 baselines exact repository digests", async () => {
   const migrations = await loadPostgresMigrations();
-  assert.equal(migrations.length, 63);
-  assert.equal(migrations.at(-1)?.filename, "063_agent_microvm_credential_issuances.sql");
+  assert.equal(migrations.length, 64);
+  assert.equal(migrations.at(-1)?.filename, "064_steam_depot_finalizer_host_activations.sql");
   const baseline = migrations.find(({ filename }) => filename === "061_schema_migration_ledger.sql")?.source ?? "";
   for (const migration of migrations.slice(0, 60)) {
     assert.ok(
@@ -118,8 +118,8 @@ test("explicit local adoption verifies schema 060 before recording and then reac
   const migrations = await loadPostgresMigrations();
   const database = fakeMigrationDatabase({ schemaPresent: true, baselineMigrations: migrations.slice(0, 60) });
   const result = await runPostgresMigrations({ client: database.client, migrations, adoptExisting: true });
-  assert.deepEqual(result, { applied: 3, currentVersion: 63 });
-  assert.equal(database.rows.length, 63);
+  assert.deepEqual(result, { applied: 4, currentVersion: 64 });
+  assert.equal(database.rows.length, 64);
   assert.equal(database.sql.filter((statement) => statement.includes("CREATE TEMP TABLE deviludo_expected_migration_baseline")).length, 2);
 });
 

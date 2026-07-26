@@ -138,10 +138,28 @@ immutable rollback receipt. Interrupted activation is recovered from the same
 journal, and a completed receipt replays without touching the service. Upgrades
 require a signed `DRAINING` state with zero active finalization operations.
 
-Windows transactions remain non-runnable until independently signed SCM bridge
-and native actuator authorizations are attached. The POSIX actuator explicitly
-refuses Windows; it never falls back to PowerShell, `sc.exe`, a shell command or
-an Agent runtime.
+The separate `start:steam-depot-finalizer-host-activation` control-plane
+service is the only online activation authority. Its TLS listener requires a
+host certificate from the dedicated Finalizer host CA, derives the SPIFFE ID
+and SHA-256 certificate fingerprint from that connection, and binds both into
+the immutable request and grant. PostgreSQL migration 064 maintains a
+credential-free projection of active Finalizer claims, permits one live
+activation per host and stores immutable grant/result ledgers. A grant is
+issued only when the target platform has no live finalization claim. The
+authority has no signing private key: it calls one fixed TLS 1.3 mTLS KMS route
+and verifies the returned Ed25519 signature locally before committing it.
+
+The host calls `/v1/steam-depot-finalizer-host-activations/authorize`, drains
+while the response contains a drain receipt, applies the exact signed grant,
+then posts the immutable actuation receipt to
+`/v1/steam-depot-finalizer-host-activations/complete`. Configuration is
+documented in `.env.example`; the authority belongs on the isolated control
+plane, not on Agent, E2E, Steam publishing or release-signing hosts.
+
+Windows uses the independently signed fixed SCM bridge and native actuator;
+the bridge accepts only the Finalizer component and exact service artifact
+argument. The POSIX actuator explicitly refuses Windows, while the Windows
+actuator refuses shell, PowerShell, `sc.exe` and arbitrary service commands.
 
 ## Service release chain
 

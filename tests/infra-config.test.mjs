@@ -101,6 +101,23 @@ test("Agent microVM bootstrap image issuance is append-only, RLS-scoped and cont
   assert.doesNotMatch(migration, /(?:private_key|certificate|secret_ref|token_value|image_bytes)\s+(?:text|bytea)/i);
 });
 
+test("Steam Finalizer host activation is globally drained, host-bound and append-only", () => {
+  const migration = readFileSync(
+    new URL("../infra/postgres/064_steam_depot_finalizer_host_activations.sql", import.meta.url), "utf8",
+  );
+  assert.match(migration, /CREATE TABLE deviludo\.steam_depot_finalizer_active_claims/);
+  assert.match(migration, /AFTER INSERT OR UPDATE ON deviludo\.steam_depot_finalization_operations/);
+  assert.match(migration, /SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, deviludo/);
+  assert.doesNotMatch(migration.match(/CREATE TABLE deviludo\.steam_depot_finalizer_active_claims \([\s\S]*?\n\);/)?.[0] ?? "", /tenant_id|operation_key/);
+  assert.match(migration, /REVOKE ALL ON TABLE deviludo\.steam_depot_finalizer_host_activation_operations FROM PUBLIC/);
+  assert.match(migration, /host_certificate_fingerprint/);
+  assert.match(migration, /steam_depot_finalizer_one_active_host_activation/);
+  assert.match(migration, /state IN \('DRAINING', 'ACTIVATION_AUTHORIZED'\)/);
+  assert.match(migration, /steam_depot_finalizer_host_activation_grants_append_only/);
+  assert.match(migration, /steam_depot_finalizer_host_activation_results_append_only/);
+  assert.doesNotMatch(migration, /api_key|password|secret_ref|private_key/i);
+});
+
 test("new AgentRun rows require database-enforced version and Adapter attestations", () => {
   const migration = readFileSync(new URL("../infra/postgres/060_agent_run_version_attestations.sql", import.meta.url), "utf8");
   assert.match(migration, /agent_version_attestation_required boolean/);

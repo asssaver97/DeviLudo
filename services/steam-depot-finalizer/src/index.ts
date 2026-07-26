@@ -1,6 +1,8 @@
 export * from "./contract";
 export * from "./contracts";
 export * from "./host-activation";
+export * from "./host-activation-ingress";
+export * from "./postgres-host-activations";
 export * from "./ingress-http";
 export * from "./locked-native-finalizer";
 export * from "./locked-platform-signer";
@@ -10,6 +12,7 @@ export * from "./native-controller-release";
 export * from "./operation-memory";
 export * from "./postgres-operations";
 export * from "./run-service";
+export * from "./run-host-activation-authority";
 export * from "./run-native-controller";
 export * from "./s3-artifact-store";
 export * from "./service";

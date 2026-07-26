@@ -61,7 +61,9 @@ export async function verifySteamDepotFinalizerHostActuation(options, dependenci
   if (!plainRecord(options) || !absolute(options.planPath) || !absolute(options.transactionPath)
     || !absolute(options.activationGrantPath) || !absolute(options.outputPath) || !SHA256.test(options.planDigest)
     || !SHA256.test(options.transactionDigest) || typeof options.keyId !== "string" || !SAFE_ID.test(options.keyId)
-    || !options.publicKey || !(now instanceof Date) || !Number.isFinite(now.valueOf())) invalid();
+    || !options.publicKey || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(options.hostId)
+    || !validSpiffeId(options.hostSpiffeId) || !SHA256.test(options.hostCertificateFingerprint)
+    || !(now instanceof Date) || !Number.isFinite(now.valueOf())) invalid();
   const [planValue, transactionValue, grantValue, replayReceipt, journal, failure] = await Promise.all([
     readJson(options.planPath), readJson(options.transactionPath), readJson(options.activationGrantPath),
     readJsonIfPresent(options.outputPath), readJsonIfPresent(`${options.outputPath}.journal`),
@@ -87,6 +89,8 @@ export async function verifySteamDepotFinalizerHostActuation(options, dependenci
     now,
     allowExpired: replayReceipt !== null || journal !== null || failure !== null,
   });
+  if (grant.payload.hostId !== options.hostId || grant.payload.hostSpiffeId !== options.hostSpiffeId
+    || grant.payload.hostCertificateFingerprint !== options.hostCertificateFingerprint) invalid();
   assertGrantBinding(plan, transaction, grant, options.outputPath);
   return deepFreeze({
     plan,
@@ -390,6 +394,9 @@ function createReceipt(transaction, grant, previousDefinition, completedAt, fail
     state: failureDigest === null ? "ACTIVATED" : "ROLLED_BACK",
     operationId: grant.payload.operationId,
     grantSequence: grant.payload.grantSequence,
+    hostId: grant.payload.hostId,
+    hostSpiffeId: grant.payload.hostSpiffeId,
+    hostCertificateFingerprint: grant.payload.hostCertificateFingerprint,
     transactionDigest: transaction.transactionDigest,
     planDigest: transaction.planDigest,
     stagingReceiptDigest: transaction.stagingReceiptDigest,
@@ -404,12 +411,14 @@ function createReceipt(transaction, grant, previousDefinition, completedAt, fail
 }
 function validateReceipt(value, transaction, grant) {
   if (!plainRecord(value) || !exactKeys(value, [
-    "architecture", "completedAt", "failureDigest", "grantSequence", "operationId", "planDigest", "platform",
-    "previousDefinitionDigest", "receiptDigest", "releaseId", "schemaVersion", "stagingReceiptDigest", "state",
-    "transactionDigest",
+    "architecture", "completedAt", "failureDigest", "grantSequence", "hostCertificateFingerprint", "hostId",
+    "hostSpiffeId", "operationId", "planDigest", "platform", "previousDefinitionDigest", "receiptDigest",
+    "releaseId", "schemaVersion", "stagingReceiptDigest", "state", "transactionDigest",
   ]) || value.schemaVersion !== "deviludo.steam-depot-finalizer-host-actuation-receipt.v1"
     || value.state !== "ACTIVATED" && value.state !== "ROLLED_BACK" || value.operationId !== grant.payload.operationId
     || value.grantSequence !== grant.payload.grantSequence || value.transactionDigest !== transaction.transactionDigest
+    || value.hostId !== grant.payload.hostId || value.hostSpiffeId !== grant.payload.hostSpiffeId
+    || value.hostCertificateFingerprint !== grant.payload.hostCertificateFingerprint
     || value.planDigest !== transaction.planDigest || value.stagingReceiptDigest !== transaction.stagingReceiptDigest
     || value.releaseId !== transaction.releaseId || value.platform !== transaction.platform
     || value.architecture !== transaction.architecture || !nullableDigest(value.previousDefinitionDigest)
@@ -485,7 +494,14 @@ async function trustAnchorFromEnvironment(env = process.env) {
   const bytes = await readBytes(path, 16 * 1024); let publicKey;
   try { publicKey = createPublicKey(bytes); } catch { invalid(); }
   if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") invalid();
-  return Object.freeze({ keyId, publicKey });
+  const hostId = requiredEnvironment(env, "DEVILUDO_STEAM_DEPOT_FINALIZER_HOST_ID");
+  const hostSpiffeId = requiredEnvironment(env, "DEVILUDO_STEAM_DEPOT_FINALIZER_HOST_SPIFFE_ID");
+  const hostCertificateFingerprint = requiredEnvironment(
+    env, "DEVILUDO_STEAM_DEPOT_FINALIZER_HOST_CERTIFICATE_FINGERPRINT",
+  );
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(hostId) || !validSpiffeId(hostSpiffeId)
+    || !SHA256.test(hostCertificateFingerprint)) invalid();
+  return Object.freeze({ keyId, publicKey, hostId, hostSpiffeId, hostCertificateFingerprint });
 }
 async function readBytes(path, maximum) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -521,6 +537,11 @@ function requiredAbsoluteEnvironment(env, name) { const value = requiredEnvironm
 function without(value, key) { const result = { ...value }; delete result[key]; return result; }
 function nullableDigest(value) { return value === null || typeof value === "string" && SHA256.test(value); }
 function canonicalTimestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
+function validSpiffeId(value) {
+  if (typeof value !== "string" || value.length < 12 || value.length > 512 || /[?#\0\s]/.test(value)) return false;
+  try { const url = new URL(value); return url.protocol === "spiffe:" && Boolean(url.hostname) && url.pathname !== "/"
+    && !url.username && !url.password && !url.port; } catch { return false; }
+}
 function exactKeys(value, expected) { return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort()); }
 function absolute(value) { return typeof value === "string" && isAbsolute(value) && resolve(value) === value && value.length <= 4_096 && !/[\0\r\n]/.test(value); }
 function requiredAbsolute(value) { if (!absolute(value)) invalid(); return value; }
