@@ -188,7 +188,11 @@ the request is re-read and claimed by a fenced Worker transaction. Retryable
 executor failures use capped exponential delay, and process loss is recovered
 from `PENDING` or an expired `RUNNING` lease rather than an in-memory message.
 
-The isolated executor image starts with `npm run start:steam-workflow-executor`.
+The isolated executor image is built only through
+`npm run image:build-steam-workflow-executor` as documented in
+[`docs/steam-workflow-executor-image.md`](../../docs/steam-workflow-executor-image.md).
+Repository source may be exercised with `npm run start:steam-workflow-executor`,
+but production uses the fixed non-root container entrypoint.
 It composes an audited, digest-pinned native publisher, tenant-RLS PostgreSQL
 authority, checksum-verifying immutable S3 reads, an mTLS platform-native depot
 finalizer and an mTLS Vault/KMS RC signer with `steamWorkflowWorkerFromEnv()`.

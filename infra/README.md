@@ -225,6 +225,16 @@ the resulting single-file bundle directly. It verifies its own bytes, build
 receipt and distinct Ed25519 release before creating any external client. See
 [`docs/agent-execution-worker-native-release.md`](../docs/agent-execution-worker-native-release.md).
 
+## Steam Workflow Executor image boundary
+
+The irreversible Steam workflow executor is excluded from the shared control
+image. Build its dedicated non-root image only with
+`image:build-steam-workflow-executor`; its immutable receipt binds the pushed
+Registry digest, exact Node base, source, Dockerfile and lockfile plus maximum
+BuildKit provenance and SBOM. The image deliberately omits SteamCMD, the native
+publisher, `config.vdf` and credentials; those remain separate read-only runtime
+inputs. See [`docs/steam-workflow-executor-image.md`](../docs/steam-workflow-executor-image.md).
+
 ## Artifact Preparer image boundary
 
 Runner source input preparation is not admitted to the shared control image.

@@ -20,6 +20,7 @@
     "db:adopt-local": "node scripts/production/migrate-postgres.mjs --adopt-existing",
     "image:build-control": "node scripts/production/build-control-plane-image.mjs",
     "image:build-artifact-preparer": "node scripts/production/build-artifact-preparer-image.mjs",
+    "image:build-steam-workflow-executor": "node scripts/production/build-steam-workflow-executor-image.mjs",
     "lock:artifact-preparer-runtime": "node scripts/production/lock-artifact-preparer-runtime.mjs",
     "inspect:artifact-preparer-release-trust": "node scripts/production/inspect-artifact-preparer-release-trust-policy.mjs",
     "authorize:artifact-preparer": "node scripts/production/authorize-artifact-preparer-release.mjs",
