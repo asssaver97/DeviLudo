@@ -300,7 +300,11 @@ let specSidecarKey;
 try {
   const health = await waitForHealth(baseUrl);
   if (!Array.isArray(health.payload.dependencies?.activeProviderBindings)
-    || !new Set(["VERIFIED", "PARTIAL", "BLOCKED"]).has(health.payload.dependencies?.activeProviderBinding)) {
+    || !new Set(["VERIFIED", "PARTIAL", "BLOCKED"]).has(health.payload.dependencies?.activeProviderBinding)
+    || !new Set(["READY", "PARTIAL", "BLOCKED"]).has(health.payload.dependencies?.agentProfileExecution)
+    || health.payload.dependencies.activeProviderBindings.some((binding) =>
+      !new Set(["PRIMARY", "FALLBACK", "PRIMARY_AND_FALLBACK"]).has(binding?.selectionRole)
+      || !new Set(["READY", "VERSION_MISMATCH", "UNAVAILABLE"]).has(binding?.runtimeState))) {
     throw new Error("local health does not expose exact per-Profile Provider binding status");
   }
   let agentSidecarKey;

@@ -49,6 +49,8 @@ export type LocalAgentBindingCandidate = Readonly<{
   providerRevisionId: string;
   profileRevisionId: string;
   credentialVersionId: string;
+  selectionRole: "PRIMARY" | "FALLBACK" | "PRIMARY_AND_FALLBACK";
+  runtimeState: "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
   modelRoles: Readonly<{
     primaryModel: string;
     planningModel: string;
@@ -62,15 +64,18 @@ export type LocalProviderBindingHealth = Readonly<{
   version: string;
   providerRevisionId: string;
   profileRevisionId: string;
+  selectionRole: LocalAgentBindingCandidate["selectionRole"];
+  runtimeState: LocalAgentBindingCandidate["runtimeState"];
   state: "VERIFIED" | "BLOCKED";
 }>;
 
 export type LocalProviderBindingSummary = "VERIFIED" | "PARTIAL" | "BLOCKED";
+export type LocalAgentProfileExecutionSummary = "READY" | "PARTIAL" | "BLOCKED";
 
 /**
- * Verifies every runnable immutable Profile binding independently. A passing
- * Claude binding must never hide a missing Codex binding (or another Profile
- * of the same Agent) in the public localhost health projection.
+ * Verifies every selected immutable primary/fallback Profile binding
+ * independently. Provider verification remains visible even when that exact
+ * CLI version is not installed, so one executable path cannot hide another.
  */
 export async function inspectLocalProviderBindings(
   candidates: readonly LocalAgentBindingCandidate[],
@@ -87,6 +92,8 @@ export async function inspectLocalProviderBindings(
       version: candidate.version,
       providerRevisionId: candidate.providerRevisionId,
       profileRevisionId: candidate.profileRevisionId,
+      selectionRole: candidate.selectionRole,
+      runtimeState: candidate.runtimeState,
       state: active ? "VERIFIED" as const : "BLOCKED" as const,
     });
   }));
@@ -99,6 +106,15 @@ export function summarizeLocalProviderBindings(
   const verified = bindings.filter((binding) => binding.state === "VERIFIED").length;
   if (bindings.length > 0 && verified === bindings.length) return "VERIFIED";
   if (verified > 0) return "PARTIAL";
+  return "BLOCKED";
+}
+
+export function summarizeLocalAgentProfileExecutions(
+  bindings: readonly LocalProviderBindingHealth[],
+): LocalAgentProfileExecutionSummary {
+  const ready = bindings.filter((binding) => binding.state === "VERIFIED" && binding.runtimeState === "READY").length;
+  if (bindings.length > 0 && ready === bindings.length) return "READY";
+  if (ready > 0) return "PARTIAL";
   return "BLOCKED";
 }
 
@@ -129,9 +145,13 @@ export function reconcileLocalAgentHealth(
   });
   return Object.freeze({
     agents: Object.freeze(agents),
-    bindingCandidates: Object.freeze(catalog.bindings.filter((binding) =>
-      agents.some((agent) => agent.agent === binding.agent
-        && agent.state === "READY" && agent.observedVersion === binding.version))),
+    bindingCandidates: Object.freeze(catalog.bindings.map((binding) => {
+      const observed = agents.find((agent) => agent.agent === binding.agent)?.observedVersion ?? null;
+      const runtimeState = observed === null
+        ? "UNAVAILABLE" as const
+        : observed === binding.version ? "READY" as const : "VERSION_MISMATCH" as const;
+      return Object.freeze({ ...binding, runtimeState });
+    })),
     catalogVerified: catalog.verified,
     probeVerified: normalized.verified,
   });
@@ -140,7 +160,7 @@ export function reconcileLocalAgentHealth(
 export function isLocalDevelopmentWorkerReady(
   probe: LocalAgentRuntimeProbe,
   reconciliation: LocalAgentHealthReconciliation,
-  activeProviderBindingVerified: boolean,
+  providerBindings: readonly LocalProviderBindingHealth[],
 ): boolean {
   return probe.service === "deviludo-local-agent-runtime"
     && probe.executionEnabled === true
@@ -149,20 +169,25 @@ export function isLocalDevelopmentWorkerReady(
     && probe.workerImageVerified === true
     && reconciliation.catalogVerified
     && reconciliation.probeVerified
-    && activeProviderBindingVerified
-    && reconciliation.agents.some((agent) => agent.state === "READY");
+    && providerBindings.some((binding) => binding.state === "VERIFIED" && binding.runtimeState === "READY");
 }
+
+type ConfiguredLocalAgentBinding = Readonly<Omit<LocalAgentBindingCandidate, "runtimeState">>;
 
 function effectiveVersions(store: DemoStoreState): Readonly<{
   versions: Readonly<Record<AgentKind, readonly string[]>>;
-  bindings: readonly LocalAgentBindingCandidate[];
+  bindings: readonly ConfiguredLocalAgentBinding[];
   verified: boolean;
 }> {
   const versions: Record<AgentKind, Set<string>> = {
     "claude-code": new Set<string>(),
     "codex-cli": new Set<string>(),
   };
-  const bindings = new Map<string, LocalAgentBindingCandidate>();
+  const bindings = new Map<string, {
+    binding: Omit<ConfiguredLocalAgentBinding, "selectionRole">;
+    primary: boolean;
+    fallback: boolean;
+  }>();
   const entries = Object.entries(store.defaults);
   let verified = entries.length > 0 && typeof store.defaults.platform === "string";
   for (const [scope, profileId] of entries) {
@@ -171,19 +196,8 @@ function effectiveVersions(store: DemoStoreState): Readonly<{
       continue;
     }
     const profile = store.profiles.find((candidate) => candidate.id === profileId);
-    const installation = profile
-      ? store.installations.find((candidate) => candidate.id === profile.installationId)
-      : undefined;
-    const provider = profile
-      ? store.providers.find((candidate) => candidate.id === profile.providerRevisionId)
-      : undefined;
-    if (!profile || profile.state !== "ACTIVE"
-      || !installation || !provider
-      || installation.agent !== profile.agent || provider.agent !== profile.agent
-      || provider.state !== "ACTIVE"
-      || provider.credentialVersionId !== profile.credentialVersionId
-      || !providerProbePassed(provider.probe)
-      || !installationServing(store, installation)) {
+    const primary = profile ? servingBinding(store, profile) : null;
+    if (!profile || !primary) {
       verified = false;
       continue;
     }
@@ -191,23 +205,80 @@ function effectiveVersions(store: DemoStoreState): Readonly<{
       verified = false;
       continue;
     }
-    versions[profile.agent].add(installation.version);
-    bindings.set(profile.id, Object.freeze({
-      agent: profile.agent,
-      version: installation.version,
-      providerRevisionId: provider.id,
-      profileRevisionId: profile.id,
-      credentialVersionId: profile.credentialVersionId,
-      modelRoles: Object.freeze({ ...provider.models }),
-    }));
+    addBinding(bindings, primary, "PRIMARY");
+    versions[profile.agent].add(primary.version);
+
+    // Production freezes a fallback only when a project explicitly selected
+    // this primary Profile. Platform and tenant defaults do not implicitly
+    // authorize a fallback for every downstream project.
+    if (scope.startsWith("project:") && profile.fallbackProfileRevisionId) {
+      const fallbackProfile = store.profiles.find((candidate) => candidate.id === profile.fallbackProfileRevisionId);
+      const fallback = fallbackProfile ? servingBinding(store, fallbackProfile) : null;
+      if (!fallbackProfile || fallbackProfile.id === profile.id || !fallback
+        || fallbackProfile.agent !== profile.agent
+        || fallbackProfile.scope !== profile.scope || fallbackProfile.scopeId !== profile.scopeId) {
+        verified = false;
+        continue;
+      }
+      addBinding(bindings, fallback, "FALLBACK");
+      versions[fallbackProfile.agent].add(fallback.version);
+    }
   }
   return Object.freeze({
     versions: Object.freeze({
       "claude-code": Object.freeze([...versions["claude-code"]].sort()),
       "codex-cli": Object.freeze([...versions["codex-cli"]].sort()),
     }),
-    bindings: Object.freeze([...bindings.values()]),
+    bindings: Object.freeze([...bindings.values()].map(({ binding, primary, fallback }) => Object.freeze({
+      ...binding,
+      selectionRole: primary && fallback ? "PRIMARY_AND_FALLBACK" as const
+        : fallback ? "FALLBACK" as const : "PRIMARY" as const,
+    }))),
     verified,
+  });
+}
+
+function servingBinding(
+  store: DemoStoreState,
+  profile: DemoStoreState["profiles"][number],
+): Omit<ConfiguredLocalAgentBinding, "selectionRole"> | null {
+  const installation = store.installations.find((candidate) => candidate.id === profile.installationId);
+  const provider = store.providers.find((candidate) => candidate.id === profile.providerRevisionId);
+  if (profile.state !== "ACTIVE" || !installation || !provider
+    || installation.agent !== profile.agent || provider.agent !== profile.agent
+    || provider.state !== "ACTIVE"
+    || provider.credentialVersionId !== profile.credentialVersionId
+    || !providerProbePassed(provider.probe)
+    || !installationServing(store, installation)) return null;
+  return Object.freeze({
+    agent: profile.agent,
+    version: installation.version,
+    providerRevisionId: provider.id,
+    profileRevisionId: profile.id,
+    credentialVersionId: profile.credentialVersionId,
+    modelRoles: Object.freeze({ ...provider.models }),
+  });
+}
+
+function addBinding(
+  bindings: Map<string, {
+    binding: Omit<ConfiguredLocalAgentBinding, "selectionRole">;
+    primary: boolean;
+    fallback: boolean;
+  }>,
+  binding: Omit<ConfiguredLocalAgentBinding, "selectionRole">,
+  role: "PRIMARY" | "FALLBACK",
+): void {
+  const existing = bindings.get(binding.profileRevisionId);
+  if (existing) {
+    if (role === "PRIMARY") existing.primary = true;
+    else existing.fallback = true;
+    return;
+  }
+  bindings.set(binding.profileRevisionId, {
+    binding,
+    primary: role === "PRIMARY",
+    fallback: role === "FALLBACK",
   });
 }
 

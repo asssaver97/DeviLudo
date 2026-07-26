@@ -5,6 +5,7 @@ import {
   inspectLocalProviderBindings,
   isLocalDevelopmentWorkerReady,
   reconcileLocalAgentHealth,
+  summarizeLocalAgentProfileExecutions,
   summarizeLocalProviderBindings,
   type LocalAgentRuntimeProbe,
 } from "@/lib/admin/local-agent-health";
@@ -44,7 +45,7 @@ export async function GET(request: Request) {
       }),
     );
     const activeProviderBinding = summarizeLocalProviderBindings(activeProviderBindings);
-    const hasRunnableProviderBinding = activeProviderBindings.some((binding) => binding.state === "VERIFIED");
+    const agentProfileExecution = summarizeLocalAgentProfileExecutions(activeProviderBindings);
     return json({
       status: "ok",
       service: "deviludo-control-plane-preview",
@@ -55,7 +56,7 @@ export async function GET(request: Request) {
         d1: "READY",
         fixtureExecutor: localRuntime.status === "ok" ? "READY" : "NOT_CONNECTED",
         localGodot: localRuntime.godotVersion ?? null,
-        developmentWorker: isLocalDevelopmentWorkerReady(localAgentRuntime, agentHealth, hasRunnableProviderBinding) ? "READY" : "BLOCKED",
+        developmentWorker: isLocalDevelopmentWorkerReady(localAgentRuntime, agentHealth, activeProviderBindings) ? "READY" : "BLOCKED",
         localAgentRuntime: localAgentRuntime.status === "NOT_CONNECTED" ? "NOT_CONNECTED" : "CONNECTED",
         localAgents: agentHealth.agents,
         agentCatalogVerified: agentHealth.catalogVerified && agentHealth.probeVerified,
@@ -63,6 +64,7 @@ export async function GET(request: Request) {
         providerBindingProbe: localAgentRuntime.providerBindingProbe ?? "NOT_CONFIGURED",
         activeProviderBinding,
         activeProviderBindings,
+        agentProfileExecution,
         workerImageIdentity: localAgentRuntime.workerImageIdentity ?? null,
         expectedWorkerImageIdentity: localAgentRuntime.expectedWorkerImageIdentity ?? null,
         workerImageVerified: localAgentRuntime.workerImageVerified === true,

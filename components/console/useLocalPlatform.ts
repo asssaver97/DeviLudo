@@ -16,11 +16,14 @@ export type LocalHealth = {
     inferenceGateway?: string;
     providerBindingProbe?: string;
     activeProviderBinding?: "VERIFIED" | "PARTIAL" | "BLOCKED";
+    agentProfileExecution?: "READY" | "PARTIAL" | "BLOCKED";
     activeProviderBindings?: Array<{
       agent: "claude-code" | "codex-cli";
       version: string;
       providerRevisionId: string;
       profileRevisionId: string;
+      selectionRole: "PRIMARY" | "FALLBACK" | "PRIMARY_AND_FALLBACK";
+      runtimeState: "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
       state: "VERIFIED" | "BLOCKED";
     }>;
     workerImageIdentity?: string | null;
