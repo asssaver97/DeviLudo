@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { LocalAgentReadiness, LocalHealth } from "@/components/console/useLocalPlatform";
@@ -164,23 +165,29 @@ const tabs: { id: TabId; label: string }[] = [
   { id: "audit", label: "健康与审计" },
 ];
 
-const navGroups: { label: string; items: { label: string; icon: AdminIconName; active?: boolean; badge?: string }[] }[] = [
+type AdminNavItem = {
+  label: string;
+  icon: AdminIconName;
+  badge?: string;
+} & ({ kind: "route"; href: string } | { kind: "tab"; tab: TabId });
+
+const navGroups: { label: string; items: AdminNavItem[] }[] = [
   {
     label: "工作空间",
     items: [
-      { label: "运行概览", icon: "activity" },
-      { label: "项目", icon: "projects" },
-      { label: "构建与测试", icon: "runners" },
-      { label: "发行", icon: "releases" },
+      { label: "运行概览", icon: "activity", kind: "route", href: "/" },
+      { label: "项目", icon: "projects", kind: "route", href: "/projects" },
+      { label: "构建与测试", icon: "runners", kind: "route", href: "/runners" },
+      { label: "发行", icon: "releases", kind: "route", href: "/evidence" },
     ],
   },
   {
     label: "平台治理",
     items: [
-      { label: "Agents", icon: "agents", active: true },
-      { label: "凭据与策略", icon: "shield" },
-      { label: "审计日志", icon: "audit" },
-      { label: "平台设置", icon: "settings" },
+      { label: "Agents", icon: "agents", kind: "route", href: "/admin/agents" },
+      { label: "凭据与策略", icon: "shield", kind: "route", href: "/settings/agents" },
+      { label: "审计日志", icon: "audit", kind: "tab", tab: "audit" },
+      { label: "平台设置", icon: "settings", kind: "route", href: "/settings/connections" },
     ],
   },
 ];
@@ -563,13 +570,22 @@ export default function AgentAdminDashboard() {
           {navGroups.map((group) => (
             <div className={styles.navGroup} key={group.label}>
               <div className={styles.navLabel}>{group.label}</div>
-              {group.items.map((item) => (
-                <button className={`${styles.navItem} ${item.active ? styles.navItemActive : ""}`} key={item.label} type="button">
-                  <AdminIcon name={item.icon} />
-                  <span>{item.label}</span>
-                  {item.badge && <em>{item.badge}</em>}
-                </button>
-              ))}
+              {group.items.map((item) => {
+                const content = <><AdminIcon name={item.icon} /><span>{item.label}</span>{item.badge && <em>{item.badge}</em>}</>;
+                const active = item.kind === "tab" ? item.tab === activeTab : item.href === "/admin/agents" && activeTab !== "audit";
+                const className = `${styles.navItem} ${active ? styles.navItemActive : ""}`;
+                if (item.kind === "route") return (
+                  <Link aria-current={active ? "page" : undefined} className={className} href={item.href} key={item.label}>
+                    {content}
+                  </Link>
+                );
+                const targetTab = item.tab;
+                return (
+                  <button aria-current={active ? "page" : undefined} className={className} key={item.label} onClick={() => setActiveTab(targetTab)} type="button">
+                    {content}
+                  </button>
+                );
+              })}
             </div>
           ))}
         </nav>

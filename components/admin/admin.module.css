@@ -124,6 +124,7 @@
   cursor: pointer;
   padding: 0 10px;
   text-align: left;
+  text-decoration: none;
 }
 
 .navItem svg {

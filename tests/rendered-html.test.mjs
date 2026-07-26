@@ -34,6 +34,12 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.match(adminHtml, /Claude Code/);
   assert.match(adminHtml, /Codex CLI/);
   assert.match(adminHtml, /正在读取权威 Agent 目录/);
+  assert.match(adminHtml, /href="\/"[^>]*>[^<]*<svg[^>]*>.*运行概览/s);
+  assert.match(adminHtml, /href="\/projects"[^>]*>.*项目/s);
+  assert.match(adminHtml, /href="\/runners"[^>]*>.*构建与测试/s);
+  assert.match(adminHtml, /href="\/evidence"[^>]*>.*发行/s);
+  assert.match(adminHtml, /href="\/settings\/agents"[^>]*>.*凭据与策略/s);
+  assert.match(adminHtml, /href="\/settings\/connections"[^>]*>.*平台设置/s);
   assert.doesNotMatch(adminHtml, /2\.1\.14|0\.91\.0|326 组件|411 组件|最后发现：2 分钟前/);
 
   const project = await request("/projects/ember-archipelago", { headers: { accept: "text/html" } });
