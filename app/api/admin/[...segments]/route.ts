@@ -7,6 +7,11 @@ import {
 } from "@/lib/agent/adapter-registry";
 import { AGENT_REGISTRY, AGENT_REGISTRY_SCHEMA_VERSION } from "@/lib/agent/registry";
 import { localWorkerImageDigest } from "@/lib/agent/local-worker-identity";
+import {
+  commitLocalCredentialRotation,
+  planLocalCredentialRotation,
+  type LocalCredentialRotationStage,
+} from "@/lib/admin/local-credential-rotation";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
 import {
@@ -1162,6 +1167,10 @@ export async function POST(request: Request, context: RouteContext) {
       }
       let replacementFingerprint: `sha256:${string}` | null = null;
       let replacementSecretRef: string | null = null;
+      let rotationStage: LocalCredentialRotationStage | null = null;
+      let replacementId: string | null = null;
+      const providerProbes = new Map<string, Readonly<Record<string, "PASS">>>();
+      let replacementStoredLocally = false;
       if (action === "rotate") {
         const replacement = requireString(body, "apiKey", 8192);
         if (replacement.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Replacement credential must be at least 8 characters");
@@ -1169,16 +1178,21 @@ export async function POST(request: Request, context: RouteContext) {
         const activeProviderIds = new Set(localStore.providers
           .filter((provider) => provider.credentialVersionId === credentialId && provider.state === "ACTIVE")
           .map((provider) => provider.id));
-        if (localStore.profiles.some((profile) => profile.state === "ACTIVE" && activeProviderIds.has(profile.providerRevisionId))) {
+        const activeProviderProfiles = localStore.profiles
+          .filter((profile) => profile.state === "ACTIVE" && activeProviderIds.has(profile.providerRevisionId));
+        if (activeProviderProfiles.length > 0 && !localProviderControlRequired()) {
           throw new HttpProblem(
             503,
             "PROVIDER_PROBE_NOT_CONFIGURED",
-            "本地测试站不会为生效 Provider 伪造新 Key 探针；当前凭据和默认 Profile 保持不变",
+            "本地测试站没有受信 Provider Connector，不能为生效 Provider 轮换 Key；当前凭据和默认 Profile 保持不变",
           );
         }
         if (authorizedCredential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
-        const nextVersion = authorizedCredential.version + 1;
-        const replacementId = authorizedCredential.id.replace(/-v\d+$/, `-v${nextVersion}`);
+        const nextVersion = Math.max(authorizedCredential.version, ...localStore.credentials
+          .filter((credential) => credential.familyId === authorizedCredential.familyId)
+          .map((credential) => credential.version)) + 1;
+        replacementId = `${authorizedCredential.familyId}-v${nextVersion}`;
+        rotationStage = await planLocalCredentialRotation(localStore, authorizedCredential, replacementId);
         const bytes = new TextEncoder().encode(replacement);
         try {
           replacementFingerprint = await fingerprintSecret(bytes);
@@ -1188,72 +1202,101 @@ export async function POST(request: Request, context: RouteContext) {
           if (localProviderControlRequired()) {
             const receipt = await putLocalProviderCredential(replacementId, replacement, replacementFingerprint);
             replacementSecretRef = receipt.secretRef;
+            replacementStoredLocally = true;
           } else {
-            replacementSecretRef = authorizedCredential.secretRef.replace(/#\d+$/, `#${nextVersion}`);
+            replacementSecretRef = `${authorizedCredential.secretRef.replace(/#\d+$/, "")}#${nextVersion}`;
           }
         } finally {
           bytes.fill(0);
           body.apiKey = "[DESTROYED_AFTER_VAULT_INGRESS]";
         }
+        if (rotationStage.bindings.length > 0) {
+          try {
+            await prepareLocalCredentialRotation(rotationStage, providerProbes);
+          } catch (error) {
+            await cleanupLocalCredentialRotation(rotationStage, replacementStoredLocally).catch(() => undefined);
+            throw error;
+          }
+        }
       } else if (localProviderControlRequired()) {
         await revokeLocalProviderCredential(credentialId);
       }
-      return await mutate(lease, operationId, () => {
-        const store = getDemoStore();
-        const credential = store.credentials.find((item) => item.id === credentialId);
-        if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
-        assertLocalCredentialActor(actor, credential);
-        if (action === "revoke") {
-          const previousState = credential.state;
-          credential.state = "REVOKED";
-          const affectedProviderIds = new Set(store.providers
-            .filter((provider) => provider.credentialVersionId === credential.id)
-            .map((provider) => {
-              provider.state = "DISABLED";
-              provider.probe = {};
-              return provider.id;
-            }));
-          let degradedProfiles = 0;
-          for (const profile of store.profiles) {
-            if (affectedProviderIds.has(profile.providerRevisionId) && profile.state === "ACTIVE") {
-              profile.state = "DEGRADED";
-              degradedProfiles += 1;
+      try {
+        return await mutate(lease, operationId, () => {
+          const store = getDemoStore();
+          const credential = store.credentials.find((item) => item.id === credentialId);
+          if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+          assertLocalCredentialActor(actor, credential);
+          if (action === "revoke") {
+            const previousState = credential.state;
+            credential.state = "REVOKED";
+            const affectedProviderIds = new Set(store.providers
+              .filter((provider) => provider.credentialVersionId === credential.id)
+              .map((provider) => {
+                provider.state = "DISABLED";
+                provider.probe = {};
+                return provider.id;
+              }));
+            let degradedProfiles = 0;
+            for (const profile of store.profiles) {
+              if (affectedProviderIds.has(profile.providerRevisionId) && profile.state === "ACTIVE") {
+                profile.state = "DEGRADED";
+                degradedProfiles += 1;
+              }
             }
+            appendDemoAudit("CREDENTIAL_REVOKE", credential.id, actor.actorId, {
+              previousState, state: credential.state, newTokensIssued: false, degradedProfiles,
+            });
+            return { id: credential.id, state: credential.state, newTokensIssued: false, degradedProfiles, plaintextRecoverable: false };
           }
-          appendDemoAudit("CREDENTIAL_REVOKE", credential.id, actor.actorId, {
-            previousState, state: credential.state, newTokensIssued: false, degradedProfiles,
+          if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
+          if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
+          if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
+          if (!replacementSecretRef) throw new HttpProblem(500, "CREDENTIAL_STORE_RECEIPT_MISSING", "Credential store receipt is missing");
+          const rotatedAt = new Date().toISOString();
+          const nextVersion = Math.max(credential.version, ...store.credentials
+            .filter((candidate) => candidate.familyId === credential.familyId)
+            .map((candidate) => candidate.version)) + 1;
+          const replacement = {
+            ...credential,
+            id: replacementId ?? `${credential.familyId}-v${nextVersion}`,
+            secretRef: replacementSecretRef,
+            fingerprint: replacementFingerprint,
+            masked: maskFingerprint(replacementFingerprint),
+            version: nextVersion,
+            state: "ACTIVE" as const,
+            createdAt: rotatedAt,
+            rotatedAt,
+          };
+          const rotation = commitLocalCredentialRotation(
+            store,
+            rotationStage ?? { credentialId: credential.id, replacementId: replacement.id, bindings: [], providers: [] },
+            authorizedCredential,
+            replacement,
+            providerProbes,
+          );
+          appendDemoAudit("CREDENTIAL_ROTATE", credential.id, actor.actorId, {
+            replacementVersionId: replacement.id, rotatedAt, newTasksOnly: true,
+            successorProfileCount: rotation.successorProfileRevisionIds.length,
+            successorProviderCount: rotation.successorProviderRevisionIds.length,
+            reboundDefaultCount: rotation.reboundDefaultCount,
+            degradedProfileCount: rotation.degradedProfileCount,
+            providerProbeVerified: rotation.successorProviderRevisionIds.length > 0,
           });
-          return { id: credential.id, state: credential.state, newTokensIssued: false, degradedProfiles, plaintextRecoverable: false };
-        }
-        if (credential.state !== "ACTIVE") throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can be rotated");
-        if (!replacementFingerprint) throw new HttpProblem(400, "REPLACEMENT_REQUIRED", "Rotation requires new credential material");
-        if (replacementFingerprint === credential.fingerprint) throw new HttpProblem(409, "CREDENTIAL_REUSED", "Replacement credential must differ from the active version");
-        if (!replacementSecretRef) throw new HttpProblem(500, "CREDENTIAL_STORE_RECEIPT_MISSING", "Credential store receipt is missing");
-        const rotatedAt = new Date().toISOString();
-        credential.state = "PREVIOUS";
-        credential.rotatedAt = rotatedAt;
-        const nextVersion = credential.version + 1;
-        const replacement = {
-          ...credential,
-          id: credential.id.replace(/-v\d+$/, `-v${nextVersion}`),
-          secretRef: replacementSecretRef,
-          fingerprint: replacementFingerprint,
-          masked: maskFingerprint(replacementFingerprint),
-          version: nextVersion,
-          state: "ACTIVE" as const,
-          createdAt: rotatedAt,
-          rotatedAt,
-        };
-        store.credentials.push(replacement);
-        appendDemoAudit("CREDENTIAL_ROTATE", credential.id, actor.actorId, {
-          replacementVersionId: replacement.id, rotatedAt, newTasksOnly: true,
+          return {
+            id: replacement.id, previousId: credential.id, state: replacement.state,
+            fingerprint: replacement.masked, rotatedAt, newTokensIssued: true,
+            oldVersionNoLongerIssued: true, plaintextRecoverable: false,
+            successorProfileRevisionIds: rotation.successorProfileRevisionIds,
+            reboundDefaultCount: rotation.reboundDefaultCount,
+          };
         });
-        return {
-          id: replacement.id, previousId: credential.id, state: replacement.state,
-          fingerprint: replacement.masked, rotatedAt, newTokensIssued: true,
-          oldVersionNoLongerIssued: true, plaintextRecoverable: false,
-        };
-      });
+      } catch (error) {
+        if (action === "rotate" && rotationStage && replacementStoredLocally) {
+          await cleanupLocalCredentialRotation(rotationStage, true).catch(() => undefined);
+        }
+        throw error;
+      }
     }
 
     if (/^inference-requests\/[a-f0-9-]+\/reconcile$/i.test(key)) {
@@ -1462,6 +1505,74 @@ function demoProviderProbePassed(provider: DemoProvider): boolean {
 function demoFixtureProviderCredential(provider: DemoProvider): boolean {
   return (provider.id === "provider-claude-platform-r3" && provider.credentialVersionId === "cred-claude-platform-v4")
     || (provider.id === "provider-codex-platform-r2" && provider.credentialVersionId === "cred-codex-platform-v2");
+}
+
+async function prepareLocalCredentialRotation(
+  stage: LocalCredentialRotationStage,
+  probes: Map<string, Readonly<Record<string, "PASS">>>,
+): Promise<void> {
+  for (const binding of stage.bindings) {
+    if (binding.rotatesCredential) {
+      const provider = binding.successorProvider;
+      if (!provider) {
+        throw new HttpProblem(409, "CREDENTIAL_ROTATION_RACE", "Credential rotation Provider successor is missing");
+      }
+      const checks = await probeLocalProvider({
+        providerRevisionId: provider.id,
+        agent: provider.agent,
+        protocol: provider.protocol,
+        baseUrl: provider.baseUrl,
+        approvedPorts: provider.approvedPorts,
+        authentication: provider.authentication,
+        models: provider.models,
+        credentialVersionId: stage.replacementId,
+        requiredChecks: PROVIDER_REQUIRED_CHECKS,
+      }, {
+        profileRevisionId: binding.successorProfile.id,
+        scope: binding.successorProfile.scope,
+        scopeId: binding.successorProfile.scopeId,
+        pricing: provider.pricing,
+      });
+      const previous = probes.get(provider.id);
+      if (previous && JSON.stringify(previous) !== JSON.stringify(checks)) {
+        throw new HttpProblem(502, "PROVIDER_PROBE_RECEIPT_INVALID", "Provider probe receipts disagree across Profile bindings");
+      }
+      probes.set(provider.id, checks);
+      await activateLocalProviderBinding({
+        providerRevisionId: provider.id,
+        profileRevisionId: binding.successorProfile.id,
+        credentialVersionId: stage.replacementId,
+      });
+      continue;
+    }
+
+    await rebindLocalProviderBinding({
+      providerRevisionId: binding.sourceProvider.id,
+      sourceProfileRevisionId: binding.sourceProfile.id,
+      targetProfileRevisionId: binding.successorProfile.id,
+      credentialVersionId: binding.sourceProvider.credentialVersionId,
+      scope: binding.successorProfile.scope,
+      scopeId: binding.successorProfile.scopeId,
+    });
+    await activateLocalProviderBinding({
+      providerRevisionId: binding.sourceProvider.id,
+      profileRevisionId: binding.successorProfile.id,
+      credentialVersionId: binding.sourceProvider.credentialVersionId,
+    });
+  }
+}
+
+async function cleanupLocalCredentialRotation(
+  stage: LocalCredentialRotationStage,
+  revokeReplacement: boolean,
+): Promise<void> {
+  for (const binding of [...stage.bindings].reverse()) {
+    await disableLocalProviderBinding({
+      providerRevisionId: binding.successorProvider?.id ?? binding.sourceProvider.id,
+      profileRevisionId: binding.successorProfile.id,
+    }).catch(() => undefined);
+  }
+  if (revokeReplacement) await revokeLocalProviderCredential(stage.replacementId);
 }
 
 async function mutate<T>(lease: LocalAdminStateLease, idempotency: string, operation: () => T): Promise<Response> {

@@ -30,8 +30,10 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
   };
   const encodedKey = Buffer.alloc(32, 19).toString("base64url");
   let probed;
+  let failProbe = false;
   const providerControl = new LocalProviderControl({
     async run(value) {
+      if (failProbe) throw new Error("synthetic Provider probe failure");
       probed = value;
       return Object.freeze({
         providerRevisionId: value.providerRevisionId,
@@ -53,7 +55,14 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
       return jsonResponse(201, providerControl.putCredential(command));
     }
     if (url.pathname === "/v1/provider-probes") {
-      return jsonResponse(200, await providerControl.probe(command));
+      try {
+        return jsonResponse(200, await providerControl.probe(command));
+      } catch {
+        return new Response(JSON.stringify({ error: { code: "LOCAL_PROVIDER_PROBE_FAILED" } }), {
+          status: 422,
+          headers: { "content-type": "application/json" },
+        });
+      }
     }
     if (url.pathname === "/v1/provider-bindings/rebind") {
       return jsonResponse(200, providerControl.rebind(command));
@@ -150,14 +159,77 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
     assert.equal((await successorActivation.json()).data.profile.state, "ACTIVE");
     assert.equal(store.profiles.find((item) => item.id === profile.id)?.state, "ACTIVE");
 
-    const revokeResponse = await POST(command(`credentials/${credential.id}/revoke`, "SecurityAdmin", {}, "revoke"), context(`credentials/${credential.id}/revoke`));
+    store.defaults.platform = profile.id;
+    const rotatePath = `credentials/${credential.id}/rotate`;
+    const rotatedResponse = await POST(command(rotatePath, "SecurityAdmin", {
+      apiKey: "sk-connector-rotated-secret-material",
+    }, "rotate-active"), context(rotatePath));
+    assert.equal(rotatedResponse.status, 201);
+    const rotatedText = await rotatedResponse.text();
+    assert.equal(rotatedText.includes("sk-connector-rotated-secret-material"), false);
+    const rotation = JSON.parse(rotatedText).data;
+    assert.equal(rotation.previousId, credential.id);
+    assert.equal(rotation.successorProfileRevisionIds.length, 2);
+    assert.equal(rotation.reboundDefaultCount, 1);
+    assert.equal(store.credentials.find((item) => item.id === credential.id)?.state, "PREVIOUS");
+    assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "ACTIVE");
+    assert.equal(store.profiles.find((item) => item.id === profile.id)?.state, "SUPERSEDED");
+    assert.equal(store.profiles.find((item) => item.id === successor.id)?.state, "SUPERSEDED");
+    assert.equal(store.providers.find((item) => item.id === profile.providerRevisionId)?.state, "DISABLED");
+    const rotationProfiles = rotation.successorProfileRevisionIds
+      .map((id) => store.profiles.find((item) => item.id === id));
+    assert.equal(rotationProfiles.every((item) => item?.state === "ACTIVE"), true);
+    assert.equal(store.defaults.platform, rotationProfiles.find((item) => item?.revision === profile.revision + 1)?.id);
+    const rotationProvider = store.providers.find((item) => item.id === rotationProfiles[0]?.providerRevisionId);
+    assert.equal(rotationProvider?.state, "ACTIVE");
+    assert.equal(rotationProvider?.credentialVersionId, rotation.id);
+    assert.equal(providerControl.checkBinding({
+      providerRevisionId: rotationProvider.id,
+      profileRevisionId: rotationProfiles[0].id,
+      credentialVersionId: rotation.id,
+      agent: rotationProfiles[0].agent,
+      modelRoles: rotationProvider.models,
+    }).active, true);
+
+    const failedRotationPath = `credentials/${rotation.id}/rotate`;
+    failProbe = true;
+    const failedRotation = await POST(command(failedRotationPath, "SecurityAdmin", {
+      apiKey: "sk-connector-probe-failure-material",
+    }, "rotate-after-probe-failure"), context(failedRotationPath));
+    assert.equal(failedRotation.status, 422);
+    assert.equal((await failedRotation.json()).error.code, "PROVIDER_PROBE_FAILED");
+    assert.equal(store.credentials.filter((item) => item.familyId === credential.familyId).length, 2);
+    assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "ACTIVE");
+    assert.equal(store.defaults.platform, rotationProfiles.find((item) => item?.revision === profile.revision + 1)?.id);
+    assert.equal(rotationProfiles.every((item) => item?.state === "ACTIVE"), true);
+
+    failProbe = false;
+    const retryRotation = await POST(command(failedRotationPath, "SecurityAdmin", {
+      apiKey: "sk-connector-probe-failure-material",
+    }, "rotate-after-probe-failure"), context(failedRotationPath));
+    assert.equal(retryRotation.status, 201);
+    const retried = (await retryRotation.json()).data;
+    assert.equal(store.credentials.find((item) => item.id === rotation.id)?.state, "PREVIOUS");
+    assert.equal(store.credentials.find((item) => item.id === retried.id)?.state, "ACTIVE");
+    const credentialCountAfterRetry = store.credentials.length;
+    const replay = await POST(command(failedRotationPath, "SecurityAdmin", {
+      apiKey: "this-material-must-not-reach-the-sidecar",
+    }, "rotate-after-probe-failure"), context(failedRotationPath));
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json()).meta.idempotentReplay, true);
+    assert.equal(store.credentials.length, credentialCountAfterRetry);
+
+    const currentProfiles = retried.successorProfileRevisionIds
+      .map((id) => store.profiles.find((item) => item.id === id));
+    const revokeResponse = await POST(command(`credentials/${retried.id}/revoke`, "SecurityAdmin", {}, "revoke"), context(`credentials/${retried.id}/revoke`));
     assert.equal(revokeResponse.status, 201);
     assert.equal((await revokeResponse.json()).data.degradedProfiles, 2);
     const projection = await GET(new Request("http://127.0.0.1:3000/api/admin/agents", {
       headers: { "x-deviludo-role": "SecurityAdmin" },
     }), context("agents"));
     const current = await projection.json();
-    assert.equal(current.meta.profiles.find((item) => item.id === profile.id).state, "DEGRADED");
+    assert.equal(current.meta.profiles.find((item) => item.id === profile.id).state, "SUPERSEDED");
+    assert.equal(currentProfiles.every((item) => current.meta.profiles.find((profile) => profile.id === item.id).state === "DEGRADED"), true);
   } finally {
     providerControl.close();
     globalThis.fetch = previous.fetch;
