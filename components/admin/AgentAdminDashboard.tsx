@@ -690,6 +690,7 @@ function OverviewTab({ catalog, versions, installations, defaultAgent, localAgen
         <div><span>Inference Gateway</span><strong>{localHealth?.dependencies?.inferenceGateway === "CONFIGURED" ? "已配置" : "未配置"}</strong><small>长期 Key 不下发 Worker</small></div>
         <div><span>开发 Worker</span><strong>{workerReady ? "READY" : "BLOCKED"}</strong><small>{workerReady ? "镜像与执行门禁已满足" : localHealth?.dependencies?.workerIdentityMode === "LOCAL_DETERMINISTIC" ? "本机安装可校验，等待 Provider 与执行授权" : "等待版本、镜像与 Gateway"}</small></div>
       </div>
+      {localHealth?.dependencies?.agentCatalogVerified === false ? <div className={styles.permissionNotice}><AdminIcon name="shield" />生效默认 Profile 与版本、安装或 Provider 证据不一致；开发 Worker 已阻断。</div> : null}
 
       <section className={styles.section}>
         <SectionHeading title="Agent 目录" description="首版仅支持经平台签名的两种内置 Agent；每个 WorkerImage 只包含一种 Agent。" action={<button className={styles.textButton} type="button" onClick={() => onNavigate("versions")}>管理版本 <AdminIcon name="chevron" /></button>} />
@@ -1138,6 +1139,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
       <section className={styles.section}>
         <SectionHeading title="生效 Provider" description="每种 Agent 使用独立协议 Schema，不执行静默跨 Agent 切换。" />
         {localHealth?.dependencies?.providerBindingProbe !== "CONFIGURED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />下列为控制面配置快照；本机没有受信 Provider 绑定探针，不能用于 Agent 执行。</div> : null}
+        {localHealth?.dependencies?.providerBindingProbe === "CONFIGURED" && localHealth.dependencies.activeProviderBinding !== "VERIFIED" ? <div className={styles.permissionNotice}><AdminIcon name="shield" />安全连接器已就绪，但没有与生效 Profile、精确模型和凭据版本一致的 ACTIVE Provider 绑定；开发 Worker 保持阻断。</div> : null}
         {!permissions.editPlatformProvider ? <div className={styles.permissionNotice}><AdminIcon name="shield" />当前角色只能查看平台 Provider。租户和项目覆盖应在对应作用域页面配置。</div> : null}
         <div className={styles.providerRows}>
           {activeProviders.map(({ kind, provider }) => <button type="button" key={kind}

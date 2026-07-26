@@ -72,6 +72,13 @@ test("new Provider opens an explicit blank draft without mutating the active sna
   assert.match(source, /onNewDraftConsumed\(newDraftRequest\)/);
 });
 
+test("Agent console distinguishes Provider probe capability from an exact active binding", () => {
+  const source = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
+  assert.match(source, /providerBindingProbe === "CONFIGURED" && localHealth\.dependencies\.activeProviderBinding !== "VERIFIED"/);
+  assert.match(source, /没有与生效 Profile、精确模型和凭据版本一致的 ACTIVE Provider 绑定/);
+  assert.match(source, /agentCatalogVerified === false/);
+});
+
 test("Agent version discovery accepts an exact version and reuses the observed local CLI", () => {
   const source = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
 
