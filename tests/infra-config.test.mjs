@@ -60,6 +60,17 @@ test("Runner native upgrades require a database-authoritative zero-lease grant a
   assert.match(migration, /OLD\.state = 'ACTIVATION_AUTHORIZED'.*'ACTIVATED'.*'ROLLED_BACK'/s);
 });
 
+test("Agent microVM bootstrap image issuance is append-only, RLS-scoped and contains no credential columns", () => {
+  const migration = readFileSync(new URL("../infra/postgres/063_agent_microvm_credential_issuances.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE deviludo\.agent_microvm_credential_issuances/);
+  assert.match(migration, /request_digest char\(64\)/);
+  assert.match(migration, /native_request_digest char\(64\)/);
+  assert.match(migration, /image_digest char\(64\)/);
+  assert.match(migration, /agent_microvm_credential_issuance_append_only/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.doesNotMatch(migration, /(?:private_key|certificate|secret_ref|token_value|image_bytes)\s+(?:text|bytea)/i);
+});
+
 test("new AgentRun rows require database-enforced version and Adapter attestations", () => {
   const migration = readFileSync(new URL("../infra/postgres/060_agent_run_version_attestations.sql", import.meta.url), "utf8");
   assert.match(migration, /agent_version_attestation_required boolean/);

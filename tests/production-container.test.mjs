@@ -53,7 +53,8 @@ test("every process entrypoint is explicitly classified into the shared control 
   );
   assert.equal(new Set([...classification.control, ...classification.external]).size, Object.keys(SERVICE_ENTRYPOINTS).length);
   for (const service of [
-    "agent-execution-worker", "agent-microvm-guest", "agent-supply-chain", "physical-runner", "godot-testkit",
+    "agent-execution-worker", "agent-microvm-credential-issuer", "agent-microvm-guest", "agent-supply-chain",
+    "physical-runner", "godot-testkit",
     "steam-workflow-executor", "steam-depot-finalizer", "steam-client-connector", "web",
   ]) {
     assert.ok(EXTERNAL_WORKLOAD_SERVICES.includes(service));

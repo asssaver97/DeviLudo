@@ -359,7 +359,7 @@ tenant prefix but access is granted by signed manifests, not path secrecy.
 - `services/identity`: invitation issuance, GitHub OAuth/PKCE, tenant membership,
   revocable platform sessions and route-bound trusted assertions.
 - `db/schema.ts`: D1-backed hosted demo schema.
-- `infra/postgres/001_core.sql` through `062_runner_native_install_authorizations.sql`:
+- `infra/postgres/001_core.sql` through `063_agent_microvm_credential_issuances.sql`:
   production PostgreSQL/RLS, immutable bindings, activity claims, durable jobs,
   approval receipts, external authority ledgers and the digest-locked upgrade
   history used by `npm run db:migrate`.

@@ -50,7 +50,8 @@ export class MtlsGuestCredentialImageIssuer implements GuestCredentialImageIssue
       profileRevisionId: request.profileRevisionId, installationId: request.installationId, agent: request.agent,
       exactAgentVersion: request.exactAgentVersion, adapterVersion: request.adapterVersion,
       workerImageDigest: request.imageDigest, providerRevisionId: request.providerRevisionId,
-      credentialVersionId: request.credentialVersionId, attestationKeyId, expiresAt });
+      credentialVersionId: request.credentialVersionId, attestationKeyId,
+      nativeRequestDigest: createHash("sha256").update(canonicalJson(request)).digest("hex"), expiresAt });
     const response = await this.#http(route(this.#origin, "/v1/agent-microvm-credentials:issue"), {
       method: "POST", timeoutMs: this.#timeoutMs, tls: this.#tls,
       headers: Object.freeze({ accept: "application/octet-stream", "content-type": "application/json",
@@ -58,14 +59,16 @@ export class MtlsGuestCredentialImageIssuer implements GuestCredentialImageIssue
         "x-deviludo-attempt-id": request.attemptId }), body,
     });
     const digest = response.headers["x-deviludo-content-sha256"];
-    if (response.statusCode !== 200 || !Buffer.isBuffer(response.payload) || response.payload.length < 128 * 1024
-      || response.payload.length > MAX_IMAGE_BYTES || typeof digest !== "string" || !SHA256.test(digest)
-      || createHash("sha256").update(response.payload).digest("hex") !== digest
-      || response.headers["x-deviludo-run-id"] !== request.runId
-      || response.headers["x-deviludo-attempt-id"] !== request.attemptId
-      || response.headers["x-deviludo-expires-at"] !== expiresAt
-      || response.payload.readUInt16LE(1024 + 56) !== 0xef53) invalid();
-    return Object.freeze({ image: Buffer.from(response.payload), digest, expiresAt });
+    try {
+      if (response.statusCode !== 200 || !Buffer.isBuffer(response.payload) || response.payload.length < 128 * 1024
+        || response.payload.length > MAX_IMAGE_BYTES || typeof digest !== "string" || !SHA256.test(digest)
+        || createHash("sha256").update(response.payload).digest("hex") !== digest
+        || response.headers["x-deviludo-run-id"] !== request.runId
+        || response.headers["x-deviludo-attempt-id"] !== request.attemptId
+        || response.headers["x-deviludo-expires-at"] !== expiresAt
+        || response.payload.readUInt16LE(1024 + 56) !== 0xef53) invalid();
+      return Object.freeze({ image: Buffer.from(response.payload), digest, expiresAt });
+    } finally { if (Buffer.isBuffer(response.payload)) response.payload.fill(0); }
   }
 
   async probe(): Promise<void> {

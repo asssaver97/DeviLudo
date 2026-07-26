@@ -1,6 +1,7 @@
 #!/usr/bin/node
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 
@@ -13,6 +14,7 @@ const SAFE_ENV = new Set([
   "DEVILUDO_MICROVM_GUEST_GATEWAY_CA_FILE", "DEVILUDO_MICROVM_GUEST_GATEWAY_TLS_CERT_FILE",
   "DEVILUDO_MICROVM_GUEST_GATEWAY_TLS_KEY_FILE", "DEVILUDO_MICROVM_GUEST_RELAY_ORIGIN",
   "DEVILUDO_MICROVM_GUEST_RELAY_TLS_CERT_FILE", "DEVILUDO_MICROVM_GUEST_RELAY_TLS_KEY_FILE",
+  "DEVILUDO_MICROVM_GUEST_REQUEST_DIGEST",
   "DEVILUDO_EPHEMERAL_SECRET_BROKER_URL", "DEVILUDO_EPHEMERAL_SECRET_CA_FILE",
   "DEVILUDO_EPHEMERAL_SECRET_TLS_CERT_FILE", "DEVILUDO_EPHEMERAL_SECRET_TLS_KEY_FILE",
 ]);
@@ -24,6 +26,8 @@ export async function runAgentMicrovmGuestInit({ command = run } = {}) {
   await command("/bin/mount", ["-t", "ext4", "-o", "rw,nosuid,nodev,noexec", "/dev/vdb", DATA_ROOT]);
   await command("/bin/mount", ["-t", "ext4", "-o", "ro,nosuid,nodev,noexec", "/dev/vdc", CREDENTIAL_ROOT]);
   const runtime = parseRuntime(JSON.parse(await readFile(ENV_FILE, "utf8")));
+  const request = JSON.parse(await readFile(`${DATA_ROOT}/control/request.json`, "utf8"));
+  if (createHash("sha256").update(canonicalJson(request)).digest("hex") !== runtime.DEVILUDO_MICROVM_GUEST_REQUEST_DIGEST) fail();
   const serviceEnv = Object.freeze({
     NODE_ENV: "production", NODE_OPTIONS: "--enable-source-maps", NODE_PATH: "", HOME: "/run/deviludo-home",
     PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", LD_LIBRARY_PATH: "", LD_PRELOAD: "",
@@ -59,6 +63,14 @@ function parseRuntime(value) {
     result[name] = raw;
   }
   return Object.freeze(result);
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") { if (!Number.isFinite(value)) fail(); return JSON.stringify(value); }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (!value || typeof value !== "object") fail();
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
 function run(executable, args, environment) {

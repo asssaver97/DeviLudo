@@ -161,7 +161,41 @@ npm run finalize:agent-microvm-launcher -- \
 四类扫描证据绑定到一个 Ed25519 envelope。相同输入可幂等重放；已有输出与重新计算的
 claims 不同会失败。
 
-## 5. Worker 挂载与执行顺序
+## 5. 短期凭据盘签发服务
+
+Credential Issuer 是独立于 Web、Agent execution Worker、E2E Runner 和 Steam 节点的
+生产工作负载，使用 `npm run start:agent-microvm-credential-issuer` 启动。配置模板位于
+`services/agent-execution-broker/credential-issuer.env.example`。其服务端 mTLS 只允许一个
+固定的 native Worker SPIFFE 身份；客户端证书、候选签名私钥和 `mke2fs` 不进入共享控制面
+镜像或 Worker。
+
+生产镜像只能通过 `npm run image:build-agent-microvm-credential-issuer -- ...` 构建。
+构建器要求 digest 固定的 Node 22.13+ 基础镜像和内部
+`agent-microvm-credential-toolchain:<平台精确版本>@sha256:...`，目标 tag 必须由平台精确版本
+和 40 位源码 revision 派生；BuildKit 强制生成最大 provenance、SBOM、禁用缓存并直接推送。
+容器固定为非 root、固定 `/usr/sbin/mke2fs` 与 `/run/deviludo-credential-images`，部署时必须把
+后者挂载为仅该 Pod 可见的 tmpfs；服务启动探针会验证 tmpfs/ramfs 与 `mke2fs` 实际摘要。
+
+收到 `/v1/agent-microvm-credentials:issue` 后，服务会：
+
+1. 严格解析且拒绝额外字段，并要求 header 与正文中的 run/attempt 完全一致；
+2. 在 PostgreSQL tenant RLS 事务中重新读取当前 `AgentRun`、执行操作、Provider、授权和
+   failover，要求同一 `RUNNING` attempt 及精确 Profile/Installation/Agent/CLI/Adapter/
+   WorkerImage/Provider/Credential/expiry；
+3. 仅在 Linux 内存文件系统中的 `0700` 工作目录，以摘要固定的 `mke2fs` 和固定参数构建
+   8 MiB、无 journal 的 ext4；
+4. 将 relay、Gateway、短期 Secret Broker 工作负载证书以及候选签名材料写入 `0400`
+   文件，不写入上游 Provider Key、DLRT 或 SecretRef；
+5. 把完整 native request 的 canonical SHA-256 放进只读 `guest-runtime.json`；Guest init
+   在启动服务前重新计算数据盘请求摘要，错配即关机；
+6. 返回前再次核对权威尝试，并向 migration `063` 的 append-only RLS 表写入请求/镜像
+   digest、大小、身份和有效期。数据库永不保存镜像或凭据字节。
+
+响应只包含二进制 ext4、摘要及 run/attempt/expiry header；发送完成或连接关闭后服务端
+立即覆写内存响应 Buffer。Worker 校验摘要与 ext4 superblock，任务结束后覆写并删除本地
+副本。授权失效或 fencing attempt 改变时，签发和重放都会失败关闭。
+
+## 6. Worker 挂载与执行顺序
 
 将 Launcher、build receipt、配置、release manifest 和 trust policy 作为不同只读文件
 挂载，并设置 `services/agent-execution-broker/.env.example` 中的

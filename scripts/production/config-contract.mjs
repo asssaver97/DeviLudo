@@ -25,6 +25,7 @@ const PROCESS_OWNED_ENVIRONMENT_NAMES = new Set([
   "DEVILUDO_EXACT_AGENT_VERSION",
   "DEVILUDO_PLATFORM_VERSION",
   "DEVILUDO_SOURCE_REVISION",
+  "DEVILUDO_MICROVM_GUEST_REQUEST_DIGEST",
   "DEVILUDO_WORKFLOW_DESTINATION",
   "DEVILUDO_TESTKIT_STEAM_AUTOMATION_POLICY_DIGEST",
   "DEVILUDO_TESTKIT_STEAM_BRIDGE_VERSION",
@@ -133,6 +134,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/authorize-agent-supply-chain-release.mjs",
     "scripts/production/authorize-control-plane-release.mjs",
     "scripts/production/build-agent-supply-chain-image.mjs",
+    "scripts/production/build-agent-microvm-credential-issuer-image.mjs",
     "scripts/production/build-agent-microvm-guest-rootfs.mjs",
     "scripts/production/build-control-plane-image.mjs",
     "scripts/production/build-runner-native.mjs",
@@ -167,6 +169,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/migrate-postgres.mjs",
     "scripts/production/run-control-service.mjs",
     "scripts/production/run-agent-supply-chain-container.mjs",
+    "scripts/production/run-agent-microvm-credential-issuer-container.mjs",
   ]) {
     const path = resolve(root, utility);
     try {

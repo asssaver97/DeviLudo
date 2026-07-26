@@ -14,7 +14,7 @@ are exposed only on `127.0.0.1`. Host-started DeviLudo services therefore use
 the same loopback `DATABASE_URL`, authenticated `REDIS_URL`, `TEMPORAL_ADDRESS`,
 `S3_ENDPOINT`, `VAULT_ADDR` and telemetry values as the Compose stack.
 `infra:up` follows dependency startup with the repository migration runner. The
-status command authenticates to PostgreSQL and Redis, proves migration `062` is
+status command authenticates to PostgreSQL and Redis, proves migration `063` is
 present, and checks every other dependency without printing credentials. Stop
 the containers with `npm run infra:down`.
 
@@ -120,9 +120,12 @@ predecessor in the same tenant/project. Migration `061` creates a
 privilege-revoked, update/delete-protected ledger and baselines the exact
 SHA-256 of migrations `001`–`060`. Migration `062` adds the immutable,
 zero-live-lease authorization ledger used by signed native Runner upgrades.
+Migration `063` adds the append-only, tenant-RLS audit ledger for attempt-bound
+Agent microVM bootstrap images; it records only request/image digests and never
+persists image bytes, certificates, private keys, tokens or SecretRefs.
 Migrations `001`–`061` remain mounted in numeric order for a newly initialized
 local PostgreSQL volume; the post-start migrator records `061` and applies
-`062`. Every later migration is executed under one
+`062` and `063`. Every later migration is executed under one
 PostgreSQL advisory lock and writes its version, filename and digest in the same
 transaction as its schema change. A gap, edited historical file, unknown future
 row, concurrent migrator or failed statement aborts startup.
@@ -169,6 +172,14 @@ override the command to run `node scripts/production/migrate-postgres.mjs`
 before control workloads are released. Only that Job receives the migration
 credential files. A normal control container receives application credentials
 for its own role and never receives the migration role.
+
+The Agent microVM credential issuer is never added to that shared image. Build
+`Dockerfile.agent-microvm-credential-issuer` only through
+`npm run image:build-agent-microvm-credential-issuer -- ...`; the builder binds
+digest-pinned Node and internal e2fs toolchain bases, the source-derived tag,
+maximum BuildKit provenance and SBOM into its receipt. The workload must receive
+a private tmpfs at `/run/deviludo-credential-images` plus file-mounted TLS and
+attestation material; it runs as UID/GID 1000 and accepts no alternate command.
 
 `npm run lock:control-runtime` first snapshots only the kind, name, UID,
 resourceVersion and immutable flag of the revision-suffixed ConfigMaps and

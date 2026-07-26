@@ -221,7 +221,9 @@ test("mTLS guest credential issuer returns only an attempt-bound read-only ext4 
     inferenceGatewayUrl: "https://inference.internal/", inferenceAuthorizationExpiresAt: "2030-01-01T00:15:00.000Z" };
   const issued = await issuer.issue(native as never, "microvm-attestation-v1"); await issuer.probe();
   assert.equal(issued.digest, imageDigest); assert.equal(issued.image.readUInt16LE(1080), 0xef53);
+  assert.ok(image.every((value) => value === 0));
   assert.equal(requestBody?.runId, runId); assert.equal(requestBody?.workerImageDigest, request().imageDigest);
+  assert.match(String(requestBody?.nativeRequestDigest), /^[a-f0-9]{64}$/);
   assert.equal("providerBaseUrl" in (requestBody ?? {}), false); assert.equal("secretRef" in (requestBody ?? {}), false);
 });
 

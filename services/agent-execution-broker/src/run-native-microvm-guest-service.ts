@@ -1,4 +1,4 @@
-import { createPrivateKey } from "node:crypto";
+import { createHash, createPrivateKey } from "node:crypto";
 import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
@@ -24,12 +24,15 @@ export async function runNativeMicrovmGuestService(
     readBounded(absolute(env, "DEVILUDO_MICROVM_GUEST_ATTESTATION_PRIVATE_KEY_FILE"), 1024 * 1024),
     ephemeralRunTokenSecretResolverFromEnv(env),
   ]);
+  const requestValue = parseJson(requestBytes);
+  if (createHash("sha256").update(canonicalJson(requestValue)).digest("hex")
+    !== digest(env, "DEVILUDO_MICROVM_GUEST_REQUEST_DIGEST")) invalid();
   const relay = await nativeGuestInferenceRelayFromEnv(resolver, env);
   const privateKey = createPrivateKey(privateKeyBytes);
   const signer = new Ed25519GuestCandidateArtifactSigner(privateKey,
     safeId(env, "DEVILUDO_MICROVM_GUEST_ATTESTATION_KEY_ID"));
   const guest = new NativeMicrovmAgentGuest({ relay, signer });
-  const result = await guest.execute(parseJson(requestBytes), { runRoot, workspaceRoot });
+  const result = await guest.execute(requestValue, { runRoot, workspaceRoot });
   const bytes = Buffer.from(canonicalJson(result));
   if (bytes.byteLength < 64 || bytes.byteLength > MAX_RESPONSE_BYTES) invalid();
   const output = await open(responseFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -57,6 +60,8 @@ function absolute(env: Readonly<Record<string, string | undefined>>, name: strin
 function required(env: Readonly<Record<string, string | undefined>>, name: string): string { const value = env[name]?.trim(); if (!value) invalid(); return value; }
 function safeId(env: Readonly<Record<string, string | undefined>>, name: string): string { const value = required(env, name);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(value)) invalid(); return value; }
+function digest(env: Readonly<Record<string, string | undefined>>, name: string): string { const value = required(env, name);
+  if (!/^[a-f0-9]{64}$/.test(value)) invalid(); return value; }
 function parseJson(value: Buffer): unknown { try { return JSON.parse(value.toString("utf8")) as unknown; } catch { invalid(); } }
 function invalid(): never { throw new Error("Native Agent microVM guest service configuration is invalid"); }
 

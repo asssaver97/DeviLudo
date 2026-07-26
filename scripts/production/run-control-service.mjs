@@ -44,6 +44,7 @@ export const CONTROL_PLANE_CONTAINER_SERVICES = Object.freeze([
 
 export const EXTERNAL_WORKLOAD_SERVICES = Object.freeze([
   "agent-execution-worker",
+  "agent-microvm-credential-issuer",
   "agent-microvm-guest",
   "agent-supply-chain",
   "agent-supply-chain-native",

@@ -89,3 +89,22 @@ Installation and expiry, is checked for an ext4 superblock and content digest,
 is mounted read-only as `/dev/vdc`, and is deleted by the Worker after Jailer
 exits. The immutable Guest rootfs contains no private key or CLI session. The
 Worker host loads only the matching candidate-attestation public key.
+
+That boundary is implemented by `npm run start:agent-microvm-credential-issuer`.
+It accepts only the configured native Worker SPIFFE identity, re-resolves the
+currently fenced `RUNNING` attempt under tenant RLS before and after image
+construction, and uses one digest-pinned `mke2fs` inside a private Linux tmpfs.
+The read-only drive carries the complete native-request digest, which Guest PID
+1 verifies against `/control/request.json` before starting Node. Migration 063
+records only append-only request/image digests and expiry metadata; image bytes,
+keys, certificates, DLRTs and SecretRefs never enter PostgreSQL. The issuer is
+an explicitly external workload and cannot run in the shared control-plane
+image.
+
+The production image is built only with
+`npm run image:build-agent-microvm-credential-issuer -- ...`. Its two bases,
+source-derived destination tag, BuildKit provenance and SBOM are validated and
+captured in an immutable receipt. The fixed non-root entrypoint accepts no
+arguments and requires `/run/deviludo-credential-images` to be mounted as a
+private tmpfs; startup fails closed if that mount or the pinned `/usr/sbin/mke2fs`
+digest differs.
