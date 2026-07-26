@@ -143,15 +143,15 @@ test("deployment CLI renders by default and makes a cluster context mandatory on
 test("every shared-image workload is rendered as a least-authority deployment and only network servers get Services", () => {
   const classification = assertControlServiceDeploymentClassification();
   assert.deepEqual(classification.workers, ["agent-configuration", "temporal-worker"]);
-  assert.equal(classification.networked.length, 28);
+  assert.equal(classification.networked.length, 29);
   assert.equal(Object.keys(CONTROL_SERVICE_PORTS).length, CONTROL_PLANE_CONTAINER_SERVICES.length - 2);
 
   const runtimeLock = makeControlRuntimeLock({ services: CONTROL_PLANE_CONTAINER_SERVICES });
   const bundle = renderControlPlaneRelease(receipt, { runtimeLock });
   assert.equal(bundle.stages[0].resources.length, 1);
   assert.equal(bundle.stages[1].resources.length, 3);
-  assert.equal(bundle.stages[2].resources.filter((resource) => resource.kind === "Deployment").length, 30);
-  assert.equal(bundle.stages[2].resources.filter((resource) => resource.kind === "Service").length, 28);
+  assert.equal(bundle.stages[2].resources.filter((resource) => resource.kind === "Deployment").length, 31);
+  assert.equal(bundle.stages[2].resources.filter((resource) => resource.kind === "Service").length, 29);
   assert.ok(EXTERNAL_WORKLOAD_SERVICES.every((service) => !bundle.services.includes(service)));
 
   const namespace = bundle.stages[0].resources[0];

@@ -856,10 +856,11 @@ static DWORD restore_active(const wchar_t *active_path, const wchar_t *pending_p
   return result;
 }
 
-static DWORD apply_request(
+static DWORD probe_active(const wchar_t *active_path);
+
+static DWORD prepare_request(
   const wchar_t *request_path,
   const wchar_t *active_path,
-  const wchar_t *temporary_path,
   const wchar_t *pending_path
 ) {
   actuation_request next;
@@ -872,14 +873,60 @@ static DWORD apply_request(
   if (result != ERROR_SUCCESS) return result;
   result = create_only_file(pending_path, next.raw, next.raw_bytes);
   if (result == ERROR_SUCCESS) result = apply_services(&next);
-  if (result == ERROR_SUCCESS) result = replace_active_file(temporary_path, active_path, next.raw, next.raw_bytes);
   if (result != ERROR_SUCCESS) {
     DWORD rollback = restore_active(active_path, pending_path);
     if (rollback != ERROR_SUCCESS) result = rollback;
-  } else if (!DeleteFileW(pending_path)) {
-    result = GetLastError();
   }
   free_actuation_request(&next);
+  return result;
+}
+
+static DWORD commit_request(
+  const wchar_t *request_path,
+  const wchar_t *active_path,
+  const wchar_t *temporary_path,
+  const wchar_t *pending_path
+) {
+  actuation_request pending;
+  DWORD result = probe_active(pending_path);
+  if (result != ERROR_SUCCESS) return result;
+  result = load_request(pending_path, &pending, 0);
+  if (result != ERROR_SUCCESS) return result;
+  if (!DeleteFileW(request_path) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+    free_actuation_request(&pending);
+    return GetLastError();
+  }
+  result = replace_active_file(temporary_path, active_path, pending.raw, pending.raw_bytes);
+  free_actuation_request(&pending);
+  if (result == ERROR_SUCCESS && !DeleteFileW(pending_path)) result = GetLastError();
+  return result;
+}
+
+static DWORD apply_request(
+  const wchar_t *request_path,
+  const wchar_t *active_path,
+  const wchar_t *temporary_path,
+  const wchar_t *pending_path
+) {
+  DWORD result = prepare_request(request_path, active_path, pending_path);
+  if (result != ERROR_SUCCESS) return result;
+  result = commit_request(request_path, active_path, temporary_path, pending_path);
+  if (result != ERROR_SUCCESS) {
+    DWORD rollback = restore_active(active_path, pending_path);
+    if (rollback != ERROR_SUCCESS) result = rollback;
+  }
+  return result;
+}
+
+static DWORD rollback_request(
+  const wchar_t *request_path,
+  const wchar_t *active_path,
+  const wchar_t *pending_path
+) {
+  DWORD result = restore_active(active_path, pending_path);
+  if (result == ERROR_SUCCESS && !DeleteFileW(request_path) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+    result = GetLastError();
+  }
   return result;
 }
 
@@ -940,9 +987,9 @@ static DWORD actuator_paths(
 
 static int write_identity(void) {
 #if defined(_M_ARM64) || defined(__aarch64__)
-  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.1.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"arm64\"}\n";
+  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.2.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"arm64\"}\n";
 #elif defined(_M_X64) || defined(__x86_64__)
-  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.1.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"x86_64\"}\n";
+  static const char identity[] = "{\"schemaVersion\":\"deviludo.windows-scm-native-actuator-identity.v1\",\"component\":\"deviludo-windows-scm-native-actuator\",\"version\":\"1.2.0\",\"requestContractVersion\":1,\"platform\":\"windows\",\"architecture\":\"x86_64\"}\n";
 #else
 #error Unsupported Windows SCM actuator architecture
 #endif
@@ -962,8 +1009,10 @@ int wmain(int argc, wchar_t **argv) {
   wchar_t *pending_path = NULL;
   DWORD result;
   if (argc == 2 && wcscmp(argv[1], L"--identity") == 0) return write_identity();
-  if (argc != 2 || (wcscmp(argv[1], L"--apply") != 0 && wcscmp(argv[1], L"--restore") != 0
-    && wcscmp(argv[1], L"--probe") != 0)) return ERROR_INVALID_PARAMETER;
+  if (argc != 2 || (wcscmp(argv[1], L"--apply") != 0 && wcscmp(argv[1], L"--prepare") != 0
+    && wcscmp(argv[1], L"--commit") != 0 && wcscmp(argv[1], L"--rollback") != 0
+    && wcscmp(argv[1], L"--restore") != 0 && wcscmp(argv[1], L"--probe") != 0
+    && wcscmp(argv[1], L"--probe-pending") != 0)) return ERROR_INVALID_PARAMETER;
   mutex = CreateMutexW(NULL, FALSE, ACTUATOR_MUTEX);
   if (mutex == NULL) return (int) GetLastError();
   {
@@ -978,8 +1027,20 @@ int wmain(int argc, wchar_t **argv) {
   }
   if (result == ERROR_SUCCESS && wcscmp(argv[1], L"--apply") == 0) {
     result = apply_request(request_path, active_path, temporary_path, pending_path);
+  } else if (result == ERROR_SUCCESS && wcscmp(argv[1], L"--prepare") == 0) {
+    result = prepare_request(request_path, active_path, pending_path);
+  } else if (result == ERROR_SUCCESS && wcscmp(argv[1], L"--commit") == 0) {
+    result = commit_request(request_path, active_path, temporary_path, pending_path);
+    if (result != ERROR_SUCCESS) {
+      DWORD rollback = restore_active(active_path, pending_path);
+      if (rollback != ERROR_SUCCESS) result = rollback;
+    }
+  } else if (result == ERROR_SUCCESS && wcscmp(argv[1], L"--rollback") == 0) {
+    result = rollback_request(request_path, active_path, pending_path);
   } else if (result == ERROR_SUCCESS && wcscmp(argv[1], L"--restore") == 0) {
     result = restore_active(active_path, pending_path);
+  } else if (result == ERROR_SUCCESS && wcscmp(argv[1], L"--probe-pending") == 0) {
+    result = probe_active(pending_path);
   } else if (result == ERROR_SUCCESS) {
     result = probe_active(active_path);
   }

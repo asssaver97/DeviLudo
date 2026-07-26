@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -8,8 +8,22 @@ import {
   executeSteamDepotFinalizerHostTransaction,
 } from "../scripts/production/apply-steam-depot-finalizer-host-transaction.mjs";
 import {
+  executeWindowsSteamDepotFinalizerHostActuation,
+  parseWindowsSteamDepotFinalizerHostActuationArguments,
+} from "../scripts/production/apply-windows-steam-depot-finalizer-host-transaction.mjs";
+import {
   createSteamDepotFinalizerHostTransaction,
 } from "../scripts/production/compile-steam-depot-finalizer-host-transaction.mjs";
+import {
+  createSteamDepotFinalizerHostActivationRequest,
+  parseSteamDepotFinalizerHostActivationRequestArguments,
+  previousSteamDepotFinalizerDefinitionDigest,
+  requestSteamDepotFinalizerHostActivation,
+} from "../scripts/production/request-steam-depot-finalizer-host-activation.mjs";
+import {
+  parseSteamDepotFinalizerHostActivationReportArguments,
+  reportSteamDepotFinalizerHostActivation,
+} from "../scripts/production/report-steam-depot-finalizer-host-activation.mjs";
 import {
   createSteamDepotFinalizerHostInstallPlan,
 } from "../scripts/production/plan-steam-depot-finalizer-host-install.mjs";
@@ -89,6 +103,162 @@ test("activation grant rejects transaction drift, stale grants and a mismatched 
     now,
     reportResult: async () => undefined,
   }), /actuation input is invalid/);
+});
+
+test("host activation requester binds the staged transaction, machine identity and receipt path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-finalizer-request-"));
+  const fixture = transactionFixture(root, "00000000-0000-4000-8000-000000000001");
+  const receiptOutputPath = join(root, "activation-receipt.json");
+  const input = {
+    ...fixture,
+    planDigest: fixture.plan.planDigest,
+    transactionDigest: fixture.transaction.transactionDigest,
+    stagingReceipt: stagingReceiptFor(fixture.plan),
+    operationId: "00000000-0000-4000-8000-000000000099",
+    receiptOutputPath,
+    previousDefinitionDigest: null,
+    identity: {
+      hostId: "steam-finalizer-linux-01",
+      hostSpiffeId: "spiffe://deviludo.internal/steam-depot-finalizer/linux-01",
+      hostCertificateFingerprint: "9".repeat(64),
+    },
+  };
+  const request = createSteamDepotFinalizerHostActivationRequest(input);
+  assert.equal(request.definitionDigest, fixture.transaction.definition.renderedDigest);
+  assert.equal(request.operationState, "INITIALIZING");
+  assert.equal(request.receiptPath, receiptOutputPath);
+
+  const signed = grantEnvelope(fixture, receiptOutputPath, null);
+  const authorized = await requestSteamDepotFinalizerHostActivation(input, {
+    client: { async authorize(value) { assert.deepEqual(value, request); return signed; } },
+    publicKey: keyPair.publicKey, keyId, now,
+  });
+  assert.equal(authorized.authorized, true);
+  assert.equal(authorized.result.payload.operationId, request.operationId);
+
+  const draining = await requestSteamDepotFinalizerHostActivation(input, {
+    client: { async authorize() { return {
+      schemaVersion: "deviludo.steam-depot-finalizer-host-drain-receipt.v1",
+      operationId: request.operationId, hostId: request.hostId, state: "DRAINING",
+      activeOperationCount: 1, observedAt: now.toISOString(), retryAfterSeconds: 5,
+    }; } },
+    publicKey: keyPair.publicKey, keyId, now,
+  });
+  assert.equal(draining.authorized, false);
+  assert.equal(draining.result.retryAfterSeconds, 5);
+
+  assert.throws(() => createSteamDepotFinalizerHostActivationRequest({
+    ...input, previousDefinitionDigest: "a".repeat(64),
+  }), /request input is invalid/);
+});
+
+test("host activation requester derives the exact POSIX previous definition and report retries safely", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-finalizer-report-"));
+  const definitionPath = join(root, "deviludo-finalizer.service");
+  const definition = Buffer.from("immutable previous service definition");
+  await writeFile(definitionPath, definition, { mode: 0o400 });
+  const previous = await previousSteamDepotFinalizerDefinitionDigest(
+    { platform: "linux", activation: { mode: "DRAINED_UPGRADE" } },
+    { definition: { destination: definitionPath } },
+  );
+  assert.equal(previous, digest(definition));
+  assert.equal(await previousSteamDepotFinalizerDefinitionDigest(
+    { platform: "linux", activation: { mode: "INITIAL" } },
+    { definition: { destination: join(root, "missing.service") } },
+  ), null);
+
+  const fixture = transactionFixture(root, "00000000-0000-4000-8000-000000000001");
+  const receiptPath = join(root, "receipt.json");
+  const grantPath = join(root, "grant.json");
+  const grant = verifiedGrant(fixture, receiptPath, null);
+  const receipt = await executeSteamDepotFinalizerHostTransaction({ ...fixture, grant, outputPath: receiptPath }, {
+    host: fakeHost(fixture.plan), now, reportResult: async () => undefined,
+  });
+  await writeFile(grantPath, JSON.stringify(grant), { mode: 0o400 });
+  let calls = 0;
+  const reported = await reportSteamDepotFinalizerHostActivation({ activationGrantPath: grantPath, receiptPath }, {
+    client: { async complete(observedGrant, observedReceipt) {
+      calls += 1; assert.deepEqual(observedGrant, grant); assert.deepEqual(observedReceipt, receipt); return observedReceipt;
+    } },
+    now,
+  });
+  assert.equal(reported.receiptDigest, receipt.receiptDigest);
+  assert.equal(calls, 1);
+});
+
+test("host activation request and report CLIs accept only exact absolute arguments", () => {
+  const root = "/var/lib/deviludo/steam-depot-finalizer";
+  assert.equal(parseSteamDepotFinalizerHostActivationRequestArguments([
+    "--operation-id", "00000000-0000-4000-8000-000000000099",
+    "--plan", `${root}/plan.json`, "--plan-digest", "1".repeat(64),
+    "--transaction", `${root}/transaction.json`, "--transaction-digest", "2".repeat(64),
+    "--grant-output", `${root}/grant.json`, "--receipt-output", `${root}/receipt.json`,
+  ]).operationId, "00000000-0000-4000-8000-000000000099");
+  assert.deepEqual(parseSteamDepotFinalizerHostActivationReportArguments([
+    "--activation-grant", `${root}/grant.json`, "--receipt", `${root}/receipt.json`,
+  ]), { activationGrantPath: `${root}/grant.json`, receiptPath: `${root}/receipt.json` });
+  assert.throws(() => parseSteamDepotFinalizerHostActivationReportArguments([
+    "--activation-grant", "relative.json", "--receipt", `${root}/receipt.json`,
+  ]), /report input is invalid/);
+});
+
+test("Windows Finalizer actuation keeps native rollback pending until mTLS health passes", async () => {
+  const payload = {
+    schemaVersion: "deviludo.steam-depot-finalizer-host-activation-grant-payload.v1",
+    operationId: "00000000-0000-4000-8000-000000000099", grantSequence: 1,
+    hostId: "steam-finalizer-windows-01",
+    hostSpiffeId: "spiffe://deviludo.internal/steam-depot-finalizer/windows-01",
+    hostCertificateFingerprint: "9".repeat(64),
+    planDigest: "1".repeat(64), transactionDigest: "2".repeat(64), stagingReceiptDigest: "3".repeat(64),
+    releaseId: "00000000-0000-4000-8000-000000000001",
+    serviceReleaseDigest: "4".repeat(64), nativeReleaseDigest: "5".repeat(64),
+    platform: "windows", architecture: "x86_64", operationState: "INITIALIZING", activeOperationCount: 0,
+    previousPlanDigest: null, previousDefinitionDigest: null, definitionDigest: "6".repeat(64),
+    receiptPath: "C:\\ProgramData\\DeviLudo\\NativeActuator\\activation-receipt.json",
+    issuedAt: "2026-07-26T00:00:00.000Z", expiresAt: "2026-07-26T00:10:00.000Z",
+  };
+  const grant = verifySteamDepotFinalizerHostActivationGrant({
+    schemaVersion: "deviludo.steam-depot-finalizer-host-activation-grant.v1",
+    algorithm: "Ed25519", keyId, payload, signature: signCanonical(keyPair.privateKey, payload),
+  }, { publicKey: keyPair.publicKey, keyId, now });
+  const events = [];
+  const host = {
+    async prepare() { events.push("prepare"); }, async probePending() { events.push("probe-pending"); },
+    async checkHealth() { events.push("health"); }, async commit() { events.push("commit"); },
+    async rollback() { events.push("rollback"); }, async probeActive() { events.push("probe-active"); },
+  };
+  const success = await executeWindowsSteamDepotFinalizerHostActuation({ grant }, { host, now });
+  assert.equal(success.state, "ACTIVATED");
+  assert.deepEqual(events, ["prepare", "probe-pending", "health", "commit"]);
+
+  events.length = 0;
+  host.checkHealth = async () => { events.push("health"); throw new Error("not ready"); };
+  const rolledBack = await executeWindowsSteamDepotFinalizerHostActuation({ grant }, { host, now });
+  assert.equal(rolledBack.state, "ROLLED_BACK");
+  assert.match(rolledBack.failureDigest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(events, ["prepare", "probe-pending", "health", "rollback"]);
+
+  events.length = 0;
+  host.checkHealth = async () => { events.push("health"); };
+  const recovered = await executeWindowsSteamDepotFinalizerHostActuation({ grant, recoveryState: "COMMITTED" }, { host, now });
+  assert.equal(recovered.state, "ACTIVATED");
+  assert.deepEqual(events, ["probe-active", "health"]);
+});
+
+test("Windows Finalizer actuator CLI binds all digests and fixed absolute files", () => {
+  const root = "C:\\ProgramData\\DeviLudo\\NativeActuator";
+  const parsed = parseWindowsSteamDepotFinalizerHostActuationArguments([
+    "--activation-grant", `${root}\\activation-grant.json`,
+    "--actuation-request", `${root}\\actuation-request.v1.bin`,
+    "--actuation-request-digest", "1".repeat(64),
+    "--output", `${root}\\activation-receipt.json`,
+    "--plan", `${root}\\install-plan.json`, "--plan-digest", "2".repeat(64),
+    "--transaction", `${root}\\transaction.json`, "--transaction-digest", "3".repeat(64),
+  ]);
+  assert.equal(parsed.actuationRequestDigest, "1".repeat(64));
+  assert.throws(() => parseWindowsSteamDepotFinalizerHostActuationArguments([
+    "--activation-grant", "relative.json",
+  ]), /actuation input is invalid/);
 });
 
 function transactionFixture(root, releaseId, previousPlan = null) {

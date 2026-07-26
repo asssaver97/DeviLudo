@@ -35,6 +35,7 @@ export const CONTROL_PLANE_CONTAINER_SERVICES = Object.freeze([
   "spec-workflow-bridge",
   "steam-access",
   "steam-approval-monitor",
+  "steam-depot-finalizer-host-activation",
   "steam-publisher-workflow",
   "steam-secure-ui",
   "steam-workflow-broker",

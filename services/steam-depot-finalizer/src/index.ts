@@ -1,6 +1,7 @@
 export * from "./contract";
 export * from "./contracts";
 export * from "./host-activation";
+export * from "./host-activation-client";
 export * from "./host-activation-ingress";
 export * from "./postgres-host-activations";
 export * from "./ingress-http";

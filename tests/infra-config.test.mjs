@@ -13,6 +13,9 @@ test("Steam depot finalizer host installation is an explicit signed local-host c
   const compile = readFileSync(new URL(
     "../scripts/production/compile-steam-depot-finalizer-host-transaction.mjs", import.meta.url,
   ), "utf8");
+  const windowsApply = readFileSync(new URL(
+    "../scripts/production/apply-windows-steam-depot-finalizer-host-transaction.mjs", import.meta.url,
+  ), "utf8");
   const readme = readFileSync(new URL("../services/steam-depot-finalizer/README.md", import.meta.url), "utf8");
   assert.equal(packageJson.scripts["plan:steam-depot-finalizer-host-install"],
     "node --import tsx scripts/production/plan-steam-depot-finalizer-host-install.mjs");
@@ -22,6 +25,12 @@ test("Steam depot finalizer host installation is an explicit signed local-host c
     "node --import tsx scripts/production/compile-steam-depot-finalizer-host-transaction.mjs");
   assert.equal(packageJson.scripts["apply:steam-depot-finalizer-host-transaction"],
     "node --import tsx scripts/production/apply-steam-depot-finalizer-host-transaction.mjs");
+  assert.equal(packageJson.scripts["request:steam-depot-finalizer-host-activation"],
+    "node --import tsx scripts/production/request-steam-depot-finalizer-host-activation.mjs");
+  assert.equal(packageJson.scripts["apply:windows-steam-depot-finalizer-host-transaction"],
+    "node --import tsx scripts/production/apply-windows-steam-depot-finalizer-host-transaction.mjs");
+  assert.equal(packageJson.scripts["report:steam-depot-finalizer-host-activation"],
+    "node --import tsx scripts/production/report-steam-depot-finalizer-host-activation.mjs");
   assert.match(apply, /verifySteamDepotFinalizerHostActivationGrant/);
   assert.match(apply, /host-actuation-journal\.v1/);
   assert.match(apply, /verifySteamDepotFinalizerServiceRuntime/);
@@ -29,6 +38,11 @@ test("Steam depot finalizer host installation is an explicit signed local-host c
   assert.match(apply, /MTLS_READY/);
   assert.match(apply, /A separately signed Windows finalizer host actuator is required/);
   assert.doesNotMatch(apply, /shell:\s*true|execSync|powershell|curl \| sh|sc\.exe/i);
+  assert.match(windowsApply, /--prepare/);
+  assert.match(windowsApply, /--probe-pending/);
+  assert.match(windowsApply, /--commit/);
+  assert.match(windowsApply, /--rollback/);
+  assert.doesNotMatch(windowsApply, /shell:\s*true|execSync|powershell|curl \| sh|sc\.exe/i);
   assert.match(compile, /verifySignedWindowsScmServiceBridgeManifest/);
   assert.match(compile, /verifySignedWindowsScmNativeActuatorManifest/);
   assert.match(compile, /digestFile\(options\.windowsActuatorPath/);

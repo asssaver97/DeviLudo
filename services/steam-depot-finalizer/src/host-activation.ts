@@ -1,5 +1,5 @@
 import { type KeyObject } from "node:crypto";
-import { isAbsolute, resolve } from "node:path";
+import { posix, win32 } from "node:path";
 import { sha256Canonical, verifyCanonical } from "../../runner-control/src/canonical";
 
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -123,7 +123,7 @@ export function validateSteamDepotFinalizerHostActivationRequest(
       && (body.previousPlanDigest !== null || body.previousDefinitionDigest !== null))
     || (body.operationState === "DRAINING"
       && (body.previousPlanDigest === null || body.previousDefinitionDigest === null))
-    || typeof body.receiptPath !== "string" || !absolute(body.receiptPath)) invalid("request");
+    || typeof body.receiptPath !== "string" || !absoluteForPlatform(body.receiptPath, body.platform)) invalid("request");
   return deepFreeze({ ...body }) as unknown as SteamDepotFinalizerHostActivationRequest;
 }
 
@@ -138,10 +138,7 @@ export function createSteamDepotFinalizerHostDrainReceipt(input: Readonly<{
   retryAfterSeconds: number;
 }>): SteamDepotFinalizerHostDrainReceipt {
   const request = validateSteamDepotFinalizerHostActivationRequest(input.request);
-  if (!Number.isSafeInteger(input.activeOperationCount) || input.activeOperationCount < 1
-    || !canonicalTimestamp(input.observedAt) || !Number.isSafeInteger(input.retryAfterSeconds)
-    || input.retryAfterSeconds < 1 || input.retryAfterSeconds > 300) invalid("drain receipt");
-  return deepFreeze({
+  return validateSteamDepotFinalizerHostDrainReceipt({
     schemaVersion: "deviludo.steam-depot-finalizer-host-drain-receipt.v1",
     operationId: request.operationId,
     hostId: request.hostId,
@@ -149,7 +146,29 @@ export function createSteamDepotFinalizerHostDrainReceipt(input: Readonly<{
     activeOperationCount: input.activeOperationCount,
     observedAt: input.observedAt,
     retryAfterSeconds: input.retryAfterSeconds,
-  });
+  }, request);
+}
+
+export function validateSteamDepotFinalizerHostDrainReceipt(
+  value: unknown,
+  requestValue?: unknown,
+): SteamDepotFinalizerHostDrainReceipt {
+  const body = record(value);
+  exactKeys(body, [
+    "activeOperationCount", "hostId", "observedAt", "operationId", "retryAfterSeconds", "schemaVersion", "state",
+  ]);
+  if (body.schemaVersion !== "deviludo.steam-depot-finalizer-host-drain-receipt.v1"
+    || typeof body.operationId !== "string" || !UUID_V4.test(body.operationId)
+    || typeof body.hostId !== "string" || !HOST_ID.test(body.hostId) || body.state !== "DRAINING"
+    || !Number.isSafeInteger(body.activeOperationCount) || Number(body.activeOperationCount) < 1
+    || typeof body.observedAt !== "string" || !canonicalTimestamp(body.observedAt)
+    || !Number.isSafeInteger(body.retryAfterSeconds) || Number(body.retryAfterSeconds) < 1
+    || Number(body.retryAfterSeconds) > 300) invalid("drain receipt");
+  if (requestValue !== undefined) {
+    const request = validateSteamDepotFinalizerHostActivationRequest(requestValue);
+    if (body.operationId !== request.operationId || body.hostId !== request.hostId) invalid("drain binding");
+  }
+  return deepFreeze({ ...body }) as unknown as SteamDepotFinalizerHostDrainReceipt;
 }
 
 export function createSteamDepotFinalizerHostActivationGrantPayload(input: Readonly<{
@@ -288,7 +307,7 @@ function validatePayload(value: unknown): SteamDepotFinalizerHostActivationGrant
       && (body.previousPlanDigest !== null || body.previousDefinitionDigest !== null))
     || (body.operationState === "DRAINING"
       && (body.previousPlanDigest === null || body.previousDefinitionDigest === null))) invalid("state");
-  if (typeof body.receiptPath !== "string" || !absolute(body.receiptPath)
+  if (typeof body.receiptPath !== "string" || !absoluteForPlatform(body.receiptPath, body.platform)
     || typeof body.issuedAt !== "string" || !canonicalTimestamp(body.issuedAt)
     || typeof body.expiresAt !== "string" || !canonicalTimestamp(body.expiresAt)) invalid("boundary");
   return deepFreeze({ ...body }) as unknown as SteamDepotFinalizerHostActivationGrantPayload;
@@ -303,10 +322,15 @@ function validSpiffeId(value: unknown): value is string {
   try {
     const url = new URL(value);
     return url.protocol === "spiffe:" && Boolean(url.hostname) && url.pathname !== "/"
-      && !url.username && !url.password && !url.port;
+      && !url.username && !url.password && !url.port && !url.search && !url.hash && url.toString() === value;
   } catch { return false; }
 }
-function absolute(value: string): boolean { return isAbsolute(value) && resolve(value) === value && value.length <= 4_096 && !/[\0\r\n]/.test(value); }
+function absoluteForPlatform(value: string, platform: unknown): boolean {
+  if (value.length > 4_096 || /[\0\r\n]/.test(value)) return false;
+  return platform === "windows"
+    ? win32.isAbsolute(value) && win32.normalize(value) === value
+    : (platform === "linux" || platform === "macos") && posix.isAbsolute(value) && posix.normalize(value) === value;
+}
 function canonicalTimestamp(value: string): boolean { return Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
 function record(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) invalid(); return value as Record<string, unknown>; }
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {

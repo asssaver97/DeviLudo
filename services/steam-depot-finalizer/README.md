@@ -149,17 +149,30 @@ issued only when the target platform has no live finalization claim. The
 authority has no signing private key: it calls one fixed TLS 1.3 mTLS KMS route
 and verifies the returned Ed25519 signature locally before committing it.
 
-The host calls `/v1/steam-depot-finalizer-host-activations/authorize`, drains
-while the response contains a drain receipt, applies the exact signed grant,
-then posts the immutable actuation receipt to
-`/v1/steam-depot-finalizer-host-activations/complete`. Configuration is
-documented in `.env.example`; the authority belongs on the isolated control
-plane, not on Agent, E2E, Steam publishing or release-signing hosts.
+`request:steam-depot-finalizer-host-activation` verifies the staged plan and
+transaction, hashes the currently active POSIX definition (or decodes the
+fixed Windows actuator's active request), then calls
+`/v1/steam-depot-finalizer-host-activations/authorize`. The deployment
+orchestrator retries only after the returned drain interval and create-only
+writes an Ed25519 grant when authorized. After the fixed actuator has emitted
+its immutable receipt, `report:steam-depot-finalizer-host-activation` posts the
+exact grant/receipt pair to
+`/v1/steam-depot-finalizer-host-activations/complete`; this command is safe to
+retry after a network failure. Configuration is documented in `.env.example`;
+the authority belongs on the isolated control plane, not on Agent, E2E, Steam
+publishing or release-signing hosts.
 
 Windows uses the independently signed fixed SCM bridge and native actuator;
 the bridge accepts only the Finalizer component and exact service artifact
 argument. The POSIX actuator explicitly refuses Windows, while the Windows
 actuator refuses shell, PowerShell, `sc.exe` and arbitrary service commands.
+`apply:windows-steam-depot-finalizer-host-transaction` verifies the host grant,
+compiled binary request, native actuator digest and previous active descriptor.
+It then uses the actuator's two-phase `--prepare` / `--probe-pending` /
+`--commit` protocol. The previous SCM definition remains recoverable until the
+new service has passed its real mTLS health gate; any pre-commit failure invokes
+the fixed `--rollback` operation and produces a signed-grant-bound rollback
+receipt.
 
 ## Service release chain
 

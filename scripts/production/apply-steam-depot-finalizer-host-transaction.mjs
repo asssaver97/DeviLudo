@@ -257,7 +257,7 @@ export class NodePosixSteamDepotFinalizerHost {
         || JSON.stringify(probe.supportedSchemes) !== JSON.stringify([scheme])) invalid();
       return;
     }
-    if (check === "MTLS_READY") { await probeMtlsHealth(context.environment); return; }
+    if (check === "MTLS_READY") { await probeSteamDepotFinalizerMtlsHealth(context.environment); return; }
     invalid();
   }
   async sleep(milliseconds) { await new Promise((accept) => setTimeout(accept, milliseconds)); }
@@ -439,7 +439,7 @@ function validatePreviousDefinition(value, transaction, grant) {
     || body.toString("base64") !== value.bodyBase64 || createHash("sha256").update(body).digest("hex") !== value.digest) invalid();
 }
 
-async function probeMtlsHealth(environment) {
+export async function probeSteamDepotFinalizerMtlsHealth(environment) {
   const key = await readBytes(requiredAbsoluteEnvironment(environment,
     "DEVILUDO_STEAM_DEPOT_FINALIZER_HEALTH_TLS_KEY_FILE"), MAX_JSON_BYTES);
   const cert = await readBytes(requiredAbsoluteEnvironment(environment,

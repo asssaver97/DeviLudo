@@ -262,7 +262,7 @@ test("Windows SCM actuator source is a fixed ProgramData Win32 authority with no
     "actuation-request.v1.bin", "pending-request.v1.bin", "active-request.v1.bin", "verify_service_parameters",
     "DeviLudoSteamDepotFinalizer", "TargetArgumentDigest", "SERVICE_CONFIG_SERVICE_SID_INFO",
     "SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO",
-    "--apply", "--restore", "--probe", "--identity",
+    "--apply", "--prepare", "--commit", "--rollback", "--restore", "--probe", "--probe-pending", "--identity",
   ]) assert.match(source, new RegExp(required.replaceAll("(", "\\(")));
   assert.doesNotMatch(source, /\bsystem\s*\(|ShellExecute|cmd\.exe|powershell|sc\.exe|reg\.exe/i);
   assert.match(cmake, /add_executable\(deviludo-windows-scm-native-actuator/);
@@ -381,7 +381,7 @@ function windowsFinalizerTransaction() {
     },
     windowsActuator: {
       verified: true, component: "deviludo-windows-scm-native-actuator", path: actuatorPath,
-      actuatorVersion: "1.1.0", requestContractVersion: 1, binaryDigest: "5".repeat(64),
+      actuatorVersion: "1.2.0", requestContractVersion: 1, binaryDigest: "5".repeat(64),
       manifestDigest: "6".repeat(64), trustPolicyDigest: "7".repeat(64),
     },
     definition,
