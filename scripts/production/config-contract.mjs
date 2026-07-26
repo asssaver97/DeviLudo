@@ -131,9 +131,11 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
   }
   for (const utility of [
     "scripts/production/agent-microvm-credential-issuer-release-authorization.mjs",
+    "scripts/production/artifact-preparer-release-authorization.mjs",
     "scripts/production/agent-supply-chain-release-authorization.mjs",
     "scripts/production/authorize-agent-microvm-credential-issuer-release.mjs",
     "scripts/production/authorize-agent-supply-chain-release.mjs",
+    "scripts/production/authorize-artifact-preparer-release.mjs",
     "scripts/production/authorize-control-plane-release.mjs",
     "scripts/production/build-agent-supply-chain-image.mjs",
     "scripts/production/build-artifact-preparer-image.mjs",
@@ -166,7 +168,9 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/deploy-control-plane.mjs",
     "scripts/production/deploy-agent-microvm-credential-issuer.mjs",
     "scripts/production/deploy-agent-supply-chain.mjs",
+    "scripts/production/deploy-artifact-preparer.mjs",
     "scripts/production/inspect-agent-supply-chain-release-trust-policy.mjs",
+    "scripts/production/inspect-artifact-preparer-release-trust-policy.mjs",
     "scripts/production/inspect-agent-microvm-credential-issuer-release-trust-policy.mjs",
     "scripts/production/inspect-control-release-trust-policy.mjs",
     "scripts/production/lock-control-runtime.mjs",

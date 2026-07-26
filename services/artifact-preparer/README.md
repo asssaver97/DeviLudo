@@ -86,3 +86,24 @@ only and emits a lock containing each object's UID and resourceVersion. It never
 reads Secret data or uses the implicit current context. Deployment must re-run
 the same metadata probe before every mutation and reject replacement, mutation
 or revision drift.
+
+Release authority is separate from the runtime lock. Start from the revoked
+template in `infra/artifact-preparer-release-trust-policy.example.json`, replace
+it with a SecurityAdmin-approved Ed25519 KMS key and record the canonical digest
+reported by `npm run inspect:artifact-preparer-release-trust`. The key and mTLS
+identity must be unique to this workload. `npm run authorize:artifact-preparer`
+obtains a maximum-30-minute authorization binding the exact image receipt and
+base, runtime-lock digest, context, namespace, replica count and timeout.
+
+`npm run deploy:artifact-preparer -- --render` is side-effect free. `--apply`
+also requires the explicit context, authorization, trust policy and policy
+digest. Before each of the namespace, security and workload writes, the
+deployer re-verifies both authorization and live runtime-resource identities.
+It server-side-applies only a restricted Namespace, tokenless ServiceAccount,
+default-deny NetworkPolicy, ClusterIP Service and digest-pinned Deployment,
+then waits for that Deployment. It has no delete, prune, exec or implicit
+current-context path. The pod runs with a read-only root filesystem, drops all
+capabilities and uses bounded emptyDir volumes for `/tmp` and source work.
+SecurityAdmin-managed mTLS ingress and least-privilege egress policies are
+required before the intentionally fail-closed default-deny workload can become
+operational.

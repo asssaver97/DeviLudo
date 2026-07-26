@@ -240,6 +240,24 @@ It never reads Secret contents or falls back to the current context. The lock is
 digestible and its live identities must be rechecked by the deployer; a lock by
 itself grants no mutation authority.
 
+Artifact Preparer release signing uses the separate revoked-by-default
+`infra/artifact-preparer-release-trust-policy.example.json`. Inspect it with
+`npm run inspect:artifact-preparer-release-trust`, then use
+`npm run authorize:artifact-preparer` to request a maximum-30-minute Ed25519
+authorization from the dedicated mTLS KMS route. Claims bind the receipt and
+base-image digest, runtime lock, explicit context, namespace, replicas and
+timeout; control-plane or Agent signing keys are not interchangeable.
+
+`npm run deploy:artifact-preparer -- --render` performs no cluster operation.
+An actual `--apply` requires the matching authorization, policy and digest,
+revalidates them plus the live locked objects before each write, and applies
+only the restricted Namespace, tokenless ServiceAccount, default-deny policy,
+ClusterIP Service and digest-pinned Deployment. The pod uses a read-only root,
+drops every capability, mounts no host path and keeps source material in a
+bounded ephemeral volume. It never deletes, prunes, execs or uses an implicit
+context. External mTLS ingress and minimum egress policies remain deliberately
+out of band, so missing network authority fails closed.
+
 ## Privileged Agent supply-chain release
 
 The Agent supply-chain Broker is never admitted to the shared control image. A
