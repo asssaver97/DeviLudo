@@ -25,7 +25,7 @@ export interface AgentMicrovmLauncherTrustPolicy {
 
 export interface AgentMicrovmLauncherReleaseClaims {
   readonly kind: "deviludo-agent-microvm-launcher";
-  readonly version: 1;
+  readonly version: 2;
   readonly releaseId: string;
   readonly platformVersion: string;
   readonly sourceRevision: string;
@@ -39,6 +39,8 @@ export interface AgentMicrovmLauncherReleaseClaims {
   readonly jailerDigest: string;
   readonly kernelDigest: string;
   readonly rootfsDigest: string;
+  readonly rootfsReleaseDigest: string;
+  readonly rootfsTrustPolicyDigest: string;
   readonly mke2fsDigest: string;
   readonly debugfsDigest: string;
   readonly sbomDigest: string;
@@ -106,11 +108,12 @@ export function verifySignedAgentMicrovmLauncherRelease(
   exactKeys(record(claims), [
     "kind", "version", "releaseId", "platformVersion", "sourceRevision", "nodeTarget", "launcherDigest",
     "launcherSizeBytes", "buildReceiptDigest", "configDigest", "firecrackerVersion", "firecrackerDigest",
-    "jailerDigest", "kernelDigest", "rootfsDigest", "mke2fsDigest", "debugfsDigest", "sbomDigest",
+    "jailerDigest", "kernelDigest", "rootfsDigest", "rootfsReleaseDigest", "rootfsTrustPolicyDigest",
+    "mke2fsDigest", "debugfsDigest", "sbomDigest",
     "malwareScanDigest", "vulnerabilityScanDigest", "provenanceDigest", "publishedAt",
   ]);
   const publishedAt = Date.parse(claims.publishedAt);
-  if (claims.kind !== "deviludo-agent-microvm-launcher" || claims.version !== 1 || !UUID.test(claims.releaseId)
+  if (claims.kind !== "deviludo-agent-microvm-launcher" || claims.version !== 2 || !UUID.test(claims.releaseId)
     || claims.platformVersion !== options.platformVersion || claims.platformVersion !== config.platformVersion
     || !SOURCE_REVISION.test(claims.sourceRevision) || claims.nodeTarget !== "22.13"
     || claims.launcherDigest !== options.launcherDigest || claims.buildReceiptDigest !== options.buildReceiptDigest
@@ -119,6 +122,8 @@ export function verifySignedAgentMicrovmLauncherRelease(
     || claims.firecrackerVersion !== config.firecrackerVersion
     || claims.firecrackerDigest !== config.firecrackerDigest || claims.jailerDigest !== config.jailerDigest
     || claims.kernelDigest !== config.kernelDigest || claims.rootfsDigest !== config.rootfsDigest
+    || claims.rootfsReleaseDigest !== config.rootfsReleaseDigest
+    || claims.rootfsTrustPolicyDigest !== config.rootfsTrustPolicyDigest
     || claims.mke2fsDigest !== config.mke2fsDigest || claims.debugfsDigest !== config.debugfsDigest
     || !SHA256.test(claims.sbomDigest) || !SHA256.test(claims.malwareScanDigest)
     || !SHA256.test(claims.vulnerabilityScanDigest) || !SHA256.test(claims.provenanceDigest)
@@ -133,11 +138,14 @@ export function releaseClaimsFromConfig(config: NativeMicrovmLauncherConfig): Re
   jailerDigest: string;
   kernelDigest: string;
   rootfsDigest: string;
+  rootfsReleaseDigest: string;
+  rootfsTrustPolicyDigest: string;
   mke2fsDigest: string;
   debugfsDigest: string;
 }> {
   return Object.freeze({ firecrackerVersion: config.firecrackerVersion, firecrackerDigest: config.firecrackerDigest,
     jailerDigest: config.jailerDigest, kernelDigest: config.kernelDigest, rootfsDigest: config.rootfsDigest,
+    rootfsReleaseDigest: config.rootfsReleaseDigest, rootfsTrustPolicyDigest: config.rootfsTrustPolicyDigest,
     mke2fsDigest: config.mke2fsDigest, debugfsDigest: config.debugfsDigest });
 }
 

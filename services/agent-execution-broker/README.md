@@ -43,10 +43,11 @@ and receives only an opaque SecretRef. There is no in-memory production
 fallback.
 
 The native launcher is built from this repository and uses the Firecracker
-Jailer with one pre-provisioned network namespace and one ext4 data disk per
-attempt. Before the Worker opens PostgreSQL or any Broker connection it verifies
-a distinct Ed25519 release manifest binding the launcher, configuration,
-Firecracker/Jailer, kernel, guest rootfs and e2fs tool digests. Runtime probing
+Jailer with one pre-provisioned network namespace, one ext4 data disk and one
+read-only attempt credential disk per attempt. Before the Worker opens PostgreSQL
+or any Broker connection it verifies distinct Ed25519 release manifests for the
+launcher and SquashFS Guest, including the exact Agent/CLI/Adapter/WorkerImage,
+configuration, Firecracker/Jailer, kernel, rootfs and e2fs tool digests. Runtime probing
 and every attempt hash the actual files again. Arbitrary VMM argv, shell
 templates, `--no-seccomp`, non-Linux hosts and non-root launch are rejected.
 Build, scan, signing, namespace and deployment requirements are documented in
@@ -71,9 +72,9 @@ enters `WAITING_PROVIDER`; it never stretches a token lifetime.
 
 Claude/Codex receives only a random attempt-local password for a loopback HTTPS
 relay. The relay URL must use literal `127.0.0.1`, its certificate has a
-matching IP SAN, its CA is baked into the immutable guest trust store, and its
-server key is a sealed
-guest mount. On every `/v1/messages` or `/v1/responses` request the relay
+matching IP SAN, its public CA is in the immutable guest trust store, and its
+server key exists only on the short-lived read-only credential drive. On every
+`/v1/messages` or `/v1/responses` request the relay
 resolves the current DLRT over the ephemeral-secret Broker's TLS 1.3 workload
 boundary, strips local authentication, and forwards with a separate mTLS
 Gateway identity. Thus a running CLI can use rotated tokens but never observes
@@ -81,7 +82,10 @@ one. The response from the secret Broker is binary, never JSON, and its request
 contains only the reference plus the bound run, attempt and allowed CLI
 environment variable.
 
-The attestation private key path in the example is also a guest-only sealed
-mount; the Worker host loads only the matching public key. A deployment may
-replace that local guest signer with the same `CandidateArtifactSigner`
-interface backed by KMS.
+The attestation private key, relay identity and Gateway/secret-Broker workload
+identities are issued as one short-lived ext4 image over a dedicated TLS 1.3
+mTLS boundary. The image is bound to the exact tenant/project/run/attempt,
+Installation and expiry, is checked for an ext4 superblock and content digest,
+is mounted read-only as `/dev/vdc`, and is deleted by the Worker after Jailer
+exits. The immutable Guest rootfs contains no private key or CLI session. The
+Worker host loads only the matching candidate-attestation public key.

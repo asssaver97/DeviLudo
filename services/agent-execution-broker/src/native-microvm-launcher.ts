@@ -19,6 +19,10 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "../../runner-control/src/canonical";
 import { parseNativeMicrovmAgentRequest, type NativeMicrovmAgentRequest } from "./native-microvm-contracts";
+import {
+  verifyConfiguredAgentMicrovmGuestRelease,
+  type AgentMicrovmGuestReleaseClaims,
+} from "./native-microvm-guest-release";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -31,7 +35,7 @@ const MAX_SOURCE_FILES = 200_000;
 const MAX_SOURCE_BYTES = 4 * 1024 * 1024 * 1024;
 
 export interface NativeMicrovmLauncherConfig {
-  readonly schemaVersion: "deviludo.agent-microvm-launcher-config.v1";
+  readonly schemaVersion: "deviludo.agent-microvm-launcher-config.v2";
   readonly backend: "firecracker-jailer";
   readonly platformVersion: string;
   readonly firecrackerVersion: string;
@@ -43,6 +47,10 @@ export interface NativeMicrovmLauncherConfig {
   readonly kernelDigest: string;
   readonly rootfsImage: string;
   readonly rootfsDigest: string;
+  readonly rootfsReleaseFile: string;
+  readonly rootfsReleaseDigest: string;
+  readonly rootfsTrustPolicyFile: string;
+  readonly rootfsTrustPolicyDigest: string;
   readonly mke2fsExecutable: string;
   readonly mke2fsDigest: string;
   readonly debugfsExecutable: string;
@@ -81,6 +89,7 @@ export function parseNativeMicrovmLauncherArguments(argv: readonly string[]): Re
   requestFile?: string;
   workspace?: string;
   responseFile?: string;
+  credentialImage?: string;
 }> {
   if (!Array.isArray(argv) || argv.length < 4 || (argv[0] !== "execute" && argv[0] !== "probe")) invalid();
   const command = argv[0];
@@ -94,7 +103,7 @@ export function parseNativeMicrovmLauncherArguments(argv: readonly string[]): Re
       continue;
     }
     const value = argv[index + 1];
-    if (!new Set(["--config-file", "--request-file", "--workspace", "--response-file"]).has(name)
+    if (!new Set(["--config-file", "--request-file", "--workspace", "--response-file", "--credential-image"]).has(name)
       || typeof value !== "string" || !value || values.has(name) || /[\0\r\n]/.test(value)) invalid();
     values.set(name, value);
     index += 1;
@@ -104,13 +113,14 @@ export function parseNativeMicrovmLauncherArguments(argv: readonly string[]): Re
     if (!json || values.size !== 1) invalid();
     return Object.freeze({ command, configFile });
   }
-  if (json || values.size !== 4) invalid();
+  if (json || values.size !== 5) invalid();
   return Object.freeze({
     command,
     configFile,
     requestFile: absolute(values.get("--request-file")),
     workspace: absolute(values.get("--workspace")),
     responseFile: absolute(values.get("--response-file")),
+    credentialImage: absolute(values.get("--credential-image")),
   });
 }
 
@@ -119,18 +129,20 @@ export function parseNativeMicrovmLauncherConfig(value: unknown): NativeMicrovmL
   exactKeys(body, [
     "schemaVersion", "backend", "platformVersion", "firecrackerVersion", "firecrackerExecutable",
     "firecrackerDigest", "jailerExecutable", "jailerDigest", "kernelImage", "kernelDigest", "rootfsImage",
-    "rootfsDigest", "mke2fsExecutable", "mke2fsDigest", "debugfsExecutable", "debugfsDigest",
+    "rootfsDigest", "rootfsReleaseFile", "rootfsReleaseDigest", "rootfsTrustPolicyFile",
+    "rootfsTrustPolicyDigest", "mke2fsExecutable", "mke2fsDigest", "debugfsExecutable", "debugfsDigest",
     "chrootBaseDirectory", "networkNamespaceDirectory", "networkNamespaceNames", "networkLockDirectory",
     "tapDeviceName", "guestMacAddress", "jailerUid", "jailerGid", "parentCgroup", "vcpuCount",
     "memoryMib", "dataDriveSizeMib", "bootArgs", "maxRunSeconds",
   ]);
-  if (body.schemaVersion !== "deviludo.agent-microvm-launcher-config.v1" || body.backend !== "firecracker-jailer"
+  if (body.schemaVersion !== "deviludo.agent-microvm-launcher-config.v2" || body.backend !== "firecracker-jailer"
     || !fixedVersion(body.platformVersion) || !fixedVersion(body.firecrackerVersion)
     || basename(absolute(body.firecrackerExecutable)) !== "firecracker"
     || basename(absolute(body.jailerExecutable)) !== "jailer"
     || basename(absolute(body.mke2fsExecutable)) !== "mke2fs"
     || basename(absolute(body.debugfsExecutable)) !== "debugfs") invalid();
-  const digestNames = ["firecrackerDigest", "jailerDigest", "kernelDigest", "rootfsDigest", "mke2fsDigest", "debugfsDigest"];
+  const digestNames = ["firecrackerDigest", "jailerDigest", "kernelDigest", "rootfsDigest", "rootfsReleaseDigest",
+    "rootfsTrustPolicyDigest", "mke2fsDigest", "debugfsDigest"];
   if (digestNames.some((name) => typeof body[name] !== "string" || !SHA256.test(body[name] as string))) invalid();
   const namespaces = body.networkNamespaceNames;
   if (!Array.isArray(namespaces) || namespaces.length < 1 || namespaces.length > 256
@@ -147,6 +159,8 @@ export function parseNativeMicrovmLauncherConfig(value: unknown): NativeMicrovmL
     jailerExecutable: absolute(body.jailerExecutable),
     kernelImage: absolute(body.kernelImage),
     rootfsImage: absolute(body.rootfsImage),
+    rootfsReleaseFile: absolute(body.rootfsReleaseFile),
+    rootfsTrustPolicyFile: absolute(body.rootfsTrustPolicyFile),
     mke2fsExecutable: absolute(body.mke2fsExecutable),
     debugfsExecutable: absolute(body.debugfsExecutable),
     chrootBaseDirectory: runtimeDirectory(body.chrootBaseDirectory, "/var/lib/deviludo/"),
@@ -171,8 +185,9 @@ export function compileFirecrackerConfiguration(
   return deepFreeze({
     "boot-source": { kernel_image_path: "/kernel", boot_args: config.bootArgs },
     drives: [
-      { drive_id: "rootfs", path_on_host: "/rootfs.ext4", is_root_device: true, is_read_only: true },
+      { drive_id: "rootfs", path_on_host: "/rootfs.squashfs", is_root_device: true, is_read_only: true },
       { drive_id: "deviludo-data", path_on_host: "/data.ext4", is_root_device: false, is_read_only: false },
+      { drive_id: "deviludo-credentials", path_on_host: "/credentials.ext4", is_root_device: false, is_read_only: true },
     ],
     "machine-config": { vcpu_count: config.vcpuCount, mem_size_mib: config.memoryMib, smt: false, track_dirty_pages: false },
     "network-interfaces": [{ iface_id: "agent-egress", guest_mac: config.guestMacAddress, host_dev_name: config.tapDeviceName }],
@@ -230,20 +245,25 @@ export class FirecrackerNativeMicrovmLauncher {
     requestFile: string;
     workspace: string;
     responseFile: string;
+    credentialImage: string;
     abortSignal?: AbortSignal;
   }>): Promise<void> {
     linuxRoot();
     const requestFile = absolute(input.requestFile);
     const workspace = absolute(input.workspace);
     const responseFile = absolute(input.responseFile);
+    const credentialImage = absolute(input.credentialImage);
     const runRoot = dirname(dirname(requestFile));
     if (requestFile !== join(runRoot, "control", "request.json") || workspace !== join(runRoot, "workspace")
-      || responseFile !== join(runRoot, "control", "response.json") || dirname(responseFile) !== dirname(requestFile)) invalid();
+      || responseFile !== join(runRoot, "control", "response.json") || dirname(responseFile) !== dirname(requestFile)
+      || credentialImage !== join(runRoot, "control", "credentials.ext4")) invalid();
     if (await realpath(runRoot) !== runRoot || await realpath(dirname(requestFile)) !== dirname(requestFile)) invalid();
     const request = await readRequest(requestFile);
+    await verifyCredentialImage(credentialImage);
     await assertWorkspace(workspace);
     await absent(responseFile);
-    const { config } = await this.#verifiedConfiguration();
+    const { config, guestRelease } = await this.#verifiedConfiguration();
+    assertAgentMicrovmGuestIdentity(guestRelease, request);
     const lease = await acquireNamespace(config);
     const id = launcherId(request, this.#uuid());
     const jailRoot = join(config.chrootBaseDirectory, "firecracker", id, "root");
@@ -252,7 +272,7 @@ export class FirecrackerNativeMicrovmLauncher {
       await prepareDataRoot(staging, requestFile, workspace);
       const dataImage = join(staging, "data.ext4");
       await createDataImage(config, staging, dataImage, this.#process, input.abortSignal);
-      await stageJail(config, jailRoot, dataImage);
+      await stageJail(config, jailRoot, dataImage, credentialImage);
       const result = await this.#process(config.jailerExecutable, compileJailerArguments(config, id, lease.namespacePath), {
         cwd: runRoot,
         timeoutMs: config.maxRunSeconds * 1_000,
@@ -275,7 +295,8 @@ export class FirecrackerNativeMicrovmLauncher {
     }
   }
 
-  async #verifiedConfiguration(): Promise<Readonly<{ config: NativeMicrovmLauncherConfig; digest: string }>> {
+  async #verifiedConfiguration(): Promise<Readonly<{ config: NativeMicrovmLauncherConfig; digest: string;
+    guestRelease: AgentMicrovmGuestReleaseClaims }>> {
     const bytes = await boundedFile(this.#configFile, MAX_JSON_BYTES);
     let value: unknown;
     try { value = JSON.parse(bytes.toString("utf8")); } catch { invalid(); }
@@ -288,7 +309,12 @@ export class FirecrackerNativeMicrovmLauncher {
       verifyFile(config.mke2fsExecutable, config.mke2fsDigest, 1024 * 1024 * 1024, true),
       verifyFile(config.debugfsExecutable, config.debugfsDigest, 1024 * 1024 * 1024, true),
     ]);
-    return Object.freeze({ config, digest: createHash("sha256").update(bytes).digest("hex") });
+    const guestRelease = await verifyConfiguredAgentMicrovmGuestRelease({
+      releaseFile: config.rootfsReleaseFile, releaseDigest: config.rootfsReleaseDigest,
+      trustPolicyFile: config.rootfsTrustPolicyFile, trustPolicyDigest: config.rootfsTrustPolicyDigest,
+      platformVersion: config.platformVersion, rootfsDigest: config.rootfsDigest,
+    });
+    return Object.freeze({ config, digest: createHash("sha256").update(bytes).digest("hex"), guestRelease });
   }
 }
 
@@ -303,16 +329,18 @@ async function createDataImage(config: NativeMicrovmLauncherConfig, staging: str
   if (result.exitCode !== 0) invalid();
 }
 
-async function stageJail(config: NativeMicrovmLauncherConfig, root: string, dataImage: string): Promise<void> {
+async function stageJail(config: NativeMicrovmLauncherConfig, root: string, dataImage: string, credentialImage: string): Promise<void> {
   await absent(dirname(root));
   await mkdir(root, { recursive: true, mode: 0o700 });
   await Promise.all([
     lockedCopy(config.kernelImage, join(root, "kernel"), 0o444),
-    lockedCopy(config.rootfsImage, join(root, "rootfs.ext4"), 0o444),
+    lockedCopy(config.rootfsImage, join(root, "rootfs.squashfs"), 0o444),
     lockedCopy(dataImage, join(root, "data.ext4"), 0o600),
+    lockedCopy(credentialImage, join(root, "credentials.ext4"), 0o400),
     writeFile(join(root, "machine-config.json"), `${canonicalJson(compileFirecrackerConfiguration(config))}\n`, { flag: "wx", mode: 0o444 }),
   ]);
   await chown(join(root, "data.ext4"), config.jailerUid, config.jailerGid);
+  await chown(join(root, "credentials.ext4"), config.jailerUid, config.jailerGid);
 }
 
 async function prepareDataRoot(staging: string, requestFile: string, workspace: string): Promise<void> {
@@ -412,6 +440,17 @@ async function verifyFile(path: string, digest: string, maximum: number, executa
   } finally { await file.close(); }
 }
 
+async function verifyCredentialImage(path: string): Promise<void> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await file.stat();
+    if (!metadata.isFile() || metadata.size < 128 * 1024 || metadata.size > 64 * 1024 * 1024
+      || (metadata.mode & 0o377) !== 0) invalid();
+    const magic = Buffer.alloc(2); const read = await file.read(magic, 0, 2, 1024 + 56);
+    if (read.bytesRead !== 2 || magic.readUInt16LE(0) !== 0xef53) invalid();
+  } finally { await file.close(); }
+}
+
 async function lockedCopy(source: string, destination: string, mode: number): Promise<void> {
   await copyFile(source, destination, constants.COPYFILE_EXCL);
   await chmod(destination, mode);
@@ -428,6 +467,12 @@ function assertResponseIdentity(value: unknown, request: NativeMicrovmAgentReque
   const body = record(value);
   if (body.runId !== request.runId || body.attemptId !== request.attemptId
     || (body.status !== "COMPLETED" && body.status !== "FAILED")) invalid();
+}
+
+export function assertAgentMicrovmGuestIdentity(release: AgentMicrovmGuestReleaseClaims,
+  request: Pick<NativeMicrovmAgentRequest, "agent" | "exactAgentVersion" | "adapterVersion" | "imageDigest">): void {
+  if (release.agent !== request.agent || release.exactAgentVersion !== request.exactAgentVersion
+    || release.adapterVersion !== request.adapterVersion || release.workerImageDigest !== request.imageDigest) invalid();
 }
 
 async function assertWorkspace(path: string): Promise<void> {
@@ -512,10 +557,11 @@ function validBootArgs(value: string): boolean {
   if (value.length < 1 || value.length > 2048 || /[\0\r\n'"`$;&|<>]/.test(value)) return false;
   const tokens = value.split(" ");
   if (tokens.some((token) => !token || !/^[A-Za-z0-9._=,:/-]+$/.test(token))) return false;
-  const required = ["reboot=k", "panic=1", "pci=off", "8250.nr_uarts=0"];
+  const required = ["reboot=k", "panic=1", "pci=off", "8250.nr_uarts=0", "root=/dev/vda", "rootfstype=squashfs", "ro"];
   return required.every((token) => tokens.includes(token))
     && tokens.some((token) => token.startsWith("ip="))
-    && !tokens.some((token) => token.startsWith("init=") || token.startsWith("rdinit=") || token.startsWith("metadata="));
+    && !tokens.some((token) => token.startsWith("init=") || token.startsWith("rdinit=") || token.startsWith("metadata=")
+      || token === "rw" || token.startsWith("rootflags="));
 }
 
 function linuxRoot(): void {
@@ -580,7 +626,7 @@ async function main(): Promise<void> {
     return;
   }
   await launcher.execute({ requestFile: args.requestFile as string, workspace: args.workspace as string,
-    responseFile: args.responseFile as string });
+    responseFile: args.responseFile as string, credentialImage: args.credentialImage as string });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

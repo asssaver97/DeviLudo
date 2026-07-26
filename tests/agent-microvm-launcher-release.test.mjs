@@ -120,19 +120,21 @@ async function fixtureFiles() {
   const outputPath = resolve(root, "release.json"); const trustPolicyPath = resolve(root, "trust-policy.json");
   const artifact = Buffer.from("#!/usr/bin/node\nlocked Firecracker launcher\n");
   const config = {
-    schemaVersion: "deviludo.agent-microvm-launcher-config.v1", backend: "firecracker-jailer",
+    schemaVersion: "deviludo.agent-microvm-launcher-config.v2", backend: "firecracker-jailer",
     platformVersion: "0.1.0-beta.1", firecrackerVersion: "1.13.1",
     firecrackerExecutable: "/opt/deviludo/firecracker/firecracker", firecrackerDigest: "1".repeat(64),
     jailerExecutable: "/opt/deviludo/firecracker/jailer", jailerDigest: "2".repeat(64),
     kernelImage: "/opt/deviludo/microvm/vmlinux", kernelDigest: "3".repeat(64),
-    rootfsImage: "/opt/deviludo/microvm/agent-guest.ext4", rootfsDigest: "4".repeat(64),
+    rootfsImage: "/opt/deviludo/microvm/agent-microvm-guest.squashfs", rootfsDigest: "4".repeat(64),
+    rootfsReleaseFile: "/opt/deviludo/microvm/agent-microvm-guest-release.json", rootfsReleaseDigest: "7".repeat(64),
+    rootfsTrustPolicyFile: "/etc/deviludo/agent-microvm-guest-trust-policy.json", rootfsTrustPolicyDigest: "8".repeat(64),
     mke2fsExecutable: "/usr/sbin/mke2fs", mke2fsDigest: "5".repeat(64),
     debugfsExecutable: "/usr/sbin/debugfs", debugfsDigest: "6".repeat(64),
     chrootBaseDirectory: "/var/lib/deviludo/firecracker-jails", networkNamespaceDirectory: "/run/netns",
     networkNamespaceNames: ["deviludo-agent-001"], networkLockDirectory: "/run/lock/deviludo-agent-microvms",
     tapDeviceName: "tap0", guestMacAddress: "06:00:ac:10:00:02", jailerUid: 10000, jailerGid: 10000,
     parentCgroup: "deviludo-agent", vcpuCount: 4, memoryMib: 8192, dataDriveSizeMib: 8192,
-    bootArgs: "reboot=k panic=1 pci=off 8250.nr_uarts=0 ip=172.20.0.2::172.20.0.1:255.255.255.0::eth0:off",
+    bootArgs: "reboot=k panic=1 pci=off 8250.nr_uarts=0 root=/dev/vda rootfstype=squashfs ro ip=172.20.0.2::172.20.0.1:255.255.255.0::eth0:off",
     maxRunSeconds: 7200,
   };
   const configBytes = Buffer.from(JSON.stringify(config));

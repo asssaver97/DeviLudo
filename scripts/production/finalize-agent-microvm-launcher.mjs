@@ -55,7 +55,7 @@ export async function prepareAgentMicrovmLauncherClaims(options) {
     || build.sizeBytes !== launcher.sizeBytes || build.platformVersion !== config.platformVersion
     || Date.parse(options.publishedAt) < Date.parse(build.completedAt)) invalid();
   validateEvidence(evidence, launcher.digest, buildReceiptDigest, configDigest);
-  return Object.freeze({ kind: "deviludo-agent-microvm-launcher", version: 1, releaseId: options.releaseId,
+  return Object.freeze({ kind: "deviludo-agent-microvm-launcher", version: 2, releaseId: options.releaseId,
     platformVersion: build.platformVersion, sourceRevision: build.sourceRevision, nodeTarget: build.nodeTarget,
     launcherDigest: launcher.digest, launcherSizeBytes: launcher.sizeBytes, buildReceiptDigest, configDigest,
     ...releaseClaimsFromConfig(config), sbomDigest: evidence.sbomDigest, malwareScanDigest: evidence.malwareScanDigest,

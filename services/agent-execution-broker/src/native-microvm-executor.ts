@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, type KeyObject } from "node:crypto";
+import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { canonicalJson } from "../../runner-control/src/canonical";
@@ -8,6 +9,8 @@ import type { IsolatedAgentExecutionRequest, IsolatedAgentExecutionResult } from
 import { validateIsolatedResult } from "./contracts";
 import type { IsolatedAgentExecutionDispatcher } from "./operations";
 import type { AgentDevelopmentWorkPackagePort } from "./postgres-work-package";
+import type { GuestCredentialImageIssuer } from "./guest-credential-client";
+import type { NativeMicrovmAgentRequest } from "./native-microvm-contracts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_RESPONSE_BYTES = 150 * 1024 * 1024;
@@ -41,6 +44,7 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
   readonly #attestationKey: KeyObject;
   readonly #sources: AgentBaselineSourcePort;
   readonly #packages: AgentDevelopmentWorkPackagePort;
+  readonly #credentials: GuestCredentialImageIssuer;
   readonly #process: NativeMicrovmProcess;
   readonly #now: () => Date;
   readonly #heartbeatIntervalMs: number;
@@ -48,7 +52,7 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
   constructor(options: Readonly<{ executable: string; executableDigest: string; configFile: string; configDigest: string;
     workRoot: string; inferenceGatewayUrl: string; timeoutMs?: number; attestationKeyId: string;
     attestationPublicKey: KeyObject; sources: AgentBaselineSourcePort; packages: AgentDevelopmentWorkPackagePort;
-    process?: NativeMicrovmProcess; now?: () => Date; heartbeatIntervalMs?: number }>) {
+    credentialIssuer: GuestCredentialImageIssuer; process?: NativeMicrovmProcess; now?: () => Date; heartbeatIntervalMs?: number }>) {
     this.#executable = absolute(options.executable, "executable");
     this.#configFile = absolute(options.configFile, "configuration file");
     this.#workRoot = absolute(options.workRoot, "work root");
@@ -62,6 +66,9 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
     if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") invalid("attestation public key");
     this.#attestationKeyId = options.attestationKeyId; this.#attestationKey = publicKey;
     this.#sources = options.sources; this.#packages = options.packages;
+    if (!options.credentialIssuer || typeof options.credentialIssuer.issue !== "function"
+      || typeof options.credentialIssuer.probe !== "function") invalid("credential issuer");
+    this.#credentials = options.credentialIssuer;
     this.#process = options.process ?? executeNativeMicrovm; this.#now = options.now ?? (() => new Date());
   }
 
@@ -87,11 +94,19 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
     await context.heartbeat();
     await this.#verifyRuntime();
     const timeoutMs = executionTimeout(input, this.#timeoutMs, this.#now());
+    const credentialImage = join(controlRoot, "credentials.ext4");
+    await rm(credentialImage, { force: true });
+    const credential = await this.#credentials.issue(request, this.#attestationKeyId);
     const abort = new AbortController();
-    const execution = this.#process(this.#executable, ["execute", "--config-file", this.#configFile,
-      "--request-file", requestFile, "--workspace", workspace, "--response-file", responseFile],
-    processOptions(runRoot, timeoutMs, abort.signal));
-    const result = await withHeartbeats(execution, context.heartbeat, this.#heartbeatIntervalMs, abort);
+    let result: NativeMicrovmProcessResult;
+    try {
+      if (credential.expiresAt !== input.authorizationExpiresAt) invalid("credential lifetime");
+      await writeSensitive(credentialImage, credential.image, credential.digest);
+      const execution = this.#process(this.#executable, ["execute", "--config-file", this.#configFile,
+        "--request-file", requestFile, "--workspace", workspace, "--response-file", responseFile,
+        "--credential-image", credentialImage], processOptions(runRoot, timeoutMs, abort.signal));
+      result = await withHeartbeats(execution, context.heartbeat, this.#heartbeatIntervalMs, abort);
+    } finally { credential.image.fill(0); await rm(credentialImage, { force: true }); }
     if (result.exitCode !== 0 || result.stdout || result.stderr
       || FORBIDDEN_OUTPUT.test(`${result.stdout}\n${result.stderr}`)) invalid("execution");
     await context.heartbeat();
@@ -101,7 +116,7 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
   }
 
   async probe(): Promise<void> {
-    await Promise.all([this.#sources.probe(), this.#packages.probe(), this.#verifyRuntime()]);
+    await Promise.all([this.#sources.probe(), this.#packages.probe(), this.#credentials.probe(), this.#verifyRuntime()]);
     const result = await this.#process(this.#executable,
       ["probe", "--config-file", this.#configFile, "--json"], processOptions(this.#workRoot, 30_000));
     if (result.exitCode !== 0 || result.stderr || FORBIDDEN_OUTPUT.test(result.stdout)) invalid("probe");
@@ -126,11 +141,11 @@ export class LockedNativeMicrovmAgentExecutor implements IsolatedAgentExecutionD
 }
 
 function nativeRequest(input: IsolatedAgentExecutionRequest, work: Awaited<ReturnType<AgentDevelopmentWorkPackagePort["resolve"]>>,
-  inferenceGatewayUrl: string) {
+  inferenceGatewayUrl: string): NativeMicrovmAgentRequest {
   return Object.freeze({ schemaVersion: "deviludo.native-agent-microvm-request.v1", tenantId: input.tenantId,
     projectId: input.projectId, runId: input.runId, attemptId: input.attemptId,
     resolutionDigest: input.resolutionDigest, profileRevisionId: input.profileRevisionId,
-    installationId: input.installationId, imageDigest: input.imageDigest, exactAgentVersion: input.exactAgentVersion,
+    installationId: input.installationId, imageDigest: input.imageDigest as `sha256:${string}`, exactAgentVersion: input.exactAgentVersion,
     adapterVersion: input.adapterVersion, agent: input.agent, providerRevisionId: input.providerRevisionId,
     providerProtocol: input.providerProtocol, credentialVersionId: input.credentialVersionId,
     model: input.model, modelRoles: input.modelRoles,
@@ -172,6 +187,12 @@ async function writeImmutable(path: string, bytes: Buffer): Promise<void> {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const metadata = await lstat(path); if (!metadata.isFile() || metadata.isSymbolicLink()
       || metadata.size !== bytes.length || !(await readFile(path)).equals(bytes)) invalid("request replay"); }
+}
+async function writeSensitive(path: string, bytes: Buffer, expectedDigest: string): Promise<void> {
+  if (bytes.length < 128 * 1024 || bytes.length > 64 * 1024 * 1024 || !SHA256.test(expectedDigest)
+    || createHash("sha256").update(bytes).digest("hex") !== expectedDigest) invalid("credential image");
+  const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o400);
+  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
 }
 async function readResponse(path: string, root: string): Promise<unknown | null> {
   try { const metadata = await lstat(path); if (!metadata.isFile() || metadata.isSymbolicLink()

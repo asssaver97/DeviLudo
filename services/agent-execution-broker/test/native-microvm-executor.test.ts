@@ -12,6 +12,7 @@ import type { IsolatedAgentExecutionRequest } from "../src/contracts";
 import { MtlsEphemeralRunTokenSecretResolver, MtlsEphemeralRunTokenSecretStore } from "../src/ephemeral-secret-client";
 import { authorizedLocalRequest, HttpsNativeGuestInferenceRelay } from "../src/native-inference-relay";
 import { LockedNativeMicrovmAgentExecutor } from "../src/native-microvm-executor";
+import { MtlsGuestCredentialImageIssuer } from "../src/guest-credential-client";
 import { PostgresAgentDevelopmentWorkPackage } from "../src/postgres-work-package";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -204,6 +205,26 @@ test("microVM guest resolves only its exact opaque DLRT reference over mTLS", as
     { runId, attemptId: "not-an-attempt", environmentVariable: "ANTHROPIC_API_KEY" }), /contract is invalid/);
 });
 
+test("mTLS guest credential issuer returns only an attempt-bound read-only ext4 image", async () => {
+  const image = Buffer.alloc(128 * 1024); image.writeUInt16LE(0xef53, 1024 + 56); const imageDigest = createHash("sha256").update(image).digest("hex");
+  let requestBody: Record<string, unknown> | undefined;
+  const issuer = new MtlsGuestCredentialImageIssuer({ endpoint: "https://guest-credentials.internal/",
+    tls: { key: Buffer.alloc(32, 1), certificate: Buffer.alloc(32, 2), ca: Buffer.alloc(32, 3) },
+    http: async (url, input) => { if (url.pathname === "/healthz") return { statusCode: 200, headers: {},
+      payload: Buffer.from(JSON.stringify({ status: "ok", service: "deviludo-agent-microvm-credential-issuer" })) };
+      requestBody = JSON.parse(input.body ?? "{}") as Record<string, unknown>;
+      return { statusCode: 200, headers: { "x-deviludo-content-sha256": imageDigest, "x-deviludo-run-id": runId,
+        "x-deviludo-attempt-id": attemptId, "x-deviludo-expires-at": "2030-01-01T00:15:00.000Z" }, payload: image }; } });
+  const { providerBaseUrl: _providerBaseUrl, ...isolated } = request(); assert.ok(_providerBaseUrl);
+  const native = { schemaVersion: "deviludo.native-agent-microvm-request.v1", ...isolated, prompt: "locked",
+    promptContentDigest: "1".repeat(64), promptDigest: "2".repeat(64), specDigest: "3".repeat(64), testPlanDigest: "4".repeat(64),
+    inferenceGatewayUrl: "https://inference.internal/", inferenceAuthorizationExpiresAt: "2030-01-01T00:15:00.000Z" };
+  const issued = await issuer.issue(native as never, "microvm-attestation-v1"); await issuer.probe();
+  assert.equal(issued.digest, imageDigest); assert.equal(issued.image.readUInt16LE(1080), 0xef53);
+  assert.equal(requestBody?.runId, runId); assert.equal(requestBody?.workerImageDigest, request().imageDigest);
+  assert.equal("providerBaseUrl" in (requestBody ?? {}), false); assert.equal("secretRef" in (requestBody ?? {}), false);
+});
+
 test("locked native executor provisions the baseline and accepts only an attested microVM candidate", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "deviludo-native-agent-")));
   const executable = join(root, "microvm-launcher"); const config = join(root, "launcher.json"); const workRoot = join(root, "work");
@@ -212,6 +233,7 @@ test("locked native executor provisions the baseline and accepts only an atteste
   const executor = new LockedNativeMicrovmAgentExecutor({ executable, executableDigest: digest("native-agent-v1"),
     configFile: config, configDigest: digest("{}"), workRoot, inferenceGatewayUrl: "https://inference.internal/",
     timeoutMs: 15 * 60_000, attestationKeyId: "microvm-attestation-v1", attestationPublicKey: keys.publicKey,
+    credentialIssuer: credentialIssuer(),
     heartbeatIntervalMs: 10,
     now: () => new Date("2030-01-01T00:00:00.000Z"), packages: { async probe() {}, async resolve(lock) { return {
       prompt: "Implement the approved game", promptDigest: "c".repeat(64), specDigest: lock.specDigest, testPlanDigest: lock.testPlanDigest }; } },
@@ -277,6 +299,7 @@ test("cancelled execution lease aborts the active native microVM before it can r
       timeoutMs: 15 * 60_000,
       attestationKeyId: "microvm-attestation-v1",
       attestationPublicKey: keys.publicKey,
+      credentialIssuer: credentialIssuer(),
       heartbeatIntervalMs: 10,
       now: () => new Date("2030-01-01T00:00:00.000Z"),
       packages: {
@@ -316,6 +339,10 @@ test("cancelled execution lease aborts the active native microVM before it can r
 });
 
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+function credentialIssuer() { return { async probe() {}, async issue(value: { inferenceAuthorizationExpiresAt: string }) {
+  const image = Buffer.alloc(128 * 1024); image.writeUInt16LE(0xef53, 1024 + 56);
+  return { image, digest: createHash("sha256").update(image).digest("hex"), expiresAt: value.inferenceAuthorizationExpiresAt };
+} }; }
 function rows<T extends Record<string, unknown>>(values: readonly T[]) { return { rows: values, rowCount: values.length }; }
 function fakeClient(query: (statement: string, values: readonly unknown[]) => Promise<{ rows: readonly Record<string, unknown>[]; rowCount: number }>): PostgresWorkflowClient {
   return { query: query as PostgresWorkflowClient["query"], release() {} };

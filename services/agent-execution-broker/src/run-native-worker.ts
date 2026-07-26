@@ -6,11 +6,14 @@ import { sourceSnapshotClientFromEnv } from "../../artifact-preparer/src/source-
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { AgentBaselineSourceSnapshotPort } from "./baseline-source";
 import { LockedNativeMicrovmAgentExecutor } from "./native-microvm-executor";
+import { verifyConfiguredAgentMicrovmGuestRelease } from "./native-microvm-guest-release";
 import { verifySignedAgentMicrovmLauncherRelease } from "./native-microvm-launcher-release";
+import { parseNativeMicrovmLauncherConfig } from "./native-microvm-launcher";
 import { PostgresAgentDevelopmentWorkPackage } from "./postgres-work-package";
 import { agentExecutionWorkerFromEnv } from "./run-worker";
 import { scmCandidatePublisherFromEnv } from "./scm-candidate-client";
 import type { EphemeralRunTokenSecretStore } from "./token-broker";
+import { guestCredentialImageIssuerFromEnv } from "./guest-credential-client";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/;
@@ -26,8 +29,9 @@ export async function nativeAgentExecutionWorkerFromEnv(secrets: EphemeralRunTok
   await verifyAgentMicrovmLauncherRuntimeFromEnv(env);
   const pool = postgresWorkflowPoolFromEnv(serviceEnv);
   try {
-    const [snapshots, candidates, publicKeyBytes] = await Promise.all([sourceSnapshotClientFromEnv(env),
-      scmCandidatePublisherFromEnv(env), bytes(env, "DEVILUDO_AGENT_MICROVM_ATTESTATION_PUBLIC_KEY_FILE")]);
+    const [snapshots, candidates, publicKeyBytes, credentialIssuer] = await Promise.all([sourceSnapshotClientFromEnv(env),
+      scmCandidatePublisherFromEnv(env), bytes(env, "DEVILUDO_AGENT_MICROVM_ATTESTATION_PUBLIC_KEY_FILE"),
+      guestCredentialImageIssuerFromEnv(env)]);
     const publicKey = createPublicKey(publicKeyBytes);
     if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") throw new Error("microVM attestation key is invalid");
     const packages = new PostgresAgentDevelopmentWorkPackage(pool);
@@ -42,7 +46,7 @@ export async function nativeAgentExecutionWorkerFromEnv(secrets: EphemeralRunTok
       timeoutMs: seconds(env.DEVILUDO_AGENT_MICROVM_TIMEOUT_SECONDS, 7_200, 60, 86_400) * 1_000,
       heartbeatIntervalMs: seconds(env.DEVILUDO_AGENT_MICROVM_HEARTBEAT_SECONDS, 30, 5, 120) * 1_000,
       attestationKeyId: safeId(env, "DEVILUDO_AGENT_MICROVM_ATTESTATION_KEY_ID"),
-      attestationPublicKey: publicKey,
+      attestationPublicKey: publicKey, credentialIssuer,
       sources,
       packages,
     });
@@ -75,7 +79,7 @@ export async function verifyAgentMicrovmLauncherRuntimeFromEnv(
     release = JSON.parse(releaseBytes.toString("utf8"));
     trustPolicy = JSON.parse(trustPolicyBytes.toString("utf8"));
   } catch { throw new Error("microVM launcher runtime is invalid"); }
-  return verifySignedAgentMicrovmLauncherRelease(release, {
+  const launcherClaims = verifySignedAgentMicrovmLauncherRelease(release, {
     trustPolicy,
     trustPolicyDigest: digest(env, "DEVILUDO_AGENT_MICROVM_TRUST_POLICY_DIGEST"),
     platformVersion: required(env, "DEVILUDO_PLATFORM_VERSION"),
@@ -85,6 +89,24 @@ export async function verifyAgentMicrovmLauncherRuntimeFromEnv(
     configDigest,
     now,
   });
+  const parsedConfig = parseNativeMicrovmLauncherConfig(config);
+  const runtimeFiles = await Promise.all([
+    hashedFile(parsedConfig.firecrackerExecutable, 1024 * 1024 * 1024),
+    hashedFile(parsedConfig.jailerExecutable, 1024 * 1024 * 1024),
+    hashedFile(parsedConfig.kernelImage, 1024 * 1024 * 1024),
+    hashedFile(parsedConfig.rootfsImage, 64 * 1024 * 1024 * 1024),
+    hashedFile(parsedConfig.mke2fsExecutable, 1024 * 1024 * 1024),
+    hashedFile(parsedConfig.debugfsExecutable, 1024 * 1024 * 1024),
+  ]);
+  const expected = [parsedConfig.firecrackerDigest, parsedConfig.jailerDigest, parsedConfig.kernelDigest,
+    parsedConfig.rootfsDigest, parsedConfig.mke2fsDigest, parsedConfig.debugfsDigest];
+  if (runtimeFiles.some((file, index) => file.digest !== expected[index])) throw new Error("microVM launcher runtime is invalid");
+  await verifyConfiguredAgentMicrovmGuestRelease({
+    releaseFile: parsedConfig.rootfsReleaseFile, releaseDigest: parsedConfig.rootfsReleaseDigest,
+    trustPolicyFile: parsedConfig.rootfsTrustPolicyFile, trustPolicyDigest: parsedConfig.rootfsTrustPolicyDigest,
+    platformVersion: parsedConfig.platformVersion, rootfsDigest: parsedConfig.rootfsDigest, now,
+  });
+  return launcherClaims;
 }
 
 async function bytes(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> {

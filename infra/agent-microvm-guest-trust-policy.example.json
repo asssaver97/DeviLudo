@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "deviludo.agent-microvm-guest-trust-policy.v1",
+  "policyId": "deviludo-agent-microvm-guest-production",
+  "policyRevision": 1,
+  "keys": [
+    {
+      "keyId": "agent-microvm-guest-example-revoked",
+      "algorithm": "Ed25519",
+      "publicKeySpkiBase64": "MCowBQYDK2VwAyEA5IygikfOr3qj21ahECtqxRmMwPliFNFlmrYB7zV1kqg=",
+      "notBefore": "2026-01-01T00:00:00.000Z",
+      "notAfter": "2027-01-01T00:00:00.000Z",
+      "status": "REVOKED"
+    }
+  ]
+}
