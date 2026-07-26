@@ -80,12 +80,26 @@ test("local Provider control retains only sidecar secret bytes and binds a passe
   assert.equal(receipt.state, "READY");
   assert.equal(probes, 1);
   assert.equal(await control.verify(preflight), false);
+  assert.equal(control.checkBinding({
+    providerRevisionId: provider.providerRevisionId,
+    profileRevisionId: preflight.profileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+    agent: provider.agent,
+    modelRoles: provider.models,
+  }).active, false);
   assert.equal(control.activate({
     providerRevisionId: provider.providerRevisionId,
     profileRevisionId: preflight.profileRevisionId,
     credentialVersionId: provider.credentialVersionId,
   }).state, "ACTIVE");
   assert.equal(await control.verify(preflight), true);
+  assert.equal(control.checkBinding({
+    providerRevisionId: provider.providerRevisionId,
+    profileRevisionId: preflight.profileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+    agent: provider.agent,
+    modelRoles: provider.models,
+  }).active, true);
   assert.equal(await control.verify({ ...preflight, model: "claude-sonnet-4-6-20250515" }), false);
   assert.equal(await control.verify({ ...preflight, credentialVersionId: "credential-claude-v8" }), false);
 
@@ -140,6 +154,13 @@ test("local Provider control retains only sidecar secret bytes and binds a passe
 
   control.revokeCredential({ credentialVersionId: provider.credentialVersionId });
   assert.equal(await control.verify(preflight), false);
+  assert.equal(control.checkBinding({
+    providerRevisionId: provider.providerRevisionId,
+    profileRevisionId: preflight.profileRevisionId,
+    credentialVersionId: provider.credentialVersionId,
+    agent: provider.agent,
+    modelRoles: provider.models,
+  }).active, false);
   await assert.rejects(async () => control.probe(probeCommand), LocalProviderProbeError);
 });
 

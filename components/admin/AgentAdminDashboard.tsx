@@ -734,7 +734,7 @@ function OverviewTab({ catalog, versions, installations, defaultAgent, localAgen
                 <span className={agent.state === "READY" ? styles.healthDotGood : styles.healthDotWarning} />
                 <strong>{agent.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</strong>
                 <span>{agent.observedVersion ?? "未安装"}</span>
-                <em>{agent.state === "READY" ? "精确版本匹配" : `${agent.state} · 期望 ${agent.expectedVersion}`}</em>
+                <em>{agent.state === "READY" ? "匹配生效 Profile 的精确版本" : `${agent.state} · 期望 ${(agent.expectedVersions ?? [agent.expectedVersion]).join(" / ")}`}</em>
               </div>
             ))}
             {localAgents.length === 0 && <div><span className={styles.healthDotMuted} /><strong>local-probe</strong><span>未连接</span><em>等待 127.0.0.1:4312</em></div>}

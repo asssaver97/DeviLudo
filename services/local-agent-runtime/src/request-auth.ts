@@ -15,7 +15,8 @@ export interface LocalAgentRuntimeAssertion {
   readonly method: "POST";
   readonly path: "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel"
     | "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
-    | "/v1/provider-bindings/rebind" | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
+    | "/v1/provider-bindings/check" | "/v1/provider-bindings/rebind"
+    | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
   readonly body: string | Uint8Array;
 }
 

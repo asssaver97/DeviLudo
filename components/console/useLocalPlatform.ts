@@ -12,8 +12,10 @@ export type LocalHealth = {
     developmentWorker?: string;
     localAgentRuntime?: string;
     localAgents?: LocalAgentReadiness[];
+    agentCatalogVerified?: boolean;
     inferenceGateway?: string;
     providerBindingProbe?: string;
+    activeProviderBinding?: string;
     workerImageIdentity?: string | null;
     expectedWorkerImageIdentity?: string | null;
     workerImageVerified?: boolean;
@@ -29,6 +31,7 @@ export type LocalAgentReadiness = {
   agent: "claude-code" | "codex-cli";
   executable: "claude" | "codex";
   expectedVersion: string;
+  expectedVersions?: string[];
   observedVersion: string | null;
   state: "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
 };

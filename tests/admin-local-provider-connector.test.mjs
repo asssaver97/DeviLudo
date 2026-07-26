@@ -58,6 +58,9 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
     if (url.pathname === "/v1/provider-bindings/rebind") {
       return jsonResponse(200, providerControl.rebind(command));
     }
+    if (url.pathname === "/v1/provider-bindings/check") {
+      return jsonResponse(200, providerControl.checkBinding(command));
+    }
     if (url.pathname === "/v1/provider-bindings/activate") {
       return jsonResponse(200, providerControl.activate(command));
     }

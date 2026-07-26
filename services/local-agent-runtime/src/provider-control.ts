@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertPinnedModelId } from "../../../lib/agent/providers";
 import type { GatewayProviderRevision } from "../../inference-gateway/src/contracts";
 import type { GatewayCredentialLease } from "../../inference-gateway/src/production-connector";
 import {
@@ -39,6 +40,12 @@ export interface LocalProviderBindingRebindReceipt {
   readonly targetProfileRevisionId: string;
   readonly state: "READY" | "ACTIVE";
   readonly sourceRemainsActive: true;
+}
+
+export interface LocalProviderBindingCheckReceipt {
+  readonly providerRevisionId: string;
+  readonly profileRevisionId: string;
+  readonly active: boolean;
 }
 
 export type LocalProviderScope = "platform" | "tenant" | "project";
@@ -169,6 +176,22 @@ export class LocalProviderControl implements LocalProviderBindingVerifier {
       provider: Object.freeze({ ...snapshotProvider(source.provider), state: "DISABLED" }),
     }));
     return bindingRebindReceipt(body, "READY");
+  }
+
+  checkBinding(value: unknown): LocalProviderBindingCheckReceipt {
+    const body = bindingCheck(value);
+    const binding = this.#bindings.get(bindingKey(body.providerRevisionId, body.profileRevisionId));
+    return Object.freeze({
+      providerRevisionId: body.providerRevisionId,
+      profileRevisionId: body.profileRevisionId,
+      active: Boolean(binding
+        && binding.profileRevisionId === body.profileRevisionId
+        && binding.provider.state === "ACTIVE"
+        && binding.provider.agent === body.agent
+        && binding.provider.credentialVersionId === body.credentialVersionId
+        && this.#credentials.has(body.credentialVersionId)
+        && sameModels(body.modelRoles, binding.provider.models)),
+    });
   }
 
   async verify(request: LocalAgentPreflightRequest): Promise<boolean> {
@@ -397,6 +420,42 @@ function bindingRebindReceipt(
     state,
     sourceRemainsActive: true,
   });
+}
+
+function bindingCheck(value: unknown): Readonly<{
+  providerRevisionId: string;
+  profileRevisionId: string;
+  credentialVersionId: string;
+  agent: "claude-code" | "codex-cli";
+  modelRoles: LocalAgentPreflightRequest["modelRoles"];
+}> {
+  const body = record(value);
+  exactKeys(body, ["agent", "credentialVersionId", "modelRoles", "profileRevisionId", "providerRevisionId"]);
+  if (body.agent !== "claude-code" && body.agent !== "codex-cli") {
+    throw new LocalProviderControlInputError("Provider binding Agent is invalid");
+  }
+  const roles = record(body.modelRoles);
+  exactKeys(roles, ["planningModel", "primaryModel", "smallFastModel", "subagentModel"]);
+  const modelRoles = Object.freeze({
+    primaryModel: pinnedModel(roles.primaryModel),
+    planningModel: pinnedModel(roles.planningModel),
+    smallFastModel: pinnedModel(roles.smallFastModel),
+    subagentModel: pinnedModel(roles.subagentModel),
+  });
+  return Object.freeze({
+    providerRevisionId: safeId(body.providerRevisionId),
+    profileRevisionId: safeId(body.profileRevisionId),
+    credentialVersionId: safeId(body.credentialVersionId),
+    agent: body.agent,
+    modelRoles,
+  });
+}
+
+function pinnedModel(value: unknown): string {
+  if (typeof value !== "string") throw new LocalProviderControlInputError("Provider binding model is invalid");
+  try { assertPinnedModelId(value); }
+  catch { throw new LocalProviderControlInputError("Provider binding model is invalid"); }
+  return value;
 }
 
 function gatewayProvider(

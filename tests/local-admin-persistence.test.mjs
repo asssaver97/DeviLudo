@@ -114,6 +114,31 @@ test("local Agent administrator snapshots fail closed on corruption and plaintex
   resetDemoStore();
 });
 
+test("local Agent administrator persists only an exact sidecar SecretRef binding", () => {
+  resetDemoStore();
+  const credential = {
+    id: "credential-47-v1",
+    familyId: "credential-47",
+    label: "Local sidecar key",
+    scope: "tenant",
+    scopeId: "tenant-local",
+    secretRef: "secret://local-agent-runtime/credential-47-v1",
+    fingerprint: `sha256:${"a".repeat(64)}`,
+    masked: "sha256:aaaa…aaaa",
+    version: 1,
+    state: "ACTIVE",
+    createdAt: "2026-07-26T00:00:00.000Z",
+    rotatedAt: null,
+  };
+  getDemoStore().credentials.push(credential);
+  const serialized = serializeLocalAdminState(getDemoStore());
+  assert.equal(parseLocalAdminState(serialized).credentials.at(-1)?.secretRef, credential.secretRef);
+
+  credential.secretRef = "secret://local-agent-runtime/credential-elsewhere-v1";
+  assert.throws(() => serializeLocalAdminState(getDemoStore()), /凭据投影无效/);
+  resetDemoStore();
+});
+
 test("local Agent administrator upgrades legacy Provider/Profile, ownership, and monotonic IDs into v5 snapshots", () => {
   const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
   assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v5");

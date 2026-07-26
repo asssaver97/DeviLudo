@@ -99,6 +99,29 @@ export async function rebindLocalProviderBinding(value: Readonly<{
   }
 }
 
+export async function checkLocalProviderBinding(value: Readonly<{
+  providerRevisionId: string;
+  profileRevisionId: string;
+  credentialVersionId: string;
+  agent: "claude-code" | "codex-cli";
+  modelRoles: Readonly<{
+    primaryModel: string;
+    planningModel: string;
+    smallFastModel: string;
+    subagentModel: string;
+  }>;
+}>): Promise<boolean> {
+  const data = await post("/v1/provider-bindings/check", value, "LOCAL_PROVIDER_CHECK_UNAVAILABLE");
+  const item = record(data);
+  if (item.providerRevisionId !== value.providerRevisionId
+    || item.profileRevisionId !== value.profileRevisionId
+    || typeof item.active !== "boolean"
+    || !exactKeys(item, ["active", "profileRevisionId", "providerRevisionId"])) {
+    throw new HttpProblem(502, "LOCAL_PROVIDER_CHECK_INVALID", "本机 Provider 绑定检查回执无效");
+  }
+  return item.active;
+}
+
 export async function disableLocalProviderBinding(value: Readonly<{
   providerRevisionId: string;
   profileRevisionId: string;
@@ -112,7 +135,8 @@ export async function disableLocalProviderBinding(value: Readonly<{
 }
 
 type LocalProviderControlPath = "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
-  | "/v1/provider-bindings/rebind" | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
+  | "/v1/provider-bindings/check" | "/v1/provider-bindings/rebind"
+  | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
 
 async function post(path: LocalProviderControlPath, value: unknown, unavailableCode: string): Promise<unknown> {
   const body = JSON.stringify(value);

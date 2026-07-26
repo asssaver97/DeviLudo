@@ -204,6 +204,12 @@ async function route(
       json(response, 200, { data: runtime.providerControl!.rebind(command) });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/v1/provider-bindings/check" && !url.search) {
+      requireProviderControl(runtime.providerControl);
+      const command = await readObject(request, "/v1/provider-bindings/check", runtime.requestVerifier);
+      json(response, 200, { data: runtime.providerControl!.checkBinding(command) });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/v1/provider-bindings/activate" && !url.search) {
       requireProviderControl(runtime.providerControl);
       const command = await readObject(request, "/v1/provider-bindings/activate", runtime.requestVerifier);
@@ -318,7 +324,8 @@ export function parseLocalAgentCancellationRequest(value: unknown): LocalAgentCa
 
 type LocalAgentRuntimeAssertionPath = "/v1/preflight" | "/v1/runs" | "/v1/runs/cancel"
   | "/v1/provider-credentials" | "/v1/provider-credentials/revoke" | "/v1/provider-probes"
-  | "/v1/provider-bindings/rebind" | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
+  | "/v1/provider-bindings/check" | "/v1/provider-bindings/rebind"
+  | "/v1/provider-bindings/activate" | "/v1/provider-bindings/disable";
 
 async function readCancellationRequest(
   request: IncomingMessage,

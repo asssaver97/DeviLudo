@@ -1,4 +1,12 @@
 import { json } from "@/lib/control-plane/http";
+import { getDemoStore } from "@/lib/control-plane/demo-store";
+import { acquireLocalAdminState } from "@/lib/control-plane/local-admin-state";
+import {
+  isLocalDevelopmentWorkerReady,
+  reconcileLocalAgentHealth,
+  type LocalAgentRuntimeProbe,
+} from "@/lib/admin/local-agent-health";
+import { checkLocalProviderBinding } from "@/lib/admin/local-provider-control";
 import { evaluateProductionWebReadiness } from "@/lib/health/production-readiness";
 import { readLocalDelivery } from "@/lib/local-delivery/store";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
@@ -6,34 +14,24 @@ import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
 const localRuntimeUrl = loopbackRuntimeUrl();
 const localAgentRuntimeUrl = loopbackOrigin("DEVILUDO_LOCAL_AGENT_RUNTIME_URL", "http://127.0.0.1:4312");
 
-type LocalAgentState = "READY" | "VERSION_MISMATCH" | "UNAVAILABLE";
-type LocalAgentHealth = {
-  status: "ok" | "degraded" | "NOT_CONNECTED";
-  service?: string;
-  executionEnabled?: boolean;
-  inferenceGateway?: "CONFIGURED" | "NOT_CONFIGURED";
-  providerBindingProbe?: "CONFIGURED" | "NOT_CONFIGURED";
-  workerImageIdentity?: string | null;
-  expectedWorkerImageIdentity?: string | null;
-  workerImageVerified?: boolean;
-  workerIdentityMode?: "PINNED_ENV" | "LOCAL_DETERMINISTIC" | "NOT_CONFIGURED";
-  agents?: { agent: "claude-code" | "codex-cli"; expectedVersion: string; observedVersion: string | null; state: LocalAgentState }[];
-};
-
 export async function GET(request: Request) {
   if (!isLoopbackTestRequest(request)) return await productionHealth();
+  let adminLease: Awaited<ReturnType<typeof acquireLocalAdminState>> | null = null;
   try {
+    adminLease = await acquireLocalAdminState();
     const delivery = await readLocalDelivery("ember-archipelago", "SPEC-008");
     let localRuntime: { status: string; godotVersion?: string | null } = { status: "NOT_CONNECTED" };
-    let localAgentRuntime: LocalAgentHealth = { status: "NOT_CONNECTED" };
+    let localAgentRuntime: LocalAgentRuntimeProbe = { status: "NOT_CONNECTED" };
     try {
       const response = await fetch(`${localRuntimeUrl}/health`, { signal: AbortSignal.timeout(2_000) });
       if (response.ok) localRuntime = await response.json() as { status: string; godotVersion?: string | null };
     } catch { /* the local runtime is an optional, explicit process */ }
     try {
       const response = await fetch(`${localAgentRuntimeUrl}/health`, { signal: AbortSignal.timeout(2_000) });
-      if (response.ok) localAgentRuntime = await response.json() as LocalAgentHealth;
+      if (response.ok) localAgentRuntime = await response.json() as LocalAgentRuntimeProbe;
     } catch { /* Agent discovery is optional and never enables execution by itself */ }
+    const agentHealth = reconcileLocalAgentHealth(localAgentRuntime, getDemoStore());
+    const activeProviderBindingVerified = await verifyOneActiveProviderBinding(agentHealth.bindingCandidates);
     return json({
       status: "ok",
       service: "deviludo-control-plane-preview",
@@ -44,11 +42,13 @@ export async function GET(request: Request) {
         d1: "READY",
         fixtureExecutor: localRuntime.status === "ok" ? "READY" : "NOT_CONNECTED",
         localGodot: localRuntime.godotVersion ?? null,
-        developmentWorker: isVerifiedAgentRuntime(localAgentRuntime) ? "READY" : "BLOCKED",
+        developmentWorker: isLocalDevelopmentWorkerReady(localAgentRuntime, agentHealth, activeProviderBindingVerified) ? "READY" : "BLOCKED",
         localAgentRuntime: localAgentRuntime.status === "NOT_CONNECTED" ? "NOT_CONNECTED" : "CONNECTED",
-        localAgents: localAgentRuntime.agents ?? [],
+        localAgents: agentHealth.agents,
+        agentCatalogVerified: agentHealth.catalogVerified && agentHealth.probeVerified,
         inferenceGateway: localAgentRuntime.inferenceGateway ?? "NOT_CONFIGURED",
         providerBindingProbe: localAgentRuntime.providerBindingProbe ?? "NOT_CONFIGURED",
+        activeProviderBinding: activeProviderBindingVerified ? "VERIFIED" : "BLOCKED",
         workerImageIdentity: localAgentRuntime.workerImageIdentity ?? null,
         expectedWorkerImageIdentity: localAgentRuntime.expectedWorkerImageIdentity ?? null,
         workerImageVerified: localAgentRuntime.workerImageVerified === true,
@@ -68,7 +68,32 @@ export async function GET(request: Request) {
       error: error instanceof Error ? error.message : "Local D1 is unavailable",
       time: new Date().toISOString(),
     }, { status: 503 });
+  } finally {
+    adminLease?.release();
   }
+}
+
+async function verifyOneActiveProviderBinding(
+  candidates: ReturnType<typeof reconcileLocalAgentHealth>["bindingCandidates"],
+): Promise<boolean> {
+  const selected = (["claude-code", "codex-cli"] as const).flatMap((agent) => {
+    const candidate = candidates.find((item) => item.agent === agent);
+    return candidate ? [candidate] : [];
+  });
+  if (selected.length === 0) return false;
+  const results = await Promise.all(selected.map(async (candidate) => {
+    try {
+      return await checkLocalProviderBinding({
+        providerRevisionId: candidate.providerRevisionId,
+        profileRevisionId: candidate.profileRevisionId,
+        credentialVersionId: candidate.credentialVersionId,
+        agent: candidate.agent,
+        modelRoles: candidate.modelRoles,
+      });
+    }
+    catch { return false; }
+  }));
+  return results.some(Boolean);
 }
 
 async function productionHealth(): Promise<Response> {
@@ -118,16 +143,6 @@ function unavailableProductionDependencies() {
     steamProjectConfigurationBroker: "UNAVAILABLE",
     releaseAuthorizationBroker: "UNAVAILABLE",
   });
-}
-
-function isVerifiedAgentRuntime(health: LocalAgentHealth): boolean {
-  return health.service === "deviludo-local-agent-runtime"
-    && health.status === "ok"
-    && health.executionEnabled === true
-    && health.inferenceGateway === "CONFIGURED"
-    && health.providerBindingProbe === "CONFIGURED"
-    && health.workerImageVerified === true
-    && Boolean(health.agents?.some((agent) => agent.state === "READY"));
 }
 
 function loopbackRuntimeUrl() {

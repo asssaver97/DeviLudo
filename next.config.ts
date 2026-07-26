@@ -15,6 +15,7 @@ const nextConfig: NextConfig = {
   // bindings; production remains disabled by NODE_ENV even if misconfigured.
   env: {
     DEVILUDO_LOCAL_TEST_MODE: process.env.DEVILUDO_LOCAL_TEST_MODE === "1" ? "1" : "0",
+    DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED: process.env.DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED === "1" ? "1" : "0",
     DEVILUDO_LOCAL_RUNTIME_URL: loopbackOrigin("DEVILUDO_LOCAL_RUNTIME_URL", "http://127.0.0.1:4311"),
     DEVILUDO_LOCAL_AGENT_RUNTIME_URL: loopbackOrigin("DEVILUDO_LOCAL_AGENT_RUNTIME_URL", "http://127.0.0.1:4312"),
     DEVILUDO_LOCAL_SPEC_RUNTIME_URL: loopbackOrigin("DEVILUDO_LOCAL_SPEC_RUNTIME_URL", "http://127.0.0.1:4313"),

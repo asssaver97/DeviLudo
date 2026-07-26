@@ -1307,3 +1307,11 @@ test("public API contract covers authoritative account connection and MFA releas
   assert.doesNotMatch(connections, /该账号不能访问商店财务和所有者设置/);
   assert.doesNotMatch(connections, /initialGitHubConnected|useState\(initialGitHubConnected\)/);
 });
+
+test("localhost Worker receives only an allow-listed Provider control flag and loopback origins", () => {
+  const config = readFileSync(new URL("../next.config.ts", import.meta.url), "utf8");
+  assert.match(config, /DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED: process\.env\.DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED === "1" \? "1" : "0"/);
+  assert.match(config, /DEVILUDO_LOCAL_AGENT_RUNTIME_URL: loopbackOrigin/);
+  assert.match(config, /Expose only the non-secret, loopback-constrained local harness/);
+  assert.doesNotMatch(config, /env:\s*\{\s*\.\.\.process\.env/);
+});

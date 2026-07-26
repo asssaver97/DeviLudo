@@ -717,8 +717,8 @@ try {
     },
   );
   const tenantProfileProbePayload = await tenantProfileProbe.response.json();
-  if (tenantProfileProbe.response.status !== 503
-    || tenantProfileProbePayload.error?.code !== "PROVIDER_PROBE_NOT_CONFIGURED") {
+  if (tenantProfileProbe.response.status !== 422
+    || tenantProfileProbePayload.error?.code !== "PROVIDER_PROBE_FAILED") {
     throw new Error("local tenant Agent Profile probe fabricated an external trust result");
   }
   const invitationGatePayload = await invitationGate.response.json();
@@ -1785,7 +1785,7 @@ try {
   console.log(`✓ Agent body contract ${forgedTenantProfile.response.status}/${forgedCredential.response.status}/${forgedRollout.response.status} · unknown fields rejected without state drift`);
   console.log(`✓ Credential lifecycle ${tenantCredentialRotation.response.status}/${tenantCredentialRevocation.response.status} · new version active, previous version revoked`);
   console.log(`✓ Tenant Agent write ${tenantProfile.response.status} (${tenantProfile.elapsedMs}ms) · scoped immutable draft`);
-  console.log(`✓ Provider probe gate ${tenantProfileProbe.response.status} (${tenantProfileProbe.elapsedMs}ms) · external trust required`);
+  console.log(`✓ Provider probe gate ${tenantProfileProbe.response.status} (${tenantProfileProbe.elapsedMs}ms) · real connector rejected unverified upstream`);
   console.log(`✓ Invitation gate    ${invitationGate.response.status} (${invitationGate.elapsedMs}ms) · ${invitationGatePayload.error.code}`);
   console.log(`✓ Local session      ${localSession.response.status} (${localSession.elapsedMs}ms) · @${sessionPayload.data.githubLogin}`);
   console.log(`✓ GET /api/health    ${health.response.status} (${health.elapsedMs}ms) · status=ok`);

@@ -225,7 +225,7 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
   }
   for (const credential of value.credentials) {
     if (!record(credential) || typeof credential.id !== "string" || typeof credential.secretRef !== "string"
-      || !credential.secretRef.startsWith("vault://") || typeof credential.fingerprint !== "string"
+      || !validCredentialSecretRef(credential) || typeof credential.fingerprint !== "string"
       || !DIGEST.test(credential.fingerprint) || typeof credential.familyId !== "string"
       || (credential.scope !== "platform" && credential.scope !== "tenant")
       || typeof credential.scopeId !== "string" || !credential.scopeId
@@ -256,6 +256,12 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
       throw new Error("本地 Agent Profile 投影无效");
     }
   }
+}
+
+function validCredentialSecretRef(credential: Record<string, unknown>): boolean {
+  if (typeof credential.id !== "string" || typeof credential.secretRef !== "string") return false;
+  return credential.secretRef.startsWith("vault://")
+    || credential.secretRef === `secret://local-agent-runtime/${credential.id}`;
 }
 
 function validResourceSequences(value: unknown): boolean {

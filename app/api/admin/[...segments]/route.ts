@@ -758,7 +758,8 @@ export async function POST(request: Request, context: RouteContext) {
       }
       const credential = currentStore.credentials.find((item) => item.id === credentialVersionId && item.state === "ACTIVE");
       const fixtureCredential = scope === "platform" && currentStore.providers.some((item) => item.agent === agent
-        && item.credentialVersionId === credentialVersionId && item.state === "ACTIVE");
+        && item.credentialVersionId === credentialVersionId && item.state === "ACTIVE"
+        && demoFixtureProviderCredential(item));
       if (!credential && !fixtureCredential) {
         throw new HttpProblem(409, "CREDENTIAL_NOT_SELECTABLE", "Profile requires an active credential version for the selected Agent");
       }
@@ -845,7 +846,7 @@ export async function POST(request: Request, context: RouteContext) {
         throw new HttpProblem(409, "PROVIDER_NOT_REUSABLE", "Installation rebind requires the source Profile's active, fully probed Provider");
       }
       const credential = snapshot.credentials.find((item) => item.id === source.credentialVersionId && item.state === "ACTIVE");
-      const fixtureCredential = source.scope === "platform" && provider.state === "ACTIVE";
+      const fixtureCredential = source.scope === "platform" && demoFixtureProviderCredential(provider);
       if (!credential && !fixtureCredential) {
         throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Installation rebind requires the source Profile's active credential version");
       }
@@ -1032,19 +1033,23 @@ export async function POST(request: Request, context: RouteContext) {
       }
       const currentProvider = getDemoStore().providers.find((item) => item.id === authorizedProfile.providerRevisionId);
       if (!currentProvider) throw new HttpProblem(409, "PROVIDER_NOT_FOUND", "Profile Provider revision is missing");
+      const currentCredential = getDemoStore().credentials.find((item) => item.id === currentProvider.credentialVersionId);
+      const fixtureCredential = demoFixtureProviderCredential(currentProvider);
       if (action === "activate") {
         if (authorizedProfile.state !== "READY" || !["READY", "ACTIVE"].includes(currentProvider.state)
           || !demoProviderProbePassed(currentProvider)) {
           throw new HttpProblem(409, "PROBE_REQUIRED", "Validate the draft and pass every probe before activation");
         }
-        if (localProviderControlRequired()) {
+        if (localProviderControlRequired() && currentCredential?.state === "ACTIVE") {
           await activateLocalProviderBinding({
             providerRevisionId: currentProvider.id,
             profileRevisionId: authorizedProfile.id,
             credentialVersionId: currentProvider.credentialVersionId,
           });
+        } else if (localProviderControlRequired() && !fixtureCredential) {
+          throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Profile activation requires its active managed credential version");
         }
-      } else if (localProviderControlRequired()) {
+      } else if (localProviderControlRequired() && currentCredential && currentCredential.state !== "REVOKED") {
         await disableLocalProviderBinding({
           providerRevisionId: currentProvider.id,
           profileRevisionId: authorizedProfile.id,
@@ -1452,6 +1457,11 @@ function demoProviderProbePassed(provider: DemoProvider): boolean {
   const keys = Object.keys(provider.probe);
   return keys.length === PROVIDER_REQUIRED_CHECKS.length
     && PROVIDER_REQUIRED_CHECKS.every((check) => provider.probe[check] === "PASS");
+}
+
+function demoFixtureProviderCredential(provider: DemoProvider): boolean {
+  return (provider.id === "provider-claude-platform-r3" && provider.credentialVersionId === "cred-claude-platform-v4")
+    || (provider.id === "provider-codex-platform-r2" && provider.credentialVersionId === "cred-codex-platform-v2");
 }
 
 async function mutate<T>(lease: LocalAdminStateLease, idempotency: string, operation: () => T): Promise<Response> {
