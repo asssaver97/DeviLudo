@@ -5,6 +5,7 @@ export * from "./locked-native-finalizer";
 export * from "./locked-platform-signer";
 export * from "./native-controller";
 export * from "./native-policy";
+export * from "./native-controller-release";
 export * from "./operation-memory";
 export * from "./postgres-operations";
 export * from "./run-service";

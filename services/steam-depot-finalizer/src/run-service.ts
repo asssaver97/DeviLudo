@@ -7,6 +7,7 @@ import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { createSteamDepotFinalizerHandler, createSteamDepotFinalizerHttpsServer } from "./ingress-http";
 import { LockedNativeSteamDepotFinalizer } from "./locked-native-finalizer";
 import { signingSchemeForPlatform } from "./native-policy";
+import { verifySteamDepotFinalizerNativeRuntime } from "./native-controller-release";
 import { verifySteamDepotFinalizerServiceRuntime } from "./native-service-release";
 import { PostgresSteamDepotFinalizationOperations } from "./postgres-operations";
 import { DurableSteamDepotFinalizerService } from "./service";
@@ -18,7 +19,10 @@ const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 export async function steamDepotFinalizerFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
-  await verifySteamDepotFinalizerServiceRuntime(env);
+  await Promise.all([
+    verifySteamDepotFinalizerServiceRuntime(env),
+    verifySteamDepotFinalizerNativeRuntime(env),
+  ]);
   const serviceEnv = Object.freeze({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "steam-depot-finalizer" });
   const config = await steamDepotFinalizerConfigFromEnv(serviceEnv);
   const pool = postgresWorkflowPoolFromEnv(serviceEnv);

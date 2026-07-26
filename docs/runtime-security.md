@@ -351,6 +351,15 @@ forbidden from requests, PostgreSQL and receipts. A failed invocation releases
 the fenced lease for exact retry, while completion becomes append-only. macOS
 cannot complete without a content-addressed notarization receipt.
 
+The native controller is a per-OS Node SEA artifact, never a source-tree
+launcher. A clean-commit build receipt fixes the Node runtime, esbuild,
+postject, package lock, complete bundle input identity, OS and architecture.
+After platform signing and scans, a dedicated Ed25519 release authority signs
+the released digest and native-signature evidence. Its trust policy is
+independent from the finalizer service bundle and every Runner key. At startup,
+the service verifies the signed native release and invokes only the controller's
+embedded `--identity` before any database, listener or signing initialization.
+
 The signing service is deployed once per native OS. Its health response contains
 exactly one scheme, and the Steam executor accepts three distinct HTTPS origins
 only; same-origin consolidation and cross-platform fallback are rejected. The

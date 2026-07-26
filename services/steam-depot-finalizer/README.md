@@ -65,6 +65,31 @@ content-addressed S3 bucket and file-mounted S3 secret/CA. The CLI rejects
 additional arguments, cross-platform requests, non-canonical policy bytes and
 request/receipt files outside the parent-created working directory.
 
+The controller is not executed from TypeScript source in production.
+`npm run build:steam-depot-finalizer-native --` builds one host-native Node SEA
+candidate from the exact clean commit and a digest-pinned Node 22 runtime. The
+receipt binds the target OS/architecture, Node, esbuild, postject, package lock,
+complete bundle input count, embedded `--identity` document and candidate
+digest. Windows and macOS candidates deliberately record that their upstream
+Node signature was invalidated or replaced by build-only ad-hoc signing.
+
+After platform code signing and SBOM/malware/vulnerability/provenance checks,
+`npm run finalize:steam-depot-finalizer-native --` accepts only a `PASS`
+evidence document bound to both candidate and released bytes. Its dedicated
+TLS 1.3 mTLS KMS route is
+`/v1/steam-depot-finalizer-native-releases/sign-ed25519`; this release key and
+trust policy are independent from the service bundle, Runner and Steam
+Workflow Executor. Inspect a proposed policy with
+`npm run inspect:steam-depot-finalizer-native-trust --`. The checked-in example
+is intentionally revoked.
+
+Before PostgreSQL, the public mTLS listener, policy parsing or a signing probe
+can start, the service verifies both signed release chains. It hashes the
+native binary and build receipt through `O_NOFOLLOW` handles, verifies the
+native release envelope, then executes only `--identity` in an empty production
+environment and binds its embedded version, source commit, Node version,
+platform and architecture to the release claims.
+
 `LockedSteamDepotPlatformSigner` invokes only fixed no-shell argv. Windows uses
 `signtool sign` plus `verify` and a fixed HTTPS timestamp authority; Linux uses
 `cosign sign-blob` plus `verify-blob`, a fixed KMS reference, public-key digest
