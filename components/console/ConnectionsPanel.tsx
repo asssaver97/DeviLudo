@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "./AppShell";
 import { CheckIcon, GithubIcon, ShieldIcon, SteamIcon } from "./Icons";
+import { steamLeastPrivilegeProof } from "@/lib/connections/steam-permission-proof";
 
 type GitHubStatus = {
   readonly state: "loading" | "unavailable" | "CONNECTED" | "NOT_CONNECTED";
@@ -17,18 +18,20 @@ type SteamStatus = {
   readonly enrollmentUrl: string | null;
   readonly accountName: string | null;
   readonly allowedAppIds: readonly string[];
+  readonly permissions: readonly ("EditAppMetadata" | "PublishAppChanges")[];
   readonly verifiedAt: string | null;
   readonly expiresAt: string | null;
 };
 
 const EMPTY_GITHUB: GitHubStatus = { state: "loading", installationCount: 0, accountLogin: null, repositorySelection: null, verifiedAt: null };
-const EMPTY_STEAM: SteamStatus = { state: "loading", enrollmentUrl: null, accountName: null, allowedAppIds: [], verifiedAt: null, expiresAt: null };
+const EMPTY_STEAM: SteamStatus = { state: "loading", enrollmentUrl: null, accountName: null, allowedAppIds: [], permissions: [], verifiedAt: null, expiresAt: null };
 
 export function ConnectionsPanel() {
   const [githubStatus, setGithubStatus] = useState<GitHubStatus>(EMPTY_GITHUB);
   const [githubBusy, setGithubBusy] = useState(false);
   const [steamStatus, setSteamStatus] = useState<SteamStatus>(EMPTY_STEAM);
   const [steamBusy, setSteamBusy] = useState(false);
+  const [steamPermissionBusy, setSteamPermissionBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
@@ -129,6 +132,36 @@ export function ConnectionsPanel() {
     }
   }
 
+  async function verifySteamLeastPrivilege() {
+    setSteamPermissionBusy(true);
+    try {
+      const response = await fetch("/api/connections/steam", { cache: "no-store" });
+      const payload = await response.json() as { data?: SteamStatus; error?: { code?: string; message?: string } };
+      if (!response.ok) {
+        setNotice(payload.error?.code === "STEAM_GUARD_ENROLLMENT_BROKER_REQUIRED"
+          ? "无法检查最小权限：本地站点尚未接入隔离的 Steam Guard Broker。"
+          : payload.error?.message ?? "Steam 发布会话权限暂时无法验证。");
+        return;
+      }
+      if (payload.data?.state !== "READY") {
+        setNotice("最小权限尚未通过：请先完成 Steam Guard 登记并建立可用发布会话。");
+        if (payload.data) setSteamStatus(payload.data);
+        return;
+      }
+      const proof = steamLeastPrivilegeProof(payload.data);
+      if (!proof) {
+        setNotice("最小权限检查未通过：Broker 返回的权限、App 范围或时效证明无效。");
+        return;
+      }
+      setSteamStatus(payload.data);
+      setNotice(`最小权限检查通过：Broker 已确认当前发布会话仅开放 App 元数据编辑与发布变更，范围为 App ${proof.allowedAppIds.join(" / ")}。`);
+    } catch {
+      setNotice("无法连接隔离的 Steam Guard Broker，最小权限未被确认。");
+    } finally {
+      setSteamPermissionBusy(false);
+    }
+  }
+
   return (
     <AppShell>
       {notice ? <div className="toast" role="status"><CheckIcon /><span>{notice}</span><button onClick={() => setNotice("")} type="button">×</button></div> : null}
@@ -169,7 +202,7 @@ export function ConnectionsPanel() {
               </div>
               <div className="connection-actions">
                 <button className="button button-secondary" disabled={steamBusy || steamStatus.state === "loading"} onClick={beginSteamLogin} type="button">{steamBusy ? "正在连接…" : steamReady ? "刷新 Steam Guard 会话" : steamWaiting ? "继续 Steam Guard 登记" : "登记 Steam Guard 会话"}</button>
-                <button className="quiet-button" onClick={() => setNotice("最小权限检查通过：该账号不能访问商店财务和所有者设置。") } type="button">检查最小权限</button>
+                <button className="quiet-button" disabled={steamPermissionBusy || steamBusy || steamStatus.state === "loading"} onClick={verifySteamLeastPrivilege} type="button">{steamPermissionBusy ? "正在检查…" : "检查最小权限"}</button>
               </div>
             </div>
           </article>
