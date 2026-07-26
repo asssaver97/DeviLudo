@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { steamWorkflowExecutorConfigFromEnv } from "../src/run-workflow-executor-service";
+import { readinessMarkerFromEnv, steamWorkflowExecutorConfigFromEnv } from "../src/run-workflow-executor-service";
 
 async function fixture(t: { after(callback: () => Promise<void>): void }) {
   const root = await mkdtemp(join(tmpdir(), "deviludo-steam-executor-"));
@@ -102,4 +102,19 @@ test("isolated Steam executor rejects missing, floating and inline secret config
     ...env,
     DEVILUDO_STEAM_EXECUTOR_DEPOT_FINALIZER_TLS_CERT_FILE: env.DEVILUDO_STEAM_EXECUTOR_RC_SIGNER_TLS_CERT_FILE,
   }), /must use distinct mTLS identities/);
+});
+
+test("Steam executor readiness marker exists only after dependency probes report READY", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-steam-executor-ready-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "ready");
+  await writeFile(path, "stale\n");
+  const marker = readinessMarkerFromEnv({ DEVILUDO_STEAM_EXECUTOR_READY_FILE: path });
+  marker.clear();
+  await assert.rejects(readFile(path), { code: "ENOENT" });
+  marker.ready();
+  assert.equal(await readFile(path, "utf8"), "READY\n");
+  assert.throws(() => marker.ready(), { code: "EEXIST" });
+  marker.clear();
+  await assert.rejects(readFile(path), { code: "ENOENT" });
 });

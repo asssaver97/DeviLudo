@@ -193,6 +193,9 @@ The isolated executor image is built only through
 [`docs/steam-workflow-executor-image.md`](../../docs/steam-workflow-executor-image.md).
 Repository source may be exercised with `npm run start:steam-workflow-executor`,
 but production uses the fixed non-root container entrypoint.
+Its build receipt, immutable runtime lock, distinct SecurityAdmin/KMS release
+authorization and restricted Kubernetes deployment are documented together in
+[`docs/steam-workflow-executor-image.md`](../../docs/steam-workflow-executor-image.md).
 It composes an audited, digest-pinned native publisher, tenant-RLS PostgreSQL
 authority, checksum-verifying immutable S3 reads, an mTLS platform-native depot
 finalizer and an mTLS Vault/KMS RC signer with `steamWorkflowWorkerFromEnv()`.

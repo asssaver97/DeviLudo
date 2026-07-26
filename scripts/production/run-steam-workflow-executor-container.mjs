@@ -16,6 +16,7 @@ const FIXED_ENVIRONMENT = Object.freeze({
   DEVILUDO_STEAM_EXECUTOR_NATIVE_EXECUTABLE: "/opt/deviludo/bin/native-steam-publisher",
   DEVILUDO_STEAM_EXECUTOR_NATIVE_CONFIG_FILE: "/opt/deviludo/config/native-steam-publisher.json",
   DEVILUDO_STEAM_EXECUTOR_WORK_ROOT: "/var/lib/deviludo/steam-publisher",
+  DEVILUDO_STEAM_EXECUTOR_READY_FILE: "/tmp/deviludo-steam-executor-ready",
 });
 
 export function validateSteamWorkflowExecutorContainerEnvironment(env = process.env) {

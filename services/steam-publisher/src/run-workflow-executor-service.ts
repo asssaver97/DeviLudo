@@ -1,5 +1,5 @@
 import { createPublicKey, type KeyObject } from "node:crypto";
-import { constants } from "node:fs";
+import { closeSync, constants, fsyncSync, openSync, unlinkSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -185,13 +185,39 @@ export async function steamWorkflowExecutorServiceFromEnv(
   const pool = postgresWorkflowPoolFromEnv({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "steam-executor" });
   try {
     const composition = composeSteamWorkflowExecutor(config, pool);
-    const worker = steamWorkflowWorkerFromEnv(composition.executor, env, pool);
+    const marker = readinessMarkerFromEnv(env);
+    marker.clear();
+    const worker = steamWorkflowWorkerFromEnv(composition.executor, env, pool, {
+      diagnostic: (event) => {
+        process.stderr.write(`${JSON.stringify({ service: "deviludo-steam-workflow-worker", event })}\n`);
+        if (event === "READY") marker.ready();
+        if (event === "STOPPED") marker.clear();
+      },
+    });
     return Object.freeze({ config, ...composition, ...worker });
   } catch (error) {
     config.s3.secretAccessKey.fill(0);
     await pool.close().catch(() => undefined);
     throw error;
   }
+}
+
+export function readinessMarkerFromEnv(env: Readonly<Record<string, string | undefined>> = process.env) {
+  const configured = env.DEVILUDO_STEAM_EXECUTOR_READY_FILE;
+  const path = configured === undefined ? undefined : absolute(env, "DEVILUDO_STEAM_EXECUTOR_READY_FILE");
+  return Object.freeze({
+    clear(): void {
+      if (!path) return;
+      try { unlinkSync(path); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    },
+    ready(): void {
+      if (!path) return;
+      const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o400);
+      try { writeFileSync(descriptor, "READY\n"); fsyncSync(descriptor); } finally { closeSync(descriptor); }
+    },
+  });
 }
 
 export async function runSteamWorkflowExecutorService(

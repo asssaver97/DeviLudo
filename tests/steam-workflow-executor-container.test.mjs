@@ -36,6 +36,7 @@ const fixedEnvironment = Object.freeze({
   DEVILUDO_STEAM_EXECUTOR_NATIVE_EXECUTABLE: "/opt/deviludo/bin/native-steam-publisher",
   DEVILUDO_STEAM_EXECUTOR_NATIVE_CONFIG_FILE: "/opt/deviludo/config/native-steam-publisher.json",
   DEVILUDO_STEAM_EXECUTOR_WORK_ROOT: "/var/lib/deviludo/steam-publisher",
+  DEVILUDO_STEAM_EXECUTOR_READY_FILE: "/tmp/deviludo-steam-executor-ready",
 });
 
 test("Steam workflow executor container starts one fixed external workload", async () => {
@@ -62,7 +63,7 @@ test("Steam workflow executor container starts one fixed external workload", asy
   }), /environment is not fixed/);
 });
 
-test("Steam workflow executor Dockerfile is isolated, non-root and receives native authority only by mount", () => {
+test("Steam workflow executor Dockerfile is isolated, non-root and pins its native publisher stage", () => {
   const dockerfile = readFileSync(new URL("../Dockerfile.steam-workflow-executor", import.meta.url), "utf8");
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(dockerfile, /^ARG NODE_BASE_IMAGE\nFROM \$\{NODE_BASE_IMAGE\} AS dependencies/m);
@@ -73,6 +74,7 @@ test("Steam workflow executor Dockerfile is isolated, non-root and receives nati
   assert.match(dockerfile,
     /ENTRYPOINT \["\/usr\/local\/bin\/node", "--import", "tsx", "scripts\/production\/run-steam-workflow-executor-container\.mjs"\]/);
   assert.match(dockerfile, /DEVILUDO_STEAM_EXECUTOR_WORK_ROOT=\/var\/lib\/deviludo\/steam-publisher/);
+  assert.match(dockerfile, /DEVILUDO_STEAM_EXECUTOR_READY_FILE=\/tmp\/deviludo-steam-executor-ready/);
   assert.doesNotMatch(dockerfile, /COPY .*services\/(?:agent|steam-depot-finalizer|steam-client-connector)/);
   assert.doesNotMatch(dockerfile, /\b(?:curl|wget|apt-get|claude|codex)\b/i);
   assert.match(dockerfile, /COPY --from=native-publisher .*\/opt\/deviludo\/bin\/native-steam-publisher/);

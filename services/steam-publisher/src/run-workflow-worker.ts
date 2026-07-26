@@ -20,6 +20,7 @@ export function steamWorkflowWorkerFromEnv(
   executor: SteamWorkflowOperationExecutor,
   env: Readonly<Record<string, string | undefined>> = process.env,
   suppliedPool?: ClosablePostgresWorkflowPool,
+  options: Readonly<{ diagnostic?: (event: "READY" | "CYCLE_FAILED" | "STOPPED") => void }> = {},
 ) {
   const serviceEnv = Object.freeze({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "steam-executor" });
   const pool = suppliedPool ?? postgresWorkflowPoolFromEnv(serviceEnv);
@@ -33,7 +34,7 @@ export function steamWorkflowWorkerFromEnv(
   const host = new PollingSteamWorkflowWorkerHost(processor, tenantIds, {
     pollIntervalMs: integer(env.DEVILUDO_STEAM_WORKER_POLL_INTERVAL_MS, 1_000, 100, 60_000),
     retryIntervalMs: integer(env.DEVILUDO_STEAM_WORKER_RETRY_INTERVAL_MS, 5_000, 100, 60_000),
-    diagnostic: (event) => diagnostic(event),
+    diagnostic: options.diagnostic ?? diagnostic,
   });
   return Object.freeze({ pool, operations, dispatch, worker, processor, host, tenantIds });
 }

@@ -35,7 +35,8 @@ ENV NODE_ENV=production \
     DEVILUDO_CONTAINER_KIND=steam-workflow-executor \
     DEVILUDO_STEAM_EXECUTOR_NATIVE_EXECUTABLE=/opt/deviludo/bin/native-steam-publisher \
     DEVILUDO_STEAM_EXECUTOR_NATIVE_CONFIG_FILE=/opt/deviludo/config/native-steam-publisher.json \
-    DEVILUDO_STEAM_EXECUTOR_WORK_ROOT=/var/lib/deviludo/steam-publisher
+    DEVILUDO_STEAM_EXECUTOR_WORK_ROOT=/var/lib/deviludo/steam-publisher \
+    DEVILUDO_STEAM_EXECUTOR_READY_FILE=/tmp/deviludo-steam-executor-ready
 
 RUN mkdir -p /var/lib/deviludo/steam-publisher /opt/deviludo/bin /opt/deviludo/config \
     && chown -R node:node /var/lib/deviludo/steam-publisher \

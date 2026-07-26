@@ -57,3 +57,49 @@ NODE_ENV=production npm run lock:steam-workflow-executor-runtime -- \
 锁包含 Registry Secret、非秘密 ConfigMap、环境 Secret 与文件 Secret 的精确身份。后续
 授权与每个 apply 阶段必须重新查询同一 context 并拒绝 UID/resourceVersion 漂移；runtime
 lock 本身不授予部署权限。
+
+## 发布授权与部署
+
+从 [`infra/steam-workflow-executor-release-trust-policy.example.json`](../infra/steam-workflow-executor-release-trust-policy.example.json)
+创建独立 Ed25519 策略；模板 key 故意为 `REVOKED`。该信任域不得复用控制面、Artifact
+Preparer、Steam RC signer 或 Depot Finalizer 的 key。先检查不显示公钥材料的语义摘要：
+
+```bash
+npm run inspect:steam-workflow-executor-release-trust -- \
+  --trust-policy /absolute/reviewed/steam-workflow-executor-release-trust.json
+```
+
+配置 `.workflow-executor.env.example` 中五个离线 release signer 变量后，请求最长 30 分钟
+的授权。claims 精确绑定镜像回执、Node/native publisher 两个基座、runtime lock、context、
+namespace、replica 与 rollout timeout：
+
+```bash
+NODE_ENV=production npm run authorize:steam-workflow-executor -- \
+  --context prod-steam/security-admin \
+  --namespace deviludo-steam-release \
+  --receipt /absolute/release/steam-workflow-executor-image-receipt.json \
+  --runtime-lock /absolute/release/steam-workflow-executor-runtime-lock.json \
+  --trust-policy /absolute/reviewed/steam-workflow-executor-release-trust.json \
+  --trust-policy-digest sha256:REVIEWED_POLICY_DIGEST
+```
+
+部署命令默认只渲染并无副作用：
+
+```bash
+npm run deploy:steam-workflow-executor -- \
+  --receipt /absolute/release/steam-workflow-executor-image-receipt.json \
+  --runtime-lock /absolute/release/steam-workflow-executor-runtime-lock.json
+```
+
+只有显式 `--apply`、显式 context、authorization 和策略摘要齐全时才会写集群。每次写入
+Namespace、安全资源和 Deployment 之前都会重新验证短期签名并查询四个运行资源的实时
+UID/resourceVersion。渲染的 Pod 禁用 ServiceAccount token、采用 restricted Pod Security、
+只读 rootfs、丢弃全部 capabilities、无 hostPath，并仅提供有界 tmpfs/work emptyDir 与只读
+Secret 文件卷。该 Worker 无入站服务，namespace-wide default-deny NetworkPolicy 的最小
+PostgreSQL、S3、KMS、Depot Finalizer 和 DNS egress 必须由独立评审的集群策略提供。
+容器启动时先清除 readiness marker；只有所有外部依赖与 native publisher 探针通过后才以
+create-only 方式写入 marker，startup/readiness probe 不会把仅仅“进程仍在”的 Worker 当成可用。
+
+部署器只执行 server-side apply 和等待精确 Deployment Available；不执行 delete、prune、
+exec，也不采用当前 kube context。现阶段仓库只生成、验证和授权发布；未配置真实 Registry、
+KMS、不可变 Secret/ConfigMap 和集群 context 时不得执行 `--apply`。

@@ -239,6 +239,12 @@ non-secret config come only from the separately pinned tool image. See
 Before authorization, `lock:steam-workflow-executor-runtime` snapshots only the
 metadata identity of its four revision-suffixed immutable runtime resources;
 it never reads Secret data and never falls back to the current kube context.
+Release signing uses the separate revoked-by-default
+`steam-workflow-executor-release-trust-policy.example.json` and fixed mTLS KMS
+route. `deploy:steam-workflow-executor` renders by default. Explicit apply
+requires a short-lived authorization and rechecks trust plus all live resource
+identities before each of three server-side apply stages. The rendered Worker
+is tokenless, non-root, read-only, default-deny and has no inbound Service.
 
 ## Artifact Preparer image boundary
 

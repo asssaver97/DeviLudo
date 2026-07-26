@@ -986,7 +986,8 @@ test("isolated Steam execution worker pins native signing, PostgreSQL, S3 and KM
   assert.match(runtime, /new MtlsSteamDepotFinalizer/);
   assert.match(runtime, /new S3SteamRcObjectInspector/);
   assert.match(runtime, /new PostgresSteamWorkflowExecutionAuthority/);
-  assert.match(runtime, /steamWorkflowWorkerFromEnv\(composition\.executor, env, pool\)/);
+  assert.match(runtime, /steamWorkflowWorkerFromEnv\(composition\.executor, env, pool, \{/);
+  assert.match(runtime, /if \(event === "READY"\) marker\.ready\(\)/);
   assert.match(runtime, /O_NOFOLLOW/);
   assert.match(finalization, /WINDOWS_AUTHENTICODE/);
   assert.match(finalization, /MACOS_DEVELOPER_ID/);
