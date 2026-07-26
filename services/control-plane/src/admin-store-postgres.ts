@@ -422,7 +422,26 @@ function normalizeCredentialTimestamps(credential: CredentialVersionRecord): voi
 }
 
 function normalizeInstallationActivation(installation: InstallationRecord): void {
-  const mutable = installation as unknown as { activatedAt?: unknown; drainingAt?: unknown; retiredAt?: unknown };
+  const mutable = installation as unknown as {
+    activatedAt?: unknown;
+    drainingAt?: unknown;
+    retiredAt?: unknown;
+    runtimeBinding?: unknown;
+    fleetHealth?: unknown;
+    state: InstallationRecord["state"];
+    health: InstallationRecord["health"];
+    rolloutPercent: InstallationRecord["rolloutPercent"];
+    previousRolloutPercent: InstallationRecord["previousRolloutPercent"];
+  };
+  if (mutable.runtimeBinding === undefined) mutable.runtimeBinding = null;
+  if (mutable.fleetHealth === undefined) mutable.fleetHealth = null;
+  if ((mutable.runtimeBinding === null || mutable.fleetHealth === null)
+    && ["READY", "CANARY", "ACTIVE", "DRAINING", "RETIRED"].includes(mutable.state)) {
+    mutable.previousRolloutPercent = mutable.rolloutPercent;
+    mutable.rolloutPercent = 0;
+    mutable.state = "QUARANTINED";
+    mutable.health = "UNHEALTHY";
+  }
   if (mutable.activatedAt === undefined) {
     mutable.activatedAt = installation.state === "ACTIVE" && installation.health === "HEALTHY"
       && installation.rolloutPercent === 100

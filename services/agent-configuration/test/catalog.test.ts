@@ -135,6 +135,13 @@ test("Agent catalog rejects unhealthy installations, inactive Providers, floatin
   scoped.profiles.push(profile("profile-tenant-r1", "tenant", tenantId));
   scoped.defaults.push([`tenant:${tenantId}`, "profile-tenant-r1"]);
   assert.throws(() => resolveCatalogConfiguration({ revision: 1, payload: scoped, tenantId, projectId }), /another tenant scope/);
+
+  const unattestedRuntime = catalog();
+  delete (unattestedRuntime.installations[0] as Record<string, unknown>).runtimeBinding;
+  assert.throws(
+    () => resolveCatalogConfiguration({ revision: 1, payload: unattestedRuntime, tenantId, projectId }),
+    /attested serving microVM runtime/,
+  );
 });
 
 test("Agent catalog keeps an attested deprecated version serving through its existing active installation", () => {
@@ -221,6 +228,12 @@ function catalog() {
       adapterVersion: "1.3.0",
       buildReceiptId: "build-receipt-claude-r1",
       buildReceiptDigest: "6".repeat(64),
+      runtimeBinding: runtimeBinding({
+        installationId: "installation-claude-r1",
+        exactAgentVersion: "2.1.14",
+        workerImageDigest: `sha256:${"5".repeat(64)}`,
+      }),
+      fleetHealth: fleetHealth(),
       state: "ACTIVE",
       health: "HEALTHY",
       rolloutPercent: 100,
@@ -292,7 +305,11 @@ function catalogWithFallback() {
   payload.installations.push({ ...payload.installations[0]!, id: "installation-claude-fallback-r1",
     agentVersionId: "claude-code@2.1.15", imageDigest: `sha256:${"b".repeat(64)}`,
     workerImageId: "worker-image-claude-fallback-r1", buildReceiptId: "build-receipt-claude-fallback-r1",
-    buildReceiptDigest: "c".repeat(64) });
+    buildReceiptDigest: "c".repeat(64), runtimeBinding: runtimeBinding({
+      installationId: "installation-claude-fallback-r1",
+      exactAgentVersion: "2.1.15",
+      workerImageDigest: `sha256:${"b".repeat(64)}`,
+    }), fleetHealth: fleetHealth() });
   payload.providers.push({ ...structuredClone(payload.providers[0]!), id: "provider-claude-fallback-r1",
     baseUrl: "https://fallback.anthropic.example/v1", credentialVersionId: "credential-claude-fallback-v1" });
   payload.credentials.push({ id: "credential-claude-fallback-v1", scope: "platform", scopeId: "global", state: "ACTIVE" });
@@ -303,4 +320,37 @@ function catalogWithFallback() {
   payload.profiles.push(fallback);
   Object.assign(payload.profiles[0]!, { fallbackProfileRevisionId: fallback.id });
   return payload;
+}
+
+function runtimeBinding(input: Readonly<{
+  installationId: string;
+  exactAgentVersion: string;
+  workerImageDigest: string;
+}>) {
+  return {
+    schemaVersion: "deviludo.agent-installation-runtime-binding.v1",
+    backend: "firecracker-jailer",
+    platform: "linux",
+    architecture: "amd64",
+    installationId: input.installationId,
+    workerPool: "development-linux-primary",
+    agent: "claude-code",
+    exactAgentVersion: input.exactAgentVersion,
+    adapterVersion: "1.3.0",
+    workerImageDigest: input.workerImageDigest,
+    launcherReleaseId: "11111111-1111-4111-8111-111111111111",
+    launcherReleaseDigest: "7".repeat(64),
+    guestReleaseId: "22222222-2222-4222-8222-222222222222",
+    guestReleaseDigest: "8".repeat(64),
+    workerBindingDigest: "9".repeat(64),
+  };
+}
+
+function fleetHealth() {
+  return {
+    schemaVersion: "deviludo.agent-installation-fleet-health.v1",
+    registeredWorkers: 2,
+    readyWorkers: 2,
+    observedAt: "2030-01-01T00:00:00.000Z",
+  };
 }

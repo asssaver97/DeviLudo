@@ -116,6 +116,7 @@ test("mTLS Broker executes and durably replays the complete Agent supply-chain l
     action: "ADVANCE",
     fromPercent: 0,
     toPercent: 5,
+    runtimeBinding: (build.body as { runtimeBinding: unknown }).runtimeBinding,
   });
   assert.equal(rollout.status, 200);
   assert.equal((rollout.body as { newTasksOnly: boolean }).newTasksOnly, true);

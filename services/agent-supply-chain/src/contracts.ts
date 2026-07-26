@@ -7,6 +7,7 @@ import type {
 } from "../../control-plane/src/agent-supply-chain";
 export type { AgentSupplyChainTerminalFailureReceipt } from "../../control-plane/src/agent-supply-chain";
 import type { AgentKind } from "../../control-plane/src/contracts";
+import type { AgentInstallationRuntimeBinding } from "../../../lib/agent/installation-runtime";
 
 export interface AgentSupplyChainOperationBinding {
   readonly operationKey: string;
@@ -41,6 +42,7 @@ export interface AgentInstallationRolloutRequest extends AgentSupplyChainOperati
   readonly action: "ADVANCE" | "ROLLBACK" | "DRAIN" | "RETIRE";
   readonly fromPercent: 0 | 5 | 25 | 100;
   readonly toPercent: 0 | 5 | 25 | 100;
+  readonly runtimeBinding: AgentInstallationRuntimeBinding;
 }
 
 export type AgentSupplyChainRequest =

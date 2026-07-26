@@ -105,8 +105,20 @@ test("native controller emits a fully bound discovery, validation, build and rol
       calls.push("validate");
       return { integrity: `sha256:${archiveSha256}`, sbomRef: `oci://registry.deviludo.test/sboms/claude-code@sha256:${"b".repeat(64)}`, evidenceDigest: "c".repeat(64) };
     },
-    async build() { calls.push("build"); return { workerImageId: "worker-image-fixed-0001", imageDigest: `sha256:${"d".repeat(64)}` }; },
-    async rollout() { calls.push("rollout"); },
+    async build(input) {
+      calls.push("build");
+      const imageDigest = `sha256:${"d".repeat(64)}`;
+      return {
+        workerImageId: "worker-image-fixed-0001",
+        imageDigest,
+        runtimeBinding: runtimeBinding({ ...input, exactAgentVersion: input.version, workerImageDigest: imageDigest }),
+        fleetHealth: fleetHealth(),
+      };
+    },
+    async rollout(request) {
+      calls.push("rollout");
+      return { runtimeBinding: request.runtimeBinding, fleetHealth: fleetHealth() };
+    },
   };
   const controller = new NativeAgentSupplyChainController(policy, registry, tools, () => new Date("2026-07-18T08:00:00.000Z"));
   const root = await mkdtemp(join(tmpdir(), "deviludo-native-controller-"));
@@ -140,10 +152,12 @@ test("native controller emits a fully bound discovery, validation, build and rol
   };
   const build = validateAgentSupplyChainResponse(await controller.execute(buildRequest, join(root, "build")), buildRequest);
   const imageDigest = (build as { imageDigest: string }).imageDigest;
+  const runtime = (build as { runtimeBinding: ReturnType<typeof runtimeBinding> }).runtimeBinding;
   const rolloutRequest = {
     schemaVersion: "deviludo.agent-installation-rollout-request.v1" as const,
     operationKey: "7".repeat(64), requestDigest: "8".repeat(64), installationId: "claude-installation-001",
     imageDigest, action: "ADVANCE" as const, fromPercent: 0 as const, toPercent: 5 as const,
+    runtimeBinding: runtime,
   };
   const rollout = validateAgentSupplyChainResponse(await controller.execute(rolloutRequest, join(root, "rollout")), rolloutRequest);
   assert.equal((rollout as { state: string }).state, "CANARY");
@@ -200,7 +214,22 @@ test("locked toolchain pins argv, quarantines malware and registers only a signe
     }
     if (executable === toolPaths.fleetctl) return {
       exitCode: 0,
-      stdout: JSON.stringify({ installationId: "claude-installation-001", target: "dev-linux-workers", imageDigest, percent: 0, health: "READY" }),
+      stdout: JSON.stringify({
+        installationId: "claude-installation-001",
+        target: "dev-linux-workers",
+        imageDigest,
+        percent: 0,
+        health: "READY",
+        runtimeBinding: runtimeBinding({
+          installationId: "claude-installation-001",
+          workerPool: "development-linux",
+          agent: "claude-code",
+          exactAgentVersion: version,
+          adapterVersion: "1.3.0",
+          workerImageDigest: imageDigest,
+        }),
+        fleetHealth: fleetHealth(),
+      }),
       stderr: "",
     };
     return { exitCode: 0, stdout: "", stderr: "" };
@@ -217,6 +246,31 @@ test("locked toolchain pins argv, quarantines malware and registers only a signe
   const registration = buildCalls.find((call) => call.executable === toolPaths.fleetctl);
   assert.ok(registration?.args.includes("register"));
   assert.ok(registration?.args.includes("dev-linux-workers"));
+
+  const unattestedRoot = join(root, "unattested-build"); await mkdir(unattestedRoot);
+  const unattestedProcess: NativeToolProcess = async (executable, args) => {
+    if (executable === toolPaths.buildctl) {
+      const metadataPath = args[args.indexOf("--metadata-file") + 1];
+      assert.ok(metadataPath);
+      await writeFile(metadataPath, JSON.stringify({ "containerimage.digest": imageDigest }));
+    }
+    if (executable === toolPaths.fleetctl) return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        installationId: "claude-installation-unattested-001",
+        target: "dev-linux-workers",
+        imageDigest,
+        percent: 0,
+        health: "READY",
+      }),
+      stderr: "",
+    };
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  await assert.rejects(new LockedNativeSupplyChainTools(policy, unattestedProcess).build({
+    agent: "claude-code", version, installationId: "claude-installation-unattested-001", artifact,
+    workerPool: "development-linux", adapterVersion: "1.3.0", workRoot: unattestedRoot,
+  }), /infrastructure is unavailable/);
 });
 
 function policyFixture(): Record<string, unknown> {
@@ -303,3 +357,37 @@ function octal(target: Buffer, offset: number, length: number, value: number): v
   target.write(`${text}\0 `, offset, length, "ascii");
 }
 function digest(value: Buffer): string { return createHash("sha256").update(value).digest("hex"); }
+function runtimeBinding(input: Readonly<{
+  installationId: string;
+  workerPool: string;
+  agent: "claude-code" | "codex-cli";
+  exactAgentVersion: string;
+  adapterVersion: string;
+  workerImageDigest: string;
+}>) {
+  return Object.freeze({
+    schemaVersion: "deviludo.agent-installation-runtime-binding.v1" as const,
+    backend: "firecracker-jailer" as const,
+    platform: "linux" as const,
+    architecture: "amd64" as const,
+    installationId: input.installationId,
+    workerPool: input.workerPool,
+    agent: input.agent,
+    exactAgentVersion: input.exactAgentVersion,
+    adapterVersion: input.adapterVersion,
+    workerImageDigest: input.workerImageDigest,
+    launcherReleaseId: "11111111-1111-4111-8111-111111111111",
+    launcherReleaseDigest: "1".repeat(64),
+    guestReleaseId: "22222222-2222-4222-8222-222222222222",
+    guestReleaseDigest: "2".repeat(64),
+    workerBindingDigest: "3".repeat(64),
+  });
+}
+function fleetHealth() {
+  return Object.freeze({
+    schemaVersion: "deviludo.agent-installation-fleet-health.v1" as const,
+    registeredWorkers: 1,
+    readyWorkers: 1,
+    observedAt: "2026-07-18T08:00:00.000Z",
+  });
+}

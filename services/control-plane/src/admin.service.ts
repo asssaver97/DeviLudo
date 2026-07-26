@@ -274,7 +274,7 @@ export class AdminService {
     assertExactVersion(version);
     if ([
       "imageDigest", "workerImageId", "buildReceipt", "buildReceiptId", "buildReceiptDigest",
-      "supplyChainEvidenceDigest", "selfUpdateDisabled", "stages",
+      "supplyChainEvidenceDigest", "selfUpdateDisabled", "stages", "runtimeBinding", "fleetHealth",
     ].some((field) => body[field] !== undefined)) {
       throw new ServiceProblem(400, "CALLER_IMAGE_IDENTITY_FORBIDDEN", "Worker image identity must come from the isolated Broker");
     }
@@ -326,6 +326,8 @@ export class AdminService {
           adapterVersion,
           buildReceiptId: null,
           buildReceiptDigest: null,
+          runtimeBinding: null,
+          fleetHealth: null,
           rollbackInstallationId,
           health: "UNHEALTHY",
           state: "BUILDING",
@@ -402,6 +404,8 @@ export class AdminService {
       installation.workerImageId = built.workerImageId;
       installation.buildReceiptId = built.buildReceiptId;
       installation.buildReceiptDigest = built.buildReceiptDigest;
+      installation.runtimeBinding = built.runtimeBinding;
+      installation.fleetHealth = built.fleetHealth;
       installation.health = built.health;
       installation.state = "READY";
       delete installation.failure;
@@ -413,6 +417,11 @@ export class AdminService {
         workerImageId: installation.workerImageId,
         buildReceiptId: installation.buildReceiptId,
         buildReceiptDigest: installation.buildReceiptDigest,
+        launcherReleaseId: installation.runtimeBinding.launcherReleaseId,
+        guestReleaseId: installation.runtimeBinding.guestReleaseId,
+        workerBindingDigest: installation.runtimeBinding.workerBindingDigest,
+        registeredWorkers: installation.fleetHealth.registeredWorkers,
+        readyWorkers: installation.fleetHealth.readyWorkers,
         supplyChainGates: "signature,sbom,vulnerability,malware,adapter-smoke,sandbox-smoke",
       });
       return installation;
@@ -427,7 +436,8 @@ export class AdminService {
     const snapshot = await this.store.read((state) => {
       const installation = state.installations.get(installationId);
       if (!installation) throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
-      if (!["READY", "CANARY", "ACTIVE"].includes(installation.state) || !installation.imageDigest) {
+      if (!["READY", "CANARY", "ACTIVE"].includes(installation.state) || !installation.imageDigest
+        || !installation.runtimeBinding || !installation.fleetHealth) {
         throw new ServiceProblem(409, "INSTALLATION_NOT_ROLLOUT_ELIGIBLE", "Installation cannot accept new tasks");
       }
       const toPercent: InstallationRecord["rolloutPercent"] = action === "rollback" ? 0
@@ -446,6 +456,7 @@ export class AdminService {
         action: action === "advance" ? "ADVANCE" : "ROLLBACK",
         fromPercent: snapshot.installation.rolloutPercent,
         toPercent: snapshot.toPercent,
+        runtimeBinding: snapshot.installation.runtimeBinding!,
       });
     } catch (error) {
       await this.store.mutate((state) => {
@@ -487,6 +498,7 @@ export class AdminService {
       installation.rolloutPercent = receipt.toPercent;
       installation.state = receipt.state;
       installation.health = receipt.health;
+      installation.fleetHealth = receipt.fleetHealth;
       if (receipt.toPercent === 100) installation.activatedAt = receipt.completedAt;
       const rollbackProfiles = action === "rollback"
         ? restoreProfilesToRollback(state, installation, {
@@ -500,6 +512,8 @@ export class AdminService {
         rolloutReceiptId: receipt.rolloutReceiptId,
         rolloutReceiptDigest: receipt.rolloutReceiptDigest,
         activatedAt: installation.activatedAt,
+        registeredWorkers: receipt.fleetHealth.registeredWorkers,
+        readyWorkers: receipt.fleetHealth.readyWorkers,
         rollbackProfileRevisionIds: rollbackProfiles,
         runningTasksUnaffected: true,
       });
@@ -520,7 +534,7 @@ export class AdminService {
   ): Promise<Readonly<Record<string, unknown>>> {
     const snapshot = await this.store.read((state) => {
       const installation = state.installations.get(installationId);
-      if (!installation || !installation.imageDigest) {
+      if (!installation || !installation.imageDigest || !installation.runtimeBinding || !installation.fleetHealth) {
         throw new ServiceProblem(404, "INSTALLATION_NOT_FOUND", "Agent installation does not exist");
       }
       if (action === "drain") {
@@ -562,6 +576,7 @@ export class AdminService {
         action: action === "drain" ? "DRAIN" : "RETIRE",
         fromPercent: snapshot.rolloutPercent,
         toPercent: 0,
+        runtimeBinding: snapshot.runtimeBinding!,
       });
     } catch (error) {
       await this.store.mutate((state) => {
@@ -587,6 +602,7 @@ export class AdminService {
       installation.rolloutPercent = receipt.toPercent;
       installation.state = receipt.state;
       installation.health = receipt.health;
+      installation.fleetHealth = receipt.fleetHealth;
       let rollbackProfiles: readonly string[] = Object.freeze([]);
       if (action === "drain") {
         installation.drainingAt = receipt.completedAt;
@@ -602,6 +618,8 @@ export class AdminService {
         state: installation.state,
         rolloutReceiptId: receipt.rolloutReceiptId,
         rolloutReceiptDigest: receipt.rolloutReceiptDigest,
+        registeredWorkers: receipt.fleetHealth.registeredWorkers,
+        readyWorkers: receipt.fleetHealth.readyWorkers,
         rollbackProfileRevisionIds: rollbackProfiles,
         ...(action === "drain" ? { activeRunsKeepPinnedImage: true } : { nonTerminalRuns: 0 }),
       });
@@ -1106,7 +1124,8 @@ export class AdminService {
       const installationReady = installation?.agent === source.agent && installation.state === "ACTIVE"
         && installation.health === "HEALTHY" && installation.rolloutPercent === 100
         && installation.selfUpdateDisabled === true && !!installation.imageDigest && !!installation.workerImageId
-        && !!installation.buildReceiptId && !!installation.buildReceiptDigest && !!installation.activatedAt;
+        && !!installation.buildReceiptId && !!installation.buildReceiptDigest && !!installation.runtimeBinding
+        && !!installation.fleetHealth && installation.fleetHealth.readyWorkers > 0 && !!installation.activatedAt;
       const versionReady = version?.agent === source.agent && ["APPROVED", "DEPRECATED"].includes(version.state)
         && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
         && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest
@@ -1526,7 +1545,8 @@ function restoreProfilesToRollback(
     ? state.installations.get(installation.rollbackInstallationId)
     : undefined;
   const rollbackReady = !!rollback && rollback.health === "HEALTHY" && !!rollback.imageDigest
-    && rollback.state === "ACTIVE" && rollback.rolloutPercent === 100;
+    && rollback.state === "ACTIVE" && rollback.rolloutPercent === 100 && !!rollback.runtimeBinding
+    && !!rollback.fleetHealth && rollback.fleetHealth.readyWorkers > 0;
   const direct = [...state.profiles.values()].filter((profile) =>
     profile.installationId === installation.id && profile.state === "ACTIVE");
   const affected = new Set(direct.map((profile) => profile.id));
@@ -1652,7 +1672,8 @@ function mostRecentlyActivatedInstallation(
 ): InstallationRecord | null {
   const candidates = [...state.installations.values()].filter((item) => item.agent === agent
     && item.workerPool === workerPool && item.state === "ACTIVE" && item.health === "HEALTHY"
-    && item.rolloutPercent === 100 && !!item.imageDigest && !!item.activatedAt
+    && item.rolloutPercent === 100 && !!item.imageDigest && !!item.runtimeBinding
+    && !!item.fleetHealth && item.fleetHealth.readyWorkers > 0 && !!item.activatedAt
     && Number.isFinite(Date.parse(item.activatedAt)));
   candidates.sort((left, right) => {
     const activationOrder = Date.parse(right.activatedAt!) - Date.parse(left.activatedAt!);
@@ -1681,7 +1702,8 @@ function assertProfileServingReady(
   const installationReady = installation?.agent === profile.agent && installation.state === "ACTIVE"
     && installation.health === "HEALTHY" && installation.rolloutPercent === 100
     && installation.selfUpdateDisabled === true && !!installation.imageDigest && !!installation.workerImageId
-    && !!installation.buildReceiptId && !!installation.buildReceiptDigest;
+    && !!installation.buildReceiptId && !!installation.buildReceiptDigest && !!installation.runtimeBinding
+    && !!installation.fleetHealth && installation.fleetHealth.readyWorkers > 0;
   const versionReady = version?.agent === profile.agent && ["APPROVED", "DEPRECATED"].includes(version.state)
     && version.signatureVerified === true && version.scan === "PASS" && !!version.validationReceiptId
     && !!version.validationReceiptDigest && !!version.supplyChainEvidenceDigest
@@ -2121,6 +2143,9 @@ function operationalAlerts(
       add("CRITICAL", "AGENT_INSTALLATION_UNSERVABLE", installation.id, `安装处于 ${installation.state}，新任务不会分配`);
     } else if (installation.state === "ACTIVE" && installation.health !== "HEALTHY") {
       add("CRITICAL", "ACTIVE_INSTALLATION_UNHEALTHY", installation.id, `活跃安装健康状态为 ${installation.health}`);
+    } else if (installation.state === "ACTIVE" && (!installation.runtimeBinding || !installation.fleetHealth
+      || installation.fleetHealth.readyWorkers < 1)) {
+      add("CRITICAL", "ACTIVE_INSTALLATION_RUNTIME_UNATTESTED", installation.id, "活跃安装缺少可服务的 microVM 运行时部署证明");
     }
   }
   for (const provider of providers) {
@@ -2136,7 +2161,8 @@ function operationalAlerts(
     const version = installation ? state.versions.get(installation.agentVersionId) : undefined;
     const provider = state.providers.get(profile.providerRevisionId);
     const credential = state.credentials.get(profile.credentialVersionId);
-    if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY") {
+    if (!installation || installation.state !== "ACTIVE" || installation.health !== "HEALTHY"
+      || !installation.runtimeBinding || !installation.fleetHealth || installation.fleetHealth.readyWorkers < 1) {
       add("CRITICAL", "PROFILE_INSTALLATION_BINDING_UNAVAILABLE", profile.id, "活跃 Profile 绑定的精确 WorkerImage 当前不可服务");
     }
     if (!version || !["APPROVED", "DEPRECATED"].includes(version.state)) {

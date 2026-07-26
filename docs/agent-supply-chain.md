@@ -188,6 +188,10 @@ Adapter 不是管理员可上传的插件。当前平台发布内置不可变 `d
 
 ## 固定门禁
 
-验证阶段固定运行 ClamAV、Trivy 离线扫描、Syft SPDX、无网络/只读/去能力的 Adapter contract 与合成代码任务，然后把包和 SBOM 推入内部 OCI。构建阶段重新下载并核对上一验证回执的 SHA-256，使用 digest 固定基础镜像、扫描最终镜像、KMS 签名并执行无网络 smoke test。灰度只允许 `0→5→25→100`，回滚只允许回到 `0`，且 Fleet 必须确认只影响新任务。每次 `100%` 回执记录权威激活时间，后续候选只把同 Agent、同 Worker 池中最近激活且仍健康的 `100% ACTIVE` 安装作为回滚目标，而不依赖目录插入顺序。回滚回执与 Agent 目录在同一事务提交：平台为所有受影响 ACTIVE Profile 建立指向该安装的不可变后继，连同 fallback 依赖和默认选择一起迁移，但不改变 Provider、模型、凭据或预算；没有合格目标时 Profile 进入 `DEGRADED` 并停止接收新任务。
+验证阶段固定运行 ClamAV、Trivy 离线扫描、Syft SPDX、无网络/只读/去能力的 Adapter contract 与合成代码任务，然后把包和 SBOM 推入内部 OCI。构建阶段重新下载并核对上一验证回执的 SHA-256，使用 digest 固定基础镜像、扫描最终镜像、KMS 签名并执行无网络 smoke test。
+
+镜像通过不等于安装可用。`fleetctl installation register --output json` 必须返回严格的 `deviludo.agent-installation-runtime-binding.v1`，其中固定 Installation、开发 Worker 池、Agent、精确 CLI/Adapter、WorkerImage digest、已签名 Launcher release、已签名 Guest rootfs release 与只读 Worker placement binding digest；同时返回 `deviludo.agent-installation-fleet-health.v1`，且至少一个注册 Worker 实际 READY。控制面只接受供应链 Broker 回执中的这组证明，浏览器不能提交或覆盖它。已有旧目录记录缺少证明时会失败关闭为 `QUARANTINED`，不会作为 Profile 或默认值继续服务。
+
+灰度只允许 `0→5→25→100`，回滚只允许回到 `0`，且 Fleet 必须在每一步重放同一运行时绑定并确认只影响新任务；绑定或 WorkerImage 漂移、推进时没有就绪 Worker都会失败。每次 `100%` 回执记录权威激活时间，后续候选只把同 Agent、同 Worker池中最近激活且仍健康的 `100% ACTIVE` 安装作为回滚目标，而不依赖目录插入顺序。回滚回执与 Agent 目录在同一事务提交：平台为所有受影响 ACTIVE Profile 建立指向该安装的不可变后继，连同 fallback 依赖和默认选择一起迁移，但不改变 Provider、模型、凭据或预算；没有合格目标时 Profile 进入 `DEGRADED` 并停止接收新任务。
 
 策略失败以退出码 `42` 写入脱敏终态回执：版本验证为 `REJECTED`，构建/灰度为 `QUARANTINED`。网络超时、扫描器不可用、Registry/KMS/Fleet 故障不生成安全终态，而由 Broker 释放 claim 后重试。

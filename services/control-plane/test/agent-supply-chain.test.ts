@@ -43,6 +43,7 @@ test("development supply-chain executes discovery, validation, immutable image b
     action: "ADVANCE",
     fromPercent: 0,
     toPercent: 5,
+    runtimeBinding: build.runtimeBinding,
   });
   assert.equal(rollout.state, "CANARY");
   assert.equal(rollout.newTasksOnly, true);
@@ -53,17 +54,18 @@ test("development supply-chain executes discovery, validation, immutable image b
     action: "ADVANCE",
     fromPercent: 5,
     toPercent: 100,
+    runtimeBinding: build.runtimeBinding,
   }), /receipt is invalid/);
   await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
-    action: "ADVANCE", fromPercent: 5, toPercent: 25 });
+    action: "ADVANCE", fromPercent: 5, toPercent: 25, runtimeBinding: build.runtimeBinding });
   await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
-    action: "ADVANCE", fromPercent: 25, toPercent: 100 });
+    action: "ADVANCE", fromPercent: 25, toPercent: 100, runtimeBinding: build.runtimeBinding });
   const draining = await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
-    action: "DRAIN", fromPercent: 100, toPercent: 0 });
+    action: "DRAIN", fromPercent: 100, toPercent: 0, runtimeBinding: build.runtimeBinding });
   assert.equal(draining.state, "DRAINING");
   assert.equal(draining.runningTasksUnaffected, true);
   const retired = await chain.rollout({ ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
-    action: "RETIRE", fromPercent: 0, toPercent: 0 });
+    action: "RETIRE", fromPercent: 0, toPercent: 0, runtimeBinding: build.runtimeBinding });
   assert.equal(retired.state, "RETIRED");
 });
 
@@ -87,6 +89,7 @@ test("mTLS supply-chain client pins routes, health identity and exact receipt di
   const rolloutInput = {
     ...operation, installationId: build.installationId, imageDigest: build.imageDigest,
     action: "ADVANCE" as const, fromPercent: 0 as const, toPercent: 5 as const,
+    runtimeBinding: build.runtimeBinding,
   };
   const rollout = await fixture.rollout(rolloutInput);
   const paths: string[] = [];
@@ -134,6 +137,17 @@ test("mTLS supply-chain client pins routes, health identity and exact receipt di
     },
   });
   await assert.rejects(adapterTampered.validateVersion({ ...operation, candidate: candidate! }), /receipt is invalid/);
+  const rolloutTampered = new MtlsAgentSupplyChain({
+    endpoint: "https://agent-supply-chain.internal", version: "1.4.2", binaryDigest: "c".repeat(64),
+    tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },
+    async http() {
+      return { statusCode: 200, payload: {
+        ...rollout,
+        runtimeBinding: { ...rollout.runtimeBinding, workerBindingDigest: "f".repeat(64) },
+      } };
+    },
+  });
+  await assert.rejects(rolloutTampered.rollout(rolloutInput), /receipt is invalid/);
   assert.throws(() => new MtlsAgentSupplyChain({
     endpoint: "https://agent-supply-chain.internal?token=bad", version: "latest", binaryDigest: "c".repeat(64),
     tls: { key: Buffer.alloc(64), certificate: Buffer.alloc(64), ca: Buffer.alloc(64) },

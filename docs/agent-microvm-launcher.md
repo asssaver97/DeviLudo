@@ -218,6 +218,13 @@ Worker 在 PostgreSQL 中按当前有效身份领取：未发生 Provider failov
 CLI 或 Adapter 任一不匹配时该 Worker 不锁定任务；另一个匹配 Worker 才能领取。更新或
 回滚先排空旧绑定，再以新建只读文件启动新进程，不能在运行中改写绑定。
 
+Fleet 注册完成时必须把 Launcher release ID/digest、Guest release ID/digest、Worker
+binding digest 和实际 Worker 就绪数作为严格运行时证明返回 Agent 供应链 Broker。控制面把
+该证明与 Installation revision 一同保存；没有证明的镜像不能进入 READY，证明与安装、池、
+Agent、CLI、Adapter 或 WorkerImage 任一漂移时不能推进灰度。ACTIVE Installation 没有至少
+一个就绪 Worker 时也不能被 Profile 解析或设为默认。这样管理页上的“已安装”代表实际签名
+microVM 运行时，而不只是 OCI Registry 中存在一个镜像。
+
 每次任务重新校验运行文件，复制冻结源码和请求到独立 ext4 数据盘，在一个排他网络
 namespace 中运行 `jailer --new-pid-ns -- --config-file /machine-config.json`。rootfs 只读、
 数据盘可写、短期凭据盘只读、SMT 关闭、串口禁用。每个请求先向 Credential Issuer 取得

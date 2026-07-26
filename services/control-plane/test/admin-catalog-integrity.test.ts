@@ -26,6 +26,14 @@ test("Agent catalog readiness accepts the seeded Claude default and rejects secr
     } as unknown as typeof version.adapterCompatibility;
   });
   await assert.rejects(nested.probe(), /Agent Adapter compatibility schema is invalid/);
+
+  const unattested = new InMemoryAdminStore();
+  await unattested.mutate((state) => {
+    const installation = state.installations.get("claude-code-installation-2-1-14")!;
+    installation.runtimeBinding = null;
+    installation.fleetHealth = null;
+  });
+  await assert.rejects(unattested.probe(), /lacks a microVM runtime deployment proof/);
 });
 
 test("Agent catalog readiness rejects a missing authority edge and fallback cycles", async () => {

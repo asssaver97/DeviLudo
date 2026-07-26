@@ -1,6 +1,10 @@
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import { isAdapterVersionAttested, isBuiltInAdapterVersion } from "../../../lib/agent/adapter-registry";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
+import {
+  parseAgentInstallationFleetHealth,
+  parseAgentInstallationRuntimeBinding,
+} from "../../../lib/agent/installation-runtime";
 import type { AgentKind, AgentVersionAttestationLock } from "./contracts";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -158,6 +162,17 @@ function resolveProfileConfiguration(input: {
   if (/(^|[-_.])(latest|stable|default)(?:$|[-_.])/i.test(exactAgentVersion)) {
     invalid("Floating Agent versions are not allowed");
   }
+  try {
+    parseAgentInstallationRuntimeBinding(installation.runtimeBinding, {
+      installationId,
+      workerPool,
+      agent,
+      exactAgentVersion,
+      adapterVersion,
+      workerImageDigest: imageDigest,
+    });
+    parseAgentInstallationFleetHealth(installation.fleetHealth, { requireReadyWorker: true });
+  } catch { invalid("Agent installation lacks an attested serving microVM runtime"); }
   const agentVersionSourceDigest = match(version.sourceDigest, SHA256, "Agent source digest");
   const adapterCompatibilityValue = object(version.adapterCompatibility, "Adapter compatibility");
   const validatedAdapterVersion = exactVersion(version.validatedAdapterVersion);

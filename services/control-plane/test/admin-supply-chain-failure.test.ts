@@ -332,6 +332,10 @@ test("rollback without a fully active target degrades the entire active fallback
       ...current,
       id: carrierInstallationId,
       rollbackInstallationId: null,
+      runtimeBinding: current.runtimeBinding ? {
+        ...current.runtimeBinding,
+        installationId: carrierInstallationId,
+      } : null,
     });
     state.profiles.set(sourceProfileId, {
       ...template,

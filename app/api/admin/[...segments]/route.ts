@@ -527,7 +527,7 @@ export async function POST(request: Request, context: RouteContext) {
       const adapterVersion = requireString(body, "adapterVersion", 120);
       if ([
         "imageDigest", "workerImageId", "buildReceipt", "buildReceiptId", "buildReceiptDigest",
-        "supplyChainEvidenceDigest", "selfUpdateDisabled", "stages",
+        "supplyChainEvidenceDigest", "selfUpdateDisabled", "stages", "runtimeBinding", "fleetHealth",
       ].some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
         throw new HttpProblem(400, "CALLER_ATTESTATION_FORBIDDEN", "WorkerImage digest 与构建回执只能来自受信供应链 Broker");
       }

@@ -1,3 +1,8 @@
+import type {
+  AgentInstallationFleetHealth,
+  AgentInstallationRuntimeBinding,
+} from "../../../lib/agent/installation-runtime";
+
 export const ADMIN_ROLES = [
   "PlatformAgentAdmin",
   "SecurityAdmin",
@@ -72,6 +77,8 @@ export interface InstallationRecord {
   readonly adapterVersion: string;
   buildReceiptId: string | null;
   buildReceiptDigest: string | null;
+  runtimeBinding: AgentInstallationRuntimeBinding | null;
+  fleetHealth: AgentInstallationFleetHealth | null;
   readonly rollbackInstallationId: string | null;
   health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   state: InstallationState;

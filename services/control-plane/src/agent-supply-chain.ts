@@ -8,6 +8,13 @@ import {
   isAdapterVersionAttested,
   isExactAdapterCompatibility,
 } from "../../../lib/agent/adapter-registry";
+import {
+  parseAgentInstallationFleetHealth,
+  parseAgentInstallationRuntimeBinding,
+  sameAgentInstallationRuntimeBinding,
+  type AgentInstallationFleetHealth,
+  type AgentInstallationRuntimeBinding,
+} from "../../../lib/agent/installation-runtime";
 import { sha256Canonical } from "../../runner-control/src/canonical";
 import { ServiceProblem, type AgentKind } from "./contracts";
 
@@ -67,6 +74,8 @@ export interface AgentInstallationBuildReceipt {
   readonly health: "HEALTHY";
   readonly selfUpdateDisabled: true;
   readonly buildReceiptId: string;
+  readonly runtimeBinding: AgentInstallationRuntimeBinding;
+  readonly fleetHealth: AgentInstallationFleetHealth;
   readonly buildReceiptDigest: string;
   readonly completedAt: string;
 }
@@ -81,6 +90,8 @@ export interface AgentInstallationRolloutReceipt {
   readonly health: "HEALTHY";
   readonly newTasksOnly: true;
   readonly runningTasksUnaffected: true;
+  readonly runtimeBinding: AgentInstallationRuntimeBinding;
+  readonly fleetHealth: AgentInstallationFleetHealth;
   readonly rolloutReceiptId: string;
   readonly rolloutReceiptDigest: string;
   readonly completedAt: string;
@@ -158,6 +169,7 @@ export abstract class AgentSupplyChain {
     action: "ADVANCE" | "ROLLBACK" | "DRAIN" | "RETIRE";
     fromPercent: 0 | 5 | 25 | 100;
     toPercent: 0 | 5 | 25 | 100;
+    runtimeBinding: AgentInstallationRuntimeBinding;
   }>): Promise<AgentInstallationRolloutReceipt>;
   abstract probe(): Promise<AgentSupplyChainHealth>;
 }
@@ -224,6 +236,20 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
       || (input.rollbackInstallationId !== null && !SAFE_ID.test(input.rollbackInstallationId))) invalidReceipt();
     const completedAt = validDate(this.#now()).toISOString();
     const imageHash = sha256Canonical({ candidate, validation, workerPool: input.workerPool, adapterVersion: input.adapterVersion });
+    const runtimeBinding = deterministicRuntimeBinding({
+      installationId: input.installationId,
+      workerPool: input.workerPool,
+      agent: candidate.agent,
+      exactAgentVersion: candidate.version,
+      adapterVersion: input.adapterVersion,
+      workerImageDigest: `sha256:${imageHash}`,
+    });
+    const fleetHealth = Object.freeze({
+      schemaVersion: "deviludo.agent-installation-fleet-health.v1" as const,
+      registeredWorkers: 1,
+      readyWorkers: 1,
+      observedAt: completedAt,
+    });
     const core = Object.freeze({
       installationId: input.installationId,
       agent: candidate.agent,
@@ -237,6 +263,8 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
       health: "HEALTHY" as const,
       selfUpdateDisabled: true as const,
       buildReceiptId: `build-${input.installationId}`,
+      runtimeBinding,
+      fleetHealth,
       completedAt,
     });
     return Object.freeze({ ...core, buildReceiptDigest: sha256Canonical(core) });
@@ -246,7 +274,17 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
     validateOperation(input);
     if (!SAFE_ID.test(input.installationId) || !DIGEST.test(input.imageDigest)) invalidReceipt();
     validateRollout(input.action, input.fromPercent, input.toPercent);
+    const runtimeBinding = parseAgentInstallationRuntimeBinding(input.runtimeBinding, {
+      installationId: input.installationId,
+      workerImageDigest: input.imageDigest,
+    });
     const completedAt = validDate(this.#now()).toISOString();
+    const fleetHealth = Object.freeze({
+      schemaVersion: "deviludo.agent-installation-fleet-health.v1" as const,
+      registeredWorkers: input.action === "RETIRE" ? 0 : 1,
+      readyWorkers: input.action === "ADVANCE" ? 1 : 0,
+      observedAt: completedAt,
+    });
     const core = Object.freeze({
       installationId: input.installationId,
       imageDigest: input.imageDigest,
@@ -257,6 +295,8 @@ export class DevelopmentAgentSupplyChain extends AgentSupplyChain {
       health: "HEALTHY" as const,
       newTasksOnly: true as const,
       runningTasksUnaffected: true as const,
+      runtimeBinding,
+      fleetHealth,
       rolloutReceiptId: `rollout-${input.installationId}-${input.action.toLowerCase()}-${input.toPercent}`,
       completedAt,
     });
@@ -472,7 +512,8 @@ function validationReceipt(value: unknown, candidate: AgentVersionCandidateRecei
 function buildReceipt(value: unknown, input: Parameters<AgentSupplyChain["buildInstallation"]>[0]): AgentInstallationBuildReceipt {
   const body = record(value);
   exactKeys(body, ["installationId", "agent", "version", "workerPool", "adapterVersion", "workerImageId", "imageDigest",
-    "rollbackInstallationId", "stages", "health", "selfUpdateDisabled", "buildReceiptId", "buildReceiptDigest", "completedAt"]);
+    "rollbackInstallationId", "stages", "health", "selfUpdateDisabled", "buildReceiptId", "runtimeBinding", "fleetHealth",
+    "buildReceiptDigest", "completedAt"]);
   const expectedStages = ["BUILDING", "SCANNING", "SMOKE_TESTING", "READY"];
   if (body.installationId !== input.installationId || body.agent !== input.candidate.agent || body.version !== input.candidate.version
     || body.workerPool !== input.workerPool || body.adapterVersion !== input.adapterVersion
@@ -483,10 +524,19 @@ function buildReceipt(value: unknown, input: Parameters<AgentSupplyChain["buildI
     || typeof body.buildReceiptId !== "string" || !SAFE_ID.test(body.buildReceiptId)
     || typeof body.buildReceiptDigest !== "string" || !SHA256.test(body.buildReceiptDigest)
     || typeof body.completedAt !== "string" || !Number.isFinite(Date.parse(body.completedAt))) invalidReceipt();
+  const runtimeBinding = parseAgentInstallationRuntimeBinding(body.runtimeBinding, {
+    installationId: input.installationId,
+    workerPool: input.workerPool,
+    agent: input.candidate.agent,
+    exactAgentVersion: input.candidate.version,
+    adapterVersion: input.adapterVersion,
+    workerImageDigest: body.imageDigest,
+  });
+  const fleetHealth = parseAgentInstallationFleetHealth(body.fleetHealth, { requireReadyWorker: true });
   const core = { installationId: body.installationId, agent: body.agent, version: body.version, workerPool: body.workerPool,
     adapterVersion: body.adapterVersion, workerImageId: body.workerImageId, imageDigest: body.imageDigest,
     rollbackInstallationId: body.rollbackInstallationId, stages: expectedStages, health: "HEALTHY", selfUpdateDisabled: true,
-    buildReceiptId: body.buildReceiptId, completedAt: body.completedAt };
+    buildReceiptId: body.buildReceiptId, runtimeBinding, fleetHealth, completedAt: body.completedAt };
   if (sha256Canonical(core) !== body.buildReceiptDigest) invalidReceipt();
   return Object.freeze({ ...core, stages: Object.freeze(expectedStages) as AgentInstallationBuildReceipt["stages"],
     health: "HEALTHY", selfUpdateDisabled: true, buildReceiptDigest: body.buildReceiptDigest }) as AgentInstallationBuildReceipt;
@@ -495,7 +545,8 @@ function buildReceipt(value: unknown, input: Parameters<AgentSupplyChain["buildI
 function rolloutReceipt(value: unknown, input: Parameters<AgentSupplyChain["rollout"]>[0]): AgentInstallationRolloutReceipt {
   const body = record(value);
   exactKeys(body, ["installationId", "imageDigest", "action", "fromPercent", "toPercent", "state", "health",
-    "newTasksOnly", "runningTasksUnaffected", "rolloutReceiptId", "rolloutReceiptDigest", "completedAt"]);
+    "newTasksOnly", "runningTasksUnaffected", "runtimeBinding", "fleetHealth", "rolloutReceiptId", "rolloutReceiptDigest",
+    "completedAt"]);
   const state = rolloutState(input.action, input.toPercent);
   if (body.installationId !== input.installationId || body.imageDigest !== input.imageDigest || body.action !== input.action
     || body.fromPercent !== input.fromPercent || body.toPercent !== input.toPercent || body.state !== state
@@ -503,9 +554,18 @@ function rolloutReceipt(value: unknown, input: Parameters<AgentSupplyChain["roll
     || typeof body.rolloutReceiptId !== "string" || !SAFE_ID.test(body.rolloutReceiptId)
     || typeof body.rolloutReceiptDigest !== "string" || !SHA256.test(body.rolloutReceiptDigest)
     || typeof body.completedAt !== "string" || !Number.isFinite(Date.parse(body.completedAt))) invalidReceipt();
+  const runtimeBinding = parseAgentInstallationRuntimeBinding(body.runtimeBinding, {
+    installationId: input.installationId,
+    workerImageDigest: input.imageDigest,
+  });
+  if (!sameAgentInstallationRuntimeBinding(runtimeBinding, input.runtimeBinding)) invalidReceipt();
+  const fleetHealth = parseAgentInstallationFleetHealth(body.fleetHealth, {
+    requireReadyWorker: input.action === "ADVANCE",
+  });
   const core = { installationId: body.installationId, imageDigest: body.imageDigest, action: body.action,
     fromPercent: body.fromPercent, toPercent: body.toPercent, state: body.state, health: "HEALTHY",
-    newTasksOnly: true, runningTasksUnaffected: true, rolloutReceiptId: body.rolloutReceiptId, completedAt: body.completedAt };
+    newTasksOnly: true, runningTasksUnaffected: true, runtimeBinding, fleetHealth,
+    rolloutReceiptId: body.rolloutReceiptId, completedAt: body.completedAt };
   if (sha256Canonical(core) !== body.rolloutReceiptDigest) invalidReceipt();
   return Object.freeze({ ...core, rolloutReceiptDigest: body.rolloutReceiptDigest }) as AgentInstallationRolloutReceipt;
 }
@@ -579,6 +639,32 @@ function rolloutState(
 }
 function agent(value: unknown): value is AgentKind { return value === "claude-code" || value === "codex-cli"; }
 function workerPool(value: string): boolean { return /^dev(?:elopment)?[-_a-z0-9]{0,100}$/i.test(value); }
+function deterministicRuntimeBinding(input: Readonly<{
+  installationId: string;
+  workerPool: string;
+  agent: AgentKind;
+  exactAgentVersion: string;
+  adapterVersion: string;
+  workerImageDigest: string;
+}>): AgentInstallationRuntimeBinding {
+  const seed = sha256Canonical({ ...input, runtime: "development-supply-chain-fixture" });
+  const guestSeed = sha256Canonical({ seed, artifact: "guest-release-id" });
+  return parseAgentInstallationRuntimeBinding({
+    schemaVersion: "deviludo.agent-installation-runtime-binding.v1",
+    backend: "firecracker-jailer",
+    platform: "linux",
+    architecture: "amd64",
+    ...input,
+    launcherReleaseId: uuidFromDigest(seed),
+    launcherReleaseDigest: sha256Canonical({ seed, artifact: "launcher-release" }),
+    guestReleaseId: uuidFromDigest(guestSeed),
+    guestReleaseDigest: sha256Canonical({ seed, artifact: "guest-release" }),
+    workerBindingDigest: sha256Canonical({ seed, artifact: "worker-binding" }),
+  });
+}
+function uuidFromDigest(value: string): string {
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-4${value.slice(13, 16)}-8${value.slice(17, 20)}-${value.slice(20, 32)}`;
+}
 function exactVersion(value: string): void { if (!VERSION.test(value) || /latest|stable|default/i.test(value)) invalidConfig(); }
 function strictHttpsUrl(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && !!url.hostname && !url.username && !url.password && !url.search && !url.hash; } catch { return false; } }
 function strictOrigin(value: string | URL): URL { const url = new URL(value); if (!strictHttpsUrl(url.href) || url.search || (url.pathname !== "/" && url.pathname !== "")) invalidConfig(); return url; }

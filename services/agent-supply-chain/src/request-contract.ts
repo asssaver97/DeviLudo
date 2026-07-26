@@ -1,4 +1,5 @@
 import { sha256Canonical } from "../../runner-control/src/canonical";
+import { parseAgentInstallationRuntimeBinding } from "../../../lib/agent/installation-runtime";
 import {
   parseAgentInstallationBuildReceipt,
   parseAgentInstallationRolloutReceipt,
@@ -185,12 +186,17 @@ function buildRequest(body: Record<string, unknown>): AgentInstallationBuildRequ
 }
 
 function rolloutRequest(body: Record<string, unknown>): AgentInstallationRolloutRequest {
-  exactKeys(body, ["schemaVersion", "operationKey", "requestDigest", "installationId", "imageDigest", "action", "fromPercent", "toPercent"]);
+  exactKeys(body, ["schemaVersion", "operationKey", "requestDigest", "installationId", "imageDigest", "action", "fromPercent", "toPercent",
+    "runtimeBinding"]);
   binding(body);
   if (typeof body.installationId !== "string" || !SAFE_ID.test(body.installationId)
     || typeof body.imageDigest !== "string" || !DIGEST.test(body.imageDigest)
     || body.action !== "ADVANCE" && body.action !== "ROLLBACK" && body.action !== "DRAIN" && body.action !== "RETIRE"
     || !rolloutTransition(body.action, body.fromPercent, body.toPercent)) invalid();
+  const runtimeBinding = parseAgentInstallationRuntimeBinding(body.runtimeBinding, {
+    installationId: body.installationId,
+    workerImageDigest: body.imageDigest,
+  });
   return Object.freeze({
     schemaVersion: "deviludo.agent-installation-rollout-request.v1",
     operationKey: body.operationKey as string,
@@ -200,6 +206,7 @@ function rolloutRequest(body: Record<string, unknown>): AgentInstallationRollout
     action: body.action,
     fromPercent: body.fromPercent as 0 | 5 | 25 | 100,
     toPercent: body.toPercent as 0 | 5 | 25 | 100,
+    runtimeBinding,
   });
 }
 

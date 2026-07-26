@@ -5,6 +5,13 @@ mirror supported Agent packages, validate signatures and integrity, generate
 SBOMs, run malware/vulnerability/sandbox/adapter checks, build one-Agent OCI
 WorkerImages, and change new-task rollout percentages.
 
+An image build is not an installed runtime by itself. The production Fleet must
+return an exact `deviludo.agent-installation-runtime-binding.v1` that binds the
+image to a signed Firecracker Launcher release, signed Guest rootfs release and
+immutable Worker placement binding, plus a current fleet-health receipt with at
+least one ready Worker. Build and rollout receipts preserve that proof; missing
+or changed proof fails closed before an Installation can serve a Profile.
+
 The TypeScript Broker does not run administrator commands or package URLs. It
 accepts four versioned mTLS requests from the control plane, persists their
 immutable binding in PostgreSQL, and invokes one signed native artifact through

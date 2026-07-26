@@ -435,6 +435,8 @@ function catalog() {
       workerPool: "development-linux-primary", imageDigest: `sha256:${"8".repeat(64)}`,
       workerImageId: "worker-image-claude-r1", adapterVersion: "1.3.0",
       buildReceiptId: "build-receipt-claude-r1", buildReceiptDigest: "9".repeat(64),
+      runtimeBinding: runtimeBinding("installation-claude-r1", "2.1.14", `sha256:${"8".repeat(64)}`),
+      fleetHealth: fleetHealth(),
       state: "ACTIVE", health: "HEALTHY", rolloutPercent: 100, selfUpdateDisabled: true,
     }],
     providers: [{
@@ -476,7 +478,9 @@ function catalogWithFallback() {
   payload.installations.push({ ...payload.installations[0]!, id: "installation-claude-fallback-r1",
     agentVersionId: "claude-code@2.1.15", imageDigest: `sha256:${"b".repeat(64)}`,
     workerImageId: "worker-image-claude-fallback-r1", buildReceiptId: "build-receipt-claude-fallback-r1",
-    buildReceiptDigest: "c".repeat(64) });
+    buildReceiptDigest: "c".repeat(64),
+    runtimeBinding: runtimeBinding("installation-claude-fallback-r1", "2.1.15", `sha256:${"b".repeat(64)}`),
+    fleetHealth: fleetHealth() });
   payload.providers.push({ ...structuredClone(payload.providers[0]!), id: "provider-claude-fallback-r1",
     baseUrl: "https://fallback.anthropic.example/v1", credentialVersionId: "credential-claude-fallback-v1" });
   payload.credentials.push({ id: "credential-claude-fallback-v1", scope: "platform", scopeId: "global", state: "ACTIVE" });
@@ -486,6 +490,35 @@ function catalogWithFallback() {
   Object.assign(payload.profiles[0]!, { fallbackProfileRevisionId: "profile-fallback-r1" });
   payload.defaults.push([`project:${projectId}`, "profile-platform-r1"]);
   return payload;
+}
+
+function runtimeBinding(installationId: string, exactAgentVersion: string, workerImageDigest: string) {
+  return {
+    schemaVersion: "deviludo.agent-installation-runtime-binding.v1",
+    backend: "firecracker-jailer",
+    platform: "linux",
+    architecture: "amd64",
+    installationId,
+    workerPool: "development-linux-primary",
+    agent: "claude-code",
+    exactAgentVersion,
+    adapterVersion: "1.3.0",
+    workerImageDigest,
+    launcherReleaseId: "11111111-1111-4111-8111-111111111111",
+    launcherReleaseDigest: "d".repeat(64),
+    guestReleaseId: "22222222-2222-4222-8222-222222222222",
+    guestReleaseDigest: "e".repeat(64),
+    workerBindingDigest: "f".repeat(64),
+  };
+}
+
+function fleetHealth() {
+  return {
+    schemaVersion: "deviludo.agent-installation-fleet-health.v1",
+    registeredWorkers: 2,
+    readyWorkers: 2,
+    observedAt: "2030-01-01T00:00:00.000Z",
+  };
 }
 
 function clientWith(

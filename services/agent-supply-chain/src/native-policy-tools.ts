@@ -4,6 +4,13 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { sha256Canonical } from "../../runner-control/src/canonical";
+import {
+  parseAgentInstallationFleetHealth,
+  parseAgentInstallationRuntimeBinding,
+  sameAgentInstallationRuntimeBinding,
+  type AgentInstallationFleetHealth,
+  type AgentInstallationRuntimeBinding,
+} from "../../../lib/agent/installation-runtime";
 import type { AgentKind } from "../../control-plane/src/contracts";
 import type { AgentInstallationRolloutRequest } from "./contracts";
 import type { NativeAgentSupplyChainPolicy, NativePolicyToolId } from "./native-policy-config";
@@ -29,7 +36,16 @@ export interface NativeValidationResult {
   readonly sbomRef: string;
   readonly evidenceDigest: string;
 }
-export interface NativeBuildResult { readonly workerImageId: string; readonly imageDigest: string }
+export interface NativeBuildResult {
+  readonly workerImageId: string;
+  readonly imageDigest: string;
+  readonly runtimeBinding: AgentInstallationRuntimeBinding;
+  readonly fleetHealth: AgentInstallationFleetHealth;
+}
+export interface NativeRolloutResult {
+  readonly runtimeBinding: AgentInstallationRuntimeBinding;
+  readonly fleetHealth: AgentInstallationFleetHealth;
+}
 
 export interface NativeSupplyChainTools {
   probe(): Promise<void>;
@@ -40,7 +56,7 @@ export interface NativeSupplyChainTools {
     agent: AgentKind; version: string; installationId: string; artifact: VerifiedAgentPackage; workerPool: string;
     adapterVersion: string; workRoot: string;
   }>): Promise<NativeBuildResult>;
-  rollout(request: AgentInstallationRolloutRequest): Promise<void>;
+  rollout(request: AgentInstallationRolloutRequest): Promise<NativeRolloutResult>;
 }
 
 export interface NativeToolProcessResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string }
@@ -180,10 +196,27 @@ export class LockedNativeSupplyChainTools implements NativeSupplyChainTools {
     const registered = jsonRecord(registration);
     if (registered.installationId !== input.installationId || registered.target !== pool.rolloutTarget
       || registered.imageDigest !== imageDigest || registered.percent !== 0 || registered.health !== "READY") transient();
-    return Object.freeze({ workerImageId: `worker-image-${imageDigest.slice(7, 39)}`, imageDigest });
+    let runtimeBinding: AgentInstallationRuntimeBinding; let fleetHealth: AgentInstallationFleetHealth;
+    try {
+      runtimeBinding = parseAgentInstallationRuntimeBinding(registered.runtimeBinding, {
+        installationId: input.installationId,
+        workerPool: input.workerPool,
+        agent: input.agent,
+        exactAgentVersion: input.version,
+        adapterVersion: input.adapterVersion,
+        workerImageDigest: imageDigest,
+      });
+      fleetHealth = parseAgentInstallationFleetHealth(registered.fleetHealth, { requireReadyWorker: true });
+    } catch { transient(); }
+    return Object.freeze({
+      workerImageId: `worker-image-${imageDigest.slice(7, 39)}`,
+      imageDigest,
+      runtimeBinding,
+      fleetHealth,
+    });
   }
 
-  async rollout(request: AgentInstallationRolloutRequest): Promise<void> {
+  async rollout(request: AgentInstallationRolloutRequest): Promise<NativeRolloutResult> {
     await this.probe();
     const command = request.action.toLowerCase();
     const result = await this.#run("fleetctl", [
@@ -197,6 +230,16 @@ export class LockedNativeSupplyChainTools implements NativeSupplyChainTools {
     const record = jsonRecord(result);
     if (record.installationId !== request.installationId
       || record.imageDigest !== request.imageDigest || record.percent !== request.toPercent || record.health !== "HEALTHY") transient();
+    let runtimeBinding: AgentInstallationRuntimeBinding; let fleetHealth: AgentInstallationFleetHealth;
+    try {
+      runtimeBinding = parseAgentInstallationRuntimeBinding(record.runtimeBinding, {
+        installationId: request.installationId,
+        workerImageDigest: request.imageDigest,
+      });
+      if (!sameAgentInstallationRuntimeBinding(runtimeBinding, request.runtimeBinding)) transient();
+      fleetHealth = parseAgentInstallationFleetHealth(record.fleetHealth, { requireReadyWorker: request.action === "ADVANCE" });
+    } catch { transient(); }
+    return Object.freeze({ runtimeBinding, fleetHealth });
   }
 
   async #run(id: NativePolicyToolId, args: readonly string[], cwd: string, timeoutMs: number): Promise<NativeToolProcessResult> {

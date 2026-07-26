@@ -1,6 +1,10 @@
 import { isExactAdapterCompatibility } from "../../../lib/agent/adapter-registry";
 import { assertPinnedModelId } from "../../../lib/agent/providers";
 import { validateProviderBaseUrl } from "../../../lib/security/network";
+import {
+  parseAgentInstallationFleetHealth,
+  parseAgentInstallationRuntimeBinding,
+} from "../../../lib/agent/installation-runtime";
 import { PROVIDER_REQUIRED_CHECKS } from "./provider-probe";
 import type { AdminCatalogState } from "./admin.store";
 import type {
@@ -30,8 +34,8 @@ const VERSION_FIELDS = Object.freeze([
 ]);
 const INSTALLATION_FIELDS = Object.freeze([
   "activatedAt", "adapterVersion", "agent", "agentVersionId", "buildReceiptDigest", "buildReceiptId", "createdAt", "drainingAt",
-  "failure", "health", "id", "imageDigest", "previousRolloutPercent", "retiredAt", "rollbackInstallationId", "rolloutPercent",
-  "selfUpdateDisabled", "state", "workerImageId", "workerPool",
+  "failure", "fleetHealth", "health", "id", "imageDigest", "previousRolloutPercent", "retiredAt", "rollbackInstallationId",
+  "rolloutPercent", "runtimeBinding", "selfUpdateDisabled", "state", "workerImageId", "workerPool",
 ]);
 const PROVIDER_FIELDS = Object.freeze([
   "agent", "approvedPorts", "authentication", "baseUrl", "credentialVersionId", "governance", "id", "models", "pricing",
@@ -94,6 +98,9 @@ export function assertAdminCatalogReferences(
   for (const installation of state.installations.values()) {
     const version = state.versions.get(installation.agentVersionId);
     if (!version || version.agent !== installation.agent) invalid("Agent installation version binding is invalid");
+    if (installation.runtimeBinding && installation.runtimeBinding.exactAgentVersion !== version.version) {
+      invalid("Agent installation runtime version binding is invalid");
+    }
     if (installation.rollbackInstallationId) {
       const rollback = state.installations.get(installation.rollbackInstallationId);
       if (!rollback || rollback.id === installation.id || rollback.agent !== installation.agent
@@ -245,11 +252,34 @@ function installationRecord(record: InstallationRecord): void {
   nullableTimestamp(record.retiredAt, "Agent installation retirement time");
   nullableSafeId(record.rollbackInstallationId, "Agent rollback installation");
   const build = [record.imageDigest, record.workerImageId, record.buildReceiptId, record.buildReceiptDigest];
-  if (!build.every((value) => value === null)) {
+  const runtime = [record.runtimeBinding, record.fleetHealth];
+  const hasBuild = !build.every((value) => value === null);
+  const hasRuntime = !runtime.every((value) => value === null);
+  if (hasBuild !== build.every((value) => value !== null)
+    || hasRuntime !== runtime.every((value) => value !== null) || hasRuntime && !hasBuild) {
+    invalid("Agent WorkerImage/runtime binding is incomplete");
+  }
+  if ((!hasBuild || !hasRuntime) && ["READY", "CANARY", "ACTIVE", "DRAINING", "RETIRED"].includes(record.state)) {
+    invalid("Serving Agent installation lacks a microVM runtime deployment proof");
+  }
+  if (hasBuild) {
     if (record.imageDigest === null || record.workerImageId === null || record.buildReceiptId === null || record.buildReceiptDigest === null
       || !IMAGE_DIGEST.test(record.imageDigest)) invalid("Agent WorkerImage binding is incomplete");
     safeId(record.workerImageId, "WorkerImage ID"); safeId(record.buildReceiptId, "WorkerImage build receipt ID");
     digest(record.buildReceiptDigest, "WorkerImage build receipt digest");
+  }
+  if (hasRuntime) {
+    if (!record.runtimeBinding || !record.fleetHealth || !record.imageDigest) invalid("Agent microVM runtime deployment proof is incomplete");
+    try {
+      parseAgentInstallationRuntimeBinding(record.runtimeBinding, {
+        installationId: record.id,
+        workerPool: record.workerPool,
+        agent: record.agent,
+        adapterVersion: record.adapterVersion,
+        workerImageDigest: record.imageDigest,
+      });
+      parseAgentInstallationFleetHealth(record.fleetHealth, { requireReadyWorker: record.state === "ACTIVE" });
+    } catch { invalid("Agent microVM runtime deployment proof is invalid"); }
   }
   if (record.failure) {
     exactFields(record.failure, ["evidenceDigest", "failedAt", "failureCode", "failureReceiptDigest", "failureReceiptId"], "Agent installation failure");

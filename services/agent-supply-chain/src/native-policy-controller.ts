@@ -149,6 +149,8 @@ export class NativeAgentSupplyChainController {
       health: "HEALTHY" as const,
       selfUpdateDisabled: true as const,
       buildReceiptId: `build-${request.installationId}`,
+      runtimeBinding: result.runtimeBinding,
+      fleetHealth: result.fleetHealth,
       completedAt,
     });
     return Object.freeze({ ...core, buildReceiptDigest: sha256Canonical(core) });
@@ -157,7 +159,7 @@ export class NativeAgentSupplyChainController {
   async #rollout(
     request: Extract<AgentSupplyChainRequest, { schemaVersion: "deviludo.agent-installation-rollout-request.v1" }>,
   ): Promise<AgentInstallationRolloutReceipt> {
-    await this.tools.rollout(request);
+    const result = await this.tools.rollout(request);
     const completedAt = timestamp(this.#now());
     const core = Object.freeze({
       installationId: request.installationId,
@@ -170,6 +172,8 @@ export class NativeAgentSupplyChainController {
       health: "HEALTHY" as const,
       newTasksOnly: true as const,
       runningTasksUnaffected: true as const,
+      runtimeBinding: result.runtimeBinding,
+      fleetHealth: result.fleetHealth,
       rolloutReceiptId: `rollout-${request.installationId}-${request.action.toLowerCase()}-${request.toPercent}`,
       completedAt,
     });

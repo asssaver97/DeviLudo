@@ -276,7 +276,7 @@ test("Postgres admin retirement guard counts every non-terminal run with RLS fai
   assert.match(statements.find((text) => text.includes("FROM deviludo.agent_runs")) ?? "", /state NOT IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
 });
 
-test("Postgres admin catalog backfills legacy Installation and credential lifecycle timestamps deterministically", async () => {
+test("Postgres admin catalog quarantines legacy Installations without microVM deployment proof", async () => {
   const createdAt = "2026-07-17T08:00:00.000Z";
   const legacyPayload = {
     ...emptyPayload,
@@ -346,8 +346,16 @@ test("Postgres admin catalog backfills legacy Installation and credential lifecy
     rotatedAt: state.credentials.get("credential-platform-legacy-v1")?.rotatedAt,
     validatedAdapterVersion: state.versions.get("claude-code@2.1.14")?.validatedAdapterVersion,
     adapterCompatibility: state.versions.get("claude-code@2.1.14")?.adapterCompatibility,
+    state: state.installations.get("claude-code-installation-legacy")?.state,
+    health: state.installations.get("claude-code-installation-legacy")?.health,
+    rolloutPercent: state.installations.get("claude-code-installation-legacy")?.rolloutPercent,
+    runtimeBinding: state.installations.get("claude-code-installation-legacy")?.runtimeBinding,
   }));
-  assert.equal(lifecycle.activatedAt, createdAt);
+  assert.equal(lifecycle.activatedAt, null);
+  assert.equal(lifecycle.state, "QUARANTINED");
+  assert.equal(lifecycle.health, "UNHEALTHY");
+  assert.equal(lifecycle.rolloutPercent, 0);
+  assert.equal(lifecycle.runtimeBinding, null);
   assert.equal(lifecycle.rotatedAt, null);
   assert.equal(lifecycle.validatedAdapterVersion, null);
   assert.equal(lifecycle.adapterCompatibility, null);

@@ -28,6 +28,17 @@ type AgentInstallation = {
   adapterVersion: string;
   imageDigest: string | null;
   buildReceiptId: string | null;
+  runtimeBinding: {
+    backend: "firecracker-jailer";
+    launcherReleaseId: string;
+    guestReleaseId: string;
+    workerBindingDigest: string;
+  } | null;
+  fleetHealth: {
+    registeredWorkers: number;
+    readyWorkers: number;
+    observedAt: string;
+  } | null;
   state: string;
   health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
   rolloutPercent: number;
@@ -631,6 +642,7 @@ export default function AgentAdminDashboard() {
           {activeTab === "overview" && <OverviewTab catalog={catalog} versions={versions} installations={installations} defaultAgent={defaultAgent} localAgents={localAgents} localHealth={localHealth} canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError} onDefaultChange={(agent) => void changeDefaultAgent(agent)} onNavigate={setActiveTab} />}
           {activeTab === "versions" && <VersionsTab rows={versions} installations={installations} canOperate={canOperateVersions} onUpdate={updateVersion} onInstall={installVersion} />}
           {activeTab === "deployments" && <DeploymentsTab installations={installations} profiles={profiles} defaults={defaults}
+            localFixture={authMode === "local-fixture"}
             canOperate={permissions.manageInstallations && !adminLoading && !adminError}
             canActivateProfile={permissions.activatePlatformProvider && !adminLoading && !adminError}
             canChangeDefault={permissions.changePlatformDefault && !adminLoading && !adminError}
@@ -779,10 +791,11 @@ function VersionsTab({ rows, installations, canOperate, onUpdate, onInstall }: {
 }
 
 function DeploymentsTab({ installations, profiles, defaults, canOperate, canActivateProfile, canChangeDefault,
-  onAdvance, onRollback, onLifecycle, onRebindProfile, onActivateProfile, onSelectDefault }: {
+  localFixture, onAdvance, onRollback, onLifecycle, onRebindProfile, onActivateProfile, onSelectDefault }: {
   installations: AgentInstallation[];
   profiles: AdminState["profiles"];
   defaults: AdminState["defaults"];
+  localFixture: boolean;
   canOperate: boolean;
   canActivateProfile: boolean;
   canChangeDefault: boolean;
@@ -793,7 +806,8 @@ function DeploymentsTab({ installations, profiles, defaults, canOperate, canActi
   onActivateProfile: (profileId: string) => void;
   onSelectDefault: (profileId: string) => void;
 }) {
-  const trustedImageAvailable = installations.some((installation) => Boolean(installation.imageDigest && installation.buildReceiptId)
+  const trustedImageAvailable = installations.some((installation) => Boolean(installation.imageDigest && installation.buildReceiptId
+      && (localFixture || installation.runtimeBinding && installation.fleetHealth && installation.fleetHealth.readyWorkers > 0))
     && installation.health === "HEALTHY" && ["READY", "CANARY", "ACTIVE"].includes(installation.state));
   return (
     <>
@@ -810,9 +824,11 @@ function DeploymentsTab({ installations, profiles, defaults, canOperate, canActi
           const hasSourceProfile = profiles.some((profile) => profile.agent === installation.agent
             && profile.scope === "platform" && profile.scopeId === "global" && profile.state === "ACTIVE"
             && profile.installationId !== installation.id);
+          const runtimeReady = localFixture || Boolean(installation.runtimeBinding && installation.fleetHealth
+            && installation.fleetHealth.readyWorkers > 0);
           const canCreateUpgradeProfile = installation.state === "ACTIVE" && installation.health === "HEALTHY"
             && percent === 100 && Boolean(installation.imageDigest && installation.buildReceiptId)
-            && hasSourceProfile && !readyProfile && !activeProfile;
+            && runtimeReady && hasSourceProfile && !readyProfile && !activeProfile;
           return (
             <div className={styles.installationRow} key={installation.id}>
               <AgentMark kind={installation.agent} />
@@ -820,6 +836,11 @@ function DeploymentsTab({ installations, profiles, defaults, canOperate, canActi
                 <h3>{installation.agent === "claude-code" ? "Claude Code" : "Codex CLI"} {installation.version}</h3>
                 <code>{installation.imageDigest ? `${installation.imageDigest.slice(0, 22)}…${installation.imageDigest.slice(-8)}` : "镜像未生成"}</code>
                 <span>{installation.workerPool} · {installation.health} · adapter {installation.adapterVersion}</span>
+                {installation.runtimeBinding && installation.fleetHealth ? (
+                  <span>Firecracker microVM · Worker {installation.fleetHealth.readyWorkers}/{installation.fleetHealth.registeredWorkers} 就绪 · Launcher {installation.runtimeBinding.launcherReleaseId.slice(0, 8)} · Guest {installation.runtimeBinding.guestReleaseId.slice(0, 8)}</span>
+                ) : localFixture
+                  ? <span>LOCAL_DETERMINISTIC · 仅 loopback 本地测试，不作为生产 microVM 证明</span>
+                  : <span>microVM 运行时证明未投影 · 禁止激活与分流</span>}
                 <span>创建 {formatLifecycleTime(installation.createdAt)} · 激活 {formatLifecycleTime(installation.activatedAt)}</span>
                 {(installation.drainingAt || installation.retiredAt) && <span>排空 {formatLifecycleTime(installation.drainingAt)} · 退役 {formatLifecycleTime(installation.retiredAt)}</span>}
                 {installation.failure && (
@@ -836,7 +857,7 @@ function DeploymentsTab({ installations, profiles, defaults, canOperate, canActi
                 <div className={styles.rolloutTicks}><span>5%</span><span>25%</span><span>100%</span></div>
               </div>
               <div className={styles.verticalActions}>
-                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || !["READY", "CANARY"].includes(installation.state) || percent === 100 || !installation.imageDigest}>推进至 {next}</button>
+                <button className={styles.primaryButton} type="button" onClick={() => onAdvance(installation.id)} disabled={!canOperate || !["READY", "CANARY"].includes(installation.state) || percent === 100 || !installation.imageDigest || !runtimeReady}>推进至 {next}</button>
                 <button className={styles.secondaryButton} type="button" onClick={() => onRollback(installation.id)} disabled={!canOperate || !["CANARY", "ACTIVE"].includes(installation.state) || percent === 0}>回滚</button>
                 {installation.state === "ACTIVE" && <button className={styles.secondaryButton} type="button" onClick={() => onLifecycle(installation.id, "drain")} disabled={!canOperate}>排空</button>}
                 {installation.state === "DRAINING" && <button className={styles.secondaryButton} type="button" onClick={() => onLifecycle(installation.id, "retire")} disabled={!canOperate}>确认退役</button>}
@@ -1433,14 +1454,38 @@ function installationRow(value: Record<string, unknown>, catalogAgent?: AgentKin
   const adapterVersion = text(value.adapterVersion);
   const health = value.health === "HEALTHY" || value.health === "DEGRADED" || value.health === "UNHEALTHY" ? value.health : null;
   if (!agent || !id || !version || !workerPool || !adapterVersion || !health) throw new Error("Agent Installation 响应无效");
+  const runtime = object(value.runtimeBinding);
+  const fleet = object(value.fleetHealth);
+  if (Boolean(runtime) !== Boolean(fleet)) throw new Error("Agent Installation 运行时证明不完整");
+  const runtimeBinding = runtime ? {
+    backend: runtime.backend === "firecracker-jailer" ? runtime.backend : null,
+    launcherReleaseId: text(runtime.launcherReleaseId),
+    guestReleaseId: text(runtime.guestReleaseId),
+    workerBindingDigest: text(runtime.workerBindingDigest),
+  } : null;
+  const registeredWorkers = fleet ? number(fleet.registeredWorkers) : null;
+  const readyWorkers = fleet ? number(fleet.readyWorkers) : null;
+  const observedAt = fleet ? text(fleet.observedAt) : null;
+  if (runtimeBinding && (!runtimeBinding.backend || !runtimeBinding.launcherReleaseId || !runtimeBinding.guestReleaseId
+      || !runtimeBinding.workerBindingDigest || registeredWorkers === null || !Number.isSafeInteger(registeredWorkers)
+      || registeredWorkers < 0 || readyWorkers === null || !Number.isSafeInteger(readyWorkers) || readyWorkers < 0
+      || readyWorkers > registeredWorkers || !observedAt)) {
+    throw new Error("Agent Installation 运行时证明无效");
+  }
   return {
     id, agent, version, workerPool, adapterVersion,
     imageDigest: text(value.imageDigest),
     buildReceiptId: text(value.buildReceiptId),
+    runtimeBinding: runtimeBinding as AgentInstallation["runtimeBinding"],
+    fleetHealth: runtimeBinding ? { registeredWorkers: registeredWorkers!, readyWorkers: readyWorkers!, observedAt: observedAt! } : null,
     state: text(value.state) ?? "FAILED",
     health,
     rolloutPercent: number(value.rolloutPercent) ?? 0,
     rollbackInstallationId: text(value.rollbackInstallationId),
+    createdAt: text(value.createdAt) ?? undefined,
+    activatedAt: text(value.activatedAt),
+    drainingAt: text(value.drainingAt),
+    retiredAt: text(value.retiredAt),
     ...(object(value.failure) ? { failure: object(value.failure) as AgentInstallation["failure"] } : {}),
   };
 }
