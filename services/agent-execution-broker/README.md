@@ -108,3 +108,6 @@ captured in an immutable receipt. The fixed non-root entrypoint accepts no
 arguments and requires `/run/deviludo-credential-images` to be mounted as a
 private tmpfs; startup fails closed if that mount or the pinned `/usr/sbin/mke2fs`
 digest differs.
+Production release commands, immutable Kubernetes resource names and the
+separate SecurityAdmin/KMS trust domain are specified in
+[`docs/agent-microvm-credential-issuer-release.md`](../../docs/agent-microvm-credential-issuer-release.md).

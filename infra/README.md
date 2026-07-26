@@ -180,6 +180,13 @@ digest-pinned Node and internal e2fs toolchain bases, the source-derived tag,
 maximum BuildKit provenance and SBOM into its receipt. The workload must receive
 a private tmpfs at `/run/deviludo-credential-images` plus file-mounted TLS and
 attestation material; it runs as UID/GID 1000 and accepts no alternate command.
+Its production release is separately locked and authorized as documented in
+[`docs/agent-microvm-credential-issuer-release.md`](../docs/agent-microvm-credential-issuer-release.md):
+four immutable runtime resources are bound by UID/resourceVersion, a distinct
+Ed25519 policy authorizes the exact image/scope, and every server-side apply
+stage rechecks both before mutation. The rendered Pod uses a private tmpfs for
+credential images and a default-deny network policy; allow rules remain an
+externally reviewed cluster input.
 
 `npm run lock:control-runtime` first snapshots only the kind, name, UID,
 resourceVersion and immutable flag of the revision-suffixed ConfigMaps and

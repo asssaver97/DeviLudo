@@ -175,6 +175,8 @@ Credential Issuer 是独立于 Web、Agent execution Worker、E2E Runner 和 Ste
 和 40 位源码 revision 派生；BuildKit 强制生成最大 provenance、SBOM、禁用缓存并直接推送。
 容器固定为非 root、固定 `/usr/sbin/mke2fs` 与 `/run/deviludo-credential-images`，部署时必须把
 后者挂载为仅该 Pod 可见的 tmpfs；服务启动探针会验证 tmpfs/ramfs 与 `mke2fs` 实际摘要。
+生产集群的运行时资源锁、独立 SecurityAdmin/KMS 授权和 restricted Kubernetes 发布流程见
+[`agent-microvm-credential-issuer-release.md`](agent-microvm-credential-issuer-release.md)。
 
 收到 `/v1/agent-microvm-credentials:issue` 后，服务会：
 

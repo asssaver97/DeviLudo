@@ -130,7 +130,9 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     }
   }
   for (const utility of [
+    "scripts/production/agent-microvm-credential-issuer-release-authorization.mjs",
     "scripts/production/agent-supply-chain-release-authorization.mjs",
+    "scripts/production/authorize-agent-microvm-credential-issuer-release.mjs",
     "scripts/production/authorize-agent-supply-chain-release.mjs",
     "scripts/production/authorize-control-plane-release.mjs",
     "scripts/production/build-agent-supply-chain-image.mjs",
@@ -161,11 +163,14 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/verify-runner-native-release.mjs",
     "scripts/production/control-release-authorization.mjs",
     "scripts/production/deploy-control-plane.mjs",
+    "scripts/production/deploy-agent-microvm-credential-issuer.mjs",
     "scripts/production/deploy-agent-supply-chain.mjs",
     "scripts/production/inspect-agent-supply-chain-release-trust-policy.mjs",
+    "scripts/production/inspect-agent-microvm-credential-issuer-release-trust-policy.mjs",
     "scripts/production/inspect-control-release-trust-policy.mjs",
     "scripts/production/lock-control-runtime.mjs",
     "scripts/production/lock-agent-supply-chain-runtime.mjs",
+    "scripts/production/lock-agent-microvm-credential-issuer-runtime.mjs",
     "scripts/production/migrate-postgres.mjs",
     "scripts/production/run-control-service.mjs",
     "scripts/production/run-agent-supply-chain-container.mjs",

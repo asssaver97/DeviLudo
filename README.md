@@ -83,7 +83,7 @@ flowchart LR
 - 任务入队时锁定 Profile revision、Installation、镜像 digest、CLI/Adapter 版本、Provider revision、模型、凭据版本、预算、规格、提交和目标矩阵。
 - Provider 失败默认进入 `WAITING_PROVIDER`；只有项目预先允许的同 Agent 精确 fallback 才能使用，永不在 Claude/Codex 间静默切换。
 - CLI 只拿到一次尝试内的随机中继凭据；最长 15 分钟且绑定 `tenant + project + run + profile + credential + model + budget` 的内部 token 在可信中继与 Gateway 边界内按需轮换，上游 Key 仅在 Gateway/Vault 边界内出现。
-- 独立 Credential Issuer 在 tenant RLS 下重新核对当前 fenced attempt，使用固定 `mke2fs` 在 tmpfs 生成只读启动盘；Guest PID 1 会重算完整请求摘要，migration `063` 只记录无密钥的签发摘要。
+- 独立 Credential Issuer 在 tenant RLS 下重新核对当前 fenced attempt，使用固定 `mke2fs` 在 tmpfs 生成只读启动盘；Guest PID 1 会重算完整请求摘要，migration `063` 只记录无密钥的签发摘要。其生产工作负载使用独立镜像、四项不可变 Kubernetes 资源锁和单独的 SecurityAdmin/KMS Ed25519 发布信任域；每个 server-side apply 阶段都会重新验签并复核资源身份，默认拒绝网络且不进入共享控制面。
 - Runner 结果必须匹配 `attempt_id + fencing_token + seq_no + commit_sha + source_digest`，迟到或越序结果会被拒绝。
 - Windows/Linux/macOS 各自获得独立的签名 lease 和 fencing token；Runner 只能结束自己的平台流，矩阵结果及最终 evidence bundle 由控制面汇总，公开 Web 路由不接收 Runner 写入。
 - 候选 PR 的证据不能授权发布。合并后必须针对实际 main SHA 重跑完整门禁。
