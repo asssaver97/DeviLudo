@@ -138,7 +138,7 @@ export function Dashboard() {
     return (
       <AppShell>
         <section className="page-heading dashboard-heading">
-          <div><span className="eyebrow">项目控制面</span><h1>游戏开发工作台</h1><p>{error || (projectsLoading ? "正在读取可访问项目…" : "创建或绑定一个 GitHub App 项目后开始构想。")}</p></div>
+          <div><span className="eyebrow">MISSION CONTROL · 项目控制面</span><h1><span>游戏开发</span>工作台</h1><p>{error || (projectsLoading ? "正在读取可访问项目…" : "创建或绑定一个 GitHub App 项目后开始构想。")}</p></div>
           <Link className="button button-primary" href="/projects/new"><PlusIcon /> 开始新构想</Link>
         </section>
         <section className="dashboard-empty-project">
@@ -154,8 +154,8 @@ export function Dashboard() {
     <AppShell>
       <section className="page-heading dashboard-heading">
         <div>
-          <span className="eyebrow">{mode === "LOCAL_FIXTURE" ? "本地控制面 · 持久状态" : "生产控制面 · Temporal 投影"}</span>
-          <h1>游戏开发工作台</h1>
+          <span className="eyebrow">MISSION CONTROL · {mode === "LOCAL_FIXTURE" ? "本地控制面 / 持久状态" : "生产控制面 / Temporal 投影"}</span>
+          <h1><span>游戏开发</span>工作台</h1>
           <p>{error ? `交付状态暂不可用：${error}` : stageName ? `${project.name}：${stageName}，${passedTargets} / ${targetCount} 个目标已通过。` : `正在读取 ${project.name} 的交付状态…`}</p>
         </div>
         <div className="dashboard-heading-actions">
@@ -167,8 +167,8 @@ export function Dashboard() {
       <section className="dashboard-grid">
         <article className="focus-project">
           <div className="focus-project-topline">
-            <span className="live-label"><i /> {stageName ?? "读取状态"}</span>
-            <span>{delivery ? new Date(delivery.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : projectionMeta ? new Date(projectionMeta.projectedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "等待投影"} 更新</span>
+            <span className="live-label"><i /> ACTIVE MISSION · {stageName ?? "读取状态"}</span>
+            <span>LAST SYNC {delivery ? new Date(delivery.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : projectionMeta ? new Date(projectionMeta.projectedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "等待投影"}</span>
           </div>
           <div className="focus-project-title">
             <div className="project-glyph" aria-hidden="true"><span>{project.name.slice(0, 1)}</span></div>
@@ -222,7 +222,7 @@ export function Dashboard() {
 
         <aside className="attention-panel">
           <div className="section-title-row">
-            <div><span className="eyebrow">需要关注</span><h2>今日门禁</h2></div>
+            <div><span className="eyebrow">BOSS GATES · 需要关注</span><h2>今日门禁</h2></div>
             <span className="counter">2</span>
           </div>
           <div className="attention-item">
@@ -240,7 +240,7 @@ export function Dashboard() {
       <section className="dashboard-lower-grid">
         <article className="activity-panel">
           <div className="section-title-row">
-            <div><span className="eyebrow">实时审计流</span><h2>最近活动</h2></div>
+            <div><span className="eyebrow">EVENT STREAM · 实时审计流</span><h2>最近活动</h2></div>
             <div className="segment-control" aria-label="筛选活动">
               {(["全部", "运行", "测试"] as const).map((filter) => (
                 <button className={activityFilter === filter ? "active" : ""} key={filter} onClick={() => setActivityFilter(filter)} type="button">{filter}</button>
@@ -263,7 +263,7 @@ export function Dashboard() {
 
         <aside className="fleet-panel">
           <div className="section-title-row">
-            <div><span className="eyebrow">mTLS 节点</span><h2>Runner 集群</h2></div>
+            <div><span className="eyebrow">RUNNER SQUAD · mTLS 节点</span><h2>Runner 集群</h2></div>
             <ServerIcon />
           </div>
           {fleetRows.map((runner) => (

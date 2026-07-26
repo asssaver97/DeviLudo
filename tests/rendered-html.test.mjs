@@ -22,7 +22,9 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.equal(home.status, 200);
   const html = await home.text();
   assert.match(html, /DeviLudo/);
-  assert.match(html, /游戏开发工作台/);
+  assert.match(html, /游戏开发.*工作台/s);
+  assert.match(html, /GAMEFORGE OS/);
+  assert.match(html, /og-gameforge\.png/);
   assert.match(html, /平台不会用演示项目替代真实租户数据/);
   assert.doesNotMatch(html, /余烬群岛|三平台 E2E/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
@@ -34,12 +36,9 @@ test("server-renders the DeviLudo workbench and admin console", async () => {
   assert.match(adminHtml, /Claude Code/);
   assert.match(adminHtml, /Codex CLI/);
   assert.match(adminHtml, /正在读取权威 Agent 目录/);
-  assert.match(adminHtml, /href="\/"[^>]*>[^<]*<svg[^>]*>.*运行概览/s);
-  assert.match(adminHtml, /href="\/projects"[^>]*>.*项目/s);
-  assert.match(adminHtml, /href="\/runners"[^>]*>.*构建与测试/s);
-  assert.match(adminHtml, /href="\/evidence"[^>]*>.*发行/s);
-  assert.match(adminHtml, /href="\/settings\/agents"[^>]*>.*凭据与策略/s);
-  assert.match(adminHtml, /href="\/settings\/connections"[^>]*>.*平台设置/s);
+  assert.match(adminHtml, /GAMEFORGE OS/);
+  assert.match(adminHtml, /MISSION \/ 构建/);
+  assert.doesNotMatch(adminHtml, /CONTROL PLANE|管理后台导航/);
   assert.doesNotMatch(adminHtml, /2\.1\.14|0\.91\.0|326 组件|411 组件|最后发现：2 分钟前/);
 
   const project = await request("/projects/ember-archipelago", { headers: { accept: "text/html" } });

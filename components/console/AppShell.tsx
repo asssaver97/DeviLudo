@@ -78,7 +78,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const tenantInitials = account ? initialsFor(account.tenantName) : "—";
   const initials = account ? account.displayName.slice(0, 2).toUpperCase() : "—";
   const visibleSettings = account ? settings.filter((item) => item.capabilities.some((capability) => account.capabilities.includes(capability))) : [];
-  const healthLabel = health === "ok" ? "系统正常" : health === "degraded" ? "系统受限" : "正在检查";
+  const healthLabel = health === "ok" ? "SYSTEM ONLINE" : health === "degraded" ? "SYSTEM LIMITED" : "SYSTEM SYNCING";
 
   async function signOut() {
     if (!account?.canSignOut) return;
@@ -91,34 +91,35 @@ export function AppShell({ children }: { children: ReactNode }) {
       <aside className="shell-sidebar">
         <Link aria-label="DeviLudo 工作台" className="brand" href="/">
           <span className="brand-mark"><SparkIcon /></span>
-          <span>DeviLudo</span>
+          <span className="brand-copy"><b>DeviLudo</b><small>GAMEFORGE OS</small></span>
         </Link>
 
         <div className="workspace-switcher">
           <span className="workspace-avatar">{tenantInitials}</span>
-          <span><b>{tenantName}</b><small>受邀 Beta</small></span>
+          <span><b>{tenantName}</b><small>PLAYER STUDIO · BETA</small></span>
           <span className="workspace-chevron">⌄</span>
         </div>
 
         <nav aria-label="主要导航" className="shell-nav">
-          <p>构建</p>
+          <p>MISSION / 构建</p>
           {navigation.map((item) => <NavItem key={item.href} {...item} />)}
-          <p>设置</p>
+          <p>SYSTEM / 设置</p>
           {visibleSettings.map((item) => <NavItem key={item.href} {...item} />)}
         </nav>
 
         <div className="shell-security-note">
           <ShieldIcon />
-          <span><b>隔离运行</b><small>凭据由网关托管</small></span>
+          <span><b>SANDBOX LOCKED</b><small>凭据由安全网关托管</small></span>
         </div>
       </aside>
 
       <div className="shell-main">
         <header className="shell-topbar">
           <div className="topbar-context">
+            <span className="topbar-mode">COMMAND CENTER</span>
             <span>{account ? `${account.tenantName} Studio` : "DeviLudo"}</span>
-            <span className="crumb">/</span>
-            <strong>生产空间</strong>
+            <span className="crumb">{"//"}</span>
+            <strong>PRODUCTION SLOT 01</strong>
           </div>
           <div className="topbar-actions">
             <span aria-live="polite" className={`system-pill is-${health}`}><i /> {healthLabel}</span>

@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { LocalAgentReadiness, LocalHealth } from "@/components/console/useLocalPlatform";
+import { AppShell } from "@/components/console/AppShell";
 import { agentAdminCapabilities } from "@/lib/admin/agent-permissions";
 import {
   builtInAgentUi,
@@ -16,7 +16,7 @@ import {
   type AuditEvent,
 } from "@/lib/admin/agent-ui";
 import { isAdapterVersionAttested } from "@/lib/agent/adapter-registry";
-import { AdminIcon, type AdminIconName } from "./AdminIcons";
+import { AdminIcon } from "./AdminIcons";
 import styles from "./admin.module.css";
 
 type TabId = "overview" | "versions" | "deployments" | "providers" | "inheritance" | "audit";
@@ -163,33 +163,6 @@ const tabs: { id: TabId; label: string }[] = [
   { id: "providers", label: "Provider" },
   { id: "inheritance", label: "选择与继承" },
   { id: "audit", label: "健康与审计" },
-];
-
-type AdminNavItem = {
-  label: string;
-  icon: AdminIconName;
-  badge?: string;
-} & ({ kind: "route"; href: string } | { kind: "tab"; tab: TabId });
-
-const navGroups: { label: string; items: AdminNavItem[] }[] = [
-  {
-    label: "工作空间",
-    items: [
-      { label: "运行概览", icon: "activity", kind: "route", href: "/" },
-      { label: "项目", icon: "projects", kind: "route", href: "/projects" },
-      { label: "构建与测试", icon: "runners", kind: "route", href: "/runners" },
-      { label: "发行", icon: "releases", kind: "route", href: "/evidence" },
-    ],
-  },
-  {
-    label: "平台治理",
-    items: [
-      { label: "Agents", icon: "agents", kind: "route", href: "/admin/agents" },
-      { label: "凭据与策略", icon: "shield", kind: "route", href: "/settings/agents" },
-      { label: "审计日志", icon: "audit", kind: "tab", tab: "audit" },
-      { label: "平台设置", icon: "settings", kind: "route", href: "/settings/connections" },
-    ],
-  },
 ];
 
 const roleOptions = Object.keys(rolePermissions) as AdminRole[];
@@ -559,65 +532,21 @@ export default function AgentAdminDashboard() {
   };
 
   return (
-    <div className={styles.appShell}>
-      <aside className={styles.sidebar}>
-        <div className={styles.brand}>
-          <div className={styles.brandGlyph} aria-hidden="true"><span /><span /><span /><span /></div>
-          <div><strong>DeviLudo</strong><small>CONTROL PLANE</small></div>
+    <AppShell>
+      <div className={styles.adminSurface}>
+        <div className={styles.adminUtilityBar}>
+          <div className={styles.environment}><span />{authMode === "trusted-control-plane" ? "PRODUCTION MODE" : authMode === "local-fixture" ? "LOCAL MODE" : "VERIFYING ADMIN SESSION"}</div>
+          {authMode !== "local-fixture" ? <div className={styles.roleSelect}><span>{authMode === "loading" ? "身份" : "可信角色"}</span><strong>{authMode === "loading" ? "验证中" : role}</strong></div> : <label className={styles.roleSelect}>
+            <span>模拟角色</span>
+            <select value={role} onChange={(event) => setRole(event.target.value as AdminRole)} aria-label="切换管理角色">
+              {roleOptions.map((option) => <option key={option}>{option}</option>)}
+            </select>
+          </label>}
         </div>
-
-        <nav className={styles.nav} aria-label="管理后台导航">
-          {navGroups.map((group) => (
-            <div className={styles.navGroup} key={group.label}>
-              <div className={styles.navLabel}>{group.label}</div>
-              {group.items.map((item) => {
-                const content = <><AdminIcon name={item.icon} /><span>{item.label}</span>{item.badge && <em>{item.badge}</em>}</>;
-                const active = item.kind === "tab" ? item.tab === activeTab : item.href === "/admin/agents" && activeTab !== "audit";
-                const className = `${styles.navItem} ${active ? styles.navItemActive : ""}`;
-                if (item.kind === "route") return (
-                  <Link aria-current={active ? "page" : undefined} className={className} href={item.href} key={item.label}>
-                    {content}
-                  </Link>
-                );
-                const targetTab = item.tab;
-                return (
-                  <button aria-current={active ? "page" : undefined} className={className} key={item.label} onClick={() => setActiveTab(targetTab)} type="button">
-                    {content}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </nav>
-
-        <div className={styles.sidebarFooter}>
-          <div className={styles.systemHealth}><span className={executionReady ? "" : styles.healthDotWarning} />{executionReady ? "本地 Agent Worker 就绪" : "本地 Agent 执行受门禁保护"}</div>
-          <div className={styles.userBlock}>
-            <div className={styles.avatar}>{authMode === "local-fixture" ? "LT" : "TA"}</div>
-            <div><strong>{authMode === "local-fixture" ? "本地测试会话" : "可信管理员会话"}</strong><small>{authMode === "loading" ? "验证中" : role}</small></div>
-            <AdminIcon name="more" />
-          </div>
-        </div>
-      </aside>
-
-      <main className={styles.main}>
-        <header className={styles.topbar}>
-          <div className={styles.breadcrumb}><span>平台</span><AdminIcon name="chevron" /><span>管理</span><AdminIcon name="chevron" /><strong>Agents</strong></div>
-          <div className={styles.topActions}>
-            <div className={styles.environment}><span />{authMode === "trusted-control-plane" ? "生产控制面" : authMode === "local-fixture" ? "本地测试环境" : "正在验证管理入口"}</div>
-            <button className={styles.iconButton} type="button" aria-label="搜索"><AdminIcon name="search" /></button>
-            <button className={`${styles.iconButton} ${styles.bellButton}`} type="button" aria-label="通知"><AdminIcon name="bell" /><span /></button>
-            {authMode !== "local-fixture" ? <div className={styles.roleSelect}><span>{authMode === "loading" ? "身份" : "可信角色"}</span><strong>{authMode === "loading" ? "验证中" : role}</strong></div> : <label className={styles.roleSelect}>
-              <span>模拟角色</span>
-              <select value={role} onChange={(event) => setRole(event.target.value as AdminRole)} aria-label="切换管理角色">
-                {roleOptions.map((option) => <option key={option}>{option}</option>)}
-              </select>
-            </label>}
-          </div>
-        </header>
 
         <div className={styles.pageHeader}>
           <div>
+            <div className={styles.eyebrow}>AGENT COMMAND · 平台治理</div>
             <div className={styles.titleRow}><h1>Agent 运维台</h1><StatusPill tone={executionReady ? "success" : "warning"}>{executionReady ? "本机可执行" : "本机执行已阻止"}</StatusPill></div>
             <p>治理开发 Agent 的版本、部署、Provider 与配置继承。运行时锁定配置，不受后续变更影响。</p>
           </div>
@@ -673,15 +602,15 @@ export default function AgentAdminDashboard() {
             profiles={profiles} providers={providers} notify={notify} />}
           {activeTab === "audit" && <AuditTab events={auditRecords} filter={auditFilter} localHealth={localHealth} agentHealth={agentHealth} setFilter={setAuditFilter} />}
         </div>
-      </main>
 
-      {toast && (
-        <div className={`${styles.toast} ${styles[`toast_${toast.tone}`]}`} role="status">
-          <span>{toast.tone === "warning" ? "!" : "✓"}</span>{toast.message}
-          <button type="button" onClick={() => setToast(null)} aria-label="关闭提示"><AdminIcon name="close" /></button>
-        </div>
-      )}
-    </div>
+        {toast && (
+          <div className={`${styles.toast} ${styles[`toast_${toast.tone}`]}`} role="status">
+            <span>{toast.tone === "warning" ? "!" : "✓"}</span>{toast.message}
+            <button type="button" onClick={() => setToast(null)} aria-label="关闭提示"><AdminIcon name="close" /></button>
+          </div>
+        )}
+      </div>
+    </AppShell>
   );
 }
 
