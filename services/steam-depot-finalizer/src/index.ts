@@ -2,6 +2,7 @@ export * from "./contract";
 export * from "./contracts";
 export * from "./ingress-http";
 export * from "./locked-native-finalizer";
+export * from "./native-controller";
 export * from "./operation-memory";
 export * from "./postgres-operations";
 export * from "./run-service";

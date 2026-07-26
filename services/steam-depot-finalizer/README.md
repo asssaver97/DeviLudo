@@ -27,6 +27,29 @@ deterministic content-addressed object keys in its receipt. The Steam workflow
 executor independently checks all objects in S3 before it signs RC v2, so a
 controller receipt alone never authorizes SteamPipe.
 
+## Native controller core
+
+`NativeSteamDepotController` is the shared, platform-independent core used by
+the separately released native executable. It accepts only the deterministic
+Godot TestKit `production-export.tar` format, verifies the requested source
+digest, tar checksum, exact manifest and every file digest, and reconstructs
+the export below a fresh `0700` work directory without links or traversal.
+
+The selected signer is fixed to one host platform and one scheme. Windows
+signs `DeviLudo.exe`, Linux signs `DeviLudo.x86_64`, and macOS signs the unique
+`DeviLudo.app` after making only the selected executable owner-writable.
+After the native tool returns, the controller walks the complete result again,
+rejects links, devices, hard links, path escapes, missing source files and size
+or count overflow, and includes signer-created files such as macOS
+`_CodeSignature/CodeResources` in a new deterministic package.
+
+Signing and notarization evidence must be secret-free JSON bound to the exact
+request digest, platform and signing scheme. The finalized package and evidence
+are written only to deterministic, content-addressed object keys; the returned
+receipt is validated against the original request before it crosses the mTLS
+service boundary. Tests run the same controller contract for Windows, Linux
+and macOS and prove digest drift and manifest traversal stop before signing.
+
 Production configuration is documented in `.env.example`. This service must be
 deployed only to release-signing hosts; it is not installed on Agent workers,
 E2E runners, the Web process or the Steam workflow executor.
