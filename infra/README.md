@@ -246,6 +246,14 @@ requires a short-lived authorization and rechecks trust plus all live resource
 identities before each of three server-side apply stages. The rendered Worker
 is tokenless, non-root, read-only, default-deny and has no inbound Service.
 
+The release-signing host uses a separate Steam Depot Finalizer service release.
+`build:steam-depot-finalizer-service` creates the source-bound bundle and
+`finalize:steam-depot-finalizer-service` binds scan and provenance evidence via
+its own offline KMS route. The service verifies its exact executing artifact
+and signed release before creating a PostgreSQL pool or TLS server. Its
+`steam-depot-finalizer-service-trust-policy.example.json` template is revoked
+by default and shares no release authority with the Steam executor or Runner.
+
 ## Artifact Preparer image boundary
 
 Runner source input preparation is not admitted to the shared control image.

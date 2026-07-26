@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { postgresWorkflowPoolFromEnv } from "../../temporal/src/node-postgres";
 import { createSteamDepotFinalizerHandler, createSteamDepotFinalizerHttpsServer } from "./ingress-http";
 import { LockedNativeSteamDepotFinalizer } from "./locked-native-finalizer";
+import { verifySteamDepotFinalizerServiceRuntime } from "./native-service-release";
 import { PostgresSteamDepotFinalizationOperations } from "./postgres-operations";
 import { DurableSteamDepotFinalizerService } from "./service";
 
@@ -16,6 +17,7 @@ const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 export async function steamDepotFinalizerFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
+  await verifySteamDepotFinalizerServiceRuntime(env);
   const serviceEnv = Object.freeze({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "steam-depot-finalizer" });
   const config = await steamDepotFinalizerConfigFromEnv(serviceEnv);
   const pool = postgresWorkflowPoolFromEnv(serviceEnv);
@@ -198,6 +200,7 @@ function waitForAbort(signal: AbortSignal): Promise<void> { if (signal.aborted) 
 function waitForServerFailure(server: HttpsServer): Promise<never> { return new Promise((_, reject) => server.once("error", reject)); }
 function diagnostic(event: "READY" | "STOPPED" | "FAILED"): void { process.stderr.write(`${JSON.stringify({ service: "deviludo-steam-depot-finalizer", event })}\n`); }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (!(globalThis as { __DEVILUDO_STEAM_DEPOT_FINALIZER_BUNDLE__?: boolean }).__DEVILUDO_STEAM_DEPOT_FINALIZER_BUNDLE__
+  && process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void runSteamDepotFinalizer().catch(() => { diagnostic("FAILED"); process.exitCode = 1; });
 }

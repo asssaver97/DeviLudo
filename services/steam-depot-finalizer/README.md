@@ -30,3 +30,29 @@ controller receipt alone never authorizes SteamPipe.
 Production configuration is documented in `.env.example`. This service must be
 deployed only to release-signing hosts; it is not installed on Agent workers,
 E2E runners, the Web process or the Steam workflow executor.
+
+## Service release chain
+
+Production does not execute this service from the repository. Build the exact
+reviewed commit with `npm run build:steam-depot-finalizer-service --` and an
+absolute, not-yet-existing output directory. The build fails on a dirty tree,
+pins esbuild 0.28.0 and records the package lock, complete bundle input set and
+artifact digest in an immutable receipt.
+
+After SBOM, malware, vulnerability and provenance checks have produced a
+`PASS` evidence document, run
+`npm run finalize:steam-depot-finalizer-service --` in the offline release
+environment. The finalizer calls only the TLS 1.3 mTLS KMS route
+`/v1/steam-depot-finalizer-service-releases/sign-ed25519`. The runtime trust
+policy is independent from Runner, Agent and Steam Workflow Executor release
+keys; the checked-in example is intentionally revoked. Review a proposed
+policy without printing public-key material with
+`npm run inspect:steam-depot-finalizer-service-trust --`.
+
+The signed bundle must be launched directly with Node and the exact artifact,
+build receipt, release envelope and trust policy paths/digests from
+`.env.example`. Before opening PostgreSQL, loading its TLS listener or probing
+the signing controller, the process verifies that `process.argv[1]` is that
+artifact, hashes it through an `O_NOFOLLOW` handle and verifies the Ed25519
+release against the fixed platform version. Source-tree startup is reserved
+for non-production local tests with `DEVILUDO_LOCAL_TEST_MODE=1`.
