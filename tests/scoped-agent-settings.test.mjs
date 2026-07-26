@@ -145,6 +145,14 @@ test("TenantAdmin credential lifecycle forwards only exact tenant-bound rotate a
     assert.equal(rotated.status, 201);
     assert.equal(controlPlaneCalls, 1);
 
+    const localRestorePath = `/api/settings/agents/credentials/${credentialId}/restore-local-binding`;
+    const productionRestore = await tenantMutation(browserRequest("POST", localRestorePath, "TenantAdmin", {
+      apiKey: "original-tenant-secret",
+    }), { params: Promise.resolve({ segments: ["credentials", credentialId, "restore-local-binding"] }) });
+    assert.equal(productionRestore.status, 404);
+    assert.equal((await productionRestore.json()).error.code, "AGENT_SETTINGS_ROUTE_NOT_FOUND");
+    assert.equal(controlPlaneCalls, 1);
+
     const revokePath = `/api/settings/agents/credentials/${credentialId}/revoke`;
     const forgedRevoke = await tenantMutation(browserRequest("POST", revokePath, "TenantAdmin", { force: true }), {
       params: Promise.resolve({ segments: ["credentials", credentialId, "revoke"] }),

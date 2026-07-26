@@ -34,6 +34,8 @@ export function TenantAgentSettings() {
   const [busy, setBusy] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState("");
   const [rotatingCredentialId, setRotatingCredentialId] = useState("");
+  const [restoringCredentialId, setRestoringCredentialId] = useState("");
+  const [localFixture, setLocalFixture] = useState(false);
   const [draftAgent, setDraftAgent] = useState<AgentKind>("claude-code");
 
   const refresh = useCallback(async () => {
@@ -42,12 +44,13 @@ export function TenantAgentSettings() {
       fetch("/api/auth/session", { headers: { accept: "application/json" } }),
     ]);
     const agentPayload = await agentResponse.json() as { data?: AgentData; meta?: Record<string, unknown>; error?: { message?: string } };
-    const sessionPayload = await sessionResponse.json() as { data?: { tenantId: string; role: string } };
+    const sessionPayload = await sessionResponse.json() as { data?: { tenantId: string; role: string; authMode?: string } };
     if (!agentResponse.ok || !agentPayload.data) throw new Error(agentPayload.error?.message ?? "无法读取租户 Agent 配置");
     const normalized = normalize(agentPayload.data, agentPayload.meta);
     setData(normalized);
     setTenantId(sessionPayload.data?.tenantId ?? "tenant-local");
     setRole(sessionPayload.data?.role ?? "TenantAdmin");
+    setLocalFixture(sessionPayload.data?.authMode === "local-fixture");
     const visibleActive = (normalized.profiles ?? []).filter((profile) => profile.state === "ACTIVE"
       && (profile.scope === "platform" || profile.scopeId === (sessionPayload.data?.tenantId ?? "tenant-local")));
     const exactDefault = normalized.defaults?.[`tenant:${sessionPayload.data?.tenantId ?? "tenant-local"}`];
@@ -118,8 +121,17 @@ export function TenantAgentSettings() {
     const form = new FormData(event.currentTarget);
     const replaced = await mutate(`/api/settings/agents/credentials/${encodeURIComponent(credentialId)}/rotate`, "POST", {
       apiKey: String(form.get("apiKey") ?? ""),
-    }, "凭据新版本已写入；完成新 Provider revision 探针后方可切换。", event.currentTarget);
+    }, "凭据已安全轮换；Provider/Profile 后继和默认项已在探针通过后原子切换。", event.currentTarget);
     if (replaced) setRotatingCredentialId("");
+  }
+
+  async function restoreLocalBinding(event: FormEvent<HTMLFormElement>, credentialId: string) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const restored = await mutate(`/api/settings/agents/credentials/${encodeURIComponent(credentialId)}/restore-local-binding`, "POST", {
+      apiKey: String(form.get("apiKey") ?? ""),
+    }, "活动凭据指纹一致；租户 Provider/Profile 的本机绑定已重新探针并激活。", event.currentTarget);
+    if (restored) setRestoringCredentialId("");
   }
 
   async function revokeCredential(credential: Credential) {
@@ -171,13 +183,19 @@ export function TenantAgentSettings() {
         <div className="masked-list credential-version-list">{credentialRows.length ? credentialRows.map((item) => <article key={item.id}>
           <div className="credential-version-summary"><span><b>{item.label}</b><small>{item.id} · v{item.version ?? "?"} · {item.state}</small><small>创建 {credentialTime(item.createdAt)} · 轮换 {credentialTime(item.rotatedAt)} · 最后使用 {credentialTime(item.lastUsedAt)}</small></span><code>{item.maskedFingerprint ?? item.masked ?? "已掩码"}</code></div>
           <div className="credential-version-actions">
-            {item.state === "ACTIVE" ? <button disabled={busy || readOnly} onClick={() => setRotatingCredentialId(item.id)} type="button">轮换</button> : null}
+            {item.state === "ACTIVE" ? <button disabled={busy || readOnly} onClick={() => { setRestoringCredentialId(""); setRotatingCredentialId(item.id); }} type="button">轮换</button> : null}
+            {localFixture && item.state === "ACTIVE" ? <button disabled={busy || readOnly} onClick={() => { setRotatingCredentialId(""); setRestoringCredentialId(item.id); }} type="button">恢复本机绑定</button> : null}
             {item.state !== "REVOKED" ? <button disabled={busy || readOnly} onClick={() => void revokeCredential(item)} type="button">撤销</button> : null}
           </div>
           {rotatingCredentialId === item.id ? <form className="credential-rotation-form" onSubmit={(event) => void rotateCredential(event, item.id)}>
             <label>新的 API Key<input autoComplete="new-password" disabled={busy || readOnly} minLength={8} name="apiKey" placeholder="提交后立即清空" required type="password" /></label>
             <button className="button button-primary" disabled={busy || readOnly} type="submit">确认轮换</button>
             <button className="button button-secondary" disabled={busy} onClick={() => setRotatingCredentialId("")} type="button">取消</button>
+          </form> : null}
+          {restoringCredentialId === item.id ? <form className="credential-rotation-form" onSubmit={(event) => void restoreLocalBinding(event, item.id)}>
+            <label>该版本原 API Key<input autoComplete="new-password" disabled={busy || readOnly} minLength={8} name="apiKey" placeholder="只用于恢复进程内安全绑定" required type="password" /></label>
+            <button className="button button-primary" disabled={busy || readOnly} type="submit">重新探针并激活</button>
+            <button className="button button-secondary" disabled={busy} onClick={() => setRestoringCredentialId("")} type="button">取消</button>
           </form> : null}
         </article>) : <p>尚无租户凭据。平台凭据不会暴露给租户页面。</p>}</div>
       </section>

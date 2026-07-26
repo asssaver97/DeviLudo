@@ -16,6 +16,7 @@ import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } 
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
 import {
   activateLocalProviderBinding,
+  checkLocalProviderBinding,
   disableLocalProviderBinding,
   localProviderControlRequired,
   probeLocalProvider,
@@ -1150,6 +1151,118 @@ export async function POST(request: Request, context: RouteContext) {
       });
     }
 
+    const credentialRestoreMatch = /^credentials\/([^/]+)\/restore-local-binding$/.exec(key);
+    if (credentialRestoreMatch) {
+      const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
+      const actor = localActor(request, role);
+      assertAllowedBodyFields(body, ["apiKey"]);
+      if (!localProviderControlRequired()) {
+        throw new HttpProblem(
+          503,
+          "PROVIDER_PROBE_NOT_CONFIGURED",
+          "本地测试站没有受信 Provider Connector，不能恢复活动 Provider 绑定",
+        );
+      }
+      const credentialId = credentialRestoreMatch[1] ?? "";
+      const credential = getDemoStore().credentials.find((item) => item.id === credentialId);
+      if (!credential) throw new HttpProblem(404, "CREDENTIAL_NOT_FOUND", "Credential version does not exist");
+      assertLocalCredentialActor(actor, credential);
+      if (credential.state !== "ACTIVE") {
+        throw new HttpProblem(409, "CREDENTIAL_NOT_ACTIVE", "Only the active credential version can restore local bindings");
+      }
+      const operationId = `admin:${key}:${idempotency}`;
+      if (Object.prototype.hasOwnProperty.call(getDemoStore().idempotency, operationId)) {
+        body.apiKey = "[DESTROYED_ON_IDEMPOTENT_REPLAY]";
+        return await mutate(lease, operationId, () => { throw new Error("idempotency replay must not execute"); });
+      }
+      const bindingSnapshots = activeCredentialBindings(getDemoStore(), credential);
+      if (bindingSnapshots.length === 0) {
+        throw new HttpProblem(409, "CREDENTIAL_NOT_BOUND", "Active credential is not bound to an active Provider/Profile");
+      }
+      const secret = requireString(body, "apiKey", 8192);
+      if (secret.length < 8) throw new HttpProblem(400, "CREDENTIAL_TOO_SHORT", "Credential must be at least 8 characters");
+      const bytes = new TextEncoder().encode(secret);
+      try {
+        const fingerprint = await fingerprintSecret(bytes);
+        if (fingerprint !== credential.fingerprint) {
+          throw new HttpProblem(
+            409,
+            "CREDENTIAL_RESTORE_FINGERPRINT_MISMATCH",
+            "恢复本机绑定必须提交该活动版本原来的 Key；新 Key 请使用轮换操作",
+          );
+        }
+        await putLocalProviderCredential(credential.id, secret, fingerprint);
+      } finally {
+        bytes.fill(0);
+        body.apiKey = "[DESTROYED_AFTER_LOCAL_RESTORE]";
+      }
+
+      const restoredProfileRevisionIds: string[] = [];
+      let alreadyActiveCount = 0;
+      for (const binding of bindingSnapshots) {
+        const alreadyActive = await checkLocalProviderBinding({
+          providerRevisionId: binding.provider.id,
+          profileRevisionId: binding.profile.id,
+          credentialVersionId: credential.id,
+          agent: binding.profile.agent,
+          modelRoles: binding.provider.models,
+        });
+        if (alreadyActive) {
+          alreadyActiveCount += 1;
+          restoredProfileRevisionIds.push(binding.profile.id);
+          continue;
+        }
+        await probeLocalProvider({
+          providerRevisionId: binding.provider.id,
+          agent: binding.provider.agent,
+          protocol: binding.provider.protocol,
+          baseUrl: binding.provider.baseUrl,
+          approvedPorts: binding.provider.approvedPorts,
+          authentication: binding.provider.authentication,
+          models: binding.provider.models,
+          credentialVersionId: credential.id,
+          requiredChecks: PROVIDER_REQUIRED_CHECKS,
+        }, {
+          profileRevisionId: binding.profile.id,
+          scope: binding.profile.scope,
+          scopeId: binding.profile.scopeId,
+          pricing: binding.provider.pricing,
+        });
+        await activateLocalProviderBinding({
+          providerRevisionId: binding.provider.id,
+          profileRevisionId: binding.profile.id,
+          credentialVersionId: credential.id,
+        });
+        restoredProfileRevisionIds.push(binding.profile.id);
+      }
+
+      return await mutate(lease, operationId, () => {
+        const store = getDemoStore();
+        const current = store.credentials.find((item) => item.id === credential.id);
+        if (!current || current.state !== "ACTIVE" || current.fingerprint !== credential.fingerprint
+          || !sameActiveCredentialBindings(store, current, bindingSnapshots)) {
+          throw new HttpProblem(409, "CREDENTIAL_BINDING_RESTORE_RACE", "Provider binding changed before local recovery could commit");
+        }
+        appendDemoAudit("CREDENTIAL_BINDINGS_RESTORED", credential.id, actor.actorId, {
+          restoredProfileCount: restoredProfileRevisionIds.length,
+          alreadyActiveCount,
+          revalidatedCount: restoredProfileRevisionIds.length - alreadyActiveCount,
+          credentialVersionUnchanged: true,
+          defaultsChanged: false,
+        });
+        return {
+          id: credential.id,
+          state: credential.state,
+          restoredProfileRevisionIds,
+          alreadyActiveCount,
+          revalidatedCount: restoredProfileRevisionIds.length - alreadyActiveCount,
+          credentialVersionUnchanged: true,
+          defaultsChanged: false,
+          plaintextRecoverable: false,
+        };
+      });
+    }
+
     const credentialMatch = /^credentials\/([^/]+)\/(rotate|revoke)$/.exec(key);
     if (credentialMatch) {
       const role = requireRole(request, ["SecurityAdmin", "TenantAdmin"]);
@@ -1505,6 +1618,54 @@ function demoProviderProbePassed(provider: DemoProvider): boolean {
 function demoFixtureProviderCredential(provider: DemoProvider): boolean {
   return (provider.id === "provider-claude-platform-r3" && provider.credentialVersionId === "cred-claude-platform-v4")
     || (provider.id === "provider-codex-platform-r2" && provider.credentialVersionId === "cred-codex-platform-v2");
+}
+
+type ActiveCredentialBindingSnapshot = Readonly<{
+  profile: DemoProfile;
+  provider: DemoProvider;
+}>;
+
+function activeCredentialBindings(
+  store: DemoStoreState,
+  credential: DemoCredential,
+): readonly ActiveCredentialBindingSnapshot[] {
+  return Object.freeze(store.profiles
+    .filter((profile) => profile.state === "ACTIVE" && profile.credentialVersionId === credential.id)
+    .toSorted((left, right) => left.id.localeCompare(right.id))
+    .map((profile) => {
+      const provider = store.providers.find((candidate) => candidate.id === profile.providerRevisionId);
+      if (!provider || provider.state !== "ACTIVE" || provider.agent !== profile.agent
+        || provider.credentialVersionId !== credential.id || !demoProviderProbePassed(provider)) {
+        throw new HttpProblem(
+          409,
+          "PROFILE_PROVIDER_BINDING_UNAVAILABLE",
+          "Active credential recovery requires every bound Profile to retain its fully probed active Provider",
+        );
+      }
+      return Object.freeze({
+        profile: { ...profile, budget: { ...profile.budget } },
+        provider: {
+          ...provider,
+          approvedPorts: [...provider.approvedPorts],
+          models: { ...provider.models },
+          pricing: { ...provider.pricing },
+          governance: { ...provider.governance },
+          probe: { ...provider.probe },
+        },
+      });
+    }));
+}
+
+function sameActiveCredentialBindings(
+  store: DemoStoreState,
+  credential: DemoCredential,
+  expected: readonly ActiveCredentialBindingSnapshot[],
+): boolean {
+  try {
+    return JSON.stringify(activeCredentialBindings(store, credential)) === JSON.stringify(expected);
+  } catch {
+    return false;
+  }
 }
 
 async function prepareLocalCredentialRotation(

@@ -1104,10 +1104,32 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
         method: "POST", role, body: { apiKey },
       });
       onChanged();
-      notify("凭据新版本已写入安全连接器；请为新版本创建 Provider revision 并完成探针后再切换", "success");
+      notify("凭据已安全轮换；Provider/Profile 后继和默认项已在完整探针通过后原子切换", "success");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "凭据轮换失败");
       notify("凭据未轮换；当前 Provider 与默认 Profile 保持不变", "warning");
+    } finally {
+      setApiKey("");
+      setTesting(false);
+    }
+  };
+
+  const restoreLocalBinding = async () => {
+    if (production) { setError("生产凭据由 Vault/KMS 持久保存，不使用本机绑定恢复"); return; }
+    if (!permissions.manageGlobalCredentials) { setError("恢复平台凭据绑定需要 SecurityAdmin 权限"); return; }
+    if (!matchingCredential) { setError(`当前没有 ${agent} 的 ACTIVE 平台凭据可恢复`); return; }
+    if (apiKey.length < 8) { setError("请输入该活动凭据版本原来的完整 API Key"); return; }
+    setError("");
+    setTesting(true);
+    try {
+      await adminRequest(`credentials/${encodeURIComponent(matchingCredential.id)}/restore-local-binding`, {
+        method: "POST", role, body: { apiKey },
+      });
+      onChanged();
+      notify("本机 Key 与活动版本指纹一致；所有关联 Provider/Profile 绑定已重新探针并激活", "success");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "本机 Provider 绑定恢复失败");
+      notify("本机绑定未完全恢复；D1 中的活动凭据、Provider 和默认项保持不变", "warning");
     } finally {
       setApiKey("");
       setTesting(false);
@@ -1154,6 +1176,8 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
           <div><span>当前 CredentialBinding</span><strong>{credentialMask}</strong><small>v{matchingCredential?.version ?? "?"} · 轮换 {formatLifecycleTime(matchingCredential?.rotatedAt ?? null)} · 最后使用 {formatLifecycleTime(matchingCredential?.lastUsedAt ?? null)}</small></div>
           <div className={styles.credentialActions}>
             <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "使用下方输入的新 Key 创建不可变版本" : "需要 SecurityAdmin 权限"} onClick={() => void rotateCredential()}>轮换</button>
+            {!production ? <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential}
+              title="sidecar 重启后，用该活动版本原来的 Key 重新探针并激活绑定" onClick={() => void restoreLocalBinding()}>恢复本机绑定</button> : null}
             <button type="button" disabled={testing || !permissions.manageGlobalCredentials || !matchingCredential} title={permissions.manageGlobalCredentials ? "立即停止该版本签发新租约" : "需要 SecurityAdmin 权限"} onClick={() => void revokeCredential()}>撤销当前</button>
           </div>
         </div>
@@ -1200,7 +1224,7 @@ function ProvidersTab({ role, localHealth, installations, profiles, providers, c
           <div className={styles.formGroup}><label htmlFor="maxTurns">最大 Turns</label><input id="maxTurns" type="number" min="1" max="200" step="1" value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
         </div>
         <div className={styles.formGroup}><label htmlFor="timeoutSeconds">任务超时（秒）</label><input id="timeoutSeconds" type="number" min="60" max="14400" step="60" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(event.target.value)} disabled={!permissions.editPlatformProvider} /></div>
-        <div className={styles.formGroup}><label htmlFor="apiKey">替换 API Key</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="留空以沿用当前凭据版本" autoComplete="new-password" disabled={!permissions.manageGlobalCredentials} /></div><small>写入后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。平台凭据仅由 SecurityAdmin 替换。</small></div>
+        <div className={styles.formGroup}><label htmlFor="apiKey">API Key（新版本或本机恢复）</label><div className={styles.keyInput}><AdminIcon name="key" /><input id="apiKey" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="轮换填新 Key；恢复填该版本原 Key" autoComplete="new-password" disabled={!permissions.manageGlobalCredentials} /></div><small>写入或复验后立即清空；数据库仅保存 SecretRef、掩码与不可逆指纹。平台凭据仅由 SecurityAdmin 操作。</small></div>
         <label className={styles.checkLabel}><input type="checkbox" checked={regionAcknowledged} onChange={(event) => setRegionAcknowledged(event.target.checked)} disabled={!permissions.editPlatformProvider} /><span>已确认该端点的数据地域、保留期限、训练政策及源码处理范围。</span></label>
         {error && <div className={styles.formError}><AdminIcon name="alert" />{error}</div>}
         <div className={styles.probeList}><span>激活探针</span><div>{["认证", "模型", "流式", "工具", "取消", "Usage", "超时", "无工具", "DNS 固定", "跳转重验"].map((probe) => <em key={probe}>{probe}</em>)}</div></div>

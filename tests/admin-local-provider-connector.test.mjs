@@ -30,10 +30,12 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
   };
   const encodedKey = Buffer.alloc(32, 19).toString("base64url");
   let probed;
+  let probeCount = 0;
   let failProbe = false;
-  const providerControl = new LocalProviderControl({
+  const createProviderControl = () => new LocalProviderControl({
     async run(value) {
       if (failProbe) throw new Error("synthetic Provider probe failure");
+      probeCount += 1;
       probed = value;
       return Object.freeze({
         providerRevisionId: value.providerRevisionId,
@@ -41,6 +43,7 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
       });
     },
   });
+  let providerControl = createProviderControl();
   const verifier = new LocalAgentRuntimeRequestVerifier(new Uint8Array(Buffer.from(encodedKey, "base64url")));
   process.env.DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED = "1";
   process.env.DEVILUDO_LOCAL_AGENT_RUNTIME_URL = "http://127.0.0.1:4312";
@@ -221,6 +224,72 @@ test("local admin stores Provider keys in the authenticated sidecar and activate
 
     const currentProfiles = retried.successorProfileRevisionIds
       .map((id) => store.profiles.find((item) => item.id === id));
+    const currentProvider = store.providers.find((item) => item.id === currentProfiles[0].providerRevisionId);
+    const currentDefault = store.defaults.platform;
+    providerControl.close();
+    providerControl = createProviderControl();
+    assert.equal(providerControl.checkBinding({
+      providerRevisionId: currentProvider.id,
+      profileRevisionId: currentProfiles[0].id,
+      credentialVersionId: retried.id,
+      agent: currentProfiles[0].agent,
+      modelRoles: currentProvider.models,
+    }).active, false);
+
+    const restorePath = `credentials/${retried.id}/restore-local-binding`;
+    const wrongRestore = await POST(command(restorePath, "SecurityAdmin", {
+      apiKey: "sk-wrong-credential-material",
+    }, "restore-wrong-fingerprint"), context(restorePath));
+    assert.equal(wrongRestore.status, 409);
+    assert.equal((await wrongRestore.json()).error.code, "CREDENTIAL_RESTORE_FINGERPRINT_MISMATCH");
+    assert.equal(store.defaults.platform, currentDefault);
+
+    failProbe = true;
+    const failedRestore = await POST(command(restorePath, "SecurityAdmin", {
+      apiKey: "sk-connector-probe-failure-material",
+    }, "restore-after-restart"), context(restorePath));
+    assert.equal(failedRestore.status, 422);
+    assert.equal((await failedRestore.json()).error.code, "PROVIDER_PROBE_FAILED");
+    assert.equal(store.defaults.platform, currentDefault);
+    assert.equal(currentProfiles.every((item) => item.state === "ACTIVE"), true);
+
+    failProbe = false;
+    const restoredResponse = await POST(command(restorePath, "SecurityAdmin", {
+      apiKey: "sk-connector-probe-failure-material",
+    }, "restore-after-restart"), context(restorePath));
+    assert.equal(restoredResponse.status, 201);
+    const restoredText = await restoredResponse.text();
+    assert.equal(restoredText.includes("sk-connector-probe-failure-material"), false);
+    const restored = JSON.parse(restoredText).data;
+    assert.deepEqual(restored.restoredProfileRevisionIds.toSorted(), currentProfiles.map((item) => item.id).toSorted());
+    assert.equal(restored.revalidatedCount, 2);
+    assert.equal(restored.alreadyActiveCount, 0);
+    assert.equal(restored.credentialVersionUnchanged, true);
+    assert.equal(store.credentials.length, credentialCountAfterRetry);
+    assert.equal(store.defaults.platform, currentDefault);
+    assert.equal(providerControl.checkBinding({
+      providerRevisionId: currentProvider.id,
+      profileRevisionId: currentProfiles[0].id,
+      credentialVersionId: retried.id,
+      agent: currentProfiles[0].agent,
+      modelRoles: currentProvider.models,
+    }).active, true);
+    const probeCountAfterRestore = probeCount;
+    const alreadyActiveRestore = await POST(command(restorePath, "SecurityAdmin", {
+      apiKey: "sk-connector-probe-failure-material",
+    }, "restore-already-active"), context(restorePath));
+    assert.equal(alreadyActiveRestore.status, 201);
+    const alreadyActive = (await alreadyActiveRestore.json()).data;
+    assert.equal(alreadyActive.alreadyActiveCount, 2);
+    assert.equal(alreadyActive.revalidatedCount, 0);
+    assert.equal(probeCount, probeCountAfterRestore);
+    assert.equal(store.audit.filter((event) => event.action === "CREDENTIAL_BINDINGS_RESTORED").length, 2);
+    const restoredReplay = await POST(command(restorePath, "SecurityAdmin", {
+      apiKey: "this-secret-must-not-reach-the-sidecar",
+    }, "restore-after-restart"), context(restorePath));
+    assert.equal(restoredReplay.status, 200);
+    assert.equal((await restoredReplay.json()).meta.idempotentReplay, true);
+
     const revokeResponse = await POST(command(`credentials/${retried.id}/revoke`, "SecurityAdmin", {}, "revoke"), context(`credentials/${retried.id}/revoke`));
     assert.equal(revokeResponse.status, 201);
     assert.equal((await revokeResponse.json()).data.degradedProfiles, 2);

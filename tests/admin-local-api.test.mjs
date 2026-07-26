@@ -824,6 +824,15 @@ test("active Provider credential rotation fails closed and preserves the current
   assert.equal(store.credentials[0]?.state, "ACTIVE");
   assert.equal(store.providers.find((item) => item.id === "provider-claude-platform-r3")?.state, "ACTIVE");
   assert.equal(store.profiles.find((item) => item.id === defaultBefore)?.state, "ACTIVE");
+
+  const restore = await POST(
+    request(`credentials/${activeCredentialId}/restore-local-binding`, "POST", "SecurityAdmin", { apiKey: "original-local-key" }),
+    context(`credentials/${activeCredentialId}/restore-local-binding`),
+  );
+  assert.equal(restore.status, 503);
+  assert.equal((await restore.json()).error.code, "PROVIDER_PROBE_NOT_CONFIGURED");
+  assert.equal(store.defaults.platform, defaultBefore);
+  assert.equal(store.credentials.length, 1);
 });
 
 test("simulated role headers cannot cross local admin RBAC boundaries", async () => {

@@ -131,19 +131,23 @@ test("Agent version links accept only the fixed official source and release-note
   ), /允许列表/);
 });
 
-test("credential lifecycle controls call the real rotate and revoke APIs", () => {
+test("credential lifecycle controls call rotate, local recovery and revoke APIs with accurate semantics", () => {
   const admin = readFileSync(new URL("../components/admin/AgentAdminDashboard.tsx", import.meta.url), "utf8");
   const tenant = readFileSync(new URL("../components/console/TenantAgentSettings.tsx", import.meta.url), "utf8");
   const project = readFileSync(new URL("../components/console/ProjectAgentSettings.tsx", import.meta.url), "utf8");
 
   assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(matchingCredential\.id\)\}\/rotate`/);
+  assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(matchingCredential\.id\)\}\/restore-local-binding`/);
   assert.match(admin, /adminRequest\(`credentials\/\$\{encodeURIComponent\(credential\.id\)\}\/revoke`/);
   assert.match(admin, /credential\.id === selectedActiveProvider\?\.credentialVersionId/);
   assert.doesNotMatch(admin, /已创建双版本轮换草稿/);
+  assert.doesNotMatch(admin, /请为新版本创建 Provider revision/);
   assert.match(admin, /setApiKey\(""\);[\s\S]*setTesting\(false\);/);
 
   assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credentialId\)\}\/rotate/);
+  assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credentialId\)\}\/restore-local-binding/);
   assert.match(tenant, /\/api\/settings\/agents\/credentials\/\$\{encodeURIComponent\(credential\.id\)\}\/revoke/);
+  assert.match(tenant, /sessionPayload\.data\?\.authMode === "local-fixture"/);
   assert.match(tenant, /window\.confirm\(/);
   assert.match(tenant, /planningModel: String\(form\.get\("planningModel"\)/);
   assert.match(tenant, /smallFastModel: String\(form\.get\("smallFastModel"\)/);

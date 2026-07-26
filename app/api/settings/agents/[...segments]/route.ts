@@ -34,6 +34,13 @@ export async function POST(request: Request, context: Context) {
       downstream = `/admin/credentials/${segments[1]}/${action}`;
       forced = action === "rotate" ? { apiKey: body.apiKey } : {};
     }
+    else if (segments.length === 3 && segments[0] === "credentials" && ID.test(segments[1] ?? "")
+      && segments[2] === "restore-local-binding") {
+      if (!isLoopbackTestRequest(request)) return notFound();
+      assertAllowedBodyFields(body, ["apiKey"]);
+      downstream = `/admin/credentials/${segments[1]}/restore-local-binding`;
+      forced = { apiKey: body.apiKey };
+    }
     else if (key === "profiles") {
       assertAllowedBodyFields(body, TENANT_PROFILE_DRAFT_FIELDS);
       downstream = "/admin/agent-profiles";
