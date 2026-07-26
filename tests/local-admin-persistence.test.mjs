@@ -22,7 +22,7 @@ class FakeD1Statement {
   bind(...values) { return new FakeD1Statement(this.database, this.sql, values); }
 
   async first() {
-    if (!this.sql.startsWith("SELECT revision, state_json FROM local_admin_state_revisions")) {
+    if (!this.sql.startsWith("SELECT revision, schema_version, state_json FROM local_admin_state_revisions")) {
       throw new Error(`Unexpected fake D1 first(): ${this.sql}`);
     }
     return this.database.latest();
@@ -33,14 +33,14 @@ class FakeD1Statement {
     if (this.sql.startsWith("INSERT OR IGNORE INTO local_admin_state_revisions")) {
       if (this.database.rows.length > 0) return result(0);
       const [schemaVersion, stateJson, createdAt] = this.values;
-      this.database.rows.push({ revision: 0, schemaVersion, commandKey: null, state_json: stateJson, createdAt });
+      this.database.rows.push({ revision: 0, schema_version: schemaVersion, commandKey: null, state_json: stateJson, createdAt });
       return result(1);
     }
     if (this.sql.startsWith("INSERT INTO local_admin_state_revisions")) {
       const [revision, schemaVersion, commandKey, stateJson, createdAt, expectedRevision] = this.values;
       if (this.database.latest()?.revision !== expectedRevision
         || this.database.rows.some((row) => row.commandKey === commandKey)) return result(0);
-      this.database.rows.push({ revision, schemaVersion, commandKey, state_json: stateJson, createdAt });
+      this.database.rows.push({ revision, schema_version: schemaVersion, commandKey, state_json: stateJson, createdAt });
       return result(1);
     }
     throw new Error(`Unexpected fake D1 run(): ${this.sql}`);
@@ -56,11 +56,11 @@ class FakeD1Database {
 
   latest() { return this.rows.toSorted((left, right) => right.revision - left.revision)[0] ?? null; }
 
-  appendExternal(stateJson) {
+  appendExternal(stateJson, schemaVersion = "deviludo.local-admin-state.v1") {
     const revision = (this.latest()?.revision ?? -1) + 1;
     this.rows.push({
       revision,
-      schemaVersion: "deviludo.local-admin-state.v1",
+      schema_version: schemaVersion,
       commandKey: `external:${revision}`,
       state_json: stateJson,
       createdAt: new Date().toISOString(),
@@ -102,6 +102,17 @@ test("local Agent administrator state rejects stale compare-and-swap commits", a
   await assert.rejects(lease.persist("admin:test:stale"), /并发更新/);
   lease.release();
   assert.equal(database.rows.length, 2);
+});
+
+test("local Agent administrator state rejects a D1 schema column and envelope version mismatch", async () => {
+  resetDemoStore();
+  const database = new FakeD1Database();
+  const first = await acquireLocalAdminState({ database });
+  first.release();
+  const envelope = JSON.parse(serializeLocalAdminState(getDemoStore()));
+  envelope.schemaVersion = "deviludo.local-admin-state.v4";
+  database.appendExternal(JSON.stringify(envelope), "deviludo.local-admin-state.v5");
+  await assert.rejects(acquireLocalAdminState({ database }), /列版本与正文不一致/);
 });
 
 test("local Agent administrator snapshots fail closed on corruption and plaintext credential fields", () => {
@@ -208,7 +219,46 @@ test("v3 AgentVersion snapshots require trusted Adapter revalidation without inv
 
   const incomplete = JSON.parse(serializeLocalAdminState(resetDemoStore()));
   incomplete.state.agentVersionMetadata["codex-cli@0.91.0"].validationReceiptDigest = null;
-  assert.equal(parseLocalAdminState(JSON.stringify(incomplete)).agentVersions["codex-cli@0.91.0"], "DISCOVERED");
+  assert.throws(() => parseLocalAdminState(JSON.stringify(incomplete)), /验证回执不完整/);
+});
+
+test("current v5 snapshots are never repaired after required immutable fields are removed", () => {
+  const current = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+  delete current.state.profiles[0].createdAt;
+  assert.throws(() => parseLocalAdminState(JSON.stringify(current)), /Profile 投影无效/);
+
+  const legacy = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+  legacy.schemaVersion = "deviludo.local-admin-state.v4";
+  delete legacy.state.profiles[0].createdAt;
+  assert.equal(parseLocalAdminState(JSON.stringify(legacy)).profiles[0].createdAt, "2026-07-17T00:00:00.000Z");
+});
+
+test("current v5 snapshots reject cross-record authority, fallback, rollout, and default tampering", () => {
+  const tampered = (mutate) => {
+    const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
+    mutate(envelope.state);
+    return JSON.stringify(envelope);
+  };
+
+  assert.throws(() => parseLocalAdminState(tampered((state) => {
+    state.profiles[0].providerRevisionId = "provider-codex-platform-r2";
+  })), /权限绑定无效/);
+
+  assert.throws(() => parseLocalAdminState(tampered((state) => {
+    state.profiles[0].fallbackProfileRevisionId = state.profiles[0].id;
+  })), /回退绑定无效/);
+
+  assert.throws(() => parseLocalAdminState(tampered((state) => {
+    state.rollouts["claude-installation-214"].percent = 25;
+  })), /灰度状态无效/);
+
+  assert.throws(() => parseLocalAdminState(tampered((state) => {
+    state.defaults["project:another-project"] = "profile-codex-project-r1";
+  })), /项目默认作用域无效/);
+
+  assert.throws(() => parseLocalAdminState(tampered((state) => {
+    state.profiles.push(structuredClone(state.profiles[0]));
+  })), /ID 重复/);
 });
 
 test("local Agent administrator migration makes every persisted revision immutable", async () => {
