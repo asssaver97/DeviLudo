@@ -116,6 +116,33 @@ Production configuration is documented in `.env.example`. This service must be
 deployed only to release-signing hosts; it is not installed on Agent workers,
 E2E runners, the Web process or the Steam workflow executor.
 
+## Restricted host installation
+
+The production host chain is deliberately split into four create-only steps:
+`plan:steam-depot-finalizer-host-install` verifies both signed releases, their
+build receipts, the canonical native policy, the embedded SEA identity and the
+fixed Node runtime; `stage:steam-depot-finalizer-host-install` copies the ten
+locked inputs through `O_NOFOLLOW` descriptors into a root-owned read-only
+release directory; `compile:steam-depot-finalizer-host-transaction` renders a
+hardened systemd, launchd or restricted SCM definition; and
+`apply:steam-depot-finalizer-host-transaction` accepts only a short-lived
+Ed25519 activation grant bound to the exact plan, staging receipt, transaction,
+definition and output receipt path.
+
+Linux and macOS activation re-hash every staged file and the Node runtime before
+mutation, journal the previous definition, switch it atomically, and require the
+signed service/native releases, embedded native identity, live native S3/signing
+probe and a real TLS 1.3 mTLS `/healthz` request to pass. A failed gate restores
+the previous definition (or removes an initial definition) and emits an
+immutable rollback receipt. Interrupted activation is recovered from the same
+journal, and a completed receipt replays without touching the service. Upgrades
+require a signed `DRAINING` state with zero active finalization operations.
+
+Windows transactions remain non-runnable until independently signed SCM bridge
+and native actuator authorizations are attached. The POSIX actuator explicitly
+refuses Windows; it never falls back to PowerShell, `sc.exe`, a shell command or
+an Agent runtime.
+
 ## Service release chain
 
 Production does not execute this service from the repository. Build the exact

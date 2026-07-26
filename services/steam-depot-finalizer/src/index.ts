@@ -1,5 +1,6 @@
 export * from "./contract";
 export * from "./contracts";
+export * from "./host-activation";
 export * from "./ingress-http";
 export * from "./locked-native-finalizer";
 export * from "./locked-platform-signer";

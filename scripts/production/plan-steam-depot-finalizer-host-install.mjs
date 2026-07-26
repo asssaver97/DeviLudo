@@ -1,13 +1,30 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import { sha256Canonical } from "../../services/runner-control/src/canonical.ts";
+import { pathToFileURL } from "node:url";
+import { canonicalJson, sha256Canonical } from "../../services/runner-control/src/canonical.ts";
+import { validateSteamDepotFinalizerNativeBuildReceipt } from "./build-steam-depot-finalizer-native.mjs";
+import { validateSteamDepotFinalizerServiceBuildReceipt } from "../build-steam-depot-finalizer-service.mjs";
+import {
+  verifySteamDepotFinalizerNativeRuntime,
+} from "../../services/steam-depot-finalizer/src/native-controller-release.ts";
+import { parseSteamDepotNativePolicy } from "../../services/steam-depot-finalizer/src/native-policy.ts";
+import {
+  verifySignedSteamDepotFinalizerServiceRelease,
+} from "../../services/steam-depot-finalizer/src/native-service-release.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SOURCE_REVISION = /^[a-f0-9]{40}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const NODE_VERSION = /^v22\.\d+\.\d+$/;
+const MAX_JSON_BYTES = 1024 * 1024;
+const MAX_ENV_BYTES = 256 * 1024;
+const MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024;
 const COMPONENT_FILES = Object.freeze({
   serviceArtifact: "deviludo-steam-depot-finalizer-service.mjs",
   serviceBuildReceipt: "steam-depot-finalizer-service-build-receipt.json",
@@ -21,6 +38,116 @@ const COMPONENT_FILES = Object.freeze({
   environment: "steam-depot-finalizer.env",
 });
 
+export function parseSteamDepotFinalizerHostPlanningArguments(argv) {
+  if (!Array.isArray(argv) || argv.length !== 2 || argv[0] !== "--input") invalid();
+  return Object.freeze({ inputPath: requiredAbsolute(argv[1]) });
+}
+
+export async function planSteamDepotFinalizerHostInstallation(inputValue, dependencies = {}) {
+  const input = validatePlanningInput(inputValue);
+  const now = dependencies.now ?? new Date();
+  const inspectIdentity = dependencies.inspectIdentity;
+  const inspectNode = dependencies.inspectNode ?? executeNodeIdentity;
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())
+    || inspectIdentity !== undefined && typeof inspectIdentity !== "function" || typeof inspectNode !== "function") invalid();
+  await Promise.all([exactDirectory(input.installRoot), exactDirectory(input.workRoot)]);
+  const files = {};
+  for (const [component, path] of Object.entries(input.sources)) {
+    files[component] = await fileMetadata(path, maximumBytes(component));
+  }
+  files.nodeRuntime = await fileMetadata(input.nodeRuntime.path, MAX_ARTIFACT_BYTES);
+  const [serviceBuild, nativeBuild, serviceRelease, serviceTrustPolicy, nativeReleaseValue,
+    nativePolicyValue, previousPlan, nodeIdentity] = await Promise.all([
+    readValidatedJson(input.sources.serviceBuildReceipt, validateSteamDepotFinalizerServiceBuildReceipt),
+    readValidatedJson(input.sources.nativeBuildReceipt, validateSteamDepotFinalizerNativeBuildReceipt),
+    readJson(input.sources.serviceRelease),
+    readJson(input.sources.serviceTrustPolicy),
+    readJson(input.sources.nativeRelease),
+    readJson(input.sources.nativePolicy),
+    input.previousPlanPath === null ? null : readJson(input.previousPlanPath),
+    inspectNode(input.nodeRuntime.path),
+  ]);
+  const serviceClaims = verifySignedSteamDepotFinalizerServiceRelease(serviceRelease, {
+    trustPolicy: serviceTrustPolicy,
+    trustPolicyDigest: input.serviceTrustPolicyDigest,
+    platformVersion: serviceBuild.platformVersion,
+    artifactDigest: files.serviceArtifact.digest,
+    artifactSizeBytes: files.serviceArtifact.sizeBytes,
+    buildReceiptDigest: files.serviceBuildReceipt.digest,
+    now,
+  });
+  if (serviceClaims.sourceRevision !== serviceBuild.sourceRevision
+    || serviceClaims.packageLockDigest !== serviceBuild.packageLockDigest
+    || serviceClaims.bundleInputDigest !== serviceBuild.bundleInputDigest
+    || serviceBuild.artifactDigest !== files.serviceArtifact.digest
+    || serviceBuild.sizeBytes !== files.serviceArtifact.sizeBytes) invalid();
+  const nativeRelease = await verifySteamDepotFinalizerNativeRuntime({
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_EXECUTABLE: input.sources.nativeArtifact,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_EXECUTABLE_DIGEST: files.nativeArtifact.digest,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_BUILD_RECEIPT_FILE: input.sources.nativeBuildReceipt,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_BUILD_RECEIPT_DIGEST: files.nativeBuildReceipt.digest,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_RELEASE_FILE: input.sources.nativeRelease,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_TRUST_POLICY_FILE: input.sources.nativeTrustPolicy,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_NATIVE_TRUST_POLICY_DIGEST: input.nativeTrustPolicyDigest,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_PLATFORM: input.platform,
+    DEVILUDO_STEAM_DEPOT_FINALIZER_VERSION: nativeBuild.platformVersion,
+  }, { ...(inspectIdentity ? { inspectIdentity } : {}), now });
+  if (nativeRelease.claims.sourceRevision !== nativeBuild.sourceRevision
+    || nativeRelease.claims.identityDigest !== nativeBuild.identityDigest
+    || nativeRelease.claims.nodeVersion !== nativeBuild.nodeVersion
+    || nativeRelease.claims.platform !== nativeBuild.platform
+    || nativeRelease.claims.architecture !== nativeBuild.architecture) invalid();
+  const policy = parseSteamDepotNativePolicy(nativePolicyValue);
+  if (policy.platform !== input.platform || policy.workRoot !== input.workRoot
+    || files.nativePolicy.digest !== sha256Canonical(policy)) invalid();
+  validateNodeIdentity(nodeIdentity, input, nativeBuild, files.nodeRuntime);
+  const serviceEnvelope = record(serviceRelease); const nativeEnvelope = record(nativeReleaseValue);
+  const nativeSignature = record(nativeEnvelope.signature);
+  const serviceKeyId = serviceEnvelope.keyId; const nativeKeyId = nativeSignature.keyId;
+  if (typeof serviceKeyId !== "string" || typeof nativeKeyId !== "string") invalid();
+  const serviceAuthorization = Object.freeze({
+    releaseId: serviceClaims.releaseId,
+    sourceRevision: serviceClaims.sourceRevision,
+    platformVersion: serviceClaims.platformVersion,
+    artifactDigest: files.serviceArtifact.digest,
+    buildReceiptDigest: files.serviceBuildReceipt.digest,
+    releaseDigest: sha256Canonical(serviceRelease),
+    trustPolicyDigest: input.serviceTrustPolicyDigest,
+    signingKeyId: serviceKeyId,
+  });
+  const nativeAuthorization = Object.freeze({
+    releaseId: nativeRelease.claims.releaseId,
+    sourceRevision: nativeRelease.claims.sourceRevision,
+    platformVersion: nativeRelease.claims.platformVersion,
+    platform: nativeRelease.claims.platform,
+    architecture: nativeRelease.claims.architecture,
+    artifactDigest: files.nativeArtifact.digest,
+    buildReceiptDigest: files.nativeBuildReceipt.digest,
+    releaseDigest: sha256Canonical(nativeReleaseValue),
+    trustPolicyDigest: input.nativeTrustPolicyDigest,
+    identityDigest: nativeRelease.claims.identityDigest,
+    signingKeyId: nativeKeyId,
+  });
+  const digests = Object.freeze(Object.fromEntries(Object.keys(COMPONENT_FILES).map((component) => [
+    component, files[component].digest,
+  ])));
+  const plan = createSteamDepotFinalizerHostInstallPlan({
+    platform: input.platform,
+    architecture: input.architecture,
+    installRoot: await exactDirectory(input.installRoot),
+    workRoot: await exactDirectory(input.workRoot),
+    sources: input.sources,
+    digests,
+    nodeRuntime: input.nodeRuntime,
+    serviceAuthorization,
+    nativeAuthorization,
+    previousPlan,
+    preparedAt: now.toISOString(),
+  });
+  await createOnlyJson(input.outputPath, plan);
+  return plan;
+}
+
 export function createSteamDepotFinalizerHostInstallPlan(input) {
   validateInput(input);
   const service = validateServiceAuthorization(input.serviceAuthorization);
@@ -30,12 +157,8 @@ export function createSteamDepotFinalizerHostInstallPlan(input) {
     || native.architecture !== input.architecture) invalid();
   if (input.digests.serviceArtifact !== service.artifactDigest
     || input.digests.serviceBuildReceipt !== service.buildReceiptDigest
-    || input.digests.serviceRelease !== service.releaseDigest
-    || input.digests.serviceTrustPolicy !== service.trustPolicyDigest
     || input.digests.nativeArtifact !== native.artifactDigest
-    || input.digests.nativeBuildReceipt !== native.buildReceiptDigest
-    || input.digests.nativeRelease !== native.releaseDigest
-    || input.digests.nativeTrustPolicy !== native.trustPolicyDigest) invalid();
+    || input.digests.nativeBuildReceipt !== native.buildReceiptDigest) invalid();
   const releaseDirectory = join(input.installRoot, "releases", service.releaseId);
   if (!boundary(releaseDirectory, input.installRoot) || input.workRoot.startsWith(`${releaseDirectory}${sep}`)) invalid();
   const artifacts = Object.freeze(Object.keys(COMPONENT_FILES).map((component) => {
@@ -75,7 +198,10 @@ export function createSteamDepotFinalizerHostInstallPlan(input) {
     releaseDirectory,
     workRoot: input.workRoot,
     serviceReleaseDigest: service.releaseDigest,
+    serviceTrustPolicyDigest: service.trustPolicyDigest,
     nativeReleaseDigest: native.releaseDigest,
+    nativeTrustPolicyDigest: native.trustPolicyDigest,
+    nativeIdentityDigest: native.identityDigest,
     nodeRuntime: Object.freeze({ ...input.nodeRuntime }),
     artifacts,
     service: descriptor,
@@ -101,7 +227,9 @@ export function validateSteamDepotFinalizerHostInstallPlan(value, expectedDigest
     || !SOURCE_REVISION.test(value.sourceRevision) || !fixedVersion(value.platformVersion)
     || !platform(value.platform) || !architecture(value.architecture) || !absolute(value.installRoot)
     || value.releaseDirectory !== join(value.installRoot, "releases", value.releaseId) || !absolute(value.workRoot)
-    || !SHA256.test(value.serviceReleaseDigest) || !SHA256.test(value.nativeReleaseDigest)
+    || !SHA256.test(value.serviceReleaseDigest) || !SHA256.test(value.serviceTrustPolicyDigest)
+    || !SHA256.test(value.nativeReleaseDigest) || !SHA256.test(value.nativeTrustPolicyDigest)
+    || !SHA256.test(value.nativeIdentityDigest)
     || !canonicalTimestamp(value.preparedAt) || !plainRecord(value.nodeRuntime)
     || !exactKeys(value.nodeRuntime, ["digest", "path", "version"]) || !absolute(value.nodeRuntime.path)
     || !SHA256.test(value.nodeRuntime.digest) || !NODE_VERSION.test(value.nodeRuntime.version)
@@ -123,6 +251,29 @@ function validateInput(value) {
     || !absolute(value.nodeRuntime.path) || !SHA256.test(value.nodeRuntime.digest)
     || !NODE_VERSION.test(value.nodeRuntime.version) || !canonicalTimestamp(value.preparedAt)
     || value.previousPlan !== null && !plainRecord(value.previousPlan)) invalid();
+}
+function validatePlanningInput(value) {
+  if (!plainRecord(value) || !exactKeys(value, [
+    "architecture", "installRoot", "nativeTrustPolicyDigest", "nodeRuntime", "outputPath", "platform",
+    "previousPlanPath", "schemaVersion", "serviceTrustPolicyDigest", "sources", "workRoot",
+  ]) || value.schemaVersion !== "deviludo.steam-depot-finalizer-host-planning-input.v1"
+    || !platform(value.platform) || !architecture(value.architecture) || !absolute(value.installRoot)
+    || !absolute(value.workRoot) || value.installRoot === value.workRoot || !absolute(value.outputPath)
+    || value.previousPlanPath !== null && !absolute(value.previousPlanPath)
+    || !SHA256.test(value.serviceTrustPolicyDigest) || !SHA256.test(value.nativeTrustPolicyDigest)
+    || !plainRecord(value.nodeRuntime) || !exactKeys(value.nodeRuntime, ["digest", "path", "version"])
+    || !absolute(value.nodeRuntime.path) || !SHA256.test(value.nodeRuntime.digest)
+    || !NODE_VERSION.test(value.nodeRuntime.version) || !plainRecord(value.sources)
+    || !exactKeys(value.sources, Object.keys(COMPONENT_FILES))) invalid();
+  for (const source of Object.values(value.sources)) if (!absolute(source)) invalid();
+  const paths = [...Object.values(value.sources), value.nodeRuntime.path, value.outputPath,
+    ...(value.previousPlanPath === null ? [] : [value.previousPlanPath])];
+  if (new Set(paths).size !== paths.length) invalid();
+  return Object.freeze({
+    ...value,
+    nodeRuntime: Object.freeze({ ...value.nodeRuntime }),
+    sources: Object.freeze({ ...value.sources }),
+  });
 }
 function validateServiceAuthorization(value) {
   if (!plainRecord(value) || !exactKeys(value, [
@@ -186,7 +337,7 @@ function securityControls(target, workRoot, releaseDirectory) {
     secretFileMode: "OWNER_READ_ONLY",
     networkPolicy: "EXPLICIT_EGRESS_ALLOWLIST_REQUIRED",
     platformIsolation: target === "linux" ? "SYSTEMD_STRICT_SANDBOX"
-      : target === "macos" ? "LAUNCHD_SANDBOX_PROFILE" : "RESTRICTED_SERVICE_SID",
+      : target === "macos" ? "DEDICATED_ACCOUNT_AND_ACL" : "RESTRICTED_SERVICE_SID",
   });
 }
 function validSecurity(value, plan) {
@@ -200,7 +351,7 @@ function validSecurity(value, plan) {
     || JSON.stringify(value.writablePaths) !== JSON.stringify([plan.workRoot])
     || JSON.stringify(value.protectedPaths) !== JSON.stringify([plan.releaseDirectory])) return false;
   const isolation = plan.platform === "linux" ? "SYSTEMD_STRICT_SANDBOX"
-    : plan.platform === "macos" ? "LAUNCHD_SANDBOX_PROFILE" : "RESTRICTED_SERVICE_SID";
+    : plan.platform === "macos" ? "DEDICATED_ACCOUNT_AND_ACL" : "RESTRICTED_SERVICE_SID";
   return value.platformIsolation === isolation;
 }
 function validActivation(value, upgrading) {
@@ -235,6 +386,66 @@ function validRollback(value, plan) {
     && SHA256.test(value.previousServiceReleaseDigest) && SHA256.test(value.previousNativeReleaseDigest);
 }
 function artifactDestination(plan, component) { return plan.artifacts.find((artifact) => artifact.component === component)?.destinationPath; }
+function validateNodeIdentity(value, input, nativeBuild, metadata) {
+  if (!plainRecord(value) || !exactKeys(value, ["arch", "execPath", "platform", "version"])
+    || value.version !== input.nodeRuntime.version || value.version !== nativeBuild.nodeVersion
+    || resolve(value.execPath) !== input.nodeRuntime.path || metadata.digest !== input.nodeRuntime.digest
+    || metadata.digest !== nativeBuild.nodeBinaryDigest
+    || value.platform !== (input.platform === "macos" ? "darwin" : input.platform === "windows" ? "win32" : "linux")
+    || value.arch !== (input.architecture === "x86_64" ? "x64" : "arm64")) invalid();
+}
+function executeNodeIdentity(path) {
+  return new Promise((accept, reject) => execFile(path, ["-p",
+    "JSON.stringify({version:process.version,platform:process.platform,arch:process.arch,execPath:process.execPath})",
+  ], {
+    encoding: "utf8", env: { NODE_ENV: "production" }, shell: false, windowsHide: true,
+    timeout: 10_000, maxBuffer: 16 * 1024,
+  }, (error, stdout, stderr) => {
+    if (error || stderr) { reject(new Error("Steam depot finalizer Node identity is invalid")); return; }
+    try { accept(JSON.parse(stdout)); } catch { reject(new Error("Steam depot finalizer Node identity is invalid")); }
+  }));
+}
+async function fileMetadata(path, maximum) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.size < 1 || before.size > maximum || (before.mode & 0o022) !== 0) invalid();
+    const hash = createHash("sha256"); const buffer = Buffer.allocUnsafe(1024 * 1024); let position = 0;
+    while (position < before.size) {
+      const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, before.size - position), position);
+      if (bytesRead < 1) invalid();
+      hash.update(buffer.subarray(0, bytesRead)); position += bytesRead;
+    }
+    const after = await file.stat();
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) invalid();
+    return Object.freeze({ digest: hash.digest("hex"), sizeBytes: before.size });
+  } finally { await file.close(); }
+}
+async function readBytes(path, maximum) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.size < 2 || before.size > maximum || (before.mode & 0o022) !== 0) invalid();
+    const body = await file.readFile(); const after = await file.stat();
+    if (body.byteLength !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) invalid();
+    return body;
+  } finally { await file.close(); }
+}
+async function readJson(path) { try { return JSON.parse((await readBytes(path, MAX_JSON_BYTES)).toString("utf8")); } catch { invalid(); } }
+async function readValidatedJson(path, validate) { return validate(await readJson(path)); }
+async function exactDirectory(path) {
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) invalid();
+  const canonical = await realpath(path);
+  if (canonical !== path) invalid();
+  return canonical;
+}
+async function createOnlyJson(path, value) {
+  const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400);
+  try { await file.writeFile(`${canonicalJson(value)}\n`, "utf8"); await file.sync(); }
+  finally { await file.close(); }
+}
+function maximumBytes(component) { return component === "serviceArtifact" || component === "nativeArtifact" ? MAX_ARTIFACT_BYTES : component === "environment" ? MAX_ENV_BYTES : MAX_JSON_BYTES; }
 function withoutDigest(value) { return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "planDigest")); }
 function serviceManager(value) { return value === "linux" ? "SYSTEMD" : value === "macos" ? "LAUNCHD" : "WINDOWS_SCM"; }
 function platform(value) { return value === "windows" || value === "linux" || value === "macos"; }
@@ -244,7 +455,29 @@ function SAFE_ID(value) { return typeof value === "string" && /^[A-Za-z0-9][A-Za
 function canonicalTimestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
 function boundary(path, root) { return absolute(path) && path !== root && path.startsWith(`${root}${sep}`); }
 function absolute(value) { return typeof value === "string" && isAbsolute(value) && resolve(value) === value && value.length <= 4_096; }
+function requiredAbsolute(value) { if (!absolute(value)) invalid(); return value; }
 function exactKeys(value, expected) { return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort()); }
 function plainRecord(value) { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
+function record(value) { if (!plainRecord(value)) invalid(); return value; }
 function deepFreeze(value) { Object.freeze(value); for (const child of Object.values(value)) if (child && typeof child === "object" && !Object.isFrozen(child)) deepFreeze(child); return value; }
 function invalid() { throw new Error("Steam depot finalizer host install plan is invalid"); }
+
+async function main() {
+  if (process.env.NODE_ENV !== "production") invalid();
+  const { inputPath } = parseSteamDepotFinalizerHostPlanningArguments(process.argv.slice(2));
+  const input = await readJson(inputPath);
+  const plan = await planSteamDepotFinalizerHostInstallation(input);
+  process.stdout.write(`${JSON.stringify({
+    schemaVersion: "deviludo.steam-depot-finalizer-host-planning-result.v1",
+    releaseId: plan.releaseId,
+    planDigest: plan.planDigest,
+    platform: plan.platform,
+    architecture: plan.architecture,
+  })}\n`);
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(() => {
+    process.stderr.write("[plan:steam-depot-finalizer-host] planning failed\n");
+    process.exitCode = 1;
+  });
+}

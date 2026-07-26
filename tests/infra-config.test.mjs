@@ -5,6 +5,36 @@ import test from "node:test";
 const observedServiceCommand = (service) =>
   `node --import tsx scripts/observability/run-service.mjs ${service}`;
 
+test("Steam depot finalizer host installation is an explicit signed local-host chain", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const apply = readFileSync(new URL(
+    "../scripts/production/apply-steam-depot-finalizer-host-transaction.mjs", import.meta.url,
+  ), "utf8");
+  const compile = readFileSync(new URL(
+    "../scripts/production/compile-steam-depot-finalizer-host-transaction.mjs", import.meta.url,
+  ), "utf8");
+  const readme = readFileSync(new URL("../services/steam-depot-finalizer/README.md", import.meta.url), "utf8");
+  assert.equal(packageJson.scripts["plan:steam-depot-finalizer-host-install"],
+    "node --import tsx scripts/production/plan-steam-depot-finalizer-host-install.mjs");
+  assert.equal(packageJson.scripts["stage:steam-depot-finalizer-host-install"],
+    "node --import tsx scripts/production/stage-steam-depot-finalizer-host-install.mjs");
+  assert.equal(packageJson.scripts["compile:steam-depot-finalizer-host-transaction"],
+    "node --import tsx scripts/production/compile-steam-depot-finalizer-host-transaction.mjs");
+  assert.equal(packageJson.scripts["apply:steam-depot-finalizer-host-transaction"],
+    "node --import tsx scripts/production/apply-steam-depot-finalizer-host-transaction.mjs");
+  assert.match(apply, /verifySteamDepotFinalizerHostActivationGrant/);
+  assert.match(apply, /host-actuation-journal\.v1/);
+  assert.match(apply, /verifySteamDepotFinalizerServiceRuntime/);
+  assert.match(apply, /verifySteamDepotFinalizerNativeRuntime/);
+  assert.match(apply, /MTLS_READY/);
+  assert.match(apply, /A separately signed Windows finalizer host actuator is required/);
+  assert.doesNotMatch(apply, /shell:\s*true|execSync|powershell|curl \| sh|sc\.exe/i);
+  assert.match(compile, /verifySignedWindowsScmServiceBridgeManifest/);
+  assert.match(compile, /verifySignedWindowsScmNativeActuatorManifest/);
+  assert.match(compile, /digestFile\(options\.windowsActuatorPath/);
+  assert.match(readme, /Upgrades\s+require a signed `DRAINING` state with zero active finalization operations/);
+});
+
 test("local integration PostgreSQL initializes the ledger baseline then migrates repository head", () => {
   const compose = readFileSync(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
   const offsets = Array.from({ length: 61 }, (_, index) => {
