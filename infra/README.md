@@ -230,10 +230,15 @@ receipt and distinct Ed25519 release before creating any external client. See
 The irreversible Steam workflow executor is excluded from the shared control
 image. Build its dedicated non-root image only with
 `image:build-steam-workflow-executor`; its immutable receipt binds the pushed
-Registry digest, exact Node base, source, Dockerfile and lockfile plus maximum
+Registry digest, exact Node base, digest-pinned native publisher image, source,
+Dockerfile and lockfile plus maximum
 BuildKit provenance and SBOM. The image deliberately omits SteamCMD, the native
-publisher, `config.vdf` and credentials; those remain separate read-only runtime
-inputs. See [`docs/steam-workflow-executor-image.md`](../docs/steam-workflow-executor-image.md).
+account session, `config.vdf` and credentials. The publisher binary and
+non-secret config come only from the separately pinned tool image. See
+[`docs/steam-workflow-executor-image.md`](../docs/steam-workflow-executor-image.md).
+Before authorization, `lock:steam-workflow-executor-runtime` snapshots only the
+metadata identity of its four revision-suffixed immutable runtime resources;
+it never reads Secret data and never falls back to the current kube context.
 
 ## Artifact Preparer image boundary
 

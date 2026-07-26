@@ -18,7 +18,8 @@ import {
 const packageVersion = "0.1.0-beta.1";
 const sourceRevision = "b".repeat(40);
 const input = Object.freeze({
-  baseImage: `registry.internal/base/node:22.15.1-bookworm-slim@sha256:${"1".repeat(64)}`,
+  nodeBaseImage: `registry.internal/base/node:22.15.1-bookworm-slim@sha256:${"1".repeat(64)}`,
+  nativePublisherImage: `registry.internal/deviludo/native-steam-publisher:1.3.0@sha256:${"5".repeat(64)}`,
   destination: `registry.internal/deviludo/steam-workflow-executor:${packageVersion}-${sourceRevision.slice(0, 12)}`,
   sourceRevision,
   platform: "linux/amd64",
@@ -66,6 +67,7 @@ test("Steam workflow executor Dockerfile is isolated, non-root and receives nati
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(dockerfile, /^ARG NODE_BASE_IMAGE\nFROM \$\{NODE_BASE_IMAGE\} AS dependencies/m);
   assert.equal((dockerfile.match(/^FROM \$\{NODE_BASE_IMAGE\}/gm) ?? []).length, 2);
+  assert.match(dockerfile, /^FROM \$\{NATIVE_PUBLISHER_IMAGE\} AS native-publisher$/m);
   assert.match(dockerfile, /RUN npm ci --omit=dev --ignore-scripts/);
   assert.match(dockerfile, /^USER node$/m);
   assert.match(dockerfile,
@@ -73,7 +75,7 @@ test("Steam workflow executor Dockerfile is isolated, non-root and receives nati
   assert.match(dockerfile, /DEVILUDO_STEAM_EXECUTOR_WORK_ROOT=\/var\/lib\/deviludo\/steam-publisher/);
   assert.doesNotMatch(dockerfile, /COPY .*services\/(?:agent|steam-depot-finalizer|steam-client-connector)/);
   assert.doesNotMatch(dockerfile, /\b(?:curl|wget|apt-get|claude|codex)\b/i);
-  assert.doesNotMatch(dockerfile, /COPY .*native-steam-publisher/);
+  assert.match(dockerfile, /COPY --from=native-publisher .*\/opt\/deviludo\/bin\/native-steam-publisher/);
   assert.equal(packageJson.scripts["image:build-steam-workflow-executor"],
     "node scripts/production/build-steam-workflow-executor-image.mjs");
 });
@@ -82,7 +84,10 @@ test("Steam workflow executor image build pins base, target repository and attes
   const spec = validateSteamWorkflowExecutorImageSpec(input, packageVersion);
   assert.deepEqual(spec, { ...input, platformVersion: packageVersion });
   assert.throws(() => validateSteamWorkflowExecutorImageSpec({
-    ...input, baseImage: `registry.internal/base/node:22.14.9-bookworm-slim@sha256:${"1".repeat(64)}`,
+    ...input, nodeBaseImage: `registry.internal/base/node:22.14.9-bookworm-slim@sha256:${"1".repeat(64)}`,
+  }, packageVersion), /input is invalid/);
+  assert.throws(() => validateSteamWorkflowExecutorImageSpec({
+    ...input, nativePublisherImage: `registry.internal/deviludo/native-steam-publisher:latest@sha256:${"5".repeat(64)}`,
   }, packageVersion), /input is invalid/);
   assert.throws(() => validateSteamWorkflowExecutorImageSpec({
     ...input, destination: `registry.internal/deviludo/control-plane:${packageVersion}-${sourceRevision.slice(0, 12)}`,
@@ -95,7 +100,8 @@ test("Steam workflow executor image build pins base, target repository and attes
   for (const argument of ["--provenance=mode=max", "--sbom=true", "--pull", "--no-cache", "--push"]) {
     assert.ok(command.args.includes(argument));
   }
-  assert.ok(command.args.includes(`NODE_BASE_IMAGE=${input.baseImage}`));
+  assert.ok(command.args.includes(`NODE_BASE_IMAGE=${input.nodeBaseImage}`));
+  assert.ok(command.args.includes(`NATIVE_PUBLISHER_IMAGE=${input.nativePublisherImage}`));
   assert.ok(!command.args.includes("--load"));
 });
 
@@ -105,7 +111,8 @@ test("Steam workflow executor image receipt revalidates immutable BuildKit outpu
   assert.equal(parseSteamWorkflowExecutorImageBuildMetadata({ "containerimage.digest": imageDigest }), imageDigest);
   assert.throws(() => parseSteamWorkflowExecutorImageBuildMetadata({}), /digest is missing/);
   const expected = {
-    baseImage: input.baseImage,
+    nodeBaseImage: input.nodeBaseImage,
+    nativePublisherImage: input.nativePublisherImage,
     dockerfileDigest: `sha256:${"3".repeat(64)}`,
     packageLockDigest: `sha256:${"4".repeat(64)}`,
     sourceRevision,
@@ -122,10 +129,11 @@ test("Steam workflow executor image receipt revalidates immutable BuildKit outpu
 
 test("Steam workflow executor image CLI rejects missing, duplicate and unknown values", () => {
   assert.deepEqual(parseSteamWorkflowExecutorImageArguments([
-    "--base-image", input.baseImage, "--destination", input.destination, "--source-revision", sourceRevision,
+    "--node-base-image", input.nodeBaseImage, "--native-publisher-image", input.nativePublisherImage,
+    "--destination", input.destination, "--source-revision", sourceRevision,
   ], packageVersion), { ...input, platformVersion: packageVersion });
   assert.throws(() => parseSteamWorkflowExecutorImageArguments(["--unknown", "value"], packageVersion), /input is invalid/);
   assert.throws(() => parseSteamWorkflowExecutorImageArguments([
-    "--base-image", input.baseImage, "--base-image", input.baseImage,
+    "--node-base-image", input.nodeBaseImage, "--node-base-image", input.nodeBaseImage,
   ], packageVersion), /input is invalid/);
 });

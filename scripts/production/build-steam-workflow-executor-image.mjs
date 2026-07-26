@@ -13,20 +13,25 @@ const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const OCI_REPOSITORY = "[a-z0-9][a-z0-9.-]*(?::[0-9]{2,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+";
 const DESTINATION = new RegExp(`^(?<repository>${OCI_REPOSITORY}):(?<tag>[A-Za-z0-9_][A-Za-z0-9._-]{0,127})$`);
 const NODE_BASE = new RegExp(`^(?<repository>${OCI_REPOSITORY}):22\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?:bookworm|trixie)-slim@sha256:(?<digest>[a-f0-9]{64})$`);
+const NATIVE_PUBLISHER = new RegExp(`^(?<repository>${OCI_REPOSITORY}):(?<version>\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)@sha256:(?<digest>[a-f0-9]{64})$`);
 const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 export function validateSteamWorkflowExecutorImageSpec(input, platformVersion) {
   if (!plainRecord(input) || !fixedVersion(platformVersion)) invalid();
-  const base = typeof input.baseImage === "string" ? NODE_BASE.exec(input.baseImage) : null;
+  const node = typeof input.nodeBaseImage === "string" ? NODE_BASE.exec(input.nodeBaseImage) : null;
+  const publisher = typeof input.nativePublisherImage === "string" ? NATIVE_PUBLISHER.exec(input.nativePublisherImage) : null;
   const destination = typeof input.destination === "string" ? DESTINATION.exec(input.destination) : null;
   const platform = input.platform ?? "linux/amd64";
-  if (!base || !base.groups?.repository.endsWith("/node") || Number(base.groups.minor) < 15
+  if (!node || !node.groups?.repository.endsWith("/node") || Number(node.groups.minor) < 15
+    || !publisher || !publisher.groups?.repository.endsWith("/native-steam-publisher")
+    || !fixedVersion(publisher.groups.version)
     || !destination || !destination.groups?.repository.endsWith("/steam-workflow-executor")
     || !SOURCE_REVISION.test(input.sourceRevision) || !PLATFORM.test(platform)) invalid();
   const expectedTag = `${platformVersion}-${input.sourceRevision.slice(0, 12)}`;
   if (destination.groups.tag !== expectedTag || destination.groups.tag === "latest") invalid();
   return Object.freeze({
-    baseImage: input.baseImage, destination: input.destination, platform, platformVersion, sourceRevision: input.sourceRevision,
+    destination: input.destination, nativePublisherImage: input.nativePublisherImage,
+    nodeBaseImage: input.nodeBaseImage, platform, platformVersion, sourceRevision: input.sourceRevision,
   });
 }
 
@@ -35,7 +40,8 @@ export function steamWorkflowExecutorImageBuildCommand(spec, metadataFile) {
   if (typeof metadataFile !== "string" || !metadataFile.startsWith("/") || /[\0\r\n]/.test(metadataFile)) invalid();
   return Object.freeze({ command: "docker", args: Object.freeze([
     "buildx", "build", "--file", "Dockerfile.steam-workflow-executor", "--platform", value.platform,
-    "--build-arg", `NODE_BASE_IMAGE=${value.baseImage}`,
+    "--build-arg", `NODE_BASE_IMAGE=${value.nodeBaseImage}`,
+    "--build-arg", `NATIVE_PUBLISHER_IMAGE=${value.nativePublisherImage}`,
     "--build-arg", `DEVILUDO_PLATFORM_VERSION=${value.platformVersion}`,
     "--build-arg", `DEVILUDO_SOURCE_REVISION=${value.sourceRevision}`,
     "--tag", value.destination, "--metadata-file", metadataFile,
@@ -60,7 +66,8 @@ export function steamWorkflowExecutorImageReceipt(spec, metadata, inputs, comple
     schemaVersion: "deviludo.steam-workflow-executor-image-receipt.v1",
     imageReference: `${value.destination.slice(0, value.destination.lastIndexOf(":"))}@${imageDigest}`,
     imageDigest,
-    baseImage: value.baseImage,
+    nodeBaseImage: value.nodeBaseImage,
+    nativePublisherImage: value.nativePublisherImage,
     sourceRevision: value.sourceRevision,
     platform: value.platform,
     platformVersion: value.platformVersion,
@@ -72,21 +79,24 @@ export function steamWorkflowExecutorImageReceipt(spec, metadata, inputs, comple
 }
 
 export function validateSteamWorkflowExecutorImageReceipt(receipt, expected) {
-  const base = typeof receipt?.baseImage === "string" ? NODE_BASE.exec(receipt.baseImage) : null;
+  const node = typeof receipt?.nodeBaseImage === "string" ? NODE_BASE.exec(receipt.nodeBaseImage) : null;
+  const publisher = typeof receipt?.nativePublisherImage === "string" ? NATIVE_PUBLISHER.exec(receipt.nativePublisherImage) : null;
   if (!plainRecord(receipt) || !exactKeys(receipt, [
-    "schemaVersion", "imageReference", "imageDigest", "baseImage", "sourceRevision", "platform", "platformVersion",
+    "schemaVersion", "imageReference", "imageDigest", "nodeBaseImage", "nativePublisherImage", "sourceRevision", "platform", "platformVersion",
     "dockerfileDigest", "packageLockDigest", "attestations", "completedAt",
   ]) || receipt.schemaVersion !== "deviludo.steam-workflow-executor-image-receipt.v1"
     || !fixedVersion(receipt.platformVersion) || !SOURCE_REVISION.test(receipt.sourceRevision) || !PLATFORM.test(receipt.platform)
     || !IMAGE_DIGEST.test(receipt.imageDigest) || typeof receipt.imageReference !== "string"
     || !receipt.imageReference.endsWith(`@${receipt.imageDigest}`)
-    || !base || !base.groups?.repository.endsWith("/node") || Number(base.groups.minor) < 15
+    || !node || !node.groups?.repository.endsWith("/node") || Number(node.groups.minor) < 15
+    || !publisher || !publisher.groups?.repository.endsWith("/native-steam-publisher") || !fixedVersion(publisher.groups.version)
     || !IMAGE_DIGEST.test(receipt.dockerfileDigest) || !IMAGE_DIGEST.test(receipt.packageLockDigest)
     || JSON.stringify(receipt.attestations) !== JSON.stringify(["buildkit-provenance-mode-max", "buildkit-sbom"])
     || !canonicalTimestamp(receipt.completedAt) || !plainRecord(expected)
     || receipt.platformVersion !== expected.platformVersion || receipt.dockerfileDigest !== expected.dockerfileDigest
     || receipt.packageLockDigest !== expected.packageLockDigest
-    || (expected.baseImage !== undefined && receipt.baseImage !== expected.baseImage)
+    || (expected.nodeBaseImage !== undefined && receipt.nodeBaseImage !== expected.nodeBaseImage)
+    || (expected.nativePublisherImage !== undefined && receipt.nativePublisherImage !== expected.nativePublisherImage)
     || (expected.sourceRevision !== undefined && receipt.sourceRevision !== expected.sourceRevision)
     || (expected.platform !== undefined && receipt.platform !== expected.platform)) invalidReceipt();
   const reference = receipt.imageReference.slice(0, -receipt.imageDigest.length - 1);
@@ -96,16 +106,17 @@ export function validateSteamWorkflowExecutorImageReceipt(receipt, expected) {
 
 export function parseSteamWorkflowExecutorImageArguments(argv, platformVersion) {
   if (!Array.isArray(argv) || argv.length % 2 !== 0) invalid();
-  const allowed = new Set(["--base-image", "--destination", "--source-revision", "--platform"]);
+  const allowed = new Set(["--node-base-image", "--native-publisher-image", "--destination", "--source-revision", "--platform"]);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index]; const value = argv[index + 1];
     if (!allowed.has(name) || typeof value !== "string" || !value || values.has(name) || /[\0\r\n]/.test(value)) invalid();
     values.set(name, value);
   }
-  if (!["--base-image", "--destination", "--source-revision"].every((name) => values.has(name))) invalid();
+  if (!["--node-base-image", "--native-publisher-image", "--destination", "--source-revision"].every((name) => values.has(name))) invalid();
   return validateSteamWorkflowExecutorImageSpec({
-    baseImage: values.get("--base-image"), destination: values.get("--destination"),
+    nodeBaseImage: values.get("--node-base-image"), nativePublisherImage: values.get("--native-publisher-image"),
+    destination: values.get("--destination"),
     sourceRevision: values.get("--source-revision"), platform: values.get("--platform") ?? "linux/amd64",
   }, platformVersion);
 }
