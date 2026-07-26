@@ -624,13 +624,19 @@ function fixtureVersionMetadata(
 
 export type DemoSmokeAdminCleanupPlan = Readonly<{
   projectIds: readonly string[];
+  agentVersionIds: readonly string[];
+  installationIds: readonly string[];
   credentialVersionIds: readonly string[];
   providerRevisionIds: readonly string[];
   profileRevisionIds: readonly string[];
+  defaultRestorations: Readonly<Record<string, string>>;
 }>;
 
 export type DemoSmokeAdminCleanupResult = Readonly<{
   changed: boolean;
+  agentVersions: number;
+  installations: number;
+  rollouts: number;
   credentials: number;
   providers: number;
   profiles: number;
@@ -653,6 +659,13 @@ export function planDemoSmokeAdminCleanup(projectIds: readonly string[]): DemoSm
   }
   const store = getDemoStore();
   const runIds = new Set(projectIds.map(localSmokeRunId).filter((value): value is string => value !== null));
+  const agentVersionIds = [...runIds].map((runId) =>
+    `claude-code@99.0.0-smoke.${runId.replaceAll("-", ".")}`);
+  const agentVersions = new Set(agentVersionIds);
+  const installationIds = store.installations
+    .filter((installation) => agentVersions.has(`${installation.agent}@${installation.version}`))
+    .map((installation) => installation.id);
+  const installations = new Set(installationIds);
   const labels = new Set([...runIds].map((runId) => `Smoke tenant Provider / ${runId}`));
   const families = new Set(store.credentials
     .filter((credential) => (credential.scope === "tenant" && credential.scopeId === "tenant-local" && labels.has(credential.label))
@@ -670,14 +683,33 @@ export function planDemoSmokeAdminCleanup(projectIds: readonly string[]): DemoSm
     .filter((provider) => credentials.has(provider.credentialVersionId))
     .map((provider) => provider.id);
   const providers = new Set(providerRevisionIds);
+  const installationProfiles = store.profiles.filter((profile) => installations.has(profile.installationId));
+  const rollbackProfileIds = new Set(installationProfiles.map(demoRollbackSuccessorId));
   const profileRevisionIds = store.profiles
-    .filter((profile) => providers.has(profile.providerRevisionId) || credentials.has(profile.credentialVersionId))
+    .filter((profile) => providers.has(profile.providerRevisionId) || credentials.has(profile.credentialVersionId)
+      || installations.has(profile.installationId) || rollbackProfileIds.has(profile.id))
     .map((profile) => profile.id);
+  const profiles = new Set(profileRevisionIds);
+  const defaultRestorations = Object.fromEntries(Object.entries(store.defaults).flatMap(([scope, profileId]) => {
+    if (!profiles.has(profileId) || scope.startsWith("project:")) return [];
+    const profile = store.profiles.find((item) => item.id === profileId);
+    if (!profile) return [];
+    const [scopeKind, scopeId = "global"] = scope.split(":");
+    const replacement = store.profiles.find((candidate) => !profiles.has(candidate.id)
+      && candidate.state === "ACTIVE" && candidate.agent === profile.agent
+      && (scopeKind === "platform"
+        ? candidate.scope === "platform" && candidate.scopeId === "global"
+        : candidate.scope === scopeKind && candidate.scopeId === scopeId));
+    return replacement ? [[scope, replacement.id]] : [];
+  }));
   return Object.freeze({
     projectIds: Object.freeze([...projectIds]),
+    agentVersionIds: Object.freeze(agentVersionIds),
+    installationIds: Object.freeze(installationIds),
     credentialVersionIds: Object.freeze(credentialVersionIds),
     providerRevisionIds: Object.freeze(providerRevisionIds),
     profileRevisionIds: Object.freeze(profileRevisionIds),
+    defaultRestorations: Object.freeze(defaultRestorations),
   });
 }
 
@@ -685,37 +717,73 @@ export function planDemoSmokeAdminCleanup(projectIds: readonly string[]): DemoSm
 export function applyDemoSmokeAdminCleanup(plan: DemoSmokeAdminCleanupPlan): DemoSmokeAdminCleanupResult {
   const store = getDemoStore();
   const projects = new Set(plan.projectIds);
+  const agentVersions = new Set(plan.agentVersionIds);
+  const installations = new Set(plan.installationIds);
   const credentials = new Set(plan.credentialVersionIds);
   const providers = new Set(plan.providerRevisionIds);
   const profiles = new Set(plan.profileRevisionIds);
   const removableProject = (value: string) => projects.has(value) || isManagedSmokeProjectId(value);
+  const removedAgentVersions = removeRecordEntries(store.agentVersions, (id) => agentVersions.has(id));
+  removeRecordEntries(store.agentVersionMetadata, (id) => agentVersions.has(id));
   const removed = {
+    agentVersions: removedAgentVersions,
+    installations: removeRows(store.installations, (item) => installations.has(item.id)),
+    rollouts: removeRecordEntries(store.rollouts, (id) => installations.has(id)),
     credentials: removeRows(store.credentials, (item) => credentials.has(item.id)),
     providers: removeRows(store.providers, (item) => providers.has(item.id)),
     profiles: removeRows(store.profiles, (item) => profiles.has(item.id)),
-    defaults: removeRecordEntries(store.defaults, (scope, profileId) => {
-      const projectId = scope.startsWith("project:") ? scope.slice("project:".length) : "";
-      return profiles.has(profileId) || (projectId !== "" && removableProject(projectId));
-    }),
+    defaults: cleanupDemoDefaults(store.defaults, profiles, plan.defaultRestorations, removableProject),
     feedback: removeRows(store.feedback, (item) => removableProject(item.projectId)),
     audit: 0,
     idempotency: 0,
   };
   const references = new Set([
     ...plan.projectIds,
+    ...plan.agentVersionIds,
+    ...plan.installationIds,
     ...plan.credentialVersionIds,
     ...plan.providerRevisionIds,
     ...plan.profileRevisionIds,
   ]);
   removed.audit = removeRows(store.audit, (event) => profiles.has(event.resource)
+    || agentVersions.has(event.resource)
+    || installations.has(event.resource)
     || providers.has(event.resource)
     || credentials.has(event.resource)
+    || referencesValue(event.metadata, references)
     || (typeof event.metadata.projectId === "string" && removableProject(event.metadata.projectId))
     || (event.resource.startsWith("project:") && removableProject(event.resource.slice("project:".length))));
   removed.idempotency = removeRecordEntries(store.idempotency, (key, value) =>
     [...projects].some((projectId) => key.includes(projectId)) || referencesValue(value, references));
   const changed = Object.values(removed).some((count) => count > 0);
   return Object.freeze({ changed, ...removed });
+}
+
+function demoRollbackSuccessorId(profile: DemoProfile): string {
+  return `profile-local-rollback-${profile.id.replace(/[^a-z0-9]/gi, "-").slice(-48)}-r${profile.revision + 1}`;
+}
+
+function cleanupDemoDefaults(
+  defaults: Record<string, string>,
+  profiles: ReadonlySet<string>,
+  restorations: Readonly<Record<string, string>>,
+  removableProject: (value: string) => boolean,
+): number {
+  let changed = 0;
+  for (const [scope, profileId] of Object.entries(defaults)) {
+    const projectId = scope.startsWith("project:") ? scope.slice("project:".length) : "";
+    if (projectId !== "" && removableProject(projectId)) {
+      delete defaults[scope];
+      changed += 1;
+      continue;
+    }
+    if (!profiles.has(profileId)) continue;
+    const restoration = restorations[scope];
+    if (restoration) defaults[scope] = restoration;
+    else delete defaults[scope];
+    changed += 1;
+  }
+  return changed;
 }
 
 function removeRows<T>(rows: T[], predicate: (item: T) => boolean): number {

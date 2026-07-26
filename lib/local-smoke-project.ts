@@ -1,5 +1,5 @@
-const EPHEMERAL_SMOKE_PROJECT = /^smoke-(?:spec|validation|feedback|release-gates|codex-release)-[1-9][0-9]{0,9}-[a-z0-9]{6,16}$/;
-const EPHEMERAL_SMOKE_RUN = /^smoke-(?:spec|validation|feedback|release-gates|codex-release)-([1-9][0-9]{0,9}-[a-z0-9]{6,16})$/;
+const EPHEMERAL_SMOKE_PROJECT = /^smoke-(?:spec|validation|feedback|release-gates|codex-release|agent-upgrade)-[1-9][0-9]{0,9}-[a-z0-9]{6,16}$/;
+const EPHEMERAL_SMOKE_RUN = /^smoke-(?:spec|validation|feedback|release-gates|codex-release|agent-upgrade)-([1-9][0-9]{0,9}-[a-z0-9]{6,16})$/;
 const PERSISTENT_SMOKE_PROJECT = "smoke-local-project";
 const MAX_CLEANUP_PROJECTS = 20;
 

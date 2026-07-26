@@ -122,7 +122,8 @@ test("authenticated local cleanup removes only run-labelled Agent resources and 
     assert.equal(response.status, 200);
     const payload = await response.json();
     assert.deepEqual(payload.data.admin, {
-      changed: true, credentials: 3, providers: 1, profiles: 1, defaults: 1,
+      changed: true, agentVersions: 0, installations: 0, rollouts: 0,
+      credentials: 3, providers: 1, profiles: 1, defaults: 1,
       feedback: 0, audit: 1, idempotency: 1,
     });
     assert.equal(getDemoStore().credentials.some((item) => item.familyId === "credential-41"), false);
@@ -138,6 +139,96 @@ test("authenticated local cleanup removes only run-labelled Agent resources and 
     else process.env.DEVILUDO_LOCAL_RUNTIME_HMAC_KEY = previousKey;
     if (previousProviderControl === undefined) delete process.env.DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED;
     else process.env.DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED = previousProviderControl;
+  }
+});
+
+test("authenticated local cleanup restores defaults and removes one exact smoke Agent upgrade lineage", async () => {
+  const previousKey = process.env.DEVILUDO_LOCAL_RUNTIME_HMAC_KEY;
+  const key = new Uint8Array(Buffer.alloc(32, 43));
+  process.env.DEVILUDO_LOCAL_RUNTIME_HMAC_KEY = Buffer.from(key).toString("base64url");
+  const runId = `${process.pid}-${Date.now().toString(36)}`;
+  const projectId = `smoke-agent-upgrade-${runId}`;
+  const version = `99.0.0-smoke.${runId.replaceAll("-", ".")}`;
+  const versionId = `claude-code@${version}`;
+  const installationId = `claude-installation-smoke-${runId}`;
+  try {
+    const store = resetDemoStore();
+    const source = store.profiles.find((profile) => profile.id === "profile-claude-platform-r5");
+    assert.ok(source);
+    store.agentVersions[versionId] = "APPROVED";
+    store.agentVersionMetadata[versionId] = {
+      source: `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${version}.tgz`,
+      sourceDigest: `sha256:${"1".repeat(64)}`,
+      releaseNotesUrl: "https://github.com/anthropics/claude-code/releases",
+      discoveredAt: "2026-07-26T00:00:00.000Z",
+      integrity: `sha256:${"2".repeat(64)}`,
+      signatureVerified: true,
+      sbomRef: `urn:deviludo:local-sbom:${versionId}`,
+      scan: "PASS",
+      validationReceiptId: `local-validation-${version.replaceAll(".", "-")}`,
+      validationReceiptDigest: `sha256:${"3".repeat(64)}`,
+      supplyChainEvidenceDigest: `sha256:${"4".repeat(64)}`,
+      validatedAdapterVersion: "1.3.0",
+      adapterCompatibility: { min: "1.3.0", maxExclusive: "1.3.1" },
+      validatedAt: "2026-07-26T00:01:00.000Z",
+    };
+    store.installations.unshift({
+      id: installationId, agent: "claude-code", version, workerPool: "dev-linux-a", adapterVersion: "1.3.0",
+      imageDigest: `sha256:${"5".repeat(64)}`, buildReceiptId: `local-build-${installationId}`,
+      buildReceiptDigest: `sha256:${"6".repeat(64)}`, state: "READY", health: "HEALTHY",
+      rolloutPercent: 0, rollbackInstallationId: "claude-installation-214",
+      createdAt: "2026-07-26T00:02:00.000Z", activatedAt: null, drainingAt: null, retiredAt: null,
+    });
+    store.rollouts[installationId] = { percent: 0, previous: 100, state: "READY" };
+    const rebound = {
+      ...source, id: `profile-installation-rebind-${runId}-r6`, revision: 6,
+      installationId, state: "SUPERSEDED", createdAt: "2026-07-26T00:03:00.000Z",
+    };
+    const rollback = {
+      ...rebound,
+      id: `profile-local-rollback-${rebound.id.replace(/[^a-z0-9]/gi, "-").slice(-48)}-r${rebound.revision + 1}`,
+      revision: rebound.revision + 1, installationId: "claude-installation-214", state: "ACTIVE",
+      createdAt: "2026-07-26T00:04:00.000Z",
+    };
+    store.profiles.push(rebound, rollback);
+    store.defaults.platform = rollback.id;
+    store.defaults["tenant:tenant-local"] = rollback.id;
+    store.defaults[`project:${projectId}`] = rollback.id;
+    store.idempotency[`admin:agent-versions/approve:${runId}`] = { id: versionId };
+    store.idempotency[`admin:agent-installations:${runId}`] = { id: installationId };
+    appendDemoAudit("AGENT_VERSION_APPROVED", versionId, "PlatformAgentAdmin");
+    appendDemoAudit("ROLLOUT_ROLLBACK", installationId, "PlatformAgentAdmin");
+    appendDemoAudit("AGENT_DEFAULT_UPDATED", "platform", "PlatformAgentAdmin", { profileRevisionId: rollback.id });
+    appendDemoAudit("USER_SENTINEL", "profile-claude-platform-r5", "PlatformAgentAdmin");
+
+    const body = JSON.stringify({ projectIds: [projectId] });
+    const response = await CLEANUP(new Request(`http://127.0.0.1:3000${cleanupPath}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...createLocalSmokeMaintenanceHeaders({ method: "POST", path: cleanupPath, body }, { key }),
+      },
+      body,
+    }));
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).data.admin, {
+      changed: true, agentVersions: 1, installations: 1, rollouts: 1,
+      credentials: 0, providers: 0, profiles: 2, defaults: 3,
+      feedback: 0, audit: 3, idempotency: 2,
+    });
+    assert.equal(store.agentVersions[versionId], undefined);
+    assert.equal(store.agentVersionMetadata[versionId], undefined);
+    assert.equal(store.installations.some((installation) => installation.id === installationId), false);
+    assert.equal(store.rollouts[installationId], undefined);
+    assert.equal(store.profiles.some((profile) => profile.id === rebound.id || profile.id === rollback.id), false);
+    assert.equal(store.defaults.platform, "profile-claude-platform-r5");
+    assert.equal(store.defaults["tenant:tenant-local"], "profile-claude-tenant-r2");
+    assert.equal(store.defaults[`project:${projectId}`], undefined);
+    assert.equal(store.audit.some((event) => event.action === "USER_SENTINEL"), true);
+  } finally {
+    resetDemoStore();
+    if (previousKey === undefined) delete process.env.DEVILUDO_LOCAL_RUNTIME_HMAC_KEY;
+    else process.env.DEVILUDO_LOCAL_RUNTIME_HMAC_KEY = previousKey;
   }
 });
 

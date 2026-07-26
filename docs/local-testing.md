@@ -95,10 +95,10 @@ npm run local:smoke
 - `/api/admin/agent-versions/deprecate` 只接受已批准版本，并禁止后续 WorkerImage 构建而不改变已有安装；
 - 版本批准回执固定 `validatedAdapterVersion` 与半开 `adapterCompatibility`；旧快照缺少证明时不会自动补签，新安装返回 `VERSION_ADAPTER_COMPATIBILITY_UNATTESTED`，管理员页面提示重新验证；
 - 本地规格批准会把同一版本/Adapter 证明复制进运行锁；证明缺失或漂移时，在预检或 Agent 进程启动前返回门禁错误，旧 D1 快照只保留显式 `null`，不会从当前目录推断证明；
-- 新 WorkerImage 到达健康 `100% ACTIVE` 后，可从当前 ACTIVE Profile 生成只更换 Installation 的 `READY` 升级 Profile；Provider 与凭据不复制，SecurityAdmin 激活和 PlatformAgentAdmin 精确切换默认保持为两个独立步骤，旧默认与已锁定任务在切换前后均不漂移；
+- Smoke 通过真实管理 HTTP 链完整执行“发现精确 Claude Code 版本 → 供应链审批 → 构建不可变 WorkerImage → 5%/25%/100% 灰度 → 只更换 Installation 的 `READY` Profile → SecurityAdmin 激活 → 平台/租户默认切换 → 回滚”。Provider 与凭据不复制；回滚后已锁定任务继续用原镜像完成候选 E2E，新任务改用旧健康 Installation 的不可变回滚 Profile；
 - 租户 Profile、BYOK 与管理员 rollout 写入拒绝未知/旧版字段和客户端作用域，并通过写入前后投影对比证明拒绝请求没有修改状态或回显未知值；
 - 租户 BYOK 通过真实页面 API 创建新不可变版本、停止旧版本签发并撤销指定旧版本；响应和投影均不包含明文或 SecretRef；
-- Smoke 创建的租户凭据、Provider、Profile 与项目默认都带本次运行标记；退出前会先撤销 Agent sidecar 中的对应密钥，再追加 D1 清理修订并回收测试投影。单调资源序号不会回退，测试数据不会污染正在演示的管理员后台；进程异常退出后可运行 `npm run local:prune-smoke` 完成同一套受签名维护清理；
+- Smoke 创建的 AgentVersion、Installation、rollout、回滚 Profile、租户凭据、Provider 与项目默认都绑定本次运行；退出前会先撤销 Agent sidecar 中的对应密钥，再恢复原平台/租户默认、追加 D1 清理修订并回收测试投影。单调资源序号不会回退，测试数据不会污染正在演示的管理员后台；进程异常退出后可运行 `npm run local:prune-smoke` 完成同一套受签名维护清理；
 - `/api/health` 返回 `status: "ok"` 且服务标识正确。
 - 侧车 `/health` 返回 `deviludo-local-runtime` 和实际 Godot 版本。
 - Agent 探针 `/health` 返回两个 CLI 的实际版本及 `READY`、`VERSION_MISMATCH` 或 `UNAVAILABLE`，并公开 `PINNED_ENV`、`LOCAL_DETERMINISTIC` 或 `NOT_CONFIGURED` 身份模式；`degraded` 是未启用执行时的预期状态。

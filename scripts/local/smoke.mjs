@@ -276,13 +276,16 @@ const smokeValidationProject = `smoke-validation-${smokeNonce}`;
 const smokeFeedbackProject = `smoke-feedback-${smokeNonce}`;
 const smokeReleaseProject = `smoke-release-gates-${smokeNonce}`;
 const smokeCodexProject = `smoke-codex-release-${smokeNonce}`;
+const smokeAgentUpgradeProject = `smoke-agent-upgrade-${smokeNonce}`;
 const smokePhysicalRunnerProject = smokeCatalogProject;
+const smokeAgentUpgradeVersion = `99.0.0-smoke.${smokeNonce.replaceAll("-", ".")}`;
 const smokeCleanupProjects = Object.freeze([
   smokeSpecProject,
   smokeValidationProject,
   smokeFeedbackProject,
   smokeReleaseProject,
   smokeCodexProject,
+  smokeAgentUpgradeProject,
   smokeCatalogProject,
 ]);
 const smokeClaudeModels = Object.freeze({
@@ -352,6 +355,7 @@ try {
     smokeFeedbackProject,
     smokeReleaseProject,
     smokeCodexProject,
+    smokeAgentUpgradeProject,
   ];
   for (const projectId of workflowProjects) {
     const created = await request(baseUrl, "/api/projects", {
@@ -808,8 +812,223 @@ try {
   });
   const approvalPayload = await specApproval.response.json();
   if (![200, 201].includes(specApproval.response.status) || approvalPayload.data?.authority?.state !== "APPROVED"
-    || approvalPayload.data.authority.revision !== 2 || approvalPayload.data.run?.state !== "QUEUED") {
+    || approvalPayload.data.authority.revision !== 2 || approvalPayload.data.run?.state !== "QUEUED"
+    || approvalPayload.data?.lockedProfile?.profileRevisionId !== "profile-claude-tenant-r2"
+    || approvalPayload.data?.lockedProfile?.installationId !== "claude-installation-214"
+    || approvalPayload.data?.lockedProfile?.exactAgentVersion !== "2.1.14") {
     throw new Error("local specification approval contract failed");
+  }
+  const preUpgradeProfileLock = JSON.stringify(approvalPayload.data.lockedProfile);
+  const upgradeVersionId = `claude-code@${smokeAgentUpgradeVersion}`;
+  const upgradeDiscovery = await request(baseUrl, "/api/admin/agent-versions/discover", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-discover-${smokeNonce}`,
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ agent: "claude-code", version: smokeAgentUpgradeVersion }),
+  });
+  const upgradeDiscoveryPayload = await upgradeDiscovery.response.json();
+  if (upgradeDiscovery.response.status !== 201
+    || upgradeDiscoveryPayload.data?.candidates?.[0]?.id !== upgradeVersionId
+    || upgradeDiscoveryPayload.data?.candidates?.[0]?.state !== "DISCOVERED"
+    || upgradeDiscoveryPayload.data?.candidates?.[0]?.activated !== false) {
+    throw new Error("local Agent upgrade did not discover one exact inactive Claude Code version");
+  }
+  const upgradeApproval = await request(baseUrl, "/api/admin/agent-versions/approve", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-approve-${smokeNonce}`,
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ id: upgradeVersionId }),
+  });
+  const upgradeApprovalPayload = await upgradeApproval.response.json();
+  if (upgradeApproval.response.status !== 201 || upgradeApprovalPayload.data?.state !== "APPROVED"
+    || !/^sha256:[a-f0-9]{64}$/.test(String(upgradeApprovalPayload.data?.validationReceiptDigest))) {
+    throw new Error("local Agent upgrade did not produce a trusted version validation receipt");
+  }
+  const upgradeInstallation = await request(baseUrl, "/api/admin/agent-installations", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-install-${smokeNonce}`,
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({
+      agent: "claude-code",
+      version: smokeAgentUpgradeVersion,
+      workerPool: "dev-linux-a",
+      adapterVersion: "1.3.0",
+    }),
+  });
+  const upgradeInstallationPayload = await upgradeInstallation.response.json();
+  const upgradeInstallationId = upgradeInstallationPayload.data?.id;
+  if (upgradeInstallation.response.status !== 201 || typeof upgradeInstallationId !== "string"
+    || upgradeInstallationPayload.data?.state !== "READY"
+    || upgradeInstallationPayload.data?.rolloutPercent !== 0
+    || upgradeInstallationPayload.data?.rollbackInstallationId !== "claude-installation-214"
+    || upgradeInstallationPayload.data?.cliSelfUpdateDisabled !== true
+    || !/^sha256:[a-f0-9]{64}$/.test(String(upgradeInstallationPayload.data?.imageDigest))
+    || !/^sha256:[a-f0-9]{64}$/.test(String(upgradeInstallationPayload.data?.buildReceiptDigest))) {
+    throw new Error("local Agent upgrade did not build an immutable rollback-capable WorkerImage");
+  }
+  for (const expectedPercent of [5, 25, 100]) {
+    const rollout = await request(baseUrl, `/api/admin/agent-rollouts/${encodeURIComponent(upgradeInstallationId)}/advance`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `smoke-upgrade-rollout-${expectedPercent}-${smokeNonce}`,
+        "x-deviludo-role": "PlatformAgentAdmin",
+      },
+      body: "{}",
+    });
+    const rolloutPayload = await rollout.response.json();
+    if (rollout.response.status !== 201 || rolloutPayload.data?.percent !== expectedPercent
+      || rolloutPayload.data?.affectsNewTasksOnly !== true
+      || rolloutPayload.data?.state !== (expectedPercent === 100 ? "ACTIVE" : "CANARY")) {
+      throw new Error(`local Agent upgrade did not advance through the ${expectedPercent}% rollout stage`);
+    }
+  }
+  const upgradeRebind = await request(
+    baseUrl,
+    "/api/admin/agent-profiles/profile-claude-platform-r5/rebind-installation",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `smoke-upgrade-rebind-${smokeNonce}`,
+        "x-deviludo-role": "PlatformAgentAdmin",
+      },
+      body: JSON.stringify({ installationId: upgradeInstallationId }),
+    },
+  );
+  const upgradeRebindPayload = await upgradeRebind.response.json();
+  const upgradeProfileId = upgradeRebindPayload.data?.profile?.id;
+  if (upgradeRebind.response.status !== 201 || typeof upgradeProfileId !== "string"
+    || upgradeRebindPayload.data?.profile?.state !== "READY"
+    || upgradeRebindPayload.data?.profile?.installationId !== upgradeInstallationId
+    || upgradeRebindPayload.data?.providerReused !== true
+    || upgradeRebindPayload.data?.defaultsChanged !== false
+    || upgradeRebindPayload.data?.affectsQueuedOrRunningTasks !== false) {
+    throw new Error("local Agent upgrade did not create an isolated Profile successor");
+  }
+  const upgradeActivation = await request(
+    baseUrl,
+    `/api/admin/agent-profiles/${encodeURIComponent(upgradeProfileId)}/activate`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `smoke-upgrade-activate-${smokeNonce}`,
+        "x-deviludo-role": "SecurityAdmin",
+      },
+      body: "{}",
+    },
+  );
+  const upgradeActivationPayload = await upgradeActivation.response.json();
+  if (upgradeActivation.response.status !== 201
+    || upgradeActivationPayload.data?.profile?.state !== "ACTIVE"
+    || upgradeActivationPayload.data?.profile?.id !== upgradeProfileId) {
+    throw new Error("local Agent upgrade Profile did not pass the separate SecurityAdmin activation gate");
+  }
+  const upgradePlatformDefault = await request(baseUrl, "/api/admin/agent-defaults/platform", {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-platform-default-${smokeNonce}`,
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ profileRevisionId: upgradeProfileId }),
+  });
+  const upgradeTenantDefault = await request(baseUrl, "/api/admin/agent-defaults/tenant:tenant-local", {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-tenant-default-${smokeNonce}`,
+      "x-deviludo-role": "TenantAdmin",
+      "x-deviludo-tenant-id": "tenant-local",
+    },
+    body: JSON.stringify({ profileRevisionId: upgradeProfileId }),
+  });
+  if (!upgradePlatformDefault.response.ok || !upgradeTenantDefault.response.ok) {
+    throw new Error("local Agent upgrade did not switch explicit platform and tenant defaults");
+  }
+  const upgradeDialogue = await request(baseUrl, `/api/projects/${smokeAgentUpgradeProject}/conversation`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-upgrade-dialogue-${smokeNonce}` },
+    body: JSON.stringify({ expectedRevision: 0, message: "使用刚完成灰度升级的 Claude Code 开发仅面向 macOS 的 Godot 桌面单机样例" }),
+  });
+  const upgradeDialoguePayload = await upgradeDialogue.response.json();
+  if (upgradeDialogue.response.status !== 201 || upgradeDialoguePayload.data?.revision !== 1) {
+    throw new Error("local Agent upgrade verification specification dialogue failed");
+  }
+  const upgradeSpecApproval = await request(baseUrl, `/api/projects/${smokeAgentUpgradeProject}/spec-revisions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": `smoke-upgrade-spec-approval-${smokeNonce}` },
+    body: JSON.stringify({
+      action: "approve",
+      revision: "SPEC-001",
+      conversationId: upgradeDialoguePayload.data.conversationId,
+      expectedRevision: upgradeDialoguePayload.data.revision,
+      specRevisionId: upgradeDialoguePayload.data.specRevisionId,
+      testPlanRevisionId: upgradeDialoguePayload.data.testPlanRevisionId,
+    }),
+  });
+  const upgradeSpecApprovalPayload = await upgradeSpecApproval.response.json();
+  const upgradedRunProfileLock = JSON.stringify(upgradeSpecApprovalPayload.data?.lockedProfile);
+  const upgradedRunId = upgradeSpecApprovalPayload.data?.run?.id;
+  if (upgradeSpecApproval.response.status !== 201
+    || upgradeSpecApprovalPayload.data?.run?.state !== "QUEUED"
+    || upgradeSpecApprovalPayload.data?.lockedProfile?.profileRevisionId !== upgradeProfileId
+    || upgradeSpecApprovalPayload.data?.lockedProfile?.installationId !== upgradeInstallationId
+    || upgradeSpecApprovalPayload.data?.lockedProfile?.exactAgentVersion !== smokeAgentUpgradeVersion
+    || upgradeSpecApprovalPayload.data?.lockedProfile?.configurationSource !== "tenant:tenant-local") {
+    throw new Error("new work did not lock the explicitly upgraded Claude Code Profile");
+  }
+  const upgradeRollback = await request(
+    baseUrl,
+    `/api/admin/agent-rollouts/${encodeURIComponent(upgradeInstallationId)}/rollback`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `smoke-upgrade-rollback-${smokeNonce}`,
+        "x-deviludo-role": "PlatformAgentAdmin",
+      },
+      body: "{}",
+    },
+  );
+  const upgradeRollbackPayload = await upgradeRollback.response.json();
+  const rollbackProfileId = upgradeRollbackPayload.data?.rollbackProfileRevisionIds?.[0];
+  if (upgradeRollback.response.status !== 201 || upgradeRollbackPayload.data?.percent !== 0
+    || upgradeRollbackPayload.data?.state !== "READY"
+    || upgradeRollbackPayload.data?.affectsNewTasksOnly !== true
+    || typeof rollbackProfileId !== "string") {
+    throw new Error("local Agent upgrade did not roll back to an immutable prior-installation Profile");
+  }
+  const upgradedRunAfterRollback = await request(
+    baseUrl,
+    `/api/projects/${smokeAgentUpgradeProject}/delivery/auto`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `smoke-upgrade-running-task-${smokeNonce}` },
+      body: "{}",
+    },
+    90_000,
+  );
+  const upgradedRunAfterRollbackPayload = await upgradedRunAfterRollback.response.json();
+  if (!upgradedRunAfterRollback.response.ok
+    || upgradedRunAfterRollbackPayload.data?.stage !== "AWAITING_ACCEPTANCE"
+    || upgradedRunAfterRollbackPayload.data?.runId !== upgradedRunId
+    || JSON.stringify(upgradedRunAfterRollbackPayload.data?.lockedProfile) !== upgradedRunProfileLock
+    || upgradedRunAfterRollbackPayload.data?.lockedProfile?.installationId !== upgradeInstallationId) {
+    throw new Error("Agent rollback interrupted or rewrote the already locked delivery run");
+  }
+  if (JSON.stringify(approvalPayload.data.lockedProfile) !== preUpgradeProfileLock) {
+    throw new Error("Agent upgrade rewrote a previously queued run");
   }
   const validationDialogue = await request(baseUrl, `/api/projects/${smokeValidationProject}/conversation`, {
     method: "POST",
@@ -835,8 +1054,34 @@ try {
   const validationApprovalPayload = await validationApproval.response.json();
   if (![200, 201].includes(validationApproval.response.status)
     || validationApprovalPayload.data?.run?.state !== "QUEUED"
+    || validationApprovalPayload.data?.lockedProfile?.profileRevisionId !== rollbackProfileId
+    || validationApprovalPayload.data?.lockedProfile?.installationId !== "claude-installation-214"
+    || validationApprovalPayload.data?.lockedProfile?.exactAgentVersion !== "2.1.14"
+    || validationApprovalPayload.data?.lockedProfile?.configurationSource !== "tenant:tenant-local"
     || JSON.stringify(validationApprovalPayload.data?.run?.targetMatrix) !== JSON.stringify(["macos"])) {
-    throw new Error("local validation specification approval failed");
+    throw new Error("post-rollback work did not resolve the immutable prior Claude Code installation");
+  }
+  const restorePlatformDefault = await request(baseUrl, "/api/admin/agent-defaults/platform", {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-restore-platform-${smokeNonce}`,
+      "x-deviludo-role": "PlatformAgentAdmin",
+    },
+    body: JSON.stringify({ profileRevisionId: "profile-claude-platform-r5" }),
+  });
+  const restoreTenantDefault = await request(baseUrl, "/api/admin/agent-defaults/tenant:tenant-local", {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `smoke-upgrade-restore-tenant-${smokeNonce}`,
+      "x-deviludo-role": "TenantAdmin",
+      "x-deviludo-tenant-id": "tenant-local",
+    },
+    body: JSON.stringify({ profileRevisionId: "profile-claude-tenant-r2" }),
+  });
+  if (!restorePlatformDefault.response.ok || !restoreTenantDefault.response.ok) {
+    throw new Error("local Agent upgrade verification could not restore the original fixture defaults");
   }
   const earlyFeedback = await request(baseUrl, `/api/projects/${smokeValidationProject}/feedback`, {
     method: "POST",
@@ -1549,6 +1794,8 @@ try {
   console.log(`✓ Agent discovery   ${exactAgentDiscovery.response.status}/${floatingAgentDiscovery.response.status} · ${installedAgent.agent}@${installedAgent.observedVersion} exact, latest rejected`);
   console.log(`✓ Spec dialogue     ${specDialogue.response.status} (${specDialogue.elapsedMs}ms) · revision=${specPayload.data.revision}`);
   console.log(`✓ Spec approval     ${specApproval.response.status} (${specApproval.elapsedMs}ms) · revision=${approvalPayload.data.authority.revision}`);
+  console.log(`✓ Agent update      ${upgradeInstallation.response.status} · 5/25/100 rollout + immutable Profile activation`);
+  console.log(`✓ Agent rollback    ${upgradeRollback.response.status} · locked run survived, new work returned to ${validationApprovalPayload.data.lockedProfile.exactAgentVersion}`);
   console.log(`✓ Auto delivery      ${localValidation.response.status} (${localValidation.elapsedMs}ms) · ${localAutomationPayload.meta?.stopReason}`);
   console.log(`✓ Auto replay        ${localAutomationReplay.response.status} (${localAutomationReplay.elapsedMs}ms) · exact D1 receipt`);
   console.log(`✓ Godot validation   ${localValidationPayload.data.releaseGate} · bound evidence`);

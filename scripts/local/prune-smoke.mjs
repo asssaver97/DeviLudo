@@ -7,7 +7,7 @@ const HOST = "127.0.0.1";
 const WEB_PORT = port("DEVILUDO_LOCAL_PORT", 3000);
 const RUNTIME_PORT = port("DEVILUDO_LOCAL_RUNTIME_PORT", 4311);
 const SPEC_PORT = port("DEVILUDO_LOCAL_SPEC_RUNTIME_PORT", 4313);
-const GENERATED = /^smoke-(?:spec|validation|feedback|release-gates|codex-release)-[1-9][0-9]{0,9}-[a-z0-9]{6,16}$/;
+const GENERATED = /^smoke-(?:spec|validation|feedback|release-gates|codex-release|agent-upgrade)-[1-9][0-9]{0,9}-[a-z0-9]{6,16}$/;
 const CHUNK_SIZE = 20;
 
 const [runtimeKey, specKey] = await Promise.all([
