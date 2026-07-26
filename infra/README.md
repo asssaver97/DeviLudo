@@ -188,6 +188,13 @@ stage rechecks both before mutation. The rendered Pod uses a private tmpfs for
 credential images and a default-deny network policy; allow rules remain an
 externally reviewed cluster input.
 
+Each production Agent polling process also mounts an immutable
+[`agent-execution-worker-binding.example.json`](agent-execution-worker-binding.example.json)-derived
+placement file. Its exact digest and the independently signed Guest identity
+jointly constrain the Installation IDs that process may claim. This host-side
+gate is what makes Claude/Codex selection, canary rollout, draining and rollback
+effective at the queue boundary rather than only in the admin projection.
+
 `npm run lock:control-runtime` first snapshots only the kind, name, UID,
 resourceVersion and immutable flag of the revision-suffixed ConfigMaps and
 Secrets; it never reads Secret data. `npm run deploy:control` consumes that lock

@@ -175,6 +175,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/run-control-service.mjs",
     "scripts/production/run-agent-supply-chain-container.mjs",
     "scripts/production/run-agent-microvm-credential-issuer-container.mjs",
+    "services/agent-execution-broker/src/worker-binding.ts",
   ]) {
     const path = resolve(root, utility);
     try {

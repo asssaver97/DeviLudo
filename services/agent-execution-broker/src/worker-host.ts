@@ -1,15 +1,19 @@
 import type { AgentExecutionOperationSource } from "./postgres-dispatch";
 import type { AgentExecutionOperationWorker } from "./operations";
+import { parseAgentExecutionWorkerBinding, type AgentExecutionWorkerBinding } from "./worker-binding";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 export class AgentExecutionOperationProcessor {
+  readonly #binding: AgentExecutionWorkerBinding;
+
   constructor(private readonly source: AgentExecutionOperationSource,
-    private readonly worker: Pick<AgentExecutionOperationWorker, "execute" | "probe">) {}
+    private readonly worker: Pick<AgentExecutionOperationWorker, "execute" | "probe">,
+    binding: AgentExecutionWorkerBinding) { this.#binding = parseAgentExecutionWorkerBinding(binding); }
 
   async processOne(tenantId: string): Promise<"IDLE" | "CONTENDED" | "TERMINAL"> {
     if (!UUID.test(tenantId)) invalid();
-    const item = await this.source.next(tenantId);
+    const item = await this.source.next(tenantId, this.#binding);
     if (!item) return "IDLE";
     if (item.tenantId !== tenantId || !UUID.test(item.runId)) invalid();
     const status = await this.worker.execute(item);

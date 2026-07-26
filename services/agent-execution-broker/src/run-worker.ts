@@ -7,6 +7,8 @@ import { PostgresAgentExecutionDispatch } from "./postgres-dispatch";
 import { PostgresAgentExecutionOperations } from "./postgres-operations";
 import { HmacEphemeralRunTokenBroker, type EphemeralRunTokenSecretStore } from "./token-broker";
 import { AgentExecutionOperationProcessor, PollingAgentExecutionWorkerHost } from "./worker-host";
+import { agentExecutionWorkerBindingFromEnv, parseAgentExecutionWorkerBinding,
+  type AgentExecutionWorkerBinding } from "./worker-binding";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
@@ -21,19 +23,22 @@ export async function agentExecutionWorkerFromEnv(
   secrets: EphemeralRunTokenSecretStore,
   env: Readonly<Record<string, string | undefined>> = process.env,
   suppliedPool?: ClosablePostgresWorkflowPool,
+  suppliedBinding?: AgentExecutionWorkerBinding,
 ) {
   const serviceEnv = Object.freeze({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "agent-execution-worker" });
   const pool = suppliedPool ?? postgresWorkflowPoolFromEnv(serviceEnv);
   let signingKey: Uint8Array | null = null;
   try {
     signingKey = await readSigningKey(env);
+    const binding = suppliedBinding === undefined
+      ? await agentExecutionWorkerBindingFromEnv(env) : parseAgentExecutionWorkerBinding(suppliedBinding);
     const operations = new PostgresAgentExecutionOperations(pool);
     const dispatch = new PostgresAgentExecutionDispatch(pool);
     const tokens = new HmacEphemeralRunTokenBroker(signingKey, secrets);
     const worker = new AgentExecutionOperationWorker(operations, tokens, executor, candidates, {
       leaseMs: integer(env.DEVILUDO_AGENT_EXECUTION_WORKER_LEASE_MS, 5 * 60_000, 30_000, 15 * 60_000),
     });
-    const processor = new AgentExecutionOperationProcessor(dispatch, worker);
+    const processor = new AgentExecutionOperationProcessor(dispatch, worker, binding);
     const host = new PollingAgentExecutionWorkerHost(processor,
       tenants(required(env, "DEVILUDO_AGENT_EXECUTION_WORKER_TENANT_IDS")), {
         pollIntervalMs: integer(env.DEVILUDO_AGENT_EXECUTION_WORKER_POLL_INTERVAL_MS, 1_000, 100, 60_000),
@@ -41,7 +46,7 @@ export async function agentExecutionWorkerFromEnv(
         diagnostic,
       });
     let disposed = false;
-    return Object.freeze({ pool, operations, dispatch, tokens, worker, processor, host,
+    return Object.freeze({ pool, operations, dispatch, tokens, worker, processor, host, binding,
       dispose: async () => { if (disposed) return; disposed = true; signingKey?.fill(0); await pool.close(); } });
   } catch (error) {
     signingKey?.fill(0); if (!suppliedPool) await pool.close().catch(() => undefined); throw error;

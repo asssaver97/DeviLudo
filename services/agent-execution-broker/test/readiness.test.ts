@@ -15,7 +15,8 @@ test("Agent execution Broker readiness requires its complete durable operation s
 });
 
 test("Agent dispatch readiness requires the durable queue relation", async () => {
-  await assertProbe(["agent_execution_operations"], (pool) => new PostgresAgentExecutionDispatch(pool), "agent_execution_operations");
+  await assertProbe(["agent_execution_operations", "agent_runs", "agent_run_provider_failovers"],
+    (pool) => new PostgresAgentExecutionDispatch(pool), "agent_execution_operations");
 });
 
 test("Agent work-package readiness requires both immutable specification relations", async () => {

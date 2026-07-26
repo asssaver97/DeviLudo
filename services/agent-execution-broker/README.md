@@ -29,6 +29,16 @@ The Broker process does not install Claude Code or Codex CLI. Polling Worker
 composition requires an explicitly supplied isolated executor and ephemeral
 secret store, so missing infrastructure fails closed.
 
+Every production polling process is also bound to a root-owned
+`deviludo.agent-execution-worker-binding.v1` file and its exact SHA-256. The
+binding names one development Worker pool and a sorted allow-list of logical
+Installation IDs, plus the exact Agent, CLI, Adapter and WorkerImage identity.
+Startup compares those fields with the independently signed Guest rootfs. Queue
+selection joins the immutable AgentRun and any recorded same-Agent Provider
+failover, and only locks work whose effective identity matches all fields. A
+Claude Worker therefore cannot claim a Codex Run, and a stale canary/rollback
+Worker cannot consume work assigned to a different Installation.
+
 `LockedNativeMicrovmAgentExecutor` is the production launcher adapter. It
 re-resolves the approved specification and frozen test plan under PostgreSQL
 RLS, materializes only the AgentRun's locked GitHub baseline through the

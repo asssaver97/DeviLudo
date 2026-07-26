@@ -209,6 +209,15 @@ Credential Issuer 是独立于 Web、Agent execution Worker、E2E Runner 和 Ste
 4. 验证清单内每个 VMM/Guest 输入与配置完全一致；
 5. 才创建 PostgreSQL pool、连接源码/候选 Broker 并启动任务消费。
 
+同一进程还必须挂载 root-owned 的
+[`agent-execution-worker-binding.example.json`](../infra/agent-execution-worker-binding.example.json)
+派生文件，并固定 `DEVILUDO_AGENT_EXECUTION_WORKER_BINDING_FILE` 与文件 SHA-256。绑定中的
+Installation ID 列表必须排序且只能属于同一个精确 Agent/CLI/Adapter/WorkerImage rootfs。
+Worker 在 PostgreSQL 中按当前有效身份领取：未发生 Provider failover 时使用主 Profile，
+已记录 failover 时使用冻结的 fallback Profile。Installation、Worker pool、镜像、Agent、
+CLI 或 Adapter 任一不匹配时该 Worker 不锁定任务；另一个匹配 Worker 才能领取。更新或
+回滚先排空旧绑定，再以新建只读文件启动新进程，不能在运行中改写绑定。
+
 每次任务重新校验运行文件，复制冻结源码和请求到独立 ext4 数据盘，在一个排他网络
 namespace 中运行 `jailer --new-pid-ns -- --config-file /machine-config.json`。rootfs 只读、
 数据盘可写、短期凭据盘只读、SMT 关闭、串口禁用。每个请求先向 Credential Issuer 取得

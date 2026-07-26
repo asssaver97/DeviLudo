@@ -14,6 +14,7 @@ import { agentExecutionWorkerFromEnv } from "./run-worker";
 import { scmCandidatePublisherFromEnv } from "./scm-candidate-client";
 import type { EphemeralRunTokenSecretStore } from "./token-broker";
 import { guestCredentialImageIssuerFromEnv } from "./guest-credential-client";
+import { agentExecutionWorkerBindingFromEnv, assertAgentExecutionWorkerGuestBinding } from "./worker-binding";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/;
@@ -26,7 +27,8 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/;
 export async function nativeAgentExecutionWorkerFromEnv(secrets: EphemeralRunTokenSecretStore,
   env: Readonly<Record<string, string | undefined>> = process.env) {
   const serviceEnv = Object.freeze({ ...env, DEVILUDO_WORKFLOW_DESTINATION: "agent-execution-worker" });
-  await verifyAgentMicrovmLauncherRuntimeFromEnv(env);
+  const verifiedRuntime = await verifyAgentMicrovmWorkerRuntimeFromEnv(env);
+  const binding = assertAgentExecutionWorkerGuestBinding(await agentExecutionWorkerBindingFromEnv(env), verifiedRuntime.guest);
   const pool = postgresWorkflowPoolFromEnv(serviceEnv);
   try {
     const [snapshots, candidates, publicKeyBytes, credentialIssuer] = await Promise.all([sourceSnapshotClientFromEnv(env),
@@ -50,13 +52,20 @@ export async function nativeAgentExecutionWorkerFromEnv(secrets: EphemeralRunTok
       sources,
       packages,
     });
-    const worker = await agentExecutionWorkerFromEnv(executor, candidates, secrets, serviceEnv, pool);
+    const worker = await agentExecutionWorkerFromEnv(executor, candidates, secrets, serviceEnv, pool, binding);
     return Object.freeze({ ...worker, executor, candidates, packages, sources, snapshots });
   } catch (error) { await pool.close().catch(() => undefined); throw error; }
 }
 
 /** Refuses database and Broker access until the complete launcher release is authorized. */
 export async function verifyAgentMicrovmLauncherRuntimeFromEnv(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  now = new Date(),
+): Promise<import("./native-microvm-launcher-release").AgentMicrovmLauncherReleaseClaims> {
+  return (await verifyAgentMicrovmWorkerRuntimeFromEnv(env, now)).launcher;
+}
+
+export async function verifyAgentMicrovmWorkerRuntimeFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
   now = new Date(),
 ) {
@@ -101,12 +110,12 @@ export async function verifyAgentMicrovmLauncherRuntimeFromEnv(
   const expected = [parsedConfig.firecrackerDigest, parsedConfig.jailerDigest, parsedConfig.kernelDigest,
     parsedConfig.rootfsDigest, parsedConfig.mke2fsDigest, parsedConfig.debugfsDigest];
   if (runtimeFiles.some((file, index) => file.digest !== expected[index])) throw new Error("microVM launcher runtime is invalid");
-  await verifyConfiguredAgentMicrovmGuestRelease({
+  const guest = await verifyConfiguredAgentMicrovmGuestRelease({
     releaseFile: parsedConfig.rootfsReleaseFile, releaseDigest: parsedConfig.rootfsReleaseDigest,
     trustPolicyFile: parsedConfig.rootfsTrustPolicyFile, trustPolicyDigest: parsedConfig.rootfsTrustPolicyDigest,
     platformVersion: parsedConfig.platformVersion, rootfsDigest: parsedConfig.rootfsDigest, now,
   });
-  return launcherClaims;
+  return Object.freeze({ launcher: launcherClaims, guest });
 }
 
 async function bytes(env: Readonly<Record<string, string | undefined>>, name: string): Promise<Buffer> {

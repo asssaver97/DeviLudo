@@ -118,6 +118,15 @@ flag. The execution Broker independently parses the primary and fallback proof
 before it can issue a short-lived inference token or dispatch a microVM; a null
 attestation is never upgraded from moving catalog state.
 
+Production queue consumers are placement-scoped rather than tenant-wide. Each
+process loads a digest-fixed Worker binding and proves that its Agent, exact CLI,
+Adapter and WorkerImage equal the signed Guest rootfs. PostgreSQL derives the
+effective placement from the immutable primary Profile or the one append-only
+same-Agent Provider failover, then matches the Installation allow-list and
+development pool before locking a queue row. This prevents a Claude rootfs from
+claiming Codex work and keeps old, canary and active Installation processes from
+cross-consuming each other's tasks during rollout.
+
 ## Credential and provider boundary
 
 The UI accepts a key only as a write/replace operation. The API writes plaintext
