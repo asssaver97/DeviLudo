@@ -19,6 +19,7 @@
     "db:migrate": "node scripts/production/migrate-postgres.mjs",
     "db:adopt-local": "node scripts/production/migrate-postgres.mjs --adopt-existing",
     "image:build-control": "node scripts/production/build-control-plane-image.mjs",
+    "image:build-artifact-preparer": "node scripts/production/build-artifact-preparer-image.mjs",
     "image:build-agent-supply-chain": "node scripts/production/build-agent-supply-chain-image.mjs",
     "image:build-agent-microvm-credential-issuer": "node scripts/production/build-agent-microvm-credential-issuer-image.mjs",
     "lock:agent-microvm-credential-issuer-runtime": "node scripts/production/lock-agent-microvm-credential-issuer-runtime.mjs",

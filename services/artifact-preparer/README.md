@@ -57,3 +57,23 @@ service before candidate/main scheduling and heartbeats its workflow lease
 during long snapshot/build transfers; Steam clean-install uses its separate
 publisher-owned lock path. Tests use in-process transports and do not claim
 that an external GitHub repository or S3 service was contacted.
+
+## Immutable production image
+
+Build this workload only with `npm run image:build-artifact-preparer`. The
+builder accepts a digest-pinned Debian-slim Node 22.15+ base (the minimum line
+with the built-in Zstandard stream used by source bundling), an exact 40-byte
+source revision, one Linux architecture and the required
+`<platform-version>-<sha12>` destination tag. BuildKit must push with maximum
+provenance and an SBOM; success emits an immutable receipt bound to the final
+registry digest, base image, Dockerfile, lockfile, source and architecture.
+
+`Dockerfile.artifact-preparer` contains no autonomous Agent, Godot executable,
+Steam tool or package-install URL. Its non-root fixed entrypoint rejects runtime
+arguments, local-test authority, preload/module injection and any work-root
+override. TLS material, the signed tenant assignment and database credentials
+remain file-mounted/external; `/var/lib/deviludo/artifact-preparer-work` must be
+backed by a bounded ephemeral volume and the container root filesystem should
+be read-only. The image receipt is a supply-chain artifact, not deployment
+authorization; a production scheduler must additionally bind it to live
+ConfigMap/Secret identities and an explicit release approval.

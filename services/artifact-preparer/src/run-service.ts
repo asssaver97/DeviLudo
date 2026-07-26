@@ -18,6 +18,7 @@ const MAX_SECRET_BYTES = 1024 * 1024;
 export async function artifactPreparationServiceFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
+  if (env.NODE_ENV !== "production") throw new Error("Artifact Preparer service requires NODE_ENV=production");
   const [serverKey, serverCertificate, clientCa, assignmentPublicKey] = await Promise.all([
     readSecret(env, "DEVILUDO_ARTIFACT_PREPARER_TLS_KEY_FILE", 32, MAX_SECRET_BYTES),
     readSecret(env, "DEVILUDO_ARTIFACT_PREPARER_TLS_CERT_FILE", 32, MAX_SECRET_BYTES),

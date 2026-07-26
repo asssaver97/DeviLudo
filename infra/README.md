@@ -214,6 +214,23 @@ The target namespace's registry, migration and per-service ConfigMap/Secret
 objects are revision-suffixed, immutable external production inputs; see
 [`docs/production-control-release.md`](../docs/production-control-release.md).
 
+## Artifact Preparer image boundary
+
+Runner source input preparation is not admitted to the shared control image.
+`npm run image:build-artifact-preparer` builds the dedicated
+`Dockerfile.artifact-preparer` from a digest-pinned Node 22.15+ Debian-slim base
+and a source-derived immutable tag. The build always pushes with maximum
+provenance and an SBOM, then emits a receipt binding the registry digest, base,
+source revision, platform, Dockerfile and lockfile. The fixed non-root entrypoint
+starts only `artifact-preparer`, rejects arguments and local-test authority, and
+fixes its work root to `/var/lib/deviludo/artifact-preparer-work`.
+
+Production must mount that work root as bounded ephemeral storage, keep the root
+filesystem read-only and provide only the file-mounted mTLS/assignment inputs
+documented in `services/artifact-preparer/.env.example`. Building a receipt does
+not authorize deployment; runtime resource locking and signed deployment
+authorization remain a separate required release stage.
+
 ## Privileged Agent supply-chain release
 
 The Agent supply-chain Broker is never admitted to the shared control image. A

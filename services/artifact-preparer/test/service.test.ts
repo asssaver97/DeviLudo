@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { artifactPreparationServiceFromEnv } from "../src/run-service";
 import { ArtifactPreparationService } from "../src/service";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -74,4 +75,15 @@ test("Artifact Preparer rejects extra trigger fields before tenant or database a
   });
   await assert.rejects(service.prepare(identity, { ...trigger, sourceDigest: "a".repeat(64) }), /trigger fields is invalid/);
   assert.equal(touched, false);
+});
+
+test("Artifact Preparer production host rejects non-production mode before reading credentials", async () => {
+  await assert.rejects(
+    artifactPreparationServiceFromEnv({ NODE_ENV: "development" }),
+    /requires NODE_ENV=production/,
+  );
+  await assert.rejects(
+    artifactPreparationServiceFromEnv({}),
+    /requires NODE_ENV=production/,
+  );
 });

@@ -136,6 +136,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/authorize-agent-supply-chain-release.mjs",
     "scripts/production/authorize-control-plane-release.mjs",
     "scripts/production/build-agent-supply-chain-image.mjs",
+    "scripts/production/build-artifact-preparer-image.mjs",
     "scripts/production/build-agent-microvm-credential-issuer-image.mjs",
     "scripts/production/build-agent-microvm-guest-rootfs.mjs",
     "scripts/production/build-control-plane-image.mjs",
@@ -174,6 +175,7 @@ export async function loadProductionConfiguration(root = resolve(dirname(fileURL
     "scripts/production/migrate-postgres.mjs",
     "scripts/production/run-control-service.mjs",
     "scripts/production/run-agent-supply-chain-container.mjs",
+    "scripts/production/run-artifact-preparer-container.mjs",
     "scripts/production/run-agent-microvm-credential-issuer-container.mjs",
     "services/agent-execution-broker/src/worker-binding.ts",
   ]) {

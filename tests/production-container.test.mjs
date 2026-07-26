@@ -4,6 +4,18 @@ import test from "node:test";
 
 import { SERVICE_ENTRYPOINTS } from "../scripts/observability/run-service.mjs";
 import {
+  artifactPreparerImageBuildCommand,
+  artifactPreparerImageReceipt,
+  parseArtifactPreparerImageArguments,
+  parseArtifactPreparerImageBuildMetadata,
+  validateArtifactPreparerImageReceipt,
+  validateArtifactPreparerImageSpec,
+} from "../scripts/production/build-artifact-preparer-image.mjs";
+import {
+  runArtifactPreparerContainer,
+  validateArtifactPreparerContainerEnvironment,
+} from "../scripts/production/run-artifact-preparer-container.mjs";
+import {
   agentSupplyChainImageBuildCommand,
   agentSupplyChainImageReceipt,
   parseAgentSupplyChainImageArguments,
@@ -44,6 +56,12 @@ const agentSupplyChainInput = Object.freeze({
   sourceRevision,
   platform: "linux/amd64",
 });
+const artifactPreparerInput = Object.freeze({
+  baseImage: `registry.internal/base/node:22.15.1-bookworm-slim@sha256:${"6".repeat(64)}`,
+  destination: `registry.internal/deviludo/artifact-preparer:${packageVersion}-${sourceRevision.slice(0, 12)}`,
+  sourceRevision,
+  platform: "linux/amd64",
+});
 
 test("every process entrypoint is explicitly classified into the shared control image or an external workload", () => {
   const classification = assertContainerServiceClassification();
@@ -54,7 +72,7 @@ test("every process entrypoint is explicitly classified into the shared control 
   assert.equal(new Set([...classification.control, ...classification.external]).size, Object.keys(SERVICE_ENTRYPOINTS).length);
   for (const service of [
     "agent-execution-worker", "agent-microvm-credential-issuer", "agent-microvm-guest", "agent-supply-chain",
-    "physical-runner", "godot-testkit",
+    "artifact-preparer", "physical-runner", "godot-testkit",
     "steam-workflow-executor", "steam-depot-finalizer", "steam-client-connector", "web",
   ]) {
     assert.ok(EXTERNAL_WORKLOAD_SERVICES.includes(service));
@@ -283,5 +301,114 @@ test("Agent supply-chain image CLI rejects missing, duplicate and unknown values
   assert.throws(() => parseAgentSupplyChainImageArguments([
     "--node-base-image", agentSupplyChainInput.nodeBaseImage,
     "--node-base-image", agentSupplyChainInput.nodeBaseImage,
+  ], packageVersion), /input is invalid/);
+});
+
+test("Artifact Preparer container has one fixed production workload and rejects local authority", async () => {
+  const env = Object.freeze({
+    NODE_ENV: "production",
+    NODE_OPTIONS: "--enable-source-maps",
+    NODE_PATH: "",
+    HOME: "/nonexistent",
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    LD_LIBRARY_PATH: "",
+    LD_PRELOAD: "",
+    DEVILUDO_CONTAINER_KIND: "artifact-preparer",
+    DEVILUDO_ARTIFACT_PREPARER_WORK_ROOT: "/var/lib/deviludo/artifact-preparer-work",
+  });
+  assert.deepEqual(validateArtifactPreparerContainerEnvironment(env), env);
+  const calls = [];
+  assert.equal(await runArtifactPreparerContainer({
+    env,
+    argv: [],
+    launch: async (argv, receivedEnvironment) => calls.push({ argv, receivedEnvironment }),
+  }), "artifact-preparer");
+  assert.deepEqual(calls, [{ argv: ["artifact-preparer"], receivedEnvironment: env }]);
+  await assert.rejects(runArtifactPreparerContainer({ env, argv: ["control-plane"] }), /arguments are forbidden/);
+  assert.throws(() => validateArtifactPreparerContainerEnvironment({ ...env, NODE_ENV: "development" }),
+    /environment is not fixed/);
+  assert.throws(() => validateArtifactPreparerContainerEnvironment({ ...env, DEVILUDO_LOCAL_TEST_MODE: "0" }),
+    /Local test authority/);
+  assert.throws(() => validateArtifactPreparerContainerEnvironment({ ...env, NODE_OPTIONS: "--require=\/tmp\/inject.js" }),
+    /environment is not fixed/);
+  assert.throws(() => validateArtifactPreparerContainerEnvironment({ ...env, LD_PRELOAD: "/tmp/inject.so" }),
+    /environment is not fixed/);
+  assert.throws(() => validateArtifactPreparerContainerEnvironment({
+    ...env,
+    DEVILUDO_ARTIFACT_PREPARER_WORK_ROOT: "/tmp",
+  }), /environment is not fixed/);
+});
+
+test("Artifact Preparer Dockerfile is a dedicated non-root immutable workload", () => {
+  const dockerfile = readFileSync(new URL("../Dockerfile.artifact-preparer", import.meta.url), "utf8");
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(dockerfile, /^ARG NODE_BASE_IMAGE\nFROM \$\{NODE_BASE_IMAGE\} AS dependencies/m);
+  assert.equal((dockerfile.match(/^FROM \$\{NODE_BASE_IMAGE\}/gm) ?? []).length, 2);
+  assert.match(dockerfile, /RUN npm ci --omit=dev --ignore-scripts/);
+  assert.match(dockerfile, /^USER node$/m);
+  assert.match(dockerfile,
+    /ENTRYPOINT \["\/usr\/local\/bin\/node", "--import", "tsx", "scripts\/production\/run-artifact-preparer-container\.mjs"\]/);
+  assert.match(dockerfile, /DEVILUDO_ARTIFACT_PREPARER_WORK_ROOT=\/var\/lib\/deviludo\/artifact-preparer-work/);
+  assert.doesNotMatch(dockerfile, /COPY .*services\/(?:agent|steam)/);
+  assert.doesNotMatch(dockerfile, /\b(?:curl|wget|npm install|claude|codex|steamcmd)\b/i);
+  assert.equal(packageJson.scripts["image:build-artifact-preparer"],
+    "node scripts/production/build-artifact-preparer-image.mjs");
+});
+
+test("Artifact Preparer image build pins a Zstandard-capable Node base and source-derived destination", () => {
+  const spec = validateArtifactPreparerImageSpec(artifactPreparerInput, packageVersion);
+  assert.deepEqual(spec, { ...artifactPreparerInput, platformVersion: packageVersion });
+  assert.throws(() => validateArtifactPreparerImageSpec({
+    ...artifactPreparerInput,
+    baseImage: `registry.internal/base/node:22.14.9-bookworm-slim@sha256:${"6".repeat(64)}`,
+  }, packageVersion), /input is invalid/);
+  assert.throws(() => validateArtifactPreparerImageSpec({
+    ...artifactPreparerInput,
+    destination: `registry.internal/deviludo/control-plane:${packageVersion}-${sourceRevision.slice(0, 12)}`,
+  }, packageVersion), /input is invalid/);
+  assert.throws(() => validateArtifactPreparerImageSpec({
+    ...artifactPreparerInput,
+    destination: "registry.internal/deviludo/artifact-preparer:latest",
+  }, packageVersion), /input is invalid/);
+  const build = artifactPreparerImageBuildCommand(spec, "/private/tmp/artifact-preparer/metadata.json");
+  assert.ok(build.args.includes("Dockerfile.artifact-preparer"));
+  for (const argument of ["--provenance=mode=max", "--sbom=true", "--pull", "--no-cache", "--push"]) {
+    assert.ok(build.args.includes(argument));
+  }
+  assert.ok(build.args.includes(`NODE_BASE_IMAGE=${artifactPreparerInput.baseImage}`));
+  assert.ok(!build.args.includes("--load"));
+});
+
+test("Artifact Preparer image receipt revalidates registry digest and exact inputs", () => {
+  const spec = validateArtifactPreparerImageSpec(artifactPreparerInput, packageVersion);
+  const imageDigest = `sha256:${"7".repeat(64)}`;
+  assert.equal(parseArtifactPreparerImageBuildMetadata({ "containerimage.digest": imageDigest }), imageDigest);
+  assert.throws(() => parseArtifactPreparerImageBuildMetadata({}), /digest is missing/);
+  const expected = {
+    baseImage: artifactPreparerInput.baseImage,
+    dockerfileDigest: `sha256:${"8".repeat(64)}`,
+    packageLockDigest: `sha256:${"9".repeat(64)}`,
+    sourceRevision,
+    platform: artifactPreparerInput.platform,
+    platformVersion: packageVersion,
+  };
+  const receipt = artifactPreparerImageReceipt(spec, { "containerimage.digest": imageDigest }, expected,
+    "2026-07-26T00:00:00.000Z");
+  assert.deepEqual(validateArtifactPreparerImageReceipt(receipt, expected), receipt);
+  assert.equal(receipt.imageReference, `registry.internal/deviludo/artifact-preparer@${imageDigest}`);
+  assert.throws(() => validateArtifactPreparerImageReceipt({ ...receipt, sourceRevision: "9".repeat(40) }, expected),
+    /receipt is invalid/);
+});
+
+test("Artifact Preparer image CLI rejects missing, duplicate and unknown values", () => {
+  assert.deepEqual(parseArtifactPreparerImageArguments([
+    "--base-image", artifactPreparerInput.baseImage,
+    "--destination", artifactPreparerInput.destination,
+    "--source-revision", sourceRevision,
+  ], packageVersion), { ...artifactPreparerInput, platformVersion: packageVersion });
+  assert.throws(() => parseArtifactPreparerImageArguments(["--unknown", "value"], packageVersion), /input is invalid/);
+  assert.throws(() => parseArtifactPreparerImageArguments([
+    "--base-image", artifactPreparerInput.baseImage,
+    "--base-image", artifactPreparerInput.baseImage,
   ], packageVersion), /input is invalid/);
 });
