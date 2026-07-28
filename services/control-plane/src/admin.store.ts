@@ -8,6 +8,7 @@ import type {
   AgentUsageSummary,
   AuditRecord,
   CredentialVersionRecord,
+  ExecutionNodeRecord,
   InstallationRecord,
   ProfileRevisionRecord,
   ProviderRevisionRecord,
@@ -18,6 +19,7 @@ import { assertAdminCatalogReferences, assertAdminCatalogSchema } from "./admin-
 export interface AdminCatalogState {
   readonly versions: Map<string, AgentVersionRecord>;
   readonly installations: Map<string, InstallationRecord>;
+  readonly executionNodes: Map<string, ExecutionNodeRecord>;
   readonly providers: Map<string, ProviderRevisionRecord>;
   readonly profiles: Map<string, ProfileRevisionRecord>;
   readonly credentials: Map<string, CredentialVersionRecord>;
@@ -81,6 +83,7 @@ export function emptyAdminCatalogState(): AdminCatalogState {
   return {
     versions: new Map(),
     installations: new Map(),
+    executionNodes: new Map(),
     providers: new Map(),
     profiles: new Map(),
     credentials: new Map(),

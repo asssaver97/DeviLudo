@@ -21,6 +21,21 @@ Configure the control-plane workload's `DEVILUDO_ADMIN_SESSION_HMAC_KEY` with th
 
 The Connector must present the approved Web administration SPIFFE identity over mTLS. It must not expose a generic proxy or accept a caller-selected destination. The Web allow-list contains only the documented Agent administration routes and never forwards cookies, Authorization, caller role headers or query strings.
 
+When this repository is mounted by `DeviLudo-Platform`, set
+`DEVILUDO_PLATFORM_MANAGED_CONFIGURATION=1`. In that mode the Account Platform
+assertion is the sole browser authority for `/admin/agents`; tenant Agent settings
+return `404`, their navigation capability is removed, and project Profile
+projections omit Provider Base URLs, credential revisions, WorkerImage details and
+execution nodes. The Platform repository contains only identity and deployment
+wiring—the Provider, secret and server configuration implementation remains here.
+
+`POST /admin/execution-nodes` registers one immutable-purpose node as either an
+isolated Linux Agent development worker or an E2E runner for Linux, Windows or
+macOS. Nodes enroll outbound with a purpose-specific SPIFFE ID and never submit an
+SSH password or cloud account key. `PlatformAgentAdmin` creates and drains nodes;
+`SecurityAdmin` separately activates or disables them after identity review.
+Draining stops new leases without invalidating already-running jobs.
+
 The version catalog projects the exact package source, source digest, discovery time, release-notes URL, signature result, integrity, SBOM, vulnerability state and validation receipts. The browser renders source and release-note links only when HTTPS, host, repository path, Agent kind and exact package version all match the built-in Claude Code or Codex CLI allow-list. A same-host link for another version, a redirect-style query, credentials, nonstandard port or lookalike host invalidates the projection instead of producing a clickable link.
 
 Credential request bodies are capped at 64 KiB and are never logged. Responses are capped, must be JSON, may not contain Vault `SecretRef` values, and are rejected if they reproduce submitted credential plaintext. The browser receives only masked fingerprints and public credential metadata.
@@ -85,6 +100,11 @@ The platform administrator console is not reused as browser authorization for lo
 Project defaults may reference an ACTIVE project Profile, an ACTIVE Profile belonging to the signed tenant, or an ACTIVE platform Profile. This is a reference to one immutable revision, not a credential copy. Tenant defaults may similarly select an ACTIVE tenant or platform Profile. A lower scope cannot select another tenant's Profile or loosen the platform allow-list.
 
 TenantAdmin may write tenant BYOK credentials and create/validate tenant Provider drafts. SecurityAdmin remains the only role that can activate a third-party endpoint after the complete Provider probe. Configuration changes affect new tasks only; queued and running tasks keep their locked Profile revision.
+
+The preceding tenant BYOK behavior applies only to a standalone deployment. In
+Platform-managed mode all Provider and execution-server configuration is global;
+Workspace users may choose only an approved Profile and cannot read or mutate the
+underlying Key, Base URL, Agent worker or E2E node configuration.
 
 An ACTIVE Profile may be prepared before its Installation finishes canary, but no
 platform, tenant, or project default may select it until the whole serving chain

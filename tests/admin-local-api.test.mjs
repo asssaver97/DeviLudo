@@ -895,6 +895,65 @@ test("simulated role headers cannot cross local admin RBAC boundaries", async ()
   assert.equal(getDemoStore().rollouts["claude-installation-214"].percent, 100);
 });
 
+test("execution server registration keeps Agent development and E2E pools isolated behind mTLS approval", async () => {
+  resetDemoStore();
+  const created = await POST(request("execution-nodes", "POST", "PlatformAgentAdmin", {
+    purpose: "E2E",
+    platform: "windows",
+    pool: "e2e-windows-shared",
+    region: "cn-hangzhou",
+    controlPlaneUrl: "https://control.deviludo.example/",
+    spiffeId: "spiffe://deviludo.internal/runner/windows-01",
+    cpuCores: 16,
+    memoryGiB: 32,
+    maxConcurrentJobs: 2,
+  }), context("execution-nodes"));
+  assert.equal(created.status, 201);
+  const createdNode = (await created.json()).data;
+  assert.equal(createdNode.state, "DRAFT");
+  assert.equal(createdNode.enrollment.mode, "OUTBOUND_MTLS");
+  assert.equal(createdNode.enrollment.secretAccepted, false);
+  assert.equal(JSON.stringify(createdNode).includes("password"), false);
+
+  const forbiddenAgentPlatform = await POST(request("execution-nodes", "POST", "PlatformAgentAdmin", {
+    purpose: "AGENT_DEVELOPMENT",
+    platform: "windows",
+    pool: "development-windows",
+    region: "cn-hangzhou",
+    controlPlaneUrl: "https://control.deviludo.example/",
+    spiffeId: "spiffe://deviludo.internal/agent-worker/windows-01",
+    cpuCores: 16,
+    memoryGiB: 32,
+    maxConcurrentJobs: 4,
+  }), context("execution-nodes"));
+  assert.equal(forbiddenAgentPlatform.status, 400);
+  assert.equal((await forbiddenAgentPlatform.json()).error.code, "AGENT_WORKER_PLATFORM_FORBIDDEN");
+
+  const unauthorizedActivationPath = `execution-nodes/${createdNode.id}/activate`;
+  const unauthorizedActivation = await POST(
+    request(unauthorizedActivationPath, "POST", "PlatformAgentAdmin"),
+    context(unauthorizedActivationPath),
+  );
+  assert.equal(unauthorizedActivation.status, 403);
+
+  const activation = await POST(request(unauthorizedActivationPath, "POST", "SecurityAdmin"), context(unauthorizedActivationPath));
+  assert.equal(activation.status, 201);
+  assert.equal((await activation.json()).data.node.state, "ACTIVE");
+
+  const drainPath = `execution-nodes/${createdNode.id}/drain`;
+  const drained = await POST(request(drainPath, "POST", "PlatformAgentAdmin"), context(drainPath));
+  assert.equal(drained.status, 201);
+  const drainedPayload = await drained.json();
+  assert.equal(drainedPayload.data.node.state, "DRAINING");
+  assert.equal(drainedPayload.data.affectsRunningJobs, true);
+
+  const disablePath = `execution-nodes/${createdNode.id}/disable`;
+  const disabled = await POST(request(disablePath, "POST", "SecurityAdmin"), context(disablePath));
+  assert.equal(disabled.status, 201);
+  assert.equal((await disabled.json()).data.node.state, "DISABLED");
+  assert.ok(getDemoStore().audit.some((event) => event.action === "EXECUTION_NODE_DISABLED" && event.resource === createdNode.id));
+});
+
 test("local admin never simulates an upstream inference billing reconciliation", async () => {
   const path = "inference-requests/44444444-4444-4444-8444-444444444444/reconcile";
   const payload = {

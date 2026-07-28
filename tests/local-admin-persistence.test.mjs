@@ -150,9 +150,9 @@ test("local Agent administrator persists only an exact sidecar SecretRef binding
   resetDemoStore();
 });
 
-test("local Agent administrator upgrades legacy Provider/Profile, ownership, and monotonic IDs into v5 snapshots", () => {
+test("local Agent administrator upgrades legacy Provider/Profile, ownership, execution nodes, and monotonic IDs into v6 snapshots", () => {
   const envelope = JSON.parse(serializeLocalAdminState(resetDemoStore()));
-  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v5");
+  assert.equal(envelope.schemaVersion, "deviludo.local-admin-state.v6");
   envelope.schemaVersion = "deviludo.local-admin-state.v1";
   delete envelope.state.resourceSequences;
   const provider = envelope.state.providers[0];
@@ -197,7 +197,8 @@ test("local Agent administrator upgrades legacy Provider/Profile, ownership, and
   assert.equal(migrated.profiles.find((item) => item.id === "profile-claude-tenant-r2").scopeId, "tenant-local");
   assert.equal(migrated.defaults["tenant:tenant-local"], "profile-claude-tenant-r2");
   assert.equal(migrated.defaults["tenant:north-dock"], undefined);
-  assert.deepEqual(migrated.resourceSequences, { credential: 0, provider: 2, profile: 4, audit: 0 });
+  assert.deepEqual(migrated.executionNodes, []);
+  assert.deepEqual(migrated.resourceSequences, { credential: 0, provider: 2, profile: 4, audit: 0, executionNode: 0 });
 
   const v2Envelope = JSON.parse(serializeLocalAdminState(migrated));
   v2Envelope.schemaVersion = "deviludo.local-admin-state.v2";

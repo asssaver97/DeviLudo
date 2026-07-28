@@ -8,12 +8,13 @@ import { isExactAdapterCompatibility } from "../agent/adapter-registry";
 import { assertPinnedModelId } from "../agent/providers";
 import { validateProviderBaseUrl } from "../security/network";
 
-const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v5";
+const SNAPSHOT_SCHEMA = "deviludo.local-admin-state.v6";
 const LEGACY_SNAPSHOT_SCHEMAS = new Set([
   "deviludo.local-admin-state.v1",
   "deviludo.local-admin-state.v2",
   "deviludo.local-admin-state.v3",
   "deviludo.local-admin-state.v4",
+  "deviludo.local-admin-state.v5",
 ]);
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const COMMAND_KEY = /^[A-Za-z0-9][A-Za-z0-9:._@/-]{0,511}$/;
@@ -36,7 +37,7 @@ const PROVIDER_REQUIRED_CHECKS = Object.freeze([
 ]);
 const STORE_FIELDS = Object.freeze([
   "agentVersionMetadata", "agentVersions", "audit", "credentials", "defaults", "feedback", "idempotency",
-  "installations", "invalidatedEvidence", "profiles", "providers", "resourceSequences", "rollouts", "specRevision",
+  "executionNodes", "installations", "invalidatedEvidence", "profiles", "providers", "resourceSequences", "rollouts", "specRevision",
   "specState", "usage",
 ]);
 const VERSION_METADATA_FIELDS = Object.freeze([
@@ -58,6 +59,9 @@ const PROFILE_FIELDS = Object.freeze([
 ]);
 const CREDENTIAL_FIELDS = Object.freeze([
   "createdAt", "familyId", "fingerprint", "id", "label", "masked", "rotatedAt", "scope", "scopeId", "secretRef", "state", "version",
+]);
+const EXECUTION_NODE_FIELDS = Object.freeze([
+  "activatedAt", "capacity", "controlPlaneUrl", "createdAt", "drainingAt", "id", "platform", "pool", "purpose", "region", "spiffeId", "state",
 ]);
 const FORBIDDEN_PERSISTED_KEYS = new Set([
   "apikey",
@@ -249,7 +253,7 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
     || (value.specState !== "DRAFT" && value.specState !== "APPROVED")
     || !Array.isArray(value.feedback) || !Array.isArray(value.invalidatedEvidence)
     || !record(value.agentVersions) || !record(value.agentVersionMetadata)
-    || !Array.isArray(value.installations) || !record(value.rollouts)
+    || !Array.isArray(value.installations) || !Array.isArray(value.executionNodes) || !record(value.rollouts)
     || !Array.isArray(value.providers) || !Array.isArray(value.profiles)
     || !Array.isArray(value.credentials) || !record(value.defaults)
     || !Array.isArray(value.audit) || !Array.isArray(value.usage) || !record(value.idempotency)
@@ -308,6 +312,29 @@ function assertDemoStoreState(value: unknown): asserts value is DemoStoreState {
   }
   const validatedState = value as unknown as DemoStoreState;
   assertInstallationReferences(validatedState);
+  assertUniqueIds(value.executionNodes, "本地执行服务器配置");
+  for (const node of value.executionNodes) {
+    if (!record(node) || !exactFieldsMatch(node, EXECUTION_NODE_FIELDS)
+      || typeof node.id !== "string" || !/^execution-node-[1-9]\d*$/.test(node.id)
+      || (node.purpose !== "AGENT_DEVELOPMENT" && node.purpose !== "E2E")
+      || (node.platform !== "linux" && node.platform !== "windows" && node.platform !== "macos")
+      || (node.purpose === "AGENT_DEVELOPMENT" && node.platform !== "linux")
+      || typeof node.pool !== "string" || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(node.pool)
+      || typeof node.region !== "string" || node.region.trim() !== node.region || node.region.length < 2 || node.region.length > 80
+      || typeof node.controlPlaneUrl !== "string" || !validControlPlaneOrigin(node.controlPlaneUrl)
+      || typeof node.spiffeId !== "string" || !validExecutionNodeSpiffeId(node.spiffeId, node.purpose)
+      || !record(node.capacity) || !exactFieldsMatch(node.capacity, ["cpuCores", "maxConcurrentJobs", "memoryGiB"])
+      || !Number.isSafeInteger(node.capacity.cpuCores) || Number(node.capacity.cpuCores) < 1 || Number(node.capacity.cpuCores) > 256
+      || !Number.isSafeInteger(node.capacity.memoryGiB) || Number(node.capacity.memoryGiB) < 1 || Number(node.capacity.memoryGiB) > 2048
+      || !Number.isSafeInteger(node.capacity.maxConcurrentJobs) || Number(node.capacity.maxConcurrentJobs) < 1 || Number(node.capacity.maxConcurrentJobs) > 64
+      || (node.state !== "DRAFT" && node.state !== "ACTIVE" && node.state !== "DRAINING" && node.state !== "DISABLED")
+      || !validTimestamp(node.createdAt) || !validNullableTimestamp(node.activatedAt) || !validNullableTimestamp(node.drainingAt)
+      || (node.state === "DRAFT" && (node.activatedAt !== null || node.drainingAt !== null))
+      || (node.state === "ACTIVE" && (node.activatedAt === null || node.drainingAt !== null))
+      || (node.state === "DRAINING" && (node.activatedAt === null || node.drainingAt === null))) {
+      throw new Error("本地执行服务器配置无效");
+    }
+  }
   assertUniqueIds(value.credentials, "本地 Agent 凭据投影");
   for (const credential of value.credentials) {
     if (!record(credential) || !exactFieldsMatch(credential, CREDENTIAL_FIELDS)
@@ -690,6 +717,23 @@ function validHttpsUrl(value: string): boolean {
   } catch { return false; }
 }
 
+function validControlPlaneOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return validHttpsUrl(value) && url.pathname === "/" && url.toString() === value;
+  } catch { return false; }
+}
+
+function validExecutionNodeSpiffeId(value: string, purpose: unknown): boolean {
+  try {
+    const url = new URL(value);
+    const prefix = purpose === "AGENT_DEVELOPMENT" ? "/agent-worker/" : "/runner/";
+    return url.protocol === "spiffe:" && Boolean(url.hostname) && !url.username && !url.password
+      && !url.search && !url.hash && url.pathname.startsWith(prefix) && url.pathname.length > prefix.length
+      && url.pathname.length <= 200 && url.toString() === value;
+  } catch { return false; }
+}
+
 function validTimestamp(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
@@ -728,7 +772,7 @@ function validCredentialSecretRef(credential: Record<string, unknown>): boolean 
 
 function validResourceSequences(value: unknown): boolean {
   if (!record(value)) return false;
-  const fields = ["audit", "credential", "profile", "provider"];
+  const fields = ["audit", "credential", "executionNode", "profile", "provider"];
   return exactFieldsMatch(value, fields) && fields.every((key) => Number.isSafeInteger(value[key]) && Number(value[key]) >= 0);
 }
 

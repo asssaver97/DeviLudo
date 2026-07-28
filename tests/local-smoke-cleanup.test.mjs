@@ -62,7 +62,7 @@ test("authenticated local cleanup removes only run-labelled Agent resources and 
   const projectId = `smoke-release-gates-${runId}`;
   try {
     const store = resetDemoStore();
-    store.resourceSequences = { credential: 41, provider: 42, profile: 44, audit: 70 };
+    store.resourceSequences = { credential: 41, provider: 42, profile: 44, audit: 70, executionNode: 0 };
     store.credentials.push(
       {
         id: "credential-40-v1", familyId: "credential-40", label: "local-sidecar-live-check",

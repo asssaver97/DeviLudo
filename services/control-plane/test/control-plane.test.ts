@@ -48,6 +48,87 @@ test("agent catalog is readable by an Auditor and defaults to Claude Code", asyn
     entry.registrySchemaVersion === "deviludo.agent-registry.v1"), true);
 });
 
+test("global administrators register, approve, drain and disable isolated execution nodes", async () => {
+  const created = await inject({
+    method: "POST",
+    url: "/admin/execution-nodes",
+    role: "PlatformAgentAdmin",
+    key: "execution-node-windows-create",
+    payload: {
+      purpose: "E2E",
+      platform: "windows",
+      pool: "e2e-windows-shared",
+      region: "cn-hangzhou",
+      controlPlaneUrl: "https://control.deviludo.example/",
+      spiffeId: "spiffe://deviludo.internal/runner/windows-primary",
+      cpuCores: 16,
+      memoryGiB: 32,
+      maxConcurrentJobs: 2,
+    },
+  });
+  assert.equal(created.statusCode, 201);
+  const node = created.json().data;
+  assert.equal(node.state, "DRAFT");
+  assert.deepEqual(node.enrollment, { mode: "OUTBOUND_MTLS", secretAccepted: false, activationRequired: true });
+
+  const tenantProjection = await inject({
+    method: "GET", url: "/admin/agents", role: "TenantAdmin", tenantId: "tenant-execution-private",
+  });
+  assert.deepEqual(tenantProjection.json().data.executionNodes, []);
+
+  const denied = await inject({
+    method: "POST", url: `/admin/execution-nodes/${node.id}/activate`, role: "PlatformAgentAdmin",
+    key: "execution-node-activation-denied", payload: {},
+  });
+  assert.equal(denied.statusCode, 403);
+
+  const activated = await inject({
+    method: "POST", url: `/admin/execution-nodes/${node.id}/activate`, role: "SecurityAdmin",
+    key: "execution-node-activate", payload: {},
+  });
+  assert.equal(activated.statusCode, 201);
+  assert.equal(activated.json().data.node.state, "ACTIVE");
+
+  const drained = await inject({
+    method: "POST", url: `/admin/execution-nodes/${node.id}/drain`, role: "PlatformAgentAdmin",
+    key: "execution-node-drain", payload: {},
+  });
+  assert.equal(drained.statusCode, 201);
+  assert.equal(drained.json().data.node.state, "DRAINING");
+  assert.equal(drained.json().data.affectsRunningJobs, true);
+
+  const disabled = await inject({
+    method: "POST", url: `/admin/execution-nodes/${node.id}/disable`, role: "SecurityAdmin",
+    key: "execution-node-disable", payload: {},
+  });
+  assert.equal(disabled.statusCode, 201);
+  assert.equal(disabled.json().data.node.state, "DISABLED");
+});
+
+test("Agent development nodes reject Windows and macOS even when the caller is PlatformAgentAdmin", async () => {
+  for (const platform of ["windows", "macos"]) {
+    const response = await inject({
+      method: "POST",
+      url: "/admin/execution-nodes",
+      role: "PlatformAgentAdmin",
+      key: `execution-node-agent-${platform}`,
+      payload: {
+        purpose: "AGENT_DEVELOPMENT",
+        platform,
+        pool: `development-${platform}`,
+        region: "cn-hangzhou",
+        controlPlaneUrl: "https://control.deviludo.example/",
+        spiffeId: `spiffe://deviludo.internal/agent-worker/${platform}-primary`,
+        cpuCores: 16,
+        memoryGiB: 32,
+        maxConcurrentJobs: 4,
+      },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error.code, "AGENT_WORKER_PLATFORM_FORBIDDEN");
+  }
+});
+
 test("installation rejects an exact but unapproved Adapter before reserving a WorkerImage", async () => {
   const before = await inject({ method: "GET", url: "/admin/agents", role: "PlatformAgentAdmin" });
   const installationCount = before.json().data.catalog

@@ -19,7 +19,7 @@ import { isAdapterVersionAttested } from "@/lib/agent/adapter-registry";
 import { AdminIcon } from "./AdminIcons";
 import styles from "./admin.module.css";
 
-type TabId = "overview" | "versions" | "deployments" | "providers" | "inheritance" | "audit";
+type TabId = "overview" | "versions" | "deployments" | "execution" | "providers" | "inheritance" | "audit";
 type Toast = { message: string; tone: "success" | "warning" | "neutral" } | null;
 type AgentInstallation = {
   id: string;
@@ -56,11 +56,26 @@ type AgentInstallation = {
     failedAt: string;
   };
 };
+type ExecutionNode = {
+  id: string;
+  purpose: "AGENT_DEVELOPMENT" | "E2E";
+  platform: "linux" | "windows" | "macos";
+  pool: string;
+  region: string;
+  controlPlaneUrl: string;
+  spiffeId: string;
+  capacity: { cpuCores: number; memoryGiB: number; maxConcurrentJobs: number };
+  state: "DRAFT" | "ACTIVE" | "DRAINING" | "DISABLED";
+  createdAt: string;
+  activatedAt: string | null;
+  drainingAt: string | null;
+};
 type AdminState = {
   catalog: AgentCatalogItem[];
   defaultAgent: AgentKind;
   versions: AgentVersionRow[];
   installations: AgentInstallation[];
+  executionNodes: ExecutionNode[];
   rollouts: Record<string, { percent: number; state: string; previous: number }>;
   profiles: Array<{
     id: string;
@@ -160,13 +175,14 @@ const tabs: { id: TabId; label: string }[] = [
   { id: "overview", label: "总览" },
   { id: "versions", label: "版本" },
   { id: "deployments", label: "安装部署" },
+  { id: "execution", label: "执行服务器" },
   { id: "providers", label: "Provider" },
   { id: "inheritance", label: "选择与继承" },
   { id: "audit", label: "健康与审计" },
 ];
 
 const roleOptions = Object.keys(rolePermissions) as AdminRole[];
-type AdminAuthMode = "loading" | "local-fixture" | "trusted-control-plane";
+type AdminAuthMode = "loading" | "local-fixture" | "trusted-control-plane" | "account-platform";
 const EXACT_AGENT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 function AgentMark({ kind, small = false }: { kind: AgentKind; small?: boolean }) {
@@ -201,11 +217,13 @@ export default function AgentAdminDashboard() {
   const [catalog, setCatalog] = useState<AgentCatalogItem[]>([]);
   const [versions, setVersions] = useState<AgentVersionRow[]>([]);
   const [installations, setInstallations] = useState<AgentInstallation[]>([]);
+  const [executionNodes, setExecutionNodes] = useState<ExecutionNode[]>([]);
   const [profiles, setProfiles] = useState<AdminState["profiles"]>([]);
   const [providers, setProviders] = useState<AdminState["providers"]>([]);
   const [credentials, setCredentials] = useState<AdminState["credentials"]>([]);
   const [defaults, setDefaults] = useState<AdminState["defaults"]>({});
   const [authMode, setAuthMode] = useState<AdminAuthMode>("loading");
+  const [allowedRoles, setAllowedRoles] = useState<AdminRole[]>([...roleOptions]);
   const [adminLoading, setAdminLoading] = useState(true);
   const [adminError, setAdminError] = useState("");
   const [discoveryAgent, setDiscoveryAgent] = useState<AgentKind>("claude-code");
@@ -235,10 +253,14 @@ export default function AgentAdminDashboard() {
         const rollout = state.rollouts[installation.id];
         return rollout ? { ...installation, rolloutPercent: rollout.percent, state: rollout.state } : installation;
       }));
+      setExecutionNodes(state.executionNodes);
       const mode = response.headers.get("x-deviludo-admin-auth-mode");
-      if (mode === "local-fixture" || mode === "trusted-control-plane") setAuthMode(mode);
+      if (mode === "local-fixture" || mode === "trusted-control-plane" || mode === "account-platform") setAuthMode(mode);
       const effectiveRole = response.headers.get("x-deviludo-effective-role");
-      if (mode === "trusted-control-plane" && isAdminRole(effectiveRole)) setRole(effectiveRole);
+      const authorizedRoles = (response.headers.get("x-deviludo-allowed-roles") ?? "").split(",")
+        .map((candidate) => candidate.trim()).filter(isAdminRole);
+      if (authorizedRoles.length) setAllowedRoles(authorizedRoles);
+      if ((mode === "trusted-control-plane" || mode === "account-platform") && isAdminRole(effectiveRole)) setRole(effectiveRole);
       setAdminError("");
     } catch (reason) {
       setAdminError(reason instanceof Error ? reason.message : "读取 Agent 管理状态失败");
@@ -531,15 +553,53 @@ export default function AgentAdminDashboard() {
     }
   };
 
+  const createExecutionNode = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!permissions.manageInstallations) {
+      notify("只有 PlatformAgentAdmin 可以创建执行服务器草稿", "warning");
+      return;
+    }
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    try {
+      await adminRequest("execution-nodes", {
+        method: "POST", role,
+        body: {
+          purpose: String(form.get("purpose") ?? ""), platform: String(form.get("platform") ?? ""),
+          pool: String(form.get("pool") ?? ""), region: String(form.get("region") ?? ""),
+          controlPlaneUrl: String(form.get("controlPlaneUrl") ?? ""), spiffeId: String(form.get("spiffeId") ?? ""),
+          cpuCores: Number(form.get("cpuCores")), memoryGiB: Number(form.get("memoryGiB")),
+          maxConcurrentJobs: Number(form.get("maxConcurrentJobs")),
+        },
+      });
+      formElement.reset();
+      await refreshAdminState(); await refreshAudit();
+      notify("执行服务器草稿已创建；SecurityAdmin 审核 mTLS 身份后才能接收任务");
+    } catch (reason) { notify(reason instanceof Error ? reason.message : "执行服务器配置失败", "warning"); }
+  };
+
+  const transitionExecutionNode = async (node: ExecutionNode, action: "activate" | "drain" | "disable") => {
+    const allowed = action === "drain" ? permissions.manageInstallations : permissions.activatePlatformProvider;
+    if (!allowed) {
+      notify(action === "drain" ? "排空服务器需要 PlatformAgentAdmin" : "激活或禁用服务器需要 SecurityAdmin", "warning");
+      return;
+    }
+    try {
+      await adminRequest(`execution-nodes/${encodeURIComponent(node.id)}/${action}`, { method: "POST", role, body: {} });
+      await refreshAdminState(); await refreshAudit();
+      notify(action === "activate" ? "服务器身份已批准并开始接收新任务" : action === "drain" ? "服务器已停止接收新任务，运行中任务保持原租约" : "服务器配置已禁用");
+    } catch (reason) { notify(reason instanceof Error ? reason.message : "服务器状态变更失败", "warning"); }
+  };
+
   return (
     <AppShell>
       <div className={styles.adminSurface}>
         <div className={styles.adminUtilityBar}>
-          <div className={styles.environment}><span />{authMode === "trusted-control-plane" ? "PRODUCTION MODE" : authMode === "local-fixture" ? "LOCAL MODE" : "VERIFYING ADMIN SESSION"}</div>
-          {authMode !== "local-fixture" ? <div className={styles.roleSelect}><span>{authMode === "loading" ? "身份" : "可信角色"}</span><strong>{authMode === "loading" ? "验证中" : role}</strong></div> : <label className={styles.roleSelect}>
-            <span>模拟角色</span>
+          <div className={styles.environment}><span />{authMode === "trusted-control-plane" ? "PRODUCTION MODE" : authMode === "account-platform" ? "ACCOUNT PLATFORM ADMIN" : authMode === "local-fixture" ? "LOCAL MODE" : "VERIFYING ADMIN SESSION"}</div>
+          {authMode === "trusted-control-plane" || authMode === "loading" ? <div className={styles.roleSelect}><span>{authMode === "loading" ? "身份" : "可信角色"}</span><strong>{authMode === "loading" ? "验证中" : role}</strong></div> : <label className={styles.roleSelect}>
+            <span>{authMode === "account-platform" ? "授权角色" : "模拟角色"}</span>
             <select value={role} onChange={(event) => setRole(event.target.value as AdminRole)} aria-label="切换管理角色">
-              {roleOptions.map((option) => <option key={option}>{option}</option>)}
+              {(authMode === "account-platform" ? allowedRoles : roleOptions).map((option) => <option key={option}>{option}</option>)}
             </select>
           </label>}
         </div>
@@ -576,6 +636,7 @@ export default function AgentAdminDashboard() {
         <div className={styles.tabs} role="tablist" aria-label="Agent 管理分区">
           {tabs.map((tab) => {
             const count = tab.id === "versions" ? String(versions.length) : tab.id === "deployments" ? String(installations.length)
+              : tab.id === "execution" ? String(executionNodes.length)
               : tab.id === "providers" ? String(providers.length) : undefined;
             return <button key={tab.id} className={activeTab === tab.id ? styles.tabActive : ""} onClick={() => setActiveTab(tab.id)} type="button" role="tab" aria-selected={activeTab === tab.id}>
               {tab.label}{count && <span>{count}</span>}
@@ -594,9 +655,13 @@ export default function AgentAdminDashboard() {
             onAdvance={advanceRollout} onRollback={rollback} onLifecycle={transitionInstallation}
             onRebindProfile={rebindInstallationProfile} onActivateProfile={activateInstallationProfile}
             onSelectDefault={selectPlatformProfile} />}
+          {activeTab === "execution" && <ExecutionNodesTab nodes={executionNodes}
+            canCreate={permissions.manageInstallations && !adminLoading && !adminError}
+            canApprove={permissions.activatePlatformProvider && !adminLoading && !adminError}
+            onCreate={createExecutionNode} onTransition={transitionExecutionNode} />}
           {activeTab === "providers" && <ProvidersTab key={providerEditorKey} role={effectivePermissionRole} localHealth={localHealth} installations={installations} profiles={profiles}
             providers={providers} credentials={credentials}
-            production={authMode === "trusted-control-plane"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }}
+            production={authMode !== "local-fixture"} notify={notify} onChanged={() => { void refreshAdminState(); void refreshAudit(); }}
             newDraftRequest={newProviderRequest} onNewDraftConsumed={consumeNewProviderRequest} />}
           {activeTab === "inheritance" && <InheritanceTab defaults={defaults} installations={installations}
             profiles={profiles} providers={providers} notify={notify} />}
@@ -836,6 +901,83 @@ function formatLifecycleTime(value: string | null | undefined): string {
   return Number.isFinite(parsed.getTime())
     ? parsed.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
     : "—";
+}
+
+function ExecutionNodesTab({ nodes, canCreate, canApprove, onCreate, onTransition }: {
+  nodes: ExecutionNode[];
+  canCreate: boolean;
+  canApprove: boolean;
+  onCreate: (event: FormEvent<HTMLFormElement>) => void;
+  onTransition: (node: ExecutionNode, action: "activate" | "drain" | "disable") => void;
+}) {
+  const [purpose, setPurpose] = useState<ExecutionNode["purpose"]>("E2E");
+  const [platform, setPlatform] = useState<ExecutionNode["platform"]>("linux");
+  const activeAgent = nodes.filter((node) => node.purpose === "AGENT_DEVELOPMENT" && node.state === "ACTIVE").length;
+  const activeE2e = nodes.filter((node) => node.purpose === "E2E" && node.state === "ACTIVE").length;
+  const platformCount = new Set(nodes.filter((node) => node.purpose === "E2E" && node.state === "ACTIVE").map((node) => node.platform)).size;
+  return <>
+    <div className={styles.metricRail}>
+      <div><span>Agent 开发服务器</span><strong>{activeAgent}</strong><small>仅 Linux 隔离 Worker</small></div>
+      <div><span>E2E 测试服务器</span><strong>{activeE2e}</strong><small>共享队列 · 出站 mTLS</small></div>
+      <div><span>已覆盖系统</span><strong>{platformCount} / 3</strong><small>Linux · Windows · macOS</small></div>
+      <div><span>待安全审批</span><strong>{nodes.filter((node) => node.state === "DRAFT").length}</strong><small>SPIFFE 身份与控制面 origin</small></div>
+    </div>
+    <div className={styles.twoColumn}>
+      <section className={styles.section}>
+        <SectionHeading eyebrow="OUTBOUND MTLS" title="新增执行服务器" description="这里只登记服务器身份、用途和容量；不接收 SSH 密码、云密钥或入站管理端口。" />
+        <form className={styles.providerForm} onSubmit={onCreate}>
+          <div className={styles.fieldPair}>
+            <div className={styles.formGroup}><label>用途</label><select name="purpose" value={purpose} onChange={(event) => { const next = event.target.value as ExecutionNode["purpose"]; setPurpose(next); if (next === "AGENT_DEVELOPMENT") setPlatform("linux"); }}><option value="E2E">E2E 测试服务器</option><option value="AGENT_DEVELOPMENT">Agent 开发服务器</option></select></div>
+            <div className={styles.formGroup}><label>操作系统</label>{purpose === "AGENT_DEVELOPMENT" ? <input name="platform" type="hidden" value="linux" /> : null}<select name={purpose === "AGENT_DEVELOPMENT" ? undefined : "platform"} value={purpose === "AGENT_DEVELOPMENT" ? "linux" : platform} disabled={purpose === "AGENT_DEVELOPMENT"} onChange={(event) => setPlatform(event.target.value as ExecutionNode["platform"])}><option value="linux">Linux</option><option value="windows">Windows</option><option value="macos">macOS</option></select><small>Agent 永远不会安装到 E2E 节点。</small></div>
+          </div>
+          <div className={styles.fieldPair}>
+            <div className={styles.formGroup}><label>服务器池</label><input name="pool" required maxLength={64} placeholder={purpose === "E2E" ? `e2e-${platform}-shared` : "development-linux"} /></div>
+            <div className={styles.formGroup}><label>地域</label><input name="region" required maxLength={80} placeholder="cn-hangzhou" /></div>
+          </div>
+          <div className={styles.formGroup}><label>平台控制面 HTTPS origin</label><input name="controlPlaneUrl" type="url" required maxLength={2000} placeholder="https://control.deviludo.example/" /><small>服务器主动连接该地址；不保存服务器入站地址或账号密码。</small></div>
+          <div className={styles.formGroup}><label>预期 SPIFFE ID</label><input name="spiffeId" required maxLength={240} placeholder={purpose === "E2E" ? "spiffe://deviludo.internal/runner/e2e-linux-01" : "spiffe://deviludo.internal/agent-worker/dev-linux-01"} /></div>
+          <div className={styles.fieldPair}>
+            <div className={styles.formGroup}><label>CPU 核数</label><input name="cpuCores" type="number" min={1} max={256} defaultValue={8} required /></div>
+            <div className={styles.formGroup}><label>内存 GiB</label><input name="memoryGiB" type="number" min={1} max={2048} defaultValue={16} required /></div>
+          </div>
+          <div className={styles.formGroup}><label>最大并发任务</label><input name="maxConcurrentJobs" type="number" min={1} max={64} defaultValue={purpose === "E2E" ? 2 : 4} required /><small>视觉/GPU/音频/Steam 任务仍由 Runner 策略强制独占。</small></div>
+          <div className={styles.formActions}><button className={styles.primaryButton} type="submit" disabled={!canCreate}>创建服务器草稿</button><StatusPill tone="neutral">PlatformAgentAdmin</StatusPill></div>
+        </form>
+      </section>
+      <section className={styles.section}>
+        <SectionHeading eyebrow="BOUNDARY" title="职责隔离" description="Agent 开发池与 E2E 测试池使用不同身份和镜像，不能互相转换。" />
+        <dl className={styles.policyList}>
+          <div><dt>Agent 开发</dt><dd>Linux microVM · workspace-write</dd></div>
+          <div><dt>E2E Linux/Windows</dt><dd>共享 EBM 队列</dd></div>
+          <div><dt>E2E macOS</dt><dd>专用 Mac Host 队列</dd></div>
+          <div><dt>认证</dt><dd>出站 mTLS · SPIFFE</dd></div>
+          <div><dt>激活</dt><dd>SecurityAdmin 审批</dd></div>
+          <div><dt>排空</dt><dd>保留已租约任务</dd></div>
+        </dl>
+      </section>
+    </div>
+    <section className={styles.section}>
+      <SectionHeading title="执行服务器目录" description="配置状态不会由 Workspace 覆盖；任务只会调度到 ACTIVE 且用途匹配的服务器。" />
+      <div className={styles.tableWrap}>
+        <table className={styles.dataTable}><thead><tr><th>服务器</th><th>用途 / 系统</th><th>池 / 地域</th><th>容量</th><th>身份</th><th>状态</th><th>操作</th></tr></thead><tbody>
+          {nodes.map((node) => <tr key={node.id}>
+            <td><strong>{node.id}</strong><code>{new URL(node.controlPlaneUrl).host}</code></td>
+            <td>{node.purpose === "AGENT_DEVELOPMENT" ? "Agent 开发" : "E2E 测试"}<br/><small>{node.platform}</small></td>
+            <td>{node.pool}<br/><small>{node.region}</small></td>
+            <td>{node.capacity.cpuCores} vCPU · {node.capacity.memoryGiB} GiB<br/><small>{node.capacity.maxConcurrentJobs} 并发</small></td>
+            <td><code>{node.spiffeId}</code></td>
+            <td><StatusPill tone={node.state === "ACTIVE" ? "success" : node.state === "DRAINING" ? "warning" : node.state === "DISABLED" ? "danger" : "neutral"}>{node.state}</StatusPill></td>
+            <td><div className={styles.inlineActions}>
+              {node.state === "DRAFT" ? <><button onClick={() => onTransition(node, "activate")} disabled={!canApprove} type="button">安全审批并激活</button><button onClick={() => onTransition(node, "disable")} disabled={!canApprove} type="button">禁用</button></> : null}
+              {node.state === "ACTIVE" ? <button onClick={() => onTransition(node, "drain")} disabled={!canCreate} type="button">排空</button> : null}
+              {node.state === "DRAINING" ? <button onClick={() => onTransition(node, "disable")} disabled={!canApprove} type="button">完成禁用</button> : null}
+            </div></td>
+          </tr>)}
+        </tbody></table>
+        {nodes.length === 0 ? <div className={styles.emptyState}>尚未登记执行服务器。先创建草稿，再由 SecurityAdmin 审批 mTLS 身份。</div> : null}
+      </div>
+    </section>
+  </>;
 }
 
 function ProvidersTab({ role, localHealth, installations, profiles, providers, credentials, production, notify, onChanged,
@@ -1365,6 +1507,7 @@ function normalizeAdminState(payload: Record<string, unknown>): AdminState {
       defaultAgent: agentKind(local.defaultAgent) ?? "claude-code",
       versions,
       installations,
+      executionNodes: records(local.executionNodes).map(executionNodeRow).filter((value): value is ExecutionNode => Boolean(value)),
       rollouts: rolloutRows(local.rollouts, installations),
       profiles: records(local.profiles).map(profileRow).filter((value): value is AdminState["profiles"][number] => Boolean(value)),
       providers: records(local.providers).map(providerRow).filter((value): value is AdminState["providers"][number] => Boolean(value)),
@@ -1383,6 +1526,7 @@ function normalizeAdminState(payload: Record<string, unknown>): AdminState {
     defaultAgent: agentKind(data.effectivePlatformDefaultAgent) ?? "claude-code",
     versions,
     installations,
+    executionNodes: records(data.executionNodes).map(executionNodeRow).filter((value): value is ExecutionNode => Boolean(value)),
     rollouts: rolloutRows(undefined, installations),
     profiles: records(data.profiles).map(profileRow).filter((value): value is AdminState["profiles"][number] => Boolean(value)),
     providers: records(data.providers).map(providerRow).filter((value): value is AdminState["providers"][number] => Boolean(value)),
@@ -1474,6 +1618,23 @@ function installationRow(value: Record<string, unknown>, catalogAgent?: AgentKin
     retiredAt: text(value.retiredAt),
     ...(object(value.failure) ? { failure: object(value.failure) as AgentInstallation["failure"] } : {}),
   };
+}
+
+function executionNodeRow(value: Record<string, unknown>): ExecutionNode | null {
+  const id = text(value.id); const purpose = value.purpose; const platform = value.platform;
+  const pool = text(value.pool); const region = text(value.region); const controlPlaneUrl = text(value.controlPlaneUrl);
+  const spiffeId = text(value.spiffeId); const state = value.state; const capacity = object(value.capacity);
+  const cpuCores = number(capacity?.cpuCores); const memoryGiB = number(capacity?.memoryGiB);
+  const maxConcurrentJobs = number(capacity?.maxConcurrentJobs); const createdAt = text(value.createdAt);
+  if (!id || (purpose !== "AGENT_DEVELOPMENT" && purpose !== "E2E")
+    || (platform !== "linux" && platform !== "windows" && platform !== "macos") || !pool || !region || !controlPlaneUrl || !spiffeId
+    || (state !== "DRAFT" && state !== "ACTIVE" && state !== "DRAINING" && state !== "DISABLED")
+    || cpuCores === null || !Number.isSafeInteger(cpuCores) || memoryGiB === null || !Number.isSafeInteger(memoryGiB)
+    || maxConcurrentJobs === null || !Number.isSafeInteger(maxConcurrentJobs) || !createdAt) return null;
+  try { new URL(controlPlaneUrl); new URL(spiffeId); } catch { return null; }
+  return { id, purpose, platform, pool, region, controlPlaneUrl, spiffeId,
+    capacity: { cpuCores, memoryGiB, maxConcurrentJobs }, state, createdAt,
+    activatedAt: text(value.activatedAt), drainingAt: text(value.drainingAt) };
 }
 
 function rolloutRows(value: unknown, installations: readonly AgentInstallation[]): AdminState["rollouts"] {

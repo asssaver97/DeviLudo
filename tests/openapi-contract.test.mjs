@@ -76,6 +76,7 @@ test("Agent administration mutations publish exact request-body contracts", () =
   assert.match(operationBlock("/admin/agent-versions/discover", "post"), /AgentVersionDiscovery/);
   assert.match(operationBlock("/admin/agent-versions/deprecate", "post"), /VersionAction/);
   assert.match(operationBlock("/admin/agent-installations", "post"), /AgentInstallationDraft/);
+  assert.match(operationBlock("/admin/execution-nodes", "post"), /ExecutionNodeDraft/);
   assert.match(operationBlock("/admin/agent-profiles/{id}/rebind-installation", "post"), /AgentProfileInstallationRebind/);
   assert.match(operationBlock("/admin/credentials/{id}/rotate", "post"), /CredentialRotation/);
   assert.match(operationBlock("/settings/agents/credentials/{id}/rotate", "post"), /CredentialRotation/);
@@ -86,16 +87,20 @@ test("Agent administration mutations publish exact request-body contracts", () =
     "/admin/agent-rollouts/{id}/rollback",
     "/admin/agent-installations/{id}/drain",
     "/admin/agent-installations/{id}/retire",
+    "/admin/execution-nodes/{id}/activate",
+    "/admin/execution-nodes/{id}/drain",
+    "/admin/execution-nodes/{id}/disable",
     "/admin/agent-profiles/{id}/validate",
     "/admin/agent-profiles/{id}/activate",
     "/admin/agent-profiles/{id}/disable",
     "/admin/credentials/{id}/revoke",
   ]) assert.match(operationBlock(path, "post"), /EmptyObject/, path);
 
-  for (const schema of ["CredentialDraft", "CredentialRotation", "AgentVersionDiscovery", "AgentInstallationDraft", "AgentProfileInstallationRebind"]) {
+  for (const schema of ["CredentialDraft", "CredentialRotation", "AgentVersionDiscovery", "AgentInstallationDraft", "ExecutionNodeDraft", "AgentProfileInstallationRebind"]) {
     assert.match(schemaBlock(schema), /additionalProperties: false/, schema);
   }
   assert.match(schemaBlock("AgentInstallationDraft"), /adapterVersion: \{ type: string, enum: \["1\.3\.0", "1\.2\.2"\] \}/);
+  assert.match(schemaBlock("ExecutionNodeDraft"), /purpose: \{ type: string, enum: \[AGENT_DEVELOPMENT, E2E\] \}/);
   for (const field of ["registrySchemaVersion", "adapterId", "adapterVersion", "providerProtocol", "configurationSchema"]) {
     assert.match(schemaBlock("AgentSettingsProjection"), new RegExp(`\\b${field}\\b`));
   }

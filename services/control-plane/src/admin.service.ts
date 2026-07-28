@@ -17,6 +17,7 @@ import {
   type AgentKind,
   type AgentVersionRecord,
   type CredentialVersionRecord,
+  type ExecutionNodeRecord,
   type InstallationRecord,
   type ProfileRevisionRecord,
   type ProfileScope,
@@ -98,6 +99,7 @@ export class AdminService {
         effectivePlatformDefaultAgent: platformProfile?.agent ?? "claude-code",
         selectionPrecedence: ["project", "tenant", "platform", "built-in:claude-code"],
         pinnedVersionsOnly: true,
+        executionNodes: Object.freeze(actor.tenantId ? [] : [...state.executionNodes.values()]),
         profiles: Object.freeze(profiles),
         providers: Object.freeze([...state.providers.values()].filter((provider) => visibleProviderIds.has(provider.id))),
         credentials: Object.freeze(credentials),
@@ -264,6 +266,102 @@ export class AdminService {
         automaticActivation: false,
       });
       return { version: record, automaticActivation: false };
+    });
+  }
+
+  async createExecutionNode(body: Record<string, unknown>, actor: RequestActor): Promise<Readonly<Record<string, unknown>>> {
+    assertAllowedFields(body, [
+      "purpose", "platform", "pool", "region", "controlPlaneUrl", "spiffeId",
+      "cpuCores", "memoryGiB", "maxConcurrentJobs",
+    ]);
+    const purpose = requiredString(body, "purpose", 32);
+    const platform = requiredString(body, "platform", 16);
+    const pool = requiredString(body, "pool", 64);
+    const region = requiredString(body, "region", 80);
+    if (purpose !== "AGENT_DEVELOPMENT" && purpose !== "E2E") {
+      throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", "Execution node purpose is invalid");
+    }
+    if (platform !== "linux" && platform !== "windows" && platform !== "macos") {
+      throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", "Execution node platform is invalid");
+    }
+    if (purpose === "AGENT_DEVELOPMENT" && platform !== "linux") {
+      throw new ServiceProblem(400, "AGENT_WORKER_PLATFORM_FORBIDDEN", "Autonomous Agents may run only on isolated Linux development workers");
+    }
+    if (!/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(pool)) {
+      throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", "Execution node pool is invalid");
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(region)) {
+      throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", "Execution node region is invalid");
+    }
+    const controlPlaneUrl = executionControlPlaneUrl(requiredString(body, "controlPlaneUrl", 2_000));
+    const spiffeId = executionSpiffeId(requiredString(body, "spiffeId", 240), purpose);
+    const capacity = Object.freeze({
+      cpuCores: executionCapacity(body.cpuCores, "cpuCores", 256),
+      memoryGiB: executionCapacity(body.memoryGiB, "memoryGiB", 2_048),
+      maxConcurrentJobs: executionCapacity(body.maxConcurrentJobs, "maxConcurrentJobs", 64),
+    });
+    return this.mutate(actor, (state) => {
+      if ([...state.executionNodes.values()].some((node) => node.spiffeId === spiffeId && node.state !== "DISABLED")) {
+        throw new ServiceProblem(409, "EXECUTION_NODE_IDENTITY_CONFLICT", "SPIFFE identity is already bound to another active configuration");
+      }
+      const now = new Date().toISOString();
+      const node: ExecutionNodeRecord = {
+        id: `execution-node-${randomUUID()}`,
+        purpose,
+        platform,
+        pool,
+        region,
+        controlPlaneUrl,
+        spiffeId,
+        capacity,
+        state: "DRAFT",
+        createdAt: now,
+        activatedAt: null,
+        drainingAt: null,
+      };
+      state.executionNodes.set(node.id, node);
+      this.audit(state, "EXECUTION_NODE_DRAFTED", node.id, actor, {
+        purpose, platform, pool, region, authentication: "outbound-mtls",
+        autonomousAgentInstalled: purpose === "AGENT_DEVELOPMENT",
+      });
+      return {
+        ...node,
+        enrollment: { mode: "OUTBOUND_MTLS", secretAccepted: false, activationRequired: true },
+      };
+    });
+  }
+
+  async transitionExecutionNode(
+    id: string,
+    action: "activate" | "drain" | "disable",
+    actor: RequestActor,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    if (!/^execution-node-[a-f0-9-]{36}$/.test(id)) {
+      throw new ServiceProblem(404, "EXECUTION_NODE_NOT_FOUND", "Execution node configuration does not exist");
+    }
+    return this.mutate(actor, (state) => {
+      const node = state.executionNodes.get(id);
+      if (!node) throw new ServiceProblem(404, "EXECUTION_NODE_NOT_FOUND", "Execution node configuration does not exist");
+      const previousState = node.state;
+      const now = new Date().toISOString();
+      if (action === "activate") {
+        if (node.state !== "DRAFT") throw new ServiceProblem(409, "INVALID_EXECUTION_NODE_TRANSITION", "Only a draft node may be activated after mTLS identity review");
+        node.state = "ACTIVE";
+        node.activatedAt = now;
+      } else if (action === "drain") {
+        if (node.state !== "ACTIVE") throw new ServiceProblem(409, "INVALID_EXECUTION_NODE_TRANSITION", "Only an active node may be drained");
+        node.state = "DRAINING";
+        node.drainingAt = now;
+      } else {
+        if (node.state !== "DRAFT" && node.state !== "DRAINING") {
+          throw new ServiceProblem(409, "INVALID_EXECUTION_NODE_TRANSITION", "An active node must be drained before it is disabled");
+        }
+        node.state = "DISABLED";
+      }
+      this.audit(state, `EXECUTION_NODE_${node.state}`, node.id, actor, {
+        previousState, state: node.state, acceptsNewJobs: node.state === "ACTIVE",
+      });
+      return { node, affectsRunningJobs: action === "drain", credentialsChanged: false };
     });
   }
 
@@ -1424,6 +1522,35 @@ Injectable()(AdminService);
 
 const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+
+function executionControlPlaneUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error();
+    return url.toString();
+  } catch {
+    throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", "Control plane URL must be a credential-free HTTPS origin");
+  }
+}
+
+function executionSpiffeId(value: string, purpose: ExecutionNodeRecord["purpose"]): string {
+  try {
+    const url = new URL(value);
+    const prefix = purpose === "AGENT_DEVELOPMENT" ? "/agent-worker/" : "/runner/";
+    if (url.protocol !== "spiffe:" || !url.hostname || url.username || url.password || url.search || url.hash
+      || !url.pathname.startsWith(prefix) || url.pathname.length <= prefix.length || url.pathname.length > 200) throw new Error();
+    return url.toString();
+  } catch {
+    throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", "SPIFFE identity does not match the execution node purpose");
+  }
+}
+
+function executionCapacity(value: unknown, field: string, maximum: number): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > maximum) {
+    throw new ServiceProblem(400, "INVALID_EXECUTION_NODE", `${field} is outside the permitted range`);
+  }
+  return Number(value);
+}
 
 function requiredUuid(body: Record<string, unknown>, field: string): string {
   const value = body[field];

@@ -14,6 +14,7 @@ import {
 } from "@/lib/admin/local-credential-rotation";
 import { adminControlPlaneBrokerFromEnvironment, resolveAdminControlPlanePath } from "@/lib/admin/control-plane-broker";
 import { verifyTrustedAdminPrincipal } from "@/lib/admin/trusted-principal";
+import { accountPlatformSessionFromRequest } from "@/lib/auth/account-platform";
 import {
   activateLocalProviderBinding,
   checkLocalProviderBinding,
@@ -30,6 +31,7 @@ import {
   withIdempotency,
   type DemoAuditEvent,
   type DemoCredential,
+  type DemoExecutionNode,
   type DemoInstallation,
   type DemoProfile,
   type DemoProvider,
@@ -52,6 +54,8 @@ import {
 import { fingerprintSecret, maskFingerprint } from "@/lib/security/credentials";
 import { validateProviderBaseUrl } from "@/lib/security/network";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { platformManagedConfiguration } from "@/lib/config/platform-managed";
+import { isTrustedLocalScopedAgentRequest } from "@/lib/admin/scoped-agent-proxy";
 
 type RouteContext = { params: Promise<{ segments: string[] }> };
 const VERSION_ROLES = ["PlatformAgentAdmin"] as const;
@@ -268,7 +272,7 @@ function localCredentialLastUsedAt(store: DemoStoreState): Readonly<Record<strin
 }
 
 function localConfigurationDiff(record: DemoAuditEvent) {
-  if (!/^(AGENT_(VERSION|INSTALLATION|PROFILE|DEFAULT)|ROLLOUT_|CREDENTIAL_)/.test(record.action)) return null;
+  if (!/^(AGENT_(VERSION|INSTALLATION|PROFILE|DEFAULT)|ROLLOUT_|CREDENTIAL_|EXECUTION_NODE_)/.test(record.action)) return null;
   const changes: Array<{ field: string; before: unknown; after: unknown }> = [];
   appendLocalDiff(changes, record.metadata, "state", "previousState", "state");
   appendLocalDiff(changes, record.metadata, "providerState", "previousProviderState", "providerState");
@@ -315,7 +319,7 @@ export async function GET(request: Request, context: RouteContext) {
   try {
     const { segments } = await context.params;
     if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
-    requireLocalAdmin(request);
+    request = await requireLocalAdmin(request);
     lease = await acquireLocalAdminState();
     const key = routeKey(segments);
     const store = getDemoStore();
@@ -332,6 +336,7 @@ export async function GET(request: Request, context: RouteContext) {
             return { id, agent: id.slice(0, separator), version: id.slice(separator + 1), state, ...store.agentVersionMetadata[id] };
           }),
           installations: store.installations,
+          executionNodes: store.executionNodes,
           rollouts: store.rollouts,
           providers: projection.providers,
           profiles: projection.profiles,
@@ -339,7 +344,8 @@ export async function GET(request: Request, context: RouteContext) {
           defaults: projection.defaults,
         },
       }, { headers: { "x-deviludo-effective-role": request.headers.get("x-deviludo-role") ?? "Auditor",
-        "x-deviludo-admin-auth-mode": "local-fixture" } });
+        "x-deviludo-allowed-roles": request.headers.get("x-deviludo-allowed-admin-roles") ?? LOCAL_ROLES.join(","),
+        "x-deviludo-admin-auth-mode": platformManagedConfiguration() ? "account-platform" : "local-fixture" } });
     }
     if (key === "agent-health") {
       const operations = localOperationalProjection(store);
@@ -395,7 +401,7 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const { segments } = await context.params;
     if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
-    requireLocalAdmin(request);
+    request = await requireLocalAdmin(request);
     lease = await acquireLocalAdminState();
     const key = routeKey(segments);
     const body = await bodyObject(request);
@@ -523,6 +529,85 @@ export async function POST(request: Request, context: RouteContext) {
           ...(state === "DEPRECATED" ? { existingInstallationsAffected: false } : {}),
           ...(receiptDigest ? { validationReceiptId: `local-validation-${id.replaceAll("@", "-")}`, validationReceiptDigest: receiptDigest } : {}),
         };
+      });
+    }
+
+    if (key === "execution-nodes") {
+      const role = requireRole(request, VERSION_ROLES);
+      assertAllowedBodyFields(body, ["purpose", "platform", "pool", "region", "controlPlaneUrl", "spiffeId", "cpuCores", "memoryGiB", "maxConcurrentJobs"]);
+      const purpose = requireString(body, "purpose", 32);
+      const platform = requireString(body, "platform", 16);
+      const pool = requireString(body, "pool", 64);
+      const region = requireString(body, "region", 80);
+      const controlPlaneUrl = canonicalExecutionControlPlaneUrl(requireString(body, "controlPlaneUrl", 2_000));
+      const spiffeId = canonicalExecutionSpiffeId(requireString(body, "spiffeId", 240), purpose);
+      const cpuCores = executionCapacity(body.cpuCores, "cpuCores", 256);
+      const memoryGiB = executionCapacity(body.memoryGiB, "memoryGiB", 2_048);
+      const maxConcurrentJobs = executionCapacity(body.maxConcurrentJobs, "maxConcurrentJobs", 64);
+      if (purpose !== "AGENT_DEVELOPMENT" && purpose !== "E2E") {
+        throw new HttpProblem(400, "INVALID_EXECUTION_NODE", "服务器用途必须是 Agent 开发或 E2E 测试");
+      }
+      if (platform !== "linux" && platform !== "windows" && platform !== "macos") {
+        throw new HttpProblem(400, "INVALID_EXECUTION_NODE", "执行服务器平台无效");
+      }
+      if (purpose === "AGENT_DEVELOPMENT" && platform !== "linux") {
+        throw new HttpProblem(400, "AGENT_WORKER_PLATFORM_FORBIDDEN", "自主 Agent 只能安装到隔离 Linux 开发服务器");
+      }
+      if (!/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(pool)) {
+        throw new HttpProblem(400, "INVALID_EXECUTION_NODE", "服务器池标识无效");
+      }
+      const store = getDemoStore();
+      if (store.executionNodes.some((node) => node.spiffeId === spiffeId && node.state !== "DISABLED")) {
+        throw new HttpProblem(409, "EXECUTION_NODE_IDENTITY_CONFLICT", "该 SPIFFE 工作负载身份已绑定到另一个活动配置");
+      }
+      const sequence = store.resourceSequences.executionNode + 1;
+      const id = `execution-node-${sequence}`;
+      const createdAt = new Date().toISOString();
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+        const current = getDemoStore();
+        current.resourceSequences.executionNode = Math.max(current.resourceSequences.executionNode, sequence);
+        const node: DemoExecutionNode = {
+          id,
+          purpose: purpose as DemoExecutionNode["purpose"],
+          platform: platform as DemoExecutionNode["platform"],
+          pool, region, controlPlaneUrl, spiffeId,
+          capacity: { cpuCores, memoryGiB, maxConcurrentJobs },
+          state: "DRAFT", createdAt, activatedAt: null, drainingAt: null,
+        };
+        current.executionNodes.push(node);
+        appendDemoAudit("EXECUTION_NODE_DRAFTED", id, role, {
+          purpose, platform, pool, region, authentication: "outbound-mtls", autonomousAgentInstalled: purpose === "AGENT_DEVELOPMENT",
+        });
+        return { ...node, enrollment: { mode: "OUTBOUND_MTLS", secretAccepted: false, activationRequired: true } };
+      });
+    }
+
+    const executionNodeAction = /^execution-nodes\/([A-Za-z0-9][A-Za-z0-9._:-]{0,179})\/(activate|drain|disable)$/.exec(key);
+    if (executionNodeAction) {
+      assertAllowedBodyFields(body, []);
+      const id = executionNodeAction[1]!;
+      const action = executionNodeAction[2] as "activate" | "drain" | "disable";
+      const role = requireRole(request, action === "drain" ? VERSION_ROLES : SECURITY_ROLES);
+      return await mutate(lease, `admin:${key}:${idempotency}`, () => {
+        const store = getDemoStore();
+        const node = store.executionNodes.find((candidate) => candidate.id === id);
+        if (!node) throw new HttpProblem(404, "EXECUTION_NODE_NOT_FOUND", "执行服务器配置不存在");
+        const previousState = node.state;
+        const now = new Date().toISOString();
+        if (action === "activate") {
+          if (node.state !== "DRAFT") throw new HttpProblem(409, "INVALID_EXECUTION_NODE_TRANSITION", "只有草稿服务器可在 mTLS 身份审核后激活");
+          node.state = "ACTIVE"; node.activatedAt = now;
+        } else if (action === "drain") {
+          if (node.state !== "ACTIVE") throw new HttpProblem(409, "INVALID_EXECUTION_NODE_TRANSITION", "只有活动服务器可以排空");
+          node.state = "DRAINING"; node.drainingAt = now;
+        } else {
+          if (node.state !== "DRAFT" && node.state !== "DRAINING") {
+            throw new HttpProblem(409, "INVALID_EXECUTION_NODE_TRANSITION", "活动服务器必须先排空，才能禁用");
+          }
+          node.state = "DISABLED";
+        }
+        appendDemoAudit(`EXECUTION_NODE_${node.state}`, node.id, role, { previousState, state: node.state, acceptsNewJobs: node.state === "ACTIVE" });
+        return { node, affectsRunningJobs: action === "drain", credentialsChanged: false };
       });
     }
 
@@ -1459,7 +1544,7 @@ export async function PUT(request: Request, context: RouteContext) {
   try {
     const { segments } = await context.params;
     if (!isLoopbackTestRequest(request)) return productionAdminRequest(request, segments);
-    requireLocalAdmin(request);
+    request = await requireLocalAdmin(request);
     lease = await acquireLocalAdminState();
     const key = routeKey(segments);
     const match = /^agent-defaults\/(platform|tenant:[a-z0-9-]+|project:[a-z0-9-]+)$/i.exec(key);
@@ -1782,10 +1867,53 @@ function optionalModel(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function requireLocalAdmin(request: Request): void {
+function canonicalExecutionControlPlaneUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error();
+    return url.toString();
+  } catch { throw new HttpProblem(400, "INVALID_EXECUTION_NODE", "控制面地址必须是无凭据、query 或 fragment 的 HTTPS origin"); }
+}
+
+function canonicalExecutionSpiffeId(value: string, purpose: string): string {
+  try {
+    const url = new URL(value);
+    const prefix = purpose === "AGENT_DEVELOPMENT" ? "/agent-worker/" : purpose === "E2E" ? "/runner/" : "/invalid/";
+    if (url.protocol !== "spiffe:" || !url.hostname || url.username || url.password || url.search || url.hash
+      || !url.pathname.startsWith(prefix) || url.pathname.length <= prefix.length || url.pathname.length > 200) throw new Error();
+    return url.toString();
+  } catch { throw new HttpProblem(400, "INVALID_EXECUTION_NODE", "SPIFFE ID 与服务器用途不匹配"); }
+}
+
+function executionCapacity(value: unknown, field: string, maximum: number): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > maximum) {
+    throw new HttpProblem(400, "INVALID_EXECUTION_NODE", `${field} 超出允许范围`);
+  }
+  return Number(value);
+}
+
+async function requireLocalAdmin(request: Request): Promise<Request> {
   if (!isLoopbackTestRequest(request)) {
     throw new HttpProblem(503, "ADMIN_CONTROL_PLANE_REQUIRED", "生产管理员操作需要独立的身份认证与 Agent 控制面；本地演示存储已禁用");
   }
+  if (!platformManagedConfiguration()) return request;
+  if (isTrustedLocalScopedAgentRequest(request)) return request;
+  let account;
+  try { account = await accountPlatformSessionFromRequest(request); }
+  catch { throw new HttpProblem(401, "ADMIN_SESSION_INVALID", "需要账号平台签发的全局管理员会话"); }
+  if (!account || account.platformAdminRoles.length === 0) {
+    throw new HttpProblem(401, "ADMIN_SESSION_INVALID", "当前 Workspace 账号不是平台管理员");
+  }
+  const requestedRole = request.headers.get("x-deviludo-role");
+  const role = requestedRole && account.platformAdminRoles.includes(requestedRole as typeof account.platformAdminRoles[number])
+    ? requestedRole : account.platformAdminRoles[0]!;
+  const headers = new Headers(request.headers);
+  headers.set("x-deviludo-role", role);
+  headers.set("x-deviludo-actor-id", account.userId);
+  headers.set("x-deviludo-allowed-admin-roles", account.platformAdminRoles.join(","));
+  headers.delete("x-deviludo-tenant-id");
+  headers.delete("x-deviludo-project-id");
+  return new Request(request, { headers });
 }
 
 async function productionAdminRequest(request: Request, segments: readonly string[]): Promise<Response> {

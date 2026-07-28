@@ -40,6 +40,9 @@ test("application shell navigation is derived from authenticated capabilities an
   assert.deepEqual(tenantShellCapabilities("TenantAdmin"), ["connections:manage", "tenant-agents:manage", "invitations:manage"]);
   assert.deepEqual(tenantShellCapabilities("ProjectOwner"), ["connections:manage"]);
   assert.deepEqual(tenantShellCapabilities("Auditor"), ["connections:manage", "tenant-agents:view"]);
+  assert.deepEqual(tenantShellCapabilities("TenantAdmin", { platformManagedConfiguration: true }), ["connections:manage", "invitations:manage"]);
+  assert.deepEqual(tenantShellCapabilities("ProjectOwner", { platformManagedConfiguration: true }), ["connections:manage"]);
+  assert.deepEqual(tenantShellCapabilities("Auditor", { platformManagedConfiguration: true }), ["connections:manage"]);
   assert.deepEqual(adminShellCapabilities("PlatformAgentAdmin"), ["platform-agents:manage", "invitations:manage"]);
   assert.deepEqual(adminShellCapabilities("SecurityAdmin"), ["platform-agents:manage", "invitations:manage"]);
   assert.deepEqual(adminShellCapabilities("Auditor"), ["platform-agents:view"]);

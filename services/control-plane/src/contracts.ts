@@ -98,6 +98,25 @@ export interface InstallationRecord {
   }>;
 }
 
+export interface ExecutionNodeRecord {
+  readonly id: string;
+  readonly purpose: "AGENT_DEVELOPMENT" | "E2E";
+  readonly platform: "linux" | "windows" | "macos";
+  readonly pool: string;
+  readonly region: string;
+  readonly controlPlaneUrl: string;
+  readonly spiffeId: string;
+  readonly capacity: {
+    readonly cpuCores: number;
+    readonly memoryGiB: number;
+    readonly maxConcurrentJobs: number;
+  };
+  state: "DRAFT" | "ACTIVE" | "DRAINING" | "DISABLED";
+  readonly createdAt: string;
+  activatedAt: string | null;
+  drainingAt: string | null;
+}
+
 export interface ProviderRevisionRecord {
   readonly id: string;
   readonly revision: number;

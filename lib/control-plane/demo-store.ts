@@ -112,6 +112,25 @@ export type DemoInstallation = {
   retiredAt: string | null;
 };
 
+export type DemoExecutionNode = {
+  id: string;
+  purpose: "AGENT_DEVELOPMENT" | "E2E";
+  platform: "linux" | "windows" | "macos";
+  pool: string;
+  region: string;
+  controlPlaneUrl: string;
+  spiffeId: string;
+  capacity: {
+    cpuCores: number;
+    memoryGiB: number;
+    maxConcurrentJobs: number;
+  };
+  state: "DRAFT" | "ACTIVE" | "DRAINING" | "DISABLED";
+  createdAt: string;
+  activatedAt: string | null;
+  drainingAt: string | null;
+};
+
 export type DemoAgentVersionState = "DISCOVERED" | "VALIDATING" | "APPROVED" | "DEPRECATED" | "BLOCKED" | "REJECTED";
 
 export type DemoAgentVersionMetadata = {
@@ -139,6 +158,7 @@ export type DemoStoreState = {
   agentVersions: Record<string, DemoAgentVersionState>;
   agentVersionMetadata: Record<string, DemoAgentVersionMetadata>;
   installations: DemoInstallation[];
+  executionNodes: DemoExecutionNode[];
   rollouts: Record<string, { percent: 0 | 5 | 25 | 100; state: string; previous: number }>;
   providers: DemoProvider[];
   profiles: DemoProfile[];
@@ -152,6 +172,7 @@ export type DemoStoreState = {
     provider: number;
     profile: number;
     audit: number;
+    executionNode: number;
   };
 };
 
@@ -213,6 +234,7 @@ const initialState = (): DemoStoreState => {
       retiredAt: null,
     },
   ],
+  executionNodes: [],
   rollouts: {
     "claude-installation-214": { percent: 100, state: "ACTIVE", previous: 25 },
     "codex-installation-091": { percent: 100, state: "ACTIVE", previous: 25 },
@@ -373,7 +395,7 @@ const initialState = (): DemoStoreState => {
     },
   ],
   idempotency: {},
-  resourceSequences: { credential: 0, provider: 2, profile: 4, audit: 0 },
+  resourceSequences: { credential: 0, provider: 2, profile: 4, audit: 0, executionNode: 0 },
   });
 };
 
@@ -386,6 +408,7 @@ export function getDemoStore(): DemoStoreState {
   backfillFeedbackProjectScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
+  backfillExecutionNodes(globalStore.__deviludoDemoStore);
   backfillResourceSequences(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
 }
@@ -407,6 +430,7 @@ export function restoreDemoStore(snapshot: DemoStoreState): DemoStoreState {
   backfillFeedbackProjectScope(globalStore.__deviludoDemoStore);
   backfillVersionMetadata(globalStore.__deviludoDemoStore);
   backfillCredentialTimestamps(globalStore.__deviludoDemoStore);
+  backfillExecutionNodes(globalStore.__deviludoDemoStore);
   backfillResourceSequences(globalStore.__deviludoDemoStore);
   return globalStore.__deviludoDemoStore;
 }
@@ -423,6 +447,7 @@ export function migrateDemoStoreState(snapshot: unknown): DemoStoreState {
   backfillVersionMetadata(migrated);
   requireLegacyVersionRevalidation(migrated);
   backfillCredentialTimestamps(migrated);
+  backfillExecutionNodes(migrated);
   backfillResourceSequences(migrated);
   return migrated;
 }
@@ -567,6 +592,10 @@ function backfillCredentialTimestamps(store: DemoStoreState): void {
   }
 }
 
+function backfillExecutionNodes(store: DemoStoreState): void {
+  store.executionNodes ??= [];
+}
+
 function backfillResourceSequences(store: DemoStoreState): void {
   const current = (store as DemoStoreState & { resourceSequences?: Partial<DemoStoreState["resourceSequences"]> }).resourceSequences ?? {};
   store.resourceSequences = {
@@ -574,6 +603,7 @@ function backfillResourceSequences(store: DemoStoreState): void {
     provider: Math.max(safeSequence(current.provider), maxNumericId(store.providers, /^provider-(?:claude-code|codex-cli)-(\d+)$/), 2),
     profile: Math.max(safeSequence(current.profile), maxNumericId(store.profiles, /^profile-(?:claude-code|codex-cli)-(\d+)-r\d+$/), 4),
     audit: Math.max(safeSequence(current.audit), maxNumericId(store.audit, /^AUD-(\d+)$/)),
+    executionNode: Math.max(safeSequence(current.executionNode), maxNumericId(store.executionNodes, /^execution-node-(\d+)$/)),
   };
 }
 

@@ -10,6 +10,7 @@ import type { AdminCatalogState } from "./admin.store";
 import type {
   AgentVersionRecord,
   CredentialVersionRecord,
+  ExecutionNodeRecord,
   InstallationRecord,
   ProfileRevisionRecord,
   ProviderRevisionRecord,
@@ -49,6 +50,10 @@ const CREDENTIAL_FIELDS = Object.freeze([
   "createdAt", "familyId", "id", "label", "lastUsedAt", "maskedFingerprint", "rotatedAt", "rotation", "scope", "scopeId",
   "secretRef", "state", "version",
 ]);
+const EXECUTION_NODE_FIELDS = Object.freeze([
+  "activatedAt", "capacity", "controlPlaneUrl", "createdAt", "drainingAt", "id", "platform", "pool", "purpose", "region",
+  "spiffeId", "state",
+]);
 
 /** Rejects untyped or secret-smuggling fields before a catalog record can be projected to an administrator. */
 export function assertAdminCatalogSchema(state: AdminCatalogState): void {
@@ -61,6 +66,11 @@ export function assertAdminCatalogSchema(state: AdminCatalogState): void {
     recordKey(key, record.id, "Agent installation");
     exactFields(record, INSTALLATION_FIELDS, "Agent installation", new Set(["failure"]));
     installationRecord(record);
+  }
+  for (const [key, record] of state.executionNodes) {
+    recordKey(key, record.id, "Execution node");
+    exactFields(record, EXECUTION_NODE_FIELDS, "Execution node");
+    executionNodeRecord(record);
   }
   for (const [key, record] of state.providers) {
     recordKey(key, record.id, "Provider revision");
@@ -287,6 +297,43 @@ function installationRecord(record: InstallationRecord): void {
     digest(record.failure.evidenceDigest, "Agent failure evidence digest");
     digest(record.failure.failureReceiptDigest, "Agent failure receipt digest"); timestamp(record.failure.failedAt, "Agent failure time");
   }
+}
+
+function executionNodeRecord(record: ExecutionNodeRecord): void {
+  if (!/^execution-node-[a-f0-9-]{36}$/.test(record.id)
+    || !new Set(["AGENT_DEVELOPMENT", "E2E"]).has(record.purpose)
+    || !new Set(["linux", "windows", "macos"]).has(record.platform)
+    || record.purpose === "AGENT_DEVELOPMENT" && record.platform !== "linux"
+    || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(record.pool)
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(record.region)
+    || !new Set(["DRAFT", "ACTIVE", "DRAINING", "DISABLED"]).has(record.state)) {
+    invalid("Execution node identity or lifecycle is invalid");
+  }
+  exactFields(record.capacity, ["cpuCores", "maxConcurrentJobs", "memoryGiB"], "Execution node capacity");
+  if (!boundedInteger(record.capacity.cpuCores, 256) || !boundedInteger(record.capacity.memoryGiB, 2_048)
+    || !boundedInteger(record.capacity.maxConcurrentJobs, 64)) invalid("Execution node capacity is invalid");
+  let origin: URL;
+  let identity: URL;
+  try { origin = new URL(record.controlPlaneUrl); identity = new URL(record.spiffeId); }
+  catch { invalid("Execution node endpoint or SPIFFE identity is invalid"); }
+  const prefix = record.purpose === "AGENT_DEVELOPMENT" ? "/agent-worker/" : "/runner/";
+  if (origin!.protocol !== "https:" || origin!.username || origin!.password || origin!.search || origin!.hash || origin!.pathname !== "/"
+    || identity!.protocol !== "spiffe:" || !identity!.hostname || identity!.username || identity!.password || identity!.search || identity!.hash
+    || !identity!.pathname.startsWith(prefix) || identity!.pathname.length <= prefix.length || identity!.pathname.length > 200) {
+    invalid("Execution node endpoint or SPIFFE identity is invalid");
+  }
+  timestamp(record.createdAt, "Execution node creation time");
+  nullableTimestamp(record.activatedAt, "Execution node activation time");
+  nullableTimestamp(record.drainingAt, "Execution node draining time");
+  if ((record.state === "ACTIVE" && !record.activatedAt)
+    || (record.state === "DRAINING" && (!record.activatedAt || !record.drainingAt))
+    || (record.state === "DRAFT" && (record.activatedAt || record.drainingAt))) {
+    invalid("Execution node lifecycle timestamps are invalid");
+  }
+}
+
+function boundedInteger(value: unknown, maximum: number): boolean {
+  return Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= maximum;
 }
 
 function providerRecord(record: ProviderRevisionRecord): void {

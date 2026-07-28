@@ -140,7 +140,7 @@ export function resolveAdminControlPlanePath(methodInput: string, segments: read
   const exact = method === "GET"
     ? new Set(["agents", "agent-health", "audit"])
     : method === "POST"
-      ? new Set(["agent-versions/discover", "agent-versions/approve", "agent-versions/block", "agent-versions/deprecate", "agent-installations", "agent-profiles", "credentials"])
+      ? new Set(["agent-versions/discover", "agent-versions/approve", "agent-versions/block", "agent-versions/deprecate", "agent-installations", "agent-profiles", "credentials", "execution-nodes"])
       : new Set<string>();
   const dynamic = method === "GET"
     ? (/^inference-runs\/([a-f0-9-]+)\/([a-f0-9-]+)\/reconciliation$/i.test(key)
@@ -152,6 +152,7 @@ export function resolveAdminControlPlanePath(methodInput: string, segments: read
         || /^agent-installations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:drain|retire)$/.test(key)
         || /^agent-profiles\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:validate|activate|disable|rebind-installation)$/.test(key)
         || /^credentials\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:rotate|revoke)$/.test(key)
+        || /^execution-nodes\/[A-Za-z0-9][A-Za-z0-9._:-]{0,179}\/(?:activate|drain|disable)$/.test(key)
         || /^inference-requests\/[a-f0-9-]{36}\/reconcile$/i.test(key)
         || /^spec-model-generations\/[a-f0-9]{64}\/reconcile$/i.test(key)
       : method === "PUT" && /^agent-defaults\/(?:platform|(?:tenant|project):[A-Za-z0-9][A-Za-z0-9_-]{0,159})$/.test(key);

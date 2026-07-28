@@ -7,6 +7,7 @@ import type {
   AgentVersionRecord,
   AuditRecord,
   CredentialVersionRecord,
+  ExecutionNodeRecord,
   InstallationRecord,
   ProfileRevisionRecord,
   ProviderRevisionRecord,
@@ -25,6 +26,7 @@ import { validatePayload } from "./admin-idempotency";
 interface CatalogPayload {
   readonly versions: readonly AgentVersionRecord[];
   readonly installations: readonly InstallationRecord[];
+  readonly executionNodes?: readonly ExecutionNodeRecord[];
   readonly providers: readonly ProviderRevisionRecord[];
   readonly profiles: readonly ProfileRevisionRecord[];
   readonly credentials: readonly CredentialVersionRecord[];
@@ -328,6 +330,7 @@ function serializeCatalog(state: AdminCatalogState): CatalogPayload {
   return Object.freeze({
     versions: Object.freeze([...state.versions.values()]),
     installations: Object.freeze([...state.installations.values()]),
+    executionNodes: Object.freeze([...state.executionNodes.values()]),
     providers: Object.freeze([...state.providers.values()]),
     profiles: Object.freeze([...state.profiles.values()]),
     credentials: Object.freeze([...state.credentials.values()]),
@@ -343,6 +346,7 @@ function deserializeCatalog(value: unknown, audit: readonly AuditRecord[]): Admi
   for (const version of state.versions.values()) normalizeAgentVersionCompatibility(version);
   loadRecords(payload.installations, state.installations, "installation");
   for (const installation of state.installations.values()) normalizeInstallationActivation(installation);
+  loadRecords(payload.executionNodes ?? [], state.executionNodes, "execution node");
   loadRecords(payload.providers, state.providers, "provider");
   loadRecords(payload.profiles, state.profiles, "profile");
   loadRecords(payload.credentials, state.credentials, "credential");

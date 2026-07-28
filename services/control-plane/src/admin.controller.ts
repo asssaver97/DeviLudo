@@ -45,6 +45,25 @@ export class AdminController {
     return this.service.createInstallation(objectBody(body), actor(request));
   }
 
+  createExecutionNode(body: Record<string, unknown>, request: FastifyRequest) {
+    return this.service.createExecutionNode(objectBody(body), actor(request));
+  }
+
+  activateExecutionNode(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
+    return this.service.transitionExecutionNode(id, "activate", actor(request));
+  }
+
+  drainExecutionNode(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
+    return this.service.transitionExecutionNode(id, "drain", actor(request));
+  }
+
+  disableExecutionNode(id: string, body: Record<string, unknown>, request: FastifyRequest) {
+    assertAllowedFields(objectBody(body), []);
+    return this.service.transitionExecutionNode(id, "disable", actor(request));
+  }
+
   advanceRollout(id: string, body: Record<string, unknown>, request: FastifyRequest) {
     assertAllowedFields(objectBody(body), []);
     return this.service.rollout(id, "advance", actor(request));
@@ -148,6 +167,10 @@ applyRoute("approveVersion", Post("agent-versions/approve"), ["PlatformAgentAdmi
 applyRoute("blockVersion", Post("agent-versions/block"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("deprecateVersion", Post("agent-versions/deprecate"), ["PlatformAgentAdmin"], [Body(), Req()]);
 applyRoute("createInstallation", Post("agent-installations"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("createExecutionNode", Post("execution-nodes"), ["PlatformAgentAdmin"], [Body(), Req()]);
+applyRoute("activateExecutionNode", Post("execution-nodes/:id/activate"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("drainExecutionNode", Post("execution-nodes/:id/drain"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
+applyRoute("disableExecutionNode", Post("execution-nodes/:id/disable"), ["SecurityAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("advanceRollout", Post("agent-rollouts/:id/advance"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("rollbackRollout", Post("agent-rollouts/:id/rollback"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);
 applyRoute("drainInstallation", Post("agent-installations/:id/drain"), ["PlatformAgentAdmin"], [Param("id"), Body(), Req()]);

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./AppShell";
 import { CheckIcon, GamepadIcon, ShieldIcon } from "./Icons";
@@ -29,13 +28,19 @@ export function ProjectAgentSettings({ projectId }: { projectId: string }) {
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [selected, setSelected] = useState("");
   const [configurationSource, setConfigurationSource] = useState("等待解析");
+  const [platformManaged, setPlatformManaged] = useState(false);
   const [notice, setNotice] = useState("正在校验项目权限…");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/agent-settings`, { headers: { accept: "application/json" } });
+    const [response, sessionResponse] = await Promise.all([
+      fetch(`/api/projects/${encodeURIComponent(projectId)}/agent-settings`, { headers: { accept: "application/json" } }),
+      fetch("/api/auth/session", { headers: { accept: "application/json" } }),
+    ]);
     const payload = await response.json() as { data?: AgentData | Array<unknown>; meta?: AgentData; error?: { message?: string } };
     if (!response.ok) throw new Error(payload.error?.message ?? "无法读取项目 Agent 设置");
+    const sessionPayload = await sessionResponse.json() as { data?: { configurationOwnership?: string } };
+    setPlatformManaged(sessionPayload.data?.configurationOwnership === "platform");
     const data: AgentData = Array.isArray(payload.data) ? payload.meta ?? {} : payload.data ?? {};
     const tenantSource = Object.keys(data.defaults ?? {}).find((scope) => scope.startsWith("tenant:"));
     const active = (data.profiles ?? []).filter((profile) => profile.state === "ACTIVE"
@@ -85,8 +90,8 @@ export function ProjectAgentSettings({ projectId }: { projectId: string }) {
         <div className="settings-card-title"><div><span className="step-number">A</span><h2>有效配置</h2></div><span>项目最高优先级</span></div>
         <div className="effective-agent"><span>{current?.agent === "codex-cli" ? "CX" : "CL"}</span><div><small>当前选择</small><h3>{current?.agent === "codex-cli" ? "Codex CLI" : "Claude Code"}</h3><code>{current?.id ?? "等待配置"}</code></div></div>
         <dl className="effective-lock-grid">
-          <div><dt>Installation</dt><dd>{currentInstallation ? `${currentInstallation.version ?? "固定版本"} · ${currentInstallation.id}` : "等待锁定"}</dd></div>
-          <div><dt>Provider</dt><dd>{currentProvider ? `${currentProvider.protocol} · ${providerHost(currentProvider.baseUrl)}` : "等待锁定"}</dd></div>
+          {!platformManaged && <div><dt>Installation</dt><dd>{currentInstallation ? `${currentInstallation.version ?? "固定版本"} · ${currentInstallation.id}` : "等待锁定"}</dd></div>}
+          {!platformManaged && <div><dt>Provider</dt><dd>{currentProvider ? `${currentProvider.protocol} · ${providerHost(currentProvider.baseUrl)}` : "等待锁定"}</dd></div>}
           <div><dt>模型角色</dt><dd>{currentProvider ? `primary ${currentProvider.models.primaryModel} · planning ${currentProvider.models.planningModel} · fast ${currentProvider.models.smallFastModel} · subagent ${currentProvider.models.subagentModel}` : "等待锁定"}</dd></div>
           <div><dt>预算 / 超时</dt><dd>{current ? `$${current.budget.maxUsd} · ${current.budget.maxTurns} turns · ${current.budget.timeoutSeconds}s` : "等待锁定"}</dd></div>
         </dl>
@@ -96,11 +101,11 @@ export function ProjectAgentSettings({ projectId }: { projectId: string }) {
         <div className="settings-card-title"><div><span className="step-number">B</span><h2>选择 Profile</h2></div><span>{profiles.length} 项可用</span></div>
         <div className="project-profile-options">{profiles.map((profile) => {
           const provider = providers.find((item) => item.id === profile.providerRevisionId);
-          return <label className={selected === profile.id ? "selected" : ""} key={profile.id}><input checked={selected === profile.id} name="profile" onChange={() => setSelected(profile.id)} type="radio" /><span><b>{profile.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</b><small>{profile.scope} · {profile.installationId} · ${profile.budget.maxUsd} / {profile.budget.maxTurns} turns</small><code>{provider?.models.primaryModel ?? "Provider revision 不可见"} · {profile.id}</code></span><i>{profile.state}</i></label>;
+          return <label className={selected === profile.id ? "selected" : ""} key={profile.id}><input checked={selected === profile.id} name="profile" onChange={() => setSelected(profile.id)} type="radio" /><span><b>{profile.agent === "claude-code" ? "Claude Code" : "Codex CLI"}</b><small>{platformManaged ? `${profile.scope} · $${profile.budget.maxUsd} / ${profile.budget.maxTurns} turns` : `${profile.scope} · ${profile.installationId} · $${profile.budget.maxUsd} / ${profile.budget.maxTurns} turns`}</small><code>{provider?.models.primaryModel ?? "模型由平台托管"}{platformManaged ? "" : ` · ${profile.id}`}</code></span><i>{profile.state}</i></label>;
         })}</div>
         <button className="button button-primary project-profile-save" disabled={busy || !selected} onClick={save} type="button">{busy ? "正在锁定…" : "保存项目选择"}</button>
       </section>
-      <aside className="project-agent-note"><ShieldIcon /><div><b>凭据隔离不变</b><p>这里保存的只是不可变 Profile revision ID。源码、CLI 配置和项目成员都无法得到长期上游 Key。</p><Link href="/settings/agents">由 TenantAdmin 管理 Provider →</Link></div></aside>
+      <aside className="project-agent-note"><ShieldIcon /><div><b>凭据隔离不变</b><p>这里保存的只是不可变 Profile revision ID。源码、CLI 配置和项目成员都无法得到长期上游 Key。</p>{platformManaged ? <span>API Key、Base URL 与执行服务器均由 DeviLudo Platform 管理员集中配置。</span> : null}</div></aside>
     </div>
   </AppShell>;
 }

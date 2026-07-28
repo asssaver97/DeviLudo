@@ -259,6 +259,58 @@ paths:
       responses:
         "201": { $ref: "#/components/responses/Ok" }
         "409": { description: Agent version is unapproved, lacks an Adapter compatibility attestation, or does not attest the requested Adapter. }
+  /admin/execution-nodes:
+    post:
+      operationId: createExecutionNode
+      description: Registers an Agent development or E2E server by outbound mTLS workload identity. SSH passwords, cloud credentials and inbound administration endpoints are not accepted.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecutionNodeDraft" }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+        "409": { description: The SPIFFE identity is already bound to a non-disabled node. }
+  /admin/execution-nodes/{id}/activate:
+    post:
+      operationId: activateExecutionNode
+      description: SecurityAdmin approves the expected SPIFFE identity and activates a DRAFT node.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/execution-nodes/{id}/drain:
+    post:
+      operationId: drainExecutionNode
+      description: Stops new assignments while jobs holding a valid lease continue on the node.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+  /admin/execution-nodes/{id}/disable:
+    post:
+      operationId: disableExecutionNode
+      description: SecurityAdmin disables a DRAFT or fully drained node. An ACTIVE node must be drained first.
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyObject" }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
   /admin/agent-rollouts/{id}/advance:
     post:
       operationId: advanceAgentRollout
@@ -1200,6 +1252,23 @@ components:
         - properties:
             agent: { const: codex-cli }
             adapterVersion: { const: "1.2.2" }
+    ExecutionNodeDraft:
+      type: object
+      additionalProperties: false
+      required: [purpose, platform, pool, region, controlPlaneUrl, spiffeId, cpuCores, memoryGiB, maxConcurrentJobs]
+      properties:
+        purpose: { type: string, enum: [AGENT_DEVELOPMENT, E2E] }
+        platform: { type: string, enum: [linux, windows, macos] }
+        pool: { type: string, pattern: "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$", maxLength: 64 }
+        region: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$", maxLength: 80 }
+        controlPlaneUrl: { type: string, format: uri, pattern: "^https://" }
+        spiffeId: { type: string, pattern: "^spiffe://" }
+        cpuCores: { type: integer, minimum: 1, maximum: 256 }
+        memoryGiB: { type: integer, minimum: 1, maximum: 2048 }
+        maxConcurrentJobs: { type: integer, minimum: 1, maximum: 64 }
+      allOf:
+        - if: { properties: { purpose: { const: AGENT_DEVELOPMENT } } }
+          then: { properties: { platform: { const: linux } } }
     AgentProfileSelection:
       type: object
       additionalProperties: false
@@ -1209,8 +1278,12 @@ components:
     AgentSettingsProjection:
       type: object
       additionalProperties: false
-      required: [catalog, platformDefault, effectivePlatformDefaultAgent, selectionPrecedence, pinnedVersionsOnly, profiles, providers, credentials, defaults]
+      required: [catalog, platformDefault, effectivePlatformDefaultAgent, selectionPrecedence, pinnedVersionsOnly, executionNodes, profiles, providers, credentials, defaults]
       properties:
+        executionNodes:
+          type: array
+          description: Global-only execution server projection. Tenant and project sessions receive an empty array.
+          items: { type: object, additionalProperties: true }
         catalog:
           type: array
           maxItems: 2

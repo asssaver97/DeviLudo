@@ -8,6 +8,7 @@ export type ShellCapability =
 
 export type TenantShellRole = "TenantAdmin" | "ProjectOwner" | "Auditor";
 export type AdminShellRole = "PlatformAgentAdmin" | "SecurityAdmin" | "Auditor";
+export type TenantShellCapabilityOptions = Readonly<{ platformManagedConfiguration?: boolean }>;
 
 export const LOCAL_SHELL_CAPABILITIES: readonly ShellCapability[] = Object.freeze([
   "connections:manage",
@@ -16,7 +17,11 @@ export const LOCAL_SHELL_CAPABILITIES: readonly ShellCapability[] = Object.freez
   "platform-agents:manage",
 ]);
 
-export function tenantShellCapabilities(role: TenantShellRole): readonly ShellCapability[] {
+export function tenantShellCapabilities(role: TenantShellRole, options: TenantShellCapabilityOptions = {}): readonly ShellCapability[] {
+  if (options.platformManagedConfiguration) {
+    if (role === "TenantAdmin") return Object.freeze(["connections:manage", "invitations:manage"]);
+    return Object.freeze(["connections:manage"]);
+  }
   if (role === "TenantAdmin") {
     return Object.freeze(["connections:manage", "tenant-agents:manage", "invitations:manage"]);
   }

@@ -2,6 +2,8 @@ import { adminControlPlaneBrokerFromEnvironment, type ControlPlaneAdminPrincipal
 import { HttpProblem, json } from "@/lib/control-plane/http";
 import { ScopedAgentAccessProblem } from "@/lib/admin/scoped-agent-access";
 
+const LOCAL_SCOPED_AGENT_REQUESTS = new WeakSet<Request>();
+
 export async function forwardScopedAgentRequest(
   request: Request,
   downstreamPath: string,
@@ -57,11 +59,18 @@ export function localAdminRequest(
   const idempotency = request.headers.get("idempotency-key");
   if (idempotency) headers.set("idempotency-key", idempotency);
   if (request.method !== "GET") headers.set("content-type", "application/json");
-  return new Request(url, {
+  const downstream = new Request(url, {
     method: request.method,
     headers,
     ...(request.method !== "GET" ? { body: JSON.stringify(body ?? {}) } : {}),
   });
+  LOCAL_SCOPED_AGENT_REQUESTS.add(downstream);
+  return downstream;
+}
+
+/** In-process capability: unlike an HTTP header, a browser cannot forge WeakSet membership. */
+export function isTrustedLocalScopedAgentRequest(request: Request): boolean {
+  return LOCAL_SCOPED_AGENT_REQUESTS.has(request);
 }
 
 function sameOrigin(request: Request): boolean {

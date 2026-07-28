@@ -22,6 +22,8 @@ export async function verifyTrustedAdminPrincipal(
 ): Promise<TrustedAdminPrincipal> {
   const url = new URL(request.url);
   if (url.search || !ADMIN_PATH.test(url.pathname) || url.pathname.includes("..") || url.pathname.includes("//")) invalid();
+  const accountPrincipal = await accountPlatformAdminPrincipal(request, env);
+  if (accountPrincipal) return accountPrincipal;
   return verifyTrustedAdminAssertion(request, env, now, url.pathname);
 }
 
@@ -33,7 +35,23 @@ export async function verifyTrustedAdminBrowserSession(
 ): Promise<TrustedAdminPrincipal> {
   const url = new URL(request.url);
   if (request.method !== "GET" || url.search || url.pathname !== ADMIN_SESSION_PATH) invalid();
+  const accountPrincipal = await accountPlatformAdminPrincipal(request, env);
+  if (accountPrincipal) return accountPrincipal;
   return verifyTrustedAdminAssertion(request, env, now, ADMIN_SESSION_PATH);
+}
+
+async function accountPlatformAdminPrincipal(
+  request: Request,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<TrustedAdminPrincipal | null> {
+  if (!platformManagedConfiguration(env)) return null;
+  const session = await accountPlatformSessionFromRequest(request);
+  if (!session || session.platformAdminRoles.length === 0) invalid();
+  const requested = request.headers.get("x-deviludo-role");
+  const role = requested && session.platformAdminRoles.includes(requested as TrustedAdminPrincipal["role"])
+    ? requested as TrustedAdminPrincipal["role"]
+    : session.platformAdminRoles[0]!;
+  return Object.freeze({ role, actorId: session.userId, sessionId: session.sessionBinding, tenantId: null, projectId: null });
 }
 
 async function verifyTrustedAdminAssertion(
@@ -82,3 +100,5 @@ export function requireInvitationTenant(value: unknown): string {
 function header(request: Request, name: string): string { const value = request.headers.get(name); if (!value || value.length > 200 || /[\u0000-\u001f\u007f]/.test(value)) invalid(); return value; }
 function arrayBuffer(value: Uint8Array): ArrayBuffer { return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer; }
 function invalid(): never { throw new Error("Administrator session assertion is invalid"); }
+import { accountPlatformSessionFromRequest } from "@/lib/auth/account-platform";
+import { platformManagedConfiguration } from "@/lib/config/platform-managed";

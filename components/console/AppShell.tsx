@@ -19,9 +19,10 @@ type ShellAccount = {
   displayName: string;
   githubLogin: string;
   role: string;
-  authMode: "github-invite" | "trusted-admin" | "local-fixture";
+  authMode: "github-invite" | "trusted-admin" | "local-fixture" | "account-platform" | "account-platform-admin";
   canSignOut: boolean;
   capabilities: readonly ShellCapability[];
+  configurationOwnership?: "workspace" | "platform";
 };
 type HealthState = "checking" | "ok" | "degraded";
 

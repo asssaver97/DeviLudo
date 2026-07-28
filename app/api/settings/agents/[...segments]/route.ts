@@ -3,6 +3,7 @@ import { assertAllowedBodyFields, bodyObject, json } from "@/lib/control-plane/h
 import { forwardScopedAgentRequest, localAdminRequest, rewrittenJsonRequest, scopedAccessProblem } from "@/lib/admin/scoped-agent-proxy";
 import { tenantAgentPrincipal } from "@/lib/admin/scoped-agent-access";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { platformManagedConfiguration } from "@/lib/config/platform-managed";
 
 type Context = { params: Promise<{ segments: string[] }> };
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
@@ -15,6 +16,7 @@ const TENANT_PROFILE_DRAFT_FIELDS = Object.freeze([
 ]);
 
 export async function POST(request: Request, context: Context) {
+  if (platformManagedConfiguration()) return managedByPlatform();
   try {
     const principal = await tenantAgentPrincipal(request);
     if (principal.role === "Auditor") return forbidden();
@@ -60,6 +62,7 @@ export async function POST(request: Request, context: Context) {
 }
 
 export async function PUT(request: Request, context: Context) {
+  if (platformManagedConfiguration()) return managedByPlatform();
   try {
     const principal = await tenantAgentPrincipal(request);
     if (principal.role === "Auditor") return forbidden();
@@ -81,3 +84,4 @@ export async function PUT(request: Request, context: Context) {
 
 function forbidden(): Response { return json({ error: { code: "FORBIDDEN", message: "审计账号只能查看配置。" } }, { status: 403 }); }
 function notFound(): Response { return json({ error: { code: "AGENT_SETTINGS_ROUTE_NOT_FOUND", message: "该租户 Agent 配置操作未开放。" } }, { status: 404 }); }
+function managedByPlatform(): Response { return json({ error: { code: "PLATFORM_MANAGED_CONFIGURATION", message: "Agent Provider 与凭据由平台统一管理。" } }, { status: 404 }); }
