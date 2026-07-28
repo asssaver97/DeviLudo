@@ -14,6 +14,7 @@ import {
   requirementsDialogueScaleDecision,
   runnerSlotLimit,
 } from "../lib/runtime/capacity-policy.ts";
+import { decideP0FleetCapacity, mayReleaseMacHost, P0_FLEET_POLICY } from "../lib/runtime/fleet-capacity.ts";
 
 test("Agent microVM resource classes are fixed at 2C4G, 4C8G and 8C16G", () => {
   assert.deepEqual(AGENT_RESOURCE_CLASSES, {
@@ -26,6 +27,37 @@ test("Agent microVM resource classes are fixed at 2C4G, 4C8G and 8C16G", () => {
   assert.equal(MULTITENANT_CAPACITY_POLICY.cpuSchedulingRatio, 1.5);
   assert.equal(MULTITENANT_CAPACITY_POLICY.memorySchedulingRatio, 1);
   assert.equal(MULTITENANT_CAPACITY_POLICY.targetStandardEquivalentConcurrency, 28);
+  assert.deepEqual(MULTITENANT_CAPACITY_POLICY.agentInteractiveReserve, { minimumSlots: 2, resourceFraction: .20 });
+});
+
+test("P0 fleet keeps Agent, Linux and Windows warm while Mac follows a non-bypassable 24 hour window", () => {
+  const at = new Date("2030-01-01T00:00:00.000Z");
+  const result = decideP0FleetCapacity({
+    queued: { AGENT: 0, LINUX: 0, WINDOWS: 0, MACOS: 1 },
+    running: { AGENT: 0, LINUX: 0, WINDOWS: 0, MACOS: 0 },
+    onlineHosts: { AGENT: 1, LINUX: 1, WINDOWS: 1, MACOS: 0 },
+    gpuQueued: { linux: 1, windows: 2 }, macReleaseEligible: false,
+  }, at);
+  assert.deepEqual(result.decisions.map(({ fleet, desiredHosts }) => [fleet, desiredHosts]), [
+    ["AGENT", 1], ["LINUX", 1], ["WINDOWS", 1], ["MACOS", 1],
+  ]);
+  const mac = result.decisions.find(({ fleet }) => fleet === "MACOS");
+  assert.equal(mac.minimumReleaseAt, "2030-01-02T00:00:00.000Z");
+  assert.equal(mayReleaseMacHost(mac.minimumReleaseAt, new Date("2030-01-01T23:59:59.999Z")), false);
+  assert.equal(mayReleaseMacHost(mac.minimumReleaseAt, new Date("2030-01-02T00:00:00.000Z")), true);
+  assert.deepEqual(result.unschedulableCapabilities, ["linux:GPU", "windows:GPU"]);
+  assert.deepEqual(P0_FLEET_POLICY.agentInteractiveReserve, { minimumSlots: 2, resourceFraction: .20 });
+});
+
+test("P0 fleet drains an eligible idle Mac but never scales Agent below one EBM", () => {
+  const result = decideP0FleetCapacity({
+    queued: { AGENT: 0, LINUX: 0, WINDOWS: 0, MACOS: 0 },
+    running: { AGENT: 0, LINUX: 0, WINDOWS: 0, MACOS: 0 },
+    onlineHosts: { AGENT: 1, LINUX: 1, WINDOWS: 1, MACOS: 1 },
+    gpuQueued: { linux: 0, windows: 0 }, macReleaseEligible: true,
+  }, new Date("2030-01-02T00:00:00.000Z"));
+  assert.equal(result.decisions.find(({ fleet }) => fleet === "AGENT").desiredHosts, 1);
+  assert.equal(result.decisions.find(({ fleet }) => fleet === "MACOS").desiredHosts, 0);
 });
 
 test("fair scheduling caps each workspace at two Agent tasks and one exclusive E2E task", () => {
@@ -102,4 +134,15 @@ test("PostgreSQL derives immutable shared queue priority and leases with aging/b
   assert.match(ingress, /attempt\.queue_priority/);
   assert.match(ingress, /attempt\.estimated_duration_seconds/);
   assert.match(ingress, /FOR UPDATE OF attempt SKIP LOCKED/);
+});
+
+test("PostgreSQL persists idempotent fleet intent and enforces the Mac allocation floor", async () => {
+  const migration = await readFile(new URL("../infra/postgres/069_fleet_capacity_control.sql", import.meta.url), "utf8");
+  assert.match(migration, /fleet_capacity_intents/);
+  assert.match(migration, /runner_host_leases/);
+  assert.match(migration, /minimum_release_at >= requested_at \+ interval '24 hours'/);
+  assert.match(migration, /fleet capacity intent binding is immutable/);
+  assert.match(migration, /terminal runner host lease is immutable/);
+  assert.match(migration, /REVOKE ALL ON deviludo\.fleet_capacity_intents FROM PUBLIC/);
+  assert.doesNotMatch(migration, /api_key|access_token|session_token|private_key/i);
 });

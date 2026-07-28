@@ -38,6 +38,9 @@ test("production browser surface is documented with trusted cookie authenticatio
     assert.match(operation, /^      security: \[\{ cookieAuth: \[\] \}\]$/m, `${method.toUpperCase()} ${path}`);
   }
   assert.match(operationBlock("/health", "get"), /^      security: \[\]$/m);
+  for (const path of ["/health/live", "/health/bootstrap", "/health/ready", "/health/public-ready"]) {
+    assert.match(operationBlock(path, "get"), /^      security: \[\]$/m, path);
+  }
 });
 
 test("session contract separates invited GitHub logout from the trusted administrator shell projection", () => {

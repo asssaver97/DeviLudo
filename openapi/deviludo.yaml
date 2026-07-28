@@ -8,6 +8,37 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /health/live:
+    get:
+      operationId: getProcessLiveness
+      description: Reports only that the Web process can serve requests; it never implies dependency readiness.
+      security: []
+      responses:
+        "200": { description: Web process is alive. }
+  /health/bootstrap:
+    get:
+      operationId: getBootstrapReadiness
+      description: Reports whether the deployment can be bootstrapped and configured without requiring an active Provider.
+      security: []
+      responses:
+        "200": { description: Bootstrap dependencies are ready. }
+        "503": { description: One or more bootstrap dependencies are blocked. }
+  /health/ready:
+    get:
+      operationId: getOperationalReadiness
+      description: Reports deployment-profile-aware operational readiness. Local P0 requires a verified primary Claude Profile.
+      security: []
+      responses:
+        "200": { description: The selected deployment profile is operational. }
+        "503": { description: The selected deployment profile is blocked. }
+  /health/public-ready:
+    get:
+      operationId: getPublicProductReadiness
+      description: Fails closed until the public domain, DNS, TLS and external integrations are explicitly enabled.
+      security: []
+      responses:
+        "200": { description: The complete public product is ready. }
+        "503": { description: An external approval or dependency is still required. }
   /health:
     get:
       operationId: getControlPlaneReadiness

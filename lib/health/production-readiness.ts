@@ -13,6 +13,7 @@ const DEFAULT_HEALTH_TIMEOUT_MS = 2_000;
 
 export type ProductionDependencyStatus =
   | "READY"
+  | "NOT_REQUIRED"
   | "NOT_CONFIGURED"
   | "INVALID_CONFIGURATION"
   | "UNAVAILABLE"
@@ -45,6 +46,7 @@ type ProbeCache = Map<string, Promise<ProductionDependencyStatus>>;
 export interface ProductionReadinessOptions {
   readonly fetch?: FetchLike;
   readonly timeoutMs?: number;
+  readonly profile?: "P0_INTERNAL" | "FULL";
 }
 
 const IDENTITY_HEALTH = Object.freeze({ status: "ok", service: "deviludo-identity-broker" });
@@ -70,6 +72,7 @@ export async function evaluateProductionWebReadiness(
     throw new Error("Production readiness timeout is invalid");
   }
   const fetcher = options.fetch ?? fetch;
+  const profile = options.profile ?? (env.DEVILUDO_DEPLOYMENT_PROFILE === "P0_INTERNAL" ? "P0_INTERNAL" : "FULL");
   const probes: ProbeCache = new Map();
   const [
     identityBroker,
@@ -86,15 +89,15 @@ export async function evaluateProductionWebReadiness(
   ] = await Promise.all([
     dependencyStatus(() => identityBrokerFromEnvironment(env), env.DEVILUDO_IDENTITY_BROKER_URL, IDENTITY_HEALTH, fetcher, timeoutMs, probes),
     dependencyStatus(() => identityAdminBrokerFromEnvironment(env), env.DEVILUDO_IDENTITY_ADMIN_BROKER_URL, IDENTITY_HEALTH, fetcher, timeoutMs, probes),
-    dependencyStatus(() => githubBrokerRuntimeFromEnvironment(env), env.DEVILUDO_GITHUB_AUTH_BROKER_URL, GITHUB_HEALTH, fetcher, timeoutMs, probes),
-    dependencyStatus(() => projectRepositoryBrokerFromEnvironment(env), env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL, PROJECT_REPOSITORY_HEALTH, fetcher, timeoutMs, probes),
+    profile === "P0_INTERNAL" ? Promise.resolve("NOT_REQUIRED" as const) : dependencyStatus(() => githubBrokerRuntimeFromEnvironment(env), env.DEVILUDO_GITHUB_AUTH_BROKER_URL, GITHUB_HEALTH, fetcher, timeoutMs, probes),
+    profile === "P0_INTERNAL" ? Promise.resolve("NOT_REQUIRED" as const) : dependencyStatus(() => projectRepositoryBrokerFromEnvironment(env), env.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL, PROJECT_REPOSITORY_HEALTH, fetcher, timeoutMs, probes),
     dependencyStatus(() => specDialogueBrokerRuntimeFromEnvironment(env), env.DEVILUDO_SPEC_DIALOGUE_BROKER_URL, SPEC_DIALOGUE_HEALTH, fetcher, timeoutMs, probes),
     dependencyStatus(() => userAcceptanceBrokerFromEnvironment(env), env.DEVILUDO_USER_ACCEPTANCE_BROKER_URL, USER_ACCEPTANCE_HEALTH, fetcher, timeoutMs, probes),
     dependencyStatus(() => deliveryProjectionBrokerFromEnvironment(env), env.DEVILUDO_DELIVERY_PROJECTION_BROKER_URL, DELIVERY_PROJECTION_HEALTH, fetcher, timeoutMs, probes),
     dependencyStatus(() => adminControlPlaneBrokerFromEnvironment(env), env.DEVILUDO_ADMIN_CONTROL_PLANE_BROKER_URL, ADMIN_CONTROL_PLANE_HEALTH, fetcher, timeoutMs, probes),
-    dependencyStatus(() => steamEnrollmentRuntimeFromEnvironment(env), env.DEVILUDO_STEAM_ENROLLMENT_BROKER_URL, STEAM_ACCESS_HEALTH, fetcher, timeoutMs, probes),
-    dependencyStatus(() => steamEnrollmentRuntimeFromEnvironment(env), env.DEVILUDO_STEAM_ENROLLMENT_BROKER_URL, STEAM_ACCESS_HEALTH, fetcher, timeoutMs, probes),
-    dependencyStatus(() => releaseAuthorizationRuntimeFromEnvironment(env), env.DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL, STEAM_ACCESS_HEALTH, fetcher, timeoutMs, probes),
+    profile === "P0_INTERNAL" ? Promise.resolve("NOT_REQUIRED" as const) : dependencyStatus(() => steamEnrollmentRuntimeFromEnvironment(env), env.DEVILUDO_STEAM_ENROLLMENT_BROKER_URL, STEAM_ACCESS_HEALTH, fetcher, timeoutMs, probes),
+    profile === "P0_INTERNAL" ? Promise.resolve("NOT_REQUIRED" as const) : dependencyStatus(() => steamEnrollmentRuntimeFromEnvironment(env), env.DEVILUDO_STEAM_ENROLLMENT_BROKER_URL, STEAM_ACCESS_HEALTH, fetcher, timeoutMs, probes),
+    profile === "P0_INTERNAL" ? Promise.resolve("NOT_REQUIRED" as const) : dependencyStatus(() => releaseAuthorizationRuntimeFromEnvironment(env), env.DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL, STEAM_ACCESS_HEALTH, fetcher, timeoutMs, probes),
   ]);
   const dependencies = Object.freeze({
     identityBroker,
@@ -110,7 +113,7 @@ export async function evaluateProductionWebReadiness(
     releaseAuthorizationBroker,
   });
   return Object.freeze({
-    ready: Object.values(dependencies).every((status) => status === "READY"),
+    ready: Object.values(dependencies).every((status) => status === "READY" || status === "NOT_REQUIRED"),
     dependencies,
   });
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ServiceUnavailableException } from "@nestjs/common";
 import { HealthController } from "../src/health.controller";
+import { InMemoryAdminStore } from "../src/admin.store";
 
 const dependencyNames = [
   "admin-store",
@@ -57,4 +58,24 @@ test("Agent administration readiness fails closed when any authoritative depende
         error instanceof ServiceUnavailableException && error.getStatus() === 503);
     });
   }
+});
+
+test("P0 profile readiness accepts an exact Claude model while rejecting a missing platform default", async () => {
+  const store = new InMemoryAdminStore();
+  const controller = new HealthController(store, {} as never, {} as never, {} as never, {} as never, {} as never);
+  assert.deepEqual(await controller.p0Profile(), {
+    schemaVersion: "deviludo.agent-profile-readiness.v1",
+    status: "ready",
+    agent: "claude-code",
+    cliVersion: "2.1.14",
+    model: "claude-sonnet-4-6-20250514",
+    profileState: "READY",
+    providerState: "READY",
+    credentialState: "ACTIVE",
+    installationState: "ACTIVE",
+    workerState: "READY",
+  });
+  await store.mutate((state) => state.defaults.delete("platform"));
+  await assert.rejects(controller.p0Profile(), (error: unknown) =>
+    error instanceof ServiceUnavailableException && error.getStatus() === 503);
 });

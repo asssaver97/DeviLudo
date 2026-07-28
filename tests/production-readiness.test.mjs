@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { evaluateProductionWebReadiness } from "../lib/health/production-readiness.ts";
+import { evaluateProductionP0OperationalReadiness } from "../lib/health/production-p0-readiness.ts";
 
 const SESSION_KEY = Buffer.alloc(32, 7).toString("base64url");
 const ADMIN_KEY = Buffer.alloc(32, 9).toString("base64");
@@ -17,6 +18,12 @@ const HEALTH_BY_HOST = Object.freeze({
   "admin-control-plane.internal": { status: "ok", service: "deviludo-admin-control-plane" },
   "steam-enrollment.internal": { schemaVersion: "deviludo.steam-access-health.v1", status: "ok" },
   "release-authorization.internal": { schemaVersion: "deviludo.steam-access-health.v1", status: "ok" },
+  "p0-runtime.internal": {
+    schemaVersion: "deviludo.p0-runtime-readiness.v1", status: "ready",
+    claudeAgent: "claude-code", claudeCliVersion: "2.1.201", claudeModel: "claude-opus-4-1-20250805", claudeProfile: "READY",
+    agentFleet: "READY", linuxFleet: "READY", windowsFleet: "READY", macCapacity: "ON_DEMAND_READY",
+    inferenceGateway: "READY", artifactStore: "READY", vault: "READY", migrations: "READY",
+  },
 });
 
 function configuredEnvironment() {
@@ -67,6 +74,41 @@ test("production Web readiness requires the complete live idea-to-Steam broker s
   assert.equal(calls.length, 10, "the shared Steam enrollment/configuration origin is probed once");
   assert.equal(calls.every(({ url }) => url.pathname === "/healthz" && url.protocol === "https:"), true);
   assert.equal(calls.every(({ init }) => init.method === "GET" && init.redirect === "error" && init.signal instanceof AbortSignal), true);
+});
+
+test("P0 internal readiness excludes GitHub and Steam without silently declaring the public product ready", async () => {
+  const environment = configuredEnvironment();
+  delete environment.DEVILUDO_GITHUB_AUTH_BROKER_URL;
+  delete environment.DEVILUDO_PROJECT_REPOSITORY_BROKER_URL;
+  delete environment.DEVILUDO_STEAM_ENROLLMENT_BROKER_URL;
+  delete environment.DEVILUDO_STEAM_ENROLLMENT_PUBLIC_ORIGIN;
+  delete environment.DEVILUDO_RELEASE_AUTHORIZATION_BROKER_URL;
+  delete environment.DEVILUDO_RELEASE_AUTHORIZATION_PUBLIC_ORIGIN;
+  const calls = [];
+  const readiness = await evaluateProductionWebReadiness(environment, { profile: "P0_INTERNAL", fetch: healthyFetch(calls) });
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.dependencies.githubAuthorizationBroker, "NOT_REQUIRED");
+  assert.equal(readiness.dependencies.projectRepositoryBroker, "NOT_REQUIRED");
+  assert.equal(readiness.dependencies.steamEnrollmentBroker, "NOT_REQUIRED");
+  assert.equal(readiness.dependencies.releaseAuthorizationBroker, "NOT_REQUIRED");
+  assert.equal(calls.length, 6);
+});
+
+test("P0 operational readiness additionally requires a pinned Claude and complete runtime fleet", async () => {
+  const environment = { ...configuredEnvironment(), DEVILUDO_P0_RUNTIME_READINESS_URL: "https://p0-runtime.internal/" };
+  const ready = await evaluateProductionP0OperationalReadiness(environment, { fetch: healthyFetch() });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.p0Runtime, "READY");
+  const missing = await evaluateProductionP0OperationalReadiness(configuredEnvironment(), { fetch: healthyFetch() });
+  assert.equal(missing.ready, false);
+  assert.equal(missing.p0Runtime, "NOT_CONFIGURED");
+  const floating = await evaluateProductionP0OperationalReadiness(environment, { fetch: async (input, init) => {
+    const url = new URL(input);
+    if (url.hostname === "p0-runtime.internal") return json({ ...HEALTH_BY_HOST[url.hostname], claudeModel: "sonnet" });
+    return healthyFetch()(input, init);
+  } });
+  assert.equal(floating.ready, false);
+  assert.equal(floating.p0Runtime, "IDENTITY_MISMATCH");
 });
 
 test("production Web readiness rejects partial secrets and unsafe broker origins without exposing them", async () => {

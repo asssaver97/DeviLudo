@@ -17,6 +17,7 @@ export const MULTITENANT_CAPACITY_POLICY = Object.freeze({
   cpuSchedulingRatio: 1.5,
   memorySchedulingRatio: 1,
   targetStandardEquivalentConcurrency: 28,
+  agentInteractiveReserve: Object.freeze({ minimumSlots: 2, resourceFraction: .20 }),
   workspaceConcurrency: Object.freeze({ agentTasks: 2, exclusiveE2eTasks: 1 }),
   runnerConcurrency: Object.freeze({
     linux: Object.freeze({ HEADLESS: 2, VISUAL: 1, GPU: 1, AUDIO: 1, STEAM_INSTALL: 1 }),

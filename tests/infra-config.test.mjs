@@ -712,6 +712,7 @@ test("approved specifications bind one append-only Runner toolchain revision", (
   const ingress = readFileSync(new URL("../services/runner-control/src/toolchain-publication-http.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("../services/runner-control/src/run-toolchain-publication-service.ts", import.meta.url), "utf8");
   assert.equal(packageJson.scripts["start:runner-toolchain-publisher"], observedServiceCommand("runner-toolchain-publisher"));
+  assert.equal(packageJson.scripts["start:runner-capacity-controller"], observedServiceCommand("runner-capacity-controller"));
   assert.match(migration, /CREATE TABLE deviludo\.runner_toolchain_revisions/);
   assert.match(migration, /UNIQUE \(tenant_id, project_id, id, payload_digest\)/);
   assert.match(migration, /runner_toolchain_revisions_append_only/);
