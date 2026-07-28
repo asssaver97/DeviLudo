@@ -188,6 +188,25 @@ Agent 供应链生产打包、固定工具参数和策略配置方法见 [Agent 
 受邀 GitHub 登录、mTLS 部署与邀请签发见 [身份 Broker 运维说明](docs/identity.md)。
 生产 Agent 管理入口、双 HMAC 域和 Connector 部署见 [管理员控制面运维说明](docs/admin-control-plane.md)。
 
+## 执行节点一键部署
+
+完成平台签名、扫描、mTLS 和主机预配后，可用两个严格配置入口完成宿主安装或升级：
+
+```bash
+sudo NODE_ENV=production npm run deploy:e2e-host -- \
+  --config /etc/deviludo/e2e-host-deployment.json \
+  --config-digest <64位SHA256> --apply
+
+sudo NODE_ENV=production npm run deploy:agent-host -- \
+  --config /etc/deviludo/agent-worker-host-deployment.json \
+  --config-digest <64位SHA256> --apply
+```
+
+E2E 入口支持 Linux systemd、macOS launchd 和签名 Windows Native Actuator，自动区分首次
+注册与排空升级并生成回执。Agent 入口只支持 Linux KVM，在修改 systemd 前重验 Worker、
+Launcher、Guest、Binding、KVM/cgroup/network namespace。示例配置和完整步骤见主仓库
+[`一键宿主部署说明`](docs/one-click-host-deployment.md)。
+
 ## 目录
 
 ```text

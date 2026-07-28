@@ -424,7 +424,7 @@ function validActivation(value, capabilityDigest, steamCapable, hasRollback) {
   return JSON.stringify(value.healthProbes) === JSON.stringify(expected);
 }
 
-function parseEnvironmentLock(bytes) {
+export function parseEnvironmentLock(bytes) {
   const source = bytes.toString("utf8");
   if (source.includes("\0") || source.includes("\r")) invalidInput();
   const values = {};

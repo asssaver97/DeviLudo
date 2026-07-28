@@ -2,7 +2,7 @@
 
 import { createHash, createPublicKey } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, lstat, open, readFile, rename, rm, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -120,8 +120,8 @@ async function executeRunnerNativeServiceTransaction(input, dependencies = {}) {
     || !Number.isFinite(now.valueOf()) || !absoluteValue(input.outputPath)) invalidInput();
   const { plan, transaction, grant } = input;
   assertGrantBinding(plan, transaction, grant);
-  assertHostBinding(host, transaction);
-  validateDefinitions(transaction);
+  assertRunnerNativeHostBinding(host, transaction);
+  validateRunnerNativeDefinitions(transaction);
   const journalPath = `${input.outputPath}.journal`;
   const failurePath = `${input.outputPath}.failure`;
   const existingReceipt = await readJsonIfPresent(input.outputPath);
@@ -149,7 +149,7 @@ async function executeRunnerNativeServiceTransaction(input, dependencies = {}) {
     return receipt;
   }
   if (await readJsonIfPresent(failurePath) !== null) invalidInput();
-  await preflightLockedFiles(host, transaction);
+  await preflightRunnerNativeLockedFiles(host, transaction);
   const previousDefinitions = [];
   for (const definition of transaction.definitions) {
     const body = await host.readDefinition(definition.destination);
@@ -170,9 +170,9 @@ async function executeRunnerNativeServiceTransaction(input, dependencies = {}) {
       await host.writeDefinition(definition.destination, Buffer.from(definition.rendered, "utf8"));
     }
     step = "ACTIVATE_SERVICES";
-    await activateDefinitions(host, transaction);
+    await activateRunnerNativeDefinitions(host, transaction);
     step = "ASSERT_RUNNING";
-    await assertDefinitionsRunning(host, transaction);
+    await assertRunnerNativeDefinitionsRunning(host, transaction);
   } catch {
     try {
       await rollbackDefinitions(host, transaction, previousDefinitions);
@@ -286,12 +286,12 @@ function assertGrantBinding(plan, transaction, grant) {
     || transaction.activation?.mode !== "DRAINED_UPGRADE" || transaction.rollback === null) invalidInput();
 }
 
-function assertHostBinding(host, transaction) {
+export function assertRunnerNativeHostBinding(host, transaction) {
   if (!new Set(["linux", "macos"]).has(host.platform) || !new Set(["x86_64", "arm64"]).has(host.architecture)
     || host.platform !== transaction.platform || host.architecture !== transaction.architecture) invalidInput();
 }
 
-function validateDefinitions(transaction) {
+export function validateRunnerNativeDefinitions(transaction) {
   if (!Array.isArray(transaction.definitions) || transaction.definitions.length < 1 || transaction.definitions.length > 2
     || transaction.managerTool !== (transaction.platform === "linux" ? "/usr/bin/systemctl" : "/bin/launchctl")) {
     invalidInput();
@@ -314,7 +314,7 @@ function validateDefinitions(transaction) {
     || JSON.stringify(transaction.activation.startOrder) !== JSON.stringify(expected)) invalidInput();
 }
 
-async function preflightLockedFiles(host, transaction) {
+export async function preflightRunnerNativeLockedFiles(host, transaction) {
   for (const definition of transaction.definitions) {
     const [executableDigest, environmentDigest] = await Promise.all([
       host.digestFile(definition.executable, MAX_EXECUTABLE_BYTES),
@@ -325,7 +325,7 @@ async function preflightLockedFiles(host, transaction) {
   }
 }
 
-async function activateDefinitions(host, transaction) {
+export async function activateRunnerNativeDefinitions(host, transaction) {
   if (transaction.platform === "linux") {
     await host.run("/usr/bin/systemctl", ["daemon-reload"]);
     for (const definition of transaction.definitions) {
@@ -341,7 +341,7 @@ async function activateDefinitions(host, transaction) {
   }
 }
 
-async function assertDefinitionsRunning(host, transaction) {
+export async function assertRunnerNativeDefinitionsRunning(host, transaction) {
   for (const definition of transaction.definitions) {
     let active = false;
     for (let attempt = 0; attempt < 30; attempt++) {
@@ -509,7 +509,7 @@ function executeFixed(command, args) {
   });
 }
 
-async function trustAnchorFromEnvironment(env = process.env) {
+export async function runnerNativeTrustAnchorFromEnvironment(env = process.env) {
   if (typeof env.DEVILUDO_RUNNER_NATIVE_ACTUATOR_KEY_ID !== "string"
     || !SAFE_ID.test(env.DEVILUDO_RUNNER_NATIVE_ACTUATOR_KEY_ID)
     || !absoluteValue(env.DEVILUDO_RUNNER_NATIVE_ACTUATOR_PUBLIC_KEY_FILE)) invalidInput();
@@ -592,7 +592,7 @@ function invalidInput() { throw new Error("Runner native service actuation input
 async function main() {
   if (process.env.NODE_ENV !== "production" || typeof process.getuid !== "function" || process.getuid() !== 0) invalidInput();
   const options = parseRunnerNativeServiceActuationArguments(process.argv.slice(2));
-  const trust = await trustAnchorFromEnvironment();
+  const trust = await runnerNativeTrustAnchorFromEnvironment();
   const receipt = await applyRunnerNativeServiceTransaction({ ...options, ...trust });
   process.stdout.write(`${JSON.stringify({
     schemaVersion: "deviludo.runner-native-service-actuation-result.v1",

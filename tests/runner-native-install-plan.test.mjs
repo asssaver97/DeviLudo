@@ -29,6 +29,14 @@ import {
   applyRunnerNativeServiceTransaction,
   parseRunnerNativeServiceActuationArguments,
 } from "../scripts/production/apply-runner-native-service-transaction.mjs";
+import {
+  applyInitialRunnerNativeServiceTransaction,
+  parseInitialRunnerNativeActuationArguments,
+} from "../scripts/production/apply-initial-runner-native-service-transaction.mjs";
+import {
+  parseE2EHostDeploymentArguments,
+  validateE2EHostDeploymentConfig,
+} from "../scripts/production/deploy-e2e-runner-host.mjs";
 
 const hex = (character) => character.repeat(64);
 const prefixed = (character) => `sha256:${hex(character)}`;
@@ -664,6 +672,88 @@ test("privileged POSIX actuator consumes one signed zero-lease grant and atomica
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("initial Runner actuator installs only into an empty service slot and replays its receipt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-runner-initial-actuator-"));
+  try {
+    const authorization = installAuthorization();
+    const machineConfig = config(false);
+    const environment = runnerEnvironment(machineConfig, authorization);
+    const environmentBody = environmentBytes(environment);
+    const plan = createRunnerNativeInstallPlan({
+      ...baseInput(authorization, machineConfig),
+      runnerEnv: environment,
+      runnerEnvFile: resolve(root, "physical-runner.env"),
+      runnerEnvFileDigest: digest(environmentBody),
+      connectorEnv: null,
+      connectorEnvFile: null,
+      connectorEnvFileDigest: null,
+      bridgeObservedDigest: null,
+      previousPlan: null,
+      now: new Date("2026-07-22T08:00:00.000Z"),
+    });
+    const transaction = createRunnerNativeServiceTransaction({
+      plan, planDigest: plan.planDigest, stagingReceipt: stagingReceipt(plan),
+      physicalRunnerEnvironment: environmentBody, steamClientConnectorEnvironment: null,
+    });
+    const planPath = resolve(root, "install-plan.json");
+    const transactionPath = resolve(root, "transaction.json");
+    const outputPath = resolve(root, "receipt.json");
+    await Promise.all([
+      writeFile(planPath, JSON.stringify(plan)), writeFile(transactionPath, JSON.stringify(transaction)),
+      writeFile(resolve(root, "physical-runner.env"), environmentBody),
+    ]);
+    const definitions = new Map(); const commands = [];
+    const host = {
+      platform: "linux", architecture: "x86_64", definitions, commands,
+      async readDefinition(path) { return definitions.has(path) ? Buffer.from(definitions.get(path)) : null; },
+      async writeDefinition(path, body) { definitions.set(path, Buffer.from(body)); },
+      async removeDefinition(path) { definitions.delete(path); },
+      async digestFile(path) { const definition = transaction.definitions.find((item) =>
+        item.executable === path || item.environmentSourcePath === path); return definition.executable === path
+          ? definition.executableDigest.slice(7) : definition.environmentSourceDigest; },
+      async run(command, args) { commands.push([command, ...args]); return { exitCode: 0, output: "" }; },
+      async sleep() {},
+    };
+    const options = { outputPath, planPath, planDigest: plan.planDigest, transactionPath,
+      transactionDigest: transaction.transactionDigest, windowsBridgePath: null,
+      windowsBridgeManifestPath: null, windowsBridgeTrustPolicyPath: null, windowsBridgeTrustPolicyDigest: null };
+    const receipt = await applyInitialRunnerNativeServiceTransaction(options, {
+      host, prepareTransaction: async () => transaction, now: new Date("2026-07-22T08:01:00.000Z"),
+    });
+    assert.equal(receipt.state, "SERVICES_STARTED");
+    assert.equal(definitions.size, 1);
+    assert.ok(commands.some((call) => call.includes("enable")));
+    const replay = await applyInitialRunnerNativeServiceTransaction(options, {
+      host: { ...host, async run() { throw new Error("replay may not mutate host"); } },
+      prepareTransaction: async () => transaction, now: new Date("2026-07-22T09:00:00.000Z"),
+    });
+    assert.equal(replay.receiptDigest, receipt.receiptDigest);
+    const parsed = parseInitialRunnerNativeActuationArguments(["--output", outputPath, "--plan", planPath,
+      "--plan-digest", plan.planDigest, "--transaction", transactionPath,
+      "--transaction-digest", transaction.transactionDigest]);
+    assert.equal(parsed.planDigest, plan.planDigest);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("E2E one-click deployment uses one digest-bound configuration for initial or upgrade mode", () => {
+  const digestValue = hex("a");
+  assert.equal(parseE2EHostDeploymentArguments([
+    "--config", "/etc/deviludo/e2e-deployment.json", "--config-digest", digestValue, "--apply",
+  ]).apply, true);
+  const configValue = validateE2EHostDeploymentConfig({
+    schemaVersion: "deviludo.e2e-host-deployment.v1",
+    artifactDirectory: "/opt/deviludo/staging/artifacts", buildReceiptPath: "/opt/deviludo/staging/build.json",
+    connectorEnvFile: null, installRoot: "/opt/deviludo/native", machineConfigPath,
+    operationId: null, planPath: "/opt/deviludo/staging/plan.json", previousPlanPath: null,
+    receiptPath: "/var/lib/deviludo/runner-receipt.json", releasePath: "/opt/deviludo/staging/release.json",
+    runnerEnvFile, transactionPath: "/opt/deviludo/staging/transaction.json",
+    trustPolicyDigest: `sha256:${digestValue}`, trustPolicyPath: "/etc/deviludo/runner-trust.json", windows: null,
+  });
+  assert.equal(configValue.operationId, null);
+  assert.throws(() => validateE2EHostDeploymentConfig({ ...configValue,
+    previousPlanPath: "/opt/deviludo/native/old-plan.json", operationId: null }), /input is invalid/);
 });
 
 test("stager rehashes signed bytes into a new read-only revision and replays only the exact receipt", async () => {

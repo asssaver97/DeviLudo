@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "deviludo.e2e-host-deployment.v1",
+  "artifactDirectory": "/opt/deviludo/staging/runner/final-artifacts",
+  "buildReceiptPath": "/opt/deviludo/staging/runner/runner-native-build-receipt.json",
+  "releasePath": "/opt/deviludo/staging/runner/runner-native-release.json",
+  "trustPolicyPath": "/etc/deviludo/runner-native-trust-policy.json",
+  "trustPolicyDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "machineConfigPath": "/etc/deviludo/physical-runner.json",
+  "installRoot": "/opt/deviludo/native",
+  "runnerEnvFile": "/etc/deviludo/physical-runner.env",
+  "connectorEnvFile": null,
+  "previousPlanPath": null,
+  "operationId": null,
+  "planPath": "/opt/deviludo/staging/runner/install-plan.json",
+  "transactionPath": "/opt/deviludo/staging/runner/service-transaction.json",
+  "receiptPath": "/var/lib/deviludo-native-actuator/initial-enrollment.json",
+  "windows": null
+}
