@@ -1,5 +1,6 @@
 import type { GitHubAuthorizationPrincipal } from "@/services/scm-proxy/src/github-auth-contracts";
 import { browserSessionCookies, identityBrokerFromEnvironment, type BrowserSessionAssertion } from "@/lib/auth/identity-broker";
+import { accountPlatformSessionFromRequest } from "@/lib/auth/account-platform";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -27,6 +28,7 @@ export interface TrustedPlatformSession {
   readonly userId: string;
   readonly sessionBinding: string;
   readonly githubUserId: number;
+  readonly githubLinked?: boolean;
 }
 
 export class GitHubAuthorizationBrokerClient {
@@ -193,6 +195,7 @@ export async function verifyTrustedGitHubSession(
   now: Date = new Date(),
 ): Promise<GitHubAuthorizationPrincipal> {
   const session = await verifyTrustedPlatformSession(request, key, now);
+  if (session.githubLinked === false) throw new Error("GitHub account linking is required");
   return Object.freeze({
     tenantId: session.tenantId,
     userId: session.userId,
@@ -207,6 +210,8 @@ export async function verifyTrustedPlatformSession(
   now: Date = new Date(),
 ): Promise<TrustedPlatformSession> {
   if (!request.headers.has("x-deviludo-session-tenant")) {
+    const accountSession=await accountPlatformSessionFromRequest(request);
+    if(accountSession)return Object.freeze({tenantId:accountSession.tenantId,userId:accountSession.userId,sessionBinding:accountSession.sessionBinding,githubUserId:accountSession.githubUserId,githubLinked:accountSession.githubLinked});
     const assertion = await verifyBrowserSession(request, key, now);
     return Object.freeze({ tenantId: assertion.tenantId, userId: assertion.userId,
       sessionBinding: assertion.sessionBinding, githubUserId: assertion.githubUserId });
@@ -245,6 +250,8 @@ async function verifyTrustedSessionHeaders(request: Request, key: Uint8Array, no
 }
 
 export async function assertBrowserSession(request: Request): Promise<BrowserSessionAssertion> {
+  const accountSession=await accountPlatformSessionFromRequest(request);
+  if(accountSession)return Object.freeze({tenantId:accountSession.tenantId,tenantSlug:accountSession.tenantSlug,tenantName:accountSession.tenantName,userId:accountSession.userId,membershipId:accountSession.membershipId,role:accountSession.role,githubUserId:accountSession.githubUserId,githubNodeId:`ACCOUNT_${accountSession.userId}`,githubLogin:accountSession.githubLinked?`github-${accountSession.githubUserId}`:`account-${accountSession.userId.slice(0,8)}`,displayName:accountSession.displayName,avatarUrl:accountSession.avatarUrl,sessionBinding:accountSession.sessionBinding,issuedAt:String(Date.now()),signature:"A".repeat(43)});
   const broker = identityBrokerFromEnvironment();
   if (!broker) throw new Error("Identity Broker is required for browser sessions");
   const cookies = browserSessionCookies(request);
@@ -252,6 +259,8 @@ export async function assertBrowserSession(request: Request): Promise<BrowserSes
 }
 
 export async function verifyBrowserSession(request: Request, key: Uint8Array, now = new Date()): Promise<BrowserSessionAssertion> {
+  const accountSession=await accountPlatformSessionFromRequest(request);
+  if(accountSession)return Object.freeze({tenantId:accountSession.tenantId,tenantSlug:accountSession.tenantSlug,tenantName:accountSession.tenantName,userId:accountSession.userId,membershipId:accountSession.membershipId,role:accountSession.role,githubUserId:accountSession.githubUserId,githubNodeId:`ACCOUNT_${accountSession.userId}`,githubLogin:accountSession.githubLinked?`github-${accountSession.githubUserId}`:`account-${accountSession.userId.slice(0,8)}`,displayName:accountSession.displayName,avatarUrl:accountSession.avatarUrl,sessionBinding:accountSession.sessionBinding,issuedAt:String(now.getTime()),signature:"A".repeat(43)});
   const assertion = await assertBrowserSession(request);
   const headers = new Headers(request.headers);
   headers.set("x-deviludo-session-tenant", assertion.tenantId);
