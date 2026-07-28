@@ -73,6 +73,13 @@ export const CONTROL_SERVICE_PORTS = Object.freeze({
   "user-acceptance": 4_547,
 });
 
+export const LATENCY_CRITICAL_CONTROL_SERVICES = Object.freeze([
+  "spec-dialogue",
+  "spec-model-broker",
+]);
+const LATENCY_CRITICAL_SERVICE_SET = new Set(LATENCY_CRITICAL_CONTROL_SERVICES);
+const LATENCY_CRITICAL_MINIMUM_REPLICAS = 3;
+
 const CONTROL_SERVICE_PORT_ENVIRONMENT = Object.freeze({
   "agent-execution-broker": "DEVILUDO_AGENT_EXECUTION_BROKER_SERVER_PORT",
   "agent-worker-workflow": "DEVILUDO_WORKFLOW_SERVICE_PORT",
@@ -242,7 +249,17 @@ export function renderControlPlaneRelease(receipt, options = {}) {
   const workloads = selectedServices.flatMap((service) => {
     const deployment = serviceDeployment(receipt, namespace, service, replicas, common, runtimeServices.get(service));
     const port = CONTROL_SERVICE_PORTS[service];
-    return port === undefined ? [deployment] : [serviceResource(namespace, service, port, common), deployment];
+    const availability = LATENCY_CRITICAL_SERVICE_SET.has(service)
+      ? [
+          disruptionBudget(namespace, service, common),
+          latencyAutoscaler(namespace, service, common),
+        ]
+      : [];
+    return [
+      ...(port === undefined ? [] : [serviceResource(namespace, service, port, common)]),
+      ...availability,
+      deployment,
+    ];
   });
   return Object.freeze({
     schemaVersion: RELEASE_SCHEMA,
@@ -406,7 +423,7 @@ function serviceDeployment(receipt, namespace, service, replicas, labels, runtim
       { configMapRef: { name: runtime.configMap.name, optional: false } },
       { secretRef: { name: runtime.environmentSecret.name, optional: false } },
     ],
-    resources: containerResources(),
+    resources: containerResources(service),
     securityContext: containerSecurityContext(),
     volumeMounts: [
       { name: "temporary", mountPath: "/tmp" },
@@ -424,7 +441,9 @@ function serviceDeployment(receipt, namespace, service, replicas, labels, runtim
     kind: "Deployment",
     metadata: { name, namespace, labels: { ...labels, ...selector }, annotations: receiptAnnotations(receipt) },
     spec: {
-      replicas,
+      replicas: LATENCY_CRITICAL_SERVICE_SET.has(service)
+        ? Math.max(replicas, LATENCY_CRITICAL_MINIMUM_REPLICAS)
+        : replicas,
       minReadySeconds: 10,
       progressDeadlineSeconds: 600,
       revisionHistoryLimit: 3,
@@ -442,11 +461,75 @@ function serviceDeployment(receipt, namespace, service, replicas, labels, runtim
           serviceAccountName: "deviludo-control",
           terminationGracePeriodSeconds: 30,
           securityContext: podSecurityContext(),
+          ...(LATENCY_CRITICAL_SERVICE_SET.has(service) ? {
+            topologySpreadConstraints: [{
+              maxSkew: 1,
+              topologyKey: "kubernetes.io/hostname",
+              whenUnsatisfiable: "DoNotSchedule",
+              labelSelector: { matchLabels: selector },
+            }],
+          } : {}),
           containers: [container],
           volumes: [
             temporaryVolume(),
             { name: "service-files", secret: { secretName: runtime.filesSecret.name, defaultMode: 256 } },
           ],
+        },
+      },
+    },
+  };
+}
+
+function disruptionBudget(namespace, service, labels) {
+  return {
+    apiVersion: "policy/v1",
+    kind: "PodDisruptionBudget",
+    metadata: {
+      name: `deviludo-${service}`,
+      namespace,
+      labels: { ...labels, "app.kubernetes.io/component": service },
+    },
+    spec: {
+      minAvailable: 2,
+      selector: {
+        matchLabels: {
+          "app.kubernetes.io/name": "deviludo",
+          "app.kubernetes.io/component": service,
+        },
+      },
+    },
+  };
+}
+
+function latencyAutoscaler(namespace, service, labels) {
+  return {
+    apiVersion: "autoscaling/v2",
+    kind: "HorizontalPodAutoscaler",
+    metadata: {
+      name: `deviludo-${service}`,
+      namespace,
+      labels: { ...labels, "app.kubernetes.io/component": service },
+    },
+    spec: {
+      minReplicas: LATENCY_CRITICAL_MINIMUM_REPLICAS,
+      maxReplicas: 20,
+      scaleTargetRef: { apiVersion: "apps/v1", kind: "Deployment", name: `deviludo-${service}` },
+      metrics: [{
+        type: "Resource",
+        resource: { name: "cpu", target: { type: "Utilization", averageUtilization: 55 } },
+      }],
+      behavior: {
+        scaleUp: {
+          stabilizationWindowSeconds: 0,
+          policies: [
+            { type: "Percent", value: 100, periodSeconds: 30 },
+            { type: "Pods", value: 4, periodSeconds: 30 },
+          ],
+          selectPolicy: "Max",
+        },
+        scaleDown: {
+          stabilizationWindowSeconds: 300,
+          policies: [{ type: "Percent", value: 25, periodSeconds: 60 }],
         },
       },
     },
@@ -497,8 +580,10 @@ function containerSecurityContext() {
   };
 }
 
-function containerResources() {
-  return { requests: { cpu: "100m", memory: "128Mi" }, limits: { cpu: "1", memory: "1Gi" } };
+function containerResources(service) {
+  return LATENCY_CRITICAL_SERVICE_SET.has(service)
+    ? { requests: { cpu: "500m", memory: "512Mi" }, limits: { cpu: "2", memory: "2Gi" } }
+    : { requests: { cpu: "100m", memory: "128Mi" }, limits: { cpu: "1", memory: "1Gi" } };
 }
 
 function temporaryVolume() {

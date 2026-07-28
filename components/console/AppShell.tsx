@@ -6,16 +6,13 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { ShellCapability } from "@/lib/auth/shell-capabilities";
 import {
   BellIcon,
-  FileIcon,
   GamepadIcon,
-  GridIcon,
-  LinkIcon,
-  ServerIcon,
+  PlusIcon,
   ShieldIcon,
   SparkIcon,
 } from "./Icons";
 
-type NavigationItem = { href: string; label: string; icon: typeof GridIcon };
+type NavigationItem = { href: string; label: string; icon: typeof GamepadIcon };
 type SettingsItem = NavigationItem & { capabilities: readonly ShellCapability[] };
 type ShellAccount = {
   tenantName: string;
@@ -29,17 +26,11 @@ type ShellAccount = {
 type HealthState = "checking" | "ok" | "degraded";
 
 const navigation: readonly NavigationItem[] = [
-  { href: "/", label: "工作台", icon: GridIcon },
-  { href: "/projects", label: "游戏项目", icon: GamepadIcon },
-  { href: "/runners", label: "运行节点", icon: ServerIcon },
-  { href: "/evidence", label: "证据中心", icon: FileIcon },
+  { href: "/projects", label: "项目", icon: GamepadIcon },
 ];
 
 const settings: readonly SettingsItem[] = [
-  { href: "/settings/connections", label: "账号连接", icon: LinkIcon, capabilities: ["connections:manage"] },
-  { href: "/settings/agents", label: "开发 Agent", icon: SparkIcon, capabilities: ["tenant-agents:manage", "tenant-agents:view"] },
-  { href: "/admin/invitations", label: "受邀账号", icon: ShieldIcon, capabilities: ["invitations:manage"] },
-  { href: "/admin/agents", label: "平台 Agent", icon: ShieldIcon, capabilities: ["platform-agents:manage", "platform-agents:view"] },
+  { href: "/settings", label: "设置", icon: ShieldIcon, capabilities: ["connections:manage", "tenant-agents:manage", "tenant-agents:view", "invitations:manage", "platform-agents:manage", "platform-agents:view"] },
 ];
 
 function NavItem({ href, label, icon: Icon }: NavigationItem) {
@@ -89,7 +80,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell">
       <aside className="shell-sidebar">
-        <Link aria-label="DeviLudo 工作台" className="brand" href="/">
+        <Link aria-label="DeviLudo 项目" className="brand" href="/projects">
           <span className="brand-mark"><SparkIcon /></span>
           <span className="brand-copy"><b>DeviLudo</b><small>GAMEFORGE OS</small></span>
         </Link>
@@ -101,9 +92,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <nav aria-label="主要导航" className="shell-nav">
-          <p>MISSION / 构建</p>
+          <Link className="shell-new-project" href="/projects/new"><PlusIcon /><span>开始新游戏</span></Link>
+          <p>WORKSPACE / 工作区</p>
           {navigation.map((item) => <NavItem key={item.href} {...item} />)}
-          <p>SYSTEM / 设置</p>
+          <p>ACCOUNT / 账户</p>
           {visibleSettings.map((item) => <NavItem key={item.href} {...item} />)}
         </nav>
 

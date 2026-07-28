@@ -162,6 +162,14 @@ the privileged Agent supply-chain Broker, signing, Steam Client and local previe
 are not present in the shared control image. Rendering has no cluster side
 effect, but the supplied lock must cover exactly the same namespace and services.
 
+`spec-dialogue` and `spec-model-broker` are latency-critical exceptions to the
+ordinary replica count. Each renders with at least three replicas, 500m CPU and
+512 MiB reserved per replica, host-level topology spread, a PDB that keeps two
+available, and an HPA from 3 to 20 replicas at 55% CPU. This is deterministic
+release content covered by the signed bundle. It reserves requirement-dialogue
+capacity independently from Agent and E2E pools; `--replicas` may raise but
+cannot lower this minimum.
+
 ## Apply with the migration gate
 
 Applying is never inferred from a current kubeconfig context. It requires both

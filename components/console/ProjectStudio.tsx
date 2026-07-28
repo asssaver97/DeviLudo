@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SpecDialogueMessage, SpecDialogueSnapshot, SpecModelResult } from "@/services/spec-dialogue/src/contracts";
 import { AppShell } from "./AppShell";
-import { ArrowIcon, CheckIcon, FileIcon, SparkIcon, SteamIcon } from "./Icons";
+import { ArrowIcon, CheckIcon, FileIcon, ServerIcon, ShieldIcon, SparkIcon, SteamIcon } from "./Icons";
 import { LocalDeliveryPanel, type DeliveryPanelStatus } from "./LocalDeliveryPanel";
 
 type Message = {
@@ -350,7 +350,17 @@ export function ProjectStudio({
         </div>
         <div className="project-header-actions">
           <span className={`spec-state ${approved ? "approved" : "draft"}`}><i /> {approved ? `${specId} 已批准` : `${specId} 草稿`}</span>
-          {mode === "existing" ? <Link className="button button-secondary" href={`/projects/${encodeURIComponent(projectId)}/steam-settings`}><SteamIcon /> Steam 设置</Link> : null}
+          {mode === "existing" ? (
+            <details className="project-tools-menu">
+              <summary className="button button-secondary"><ShieldIcon /> 项目管理</summary>
+              <div>
+                <Link href={`/projects/${encodeURIComponent(projectId)}/agent-settings`}><SparkIcon /><span><b>Agent 设置</b><small>选择项目开发 Profile</small></span></Link>
+                <Link href={`/runners?project=${encodeURIComponent(projectId)}`}><ServerIcon /><span><b>运行节点</b><small>查看跨平台 E2E</small></span></Link>
+                <Link href={`/evidence?project=${encodeURIComponent(projectId)}`}><FileIcon /><span><b>交付证据</b><small>构建、测试与审计</small></span></Link>
+                <Link href={`/projects/${encodeURIComponent(projectId)}/steam-settings`}><SteamIcon /><span><b>Steam 设置</b><small>私有 Beta 与发布</small></span></Link>
+              </div>
+            </details>
+          ) : null}
         </div>
       </section>
 

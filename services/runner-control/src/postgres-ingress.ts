@@ -375,6 +375,7 @@ export class PostgresRunnerIngressStore {
             AND lock.run_id = attempt.run_id
           WHERE attempt.tenant_id = $1::uuid
             AND attempt.state IN ('QUEUED', 'RUNNING')
+            AND attempt.dispatch_not_before <= $3::timestamptz
             AND attempt.target_matrix @> ARRAY[$2]::text[]
             AND (attempt.mode <> 'STEAM_CLEAN_INSTALL' OR $4::boolean)
             AND NOT EXISTS (
@@ -385,7 +386,18 @@ export class PostgresRunnerIngressStore {
                        AND occupied.lease_expires_at >= $3::timestamptz)
                       OR occupied.state IN ('PASSED', 'FAILED'))
             )
-          ORDER BY attempt.created_at, attempt.id
+          ORDER BY
+            (attempt.queue_deadline_at <= $3::timestamptz) DESC,
+            (
+              attempt.queue_priority
+              + LEAST(
+                  FLOOR(EXTRACT(EPOCH FROM ($3::timestamptz - attempt.queued_at)) / 60),
+                  250
+                )
+            ) DESC,
+            attempt.estimated_duration_seconds,
+            attempt.queued_at,
+            attempt.id
           LIMIT 1
           FOR UPDATE OF attempt SKIP LOCKED`,
         [tenantId, runner.platform, at, runner.steamClientConnector !== null],

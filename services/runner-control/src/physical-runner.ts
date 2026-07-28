@@ -1,6 +1,7 @@
 import type { KeyObject } from "node:crypto";
 import type { RunnerEvent } from "../../../lib/domain/e2e";
 import type { TargetPlatform } from "../../../lib/domain/types";
+import { fairTenantScanOrder } from "../../../lib/runtime/capacity-policy";
 import { sha256Canonical } from "./canonical";
 import type {
   PlatformEvidenceManifest,
@@ -92,6 +93,7 @@ export class PhysicalRunnerAgent {
   readonly #executor: PhysicalRunnerExecutor;
   readonly #journal: PhysicalRunnerJournal;
   readonly #now: () => Date;
+  #lastServedTenantId: string | null = null;
 
   constructor(options: {
     readonly capabilities: RunnerCapabilities;
@@ -125,9 +127,10 @@ export class PhysicalRunnerAgent {
     const registered = await this.#ingress.register(this.#capabilities);
     assertRegistration(registered, this.#capabilities, this.#identity);
     if (registered.state !== "ONLINE") return Object.freeze({ status: "DRAINING" });
-    for (const tenantId of tenantIds) {
+    for (const tenantId of fairTenantScanOrder(tenantIds, this.#lastServedTenantId)) {
       const job = await this.#ingress.leaseNext(this.#capabilities.runnerId, tenantId);
       if (!job) continue;
+      this.#lastServedTenantId = tenantId;
       return this.#process(tenantId, job);
     }
     return Object.freeze({ status: "IDLE" });

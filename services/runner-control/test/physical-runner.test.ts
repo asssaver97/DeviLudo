@@ -242,6 +242,38 @@ test("physical Runner journal replays identical events and evidence without re-e
   assert.equal(assignmentReads, 2);
 });
 
+test("physical Runner rotates signed tenant assignments so one busy workspace cannot monopolize the fleet", async () => {
+  const cap = capabilities("linux");
+  class FairScanIngress extends ContractIngress {
+    readonly leaseCalls: string[] = [];
+    firstLeaseIssued = false;
+    override async leaseNext(runnerId: string, requestedTenantId: string): Promise<SignedRunnerJob | null> {
+      assert.equal(runnerId, cap.runnerId);
+      this.leaseCalls.push(requestedTenantId);
+      if (!this.firstLeaseIssued && requestedTenantId === tenantId) {
+        this.firstLeaseIssued = true;
+        return this.signedJob;
+      }
+      return null;
+    }
+  }
+  const ingress = new FairScanIngress(cap, job("linux"));
+  const agent = new PhysicalRunnerAgent({
+    capabilities: cap,
+    identity: identity(cap),
+    tenantAssignments: assignments([tenantId, otherTenantId]),
+    jobKeyId: "runner-job-key-01",
+    jobPublicKey: keys.publicKey,
+    ingress,
+    executor: { async execute() { return output(); } },
+    journal: new MemoryPhysicalRunnerJournal(),
+    now: () => new Date(now),
+  });
+  assert.equal((await agent.runOnce()).status, "COMPLETED");
+  assert.equal((await agent.runOnce()).status, "IDLE");
+  assert.deepEqual(ingress.leaseCalls, [tenantId, otherTenantId, tenantId]);
+});
+
 test("physical Runner fails closed before leasing when its signed assignment or registered identity drifts", async () => {
   const cap = capabilities("linux");
   const ingress = new ContractIngress(cap, job("linux"));

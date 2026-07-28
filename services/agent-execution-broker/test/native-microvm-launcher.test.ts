@@ -74,6 +74,7 @@ function config(overrides: Record<string, unknown> = {}) {
     jailerUid: 10000,
     jailerGid: 10000,
     parentCgroup: "deviludo-agent",
+    resourceClass: "STANDARD",
     vcpuCount: 4,
     memoryMib: 8192,
     dataDriveSizeMib: 8192,
@@ -136,6 +137,8 @@ test("Firecracker launcher configuration compiles only fixed jailer and VM argum
     "--credential-image", "/run/job/control/credentials.ext4",
   ]).command, "execute");
   assert.throws(() => parseNativeMicrovmLauncherConfig(config({ bootArgs: "init=/bin/sh reboot=k panic=1 pci=off 8250.nr_uarts=0 ip=dhcp" })),
+    /launcher input is invalid/);
+  assert.throws(() => parseNativeMicrovmLauncherConfig(config({ resourceClass: "SMALL" })),
     /launcher input is invalid/);
   assert.throws(() => parseNativeMicrovmLauncherArguments(["execute", "--config-file", "/x", "--shell", "bash"]),
     /launcher input is invalid/);

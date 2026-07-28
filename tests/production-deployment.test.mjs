@@ -6,6 +6,7 @@ import {
   applyControlPlaneRelease,
   assertControlServiceDeploymentClassification,
   CONTROL_SERVICE_PORTS,
+  LATENCY_CRITICAL_CONTROL_SERVICES,
   parseControlPlaneDeploymentArguments,
   renderControlPlaneRelease,
   validateControlPlaneImageReceipt,
@@ -189,6 +190,26 @@ test("every shared-image workload is rendered as a least-authority deployment an
   assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
   assert.equal(pod.volumes.find((volume) => volume.name === "service-files").secret.secretName,
     `deviludo-control-plane-files-${runtimeConfigurationRevision}`);
+
+  for (const service of LATENCY_CRITICAL_CONTROL_SERVICES) {
+    const deployment = bundle.stages[2].resources.find((resource) => resource.kind === "Deployment"
+      && resource.metadata.name === `deviludo-${service}`);
+    const reserved = deployment.spec.template.spec.containers[0];
+    assert.equal(deployment.spec.replicas, 3);
+    assert.deepEqual(reserved.resources, {
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "2", memory: "2Gi" },
+    });
+    assert.equal(deployment.spec.template.spec.topologySpreadConstraints[0].whenUnsatisfiable, "DoNotSchedule");
+    const budget = bundle.stages[2].resources.find((resource) => resource.kind === "PodDisruptionBudget"
+      && resource.metadata.name === `deviludo-${service}`);
+    assert.equal(budget.spec.minAvailable, 2);
+    const autoscaler = bundle.stages[2].resources.find((resource) => resource.kind === "HorizontalPodAutoscaler"
+      && resource.metadata.name === `deviludo-${service}`);
+    assert.equal(autoscaler.spec.minReplicas, 3);
+    assert.equal(autoscaler.spec.maxReplicas, 20);
+    assert.equal(autoscaler.spec.metrics[0].resource.target.averageUtilization, 55);
+  }
 });
 
 test("migration job alone receives the dedicated file-mounted database owner credential", () => {

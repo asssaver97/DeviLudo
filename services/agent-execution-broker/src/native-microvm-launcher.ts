@@ -19,6 +19,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { canonicalJson } from "../../runner-control/src/canonical";
 import { parseNativeMicrovmAgentRequest, type NativeMicrovmAgentRequest } from "./native-microvm-contracts";
+import { assertAgentResourceClass, type AgentResourceClass } from "../../../lib/runtime/capacity-policy";
 import {
   verifyConfiguredAgentMicrovmGuestRelease,
   type AgentMicrovmGuestReleaseClaims,
@@ -64,6 +65,7 @@ export interface NativeMicrovmLauncherConfig {
   readonly jailerUid: number;
   readonly jailerGid: number;
   readonly parentCgroup: string;
+  readonly resourceClass: AgentResourceClass;
   readonly vcpuCount: number;
   readonly memoryMib: number;
   readonly dataDriveSizeMib: number;
@@ -132,7 +134,7 @@ export function parseNativeMicrovmLauncherConfig(value: unknown): NativeMicrovmL
     "rootfsDigest", "rootfsReleaseFile", "rootfsReleaseDigest", "rootfsTrustPolicyFile",
     "rootfsTrustPolicyDigest", "mke2fsExecutable", "mke2fsDigest", "debugfsExecutable", "debugfsDigest",
     "chrootBaseDirectory", "networkNamespaceDirectory", "networkNamespaceNames", "networkLockDirectory",
-    "tapDeviceName", "guestMacAddress", "jailerUid", "jailerGid", "parentCgroup", "vcpuCount",
+    "tapDeviceName", "guestMacAddress", "jailerUid", "jailerGid", "parentCgroup", "resourceClass", "vcpuCount",
     "memoryMib", "dataDriveSizeMib", "bootArgs", "maxRunSeconds",
   ]);
   if (body.schemaVersion !== "deviludo.agent-microvm-launcher-config.v2" || body.backend !== "firecracker-jailer"
@@ -176,6 +178,8 @@ export function parseNativeMicrovmLauncherConfig(value: unknown): NativeMicrovmL
   } as unknown as NativeMicrovmLauncherConfig;
   const firstMacOctet = Number.parseInt(config.guestMacAddress.slice(0, 2), 16);
   if (config.jailerUid === 0 || config.jailerGid === 0 || (firstMacOctet & 1) !== 0) invalid();
+  if (config.resourceClass !== "SMALL" && config.resourceClass !== "STANDARD" && config.resourceClass !== "LARGE") invalid();
+  try { assertAgentResourceClass(config.resourceClass, config.vcpuCount, config.memoryMib); } catch { invalid(); }
   return deepFreeze(config);
 }
 

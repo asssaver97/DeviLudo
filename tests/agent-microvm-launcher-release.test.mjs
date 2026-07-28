@@ -133,7 +133,7 @@ async function fixtureFiles() {
     chrootBaseDirectory: "/var/lib/deviludo/firecracker-jails", networkNamespaceDirectory: "/run/netns",
     networkNamespaceNames: ["deviludo-agent-001"], networkLockDirectory: "/run/lock/deviludo-agent-microvms",
     tapDeviceName: "tap0", guestMacAddress: "06:00:ac:10:00:02", jailerUid: 10000, jailerGid: 10000,
-    parentCgroup: "deviludo-agent", vcpuCount: 4, memoryMib: 8192, dataDriveSizeMib: 8192,
+    parentCgroup: "deviludo-agent", resourceClass: "STANDARD", vcpuCount: 4, memoryMib: 8192, dataDriveSizeMib: 8192,
     bootArgs: "reboot=k panic=1 pci=off 8250.nr_uarts=0 root=/dev/vda rootfstype=squashfs ro ip=172.20.0.2::172.20.0.1:255.255.255.0::eth0:off",
     maxRunSeconds: 7200,
   };
