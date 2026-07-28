@@ -3,6 +3,7 @@ import { trustedGitHubSessionKeyFromEnvironment, verifyTrustedPlatformSession } 
 import { projectRepositoryBrokerFromEnvironment } from "@/lib/projects/repository-broker";
 import { readLocalProject } from "@/lib/projects/local-project-catalog";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { localGitHubImportEnabled } from "@/lib/connections/local-github-runtime";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
@@ -11,7 +12,7 @@ export async function GET(request: Request, context: { params: Promise<{ project
   if (isLoopbackTestRequest(request)) {
     const project = await readLocalProject(projectId);
     return project
-      ? json({ data: project, meta: { mode: "LOCAL_FIXTURE" } })
+      ? json({ data: project, meta: { mode: localGitHubImportEnabled(request) ? "LOCAL_GITHUB" : "LOCAL_FIXTURE" } })
       : json({ error: { code: "PROJECT_NOT_FOUND", message: "本地项目不存在。" } }, { status: 404 });
   }
   if (!UUID.test(projectId)) return json({ error: { code: "INVALID_PROJECT", message: "项目标识无效。" } }, { status: 400 });

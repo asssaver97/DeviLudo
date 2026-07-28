@@ -2255,14 +2255,28 @@ body:has(.app-shell) {
   transform: translate(3px, 3px);
 }
 
-.button-primary {
-  background: var(--acid);
-  border-color: #ffe8a6;
-  color: #17120a;
+.button-primary,
+.button-acid {
+  position: relative;
+  z-index: 101;
+  background: #10283a;
+  border-color: var(--blue);
+  box-shadow: 3px 3px 0 #020305, inset 0 0 0 1px rgba(141, 233, 255, .16);
+  color: #f4fbff;
+  text-shadow: 1px 1px 0 #000;
 }
 
-.button-primary:hover {
-  background: #ffd875;
+.button-primary:hover,
+.button-acid:hover {
+  background: #17435a;
+  border-color: #8de9ff;
+  color: #fff;
+}
+
+.button-primary:focus-visible,
+.button-acid:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: 3px;
 }
 
 .button-secondary {

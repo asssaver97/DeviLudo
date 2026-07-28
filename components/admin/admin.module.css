@@ -1763,14 +1763,24 @@
 }
 
 .primaryButton {
-  background: var(--lime);
-  border-color: #ffe8a6;
-  color: #17120a !important;
+  position: relative;
+  z-index: 101;
+  background: #10283a;
+  border-color: var(--blue);
+  box-shadow: 3px 3px 0 #000, inset 0 0 0 1px rgba(141, 233, 255, .16);
+  color: #f4fbff !important;
+  text-shadow: 1px 1px 0 #000;
 }
 
 .primaryButton:hover {
-  background: #ffd875;
-  border-color: #fff0bd;
+  background: #17435a;
+  border-color: #8de9ff;
+  color: #fff !important;
+}
+
+.primaryButton:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
 }
 
 .secondaryButton,

@@ -3,6 +3,7 @@ import test from "node:test";
 import { GET as GET_REPOSITORIES } from "../app/api/projects/repositories/route.ts";
 import { GET as GET_PROJECT } from "../app/api/projects/[projectId]/route.ts";
 import { GET as GET_PROJECTS, POST as CREATE_PROJECT } from "../app/api/projects/route.ts";
+import { createLocalGitHubProject } from "../lib/projects/local-project-catalog.ts";
 
 function request(path, init = {}) {
   return new Request(`http://127.0.0.1:3000${path}`, init);
@@ -134,4 +135,46 @@ test("local project creation rejects browser-supplied repository authority and n
     if (previousNodeEnvironment === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnvironment;
   }
+});
+
+test("authenticated local GitHub authority persists the exact real repository binding", async () => {
+  const suffix = `${process.pid}-${Date.now().toString(36)}`;
+  const slug = `github-game-${suffix}`;
+  const result = await createLocalGitHubProject({
+    slug,
+    name: "真实 GitHub 游戏",
+    repository: {
+      installationId: "42001",
+      repositoryId: 991,
+      repositoryNodeId: `R_real_${suffix}`,
+      owner: "ada",
+      name: "real-godot-game",
+      defaultBranch: "develop",
+    },
+  }, `github-import-${suffix}`);
+  assert.equal(result.replayed, false);
+  assert.deepEqual(result.project, {
+    projectId: slug,
+    tenantId: "tenant-local",
+    slug,
+    name: "真实 GitHub 游戏",
+    repositoryBindingId: `github-binding-${slug}-991`,
+    installationId: "42001",
+    repositoryId: 991,
+    repositoryNodeId: `R_real_${suffix}`,
+    owner: "ada",
+    repositoryName: "real-godot-game",
+    defaultBranch: "develop",
+    createdAt: result.project.createdAt,
+  });
+  const replay = await createLocalGitHubProject({
+    slug,
+    name: "真实 GitHub 游戏",
+    repository: {
+      installationId: "42001", repositoryId: 991, repositoryNodeId: `R_real_${suffix}`,
+      owner: "ada", name: "real-godot-game", defaultBranch: "develop",
+    },
+  }, `github-import-${suffix}`);
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.project, result.project);
 });

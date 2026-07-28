@@ -5,9 +5,21 @@ import {
   requireGitHubSetupParameters,
   verifyTrustedGitHubSession,
 } from "@/lib/connections/github-broker";
+import { LocalGitHubRuntimeClient, localGitHubImportEnabled } from "@/lib/connections/local-github-runtime";
 
 /** Untrusted setup parameters are handled only by the authenticated broker. */
 export async function GET(request: Request) {
+  if (localGitHubImportEnabled(request)) {
+    let parameters: ReturnType<typeof requireGitHubSetupParameters>;
+    try { parameters = requireGitHubSetupParameters(new URL(request.url)); }
+    catch { return json({ error: { code: "GITHUB_APP_SETUP_REJECTED", message: "GitHub App setup callback is invalid." } }, { status: 400 }); }
+    try {
+      const result = await new LocalGitHubRuntimeClient().setup(parameters);
+      return redirectTo(result.authorizeUrl);
+    } catch {
+      return json({ error: { code: "LOCAL_GITHUB_RUNTIME_UNAVAILABLE", message: "本机 GitHub App setup 未完成。" } }, { status: 502 });
+    }
+  }
   let runtime: ReturnType<typeof githubBrokerRuntimeFromEnvironment>;
   try {
     runtime = githubBrokerRuntimeFromEnvironment();

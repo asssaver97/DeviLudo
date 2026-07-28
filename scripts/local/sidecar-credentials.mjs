@@ -9,7 +9,8 @@ const OWNER_FIELDS = Object.freeze(["createdAt", "deploymentId", "pid", "schema"
 const DEFAULT_STALE_AFTER_MS = 5_000;
 
 /**
- * Claims one launcher identity before installing its three keys. A dead owner
+ * Claims one launcher identity before installing its three standard keys and
+ * an optional GitHub-import key. A dead owner
  * may be replaced atomically, but legacy key files are reclaimed only after a
  * safety window. The owner record contains no key material.
  */
@@ -97,8 +98,8 @@ export async function installLocalSidecarCredentials(credentials) {
 }
 
 function validateCredentials(credentials) {
-  if (!Array.isArray(credentials) || credentials.length !== 3) {
-    throw new Error("Exactly three local sidecar credentials are required");
+  if (!Array.isArray(credentials) || credentials.length < 3 || credentials.length > 4) {
+    throw new Error("Three or four local sidecar credentials are required");
   }
   const files = new Set();
   for (const credential of credentials) {

@@ -3,8 +3,13 @@ import {
   githubBrokerRuntimeFromEnvironment,
   verifyTrustedGitHubSession,
 } from "@/lib/connections/github-broker";
+import { LocalGitHubRuntimeClient, localGitHubImportEnabled } from "@/lib/connections/local-github-runtime";
 
 export async function GET(request: Request) {
+  if (localGitHubImportEnabled(request)) {
+    try { return json({ data: await new LocalGitHubRuntimeClient().status(), meta: { mode: "LOCAL_GITHUB" } }); }
+    catch { return json({ error: { code: "LOCAL_GITHUB_RUNTIME_UNAVAILABLE", message: "本机 GitHub 导入服务不可用。" } }, { status: 503 }); }
+  }
   let runtime: ReturnType<typeof githubBrokerRuntimeFromEnvironment>;
   try {
     runtime = githubBrokerRuntimeFromEnvironment();
@@ -28,6 +33,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (localGitHubImportEnabled(request)) {
+    try { return json({ data: await new LocalGitHubRuntimeClient().begin(), meta: { mode: "LOCAL_GITHUB" } }, { status: 201 }); }
+    catch { return json({ error: { code: "LOCAL_GITHUB_RUNTIME_UNAVAILABLE", message: "本机 GitHub 导入服务不可用。" } }, { status: 503 }); }
+  }
   let runtime: ReturnType<typeof githubBrokerRuntimeFromEnvironment>;
   try {
     runtime = githubBrokerRuntimeFromEnvironment();

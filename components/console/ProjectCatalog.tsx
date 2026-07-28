@@ -12,7 +12,7 @@ export function ProjectCatalog() {
     <AppShell>
       <section className="page-heading project-catalog-heading">
         <div>
-          <span className="eyebrow">{mode === "LOCAL_FIXTURE" ? "Localhost · 隔离项目目录" : "GitHub App · 租户项目目录"}</span>
+          <span className="eyebrow">{mode === "LOCAL_FIXTURE" ? "Localhost · 隔离项目目录" : mode === "LOCAL_GITHUB" ? "Localhost · 真实 GitHub App" : "GitHub App · 租户项目目录"}</span>
           <h1>游戏项目</h1>
           <p>这里只展示当前账号经租户和 GitHub App 授权后仍可访问的项目；仓库归属由服务端实时绑定。</p>
         </div>

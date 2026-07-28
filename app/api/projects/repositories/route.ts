@@ -3,8 +3,13 @@ import { trustedGitHubSessionKeyFromEnvironment, verifyTrustedPlatformSession } 
 import { projectRepositoryBrokerFromEnvironment } from "@/lib/projects/repository-broker";
 import { localRepositoryCatalog } from "@/lib/projects/local-project-catalog";
 import { isLoopbackTestRequest } from "@/lib/security/local-test-mode";
+import { LocalGitHubRuntimeClient, localGitHubImportEnabled } from "@/lib/connections/local-github-runtime";
 
 export async function GET(request: Request) {
+  if (localGitHubImportEnabled(request)) {
+    try { return json({ data: await new LocalGitHubRuntimeClient().repositories(), meta: { mode: "LOCAL_GITHUB" } }); }
+    catch { return json({ error: { code: "REPOSITORY_CATALOG_UNAVAILABLE", message: "暂时无法读取 GitHub App 可见仓库。" } }, { status: 502 }); }
+  }
   if (isLoopbackTestRequest(request)) {
     return json({ data: localRepositoryCatalog(), meta: { mode: "LOCAL_FIXTURE" } });
   }

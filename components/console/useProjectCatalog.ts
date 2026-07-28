@@ -19,7 +19,7 @@ export type ProjectCatalogItem = Readonly<{
 
 export function useProjectCatalog() {
   const [projects, setProjects] = useState<readonly ProjectCatalogItem[]>([]);
-  const [mode, setMode] = useState<"LOCAL_FIXTURE" | "PRODUCTION" | null>(null);
+  const [mode, setMode] = useState<"LOCAL_FIXTURE" | "LOCAL_GITHUB" | "PRODUCTION" | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -30,7 +30,7 @@ export function useProjectCatalog() {
         const body = await response.json() as { data?: unknown; meta?: { mode?: unknown }; error?: { message?: string } };
         if (!response.ok) throw new Error(body.error?.message ?? "项目目录不可用");
         const responseMode = body.meta?.mode;
-        if (responseMode !== "LOCAL_FIXTURE" && responseMode !== "PRODUCTION") throw new Error("项目目录来源无效");
+        if (responseMode !== "LOCAL_FIXTURE" && responseMode !== "LOCAL_GITHUB" && responseMode !== "PRODUCTION") throw new Error("项目目录来源无效");
         const parsed = parseProjectCatalog(body.data, responseMode);
         setProjects(parsed);
         setMode(responseMode);
@@ -67,7 +67,7 @@ export function useProjectSelection() {
 
 export function parseProjectCatalog(
   value: unknown,
-  mode: "LOCAL_FIXTURE" | "PRODUCTION",
+  mode: "LOCAL_FIXTURE" | "LOCAL_GITHUB" | "PRODUCTION",
 ): readonly ProjectCatalogItem[] {
   if (!Array.isArray(value) || value.length > 500) throw new Error("项目目录格式无效");
   const projects = value.map((project) => parseProject(project, mode));
@@ -75,7 +75,7 @@ export function parseProjectCatalog(
   return Object.freeze(projects);
 }
 
-function parseProject(value: unknown, mode: "LOCAL_FIXTURE" | "PRODUCTION"): ProjectCatalogItem {
+function parseProject(value: unknown, mode: "LOCAL_FIXTURE" | "LOCAL_GITHUB" | "PRODUCTION"): ProjectCatalogItem {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("项目目录格式无效");
   const item = value as Record<string, unknown>;
   const stringFields = ["projectId", "tenantId", "slug", "name", "repositoryBindingId", "installationId", "repositoryNodeId", "owner", "repositoryName", "defaultBranch", "createdAt"] as const;

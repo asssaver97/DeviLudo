@@ -16,7 +16,7 @@ npm run local:install-export-templates
 
 安装器使用版本化目录中的固定下载 URL、字节数和 SHA-256，拒绝浮动版本、路径穿越、链接、重复文件和现存未验证目录。也可用 `--archive /绝对路径/官方模板.tpz` 对已经下载的归档执行相同校验。安装结果写入 Godot 标准目录并设为只读；每次验证仍会重验安装清单和 macOS 模板摘要，再把精确版本只读挂载进隔离 HOME。
 
-不要把 API Key、GitHub 私钥或 Steam 密码写入命令、脚本或 `.env`。仓库根目录的 `.env.example` 只包含本地默认值、公开 ID 和 Vault 引用示例；测试站的演示操作会停在外部服务门禁处。
+不要把 API Key、GitHub 私钥或 Steam 密码写入命令、脚本或 `.env`。仓库根目录的 `.env.example` 只包含本地默认值、公开 ID 和 Vault 引用示例；测试站的演示操作会停在外部服务门禁处。需要从本地网站导入真实仓库时，使用独立的显式模式和私有文件，参见[本地导入真实 GitHub 项目](local-github-import.md)。
 
 ## 启动
 
@@ -28,7 +28,7 @@ npm run local:dev
 
 测试站地址为 <http://127.0.0.1:3000>，Godot 验证侧车为 `http://127.0.0.1:4311`，Agent 就绪探针为 `http://127.0.0.1:4312`，规格对话侧车为 `http://127.0.0.1:4313`。同一命令会检查四个端口并同时启动四个进程。按一次 `Ctrl-C` 会向完整子进程树发送优雅停止信号；五秒后仍未退出会自动强制清理，再按一次 `Ctrl-C` 可立即强制停止。
 
-启动器会为 Godot、Agent 和规格 sidecar 分别生成独立 256-bit 会话 Key。Web 到 sidecar 的每个非健康请求都签名绑定服务受众、方法、路径、正文摘要、时间戳和单次 nonce；Key 以 `0600` 写入被 Git 忽略的 `.deviludo/` 仅供 smoke 验证，并在退出时删除。固定请求头、跨服务 Key、过期请求、正文或路径篡改都会被拒绝。
+启动器会为 Godot、Agent 和规格 sidecar 分别生成独立 256-bit 会话 Key；真实 GitHub 导入模式会再生成一把不同受众的临时 Key。Web 到 sidecar 的每个非健康请求都签名绑定服务受众、方法、路径、正文摘要、时间戳和单次 nonce；Key 以 `0600` 写入被 Git 忽略的 `.deviludo/` 仅供 smoke 验证，并在退出时删除。固定请求头、跨服务 Key、过期请求、正文或路径篡改都会被拒绝。
 
 `.deviludo/local-deployment.json` 是不含密钥的原子所有权租约，只记录 schema、launcher PID、随机 deployment ID 和创建时间。Web 与三个 sidecar 均由独立监督进程托管，每 500ms 同时核对 PID 存活和精确租约；launcher 遭到 `SIGKILL`、租约被替换或删除时，四个服务会在五秒强制上限内退出并释放 loopback 端口。新启动器绝不复用旧 Key：只有成功原子接管一个已死亡的合法租约（或确认没有租约），并且格式正确的遗留 Key 已超过五秒安全窗口后，才删除旧会话文件并生成新 Key。活跃 PID、近期不明确文件、符号链接、权限/格式错误或并发接管都保持失败关闭。
 

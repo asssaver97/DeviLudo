@@ -30,6 +30,15 @@ export type LocalRepositoryCatalog = Readonly<{
   }>[];
 }>;
 
+export type LocalGitHubRepositoryAuthority = Readonly<{
+  installationId: string;
+  repositoryId: number;
+  repositoryNodeId: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+}>;
+
 type ProjectRow = {
   project_id: string;
   tenant_id: string;
@@ -131,6 +140,23 @@ export async function createLocalProject(
     : withMemoryLock(() => createMemoryProject(normalized, commandKey, requestDigest));
 }
 
+/**
+ * Persists only repository authority returned by the authenticated local
+ * GitHub sidecar. Browser requests never supply these descriptive fields.
+ */
+export async function createLocalGitHubProject(
+  input: Readonly<{ slug: string; name: string; repository: LocalGitHubRepositoryAuthority }>,
+  commandKey: string,
+): Promise<Readonly<{ project: LocalProjectCatalogItem; replayed: boolean }>> {
+  const normalized = normalizeGitHubInput(input);
+  if (!COMMAND_PATTERN.test(commandKey)) throw new LocalProjectCatalogError("INVALID_PROJECT");
+  const requestDigest = await sha256(JSON.stringify(normalized));
+  const database = await resolveDatabase();
+  return database
+    ? createD1Project(database, normalized, commandKey, requestDigest)
+    : withMemoryLock(() => createMemoryProject(normalized, commandKey, requestDigest));
+}
+
 export async function cleanupLocalSmokeProjects(projectIds: readonly string[]): Promise<Readonly<{
   projects: number;
   commands: number;
@@ -176,7 +202,7 @@ export async function cleanupLocalSmokeProjects(projectIds: readonly string[]): 
 
 async function createD1Project(
   database: D1Database,
-  input: ReturnType<typeof normalizeInput>,
+  input: ReturnType<typeof normalizeInput> | ReturnType<typeof normalizeGitHubInput>,
   commandKey: string,
   requestDigest: string,
 ) {
@@ -216,7 +242,7 @@ async function createD1Project(
 }
 
 function createMemoryProject(
-  input: ReturnType<typeof normalizeInput>,
+  input: ReturnType<typeof normalizeInput> | ReturnType<typeof normalizeGitHubInput>,
   commandKey: string,
   requestDigest: string,
 ) {
@@ -247,22 +273,58 @@ function normalizeInput(input: Readonly<{ slug: string; name: string; installati
     || input.installationId !== "local-fixture-9001" || input.repositoryId !== 7001) {
     throw new LocalProjectCatalogError("INVALID_PROJECT");
   }
-  return Object.freeze({ slug, name, installationId: input.installationId, repositoryId: input.repositoryId });
+  return Object.freeze({
+    slug,
+    name,
+    installationId: input.installationId,
+    repositoryId: input.repositoryId,
+    repositoryNodeId: `LOCAL_R_${slug}`,
+    owner: "local-sandbox",
+    repositoryName: slug,
+    defaultBranch: "main",
+    source: "fixture" as const,
+  });
 }
 
-function makeProject(input: ReturnType<typeof normalizeInput>): LocalProjectCatalogItem {
+function normalizeGitHubInput(input: Readonly<{ slug: string; name: string; repository: LocalGitHubRepositoryAuthority }>) {
+  const slug = typeof input.slug === "string" ? input.slug.trim() : "";
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const repository = input.repository;
+  if (!PROJECT_PATTERN.test(slug) || name.length < 1 || name.length > 120 || /[\0-\x1f\x7f]/.test(name)
+    || !repository || !/^\d{1,20}$/.test(repository.installationId) || repository.installationId === "0"
+    || !Number.isSafeInteger(repository.repositoryId) || repository.repositoryId < 1
+    || !safeGitHubName(repository.repositoryNodeId, 256) || !safeGitHubName(repository.owner, 100)
+    || !safeGitHubName(repository.name, 100) || !safeGitHubName(repository.defaultBranch, 255)) {
+    throw new LocalProjectCatalogError("INVALID_PROJECT");
+  }
+  return Object.freeze({
+    slug,
+    name,
+    installationId: repository.installationId,
+    repositoryId: repository.repositoryId,
+    repositoryNodeId: repository.repositoryNodeId,
+    owner: repository.owner,
+    repositoryName: repository.name,
+    defaultBranch: repository.defaultBranch,
+    source: "github" as const,
+  });
+}
+
+function makeProject(input: ReturnType<typeof normalizeInput> | ReturnType<typeof normalizeGitHubInput>): LocalProjectCatalogItem {
   return Object.freeze({
     projectId: input.slug,
     tenantId: "tenant-local",
     slug: input.slug,
     name: input.name,
-    repositoryBindingId: `local-binding-${input.slug}`,
+    repositoryBindingId: input.source === "fixture"
+      ? `local-binding-${input.slug}`
+      : `github-binding-${input.slug}-${input.repositoryId}`,
     installationId: input.installationId,
     repositoryId: input.repositoryId,
-    repositoryNodeId: `LOCAL_R_${input.slug}`,
-    owner: "local-sandbox",
-    repositoryName: input.slug,
-    defaultBranch: "main",
+    repositoryNodeId: input.repositoryNodeId,
+    owner: input.owner,
+    repositoryName: input.repositoryName,
+    defaultBranch: input.defaultBranch,
     createdAt: new Date().toISOString(),
   });
 }
@@ -288,29 +350,36 @@ function parseProject(value: unknown): LocalProjectCatalogItem {
     || typeof project.repositoryBindingId !== "string" || typeof project.installationId !== "string"
     || !Number.isSafeInteger(project.repositoryId) || typeof project.repositoryNodeId !== "string"
     || typeof project.owner !== "string" || typeof project.repositoryName !== "string"
-    || project.defaultBranch !== "main" || typeof project.createdAt !== "string"
+    || !safeGitHubName(project.defaultBranch, 255) || typeof project.createdAt !== "string"
     || !Number.isFinite(Date.parse(project.createdAt)) || new Date(project.createdAt).toISOString() !== project.createdAt) {
     throw new Error("Local project catalog is invalid");
   }
-  const fixture = project.projectId === FIXTURE_PROJECT.projectId;
+  const fixture = project.projectId === FIXTURE_PROJECT.projectId
+    && project.installationId === FIXTURE_PROJECT.installationId;
   if (fixture) {
     for (const field of fields) {
       if (project[field] !== FIXTURE_PROJECT[field as keyof LocalProjectCatalogItem]) {
         throw new Error("Local project catalog fixture is invalid");
       }
     }
-  } else if (project.repositoryBindingId !== `local-binding-${project.projectId}`
-    || project.installationId !== "local-fixture-9001" || project.repositoryId !== 7001
-    || project.repositoryNodeId !== `LOCAL_R_${project.projectId}` || project.owner !== "local-sandbox"
-    || project.repositoryName !== project.projectId) {
-    throw new Error("Local project catalog binding is invalid");
+  } else {
+    const fixtureBinding = project.repositoryBindingId === `local-binding-${project.projectId}`
+      && project.installationId === "local-fixture-9001" && project.repositoryId === 7001
+      && project.repositoryNodeId === `LOCAL_R_${project.projectId}` && project.owner === "local-sandbox"
+      && project.repositoryName === project.projectId && project.defaultBranch === "main";
+    const githubBinding = project.repositoryBindingId === `github-binding-${project.projectId}-${project.repositoryId}`
+      && /^\d{1,20}$/.test(project.installationId as string) && project.installationId !== "0"
+      && safeGitHubName(project.repositoryNodeId, 256) && safeGitHubName(project.owner, 100)
+      && safeGitHubName(project.repositoryName, 100);
+    if (!fixtureBinding && !githubBinding) throw new Error("Local project catalog binding is invalid");
   }
   return Object.freeze(project as LocalProjectCatalogItem);
 }
 
 function memory(): MemoryState {
   globalState.__deviludoLocalProjects ??= {
-    projects: new Map([[FIXTURE_PROJECT.projectId, FIXTURE_PROJECT]]), commands: new Map(), queue: Promise.resolve(),
+    projects: new Map(process.env.DEVILUDO_LOCAL_GITHUB_IMPORT === "1" ? [] : [[FIXTURE_PROJECT.projectId, FIXTURE_PROJECT]]),
+    commands: new Map(), queue: Promise.resolve(),
   };
   return globalState.__deviludoLocalProjects;
 }
@@ -345,14 +414,16 @@ async function ensureStore(database: D1Database): Promise<void> {
     database.prepare(`CREATE TRIGGER IF NOT EXISTS local_projects_limit
       BEFORE INSERT ON local_projects WHEN (SELECT COUNT(*) FROM local_projects) >= 100
       BEGIN SELECT RAISE(ABORT, 'local project limit reached'); END`),
-    database.prepare(`INSERT OR IGNORE INTO local_projects
-      (project_id, tenant_id, slug, name, repository_binding_id, installation_id, repository_id,
-       repository_node_id, owner, repository_name, default_branch, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(FIXTURE_PROJECT.projectId, FIXTURE_PROJECT.tenantId, FIXTURE_PROJECT.slug, FIXTURE_PROJECT.name,
-        FIXTURE_PROJECT.repositoryBindingId, FIXTURE_PROJECT.installationId, FIXTURE_PROJECT.repositoryId,
-        FIXTURE_PROJECT.repositoryNodeId, FIXTURE_PROJECT.owner, FIXTURE_PROJECT.repositoryName,
-        FIXTURE_PROJECT.defaultBranch, FIXTURE_PROJECT.createdAt),
+    ...(process.env.DEVILUDO_LOCAL_GITHUB_IMPORT === "1" ? [] : [
+      database.prepare(`INSERT OR IGNORE INTO local_projects
+        (project_id, tenant_id, slug, name, repository_binding_id, installation_id, repository_id,
+         repository_node_id, owner, repository_name, default_branch, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(FIXTURE_PROJECT.projectId, FIXTURE_PROJECT.tenantId, FIXTURE_PROJECT.slug, FIXTURE_PROJECT.name,
+          FIXTURE_PROJECT.repositoryBindingId, FIXTURE_PROJECT.installationId, FIXTURE_PROJECT.repositoryId,
+          FIXTURE_PROJECT.repositoryNodeId, FIXTURE_PROJECT.owner, FIXTURE_PROJECT.repositoryName,
+          FIXTURE_PROJECT.defaultBranch, FIXTURE_PROJECT.createdAt),
+    ]),
   ]);
   initializedDb = database;
 }
@@ -365,6 +436,10 @@ function sortedProjects(projects: Iterable<LocalProjectCatalogItem>) {
 async function sha256(value: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function safeGitHubName(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum && !/[\0-\x1f\x7f]/.test(value);
 }
 
 function resultChanges(result: Readonly<{ meta: Readonly<{ changes?: unknown }> }>): number {

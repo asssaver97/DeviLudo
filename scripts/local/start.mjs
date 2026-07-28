@@ -2,7 +2,7 @@
 
 import { constants as osSignals } from "node:os";
 import { randomBytes } from "node:crypto";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,7 @@ const DEFAULT_LOCAL_RUNTIME_PORT = 4311;
 const DEFAULT_LOCAL_AGENT_RUNTIME_PORT = 4312;
 const DEFAULT_LOCAL_SPEC_RUNTIME_PORT = 4313;
 const DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT = 4314;
+const DEFAULT_LOCAL_GITHUB_RUNTIME_PORT = 4315;
 const DEFAULT_LOCAL_CLAUDE_VERSION = "2.1.201";
 const DEFAULT_LOCAL_CODEX_VERSION = "0.146.0-alpha.3.1";
 const FORCE_STOP_AFTER_MS = 5_000;
@@ -35,6 +36,9 @@ Environment:
   DEVILUDO_LOCAL_AGENT_RUNTIME_PORT  Local Agent readiness port (default: ${DEFAULT_LOCAL_AGENT_RUNTIME_PORT})
   DEVILUDO_LOCAL_SPEC_RUNTIME_PORT  Local specification dialogue port (default: ${DEFAULT_LOCAL_SPEC_RUNTIME_PORT})
   DEVILUDO_LOCAL_INFERENCE_GATEWAY_PORT  Internal loopback inference Gateway port (default: ${DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT})
+  DEVILUDO_LOCAL_GITHUB_IMPORT  Set to 1 to enable real GitHub App import
+  DEVILUDO_LOCAL_GITHUB_RUNTIME_PORT  Local GitHub sidecar port (default: ${DEFAULT_LOCAL_GITHUB_RUNTIME_PORT})
+  DEVILUDO_LOCAL_GITHUB_CONFIG_FILE  Non-secret config path (default: .deviludo/github-app.json)
   DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION  Exact trusted Claude Code version (default: ${DEFAULT_LOCAL_CLAUDE_VERSION})
   DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION  Exact trusted Codex CLI version (default: ${DEFAULT_LOCAL_CODEX_VERSION})
   DEVILUDO_LOCAL_SPEC_STATE_FILE  Absolute durable specification state file (default: .deviludo/local-spec-state.json)
@@ -131,8 +135,11 @@ let localRuntimePort;
 let localAgentRuntimePort;
 let localSpecRuntimePort;
 let localInferenceGatewayPort;
+let localGitHubRuntimePort;
 let localClaudeVersion;
 let localCodexVersion;
+let localGitHubConfig;
+const localGitHubImport = process.env.DEVILUDO_LOCAL_GITHUB_IMPORT === "1";
 try {
   port = parsePort(process.argv.slice(2));
   if (port !== null) {
@@ -140,9 +147,14 @@ try {
     localAgentRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_AGENT_RUNTIME_PORT", DEFAULT_LOCAL_AGENT_RUNTIME_PORT);
     localSpecRuntimePort = parseEnvironmentPort("DEVILUDO_LOCAL_SPEC_RUNTIME_PORT", DEFAULT_LOCAL_SPEC_RUNTIME_PORT);
     localInferenceGatewayPort = parseEnvironmentPort("DEVILUDO_LOCAL_INFERENCE_GATEWAY_PORT", DEFAULT_LOCAL_INFERENCE_GATEWAY_PORT);
+    localGitHubRuntimePort = localGitHubImport
+      ? parseEnvironmentPort("DEVILUDO_LOCAL_GITHUB_RUNTIME_PORT", DEFAULT_LOCAL_GITHUB_RUNTIME_PORT)
+      : undefined;
     localClaudeVersion = parseExactAgentVersion("DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION", DEFAULT_LOCAL_CLAUDE_VERSION);
     localCodexVersion = parseExactAgentVersion("DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION", DEFAULT_LOCAL_CODEX_VERSION);
-    if (new Set([port, localRuntimePort, localAgentRuntimePort, localSpecRuntimePort, localInferenceGatewayPort]).size !== 5) throw new Error("Web and local sidecar ports must be different");
+    const selectedPorts = [port, localRuntimePort, localAgentRuntimePort, localSpecRuntimePort, localInferenceGatewayPort,
+      ...(localGitHubRuntimePort === undefined ? [] : [localGitHubRuntimePort])];
+    if (new Set(selectedPorts).size !== selectedPorts.length) throw new Error("Web and local sidecar ports must be different");
   }
 } catch (error) {
   port = undefined;
@@ -150,6 +162,7 @@ try {
   localAgentRuntimePort = undefined;
   localSpecRuntimePort = undefined;
   localInferenceGatewayPort = undefined;
+  localGitHubRuntimePort = undefined;
   localClaudeVersion = undefined;
   localCodexVersion = undefined;
   fail(error instanceof Error ? error.message : String(error));
@@ -165,15 +178,21 @@ if (port === null || port === undefined || localRuntimePort === undefined || loc
 const localRuntimeHmacKey = randomBytes(32).toString("base64url");
 const localAgentRuntimeHmacKey = randomBytes(32).toString("base64url");
 const localSpecRuntimeHmacKey = randomBytes(32).toString("base64url");
+const localGitHubRuntimeHmacKey = localGitHubImport ? randomBytes(32).toString("base64url") : undefined;
 const localSidecarCredentials = Object.freeze([
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-runtime.hmac"), key: localRuntimeHmacKey }),
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-agent-runtime.hmac"), key: localAgentRuntimeHmacKey }),
   Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-spec-runtime.hmac"), key: localSpecRuntimeHmacKey }),
+  ...(localGitHubRuntimeHmacKey ? [Object.freeze({ file: path.join(workspaceRoot, ".deviludo", "local-github-runtime.hmac"), key: localGitHubRuntimeHmacKey })] : []),
 ]);
 const localDeploymentOwnerFile = path.join(workspaceRoot, ".deviludo", "local-deployment.json");
 const localSpecStateFile = process.env.DEVILUDO_LOCAL_SPEC_STATE_FILE
   ? path.resolve(process.env.DEVILUDO_LOCAL_SPEC_STATE_FILE)
   : path.join(workspaceRoot, ".deviludo", "local-spec-state.json");
+const localGitHubStateFile = path.join(workspaceRoot, ".deviludo", "local-github-state.json");
+const localGitHubConfigFile = process.env.DEVILUDO_LOCAL_GITHUB_CONFIG_FILE
+  ? path.resolve(process.env.DEVILUDO_LOCAL_GITHUB_CONFIG_FILE)
+  : path.join(workspaceRoot, ".deviludo", "github-app.json");
 
 let removeLocalSidecarKeys = () => {};
 let localDeploymentId;
@@ -183,17 +202,25 @@ const supervisedChildEntry = path.join(workspaceRoot, "scripts", "local", "super
 const localRuntimeEntry = path.join(workspaceRoot, "services", "local-runtime", "src", "server.ts");
 const localAgentRuntimeEntry = path.join(workspaceRoot, "services", "local-agent-runtime", "src", "server.ts");
 const localSpecRuntimeEntry = path.join(workspaceRoot, "services", "local-spec-runtime", "src", "server.ts");
+const localGitHubRuntimeEntry = path.join(workspaceRoot, "services", "local-github-runtime", "src", "server.ts");
 try {
   await access(vinextCli);
   await access(supervisedChildEntry);
   await access(localRuntimeEntry);
   await access(localAgentRuntimeEntry);
   await access(localSpecRuntimeEntry);
+  if (localGitHubImport) {
+    await access(localGitHubRuntimeEntry);
+    localGitHubConfig = parseLocalGitHubConfig(JSON.parse(await readFile(localGitHubConfigFile, "utf8")));
+    await access(localGitHubConfig.clientSecretFile);
+    await access(localGitHubConfig.privateKeyFile);
+  }
   await assertPortAvailable(port);
   await assertPortAvailable(localRuntimePort);
   await assertPortAvailable(localAgentRuntimePort);
   await assertPortAvailable(localSpecRuntimePort);
   await assertPortAvailable(localInferenceGatewayPort);
+  if (localGitHubRuntimePort !== undefined) await assertPortAvailable(localGitHubRuntimePort);
   await mkdir(path.join(workspaceRoot, ".wrangler"), { recursive: true });
   await mkdir(path.join(workspaceRoot, ".deviludo"), { recursive: true, mode: 0o700 });
   const session = await installLocalSidecarSession({
@@ -216,6 +243,7 @@ console.log(`[local:dev] Starting the constrained local runtime at http://${HOST
 console.log(`[local:dev] Starting Agent readiness at http://${HOST}:${localAgentRuntimePort}`);
 console.log(`[local:dev] Starting specification dialogue at http://${HOST}:${localSpecRuntimePort}`);
 console.log(`[local:dev] Starting the internal inference Gateway at http://${HOST}:${localInferenceGatewayPort}/v1`);
+if (localGitHubRuntimePort !== undefined) console.log(`[local:dev] Starting real GitHub App import at http://${HOST}:${localGitHubRuntimePort}`);
 console.log("[local:dev] Press Ctrl-C to stop the server and its child processes.");
 
 function supervisedArguments(childArguments) {
@@ -290,6 +318,32 @@ const localSpecRuntimeChild = spawn(
   },
 );
 
+const localGitHubRuntimeChild = localGitHubRuntimePort === undefined || !localGitHubRuntimeHmacKey ? null : spawn(
+  process.execPath,
+  supervisedArguments(["--import", "tsx", localGitHubRuntimeEntry]),
+  {
+    cwd: workspaceRoot,
+    detached: process.platform !== "win32",
+    env: {
+      ...process.env,
+      NODE_ENV: "development",
+      DEVILUDO_LOCAL_TEST_MODE: "1",
+      DEVILUDO_LOCAL_GITHUB_IMPORT: "1",
+      DEVILUDO_LOCAL_GITHUB_RUNTIME_PORT: String(localGitHubRuntimePort),
+      DEVILUDO_LOCAL_GITHUB_RUNTIME_HMAC_KEY: localGitHubRuntimeHmacKey,
+      DEVILUDO_LOCAL_GITHUB_REDIRECT_URI: `http://${HOST}:${port}/api/connections/github/callback`,
+      DEVILUDO_LOCAL_GITHUB_STATE_FILE: localGitHubStateFile,
+      DEVILUDO_LOCAL_GITHUB_APP_ID: localGitHubConfig.appId,
+      DEVILUDO_LOCAL_GITHUB_APP_SLUG: localGitHubConfig.appSlug,
+      DEVILUDO_LOCAL_GITHUB_CLIENT_ID: localGitHubConfig.clientId,
+      DEVILUDO_LOCAL_GITHUB_USER_ID: String(localGitHubConfig.githubUserId),
+      DEVILUDO_LOCAL_GITHUB_CLIENT_SECRET_FILE: localGitHubConfig.clientSecretFile,
+      DEVILUDO_LOCAL_GITHUB_PRIVATE_KEY_FILE: localGitHubConfig.privateKeyFile,
+    },
+    stdio: "inherit",
+  },
+);
+
 const siteChild = spawn(
   process.execPath,
   supervisedArguments([vinextCli, "dev", "--hostname", HOST, "--port", String(port)]),
@@ -307,6 +361,11 @@ const siteChild = spawn(
       DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED: "1",
       DEVILUDO_LOCAL_SPEC_RUNTIME_URL: `http://${HOST}:${localSpecRuntimePort}`,
       DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY: localSpecRuntimeHmacKey,
+      ...(localGitHubRuntimePort === undefined || !localGitHubRuntimeHmacKey ? {} : {
+        DEVILUDO_LOCAL_GITHUB_IMPORT: "1",
+        DEVILUDO_LOCAL_GITHUB_RUNTIME_URL: `http://${HOST}:${localGitHubRuntimePort}`,
+        DEVILUDO_LOCAL_GITHUB_RUNTIME_HMAC_KEY: localGitHubRuntimeHmacKey,
+      }),
       WRANGLER_LOG_PATH: path.join(workspaceRoot, ".wrangler", "wrangler-local.log"),
     },
     stdio: "inherit",
@@ -319,7 +378,7 @@ let forceStopTimer;
 let shutdownStartedAt = 0;
 
 function killProcessTree(child, signal) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+  if (!child || !child.pid || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
@@ -343,6 +402,7 @@ function killAll(signal) {
   killProcessTree(localRuntimeChild, signal);
   killProcessTree(localAgentRuntimeChild, signal);
   killProcessTree(localSpecRuntimeChild, signal);
+  killProcessTree(localGitHubRuntimeChild, signal);
 }
 
 function beginShutdown(signal) {
@@ -399,6 +459,12 @@ localSpecRuntimeChild.once("error", (error) => {
   process.exitCode = 1;
 });
 
+localGitHubRuntimeChild?.once("error", (error) => {
+  console.error(`[local:dev] Could not start real GitHub import: ${error.message}`);
+  killAll("SIGTERM");
+  process.exitCode = 1;
+});
+
 localRuntimeChild.once("exit", (code, signal) => {
   if (stopping) return;
   console.error(`[local:dev] Local runtime exited unexpectedly (${signal ?? code ?? "unknown"}).`);
@@ -426,11 +492,22 @@ localSpecRuntimeChild.once("exit", (code, signal) => {
   process.exitCode = code ?? 1;
 });
 
+localGitHubRuntimeChild?.once("exit", (code, signal) => {
+  if (stopping) return;
+  console.error(`[local:dev] Real GitHub import exited unexpectedly (${signal ?? code ?? "unknown"}).`);
+  killProcessTree(siteChild, "SIGTERM");
+  killProcessTree(localRuntimeChild, "SIGTERM");
+  killProcessTree(localAgentRuntimeChild, "SIGTERM");
+  killProcessTree(localSpecRuntimeChild, "SIGTERM");
+  process.exitCode = code ?? 1;
+});
+
 siteChild.once("exit", (code, signal) => {
   clearTimeout(forceStopTimer);
   killProcessTree(localRuntimeChild, "SIGTERM");
   killProcessTree(localAgentRuntimeChild, "SIGTERM");
   killProcessTree(localSpecRuntimeChild, "SIGTERM");
+  killProcessTree(localGitHubRuntimeChild, "SIGTERM");
   for (const handledSignal of handledSignals) {
     process.removeAllListeners(handledSignal);
   }
@@ -455,3 +532,19 @@ process.once("exit", () => {
   try { removeLocalSidecarKeys(); }
   catch { console.error("[local:dev] Could not remove a sidecar session key."); }
 });
+
+function parseLocalGitHubConfig(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Local GitHub config is invalid");
+  const keys = ["appId", "appSlug", "clientId", "clientSecretFile", "githubUserId", "privateKeyFile", "schema"];
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(keys.sort())
+    || value.schema !== "deviludo.local-github-config.v1"
+    || typeof value.appId !== "string" || !/^\d{1,20}$/.test(value.appId) || value.appId === "0"
+    || typeof value.appSlug !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(value.appSlug)
+    || typeof value.clientId !== "string" || !/^(?:Iv1\.[A-Za-z0-9]{16,}|Ov23li[A-Za-z0-9]{10,})$/.test(value.clientId)
+    || !Number.isSafeInteger(value.githubUserId) || value.githubUserId < 1
+    || typeof value.clientSecretFile !== "string" || !path.isAbsolute(value.clientSecretFile) || path.resolve(value.clientSecretFile) !== value.clientSecretFile
+    || typeof value.privateKeyFile !== "string" || !path.isAbsolute(value.privateKeyFile) || path.resolve(value.privateKeyFile) !== value.privateKeyFile) {
+    throw new Error("Local GitHub config is invalid");
+  }
+  return Object.freeze({ ...value });
+}

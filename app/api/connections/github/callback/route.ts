@@ -5,9 +5,23 @@ import {
   requireGitHubOauthParameters,
   verifyTrustedGitHubSession,
 } from "@/lib/connections/github-broker";
+import { LocalGitHubRuntimeClient, localGitHubImportEnabled } from "@/lib/connections/local-github-runtime";
 
 /** OAuth codes and state are intentionally not parsed or reflected here. */
 export async function GET(request: Request) {
+  if (localGitHubImportEnabled(request)) {
+    let parameters: ReturnType<typeof requireGitHubOauthParameters>;
+    try { parameters = requireGitHubOauthParameters(new URL(request.url)); }
+    catch { return json({ error: { code: "GITHUB_USER_AUTHORIZATION_REJECTED", message: "GitHub user authorization callback is invalid." } }, { status: 400 }); }
+    try {
+      const result = await new LocalGitHubRuntimeClient().complete(parameters);
+      const location = new URL(result.returnPath, "https://deviludo.invalid");
+      location.searchParams.set("github", "connected");
+      return new Response(null, { status: 303, headers: { location: `${location.pathname}${location.search}`, "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff" } });
+    } catch {
+      return json({ error: { code: "LOCAL_GITHUB_RUNTIME_UNAVAILABLE", message: "本机 GitHub 用户授权未完成。" } }, { status: 502 });
+    }
+  }
   let runtime: ReturnType<typeof githubBrokerRuntimeFromEnvironment>;
   try {
     runtime = githubBrokerRuntimeFromEnvironment();

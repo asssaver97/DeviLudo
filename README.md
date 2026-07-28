@@ -101,6 +101,8 @@ npm run local:install-export-templates
 npm run local:dev
 ```
 
+需要让本地网站通过 GitHub App 安装与 PKCE 授权导入真实仓库时，按[本地 GitHub 导入说明](docs/local-github-import.md)配置被忽略的密钥文件，然后运行 `npm run local:github`。默认 `local:dev` 仍保持无 GitHub 网络访问的 fixture 模式。
+
 打开 `http://127.0.0.1:3000`。该命令同时启动 Web 控制面、`127.0.0.1:4311` Godot 验证侧车、`127.0.0.1:4312` Agent 执行 sidecar、`127.0.0.1:4313` 确定性规格对话侧车，以及由 Agent sidecar 托管的 `127.0.0.1:4314/v1` 内部 Inference Gateway；全部只绑定 loopback。启动器为三个控制 sidecar 分别生成临时 HMAC Key，并以 `0600` 写入被忽略的 `.deviludo/` 供本地冒烟验证，退出时删除。规格状态和部署租约不含 Key；受监督子进程持续核对 launcher PID 与随机 deployment ID。规格/项目页面和 D1 不会擅自调用第三方模型、GitHub 或 Steam；只有 SecurityAdmin 明确写入 Key、运行探针并激活 Provider 后，精确 CLI/镜像/Profile 门禁才可能启动真实 Agent。项目页的本机验证仍运行已安装 Godot；CLI 版本漂移会显示 `VERSION_MISMATCH` 并阻止执行。
 
 模板安装器只接受版本目录中固定的 Godot 官方构建，下载固定 URL 后校验归档大小、SHA-256 和全部压缩路径，再原子发布只读文件清单。验证侧车不会直接复用可变的编辑器 HOME；它会重验安装清单和 `macos.zip` 摘要，并只把精确版本目录挂载到本次运行的隔离 HOME。已有未验证目录不会被覆盖。
