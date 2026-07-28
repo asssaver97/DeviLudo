@@ -12,6 +12,9 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
+/blob-report/
 
 # next.js
 /.next/
@@ -21,6 +24,23 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.pid
+*.pid.lock
+*.swp
+*.swo
+*.tmp
+*.temp
+
+# editor and tool caches
+/.idea/
+/.vscode/
+/.cache/
+/.turbo/
+.eslintcache
 
 # debug
 npm-debug.log*
@@ -31,10 +51,8 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
-!services/identity/.env.example
-!services/scm-proxy/.env.authorization.example
-!services/scm-proxy/.env.candidate.example
-!services/scm-proxy/.env.repository.example
+!**/.env.example
+!**/.env.*.example
 
 # vercel
 .vercel
@@ -42,8 +60,16 @@ yarn-error.log*
 # typescript
 next-env.d.ts
 *.tsbuildinfo
-/dist/
+dist/
 /.wrangler/
 /outputs/
 /work/
 /.deviludo/
+
+# local databases and runtime credentials
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+config.vdf
