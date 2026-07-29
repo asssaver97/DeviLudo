@@ -40,6 +40,24 @@ export type ProductProjectDetail = ProductProjectSummary & Readonly<{
   events: readonly ProductEvent[];
 }>;
 
+export type ProductConversationMessage = Readonly<{
+  id: string;
+  role: "USER" | "ASSISTANT";
+  content: string;
+  metadata: Readonly<Record<string, unknown>>;
+  createdAt: string;
+}>;
+
+export type ProductConversation = Readonly<{
+  id: string;
+  projectId: string | null;
+  mode: "NEW_GAME" | "PROJECT_FEEDBACK";
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: readonly ProductConversationMessage[];
+}>;
+
 export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   DRAFT: "规格确认中",
   AGENT_RUNNING: "Agent 生成中",

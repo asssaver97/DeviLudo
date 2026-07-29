@@ -9,6 +9,7 @@ import {
 } from "@/lib/runtime/server-pools";
 import { assertJobPlacement, isJobKind, type E2eJobKind } from "@/lib/runtime/job-routing";
 import type { Database } from "./database";
+import { createProductConversationReply } from "./product-conversation";
 import type {
   ClaimedJobIdentity,
   JobCompletion,
@@ -190,6 +191,181 @@ export class CoreRepository {
           createdAt: event.created_at,
         }))),
       });
+    });
+  }
+
+  async readConversation(tenantId: string, conversationId: string): Promise<ProductConversation | null> {
+    return this.database.withTenant(tenantId, async client => {
+      const conversation = await client.query<ProductConversationRow>(
+        `SELECT id::text, project_id::text, mode, title, created_at::text, updated_at::text
+           FROM deviludo.project_conversations
+          WHERE id = $1::uuid`,
+        [conversationId],
+      );
+      return conversation.rows[0]
+        ? this.readConversationMessages(client, conversation.rows[0])
+        : null;
+    });
+  }
+
+  async appendConversationTurn(input: Readonly<{
+    tenantId: string;
+    tenantName: string;
+    conversationId: string;
+    projectId: string | null;
+    userContent: string;
+  }>): Promise<ProductConversation> {
+    return this.database.withTenant(input.tenantId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.tenants(id, name) VALUES ($1::uuid, $2)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.tenantId, input.tenantName],
+      );
+
+      const existing = await client.query<ProductConversationRow>(
+        `SELECT id::text, project_id::text, mode, title, created_at::text, updated_at::text
+           FROM deviludo.project_conversations
+          WHERE id = $1::uuid
+          FOR UPDATE`,
+        [input.conversationId],
+      );
+      let conversation = existing.rows[0];
+      if (conversation && conversation.project_id !== input.projectId) {
+        throw new Error("A conversation cannot switch projects");
+      }
+
+      let project: { name: string; workflowId: string; workflowState: string; stateData: Record<string, unknown> } | null = null;
+      if (input.projectId) {
+        const projectResult = await client.query<{ name: string }>(
+          `SELECT name FROM deviludo.projects WHERE id = $1::uuid`,
+          [input.projectId],
+        );
+        const workflowResult = await client.query<{
+          id: string;
+          state: string;
+          state_data: Record<string, unknown>;
+        }>(
+          `SELECT id::text, state::text, state_data
+             FROM deviludo.workflow_instances
+            WHERE project_id = $1::uuid
+            ORDER BY created_at DESC
+            LIMIT 1
+            FOR UPDATE`,
+          [input.projectId],
+        );
+        if (!projectResult.rows[0] || !workflowResult.rows[0]) throw new Error("Project not found");
+        project = {
+          name: projectResult.rows[0].name,
+          workflowId: workflowResult.rows[0].id,
+          workflowState: workflowResult.rows[0].state,
+          stateData: workflowResult.rows[0].state_data,
+        };
+      }
+
+      if (!conversation) {
+        const created = await client.query<ProductConversationRow>(
+          `INSERT INTO deviludo.project_conversations(tenant_id, id, project_id, mode, title)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)
+           RETURNING id::text, project_id::text, mode, title, created_at::text, updated_at::text`,
+          [
+            input.tenantId,
+            input.conversationId,
+            input.projectId,
+            input.projectId ? "PROJECT_FEEDBACK" : "NEW_GAME",
+            conversationTitleFromContent(input.userContent),
+          ],
+        );
+        conversation = created.rows[0];
+      }
+
+      const userMessage = await client.query<{ message_id: string }>(
+        `INSERT INTO deviludo.conversation_messages(tenant_id, conversation_id, role, content)
+         VALUES ($1::uuid, $2::uuid, 'USER', $3)
+         RETURNING message_id::text`,
+        [input.tenantId, input.conversationId, input.userContent],
+      );
+      const turnCount = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM deviludo.conversation_messages
+          WHERE conversation_id = $1::uuid AND role = 'USER'`,
+        [input.conversationId],
+      );
+      const assistant = createProductConversationReply({
+        userContent: input.userContent,
+        turnNumber: Number(turnCount.rows[0]?.count ?? 1),
+        project: project ? { name: project.name, workflowState: project.workflowState } : null,
+      });
+
+      if (assistant.appliedToDraft && project) {
+        const specification = productSpecificationFromState(project.stateData);
+        await client.query(
+          `UPDATE deviludo.workflow_instances
+              SET state_data = state_data || jsonb_build_object('specification', $2::jsonb),
+                  version = version + 1,
+                  updated_at = clock_timestamp()
+            WHERE id = $1::uuid AND state = 'DRAFT'`,
+          [project.workflowId, JSON.stringify(appendRevisionNote(specification, input.userContent))],
+        );
+        await client.query(
+          `INSERT INTO deviludo.workflow_events(
+             tenant_id, workflow_id, event_kind, event_data, idempotency_key
+           ) VALUES ($1::uuid, $2::uuid, 'SPEC_REFINED', $3::jsonb, $4)
+           ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING`,
+          [
+            input.tenantId,
+            project.workflowId,
+            JSON.stringify({ note: input.userContent, source: "HOME_CONVERSATION" }),
+            `conversation:${input.conversationId}:${userMessage.rows[0].message_id}`,
+          ],
+        );
+      }
+
+      await client.query(
+        `INSERT INTO deviludo.conversation_messages(tenant_id, conversation_id, role, content, metadata)
+         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+        [
+          input.tenantId,
+          input.conversationId,
+          assistant.content,
+          JSON.stringify({ appliedToDraft: assistant.appliedToDraft }),
+        ],
+      );
+      const updated = await client.query<ProductConversationRow>(
+        `UPDATE deviludo.project_conversations
+            SET updated_at = clock_timestamp()
+          WHERE id = $1::uuid
+          RETURNING id::text, project_id::text, mode, title, created_at::text, updated_at::text`,
+        [input.conversationId],
+      );
+      return this.readConversationMessages(client, updated.rows[0]);
+    });
+  }
+
+  private async readConversationMessages(
+    client: PoolClient,
+    conversation: ProductConversationRow,
+  ): Promise<ProductConversation> {
+    const messages = await client.query<ProductConversationMessageRow>(
+      `SELECT message_id::text, role, content, metadata, created_at::text
+         FROM deviludo.conversation_messages
+        WHERE conversation_id = $1::uuid
+        ORDER BY message_id`,
+      [conversation.id],
+    );
+    return Object.freeze({
+      id: conversation.id,
+      projectId: conversation.project_id,
+      mode: conversation.mode,
+      title: conversation.title,
+      createdAt: conversation.created_at,
+      updatedAt: conversation.updated_at,
+      messages: Object.freeze(messages.rows.map(message => Object.freeze({
+        id: message.message_id,
+        role: message.role,
+        content: message.content,
+        metadata: Object.freeze({ ...message.metadata }),
+        createdAt: message.created_at,
+      }))),
     });
   }
 
@@ -618,6 +794,39 @@ export type ProductProjectDetail = ProductProjectSummary & Readonly<{
   }>[];
 }>;
 
+export type ProductConversation = Readonly<{
+  id: string;
+  projectId: string | null;
+  mode: "NEW_GAME" | "PROJECT_FEEDBACK";
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: readonly Readonly<{
+    id: string;
+    role: "USER" | "ASSISTANT";
+    content: string;
+    metadata: Readonly<Record<string, unknown>>;
+    createdAt: string;
+  }>[];
+}>;
+
+type ProductConversationRow = {
+  id: string;
+  project_id: string | null;
+  mode: "NEW_GAME" | "PROJECT_FEEDBACK";
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type ProductConversationMessageRow = {
+  message_id: string;
+  role: "USER" | "ASSISTANT";
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
 type ProductProjectRow = {
   id: string;
   name: string;
@@ -661,5 +870,30 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
     specification: specification && typeof specification === "object" && !Array.isArray(specification)
       ? Object.freeze({ ...(specification as Record<string, unknown>) })
       : Object.freeze({}),
+  });
+}
+
+function conversationTitleFromContent(content: string): string {
+  const firstSentence = content.split(/[。！？.!?\n]/, 1)[0].trim() || "新游戏对话";
+  return firstSentence.slice(0, 80);
+}
+
+function productSpecificationFromState(stateData: Record<string, unknown>): Readonly<Record<string, unknown>> {
+  const value = stateData.specification;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : Object.freeze({});
+}
+
+function appendRevisionNote(
+  specification: Readonly<Record<string, unknown>>,
+  note: string,
+): Readonly<Record<string, unknown>> {
+  const previous = Array.isArray(specification.revisionNotes)
+    ? specification.revisionNotes.filter(value => typeof value === "string")
+    : [];
+  return Object.freeze({
+    ...specification,
+    revisionNotes: Object.freeze([...previous, note].slice(-12)),
   });
 }

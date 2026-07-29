@@ -6,6 +6,9 @@ test("a creator can refine and deliver a game through every Core and platform st
   await stack.startLogicalNodes(nodes);
 
   await page.goto("/");
+  await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "首页", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "项目", exact: true }).click();
   await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
   await expect(page.getByText("本地游戏工作室", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("SYSTEM ONLINE")).toBeVisible();
@@ -110,9 +113,36 @@ test("keyboard creation derives a name and an active delivery can be cancelled",
   await expect(page).toHaveURL(/\/projects\/new$/);
 });
 
+test("the home chat supports both project feedback and a fresh game conversation", async ({ page, stack }) => {
+  const project = await stack.createProject({
+    name: "雾港列车",
+    concept: "玩家在风暴中调度幽灵列车并营救乘客。",
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
+  await page.getByLabel("关联项目").selectOption(project.id);
+  const feedback = "增加一个低视野模式，并让车灯成为需要管理的资源。";
+  await page.getByLabel("游戏想法或修改意见").fill(feedback);
+  await page.getByRole("button", { name: "发送消息" }).click();
+  await expect(page.getByText(feedback, { exact: true })).toBeVisible();
+  await expect(page.getByText(/加入《雾港列车》的规格草案/)).toBeVisible();
+  await expect(page.getByText("已写入规格草案", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "打开项目工作室" })).toHaveAttribute("href", `/projects/${project.id}`);
+  expect((await stack.readProject(project.id)).specification.revisionNotes).toContain(feedback);
+
+  await page.getByRole("button", { name: "新对话" }).click();
+  await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
+  await expect(page.getByLabel("关联项目")).toHaveValue("");
+  const concept = "我想做一款以时间循环为核心的像素冒险游戏。";
+  await page.getByLabel("游戏想法或修改意见").fill(concept);
+  await page.getByLabel("游戏想法或修改意见").press("Control+Enter");
+  await expect(page.getByText(concept, { exact: true })).toBeVisible();
+  await expect(page.getByText(/玩家每分钟最常做的动作/)).toBeVisible();
+});
+
 test("an unknown project presents a stable product error", async ({ page }) => {
   await page.goto(`/projects/${randomUUID()}`);
   await expect(page.getByText("项目读取失败 (404)")).toBeVisible();
-  await page.getByRole("link", { name: "DeviLudo 项目" }).click();
-  await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "DeviLudo 首页" }).click();
+  await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
 });

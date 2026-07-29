@@ -23,15 +23,15 @@ export function ServerPoolDashboard() {
     return () => controller.abort();
   }, []);
 
-  if (error) return <div className="errorPanel">{error}</div>;
-  if (!state) return <p className="pageIntro">正在读取五类服务器池状态…</p>;
+  if (error) return <div className="inline-notice danger">{error}</div>;
+  if (!state) return <section className="resource-empty-project">正在读取五类服务器池状态…</section>;
 
   return (
     <div className="poolGrid">
       {state.pools.map(pool => {
         const nodes = state.nodes.filter(node => node.poolKind === pool.kind);
         return (
-          <article className="poolCard" key={pool.kind}>
+          <article className="resource-detail poolCard" key={pool.kind}>
             <header>
               <div>
                 <h2>{pool.kind}</h2>

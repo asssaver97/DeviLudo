@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { ProductDashboard } from "@/components/ProductDashboard";
+import { HomeChat } from "@/components/HomeChat";
 
-export const metadata: Metadata = { title: "工作台 · DeviLudo" };
+export const metadata: Metadata = { title: "首页 · DeviLudo" };
 
-export default function HomePage() { return <ProductDashboard />; }
+export default function HomePage() { return <HomeChat />; }

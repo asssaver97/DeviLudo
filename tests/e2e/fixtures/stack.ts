@@ -87,6 +87,8 @@ export class StackHarness {
         deviludo.workflow_events,
         deviludo.workflow_instances,
         deviludo.agent_installations,
+        deviludo.conversation_messages,
+        deviludo.project_conversations,
         deviludo.projects,
         deviludo.tenants,
         deviludo.server_nodes

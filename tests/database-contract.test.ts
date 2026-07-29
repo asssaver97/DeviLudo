@@ -11,7 +11,8 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "WEB", "CORE", "E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS",
   ]);
   for (const table of [
-    "server_pools", "server_nodes", "pool_capacity_intents", "workflow_instances",
+    "server_pools", "server_nodes", "pool_capacity_intents", "project_conversations",
+    "conversation_messages", "workflow_instances",
     "workflow_events", "jobs", "external_signals", "operation_receipts",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
@@ -23,7 +24,8 @@ test("every tenant-owned table fails closed with forced row isolation", async ()
   assert.match(sql, /current_setting\('app\.tenant_id', true\)/);
   assert.match(sql, /ALTER TABLE deviludo\.tenants FORCE ROW LEVEL SECURITY/);
   for (const table of [
-    "projects", "agent_installations", "workflow_instances", "workflow_events",
+    "projects", "project_conversations", "conversation_messages", "agent_installations",
+    "workflow_instances", "workflow_events",
     "jobs", "external_signals", "operation_receipts", "tenant_claim_fairness",
   ]) {
     assert.ok(sql.includes(`'${table}'`), `${table} must be enumerated by the forced isolation block`);

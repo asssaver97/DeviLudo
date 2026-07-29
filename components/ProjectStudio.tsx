@@ -57,7 +57,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
-  if (!project) return <ProductShell><div className="studioLoading">{error ?? "正在进入项目工作室…"}</div></ProductShell>;
+  if (!project) return <ProductShell><section className="project-catalog-empty product-studio-loading">{error ?? "正在进入项目工作室…"}</section></ProductShell>;
   const specification = project.specification;
   const coreLoop = stringList(specification.coreLoop);
   const acceptance = stringList(specification.acceptanceCriteria);
@@ -66,36 +66,36 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
   return (
     <ProductShell>
-      <section className="studioHeader">
-        <div><Link href="/">← 游戏项目</Link><p className="productEyebrow">PROJECT STUDIO · 项目工作室</p><h1>{project.name}</h1><p>{project.concept}</p></div>
-        <div className={`studioState state-${project.workflowState.toLowerCase()}`}><i />{WORKFLOW_LABELS[project.workflowState] ?? project.workflowState}</div>
+      <section className="project-page-header product-studio-header">
+        <div><div className="breadcrumb"><Link href="/projects">游戏项目</Link><span>/</span><b>{project.name}</b></div><span className="eyebrow">PROJECT STUDIO · 项目工作室</span><h1>{project.name}</h1><p>{project.concept}</p></div>
+        <div className={`spec-state product-studio-state ${project.workflowState === "SUCCEEDED" ? "approved" : "draft"} state-${project.workflowState.toLowerCase()}`}><i />{WORKFLOW_LABELS[project.workflowState] ?? project.workflowState}</div>
       </section>
-      {error ? <div className="productError">{error}</div> : null}
+      {error ? <div className="inline-notice danger">{error}</div> : null}
 
-      <div className="studioLayout">
-        <section className="specPanel">
-          <div className="panelHeading"><div><span>01</span><h2>游戏规格</h2></div><small>{project.workflowState === "DRAFT" ? "等待你的批准" : "已锁定到本次工作流"}</small></div>
-          <article className="specBlock"><label>产品愿景</label><p>{String(specification.vision ?? project.concept)}</p></article>
-          <article className="specBlock"><label>核心循环</label><ol>{coreLoop.map(item => <li key={item}>{item}</li>)}</ol></article>
-          <article className="specBlock"><label>玩家体验</label><p>{String(specification.playerExperience ?? "")}</p></article>
-          <article className="specBlock"><label>验收标准</label><ul>{acceptance.map(item => <li key={item}>✓ {item}</li>)}</ul></article>
-          {revisions.length ? <article className="specBlock"><label>修订记录</label><ul>{revisions.map((item, index) => <li key={`${index}:${item}`}>↳ {item}</li>)}</ul></article> : null}
+      <div className="studio-grid product-studio-grid">
+        <section className="conversation-panel product-specification-panel">
+          <div className="conversation-header product-panel-heading"><div><span className="step-number">01</span><span><b>游戏规格</b><small>{project.workflowState === "DRAFT" ? "等待你的批准" : "已锁定到本次工作流"}</small></span></div></div>
+          <article className="spec-section product-spec-block"><span className="spec-section-label">产品愿景</span><p>{String(specification.vision ?? project.concept)}</p></article>
+          <article className="spec-section product-spec-block"><span className="spec-section-label">核心循环</span><ol>{coreLoop.map(item => <li key={item}>{item}</li>)}</ol></article>
+          <article className="spec-section product-spec-block"><span className="spec-section-label">玩家体验</span><p>{String(specification.playerExperience ?? "")}</p></article>
+          <article className="spec-section product-spec-block"><span className="spec-section-label">验收标准</span><ul>{acceptance.map(item => <li key={item}>✓ {item}</li>)}</ul></article>
+          {revisions.length ? <article className="spec-section product-spec-block"><span className="spec-section-label">修订记录</span><ul>{revisions.map((item, index) => <li key={`${index}:${item}`}>↳ {item}</li>)}</ul></article> : null}
           {project.workflowState === "DRAFT" ? (
-            <div className="specActions">
+            <div className="composer product-spec-actions">
               <textarea onChange={event => setNote(event.target.value)} placeholder="补充或修正规格，例如：单局改为 10 分钟，并加入手柄震动反馈……" value={note} />
-              <div><button className="secondaryButton" disabled={busy || note.trim().length < 2} onClick={() => void mutate("specification", { note: note.trim() })}>提交修订</button><button className="approveButton" disabled={busy} onClick={() => void mutate("approve")}>批准规格并启动 Agent →</button></div>
+              <div><button className="button button-secondary" disabled={busy || note.trim().length < 2} onClick={() => void mutate("specification", { note: note.trim() })}>提交修订</button><button className="button button-primary" disabled={busy} onClick={() => void mutate("approve")}>批准规格并启动 Agent →</button></div>
             </div>
           ) : null}
         </section>
 
-        <aside className="pipelinePanel">
-          <div className="panelHeading"><div><span>02</span><h2>交付流水线</h2></div><small>{active ? "自动刷新" : "当前状态"}</small></div>
-          <div className="pipelineList">
+        <aside className="spec-panel product-pipeline-panel">
+          <div className="spec-panel-header product-pipeline-header"><div><span className="eyebrow">交付流水线</span><h2>PIPELINE</h2></div><span className="revision-badge">{active ? "自动刷新" : "当前状态"}</span></div>
+          <div className="product-pipeline-list">
             {PIPELINE.map(([kind, label], index) => {
               const jobs = project.jobs.filter(job => job.kind === kind);
               const state = aggregateJobState(jobs.map(job => job.state));
               return (
-                <div className={`pipelineStage job-${state.toLowerCase()}`} key={kind}>
+                <div className={`product-pipeline-stage job-${state.toLowerCase()}`} key={kind}>
                   <span>{String(index + 1).padStart(2, "0")}</span>
                   <div><b>{label}</b><small>{jobs.length ? jobs.map(job => `${job.targetOperatingSystem ?? "core"}: ${job.state}`).join(" · ") : "尚未入队"}</small></div>
                   <i>{state === "SUCCEEDED" ? "✓" : state === "RUNNING" ? "●" : state === "QUEUED" ? "…" : "○"}</i>
@@ -103,8 +103,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               );
             })}
           </div>
-          {active ? <button className="cancelButton" disabled={busy} onClick={() => void mutate("cancel")}>取消本次交付</button> : null}
-          <div className="runtimeNote"><b>本地执行范围</b><p>Core 负责 Agent 与制品；本机 macOS 节点负责 macOS 测试、签名和干净回装。Linux/Windows 作业会安全等待相应节点。</p></div>
+          {active ? <button className="button button-secondary product-cancel-button" disabled={busy} onClick={() => void mutate("cancel")}>取消本次交付</button> : null}
+          <div className="product-runtime-note"><b>本地执行范围</b><p>Core 负责 Agent 与制品；本机 macOS 节点负责 macOS 测试、签名和干净回装。Linux/Windows 作业会安全等待相应节点。</p></div>
         </aside>
       </div>
     </ProductShell>

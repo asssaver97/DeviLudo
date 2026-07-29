@@ -113,6 +113,55 @@ export async function runApi(
     return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
   });
 
+  app.get<{ Params: { conversationId: string } }>(
+    "/v1/conversations/:conversationId",
+    async (request, reply) => {
+      const session = localProductSession(request, config);
+      if (!UUID.test(request.params.conversationId)) {
+        return reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
+      }
+      const conversation = await repository.readConversation(session.tenantId, request.params.conversationId);
+      return conversation
+        ? reply.send({ conversation })
+        : reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
+    },
+  );
+
+  app.post("/v1/conversations/messages", async (request, reply) => {
+    const session = localProductSession(request, config);
+    const body = objectBody(request.body);
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+    const conversationId = body.conversationId === undefined ? null : body.conversationId;
+    const suppliedProjectId = body.projectId === undefined ? null : body.projectId;
+    if (content.length < 2 || content.length > 4_000
+      || (conversationId !== null && (typeof conversationId !== "string" || !UUID.test(conversationId)))
+      || (suppliedProjectId !== null && (typeof suppliedProjectId !== "string" || !UUID.test(suppliedProjectId)))) {
+      return reply.code(400).send({ code: "INVALID_CONVERSATION_MESSAGE" });
+    }
+
+    let projectId = suppliedProjectId as string | null;
+    if (typeof conversationId === "string") {
+      const existing = await repository.readConversation(session.tenantId, conversationId);
+      if (!existing) return reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
+      if (body.projectId !== undefined && projectId !== existing.projectId) {
+        return reply.code(409).send({ code: "CONVERSATION_PROJECT_LOCKED" });
+      }
+      projectId = existing.projectId;
+    } else if (projectId && !(await repository.readProject(session.tenantId, projectId))) {
+      return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    }
+
+    const created = conversationId === null;
+    const conversation = await repository.appendConversationTurn({
+      tenantId: session.tenantId,
+      tenantName: session.tenantName,
+      conversationId: typeof conversationId === "string" ? conversationId : randomUUID(),
+      projectId,
+      userContent: content,
+    });
+    return reply.code(created ? 201 : 200).send({ conversation });
+  });
+
   app.post<{ Params: { projectId: string } }>(
     "/v1/projects/:projectId/specification",
     async (request, reply) => {
@@ -366,6 +415,7 @@ function unauthorized(message: string): Error & { statusCode: number } {
 }
 
 const LOCAL_TENANT_ID = "00000000-0000-4000-8000-000000000001";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function localProductSession(request: FastifyRequest, config: CoreConfig) {
   authorizeWeb(request, config);

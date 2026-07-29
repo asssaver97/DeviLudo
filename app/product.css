@@ -1,0 +1,685 @@
+/*
+ * Product-only extensions.
+ *
+ * The global shell, catalog, buttons, typography, panels and responsive
+ * behavior come directly from the pre-refactor stylesheet in globals.css.
+ * This file only gives new Core-era surfaces the same original tokens and
+ * component proportions.
+ */
+
+.system-pill.is-checking,
+.system-pill.is-degraded {
+  color: var(--amber);
+}
+
+.system-pill.is-checking i,
+.system-pill.is-degraded i {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(255, 184, 76, .12);
+}
+
+.repository-onboarding-form textarea {
+  background: #0c121c;
+  border: 2px solid #334157;
+  border-radius: 0;
+  color: var(--ink);
+  font: 11px var(--font-geist-mono), monospace;
+  line-height: 1.7;
+  min-height: 170px;
+  padding: 13px;
+  resize: vertical;
+  text-transform: none;
+  width: 100%;
+}
+
+.repository-onboarding-form input:focus,
+.repository-onboarding-form select:focus,
+.repository-onboarding-form textarea:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(53, 196, 239, .12);
+  outline: none;
+}
+
+.idea-onboarding {
+  max-width: 780px;
+}
+
+.idea-submit-row {
+  align-items: center;
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+}
+
+.idea-submit-row small {
+  color: #718094;
+  font: 8px var(--font-geist-mono), monospace;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: .42;
+  transform: none;
+}
+
+/* Home design conversation */
+
+.homeChat {
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto;
+  min-height: calc(100vh - 170px);
+  width: min(980px, 100%);
+}
+
+.homeChat-hero.simple-home-hero {
+  margin-bottom: 31px;
+  margin-top: 4vh;
+}
+
+.homeChat-hero h1 {
+  color: #fff;
+  font-family: var(--font-geist-mono), monospace;
+  font-weight: 800;
+  text-shadow: 4px 4px 0 #000;
+  text-transform: uppercase;
+}
+
+.homeChat-hero > p {
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.homeChat-composer {
+  background: rgba(17, 24, 36, .96);
+  border: 2px solid #2d394c;
+  border-radius: 0;
+  box-shadow: 4px 4px 0 #020305;
+  color: var(--ink);
+  margin: 0 auto;
+  overflow: hidden;
+  width: min(780px, 100%);
+}
+
+.homeChat-composer:focus-within {
+  border-color: var(--blue);
+}
+
+.homeChat-contextRow {
+  align-items: center;
+  background: #080d15;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+  min-height: 52px;
+  padding: 8px 14px;
+}
+
+.homeChat-contextRow label {
+  align-items: center;
+  color: var(--blue);
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+}
+
+.homeChat-contextRow label > span {
+  color: var(--muted);
+  flex: none;
+  font: 800 8px var(--font-geist-mono), monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.homeChat-contextRow svg {
+  flex: none;
+  height: 16px;
+  width: 16px;
+}
+
+.homeChat-contextRow select {
+  background: #0c121c;
+  border: 2px solid #334157;
+  border-radius: 0;
+  color: var(--ink);
+  font: 9px var(--font-geist-mono), monospace;
+  max-width: 410px;
+  min-height: 34px;
+  min-width: 230px;
+  outline: none;
+  overflow: hidden;
+  padding: 0 30px 0 10px;
+  text-overflow: ellipsis;
+}
+
+.homeChat-contextRow select:focus {
+  border-color: var(--blue);
+}
+
+.homeChat-contextRow select:disabled {
+  color: var(--muted);
+}
+
+.homeChat-contextRow > span {
+  color: var(--muted);
+  font: 8px var(--font-geist-mono), monospace;
+}
+
+.homeChat-composer > textarea {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  display: block;
+  font: 11px/1.72 var(--font-geist-mono), monospace;
+  min-height: 116px;
+  outline: none;
+  padding: 19px 21px 10px;
+  resize: none;
+  width: 100%;
+}
+
+.homeChat-composer > textarea::placeholder {
+  color: var(--muted);
+}
+
+.homeChat-composer > footer {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 11px;
+  min-height: 55px;
+  padding: 8px 11px 11px 19px;
+}
+
+.homeChat-composer > footer > span:first-child,
+.homeChat-count {
+  font: 8px var(--font-geist-mono), monospace;
+}
+
+.homeChat-composer kbd {
+  align-items: center;
+  background: #080d15;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  display: inline-flex;
+  font: 8px var(--font-geist-mono), monospace;
+  height: 20px;
+  justify-content: center;
+  margin-right: 3px;
+  min-width: 20px;
+}
+
+.homeChat-count {
+  margin-left: auto;
+}
+
+.homeChat-composer > footer .button {
+  min-width: 96px;
+}
+
+.homeChat-starters {
+  display: flex;
+  gap: 7px;
+  justify-content: center;
+  margin: 14px auto 0;
+  overflow-x: auto;
+  width: min(780px, 100%);
+}
+
+.homeChat-starters button {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  flex: 0 1 auto;
+  font: 8px var(--font-geist-mono), monospace;
+  min-width: 0;
+  overflow: hidden;
+  padding: 7px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeChat-starters button:hover {
+  background: var(--acid);
+  border-color: var(--ink);
+  color: #17120a;
+}
+
+.homeChat-error {
+  background: #251518;
+  border: 1px solid #81404b;
+  color: #ffadb5;
+  font: 9px var(--font-geist-mono), monospace;
+  margin: 15px auto 0;
+  padding: 12px;
+  width: min(780px, 100%);
+}
+
+.homeChat-active {
+  justify-content: flex-start;
+  min-height: calc(100vh - 148px);
+}
+
+.homeChat-threadShell {
+  max-height: none;
+  min-height: 0;
+  width: min(880px, 100%);
+}
+
+.homeChat-threadHeader > div:first-child {
+  min-width: 0;
+}
+
+.homeChat-threadHeader > div:first-child > span:last-child {
+  min-width: 0;
+}
+
+.homeChat-threadHeader > div:first-child b {
+  max-width: 500px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeChat-threadActions {
+  flex: none;
+}
+
+.homeChat-threadActions .button {
+  font-size: 8px;
+  height: 35px;
+  padding: 0 11px;
+}
+
+.homeChat-messages {
+  min-height: 300px;
+}
+
+.homeChat-message header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.homeChat-message header b {
+  color: var(--muted);
+  font: 700 8px var(--font-geist-mono), monospace;
+}
+
+.homeChat-applied {
+  background: #10231f;
+  border: 1px solid #397c66;
+  color: var(--green);
+  font: 800 7px var(--font-geist-mono), monospace;
+  padding: 4px 6px;
+}
+
+.homeChat-thinking {
+  opacity: .7;
+}
+
+.homeChat-thinking p span {
+  animation: pulse 1s infinite;
+}
+
+.homeChat-active .homeChat-composer {
+  bottom: 18px;
+  margin-top: 18px;
+  position: sticky;
+  width: min(880px, 100%);
+  z-index: 3;
+}
+
+.homeChat-active .homeChat-composer > textarea {
+  min-height: 72px;
+}
+
+/* Core project workspace */
+
+.product-studio-header > div:first-child {
+  max-width: 820px;
+}
+
+.product-studio-state {
+  flex: none;
+  text-transform: uppercase;
+}
+
+.product-studio-state.state-succeeded {
+  background: #11251f;
+  border-color: #397c66;
+  color: var(--green);
+}
+
+.product-studio-state.state-failed,
+.product-studio-state.state-cancelled {
+  background: #251518;
+  border-color: #81404b;
+  color: var(--danger);
+}
+
+.product-studio-grid {
+  align-items: start;
+}
+
+.product-specification-panel {
+  max-height: none;
+}
+
+.product-panel-heading b {
+  font-family: var(--font-geist-mono), monospace;
+  text-transform: uppercase;
+}
+
+.product-spec-block p {
+  color: var(--ink);
+  font: 11px/1.72 var(--font-geist-mono), monospace;
+  margin: 0;
+}
+
+.product-spec-block ol,
+.product-spec-block ul {
+  color: var(--muted);
+  font: 10px/1.7 var(--font-geist-mono), monospace;
+  margin: 0;
+  padding-left: 21px;
+}
+
+.product-spec-block ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.product-spec-block li + li {
+  margin-top: 6px;
+}
+
+.product-spec-block li::marker {
+  color: var(--acid);
+}
+
+.product-spec-actions {
+  background: #0d1520;
+  border-color: var(--line);
+  border-radius: 0;
+  margin-top: 18px;
+}
+
+.product-spec-actions textarea {
+  color: var(--ink);
+  min-height: 90px;
+}
+
+.product-spec-actions > div {
+  gap: 9px;
+}
+
+.product-pipeline-panel {
+  min-height: 0;
+  position: sticky;
+  top: 82px;
+}
+
+.product-pipeline-header {
+  background: #22241f;
+}
+
+.product-pipeline-list {
+  border-top: 1px solid var(--line);
+}
+
+.product-pipeline-stage {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 28px 1fr 20px;
+  min-height: 66px;
+  padding: 0 20px;
+}
+
+.product-pipeline-stage > span {
+  color: #536176;
+  font: 700 8px var(--font-geist-mono), monospace;
+}
+
+.product-pipeline-stage b,
+.product-pipeline-stage small {
+  display: block;
+}
+
+.product-pipeline-stage b {
+  color: var(--ink);
+  font: 800 10px var(--font-geist-mono), monospace;
+  text-transform: uppercase;
+}
+
+.product-pipeline-stage small {
+  color: var(--muted);
+  font: 8px/1.45 var(--font-geist-mono), monospace;
+  margin-top: 5px;
+}
+
+.product-pipeline-stage > i {
+  color: #536176;
+  font-style: normal;
+  text-align: center;
+}
+
+.product-pipeline-stage.job-succeeded > i {
+  color: var(--green);
+}
+
+.product-pipeline-stage.job-running > i {
+  animation: pulse 1.2s infinite;
+  color: var(--blue);
+}
+
+.product-pipeline-stage.job-failed > i {
+  color: var(--danger);
+}
+
+.product-cancel-button {
+  margin: 18px 20px 0;
+  width: calc(100% - 40px);
+}
+
+.product-runtime-note {
+  background: #0d1520;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  margin: 18px 20px 20px;
+  padding: 13px;
+}
+
+.product-runtime-note b {
+  color: var(--green);
+  font: 800 8px var(--font-geist-mono), monospace;
+  letter-spacing: .08em;
+}
+
+.product-runtime-note p {
+  color: var(--muted);
+  font: 8px/1.6 var(--font-geist-mono), monospace;
+  margin: 7px 0 0;
+}
+
+.product-studio-loading {
+  margin: 10vh auto 0;
+  max-width: 700px;
+}
+
+/* Fixed server-pool diagnostics */
+
+.adminPage {
+  margin: 0 auto;
+  width: min(1160px, 100%);
+}
+
+.poolGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.poolCard {
+  box-shadow: 4px 4px 0 #020305;
+  min-width: 0;
+}
+
+.poolCard header {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.poolCard h2 {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 14px;
+  margin: 0;
+}
+
+.badge {
+  background: #11251f;
+  border: 1px solid #397c66;
+  color: var(--green);
+  font: 800 8px var(--font-geist-mono), monospace;
+  padding: 5px 9px;
+}
+
+.metrics {
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 20px 0;
+}
+
+.metrics > div {
+  border-right: 1px solid var(--line);
+  padding: 12px 10px;
+}
+
+.metrics > div:last-child {
+  border-right: 0;
+}
+
+.metrics strong,
+.metrics small {
+  display: block;
+}
+
+.metrics strong {
+  font: 800 20px var(--font-geist-mono), monospace;
+}
+
+.metrics small,
+.capabilities,
+.nodeList {
+  color: var(--muted);
+  font: 8px var(--font-geist-mono), monospace;
+}
+
+.nodeList {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+
+.nodeList li {
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding-top: 8px;
+}
+
+@media (max-width: 1100px) {
+  .product-pipeline-panel {
+    position: static;
+  }
+}
+
+@media (max-width: 800px) {
+  .idea-submit-row,
+  .homeChat-contextRow,
+  .homeChat-starters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .idea-submit-row .button {
+    width: 100%;
+  }
+
+  .homeChat {
+    min-height: calc(100vh - 122px);
+  }
+
+  .homeChat-contextRow {
+    gap: 7px;
+  }
+
+  .homeChat-contextRow label {
+    display: grid;
+    grid-template-columns: 18px 1fr;
+  }
+
+  .homeChat-contextRow label > span {
+    display: none;
+  }
+
+  .homeChat-contextRow select {
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .homeChat-contextRow > span,
+  .homeChat-composer > footer > span {
+    display: none;
+  }
+
+  .homeChat-composer > textarea {
+    font-size: 10px;
+    min-height: 130px;
+    padding: 16px;
+  }
+
+  .homeChat-composer > footer {
+    justify-content: flex-end;
+    padding-left: 11px;
+  }
+
+  .homeChat-composer > footer .button {
+    width: 100%;
+  }
+
+  .homeChat-starters button {
+    text-align: left;
+  }
+
+  .homeChat-threadHeader {
+    align-items: flex-start;
+    min-height: 0;
+    padding: 14px;
+  }
+
+  .homeChat-threadHeader > div:first-child b {
+    white-space: normal;
+  }
+
+  .homeChat-threadActions {
+    width: 100%;
+  }
+
+  .homeChat-threadActions .button {
+    flex: 1;
+  }
+
+  .poolGrid {
+    grid-template-columns: 1fr;
+  }
+}

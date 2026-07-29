@@ -127,6 +127,40 @@ CREATE TABLE deviludo.projects (
   PRIMARY KEY (tenant_id, id)
 );
 
+CREATE TABLE deviludo.project_conversations (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid,
+  mode text NOT NULL CHECK (mode IN ('NEW_GAME', 'PROJECT_FEEDBACK')),
+  title text NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id),
+  CHECK (
+    (mode = 'NEW_GAME' AND project_id IS NULL)
+    OR (mode = 'PROJECT_FEEDBACK' AND project_id IS NOT NULL)
+  )
+);
+CREATE INDEX project_conversations_recent
+  ON deviludo.project_conversations(tenant_id, updated_at DESC);
+
+CREATE TABLE deviludo.conversation_messages (
+  tenant_id uuid NOT NULL,
+  conversation_id uuid NOT NULL,
+  message_id bigint GENERATED ALWAYS AS IDENTITY,
+  role text NOT NULL CHECK (role IN ('USER', 'ASSISTANT')),
+  content text NOT NULL CHECK (length(content) BETWEEN 1 AND 4000),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, message_id),
+  FOREIGN KEY (tenant_id, conversation_id)
+    REFERENCES deviludo.project_conversations(tenant_id, id) ON DELETE CASCADE
+);
+CREATE INDEX conversation_messages_thread
+  ON deviludo.conversation_messages(tenant_id, conversation_id, message_id);
+
 CREATE TABLE deviludo.agent_installations (
   tenant_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -295,7 +329,8 @@ DECLARE
   table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
-    'projects', 'agent_installations', 'workflow_instances', 'workflow_events',
+    'projects', 'project_conversations', 'conversation_messages',
+    'agent_installations', 'workflow_instances', 'workflow_events',
     'jobs', 'external_signals', 'operation_receipts', 'tenant_claim_fairness'
   ]
   LOOP
@@ -755,7 +790,8 @@ GRANT INSERT, SELECT ON deviludo.pool_capacity_intents TO deviludo_scheduler;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_api, deviludo_scheduler;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-  deviludo.tenants, deviludo.projects, deviludo.agent_installations,
+  deviludo.tenants, deviludo.projects, deviludo.project_conversations,
+  deviludo.conversation_messages, deviludo.agent_installations,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
   deviludo.external_signals, deviludo.operation_receipts
   TO deviludo_api;
