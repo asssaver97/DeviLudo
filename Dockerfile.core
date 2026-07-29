@@ -7,5 +7,6 @@ RUN npm ci --omit=dev
 COPY --chown=core:core lib ./lib
 COPY --chown=core:core services/core ./services/core
 COPY --chown=core:core tsconfig.json ./
+RUN install -d -o core -g core -m 0700 /var/lib/deviludo/agent-secrets
 USER core
 CMD ["node", "--import", "tsx", "services/core/src/main.ts"]

@@ -6,8 +6,13 @@ test("a creator can refine and deliver a game through every Core and platform st
   await stack.startLogicalNodes(nodes);
 
   await page.goto("/");
+  await expect(page.locator('link[rel="icon"][href="/favicon.svg"]')).toHaveCount(1);
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await expect(page.getByRole("link", { name: "首页", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "开始新游戏" })).toHaveCount(0);
+  await page.locator("summary.workspace-switcher").click();
+  await expect(page.getByRole("menu", { name: "工作室菜单" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /本地游戏工作室/ })).toBeVisible();
   await page.getByRole("link", { name: "项目", exact: true }).click();
   await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
   await expect(page.getByText("本地游戏工作室", { exact: true }).first()).toBeVisible();
@@ -109,8 +114,8 @@ test("keyboard creation derives a name and an active delivery can be cancelled",
 
   await page.getByRole("link", { name: "项目", exact: true }).click();
   await expect(page.getByRole("heading", { name: "月影邮差" })).toBeVisible();
-  await page.getByRole("link", { name: "开始新游戏" }).click();
-  await expect(page).toHaveURL(/\/projects\/new$/);
+  await page.getByRole("link", { name: "首页", exact: true }).click();
+  await expect(page).toHaveURL(/\/$/);
 });
 
 test("the home chat supports both project feedback and a fresh game conversation", async ({ page, stack }) => {

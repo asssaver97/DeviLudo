@@ -5,6 +5,18 @@ export type ProductSession = Readonly<{
   role: string;
 }>;
 
+export const AGENT_RUNTIME_KINDS = ["CLAUDE_CODE", "CODEX_CLI"] as const;
+export type AgentRuntimeKind = typeof AGENT_RUNTIME_KINDS[number];
+
+export type TenantAgentSettings = Readonly<{
+  agentRuntime: AgentRuntimeKind;
+  baseUrl: string;
+  apiKeyConfigured: boolean;
+  apiKeyFingerprint: string | null;
+  revision: number;
+  updatedAt: string | null;
+}>;
+
 export type ProductProjectSummary = Readonly<{
   id: string;
   name: string;

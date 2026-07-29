@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { AGENT_RUNTIME_KINDS, type AgentRuntimeKind } from "@/lib/product/contracts";
 import {
   fixedPoolRecords,
   isServerPoolKind,
@@ -37,6 +38,69 @@ export class CoreRepository {
 
   async readServerPools() {
     return fixedPoolRecords(await this.readServerNodes());
+  }
+
+  async readAgentSettings(tenantId: string): Promise<StoredTenantAgentSettings | null> {
+    return this.database.withTenant(tenantId, async client => {
+      const result = await client.query<AgentSettingsRow>(
+        `SELECT agent_runtime::text, base_url, credential_secret_ref,
+                api_key_fingerprint, credential_version::text, revision::text,
+                updated_by, updated_at::text
+           FROM deviludo.tenant_agent_settings
+          WHERE tenant_id = $1::uuid`,
+        [tenantId],
+      );
+      return result.rows[0] ? agentSettingsFromRow(result.rows[0]) : null;
+    });
+  }
+
+  async saveAgentSettings(input: Readonly<{
+    tenantId: string;
+    tenantName: string;
+    agentRuntime: AgentRuntimeKind;
+    baseUrl: string;
+    credentialSecretRef: string;
+    apiKeyFingerprint: string;
+    credentialVersion: string;
+    updatedBy: string;
+  }>): Promise<StoredTenantAgentSettings> {
+    return this.database.withTenant(input.tenantId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.tenants(id, name) VALUES ($1::uuid, $2)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.tenantId, input.tenantName],
+      );
+      const result = await client.query<AgentSettingsRow>(
+        `INSERT INTO deviludo.tenant_agent_settings(
+           tenant_id, agent_runtime, base_url, credential_secret_ref,
+           api_key_fingerprint, credential_version, updated_by
+         ) VALUES (
+           $1::uuid, $2::deviludo.agent_runtime, $3, $4, $5, $6::uuid, $7
+         )
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           agent_runtime = EXCLUDED.agent_runtime,
+           base_url = EXCLUDED.base_url,
+           credential_secret_ref = EXCLUDED.credential_secret_ref,
+           api_key_fingerprint = EXCLUDED.api_key_fingerprint,
+           credential_version = EXCLUDED.credential_version,
+           revision = deviludo.tenant_agent_settings.revision + 1,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = clock_timestamp()
+         RETURNING agent_runtime::text, base_url, credential_secret_ref,
+                   api_key_fingerprint, credential_version::text, revision::text,
+                   updated_by, updated_at::text`,
+        [
+          input.tenantId,
+          input.agentRuntime,
+          input.baseUrl,
+          input.credentialSecretRef,
+          input.apiKeyFingerprint,
+          input.credentialVersion,
+          input.updatedBy,
+        ],
+      );
+      return agentSettingsFromRow(result.rows[0]);
+    });
   }
 
   async listProjects(tenantId: string): Promise<readonly ProductProjectSummary[]> {
@@ -746,6 +810,48 @@ function serverNodeFromRow(row: ServerNodeRow): ServerNodeRecord {
 }
 
 type ClaimRow = { jobId: string; tenantId: string; leaseToken: string };
+type AgentSettingsRow = {
+  agent_runtime: string;
+  base_url: string;
+  credential_secret_ref: string;
+  api_key_fingerprint: string;
+  credential_version: string;
+  revision: string;
+  updated_by: string;
+  updated_at: string;
+};
+
+export type StoredTenantAgentSettings = Readonly<{
+  agentRuntime: AgentRuntimeKind;
+  baseUrl: string;
+  credentialSecretRef: string;
+  apiKeyFingerprint: string;
+  credentialVersion: string;
+  revision: number;
+  updatedBy: string;
+  updatedAt: string;
+}>;
+
+function agentSettingsFromRow(row: AgentSettingsRow): StoredTenantAgentSettings {
+  const revision = Number(row.revision);
+  if (!(AGENT_RUNTIME_KINDS as readonly string[]).includes(row.agent_runtime)
+    || !Number.isSafeInteger(revision) || revision < 1
+    || !row.credential_secret_ref.startsWith("vault://tenants/")
+    || !/^sha256:[0-9a-f]{12}$/.test(row.api_key_fingerprint)) {
+    throw new Error("Stored tenant Agent settings are invalid");
+  }
+  return Object.freeze({
+    agentRuntime: row.agent_runtime as AgentRuntimeKind,
+    baseUrl: row.base_url,
+    credentialSecretRef: row.credential_secret_ref,
+    apiKeyFingerprint: row.api_key_fingerprint,
+    credentialVersion: row.credential_version,
+    revision,
+    updatedBy: row.updated_by,
+    updatedAt: row.updated_at,
+  });
+}
+
 type JobRow = {
   id: string;
   workflow_id: string;

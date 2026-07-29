@@ -81,6 +81,7 @@ export class StackHarness {
       SET lock_timeout = '5s';
       TRUNCATE TABLE
         deviludo.tenant_claim_fairness,
+        deviludo.tenant_agent_settings,
         deviludo.operation_receipts,
         deviludo.external_signals,
         deviludo.jobs,

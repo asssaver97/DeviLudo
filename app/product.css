@@ -7,6 +7,302 @@
  * component proportions.
  */
 
+.workspace-menu {
+  margin: 27px 0 20px;
+  position: relative;
+}
+
+.workspace-menu .workspace-switcher {
+  cursor: pointer;
+  list-style: none;
+  margin: 0;
+}
+
+.workspace-menu .workspace-switcher::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-menu .workspace-switcher::marker {
+  content: "";
+}
+
+.workspace-menu .workspace-switcher:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: 3px;
+}
+
+.workspace-menu[open] .workspace-switcher {
+  border-color: var(--blue);
+}
+
+.workspace-chevron {
+  transition: transform 120ms ease;
+}
+
+.workspace-menu[open] .workspace-chevron {
+  transform: rotate(180deg);
+}
+
+.workspace-dropdown {
+  background: #0b111c;
+  border: 2px solid #2d3b50;
+  box-shadow: 4px 4px 0 #020305;
+  display: grid;
+  left: 0;
+  padding: 7px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 40;
+}
+
+.workspace-dropdown-label {
+  color: #536176;
+  font: 800 7px var(--font-geist-mono), monospace;
+  letter-spacing: .1em;
+  padding: 6px 7px 8px;
+  text-transform: uppercase;
+}
+
+.workspace-option {
+  align-items: center;
+  background: #172231;
+  border: 1px solid var(--blue);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 9px;
+}
+
+.workspace-option b,
+.workspace-option small {
+  display: block;
+}
+
+.workspace-option b {
+  color: #fff;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-option small {
+  color: var(--sidebar-muted);
+  font-size: 8px;
+  margin-top: 3px;
+}
+
+.workspace-option i {
+  color: var(--green);
+  font: normal 800 10px var(--font-geist-mono), monospace;
+}
+
+.shell-home-entry {
+  margin: 1px 0 8px;
+  min-height: 42px;
+}
+
+.agent-config-heading {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+}
+
+.agent-config-layout {
+  align-items: start;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+}
+
+.agent-config-form-card,
+.agent-config-security {
+  min-width: 0;
+}
+
+.agent-config-form fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.agent-config-form legend,
+.agent-config-form > label {
+  color: #8d99a8;
+  font: 800 8px var(--font-geist-mono), monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.agent-runtime-options {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 7px;
+}
+
+.agent-runtime-choice {
+  align-items: center;
+  background: #0c121c;
+  border: 2px solid #2d394c;
+  cursor: pointer;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 10px;
+  min-height: 78px;
+  padding: 14px;
+  position: relative;
+}
+
+.agent-runtime-choice:hover,
+.agent-runtime-choice.is-selected {
+  background: #142130;
+  border-color: var(--blue);
+}
+
+.agent-runtime-choice.is-selected {
+  box-shadow: inset 3px 0 var(--acid), 3px 3px 0 #020305;
+}
+
+.agent-runtime-choice input {
+  height: 1px;
+  opacity: 0;
+  position: absolute;
+  width: 1px;
+}
+
+.agent-runtime-choice b,
+.agent-runtime-choice small {
+  display: block;
+}
+
+.agent-runtime-choice b {
+  color: #fff;
+  font: 800 11px var(--font-geist-mono), monospace;
+}
+
+.agent-runtime-choice small {
+  color: #7f8c9e;
+  font: 8px/1.55 var(--font-geist-mono), monospace;
+  margin-top: 6px;
+}
+
+.agent-runtime-choice i {
+  border: 2px solid #43516a;
+  height: 10px;
+  width: 10px;
+}
+
+.agent-runtime-choice.is-selected i {
+  background: var(--acid);
+  border-color: #ffe59d;
+  box-shadow: 0 0 10px rgba(255, 200, 87, .5);
+}
+
+.agent-runtime-choice:has(input:focus-visible) {
+  outline: 2px solid var(--acid);
+  outline-offset: 3px;
+}
+
+.agent-config-form label > small {
+  color: #667589;
+  font: 8px/1.5 var(--font-geist-mono), monospace;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.agent-config-submit {
+  min-height: 42px;
+  min-width: 150px;
+}
+
+.agent-config-notice {
+  border: 1px solid;
+  font: 9px/1.55 var(--font-geist-mono), monospace;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.agent-config-notice.is-success {
+  background: #10241e;
+  border-color: #397c66;
+  color: var(--green);
+}
+
+.agent-config-notice.is-error {
+  background: #251518;
+  border-color: #81404b;
+  color: #ffadb5;
+}
+
+.agent-config-lock {
+  align-items: flex-start;
+  background: #0d1520;
+  border: 1px solid var(--line);
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+}
+
+.agent-config-lock svg {
+  color: var(--blue);
+  flex: none;
+}
+
+.agent-config-lock b,
+.agent-config-lock small {
+  display: block;
+}
+
+.agent-config-lock b {
+  color: #fff;
+  font: 800 10px var(--font-geist-mono), monospace;
+}
+
+.agent-config-lock small {
+  color: #7f8c9e;
+  font: 8px/1.6 var(--font-geist-mono), monospace;
+  margin-top: 5px;
+}
+
+.agent-config-security ul {
+  display: grid;
+  gap: 0;
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+
+.agent-config-security li {
+  border-top: 1px solid var(--line);
+  padding: 13px 2px;
+}
+
+.agent-config-security li b,
+.agent-config-security li span {
+  display: block;
+}
+
+.agent-config-security li b {
+  color: var(--ink);
+  font: 800 9px var(--font-geist-mono), monospace;
+}
+
+.agent-config-security li span,
+.agent-config-updated {
+  color: #718094;
+  font: 8px/1.6 var(--font-geist-mono), monospace;
+  margin-top: 5px;
+}
+
+.agent-config-updated {
+  border-top: 1px solid var(--line);
+  margin-bottom: 0;
+  padding-top: 13px;
+}
+
 .system-pill.is-checking,
 .system-pill.is-degraded {
   color: var(--amber);
@@ -597,12 +893,40 @@
 }
 
 @media (max-width: 1100px) {
+  .agent-config-layout {
+    grid-template-columns: 1fr;
+  }
+
   .product-pipeline-panel {
     position: static;
   }
 }
 
 @media (max-width: 800px) {
+  .agent-config-heading {
+    gap: 18px;
+  }
+
+  .agent-runtime-options {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-menu .workspace-switcher {
+    display: flex;
+    justify-content: center;
+    padding: 8px;
+  }
+
+  .workspace-dropdown {
+    left: 0;
+    right: auto;
+    width: 238px;
+  }
+
+  .shell-home-entry {
+    min-height: 40px;
+  }
+
   .idea-submit-row,
   .homeChat-contextRow,
   .homeChat-starters {

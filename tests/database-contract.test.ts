@@ -12,7 +12,7 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
   ]);
   for (const table of [
     "server_pools", "server_nodes", "pool_capacity_intents", "project_conversations",
-    "conversation_messages", "workflow_instances",
+    "conversation_messages", "tenant_agent_settings", "workflow_instances",
     "workflow_events", "jobs", "external_signals", "operation_receipts",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
@@ -25,7 +25,7 @@ test("every tenant-owned table fails closed with forced row isolation", async ()
   assert.match(sql, /ALTER TABLE deviludo\.tenants FORCE ROW LEVEL SECURITY/);
   for (const table of [
     "projects", "project_conversations", "conversation_messages", "agent_installations",
-    "workflow_instances", "workflow_events",
+    "tenant_agent_settings", "workflow_instances", "workflow_events",
     "jobs", "external_signals", "operation_receipts", "tenant_claim_fairness",
   ]) {
     assert.ok(sql.includes(`'${table}'`), `${table} must be enumerated by the forced isolation block`);
@@ -37,6 +37,17 @@ test("every tenant-owned table fails closed with forced row isolation", async ()
     assert.match(sql, new RegExp(`CREATE ROLE deviludo_${role} NOLOGIN NOBYPASSRLS`));
   }
   assert.match(sql, /CREATE ROLE deviludo_claim_executor NOLOGIN BYPASSRLS/);
+  assert.match(sql, /credential_secret_ref text NOT NULL/);
+  assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/tenants\/' \|\| tenant_id::text/);
+  assert.doesNotMatch(sql, /api_key\s+text/i);
+});
+
+test("Agent settings are frozen into new Agent jobs as a tenant-bound secret reference", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  assert.match(sql, /agent_settings deviludo\.tenant_agent_settings%ROWTYPE/);
+  assert.match(sql, /'credentialRef', agent_settings\.credential_secret_ref/);
+  assert.match(sql, /'runtime', agent_settings\.agent_runtime::text/);
+  assert.match(sql, /'revision', agent_settings\.revision/);
 });
 
 test("cross-tenant claiming returns identity only and then requires a tenant transaction", async () => {

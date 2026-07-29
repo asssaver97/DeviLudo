@@ -7,6 +7,7 @@ import {
   type ServerNodeState,
   type ServerOperatingSystem,
 } from "@/lib/runtime/server-pools";
+import { createAgentSecretStore, parseAgentSettingsInput, type AgentSecretStore } from "./agent-settings";
 import type { CoreConfig } from "./config";
 import {
   assertE2eCompletion,
@@ -16,7 +17,7 @@ import {
 } from "./contracts";
 import type { Database } from "./database";
 import { CORE_MODULES } from "./modules";
-import type { CoreRepository } from "./repository";
+import type { CoreRepository, StoredTenantAgentSettings } from "./repository";
 import { HttpSigningGrantBroker, type SigningGrantBroker } from "./signing-grants";
 
 export async function runApi(
@@ -25,6 +26,7 @@ export async function runApi(
   config: CoreConfig,
   signal: AbortSignal,
   signingGrants: SigningGrantBroker = new HttpSigningGrantBroker(),
+  agentSecrets: AgentSecretStore = createAgentSecretStore(),
 ): Promise<void> {
   const app = Fastify({
     logger: true,
@@ -79,6 +81,37 @@ export async function runApi(
   app.get("/v1/session", async (request, reply) => {
     const session = localProductSession(request, config);
     return reply.send({ session });
+  });
+
+  app.get("/v1/settings/agent", async (request, reply) => {
+    const session = localProductSession(request, config);
+    const settings = await repository.readAgentSettings(session.tenantId);
+    return reply.header("cache-control", "no-store").send({ settings: publicAgentSettings(settings) });
+  });
+
+  app.put("/v1/settings/agent", async (request, reply) => {
+    const session = localProductSession(request, config);
+    const input = parseAgentSettingsInput(request.body);
+    const current = await repository.readAgentSettings(session.tenantId);
+    if (!input.apiKey && !current) throw new Error("首次配置必须提供 API Key");
+    const credential = input.apiKey
+      ? await agentSecrets.writeApiKey(session.tenantId, input.apiKey)
+      : {
+          secretRef: current?.credentialSecretRef ?? "",
+          fingerprint: current?.apiKeyFingerprint ?? "",
+          version: current?.credentialVersion ?? "",
+        };
+    const saved = await repository.saveAgentSettings({
+      tenantId: session.tenantId,
+      tenantName: session.tenantName,
+      agentRuntime: input.agentRuntime,
+      baseUrl: input.baseUrl,
+      credentialSecretRef: credential.secretRef,
+      apiKeyFingerprint: credential.fingerprint,
+      credentialVersion: credential.version,
+      updatedBy: session.displayName,
+    });
+    return reply.header("cache-control", "no-store").send({ settings: publicAgentSettings(saved) });
   });
 
   app.get("/v1/projects", async (request, reply) => {
@@ -427,6 +460,17 @@ function localProductSession(request: FastifyRequest, config: CoreConfig) {
     tenantName: "本地游戏工作室",
     displayName: "本地创作者",
     role: "OWNER",
+  });
+}
+
+function publicAgentSettings(settings: StoredTenantAgentSettings | null) {
+  return Object.freeze({
+    agentRuntime: settings?.agentRuntime ?? "CLAUDE_CODE",
+    baseUrl: settings?.baseUrl ?? "https://api.anthropic.com",
+    apiKeyConfigured: settings !== null,
+    apiKeyFingerprint: settings?.apiKeyFingerprint ?? null,
+    revision: settings?.revision ?? 0,
+    updatedAt: settings?.updatedAt ?? null,
   });
 }
 

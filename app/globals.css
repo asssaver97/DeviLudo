@@ -207,27 +207,6 @@ button {
   width: 18px;
 }
 
-.shell-new-project {
-  align-items: center;
-  background: var(--acid);
-  border: 2px solid #ffe59d;
-  box-shadow: 4px 4px 0 #000;
-  color: #111722;
-  display: flex;
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 10px;
-  font-weight: 900;
-  gap: 10px;
-  justify-content: center;
-  letter-spacing: .04em;
-  margin: 1px 0 8px;
-  min-height: 42px;
-  text-transform: uppercase;
-}
-
-.shell-new-project:hover { filter: brightness(1.04); transform: translate(-1px, -1px); }
-.shell-new-project svg { height: 16px; width: 16px; }
-
 .settings-hub-heading { margin-bottom: 24px; }
 .settings-hub-grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 980px; }
 .settings-hub-card {
@@ -2730,8 +2709,6 @@ body:has(.app-shell) {
 @media (max-width: 800px) {
   .brand-copy { display: none; }
   .shell-sidebar { background-position: center bottom; }
-  .shell-new-project { box-shadow: 3px 3px 0 #000; min-height: 40px; padding: 0; }
-  .shell-new-project span { display: none; }
   .settings-hub-grid,
   .simple-home-project-grid { grid-template-columns: 1fr; }
   .simple-home-hero { margin-top: 3vh; }

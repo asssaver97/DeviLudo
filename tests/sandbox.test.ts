@@ -46,6 +46,35 @@ test("sandbox plans isolate each Core job and select the fixed execution policy"
   assert.throws(() => sandboxPlan(Object.freeze({ ...baseJob, exclusive: true })));
 });
 
+test("Agent sandbox plans consume only the frozen tenant configuration reference", () => {
+  const configured = sandboxPlan(Object.freeze({
+    ...baseJob,
+    payload: Object.freeze({
+      agentConfiguration: Object.freeze({
+        runtime: "CODEX_CLI",
+        baseUrl: "https://api.example.com/v1",
+        credentialRef: `vault://tenants/${baseJob.tenantId}/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099`,
+        revision: 3,
+      }),
+    }),
+  }));
+  assert.deepEqual(configured.agentConfiguration, {
+    runtime: "CODEX_CLI",
+    baseUrl: "https://api.example.com/v1",
+    credentialRef: `vault://tenants/${baseJob.tenantId}/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099`,
+    revision: 3,
+  });
+  assert.throws(() => sandboxPlan(Object.freeze({
+    ...baseJob,
+    payload: Object.freeze({
+      agentConfiguration: Object.freeze({
+        ...configured.agentConfiguration,
+        credentialRef: "vault://tenants/40000000-0000-4000-8000-000000000001/agent-runtime/api-key/versions/x",
+      }),
+    }),
+  })), /configuration lock/i);
+});
+
 test("production sandbox execution fails closed without a trusted backend", async () => {
   const backend = new ProcessSandboxBackend("", true);
   await assert.rejects(() => backend.execute(

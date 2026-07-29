@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import type { ProductSession } from "@/lib/product/contracts";
-import { BellIcon, GamepadIcon, HomeIcon, PlusIcon, ServerIcon, ShieldIcon, SparkIcon } from "./console/Icons";
+import { BellIcon, GamepadIcon, HomeIcon, ServerIcon, SettingsIcon, ShieldIcon, SparkIcon } from "./console/Icons";
 
 type HealthState = "checking" | "ok" | "degraded";
 
@@ -36,22 +36,34 @@ export function ProductShell({ children }: { children: ReactNode }) {
           <span className="brand-copy"><b>DeviLudo</b><small>GAMEFORGE OS</small></span>
         </Link>
 
-        <div className="workspace-switcher">
-          <span className="workspace-avatar">{initials}</span>
-          <span><b>{tenantName}</b><small>PLAYER STUDIO · BETA</small></span>
-          <span className="workspace-chevron">⌄</span>
-        </div>
+        <details className="workspace-menu">
+          <summary aria-label={`切换工作室，当前 ${tenantName}`} className="workspace-switcher">
+            <span className="workspace-avatar">{initials}</span>
+            <span><b>{tenantName}</b><small>PLAYER STUDIO · BETA</small></span>
+            <span aria-hidden="true" className="workspace-chevron">⌄</span>
+          </summary>
+          <div aria-label="工作室菜单" className="workspace-dropdown" role="menu">
+            <span className="workspace-dropdown-label">当前工作室</span>
+            <Link aria-current="page" className="workspace-option" href="/" role="menuitem">
+              <span className="workspace-avatar">{initials}</span>
+              <span><b>{tenantName}</b><small>{session?.role ?? "TenantAdmin"} · 租户隔离</small></span>
+              <i aria-hidden="true">✓</i>
+            </Link>
+          </div>
+        </details>
 
         <nav aria-label="主要导航" className="shell-nav">
-          <Link className="shell-new-project" href="/projects/new"><PlusIcon /><span>开始新游戏</span></Link>
-          <p>WORKSPACE / 工作区</p>
-          <Link className={`shell-nav-item ${pathname === "/" ? "is-active" : ""}`} href="/">
+          <Link className={`shell-nav-item shell-home-entry ${pathname === "/" ? "is-active" : ""}`} href="/">
             <HomeIcon /><span>首页</span>{pathname === "/" ? <i aria-hidden="true" /> : null}
           </Link>
+          <p>WORKSPACE / 工作区</p>
           <Link className={`shell-nav-item ${pathname.startsWith("/projects") ? "is-active" : ""}`} href="/projects">
             <GamepadIcon /><span>项目</span>{pathname.startsWith("/projects") ? <i aria-hidden="true" /> : null}
           </Link>
-          <p>ACCOUNT / 账户</p>
+          <p>CONFIG / 配置</p>
+          <Link className={`shell-nav-item ${pathname.startsWith("/settings") ? "is-active" : ""}`} href="/settings">
+            <SettingsIcon /><span>设置</span>{pathname.startsWith("/settings") ? <i aria-hidden="true" /> : null}
+          </Link>
           <Link className={`shell-nav-item ${pathname.startsWith("/admin/server-pools") ? "is-active" : ""}`} href="/admin/server-pools">
             <ServerIcon /><span>运行状态</span>{pathname.startsWith("/admin/server-pools") ? <i aria-hidden="true" /> : null}
           </Link>

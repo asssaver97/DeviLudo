@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { AGENT_RUNTIME_KINDS, type AgentRuntimeKind } from "@/lib/product/contracts";
+import { normalizeBaseUrl } from "./agent-settings";
 import type { CoreConfig } from "./config";
 import type { JobProtocolV3 } from "./contracts";
 import type { CoreRepository } from "./repository";
@@ -12,6 +14,12 @@ export type SandboxPlan = Readonly<{
   workspace: string;
   objectPrefix: string;
   vaultPath: string;
+  agentConfiguration: Readonly<{
+    runtime: AgentRuntimeKind;
+    baseUrl: string;
+    credentialRef: string;
+    revision: number;
+  }> | null;
   networkPolicy: "AGENT_EGRESS_ALLOWLIST" | "BUILD_EGRESS_DENY" | "STEAM_ONLY";
 }>;
 
@@ -43,6 +51,9 @@ export class ProcessSandboxBackend implements SandboxBackend {
       });
     }
     if (!isAbsolute(this.executable)) throw new Error("Sandbox executor path must be absolute");
+    if (this.production && plan.job.jobKind === "AGENT_GENERATION" && !plan.agentConfiguration) {
+      throw new Error("Tenant Agent settings are required in production");
+    }
     return await executeBackend(this.executable, plan, signal);
   }
 }
@@ -108,7 +119,39 @@ export function sandboxPlan(job: JobProtocolV3): SandboxPlan {
     workspace: `/var/lib/deviludo/workspaces/${job.tenantId}/${job.projectId}/${job.jobId}/g${job.isolationGeneration}`,
     objectPrefix: `tenants/${job.tenantId}/projects/${job.projectId}/jobs/${job.jobId}`,
     vaultPath: `tenants/${job.tenantId}/projects/${job.projectId}/jobs/${job.jobId}`,
+    agentConfiguration: job.jobKind === "AGENT_GENERATION"
+      ? agentConfigurationFromPayload(job.payload, job.tenantId)
+      : null,
     networkPolicy,
+  });
+}
+
+function agentConfigurationFromPayload(
+  payload: Readonly<Record<string, unknown>>,
+  tenantId: string,
+): SandboxPlan["agentConfiguration"] {
+  const value = payload.agentConfiguration;
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Agent configuration lock is invalid");
+  }
+  const input = value as Record<string, unknown>;
+  const baseUrl = typeof input.baseUrl === "string"
+    ? normalizeBaseUrl(input.baseUrl, process.env.NODE_ENV ?? "development")
+    : "";
+  if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.runtime)
+    || !baseUrl
+    || typeof input.credentialRef !== "string"
+    || !input.credentialRef.startsWith(`vault://tenants/${tenantId}/`)
+    || !Number.isSafeInteger(input.revision)
+    || Number(input.revision) < 1) {
+    throw new Error("Agent configuration lock is invalid");
+  }
+  return Object.freeze({
+    runtime: input.runtime as AgentRuntimeKind,
+    baseUrl,
+    credentialRef: input.credentialRef,
+    revision: Number(input.revision),
   });
 }
 

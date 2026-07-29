@@ -49,6 +49,7 @@ CREATE TYPE deviludo.job_state AS ENUM (
 CREATE TYPE deviludo.operation_state AS ENUM (
   'REGISTERED', 'IN_PROGRESS', 'RECEIPTED', 'RECONCILIATION_REQUIRED', 'VOID'
 );
+CREATE TYPE deviludo.agent_runtime AS ENUM ('CLAUDE_CODE', 'CODEX_CLI');
 
 CREATE TABLE deviludo.server_pools (
   kind deviludo.server_pool_kind PRIMARY KEY,
@@ -117,6 +118,25 @@ CREATE TABLE deviludo.tenants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE deviludo.tenant_agent_settings (
+  tenant_id uuid PRIMARY KEY REFERENCES deviludo.tenants(id),
+  agent_runtime deviludo.agent_runtime NOT NULL,
+  base_url text NOT NULL CHECK (
+    length(base_url) BETWEEN 8 AND 2048
+    AND base_url ~ '^https?://'
+  ),
+  credential_secret_ref text NOT NULL CHECK (
+    length(credential_secret_ref) BETWEEN 32 AND 1000
+    AND credential_secret_ref LIKE 'vault://tenants/' || tenant_id::text || '/%'
+  ),
+  api_key_fingerprint text NOT NULL CHECK (api_key_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
+  credential_version uuid NOT NULL,
+  revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE deviludo.projects (
@@ -330,7 +350,7 @@ DECLARE
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'projects', 'project_conversations', 'conversation_messages',
-    'agent_installations', 'workflow_instances', 'workflow_events',
+    'agent_installations', 'tenant_agent_settings', 'workflow_instances', 'workflow_events',
     'jobs', 'external_signals', 'operation_receipts', 'tenant_claim_fairness'
   ]
   LOOP
@@ -489,6 +509,7 @@ SET search_path = pg_catalog, deviludo
 AS $$
 DECLARE
   workflow deviludo.workflow_instances%ROWTYPE;
+  agent_settings deviludo.tenant_agent_settings%ROWTYPE;
   inserted_id uuid;
 BEGIN
   SELECT * INTO workflow
@@ -514,12 +535,23 @@ BEGIN
   );
 
   IF p_signal_kind = 'SPEC_APPROVED' AND workflow.state = 'DRAFT' THEN
+    SELECT * INTO agent_settings
+      FROM deviludo.tenant_agent_settings
+     WHERE tenant_id = workflow.tenant_id;
     UPDATE deviludo.workflow_instances
        SET state = 'AGENT_RUNNING', version = version + 1, updated_at = clock_timestamp()
      WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
     PERFORM deviludo.enqueue_job(
       workflow.tenant_id, workflow.id, workflow.project_id, 'AGENT_GENERATION', NULL,
-      workflow.id::text || ':agent', '{}'::jsonb
+      workflow.id::text || ':agent',
+      CASE WHEN agent_settings.tenant_id IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(
+        'agentConfiguration', jsonb_build_object(
+          'runtime', agent_settings.agent_runtime::text,
+          'baseUrl', agent_settings.base_url,
+          'credentialRef', agent_settings.credential_secret_ref,
+          'revision', agent_settings.revision
+        )
+      ) END
     );
   ELSIF p_signal_kind = 'CANCEL_REQUESTED' THEN
     UPDATE deviludo.workflow_instances
@@ -792,6 +824,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_api, devilud
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.tenants, deviludo.projects, deviludo.project_conversations,
   deviludo.conversation_messages, deviludo.agent_installations,
+  deviludo.tenant_agent_settings,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
   deviludo.external_signals, deviludo.operation_receipts
   TO deviludo_api;

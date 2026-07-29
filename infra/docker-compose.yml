@@ -45,7 +45,10 @@ services:
     environment:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: api
+      DEVILUDO_AGENT_SECRET_ROOT: /var/lib/deviludo/agent-secrets
       PORT: "8080"
+    volumes:
+      - agent-secrets:/var/lib/deviludo/agent-secrets
     ports:
       - "127.0.0.1:${DEVILUDO_CORE_HOST_PORT:-8080}:8080"
     healthcheck:
@@ -105,3 +108,4 @@ networks:
 
 volumes:
   postgres-data: {}
+  agent-secrets: {}
