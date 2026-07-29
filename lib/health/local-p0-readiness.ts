@@ -68,17 +68,16 @@ export async function evaluateLocalP0BootstrapReadiness(
 }
 
 function localP0Environment(): Environment {
-  // Bracket lookup is intentional: Vite replaces static process.env property
-  // access while bundling the Worker, but Vinext exposes launcher variables
-  // through its runtime process.env proxy.
-  const read = (name: string) => process.env[name];
+  // Keep each non-secret launcher binding explicit so Next/Vinext can replace
+  // only the allow-listed properties from next.config.ts. Never spread the
+  // launcher environment into the Worker or expose its secret bindings here.
   return Object.freeze({
-    DEVILUDO_PLATFORM_MANAGED_CONFIGURATION: read("DEVILUDO_PLATFORM_MANAGED_CONFIGURATION"),
-    DEVILUDO_ACCOUNT_API_URL: read("DEVILUDO_ACCOUNT_API_URL"),
-    DEVILUDO_LOCAL_RUNTIME_URL: read("DEVILUDO_LOCAL_RUNTIME_URL"),
-    DEVILUDO_LOCAL_AGENT_RUNTIME_URL: read("DEVILUDO_LOCAL_AGENT_RUNTIME_URL"),
-    DEVILUDO_LOCAL_SPEC_RUNTIME_URL: read("DEVILUDO_LOCAL_SPEC_RUNTIME_URL"),
-    DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: read("DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL"),
+    DEVILUDO_PLATFORM_MANAGED_CONFIGURATION: process.env.DEVILUDO_PLATFORM_MANAGED_CONFIGURATION,
+    DEVILUDO_ACCOUNT_API_URL: process.env.DEVILUDO_ACCOUNT_API_URL,
+    DEVILUDO_LOCAL_RUNTIME_URL: process.env.DEVILUDO_LOCAL_RUNTIME_URL,
+    DEVILUDO_LOCAL_AGENT_RUNTIME_URL: process.env.DEVILUDO_LOCAL_AGENT_RUNTIME_URL,
+    DEVILUDO_LOCAL_SPEC_RUNTIME_URL: process.env.DEVILUDO_LOCAL_SPEC_RUNTIME_URL,
+    DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: process.env.DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL,
   });
 }
 
