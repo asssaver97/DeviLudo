@@ -36,6 +36,32 @@ test("local P0 bootstrap accepts an identity-checked unconfigured inference Gate
   assert.equal(calls.length, 5);
 });
 
+test("local P0 bootstrap reads managed-platform variables through the runtime environment", async () => {
+  const names = Object.keys(ENVIRONMENT);
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  Object.assign(process.env, ENVIRONMENT);
+  const calls = [];
+  try {
+    const readiness = await evaluateLocalP0BootstrapReadiness(undefined, { fetch: async (input) => {
+      const url = new URL(input); calls.push(url.port);
+      if (url.port === "4100") return Response.json({ status: "ok", service: "deviludo-account-api" });
+      if (url.port === "4311") return Response.json({ status: "ok", service: "deviludo-local-runtime", godotVersion: "4.6.2", exportTemplatesRoot: "/templates" });
+      if (url.port === "4312") return Response.json({ status: "ok", service: "deviludo-local-agent-runtime", executionEnabled: true, workerImageVerified: true });
+      if (url.port === "4313") return Response.json({ status: "ok", service: "deviludo-local-spec-runtime" });
+      return Response.json({ schemaVersion: "deviludo.inference-gateway-health.v1", status: "unavailable",
+        service: "deviludo-inference-gateway", connector: "CONFIGURED", providerProbe: "NOT_CONFIGURED", reconciliation: "NOT_CONFIGURED" }, { status: 503 });
+    } });
+    assert.equal(readiness.ready, true);
+    assert.equal(readiness.dependencies.accountPlatform, "READY");
+    assert.ok(calls.includes("4100"));
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
 test("local P0 bootstrap fails closed for a missing export template or a forged service identity", async () => {
   const readiness = await evaluateLocalP0BootstrapReadiness(ENVIRONMENT, { fetch: async (input) => {
     const url = new URL(input);

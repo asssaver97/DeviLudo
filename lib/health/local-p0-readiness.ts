@@ -18,7 +18,7 @@ export interface LocalP0BootstrapReadiness {
 type Environment = Readonly<Record<string, string | undefined>>;
 
 export async function evaluateLocalP0BootstrapReadiness(
-  env: Environment = process.env,
+  env: Environment = localP0Environment(),
   options: Readonly<{ fetch?: typeof fetch; timeoutMs?: number }> = {},
 ): Promise<LocalP0BootstrapReadiness> {
   // Keep the platform global fetch as a direct call. Vinext's Worker bridge
@@ -64,6 +64,21 @@ export async function evaluateLocalP0BootstrapReadiness(
     dependencies,
     agentProbe,
     inferenceProbe: gatewayResult.body ?? Object.freeze({ status: "NOT_CONNECTED" }),
+  });
+}
+
+function localP0Environment(): Environment {
+  // Bracket lookup is intentional: Vite replaces static process.env property
+  // access while bundling the Worker, but Vinext exposes launcher variables
+  // through its runtime process.env proxy.
+  const read = (name: string) => process.env[name];
+  return Object.freeze({
+    DEVILUDO_PLATFORM_MANAGED_CONFIGURATION: read("DEVILUDO_PLATFORM_MANAGED_CONFIGURATION"),
+    DEVILUDO_ACCOUNT_API_URL: read("DEVILUDO_ACCOUNT_API_URL"),
+    DEVILUDO_LOCAL_RUNTIME_URL: read("DEVILUDO_LOCAL_RUNTIME_URL"),
+    DEVILUDO_LOCAL_AGENT_RUNTIME_URL: read("DEVILUDO_LOCAL_AGENT_RUNTIME_URL"),
+    DEVILUDO_LOCAL_SPEC_RUNTIME_URL: read("DEVILUDO_LOCAL_SPEC_RUNTIME_URL"),
+    DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: read("DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL"),
   });
 }
 
