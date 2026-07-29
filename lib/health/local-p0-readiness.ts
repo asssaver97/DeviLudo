@@ -21,7 +21,10 @@ export async function evaluateLocalP0BootstrapReadiness(
   env: Environment = process.env,
   options: Readonly<{ fetch?: typeof fetch; timeoutMs?: number }> = {},
 ): Promise<LocalP0BootstrapReadiness> {
-  const fetcher = options.fetch ?? fetch;
+  // Keep the platform global fetch as a direct call. Vinext's Worker bridge
+  // rejects the host fetch implementation when it is detached and forwarded
+  // through a function parameter, even when an explicit receiver is supplied.
+  const fetcher = options.fetch;
   const timeoutMs = options.timeoutMs ?? 2_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 10_000) throw new Error("Local readiness timeout is invalid");
   const managed = env.DEVILUDO_PLATFORM_MANAGED_CONFIGURATION === "1";
@@ -46,7 +49,7 @@ export async function evaluateLocalP0BootstrapReadiness(
     && new Set(["ok", "unavailable"]).has(String(body.status))
     && body.service === "deviludo-inference-gateway" && body.connector === "CONFIGURED"
     && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.providerProbe))
-    && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.reconciliation)), fetcher, timeoutMs);
+    && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.reconciliation)), fetcher, timeoutMs, false, true);
   const dependencies = Object.freeze({
     accountPlatform: accountResult.status,
     localGodot: runtimeResult.status,
@@ -68,9 +71,10 @@ async function probe(
   endpoint: string | undefined,
   pathname: string,
   valid: (body: Readonly<Record<string, unknown>>) => boolean,
-  fetcher: typeof fetch,
+  fetcher: typeof fetch | undefined,
   timeoutMs: number,
   allowConfiguredLocal = false,
+  acceptServiceUnavailable = false,
 ): Promise<Readonly<{ status: LocalBootstrapStatus; body: Readonly<Record<string, unknown>> | null }>> {
   if (!endpoint) return Object.freeze({ status: "NOT_CONFIGURED", body: null });
   let url: URL;
@@ -84,10 +88,16 @@ async function probe(
     url.hash = "";
   } catch { return Object.freeze({ status: "NOT_CONFIGURED", body: null }); }
   try {
-    const response = await fetcher.call(globalThis, url.href, {
-      method: "GET", headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok || response.redirected) return Object.freeze({ status: "UNAVAILABLE", body: null });
+    // Vinext's local Worker-to-host bridge currently rejects the richer
+    // RequestInit shape (notably redirect policy) for loopback sidecars. These
+    // are identity-checked health reads; reject a followed redirect below.
+    const init: RequestInit = { signal: AbortSignal.timeout(timeoutMs) };
+    const response = fetcher
+      ? await fetcher(url.href, init)
+      : await fetch(url.href, init);
+    if ((!response.ok && !(acceptServiceUnavailable && response.status === 503)) || response.redirected) {
+      return Object.freeze({ status: "UNAVAILABLE", body: null });
+    }
     const body = await response.json() as unknown;
     if (!body || typeof body !== "object" || Array.isArray(body)) return Object.freeze({ status: "IDENTITY_MISMATCH", body: null });
     const record = body as Readonly<Record<string, unknown>>;

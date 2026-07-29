@@ -14,10 +14,11 @@ const ENVIRONMENT = Object.freeze({
   DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL: "http://127.0.0.1:4314/v1",
 });
 
-test("local P0 bootstrap requires account, Godot/templates, Agent, spec and inference sidecars", async () => {
+test("local P0 bootstrap accepts an identity-checked unconfigured inference Gateway", async () => {
   const calls = [];
-  const readiness = await evaluateLocalP0BootstrapReadiness(ENVIRONMENT, { fetch: async (input) => {
+  const readiness = await evaluateLocalP0BootstrapReadiness(ENVIRONMENT, { fetch: async (input, init) => {
     assert.equal(typeof input, "string");
+    assert.equal(init.redirect, undefined);
     const url = new URL(input); calls.push(url.href);
     const bodies = {
       "4100/healthz": { status: "ok", service: "deviludo-account-api" },
@@ -27,7 +28,7 @@ test("local P0 bootstrap requires account, Godot/templates, Agent, spec and infe
       "4314/healthz": { schemaVersion: "deviludo.inference-gateway-health.v1", status: "unavailable",
         service: "deviludo-inference-gateway", connector: "CONFIGURED", providerProbe: "NOT_CONFIGURED", reconciliation: "NOT_CONFIGURED" },
     };
-    return Response.json(bodies[`${url.port}${url.pathname}`]);
+    return Response.json(bodies[`${url.port}${url.pathname}`], { status: url.port === "4314" ? 503 : 200 });
   } });
   assert.equal(readiness.ready, true);
   assert.deepEqual(new Set(Object.values(readiness.dependencies)), new Set(["READY"]));
