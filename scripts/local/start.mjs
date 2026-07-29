@@ -41,6 +41,7 @@ Environment:
   DEVILUDO_LOCAL_GITHUB_CONFIG_FILE  Non-secret config path (default: .deviludo/github-app.json)
   DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION  Exact trusted Claude Code version (default: ${DEFAULT_LOCAL_CLAUDE_VERSION})
   DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION  Exact trusted Codex CLI version (default: ${DEFAULT_LOCAL_CODEX_VERSION})
+  DEVILUDO_LOCAL_SUPERVISOR_PID  Optional parent PID; core shuts down if that launcher exits
   DEVILUDO_LOCAL_SPEC_STATE_FILE  Absolute durable specification state file (default: .deviludo/local-spec-state.json)
   DEVILUDO_GODOT_BINARY        Absolute path to the Godot 4 executable
   DEVILUDO_GODOT_EXPORT_TEMPLATES_ROOT  Verified export_templates root`);
@@ -108,6 +109,14 @@ function parseExactAgentVersion(name, fallback) {
   return value;
 }
 
+function parseOptionalSupervisorPid(value) {
+  if (value === undefined || value === "") return undefined;
+  if (!/^\d+$/.test(value)) throw new Error("DEVILUDO_LOCAL_SUPERVISOR_PID must be an exact process ID");
+  const pid = Number(value);
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) throw new Error("DEVILUDO_LOCAL_SUPERVISOR_PID is invalid");
+  return pid;
+}
+
 function assertPortAvailable(port) {
   return new Promise((resolve, reject) => {
     const probe = createServer();
@@ -138,6 +147,7 @@ let localInferenceGatewayPort;
 let localGitHubRuntimePort;
 let localClaudeVersion;
 let localCodexVersion;
+let localSupervisorPid;
 let localGitHubConfig;
 const localGitHubImport = process.env.DEVILUDO_LOCAL_GITHUB_IMPORT === "1";
 try {
@@ -152,6 +162,7 @@ try {
       : undefined;
     localClaudeVersion = parseExactAgentVersion("DEVILUDO_LOCAL_CLAUDE_EXPECTED_VERSION", DEFAULT_LOCAL_CLAUDE_VERSION);
     localCodexVersion = parseExactAgentVersion("DEVILUDO_LOCAL_CODEX_EXPECTED_VERSION", DEFAULT_LOCAL_CODEX_VERSION);
+    localSupervisorPid = parseOptionalSupervisorPid(process.env.DEVILUDO_LOCAL_SUPERVISOR_PID);
     const selectedPorts = [port, localRuntimePort, localAgentRuntimePort, localSpecRuntimePort, localInferenceGatewayPort,
       ...(localGitHubRuntimePort === undefined ? [] : [localGitHubRuntimePort])];
     if (new Set(selectedPorts).size !== selectedPorts.length) throw new Error("Web and local sidecar ports must be different");
@@ -165,6 +176,7 @@ try {
   localGitHubRuntimePort = undefined;
   localClaudeVersion = undefined;
   localCodexVersion = undefined;
+  localSupervisorPid = undefined;
   fail(error instanceof Error ? error.message : String(error));
   usage();
 }
@@ -428,6 +440,15 @@ function beginShutdown(signal) {
   }, FORCE_STOP_AFTER_MS);
 }
 
+const supervisorTimer = localSupervisorPid === undefined ? null : setInterval(() => {
+  try { process.kill(localSupervisorPid, 0); }
+  catch {
+    console.error("[local:dev] Parent launcher exited; stopping the local core.");
+    beginShutdown("SIGTERM");
+  }
+}, 500);
+supervisorTimer?.unref();
+
 const handledSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
 for (const signal of handledSignals) {
   process.on(signal, () => beginShutdown(signal));
@@ -504,6 +525,7 @@ localGitHubRuntimeChild?.once("exit", (code, signal) => {
 
 siteChild.once("exit", (code, signal) => {
   clearTimeout(forceStopTimer);
+  if (supervisorTimer) clearInterval(supervisorTimer);
   killProcessTree(localRuntimeChild, "SIGTERM");
   killProcessTree(localAgentRuntimeChild, "SIGTERM");
   killProcessTree(localSpecRuntimeChild, "SIGTERM");
@@ -528,6 +550,7 @@ siteChild.once("exit", (code, signal) => {
 });
 
 process.once("exit", () => {
+  if (supervisorTimer) clearInterval(supervisorTimer);
   killAll("SIGKILL");
   try { removeLocalSidecarKeys(); }
   catch { console.error("[local:dev] Could not remove a sidecar session key."); }

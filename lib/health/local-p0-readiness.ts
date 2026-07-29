@@ -84,7 +84,9 @@ async function probe(
     url.hash = "";
   } catch { return Object.freeze({ status: "NOT_CONFIGURED", body: null }); }
   try {
-    const response = await fetcher(url.href, { method: "GET", headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetcher.call(globalThis, url.href, {
+      method: "GET", headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!response.ok || response.redirected) return Object.freeze({ status: "UNAVAILABLE", body: null });
     const body = await response.json() as unknown;
     if (!body || typeof body !== "object" || Array.isArray(body)) return Object.freeze({ status: "IDENTITY_MISMATCH", body: null });
