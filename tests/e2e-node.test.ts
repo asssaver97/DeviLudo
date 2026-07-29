@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { JobProtocolV3 } from "@/services/core/src/contracts";
-import type { E2eNodeConfig } from "@/services/e2e-node/src/config";
+import { loadE2eNodeConfig, type E2eNodeConfig } from "@/services/e2e-node/src/config";
 import type { CoreE2eClient } from "@/services/e2e-node/src/core-client";
 import { executeE2eJob } from "@/services/e2e-node/src/executor";
 import type { IsolationController } from "@/services/e2e-node/src/isolation";
@@ -103,6 +103,70 @@ test("a signing job for another platform is rejected before isolation", async ()
     new AbortController().signal,
   ));
   assert.deepEqual(calls, []);
+});
+
+test("logical operating-system overrides are restricted to test mode and still pool matched", () => {
+  const environment: NodeJS.ProcessEnv = {
+    NODE_ENV: "test",
+    DEVILUDO_E2E_NODE_ID: config.nodeId,
+    DEVILUDO_E2E_POOL_KIND: "E2E_WINDOWS",
+    DEVILUDO_E2E_OPERATING_SYSTEM_OVERRIDE: "windows",
+    DEVILUDO_CORE_API_URL: "http://127.0.0.1:8080",
+    DEVILUDO_E2E_NODE_TOKEN: "local-e2e-node-token",
+  };
+  const logical = loadE2eNodeConfig(environment);
+  assert.equal(logical.operatingSystem, "windows");
+  assert.equal(logical.poolKind, "E2E_WINDOWS");
+  assert.throws(() => loadE2eNodeConfig({ ...environment, NODE_ENV: "development" }));
+  assert.throws(() => loadE2eNodeConfig({
+    ...environment,
+    DEVILUDO_E2E_POOL_KIND: "E2E_MACOS",
+  }));
+});
+
+test("execution failures still attempt cleanup and the final trusted reimage", async () => {
+  const signingJob: JobProtocolV3 = Object.freeze({
+    ...baseJob,
+    jobKind: "ARTIFACT_SIGN",
+    requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
+  });
+  const client = {
+    async issueSigningGrant() {
+      throw new Error("signing broker unavailable");
+    },
+  } as unknown as CoreE2eClient;
+  const calls: string[] = [];
+  await assert.rejects(() => executeE2eJob(
+    signingJob,
+    config,
+    client,
+    fakeIsolation(calls),
+    new AbortController().signal,
+  ), AggregateError);
+  assert.deepEqual(calls, ["agent-absent", "reimage-before", "cleanup", "reimage-after"]);
+});
+
+test("cleanup failures fail the job even when execution itself succeeds", async () => {
+  const calls: string[] = [];
+  const isolation: IsolationController = {
+    async assertAgentAbsent() { calls.push("agent-absent"); },
+    async reimage(_job, stage) {
+      calls.push(`reimage-${stage}`);
+      return `trusted-reimage-${stage}-proof`;
+    },
+    async cleanup() {
+      calls.push("cleanup");
+      throw new Error("cleanup failed");
+    },
+  };
+  await assert.rejects(() => executeE2eJob(
+    baseJob,
+    config,
+    {} as CoreE2eClient,
+    isolation,
+    new AbortController().signal,
+  ), AggregateError);
+  assert.deepEqual(calls, ["agent-absent", "reimage-before", "cleanup", "reimage-after"]);
 });
 
 function fakeIsolation(calls: string[]): IsolationController {

@@ -37,3 +37,21 @@ npm run test
 npm run build
 npm run verify:architecture
 ```
+
+## 全功能 E2E
+
+首次在开发机安装三个浏览器引擎：
+
+```bash
+npm run test:e2e:install
+```
+
+随后运行确定性的全栈 E2E：
+
+```bash
+npm run test:e2e
+```
+
+该命令会为本次运行分配动态 Web/Core 端口，创建名称以 `deviludo-e2e-` 开头的独立 Compose project 和 PostgreSQL 卷，并在结束或失败后清理。测试覆盖 Chromium、Firefox、WebKit、Web BFF/Core API、完整工作流以及三个测试态逻辑 E2E 节点，不会读取或清理 `local:up` 使用的开发数据库。
+
+需要观察浏览器交互时可运行 `npm run test:e2e:headed`。真实宿主机 macOS 节点仍由 `npm run local:test` 单独验收。

@@ -23,7 +23,7 @@ export function loadE2eNodeConfig(env: NodeJS.ProcessEnv = process.env): E2eNode
   if (!isServerPoolKind(poolKind) || !poolKind.startsWith("E2E_")) {
     throw new Error("DEVILUDO_E2E_POOL_KIND must be one of the three fixed E2E pools");
   }
-  const operatingSystem = hostOperatingSystem();
+  const operatingSystem = configuredOperatingSystem(env);
   assertPoolOperatingSystem(poolKind, operatingSystem);
   const nodeId = env.DEVILUDO_E2E_NODE_ID ?? "";
   if (!/^[0-9a-f-]{36}$/i.test(nodeId)) throw new Error("DEVILUDO_E2E_NODE_ID must be a UUID");
@@ -54,6 +54,18 @@ export function loadE2eNodeConfig(env: NodeJS.ProcessEnv = process.env): E2eNode
     caFile,
     pollMilliseconds,
   });
+}
+
+function configuredOperatingSystem(env: NodeJS.ProcessEnv): ServerOperatingSystem {
+  const override = env.DEVILUDO_E2E_OPERATING_SYSTEM_OVERRIDE;
+  if (!override) return hostOperatingSystem();
+  if (env.NODE_ENV !== "test") {
+    throw new Error("DEVILUDO_E2E_OPERATING_SYSTEM_OVERRIDE is restricted to NODE_ENV=test");
+  }
+  if (!(["linux", "windows", "macos"] as readonly string[]).includes(override)) {
+    throw new Error("DEVILUDO_E2E_OPERATING_SYSTEM_OVERRIDE is invalid");
+  }
+  return override as ServerOperatingSystem;
 }
 
 export function hostOperatingSystem(platform: NodeJS.Platform = process.platform): ServerOperatingSystem {

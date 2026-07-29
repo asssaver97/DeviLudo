@@ -47,7 +47,7 @@ services:
       DEVILUDO_CORE_ROLE: api
       PORT: "8080"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${DEVILUDO_CORE_HOST_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
       interval: 2s
@@ -85,7 +85,7 @@ services:
       core-api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${DEVILUDO_WEB_HOST_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health/live"]
       interval: 2s

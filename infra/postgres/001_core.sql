@@ -526,6 +526,21 @@ DECLARE
   workflow deviludo.workflow_instances%ROWTYPE;
   platform deviludo.server_os;
 BEGIN
+  -- Serialize all terminal job mutations on the workflow before taking a job
+  -- row lock. Platform workers complete sibling jobs concurrently, and taking
+  -- those locks in the opposite order can deadlock during stage advancement.
+  SELECT * INTO job
+    FROM deviludo.jobs
+   WHERE id = p_job_id
+     AND state = 'RUNNING'
+     AND lease_token = p_lease_token
+     AND fencing_token = p_fencing_token
+     AND isolation_generation = p_isolation_generation;
+  IF job.id IS NULL THEN RETURN false; END IF;
+  SELECT * INTO workflow
+    FROM deviludo.workflow_instances
+   WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+   FOR UPDATE;
   SELECT * INTO job
     FROM deviludo.jobs
    WHERE id = p_job_id
@@ -560,11 +575,6 @@ BEGIN
     jsonb_build_object('jobId', job.id, 'jobKind', job.kind, 'operatingSystem', job.target_operating_system),
     'job-succeeded:' || job.id::text
   );
-
-  SELECT * INTO workflow
-    FROM deviludo.workflow_instances
-   WHERE tenant_id = job.tenant_id AND id = job.workflow_id
-   FOR UPDATE;
 
   IF workflow.state = 'AGENT_RUNNING' AND job.kind = 'AGENT_GENERATION' THEN
     UPDATE deviludo.workflow_instances SET state = 'ARTIFACT_BUILDING', version = version + 1,
@@ -639,8 +649,16 @@ SET search_path = pg_catalog, deviludo
 AS $$
 DECLARE
   job deviludo.jobs%ROWTYPE;
+  workflow deviludo.workflow_instances%ROWTYPE;
   terminal boolean;
 BEGIN
+  SELECT * INTO job FROM deviludo.jobs
+   WHERE id = p_job_id AND state = 'RUNNING'
+     AND lease_token = p_lease_token AND fencing_token = p_fencing_token;
+  IF job.id IS NULL THEN RETURN false; END IF;
+  SELECT * INTO workflow FROM deviludo.workflow_instances
+   WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+   FOR UPDATE;
   SELECT * INTO job FROM deviludo.jobs
    WHERE id = p_job_id AND state = 'RUNNING'
      AND lease_token = p_lease_token AND fencing_token = p_fencing_token

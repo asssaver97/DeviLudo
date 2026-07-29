@@ -8,8 +8,8 @@ test("local deployment exposes only Web while Core roles share one image", async
   for (const service of ["core-api", "core-scheduler", "core-sandbox"]) {
     assert.match(compose, new RegExp(`\\n  ${service}:\\n    <<: \\*core`));
   }
-  assert.match(compose, /web:[\s\S]*127\.0\.0\.1:3000:3000/);
-  assert.match(compose, /core-api:[\s\S]*127\.0\.0\.1:8080:8080/);
+  assert.match(compose, /web:[\s\S]*127\.0\.0\.1:\$\{DEVILUDO_WEB_HOST_PORT:-3000\}:3000/);
+  assert.match(compose, /core-api:[\s\S]*127\.0\.0\.1:\$\{DEVILUDO_CORE_HOST_PORT:-8080\}:8080/);
   const webSection = compose.match(/\n  web:([\s\S]*?)\nnetworks:/)?.[1] ?? "";
   assert.doesNotMatch(webSection, /DATABASE_URL|VAULT|OBJECT_STORE|S3_/);
   assert.match(webSection, /- edge[\s\S]*- core/);

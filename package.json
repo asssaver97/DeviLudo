@@ -18,6 +18,9 @@
     "local:prepare": "node scripts/local-prepare.mjs",
     "local:e2e": "node --import tsx scripts/local-macos-e2e.mjs",
     "local:test": "node scripts/local-integration-test.mjs",
+    "test:e2e": "node scripts/run-e2e.mjs",
+    "test:e2e:headed": "node scripts/run-e2e.mjs --headed",
+    "test:e2e:install": "playwright install chromium firefox webkit",
     "local:down": "node scripts/local-down.mjs",
     "local:reset": "node scripts/local-down.mjs --volumes",
     "infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d --wait",
@@ -39,6 +42,7 @@
     "tsx": "4.22.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@types/node": "22.19.19",
     "@types/pg": "8.20.0",
     "@types/react": "19.2.14",

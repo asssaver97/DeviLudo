@@ -1,0 +1,18 @@
+services:
+  core-api:
+    environment:
+      NODE_ENV: test
+      DEVILUDO_CORE_POLL_MS: "100"
+      DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
+
+  core-scheduler:
+    environment:
+      NODE_ENV: test
+      DEVILUDO_CORE_POLL_MS: "100"
+      DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
+
+  core-sandbox:
+    environment:
+      NODE_ENV: test
+      DEVILUDO_CORE_POLL_MS: "100"
+      DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
