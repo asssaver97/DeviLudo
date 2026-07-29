@@ -21,6 +21,9 @@ const localBindingConfig = {
             "DEVILUDO_LOCAL_RUNTIME_HMAC_KEY",
             "DEVILUDO_LOCAL_AGENT_RUNTIME_HMAC_KEY",
             "DEVILUDO_LOCAL_SPEC_RUNTIME_HMAC_KEY",
+            ...(process.env.DEVILUDO_PLATFORM_MANAGED_CONFIGURATION === "1"
+              ? ["DEVILUDO_INTERNAL_SERVICE_TOKEN"]
+              : []),
           ],
         },
       }

@@ -1386,7 +1386,16 @@ test("public API contract covers authoritative account connection and MFA releas
 test("localhost Worker receives only an allow-listed Provider control flag and loopback origins", () => {
   const config = readFileSync(new URL("../next.config.ts", import.meta.url), "utf8");
   assert.match(config, /DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED: process\.env\.DEVILUDO_LOCAL_PROVIDER_CONTROL_REQUIRED === "1" \? "1" : "0"/);
+  assert.match(config, /DEVILUDO_PLATFORM_MANAGED_CONFIGURATION: process\.env\.DEVILUDO_PLATFORM_MANAGED_CONFIGURATION === "1" \? "1" : "0"/);
+  assert.match(config, /DEVILUDO_ACCOUNT_API_URL: loopbackOrigin/);
   assert.match(config, /DEVILUDO_LOCAL_AGENT_RUNTIME_URL: loopbackOrigin/);
   assert.match(config, /Expose only the non-secret, loopback-constrained local harness/);
   assert.doesNotMatch(config, /env:\s*\{\s*\.\.\.process\.env/);
+});
+
+test("managed localhost Worker receives its internal service token only as a secret binding", () => {
+  const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+  const nextConfig = readFileSync(new URL("../next.config.ts", import.meta.url), "utf8");
+  assert.match(viteConfig, /DEVILUDO_PLATFORM_MANAGED_CONFIGURATION === "1"[\s\S]*?DEVILUDO_INTERNAL_SERVICE_TOKEN/);
+  assert.doesNotMatch(nextConfig, /DEVILUDO_INTERNAL_SERVICE_TOKEN/);
 });
