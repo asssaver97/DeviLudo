@@ -30,22 +30,23 @@ export async function evaluateLocalP0BootstrapReadiness(
   const agent = loopbackOrigin(env.DEVILUDO_LOCAL_AGENT_RUNTIME_URL, "http://127.0.0.1:4312");
   const spec = loopbackOrigin(env.DEVILUDO_LOCAL_SPEC_RUNTIME_URL, "http://127.0.0.1:4313");
   const gateway = loopbackOrigin(env.DEVILUDO_LOCAL_INFERENCE_GATEWAY_URL, "http://127.0.0.1:4314/v1");
-  const [accountResult, runtimeResult, agentResult, specResult, gatewayResult] = await Promise.all([
-    managed
-      ? probe(accountEndpoint, "/healthz", (body) => body.status === "ok" && body.service === "deviludo-account-api", fetcher, timeoutMs, true)
-      : Promise.resolve({ status: "NOT_REQUIRED" as const, body: null }),
-    probe(runtime, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-runtime"
-      && typeof body.godotVersion === "string" && body.godotVersion.length > 0
-      && typeof body.exportTemplatesRoot === "string" && body.exportTemplatesRoot.length > 0, fetcher, timeoutMs),
-    probe(agent, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-agent-runtime"
-      && body.executionEnabled === true && body.workerImageVerified === true, fetcher, timeoutMs),
-    probe(spec, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-spec-runtime", fetcher, timeoutMs),
-    probe(gateway, "/healthz", (body) => body.schemaVersion === "deviludo.inference-gateway-health.v1"
-      && new Set(["ok", "unavailable"]).has(String(body.status))
-      && body.service === "deviludo-inference-gateway" && body.connector === "CONFIGURED"
-      && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.providerProbe))
-      && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.reconciliation)), fetcher, timeoutMs),
-  ]);
+  // vinext's local Worker bridge does not guarantee concurrent loopback fetches
+  // to separate host sidecars. Bootstrap is infrequent, so probe them in a
+  // deterministic sequence and preserve the identity of the failing boundary.
+  const accountResult = managed
+    ? await probe(accountEndpoint, "/healthz", (body) => body.status === "ok" && body.service === "deviludo-account-api", fetcher, timeoutMs, true)
+    : { status: "NOT_REQUIRED" as const, body: null };
+  const runtimeResult = await probe(runtime, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-runtime"
+    && typeof body.godotVersion === "string" && body.godotVersion.length > 0
+    && typeof body.exportTemplatesRoot === "string" && body.exportTemplatesRoot.length > 0, fetcher, timeoutMs);
+  const agentResult = await probe(agent, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-agent-runtime"
+    && body.executionEnabled === true && body.workerImageVerified === true, fetcher, timeoutMs);
+  const specResult = await probe(spec, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-spec-runtime", fetcher, timeoutMs);
+  const gatewayResult = await probe(gateway, "/healthz", (body) => body.schemaVersion === "deviludo.inference-gateway-health.v1"
+    && new Set(["ok", "unavailable"]).has(String(body.status))
+    && body.service === "deviludo-inference-gateway" && body.connector === "CONFIGURED"
+    && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.providerProbe))
+    && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.reconciliation)), fetcher, timeoutMs);
   const dependencies = Object.freeze({
     accountPlatform: accountResult.status,
     localGodot: runtimeResult.status,
