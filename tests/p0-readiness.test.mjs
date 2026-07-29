@@ -17,18 +17,21 @@ const ENVIRONMENT = Object.freeze({
 test("local P0 bootstrap requires account, Godot/templates, Agent, spec and inference sidecars", async () => {
   const calls = [];
   const readiness = await evaluateLocalP0BootstrapReadiness(ENVIRONMENT, { fetch: async (input) => {
+    assert.equal(typeof input, "string");
     const url = new URL(input); calls.push(url.href);
     const bodies = {
       "4100/healthz": { status: "ok", service: "deviludo-account-api" },
       "4311/health": { status: "ok", service: "deviludo-local-runtime", godotVersion: "4.6.2", exportTemplatesRoot: "/templates" },
       "4312/health": { status: "ok", service: "deviludo-local-agent-runtime", executionEnabled: true, workerImageVerified: true },
       "4313/health": { status: "ok", service: "deviludo-local-spec-runtime" },
-      "4314/healthz": { status: "ok", service: "deviludo-inference-gateway", connector: "CONFIGURED", providerProbe: "CONFIGURED" },
+      "4314/healthz": { schemaVersion: "deviludo.inference-gateway-health.v1", status: "unavailable",
+        service: "deviludo-inference-gateway", connector: "CONFIGURED", providerProbe: "NOT_CONFIGURED", reconciliation: "NOT_CONFIGURED" },
     };
     return Response.json(bodies[`${url.port}${url.pathname}`]);
   } });
   assert.equal(readiness.ready, true);
   assert.deepEqual(new Set(Object.values(readiness.dependencies)), new Set(["READY"]));
+  assert.equal(readiness.inferenceProbe.status, "unavailable");
   assert.equal(calls.length, 5);
 });
 
@@ -37,7 +40,8 @@ test("local P0 bootstrap fails closed for a missing export template or a forged 
     const url = new URL(input);
     if (url.port === "4311") return Response.json({ status: "ok", service: "deviludo-local-runtime", godotVersion: "4.6.2", exportTemplatesRoot: null });
     if (url.port === "4313") return Response.json({ status: "ok", service: "forged-spec-runtime" });
-    if (url.port === "4314") return Response.json({ status: "ok", service: "deviludo-inference-gateway", connector: "CONFIGURED", providerProbe: "CONFIGURED" });
+    if (url.port === "4314") return Response.json({ schemaVersion: "deviludo.inference-gateway-health.v1", status: "unavailable",
+      service: "deviludo-inference-gateway", connector: "CONFIGURED", providerProbe: "NOT_CONFIGURED", reconciliation: "NOT_CONFIGURED" });
     if (url.port === "4312") return Response.json({ status: "ok", service: "deviludo-local-agent-runtime", executionEnabled: true, workerImageVerified: true });
     return Response.json({ status: "ok", service: "deviludo-account-api" });
   } });

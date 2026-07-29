@@ -33,13 +33,20 @@ export async function GET(request: Request) {
     const claudeReady = bindings.some((binding) => binding.agent === "claude-code"
       && binding.state === "VERIFIED" && binding.runtimeState === "READY" && binding.selectionRole !== "FALLBACK");
     const workerReady = isLocalDevelopmentWorkerReady(bootstrap.agentProbe, reconciliation, bindings);
-    return response(workerReady && claudeReady, "LOCAL", {
+    const inferenceReady = bootstrap.inferenceProbe.schemaVersion === "deviludo.inference-gateway-health.v1"
+      && bootstrap.inferenceProbe.status === "ok"
+      && bootstrap.inferenceProbe.service === "deviludo-inference-gateway"
+      && bootstrap.inferenceProbe.connector === "CONFIGURED";
+    return response(workerReady && claudeReady && inferenceReady, "LOCAL", {
       ...bootstrap.dependencies,
       developmentWorker: workerReady ? "READY" : "BLOCKED",
       claudeProfile: claudeReady ? "READY" : "BLOCKED",
+      inferenceGatewayOperational: inferenceReady ? "READY" : "BLOCKED",
     });
   } catch {
-    return response(false, "LOCAL", { ...bootstrap.dependencies, developmentWorker: "UNAVAILABLE", claudeProfile: "BLOCKED" });
+    return response(false, "LOCAL", {
+      ...bootstrap.dependencies, developmentWorker: "UNAVAILABLE", claudeProfile: "BLOCKED", inferenceGatewayOperational: "BLOCKED",
+    });
   } finally { lease?.release(); }
 }
 

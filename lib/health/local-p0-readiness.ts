@@ -12,6 +12,7 @@ export interface LocalP0BootstrapReadiness {
     inferenceGateway: LocalBootstrapStatus;
   }>;
   readonly agentProbe: LocalAgentRuntimeProbe;
+  readonly inferenceProbe: Readonly<Record<string, unknown>>;
 }
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -39,8 +40,11 @@ export async function evaluateLocalP0BootstrapReadiness(
     probe(agent, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-agent-runtime"
       && body.executionEnabled === true && body.workerImageVerified === true, fetcher, timeoutMs),
     probe(spec, "/health", (body) => body.status === "ok" && body.service === "deviludo-local-spec-runtime", fetcher, timeoutMs),
-    probe(gateway, "/healthz", (body) => body.status === "ok" && body.service === "deviludo-inference-gateway"
-      && body.connector === "CONFIGURED" && body.providerProbe === "CONFIGURED", fetcher, timeoutMs),
+    probe(gateway, "/healthz", (body) => body.schemaVersion === "deviludo.inference-gateway-health.v1"
+      && new Set(["ok", "unavailable"]).has(String(body.status))
+      && body.service === "deviludo-inference-gateway" && body.connector === "CONFIGURED"
+      && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.providerProbe))
+      && new Set(["CONFIGURED", "NOT_CONFIGURED"]).has(String(body.reconciliation)), fetcher, timeoutMs),
   ]);
   const dependencies = Object.freeze({
     accountPlatform: accountResult.status,
@@ -55,6 +59,7 @@ export async function evaluateLocalP0BootstrapReadiness(
     ready: Object.values(dependencies).every((status) => status === "READY" || status === "NOT_REQUIRED"),
     dependencies,
     agentProbe,
+    inferenceProbe: gatewayResult.body ?? Object.freeze({ status: "NOT_CONNECTED" }),
   });
 }
 
@@ -78,7 +83,7 @@ async function probe(
     url.hash = "";
   } catch { return Object.freeze({ status: "NOT_CONFIGURED", body: null }); }
   try {
-    const response = await fetcher(url, { method: "GET", headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetcher(url.href, { method: "GET", headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok || response.redirected) return Object.freeze({ status: "UNAVAILABLE", body: null });
     const body = await response.json() as unknown;
     if (!body || typeof body !== "object" || Array.isArray(body)) return Object.freeze({ status: "IDENTITY_MISMATCH", body: null });
