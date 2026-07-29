@@ -5,11 +5,12 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import {
   createAgentSecretStore,
+  isMaskedApiKey,
   LocalAgentSecretStore,
+  maskApiKey,
   parseAgentSettingsInput,
+  parseClaudeSettingsJson,
 } from "@/services/core/src/agent-settings";
-
-const tenantId = "50000000-0000-4000-8000-000000000001";
 
 test("Agent settings accept fixed runtimes and normalize safe provider URLs", () => {
   assert.deepEqual(parseAgentSettingsInput({
@@ -20,6 +21,7 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
     apiKey: "sk-valid-secret",
+    models: null,
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
@@ -33,20 +35,85 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     agentRuntime: "CLAUDE_CODE",
     baseUrl: "https://user:pass@example.com/v1",
   }), /credentials/i);
+  assert.throws(() => parseAgentSettingsInput({
+    agentRuntime: "CLAUDE_CODE",
+    baseUrl: "https://api.anthropic.com",
+    apiKey: "sk-valid-secret",
+  }), /five model routes/i);
 });
 
-test("the local Secret store writes a versioned tenant key and returns only a fingerprint reference", async () => {
+test("Claude settings.json accepts only the supported connection fields", () => {
+  const settingsJson = JSON.stringify({
+    env: {
+      ANTHROPIC_BASE_URL: "https://gateway.example.com/anthropic/",
+      ANTHROPIC_AUTH_TOKEN: "sk-gateway-secret",
+      ANTHROPIC_MODEL: "claude-fable-5-max",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
+      CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
+    },
+  });
+  assert.deepEqual(parseClaudeSettingsJson(settingsJson), {
+    baseUrl: "https://gateway.example.com/anthropic/",
+    apiKey: "sk-gateway-secret",
+    models: {
+      primary: "claude-fable-5-max",
+      opus: "claude-opus-route",
+      sonnet: "claude-sonnet-route",
+      haiku: "claude-haiku-route",
+      subagent: "claude-subagent-route",
+    },
+  });
+  assert.deepEqual(parseAgentSettingsInput({
+    agentRuntime: "CLAUDE_CODE",
+    settingsJson,
+  }, "production"), {
+    agentRuntime: "CLAUDE_CODE",
+    baseUrl: "https://gateway.example.com/anthropic",
+    apiKey: "sk-gateway-secret",
+    models: {
+      primary: "claude-fable-5-max",
+      opus: "claude-opus-route",
+      sonnet: "claude-sonnet-route",
+      haiku: "claude-haiku-route",
+      subagent: "claude-subagent-route",
+    },
+  });
+  assert.throws(() => parseAgentSettingsInput({
+    agentRuntime: "CODEX_CLI",
+    settingsJson,
+  }), /only available for Claude Code/i);
+  assert.throws(() => parseClaudeSettingsJson(JSON.stringify({
+    env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com", SHELL: "/bin/sh" },
+  })), /unsupported environment fields/i);
+  assert.throws(() => parseClaudeSettingsJson(JSON.stringify({ env: {
+    ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+    ANTHROPIC_MODEL: "model-a",
+    CLAUDE_CODE_SUBAGENT_MODEL: "model-b",
+  } })), /all five model values/i);
+});
+
+test("API keys use a stable first-three and last-four mask", () => {
+  assert.equal(maskApiKey("sk-local-secret-value"), "sk-********alue");
+  assert.equal(isMaskedApiKey("sk-********alue"), true);
+  assert.equal(isMaskedApiKey("sk-local-secret-value"), false);
+});
+
+test("the local Secret store writes a versioned instance key and returns only safe metadata", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-agent-settings-"));
   try {
     const store = new LocalAgentSecretStore(root);
-    const saved = await store.writeApiKey(tenantId, "sk-local-secret-value");
-    assert.match(saved.secretRef, new RegExp(`^vault://tenants/${tenantId}/`));
+    const saved = await store.writeApiKey("sk-local-secret-value");
+    assert.match(saved.secretRef, /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//);
+    assert.equal(saved.mask, "sk-********alue");
     assert.match(saved.fingerprint, /^sha256:[0-9a-f]{12}$/);
     assert.doesNotMatch(JSON.stringify(saved), /sk-local-secret-value/);
+    assert.equal(await store.readApiKey(saved.secretRef), "sk-local-secret-value");
+    assert.equal(await store.readApiKeyMask(saved.secretRef), saved.mask);
     const stored = await readFile(join(
       root,
-      "tenants",
-      tenantId,
+      "instance",
       "agent-runtime",
       "api-key",
       "versions",

@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { loadE2eNodeConfig } from "./config";
 import { runE2eNode } from "./runner";
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const config = loadE2eNodeConfig();
   const controller = new AbortController();
   for (const event of ["SIGINT", "SIGTERM"] as const) process.once(event, () => controller.abort());

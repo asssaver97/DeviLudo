@@ -330,7 +330,7 @@ button {
   z-index: 8;
 }
 
-/* Tenant and project Agent configuration */
+/* Workspace and project Agent configuration */
 .agent-settings-heading { align-items: flex-start; display: flex; justify-content: space-between; }
 .scope-badge { align-items: center; background: #e8eee7; border: 1px solid #cbd7ca; border-radius: 999px; color: #39543e; display: inline-flex; font-size: 11px; font-weight: 700; gap: 7px; padding: 8px 12px; }
 .scope-badge svg { height: 14px; width: 14px; }
@@ -2109,12 +2109,21 @@ body:has(.app-shell) {
 }
 
 .brand-mark {
-  background: var(--acid);
+  background: var(--canvas);
   border: 2px solid #ffe59d;
   box-shadow: 4px 4px 0 #000;
   height: 36px;
+  overflow: hidden;
   transform: none;
   width: 36px;
+}
+
+.brand-mark img {
+  display: block;
+  height: 100%;
+  image-rendering: pixelated;
+  object-fit: cover;
+  width: 100%;
 }
 
 .brand-copy,

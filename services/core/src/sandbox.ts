@@ -1,7 +1,11 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
-import { AGENT_RUNTIME_KINDS, type AgentRuntimeKind } from "@/lib/product/contracts";
-import { normalizeBaseUrl } from "./agent-settings";
+import {
+  AGENT_RUNTIME_KINDS,
+  type AgentModelConfiguration,
+  type AgentRuntimeKind,
+} from "@/lib/product/contracts";
+import { normalizeAgentModels, normalizeBaseUrl } from "./agent-settings";
 import type { CoreConfig } from "./config";
 import type { JobProtocolV3 } from "./contracts";
 import type { CoreRepository } from "./repository";
@@ -17,7 +21,10 @@ export type SandboxPlan = Readonly<{
   agentConfiguration: Readonly<{
     runtime: AgentRuntimeKind;
     baseUrl: string;
+    models: AgentModelConfiguration | null;
     credentialRef: string;
+    credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "OPENAI_API_KEY";
+    environment: Readonly<Record<string, string>>;
     revision: number;
   }> | null;
   networkPolicy: "AGENT_EGRESS_ALLOWLIST" | "BUILD_EGRESS_DENY" | "STEAM_ONLY";
@@ -52,7 +59,7 @@ export class ProcessSandboxBackend implements SandboxBackend {
     }
     if (!isAbsolute(this.executable)) throw new Error("Sandbox executor path must be absolute");
     if (this.production && plan.job.jobKind === "AGENT_GENERATION" && !plan.agentConfiguration) {
-      throw new Error("Tenant Agent settings are required in production");
+      throw new Error("Instance Agent settings are required in production");
     }
     return await executeBackend(this.executable, plan, signal);
   }
@@ -97,7 +104,7 @@ export async function runSandbox(
         level: "error",
         event: "sandbox_job_failed",
         jobId: job?.jobId,
-        tenantId: job?.tenantId,
+        workspaceId: job?.workspaceId,
         projectId: job?.projectId,
         message: error instanceof Error ? error.message : String(error),
       }));
@@ -116,11 +123,11 @@ export function sandboxPlan(job: JobProtocolV3): SandboxPlan {
     schemaVersion: "deviludo.sandbox-plan.v1",
     mode,
     job,
-    workspace: `/var/lib/deviludo/workspaces/${job.tenantId}/${job.projectId}/${job.jobId}/g${job.isolationGeneration}`,
-    objectPrefix: `tenants/${job.tenantId}/projects/${job.projectId}/jobs/${job.jobId}`,
-    vaultPath: `tenants/${job.tenantId}/projects/${job.projectId}/jobs/${job.jobId}`,
+    workspace: `/var/lib/deviludo/workspaces/${job.workspaceId}/${job.projectId}/${job.jobId}/g${job.isolationGeneration}`,
+    objectPrefix: `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`,
+    vaultPath: `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`,
     agentConfiguration: job.jobKind === "AGENT_GENERATION"
-      ? agentConfigurationFromPayload(job.payload, job.tenantId)
+      ? agentConfigurationFromPayload(job.payload)
       : null,
     networkPolicy,
   });
@@ -128,7 +135,6 @@ export function sandboxPlan(job: JobProtocolV3): SandboxPlan {
 
 function agentConfigurationFromPayload(
   payload: Readonly<Record<string, unknown>>,
-  tenantId: string,
 ): SandboxPlan["agentConfiguration"] {
   const value = payload.agentConfiguration;
   if (value === undefined) return null;
@@ -139,10 +145,11 @@ function agentConfigurationFromPayload(
   const baseUrl = typeof input.baseUrl === "string"
     ? normalizeBaseUrl(input.baseUrl, process.env.NODE_ENV ?? "development")
     : "";
+  const models = normalizeAgentModels(input.models);
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.runtime)
     || !baseUrl
     || typeof input.credentialRef !== "string"
-    || !input.credentialRef.startsWith(`vault://tenants/${tenantId}/`)
+    || !input.credentialRef.startsWith("vault://instance/agent-runtime/api-key/versions/")
     || !Number.isSafeInteger(input.revision)
     || Number(input.revision) < 1) {
     throw new Error("Agent configuration lock is invalid");
@@ -150,8 +157,29 @@ function agentConfigurationFromPayload(
   return Object.freeze({
     runtime: input.runtime as AgentRuntimeKind,
     baseUrl,
+    models,
     credentialRef: input.credentialRef,
+    credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY",
+    environment: input.runtime === "CLAUDE_CODE"
+      ? claudeCodeEnvironment(baseUrl, models)
+      : Object.freeze({ OPENAI_BASE_URL: baseUrl }),
     revision: Number(input.revision),
+  });
+}
+
+function claudeCodeEnvironment(
+  baseUrl: string,
+  models: AgentModelConfiguration | null,
+): Readonly<Record<string, string>> {
+  return Object.freeze({
+    ANTHROPIC_BASE_URL: baseUrl,
+    ...(models ? {
+      ANTHROPIC_MODEL: models.primary,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
+      CLAUDE_CODE_SUBAGENT_MODEL: models.subagent,
+    } : {}),
   });
 }
 

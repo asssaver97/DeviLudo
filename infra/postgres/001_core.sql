@@ -87,7 +87,7 @@ CREATE TABLE deviludo.server_nodes (
   state deviludo.server_node_state NOT NULL DEFAULT 'PROVISIONING',
   capabilities text[] NOT NULL DEFAULT ARRAY[]::text[],
   isolation_generation bigint NOT NULL DEFAULT 1 CHECK (isolation_generation > 0),
-  current_tenant_id uuid,
+  current_workspace_id uuid,
   agent_installed boolean NOT NULL DEFAULT false CHECK (agent_installed = false),
   last_heartbeat_at timestamptz,
   last_reimage_proof_at timestamptz,
@@ -114,75 +114,85 @@ INSERT INTO deviludo.pool_capacity_intents(pool_kind, desired_nodes, reason, ope
 SELECT kind, desired_nodes, 'P0_BASELINE', 'p0-baseline:' || kind::text
 FROM deviludo.server_pools;
 
-CREATE TABLE deviludo.tenants (
+CREATE TABLE deviludo.workspaces (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
-CREATE TABLE deviludo.tenant_agent_settings (
-  tenant_id uuid PRIMARY KEY REFERENCES deviludo.tenants(id),
+CREATE TABLE deviludo.instance_agent_settings (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
   agent_runtime deviludo.agent_runtime NOT NULL,
   base_url text NOT NULL CHECK (
     length(base_url) BETWEEN 8 AND 2048
     AND base_url ~ '^https?://'
   ),
+  primary_model text CHECK (primary_model IS NULL OR primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  opus_model text CHECK (opus_model IS NULL OR opus_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  sonnet_model text CHECK (sonnet_model IS NULL OR sonnet_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  haiku_model text CHECK (haiku_model IS NULL OR haiku_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  subagent_model text CHECK (subagent_model IS NULL OR subagent_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
   credential_secret_ref text NOT NULL CHECK (
     length(credential_secret_ref) BETWEEN 32 AND 1000
-    AND credential_secret_ref LIKE 'vault://tenants/' || tenant_id::text || '/%'
+    AND credential_secret_ref LIKE 'vault://instance/agent-runtime/api-key/versions/%'
   ),
+  api_key_mask text NOT NULL CHECK (api_key_mask ~ '^.{3}\*{8}.{4}$'),
   api_key_fingerprint text NOT NULL CHECK (api_key_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
   credential_version uuid NOT NULL,
   revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
   updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (
+    (primary_model IS NULL AND opus_model IS NULL AND sonnet_model IS NULL
+      AND haiku_model IS NULL AND subagent_model IS NULL)
+    OR
+    (primary_model IS NOT NULL AND opus_model IS NOT NULL AND sonnet_model IS NOT NULL
+      AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
+  )
 );
 
 CREATE TABLE deviludo.projects (
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
+  workspace_id uuid NOT NULL REFERENCES deviludo.workspaces(id),
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   name text NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id)
+  PRIMARY KEY (workspace_id, id)
 );
 
 CREATE TABLE deviludo.project_conversations (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
-  project_id uuid,
+  project_id uuid NOT NULL,
   mode text NOT NULL CHECK (mode IN ('NEW_GAME', 'PROJECT_FEEDBACK')),
   title text NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id),
-  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
-  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id),
-  CHECK (
-    (mode = 'NEW_GAME' AND project_id IS NULL)
-    OR (mode = 'PROJECT_FEEDBACK' AND project_id IS NOT NULL)
-  )
+  PRIMARY KEY (workspace_id, id),
+  FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
+  CHECK (mode IN ('NEW_GAME', 'PROJECT_FEEDBACK'))
 );
 CREATE INDEX project_conversations_recent
-  ON deviludo.project_conversations(tenant_id, updated_at DESC);
+  ON deviludo.project_conversations(workspace_id, updated_at DESC);
 
 CREATE TABLE deviludo.conversation_messages (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   conversation_id uuid NOT NULL,
   message_id bigint GENERATED ALWAYS AS IDENTITY,
   role text NOT NULL CHECK (role IN ('USER', 'ASSISTANT')),
   content text NOT NULL CHECK (length(content) BETWEEN 1 AND 4000),
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, message_id),
-  FOREIGN KEY (tenant_id, conversation_id)
-    REFERENCES deviludo.project_conversations(tenant_id, id) ON DELETE CASCADE
+  PRIMARY KEY (workspace_id, message_id),
+  FOREIGN KEY (workspace_id, conversation_id)
+    REFERENCES deviludo.project_conversations(workspace_id, id) ON DELETE CASCADE
 );
 CREATE INDEX conversation_messages_thread
-  ON deviludo.conversation_messages(tenant_id, conversation_id, message_id);
+  ON deviludo.conversation_messages(workspace_id, conversation_id, message_id);
 
 CREATE TABLE deviludo.agent_installations (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   project_id uuid,
   agent_kind text NOT NULL CHECK (length(agent_kind) BETWEEN 1 AND 80),
@@ -190,13 +200,13 @@ CREATE TABLE deviludo.agent_installations (
   image_digest text NOT NULL CHECK (image_digest ~ '^sha256:[0-9a-f]{64}$'),
   execution_pool deviludo.server_pool_kind NOT NULL DEFAULT 'CORE' CHECK (execution_pool = 'CORE'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id),
-  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
-  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id)
+  PRIMARY KEY (workspace_id, id),
+  FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id)
 );
 
 CREATE TABLE deviludo.workflow_instances (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   project_id uuid NOT NULL,
   state deviludo.workflow_state NOT NULL DEFAULT 'DRAFT',
@@ -204,27 +214,27 @@ CREATE TABLE deviludo.workflow_instances (
   state_data jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(state_data) = 'object'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id),
-  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
-  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id)
+  PRIMARY KEY (workspace_id, id),
+  FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id)
 );
 
 CREATE TABLE deviludo.workflow_events (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   event_id bigint GENERATED ALWAYS AS IDENTITY,
   workflow_id uuid NOT NULL,
   event_kind text NOT NULL CHECK (length(event_kind) BETWEEN 1 AND 120),
   event_data jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(event_data) = 'object'),
   idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, event_id),
-  UNIQUE (tenant_id, workflow_id, idempotency_key),
-  FOREIGN KEY (tenant_id, workflow_id)
-    REFERENCES deviludo.workflow_instances(tenant_id, id)
+  PRIMARY KEY (workspace_id, event_id),
+  UNIQUE (workspace_id, workflow_id, idempotency_key),
+  FOREIGN KEY (workspace_id, workflow_id)
+    REFERENCES deviludo.workflow_instances(workspace_id, id)
 );
 
 CREATE TABLE deviludo.jobs (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   workflow_id uuid NOT NULL,
   project_id uuid NOT NULL,
@@ -253,11 +263,11 @@ CREATE TABLE deviludo.jobs (
   after_reimage_proof text,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id),
-  UNIQUE (tenant_id, idempotency_key),
-  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
-  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id),
-  FOREIGN KEY (tenant_id, workflow_id) REFERENCES deviludo.workflow_instances(tenant_id, id),
+  PRIMARY KEY (workspace_id, id),
+  UNIQUE (workspace_id, idempotency_key),
+  FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
+  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id),
   CHECK (
     (
       kind IN ('AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH')
@@ -289,21 +299,21 @@ CREATE UNIQUE INDEX jobs_one_active_lease_per_executor
   ON deviludo.jobs(lease_owner) WHERE state = 'RUNNING';
 
 CREATE TABLE deviludo.external_signals (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   workflow_id uuid NOT NULL,
   signal_kind text NOT NULL CHECK (length(signal_kind) BETWEEN 1 AND 120),
   payload jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
   idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id),
-  UNIQUE (tenant_id, workflow_id, idempotency_key),
-  FOREIGN KEY (tenant_id, workflow_id)
-    REFERENCES deviludo.workflow_instances(tenant_id, id)
+  PRIMARY KEY (workspace_id, id),
+  UNIQUE (workspace_id, workflow_id, idempotency_key),
+  FOREIGN KEY (workspace_id, workflow_id)
+    REFERENCES deviludo.workflow_instances(workspace_id, id)
 );
 
 CREATE TABLE deviludo.operation_receipts (
-  tenant_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   project_id uuid NOT NULL,
   workflow_id uuid NOT NULL,
@@ -315,34 +325,66 @@ CREATE TABLE deviludo.operation_receipts (
   receipt jsonb CHECK (receipt IS NULL OR jsonb_typeof(receipt) = 'object'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (tenant_id, id),
-  UNIQUE (tenant_id, idempotency_key),
-  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
-  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id),
-  FOREIGN KEY (tenant_id, workflow_id) REFERENCES deviludo.workflow_instances(tenant_id, id),
-  FOREIGN KEY (tenant_id, job_id) REFERENCES deviludo.jobs(tenant_id, id)
+  PRIMARY KEY (workspace_id, id),
+  UNIQUE (workspace_id, idempotency_key),
+  FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
+  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id),
+  FOREIGN KEY (workspace_id, job_id) REFERENCES deviludo.jobs(workspace_id, id)
 );
 
-CREATE TABLE deviludo.tenant_claim_fairness (
-  tenant_id uuid PRIMARY KEY REFERENCES deviludo.tenants(id),
+CREATE TABLE deviludo.workspace_claim_fairness (
+  workspace_id uuid PRIMARY KEY REFERENCES deviludo.workspaces(id),
   last_claimed_at timestamptz NOT NULL
 );
 
-CREATE OR REPLACE FUNCTION deviludo.current_tenant_id()
+-- Cross-workspace creation receipts contain only opaque identities. They make
+-- retries safe before a workspace exists and are never exposed as product data.
+CREATE TABLE deviludo.project_creation_receipts (
+  idempotency_key text PRIMARY KEY CHECK (length(idempotency_key) BETWEEN 8 AND 300),
+  operation_kind text NOT NULL CHECK (operation_kind IN ('PROJECT', 'CONVERSATION')),
+  workspace_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  conversation_id uuid,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
+  FOREIGN KEY (workspace_id, conversation_id)
+    REFERENCES deviludo.project_conversations(workspace_id, id),
+  CHECK (
+    (operation_kind = 'PROJECT' AND conversation_id IS NULL)
+    OR (operation_kind = 'CONVERSATION' AND conversation_id IS NOT NULL)
+  )
+);
+
+CREATE OR REPLACE FUNCTION deviludo.current_workspace_id()
 RETURNS uuid
 LANGUAGE sql
 STABLE
 PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
-  SELECT nullif(current_setting('app.tenant_id', true), '')::uuid
+  SELECT nullif(current_setting('app.workspace_id', true), '')::uuid
 $$;
 
-ALTER TABLE deviludo.tenants ENABLE ROW LEVEL SECURITY;
-ALTER TABLE deviludo.tenants FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON deviludo.tenants
-  USING (id = deviludo.current_tenant_id())
-  WITH CHECK (id = deviludo.current_tenant_id());
+CREATE OR REPLACE FUNCTION deviludo.list_workspaces()
+RETURNS TABLE (id uuid, name text, created_at timestamptz)
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+  SELECT workspace.id, workspace.name, workspace.created_at
+    FROM deviludo.workspaces workspace
+   ORDER BY workspace.created_at, workspace.id
+$$;
+ALTER FUNCTION deviludo.list_workspaces() OWNER TO deviludo_claim_executor;
+
+ALTER TABLE deviludo.workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deviludo.workspaces FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspace_isolation ON deviludo.workspaces
+  USING (id = deviludo.current_workspace_id())
+  WITH CHECK (id = deviludo.current_workspace_id());
 
 DO $rls$
 DECLARE
@@ -350,14 +392,14 @@ DECLARE
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'projects', 'project_conversations', 'conversation_messages',
-    'agent_installations', 'tenant_agent_settings', 'workflow_instances', 'workflow_events',
-    'jobs', 'external_signals', 'operation_receipts', 'tenant_claim_fairness'
+    'agent_installations', 'workflow_instances', 'workflow_events',
+    'jobs', 'external_signals', 'operation_receipts', 'workspace_claim_fairness'
   ]
   LOOP
     EXECUTE format('ALTER TABLE deviludo.%I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('ALTER TABLE deviludo.%I FORCE ROW LEVEL SECURITY', table_name);
     EXECUTE format(
-      'CREATE POLICY tenant_isolation ON deviludo.%I USING (tenant_id = deviludo.current_tenant_id()) WITH CHECK (tenant_id = deviludo.current_tenant_id())',
+      'CREATE POLICY workspace_isolation ON deviludo.%I USING (workspace_id = deviludo.current_workspace_id()) WITH CHECK (workspace_id = deviludo.current_workspace_id())',
       table_name
     );
   END LOOP;
@@ -382,7 +424,7 @@ AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION deviludo.enqueue_job(
-  p_tenant_id uuid,
+  p_workspace_id uuid,
   p_workflow_id uuid,
   p_project_id uuid,
   p_kind deviludo.job_kind,
@@ -407,15 +449,15 @@ BEGIN
   END;
   IF v_pool IS NULL THEN RAISE EXCEPTION 'invalid fixed job placement'; END IF;
   INSERT INTO deviludo.jobs (
-    tenant_id, workflow_id, project_id, kind, pool_kind, target_operating_system,
+    workspace_id, workflow_id, project_id, kind, pool_kind, target_operating_system,
     required_capabilities, exclusive, idempotency_key, payload
   )
   VALUES (
-    p_tenant_id, p_workflow_id, p_project_id, p_kind, v_pool,
+    p_workspace_id, p_workflow_id, p_project_id, p_kind, v_pool,
     CASE WHEN v_pool = 'CORE' THEN NULL ELSE p_operating_system END,
     deviludo.required_capabilities(p_kind), v_pool <> 'CORE', p_idempotency_key, p_payload
   )
-  ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+  ON CONFLICT (workspace_id, idempotency_key) DO UPDATE
     SET updated_at = deviludo.jobs.updated_at
   RETURNING id INTO v_id;
   RETURN v_id;
@@ -427,7 +469,7 @@ CREATE OR REPLACE FUNCTION deviludo.claim_job(
   p_pool_kind deviludo.server_pool_kind,
   p_lease_seconds integer
 )
-RETURNS TABLE ("jobId" uuid, "tenantId" uuid, "leaseToken" uuid)
+RETURNS TABLE ("jobId" uuid, "workspaceId" uuid, "leaseToken" uuid)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, deviludo
@@ -451,15 +493,15 @@ BEGIN
   SELECT job.*
     INTO candidate
     FROM deviludo.jobs job
-    LEFT JOIN deviludo.tenant_claim_fairness fairness
-      ON fairness.tenant_id = job.tenant_id
+    LEFT JOIN deviludo.workspace_claim_fairness fairness
+      ON fairness.workspace_id = job.workspace_id
    WHERE job.pool_kind = p_pool_kind
      AND job.state IN ('QUEUED', 'RETRY')
      AND job.available_at <= clock_timestamp()
      AND NOT EXISTS (
        SELECT 1
          FROM deviludo.jobs prior
-        WHERE prior.tenant_id = job.tenant_id
+        WHERE prior.workspace_id = job.workspace_id
           AND prior.pool_kind = job.pool_kind
           AND prior.state IN ('QUEUED', 'RETRY')
           AND prior.available_at <= clock_timestamp()
@@ -486,11 +528,11 @@ BEGIN
          heartbeat_at = clock_timestamp(),
          fencing_token = fencing_token + 1,
          updated_at = clock_timestamp()
-   WHERE tenant_id = candidate.tenant_id AND id = candidate.id;
-  INSERT INTO deviludo.tenant_claim_fairness(tenant_id, last_claimed_at)
-  VALUES (candidate.tenant_id, clock_timestamp())
-  ON CONFLICT (tenant_id) DO UPDATE SET last_claimed_at = EXCLUDED.last_claimed_at;
-  RETURN QUERY SELECT candidate.id, candidate.tenant_id, next_token;
+   WHERE workspace_id = candidate.workspace_id AND id = candidate.id;
+  INSERT INTO deviludo.workspace_claim_fairness(workspace_id, last_claimed_at)
+  VALUES (candidate.workspace_id, clock_timestamp())
+  ON CONFLICT (workspace_id) DO UPDATE SET last_claimed_at = EXCLUDED.last_claimed_at;
+  RETURN QUERY SELECT candidate.id, candidate.workspace_id, next_token;
 END
 $$;
 ALTER FUNCTION deviludo.claim_job(text, deviludo.server_pool_kind, integer)
@@ -509,7 +551,7 @@ SET search_path = pg_catalog, deviludo
 AS $$
 DECLARE
   workflow deviludo.workflow_instances%ROWTYPE;
-  agent_settings deviludo.tenant_agent_settings%ROWTYPE;
+  agent_settings deviludo.instance_agent_settings%ROWTYPE;
   inserted_id uuid;
 BEGIN
   SELECT * INTO workflow
@@ -518,36 +560,43 @@ BEGIN
    FOR UPDATE;
   IF workflow.id IS NULL THEN RAISE EXCEPTION 'workflow not found'; END IF;
   INSERT INTO deviludo.external_signals(
-    tenant_id, workflow_id, signal_kind, payload, idempotency_key
+    workspace_id, workflow_id, signal_kind, payload, idempotency_key
   )
   VALUES (
-    workflow.tenant_id, workflow.id, p_signal_kind, p_payload, p_idempotency_key
+    workflow.workspace_id, workflow.id, p_signal_kind, p_payload, p_idempotency_key
   )
-  ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING
+  ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING
   RETURNING id INTO inserted_id;
   IF inserted_id IS NULL THEN RETURN false; END IF;
 
   INSERT INTO deviludo.workflow_events(
-    tenant_id, workflow_id, event_kind, event_data, idempotency_key
+    workspace_id, workflow_id, event_kind, event_data, idempotency_key
   )
   VALUES (
-    workflow.tenant_id, workflow.id, p_signal_kind, p_payload, 'signal:' || p_idempotency_key
+    workflow.workspace_id, workflow.id, p_signal_kind, p_payload, 'signal:' || p_idempotency_key
   );
 
   IF p_signal_kind = 'SPEC_APPROVED' AND workflow.state = 'DRAFT' THEN
     SELECT * INTO agent_settings
-      FROM deviludo.tenant_agent_settings
-     WHERE tenant_id = workflow.tenant_id;
+      FROM deviludo.instance_agent_settings
+     WHERE singleton = true;
     UPDATE deviludo.workflow_instances
        SET state = 'AGENT_RUNNING', version = version + 1, updated_at = clock_timestamp()
-     WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+     WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     PERFORM deviludo.enqueue_job(
-      workflow.tenant_id, workflow.id, workflow.project_id, 'AGENT_GENERATION', NULL,
+      workflow.workspace_id, workflow.id, workflow.project_id, 'AGENT_GENERATION', NULL,
       workflow.id::text || ':agent',
-      CASE WHEN agent_settings.tenant_id IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(
+      CASE WHEN agent_settings.singleton IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(
         'agentConfiguration', jsonb_build_object(
           'runtime', agent_settings.agent_runtime::text,
           'baseUrl', agent_settings.base_url,
+          'models', CASE WHEN agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
+            'primary', agent_settings.primary_model,
+            'opus', agent_settings.opus_model,
+            'sonnet', agent_settings.sonnet_model,
+            'haiku', agent_settings.haiku_model,
+            'subagent', agent_settings.subagent_model
+          ) END,
           'credentialRef', agent_settings.credential_secret_ref,
           'revision', agent_settings.revision
         )
@@ -556,7 +605,7 @@ BEGIN
   ELSIF p_signal_kind = 'CANCEL_REQUESTED' THEN
     UPDATE deviludo.workflow_instances
        SET state = 'CANCELLED', version = version + 1, updated_at = clock_timestamp()
-     WHERE tenant_id = workflow.tenant_id AND id = workflow.id
+     WHERE workspace_id = workflow.workspace_id AND id = workflow.id
        AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED');
     UPDATE deviludo.jobs
        SET state = 'CANCELLED',
@@ -566,7 +615,7 @@ BEGIN
            heartbeat_at = NULL,
            fencing_token = fencing_token + 1,
            updated_at = clock_timestamp()
-     WHERE tenant_id = workflow.tenant_id AND workflow_id = workflow.id
+     WHERE workspace_id = workflow.workspace_id AND workflow_id = workflow.id
        AND state IN ('QUEUED', 'RETRY', 'RUNNING');
   END IF;
   RETURN true;
@@ -606,7 +655,7 @@ BEGIN
   IF job.id IS NULL THEN RETURN false; END IF;
   SELECT * INTO workflow
     FROM deviludo.workflow_instances
-   WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+   WHERE workspace_id = job.workspace_id AND id = job.workflow_id
    FOR UPDATE;
   SELECT * INTO job
     FROM deviludo.jobs
@@ -630,74 +679,74 @@ BEGIN
          after_reimage_proof = p_after_reimage_proof,
          lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
          heartbeat_at = NULL, updated_at = clock_timestamp()
-   WHERE tenant_id = job.tenant_id AND id = job.id;
+   WHERE workspace_id = job.workspace_id AND id = job.id;
   UPDATE deviludo.operation_receipts
      SET state = 'RECEIPTED', receipt = p_receipt, updated_at = clock_timestamp()
-   WHERE tenant_id = job.tenant_id AND job_id = job.id
+   WHERE workspace_id = job.workspace_id AND job_id = job.id
      AND state IN ('REGISTERED', 'IN_PROGRESS');
   INSERT INTO deviludo.workflow_events(
-    tenant_id, workflow_id, event_kind, event_data, idempotency_key
+    workspace_id, workflow_id, event_kind, event_data, idempotency_key
   ) VALUES (
-    job.tenant_id, job.workflow_id, 'JOB_SUCCEEDED',
+    job.workspace_id, job.workflow_id, 'JOB_SUCCEEDED',
     jsonb_build_object('jobId', job.id, 'jobKind', job.kind, 'operatingSystem', job.target_operating_system),
     'job-succeeded:' || job.id::text
   );
 
   IF workflow.state = 'AGENT_RUNNING' AND job.kind = 'AGENT_GENERATION' THEN
     UPDATE deviludo.workflow_instances SET state = 'ARTIFACT_BUILDING', version = version + 1,
-      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
-    PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'ARTIFACT_BUILD', NULL,
+      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
+    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'ARTIFACT_BUILD', NULL,
       job.workflow_id::text || ':artifact');
   ELSIF workflow.state = 'ARTIFACT_BUILDING' AND job.kind = 'ARTIFACT_BUILD' THEN
     UPDATE deviludo.workflow_instances SET state = 'E2E_TESTING', version = version + 1,
-      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     FOREACH platform IN ARRAY ARRAY['linux', 'windows', 'macos']::deviludo.server_os[]
     LOOP
-      PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'E2E_TEST', platform,
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'E2E_TEST', platform,
         job.workflow_id::text || ':e2e:' || platform::text);
     END LOOP;
   ELSIF workflow.state = 'E2E_TESTING' AND job.kind = 'E2E_TEST'
     AND NOT EXISTS (
       SELECT 1 FROM deviludo.jobs
-       WHERE tenant_id = job.tenant_id AND workflow_id = job.workflow_id
+       WHERE workspace_id = job.workspace_id AND workflow_id = job.workflow_id
          AND kind = 'E2E_TEST' AND state <> 'SUCCEEDED'
     )
   THEN
     UPDATE deviludo.workflow_instances SET state = 'SIGNING', version = version + 1,
-      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     FOREACH platform IN ARRAY ARRAY['linux', 'windows', 'macos']::deviludo.server_os[]
     LOOP
-      PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'ARTIFACT_SIGN', platform,
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'ARTIFACT_SIGN', platform,
         job.workflow_id::text || ':sign:' || platform::text);
     END LOOP;
   ELSIF workflow.state = 'SIGNING' AND job.kind = 'ARTIFACT_SIGN'
     AND NOT EXISTS (
       SELECT 1 FROM deviludo.jobs
-       WHERE tenant_id = job.tenant_id AND workflow_id = job.workflow_id
+       WHERE workspace_id = job.workspace_id AND workflow_id = job.workflow_id
          AND kind = 'ARTIFACT_SIGN' AND state <> 'SUCCEEDED'
     )
   THEN
     UPDATE deviludo.workflow_instances SET state = 'STEAM_PUBLISHING', version = version + 1,
-      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
-    PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'STEAM_PUBLISH', NULL,
+      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
+    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'STEAM_PUBLISH', NULL,
       job.workflow_id::text || ':publish');
   ELSIF workflow.state = 'STEAM_PUBLISHING' AND job.kind = 'STEAM_PUBLISH' THEN
     UPDATE deviludo.workflow_instances SET state = 'CLEAN_INSTALL_VERIFYING', version = version + 1,
-      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     FOREACH platform IN ARRAY ARRAY['linux', 'windows', 'macos']::deviludo.server_os[]
     LOOP
-      PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'STEAM_CLEAN_INSTALL', platform,
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'STEAM_CLEAN_INSTALL', platform,
         job.workflow_id::text || ':clean-install:' || platform::text);
     END LOOP;
   ELSIF workflow.state = 'CLEAN_INSTALL_VERIFYING' AND job.kind = 'STEAM_CLEAN_INSTALL'
     AND NOT EXISTS (
       SELECT 1 FROM deviludo.jobs
-       WHERE tenant_id = job.tenant_id AND workflow_id = job.workflow_id
+       WHERE workspace_id = job.workspace_id AND workflow_id = job.workflow_id
          AND kind = 'STEAM_CLEAN_INSTALL' AND state <> 'SUCCEEDED'
     )
   THEN
     UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED', version = version + 1,
-      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
   END IF;
   RETURN true;
 END
@@ -724,7 +773,7 @@ BEGIN
      AND lease_token = p_lease_token AND fencing_token = p_fencing_token;
   IF job.id IS NULL THEN RETURN false; END IF;
   SELECT * INTO workflow FROM deviludo.workflow_instances
-   WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+   WHERE workspace_id = job.workspace_id AND id = job.workflow_id
    FOR UPDATE;
   SELECT * INTO job FROM deviludo.jobs
    WHERE id = p_job_id AND state = 'RUNNING'
@@ -737,10 +786,10 @@ BEGIN
          available_at = clock_timestamp() + make_interval(secs => least(3600, (2 ^ greatest(attempt, 1))::integer)),
          lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
          last_error = left(p_reason, 2000), updated_at = clock_timestamp()
-   WHERE tenant_id = job.tenant_id AND id = job.id;
-  INSERT INTO deviludo.workflow_events(tenant_id, workflow_id, event_kind, event_data, idempotency_key)
+   WHERE workspace_id = job.workspace_id AND id = job.id;
+  INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
   VALUES (
-    job.tenant_id, job.workflow_id,
+    job.workspace_id, job.workflow_id,
     CASE WHEN terminal THEN 'JOB_FAILED' ELSE 'JOB_RETRY_SCHEDULED' END,
     jsonb_build_object('jobId', job.id, 'attempt', job.attempt, 'reason', left(p_reason, 2000)),
     'job-failure:' || job.id::text || ':' || job.attempt::text
@@ -748,7 +797,7 @@ BEGIN
   IF terminal THEN
     UPDATE deviludo.workflow_instances SET state = 'FAILED', version = version + 1,
       updated_at = clock_timestamp()
-     WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+     WHERE workspace_id = job.workspace_id AND id = job.workflow_id
        AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED');
   END IF;
   RETURN true;
@@ -774,17 +823,17 @@ BEGIN
            lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
            last_error = 'lease expired', updated_at = clock_timestamp()
      WHERE state = 'RUNNING' AND lease_expires_at < clock_timestamp()
-     RETURNING tenant_id, workflow_id, id, attempt, state
+     RETURNING workspace_id, workflow_id, id, attempt, state
   ), events AS (
     INSERT INTO deviludo.workflow_events(
-      tenant_id, workflow_id, event_kind, event_data, idempotency_key
+      workspace_id, workflow_id, event_kind, event_data, idempotency_key
     )
-    SELECT tenant_id, workflow_id,
+    SELECT workspace_id, workflow_id,
       CASE WHEN state = 'FAILED' THEN 'JOB_FAILED' ELSE 'JOB_RETRY_SCHEDULED' END,
       jsonb_build_object('jobId', id, 'attempt', attempt, 'reason', 'lease expired'),
       'lease-expired:' || id::text || ':' || attempt::text
     FROM expired
-    ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING
+    ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING
   )
   SELECT count(*) INTO recovered FROM expired;
   RETURN recovered;
@@ -822,12 +871,13 @@ GRANT INSERT, SELECT ON deviludo.pool_capacity_intents TO deviludo_scheduler;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_api, deviludo_scheduler;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-  deviludo.tenants, deviludo.projects, deviludo.project_conversations,
+  deviludo.workspaces, deviludo.projects, deviludo.project_conversations,
   deviludo.conversation_messages, deviludo.agent_installations,
-  deviludo.tenant_agent_settings,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
   deviludo.external_signals, deviludo.operation_receipts
   TO deviludo_api;
+GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api;
+GRANT SELECT, INSERT ON deviludo.project_creation_receipts TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
   deviludo.external_signals, deviludo.operation_receipts
@@ -836,8 +886,9 @@ GRANT SELECT, INSERT, UPDATE ON
   deviludo.workflow_instances, deviludo.jobs, deviludo.workflow_events, deviludo.operation_receipts
   TO deviludo_sandbox;
 
-GRANT EXECUTE ON FUNCTION deviludo.current_tenant_id() TO
+GRANT EXECUTE ON FUNCTION deviludo.current_workspace_id() TO
   deviludo_api, deviludo_scheduler, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.list_workspaces() TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.required_capabilities(deviludo.job_kind) TO
   deviludo_api, deviludo_scheduler, deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.enqueue_job(
@@ -855,8 +906,8 @@ GRANT EXECUTE ON FUNCTION deviludo.recover_expired_jobs(), deviludo.reconcile_p0
   TO deviludo_scheduler;
 
 GRANT SELECT, UPDATE ON deviludo.jobs TO deviludo_claim_executor;
-GRANT SELECT, INSERT, UPDATE ON deviludo.tenant_claim_fairness TO deviludo_claim_executor;
-GRANT SELECT ON deviludo.tenants TO deviludo_claim_executor;
+GRANT SELECT, INSERT, UPDATE ON deviludo.workspace_claim_fairness TO deviludo_claim_executor;
+GRANT SELECT ON deviludo.workspaces TO deviludo_claim_executor;
 GRANT SELECT, INSERT ON deviludo.workflow_events TO deviludo_claim_executor;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_claim_executor;
 

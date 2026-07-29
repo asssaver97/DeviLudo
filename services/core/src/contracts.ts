@@ -16,7 +16,7 @@ export type JobProtocolV3 = Readonly<{
   schemaVersion: "deviludo.job.v3";
   jobId: string;
   workflowId: string;
-  tenantId: string;
+  workspaceId: string;
   projectId: string;
   poolKind: ServerPoolKind;
   jobKind: JobKind;
@@ -34,7 +34,7 @@ export type JobProtocolV3 = Readonly<{
 
 export type ClaimedJobIdentity = Readonly<{
   jobId: string;
-  tenantId: string;
+  workspaceId: string;
   leaseToken: string;
 }>;
 
@@ -61,7 +61,7 @@ export function parseJobProtocolV3(value: unknown): JobProtocolV3 {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Job payload must be an object");
   const input = value as Record<string, unknown>;
   if (input.schemaVersion !== "deviludo.job.v3"
-    || ![input.jobId, input.workflowId, input.tenantId, input.projectId]
+    || ![input.jobId, input.workflowId, input.workspaceId, input.projectId]
       .every(item => typeof item === "string" && UUID.test(item))
     || !isServerPoolKind(input.poolKind)
     || !isJobKind(input.jobKind)

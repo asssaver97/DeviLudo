@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import type { ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
+import type { ProductConversation, ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
 import { WORKFLOW_LABELS } from "@/lib/product/contracts";
 import { ProductShell } from "./ProductShell";
 import { GamepadIcon, PlusIcon, SendIcon, SparkIcon } from "./console/Icons";
@@ -27,6 +27,7 @@ export function HomeChat() {
     const controller = new AbortController();
     void fetch("/api/projects", { signal: controller.signal })
       .then(async response => {
+        if (response.status === 409) return [];
         if (!response.ok) throw new Error("项目列表加载失败");
         return (await response.json() as { projects: readonly ProductProjectSummary[] }).projects;
       })
@@ -40,7 +41,7 @@ export function HomeChat() {
     if (conversation) threadEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [conversation]);
 
-  const activeProjectId = conversation?.projectId ?? selectedProjectId;
+  const activeProjectId = conversation?.projectId || selectedProjectId;
   const activeProject = useMemo(
     () => projects.find(project => project.id === activeProjectId) ?? null,
     [activeProjectId, projects],
@@ -61,13 +62,27 @@ export function HomeChat() {
         : { projectId: selectedProjectId || null, content: message };
       const response = await fetch("/api/conversations/messages", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "idempotency-key": `conversation:${crypto.randomUUID()}` },
         body: JSON.stringify(body),
       });
-      if (!response.ok) throw new Error(response.status === 404 ? "所选项目或对话已不存在" : "消息发送失败");
-      const result = await response.json() as { conversation: ProductConversation };
+      const result = await response.json() as {
+        code?: string;
+        message?: string;
+        workspace?: WorkspaceSummary;
+        project?: ProductProjectSummary;
+        conversation?: ProductConversation;
+      };
+      if (!response.ok || !result.conversation) {
+        if (result.code === "AGENT_CONFIG_REQUIRED" || result.code === "AGENT_NAMING_FAILED") {
+          window.location.assign("/settings?required=project-name");
+          return;
+        }
+        throw new Error(response.status === 404 ? "所选项目或对话已不存在" : result.message ?? "消息发送失败");
+      }
+      if (result.workspace) window.dispatchEvent(new CustomEvent("deviludo:workspace-changed", { detail: result.workspace }));
+      if (result.project) setProjects(current => current.some(project => project.id === result.project!.id) ? current : Object.freeze([result.project!, ...current]));
       setConversation(result.conversation);
-      setSelectedProjectId(result.conversation.projectId ?? "");
+      setSelectedProjectId(result.conversation.projectId);
       setContent("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "消息发送失败，请稍后重试");
@@ -104,7 +119,7 @@ export function HomeChat() {
                 </span>
               </div>
               <div className="homeChat-threadActions">
-                {activeProject ? <Link className="button button-secondary" href={`/projects/${activeProject.id}`}>打开项目工作室</Link> : null}
+                {activeProject ? <Link className="button button-secondary" href={`/projects/${activeProject.id}`}>打开项目</Link> : null}
                 <button className="button button-secondary" onClick={startFreshConversation} type="button"><PlusIcon />新对话</button>
               </div>
             </header>
@@ -139,7 +154,6 @@ export function HomeChat() {
             <span className="assistant-mark"><SparkIcon /></span>
             <span className="eyebrow">FROM IDEA TO PLAYABLE / 从想法到可玩</span>
             <h1>今天想做什么游戏？</h1>
-            <p>选择一个项目继续修改，或直接说出新想法。我们会通过对话把模糊灵感收拢成可执行的游戏需求。</p>
           </header>
         )}
 
@@ -154,7 +168,7 @@ export function HomeChat() {
                 onChange={event => setSelectedProjectId(event.target.value)}
                 value={activeProjectId}
               >
-                <option value="">新游戏 · 不关联项目</option>
+                <option value="">创建新项目</option>
                 {projects.map(project => (
                   <option key={project.id} value={project.id}>
                     {project.name} · {WORKFLOW_LABELS[project.workflowState] ?? project.workflowState}
@@ -162,7 +176,6 @@ export function HomeChat() {
                 ))}
               </select>
             </label>
-            <span>{activeProject ? "反馈将关联到现有项目" : "从需求和细节开始沟通"}</span>
           </div>
           <textarea
             aria-label="游戏想法或修改意见"

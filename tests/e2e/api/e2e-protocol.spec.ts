@@ -40,7 +40,7 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
 
   const badHeartbeat = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/heartbeat`, {
     method: "POST",
-    data: { tenantId: job.tenantId, leaseToken: randomUUID() },
+    data: { workspaceId: job.workspaceId, leaseToken: randomUUID() },
   });
   expect(badHeartbeat.status()).toBe(400);
   const heartbeat = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/heartbeat`, {
@@ -169,22 +169,22 @@ test("the scheduler recovers an expired lease and increments fencing on the next
   expect((await completeResponse(stack, reclaimed)).ok()).toBeTruthy();
 });
 
-test("development smoke routes verify tenant isolation and persist trusted macOS proofs", async ({ stack }) => {
+test("development smoke routes verify workspace isolation and persist trusted macOS proofs", async ({ stack }) => {
   const nodes = await stack.registerFixedNodes();
-  const isolation = await stack.coreWeb("/v1/dev/smoke/tenant-isolation", { method: "POST", data: {} });
+  const isolation = await stack.coreWeb("/v1/dev/smoke/workspace-isolation", { method: "POST", data: {} });
   expect(isolation.ok()).toBeTruthy();
   expect(await isolation.json()).toMatchObject({
     passed: true,
     checks: {
       ownRead: true,
-      crossTenantHidden: true,
+      crossWorkspaceHidden: true,
       missingContextHidden: true,
-      crossTenantWriteRejected: true,
+      crossWorkspaceWriteRejected: true,
     },
   });
 
   const ids = {
-    tenantId: randomUUID(),
+    workspaceId: randomUUID(),
     projectId: randomUUID(),
     workflowId: randomUUID(),
     jobId: randomUUID(),
@@ -204,7 +204,7 @@ test("development smoke routes verify tenant isolation and persist trusted macOS
   expect(job.jobId).toBe(ids.jobId);
   expect((await completeResponse(stack, job)).ok()).toBeTruthy();
 
-  const status = await stack.coreWeb(`/v1/dev/smoke/mac-e2e/${ids.tenantId}/${ids.jobId}`);
+  const status = await stack.coreWeb(`/v1/dev/smoke/mac-e2e/${ids.workspaceId}/${ids.jobId}`);
   expect(status.ok()).toBeTruthy();
   expect(await status.json()).toMatchObject({
     job: {
@@ -214,7 +214,7 @@ test("development smoke routes verify tenant isolation and persist trusted macOS
       afterReimageProof: proof("after"),
     },
   });
-  const missing = await stack.coreWeb(`/v1/dev/smoke/mac-e2e/${ids.tenantId}/${randomUUID()}`);
+  const missing = await stack.coreWeb(`/v1/dev/smoke/mac-e2e/${ids.workspaceId}/${randomUUID()}`);
   expect(missing.status()).toBe(404);
 });
 
@@ -286,8 +286,8 @@ async function fail(stack: StackHarness, job: JobProtocolV3, reason: string): Pr
   });
 }
 
-function identity(job: JobProtocolV3): Readonly<{ tenantId: string; leaseToken: string }> {
-  return Object.freeze({ tenantId: job.tenantId, leaseToken: job.lease.token });
+function identity(job: JobProtocolV3): Readonly<{ workspaceId: string; leaseToken: string }> {
+  return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token });
 }
 
 function proof(stage: string): string {

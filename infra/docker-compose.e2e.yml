@@ -4,6 +4,7 @@ services:
       NODE_ENV: test
       DEVILUDO_CORE_POLL_MS: "100"
       DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
+      DEVILUDO_PROJECT_NAMING_TEST_RESPONSE: 时间回廊
 
   core-scheduler:
     environment:

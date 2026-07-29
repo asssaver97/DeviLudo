@@ -36,7 +36,7 @@ export async function runE2eNode(
         level: "error",
         event: "e2e_job_failed",
         jobId: job?.jobId,
-        tenantId: job?.tenantId,
+        workspaceId: job?.workspaceId,
         poolKind: config.poolKind,
         message: error instanceof Error ? error.message : String(error),
       }));

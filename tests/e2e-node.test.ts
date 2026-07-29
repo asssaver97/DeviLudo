@@ -10,7 +10,7 @@ const baseJob: JobProtocolV3 = Object.freeze({
   schemaVersion: "deviludo.job.v3",
   jobId: "20000000-0000-4000-8000-000000000001",
   workflowId: "20000000-0000-4000-8000-000000000002",
-  tenantId: "20000000-0000-4000-8000-000000000003",
+  workspaceId: "20000000-0000-4000-8000-000000000003",
   projectId: "20000000-0000-4000-8000-000000000004",
   poolKind: "E2E_MACOS",
   jobKind: "E2E_TEST",
@@ -18,7 +18,7 @@ const baseJob: JobProtocolV3 = Object.freeze({
   requiredCapabilities: Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]),
   exclusive: true,
   isolationGeneration: 7,
-  payload: Object.freeze({ artifact: "tenant/project/build.zip" }),
+  payload: Object.freeze({ artifact: "workspace/project/build.zip" }),
   lease: Object.freeze({
     token: "lease_token_abcdefghijklmnopqrstuvwxyz",
     expiresAt: new Date(Date.now() + 60_000).toISOString(),

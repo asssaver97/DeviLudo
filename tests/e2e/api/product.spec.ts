@@ -3,8 +3,8 @@ import { test, expect } from "../fixtures/stack";
 
 test("project, specification and workflow APIs cover validation, idempotency and terminal behavior", async ({ stack }) => {
   const empty = await stack.web("/api/projects");
-  expect(empty.ok()).toBeTruthy();
-  expect((await empty.json() as { projects: unknown[] }).projects).toEqual([]);
+  expect(empty.status()).toBe(409);
+  expect(await empty.json()).toMatchObject({ code: "WORKSPACE_REQUIRED" });
 
   for (const invalid of [
     null,
@@ -51,7 +51,7 @@ test("project, specification and workflow APIs cover validation, idempotency and
   expect(revisedProject.specification.revisionNotes).toContain(revisionNote);
 
   const signal = {
-    tenantId: "00000000-0000-4000-8000-000000000001",
+    workspaceId: project.workspaceId,
     kind: "EXTERNAL_APPROVAL",
     idempotencyKey: `external:${project.workflowId}`,
     payload: { source: "e2e" },
@@ -71,7 +71,7 @@ test("project, specification and workflow APIs cover validation, idempotency and
 
   const invalidSignal = await stack.coreWeb(`/v1/workflows/${project.workflowId}/signals`, {
     method: "POST",
-    data: { tenantId: signal.tenantId, kind: "UNKNOWN", idempotencyKey: "invalid", payload: {} },
+    data: { workspaceId: signal.workspaceId, kind: "UNKNOWN", idempotencyKey: "invalid", payload: {} },
   });
   expect(invalidSignal.status()).toBe(400);
 

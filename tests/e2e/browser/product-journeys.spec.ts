@@ -6,16 +6,16 @@ test("a creator can refine and deliver a game through every Core and platform st
   await stack.startLogicalNodes(nodes);
 
   await page.goto("/");
-  await expect(page.locator('link[rel="icon"][href="/favicon.svg"]')).toHaveCount(1);
+  await expect(page.locator('link[rel="icon"][href="/favicon-deviludo.png"]')).toHaveCount(1);
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await expect(page.getByRole("link", { name: "首页", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "开始新游戏" })).toHaveCount(0);
   await page.locator("summary.workspace-switcher").click();
-  await expect(page.getByRole("menu", { name: "工作室菜单" })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: /本地游戏工作室/ })).toBeVisible();
+  await expect(page.getByRole("menu", { name: "工作区菜单" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "添加工作区" })).toBeVisible();
   await page.getByRole("link", { name: "项目", exact: true }).click();
   await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
-  await expect(page.getByText("本地游戏工作室", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("未选择工作区", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("SYSTEM ONLINE")).toBeVisible();
   await expect(page.getByRole("heading", { name: "还没有游戏项目" })).toBeVisible();
   await page.getByRole("button", { name: "通知" }).click();
@@ -54,6 +54,11 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
 
   const projectId = page.url().split("/").pop() ?? "";
+  const browserSession = await (await page.request.get("/api/session")).json() as {
+    session: { selectedWorkspace: { id: string } | null };
+  };
+  expect(browserSession.session.selectedWorkspace).not.toBeNull();
+  await stack.selectWorkspace(browserSession.session.selectedWorkspace!.id);
   const project = await stack.readProject(projectId);
   expect(project.workflowState).toBe("SUCCEEDED");
   expect(project.jobs).toHaveLength(12);
@@ -98,13 +103,14 @@ test("a creator can refine and deliver a game through every Core and platform st
 
 test("keyboard creation derives a name and an active delivery can be cancelled", async ({ page, stack }) => {
   expect(stack.webUrl.protocol).toBe("http:");
+  await stack.configureAgent();
   await page.goto("/projects/new");
   const concept = "月影邮差。玩家驾驶滑翔翼在夜间群岛之间投递会发光的信件。";
   await page.getByLabel("游戏构想").fill(concept);
   await page.getByLabel("游戏构想").press("Control+Enter");
 
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]{36}$/);
-  await expect(page.getByRole("heading", { name: "月影邮差" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "时间回廊" })).toBeVisible();
   await page.getByRole("button", { name: /批准规格并启动 Agent/ }).click();
   await expect(page.getByRole("button", { name: "取消本次交付" })).toBeVisible();
   await page.getByRole("button", { name: "取消本次交付" }).click();
@@ -113,16 +119,19 @@ test("keyboard creation derives a name and an active delivery can be cancelled",
   await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
 
   await page.getByRole("link", { name: "项目", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "月影邮差" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "时间回廊" })).toBeVisible();
   await page.getByRole("link", { name: "首页", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
 });
 
 test("the home chat supports both project feedback and a fresh game conversation", async ({ page, stack }) => {
+  await stack.configureAgent();
   const project = await stack.createProject({
     name: "雾港列车",
     concept: "玩家在风暴中调度幽灵列车并营救乘客。",
   });
+  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
+  expect(selected.ok()).toBeTruthy();
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await page.getByLabel("关联项目").selectOption(project.id);
@@ -132,7 +141,7 @@ test("the home chat supports both project feedback and a fresh game conversation
   await expect(page.getByText(feedback, { exact: true })).toBeVisible();
   await expect(page.getByText(/加入《雾港列车》的规格草案/)).toBeVisible();
   await expect(page.getByText("已写入规格草案", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "打开项目工作室" })).toHaveAttribute("href", `/projects/${project.id}`);
+  await expect(page.getByRole("link", { name: "打开项目" })).toHaveAttribute("href", `/projects/${project.id}`);
   expect((await stack.readProject(project.id)).specification.revisionNotes).toContain(feedback);
 
   await page.getByRole("button", { name: "新对话" }).click();
@@ -146,6 +155,8 @@ test("the home chat supports both project feedback and a fresh game conversation
 });
 
 test("an unknown project presents a stable product error", async ({ page }) => {
+  const selected = await page.request.post("/api/workspaces", { data: { name: "错误边界工作区" } });
+  expect(selected.status()).toBe(201);
   await page.goto(`/projects/${randomUUID()}`);
   await expect(page.getByText("项目读取失败 (404)")).toBeVisible();
   await page.getByRole("link", { name: "DeviLudo 首页" }).click();

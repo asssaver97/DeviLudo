@@ -3,7 +3,7 @@ import type { CoreConfig } from "./config";
 
 export type Database = Readonly<{
   pool: Pool;
-  withTenant<T>(tenantId: string, callback: (client: PoolClient) => Promise<T>): Promise<T>;
+  withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }>;
 
@@ -24,12 +24,12 @@ export function createDatabase(config: CoreConfig): Database {
 
   return Object.freeze({
     pool,
-    async withTenant<T>(tenantId: string, callback: (client: PoolClient) => Promise<T>): Promise<T> {
-      if (!UUID.test(tenantId)) throw new Error("Tenant id is invalid");
+    async withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>): Promise<T> {
+      if (!UUID.test(workspaceId)) throw new Error("Workspace id is invalid");
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+        await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
         const result = await callback(client);
         await client.query("COMMIT");
         return result;

@@ -1,17 +1,37 @@
+export type WorkspaceSummary = Readonly<{
+  id: string;
+  name: string;
+  createdAt: string;
+}>;
+
 export type ProductSession = Readonly<{
-  tenantId: string;
-  tenantName: string;
-  displayName: string;
-  role: string;
+  selectedWorkspace: WorkspaceSummary | null;
 }>;
 
 export const AGENT_RUNTIME_KINDS = ["CLAUDE_CODE", "CODEX_CLI"] as const;
 export type AgentRuntimeKind = typeof AGENT_RUNTIME_KINDS[number];
 
-export type TenantAgentSettings = Readonly<{
+export type AgentRuntimeAvailability = Readonly<{
+  kind: AgentRuntimeKind;
+  installed: boolean;
+  version: string | null;
+  scope: "LOCAL_HOST" | "CORE_RUNTIME";
+}>;
+
+export type AgentModelConfiguration = Readonly<{
+  primary: string;
+  opus: string;
+  sonnet: string;
+  haiku: string;
+  subagent: string;
+}>;
+
+export type InstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
+  models: AgentModelConfiguration | null;
   apiKeyConfigured: boolean;
+  apiKeyMasked: string | null;
   apiKeyFingerprint: string | null;
   revision: number;
   updatedAt: string | null;
@@ -62,7 +82,7 @@ export type ProductConversationMessage = Readonly<{
 
 export type ProductConversation = Readonly<{
   id: string;
-  projectId: string | null;
+  projectId: string;
   mode: "NEW_GAME" | "PROJECT_FEEDBACK";
   title: string;
   createdAt: string;

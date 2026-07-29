@@ -16,6 +16,7 @@ const webToken = process.env.DEVILUDO_WEB_CORE_TOKEN ?? "local-web-to-core-token
 const nodeToken = process.env.DEVILUDO_E2E_NODE_TOKEN ?? "local-e2e-node-token";
 
 export type ProjectDetail = Readonly<{
+  workspaceId: string;
   id: string;
   name: string;
   concept: string;
@@ -80,8 +81,9 @@ export class StackHarness {
     await this.executeSql(`
       SET lock_timeout = '5s';
       TRUNCATE TABLE
-        deviludo.tenant_claim_fairness,
-        deviludo.tenant_agent_settings,
+        deviludo.workspace_claim_fairness,
+        deviludo.project_creation_receipts,
+        deviludo.instance_agent_settings,
         deviludo.operation_receipts,
         deviludo.external_signals,
         deviludo.jobs,
@@ -91,7 +93,7 @@ export class StackHarness {
         deviludo.conversation_messages,
         deviludo.project_conversations,
         deviludo.projects,
-        deviludo.tenants,
+        deviludo.workspaces,
         deviludo.server_nodes
       RESTART IDENTITY CASCADE;
       DELETE FROM deviludo.pool_capacity_intents WHERE reason <> 'P0_BASELINE';
@@ -117,15 +119,48 @@ export class StackHarness {
   }
 
   async createProject(input: Readonly<{ name?: string; concept: string }>): Promise<ProjectDetail> {
-    const response = await this.web("/api/projects", { method: "POST", data: input });
+    const name = input.name ?? input.concept.split(/[。！？.!?\n]/, 1)[0].trim().slice(0, 40);
+    const response = await this.web("/api/projects", {
+      method: "POST",
+      data: { ...input, name },
+      headers: { "idempotency-key": `e2e-project:${crypto.randomUUID()}` },
+    });
     expect(response.status()).toBe(201);
-    return (await response.json() as { project: ProjectDetail }).project;
+    const body = await response.json() as { workspace: { id: string }; project: Omit<ProjectDetail, "workspaceId"> };
+    return Object.freeze({ ...body.project, workspaceId: body.workspace.id });
+  }
+
+  async configureAgent(): Promise<void> {
+    const response = await this.web("/api/settings/agent", {
+      method: "PUT",
+      data: {
+        agentRuntime: "CLAUDE_CODE",
+        baseUrl: "https://api.example.com",
+        apiKey: "sk-e2e-instance-secret",
+        models: {
+          primary: "claude-primary",
+          opus: "claude-opus",
+          sonnet: "claude-sonnet",
+          haiku: "claude-haiku",
+          subagent: "claude-subagent",
+        },
+      },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
   }
 
   async readProject(projectId: string): Promise<ProjectDetail> {
     const response = await this.web(`/api/projects/${projectId}`);
     expect(response.ok()).toBeTruthy();
     return (await response.json() as { project: ProjectDetail }).project;
+  }
+
+  async selectWorkspace(workspaceId: string): Promise<void> {
+    const response = await this.web("/api/session/workspace", {
+      method: "PUT",
+      data: { workspaceId },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
   }
 
   async waitForProject(

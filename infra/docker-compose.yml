@@ -12,6 +12,9 @@ x-core: &core
     DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
     DEVILUDO_E2E_NODE_TOKEN: local-e2e-node-token
     DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_MACOS
+    DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE: ${DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE:-CORE_RUNTIME}
+    DEVILUDO_CLAUDE_CODE_VERSION: "${DEVILUDO_CLAUDE_CODE_VERSION:-}"
+    DEVILUDO_CODEX_CLI_VERSION: "${DEVILUDO_CODEX_CLI_VERSION:-}"
     DEVILUDO_CORE_API_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
     DEVILUDO_CORE_SCHEDULER_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
     DEVILUDO_CORE_SANDBOX_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
@@ -88,7 +91,7 @@ services:
       core-api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${DEVILUDO_WEB_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${DEVILUDO_WEB_HOST_PORT:-3100}:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health/live"]
       interval: 2s

@@ -6,4 +6,5 @@ process.env.DEVILUDO_E2E_NODE_ID = saved.nodeId;
 process.env.DEVILUDO_E2E_POOL_KIND = saved.poolKind;
 process.env.DEVILUDO_CORE_API_URL = saved.coreUrl;
 process.env.DEVILUDO_E2E_NODE_TOKEN = saved.token;
-await import("../services/e2e-node/src/main.ts");
+const { main } = await import("../services/e2e-node/src/main.ts");
+await main();

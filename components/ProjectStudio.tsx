@@ -57,7 +57,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
-  if (!project) return <ProductShell><section className="project-catalog-empty product-studio-loading">{error ?? "正在进入项目工作室…"}</section></ProductShell>;
+  if (!project) return <ProductShell><section className="project-catalog-empty product-studio-loading">{error ?? "正在进入项目…"}</section></ProductShell>;
   const specification = project.specification;
   const coreLoop = stringList(specification.coreLoop);
   const acceptance = stringList(specification.acceptanceCriteria);
@@ -67,14 +67,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   return (
     <ProductShell>
       <section className="project-page-header product-studio-header">
-        <div><div className="breadcrumb"><Link href="/projects">游戏项目</Link><span>/</span><b>{project.name}</b></div><span className="eyebrow">PROJECT STUDIO · 项目工作室</span><h1>{project.name}</h1><p>{project.concept}</p></div>
+        <div><div className="breadcrumb"><Link href="/projects">游戏项目</Link><span>/</span><b>{project.name}</b></div><span className="eyebrow">PROJECT · 项目</span><h1>{project.name}</h1><p>{project.concept}</p></div>
         <div className={`spec-state product-studio-state ${project.workflowState === "SUCCEEDED" ? "approved" : "draft"} state-${project.workflowState.toLowerCase()}`}><i />{WORKFLOW_LABELS[project.workflowState] ?? project.workflowState}</div>
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
 
       <div className="studio-grid product-studio-grid">
         <section className="conversation-panel product-specification-panel">
-          <div className="conversation-header product-panel-heading"><div><span className="step-number">01</span><span><b>游戏规格</b><small>{project.workflowState === "DRAFT" ? "等待你的批准" : "已锁定到本次工作流"}</small></span></div></div>
+          <div className="conversation-header product-panel-heading"><div><span className="step-number">01</span><span><b>游戏规格</b><small>{project.workflowState === "DRAFT" ? "等待你的批准" : "制作中"}</small></span></div></div>
           <article className="spec-section product-spec-block"><span className="spec-section-label">产品愿景</span><p>{String(specification.vision ?? project.concept)}</p></article>
           <article className="spec-section product-spec-block"><span className="spec-section-label">核心循环</span><ol>{coreLoop.map(item => <li key={item}>{item}</li>)}</ol></article>
           <article className="spec-section product-spec-block"><span className="spec-section-label">玩家体验</span><p>{String(specification.playerExperience ?? "")}</p></article>
@@ -104,7 +104,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             })}
           </div>
           {active ? <button className="button button-secondary product-cancel-button" disabled={busy} onClick={() => void mutate("cancel")}>取消本次交付</button> : null}
-          <div className="product-runtime-note"><b>本地执行范围</b><p>Core 负责 Agent 与制品；本机 macOS 节点负责 macOS 测试、签名和干净回装。Linux/Windows 作业会安全等待相应节点。</p></div>
         </aside>
       </div>
     </ProductShell>

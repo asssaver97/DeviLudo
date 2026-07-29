@@ -18,7 +18,7 @@ const PLATFORMS = ["linux", "windows", "macos"] as const;
 
 export type WorkflowSnapshot = Readonly<{
   id: string;
-  tenantId: string;
+  workspaceId: string;
   projectId: string;
   state: WorkflowState;
   completedE2e: readonly ServerOperatingSystem[];
@@ -46,10 +46,10 @@ export type WorkflowTransition = Readonly<{
   enqueue: readonly EnqueueCommand[];
 }>;
 
-export function initialWorkflowSnapshot(id: string, tenantId: string, projectId: string): WorkflowSnapshot {
+export function initialWorkflowSnapshot(id: string, workspaceId: string, projectId: string): WorkflowSnapshot {
   return Object.freeze({
     id,
-    tenantId,
+    workspaceId,
     projectId,
     state: "DRAFT",
     completedE2e: Object.freeze([]),

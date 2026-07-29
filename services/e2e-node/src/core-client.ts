@@ -114,7 +114,7 @@ export class CoreE2eClient {
 }
 
 function identity(job: JobProtocolV3) {
-  return Object.freeze({ tenantId: job.tenantId, leaseToken: job.lease.token });
+  return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token });
 }
 
 async function optionalFile(path: string | null): Promise<Buffer | undefined> {

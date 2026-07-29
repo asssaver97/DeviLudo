@@ -7,7 +7,7 @@ const baseJob: JobProtocolV3 = Object.freeze({
   schemaVersion: "deviludo.job.v3",
   jobId: "30000000-0000-4000-8000-000000000001",
   workflowId: "30000000-0000-4000-8000-000000000002",
-  tenantId: "30000000-0000-4000-8000-000000000003",
+  workspaceId: "30000000-0000-4000-8000-000000000003",
   projectId: "30000000-0000-4000-8000-000000000004",
   poolKind: "CORE",
   jobKind: "AGENT_GENERATION",
@@ -27,7 +27,7 @@ test("sandbox plans isolate each Core job and select the fixed execution policy"
   const agent = sandboxPlan(baseJob);
   assert.equal(agent.mode, "MICROVM");
   assert.equal(agent.networkPolicy, "AGENT_EGRESS_ALLOWLIST");
-  assert.match(agent.workspace, new RegExp(`${baseJob.tenantId}.+${baseJob.jobId}`));
+  assert.match(agent.workspace, new RegExp(`${baseJob.workspaceId}.+${baseJob.jobId}`));
 
   const build = sandboxPlan(Object.freeze({
     ...baseJob,
@@ -46,14 +46,15 @@ test("sandbox plans isolate each Core job and select the fixed execution policy"
   assert.throws(() => sandboxPlan(Object.freeze({ ...baseJob, exclusive: true })));
 });
 
-test("Agent sandbox plans consume only the frozen tenant configuration reference", () => {
+test("Agent sandbox plans consume only the frozen instance configuration reference", () => {
   const configured = sandboxPlan(Object.freeze({
     ...baseJob,
     payload: Object.freeze({
       agentConfiguration: Object.freeze({
         runtime: "CODEX_CLI",
         baseUrl: "https://api.example.com/v1",
-        credentialRef: `vault://tenants/${baseJob.tenantId}/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099`,
+        models: null,
+        credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
         revision: 3,
       }),
     }),
@@ -61,7 +62,10 @@ test("Agent sandbox plans consume only the frozen tenant configuration reference
   assert.deepEqual(configured.agentConfiguration, {
     runtime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
-    credentialRef: `vault://tenants/${baseJob.tenantId}/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099`,
+    models: null,
+    credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
+    credentialEnvironmentVariable: "OPENAI_API_KEY",
+    environment: { OPENAI_BASE_URL: "https://api.example.com/v1" },
     revision: 3,
   });
   assert.throws(() => sandboxPlan(Object.freeze({
@@ -69,10 +73,40 @@ test("Agent sandbox plans consume only the frozen tenant configuration reference
     payload: Object.freeze({
       agentConfiguration: Object.freeze({
         ...configured.agentConfiguration,
-        credentialRef: "vault://tenants/40000000-0000-4000-8000-000000000001/agent-runtime/api-key/versions/x",
+        credentialRef: "vault://invalid/agent-runtime/api-key/versions/x",
       }),
     }),
   })), /configuration lock/i);
+});
+
+test("Claude Code sandbox plans map each configured model route to its environment variable", () => {
+  const configured = sandboxPlan(Object.freeze({
+    ...baseJob,
+    payload: Object.freeze({
+      agentConfiguration: Object.freeze({
+        runtime: "CLAUDE_CODE",
+        baseUrl: "https://www.sotamodel.net",
+        models: {
+          primary: "claude-fable-5-max",
+          opus: "claude-opus-route",
+          sonnet: "claude-sonnet-route",
+          haiku: "claude-haiku-route",
+          subagent: "claude-subagent-route",
+        },
+        credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
+        revision: 4,
+      }),
+    }),
+  }));
+  assert.equal(configured.agentConfiguration?.credentialEnvironmentVariable, "ANTHROPIC_AUTH_TOKEN");
+  assert.deepEqual(configured.agentConfiguration?.environment, {
+    ANTHROPIC_BASE_URL: "https://www.sotamodel.net",
+    ANTHROPIC_MODEL: "claude-fable-5-max",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
+    CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
+  });
 });
 
 test("production sandbox execution fails closed without a trusted backend", async () => {

@@ -88,7 +88,7 @@ export type ServerNodeRecord = Readonly<{
   state: ServerNodeState;
   capabilities: readonly string[];
   isolationGeneration: number;
-  currentTenantId: string | null;
+  currentWorkspaceId: string | null;
   lastHeartbeatAt: string | null;
   lastReimageProofAt: string | null;
 }>;

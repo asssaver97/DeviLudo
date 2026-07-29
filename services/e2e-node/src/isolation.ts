@@ -52,7 +52,7 @@ export class TrustedIsolationController implements IsolationController {
       action,
       "--stage", stage,
       "--job-id", job.jobId,
-      "--tenant-id", job.tenantId,
+      "--workspace-id", job.workspaceId,
       "--generation", String(job.isolationGeneration),
     ], {
       timeout: 10 * 60_000,

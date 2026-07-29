@@ -1,5 +1,10 @@
 import type { PoolClient } from "pg";
-import { AGENT_RUNTIME_KINDS, type AgentRuntimeKind } from "@/lib/product/contracts";
+import {
+  AGENT_RUNTIME_KINDS,
+  type AgentModelConfiguration,
+  type AgentRuntimeKind,
+  type WorkspaceSummary,
+} from "@/lib/product/contracts";
 import {
   fixedPoolRecords,
   isServerPoolKind,
@@ -17,6 +22,7 @@ import type {
   JobProtocolV3,
   WorkflowSignalInput,
 } from "./contracts";
+import { normalizeAgentModels } from "./agent-settings";
 
 export class CoreRepository {
   constructor(private readonly database: Database) {}
@@ -28,7 +34,7 @@ export class CoreRepository {
   async readServerNodes(): Promise<readonly ServerNodeRecord[]> {
     const result = await this.database.pool.query<ServerNodeRow>(
       `SELECT id::text, pool_kind::text, operating_system::text, state::text, capabilities,
-              isolation_generation::text, current_tenant_id::text, last_heartbeat_at::text,
+              isolation_generation::text, current_workspace_id::text, last_heartbeat_at::text,
               last_reimage_proof_at::text
          FROM deviludo.server_nodes
         ORDER BY pool_kind, id`,
@@ -40,71 +46,107 @@ export class CoreRepository {
     return fixedPoolRecords(await this.readServerNodes());
   }
 
-  async readAgentSettings(tenantId: string): Promise<StoredTenantAgentSettings | null> {
-    return this.database.withTenant(tenantId, async client => {
-      const result = await client.query<AgentSettingsRow>(
-        `SELECT agent_runtime::text, base_url, credential_secret_ref,
-                api_key_fingerprint, credential_version::text, revision::text,
-                updated_by, updated_at::text
-           FROM deviludo.tenant_agent_settings
-          WHERE tenant_id = $1::uuid`,
-        [tenantId],
+  async listWorkspaces(): Promise<readonly WorkspaceSummary[]> {
+    const result = await this.database.pool.query<WorkspaceRow>(
+      `SELECT id::text, name, created_at::text FROM deviludo.list_workspaces()`,
+    );
+    return Object.freeze(result.rows.map(workspaceFromRow));
+  }
+
+  async createWorkspace(input: Readonly<{ id: string; name: string }>): Promise<WorkspaceSummary> {
+    return this.database.withWorkspace(input.id, async client => {
+      const result = await client.query<WorkspaceRow>(
+        `INSERT INTO deviludo.workspaces(id, name)
+         VALUES ($1::uuid, $2)
+         RETURNING id::text, name, created_at::text`,
+        [input.id, input.name],
       );
-      return result.rows[0] ? agentSettingsFromRow(result.rows[0]) : null;
+      return workspaceFromRow(result.rows[0]);
     });
   }
 
+  async readWorkspace(workspaceId: string): Promise<WorkspaceSummary | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<WorkspaceRow>(
+        `SELECT id::text, name, created_at::text
+           FROM deviludo.workspaces
+          WHERE id = $1::uuid`,
+        [workspaceId],
+      );
+      return result.rows[0] ? workspaceFromRow(result.rows[0]) : null;
+    });
+  }
+
+  async readAgentSettings(): Promise<StoredInstanceAgentSettings | null> {
+    const result = await this.database.pool.query<AgentSettingsRow>(
+        `SELECT agent_runtime::text, base_url, primary_model, opus_model,
+                sonnet_model, haiku_model, subagent_model, credential_secret_ref,
+                api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
+                updated_by, updated_at::text
+           FROM deviludo.instance_agent_settings
+          WHERE singleton = true`,
+    );
+    return result.rows[0] ? agentSettingsFromRow(result.rows[0]) : null;
+  }
+
   async saveAgentSettings(input: Readonly<{
-    tenantId: string;
-    tenantName: string;
     agentRuntime: AgentRuntimeKind;
     baseUrl: string;
+    models: AgentModelConfiguration | null;
     credentialSecretRef: string;
+    apiKeyMask: string;
     apiKeyFingerprint: string;
     credentialVersion: string;
     updatedBy: string;
-  }>): Promise<StoredTenantAgentSettings> {
-    return this.database.withTenant(input.tenantId, async client => {
-      await client.query(
-        `INSERT INTO deviludo.tenants(id, name) VALUES ($1::uuid, $2)
-         ON CONFLICT (id) DO NOTHING`,
-        [input.tenantId, input.tenantName],
-      );
-      const result = await client.query<AgentSettingsRow>(
-        `INSERT INTO deviludo.tenant_agent_settings(
-           tenant_id, agent_runtime, base_url, credential_secret_ref,
-           api_key_fingerprint, credential_version, updated_by
+  }>): Promise<StoredInstanceAgentSettings> {
+      const result = await this.database.pool.query<AgentSettingsRow>(
+        `INSERT INTO deviludo.instance_agent_settings(
+           singleton, agent_runtime, base_url, primary_model, opus_model,
+           sonnet_model, haiku_model, subagent_model, credential_secret_ref,
+           api_key_mask, api_key_fingerprint, credential_version, updated_by
          ) VALUES (
-           $1::uuid, $2::deviludo.agent_runtime, $3, $4, $5, $6::uuid, $7
+           true, $1::deviludo.agent_runtime, $2, $3, $4, $5, $6, $7,
+           $8, $9, $10, $11::uuid, $12
          )
-         ON CONFLICT (tenant_id) DO UPDATE SET
+         ON CONFLICT (singleton) DO UPDATE SET
            agent_runtime = EXCLUDED.agent_runtime,
            base_url = EXCLUDED.base_url,
+           primary_model = EXCLUDED.primary_model,
+           opus_model = EXCLUDED.opus_model,
+           sonnet_model = EXCLUDED.sonnet_model,
+           haiku_model = EXCLUDED.haiku_model,
+           subagent_model = EXCLUDED.subagent_model,
            credential_secret_ref = EXCLUDED.credential_secret_ref,
+           api_key_mask = EXCLUDED.api_key_mask,
            api_key_fingerprint = EXCLUDED.api_key_fingerprint,
            credential_version = EXCLUDED.credential_version,
-           revision = deviludo.tenant_agent_settings.revision + 1,
+           revision = deviludo.instance_agent_settings.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = clock_timestamp()
-         RETURNING agent_runtime::text, base_url, credential_secret_ref,
-                   api_key_fingerprint, credential_version::text, revision::text,
+         RETURNING agent_runtime::text, base_url, primary_model, opus_model,
+                   sonnet_model, haiku_model, subagent_model, credential_secret_ref,
+                   api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                    updated_by, updated_at::text`,
         [
-          input.tenantId,
           input.agentRuntime,
           input.baseUrl,
+          input.models?.primary ?? null,
+          input.models?.opus ?? null,
+          input.models?.sonnet ?? null,
+          input.models?.haiku ?? null,
+          input.models?.subagent ?? null,
           input.credentialSecretRef,
+          input.apiKeyMask,
           input.apiKeyFingerprint,
           input.credentialVersion,
           input.updatedBy,
         ],
       );
       return agentSettingsFromRow(result.rows[0]);
-    });
   }
 
-  async listProjects(tenantId: string): Promise<readonly ProductProjectSummary[]> {
-    return this.database.withTenant(tenantId, async client => {
+  async listProjects(workspaceId: string): Promise<readonly ProductProjectSummary[]> {
+    return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<ProductProjectRow>(
         `SELECT p.id::text, p.name, p.created_at::text,
                 workflow.id::text AS workflow_id,
@@ -115,7 +157,7 @@ export class CoreRepository {
            LEFT JOIN LATERAL (
              SELECT id, state, state_data, updated_at
                FROM deviludo.workflow_instances
-              WHERE tenant_id = p.tenant_id AND project_id = p.id
+              WHERE workspace_id = p.workspace_id AND project_id = p.id
               ORDER BY created_at DESC
               LIMIT 1
            ) workflow ON true
@@ -126,30 +168,31 @@ export class CoreRepository {
   }
 
   async createProject(input: Readonly<{
-    tenantId: string;
-    tenantName: string;
+    workspaceId: string;
+    workspaceName: string;
     projectId: string;
     workflowId: string;
+    idempotencyKey: string;
     name: string;
     concept: string;
     specification: Readonly<Record<string, unknown>>;
   }>): Promise<ProductProjectDetail> {
-    await this.database.withTenant(input.tenantId, async client => {
+    await this.database.withWorkspace(input.workspaceId, async client => {
       await client.query(
-        `INSERT INTO deviludo.tenants(id, name) VALUES ($1::uuid, $2)
+        `INSERT INTO deviludo.workspaces(id, name) VALUES ($1::uuid, $2)
          ON CONFLICT (id) DO NOTHING`,
-        [input.tenantId, input.tenantName],
+        [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.projects(tenant_id, id, name)
+        `INSERT INTO deviludo.projects(workspace_id, id, name)
          VALUES ($1::uuid, $2::uuid, $3)`,
-        [input.tenantId, input.projectId, input.name],
+        [input.workspaceId, input.projectId, input.name],
       );
       await client.query(
-        `INSERT INTO deviludo.workflow_instances(tenant_id, id, project_id, state_data)
+        `INSERT INTO deviludo.workflow_instances(workspace_id, id, project_id, state_data)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4::jsonb)`,
         [
-          input.tenantId,
+          input.workspaceId,
           input.workflowId,
           input.projectId,
           JSON.stringify({ concept: input.concept, specification: input.specification }),
@@ -157,24 +200,114 @@ export class CoreRepository {
       );
       await client.query(
         `INSERT INTO deviludo.workflow_events(
-           tenant_id, workflow_id, event_kind, event_data, idempotency_key
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
          ) VALUES ($1::uuid, $2::uuid, 'PROJECT_CREATED', $3::jsonb, 'project-created')`,
-        [input.tenantId, input.workflowId, JSON.stringify({ concept: input.concept })],
+        [input.workspaceId, input.workflowId, JSON.stringify({ concept: input.concept })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_creation_receipts(
+           idempotency_key, operation_kind, workspace_id, project_id
+         ) VALUES ($1, 'PROJECT', $2::uuid, $3::uuid)`,
+        [input.idempotencyKey, input.workspaceId, input.projectId],
       );
     });
-    const created = await this.readProject(input.tenantId, input.projectId);
+    const created = await this.readProject(input.workspaceId, input.projectId);
     if (!created) throw new Error("Created project could not be read");
     return created;
   }
 
+  async readProjectCreationReceipt(idempotencyKey: string): Promise<CreationReceipt | null> {
+    const result = await this.database.pool.query<CreationReceiptRow>(
+      `SELECT idempotency_key, operation_kind, workspace_id::text, project_id::text,
+              conversation_id::text
+         FROM deviludo.project_creation_receipts
+        WHERE idempotency_key = $1`,
+      [idempotencyKey],
+    );
+    return result.rows[0] ? creationReceiptFromRow(result.rows[0]) : null;
+  }
+
+  async createProjectConversation(input: Readonly<{
+    workspaceId: string;
+    workspaceName: string;
+    projectId: string;
+    workflowId: string;
+    conversationId: string;
+    idempotencyKey: string;
+    name: string;
+    concept: string;
+    specification: Readonly<Record<string, unknown>>;
+    userContent: string;
+  }>): Promise<Readonly<{ project: ProductProjectDetail; conversation: ProductConversation }>> {
+    await this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.workspaces(id, name) VALUES ($1::uuid, $2)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.workspaceId, input.workspaceName],
+      );
+      await client.query(
+        `INSERT INTO deviludo.projects(workspace_id, id, name) VALUES ($1::uuid, $2::uuid, $3)`,
+        [input.workspaceId, input.projectId, input.name],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_instances(workspace_id, id, project_id, state_data)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::jsonb)`,
+        [
+          input.workspaceId,
+          input.workflowId,
+          input.projectId,
+          JSON.stringify({ concept: input.concept, specification: input.specification }),
+        ],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
+         ) VALUES ($1::uuid, $2::uuid, 'PROJECT_CREATED', $3::jsonb, 'project-created')`,
+        [input.workspaceId, input.workflowId, JSON.stringify({ concept: input.concept, source: "HOME_CONVERSATION" })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'NEW_GAME', $4)`,
+        [input.workspaceId, input.conversationId, input.projectId, input.name],
+      );
+      await client.query(
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content)
+         VALUES ($1::uuid, $2::uuid, 'USER', $3)`,
+        [input.workspaceId, input.conversationId, input.userContent],
+      );
+      const assistant = createProductConversationReply({
+        userContent: input.userContent,
+        turnNumber: 1,
+        project: null,
+      });
+      await client.query(
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+        [input.workspaceId, input.conversationId, assistant.content, JSON.stringify({ appliedToDraft: false })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_creation_receipts(
+           idempotency_key, operation_kind, workspace_id, project_id, conversation_id
+         ) VALUES ($1, 'CONVERSATION', $2::uuid, $3::uuid, $4::uuid)`,
+        [input.idempotencyKey, input.workspaceId, input.projectId, input.conversationId],
+      );
+    });
+    const [project, conversation] = await Promise.all([
+      this.readProject(input.workspaceId, input.projectId),
+      this.readConversation(input.workspaceId, input.conversationId),
+    ]);
+    if (!project || !conversation) throw new Error("Created project conversation could not be read");
+    return Object.freeze({ project, conversation });
+  }
+
   async updateProjectSpecification(input: Readonly<{
-    tenantId: string;
+    workspaceId: string;
     projectId: string;
     specification: Readonly<Record<string, unknown>>;
     note: string;
     idempotencyKey: string;
   }>): Promise<ProductProjectDetail | null> {
-    await this.database.withTenant(input.tenantId, async client => {
+    await this.database.withWorkspace(input.workspaceId, async client => {
       const workflow = await client.query<{ id: string }>(
         `UPDATE deviludo.workflow_instances
             SET state_data = state_data || jsonb_build_object('specification', $2::jsonb),
@@ -187,17 +320,17 @@ export class CoreRepository {
       if (!workflow.rows[0]) throw new Error("Only draft project specifications can be edited");
       await client.query(
         `INSERT INTO deviludo.workflow_events(
-           tenant_id, workflow_id, event_kind, event_data, idempotency_key
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
          ) VALUES ($1::uuid, $2::uuid, 'SPEC_REFINED', $3::jsonb, $4)
-         ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING`,
-        [input.tenantId, workflow.rows[0].id, JSON.stringify({ note: input.note }), input.idempotencyKey],
+         ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING`,
+        [input.workspaceId, workflow.rows[0].id, JSON.stringify({ note: input.note }), input.idempotencyKey],
       );
     });
-    return this.readProject(input.tenantId, input.projectId);
+    return this.readProject(input.workspaceId, input.projectId);
   }
 
-  async readProject(tenantId: string, projectId: string): Promise<ProductProjectDetail | null> {
-    return this.database.withTenant(tenantId, async client => {
+  async readProject(workspaceId: string, projectId: string): Promise<ProductProjectDetail | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
       const project = await client.query<ProductProjectRow>(
         `SELECT p.id::text, p.name, p.created_at::text,
                 workflow.id::text AS workflow_id,
@@ -208,7 +341,7 @@ export class CoreRepository {
            LEFT JOIN LATERAL (
              SELECT id, state, state_data, updated_at
                FROM deviludo.workflow_instances
-              WHERE tenant_id = p.tenant_id AND project_id = p.id
+              WHERE workspace_id = p.workspace_id AND project_id = p.id
               ORDER BY created_at DESC
               LIMIT 1
            ) workflow ON true
@@ -258,8 +391,8 @@ export class CoreRepository {
     });
   }
 
-  async readConversation(tenantId: string, conversationId: string): Promise<ProductConversation | null> {
-    return this.database.withTenant(tenantId, async client => {
+  async readConversation(workspaceId: string, conversationId: string): Promise<ProductConversation | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
       const conversation = await client.query<ProductConversationRow>(
         `SELECT id::text, project_id::text, mode, title, created_at::text, updated_at::text
            FROM deviludo.project_conversations
@@ -273,19 +406,12 @@ export class CoreRepository {
   }
 
   async appendConversationTurn(input: Readonly<{
-    tenantId: string;
-    tenantName: string;
+    workspaceId: string;
     conversationId: string;
-    projectId: string | null;
+    projectId: string;
     userContent: string;
   }>): Promise<ProductConversation> {
-    return this.database.withTenant(input.tenantId, async client => {
-      await client.query(
-        `INSERT INTO deviludo.tenants(id, name) VALUES ($1::uuid, $2)
-         ON CONFLICT (id) DO NOTHING`,
-        [input.tenantId, input.tenantName],
-      );
-
+    return this.database.withWorkspace(input.workspaceId, async client => {
       const existing = await client.query<ProductConversationRow>(
         `SELECT id::text, project_id::text, mode, title, created_at::text, updated_at::text
            FROM deviludo.project_conversations
@@ -298,8 +424,8 @@ export class CoreRepository {
         throw new Error("A conversation cannot switch projects");
       }
 
-      let project: { name: string; workflowId: string; workflowState: string; stateData: Record<string, unknown> } | null = null;
-      if (input.projectId) {
+      let project: { name: string; workflowId: string; workflowState: string; stateData: Record<string, unknown> };
+      {
         const projectResult = await client.query<{ name: string }>(
           `SELECT name FROM deviludo.projects WHERE id = $1::uuid`,
           [input.projectId],
@@ -328,25 +454,25 @@ export class CoreRepository {
 
       if (!conversation) {
         const created = await client.query<ProductConversationRow>(
-          `INSERT INTO deviludo.project_conversations(tenant_id, id, project_id, mode, title)
+          `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)
            RETURNING id::text, project_id::text, mode, title, created_at::text, updated_at::text`,
           [
-            input.tenantId,
+            input.workspaceId,
             input.conversationId,
             input.projectId,
-            input.projectId ? "PROJECT_FEEDBACK" : "NEW_GAME",
-            conversationTitleFromContent(input.userContent),
+            "PROJECT_FEEDBACK",
+            project.name,
           ],
         );
         conversation = created.rows[0];
       }
 
       const userMessage = await client.query<{ message_id: string }>(
-        `INSERT INTO deviludo.conversation_messages(tenant_id, conversation_id, role, content)
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content)
          VALUES ($1::uuid, $2::uuid, 'USER', $3)
          RETURNING message_id::text`,
-        [input.tenantId, input.conversationId, input.userContent],
+        [input.workspaceId, input.conversationId, input.userContent],
       );
       const turnCount = await client.query<{ count: string }>(
         `SELECT count(*)::text AS count
@@ -357,10 +483,12 @@ export class CoreRepository {
       const assistant = createProductConversationReply({
         userContent: input.userContent,
         turnNumber: Number(turnCount.rows[0]?.count ?? 1),
-        project: project ? { name: project.name, workflowState: project.workflowState } : null,
+        project: conversation.mode === "NEW_GAME"
+          ? null
+          : { name: project.name, workflowState: project.workflowState },
       });
 
-      if (assistant.appliedToDraft && project) {
+      if (assistant.appliedToDraft) {
         const specification = productSpecificationFromState(project.stateData);
         await client.query(
           `UPDATE deviludo.workflow_instances
@@ -372,11 +500,11 @@ export class CoreRepository {
         );
         await client.query(
           `INSERT INTO deviludo.workflow_events(
-             tenant_id, workflow_id, event_kind, event_data, idempotency_key
+             workspace_id, workflow_id, event_kind, event_data, idempotency_key
            ) VALUES ($1::uuid, $2::uuid, 'SPEC_REFINED', $3::jsonb, $4)
-           ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING`,
+           ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING`,
           [
-            input.tenantId,
+            input.workspaceId,
             project.workflowId,
             JSON.stringify({ note: input.userContent, source: "HOME_CONVERSATION" }),
             `conversation:${input.conversationId}:${userMessage.rows[0].message_id}`,
@@ -385,10 +513,10 @@ export class CoreRepository {
       }
 
       await client.query(
-        `INSERT INTO deviludo.conversation_messages(tenant_id, conversation_id, role, content, metadata)
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
          VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
         [
-          input.tenantId,
+          input.workspaceId,
           input.conversationId,
           assistant.content,
           JSON.stringify({ appliedToDraft: assistant.appliedToDraft }),
@@ -442,7 +570,7 @@ export class CoreRepository {
       `INSERT INTO deviludo.server_nodes (pool_kind, operating_system, capabilities)
        VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, $3::text[])
        RETURNING id::text, pool_kind::text, operating_system::text, state::text, capabilities,
-                 isolation_generation::text, current_tenant_id::text, last_heartbeat_at::text,
+                 isolation_generation::text, current_workspace_id::text, last_heartbeat_at::text,
                  last_reimage_proof_at::text`,
       [input.poolKind, input.operatingSystem, input.capabilities],
     );
@@ -456,7 +584,7 @@ export class CoreRepository {
               updated_at = clock_timestamp()
         WHERE id = $1::uuid
         RETURNING id::text, pool_kind::text, operating_system::text, state::text, capabilities,
-                  isolation_generation::text, current_tenant_id::text, last_heartbeat_at::text,
+                  isolation_generation::text, current_workspace_id::text, last_heartbeat_at::text,
                   last_reimage_proof_at::text`,
       [id, state],
     );
@@ -469,25 +597,25 @@ export class CoreRepository {
     leaseSeconds: number;
   }>): Promise<JobProtocolV3 | null> {
     const claimed = await this.database.pool.query<ClaimRow>(
-      `SELECT "jobId"::text, "tenantId"::text, "leaseToken"::text
+      `SELECT "jobId"::text, "workspaceId"::text, "leaseToken"::text
          FROM deviludo.claim_job($1, $2::deviludo.server_pool_kind, $3)`,
       [input.workerId, input.poolKind, input.leaseSeconds],
     );
     if (!claimed.rows[0]) return null;
     const identity: ClaimedJobIdentity = Object.freeze({
       jobId: claimed.rows[0].jobId,
-      tenantId: claimed.rows[0].tenantId,
+      workspaceId: claimed.rows[0].workspaceId,
       leaseToken: claimed.rows[0].leaseToken,
     });
-    return this.database.withTenant(identity.tenantId, async client => this.readClaimedJob(client, identity));
+    return this.database.withWorkspace(identity.workspaceId, async client => this.readClaimedJob(client, identity));
   }
 
   async loadLeasedJob(identity: ClaimedJobIdentity): Promise<JobProtocolV3> {
-    return this.database.withTenant(identity.tenantId, async client => this.readClaimedJob(client, identity));
+    return this.database.withWorkspace(identity.workspaceId, async client => this.readClaimedJob(client, identity));
   }
 
   async heartbeat(job: JobProtocolV3): Promise<boolean> {
-    return this.database.withTenant(job.tenantId, async client => {
+    return this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query(
         `UPDATE deviludo.jobs
             SET heartbeat_at = clock_timestamp(),
@@ -504,7 +632,7 @@ export class CoreRepository {
   }
 
   async complete(job: JobProtocolV3, completion: JobCompletion): Promise<boolean> {
-    return this.database.withTenant(job.tenantId, async client => {
+    return this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query<{ completed: boolean }>(
         `SELECT deviludo.complete_job(
           $1::uuid, $2::uuid, $3::bigint, $4::bigint, $5::jsonb,
@@ -526,7 +654,7 @@ export class CoreRepository {
   }
 
   async fail(job: JobProtocolV3, reason: string): Promise<boolean> {
-    return this.database.withTenant(job.tenantId, async client => {
+    return this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query<{ failed: boolean }>(
         "SELECT deviludo.fail_job($1::uuid, $2::uuid, $3::bigint, $4::text) AS failed",
         [job.jobId, job.lease.token, job.lease.fencingToken, reason.slice(0, 2_000)],
@@ -547,11 +675,11 @@ export class CoreRepository {
   }
 
   async appendSignal(
-    tenantId: string,
+    workspaceId: string,
     workflowId: string,
     signal: WorkflowSignalInput,
   ): Promise<boolean> {
-    return this.database.withTenant(tenantId, async client => {
+    return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<{ accepted: boolean }>(
         `SELECT deviludo.accept_workflow_signal(
           $1::uuid, $2::text, $3::text, $4::jsonb
@@ -563,26 +691,26 @@ export class CoreRepository {
   }
 
   async createMacSmokeJob(ids: Readonly<{
-    tenantId: string;
+    workspaceId: string;
     projectId: string;
     workflowId: string;
     jobId: string;
     jobKind: E2eJobKind;
   }>): Promise<void> {
-    await this.database.withTenant(ids.tenantId, async client => {
-      await client.query("INSERT INTO deviludo.tenants(id, name) VALUES ($1, 'Local smoke tenant')", [ids.tenantId]);
+    await this.database.withWorkspace(ids.workspaceId, async client => {
+      await client.query("INSERT INTO deviludo.workspaces(id, name) VALUES ($1, 'Local smoke workspace')", [ids.workspaceId]);
       await client.query(
-        "INSERT INTO deviludo.projects(tenant_id, id, name) VALUES ($1, $2, 'Local smoke project')",
-        [ids.tenantId, ids.projectId],
+        "INSERT INTO deviludo.projects(workspace_id, id, name) VALUES ($1, $2, 'Local smoke project')",
+        [ids.workspaceId, ids.projectId],
       );
       await client.query(
-        `INSERT INTO deviludo.workflow_instances(tenant_id, id, project_id, state)
+        `INSERT INTO deviludo.workflow_instances(workspace_id, id, project_id, state)
          VALUES ($1, $2, $3, 'DRAFT')`,
-        [ids.tenantId, ids.workflowId, ids.projectId],
+        [ids.workspaceId, ids.workflowId, ids.projectId],
       );
       await client.query(
         `INSERT INTO deviludo.jobs(
-          tenant_id, id, workflow_id, project_id, kind, pool_kind, target_operating_system,
+          workspace_id, id, workflow_id, project_id, kind, pool_kind, target_operating_system,
           required_capabilities, exclusive, idempotency_key, payload
         ) VALUES (
           $1, $2, $3, $4, $5::deviludo.job_kind, 'E2E_MACOS', 'macos',
@@ -590,7 +718,7 @@ export class CoreRepository {
           $6::text, '{"smoke":true}'::jsonb
         )`,
         [
-          ids.tenantId,
+          ids.workspaceId,
           ids.jobId,
           ids.workflowId,
           ids.projectId,
@@ -601,40 +729,40 @@ export class CoreRepository {
     });
   }
 
-  async verifyTenantIsolation(ids: Readonly<{
-    firstTenantId: string;
+  async verifyWorkspaceIsolation(ids: Readonly<{
+    firstWorkspaceId: string;
     firstProjectId: string;
-    secondTenantId: string;
+    secondWorkspaceId: string;
     secondProjectId: string;
     forbiddenProjectId: string;
   }>): Promise<Readonly<{
     ownRead: boolean;
-    crossTenantHidden: boolean;
+    crossWorkspaceHidden: boolean;
     missingContextHidden: boolean;
-    crossTenantWriteRejected: boolean;
+    crossWorkspaceWriteRejected: boolean;
   }>> {
-    await this.database.withTenant(ids.firstTenantId, async client => {
-      await client.query("INSERT INTO deviludo.tenants(id, name) VALUES ($1, 'Isolation tenant A')", [ids.firstTenantId]);
+    await this.database.withWorkspace(ids.firstWorkspaceId, async client => {
+      await client.query("INSERT INTO deviludo.workspaces(id, name) VALUES ($1, 'Isolation workspace A')", [ids.firstWorkspaceId]);
       await client.query(
-        "INSERT INTO deviludo.projects(tenant_id, id, name) VALUES ($1, $2, 'Isolation project A')",
-        [ids.firstTenantId, ids.firstProjectId],
+        "INSERT INTO deviludo.projects(workspace_id, id, name) VALUES ($1, $2, 'Isolation project A')",
+        [ids.firstWorkspaceId, ids.firstProjectId],
       );
     });
-    await this.database.withTenant(ids.secondTenantId, async client => {
-      await client.query("INSERT INTO deviludo.tenants(id, name) VALUES ($1, 'Isolation tenant B')", [ids.secondTenantId]);
+    await this.database.withWorkspace(ids.secondWorkspaceId, async client => {
+      await client.query("INSERT INTO deviludo.workspaces(id, name) VALUES ($1, 'Isolation workspace B')", [ids.secondWorkspaceId]);
       await client.query(
-        "INSERT INTO deviludo.projects(tenant_id, id, name) VALUES ($1, $2, 'Isolation project B')",
-        [ids.secondTenantId, ids.secondProjectId],
+        "INSERT INTO deviludo.projects(workspace_id, id, name) VALUES ($1, $2, 'Isolation project B')",
+        [ids.secondWorkspaceId, ids.secondProjectId],
       );
     });
-    const ownRead = await this.database.withTenant(ids.firstTenantId, async client => {
+    const ownRead = await this.database.withWorkspace(ids.firstWorkspaceId, async client => {
       const result = await client.query(
         "SELECT 1 FROM deviludo.projects WHERE id = $1::uuid",
         [ids.firstProjectId],
       );
       return result.rowCount === 1;
     });
-    const crossTenantHidden = await this.database.withTenant(ids.secondTenantId, async client => {
+    const crossWorkspaceHidden = await this.database.withWorkspace(ids.secondWorkspaceId, async client => {
       const result = await client.query(
         "SELECT 1 FROM deviludo.projects WHERE id = $1::uuid",
         [ids.firstProjectId],
@@ -645,33 +773,33 @@ export class CoreRepository {
       "SELECT 1 FROM deviludo.projects WHERE id = $1::uuid",
       [ids.firstProjectId],
     );
-    let crossTenantWriteRejected = false;
+    let crossWorkspaceWriteRejected = false;
     try {
-      await this.database.withTenant(ids.secondTenantId, async client => {
+      await this.database.withWorkspace(ids.secondWorkspaceId, async client => {
         await client.query(
-          "INSERT INTO deviludo.projects(tenant_id, id, name) VALUES ($1, $2, 'Forbidden project')",
-          [ids.firstTenantId, ids.forbiddenProjectId],
+          "INSERT INTO deviludo.projects(workspace_id, id, name) VALUES ($1, $2, 'Forbidden project')",
+          [ids.firstWorkspaceId, ids.forbiddenProjectId],
         );
       });
     } catch {
-      crossTenantWriteRejected = true;
+      crossWorkspaceWriteRejected = true;
     }
     return Object.freeze({
       ownRead,
-      crossTenantHidden,
+      crossWorkspaceHidden,
       missingContextHidden: missing.rowCount === 0,
-      crossTenantWriteRejected,
+      crossWorkspaceWriteRejected,
     });
   }
 
-  async readJobStatus(tenantId: string, jobId: string): Promise<Readonly<{
+  async readJobStatus(workspaceId: string, jobId: string): Promise<Readonly<{
     state: string;
     beforeReimageProof: string | null;
     cleanupProof: string | null;
     afterReimageProof: string | null;
     lastError: string | null;
   }> | null> {
-    return this.database.withTenant(tenantId, async client => {
+    return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<{
         state: string;
         before_reimage_proof: string | null;
@@ -695,16 +823,16 @@ export class CoreRepository {
   }
 
   async registerOperation(job: JobProtocolV3, operationKind: string): Promise<string> {
-    return this.database.withTenant(job.tenantId, async client => {
+    return this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query<{ id: string }>(
         `INSERT INTO deviludo.operation_receipts
-          (tenant_id, project_id, workflow_id, job_id, operation_kind, idempotency_key, state, request)
+          (workspace_id, project_id, workflow_id, job_id, operation_kind, idempotency_key, state, request)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, 'REGISTERED', $7::jsonb)
-         ON CONFLICT (tenant_id, idempotency_key)
+         ON CONFLICT (workspace_id, idempotency_key)
          DO UPDATE SET updated_at = deviludo.operation_receipts.updated_at
          RETURNING id::text`,
         [
-          job.tenantId,
+          job.workspaceId,
           job.projectId,
           job.workflowId,
           job.jobId,
@@ -722,7 +850,7 @@ export class CoreRepository {
     operationId: string,
     receipt: Readonly<Record<string, unknown>>,
   ): Promise<void> {
-    await this.database.withTenant(job.tenantId, async client => {
+    await this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query(
         `UPDATE deviludo.operation_receipts
             SET state = 'RECEIPTED', receipt = $2::jsonb, updated_at = clock_timestamp()
@@ -735,7 +863,7 @@ export class CoreRepository {
 
   private async readClaimedJob(client: PoolClient, identity: ClaimedJobIdentity): Promise<JobProtocolV3> {
     const result = await client.query<JobRow>(
-      `SELECT id::text, workflow_id::text, tenant_id::text, project_id::text,
+      `SELECT id::text, workflow_id::text, workspace_id::text, project_id::text,
               pool_kind::text, kind::text, target_operating_system::text,
               required_capabilities, exclusive, isolation_generation::text, payload,
               lease_token::text, lease_expires_at::text, fencing_token::text
@@ -744,7 +872,7 @@ export class CoreRepository {
       [identity.jobId, identity.leaseToken],
     );
     const row = result.rows[0];
-    if (!row) throw new Error("Claimed job body is unavailable in the tenant transaction");
+    if (!row) throw new Error("Claimed job body is unavailable in the workspace transaction");
     if (!isServerPoolKind(row.pool_kind) || !isJobKind(row.kind)
       || !["linux", "windows", "macos", null].includes(row.target_operating_system as never)) {
       throw new Error("Stored job routing contract is invalid");
@@ -758,7 +886,7 @@ export class CoreRepository {
       schemaVersion: "deviludo.job.v3",
       jobId: row.id,
       workflowId: row.workflow_id,
-      tenantId: row.tenant_id,
+      workspaceId: row.workspace_id,
       projectId: row.project_id,
       poolKind: row.pool_kind,
       jobKind: row.kind,
@@ -783,7 +911,7 @@ type ServerNodeRow = {
   state: string;
   capabilities: string[];
   isolation_generation: string;
-  current_tenant_id: string | null;
+  current_workspace_id: string | null;
   last_heartbeat_at: string | null;
   last_reimage_proof_at: string | null;
 };
@@ -803,17 +931,23 @@ function serverNodeFromRow(row: ServerNodeRow): ServerNodeRecord {
     state: row.state as ServerNodeState,
     capabilities: Object.freeze([...row.capabilities]),
     isolationGeneration: Number(row.isolation_generation),
-    currentTenantId: row.current_tenant_id,
+    currentWorkspaceId: row.current_workspace_id,
     lastHeartbeatAt: row.last_heartbeat_at,
     lastReimageProofAt: row.last_reimage_proof_at,
   });
 }
 
-type ClaimRow = { jobId: string; tenantId: string; leaseToken: string };
+type ClaimRow = { jobId: string; workspaceId: string; leaseToken: string };
 type AgentSettingsRow = {
   agent_runtime: string;
   base_url: string;
+  primary_model: string | null;
+  opus_model: string | null;
+  sonnet_model: string | null;
+  haiku_model: string | null;
+  subagent_model: string | null;
   credential_secret_ref: string;
+  api_key_mask: string | null;
   api_key_fingerprint: string;
   credential_version: string;
   revision: string;
@@ -821,10 +955,12 @@ type AgentSettingsRow = {
   updated_at: string;
 };
 
-export type StoredTenantAgentSettings = Readonly<{
+export type StoredInstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
+  models: AgentModelConfiguration | null;
   credentialSecretRef: string;
+  apiKeyMask: string | null;
   apiKeyFingerprint: string;
   credentialVersion: string;
   revision: number;
@@ -832,18 +968,28 @@ export type StoredTenantAgentSettings = Readonly<{
   updatedAt: string;
 }>;
 
-function agentSettingsFromRow(row: AgentSettingsRow): StoredTenantAgentSettings {
+function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSettings {
   const revision = Number(row.revision);
+  const models = normalizeAgentModels(row.primary_model === null ? null : {
+    primary: row.primary_model,
+    opus: row.opus_model,
+    sonnet: row.sonnet_model,
+    haiku: row.haiku_model,
+    subagent: row.subagent_model,
+  });
   if (!(AGENT_RUNTIME_KINDS as readonly string[]).includes(row.agent_runtime)
     || !Number.isSafeInteger(revision) || revision < 1
-    || !row.credential_secret_ref.startsWith("vault://tenants/")
+    || !row.credential_secret_ref.startsWith("vault://instance/agent-runtime/api-key/versions/")
+    || (row.api_key_mask !== null && !/^.{3}\*{8}.{4}$/.test(row.api_key_mask))
     || !/^sha256:[0-9a-f]{12}$/.test(row.api_key_fingerprint)) {
-    throw new Error("Stored tenant Agent settings are invalid");
+    throw new Error("Stored instance Agent settings are invalid");
   }
   return Object.freeze({
     agentRuntime: row.agent_runtime as AgentRuntimeKind,
     baseUrl: row.base_url,
+    models,
     credentialSecretRef: row.credential_secret_ref,
+    apiKeyMask: row.api_key_mask,
     apiKeyFingerprint: row.api_key_fingerprint,
     credentialVersion: row.credential_version,
     revision,
@@ -855,7 +1001,7 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredTenantAgentSettings 
 type JobRow = {
   id: string;
   workflow_id: string;
-  tenant_id: string;
+  workspace_id: string;
   project_id: string;
   pool_kind: string;
   kind: string;
@@ -902,7 +1048,7 @@ export type ProductProjectDetail = ProductProjectSummary & Readonly<{
 
 export type ProductConversation = Readonly<{
   id: string;
-  projectId: string | null;
+  projectId: string;
   mode: "NEW_GAME" | "PROJECT_FEEDBACK";
   title: string;
   createdAt: string;
@@ -918,7 +1064,7 @@ export type ProductConversation = Readonly<{
 
 type ProductConversationRow = {
   id: string;
-  project_id: string | null;
+  project_id: string;
   mode: "NEW_GAME" | "PROJECT_FEEDBACK";
   title: string;
   created_at: string;
@@ -932,6 +1078,24 @@ type ProductConversationMessageRow = {
   metadata: Record<string, unknown>;
   created_at: string;
 };
+
+type WorkspaceRow = { id: string; name: string; created_at: string };
+
+type CreationReceiptRow = {
+  idempotency_key: string;
+  operation_kind: "PROJECT" | "CONVERSATION";
+  workspace_id: string;
+  project_id: string;
+  conversation_id: string | null;
+};
+
+export type CreationReceipt = Readonly<{
+  idempotencyKey: string;
+  operationKind: "PROJECT" | "CONVERSATION";
+  workspaceId: string;
+  projectId: string;
+  conversationId: string | null;
+}>;
 
 type ProductProjectRow = {
   id: string;
@@ -979,9 +1143,18 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
   });
 }
 
-function conversationTitleFromContent(content: string): string {
-  const firstSentence = content.split(/[。！？.!?\n]/, 1)[0].trim() || "新游戏对话";
-  return firstSentence.slice(0, 80);
+function workspaceFromRow(row: WorkspaceRow): WorkspaceSummary {
+  return Object.freeze({ id: row.id, name: row.name, createdAt: row.created_at });
+}
+
+function creationReceiptFromRow(row: CreationReceiptRow): CreationReceipt {
+  return Object.freeze({
+    idempotencyKey: row.idempotency_key,
+    operationKind: row.operation_kind,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    conversationId: row.conversation_id,
+  });
 }
 
 function productSpecificationFromState(stateData: Record<string, unknown>): Readonly<Record<string, unknown>> {

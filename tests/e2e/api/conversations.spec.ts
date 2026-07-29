@@ -3,7 +3,7 @@ import { test, expect } from "../fixtures/stack";
 
 type Conversation = Readonly<{
   id: string;
-  projectId: string | null;
+  projectId: string;
   mode: "NEW_GAME" | "PROJECT_FEEDBACK";
   messages: readonly Readonly<{
     role: "USER" | "ASSISTANT";
@@ -29,14 +29,33 @@ test("new-game conversations validate, persist and keep their context locked", a
   });
   expect(missing.status()).toBe(404);
 
+  const unconfigured = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    headers: { "idempotency-key": `conversation:${randomUUID()}` },
+    data: { content: "一款没有完成 Agent 配置的游戏构想" },
+  });
+  expect(unconfigured.status()).toBe(424);
+  expect(await unconfigured.json()).toMatchObject({ code: "AGENT_CONFIG_REQUIRED" });
+  expect(await stack.queryRows<{ count: number }>("SELECT count(*)::int AS count FROM deviludo.workspaces")).toEqual([{ count: 0 }]);
+
+  await stack.configureAgent();
+
   const started = await stack.web("/api/conversations/messages", {
     method: "POST",
+    headers: { "idempotency-key": `conversation:${randomUUID()}` },
     data: { content: "我想做一款以时间循环为核心的像素冒险游戏" },
   });
   expect(started.status()).toBe(201);
-  const first = (await started.json() as { conversation: Conversation }).conversation;
+  const startedBody = await started.json() as {
+    workspace: { id: string; name: string };
+    project: { id: string; name: string };
+    conversation: Conversation;
+  };
+  const first = startedBody.conversation;
   expect(first.mode).toBe("NEW_GAME");
-  expect(first.projectId).toBeNull();
+  expect(first.projectId).toBe(startedBody.project.id);
+  expect(startedBody.project.name).toBe("时间回廊");
+  expect(startedBody.workspace.name).toBe(startedBody.project.name);
   expect(first.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
   expect(first.messages[1].content).toContain("玩家每分钟最常做的动作");
 

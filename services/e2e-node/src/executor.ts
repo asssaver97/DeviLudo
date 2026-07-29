@@ -99,7 +99,7 @@ async function runSigning(
   const receipt = await runExternal(executable, {
     schemaVersion: "deviludo.sign-request.v1",
     jobId: job.jobId,
-    tenantId: job.tenantId,
+    workspaceId: job.workspaceId,
     projectId: job.projectId,
     operatingSystem: job.targetOperatingSystem,
     payload: job.payload,
@@ -127,7 +127,7 @@ async function runUnprivileged(
     schemaVersion: "deviludo.e2e-execution.v1",
     action,
     jobId: job.jobId,
-    tenantId: job.tenantId,
+    workspaceId: job.workspaceId,
     projectId: job.projectId,
     payload: job.payload,
   }, signal, action);

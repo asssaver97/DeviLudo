@@ -17,8 +17,9 @@ export const metadata: Metadata = {
   title: "DeviLudo · 游戏 AI 开发平台",
   description: "把游戏构想变成经过跨平台验证、可交付到 Steam 的成品。",
   icons: {
-    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
-    shortcut: "/favicon.svg",
+    icon: [{ url: "/favicon-deviludo.png", sizes: "64x64", type: "image/png" }],
+    shortcut: "/favicon-deviludo.png",
+    apple: [{ url: "/deviludo-brand-mark.png", sizes: "256x256", type: "image/png" }],
   },
 };
 

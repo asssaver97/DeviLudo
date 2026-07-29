@@ -123,7 +123,7 @@ NODE_ENV=production npm run e2e-node
 - `DEVILUDO_E2E_CLIENT_CERT_FILE`、`DEVILUDO_E2E_CLIENT_KEY_FILE`、`DEVILUDO_E2E_CORE_CA_FILE`。
 - `DEVILUDO_E2E_ISOLATION_EXECUTOR`、`DEVILUDO_E2E_TEST_EXECUTOR`、`DEVILUDO_E2E_SIGN_EXECUTOR`、`DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR` 的绝对路径。
 
-可信执行器必须保证单节点单租户、签名前短期授权、执行前后重镜像和工作区清理。测试执行器不得读取签名凭据。
+可信执行器必须保证单节点单工作区、签名前短期授权、执行前后重镜像和工作区清理。测试执行器不得读取签名凭据。
 
 ### 7. 上线检查
 
@@ -135,13 +135,16 @@ curl -fsS https://deviludo.example.com/api/health/live
 
 `/health/ready` 必须分别报告五类池；未常驻的 macOS 池可以是 `ON_DEMAND_READY`。
 
-## 租户与安全边界
+## 工作区与安全边界
 
-- 所有租户表强制 RLS；跨表关系同时包含 `tenant_id`，缺少租户上下文时拒绝访问。
+- 工作区是项目、对话、任务和制品的隔离边界，不是登录账号；当前本地实例采用单操作者模式。
+- 未选择工作区时，创建项目会自动建立同名工作区；对话新建项目时由全局 Agent 配置生成名称。
+- Agent 连接配置属于整个 Deviludo 实例，由所有工作区共享；API Key 只保存在 Core 的 Secret 边界。
+- 所有工作区业务表强制 RLS；跨表关系同时包含 `workspace_id`，缺少工作区上下文时拒绝访问。
 - Core 三角色使用独立数据库登录、服务身份和 Vault 策略。
-- 对象键、Vault 路径、日志和工作区均绑定 `tenantId/projectId`。
+- 对象键、Vault 路径、日志和工作区均绑定 `workspaceId/projectId`。
 - Agent 仅在 CORE 的任务级 microVM 或受限容器中执行。
-- E2E 作业使用租约、心跳、fencing token 和不可变幂等键；跨租户前必须清理或重镜像。
+- E2E 作业使用租约、心跳、fencing token 和不可变幂等键；跨工作区前必须清理或重镜像。
 
 ## 本地开发
 
@@ -154,8 +157,11 @@ npm run local:up
 
 本地最小栈包含 Web、Core 三角色、PostgreSQL 和宿主机 macOS E2E 节点：
 
-- Web：<http://127.0.0.1:3000>
+- Web：<http://127.0.0.1:3100>
 - Core：<http://127.0.0.1:8080>
+
+如需改用其他端口，设置 `DEVILUDO_WEB_HOST_PORT`；本地启动脚本不会占用 `3000`。
+启动时会检测宿主机上的 Claude Code 与 Codex CLI，并在设置页显示安装状态和版本。
 
 ```bash
 npm run local:down   # 停止

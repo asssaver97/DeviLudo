@@ -7,11 +7,11 @@ import {
 } from "@/services/core/src/workflow-state-machine";
 
 const workflowId = "10000000-0000-4000-8000-000000000001";
-const tenantId = "10000000-0000-4000-8000-000000000002";
+const workspaceId = "10000000-0000-4000-8000-000000000002";
 const projectId = "10000000-0000-4000-8000-000000000003";
 
 test("the deterministic workflow covers generation, build, three-platform gates and release", () => {
-  let snapshot: WorkflowSnapshot = initialWorkflowSnapshot(workflowId, tenantId, projectId);
+  let snapshot: WorkflowSnapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId);
   let transition = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" });
   assert.deepEqual(transition.enqueue.map(command => command.jobKind), ["AGENT_GENERATION"]);
   snapshot = transition.snapshot;
@@ -65,7 +65,7 @@ test("the deterministic workflow covers generation, build, three-platform gates 
 
 test("cancellation is terminal and does not enqueue more work", () => {
   const snapshot = transitionWorkflow(
-    initialWorkflowSnapshot(workflowId, tenantId, projectId),
+    initialWorkflowSnapshot(workflowId, workspaceId, projectId),
     { kind: "SPEC_APPROVED" },
   ).snapshot;
   const cancelled = transitionWorkflow(snapshot, { kind: "CANCEL_REQUESTED" });

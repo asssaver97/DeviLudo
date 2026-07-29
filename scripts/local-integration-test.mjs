@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { startLocalE2e } from "./local-e2e-daemon.mjs";
 
-const webUrl = process.env.DEVILUDO_WEB_URL ?? "http://127.0.0.1:3000";
+const webUrl = process.env.DEVILUDO_WEB_URL ?? "http://127.0.0.1:3100";
 const coreUrl = process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080";
 const webToken = process.env.DEVILUDO_WEB_CORE_TOKEN ?? "local-web-to-core-token-0000000000000001";
+let workspaceCookie = "";
 
 await assertOk(new URL("/api/health/live", webUrl), "Web liveness");
 await assertOk(new URL("/health/live", coreUrl), "Core liveness");
@@ -13,12 +14,13 @@ if (ready.status !== "ready" || ready.pools.E2E_MACOS !== "READY") {
 }
 const pools = await assertOk(new URL("/api/admin/server-pools", webUrl), "Web BFF");
 if (pools.pools.length !== 5) throw new Error("Web BFF did not return exactly five fixed pools");
-const isolation = await coreRequest("/v1/dev/smoke/tenant-isolation", { method: "POST", body: "{}" });
-if (!isolation.passed) throw new Error(`Tenant isolation smoke failed: ${JSON.stringify(isolation)}`);
+const isolation = await coreRequest("/v1/dev/smoke/workspace-isolation", { method: "POST", body: "{}" });
+if (!isolation.passed) throw new Error(`Workspace isolation smoke failed: ${JSON.stringify(isolation)}`);
 
 await startLocalE2e();
 const createdProduct = await webRequest("/api/projects", {
   method: "POST",
+  headers: { "idempotency-key": `local-smoke:${randomUUID()}` },
   body: JSON.stringify({
     name: "星舰故障夜班",
     concept: "一款双人合作的太空维修游戏，玩家需要在十五分钟内分工处理火灾、电力与导航故障。",
@@ -35,15 +37,15 @@ if (!progressedProduct.jobs.some(job => job.kind === "AGENT_GENERATION" && job.s
 }
 const completedKinds = [];
 for (const jobKind of ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]) {
-  const tenantId = randomUUID();
+  const workspaceId = randomUUID();
   const projectId = randomUUID();
   const workflowId = randomUUID();
   const jobId = randomUUID();
   await coreRequest("/v1/dev/smoke/mac-e2e", {
     method: "POST",
-    body: JSON.stringify({ tenantId, projectId, workflowId, jobId, jobKind }),
+    body: JSON.stringify({ workspaceId, projectId, workflowId, jobId, jobKind }),
   });
-  const job = await waitForJob(tenantId, jobId, 20_000);
+  const job = await waitForJob(workspaceId, jobId, 20_000);
   if (job.state !== "SUCCEEDED"
     || !job.beforeReimageProof
     || !job.cleanupProof
@@ -60,7 +62,7 @@ console.log(JSON.stringify({
   macJobs: completedKinds,
   productFlow: "PROJECT_TO_MAC_E2E",
   isolationProofs: 3,
-  tenantIsolationChecks: 4,
+  workspaceIsolationChecks: 4,
 }));
 
 async function assertOk(url, label) {
@@ -86,9 +88,15 @@ async function coreRequest(path, init = {}) {
 async function webRequest(path, init = {}) {
   const response = await fetch(new URL(path, webUrl), {
     ...init,
-    headers: { "content-type": "application/json", ...init.headers },
+    headers: {
+      "content-type": "application/json",
+      ...(workspaceCookie ? { cookie: workspaceCookie } : {}),
+      ...init.headers,
+    },
     signal: AbortSignal.timeout(5_000),
   });
+  const setCookie = response.headers.get("set-cookie");
+  if (setCookie) workspaceCookie = setCookie.split(";", 1)[0];
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`Web product API returned ${response.status}: ${JSON.stringify(payload)}`);
   return payload;
@@ -109,10 +117,10 @@ async function waitForProductStage(projectId, timeout) {
   throw new Error("Timed out waiting for the product project to reach macOS E2E");
 }
 
-async function waitForJob(tenantId, jobId, timeout) {
+async function waitForJob(workspaceId, jobId, timeout) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const result = await coreRequest(`/v1/dev/smoke/mac-e2e/${tenantId}/${jobId}`);
+    const result = await coreRequest(`/v1/dev/smoke/mac-e2e/${workspaceId}/${jobId}`);
     if (["SUCCEEDED", "FAILED"].includes(result.job?.state)) return result.job;
     await new Promise(resolve => setTimeout(resolve, 250));
   }

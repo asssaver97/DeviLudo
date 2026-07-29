@@ -39,7 +39,7 @@ export class HttpSigningGrantBroker implements SigningGrantBroker {
         "idempotency-key": `${job.jobId}:signing-grant:g${job.isolationGeneration}`,
       },
       body: JSON.stringify({
-        tenantId: job.tenantId,
+        workspaceId: job.workspaceId,
         projectId: job.projectId,
         jobId: job.jobId,
         poolKind: job.poolKind,

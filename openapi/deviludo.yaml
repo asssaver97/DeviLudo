@@ -34,6 +34,49 @@ paths:
       responses:
         "201":
           description: Node registered in a fixed pool
+  /v1/session:
+    get:
+      operationId: readLocalSession
+      responses:
+        "200":
+          description: Current optional workspace selection
+  /v1/workspaces:
+    get:
+      operationId: listWorkspaces
+      responses:
+        "200":
+          description: Workspaces visible to the local operator
+    post:
+      operationId: createWorkspace
+      responses:
+        "201":
+          description: Workspace created and selected
+  /v1/session/workspace:
+    put:
+      operationId: selectWorkspace
+      responses:
+        "200":
+          description: Workspace selection persisted in an HttpOnly cookie
+    delete:
+      operationId: clearWorkspace
+      responses:
+        "200":
+          description: Workspace selection cleared
+  /v1/projects:
+    get:
+      operationId: listProjects
+      responses:
+        "200":
+          description: Projects in the selected workspace
+        "409":
+          description: A workspace has not been selected
+    post:
+      operationId: createProject
+      responses:
+        "201":
+          description: Project created; a same-name workspace is also created when none is selected
+        "424":
+          description: Global Agent configuration is required to generate a missing project name
   /v1/e2e/jobs/claim:
     post:
       operationId: claimE2eJob
