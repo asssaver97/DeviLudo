@@ -1,10 +1,10 @@
-import { json } from "@/lib/control-plane/http";
+export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return json({
-    schemaVersion: "deviludo.platform-liveness.v1",
+export function GET() {
+  return Response.json({
+    schemaVersion: "deviludo.web-liveness.v1",
+    service: "web",
     status: "ok",
-    service: "deviludo-web",
     time: new Date().toISOString(),
   }, { headers: { "cache-control": "no-store" } });
 }

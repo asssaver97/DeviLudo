@@ -1,11 +1,6 @@
 import type { Metadata } from "next";
-import { Dashboard } from "@/components/console/Dashboard";
+import { ProductDashboard } from "@/components/ProductDashboard";
 
-export const metadata: Metadata = {
-  title: "工作台",
-  description: "从游戏构想到跨平台测试与 Steam 发布的自动开发控制台。",
-};
+export const metadata: Metadata = { title: "工作台 · DeviLudo" };
 
-export default function Home() {
-  return <Dashboard />;
-}
+export default function HomePage() { return <ProductDashboard />; }

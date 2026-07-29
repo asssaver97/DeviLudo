@@ -1,6 +1,0 @@
-{
-  "schemaVersion": "deviludo.agent-worker-host-deployment.v1",
-  "environmentFile": "/etc/deviludo/agent-execution-worker.env",
-  "environmentFileDigest": "0000000000000000000000000000000000000000000000000000000000000000",
-  "receiptPath": "/var/lib/deviludo/agent-worker-deployment-receipt.json"
-}

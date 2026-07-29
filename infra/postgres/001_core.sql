@@ -1,465 +1,304 @@
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE SCHEMA IF NOT EXISTS deviludo;
 
-CREATE OR REPLACE FUNCTION deviludo.current_tenant_id()
-RETURNS uuid LANGUAGE sql STABLE PARALLEL SAFE AS $$
-  SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid
-$$;
+DO $roles$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deviludo_api') THEN
+    CREATE ROLE deviludo_api NOLOGIN NOBYPASSRLS;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deviludo_scheduler') THEN
+    CREATE ROLE deviludo_scheduler NOLOGIN NOBYPASSRLS;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deviludo_sandbox') THEN
+    CREATE ROLE deviludo_sandbox NOLOGIN NOBYPASSRLS;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deviludo_claim_executor') THEN
+    CREATE ROLE deviludo_claim_executor NOLOGIN BYPASSRLS;
+  END IF;
+  EXECUTE format(
+    'GRANT deviludo_api, deviludo_scheduler, deviludo_sandbox TO %I',
+    current_user
+  );
+END
+$roles$;
+
+CREATE SCHEMA deviludo;
+REVOKE ALL ON SCHEMA deviludo FROM PUBLIC;
+GRANT USAGE ON SCHEMA deviludo TO
+  deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
+
+CREATE TYPE deviludo.server_pool_kind AS ENUM (
+  'WEB', 'CORE', 'E2E_LINUX', 'E2E_WINDOWS', 'E2E_MACOS'
+);
+CREATE TYPE deviludo.server_os AS ENUM ('linux', 'windows', 'macos');
+CREATE TYPE deviludo.server_node_state AS ENUM (
+  'PROVISIONING', 'ACTIVE', 'DRAINING', 'DISABLED', 'REIMAGING'
+);
+CREATE TYPE deviludo.workflow_state AS ENUM (
+  'DRAFT', 'AGENT_RUNNING', 'ARTIFACT_BUILDING', 'E2E_TESTING', 'SIGNING',
+  'STEAM_PUBLISHING', 'CLEAN_INSTALL_VERIFYING', 'SUCCEEDED', 'FAILED', 'CANCELLED'
+);
+CREATE TYPE deviludo.job_kind AS ENUM (
+  'AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH',
+  'E2E_TEST', 'ARTIFACT_SIGN', 'STEAM_CLEAN_INSTALL'
+);
+CREATE TYPE deviludo.job_state AS ENUM (
+  'QUEUED', 'RUNNING', 'RETRY', 'SUCCEEDED', 'FAILED', 'CANCELLED'
+);
+CREATE TYPE deviludo.operation_state AS ENUM (
+  'REGISTERED', 'IN_PROGRESS', 'RECEIPTED', 'RECONCILIATION_REQUIRED', 'VOID'
+);
+
+CREATE TABLE deviludo.server_pools (
+  kind deviludo.server_pool_kind PRIMARY KEY,
+  operating_system deviludo.server_os NOT NULL,
+  minimum_nodes integer NOT NULL CHECK (minimum_nodes >= 0),
+  maximum_nodes integer NOT NULL CHECK (maximum_nodes >= minimum_nodes),
+  desired_nodes integer NOT NULL CHECK (desired_nodes BETWEEN minimum_nodes AND maximum_nodes),
+  capabilities text[] NOT NULL CHECK (cardinality(capabilities) > 0),
+  public_ingress boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (
+    (kind IN ('WEB', 'CORE', 'E2E_LINUX') AND operating_system = 'linux')
+    OR (kind = 'E2E_WINDOWS' AND operating_system = 'windows')
+    OR (kind = 'E2E_MACOS' AND operating_system = 'macos')
+  ),
+  CHECK (public_ingress = (kind = 'WEB'))
+);
+
+INSERT INTO deviludo.server_pools
+  (kind, operating_system, minimum_nodes, maximum_nodes, desired_nodes, capabilities, public_ingress)
+VALUES
+  ('WEB', 'linux', 1, 1, 1, ARRAY['CUSTOMER_WEB', 'STREAMING_BFF'], true),
+  ('CORE', 'linux', 1, 1, 1, ARRAY[
+    'BUSINESS_API', 'WORKFLOW_SCHEDULER', 'AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH'
+  ], false),
+  ('E2E_LINUX', 'linux', 1, 1, 1, ARRAY['E2E_TEST', 'ARTIFACT_SIGN', 'STEAM_CLEAN_INSTALL'], false),
+  ('E2E_WINDOWS', 'windows', 1, 1, 1, ARRAY['E2E_TEST', 'ARTIFACT_SIGN', 'STEAM_CLEAN_INSTALL'], false),
+  ('E2E_MACOS', 'macos', 0, 1, 0, ARRAY['E2E_TEST', 'ARTIFACT_SIGN', 'STEAM_CLEAN_INSTALL'], false);
+
+CREATE TABLE deviludo.server_nodes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  pool_kind deviludo.server_pool_kind NOT NULL REFERENCES deviludo.server_pools(kind),
+  operating_system deviludo.server_os NOT NULL,
+  state deviludo.server_node_state NOT NULL DEFAULT 'PROVISIONING',
+  capabilities text[] NOT NULL DEFAULT ARRAY[]::text[],
+  isolation_generation bigint NOT NULL DEFAULT 1 CHECK (isolation_generation > 0),
+  current_tenant_id uuid,
+  agent_installed boolean NOT NULL DEFAULT false CHECK (agent_installed = false),
+  last_heartbeat_at timestamptz,
+  last_reimage_proof_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (
+    (pool_kind IN ('WEB', 'CORE', 'E2E_LINUX') AND operating_system = 'linux')
+    OR (pool_kind = 'E2E_WINDOWS' AND operating_system = 'windows')
+    OR (pool_kind = 'E2E_MACOS' AND operating_system = 'macos')
+  )
+);
+CREATE INDEX server_nodes_pool_state ON deviludo.server_nodes(pool_kind, state);
+
+CREATE TABLE deviludo.pool_capacity_intents (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  pool_kind deviludo.server_pool_kind NOT NULL REFERENCES deviludo.server_pools(kind),
+  desired_nodes integer NOT NULL CHECK (desired_nodes BETWEEN 0 AND 1),
+  reason text NOT NULL CHECK (length(reason) BETWEEN 1 AND 200),
+  operation_key text NOT NULL UNIQUE CHECK (length(operation_key) BETWEEN 8 AND 300),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+INSERT INTO deviludo.pool_capacity_intents(pool_kind, desired_nodes, reason, operation_key)
+SELECT kind, desired_nodes, 'P0_BASELINE', 'p0-baseline:' || kind::text
+FROM deviludo.server_pools;
 
 CREATE TABLE deviludo.tenants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  slug text NOT NULL UNIQUE,
-  name text NOT NULL,
-  status text NOT NULL CHECK (status IN ('ACTIVE', 'SUSPENDED')) DEFAULT 'ACTIVE',
-  version integer NOT NULL DEFAULT 1,
-  created_at timestamptz NOT NULL DEFAULT now()
+  name text NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE deviludo.projects (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  slug text NOT NULL,
-  name text NOT NULL,
-  github_installation_id text,
-  github_repository_node_id text,
-  default_branch text NOT NULL DEFAULT 'main',
-  steam_app_id text,
-  version integer NOT NULL DEFAULT 1,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, slug)
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  name text NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id)
 );
 
-CREATE TABLE deviludo.github_installations (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  installation_id bigint NOT NULL CHECK (installation_id > 0),
-  account_node_id text NOT NULL,
-  account_login text NOT NULL,
-  repository_selection text NOT NULL CHECK (repository_selection IN ('all', 'selected')),
-  permissions jsonb NOT NULL,
-  status text NOT NULL CHECK (status IN ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED', 'REVOKED')),
-  verified_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, installation_id)
+CREATE TABLE deviludo.agent_installations (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid,
+  agent_kind text NOT NULL CHECK (length(agent_kind) BETWEEN 1 AND 80),
+  exact_version text NOT NULL CHECK (length(exact_version) BETWEEN 1 AND 120),
+  image_digest text NOT NULL CHECK (image_digest ~ '^sha256:[0-9a-f]{64}$'),
+  execution_pool deviludo.server_pool_kind NOT NULL DEFAULT 'CORE' CHECK (execution_pool = 'CORE'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id)
 );
 
--- Raw OAuth state, PKCE verifiers, authorization codes and user access tokens
--- are never persisted here. State/session values are SHA-256 digests; the
--- verifier is a short-lived Vault reference consumed exactly once.
-CREATE TABLE deviludo.github_installation_authorizations (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  state_digest text NOT NULL UNIQUE CHECK (state_digest ~ '^[a-f0-9]{64}$'),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  user_subject text NOT NULL,
-  session_binding_digest text NOT NULL CHECK (session_binding_digest ~ '^[a-f0-9]{64}$'),
-  stage text NOT NULL CHECK (stage IN ('INSTALL', 'OAUTH')),
-  installation_id bigint CHECK (installation_id > 0),
-  pkce_verifier_secret_ref text,
-  return_path text NOT NULL,
-  status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'COMPLETED', 'FAILED', 'EXPIRED')),
-  claim_token uuid,
-  claim_expires_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NOT NULL,
-  completed_at timestamptz,
-  failure_code text,
-  CHECK ((stage = 'INSTALL' AND installation_id IS NULL AND pkce_verifier_secret_ref IS NULL)
-    OR (stage = 'OAUTH' AND installation_id IS NOT NULL AND pkce_verifier_secret_ref IS NOT NULL)),
-  CHECK (return_path = '/settings/connections'
-    OR return_path ~ '^/projects/[A-Za-z0-9][A-Za-z0-9._-]{0,99}/settings/connections$')
+CREATE TABLE deviludo.workflow_instances (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  state deviludo.workflow_state NOT NULL DEFAULT 'DRAFT',
+  version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
+  state_data jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(state_data) = 'object'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id)
 );
 
-CREATE TABLE deviludo.github_repository_bindings (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL UNIQUE REFERENCES deviludo.projects(id),
-  github_installation_id uuid NOT NULL REFERENCES deviludo.github_installations(id),
-  repository_id bigint NOT NULL CHECK (repository_id > 0),
-  repository_node_id text NOT NULL,
-  owner_name text NOT NULL,
-  repository_name text NOT NULL,
-  default_branch text NOT NULL,
-  status text NOT NULL CHECK (status IN ('ACTIVE', 'REVOKED', 'MISSING_PERMISSION')),
-  bound_at timestamptz NOT NULL DEFAULT now(),
-  version integer NOT NULL DEFAULT 1,
-  UNIQUE (tenant_id, repository_node_id)
+CREATE TABLE deviludo.workflow_events (
+  tenant_id uuid NOT NULL,
+  event_id bigint GENERATED ALWAYS AS IDENTITY,
+  workflow_id uuid NOT NULL,
+  event_kind text NOT NULL CHECK (length(event_kind) BETWEEN 1 AND 120),
+  event_data jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(event_data) = 'object'),
+  idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, event_id),
+  UNIQUE (tenant_id, workflow_id, idempotency_key),
+  FOREIGN KEY (tenant_id, workflow_id)
+    REFERENCES deviludo.workflow_instances(tenant_id, id)
 );
 
-CREATE TABLE deviludo.immutable_revisions (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid REFERENCES deviludo.projects(id),
-  aggregate_type text NOT NULL CHECK (aggregate_type IN (
-    'GAME_SPEC', 'AGENT_VERSION', 'WORKER_IMAGE', 'INSTALLATION',
-    'PROVIDER', 'CREDENTIAL_BINDING', 'AGENT_PROFILE', 'TEST_PLAN'
-  )),
-  aggregate_id uuid NOT NULL,
-  revision integer NOT NULL CHECK (revision > 0),
-  state text NOT NULL,
-  payload jsonb NOT NULL,
-  payload_digest text NOT NULL CHECK (payload_digest ~ '^[a-f0-9]{64}$'),
-  previous_revision_id uuid REFERENCES deviludo.immutable_revisions(id),
-  created_by text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, aggregate_type, aggregate_id, revision),
-  UNIQUE (tenant_id, aggregate_type, payload_digest)
+CREATE TABLE deviludo.jobs (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  workflow_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  kind deviludo.job_kind NOT NULL,
+  pool_kind deviludo.server_pool_kind NOT NULL,
+  target_operating_system deviludo.server_os,
+  required_capabilities text[] NOT NULL CHECK (cardinality(required_capabilities) > 0),
+  exclusive boolean NOT NULL,
+  isolation_generation bigint NOT NULL DEFAULT 1 CHECK (isolation_generation > 0),
+  state deviludo.job_state NOT NULL DEFAULT 'QUEUED',
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
+  receipt jsonb CHECK (receipt IS NULL OR jsonb_typeof(receipt) = 'object'),
+  idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
+  priority integer NOT NULL DEFAULT 100 CHECK (priority BETWEEN 0 AND 1000),
+  attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+  max_attempts integer NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 20),
+  available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  lease_owner text,
+  lease_token uuid,
+  lease_expires_at timestamptz,
+  heartbeat_at timestamptz,
+  fencing_token bigint NOT NULL DEFAULT 0 CHECK (fencing_token >= 0),
+  last_error text,
+  before_reimage_proof text,
+  cleanup_proof text,
+  after_reimage_proof text,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id),
+  UNIQUE (tenant_id, idempotency_key),
+  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id),
+  FOREIGN KEY (tenant_id, workflow_id) REFERENCES deviludo.workflow_instances(tenant_id, id),
+  CHECK (
+    (
+      kind IN ('AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH')
+      AND pool_kind = 'CORE'
+      AND target_operating_system IS NULL
+      AND exclusive = false
+    )
+    OR (
+      kind IN ('E2E_TEST', 'ARTIFACT_SIGN', 'STEAM_CLEAN_INSTALL')
+      AND exclusive = true
+      AND (
+        (pool_kind = 'E2E_LINUX' AND target_operating_system = 'linux')
+        OR (pool_kind = 'E2E_WINDOWS' AND target_operating_system = 'windows')
+        OR (pool_kind = 'E2E_MACOS' AND target_operating_system = 'macos')
+      )
+    )
+  ),
+  CHECK (
+    (state IN ('QUEUED', 'RETRY', 'SUCCEEDED', 'FAILED', 'CANCELLED')
+      AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+    OR
+    (state = 'RUNNING'
+      AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+  )
+);
+CREATE INDEX jobs_claim_order
+  ON deviludo.jobs(pool_kind, state, available_at, priority DESC, created_at);
+CREATE UNIQUE INDEX jobs_one_active_lease_per_executor
+  ON deviludo.jobs(lease_owner) WHERE state = 'RUNNING';
+
+CREATE TABLE deviludo.external_signals (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  workflow_id uuid NOT NULL,
+  signal_kind text NOT NULL CHECK (length(signal_kind) BETWEEN 1 AND 120),
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
+  idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id),
+  UNIQUE (tenant_id, workflow_id, idempotency_key),
+  FOREIGN KEY (tenant_id, workflow_id)
+    REFERENCES deviludo.workflow_instances(tenant_id, id)
 );
 
--- Deliberately contains no credential plaintext. `secret_ref` names a Vault
--- version; fingerprint is a one-way HMAC used only to identify duplicates.
-CREATE TABLE deviludo.credential_versions (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid REFERENCES deviludo.projects(id),
-  binding_id uuid NOT NULL,
-  secret_ref text NOT NULL,
-  fingerprint text NOT NULL,
-  masked_value text NOT NULL,
-  status text NOT NULL CHECK (status IN ('ACTIVE', 'ROTATING', 'REVOKED')),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  rotated_at timestamptz,
-  revoked_at timestamptz,
-  last_used_at timestamptz,
-  UNIQUE (tenant_id, binding_id, fingerprint)
+CREATE TABLE deviludo.operation_receipts (
+  tenant_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  workflow_id uuid NOT NULL,
+  job_id uuid NOT NULL,
+  operation_kind text NOT NULL CHECK (length(operation_kind) BETWEEN 1 AND 120),
+  idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
+  state deviludo.operation_state NOT NULL,
+  request jsonb NOT NULL CHECK (jsonb_typeof(request) = 'object'),
+  receipt jsonb CHECK (receipt IS NULL OR jsonb_typeof(receipt) = 'object'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (tenant_id, id),
+  UNIQUE (tenant_id, idempotency_key),
+  FOREIGN KEY (tenant_id) REFERENCES deviludo.tenants(id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES deviludo.projects(tenant_id, id),
+  FOREIGN KEY (tenant_id, workflow_id) REFERENCES deviludo.workflow_instances(tenant_id, id),
+  FOREIGN KEY (tenant_id, job_id) REFERENCES deviludo.jobs(tenant_id, id)
 );
 
-CREATE TABLE deviludo.agent_runs (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  iteration_id uuid NOT NULL,
-  idempotency_key text NOT NULL,
-  state text NOT NULL,
-  profile_revision_id uuid NOT NULL REFERENCES deviludo.immutable_revisions(id),
-  installation_id uuid NOT NULL REFERENCES deviludo.immutable_revisions(id),
-  image_digest text NOT NULL,
-  adapter_version text NOT NULL,
-  exact_agent_version text NOT NULL,
-  provider_revision_id uuid NOT NULL REFERENCES deviludo.immutable_revisions(id),
-  model text NOT NULL,
-  credential_version_id uuid NOT NULL REFERENCES deviludo.immutable_revisions(id),
-  configuration_lock jsonb NOT NULL,
-  resolution_digest text NOT NULL CHECK (resolution_digest ~ '^[a-f0-9]{64}$'),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, idempotency_key)
+CREATE TABLE deviludo.tenant_claim_fairness (
+  tenant_id uuid PRIMARY KEY REFERENCES deviludo.tenants(id),
+  last_claimed_at timestamptz NOT NULL
 );
 
-CREATE TABLE deviludo.e2e_attempts (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  run_id uuid NOT NULL REFERENCES deviludo.agent_runs(id),
-  attempt_number integer NOT NULL CHECK (attempt_number > 0),
-  commit_sha text NOT NULL CHECK (commit_sha ~ '^[a-f0-9]{40}$'),
-  source_digest text NOT NULL CHECK (source_digest ~ '^[a-f0-9]{64}$'),
-  binding jsonb NOT NULL,
-  target_matrix text[] NOT NULL,
-  state text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (run_id, attempt_number)
-);
+CREATE OR REPLACE FUNCTION deviludo.current_tenant_id()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+  SELECT nullif(current_setting('app.tenant_id', true), '')::uuid
+$$;
 
--- Runners are platform infrastructure identities rather than tenant-owned
--- records. Every write still lands in a tenant-bound lease/event row below.
-CREATE TABLE deviludo.runner_registrations (
-  id text PRIMARY KEY,
-  spiffe_id text NOT NULL UNIQUE CHECK (spiffe_id LIKE 'spiffe://%'),
-  certificate_fingerprint text NOT NULL UNIQUE CHECK (certificate_fingerprint ~ '^[a-f0-9]{64}$'),
-  certificate_serial text NOT NULL,
-  certificate_not_after timestamptz NOT NULL,
-  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
-  architecture text NOT NULL CHECK (architecture IN ('x86_64', 'arm64')),
-  capability_digest text NOT NULL CHECK (capability_digest ~ '^[a-f0-9]{64}$'),
-  capabilities jsonb NOT NULL,
-  state text NOT NULL CHECK (state IN ('ONLINE', 'DRAINING', 'OFFLINE', 'QUARANTINED')),
-  registered_at timestamptz NOT NULL,
-  last_seen_at timestamptz NOT NULL
-);
-
-CREATE TABLE deviludo.e2e_platform_leases (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  attempt_id uuid NOT NULL REFERENCES deviludo.e2e_attempts(id),
-  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
-  runner_id text NOT NULL REFERENCES deviludo.runner_registrations(id),
-  fencing_token bigint NOT NULL CHECK (fencing_token > 0),
-  lease_expires_at timestamptz NOT NULL,
-  last_seq_no bigint NOT NULL DEFAULT 0,
-  cursor jsonb NOT NULL,
-  job_digest text NOT NULL CHECK (job_digest ~ '^[a-f0-9]{64}$'),
-  job_signature text NOT NULL,
-  evidence_manifest_digest text CHECK (evidence_manifest_digest ~ '^[a-f0-9]{64}$'),
-  state text NOT NULL CHECK (state IN ('LEASED', 'RUNNING', 'PASSED', 'FAILED', 'EXPIRED', 'INVALIDATED')),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (attempt_id, platform, fencing_token)
-);
-
-CREATE TABLE deviludo.platform_runner_events (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  attempt_id uuid NOT NULL REFERENCES deviludo.e2e_attempts(id),
-  platform_lease_id uuid NOT NULL REFERENCES deviludo.e2e_platform_leases(id),
-  runner_id text NOT NULL REFERENCES deviludo.runner_registrations(id),
-  platform text NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
-  fencing_token bigint NOT NULL,
-  seq_no bigint NOT NULL CHECK (seq_no > 0),
-  commit_sha text NOT NULL,
-  source_digest text NOT NULL,
-  event_type text NOT NULL,
-  status text NOT NULL,
-  artifact_digest text,
-  occurred_at timestamptz NOT NULL,
-  received_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (platform_lease_id, seq_no)
-);
-
-CREATE TABLE deviludo.scm_operation_claims (
-  operation_key text PRIMARY KEY,
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  operation text NOT NULL CHECK (operation IN ('PUBLISH_CANDIDATE', 'MERGE_ACCEPTED_CANDIDATE')),
-  request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
-  claim_token uuid NOT NULL,
-  claim_expires_at timestamptz NOT NULL,
-  response jsonb,
-  authorized_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz
-);
-
-CREATE TABLE deviludo.github_candidate_receipts (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  run_id uuid NOT NULL REFERENCES deviludo.agent_runs(id),
-  attempt_id text NOT NULL UNIQUE,
-  spec_revision_id uuid NOT NULL REFERENCES deviludo.immutable_revisions(id),
-  repository_binding_id uuid NOT NULL REFERENCES deviludo.github_repository_bindings(id),
-  artifact_digest text NOT NULL CHECK (artifact_digest ~ '^[a-f0-9]{64}$'),
-  base_commit_sha text NOT NULL CHECK (base_commit_sha ~ '^[a-f0-9]{40}$'),
-  candidate_branch text NOT NULL,
-  candidate_commit_sha text NOT NULL CHECK (candidate_commit_sha ~ '^[a-f0-9]{40}$'),
-  source_digest text NOT NULL CHECK (source_digest ~ '^[a-f0-9]{64}$'),
-  pull_request_number bigint NOT NULL CHECK (pull_request_number > 0),
-  pull_request_node_id text NOT NULL,
-  pull_request_url text NOT NULL,
-  receipt jsonb NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (repository_binding_id, pull_request_number)
-);
-
-CREATE TABLE deviludo.github_merge_receipts (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  candidate_receipt_id uuid NOT NULL UNIQUE REFERENCES deviludo.github_candidate_receipts(id),
-  acceptance_nonce text NOT NULL,
-  evidence_bundle_digest text NOT NULL CHECK (evidence_bundle_digest ~ '^[a-f0-9]{64}$'),
-  candidate_commit_sha text NOT NULL CHECK (candidate_commit_sha ~ '^[a-f0-9]{40}$'),
-  merge_commit_sha text NOT NULL CHECK (merge_commit_sha ~ '^[a-f0-9]{40}$'),
-  default_branch_head_sha text NOT NULL CHECK (default_branch_head_sha ~ '^[a-f0-9]{40}$'),
-  requires_fresh_main_snapshot boolean NOT NULL,
-  receipt jsonb NOT NULL,
-  merged_at timestamptz NOT NULL,
-  UNIQUE (tenant_id, acceptance_nonce)
-);
-
-CREATE TABLE deviludo.evidence_bundles (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  attempt_id uuid NOT NULL REFERENCES deviludo.e2e_attempts(id),
-  commit_sha text NOT NULL,
-  source_digest text NOT NULL,
-  binding jsonb NOT NULL,
-  manifest jsonb NOT NULL,
-  bundle_digest text NOT NULL UNIQUE,
-  object_key text NOT NULL,
-  status text NOT NULL CHECK (status IN ('PASSED', 'FAILED')),
-  invalidated_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE deviludo.steam_releases (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  main_commit_sha text NOT NULL CHECK (main_commit_sha ~ '^[a-f0-9]{40}$'),
-  evidence_bundle_id uuid NOT NULL REFERENCES deviludo.evidence_bundles(id),
-  steam_app_id text NOT NULL,
-  steam_session_secret_ref text NOT NULL,
-  mfa_approval_id uuid NOT NULL,
-  state text NOT NULL,
-  external_gate text NOT NULL DEFAULT 'NONE',
-  version integer NOT NULL DEFAULT 1,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE deviludo.steam_build_sessions (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  account_id text NOT NULL,
-  account_name text NOT NULL,
-  config_vdf_secret_ref text NOT NULL,
-  credential_version_id uuid NOT NULL REFERENCES deviludo.credential_versions(id),
-  allowed_app_ids text[] NOT NULL,
-  permissions text[] NOT NULL,
-  state text NOT NULL CHECK (state IN ('ACTIVE', 'REVOKED', 'EXPIRED')),
-  verified_at timestamptz NOT NULL,
-  expires_at timestamptz NOT NULL,
-  revoked_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, account_id, credential_version_id),
-  CHECK (permissions @> ARRAY['EditAppMetadata', 'PublishAppChanges']::text[])
-);
-
-CREATE TABLE deviludo.steam_publish_claims (
-  key text PRIMARY KEY,
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  release_id uuid NOT NULL REFERENCES deviludo.steam_releases(id),
-  request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
-  claim_token uuid NOT NULL,
-  claim_expires_at timestamptz NOT NULL,
-  response jsonb,
-  authorized_at timestamptz NOT NULL,
-  completed_at timestamptz
-);
-
-CREATE TABLE deviludo.steam_build_receipts (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id uuid NOT NULL REFERENCES deviludo.tenants(id),
-  project_id uuid NOT NULL REFERENCES deviludo.projects(id),
-  release_id uuid NOT NULL UNIQUE REFERENCES deviludo.steam_releases(id),
-  steam_app_id text NOT NULL CHECK (steam_app_id ~ '^[0-9]+$'),
-  build_id text NOT NULL CHECK (build_id ~ '^[0-9]+$'),
-  main_commit_sha text NOT NULL CHECK (main_commit_sha ~ '^[a-f0-9]{40}$'),
-  source_digest text NOT NULL CHECK (source_digest ~ '^[a-f0-9]{64}$'),
-  evidence_bundle_digest text NOT NULL CHECK (evidence_bundle_digest ~ '^[a-f0-9]{64}$'),
-  beta_branch text NOT NULL CHECK (beta_branch ~ '^[a-z0-9][a-z0-9_-]{2,39}$' AND beta_branch NOT IN ('default', 'public')),
-  depot_manifest_ids jsonb NOT NULL,
-  install_attempts jsonb NOT NULL,
-  steam_install_evidence_bundle_digest text CHECK (steam_install_evidence_bundle_digest ~ '^[a-f0-9]{64}$'),
-  state text NOT NULL CHECK (state IN ('INSTALL_TESTING', 'EXTERNAL_APPROVAL_REQUIRED')),
-  uploaded_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (steam_app_id, build_id)
-);
-
-CREATE TABLE deviludo.audit_events (
-  sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  id uuid NOT NULL UNIQUE,
-  tenant_id uuid REFERENCES deviludo.tenants(id),
-  project_id uuid REFERENCES deviludo.projects(id),
-  actor jsonb NOT NULL,
-  action text NOT NULL,
-  resource_type text NOT NULL,
-  resource_id text NOT NULL,
-  request_id text NOT NULL,
-  idempotency_key text,
-  before_digest text,
-  after_digest text,
-  metadata jsonb NOT NULL,
-  previous_event_hash text,
-  event_hash text NOT NULL UNIQUE,
-  occurred_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE OR REPLACE FUNCTION deviludo.reject_mutation()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '55000';
-END $$;
-
-CREATE TRIGGER immutable_revisions_append_only
-BEFORE UPDATE OR DELETE ON deviludo.immutable_revisions
-FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
-
-CREATE TRIGGER audit_events_append_only
-BEFORE UPDATE OR DELETE ON deviludo.audit_events
-FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
-
-CREATE TRIGGER github_candidate_receipts_append_only
-BEFORE UPDATE OR DELETE ON deviludo.github_candidate_receipts
-FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
-
-CREATE TRIGGER github_merge_receipts_append_only
-BEFORE UPDATE OR DELETE ON deviludo.github_merge_receipts
-FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
-
-CREATE OR REPLACE FUNCTION deviludo.protect_steam_build_receipt()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF ROW(NEW.tenant_id, NEW.project_id, NEW.release_id, NEW.steam_app_id,
-         NEW.build_id, NEW.main_commit_sha, NEW.source_digest,
-         NEW.evidence_bundle_digest, NEW.beta_branch, NEW.depot_manifest_ids,
-         NEW.install_attempts, NEW.uploaded_at, NEW.created_at)
-     IS DISTINCT FROM
-     ROW(OLD.tenant_id, OLD.project_id, OLD.release_id, OLD.steam_app_id,
-         OLD.build_id, OLD.main_commit_sha, OLD.source_digest,
-         OLD.evidence_bundle_digest, OLD.beta_branch, OLD.depot_manifest_ids,
-         OLD.install_attempts, OLD.uploaded_at, OLD.created_at)
-     OR OLD.state <> 'INSTALL_TESTING'
-     OR NEW.state <> 'EXTERNAL_APPROVAL_REQUIRED'
-     OR OLD.steam_install_evidence_bundle_digest IS NOT NULL
-     OR NEW.steam_install_evidence_bundle_digest IS NULL THEN
-    RAISE EXCEPTION 'steam build receipt binding is immutable' USING ERRCODE = '55000';
-  END IF;
-  RETURN NEW;
-END $$;
-
-CREATE TRIGGER steam_build_receipt_binding_immutable
-BEFORE UPDATE ON deviludo.steam_build_receipts
-FOR EACH ROW EXECUTE FUNCTION deviludo.protect_steam_build_receipt();
-
-CREATE TRIGGER steam_build_receipt_no_delete
-BEFORE DELETE ON deviludo.steam_build_receipts
-FOR EACH ROW EXECUTE FUNCTION deviludo.reject_mutation();
-
-CREATE OR REPLACE FUNCTION deviludo.protect_run_configuration()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF ROW(NEW.profile_revision_id, NEW.installation_id, NEW.image_digest,
-         NEW.adapter_version, NEW.exact_agent_version, NEW.provider_revision_id,
-         NEW.model, NEW.credential_version_id, NEW.configuration_lock,
-         NEW.resolution_digest)
-     IS DISTINCT FROM
-     ROW(OLD.profile_revision_id, OLD.installation_id, OLD.image_digest,
-         OLD.adapter_version, OLD.exact_agent_version, OLD.provider_revision_id,
-         OLD.model, OLD.credential_version_id, OLD.configuration_lock,
-         OLD.resolution_digest) THEN
-    RAISE EXCEPTION 'agent run configuration lock is immutable' USING ERRCODE = '55000';
-  END IF;
-  RETURN NEW;
-END $$;
-
-CREATE TRIGGER agent_run_configuration_lock
-BEFORE UPDATE ON deviludo.agent_runs
-FOR EACH ROW EXECUTE FUNCTION deviludo.protect_run_configuration();
-
--- Tenant isolation. The API opens every transaction with
--- SET LOCAL app.tenant_id = '<authorized tenant uuid>'. The owner role is never
--- used by the application so FORCE RLS cannot be bypassed accidentally.
 ALTER TABLE deviludo.tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE deviludo.tenants FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_self ON deviludo.tenants
+CREATE POLICY tenant_isolation ON deviludo.tenants
   USING (id = deviludo.current_tenant_id())
   WITH CHECK (id = deviludo.current_tenant_id());
 
-DO $$
-DECLARE table_name text;
+DO $rls$
+DECLARE
+  table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
-    'projects', 'github_installations', 'github_installation_authorizations', 'github_repository_bindings',
-    'immutable_revisions', 'agent_runs', 'e2e_attempts',
-    'credential_versions', 'e2e_platform_leases', 'platform_runner_events', 'evidence_bundles',
-    'scm_operation_claims', 'github_candidate_receipts', 'github_merge_receipts',
-    'steam_releases', 'steam_build_sessions', 'steam_publish_claims', 'steam_build_receipts', 'audit_events'
-  ] LOOP
+    'projects', 'agent_installations', 'workflow_instances', 'workflow_events',
+    'jobs', 'external_signals', 'operation_receipts', 'tenant_claim_fairness'
+  ]
+  LOOP
     EXECUTE format('ALTER TABLE deviludo.%I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('ALTER TABLE deviludo.%I FORCE ROW LEVEL SECURITY', table_name);
     EXECUTE format(
@@ -467,23 +306,471 @@ BEGIN
       table_name
     );
   END LOOP;
-END $$;
+END
+$rls$;
 
-CREATE INDEX agent_runs_project_state_idx ON deviludo.agent_runs (tenant_id, project_id, state);
-CREATE INDEX e2e_attempt_state_idx ON deviludo.e2e_attempts (state, created_at);
-CREATE INDEX e2e_platform_lease_idx ON deviludo.e2e_platform_leases (state, lease_expires_at);
-CREATE INDEX e2e_platform_runner_idx ON deviludo.e2e_platform_leases (runner_id, state, lease_expires_at);
-CREATE INDEX github_installation_status_idx ON deviludo.github_installations (tenant_id, status);
-CREATE INDEX github_authorization_principal_status_idx ON deviludo.github_installation_authorizations (tenant_id, user_subject, status);
-CREATE INDEX github_authorization_expiry_idx ON deviludo.github_installation_authorizations (expires_at, status);
-CREATE INDEX github_repository_installation_idx ON deviludo.github_repository_bindings (github_installation_id, status);
-CREATE INDEX scm_operation_claim_idx ON deviludo.scm_operation_claims (tenant_id, project_id, claim_expires_at);
-CREATE INDEX github_candidate_project_commit_idx ON deviludo.github_candidate_receipts (project_id, candidate_commit_sha);
-CREATE INDEX github_merge_project_commit_idx ON deviludo.github_merge_receipts (project_id, merge_commit_sha);
-CREATE INDEX evidence_commit_idx ON deviludo.evidence_bundles (tenant_id, project_id, commit_sha);
-CREATE INDEX steam_build_session_state_idx ON deviludo.steam_build_sessions (tenant_id, state, expires_at);
-CREATE INDEX steam_publish_active_claim_idx ON deviludo.steam_publish_claims (tenant_id, project_id, claim_expires_at);
-CREATE INDEX steam_build_receipt_project_state_idx ON deviludo.steam_build_receipts (project_id, state);
-CREATE INDEX audit_tenant_time_idx ON deviludo.audit_events (tenant_id, occurred_at DESC);
+CREATE OR REPLACE FUNCTION deviludo.required_capabilities(p_kind deviludo.job_kind)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+  SELECT CASE p_kind
+    WHEN 'AGENT_GENERATION' THEN ARRAY['MICROVM', 'NETWORK_POLICY']
+    WHEN 'ARTIFACT_BUILD' THEN ARRAY['RESTRICTED_CONTAINER', 'BUILD_TOOLCHAIN']
+    WHEN 'STEAM_PUBLISH' THEN ARRAY['RESTRICTED_CONTAINER', 'STEAMCMD']
+    WHEN 'E2E_TEST' THEN ARRAY['GAME_RUNTIME', 'TRUSTED_REIMAGE']
+    WHEN 'ARTIFACT_SIGN' THEN ARRAY['SIGNING', 'HSM', 'TRUSTED_REIMAGE']
+    WHEN 'STEAM_CLEAN_INSTALL' THEN ARRAY['STEAM_CLIENT', 'TRUSTED_REIMAGE']
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION deviludo.enqueue_job(
+  p_tenant_id uuid,
+  p_workflow_id uuid,
+  p_project_id uuid,
+  p_kind deviludo.job_kind,
+  p_operating_system deviludo.server_os,
+  p_idempotency_key text,
+  p_payload jsonb DEFAULT '{}'::jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  v_pool deviludo.server_pool_kind;
+  v_id uuid;
+BEGIN
+  v_pool := CASE
+    WHEN p_kind IN ('AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH') THEN 'CORE'
+    WHEN p_operating_system = 'linux' THEN 'E2E_LINUX'
+    WHEN p_operating_system = 'windows' THEN 'E2E_WINDOWS'
+    WHEN p_operating_system = 'macos' THEN 'E2E_MACOS'
+  END;
+  IF v_pool IS NULL THEN RAISE EXCEPTION 'invalid fixed job placement'; END IF;
+  INSERT INTO deviludo.jobs (
+    tenant_id, workflow_id, project_id, kind, pool_kind, target_operating_system,
+    required_capabilities, exclusive, idempotency_key, payload
+  )
+  VALUES (
+    p_tenant_id, p_workflow_id, p_project_id, p_kind, v_pool,
+    CASE WHEN v_pool = 'CORE' THEN NULL ELSE p_operating_system END,
+    deviludo.required_capabilities(p_kind), v_pool <> 'CORE', p_idempotency_key, p_payload
+  )
+  ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+    SET updated_at = deviludo.jobs.updated_at
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION deviludo.claim_job(
+  p_executor_id text,
+  p_pool_kind deviludo.server_pool_kind,
+  p_lease_seconds integer
+)
+RETURNS TABLE ("jobId" uuid, "tenantId" uuid, "leaseToken" uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  candidate deviludo.jobs%ROWTYPE;
+  next_token uuid;
+BEGIN
+  IF length(p_executor_id) NOT BETWEEN 3 AND 200
+    OR p_lease_seconds NOT BETWEEN 15 AND 600
+    OR p_pool_kind IN ('WEB')
+  THEN
+    RAISE EXCEPTION 'invalid job claim';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM deviludo.jobs
+    WHERE lease_owner = p_executor_id AND state = 'RUNNING'
+  ) THEN RETURN; END IF;
+
+  SELECT job.*
+    INTO candidate
+    FROM deviludo.jobs job
+    LEFT JOIN deviludo.tenant_claim_fairness fairness
+      ON fairness.tenant_id = job.tenant_id
+   WHERE job.pool_kind = p_pool_kind
+     AND job.state IN ('QUEUED', 'RETRY')
+     AND job.available_at <= clock_timestamp()
+     AND NOT EXISTS (
+       SELECT 1
+         FROM deviludo.jobs prior
+        WHERE prior.tenant_id = job.tenant_id
+          AND prior.pool_kind = job.pool_kind
+          AND prior.state IN ('QUEUED', 'RETRY')
+          AND prior.available_at <= clock_timestamp()
+          AND (
+            prior.priority > job.priority
+            OR (
+              prior.priority = job.priority
+              AND (prior.created_at, prior.id) < (job.created_at, job.id)
+            )
+          )
+     )
+   ORDER BY fairness.last_claimed_at ASC NULLS FIRST, job.priority DESC, job.created_at, job.id
+   FOR UPDATE OF job SKIP LOCKED
+   LIMIT 1;
+
+  IF candidate.id IS NULL THEN RETURN; END IF;
+  next_token := gen_random_uuid();
+  UPDATE deviludo.jobs
+     SET state = 'RUNNING',
+         attempt = attempt + 1,
+         lease_owner = p_executor_id,
+         lease_token = next_token,
+         lease_expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds),
+         heartbeat_at = clock_timestamp(),
+         fencing_token = fencing_token + 1,
+         updated_at = clock_timestamp()
+   WHERE tenant_id = candidate.tenant_id AND id = candidate.id;
+  INSERT INTO deviludo.tenant_claim_fairness(tenant_id, last_claimed_at)
+  VALUES (candidate.tenant_id, clock_timestamp())
+  ON CONFLICT (tenant_id) DO UPDATE SET last_claimed_at = EXCLUDED.last_claimed_at;
+  RETURN QUERY SELECT candidate.id, candidate.tenant_id, next_token;
+END
+$$;
+ALTER FUNCTION deviludo.claim_job(text, deviludo.server_pool_kind, integer)
+  OWNER TO deviludo_claim_executor;
+
+CREATE OR REPLACE FUNCTION deviludo.accept_workflow_signal(
+  p_workflow_id uuid,
+  p_signal_kind text,
+  p_idempotency_key text,
+  p_payload jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  workflow deviludo.workflow_instances%ROWTYPE;
+  inserted_id uuid;
+BEGIN
+  SELECT * INTO workflow
+    FROM deviludo.workflow_instances
+   WHERE id = p_workflow_id
+   FOR UPDATE;
+  IF workflow.id IS NULL THEN RAISE EXCEPTION 'workflow not found'; END IF;
+  INSERT INTO deviludo.external_signals(
+    tenant_id, workflow_id, signal_kind, payload, idempotency_key
+  )
+  VALUES (
+    workflow.tenant_id, workflow.id, p_signal_kind, p_payload, p_idempotency_key
+  )
+  ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING
+  RETURNING id INTO inserted_id;
+  IF inserted_id IS NULL THEN RETURN false; END IF;
+
+  INSERT INTO deviludo.workflow_events(
+    tenant_id, workflow_id, event_kind, event_data, idempotency_key
+  )
+  VALUES (
+    workflow.tenant_id, workflow.id, p_signal_kind, p_payload, 'signal:' || p_idempotency_key
+  );
+
+  IF p_signal_kind = 'SPEC_APPROVED' AND workflow.state = 'DRAFT' THEN
+    UPDATE deviludo.workflow_instances
+       SET state = 'AGENT_RUNNING', version = version + 1, updated_at = clock_timestamp()
+     WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+    PERFORM deviludo.enqueue_job(
+      workflow.tenant_id, workflow.id, workflow.project_id, 'AGENT_GENERATION', NULL,
+      workflow.id::text || ':agent', '{}'::jsonb
+    );
+  ELSIF p_signal_kind = 'CANCEL_REQUESTED' THEN
+    UPDATE deviludo.workflow_instances
+       SET state = 'CANCELLED', version = version + 1, updated_at = clock_timestamp()
+     WHERE tenant_id = workflow.tenant_id AND id = workflow.id
+       AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED');
+    UPDATE deviludo.jobs
+       SET state = 'CANCELLED',
+           lease_owner = NULL,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           heartbeat_at = NULL,
+           fencing_token = fencing_token + 1,
+           updated_at = clock_timestamp()
+     WHERE tenant_id = workflow.tenant_id AND workflow_id = workflow.id
+       AND state IN ('QUEUED', 'RETRY', 'RUNNING');
+  END IF;
+  RETURN true;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION deviludo.complete_job(
+  p_job_id uuid,
+  p_lease_token uuid,
+  p_fencing_token bigint,
+  p_isolation_generation bigint,
+  p_receipt jsonb,
+  p_before_reimage_proof text,
+  p_cleanup_proof text,
+  p_after_reimage_proof text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  job deviludo.jobs%ROWTYPE;
+  workflow deviludo.workflow_instances%ROWTYPE;
+  platform deviludo.server_os;
+BEGIN
+  SELECT * INTO job
+    FROM deviludo.jobs
+   WHERE id = p_job_id
+     AND state = 'RUNNING'
+     AND lease_token = p_lease_token
+     AND fencing_token = p_fencing_token
+     AND isolation_generation = p_isolation_generation
+   FOR UPDATE;
+  IF job.id IS NULL THEN RETURN false; END IF;
+  IF job.exclusive AND (
+    length(coalesce(p_before_reimage_proof, '')) < 16
+    OR length(coalesce(p_cleanup_proof, '')) < 16
+    OR length(coalesce(p_after_reimage_proof, '')) < 16
+  ) THEN RAISE EXCEPTION 'trusted reimage and cleanup proofs are required'; END IF;
+
+  UPDATE deviludo.jobs
+     SET state = 'SUCCEEDED', receipt = p_receipt,
+         before_reimage_proof = p_before_reimage_proof,
+         cleanup_proof = p_cleanup_proof,
+         after_reimage_proof = p_after_reimage_proof,
+         lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+         heartbeat_at = NULL, updated_at = clock_timestamp()
+   WHERE tenant_id = job.tenant_id AND id = job.id;
+  UPDATE deviludo.operation_receipts
+     SET state = 'RECEIPTED', receipt = p_receipt, updated_at = clock_timestamp()
+   WHERE tenant_id = job.tenant_id AND job_id = job.id
+     AND state IN ('REGISTERED', 'IN_PROGRESS');
+  INSERT INTO deviludo.workflow_events(
+    tenant_id, workflow_id, event_kind, event_data, idempotency_key
+  ) VALUES (
+    job.tenant_id, job.workflow_id, 'JOB_SUCCEEDED',
+    jsonb_build_object('jobId', job.id, 'jobKind', job.kind, 'operatingSystem', job.target_operating_system),
+    'job-succeeded:' || job.id::text
+  );
+
+  SELECT * INTO workflow
+    FROM deviludo.workflow_instances
+   WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+   FOR UPDATE;
+
+  IF workflow.state = 'AGENT_RUNNING' AND job.kind = 'AGENT_GENERATION' THEN
+    UPDATE deviludo.workflow_instances SET state = 'ARTIFACT_BUILDING', version = version + 1,
+      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+    PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'ARTIFACT_BUILD', NULL,
+      job.workflow_id::text || ':artifact');
+  ELSIF workflow.state = 'ARTIFACT_BUILDING' AND job.kind = 'ARTIFACT_BUILD' THEN
+    UPDATE deviludo.workflow_instances SET state = 'E2E_TESTING', version = version + 1,
+      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+    FOREACH platform IN ARRAY ARRAY['linux', 'windows', 'macos']::deviludo.server_os[]
+    LOOP
+      PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'E2E_TEST', platform,
+        job.workflow_id::text || ':e2e:' || platform::text);
+    END LOOP;
+  ELSIF workflow.state = 'E2E_TESTING' AND job.kind = 'E2E_TEST'
+    AND NOT EXISTS (
+      SELECT 1 FROM deviludo.jobs
+       WHERE tenant_id = job.tenant_id AND workflow_id = job.workflow_id
+         AND kind = 'E2E_TEST' AND state <> 'SUCCEEDED'
+    )
+  THEN
+    UPDATE deviludo.workflow_instances SET state = 'SIGNING', version = version + 1,
+      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+    FOREACH platform IN ARRAY ARRAY['linux', 'windows', 'macos']::deviludo.server_os[]
+    LOOP
+      PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'ARTIFACT_SIGN', platform,
+        job.workflow_id::text || ':sign:' || platform::text);
+    END LOOP;
+  ELSIF workflow.state = 'SIGNING' AND job.kind = 'ARTIFACT_SIGN'
+    AND NOT EXISTS (
+      SELECT 1 FROM deviludo.jobs
+       WHERE tenant_id = job.tenant_id AND workflow_id = job.workflow_id
+         AND kind = 'ARTIFACT_SIGN' AND state <> 'SUCCEEDED'
+    )
+  THEN
+    UPDATE deviludo.workflow_instances SET state = 'STEAM_PUBLISHING', version = version + 1,
+      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+    PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'STEAM_PUBLISH', NULL,
+      job.workflow_id::text || ':publish');
+  ELSIF workflow.state = 'STEAM_PUBLISHING' AND job.kind = 'STEAM_PUBLISH' THEN
+    UPDATE deviludo.workflow_instances SET state = 'CLEAN_INSTALL_VERIFYING', version = version + 1,
+      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+    FOREACH platform IN ARRAY ARRAY['linux', 'windows', 'macos']::deviludo.server_os[]
+    LOOP
+      PERFORM deviludo.enqueue_job(job.tenant_id, job.workflow_id, job.project_id, 'STEAM_CLEAN_INSTALL', platform,
+        job.workflow_id::text || ':clean-install:' || platform::text);
+    END LOOP;
+  ELSIF workflow.state = 'CLEAN_INSTALL_VERIFYING' AND job.kind = 'STEAM_CLEAN_INSTALL'
+    AND NOT EXISTS (
+      SELECT 1 FROM deviludo.jobs
+       WHERE tenant_id = job.tenant_id AND workflow_id = job.workflow_id
+         AND kind = 'STEAM_CLEAN_INSTALL' AND state <> 'SUCCEEDED'
+    )
+  THEN
+    UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED', version = version + 1,
+      updated_at = clock_timestamp() WHERE tenant_id = workflow.tenant_id AND id = workflow.id;
+  END IF;
+  RETURN true;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION deviludo.fail_job(
+  p_job_id uuid,
+  p_lease_token uuid,
+  p_fencing_token bigint,
+  p_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  job deviludo.jobs%ROWTYPE;
+  terminal boolean;
+BEGIN
+  SELECT * INTO job FROM deviludo.jobs
+   WHERE id = p_job_id AND state = 'RUNNING'
+     AND lease_token = p_lease_token AND fencing_token = p_fencing_token
+   FOR UPDATE;
+  IF job.id IS NULL THEN RETURN false; END IF;
+  terminal := job.attempt >= job.max_attempts;
+  UPDATE deviludo.jobs
+     SET state = CASE WHEN terminal THEN 'FAILED'::deviludo.job_state ELSE 'RETRY'::deviludo.job_state END,
+         available_at = clock_timestamp() + make_interval(secs => least(3600, (2 ^ greatest(attempt, 1))::integer)),
+         lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+         last_error = left(p_reason, 2000), updated_at = clock_timestamp()
+   WHERE tenant_id = job.tenant_id AND id = job.id;
+  INSERT INTO deviludo.workflow_events(tenant_id, workflow_id, event_kind, event_data, idempotency_key)
+  VALUES (
+    job.tenant_id, job.workflow_id,
+    CASE WHEN terminal THEN 'JOB_FAILED' ELSE 'JOB_RETRY_SCHEDULED' END,
+    jsonb_build_object('jobId', job.id, 'attempt', job.attempt, 'reason', left(p_reason, 2000)),
+    'job-failure:' || job.id::text || ':' || job.attempt::text
+  );
+  IF terminal THEN
+    UPDATE deviludo.workflow_instances SET state = 'FAILED', version = version + 1,
+      updated_at = clock_timestamp()
+     WHERE tenant_id = job.tenant_id AND id = job.workflow_id
+       AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED');
+  END IF;
+  RETURN true;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION deviludo.recover_expired_jobs()
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  recovered bigint;
+BEGIN
+  WITH expired AS (
+    UPDATE deviludo.jobs
+       SET state = CASE WHEN attempt >= max_attempts
+                        THEN 'FAILED'::deviludo.job_state
+                        ELSE 'RETRY'::deviludo.job_state END,
+           available_at = clock_timestamp() + make_interval(secs => least(3600, (2 ^ greatest(attempt, 1))::integer)),
+           lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+           last_error = 'lease expired', updated_at = clock_timestamp()
+     WHERE state = 'RUNNING' AND lease_expires_at < clock_timestamp()
+     RETURNING tenant_id, workflow_id, id, attempt, state
+  ), events AS (
+    INSERT INTO deviludo.workflow_events(
+      tenant_id, workflow_id, event_kind, event_data, idempotency_key
+    )
+    SELECT tenant_id, workflow_id,
+      CASE WHEN state = 'FAILED' THEN 'JOB_FAILED' ELSE 'JOB_RETRY_SCHEDULED' END,
+      jsonb_build_object('jobId', id, 'attempt', attempt, 'reason', 'lease expired'),
+      'lease-expired:' || id::text || ':' || attempt::text
+    FROM expired
+    ON CONFLICT (tenant_id, workflow_id, idempotency_key) DO NOTHING
+  )
+  SELECT count(*) INTO recovered FROM expired;
+  RETURN recovered;
+END
+$$;
+ALTER FUNCTION deviludo.recover_expired_jobs() OWNER TO deviludo_claim_executor;
+
+CREATE OR REPLACE FUNCTION deviludo.reconcile_p0_capacity()
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+AS $$
+  INSERT INTO deviludo.pool_capacity_intents(pool_kind, desired_nodes, reason, operation_key)
+  SELECT pool.kind, pool.desired_nodes, 'P0_RECONCILIATION',
+         'p0:' || pool.kind::text || ':' || pool.desired_nodes::text || ':' || extract(epoch FROM date_trunc('hour', clock_timestamp()))::text
+    FROM deviludo.server_pools pool
+   WHERE NOT EXISTS (
+     SELECT 1 FROM deviludo.pool_capacity_intents intent
+      WHERE intent.pool_kind = pool.kind
+        AND intent.desired_nodes = pool.desired_nodes
+        AND intent.created_at > clock_timestamp() - interval '1 hour'
+   )
+  ON CONFLICT (operation_key) DO NOTHING
+$$;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA deviludo FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA deviludo FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA deviludo FROM PUBLIC;
+
+GRANT SELECT ON deviludo.server_pools, deviludo.server_nodes, deviludo.pool_capacity_intents
+  TO deviludo_api, deviludo_scheduler;
+GRANT INSERT, UPDATE ON deviludo.server_nodes TO deviludo_api;
+GRANT INSERT, SELECT ON deviludo.pool_capacity_intents TO deviludo_scheduler;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_api, deviludo_scheduler;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  deviludo.tenants, deviludo.projects, deviludo.agent_installations,
+  deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
+  deviludo.external_signals, deviludo.operation_receipts
+  TO deviludo_api;
+GRANT SELECT, INSERT, UPDATE ON
+  deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
+  deviludo.external_signals, deviludo.operation_receipts
+  TO deviludo_scheduler;
+GRANT SELECT, INSERT, UPDATE ON
+  deviludo.workflow_instances, deviludo.jobs, deviludo.workflow_events, deviludo.operation_receipts
+  TO deviludo_sandbox;
+
+GRANT EXECUTE ON FUNCTION deviludo.current_tenant_id() TO
+  deviludo_api, deviludo_scheduler, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.required_capabilities(deviludo.job_kind) TO
+  deviludo_api, deviludo_scheduler, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.enqueue_job(
+  uuid, uuid, uuid, deviludo.job_kind, deviludo.server_os, text, jsonb
+) TO deviludo_api, deviludo_scheduler, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.claim_job(text, deviludo.server_pool_kind, integer)
+  TO deviludo_api, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.accept_workflow_signal(uuid, text, text, jsonb)
+  TO deviludo_api;
+GRANT EXECUTE ON FUNCTION deviludo.complete_job(uuid, uuid, bigint, bigint, jsonb, text, text, text)
+  TO deviludo_api, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.fail_job(uuid, uuid, bigint, text)
+  TO deviludo_api, deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.recover_expired_jobs(), deviludo.reconcile_p0_capacity()
+  TO deviludo_scheduler;
+
+GRANT SELECT, UPDATE ON deviludo.jobs TO deviludo_claim_executor;
+GRANT SELECT, INSERT, UPDATE ON deviludo.tenant_claim_fairness TO deviludo_claim_executor;
+GRANT SELECT ON deviludo.tenants TO deviludo_claim_executor;
+GRANT SELECT, INSERT ON deviludo.workflow_events TO deviludo_claim_executor;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_claim_executor;
 
 COMMIT;

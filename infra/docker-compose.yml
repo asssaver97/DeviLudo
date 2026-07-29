@@ -1,162 +1,107 @@
-name: deviludo-local-control-plane
+name: deviludo-local
 
-# Local integration stack. Production must use managed HA equivalents and the
-# network/RBAC policies described in docs/architecture.md.
+x-core: &core
+  image: deviludo-core:local
+  build:
+    context: ..
+    dockerfile: Dockerfile.core
+  restart: unless-stopped
+  environment: &core-environment
+    NODE_ENV: development
+    DEVILUDO_DATABASE_SET_ROLE: "1"
+    DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
+    DEVILUDO_E2E_NODE_TOKEN: local-e2e-node-token
+    DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_MACOS
+    DEVILUDO_CORE_API_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+    DEVILUDO_CORE_SCHEDULER_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+    DEVILUDO_CORE_SANDBOX_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - data
+
 services:
   postgres:
-    image: postgres:16.4-alpine
+    image: postgres:17.6-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: deviludo
       POSTGRES_USER: deviludo
-      POSTGRES_PASSWORD: ${DEVILUDO_POSTGRES_PASSWORD:?set DEVILUDO_POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: deviludo-local
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/001_core.sql:/docker-entrypoint-initdb.d/001_core.sql:ro
-      - ./postgres/002_workflow_dispatch.sql:/docker-entrypoint-initdb.d/002_workflow_dispatch.sql:ro
-      - ./postgres/003_workflow_jobs.sql:/docker-entrypoint-initdb.d/003_workflow_jobs.sql:ro
-      - ./postgres/004_github_verified_identity.sql:/docker-entrypoint-initdb.d/004_github_verified_identity.sql:ro
-      - ./postgres/005_steam_enrollments.sql:/docker-entrypoint-initdb.d/005_steam_enrollments.sql:ro
-      - ./postgres/006_release_authorizations.sql:/docker-entrypoint-initdb.d/006_release_authorizations.sql:ro
-      - ./postgres/007_workflow_job_heartbeats.sql:/docker-entrypoint-initdb.d/007_workflow_job_heartbeats.sql:ro
-      - ./postgres/008_workflow_control_actions.sql:/docker-entrypoint-initdb.d/008_workflow_control_actions.sql:ro
-      - ./postgres/009_workflow_inbox_tenant_key.sql:/docker-entrypoint-initdb.d/009_workflow_inbox_tenant_key.sql:ro
-      - ./postgres/010_admin_idempotency.sql:/docker-entrypoint-initdb.d/010_admin_idempotency.sql:ro
-      - ./postgres/011_admin_catalog.sql:/docker-entrypoint-initdb.d/011_admin_catalog.sql:ro
-      - ./postgres/012_workflow_signal_outbox.sql:/docker-entrypoint-initdb.d/012_workflow_signal_outbox.sql:ro
-      - ./postgres/013_runner_workflow_attempts.sql:/docker-entrypoint-initdb.d/013_runner_workflow_attempts.sql:ro
-      - ./postgres/014_runner_execution_locks.sql:/docker-entrypoint-initdb.d/014_runner_execution_locks.sql:ro
-      - ./postgres/015_runner_ingress_transactions.sql:/docker-entrypoint-initdb.d/015_runner_ingress_transactions.sql:ro
-      - ./postgres/016_approved_test_plan_bindings.sql:/docker-entrypoint-initdb.d/016_approved_test_plan_bindings.sql:ro
-      - ./postgres/017_runner_toolchain_revisions.sql:/docker-entrypoint-initdb.d/017_runner_toolchain_revisions.sql:ro
-      - ./postgres/018_steam_install_grants.sql:/docker-entrypoint-initdb.d/018_steam_install_grants.sql:ro
-      - ./postgres/019_steam_publish_claims.sql:/docker-entrypoint-initdb.d/019_steam_publish_claims.sql:ro
-      - ./postgres/020_steam_workflow_operations.sql:/docker-entrypoint-initdb.d/020_steam_workflow_operations.sql:ro
-      - ./postgres/021_steam_release_execution.sql:/docker-entrypoint-initdb.d/021_steam_release_execution.sql:ro
-      - ./postgres/022_steam_workflow_dispatch.sql:/docker-entrypoint-initdb.d/022_steam_workflow_dispatch.sql:ro
-      - ./postgres/023_steam_rc_issuance.sql:/docker-entrypoint-initdb.d/023_steam_rc_issuance.sql:ro
-      - ./postgres/024_steam_release_preparation.sql:/docker-entrypoint-initdb.d/024_steam_release_preparation.sql:ro
-      - ./postgres/025_steam_release_lifecycle.sql:/docker-entrypoint-initdb.d/025_steam_release_lifecycle.sql:ro
-      - ./postgres/026_steam_clean_install_reservations.sql:/docker-entrypoint-initdb.d/026_steam_clean_install_reservations.sql:ro
-      - ./postgres/027_agent_supply_chain_operations.sql:/docker-entrypoint-initdb.d/027_agent_supply_chain_operations.sql:ro
-      - ./postgres/028_inference_gateway.sql:/docker-entrypoint-initdb.d/028_inference_gateway.sql:ro
-      - ./postgres/029_inference_request_claims.sql:/docker-entrypoint-initdb.d/029_inference_request_claims.sql:ro
-      - ./postgres/030_inference_reconciliation.sql:/docker-entrypoint-initdb.d/030_inference_reconciliation.sql:ro
-      - ./postgres/031_spec_dialogue.sql:/docker-entrypoint-initdb.d/031_spec_dialogue.sql:ro
-      - ./postgres/032_spec_workflow_bridge.sql:/docker-entrypoint-initdb.d/032_spec_workflow_bridge.sql:ro
-      - ./postgres/033_agent_configuration_resolution.sql:/docker-entrypoint-initdb.d/033_agent_configuration_resolution.sql:ro
-      - ./postgres/034_inference_provider_projection.sql:/docker-entrypoint-initdb.d/034_inference_provider_projection.sql:ro
-      - ./postgres/035_agent_execution_broker.sql:/docker-entrypoint-initdb.d/035_agent_execution_broker.sql:ro
-      - ./postgres/036_scm_candidate_publication.sql:/docker-entrypoint-initdb.d/036_scm_candidate_publication.sql:ro
-      - ./postgres/037_feedback_evidence_invalidation.sql:/docker-entrypoint-initdb.d/037_feedback_evidence_invalidation.sql:ro
-      - ./postgres/038_user_feedback_iterations.sql:/docker-entrypoint-initdb.d/038_user_feedback_iterations.sql:ro
-      - ./postgres/039_user_candidate_acceptances.sql:/docker-entrypoint-initdb.d/039_user_candidate_acceptances.sql:ro
-      - ./postgres/040_scm_authoritative_merges.sql:/docker-entrypoint-initdb.d/040_scm_authoritative_merges.sql:ro
-      - ./postgres/041_delivery_state_projections.sql:/docker-entrypoint-initdb.d/041_delivery_state_projections.sql:ro
-      - ./postgres/042_github_authorization_request_ledger.sql:/docker-entrypoint-initdb.d/042_github_authorization_request_ledger.sql:ro
-      - ./postgres/043_project_repository_onboarding.sql:/docker-entrypoint-initdb.d/043_project_repository_onboarding.sql:ro
-      - ./postgres/044_invited_platform_identity.sql:/docker-entrypoint-initdb.d/044_invited_platform_identity.sql:ro
-      - ./postgres/045_secret_broker.sql:/docker-entrypoint-initdb.d/045_secret_broker.sql:ro
-      - ./postgres/046_agent_run_provider_failovers.sql:/docker-entrypoint-initdb.d/046_agent_run_provider_failovers.sql:ro
-      - ./postgres/047_agent_run_provider_failover_audit.sql:/docker-entrypoint-initdb.d/047_agent_run_provider_failover_audit.sql:ro
-      - ./postgres/048_steam_install_failure_revocations.sql:/docker-entrypoint-initdb.d/048_steam_install_failure_revocations.sql:ro
-      - ./postgres/049_delivery_cancellation_revocations.sql:/docker-entrypoint-initdb.d/049_delivery_cancellation_revocations.sql:ro
-      - ./postgres/050_delivery_cancellation_requests.sql:/docker-entrypoint-initdb.d/050_delivery_cancellation_requests.sql:ro
-      - ./postgres/051_steam_external_approval_observations.sql:/docker-entrypoint-initdb.d/051_steam_external_approval_observations.sql:ro
-      - ./postgres/052_provider_recovery_checks.sql:/docker-entrypoint-initdb.d/052_provider_recovery_checks.sql:ro
-      - ./postgres/053_provider_recovery_scheduling.sql:/docker-entrypoint-initdb.d/053_provider_recovery_scheduling.sql:ro
-      - ./postgres/054_steam_depot_finalization_operations.sql:/docker-entrypoint-initdb.d/054_steam_depot_finalization_operations.sql:ro
-      - ./postgres/055_spec_model_generation_operations.sql:/docker-entrypoint-initdb.d/055_spec_model_generation_operations.sql:ro
-      - ./postgres/056_spec_model_generation_reconciliation.sql:/docker-entrypoint-initdb.d/056_spec_model_generation_reconciliation.sql:ro
-      - ./postgres/057_runner_toolchain_approval_guard.sql:/docker-entrypoint-initdb.d/057_runner_toolchain_approval_guard.sql:ro
-      - ./postgres/058_runner_toolchain_publications.sql:/docker-entrypoint-initdb.d/058_runner_toolchain_publications.sql:ro
-      - ./postgres/059_steam_project_configuration_intents.sql:/docker-entrypoint-initdb.d/059_steam_project_configuration_intents.sql:ro
-      - ./postgres/060_agent_run_version_attestations.sql:/docker-entrypoint-initdb.d/060_agent_run_version_attestations.sql:ro
-      - ./postgres/061_schema_migration_ledger.sql:/docker-entrypoint-initdb.d/061_schema_migration_ledger.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
-      interval: 5s
+      interval: 2s
       timeout: 3s
-      retries: 20
-    ports: ["127.0.0.1:${DEVILUDO_POSTGRES_PORT:-5432}:5432"]
-    networks: [control]
+      retries: 30
+    networks:
+      - data
 
-  temporal:
-    image: temporalio/auto-setup:1.25.2
-    depends_on:
-      postgres:
-        condition: service_healthy
+  core-api:
+    <<: *core
     environment:
-      DB: postgres12
-      DB_PORT: 5432
-      POSTGRES_USER: deviludo
-      POSTGRES_PWD: ${DEVILUDO_POSTGRES_PASSWORD:?set DEVILUDO_POSTGRES_PASSWORD}
-      POSTGRES_SEEDS: postgres
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
-    ports: ["127.0.0.1:7233:7233"]
-    networks: [control]
-
-  temporal-ui:
-    image: temporalio/ui:2.31.2
-    depends_on: [temporal]
-    environment:
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:3000
-    ports: ["127.0.0.1:8233:8080"]
-    networks: [control]
-
-  redis:
-    image: redis:7.4.1-alpine
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${DEVILUDO_REDIS_PASSWORD:?set DEVILUDO_REDIS_PASSWORD}"]
-    volumes: ["redis-data:/data"]
+      <<: *core-environment
+      DEVILUDO_CORE_ROLE: api
+      PORT: "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$$DEVILUDO_REDIS_PASSWORD\" ping | grep PONG"]
-      interval: 5s
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
+      interval: 2s
       timeout: 3s
-      retries: 20
-    environment:
-      DEVILUDO_REDIS_PASSWORD: ${DEVILUDO_REDIS_PASSWORD:?set DEVILUDO_REDIS_PASSWORD}
-    ports: ["127.0.0.1:${DEVILUDO_REDIS_PORT:-6379}:6379"]
-    networks: [control]
+      retries: 30
+    networks:
+      - core
+      - data
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z
-    command: ["server", "/data", "--console-address", ":9001"]
+  core-scheduler:
+    <<: *core
     environment:
-      MINIO_ROOT_USER: ${DEVILUDO_MINIO_USER:?set DEVILUDO_MINIO_USER}
-      MINIO_ROOT_PASSWORD: ${DEVILUDO_MINIO_PASSWORD:?set DEVILUDO_MINIO_PASSWORD}
-    volumes: ["minio-data:/data"]
+      <<: *core-environment
+      DEVILUDO_CORE_ROLE: scheduler
+
+  core-sandbox:
+    <<: *core
+    environment:
+      <<: *core-environment
+      DEVILUDO_CORE_ROLE: sandbox
+
+  web:
+    image: deviludo-web:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      DEVILUDO_CORE_API_URL: http://core-api:8080
+      DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
+    depends_on:
+      core-api:
+        condition: service_healthy
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
-    networks: [control]
-
-  vault:
-    image: hashicorp/vault:1.17.6
-    cap_add: [IPC_LOCK]
-    command: ["server", "-dev", "-dev-root-token-id=${DEVILUDO_VAULT_DEV_TOKEN:?set DEVILUDO_VAULT_DEV_TOKEN}"]
-    environment:
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    ports: ["127.0.0.1:8200:8200"]
-    volumes:
-      - ./vault:/vault/policies:ro
-    networks: [control]
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.111.0
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes:
-      - ./otel/collector.yaml:/etc/otelcol/config.yaml:ro
-    ports:
-      - "127.0.0.1:4317:4317"
-      - "127.0.0.1:4318:4318"
-      - "127.0.0.1:13133:13133"
-    networks: [control]
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - edge
+      - core
 
 networks:
-  control:
+  edge: {}
+  core:
+    # Core is published only on 127.0.0.1 for the native macOS node.
+    internal: false
+  data:
     internal: true
 
 volumes:
-  postgres-data:
-  redis-data:
-  minio-data:
+  postgres-data: {}

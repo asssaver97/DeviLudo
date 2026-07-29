@@ -1,0 +1,11 @@
+FROM node:22.22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 core && adduser --system --uid 1001 --ingroup core core
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY --chown=core:core lib ./lib
+COPY --chown=core:core services/core ./services/core
+COPY --chown=core:core tsconfig.json ./
+USER core
+CMD ["node", "--import", "tsx", "services/core/src/main.ts"]
