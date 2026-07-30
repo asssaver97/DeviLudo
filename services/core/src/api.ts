@@ -1,11 +1,14 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createPublicKey, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
+import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
+import type { ProductConversation, ProductProjectDetail, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
   type ServerNodeState,
   type ServerOperatingSystem,
+  type ServerPoolKind,
 } from "@/lib/runtime/server-pools";
 import {
   createAgentSecretStore,
@@ -14,6 +17,17 @@ import {
   type AgentSecretStore,
 } from "./agent-settings";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
+import {
+  CSRF_COOKIE,
+  SESSION_COOKIE,
+  assertPassword,
+  csrfCookie,
+  digest,
+  hashPassword,
+  newSessionSecrets,
+  sessionCookie,
+  verifyPassword,
+} from "./auth";
 import type { CoreConfig } from "./config";
 import {
   assertE2eCompletion,
@@ -23,9 +37,25 @@ import {
 } from "./contracts";
 import type { Database } from "./database";
 import { CORE_MODULES } from "./modules";
+import { CoreObjectStore } from "./object-store";
 import { generateProjectName } from "./project-naming";
-import type { CoreRepository, StoredInstanceAgentSettings } from "./repository";
+import {
+  analyzeImportedProject,
+  downloadGitProject,
+  inspectProjectZip,
+  type ImportedSourceSnapshot,
+} from "./project-import";
+import {
+  generateProductConversationReply,
+  streamProductConversationReply,
+  type ConversationAgentProjectContext,
+  type ProductConversationAgentReply,
+} from "./product-conversation";
+import type { AuthenticatedSession, CoreRepository, StoredInstanceAgentSettings } from "./repository";
 import { HttpSigningGrantBroker, type SigningGrantBroker } from "./signing-grants";
+import { E2ePkiIssuer } from "./e2e-pki";
+import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
+import { createInitialProjectDocument, parseProjectDocumentContent } from "@/lib/product/project-document";
 
 export async function runApi(
   repository: CoreRepository,
@@ -35,12 +65,29 @@ export async function runApi(
   signingGrants: SigningGrantBroker = new HttpSigningGrantBroker(),
   agentSecrets: AgentSecretStore = createAgentSecretStore(),
 ): Promise<void> {
+  const objectStore = new CoreObjectStore();
+  const pki = new E2ePkiIssuer();
   const app = Fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
     requestTimeout: 70_000,
     trustProxy: false,
+    ...(config.tlsCertificateFile && config.tlsKeyFile && config.tlsClientCaFile ? {
+      https: {
+        cert: readFileSync(config.tlsCertificateFile),
+        key: readFileSync(config.tlsKeyFile),
+        ca: readFileSync(config.tlsClientCaFile),
+        requestCert: true,
+        rejectUnauthorized: false,
+      },
+    } : {}),
   });
+
+  app.addContentTypeParser(
+    ["application/zip", "application/x-zip-compressed"],
+    { parseAs: "buffer" },
+    (_request, body, done) => done(null, body),
+  );
 
   app.setErrorHandler((error, _request, reply) => {
     const failure = error instanceof Error ? error : new Error(String(error));
@@ -50,6 +97,18 @@ export async function runApi(
       code: status >= 500 ? "INTERNAL_ERROR" : code ?? "INVALID_REQUEST",
       message: status >= 500 ? "Core request failed" : failure.message,
     });
+  });
+
+  app.addHook("preHandler", async request => {
+    const path = request.url.split("?", 1)[0];
+    if (!path.startsWith("/v1/") || path.startsWith("/v1/e2e/")) return;
+    authorizeWeb(request, config);
+    if (path.startsWith("/v1/dev/")) return;
+    const session = await authenticateRequest(request, repository);
+    if (session) authenticatedRequests.set(request, session);
+    if (["/v1/auth/setup", "/v1/auth/login", "/v1/auth/invitations/accept", "/v1/session"].includes(path)) return;
+    if (!session) throw unauthorized("请先登录");
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) assertCsrf(request, session);
   });
 
   app.get("/health/live", async () => ({
@@ -67,42 +126,121 @@ export async function runApi(
     const ready = pools
       .filter(pool => required.has(pool.kind))
       .every(pool => pool.readiness === "READY" || pool.readiness === "ON_DEMAND_READY");
-    return reply.code(ready ? 200 : 503).send({
+    const setupRequired = !(await repository.hasUsers());
+    return reply.code(ready && !setupRequired ? 200 : 503).send({
       schemaVersion: "deviludo.platform-readiness.v1",
-      status: ready ? "ready" : "not_ready",
+      status: setupRequired ? "setup_required" : ready ? "ready" : "not_ready",
       pools: Object.fromEntries(pools.map(pool => [pool.kind, pool.readiness])),
       requiredPools: config.requiredReadyPools,
     });
   });
 
+  app.post("/v1/auth/setup", async (request, reply) => {
+    const body = objectBody(request.body);
+    const username = typeof body.username === "string" ? body.username.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    const passwordConfirmation = typeof body.passwordConfirmation === "string" ? body.passwordConfirmation : "";
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(username)) {
+      throw httpError(400, "INVALID_USERNAME", "用户名需为 3–64 位字母、数字、点、下划线或连字符");
+    }
+    if (password !== passwordConfirmation) {
+      throw httpError(400, "PASSWORD_MISMATCH", "两次输入的密码不一致");
+    }
+    assertPassword(password);
+    const secrets = newSessionSecrets();
+    const user = await repository.createInitialAdmin({
+      username,
+      passwordHash: await hashPassword(password),
+      tokenHash: secrets.tokenHash,
+      csrfHash: secrets.csrfHash,
+      remoteAddress: request.ip || null,
+    });
+    return reply
+      .header("set-cookie", [sessionCookie(secrets.token), csrfCookie(secrets.csrfToken)])
+      .code(201)
+      .send({ user: publicUser(user), setupRequired: false });
+  });
+
+  app.post("/v1/auth/login", async (request, reply) => {
+    const body = objectBody(request.body);
+    const username = typeof body.username === "string" ? body.username.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    const remoteAddress = request.ip || null;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(username) || !password || password.length > 1024) {
+      throw unauthorized("用户名或密码错误");
+    }
+    if (await repository.loginFailureCount(username, remoteAddress) >= 5) {
+      throw httpError(429, "LOGIN_RATE_LIMITED", "登录失败次数过多，请 15 分钟后重试");
+    }
+    const user = await repository.readLoginUser(username);
+    if (!user || user.disabledAt || !(await verifyPassword(user.passwordHash, password))) {
+      await repository.recordAuthenticationEvent({ userId: user?.id, username, kind: "LOGIN_FAILED", remoteAddress });
+      throw unauthorized("用户名或密码错误");
+    }
+    const secrets = newSessionSecrets();
+    await repository.createSession({ userId: user.id, tokenHash: secrets.tokenHash, csrfHash: secrets.csrfHash });
+    await repository.recordAuthenticationEvent({ userId: user.id, username: user.username, kind: "LOGIN_SUCCEEDED", remoteAddress });
+    return reply
+      .header("set-cookie", [sessionCookie(secrets.token), csrfCookie(secrets.csrfToken)])
+      .send({ user: publicUser(user) });
+  });
+
+  app.post("/v1/auth/logout", async (request, reply) => {
+    const session = productAccess(request, config);
+    await repository.revokeSession(session.id);
+    await repository.recordAuthenticationEvent({ userId: session.user.id, username: session.user.username, kind: "LOGOUT", remoteAddress: request.ip || null });
+    return reply.header("set-cookie", [sessionCookie(null), csrfCookie(null), selectedWorkspaceCookie(null)]).send({ loggedOut: true });
+  });
+
+  app.post("/v1/auth/password", async (request, reply) => {
+    const session = productAccess(request, config);
+    const body = objectBody(request.body);
+    const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+    const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+    const stored = await repository.readLoginUser(session.user.username);
+    if (!stored || !(await verifyPassword(stored.passwordHash, currentPassword))) throw unauthorized("当前密码错误");
+    assertPassword(newPassword);
+    await repository.changePassword(session.user.id, await hashPassword(newPassword));
+    await repository.recordAuthenticationEvent({ userId: session.user.id, username: session.user.username, kind: "PASSWORD_CHANGED", remoteAddress: request.ip || null });
+    return reply.header("set-cookie", [sessionCookie(null), csrfCookie(null), selectedWorkspaceCookie(null)]).send({ changed: true, loginRequired: true });
+  });
+
   app.get("/v1/admin/server-pools", async (request, reply) => {
-    authorizeWeb(request, config);
+    requireInstanceAdmin(request);
     const [pools, nodes] = await Promise.all([repository.readServerPools(), repository.readServerNodes()]);
     return reply.send({ pools, nodes });
   });
 
   app.get("/v1/admin/server-nodes", async (request, reply) => {
-    authorizeWeb(request, config);
+    requireInstanceAdmin(request);
     return reply.send({ nodes: await repository.readServerNodes() });
   });
 
   app.get("/v1/session", async (request, reply) => {
-    localProductAccess(request, config);
-    const selectedWorkspace = await selectedWorkspaceFromRequest(request, repository);
-    return reply.header("cache-control", "no-store").send({ session: { selectedWorkspace } });
+    const principal = authenticatedRequests.get(request) ?? null;
+    const setupRequired = !(await repository.hasUsers());
+    const selectedWorkspace = principal
+      ? await selectedWorkspaceFromRequest(request, repository, principal)
+      : null;
+    return reply.header("cache-control", "no-store").send({ session: {
+      user: principal ? publicUser(principal.user) : null,
+      authenticated: principal !== null,
+      setupRequired,
+      selectedWorkspace,
+    } });
   });
 
   app.get("/v1/workspaces", async (request, reply) => {
-    localProductAccess(request, config);
-    return reply.header("cache-control", "no-store").send({ workspaces: await repository.listWorkspaces() });
+    const principal = productAccess(request, config);
+    return reply.header("cache-control", "no-store").send({ workspaces: await repository.listWorkspaces(principal.user.id) });
   });
 
   app.post("/v1/workspaces", async (request, reply) => {
-    localProductAccess(request, config);
+    const principal = productAccess(request, config);
     const body = objectBody(request.body);
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (name.length < 1 || name.length > 200) return reply.code(400).send({ code: "INVALID_WORKSPACE_NAME" });
-    const workspace = await repository.createWorkspace({ id: randomUUID(), name });
+    const workspace = await repository.createWorkspace({ id: randomUUID(), name, ownerUserId: principal.user.id });
     return reply
       .header("set-cookie", selectedWorkspaceCookie(workspace.id))
       .code(201)
@@ -110,23 +248,103 @@ export async function runApi(
   });
 
   app.put("/v1/session/workspace", async (request, reply) => {
-    localProductAccess(request, config);
+    const principal = productAccess(request, config);
     const body = objectBody(request.body);
     if (typeof body.workspaceId !== "string" || !UUID.test(body.workspaceId)) {
       return reply.code(400).send({ code: "INVALID_WORKSPACE" });
     }
-    const workspace = await repository.readWorkspace(body.workspaceId);
+    const workspace = await repository.readWorkspace(body.workspaceId, principal.user.id);
     if (!workspace) return reply.code(404).send({ code: "WORKSPACE_NOT_FOUND" });
     return reply.header("set-cookie", selectedWorkspaceCookie(workspace.id)).send({ selectedWorkspace: workspace });
   });
 
   app.delete("/v1/session/workspace", async (request, reply) => {
-    localProductAccess(request, config);
+    productAccess(request, config);
     return reply.header("set-cookie", selectedWorkspaceCookie(null)).send({ selectedWorkspace: null });
   });
 
+  app.get("/v1/workspaces/current/members", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    return reply.send({ members: await repository.listWorkspaceMembers(principal.user.id, workspace.id) });
+  });
+
+  app.post("/v1/workspaces/current/invitations", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const membership = await repository.readMembership(principal.user.id, workspace.id);
+    if (membership !== "OWNER" && membership !== "ADMIN") throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "需要工作区管理员权限");
+    const body = objectBody(request.body);
+    const role = body.role === "ADMIN" ? "ADMIN" : body.role === "MEMBER" ? "MEMBER" : null;
+    if (!role) throw httpError(400, "INVALID_WORKSPACE_ROLE", "邀请角色无效");
+    const token = randomBytes(32).toString("base64url");
+    const invitation = await repository.createInvitation({
+      workspaceId: workspace.id,
+      createdBy: principal.user.id,
+      tokenHash: digest(token),
+      role,
+    });
+    await repository.recordAuthenticationEvent({
+      userId: principal.user.id,
+      username: principal.user.username,
+      kind: "INVITATION_CREATED",
+      metadata: { workspaceId: workspace.id, invitationId: invitation.id, role },
+    });
+    return reply.code(201).send({
+      invitation: { ...invitation, role, url: `/accept-invitation?token=${encodeURIComponent(token)}` },
+    });
+  });
+
+  app.post("/v1/auth/invitations/accept", async (request, reply) => {
+    const body = objectBody(request.body);
+    const token = typeof body.token === "string" ? body.token : "";
+    const username = typeof body.username === "string" ? body.username.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(username) || token.length < 32) {
+      throw httpError(400, "INVALID_INVITATION_ACCEPTANCE", "邀请注册信息无效");
+    }
+    assertPassword(password);
+    const user = await repository.acceptInvitation({ tokenHash: digest(token), username, passwordHash: await hashPassword(password) });
+    await repository.recordAuthenticationEvent({ userId: user.id, username: user.username, kind: "INVITATION_ACCEPTED", remoteAddress: request.ip || null });
+    return reply.code(201).send({ user });
+  });
+
+  app.patch<{ Params: { userId: string } }>("/v1/workspaces/current/members/:userId", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const membership = await repository.readMembership(principal.user.id, workspace.id);
+    if (membership !== "OWNER" && membership !== "ADMIN") throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "需要工作区管理员权限");
+    const body = objectBody(request.body);
+    const role = body.role === "ADMIN" ? "ADMIN" : body.role === "MEMBER" ? "MEMBER" : null;
+    if (!role) throw httpError(400, "INVALID_WORKSPACE_ROLE", "成员角色无效");
+    await repository.updateMembership({ actorUserId: principal.user.id, workspaceId: workspace.id, userId: request.params.userId, role });
+    await repository.recordAuthenticationEvent({
+      userId: principal.user.id,
+      username: principal.user.username,
+      kind: "MEMBERSHIP_CHANGED",
+      metadata: { workspaceId: workspace.id, targetUserId: request.params.userId, role },
+    });
+    return reply.send({ updated: true });
+  });
+
+  app.delete<{ Params: { userId: string } }>("/v1/workspaces/current/members/:userId", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const membership = await repository.readMembership(principal.user.id, workspace.id);
+    if (membership !== "OWNER" && membership !== "ADMIN") throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "需要工作区管理员权限");
+    await repository.updateMembership({ actorUserId: principal.user.id, workspaceId: workspace.id, userId: request.params.userId, role: null });
+    await repository.recordAuthenticationEvent({
+      userId: principal.user.id,
+      username: principal.user.username,
+      kind: "MEMBERSHIP_CHANGED",
+      metadata: { workspaceId: workspace.id, targetUserId: request.params.userId, role: null },
+    });
+    return reply.send({ removed: true });
+  });
+
   app.get("/v1/settings/agent", async (request, reply) => {
-    localProductAccess(request, config);
+    const principal = productAccess(request, config);
+    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
     const [settings, runtimes] = await Promise.all([
       repository.readAgentSettings(),
       detectAgentRuntimes(),
@@ -142,7 +360,8 @@ export async function runApi(
   });
 
   app.put("/v1/settings/agent", async (request, reply) => {
-    localProductAccess(request, config);
+    const principal = productAccess(request, config);
+    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
     const input = parseAgentSettingsInput(request.body);
     const current = await repository.readAgentSettings();
     const currentMask = current
@@ -171,19 +390,19 @@ export async function runApi(
       apiKeyMask: credential.mask,
       apiKeyFingerprint: credential.fingerprint,
       credentialVersion: credential.version,
-      updatedBy: "LOCAL_OPERATOR",
+      updatedBy: principal.user.username,
     });
     return reply.header("cache-control", "no-store").send({ settings: publicAgentSettings(saved) });
   });
 
   app.get("/v1/projects", async (request, reply) => {
-    localProductAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository);
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
     return reply.send({ projects: await repository.listProjects(workspace.id) });
   });
 
   app.post("/v1/projects", async (request, reply) => {
-    localProductAccess(request, config);
+    const principal = productAccess(request, config);
     const body = objectBody(request.body);
     const concept = typeof body.concept === "string" ? body.concept.trim() : "";
     const suppliedName = typeof body.name === "string" ? body.name.trim() : "";
@@ -191,14 +410,14 @@ export async function runApi(
       return reply.code(400).send({ code: "INVALID_GAME_CONCEPT" });
     }
     const idempotencyKey = requestIdempotencyKey(request, "project");
-    const currentWorkspace = await selectedWorkspaceFromRequest(request, repository);
-    const prior = await repository.readProjectCreationReceipt(idempotencyKey);
+    const currentWorkspace = await selectedWorkspaceFromRequest(request, repository, principal);
+    const prior = await repository.readProjectCreationReceipt(principal.user.id, idempotencyKey);
     if (prior) {
       if (prior.operationKind !== "PROJECT" || (currentWorkspace && currentWorkspace.id !== prior.workspaceId)) {
         return reply.code(409).send({ code: "IDEMPOTENCY_KEY_REUSED" });
       }
       const [workspace, project] = await Promise.all([
-        repository.readWorkspace(prior.workspaceId),
+        repository.readWorkspace(prior.workspaceId, principal.user.id),
         repository.readProject(prior.workspaceId, prior.projectId),
       ]);
       if (!workspace || !project) throw new Error("Project creation receipt is incomplete");
@@ -207,6 +426,7 @@ export async function runApi(
     const name = suppliedName || await agentProjectName(concept, repository, agentSecrets);
     const workspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
     const project = await repository.createProject({
+      actorUserId: principal.user.id,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       projectId: randomUUID(),
@@ -215,8 +435,9 @@ export async function runApi(
       name,
       concept,
       specification: specificationFromConcept(name, concept),
+      ...defaultWorkflowConfiguration(),
     });
-    const selectedWorkspace = currentWorkspace ?? await repository.readWorkspace(workspace.id);
+    const selectedWorkspace = currentWorkspace ?? await repository.readWorkspace(workspace.id, principal.user.id);
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
     return reply
       .header("set-cookie", selectedWorkspaceCookie(selectedWorkspace.id))
@@ -224,18 +445,184 @@ export async function runApi(
       .send({ workspace: selectedWorkspace, project });
   });
 
+  app.post("/v1/projects/import/git", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const body = objectBody(request.body);
+    const repositoryUrl = typeof body.repositoryUrl === "string" ? body.repositoryUrl.trim() : "";
+    if (repositoryUrl.length < 10 || repositoryUrl.length > 2_000) {
+      throw httpError(400, "INVALID_GIT_REPOSITORY", "请输入公开 GitHub 或 GitLab 仓库地址");
+    }
+    const result = await processProjectImport({
+      request,
+      principal,
+      repository,
+      agentSecrets,
+      objectStore,
+      source: () => downloadGitProject(repositoryUrl),
+    });
+    return reply
+      .header("set-cookie", selectedWorkspaceCookie(result.workspace.id))
+      .code(result.statusCode)
+      .send(result.payload);
+  });
+
+  app.post<{ Querystring: { name?: string } }>(
+    "/v1/projects/import/archive",
+    { bodyLimit: 64 * 1024 * 1024 },
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      if (!Buffer.isBuffer(request.body)) {
+        throw httpError(400, "INVALID_PROJECT_ARCHIVE", "请选择 ZIP 项目压缩包或本地项目文件夹");
+      }
+      const displayName = typeof request.query.name === "string" ? request.query.name.trim() : "本地项目";
+      const result = await processProjectImport({
+        request,
+        principal,
+        repository,
+        agentSecrets,
+        objectStore,
+        source: async () => inspectProjectZip({
+          bytes: request.body as Buffer,
+          sourceKind: "LOCAL_ARCHIVE",
+          displayName,
+        }),
+      });
+      return reply
+        .header("set-cookie", selectedWorkspaceCookie(result.workspace.id))
+        .code(result.statusCode)
+        .send(result.payload);
+    },
+  );
+
   app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId", async (request, reply) => {
-    localProductAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository);
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
+    return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+  });
+
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/artifacts", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return reply.send({ artifacts: await repository.listProjectArtifacts(workspace.id, project.id) });
+  });
+
+  app.post<{ Params: { projectId: string; artifactId: string } }>(
+    "/v1/projects/:projectId/artifacts/:artifactId/download",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      if (!UUID.test(request.params.projectId) || !UUID.test(request.params.artifactId)) {
+        return reply.code(404).send({ code: "ARTIFACT_NOT_FOUND" });
+      }
+      const artifact = await repository.readProjectArtifact(
+        workspace.id,
+        request.params.projectId,
+        request.params.artifactId,
+      );
+      if (!artifact) return reply.code(404).send({ code: "ARTIFACT_NOT_FOUND" });
+      return reply.send(await objectStore.authorizeArtifactDownload(artifact));
+    },
+  );
+
+  app.get<{ Params: { projectId: string } }>(
+    "/v1/projects/:projectId/conversations",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      return reply.send({
+        conversations: await repository.listProjectConversations(workspace.id, project.id),
+      });
+    },
+  );
+
+  app.get<{ Params: { projectId: string }; Querystring: { after?: string } }>(
+    "/v1/projects/:projectId/agent-progress/stream",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      if (!UUID.test(request.params.projectId)) {
+        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      }
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const requestedAfter = Number(request.query.after ?? "0");
+      let after = Number.isSafeInteger(requestedAfter) && requestedAfter >= 0 ? requestedAfter : 0;
+      let closed = false;
+      request.raw.once("aborted", () => { closed = true; });
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "cache-control": "no-store, no-transform",
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "x-accel-buffering": "no",
+      });
+      for (let poll = 0; poll < 60 && !closed && !reply.raw.destroyed; poll += 1) {
+        const events = await repository.readAgentProgress(workspace.id, project.id, after);
+        for (const event of events) {
+          after = Math.max(after, event.sequence);
+          reply.raw.write(`${JSON.stringify({ type: "progress", event })}\n`);
+        }
+        if (events.length || poll === 0) {
+          reply.raw.write(`${JSON.stringify({ type: "cursor", after })}\n`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 400));
+      }
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
+    },
+  );
+
+  app.delete<{ Params: { projectId: string } }>("/v1/projects/:projectId", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const membership = await repository.readMembership(principal.user.id, workspace.id);
+    if (membership !== "OWNER" && membership !== "ADMIN") {
+      throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区管理员可以删除项目");
+    }
+    const deleted = await repository.deleteProject(
+      workspace.id,
+      request.params.projectId,
+      () => objectStore.deleteProjectObjects(workspace.id, request.params.projectId),
+    );
+    return deleted
+      ? reply.code(204).send()
+      : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+  });
+
+  app.put<{ Params: { projectId: string } }>("/v1/projects/:projectId/document", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const body = objectBody(request.body);
+    if (!Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 1) {
+      return reply.code(400).send({ code: "INVALID_PROJECT_DOCUMENT_REVISION" });
+    }
+    let content;
+    try {
+      content = parseProjectDocumentContent(body.content);
+    } catch (error) {
+      return reply.code(400).send({
+        code: "INVALID_PROJECT_DOCUMENT",
+        message: error instanceof Error ? error.message : "项目说明文档无效",
+      });
+    }
+    const project = await repository.updateProjectDocument({
+      actorUserId: principal.user.id,
+      workspaceId: workspace.id,
+      projectId: request.params.projectId,
+      expectedRevision: Number(body.expectedRevision),
+      content,
+    });
     return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
   });
 
   app.get<{ Params: { conversationId: string } }>(
     "/v1/conversations/:conversationId",
     async (request, reply) => {
-      localProductAccess(request, config);
-      const workspace = await requireSelectedWorkspace(request, repository);
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
       if (!UUID.test(request.params.conversationId)) {
         return reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
       }
@@ -247,89 +634,57 @@ export async function runApi(
   );
 
   app.post("/v1/conversations/messages", async (request, reply) => {
-    localProductAccess(request, config);
-    const body = objectBody(request.body);
-    const content = typeof body.content === "string" ? body.content.trim() : "";
-    const conversationId = body.conversationId === undefined ? null : body.conversationId;
-    const suppliedProjectId = body.projectId === undefined ? null : body.projectId;
-    if (content.length < 2 || content.length > 4_000
-      || (conversationId !== null && (typeof conversationId !== "string" || !UUID.test(conversationId)))
-      || (suppliedProjectId !== null && (typeof suppliedProjectId !== "string" || !UUID.test(suppliedProjectId)))) {
-      return reply.code(400).send({ code: "INVALID_CONVERSATION_MESSAGE" });
-    }
+    const principal = productAccess(request, config);
+    const command = conversationMessageCommand(request.body);
+    const result = await processConversationMessage({ request, principal, repository, agentSecrets, command });
+    if (result.setWorkspaceCookie) reply.header("set-cookie", selectedWorkspaceCookie(result.payload.workspace.id));
+    return reply.code(result.statusCode).send(result.payload);
+  });
 
-    let workspace = await selectedWorkspaceFromRequest(request, repository);
-    let projectId = suppliedProjectId as string | null;
-    if (typeof conversationId === "string") {
-      workspace ??= await requireSelectedWorkspace(request, repository);
-      const existing = await repository.readConversation(workspace.id, conversationId);
-      if (!existing) return reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
-      if (body.projectId !== undefined && projectId !== existing.projectId) {
-        return reply.code(409).send({ code: "CONVERSATION_PROJECT_LOCKED" });
-      }
-      projectId = existing.projectId;
-    } else if (projectId && (!workspace || !(await repository.readProject(workspace.id, projectId)))) {
-      return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    }
-
-    const created = conversationId === null;
-    if (created && !projectId) {
-      const idempotencyKey = requestIdempotencyKey(request, "conversation");
-      const prior = await repository.readProjectCreationReceipt(idempotencyKey);
-      if (prior) {
-        if (prior.operationKind !== "CONVERSATION" || !prior.conversationId
-          || (workspace && workspace.id !== prior.workspaceId)) {
-          return reply.code(409).send({ code: "IDEMPOTENCY_KEY_REUSED" });
-        }
-        const [priorWorkspace, project, conversation] = await Promise.all([
-          repository.readWorkspace(prior.workspaceId),
-          repository.readProject(prior.workspaceId, prior.projectId),
-          repository.readConversation(prior.workspaceId, prior.conversationId),
-        ]);
-        if (!priorWorkspace || !project || !conversation) throw new Error("Conversation creation receipt is incomplete");
-        return reply
-          .header("set-cookie", selectedWorkspaceCookie(priorWorkspace.id))
-          .send({ workspace: priorWorkspace, project, conversation });
-      }
-      const name = await agentProjectName(content, repository, agentSecrets);
-      const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
-      const createdBundle = await repository.createProjectConversation({
-        workspaceId: targetWorkspace.id,
-        workspaceName: targetWorkspace.name,
-        projectId: randomUUID(),
-        workflowId: randomUUID(),
-        conversationId: randomUUID(),
-        idempotencyKey,
-        name,
-        concept: content,
-        specification: specificationFromConcept(name, content),
-        userContent: content,
-      });
-      const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id);
-      if (!selectedWorkspace) throw new Error("Created workspace could not be read");
-      return reply
-        .header("set-cookie", selectedWorkspaceCookie(selectedWorkspace.id))
-        .code(201)
-        .send({ workspace: selectedWorkspace, ...createdBundle });
-    }
-    workspace ??= await requireSelectedWorkspace(request, repository);
-    if (!projectId) throw new Error("Conversation project is required");
-    const conversation = await repository.appendConversationTurn({
-      workspaceId: workspace.id,
-      conversationId: typeof conversationId === "string" ? conversationId : randomUUID(),
-      projectId,
-      userContent: content,
+  app.post("/v1/conversations/messages/stream", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const command = conversationMessageCommand(request.body);
+    const abortController = new AbortController();
+    request.raw.once("aborted", () => abortController.abort());
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "cache-control": "no-store, no-transform",
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "x-accel-buffering": "no",
     });
-    const project = await repository.readProject(workspace.id, projectId);
-    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    return reply.code(created ? 201 : 200).send({ workspace, project, conversation });
+    const write = (event: Readonly<Record<string, unknown>>) => {
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(`${JSON.stringify(event)}\n`);
+    };
+    write({ type: "status", phase: "PREPARING" });
+    try {
+      const result = await processConversationMessage({
+        request,
+        principal,
+        repository,
+        agentSecrets,
+        command,
+        signal: abortController.signal,
+        onStage: phase => write({ type: "status", phase }),
+        onDelta: delta => write({ type: "delta", delta }),
+      });
+      const latestMessage = result.payload.conversation.messages.at(-1);
+      if (latestMessage?.metadata.projectDocumentUpdated === true) {
+        write({ type: "project_document", project: result.payload.project });
+      }
+      write({ type: "complete", ...result.payload });
+    } catch (error) {
+      const failure = publicStreamError(error);
+      write({ type: "error", ...failure });
+    } finally {
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
+    }
   });
 
   app.post<{ Params: { projectId: string } }>(
     "/v1/projects/:projectId/specification",
     async (request, reply) => {
-      localProductAccess(request, config);
-      const workspace = await requireSelectedWorkspace(request, repository);
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
       const body = objectBody(request.body);
       const note = typeof body.note === "string" ? body.note.trim() : "";
       if (note.length < 2 || note.length > 2_000) {
@@ -349,34 +704,133 @@ export async function runApi(
   );
 
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/approve", async (request, reply) => {
-    localProductAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository);
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    const digest = createHash("sha256").update(JSON.stringify(project.specification)).digest("hex");
+    const specificationObject = await objectStore.putSpecification({
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workflowId: project.workflowId,
+      specification: project.specification,
+    });
+    await repository.registerSpecificationArtifact({
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workflowId: project.workflowId,
+      object: specificationObject,
+    });
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "SPEC_APPROVED",
       idempotencyKey: `spec-approved:${project.workflowId}`,
-      payload: { specificationDigest: `sha256:${digest}` },
+      payload: { specificationObject },
+    });
+    return reply.code(accepted ? 202 : 200).send({ accepted });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/retry-agent", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const idempotencyKey = requestIdempotencyKey(request, "agent-retry");
+    const failedJob = [...project.jobs]
+      .reverse()
+      .find(job => job.state === "FAILED");
+    if (project.workflowState !== "FAILED" || failedJob?.kind !== "AGENT_GENERATION") {
+      if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
+        return reply.send({ accepted: false });
+      }
+      return reply.code(409).send({
+        code: "AGENT_RETRY_UNAVAILABLE",
+        message: "当前失败阶段不是 Agent 生成，不能从这里重试",
+      });
+    }
+    if (!await repository.readAgentSettings()) {
+      return reply.code(424).send({
+        code: "AGENT_CONFIG_REQUIRED",
+        message: "请先完成全局 Agent 配置，再重新生成",
+      });
+    }
+    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
+      kind: "AGENT_RETRY_REQUESTED",
+      idempotencyKey,
+      payload: {
+        previousJobId: failedJob.id,
+        requestedBy: principal.user.username,
+      },
+    });
+    return reply.code(accepted ? 202 : 200).send({ accepted });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/retry-artifact-build", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const idempotencyKey = requestIdempotencyKey(request, "artifact-build-retry");
+    const failedJob = [...project.jobs]
+      .reverse()
+      .find(job => job.state === "FAILED");
+    if (project.workflowState !== "FAILED" || failedJob?.kind !== "ARTIFACT_BUILD") {
+      if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
+        return reply.send({ accepted: false });
+      }
+      return reply.code(409).send({
+        code: "ARTIFACT_BUILD_RETRY_UNAVAILABLE",
+        message: "当前失败阶段不是制品构建，不能从这里重试",
+      });
+    }
+    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
+      kind: "ARTIFACT_BUILD_RETRY_REQUESTED",
+      idempotencyKey,
+      payload: {
+        previousJobId: failedJob.id,
+        requestedBy: principal.user.username,
+      },
+    });
+    return reply.code(accepted ? 202 : 200).send({ accepted });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/retry-e2e", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const idempotencyKey = requestIdempotencyKey(request, "e2e-retry");
+    const failedJob = [...project.jobs].reverse().find(job => job.state === "FAILED");
+    if (project.workflowState !== "FAILED" || failedJob?.kind !== "E2E_TEST") {
+      if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
+        return reply.send({ accepted: false });
+      }
+      return reply.code(409).send({
+        code: "E2E_RETRY_UNAVAILABLE",
+        message: "当前失败阶段不是跨平台 E2E，不能从这里重试",
+      });
+    }
+    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
+      kind: "E2E_RETRY_REQUESTED",
+      idempotencyKey,
+      payload: { previousJobId: failedJob.id, requestedBy: principal.user.username },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/cancel", async (request, reply) => {
-    localProductAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository);
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "CANCEL_REQUESTED",
       idempotencyKey: `cancel:${project.workflowId}`,
-      payload: { requestedBy: "LOCAL_OPERATOR" },
+      payload: { requestedBy: principal.user.username },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
   app.post("/v1/admin/server-nodes", async (request, reply) => {
-    authorizeWeb(request, config);
+    requireInstanceAdmin(request);
     const body = objectBody(request.body);
     if (!isServerPoolKind(body.poolKind)
       || !["linux", "windows", "macos"].includes(String(body.operatingSystem))
@@ -394,10 +848,64 @@ export async function runApi(
     return reply.code(201).send({ node });
   });
 
+  app.post("/v1/admin/e2e-enrollment-tokens", async (request, reply) => {
+    const principal = requireInstanceAdmin(request);
+    const body = objectBody(request.body);
+    if (!isServerPoolKind(body.poolKind) || !body.poolKind.startsWith("E2E_")) {
+      return reply.code(400).send({ code: "INVALID_E2E_POOL" });
+    }
+    const token = randomBytes(32).toString("base64url");
+    const created = await repository.createE2eEnrollmentToken({
+      tokenHash: digest(token),
+      poolKind: body.poolKind as Extract<ServerPoolKind, `E2E_${string}`>,
+      createdBy: principal.user.id,
+    });
+    return reply.code(201).send({ enrollment: { ...created, token } });
+  });
+
+  app.post("/v1/e2e/enroll", async (request, reply) => {
+    const body = objectBody(request.body);
+    const token = typeof body.token === "string" ? body.token : "";
+    if (!isServerPoolKind(body.poolKind) || !body.poolKind.startsWith("E2E_")
+      || !["linux", "windows", "macos"].includes(String(body.operatingSystem))
+      || typeof body.csr !== "string" || typeof body.receiptPublicKey !== "string" || token.length < 32) {
+      return reply.code(400).send({ code: "INVALID_E2E_ENROLLMENT" });
+    }
+    try {
+      if (createPublicKey(body.receiptPublicKey).asymmetricKeyType !== "ed25519") throw new Error("not Ed25519");
+    } catch {
+      return reply.code(400).send({ code: "INVALID_E2E_RECEIPT_KEY" });
+    }
+    const operatingSystem = body.operatingSystem as ServerOperatingSystem;
+    assertPoolOperatingSystem(body.poolKind, operatingSystem);
+    const nodeId = await repository.reserveE2eEnrollment({
+      tokenHash: digest(token),
+      poolKind: body.poolKind as Extract<ServerPoolKind, `E2E_${string}`>,
+      operatingSystem,
+      receiptPublicKey: body.receiptPublicKey,
+    });
+    const certificate = await pki.issue(nodeId, body.csr);
+    await repository.saveE2eCertificate({ nodeId, ...certificate });
+    return reply.code(201).send({ nodeId, ...certificate });
+  });
+
+  app.post<{ Params: { nodeId: string } }>("/v1/e2e/nodes/:nodeId/renew", async (request, reply) => {
+    authorizeE2e(request, config);
+    const socket = request.raw.socket as Socket & { getPeerCertificate?: () => { subjectaltname?: string } };
+    if (!(socket.getPeerCertificate?.().subjectaltname ?? "").includes(`URI:spiffe://deviludo/e2e-node/${request.params.nodeId}`)) {
+      throw unauthorized("E2E node certificate identity mismatch");
+    }
+    const body = objectBody(request.body);
+    if (typeof body.csr !== "string") return reply.code(400).send({ code: "INVALID_CSR" });
+    const certificate = await pki.issue(request.params.nodeId, body.csr);
+    await repository.saveE2eCertificate({ nodeId: request.params.nodeId, ...certificate });
+    return reply.send(certificate);
+  });
+
   app.post<{ Params: { nodeId: string; action: string } }>(
     "/v1/admin/server-nodes/:nodeId/:action",
     async (request, reply) => {
-      authorizeWeb(request, config);
+      requireInstanceAdmin(request);
       const states: Readonly<Record<string, ServerNodeState>> = Object.freeze({
         activate: "ACTIVE",
         drain: "DRAINING",
@@ -411,13 +919,14 @@ export async function runApi(
   );
 
   app.post("/v1/e2e/jobs/claim", async (request, reply) => {
-    authorizeE2e(request, config);
+    const authenticatedNodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
     if (typeof body.nodeId !== "string"
       || !isServerPoolKind(body.poolKind)
       || !body.poolKind.startsWith("E2E_")) {
       return reply.code(400).send({ code: "INVALID_E2E_CLAIM" });
     }
+    if (authenticatedNodeId && authenticatedNodeId !== body.nodeId) throw unauthorized("E2E node identity mismatch");
     const node = (await repository.readServerNodes()).find(candidate => candidate.id === body.nodeId);
     if (!node || node.state !== "ACTIVE" || node.poolKind !== body.poolKind) {
       return reply.code(409).send({ code: "NODE_NOT_ELIGIBLE" });
@@ -431,51 +940,79 @@ export async function runApi(
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/heartbeat", async (request, reply) => {
-    authorizeE2e(request, config);
+    const nodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
-    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body));
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     return reply.send({ accepted: await repository.heartbeat(job) });
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/complete", async (request, reply) => {
-    authorizeE2e(request, config);
+    const nodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
-    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body));
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     const completion = parseCompletion(body);
     assertE2eCompletion(job, completion);
+    await objectStore.verifyOutputs(job, completion.executorReceipt.outputObjects);
     return reply.send({ accepted: await repository.complete(job, completion) });
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/fail", async (request, reply) => {
-    authorizeE2e(request, config);
+    const nodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
-    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body));
-    const reason = typeof body.reason === "string" ? body.reason : "E2E execution failed";
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    if (body.classification !== "INFRASTRUCTURE"
+      || !E2E_INFRASTRUCTURE_DOMAINS.includes(body.domain as never)
+      || typeof body.reason !== "string" || body.reason.trim().length < 1) {
+      return reply.code(400).send({ code: "INVALID_E2E_FAILURE_CLASSIFICATION" });
+    }
+    const reason = `E2E_INFRASTRUCTURE/${body.domain}: ${body.reason.trim()}`;
     return reply.send({ accepted: await repository.fail(job, reason) });
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/signing-grant", async (request, reply) => {
-    authorizeE2e(request, config);
+    const nodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
-    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body));
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     if (job.jobKind !== "ARTIFACT_SIGN") return reply.code(403).send({ code: "SIGNING_GRANT_FORBIDDEN" });
     if (typeof body.beforeReimageProof !== "string" || body.beforeReimageProof.length < 16) {
       return reply.code(409).send({ code: "REIMAGE_PROOF_REQUIRED" });
     }
-    const operationId = await repository.registerOperation(job, "PLATFORM_SIGN");
+    const operationId = await repository.beginOperation(job, "PLATFORM_SIGN");
     const grant = await signingGrants.issue(job);
     return reply.send({ ...grant, operationId });
   });
 
-  app.post<{ Params: { workflowId: string } }>("/v1/workflows/:workflowId/signals", async (request, reply) => {
-    authorizeWeb(request, config);
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/objects", async (request, reply) => {
+    const nodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
-    if (typeof body.workspaceId !== "string"
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    return reply.send({ inputs: await objectStore.authorizeInputs(job) });
+  });
+
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/outputs", async (request, reply) => {
+    const nodeId = authorizeE2e(request, config);
+    const body = objectBody(request.body);
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    return reply.send(await objectStore.authorizeOutput(job, {
+      kind: String(body.kind ?? ""),
+      sha256: String(body.sha256 ?? ""),
+      sizeBytes: Number(body.sizeBytes),
+      targetPlatform: job.targetOperatingSystem,
+    }));
+  });
+
+  app.post<{ Params: { workflowId: string } }>("/v1/workflows/:workflowId/signals", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const body = objectBody(request.body);
+    if (typeof body.workspaceId !== "string" || !UUID.test(body.workspaceId)
+      || !UUID.test(request.params.workflowId)
       || !["SPEC_APPROVED", "CANCEL_REQUESTED", "EXTERNAL_APPROVAL"].includes(String(body.kind))
       || typeof body.idempotencyKey !== "string"
       || !body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) {
       return reply.code(400).send({ code: "INVALID_WORKFLOW_SIGNAL" });
     }
+    const workspace = await repository.readWorkspace(body.workspaceId, principal.user.id);
+    if (!workspace) return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND" });
     const accepted = await repository.appendSignal(body.workspaceId, request.params.workflowId, {
       kind: body.kind,
       idempotencyKey: body.idempotencyKey,
@@ -484,54 +1021,192 @@ export async function runApi(
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
-  app.post("/v1/dev/smoke/mac-e2e", async (request, reply) => {
-    authorizeWeb(request, config);
-    if (process.env.NODE_ENV === "production") return reply.code(404).send({ code: "NOT_FOUND" });
-    const body = objectBody(request.body);
-    for (const name of ["workspaceId", "projectId", "workflowId", "jobId"]) {
-      if (typeof body[name] !== "string") return reply.code(400).send({ code: "INVALID_SMOKE_IDS" });
-    }
-    if (!["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"].includes(String(body.jobKind))) {
-      return reply.code(400).send({ code: "INVALID_SMOKE_JOB_KIND" });
-    }
-    await repository.createMacSmokeJob({
-      workspaceId: body.workspaceId as string,
-      projectId: body.projectId as string,
-      workflowId: body.workflowId as string,
-      jobId: body.jobId as string,
-      jobKind: body.jobKind as "E2E_TEST" | "ARTIFACT_SIGN" | "STEAM_CLEAN_INSTALL",
-    });
-    return reply.code(201).send({ accepted: true });
-  });
-
-  app.post("/v1/dev/smoke/workspace-isolation", async (request, reply) => {
-    authorizeWeb(request, config);
-    if (process.env.NODE_ENV === "production") return reply.code(404).send({ code: "NOT_FOUND" });
-    const result = await repository.verifyWorkspaceIsolation({
-      firstWorkspaceId: randomUUID(),
-      firstProjectId: randomUUID(),
-      secondWorkspaceId: randomUUID(),
-      secondProjectId: randomUUID(),
-      forbiddenProjectId: randomUUID(),
-    });
-    const passed = Object.values(result).every(Boolean);
-    return reply.code(passed ? 200 : 500).send({ passed, checks: result });
-  });
-
-  app.get<{ Params: { workspaceId: string; jobId: string } }>(
-    "/v1/dev/smoke/mac-e2e/:workspaceId/:jobId",
-    async (request, reply) => {
-      authorizeWeb(request, config);
-      if (process.env.NODE_ENV === "production") return reply.code(404).send({ code: "NOT_FOUND" });
-      const job = await repository.readJobStatus(request.params.workspaceId, request.params.jobId);
-      return job ? reply.send({ job }) : reply.code(404).send({ code: "JOB_NOT_FOUND" });
-    },
-  );
-
   signal.addEventListener("abort", () => void app.close(), { once: true });
   await app.listen({ host: "0.0.0.0", port: config.port });
   await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
   await database.close();
+}
+
+type ConversationMessageCommand = Readonly<{
+  content: string;
+  conversationId: string | null;
+  projectId: string | null;
+  projectIdSupplied: boolean;
+}>;
+
+type ConversationMessageResult = Readonly<{
+  statusCode: 200 | 201;
+  setWorkspaceCookie: boolean;
+  payload: Readonly<{
+    workspace: WorkspaceSummary;
+    project: ProductProjectDetail;
+    conversation: ProductConversation;
+  }>;
+}>;
+
+function conversationMessageCommand(value: unknown): ConversationMessageCommand {
+  const body = objectBody(value);
+  const content = typeof body.content === "string" ? body.content.trim() : "";
+  const conversationId = body.conversationId === undefined ? null : body.conversationId;
+  const projectId = body.projectId === undefined ? null : body.projectId;
+  if (content.length < 2 || content.length > 4_000
+    || (conversationId !== null && (typeof conversationId !== "string" || !UUID.test(conversationId)))
+    || (projectId !== null && (typeof projectId !== "string" || !UUID.test(projectId)))) {
+    throw httpError(400, "INVALID_CONVERSATION_MESSAGE", "对话消息格式无效");
+  }
+  return Object.freeze({
+    content,
+    conversationId: conversationId as string | null,
+    projectId: projectId as string | null,
+    projectIdSupplied: body.projectId !== undefined,
+  });
+}
+
+async function processConversationMessage(input: Readonly<{
+  request: FastifyRequest;
+  principal: AuthenticatedSession;
+  repository: CoreRepository;
+  agentSecrets: AgentSecretStore;
+  command: ConversationMessageCommand;
+  signal?: AbortSignal;
+  onStage?: (phase: "NAMING" | "RESPONDING" | "SAVING") => void;
+  onDelta?: (delta: string) => void;
+}>): Promise<ConversationMessageResult> {
+  const { request, principal, repository, agentSecrets, command } = input;
+  let workspace = await selectedWorkspaceFromRequest(request, repository, principal);
+  let projectId = command.projectId;
+  let existingConversation: ProductConversation | null = null;
+  if (command.conversationId) {
+    workspace ??= await requireSelectedWorkspace(request, repository, principal);
+    existingConversation = await repository.readConversation(workspace.id, command.conversationId);
+    if (!existingConversation) throw httpError(404, "CONVERSATION_NOT_FOUND", "对话已不存在");
+    if (command.projectIdSupplied && projectId !== existingConversation.projectId) {
+      throw httpError(409, "CONVERSATION_PROJECT_LOCKED", "对话不能切换到其他项目");
+    }
+    projectId = existingConversation.projectId;
+  } else if (projectId && (!workspace || !(await repository.readProject(workspace.id, projectId)))) {
+    throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
+  }
+
+  const created = command.conversationId === null;
+  if (created && !projectId) {
+    const idempotencyKey = requestIdempotencyKey(request, "conversation");
+    const prior = await repository.readProjectCreationReceipt(principal.user.id, idempotencyKey);
+    if (prior) {
+      if (prior.operationKind !== "CONVERSATION" || !prior.conversationId
+        || (workspace && workspace.id !== prior.workspaceId)) {
+        throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他操作");
+      }
+      const [priorWorkspace, project, conversation] = await Promise.all([
+        repository.readWorkspace(prior.workspaceId, principal.user.id),
+        repository.readProject(prior.workspaceId, prior.projectId),
+        repository.readConversation(prior.workspaceId, prior.conversationId),
+      ]);
+      if (!priorWorkspace || !project || !conversation) throw new Error("Conversation creation receipt is incomplete");
+      return Object.freeze({
+        statusCode: 200,
+        setWorkspaceCookie: true,
+        payload: Object.freeze({ workspace: priorWorkspace, project, conversation }),
+      });
+    }
+    input.onStage?.("NAMING");
+    const name = await agentProjectName(command.content, repository, agentSecrets);
+    const specification = specificationFromConcept(name, command.content);
+    input.onStage?.("RESPONDING");
+    const agentReply = await conversationAgentReply({
+      userContent: command.content,
+      history: Object.freeze([]),
+      project: Object.freeze({
+        name,
+        concept: command.content,
+        workflowState: "DRAFT",
+        specification,
+        document: createInitialProjectDocument(name, command.content, specification),
+      }),
+      allowDraftMutation: true,
+    }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
+    input.onStage?.("SAVING");
+    const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
+    const createdBundle = await repository.createProjectConversation({
+      actorUserId: principal.user.id,
+      workspaceId: targetWorkspace.id,
+      workspaceName: targetWorkspace.name,
+      projectId: randomUUID(),
+      workflowId: randomUUID(),
+      conversationId: randomUUID(),
+      idempotencyKey,
+      name,
+      concept: command.content,
+      specification,
+      document: agentReply.projectDocument ?? createInitialProjectDocument(name, command.content, specification),
+      userContent: command.content,
+      assistantContent: agentReply.content,
+      assistantMetadata: conversationAgentMetadata(agentReply),
+      ...defaultWorkflowConfiguration(),
+    });
+    const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id, principal.user.id);
+    if (!selectedWorkspace) throw new Error("Created workspace could not be read");
+    return Object.freeze({
+      statusCode: 201,
+      setWorkspaceCookie: true,
+      payload: Object.freeze({ workspace: selectedWorkspace, ...createdBundle }),
+    });
+  }
+
+  workspace ??= await requireSelectedWorkspace(request, repository, principal);
+  if (!projectId) throw new Error("Conversation project is required");
+  const project = await repository.readProject(workspace.id, projectId);
+  if (!project) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
+  if (project.workflowState === "AGENT_RUNNING") {
+    input.onStage?.("SAVING");
+    const conversation = await repository.appendAgentGuidance({
+      workspaceId: workspace.id,
+      projectId,
+      conversationId: command.conversationId ?? randomUUID(),
+      content: command.content,
+    });
+    return Object.freeze({
+      statusCode: created ? 201 : 200,
+      setWorkspaceCookie: false,
+      payload: Object.freeze({ workspace, project, conversation }),
+    });
+  }
+  input.onStage?.("RESPONDING");
+  const agentReply = await conversationAgentReply({
+    userContent: command.content,
+    history: existingConversation?.messages ?? Object.freeze([]),
+    project: conversationProjectContext(project),
+    allowDraftMutation: project.workflowState === "DRAFT",
+  }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
+  input.onStage?.("SAVING");
+  const conversation = await repository.appendConversationTurn({
+    workspaceId: workspace.id,
+    conversationId: command.conversationId ?? randomUUID(),
+    projectId,
+    userContent: command.content,
+    expectedWorkflowState: project.workflowState,
+    assistantContent: agentReply.content,
+    assistantApplyToDraft: agentReply.applyToDraft,
+    assistantProjectDocument: agentReply.projectDocument,
+    assistantMetadata: conversationAgentMetadata(agentReply),
+  });
+  const updatedProject = await repository.readProject(workspace.id, projectId);
+  if (!updatedProject) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
+  return Object.freeze({
+    statusCode: created ? 201 : 200,
+    setWorkspaceCookie: false,
+    payload: Object.freeze({ workspace, project: updatedProject, conversation }),
+  });
+}
+
+function publicStreamError(error: unknown): Readonly<{ code: string; message: string }> {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  const status = "statusCode" in failure && typeof failure.statusCode === "number" ? failure.statusCode : 500;
+  const code = "code" in failure && typeof failure.code === "string" ? failure.code : null;
+  return Object.freeze({
+    code: status >= 500 ? "INTERNAL_ERROR" : code ?? "INVALID_REQUEST",
+    message: status >= 500 ? "Core request failed" : failure.message,
+  });
 }
 
 function authorizeWeb(request: FastifyRequest, config: CoreConfig): void {
@@ -540,22 +1215,24 @@ function authorizeWeb(request: FastifyRequest, config: CoreConfig): void {
   if (!secureEqual(actual, config.webToken)) throw unauthorized("Web service authentication failed");
 }
 
-function authorizeE2e(request: FastifyRequest, config: CoreConfig): void {
+function authorizeE2e(request: FastifyRequest, config: CoreConfig): string | null {
   if (process.env.NODE_ENV === "production") {
     const socket = request.raw.socket as Socket & {
       authorized?: boolean;
       getPeerCertificate?: () => { subjectaltname?: string };
     };
     const identity = socket.getPeerCertificate?.().subjectaltname ?? "";
-    if (socket.authorized !== true || !identity.includes("URI:spiffe://deviludo/e2e-node/")) {
+    const match = identity.match(/(?:^|,\s*)URI:spiffe:\/\/deviludo\/e2e-node\/([0-9a-f-]{36})(?:,|$)/i);
+    if (socket.authorized !== true || !match) {
       throw unauthorized("E2E node mTLS authentication failed");
     }
-    return;
+    return match[1];
   }
   const actual = String(request.headers["x-deviludo-node-auth"] ?? "");
   if (!config.e2eDevelopmentToken || !secureEqual(actual, config.e2eDevelopmentToken)) {
     throw unauthorized("E2E node authentication failed");
   }
+  return null;
 }
 
 function jobIdentity(jobId: string, body: Record<string, unknown>): ClaimedJobIdentity {
@@ -582,26 +1259,55 @@ function unauthorized(message: string): Error & { statusCode: number } {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WORKSPACE_COOKIE = "deviludo_workspace";
+const authenticatedRequests = new WeakMap<FastifyRequest, AuthenticatedSession>();
 
-function localProductAccess(request: FastifyRequest, config: CoreConfig): void {
+function productAccess(request: FastifyRequest, config: CoreConfig): AuthenticatedSession {
   authorizeWeb(request, config);
-  if (process.env.NODE_ENV === "production") {
-    throw unauthorized("A verified operator session is required");
-  }
+  const session = authenticatedRequests.get(request);
+  if (!session) throw unauthorized("请先登录");
+  return session;
 }
 
 async function selectedWorkspaceFromRequest(
   request: FastifyRequest,
   repository: CoreRepository,
+  session: AuthenticatedSession,
 ) {
   const workspaceId = cookieValue(request.headers.cookie, WORKSPACE_COOKIE);
-  return workspaceId && UUID.test(workspaceId) ? repository.readWorkspace(workspaceId) : null;
+  return workspaceId && UUID.test(workspaceId) ? repository.readWorkspace(workspaceId, session.user.id) : null;
 }
 
-async function requireSelectedWorkspace(request: FastifyRequest, repository: CoreRepository) {
-  const workspace = await selectedWorkspaceFromRequest(request, repository);
+async function requireSelectedWorkspace(
+  request: FastifyRequest,
+  repository: CoreRepository,
+  session: AuthenticatedSession,
+) {
+  const workspace = await selectedWorkspaceFromRequest(request, repository, session);
   if (!workspace) throw httpError(409, "WORKSPACE_REQUIRED", "请先选择工作区");
   return workspace;
+}
+
+async function authenticateRequest(request: FastifyRequest, repository: CoreRepository) {
+  const token = cookieValue(request.headers.cookie, SESSION_COOKIE);
+  return token && token.length >= 32 ? repository.readSession(digest(token)) : null;
+}
+
+function assertCsrf(request: FastifyRequest, session: AuthenticatedSession): void {
+  if (request.headers["x-deviludo-origin-verified"] !== "1") {
+    throw httpError(403, "ORIGIN_REJECTED", "请求来源无效");
+  }
+  const header = String(request.headers["x-deviludo-csrf"] ?? request.headers["x-csrf-token"] ?? "");
+  const cookie = cookieValue(request.headers.cookie, CSRF_COOKIE);
+  if (!header || !cookie || !secureEqual(digest(header), session.csrfHash) || !secureEqual(header, cookie)) {
+    throw httpError(403, "CSRF_REJECTED", "CSRF 校验失败");
+  }
+}
+
+function requireInstanceAdmin(request: FastifyRequest): AuthenticatedSession {
+  const principal = authenticatedRequests.get(request);
+  if (!principal) throw unauthorized("请先登录");
+  if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
+  return principal;
 }
 
 function selectedWorkspaceCookie(workspaceId: string | null): string {
@@ -657,6 +1363,173 @@ async function agentProjectName(
   }
 }
 
+async function processProjectImport(input: Readonly<{
+  request: FastifyRequest;
+  principal: AuthenticatedSession;
+  repository: CoreRepository;
+  agentSecrets: AgentSecretStore;
+  objectStore: CoreObjectStore;
+  source: () => Promise<ImportedSourceSnapshot>;
+}>): Promise<Readonly<{
+  statusCode: 200 | 201;
+  workspace: WorkspaceSummary;
+  payload: Readonly<{
+    workspace: WorkspaceSummary;
+    project: ProductProjectDetail;
+    conversation: ProductConversation | null;
+  }>;
+}>> {
+  const idempotencyKey = requestIdempotencyKey(input.request, "project-import");
+  const currentWorkspace = await selectedWorkspaceFromRequest(input.request, input.repository, input.principal);
+  const prior = await input.repository.readProjectCreationReceipt(input.principal.user.id, idempotencyKey);
+  if (prior) {
+    if (prior.operationKind !== "PROJECT" || (currentWorkspace && currentWorkspace.id !== prior.workspaceId)) {
+      throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他操作");
+    }
+    const [workspace, project, conversations] = await Promise.all([
+      input.repository.readWorkspace(prior.workspaceId, input.principal.user.id),
+      input.repository.readProject(prior.workspaceId, prior.projectId),
+      input.repository.listProjectConversations(prior.workspaceId, prior.projectId),
+    ]);
+    if (!workspace || !project) throw new Error("Project import receipt is incomplete");
+    const conversation = conversations[0]
+      ? await input.repository.readConversation(prior.workspaceId, conversations[0].id)
+      : null;
+    return Object.freeze({
+      statusCode: 200,
+      workspace,
+      payload: Object.freeze({ workspace, project, conversation }),
+    });
+  }
+
+  let source: ImportedSourceSnapshot;
+  try {
+    source = await input.source();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "项目源码读取失败";
+    throw httpError(422, "PROJECT_IMPORT_SOURCE_FAILED", message);
+  }
+  const settings = await input.repository.readAgentSettings();
+  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
+  const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
+  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
+  let analysis;
+  try {
+    analysis = await analyzeImportedProject({ source, settings, apiKey });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "项目分析 Agent 调用失败";
+    throw httpError(424, "AGENT_IMPORT_FAILED", message);
+  }
+
+  const targetWorkspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name: analysis.name, createdAt: "" });
+  const projectId = randomUUID();
+  const workflowId = randomUUID();
+  const stored = await input.objectStore.putImportedSource({
+    workspaceId: targetWorkspace.id,
+    projectId,
+    archive: source.archive,
+    sourceKind: source.sourceKind,
+  });
+  let bundle;
+  try {
+    bundle = await input.repository.createImportedProject({
+      actorUserId: input.principal.user.id,
+      workspaceId: targetWorkspace.id,
+      workspaceName: targetWorkspace.name,
+      projectId,
+      workflowId,
+      conversationId: randomUUID(),
+      artifactId: randomUUID(),
+      idempotencyKey,
+      name: analysis.name,
+      concept: analysis.concept,
+      specification: analysis.specification,
+      document: analysis.document,
+      userContent: source.repositoryUrl
+        ? `导入并分析 Git 项目：${source.repositoryUrl}`
+        : `导入并分析本地项目：${source.displayName}`,
+      assistantContent: analysis.assistantContent,
+      assistantMetadata: {
+        agentRuntime: analysis.runtime,
+        model: analysis.model,
+        settingsRevision: analysis.settingsRevision,
+      },
+      source: {
+        kind: source.sourceKind,
+        repositoryUrl: source.repositoryUrl,
+        displayName: source.displayName,
+        fileCount: source.fileCount,
+        totalBytes: source.totalBytes,
+        bucket: stored.bucket,
+        key: stored.key,
+        sha256: stored.sha256,
+        sizeBytes: stored.sizeBytes,
+      },
+      ...defaultWorkflowConfiguration(),
+    });
+  } catch (error) {
+    await input.objectStore.deleteProjectObjects(targetWorkspace.id, projectId).catch(() => undefined);
+    throw error;
+  }
+  const workspace = currentWorkspace ?? await input.repository.readWorkspace(targetWorkspace.id, input.principal.user.id);
+  if (!workspace) throw new Error("Imported workspace could not be read");
+  return Object.freeze({
+    statusCode: 201,
+    workspace,
+    payload: Object.freeze({ workspace, ...bundle }),
+  });
+}
+
+async function conversationAgentReply(
+  input: Readonly<{
+    userContent: string;
+    history: readonly Pick<ProductConversation["messages"][number], "role" | "content">[];
+    project: ConversationAgentProjectContext;
+    allowDraftMutation: boolean;
+  }>,
+  repository: CoreRepository,
+  agentSecrets: AgentSecretStore,
+  stream?: Readonly<{
+    signal?: AbortSignal;
+    onDelta?: (delta: string) => void;
+  }>,
+): Promise<ProductConversationAgentReply> {
+  const settings = await repository.readAgentSettings();
+  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
+  const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
+  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
+  try {
+    if (stream?.onDelta) {
+      return await streamProductConversationReply({ ...input, settings, apiKey, signal: stream.signal }, stream.onDelta);
+    }
+    return await generateProductConversationReply({ ...input, settings, apiKey });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "设计 Agent 调用失败";
+    throw httpError(424, "AGENT_CONVERSATION_FAILED", message);
+  }
+}
+
+function conversationProjectContext(project: ProductProjectDetail): ConversationAgentProjectContext {
+  return Object.freeze({
+    name: project.name,
+    concept: project.concept,
+    workflowState: project.workflowState,
+    specification: project.specification,
+    document: project.document.content,
+  });
+}
+
+function conversationAgentMetadata(reply: ProductConversationAgentReply): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    source: "AI_AGENT",
+    agentRuntime: reply.runtime,
+    model: reply.model,
+    settingsRevision: reply.settingsRevision,
+    readyForDevelopment: reply.readyForDevelopment,
+    options: reply.options,
+  });
+}
+
 function httpError(statusCode: number, code: string, message: string): Error & { statusCode: number; code: string } {
   return Object.assign(new Error(message), { statusCode, code });
 }
@@ -692,6 +1565,24 @@ function specificationFromConcept(name: string, concept: string): Readonly<Recor
     ]),
     revisionNotes: Object.freeze([]),
   });
+}
+
+function publicUser(user: UserRecord) {
+  return Object.freeze({
+    id: user.id,
+    username: user.username,
+    instanceAdmin: user.instanceAdmin,
+    createdAt: user.createdAt,
+  });
+}
+
+function defaultWorkflowConfiguration(): Readonly<{
+  profile: "VALIDATE" | "RELEASE";
+  targetPlatforms: readonly ServerOperatingSystem[];
+}> {
+  return process.env.DEVILUDO_DEFAULT_WORKFLOW_PROFILE === "RELEASE"
+    ? Object.freeze({ profile: "RELEASE", targetPlatforms: Object.freeze<ServerOperatingSystem[]>(["linux", "windows", "macos"]) })
+    : Object.freeze({ profile: "VALIDATE", targetPlatforms: Object.freeze<ServerOperatingSystem[]>(["macos"]) });
 }
 
 function refineSpecification(

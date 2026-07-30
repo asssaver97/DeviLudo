@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from "react";
 import type { ServerNodeRecord, ServerPoolRecord } from "@/lib/runtime/server-pools";
+import { useLanguage } from "./i18n/LanguageProvider";
 
 type PoolResponse = Readonly<{ pools: readonly ServerPoolRecord[]; nodes: readonly ServerNodeRecord[] }>;
 
 export function ServerPoolDashboard() {
+  const { text } = useLanguage();
   const [state, setState] = useState<PoolResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -13,18 +15,18 @@ export function ServerPoolDashboard() {
     const controller = new AbortController();
     fetch("/api/admin/server-pools", { cache: "no-store", signal: controller.signal })
       .then(async response => {
-        if (!response.ok) throw new Error(`服务器池接口返回 ${response.status}`);
+        if (!response.ok) throw new Error(text(`服务器池接口返回 ${response.status}`, `Server pool API returned ${response.status}`));
         return await response.json() as PoolResponse;
       })
       .then(setState)
       .catch(reason => {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "加载失败");
+        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : text("加载失败", "Unable to load"));
       });
     return () => controller.abort();
-  }, []);
+  }, [text]);
 
   if (error) return <div className="inline-notice danger">{error}</div>;
-  if (!state) return <section className="resource-empty-project">正在读取五类服务器池状态…</section>;
+  if (!state) return <section className="resource-empty-project">{text("正在读取五类服务器池状态…", "LOADING FIVE SERVER POOLS…")}</section>;
 
   return (
     <div className="poolGrid">
@@ -40,13 +42,13 @@ export function ServerPoolDashboard() {
               <span className="badge">{pool.readiness}</span>
             </header>
             <div className="metrics">
-              <div><strong>{pool.activeNodes}</strong><small>活动</small></div>
-              <div><strong>{pool.desiredNodes}</strong><small>期望</small></div>
-              <div><strong>{pool.maximumNodes}</strong><small>上限</small></div>
+              <div><strong>{pool.activeNodes}</strong><small>{text("活动", "ACTIVE")}</small></div>
+              <div><strong>{pool.desiredNodes}</strong><small>{text("期望", "DESIRED")}</small></div>
+              <div><strong>{pool.maximumNodes}</strong><small>{text("上限", "MAX")}</small></div>
             </div>
             <div className="capabilities">{pool.capabilities.join(" · ")}</div>
             <ul className="nodeList">
-              {nodes.length === 0 ? <li><span>无常驻节点</span><span>按需</span></li> : nodes.map(node => (
+              {nodes.length === 0 ? <li><span>{text("无常驻节点", "No resident nodes")}</span><span>{text("按需", "ON DEMAND")}</span></li> : nodes.map(node => (
                 <li key={node.id}><span>{node.id}</span><span>{node.state}</span></li>
               ))}
             </ul>

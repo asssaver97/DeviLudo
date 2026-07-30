@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { APIResponse } from "@playwright/test";
-import type { JobProtocolV3 } from "../../../services/core/src/contracts";
+import type { JobProtocolV4 } from "../../../services/core/src/contracts";
 import {
   StackHarness,
   test,
@@ -169,55 +169,6 @@ test("the scheduler recovers an expired lease and increments fencing on the next
   expect((await completeResponse(stack, reclaimed)).ok()).toBeTruthy();
 });
 
-test("development smoke routes verify workspace isolation and persist trusted macOS proofs", async ({ stack }) => {
-  const nodes = await stack.registerFixedNodes();
-  const isolation = await stack.coreWeb("/v1/dev/smoke/workspace-isolation", { method: "POST", data: {} });
-  expect(isolation.ok()).toBeTruthy();
-  expect(await isolation.json()).toMatchObject({
-    passed: true,
-    checks: {
-      ownRead: true,
-      crossWorkspaceHidden: true,
-      missingContextHidden: true,
-      crossWorkspaceWriteRejected: true,
-    },
-  });
-
-  const ids = {
-    workspaceId: randomUUID(),
-    projectId: randomUUID(),
-    workflowId: randomUUID(),
-    jobId: randomUUID(),
-  };
-  const invalid = await stack.coreWeb("/v1/dev/smoke/mac-e2e", {
-    method: "POST",
-    data: { ...ids, jobKind: "UNKNOWN" },
-  });
-  expect(invalid.status()).toBe(400);
-
-  const created = await stack.coreWeb("/v1/dev/smoke/mac-e2e", {
-    method: "POST",
-    data: { ...ids, jobKind: "STEAM_CLEAN_INSTALL" },
-  });
-  expect(created.status()).toBe(201);
-  const job = await claim(stack, requiredNode(nodes, "E2E_MACOS"));
-  expect(job.jobId).toBe(ids.jobId);
-  expect((await completeResponse(stack, job)).ok()).toBeTruthy();
-
-  const status = await stack.coreWeb(`/v1/dev/smoke/mac-e2e/${ids.workspaceId}/${ids.jobId}`);
-  expect(status.ok()).toBeTruthy();
-  expect(await status.json()).toMatchObject({
-    job: {
-      state: "SUCCEEDED",
-      beforeReimageProof: proof("before"),
-      cleanupProof: proof("cleanup"),
-      afterReimageProof: proof("after"),
-    },
-  });
-  const missing = await stack.coreWeb(`/v1/dev/smoke/mac-e2e/${ids.workspaceId}/${randomUUID()}`);
-  expect(missing.status()).toBe(404);
-});
-
 async function prepareE2eStage(stack: StackHarness): Promise<Readonly<{
   project: ProjectDetail;
   nodes: readonly NodeRecord[];
@@ -240,17 +191,17 @@ async function claimResponse(stack: StackHarness, node: NodeRecord): Promise<API
   });
 }
 
-async function claim(stack: StackHarness, node: NodeRecord): Promise<JobProtocolV3> {
+async function claim(stack: StackHarness, node: NodeRecord): Promise<JobProtocolV4> {
   const response = await claimResponse(stack, node);
   expect(response.ok()).toBeTruthy();
-  const job = (await response.json() as { job: JobProtocolV3 | null }).job;
+  const job = (await response.json() as { job: JobProtocolV4 | null }).job;
   expect(job).not.toBeNull();
-  return job as JobProtocolV3;
+  return job as JobProtocolV4;
 }
 
 async function completeResponse(
   stack: StackHarness,
-  job: JobProtocolV3,
+  job: JobProtocolV4,
   overrides: Readonly<{
     isolationGeneration?: number;
     receipt?: Readonly<Record<string, unknown>>;
@@ -279,14 +230,14 @@ async function completeResponse(
   });
 }
 
-async function fail(stack: StackHarness, job: JobProtocolV3, reason: string): Promise<APIResponse> {
+async function fail(stack: StackHarness, job: JobProtocolV4, reason: string): Promise<APIResponse> {
   return await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/fail`, {
     method: "POST",
     data: { ...identity(job), reason },
   });
 }
 
-function identity(job: JobProtocolV3): Readonly<{ workspaceId: string; leaseToken: string }> {
+function identity(job: JobProtocolV4): Readonly<{ workspaceId: string; leaseToken: string }> {
   return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token });
 }
 

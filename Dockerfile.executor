@@ -1,0 +1,13 @@
+FROM node:22.22.0-alpine3.23
+RUN apk add --no-cache docker-cli \
+ && addgroup -g 10001 executor \
+ && adduser -D -u 10001 -G executor executor
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --omit=dev
+COPY lib ./lib
+COPY services/core/src/contracts.ts services/core/src/sandbox.ts services/core/src/agent-settings.ts ./services/core/src/
+COPY services/sandbox-executor ./services/sandbox-executor
+RUN install -d -m 0555 /run/service-secrets
+USER 10001:10001
+CMD ["node", "--import", "tsx", "services/sandbox-executor/src/daemon.ts"]

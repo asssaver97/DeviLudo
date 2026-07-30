@@ -7,6 +7,7 @@ import {
 
 export const JOB_KINDS = [
   "AGENT_GENERATION",
+  "PROJECT_DOCUMENT_MAINTENANCE",
   "ARTIFACT_BUILD",
   "STEAM_PUBLISH",
   "E2E_TEST",
@@ -15,7 +16,7 @@ export const JOB_KINDS = [
 ] as const;
 
 export type JobKind = typeof JOB_KINDS[number];
-export type CoreJobKind = Extract<JobKind, "AGENT_GENERATION" | "ARTIFACT_BUILD" | "STEAM_PUBLISH">;
+export type CoreJobKind = Extract<JobKind, "AGENT_GENERATION" | "PROJECT_DOCUMENT_MAINTENANCE" | "ARTIFACT_BUILD" | "STEAM_PUBLISH">;
 export type E2eJobKind = Exclude<JobKind, CoreJobKind>;
 
 const E2E_POOL_BY_OS: Readonly<Record<ServerOperatingSystem, ServerPoolKind>> = Object.freeze({
@@ -29,7 +30,7 @@ export function isJobKind(value: unknown): value is JobKind {
 }
 
 export function routeJob(kind: JobKind, targetOperatingSystem?: ServerOperatingSystem): ServerPoolKind {
-  if (kind === "AGENT_GENERATION" || kind === "ARTIFACT_BUILD" || kind === "STEAM_PUBLISH") {
+  if (kind === "AGENT_GENERATION" || kind === "PROJECT_DOCUMENT_MAINTENANCE" || kind === "ARTIFACT_BUILD" || kind === "STEAM_PUBLISH") {
     if (targetOperatingSystem !== undefined) throw new Error(`${kind} cannot target an E2E operating system`);
     return "CORE";
   }
@@ -52,6 +53,7 @@ export function jobCapabilities(kind: JobKind): readonly string[] {
   if (kind === "E2E_TEST") return Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]);
   if (kind === "STEAM_CLEAN_INSTALL") return Object.freeze(["STEAM_CLIENT", "TRUSTED_REIMAGE"]);
   if (kind === "AGENT_GENERATION") return Object.freeze(["MICROVM", "NETWORK_POLICY"]);
+  if (kind === "PROJECT_DOCUMENT_MAINTENANCE") return Object.freeze(["MICROVM", "NETWORK_POLICY"]);
   if (kind === "ARTIFACT_BUILD") return Object.freeze(["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"]);
   return Object.freeze(["RESTRICTED_CONTAINER", "STEAMCMD"]);
 }

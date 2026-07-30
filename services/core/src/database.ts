@@ -3,7 +3,8 @@ import type { CoreConfig } from "./config";
 
 export type Database = Readonly<{
   pool: Pool;
-  withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>): Promise<T>;
+  withUser<T>(userId: string, callback: (client: PoolClient) => Promise<T>): Promise<T>;
+  withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>, userId?: string): Promise<T>;
   close(): Promise<void>;
 }>;
 
@@ -24,24 +25,38 @@ export function createDatabase(config: CoreConfig): Database {
 
   return Object.freeze({
     pool,
-    async withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>): Promise<T> {
+    async withUser<T>(userId: string, callback: (client: PoolClient) => Promise<T>): Promise<T> {
+      if (!UUID.test(userId)) throw new Error("User id is invalid");
+      return withTransaction(pool, callback, { userId });
+    },
+    async withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>, userId?: string): Promise<T> {
       if (!UUID.test(workspaceId)) throw new Error("Workspace id is invalid");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
-        const result = await callback(client);
-        await client.query("COMMIT");
-        return result;
-      } catch (error) {
-        await client.query("ROLLBACK").catch(() => undefined);
-        throw error;
-      } finally {
-        client.release();
-      }
+      if (userId !== undefined && !UUID.test(userId)) throw new Error("User id is invalid");
+      return withTransaction(pool, callback, { workspaceId, userId });
     },
     close: () => pool.end(),
   });
+}
+
+async function withTransaction<T>(
+  pool: Pool,
+  callback: (client: PoolClient) => Promise<T>,
+  context: Readonly<{ workspaceId?: string; userId?: string }>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    if (context.userId) await client.query("SELECT set_config('app.user_id', $1, true)", [context.userId]);
+    if (context.workspaceId) await client.query("SELECT set_config('app.workspace_id', $1, true)", [context.workspaceId]);
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export function oneRow<T extends QueryResultRow>(rows: T[], message: string): T {

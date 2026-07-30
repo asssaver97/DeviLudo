@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+config="/Library/Application Support/DeviludoE2E/node.env"
+[[ -r $config ]]
+set -a; source "$config"; set +a
+exec /opt/homebrew/bin/node /opt/deviludo/current/e2e-renew.mjs

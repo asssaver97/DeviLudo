@@ -1,41 +1,227 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import type { ProductProjectDetail } from "@/lib/product/contracts";
-import { WORKFLOW_LABELS } from "@/lib/product/contracts";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
+import type {
+  AgentProgressEvent,
+  ArtifactRecord,
+  ProductConversation,
+  ProductConversationSummary,
+  ProductProjectDetail,
+} from "@/lib/product/contracts";
+import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
+import {
+  chronologicalMessages,
+  ConversationStreamError,
+  optimisticConversation,
+  sendConversationMessageStream,
+} from "@/lib/product/conversation-stream";
+import { ConversationBox } from "./conversation/ConversationBox";
+import { FileIcon, PlusIcon } from "./console/Icons";
 import { ProductShell } from "./ProductShell";
+import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 
 const PIPELINE = [
-  ["AGENT_GENERATION", "Agent 生成"],
-  ["ARTIFACT_BUILD", "制品构建"],
-  ["E2E_TEST", "跨平台 E2E"],
-  ["ARTIFACT_SIGN", "平台签名"],
-  ["STEAM_PUBLISH", "Steam 上传"],
-  ["STEAM_CLEAN_INSTALL", "干净回装"],
+  ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
+  ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
+  ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
+  ["ARTIFACT_SIGN", "平台签名", "Platform Signing"],
+  ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
+  ["STEAM_CLEAN_INSTALL", "干净回装", "Clean Install"],
 ] as const;
 
 export function ProjectStudio({ projectId }: { projectId: string }) {
+  const { locale, text } = useLanguage();
   const [project, setProject] = useState<ProductProjectDetail | null>(null);
-  const [note, setNote] = useState("");
+  const [conversations, setConversations] = useState<readonly ProductConversationSummary[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [conversation, setConversation] = useState<ProductConversation | null>(null);
+  const [conversationInput, setConversationInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [streamingReply, setStreamingReply] = useState("");
+  const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
+  const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>([]);
+  const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null);
+  const agentProgressCursor = useRef(0);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [documentCollapsed, setDocumentCollapsed] = useState(false);
+  const [editingDocument, setEditingDocument] = useState(false);
+  const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
 
-  const load = useCallback(async () => {
+  const loadProject = useCallback(async () => {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" });
     const payload = await response.json() as { project?: ProductProjectDetail; message?: string };
-    if (!response.ok || !payload.project) throw new Error(payload.message ?? `项目读取失败 (${response.status})`);
-    setProject(payload.project);
-  }, [projectId]);
+    if (!response.ok || !payload.project) throw new Error(payload.message ?? text(`项目读取失败 (${response.status})`, `Unable to load project (${response.status})`));
+    setProject(current => newestProjectSnapshot(current, payload.project!));
+  }, [projectId, text]);
+
+  const loadConversations = useCallback(async () => {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversations`, { cache: "no-store" });
+    const payload = await response.json() as { conversations?: readonly ProductConversationSummary[]; message?: string };
+    if (!response.ok || !payload.conversations) throw new Error(payload.message ?? text(`历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
+    setConversations(payload.conversations);
+    const initialId = payload.conversations[0]?.id ?? null;
+    setSelectedConversationId(initialId);
+    if (!initialId) {
+      setConversation(null);
+      return;
+    }
+    const conversationResponse = await fetch(`/api/conversations/${encodeURIComponent(initialId)}`, { cache: "no-store" });
+    const conversationPayload = await conversationResponse.json() as { conversation?: ProductConversation; message?: string };
+    if (!conversationResponse.ok || !conversationPayload.conversation) {
+      throw new Error(conversationPayload.message ?? text(`会话读取失败 (${conversationResponse.status})`, `Unable to load conversation (${conversationResponse.status})`));
+    }
+    setConversation(conversationPayload.conversation);
+  }, [projectId, text]);
+
+  const loadArtifacts = useCallback(async () => {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts`, { cache: "no-store" });
+    const payload = await response.json() as { artifacts?: readonly ArtifactRecord[]; message?: string };
+    if (!response.ok || !payload.artifacts) {
+      throw new Error(payload.message ?? text(`制品读取失败 (${response.status})`, `Unable to load artifacts (${response.status})`));
+    }
+    setArtifacts(payload.artifacts);
+  }, [projectId, text]);
 
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
-      void load().catch(reason => active && setError(reason instanceof Error ? reason.message : "项目读取失败"));
+      void (async () => {
+        try {
+          await loadProject();
+          await loadConversations();
+          await loadArtifacts();
+        } catch (reason) {
+          if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
+        }
+      })();
     }, 0);
-    const timer = setInterval(() => void load().catch(() => undefined), 1500);
+    const timer = setInterval(() => void Promise.all([
+      loadProject(),
+      loadArtifacts(),
+    ]).catch(() => undefined), 1500);
     return () => { active = false; clearTimeout(initial); clearInterval(timer); };
-  }, [load]);
+  }, [loadArtifacts, loadConversations, loadProject, text]);
+
+  const activeAgentJobId = project?.jobs
+    .filter(job => job.kind === "AGENT_GENERATION")
+    .at(-1)?.id ?? null;
+  const agentRunning = project?.workflowState === "AGENT_RUNNING";
+  const activeAgentProgress = useMemo(
+    () => activeAgentJobId
+      ? Object.freeze(agentProgress.filter(event => event.jobId === activeAgentJobId))
+      : Object.freeze([]),
+    [activeAgentJobId, agentProgress],
+  );
+
+  useEffect(() => {
+    if (!agentRunning || !activeAgentJobId) return;
+    const controller = new AbortController();
+    let active = true;
+    agentProgressCursor.current = 0;
+    void (async () => {
+      while (active && !controller.signal.aborted) {
+        try {
+          agentProgressCursor.current = await readAgentProgressStream(
+            projectId,
+            agentProgressCursor.current,
+            controller.signal,
+            event => {
+              if (!active || event.jobId !== activeAgentJobId) return;
+              setAgentProgress(current => {
+                const activeEvents = current.filter(item => item.jobId === activeAgentJobId);
+                return activeEvents.some(item => item.sequence === event.sequence)
+                  ? current
+                  : Object.freeze([...activeEvents, event].slice(-200));
+              });
+            },
+          );
+        } catch (reason) {
+          if (controller.signal.aborted) break;
+          console.error(reason);
+          await new Promise(resolve => setTimeout(resolve, 1_000));
+        }
+      }
+    })();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [activeAgentJobId, agentRunning, projectId]);
+
+  async function openConversation(conversationId: string) {
+    if (conversationId === selectedConversationId && conversation) return;
+    setError(null);
+    setSelectedConversationId(conversationId);
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { cache: "no-store" });
+      const payload = await response.json() as { conversation?: ProductConversation; message?: string };
+      if (!response.ok || !payload.conversation) throw new Error(payload.message ?? text(`会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
+      setConversation(payload.conversation);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("会话读取失败", "Unable to load conversation"));
+    }
+  }
+
+  function startConversation() {
+    setSelectedConversationId(null);
+    setConversation(null);
+    setConversationInput("");
+    setError(null);
+  }
+
+  async function sendConversationMessage(event?: FormEvent<HTMLFormElement>, selectedOption?: string) {
+    event?.preventDefault();
+    const content = (selectedOption ?? conversationInput).trim();
+    if (content.length < 2 || sendingMessage) return;
+    const previousConversation = conversation;
+    const previousSelectedConversationId = selectedConversationId;
+    const pendingConversation = optimisticConversation(previousConversation, projectId, content, project?.name ?? text("项目会话", "Project conversation"));
+    setSendingMessage(true);
+    setError(null);
+    setStreamingReply("");
+    setConversation(pendingConversation);
+    setSelectedConversationId(pendingConversation.id);
+    setConversationInput("");
+    try {
+      const payload = await sendConversationMessageStream(
+        previousConversation ? { conversationId: previousConversation.id, content } : { projectId, content },
+        `conversation:${crypto.randomUUID()}`,
+        delta => setStreamingReply(current => current + delta),
+        updatedProject => setProject(current => newestProjectSnapshot(current, updatedProject)),
+      );
+      const nextConversation = payload.conversation;
+      setConversation(nextConversation);
+      setSelectedConversationId(nextConversation.id);
+      setProject(current => newestProjectSnapshot(current, payload.project));
+      setConversations(current => {
+        const summary = conversationSummary(nextConversation);
+        return Object.freeze([summary, ...current.filter(item => item.id !== summary.id)]);
+      });
+    } catch (reason) {
+      if (reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
+        window.location.assign("/settings?required=conversation");
+        return;
+      }
+      setConversation(previousConversation);
+      setSelectedConversationId(previousSelectedConversationId);
+      setConversationInput(content);
+      setError(reason instanceof ConversationStreamError ? reason.message : text("消息发送失败，请稍后重试", "Message failed. Please try again."));
+    } finally {
+      setStreamingReply("");
+      setSendingMessage(false);
+    }
+  }
 
   async function mutate(path: string, body?: Record<string, unknown>) {
     setBusy(true);
@@ -43,75 +229,354 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(path === "retry-agent" ? { "idempotency-key": `agent-retry:${crypto.randomUUID()}` } : {}),
+          ...(path === "retry-artifact-build" ? { "idempotency-key": `artifact-build-retry:${crypto.randomUUID()}` } : {}),
+          ...(path === "retry-e2e" ? { "idempotency-key": `e2e-retry:${crypto.randomUUID()}` } : {}),
+        },
         body: JSON.stringify(body ?? {}),
       });
-      const payload = await response.json().catch(() => ({})) as { message?: string };
-      if (!response.ok) throw new Error(payload.message ?? `操作失败 (${response.status})`);
-      setNote("");
-      await load();
+      const payload = await response.json().catch(() => ({})) as { code?: string; message?: string };
+      if (payload.code === "AGENT_CONFIG_REQUIRED") {
+        window.location.assign("/settings?required=agent-retry");
+        return;
+      }
+      if (!response.ok) throw new Error(payload.message ?? text(`操作失败 (${response.status})`, `Operation failed (${response.status})`));
+      await loadProject();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "操作失败");
+      setError(reason instanceof Error ? reason.message : text("操作失败", "Operation failed"));
     } finally {
       setBusy(false);
     }
   }
 
-  if (!project) return <ProductShell><section className="project-catalog-empty product-studio-loading">{error ?? "正在进入项目…"}</section></ProductShell>;
-  const specification = project.specification;
-  const coreLoop = stringList(specification.coreLoop);
-  const acceptance = stringList(specification.acceptanceCriteria);
-  const revisions = stringList(specification.revisionNotes);
-  const active = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
+  function beginDocumentEdit() {
+    if (!project) return;
+    setDocumentDraft({
+      introduction: project.document.content.introduction,
+      gameplay: project.document.content.gameplay,
+      categories: project.document.content.categories.join("\n"),
+      features: project.document.content.features.join("\n"),
+    });
+    setEditingDocument(true);
+  }
+
+  async function saveDocument() {
+    if (!project) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/document`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: project.document.revision,
+          content: {
+            introduction: documentDraft.introduction.trim(),
+            gameplay: documentDraft.gameplay.trim(),
+            categories: documentLines(documentDraft.categories),
+            features: documentLines(documentDraft.features),
+          },
+        }),
+      });
+      const payload = await response.json().catch(() => ({})) as { message?: string };
+      if (!response.ok) throw new Error(payload.message ?? text(`说明文档保存失败 (${response.status})`, `Unable to save project document (${response.status})`));
+      setEditingDocument(false);
+      await loadProject();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("说明文档保存失败", "Unable to save project document"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteProject() {
+    if (!project || deleting) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { message?: string };
+        throw new Error(payload.message ?? text(`项目删除失败 (${response.status})`, `Unable to delete project (${response.status})`));
+      }
+      window.location.assign("/projects");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("项目删除失败", "Unable to delete project"));
+      setConfirmingDelete(false);
+      setDeleting(false);
+    }
+  }
+
+  async function downloadArtifact(artifact: ArtifactRecord) {
+    if (downloadingArtifactId) return;
+    setDownloadingArtifactId(artifact.id);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.id)}/download`,
+        { method: "POST" },
+      );
+      const payload = await response.json() as { url?: string; filename?: string; message?: string };
+      if (!response.ok || !payload.url || !payload.filename) {
+        throw new Error(payload.message ?? text(`制品下载授权失败 (${response.status})`, `Unable to authorize download (${response.status})`));
+      }
+      const link = document.createElement("a");
+      link.href = payload.url;
+      link.download = payload.filename;
+      link.rel = "noopener";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("制品下载失败", "Artifact download failed"));
+    } finally {
+      setDownloadingArtifactId(null);
+    }
+  }
+
+  const activeConversation = useMemo(
+    () => conversation?.id === selectedConversationId ? conversation : null,
+    [conversation, selectedConversationId],
+  );
+  const orderedMessages = useMemo(
+    () => chronologicalMessages(activeConversation?.messages ?? Object.freeze([])),
+    [activeConversation],
+  );
+  const latestConversationMessage = orderedMessages.at(-1);
+  const requirementsReady = project?.workflowState === "DRAFT"
+    && latestConversationMessage?.role === "ASSISTANT"
+    && latestConversationMessage.metadata.readyForDevelopment === true;
+
+  if (!project) {
+    return <ProductShell><section className="project-catalog-empty product-studio-loading">{error ?? text("正在进入项目…", "LOADING PROJECT…")}</section></ProductShell>;
+  }
+
+  const deliveryActive = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
+  const latestFailedJob = project.workflowState === "FAILED"
+    ? latestPipelineJobs(project.jobs).find(job => job.state === "FAILED") ?? null
+    : null;
+  const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
 
   return (
     <ProductShell>
       <section className="project-page-header product-studio-header">
-        <div><div className="breadcrumb"><Link href="/projects">游戏项目</Link><span>/</span><b>{project.name}</b></div><span className="eyebrow">PROJECT · 项目</span><h1>{project.name}</h1><p>{project.concept}</p></div>
-        <div className={`spec-state product-studio-state ${project.workflowState === "SUCCEEDED" ? "approved" : "draft"} state-${project.workflowState.toLowerCase()}`}><i />{WORKFLOW_LABELS[project.workflowState] ?? project.workflowState}</div>
+        <div>
+          <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{project.name}</b></div>
+          <span className="eyebrow">{text("PROJECT · 项目", "PROJECT")}</span>
+          <h1>{project.name}</h1>
+          <p>{project.concept}</p>
+        </div>
+        <div className="product-studio-header-actions">
+          <button className="button project-delete-button" onClick={() => setConfirmingDelete(true)} type="button">{text("删除项目", "DELETE PROJECT")}</button>
+        </div>
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
 
-      <div className="studio-grid product-studio-grid">
-        <section className="conversation-panel product-specification-panel">
-          <div className="conversation-header product-panel-heading"><div><span className="step-number">01</span><span><b>游戏规格</b><small>{project.workflowState === "DRAFT" ? "等待你的批准" : "制作中"}</small></span></div></div>
-          <article className="spec-section product-spec-block"><span className="spec-section-label">产品愿景</span><p>{String(specification.vision ?? project.concept)}</p></article>
-          <article className="spec-section product-spec-block"><span className="spec-section-label">核心循环</span><ol>{coreLoop.map(item => <li key={item}>{item}</li>)}</ol></article>
-          <article className="spec-section product-spec-block"><span className="spec-section-label">玩家体验</span><p>{String(specification.playerExperience ?? "")}</p></article>
-          <article className="spec-section product-spec-block"><span className="spec-section-label">验收标准</span><ul>{acceptance.map(item => <li key={item}>✓ {item}</li>)}</ul></article>
-          {revisions.length ? <article className="spec-section product-spec-block"><span className="spec-section-label">修订记录</span><ul>{revisions.map((item, index) => <li key={`${index}:${item}`}>↳ {item}</li>)}</ul></article> : null}
-          {project.workflowState === "DRAFT" ? (
-            <div className="composer product-spec-actions">
-              <textarea onChange={event => setNote(event.target.value)} placeholder="补充或修正规格，例如：单局改为 10 分钟，并加入手柄震动反馈……" value={note} />
-              <div><button className="button button-secondary" disabled={busy || note.trim().length < 2} onClick={() => void mutate("specification", { note: note.trim() })}>提交修订</button><button className="button button-primary" disabled={busy} onClick={() => void mutate("approve")}>批准规格并启动 Agent →</button></div>
+      <section aria-label={text("交付流程", "Delivery pipeline")} className="product-delivery-pipeline">
+        <header className="product-delivery-pipeline-header">
+          <div>
+            <span className="eyebrow">DELIVERY PIPELINE</span>
+            <h2>{text("交付流程", "DELIVERY PIPELINE")}</h2>
+          </div>
+          {project.workflowState !== "DRAFT" ? (
+            <div className="product-delivery-pipeline-actions">
+              <span className="revision-badge">{deliveryActive ? text("自动刷新", "AUTO REFRESH") : workflowLabel(project.workflowState, text)}</span>
+              {deliveryActive ? <button className="button button-secondary" disabled={busy} onClick={() => void mutate("cancel")} type="button">{text("取消本次交付", "CANCEL DELIVERY")}</button> : null}
             </div>
           ) : null}
-        </section>
+        </header>
+        <ol className="product-delivery-track">
+          {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
+            const jobs = latestPipelineJobs(project.jobs.filter(job => job.kind === kind));
+            const state = aggregateJobState(jobs.map(job => job.state));
+            const view = pipelineStageView(state, text);
+            return (
+              <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
+                <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
+                <span className="product-delivery-stage-number">{String(index + 1).padStart(2, "0")}</span>
+                <b>{text(chineseLabel, englishLabel)}</b>
+                <strong>{view.label}</strong>
+                <small>{pipelineJobDetails(jobs, text)}</small>
+              </li>
+            );
+          })}
+        </ol>
+        {pipelineFailure && latestFailedJob ? (
+          <section aria-label={text("交付失败原因", "Delivery failure reason")} className="product-delivery-failure" role="alert">
+            <div className="product-delivery-failure-icon" aria-hidden="true">!</div>
+            <div className="product-delivery-failure-copy">
+              <div>
+                <strong>{pipelineFailure.title}</strong>
+                <span>{text(`已尝试 ${latestFailedJob.attempt} 次`, `${latestFailedJob.attempt} attempts`)}</span>
+              </div>
+              <p>{pipelineFailure.reason}</p>
+              <small>{pipelineFailure.action}</small>
+              {latestFailedJob.lastError ? (
+                <details>
+                  <summary>{text("技术详情", "TECHNICAL DETAILS")}</summary>
+                  <code>{technicalFailureDetail(latestFailedJob.lastError)}</code>
+                </details>
+              ) : null}
+            </div>
+            {latestFailedJob.kind === "AGENT_GENERATION" ? (
+              <button className="button button-primary product-delivery-retry" disabled={busy} onClick={() => void mutate("retry-agent")} type="button">
+                {busy ? text("正在重新启动…", "RESTARTING…") : text("重新生成", "RETRY AGENT")}
+              </button>
+            ) : latestFailedJob.kind === "ARTIFACT_BUILD" ? (
+              <button className="button button-primary product-delivery-retry" disabled={busy} onClick={() => void mutate("retry-artifact-build")} type="button">
+                {busy ? text("正在重新构建…", "REBUILDING…") : text("重新构建", "RETRY BUILD")}
+              </button>
+            ) : latestFailedJob.kind === "E2E_TEST" ? (
+              <button className="button button-primary product-delivery-retry" disabled={busy} onClick={() => void mutate("retry-e2e")} type="button">
+                {busy ? text("正在重新测试…", "RETESTING…") : text("重新测试", "RETRY E2E")}
+              </button>
+            ) : null}
+          </section>
+        ) : null}
+      </section>
 
-        <aside className="spec-panel product-pipeline-panel">
-          <div className="spec-panel-header product-pipeline-header"><div><span className="eyebrow">交付流水线</span><h2>PIPELINE</h2></div><span className="revision-badge">{active ? "自动刷新" : "当前状态"}</span></div>
-          <div className="product-pipeline-list">
-            {PIPELINE.map(([kind, label], index) => {
-              const jobs = project.jobs.filter(job => job.kind === kind);
-              const state = aggregateJobState(jobs.map(job => job.state));
-              return (
-                <div className={`product-pipeline-stage job-${state.toLowerCase()}`} key={kind}>
-                  <span>{String(index + 1).padStart(2, "0")}</span>
-                  <div><b>{label}</b><small>{jobs.length ? jobs.map(job => `${job.targetOperatingSystem ?? "core"}: ${job.state}`).join(" · ") : "尚未入队"}</small></div>
-                  <i>{state === "SUCCEEDED" ? "✓" : state === "RUNNING" ? "●" : state === "QUEUED" ? "…" : "○"}</i>
+      {artifacts.length ? (
+        <section aria-label={text("项目制品", "Project artifacts")} className="product-artifacts-panel">
+          <header>
+            <div><span className="eyebrow">ARTIFACTS</span><h2>{text("项目制品", "PROJECT ARTIFACTS")}</h2></div>
+            <span>{text(`${artifacts.length} 个文件`, `${artifacts.length} files`)}</span>
+          </header>
+          <div className="product-artifact-list">
+            {artifacts.map(artifact => (
+              <article key={artifact.id}>
+                <div>
+                  <b>{artifactLabel(artifact, text)}</b>
+                  <span>{artifact.targetPlatform ?? text("通用", "COMMON")} · {formatArtifactSize(artifact.object.sizeBytes)}</span>
+                  <code>{artifact.object.sha256.slice(0, 23)}…</code>
                 </div>
-              );
-            })}
+                <button
+                  className="button button-secondary"
+                  disabled={downloadingArtifactId !== null}
+                  onClick={() => void downloadArtifact(artifact)}
+                  type="button"
+                >{downloadingArtifactId === artifact.id ? text("准备下载…", "PREPARING…") : text("下载", "DOWNLOAD")}</button>
+              </article>
+            ))}
           </div>
-          {active ? <button className="button button-secondary product-cancel-button" disabled={busy} onClick={() => void mutate("cancel")}>取消本次交付</button> : null}
+        </section>
+      ) : null}
+
+      <div className={`project-workspace-layout ${documentCollapsed ? "document-is-collapsed" : ""}`}>
+        <main className="project-workspace-main">
+          <section className="conversation-panel project-conversation-panel">
+            <div className="conversation-header product-panel-heading">
+              <div><span className="step-number">01</span><span><h2>{text("项目会话", "PROJECT CONVERSATIONS")}</h2><small>{conversations.length ? text(`${conversations.length} 个历史会话`, `${conversations.length} saved conversation${conversations.length === 1 ? "" : "s"}`) : text("还没有历史会话", "No conversation history")}</small></span></div>
+              <button className="button button-secondary project-new-conversation" onClick={startConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button>
+            </div>
+            <div className="project-conversation-layout">
+              <nav aria-label={text("历史会话", "Conversation history")} className="project-conversation-history">
+                <span className="project-conversation-history-title">{text("历史会话", "HISTORY")}</span>
+                {conversations.length ? conversations.map(item => (
+                  <button
+                    aria-pressed={selectedConversationId === item.id}
+                    className={selectedConversationId === item.id ? "is-active" : ""}
+                    key={item.id}
+                    onClick={() => void openConversation(item.id)}
+                    type="button"
+                  >
+                    <b>{item.preview}</b>
+                    <small>{conversationTurns(item.messageCount, text)} · {formatConversationTime(item.updatedAt, localeTag(locale), text)}</small>
+                  </button>
+                )) : <p>{text("发送第一条消息后，会话会保存在这里。", "Your conversations will appear here after the first message.")}</p>}
+              </nav>
+
+              <ConversationBox
+                agentProgress={{ running: agentRunning, events: activeAgentProgress }}
+                className="project-conversation-box"
+                conversationKey={activeConversation?.id ?? null}
+                messages={orderedMessages}
+                onOptionSelect={option => void sendConversationMessage(undefined, option)}
+                onSubmit={sendConversationMessage}
+                onValueChange={setConversationInput}
+                placeholder={agentRunning
+                  ? text("向正在生成的 Agent 发送引导…", "Guide the Agent while it is generating…")
+                  : activeConversation ? text("继续这段会话…", "Continue this conversation…") : text("开始一个新的项目会话…", "Start a new project conversation…")}
+                primaryAction={requirementsReady && !sendingMessage ? (
+                  <button
+                    className="button button-secondary conversation-box-develop"
+                    disabled={busy}
+                    onClick={() => void mutate("approve")}
+                    type="button"
+                  >{busy ? text("正在开始开发…", "STARTING…") : text("按照当前需求开发", "BUILD CURRENT REQUIREMENTS")}</button>
+                ) : null}
+                sendButtonLabel={text("发送项目消息", "Send project message")}
+                sending={sendingMessage}
+                showSendingReply={!agentRunning}
+                streamingReply={streamingReply}
+                textareaLabel={text("继续项目会话", "Continue project conversation")}
+                value={conversationInput}
+              />
+            </div>
+          </section>
+        </main>
+
+        <aside className="product-document-sidebar">
+          <header className="product-document-sidebar-header">
+            <button
+              aria-label={documentCollapsed ? text("展开项目说明", "Expand project document") : text("收起项目说明", "Collapse project document")}
+              className="product-document-toggle"
+              onClick={() => setDocumentCollapsed(value => !value)}
+              type="button"
+            ><FileIcon /><span>{documentCollapsed ? "<" : ">"}</span></button>
+            {documentCollapsed ? <b className="product-document-collapsed-title">{text("项目说明", "PROJECT DOC")}</b> : (
+              <div><span className="step-number">DOC</span><span><b>{text("项目说明", "PROJECT DOCUMENT")}</b><small>{text("Agent 随需求对话实时维护", "Updated by Agent from the conversation")}</small></span></div>
+            )}
+          </header>
+          {!documentCollapsed ? (
+            <>
+              <div className="product-document-sidebar-actions">
+                <span className="revision-badge">R{project.document.revision} · {documentMaintainer(project.document.maintainedBy, text)}</span>
+                {editingDocument ? (
+                  <div><button className="button button-secondary" disabled={busy} onClick={() => setEditingDocument(false)}>{text("取消", "CANCEL")}</button><button className="button button-primary" disabled={busy} onClick={() => void saveDocument()}>{text("保存", "SAVE")}</button></div>
+                ) : <button className="button button-secondary" disabled={busy} onClick={beginDocumentEdit}>{text("编辑", "EDIT")}</button>}
+              </div>
+              {editingDocument ? (
+                <div className="product-document-sidebar-editor">
+                  <label><span>{text("游戏介绍", "Game introduction")}</span><textarea value={documentDraft.introduction} onChange={event => setDocumentDraft(current => ({ ...current, introduction: event.target.value }))} /></label>
+                  <label><span>{text("玩法", "Gameplay")}</span><textarea value={documentDraft.gameplay} onChange={event => setDocumentDraft(current => ({ ...current, gameplay: event.target.value }))} /></label>
+                  <label><span>{text("游戏分类", "Categories")}</span><textarea value={documentDraft.categories} onChange={event => setDocumentDraft(current => ({ ...current, categories: event.target.value }))} /></label>
+                  <label><span>{text("主要特性", "Key features")}</span><textarea value={documentDraft.features} onChange={event => setDocumentDraft(current => ({ ...current, features: event.target.value }))} /></label>
+                </div>
+              ) : (
+                <div className="product-document-sidebar-content">
+                  <article><span className="document-section-label">{text("游戏介绍", "GAME INTRODUCTION")}</span><p>{project.document.content.introduction}</p></article>
+                  <article><span className="document-section-label">{text("玩法", "GAMEPLAY")}</span><p>{project.document.content.gameplay}</p></article>
+                  <article><span className="document-section-label">{text("游戏分类", "CATEGORIES")}</span><div className="product-document-tags">{project.document.content.categories.map(category => <span key={category}>{category}</span>)}</div></article>
+                  <article><span className="document-section-label">{text("主要特性", "KEY FEATURES")}</span><ul>{project.document.content.features.map(feature => <li key={feature}>{feature}</li>)}</ul></article>
+                </div>
+              )}
+            </>
+          ) : null}
         </aside>
       </div>
+
+      {confirmingDelete ? (
+        <div className="workspace-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !deleting) setConfirmingDelete(false); }}>
+          <section aria-labelledby="project-delete-title" aria-modal="true" className="workspace-dialog project-delete-dialog" role="dialog">
+            <span className="eyebrow">DELETE PROJECT</span>
+            <h2 id="project-delete-title">{text(`删除《${project.name}》？`, `DELETE “${project.name}”?`)}</h2>
+            <p>{deliveryActive ? text("项目仍在执行交付。请先取消本次交付，等待状态变为已取消后再删除。", "This project is still being delivered. Cancel the delivery and wait for it to stop before deleting it.") : text("历史会话、说明文档、工作流、制品记录和对象文件都会永久删除。", "Conversation history, the project document, workflows, artifacts, and object files will be deleted permanently.")}</p>
+            <div><button className="button button-secondary" disabled={deleting} onClick={() => setConfirmingDelete(false)} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting || deliveryActive} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : text("确认删除", "CONFIRM DELETE")}</button></div>
+          </section>
+        </div>
+      ) : null}
     </ProductShell>
   );
 }
 
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+function newestProjectSnapshot(
+  current: ProductProjectDetail | null,
+  incoming: ProductProjectDetail,
+): ProductProjectDetail {
+  if (!current || current.id !== incoming.id || current.document.revision <= incoming.document.revision) return incoming;
+  return Object.freeze({ ...incoming, document: current.document });
 }
 
 function aggregateJobState(states: readonly string[]): string {
@@ -121,4 +586,236 @@ function aggregateJobState(states: readonly string[]): string {
   if (states.every(state => state === "SUCCEEDED")) return "SUCCEEDED";
   if (states.some(state => state === "QUEUED" || state === "RETRY")) return "QUEUED";
   return states[0];
+}
+
+type PipelineStageView = Readonly<{
+  kind: "completed" | "active" | "pending" | "failed" | "cancelled";
+  label: string;
+  symbol: string;
+}>;
+
+function pipelineStageView(state: string, text: (chinese: string, english: string) => string): PipelineStageView {
+  if (state === "SUCCEEDED") return { kind: "completed", label: text("已完成", "COMPLETED"), symbol: "✓" };
+  if (state === "RUNNING" || state === "QUEUED" || state === "RETRY") return { kind: "active", label: text("进行中", "IN PROGRESS"), symbol: "●" };
+  if (state === "FAILED") return { kind: "failed", label: text("失败", "FAILED"), symbol: "!" };
+  if (state === "CANCELLED") return { kind: "cancelled", label: text("已取消", "CANCELLED"), symbol: "×" };
+  return { kind: "pending", label: text("未开始", "NOT STARTED"), symbol: "○" };
+}
+
+function pipelineJobDetails(jobs: ProductProjectDetail["jobs"], text: (chinese: string, english: string) => string): string {
+  if (!jobs.length) return text("等待上一步", "Waiting for previous stage");
+  return jobs.map(job => `${job.targetOperatingSystem ?? "core"} · ${jobStateLabel(job.state, text)}`).join(" / ");
+}
+
+function latestPipelineJobs(jobs: ProductProjectDetail["jobs"]): ProductProjectDetail["jobs"] {
+  const latest = new Map<string, ProductProjectDetail["jobs"][number]>();
+  for (const job of jobs) {
+    const key = `${job.kind}:${job.targetOperatingSystem ?? "core"}`;
+    const current = latest.get(key);
+    if (!current || Date.parse(current.createdAt) <= Date.parse(job.createdAt)) latest.set(key, job);
+  }
+  return Object.freeze([...latest.values()]);
+}
+
+type JobFailurePresentation = Readonly<{ title: string; reason: string; action: string }>;
+
+function jobFailurePresentation(
+  job: ProductProjectDetail["jobs"][number],
+  text: (chinese: string, english: string) => string,
+): JobFailurePresentation {
+  const raw = job.lastError ?? "";
+  const stageLabel = pipelineKindLabels(job.kind);
+  const title = job.kind === "AGENT_GENERATION"
+    ? text("Agent 生成失败", "AGENT GENERATION FAILED")
+    : text(`${stageLabel[0]}失败`, `${stageLabel[1]} failed`);
+  const infrastructure = raw.match(/^E2E_INFRASTRUCTURE\/(NODE|VM|GODOT_RUNTIME|NETWORK):\s*(.*)$/s);
+  if (job.kind === "E2E_TEST" && infrastructure) {
+    const labels: Record<string, readonly [string, string]> = {
+      NODE: ["E2E 节点", "E2E node"],
+      VM: ["隔离虚拟机", "isolated VM"],
+      GODOT_RUNTIME: ["Godot 运行时", "Godot runtime"],
+      NETWORK: ["节点网络", "node network"],
+    };
+    const label = labels[infrastructure[1]] ?? labels.NODE;
+    return {
+      title,
+      reason: text(`${label[0]}发生基础设施故障，游戏内容尚未被判定为失败。`, `The ${label[1]} had an infrastructure failure; the game content has not been marked as failed.`),
+      action: text("修复对应基础设施后重新测试；无需重新生成游戏。", "Repair the affected infrastructure and rerun E2E; the game does not need to be regenerated."),
+    };
+  }
+  if (job.kind === "E2E_TEST" && /^E2E_PRODUCT:/i.test(raw)) {
+    return {
+      title: text("游戏制品未通过 E2E", "GAME ARTIFACT FAILED E2E"),
+      reason: text("平台已确认问题来自游戏制品内容，自动 Agent 修复次数已用尽或全局 Agent 当前不可用。", "The platform confirmed a game-artifact issue, but automatic Agent repairs were exhausted or the global Agent is unavailable."),
+      action: text("检查 Agent 配置后重新生成；E2E 报告已保留在项目制品中。", "Check the Agent settings and regenerate; the E2E report remains available in Project Artifacts."),
+    };
+  }
+  if (/allowlist|not in the signed release|no such image/i.test(raw)) {
+    return {
+      title,
+      reason: text("任务引用的运行环境已被本地更新替换，旧镜像无法再安全启动。", "The task referenced a runtime image that was replaced by a local update and can no longer be started safely."),
+      action: text("使用当前已验证的 Agent 运行环境重新生成。", "Retry with the currently verified Agent runtime."),
+    };
+  }
+  if (/401|403|unauthori[sz]ed|invalid.*(?:key|token)|authentication/i.test(raw)) {
+    return {
+      title,
+      reason: text("Provider 拒绝了 Agent 凭据。", "The provider rejected the Agent credential."),
+      action: text("请在设置中检查 API Key、Base URL 和模型后重试。", "Check the API key, base URL, and model in Settings, then retry."),
+    };
+  }
+  if (/timed? out|timeout|ECONN|ENOTFOUND|network|socket hang up/i.test(raw)) {
+    return {
+      title,
+      reason: text("Agent 运行时未能连接 Provider，或执行超过了时限。", "The Agent runtime could not reach the provider or exceeded its time limit."),
+      action: text("检查网络与 Provider 状态后重新生成。", "Check network and provider availability, then retry."),
+    };
+  }
+  if (/vault|secret|credential|EACCES|permission denied/i.test(raw)) {
+    return {
+      title,
+      reason: text("Agent 无法读取受保护的运行凭据。", "The Agent could not read its protected runtime credential."),
+      action: text("重新保存 Agent 配置；若问题仍存在，请检查 Core 与 Vault 状态。", "Save the Agent configuration again; if it persists, check Core and Vault."),
+    };
+  }
+  if (job.kind === "ARTIFACT_BUILD" && /export_presets\.cfg|export preset/i.test(raw)) {
+    return {
+      title,
+      reason: text("Builder 缺少受控的 Godot 导出预设，无法生成目标平台制品。", "The Builder did not have a controlled Godot export preset for the target platform."),
+      action: text("使用修复后的 Builder 重新构建；无需重新运行 Agent。", "Retry with the corrected Builder; the Agent does not need to run again."),
+    };
+  }
+  if (job.kind === "E2E_TEST" && /env:\s*node:\s*No such file|ENOENT.*node/i.test(raw)) {
+    return {
+      title,
+      reason: text("E2E 节点未能启动受控测试运行器。", "The E2E node could not start its controlled test runner."),
+      action: text("使用修复后的节点运行时重新测试；无需重新生成或构建。", "Retry with the corrected node runtime; generation and build do not need to run again."),
+    };
+  }
+  if (/DEVILUDO_PROGRESS:/i.test(raw)) {
+    return {
+      title,
+      reason: text("旧执行器把正常进度混入了失败日志，导致真实原因被截断。", "The previous executor mixed normal progress into the failure log, truncating the real cause."),
+      action: text("使用修复后的执行器重新生成；后续失败将直接显示真实原因。", "Retry with the corrected executor; subsequent failures will show the actual cause."),
+    };
+  }
+  return {
+    title,
+    reason: text("该阶段在多次重试后仍未完成。", "This stage did not complete after multiple attempts."),
+    action: job.kind === "AGENT_GENERATION"
+      ? text("可重新生成；技术详情可用于进一步排查。", "Retry the Agent; technical details are available for diagnosis.")
+      : text("请展开技术详情排查后再继续。", "Expand the technical details before continuing."),
+  };
+}
+
+function pipelineKindLabels(kind: string): readonly [string, string] {
+  const stage = PIPELINE.find(([candidate]) => candidate === kind);
+  return stage ? [stage[1], stage[2]] : [kind, kind];
+}
+
+export function technicalFailureDetail(raw: string): string {
+  const withoutProgress = raw
+    .replace(/(?:Sandbox executor failed:\s*)?DEVILUDO_PROGRESS:[^\n]*(?:\n|$)/g, "")
+    .trim();
+  if (!withoutProgress && raw.includes("DEVILUDO_PROGRESS:")) {
+    return "EXECUTOR_DIAGNOSTIC_TRUNCATED: 旧执行器未保留真实失败原因";
+  }
+  const detail = withoutProgress || raw;
+  const jsonStart = detail.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const value = JSON.parse(detail.slice(jsonStart)) as { code?: unknown; message?: unknown };
+      const code = typeof value.code === "string" ? value.code : "EXECUTION_FAILED";
+      const message = typeof value.message === "string" ? value.message : detail;
+      return `${code}: ${message}`;
+    } catch { /* retain the bounded original detail */ }
+  }
+  return detail.slice(-800);
+}
+
+function jobStateLabel(state: string, text: (chinese: string, english: string) => string): string {
+  if (state === "SUCCEEDED") return text("完成", "Complete");
+  if (state === "RUNNING") return text("执行中", "Running");
+  if (state === "QUEUED") return text("排队中", "Queued");
+  if (state === "RETRY") return text("等待重试", "Retry pending");
+  if (state === "FAILED") return text("失败", "Failed");
+  if (state === "CANCELLED") return text("已取消", "Cancelled");
+  return state;
+}
+
+function documentLines(value: string): string[] {
+  return value.split(/\n|，|,/).map(item => item.trim()).filter(Boolean);
+}
+
+function artifactLabel(
+  artifact: ArtifactRecord,
+  text: (chinese: string, english: string) => string,
+): string {
+  const labels: Record<ArtifactRecord["kind"], readonly [string, string]> = {
+    SOURCE: ["源码快照", "SOURCE SNAPSHOT"],
+    SPECIFICATION: ["需求快照", "REQUIREMENTS SNAPSHOT"],
+    PROJECT_DOCUMENT: ["项目说明", "PROJECT DOCUMENT"],
+    BUILD: ["游戏构建", "GAME BUILD"],
+    E2E_REPORT: ["E2E 报告", "E2E REPORT"],
+    SIGNED_BUILD: ["签名构建", "SIGNED BUILD"],
+    PUBLISH_RECEIPT: ["发布回执", "PUBLISH RECEIPT"],
+    CLEAN_INSTALL_REPORT: ["回装报告", "CLEAN-INSTALL REPORT"],
+  };
+  const label = labels[artifact.kind];
+  return text(label[0], label[1]);
+}
+
+function formatArtifactSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 ** 2) return `${(sizeBytes / 1024).toFixed(1)} KiB`;
+  if (sizeBytes < 1024 ** 3) return `${(sizeBytes / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(sizeBytes / 1024 ** 3).toFixed(1)} GiB`;
+}
+
+function documentMaintainer(value: ProductProjectDetail["document"]["maintainedBy"], text: (chinese: string, english: string) => string): string {
+  if (value === "AGENT") return text("Agent 维护", "Agent maintained");
+  if (value === "USER") return text("协作者维护", "Contributor maintained");
+  return text("初始文档", "Initial document");
+}
+
+function conversationSummary(conversation: ProductConversation): ProductConversationSummary {
+  const firstUserMessage = conversation.messages.find(message => message.role === "USER");
+  return Object.freeze({
+    id: conversation.id,
+    projectId: conversation.projectId,
+    mode: conversation.mode,
+    title: conversation.title,
+    preview: firstUserMessage?.content ?? conversation.title,
+    messageCount: conversation.messages.length,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+  });
+}
+
+function conversationTurns(messageCount: number, text: (chinese: string, english: string) => string): string {
+  const turns = Math.max(1, Math.ceil(messageCount / 2));
+  return text(`${turns} 轮`, `${turns} turn${turns === 1 ? "" : "s"}`);
+}
+
+function formatConversationTime(value: string, locale: string, text: (chinese: string, english: string) => string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return text("刚刚", "Just now");
+  return new Intl.DateTimeFormat(locale, {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
+  const labels: Record<string, readonly [string, string]> = {
+    DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
+    ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"], E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
+    SIGNING: ["平台签名中", "Signing"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
+    CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"], SUCCEEDED: ["交付完成", "Delivered"],
+    FAILED: ["流程失败", "Failed"], CANCELLED: ["已取消", "Cancelled"],
+  };
+  const label = labels[state];
+  return label ? text(label[0], label[1]) : state;
 }

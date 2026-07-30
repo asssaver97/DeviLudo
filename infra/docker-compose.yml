@@ -6,18 +6,19 @@ x-core: &core
     context: ..
     dockerfile: Dockerfile.core
   restart: unless-stopped
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=1001,gid=1001
   environment: &core-environment
     NODE_ENV: development
     DEVILUDO_DATABASE_SET_ROLE: "1"
-    DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
-    DEVILUDO_E2E_NODE_TOKEN: local-e2e-node-token
     DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_MACOS
     DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE: ${DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE:-CORE_RUNTIME}
     DEVILUDO_CLAUDE_CODE_VERSION: "${DEVILUDO_CLAUDE_CODE_VERSION:-}"
     DEVILUDO_CODEX_CLI_VERSION: "${DEVILUDO_CODEX_CLI_VERSION:-}"
-    DEVILUDO_CORE_API_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
-    DEVILUDO_CORE_SCHEDULER_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
-    DEVILUDO_CORE_SANDBOX_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
   depends_on:
     postgres:
       condition: service_healthy
@@ -43,15 +44,52 @@ services:
     networks:
       - data
 
+  bootstrap-instance:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      NODE_ENV: development
+      DEVILUDO_BOOTSTRAP_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+      DEVILUDO_RUNTIME_IMAGES_JSON: ${DEVILUDO_RUNTIME_IMAGES_JSON:-UNCONFIGURED}
+      DEVILUDO_EXECUTOR_PUBLIC_KEY_FILE: /run/deviludo-local/executor-ed25519.pub
+      DEVILUDO_E2E_PUBLIC_KEY_FILE: /run/deviludo-local/e2e-macos-ed25519.pub
+    command: ["node", "scripts/bootstrap-instance.mjs"]
+    volumes:
+      - ../.deviludo/local:/run/deviludo-local:ro
+
+  migrate:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      NODE_ENV: development
+      DEVILUDO_MIGRATION_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+    command: ["node", "scripts/migrate-postgres.mjs"]
+
   core-api:
     <<: *core
     environment:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: api
-      DEVILUDO_AGENT_SECRET_ROOT: /var/lib/deviludo/agent-secrets
+      DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
+      DEVILUDO_E2E_NODE_TOKEN: local-e2e-node-token
+      DEVILUDO_CORE_API_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+      DEVILUDO_S3_ENDPOINT: http://minio:9000
+      DEVILUDO_S3_PUBLIC_ENDPOINT: http://127.0.0.1:${DEVILUDO_MINIO_HOST_PORT:-39000}
+      DEVILUDO_S3_REGION: us-east-1
+      DEVILUDO_S3_PATH_STYLE: "1"
+      DEVILUDO_S3_ACCESS_KEY_ID: deviludo-local
+      DEVILUDO_S3_SECRET_ACCESS_KEY: deviludo-local-secret
+      DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
+      DEVILUDO_VAULT_ADDR: http://vault:8200
+      DEVILUDO_VAULT_TOKEN_FILE: /run/deviludo-vault/api.token
       PORT: "8080"
     volumes:
-      - agent-secrets:/var/lib/deviludo/agent-secrets
+      - vault-tokens:/run/deviludo-vault:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:${DEVILUDO_CORE_HOST_PORT:-8080}:8080"
     healthcheck:
@@ -68,12 +106,240 @@ services:
     environment:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: scheduler
+      DEVILUDO_CORE_SCHEDULER_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+      DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS: "${DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS:-86400}"
 
   core-sandbox:
     <<: *core
     environment:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: sandbox
+      DEVILUDO_CORE_SANDBOX_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
+      DEVILUDO_S3_ENDPOINT: http://minio:9000
+      DEVILUDO_S3_REGION: us-east-1
+      DEVILUDO_S3_PATH_STYLE: "1"
+      DEVILUDO_S3_ACCESS_KEY_ID: deviludo-local
+      DEVILUDO_S3_SECRET_ACCESS_KEY: deviludo-local-secret
+      DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
+      DEVILUDO_SANDBOX_EXECUTOR: /usr/local/bin/sandbox-executor-client
+      DEVILUDO_SANDBOX_ISOLATION_MODE: RESTRICTED_CONTAINER
+      DEVILUDO_EXECUTOR_SOCKET: /run/deviludo-executor/executor.sock
+      DEVILUDO_EXECUTOR_SOCKET_GID: "1001"
+    volumes:
+      - executor-socket:/run/deviludo-executor
+
+  sandbox-executor-init:
+    image: deviludo-sandbox-executor:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.executor
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        install -d -m 2770 -o 10001 -g 1001 /run/deviludo-executor &&
+        install -d -m 0700 -o 10001 -g 10001 /var/lib/deviludo-executor /run/service-secrets &&
+        install -m 0400 -o 10001 -g 10001 /run/bootstrap-secrets/executor-ed25519.pem /run/service-secrets/identity.pem &&
+        install -m 0400 -o 10001 -g 10001 /run/deviludo-vault/executor.token /run/service-secrets/vault.token &&
+        install -m 0400 -o 10001 -g 10001 /run/bootstrap-secrets/s3.credentials /run/service-secrets/s3.credentials
+    volumes:
+      - executor-socket:/run/deviludo-executor
+      - executor-work:/var/lib/deviludo-executor
+      - executor-service-secrets:/run/service-secrets
+      - ../.deviludo/local:/run/bootstrap-secrets:ro
+      - vault-tokens:/run/deviludo-vault:ro
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+
+  sandbox-executord:
+    image: deviludo-sandbox-executor:local
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_ENV: development
+      DEVILUDO_EXECUTOR_ID: local-core-executor
+      DEVILUDO_EXECUTOR_SOCKET: /run/deviludo-executor/executor.sock
+      DEVILUDO_EXECUTOR_SOCKET_GID: "1001"
+      DEVILUDO_EXECUTOR_IDENTITY_KEY_FILE: /run/service-secrets/identity.pem
+      DEVILUDO_EXECUTOR_WORK_ROOT: /var/lib/deviludo-executor
+      DEVILUDO_EXECUTOR_SECRET_ROOT: /run/deviludo-secrets
+      DEVILUDO_EXECUTOR_ALLOWED_IMAGES: ${DEVILUDO_EXECUTOR_ALLOWED_IMAGES:-UNCONFIGURED}
+      DEVILUDO_EXECUTOR_ALLOW_DEVELOPMENT_CONTAINER: "1"
+      DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE: ${DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE:-}
+      DEVILUDO_EXECUTOR_AGENT_NETWORK: deviludo-executor-agent-local
+      DEVILUDO_EXECUTOR_STEAM_NETWORK: deviludo-executor-steam-local
+      DEVILUDO_EXECUTOR_EGRESS_PROXY: http://provider-proxy:3128
+      DEVILUDO_EXECUTOR_STEAM_PROXY: http://steam-proxy:3128
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,www.sotamodel.net}
+      DEVILUDO_VAULT_ADDR: http://vault:8200
+      DEVILUDO_VAULT_TOKEN_FILE: /run/service-secrets/vault.token
+      DEVILUDO_S3_ENDPOINT: http://minio:9000
+      DEVILUDO_S3_REGION: us-east-1
+      DEVILUDO_S3_PATH_STYLE: "1"
+      DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
+      AWS_SHARED_CREDENTIALS_FILE: /run/service-secrets/s3.credentials
+    group_add:
+      - "${DEVILUDO_DOCKER_GID:-0}"
+      - "1001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - executor-socket:/run/deviludo-executor
+      - executor-work:/var/lib/deviludo-executor
+      - executor-service-secrets:/run/service-secrets:ro
+    tmpfs:
+      - /run/deviludo-secrets:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      sandbox-executor-init:
+        condition: service_completed_successfully
+    networks:
+      - data
+      - executor-agent
+
+  provider-proxy:
+    image: deviludo-provider-proxy:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.provider-proxy
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /run:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+    environment:
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,www.sotamodel.net}
+    networks:
+      - executor-agent
+      - egress
+
+  steam-proxy:
+    image: deviludo-provider-proxy:local
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /run:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+    environment:
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_STEAM_ALLOWLIST:-api.steampowered.com,partner.steamgames.com,content.steampowered.com,client-download.steampowered.com,steamcdn-a.akamaihd.net}
+    networks:
+      - executor-steam
+      - egress
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: deviludo-local
+      MINIO_ROOT_PASSWORD: deviludo-local-secret
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:${DEVILUDO_MINIO_HOST_PORT:-39000}:9000"
+    networks:
+      - data
+      - native-artifact
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 deviludo-local deviludo-local-secret && mc mb --ignore-existing local/deviludo-artifacts"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - data
+
+  vault:
+    image: hashicorp/vault:1.19.0
+    cap_add: ["IPC_LOCK"]
+    command: ["server"]
+    volumes:
+      - vault-data:/vault/file
+      - ./vault/local.hcl:/vault/config/local.hcl:ro
+    networks:
+      - data
+
+  vault-init:
+    image: hashicorp/vault:1.19.0
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/init/local-init.sh"]
+    volumes:
+      - ./vault:/init:ro
+      - ./vault:/policies:ro
+      - vault-tokens:/tokens
+    depends_on:
+      vault:
+        condition: service_started
+    networks:
+      - data
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.128.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    networks:
+      - data
+
+  agent-claude-image:
+    image: deviludo-agent-claude:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent-claude
+    profiles: ["images"]
+
+  agent-codex-image:
+    image: deviludo-agent-codex:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent-codex
+    profiles: ["images"]
+
+  agent-fixture-image:
+    image: deviludo-agent-fixture:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent-fixture
+    profiles: ["images"]
+
+  godot-builder-image:
+    image: deviludo-godot-builder:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.godot-builder
+    profiles: ["images"]
+
+  steam-publisher-image:
+    image: deviludo-steam-publisher:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.steam-publisher
+    profiles: ["images"]
+
+  e2e-macos-image:
+    image: deviludo-e2e-macos:local
+    build:
+      context: ..
+      dockerfile: Dockerfile.e2e-runtime
+    profiles: ["images"]
 
   web:
     image: deviludo-web:local
@@ -81,6 +347,11 @@ services:
       context: ..
       dockerfile: Dockerfile.web
     restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=1001,gid=1001
     environment:
       NODE_ENV: production
       PORT: "3000"
@@ -108,7 +379,22 @@ networks:
     internal: false
   data:
     internal: true
+  executor-agent:
+    name: deviludo-executor-agent-local
+    internal: true
+  executor-steam:
+    name: deviludo-executor-steam-local
+    internal: true
+  native-artifact: {}
+  egress: {}
 
 volumes:
   postgres-data: {}
   agent-secrets: {}
+  minio-data: {}
+  vault-tokens: {}
+  vault-data: {}
+  executor-socket:
+    name: deviludo-executor-socket
+  executor-work: {}
+  executor-service-secrets: {}

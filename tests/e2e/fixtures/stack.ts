@@ -81,6 +81,11 @@ export class StackHarness {
     await this.executeSql(`
       SET lock_timeout = '5s';
       TRUNCATE TABLE
+        deviludo.authentication_events,
+        deviludo.sessions,
+        deviludo.workspace_invitations,
+        deviludo.workspace_memberships,
+        deviludo.users,
         deviludo.workspace_claim_fairness,
         deviludo.project_creation_receipts,
         deviludo.instance_agent_settings,
@@ -98,6 +103,12 @@ export class StackHarness {
       RESTART IDENTITY CASCADE;
       DELETE FROM deviludo.pool_capacity_intents WHERE reason <> 'P0_BASELINE';
     `);
+    const password = "E2e-admin!2026";
+    const setup = await this.web("/api/auth/setup", {
+      method: "POST",
+      data: { username: "e2e-admin", password, passwordConfirmation: password },
+    });
+    expect(setup.status(), await setup.text()).toBe(201);
   }
 
   async web(path: string, options: FetchOptions = {}): Promise<APIResponse> {
@@ -105,9 +116,16 @@ export class StackHarness {
   }
 
   async coreWeb(path: string, options: FetchOptions = {}): Promise<APIResponse> {
+    const storageState = await this.request.storageState();
+    const csrfToken = storageState.cookies.find(cookie => cookie.name === "deviludo_csrf")?.value;
     return await this.request.fetch(new URL(path, this.coreUrl).href, {
       ...options,
-      headers: { "x-deviludo-web-auth": webToken, ...options.headers },
+      headers: {
+        "x-deviludo-web-auth": webToken,
+        "x-deviludo-origin-verified": "1",
+        ...(csrfToken ? { "x-deviludo-csrf": csrfToken } : {}),
+        ...options.headers,
+      },
     });
   }
 
@@ -182,7 +200,7 @@ export class StackHarness {
     const nodes: NodeRecord[] = [];
     for (const definition of NODE_DEFINITIONS) {
       const created = await this.coreWeb("/v1/admin/server-nodes", { method: "POST", data: definition });
-      expect(created.status()).toBe(201);
+      expect(created.status(), created.status() === 201 ? undefined : await created.text()).toBe(201);
       const node = (await created.json() as { node: NodeRecord }).node;
       const activated = await this.coreWeb(`/v1/admin/server-nodes/${node.id}/activate`, {
         method: "POST",
@@ -286,9 +304,11 @@ export class StackHarness {
 }
 
 export const test = base.extend<{ stack: StackHarness }>({
-  stack: async ({ request }, provide) => {
+  stack: async ({ request, context }, provide) => {
     const harness = new StackHarness(request);
     await harness.reset();
+    const storageState = await request.storageState();
+    await context.addCookies(storageState.cookies);
     try {
       await provide(harness);
     } finally {

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+for config in /etc/deviludo/e2e/node.env "/Library/Application Support/DeviludoE2E/node.env"; do
+  if [[ -r $config ]]; then set -a; source "$config"; set +a; break; fi
+done
+if [[ ${1:-} == preflight ]]; then
+  [[ ${DEVILUDO_E2E_NODE_ID:-} =~ ^[0-9a-f-]{36}$ ]]
+  [[ -x ${DEVILUDO_E2E_ISOLATION_EXECUTOR:-} && -x ${DEVILUDO_E2E_TEST_EXECUTOR:-} \
+    && -x ${DEVILUDO_E2E_SIGN_EXECUTOR:-} && -x ${DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR:-} ]]
+  [[ -r ${DEVILUDO_E2E_CLIENT_CERT_FILE:-} && -r ${DEVILUDO_E2E_CLIENT_KEY_FILE:-} \
+    && -r ${DEVILUDO_E2E_CORE_CA_FILE:-} && -r ${DEVILUDO_E2E_IDENTITY_KEY_FILE:-} ]]
+  node_bin=${DEVILUDO_NODE_BIN:-}
+  [[ -n $node_bin ]] || { for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do [[ -x $candidate ]] && node_bin=$candidate && break; done; }
+  [[ -x ${node_bin:-} ]]
+  "$node_bin" --check /opt/deviludo/current/e2e-node.mjs
+  exit 0
+fi
+node_bin=${DEVILUDO_NODE_BIN:-}
+[[ -n $node_bin ]] || { for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do [[ -x $candidate ]] && node_bin=$candidate && break; done; }
+[[ -x ${node_bin:-} ]]
+exec "$node_bin" /opt/deviludo/current/e2e-node.mjs

@@ -1,4 +1,5 @@
 import { CORE_ROLES, type CoreRole } from "./contracts";
+import { readFileSync } from "node:fs";
 import { isServerPoolKind, SERVER_POOL_KINDS, type ServerPoolKind } from "@/lib/runtime/server-pools";
 
 export type CoreConfig = Readonly<{
@@ -10,7 +11,11 @@ export type CoreConfig = Readonly<{
   webToken: string;
   e2eDevelopmentToken: string | null;
   pollMilliseconds: number;
+  projectDocumentIdleSeconds: number;
   requiredReadyPools: readonly ServerPoolKind[];
+  tlsCertificateFile: string | null;
+  tlsKeyFile: string | null;
+  tlsClientCaFile: string | null;
 }>;
 
 export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
@@ -20,7 +25,7 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   }
   const typedRole = role as CoreRole;
   const databaseKey = `DEVILUDO_CORE_${typedRole.toUpperCase()}_DATABASE_URL`;
-  const databaseUrl = env[databaseKey] ?? "";
+  const databaseUrl = secretValue(env, databaseKey);
   if (!databaseUrl) throw new Error(`${databaseKey} is required`);
   const url = new URL(databaseUrl);
   if (!["postgres:", "postgresql:"].includes(url.protocol) || !url.username || url.pathname.length < 2) {
@@ -28,7 +33,13 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   }
   const port = parseInteger(env.PORT ?? "8080", 1, 65535, "PORT");
   const pollMilliseconds = parseInteger(env.DEVILUDO_CORE_POLL_MS ?? "500", 50, 60_000, "DEVILUDO_CORE_POLL_MS");
-  const webToken = env.DEVILUDO_WEB_CORE_TOKEN ?? "";
+  const projectDocumentIdleSeconds = parseInteger(
+    env.DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS ?? "86400",
+    60,
+    2_592_000,
+    "DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS",
+  );
+  const webToken = secretValue(env, "DEVILUDO_WEB_CORE_TOKEN");
   if (typedRole === "api" && env.NODE_ENV === "production" && webToken.length < 32) {
     throw new Error("The Web-to-Core token is required in production");
   }
@@ -46,6 +57,12 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     || new Set(requiredReadyPools).size !== requiredReadyPools.length) {
     throw new Error("DEVILUDO_REQUIRED_READY_POOLS is invalid");
   }
+  const tlsCertificateFile = env.DEVILUDO_CORE_TLS_CERT_FILE ?? null;
+  const tlsKeyFile = env.DEVILUDO_CORE_TLS_KEY_FILE ?? null;
+  const tlsClientCaFile = env.DEVILUDO_CORE_TLS_CLIENT_CA_FILE ?? null;
+  if (env.NODE_ENV === "production" && (![tlsCertificateFile, tlsKeyFile, tlsClientCaFile].every(value => value?.startsWith("/")))) {
+    throw new Error("Production Core API requires TLS certificate, key, and E2E client CA files");
+  }
   return Object.freeze({
     role: typedRole,
     port,
@@ -55,8 +72,23 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     webToken,
     e2eDevelopmentToken,
     pollMilliseconds,
+    projectDocumentIdleSeconds,
     requiredReadyPools: Object.freeze(requiredReadyPools),
+    tlsCertificateFile,
+    tlsKeyFile,
+    tlsClientCaFile,
   });
+}
+
+function secretValue(env: NodeJS.ProcessEnv, key: string): string {
+  const direct = env[key];
+  const file = env[`${key}_FILE`];
+  if (direct && file) throw new Error(`${key} and ${key}_FILE cannot both be set`);
+  if (!file) return direct ?? "";
+  if (!file.startsWith("/")) throw new Error(`${key}_FILE must be absolute`);
+  const value = readFileSync(file, "utf8").trim();
+  if (!value) throw new Error(`${key}_FILE is empty`);
+  return value;
 }
 
 function parseInteger(value: string, minimum: number, maximum: number, name: string): number {

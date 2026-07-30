@@ -15,6 +15,7 @@ export type E2eNodeConfig = Readonly<{
   certificateFile: string | null;
   keyFile: string | null;
   caFile: string | null;
+  identityKeyFile: string;
   pollMilliseconds: number;
 }>;
 
@@ -36,9 +37,11 @@ export function loadE2eNodeConfig(env: NodeJS.ProcessEnv = process.env): E2eNode
   const certificateFile = optionalAbsolute(env.DEVILUDO_E2E_CLIENT_CERT_FILE);
   const keyFile = optionalAbsolute(env.DEVILUDO_E2E_CLIENT_KEY_FILE);
   const caFile = optionalAbsolute(env.DEVILUDO_E2E_CORE_CA_FILE);
+  const identityKeyFile = optionalAbsolute(env.DEVILUDO_E2E_IDENTITY_KEY_FILE);
   if (production && (!certificateFile || !keyFile || !caFile)) {
     throw new Error("Production E2E nodes require mTLS certificate, key, and CA files");
   }
+  if (!identityKeyFile) throw new Error("DEVILUDO_E2E_IDENTITY_KEY_FILE is required");
   const pollMilliseconds = Number(env.DEVILUDO_E2E_POLL_MS ?? "750");
   if (!Number.isSafeInteger(pollMilliseconds) || pollMilliseconds < 100 || pollMilliseconds > 60_000) {
     throw new Error("DEVILUDO_E2E_POLL_MS is invalid");
@@ -52,6 +55,7 @@ export function loadE2eNodeConfig(env: NodeJS.ProcessEnv = process.env): E2eNode
     certificateFile,
     keyFile,
     caFile,
+    identityKeyFile,
     pollMilliseconds,
   });
 }

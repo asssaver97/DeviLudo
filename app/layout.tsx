@@ -1,17 +1,10 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { cookies } from "next/headers";
+import "@fontsource/dotgothic16/400.css";
+import "@fontsource/press-start-2p/400.css";
+import { LanguageProvider, type Locale } from "@/components/i18n/LanguageProvider";
 import "./globals.css";
 import "./product.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export const metadata: Metadata = {
   title: "DeviLudo · 游戏 AI 开发平台",
@@ -23,10 +16,12 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const storedLocale = (await cookies()).get("deviludo_locale")?.value;
+  const initialLocale: Locale = storedLocale === "en" ? "en" : "zh";
   return (
-    <html lang="zh-CN">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>{children}</body>
+    <html lang={initialLocale === "en" ? "en" : "zh-CN"} suppressHydrationWarning>
+      <body className="antialiased"><LanguageProvider initialLocale={initialLocale}>{children}</LanguageProvider></body>
     </html>
   );
 }

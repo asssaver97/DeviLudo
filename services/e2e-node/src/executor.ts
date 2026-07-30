@@ -1,14 +1,18 @@
 import { spawn } from "node:child_process";
-import { isAbsolute } from "node:path";
+import { createHash, sign } from "node:crypto";
+import { readFile, rm } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { assertJobPlacement } from "@/lib/runtime/job-routing";
 import {
-  parseJobProtocolV3,
+  parseJobProtocolV4,
+  executorReceiptSigningPayload,
   type JobCompletion,
-  type JobProtocolV3,
+  type JobProtocolV4,
 } from "@/services/core/src/contracts";
 import type { E2eNodeConfig } from "./config";
 import type { CoreE2eClient, SigningGrant } from "./core-client";
 import type { IsolationController } from "./isolation";
+import { e2eExecutableInvocation, e2eToolPath } from "./tool-path";
 
 export async function executeE2eJob(
   rawJob: unknown,
@@ -17,7 +21,8 @@ export async function executeE2eJob(
   isolation: IsolationController,
   signal: AbortSignal,
 ): Promise<JobCompletion> {
-  const job = parseJobProtocolV3(rawJob);
+  const job = parseJobProtocolV4(rawJob);
+  const startedAt = new Date().toISOString();
   if (job.poolKind !== config.poolKind || job.targetOperatingSystem !== config.operatingSystem) {
     throw new Error("E2E job does not match this node pool and operating system");
   }
@@ -32,22 +37,25 @@ export async function executeE2eJob(
 
   await isolation.assertAgentAbsent();
   const beforeReimageProof = await isolation.reimage(job, "before");
+  const inputs = await client.authorizeObjects(job);
   let executionReceipt: Readonly<Record<string, unknown>> | null = null;
   let executionFailure: unknown;
   try {
     if (job.jobKind === "ARTIFACT_SIGN") {
       const grant = await client.issueSigningGrant(job, beforeReimageProof);
-      executionReceipt = await runSigning(job, grant, signal);
+      executionReceipt = await runSigning(job, grant, inputs, signal);
     } else if (job.jobKind === "E2E_TEST") {
-      executionReceipt = await runUnprivileged(job, "test", process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", signal);
+      executionReceipt = await runUnprivileged(job, "test", inputs, process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", signal);
     } else {
       executionReceipt = await runUnprivileged(
         job,
         "clean-install",
+        inputs,
         process.env.DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR ?? "",
         signal,
       );
     }
+    validateExecutionReceipt(job, executionReceipt);
   } catch (error) {
     executionFailure = error;
   }
@@ -70,6 +78,57 @@ export async function executeE2eJob(
       "E2E execution failed; cleanup and post-job reimage were attempted",
     );
   }
+  const finishedAt = new Date().toISOString();
+  const artifactKind = job.jobKind === "E2E_TEST" ? "E2E_REPORT"
+    : job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT";
+  let outputContent: Buffer;
+  let publicExecutionReceipt = executionReceipt;
+  if (job.jobKind === "ARTIFACT_SIGN") {
+    const outputPath = typeof executionReceipt.outputPath === "string" ? executionReceipt.outputPath : "";
+    if (!isAbsolute(outputPath)) throw new Error("Signing executor did not return an absolute signed artifact path");
+    const configuredJobRoot = process.env.DEVILUDO_E2E_JOB_ROOT ?? "";
+    if (!isAbsolute(configuredJobRoot)) throw new Error("A fixed E2E job root is required for signing");
+    const jobRoot = resolve(configuredJobRoot);
+    const resolvedOutput = resolve(outputPath);
+    const relativeOutput = relative(jobRoot, resolvedOutput);
+    if (relativeOutput.startsWith("..") || isAbsolute(relativeOutput)) {
+      throw new Error("Signing output escaped the fixed E2E job root");
+    }
+    outputContent = await readFile(resolvedOutput);
+    const outputSha256 = `sha256:${createHash("sha256").update(outputContent).digest("hex")}`;
+    if (executionReceipt.outputSha256 !== outputSha256
+      || executionReceipt.outputSizeBytes !== outputContent.length) {
+      throw new Error("Signing executor receipt does not match the signed artifact bytes");
+    }
+    const safeReceipt = Object.fromEntries(Object.entries(executionReceipt).filter(([key]) => key !== "outputPath"));
+    publicExecutionReceipt = Object.freeze(safeReceipt);
+    await rm(dirname(resolvedOutput), { recursive: true, force: true });
+  } else {
+    outputContent = Buffer.from(JSON.stringify(executionReceipt));
+  }
+  const outputDigest = `sha256:${createHash("sha256").update(outputContent).digest("hex")}`;
+  const upload = await client.uploadOutput(job, { kind: artifactKind, sha256: outputDigest, sizeBytes: outputContent.length });
+  const uploaded = await fetch(upload.uploadUrl, { method: "PUT", body: new Uint8Array(outputContent), headers: upload.requiredHeaders, signal: AbortSignal.timeout(120_000) });
+  if (!uploaded.ok) {
+    const detail = (await uploaded.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
+    throw new Error(`Artifact upload returned ${uploaded.status}${detail ? `: ${detail}` : ""}`);
+  }
+  const outputObjects = Object.freeze([Object.freeze({
+    ...upload.object,
+    kind: artifactKind,
+    targetPlatform: job.targetOperatingSystem ?? undefined,
+  })]);
+  const unsigned = Object.freeze({
+    schemaVersion: "deviludo.executor-receipt.v2" as const,
+    executorId: config.nodeId,
+    startedAt,
+    finishedAt,
+    exitCode: 0,
+    simulated: false as const,
+    outputObjects,
+  });
+  const identityKey = await readFile(config.identityKeyFile, "utf8");
+  const signature = sign(null, executorReceiptSigningPayload(unsigned), identityKey).toString("base64url");
   return Object.freeze({
     leaseToken: job.lease.token,
     fencingToken: job.lease.fencingToken,
@@ -79,17 +138,50 @@ export async function executeE2eJob(
       jobKind: job.jobKind,
       poolKind: job.poolKind,
       operatingSystem: config.operatingSystem,
-      execution: executionReceipt,
+      execution: publicExecutionReceipt,
     }),
+    executorReceipt: Object.freeze({ ...unsigned, signature }),
     beforeReimageProof,
     cleanupProof,
     afterReimageProof,
   });
 }
 
+export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<Record<string, unknown>>): void {
+  const inputDigests = new Set(job.inputObjects.map(input => input.sha256));
+  if (receipt.jobId !== job.jobId || typeof receipt.inputDigest !== "string" || !inputDigests.has(receipt.inputDigest as `sha256:${string}`)) {
+    throw new Error("E2E executor receipt does not match the leased job inputs");
+  }
+  if (job.jobKind === "ARTIFACT_SIGN") {
+    if (receipt.schemaVersion !== "deviludo.platform-sign-receipt.v1"
+      || receipt.targetPlatform !== job.targetOperatingSystem
+      || typeof receipt.outputSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.outputSha256)
+      || !Number.isSafeInteger(receipt.outputSizeBytes) || Number(receipt.outputSizeBytes) < 1) {
+      throw new Error("Platform signing receipt is invalid");
+    }
+    return;
+  }
+  const expectedAction = job.jobKind === "E2E_TEST" ? "test" : "clean-install";
+  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v1"
+    || receipt.action !== expectedAction
+    || !["PASSED", "FAILED"].includes(String(receipt.outcome))
+    || (receipt.outcome === "FAILED" ? receipt.failureDomain !== "PRODUCT" : receipt.failureDomain !== null)
+    || typeof receipt.summary !== "string" || receipt.summary.trim().length < 1 || receipt.summary.length > 2_000
+    || !receipt.guest || typeof receipt.guest !== "object" || Array.isArray(receipt.guest)) {
+    throw new Error("Godot guest receipt is invalid");
+  }
+  const guest = receipt.guest as Record<string, unknown>;
+  if (!Number.isSafeInteger(guest.exitCode)
+    || (receipt.outcome === "PASSED" && guest.exitCode !== 0)
+    || (receipt.outcome === "FAILED" && guest.exitCode === 0)) {
+    throw new Error("Godot guest outcome does not match its exit code");
+  }
+}
+
 async function runSigning(
-  job: JobProtocolV3,
+  job: JobProtocolV4,
   grant: SigningGrant,
+  inputs: readonly unknown[],
   signal: AbortSignal,
 ): Promise<Readonly<Record<string, unknown>>> {
   if (Date.parse(grant.expiresAt) <= Date.now() || Date.parse(grant.expiresAt) > Date.now() + 5 * 60_000) {
@@ -103,6 +195,7 @@ async function runSigning(
     projectId: job.projectId,
     operatingSystem: job.targetOperatingSystem,
     payload: job.payload,
+    inputs,
     grant: {
       grantId: grant.grantId,
       wrappedToken: grant.wrappedToken,
@@ -118,8 +211,9 @@ async function runSigning(
 }
 
 async function runUnprivileged(
-  job: JobProtocolV3,
+  job: JobProtocolV4,
   action: "test" | "clean-install",
+  inputs: readonly unknown[],
   executable: string,
   signal: AbortSignal,
 ): Promise<Readonly<Record<string, unknown>>> {
@@ -130,6 +224,7 @@ async function runUnprivileged(
     workspaceId: job.workspaceId,
     projectId: job.projectId,
     payload: job.payload,
+    inputs,
   }, signal, action);
 }
 
@@ -140,18 +235,21 @@ async function runExternal(
   action: string,
 ): Promise<Readonly<Record<string, unknown>>> {
   if (!executable) {
-    if (process.env.NODE_ENV === "production") throw new Error(`${action} executor is required`);
-    return Object.freeze({ executor: "development-simulator", action, succeeded: true });
+    throw new Error(`${action} executor is required`);
   }
   if (!isAbsolute(executable)) throw new Error(`${action} executor path must be absolute`);
-  const child = spawn(executable, [action], {
+  const invocation = e2eExecutableInvocation(executable, [action]);
+  const child = spawn(invocation.executable, invocation.arguments, {
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
     signal,
     env: {
-      PATH: "/usr/local/bin:/usr/bin:/bin",
+      PATH: e2eToolPath(),
       LANG: "C.UTF-8",
       NODE_ENV: process.env.NODE_ENV ?? "production",
+      ...(process.env.DEVILUDO_E2E_GUEST_RUNNER ? { DEVILUDO_E2E_GUEST_RUNNER: process.env.DEVILUDO_E2E_GUEST_RUNNER } : {}),
+      ...(process.env.DEVILUDO_E2E_JOB_ROOT ? { DEVILUDO_E2E_JOB_ROOT: process.env.DEVILUDO_E2E_JOB_ROOT } : {}),
+      ...(process.env.DEVILUDO_E2E_SIGNING_BROKER_URL ? { DEVILUDO_E2E_SIGNING_BROKER_URL: process.env.DEVILUDO_E2E_SIGNING_BROKER_URL } : {}),
     },
   });
   child.stdin.end(JSON.stringify(request));

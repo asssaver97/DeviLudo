@@ -1,0 +1,4 @@
+FROM alpine:3.23
+RUN adduser -D -u 10001 runner
+USER 10001:10001
+ENTRYPOINT ["/bin/false"]

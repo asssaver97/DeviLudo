@@ -14,13 +14,14 @@ export const WORKFLOW_STATES = [
   "CANCELLED",
 ] as const;
 export type WorkflowState = typeof WORKFLOW_STATES[number];
-const PLATFORMS = ["linux", "windows", "macos"] as const;
 
 export type WorkflowSnapshot = Readonly<{
   id: string;
   workspaceId: string;
   projectId: string;
   state: WorkflowState;
+  profile: "VALIDATE" | "RELEASE";
+  targetPlatforms: readonly ServerOperatingSystem[];
   completedE2e: readonly ServerOperatingSystem[];
   completedSigning: readonly ServerOperatingSystem[];
   completedCleanInstall: readonly ServerOperatingSystem[];
@@ -46,12 +47,23 @@ export type WorkflowTransition = Readonly<{
   enqueue: readonly EnqueueCommand[];
 }>;
 
-export function initialWorkflowSnapshot(id: string, workspaceId: string, projectId: string): WorkflowSnapshot {
+export function initialWorkflowSnapshot(
+  id: string,
+  workspaceId: string,
+  projectId: string,
+  profile: "VALIDATE" | "RELEASE" = "VALIDATE",
+  targetPlatforms: readonly ServerOperatingSystem[] = ["macos"],
+): WorkflowSnapshot {
+  if (targetPlatforms.length < 1 || targetPlatforms.length > 3 || new Set(targetPlatforms).size !== targetPlatforms.length) {
+    throw new Error("Workflow target platforms are invalid");
+  }
   return Object.freeze({
     id,
     workspaceId,
     projectId,
     state: "DRAFT",
+    profile,
+    targetPlatforms: Object.freeze([...targetPlatforms]),
     completedE2e: Object.freeze([]),
     completedSigning: Object.freeze([]),
     completedCleanInstall: Object.freeze([]),
@@ -75,20 +87,21 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   if (snapshot.state === "ARTIFACT_BUILDING" && event.jobKind === "ARTIFACT_BUILD") {
     return result(
       { ...snapshot, state: "E2E_TESTING" },
-      PLATFORMS.map(platform => command(snapshot, "E2E_TEST", platform, `e2e:${platform}`)),
+      snapshot.targetPlatforms.map(platform => command(snapshot, "E2E_TEST", platform, `e2e:${platform}`)),
     );
   }
   if (snapshot.state === "E2E_TESTING" && event.jobKind === "E2E_TEST" && event.targetOperatingSystem) {
     const completedE2e = appendPlatform(snapshot.completedE2e, event.targetOperatingSystem);
-    if (completedE2e.length < PLATFORMS.length) return result({ ...snapshot, completedE2e }, []);
+    if (completedE2e.length < snapshot.targetPlatforms.length) return result({ ...snapshot, completedE2e }, []);
+    if (snapshot.profile === "VALIDATE") return result({ ...snapshot, state: "SUCCEEDED", completedE2e }, []);
     return result(
       { ...snapshot, state: "SIGNING", completedE2e },
-      PLATFORMS.map(platform => command(snapshot, "ARTIFACT_SIGN", platform, `sign:${platform}`)),
+      snapshot.targetPlatforms.map(platform => command(snapshot, "ARTIFACT_SIGN", platform, `sign:${platform}`)),
     );
   }
   if (snapshot.state === "SIGNING" && event.jobKind === "ARTIFACT_SIGN" && event.targetOperatingSystem) {
     const completedSigning = appendPlatform(snapshot.completedSigning, event.targetOperatingSystem);
-    if (completedSigning.length < PLATFORMS.length) return result({ ...snapshot, completedSigning }, []);
+    if (completedSigning.length < snapshot.targetPlatforms.length) return result({ ...snapshot, completedSigning }, []);
     return result(
       { ...snapshot, state: "STEAM_PUBLISHING", completedSigning },
       [command(snapshot, "STEAM_PUBLISH", null, "publish")],
@@ -97,7 +110,7 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   if (snapshot.state === "STEAM_PUBLISHING" && event.jobKind === "STEAM_PUBLISH") {
     return result(
       { ...snapshot, state: "CLEAN_INSTALL_VERIFYING" },
-      PLATFORMS.map(platform => command(snapshot, "STEAM_CLEAN_INSTALL", platform, `clean-install:${platform}`)),
+      snapshot.targetPlatforms.map(platform => command(snapshot, "STEAM_CLEAN_INSTALL", platform, `clean-install:${platform}`)),
     );
   }
   if (snapshot.state === "CLEAN_INSTALL_VERIFYING"
@@ -106,7 +119,7 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
     const completedCleanInstall = appendPlatform(snapshot.completedCleanInstall, event.targetOperatingSystem);
     return result({
       ...snapshot,
-      state: completedCleanInstall.length === PLATFORMS.length ? "SUCCEEDED" : snapshot.state,
+      state: completedCleanInstall.length === snapshot.targetPlatforms.length ? "SUCCEEDED" : snapshot.state,
       completedCleanInstall,
     }, []);
   }

@@ -43,7 +43,7 @@ async function requestClaudeName(
     },
     body: JSON.stringify({
       model,
-      max_tokens: 80,
+      max_tokens: 512,
       temperature: 0.2,
       messages: [{ role: "user", content: prompt }],
     }),

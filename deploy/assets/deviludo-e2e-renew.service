@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew Deviludo E2E mTLS certificate
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=deviludo-e2e
+Group=deviludo-e2e
+EnvironmentFile=/etc/deviludo/e2e/node.env
+ExecStart=/usr/bin/node /opt/deviludo/current/e2e-renew.mjs

@@ -11,7 +11,9 @@ const workspaceId = "10000000-0000-4000-8000-000000000002";
 const projectId = "10000000-0000-4000-8000-000000000003";
 
 test("the deterministic workflow covers generation, build, three-platform gates and release", () => {
-  let snapshot: WorkflowSnapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId);
+  let snapshot: WorkflowSnapshot = initialWorkflowSnapshot(
+    workflowId, workspaceId, projectId, "RELEASE", ["linux", "windows", "macos"],
+  );
   let transition = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" });
   assert.deepEqual(transition.enqueue.map(command => command.jobKind), ["AGENT_GENERATION"]);
   snapshot = transition.snapshot;
@@ -61,6 +63,17 @@ test("the deterministic workflow covers generation, build, three-platform gates 
     snapshot = transition.snapshot;
   }
   assert.equal(snapshot.state, "SUCCEEDED");
+});
+
+test("local validation targets only macOS and ends after E2E", () => {
+  let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]);
+  snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
+  const build = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null });
+  assert.deepEqual(build.enqueue.map(item => item.poolKind), ["E2E_MACOS"]);
+  const complete = transitionWorkflow(build.snapshot, { kind: "JOB_SUCCEEDED", jobKind: "E2E_TEST", targetOperatingSystem: "macos" });
+  assert.equal(complete.snapshot.state, "SUCCEEDED");
+  assert.deepEqual(complete.enqueue, []);
 });
 
 test("cancellation is terminal and does not enqueue more work", () => {

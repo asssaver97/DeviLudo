@@ -26,6 +26,7 @@ test("the application has exactly five fixed server pools", () => {
 
 test("job placement cannot escape its fixed pool", () => {
   assert.equal(routeJob("AGENT_GENERATION"), "CORE");
+  assert.equal(routeJob("PROJECT_DOCUMENT_MAINTENANCE"), "CORE");
   assert.equal(routeJob("ARTIFACT_BUILD"), "CORE");
   assert.equal(routeJob("STEAM_PUBLISH"), "CORE");
   assert.equal(routeJob("E2E_TEST", "linux"), "E2E_LINUX");

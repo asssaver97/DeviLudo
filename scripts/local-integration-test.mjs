@@ -1,128 +1,85 @@
 import { randomUUID } from "node:crypto";
-import { startLocalE2e } from "./local-e2e-daemon.mjs";
 
-const webUrl = process.env.DEVILUDO_WEB_URL ?? "http://127.0.0.1:3100";
-const coreUrl = process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080";
-const webToken = process.env.DEVILUDO_WEB_CORE_TOKEN ?? "local-web-to-core-token-0000000000000001";
-let workspaceCookie = "";
-
-await assertOk(new URL("/api/health/live", webUrl), "Web liveness");
-await assertOk(new URL("/health/live", coreUrl), "Core liveness");
-const ready = await assertOk(new URL("/health/ready", coreUrl), "Core readiness");
-if (ready.status !== "ready" || ready.pools.E2E_MACOS !== "READY") {
-  throw new Error("Core readiness did not include the active macOS pool");
+const webUrl = new URL(process.env.DEVILUDO_WEB_URL ?? "http://127.0.0.1:3100");
+const coreUrl = new URL(process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080");
+const username = process.env.DEVILUDO_LOCAL_TEST_USERNAME ?? "";
+const password = process.env.DEVILUDO_LOCAL_TEST_PASSWORD ?? "";
+if (!username || !password) {
+  throw new Error("DEVILUDO_LOCAL_TEST_USERNAME and DEVILUDO_LOCAL_TEST_PASSWORD are required; local:test never creates a guessed administrator");
 }
-const pools = await assertOk(new URL("/api/admin/server-pools", webUrl), "Web BFF");
-if (pools.pools.length !== 5) throw new Error("Web BFF did not return exactly five fixed pools");
-const isolation = await coreRequest("/v1/dev/smoke/workspace-isolation", { method: "POST", body: "{}" });
-if (!isolation.passed) throw new Error(`Workspace isolation smoke failed: ${JSON.stringify(isolation)}`);
 
-await startLocalE2e();
-const createdProduct = await webRequest("/api/projects", {
-  method: "POST",
-  headers: { "idempotency-key": `local-smoke:${randomUUID()}` },
-  body: JSON.stringify({
-    name: "星舰故障夜班",
-    concept: "一款双人合作的太空维修游戏，玩家需要在十五分钟内分工处理火灾、电力与导航故障。",
-  }),
+await json(new URL("/api/health/live", webUrl));
+await json(new URL("/health/live", coreUrl));
+const cookies = new Map();
+const current = await request("/api/session");
+const login = current.session?.setupRequired
+  ? await request("/api/auth/setup", { method: "POST", body: { username, password, passwordConfirmation: password } })
+  : await request("/api/auth/login", { method: "POST", body: { username, password } });
+if (!login.user?.instanceAdmin) throw new Error("Local integration user must be an instance administrator");
+
+const agent = await request("/api/settings/agent");
+if (!agent.settings?.apiKeyConfigured) {
+  const apiKey = process.env.DEVILUDO_LOCAL_TEST_API_KEY ?? "";
+  const baseUrl = process.env.DEVILUDO_LOCAL_TEST_BASE_URL ?? "";
+  const runtime = process.env.DEVILUDO_LOCAL_TEST_AGENT_RUNTIME ?? "CLAUDE_CODE";
+  const model = process.env.DEVILUDO_LOCAL_TEST_MODEL ?? "";
+  if (!apiKey || !baseUrl || (runtime === "CLAUDE_CODE" && !model)) {
+    throw new Error("Configure Agent in Settings, or provide DEVILUDO_LOCAL_TEST_API_KEY, BASE_URL, AGENT_RUNTIME and MODEL");
+  }
+  await request("/api/settings/agent", { method: "PUT", body: {
+    agentRuntime: runtime, baseUrl, apiKey,
+    models: runtime === "CLAUDE_CODE" ? { primary: model, opus: model, sonnet: model, haiku: model, subagent: model } : null,
+  } });
+}
+
+const pools = await request("/api/admin/server-pools");
+if (pools.pools?.length !== 5 || !pools.pools.some(pool => pool.kind === "E2E_MACOS" && pool.readiness === "READY")) {
+  throw new Error("Five fixed pools or the native macOS node are not ready");
+}
+const created = await request("/api/projects", {
+  method: "POST", headers: { "idempotency-key": `local-real:${randomUUID()}` },
+  body: { name: `本地真实链路 ${new Date().toISOString()}`, concept: "创建一个可无界面运行的 Godot 小游戏，通过确定性的输入完成一局并自动退出。" },
 });
-if (createdProduct.project?.workflowState !== "DRAFT") throw new Error("Product project did not start as a draft");
-await webRequest(`/api/projects/${createdProduct.project.id}/approve`, { method: "POST", body: "{}" });
-const progressedProduct = await waitForProductStage(createdProduct.project.id, 20_000);
-if (!progressedProduct.jobs.some(job => job.kind === "AGENT_GENERATION" && job.state === "SUCCEEDED")
-  || !progressedProduct.jobs.some(job => job.kind === "ARTIFACT_BUILD" && job.state === "SUCCEEDED")
-  || !progressedProduct.jobs.some(job => job.kind === "E2E_TEST"
-    && job.targetOperatingSystem === "macos" && job.state === "SUCCEEDED")) {
-  throw new Error(`Product delivery did not execute Core and macOS stages: ${JSON.stringify(progressedProduct.jobs)}`);
+await request(`/api/projects/${created.project.id}/approve`, { method: "POST", body: {} });
+const project = await waitForProject(created.project.id, 20 * 60_000);
+for (const kind of ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]) {
+  const job = project.jobs.find(candidate => candidate.kind === kind);
+  if (!job || job.state !== "SUCCEEDED") throw new Error(`Real ${kind} stage did not succeed: ${JSON.stringify(project.jobs)}`);
 }
-const completedKinds = [];
-for (const jobKind of ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]) {
-  const workspaceId = randomUUID();
-  const projectId = randomUUID();
-  const workflowId = randomUUID();
-  const jobId = randomUUID();
-  await coreRequest("/v1/dev/smoke/mac-e2e", {
-    method: "POST",
-    body: JSON.stringify({ workspaceId, projectId, workflowId, jobId, jobKind }),
-  });
-  const job = await waitForJob(workspaceId, jobId, 20_000);
-  if (job.state !== "SUCCEEDED"
-    || !job.beforeReimageProof
-    || !job.cleanupProof
-    || !job.afterReimageProof) {
-    throw new Error(`macOS ${jobKind} smoke failed its isolation contract: ${JSON.stringify(job)}`);
+console.log(JSON.stringify({ tested: true, projectId: project.id, workspaceId: created.workspace.id, workflowState: project.workflowState, stages: ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"] }));
+
+async function waitForProject(projectId, timeout) {
+  const deadline = Date.now() + timeout;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = (await request(`/api/projects/${projectId}`)).project;
+    if (latest.workflowState === "SUCCEEDED") return latest;
+    if (["FAILED", "CANCELLED"].includes(latest.workflowState)) throw new Error(`Workflow stopped in ${latest.workflowState}: ${JSON.stringify(latest.jobs)}`);
+    await new Promise(resolve => setTimeout(resolve, 1_000));
   }
-  completedKinds.push(jobKind);
-}
-console.log(JSON.stringify({
-  tested: true,
-  web: "ok",
-  core: "ok",
-  fixedPools: 5,
-  macJobs: completedKinds,
-  productFlow: "PROJECT_TO_MAC_E2E",
-  isolationProofs: 3,
-  workspaceIsolationChecks: 4,
-}));
-
-async function assertOk(url, label) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-  if (!response.ok) throw new Error(`${label} returned ${response.status}`);
-  return await response.json();
+  throw new Error(`Timed out waiting for real workflow: ${JSON.stringify(latest)}`);
 }
 
-async function coreRequest(path, init = {}) {
-  const response = await fetch(new URL(path, coreUrl), {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      "x-deviludo-web-auth": webToken,
-      ...init.headers,
-    },
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!response.ok) throw new Error(`Core smoke API returned ${response.status}: ${await response.text()}`);
-  return await response.json();
-}
-
-async function webRequest(path, init = {}) {
+async function request(path, options = {}) {
+  const headers = new Headers(options.headers);
+  headers.set("content-type", "application/json");
+  if (cookies.size) headers.set("cookie", [...cookies].map(([name, value]) => `${name}=${value}`).join("; "));
   const response = await fetch(new URL(path, webUrl), {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(workspaceCookie ? { cookie: workspaceCookie } : {}),
-      ...init.headers,
-    },
-    signal: AbortSignal.timeout(5_000),
+    method: options.method ?? "GET", headers,
+    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    signal: AbortSignal.timeout(70_000),
   });
-  const setCookie = response.headers.get("set-cookie");
-  if (setCookie) workspaceCookie = setCookie.split(";", 1)[0];
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`Web product API returned ${response.status}: ${JSON.stringify(payload)}`);
-  return payload;
+  for (const setCookie of response.headers.getSetCookie()) {
+    const [pair] = setCookie.split(";", 1); const separator = pair.indexOf("=");
+    if (separator > 0) { const name = pair.slice(0, separator); const value = pair.slice(separator + 1); if (value) cookies.set(name, value); else cookies.delete(name); }
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`${path} returned ${response.status}: ${JSON.stringify(body)}`);
+  return body;
 }
 
-async function waitForProductStage(projectId, timeout) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const result = await webRequest(`/api/projects/${projectId}`);
-    const project = result.project;
-    if (project?.jobs.some(job => job.kind === "E2E_TEST"
-      && job.targetOperatingSystem === "macos" && job.state === "SUCCEEDED")) return project;
-    if (["FAILED", "CANCELLED"].includes(project?.workflowState)) {
-      throw new Error(`Product workflow stopped in ${project.workflowState}`);
-    }
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error("Timed out waiting for the product project to reach macOS E2E");
-}
-
-async function waitForJob(workspaceId, jobId, timeout) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const result = await coreRequest(`/v1/dev/smoke/mac-e2e/${workspaceId}/${jobId}`);
-    if (["SUCCEEDED", "FAILED"].includes(result.job?.state)) return result.job;
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error("Timed out waiting for the local macOS E2E smoke job");
+async function json(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+  return response.json();
 }

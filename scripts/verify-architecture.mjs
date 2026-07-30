@@ -9,8 +9,9 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const { stdout } = await execute("rg", ["--files"], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
 const textExtensions = new Set([
   ".ts", ".tsx", ".mjs", ".js", ".json", ".sql", ".yml", ".yaml", ".md", ".d.ts",
+  ".sh", ".ps1", ".cmd", ".toml", ".hcl", ".plist",
 ]);
-const rootTextFiles = new Set(["Dockerfile.core", "Dockerfile.web", ".env.example"]);
+const rootTextFiles = new Set([".env.example"]);
 const excluded = new Set(["scripts/verify-architecture.mjs"]);
 const forbidden = [
   { label: "retired workflow sdk", pattern: new RegExp(["tempo", "ral"].join(""), "i") },
@@ -28,11 +29,13 @@ const forbidden = [
   { label: "retired local database binding", pattern: /\bD1(?:Database)?\b/ },
   { label: "free-form agent pool field", pattern: new RegExp(["worker", "Pool"].join("")) },
   { label: "old node endpoint", pattern: new RegExp(["execution", "-nodes"].join(""), "i") },
+  { label: "old job protocol", pattern: /deviludo\.job\.v[123]\b/ },
+  { label: "simulated success", pattern: /development-simulator|simulated\s*:\s*true/ },
 ];
 const violations = [];
 for (const file of stdout.trim().split("\n").filter(Boolean)) {
   if (excluded.has(file)) continue;
-  if (!textExtensions.has(extname(file)) && !rootTextFiles.has(file) && file !== "package-lock.json") continue;
+  if (!textExtensions.has(extname(file)) && !rootTextFiles.has(file) && !file.startsWith("Dockerfile.") && file !== "package-lock.json") continue;
   const content = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
   for (const rule of forbidden) {
     if (rule.pattern.test(content)) violations.push(`${file}: ${rule.label}`);
@@ -44,8 +47,8 @@ const serviceDirectories = [...new Set(
     .filter(file => file.startsWith("services/"))
     .map(file => file.split("/")[1]),
 )].sort();
-if (JSON.stringify(serviceDirectories) !== JSON.stringify(["core", "e2e-node"])) {
-  violations.push(`services: expected core,e2e-node; found ${serviceDirectories.join(",")}`);
+if (JSON.stringify(serviceDirectories) !== JSON.stringify(["core", "e2e-node", "sandbox-executor"])) {
+  violations.push(`services: expected core,e2e-node,sandbox-executor; found ${serviceDirectories.join(",")}`);
 }
 const migrations = (await readdir(new URL("../infra/postgres/", import.meta.url)))
   .filter(file => file.endsWith(".sql"))

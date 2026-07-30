@@ -11,10 +11,16 @@ export async function runScheduler(
     try {
       const recovered = await repository.recoverExpiredJobs();
       await repository.reconcileCapacity();
+      const projectDocumentsScheduled = await repository.scheduleIdleProjectDocumentMaintenance(
+        config.projectDocumentIdleSeconds,
+      );
+      const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       console.log(JSON.stringify({
         level: "info",
         event: "scheduler_tick",
         recovered,
+        projectDocumentsScheduled,
+        expiredAuthRecordsRemoved,
         elapsedMilliseconds: Date.now() - startedAt,
       }));
     } catch (error) {

@@ -185,9 +185,62 @@ export function normalizeBaseUrl(value: string, environment: string): string {
 }
 
 export function createAgentSecretStore(env: NodeJS.ProcessEnv = process.env): AgentSecretStore {
+  if (env.DEVILUDO_VAULT_ADDR && env.DEVILUDO_VAULT_TOKEN_FILE) return new VaultAgentSecretStore(env);
   return env.NODE_ENV === "production"
     ? new BrokerAgentSecretStore(env)
     : new LocalAgentSecretStore(env.DEVILUDO_AGENT_SECRET_ROOT ?? "/tmp/deviludo-agent-secrets");
+}
+
+class VaultAgentSecretStore implements AgentSecretStore {
+  private readonly address: URL;
+  private readonly tokenFile: string;
+
+  constructor(env: NodeJS.ProcessEnv) {
+    this.address = new URL(env.DEVILUDO_VAULT_ADDR ?? "");
+    if (!(["https:", "http:"].includes(this.address.protocol))
+      || (this.address.protocol === "http:" && env.NODE_ENV === "production")) {
+      throw new Error("Vault address must use HTTPS outside local development");
+    }
+    this.tokenFile = env.DEVILUDO_VAULT_TOKEN_FILE ?? "";
+    if (!isAbsolute(this.tokenFile)) throw new Error("Vault token must be file-mounted");
+  }
+
+  async writeApiKey(apiKey: string): Promise<AgentSecretVersion> {
+    const version = randomUUID();
+    const response = await fetch(new URL(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, this.address), {
+      method: "POST",
+      headers: { "x-vault-token": await this.token(), "content-type": "application/json" },
+      body: JSON.stringify({ data: { value: apiKey } }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) throw new Error(`Vault returned ${response.status}`);
+    return secretVersion(version, apiKey);
+  }
+
+  async readApiKey(secretRef: string): Promise<string | null> {
+    const prefix = "vault://instance/agent-runtime/api-key/versions/";
+    if (!secretRef.startsWith(prefix)) return null;
+    const version = secretRef.slice(prefix.length);
+    if (!/^[0-9a-f-]{36}$/i.test(version)) return null;
+    const response = await fetch(new URL(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, this.address), {
+      headers: { "x-vault-token": await this.token() }, signal: AbortSignal.timeout(5_000),
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`Vault returned ${response.status}`);
+    const body = await response.json() as { data?: { data?: { value?: unknown } } };
+    return typeof body.data?.data?.value === "string" ? body.data.data.value : null;
+  }
+
+  async readApiKeyMask(secretRef: string): Promise<string | null> {
+    const value = await this.readApiKey(secretRef);
+    return value ? maskApiKey(value) : null;
+  }
+
+  private async token(): Promise<string> {
+    const token = (await readFile(this.tokenFile, "utf8")).trim();
+    if (token.length < 8 || token.length > 4096) throw new Error("Vault token file is invalid");
+    return token;
+  }
 }
 
 export class LocalAgentSecretStore implements AgentSecretStore {

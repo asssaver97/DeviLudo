@@ -1,7 +1,8 @@
-import type { JobProtocolV3 } from "@/services/core/src/contracts";
+import type { JobProtocolV4 } from "@/services/core/src/contracts";
 import type { E2eNodeConfig } from "./config";
 import { CoreE2eClient } from "./core-client";
 import { executeE2eJob } from "./executor";
+import { classifyE2eInfrastructureFailure } from "@/lib/runtime/e2e-failure";
 import { TrustedIsolationController, type IsolationController } from "./isolation";
 
 export async function runE2eNode(
@@ -17,30 +18,40 @@ export async function runE2eNode(
   await isolation.assertAgentAbsent();
 
   while (!signal.aborted) {
-    let job: JobProtocolV3 | null = null;
+    let job: JobProtocolV4 | null = null;
     try {
       job = await client.claim();
       if (!job) {
         await delay(config.pollMilliseconds, signal);
         continue;
       }
-      const heartbeat = setInterval(() => void client.heartbeat(job as JobProtocolV3).catch(() => undefined), 20_000);
+      const jobController = new AbortController();
+      const abortJob = () => jobController.abort();
+      signal.addEventListener("abort", abortJob, { once: true });
+      const heartbeat = setInterval(() => void client.heartbeat(job as JobProtocolV4)
+        .then(accepted => { if (!accepted) jobController.abort(); })
+        .catch(() => jobController.abort()), 20_000);
       try {
-        const completion = await executeE2eJob(job, config, client, isolation, signal);
+        const completion = await executeE2eJob(job, config, client, isolation, jobController.signal);
         if (!await client.complete(job, completion)) throw new Error("E2E completion was rejected by fencing");
       } finally {
         clearInterval(heartbeat);
+        signal.removeEventListener("abort", abortJob);
+        jobController.abort();
       }
     } catch (error) {
+      const failure = classifyE2eInfrastructureFailure(error);
       console.error(JSON.stringify({
         level: "error",
         event: "e2e_job_failed",
         jobId: job?.jobId,
         workspaceId: job?.workspaceId,
         poolKind: config.poolKind,
-        message: error instanceof Error ? error.message : String(error),
+        classification: failure.classification,
+        domain: failure.domain,
+        message: failure.reason,
       }));
-      if (job) await client.fail(job, error instanceof Error ? error.message : String(error)).catch(() => undefined);
+      if (job) await client.fail(job, failure).catch(() => undefined);
       await delay(config.pollMilliseconds, signal);
     }
   }

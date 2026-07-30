@@ -18,7 +18,7 @@ const settings: StoredInstanceAgentSettings = Object.freeze({
   apiKeyFingerprint: "sha256:0123456789ab",
   credentialVersion: "30000000-0000-4000-8000-000000000099",
   revision: 1,
-  updatedBy: "LOCAL_OPERATOR",
+  updatedBy: "TEST_OPERATOR",
   updatedAt: new Date(0).toISOString(),
 });
 
@@ -38,6 +38,7 @@ test("Claude-compatible naming uses the configured instance endpoint and primary
   assert.equal(name, "逐浪灯塔");
   assert.equal(requestedUrl, "https://gateway.example.com/anthropic/v1/messages");
   assert.equal(requestedBody.model, "claude-primary");
+  assert.equal(requestedBody.max_tokens, 512);
 });
 
 test("generated project names fail closed when the provider returns invalid text", () => {

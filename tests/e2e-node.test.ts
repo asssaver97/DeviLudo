@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { JobProtocolV3 } from "@/services/core/src/contracts";
+import type { JobProtocolV4 } from "@/services/core/src/contracts";
+import { classifyE2eInfrastructureFailure } from "@/lib/runtime/e2e-failure";
 import { loadE2eNodeConfig, type E2eNodeConfig } from "@/services/e2e-node/src/config";
 import type { CoreE2eClient } from "@/services/e2e-node/src/core-client";
-import { executeE2eJob } from "@/services/e2e-node/src/executor";
+import { executeE2eJob, validateExecutionReceipt } from "@/services/e2e-node/src/executor";
 import type { IsolationController } from "@/services/e2e-node/src/isolation";
+import { e2eExecutableInvocation } from "@/services/e2e-node/src/tool-path";
 
-const baseJob: JobProtocolV3 = Object.freeze({
-  schemaVersion: "deviludo.job.v3",
+const baseJob: JobProtocolV4 = Object.freeze({
+  schemaVersion: "deviludo.job.v4",
   jobId: "20000000-0000-4000-8000-000000000001",
   workflowId: "20000000-0000-4000-8000-000000000002",
   workspaceId: "20000000-0000-4000-8000-000000000003",
@@ -18,6 +20,12 @@ const baseJob: JobProtocolV3 = Object.freeze({
   requiredCapabilities: Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]),
   exclusive: true,
   isolationGeneration: 7,
+  runtimeImage: `sha256:${"b".repeat(64)}`,
+  workflowProfile: "VALIDATE",
+  inputObjects: Object.freeze([]),
+  outputContract: Object.freeze({ kinds: Object.freeze(["E2E_REPORT"]), maxBytes: 1_048_576 }),
+  budget: Object.freeze({ cpuMillis: 900_000, memoryBytes: 4_294_967_296, networkBytes: 1_073_741_824 }),
+  timeoutSeconds: 1800,
   payload: Object.freeze({ artifact: "workspace/project/build.zip" }),
   lease: Object.freeze({
     token: "lease_token_abcdefghijklmnopqrstuvwxyz",
@@ -35,12 +43,74 @@ const config: E2eNodeConfig = Object.freeze({
   certificateFile: null,
   keyFile: null,
   caFile: null,
+  identityKeyFile: "/tmp/deviludo-test-ed25519.pem",
   pollMilliseconds: 250,
+});
+
+test("JavaScript E2E executors use the running Node binary instead of a PATH-dependent shebang", () => {
+  assert.deepEqual(
+    e2eExecutableInvocation("/opt/deviludo/e2e-job.mjs", ["test"], "/fixed/node"),
+    { executable: "/fixed/node", arguments: ["/opt/deviludo/e2e-job.mjs", "test"] },
+  );
+  assert.deepEqual(
+    e2eExecutableInvocation("/opt/deviludo/e2e-job", ["test"], "/fixed/node"),
+    { executable: "/opt/deviludo/e2e-job", arguments: ["test"] },
+  );
+});
+
+test("E2E infrastructure failures retain the underlying node, VM, runtime, or network domain", () => {
+  assert.equal(classifyE2eInfrastructureFailure(new Error("executor binary is missing")).domain, "NODE");
+  assert.equal(classifyE2eInfrastructureFailure(new Error("golden VM reimage failed")).domain, "VM");
+  assert.equal(classifyE2eInfrastructureFailure(new Error("Godot guest runner returned invalid JSON")).domain, "GODOT_RUNTIME");
+  assert.equal(classifyE2eInfrastructureFailure(new Error("Artifact download returned 503")).domain, "NETWORK");
+  assert.deepEqual(
+    classifyE2eInfrastructureFailure(new AggregateError([
+      new Error("Artifact download returned 503"),
+      new Error("cleanup proof missing after VM teardown"),
+    ])).domain,
+    "VM",
+  );
+});
+
+test("a trusted failed guest report is a product outcome instead of an E2E node failure", () => {
+  const digest = `sha256:${"a".repeat(64)}` as const;
+  const job: JobProtocolV4 = Object.freeze({
+    ...baseJob,
+    inputObjects: Object.freeze([Object.freeze({
+      kind: "BUILD",
+      targetPlatform: "macos",
+      bucket: "deviludo-artifacts",
+      key: `workspaces/${baseJob.workspaceId}/projects/${baseJob.projectId}/jobs/build/build-macos.tar.gz`,
+      sha256: digest,
+      sizeBytes: 1024,
+    })]),
+  });
+  assert.doesNotThrow(() => validateExecutionReceipt(job, Object.freeze({
+    schemaVersion: "deviludo.godot-guest-report.v1",
+    action: "test",
+    jobId: job.jobId,
+    inputDigest: digest,
+    outcome: "FAILED",
+    failureDomain: "PRODUCT",
+    summary: "The exported game crashed while entering the first level",
+    guest: Object.freeze({ exitCode: 1 }),
+  })));
+  assert.throws(() => validateExecutionReceipt(job, Object.freeze({
+    schemaVersion: "deviludo.godot-guest-report.v1",
+    action: "test",
+    jobId: job.jobId,
+    inputDigest: digest,
+    outcome: "FAILED",
+    failureDomain: "NETWORK",
+    summary: "network unavailable",
+    guest: Object.freeze({ exitCode: 1 }),
+  })));
 });
 
 test("ordinary E2E tests never receive signing authority", async () => {
   let grantRequests = 0;
   const client = {
+    async authorizeObjects() { return []; },
     async issueSigningGrant() {
       grantRequests += 1;
       throw new Error("must not be called");
@@ -48,17 +118,15 @@ test("ordinary E2E tests never receive signing authority", async () => {
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
   const isolation = fakeIsolation(calls);
-  const completion = await executeE2eJob(baseJob, config, client, isolation, new AbortController().signal);
+  await assert.rejects(() => executeE2eJob(baseJob, config, client, isolation, new AbortController().signal), AggregateError);
   assert.equal(grantRequests, 0);
   assert.deepEqual(calls, ["agent-absent", "reimage-before", "cleanup", "reimage-after"]);
-  assert.equal(completion.isolationGeneration, 7);
-  assert.ok(completion.beforeReimageProof);
-  assert.ok(completion.afterReimageProof);
 });
 
 test("signing is platform matched, exclusive and receives one short-lived grant", async () => {
   let grantRequests = 0;
   const client = {
+    async authorizeObjects() { return []; },
     async issueSigningGrant() {
       grantRequests += 1;
       return {
@@ -69,25 +137,23 @@ test("signing is platform matched, exclusive and receives one short-lived grant"
       };
     },
   } as unknown as CoreE2eClient;
-  const job: JobProtocolV3 = Object.freeze({
+  const job: JobProtocolV4 = Object.freeze({
     ...baseJob,
     jobKind: "ARTIFACT_SIGN",
     requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
   });
-  const completion = await executeE2eJob(
+  await assert.rejects(() => executeE2eJob(
     job,
     config,
     client,
     fakeIsolation([]),
     new AbortController().signal,
-  );
+  ), AggregateError);
   assert.equal(grantRequests, 1);
-  assert.equal(completion.receipt.jobKind, "ARTIFACT_SIGN");
-  assert.equal(JSON.stringify(completion.receipt).includes("wrapped-one-time-token"), false);
 });
 
 test("a signing job for another platform is rejected before isolation", async () => {
-  const job: JobProtocolV3 = Object.freeze({
+  const job: JobProtocolV4 = Object.freeze({
     ...baseJob,
     jobKind: "ARTIFACT_SIGN",
     poolKind: "E2E_WINDOWS",
@@ -113,6 +179,7 @@ test("logical operating-system overrides are restricted to test mode and still p
     DEVILUDO_E2E_OPERATING_SYSTEM_OVERRIDE: "windows",
     DEVILUDO_CORE_API_URL: "http://127.0.0.1:8080",
     DEVILUDO_E2E_NODE_TOKEN: "local-e2e-node-token",
+    DEVILUDO_E2E_IDENTITY_KEY_FILE: "/tmp/deviludo-test-ed25519.pem",
   };
   const logical = loadE2eNodeConfig(environment);
   assert.equal(logical.operatingSystem, "windows");
@@ -125,12 +192,13 @@ test("logical operating-system overrides are restricted to test mode and still p
 });
 
 test("execution failures still attempt cleanup and the final trusted reimage", async () => {
-  const signingJob: JobProtocolV3 = Object.freeze({
+  const signingJob: JobProtocolV4 = Object.freeze({
     ...baseJob,
     jobKind: "ARTIFACT_SIGN",
     requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
   });
   const client = {
+    async authorizeObjects() { return []; },
     async issueSigningGrant() {
       throw new Error("signing broker unavailable");
     },
@@ -162,7 +230,7 @@ test("cleanup failures fail the job even when execution itself succeeds", async 
   await assert.rejects(() => executeE2eJob(
     baseJob,
     config,
-    {} as CoreE2eClient,
+    { authorizeObjects: async () => [] } as unknown as CoreE2eClient,
     isolation,
     new AbortController().signal,
   ), AggregateError);

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { JobProtocolV3 } from "./contracts";
+import type { JobProtocolV4 } from "./contracts";
 
 export type SigningGrant = Readonly<{
   grantId: string;
@@ -8,11 +8,11 @@ export type SigningGrant = Readonly<{
 }>;
 
 export interface SigningGrantBroker {
-  issue(job: JobProtocolV3): Promise<SigningGrant>;
+  issue(job: JobProtocolV4): Promise<SigningGrant>;
 }
 
 export class HttpSigningGrantBroker implements SigningGrantBroker {
-  async issue(job: JobProtocolV3): Promise<SigningGrant> {
+  async issue(job: JobProtocolV4): Promise<SigningGrant> {
     if (job.jobKind !== "ARTIFACT_SIGN" || !job.targetOperatingSystem || !job.poolKind.startsWith("E2E_")) {
       throw new Error("Signing grants are only available to platform-matched signing jobs");
     }

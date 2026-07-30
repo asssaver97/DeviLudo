@@ -1,0 +1,175 @@
+x-core: &core
+  image: ${DEVILUDO_CORE_IMAGE:?immutable Core image is required}
+  restart: unless-stopped
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+  environment: &environment
+    NODE_ENV: production
+    DEVILUDO_DEFAULT_WORKFLOW_PROFILE: RELEASE
+    DEVILUDO_DATABASE_SET_ROLE: "1"
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${DEVILUDO_OTEL_ENDPOINT:?}
+services:
+  migrate:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      <<: *environment
+      DEVILUDO_MIGRATION_DATABASE_URL_FILE: /run/secrets/database-owner.url
+    volumes:
+      - /etc/deviludo/core/secrets/database-owner.url:/run/secrets/database-owner.url:ro
+    command: ["node", "scripts/migrate-postgres.mjs"]
+  register-runtimes:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      <<: *environment
+      DEVILUDO_BOOTSTRAP_DATABASE_URL_FILE: /run/secrets/database-owner.url
+      DEVILUDO_RELEASE_MANIFEST_FILE: /run/release/release-manifest.json
+    volumes:
+      - /etc/deviludo/core/secrets/database-owner.url:/run/secrets/database-owner.url:ro
+      - /opt/deviludo/current:/run/release:ro
+    command: ["node", "scripts/register-runtime-images.mjs"]
+  register-executor:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      <<: *environment
+      DEVILUDO_BOOTSTRAP_DATABASE_URL_FILE: /run/secrets/database-owner.url
+      DEVILUDO_EXECUTOR_PUBLIC_KEY_FILE: /run/secrets/executor-ed25519.pub
+      DEVILUDO_EXECUTOR_ID: core-executor
+    volumes:
+      - /etc/deviludo/core/secrets/database-owner.url:/run/secrets/database-owner.url:ro
+      - /etc/deviludo/core/secrets/executor-ed25519.pub:/run/secrets/executor-ed25519.pub:ro
+    command: ["node", "scripts/register-executor-identity.mjs"]
+  bootstrap-vault:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      <<: *environment
+      DEVILUDO_VAULT_ADDR: ${DEVILUDO_VAULT_ADDR:?}
+      DEVILUDO_VAULT_ADMIN_TOKEN_FILE: /run/secrets/vault-admin.token
+      DEVILUDO_VAULT_POLICY_DIRECTORY: /run/release
+    volumes:
+      - /etc/deviludo/core/secrets/vault-admin.token:/run/secrets/vault-admin.token:ro
+      - /etc/deviludo/core/secrets/vault-api.token:/run/secrets/vault-api.token:ro
+      - /etc/deviludo/core/secrets/vault-executor.token:/run/secrets/vault-executor.token:ro
+      - /etc/deviludo/core/secrets/vault-pki.token:/run/secrets/vault-pki.token:ro
+      - /opt/deviludo/current:/run/release:ro
+    command: ["node", "scripts/bootstrap-vault.mjs"]
+  bootstrap-object-store:
+    <<: *core
+    profiles: ["init"]
+    environment:
+      <<: *environment
+      DEVILUDO_S3_ENDPOINT: ${DEVILUDO_S3_ENDPOINT:?}
+      DEVILUDO_S3_PUBLIC_ENDPOINT: ${DEVILUDO_S3_PUBLIC_ENDPOINT:?}
+      DEVILUDO_S3_REGION: ${DEVILUDO_S3_REGION:-us-east-1}
+      DEVILUDO_S3_PATH_STYLE: ${DEVILUDO_S3_PATH_STYLE:-0}
+      DEVILUDO_ARTIFACT_BUCKET: ${DEVILUDO_ARTIFACT_BUCKET:?}
+      DEVILUDO_S3_CREATE_BUCKET: ${DEVILUDO_S3_CREATE_BUCKET:-0}
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/s3.credentials
+    volumes:
+      - /etc/deviludo/core/secrets/s3.credentials:/run/secrets/s3.credentials:ro
+    command: ["node", "scripts/bootstrap-object-store.mjs"]
+  api:
+    <<: *core
+    environment:
+      <<: *environment
+      DEVILUDO_CORE_ROLE: api
+      DEVILUDO_CORE_API_DATABASE_URL_FILE: /run/secrets/database-api.url
+      DEVILUDO_S3_ENDPOINT: ${DEVILUDO_S3_ENDPOINT:?}
+      DEVILUDO_S3_PUBLIC_ENDPOINT: ${DEVILUDO_S3_PUBLIC_ENDPOINT:?}
+      DEVILUDO_S3_REGION: ${DEVILUDO_S3_REGION:-us-east-1}
+      DEVILUDO_S3_PATH_STYLE: ${DEVILUDO_S3_PATH_STYLE:-0}
+      DEVILUDO_ARTIFACT_BUCKET: ${DEVILUDO_ARTIFACT_BUCKET:?}
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/s3.credentials
+      DEVILUDO_VAULT_ADDR: ${DEVILUDO_VAULT_ADDR:?}
+      DEVILUDO_VAULT_TOKEN_FILE: /run/secrets/vault-api.token
+      DEVILUDO_WEB_CORE_TOKEN_FILE: /run/secrets/web-token
+      DEVILUDO_CORE_TLS_CERT_FILE: /run/secrets/core.crt
+      DEVILUDO_CORE_TLS_KEY_FILE: /run/secrets/core.key
+      DEVILUDO_CORE_TLS_CLIENT_CA_FILE: /run/secrets/e2e-ca.crt
+      DEVILUDO_VAULT_PKI_TOKEN_FILE: /run/secrets/vault-pki.token
+    volumes:
+      - /etc/deviludo/core/secrets/database-api.url:/run/secrets/database-api.url:ro
+      - /etc/deviludo/core/secrets/web-token:/run/secrets/web-token:ro
+      - /etc/deviludo/core/secrets/s3.credentials:/run/secrets/s3.credentials:ro
+      - /etc/deviludo/core/secrets/vault-api.token:/run/secrets/vault-api.token:ro
+      - /etc/deviludo/core/secrets/vault-pki.token:/run/secrets/vault-pki.token:ro
+      - /etc/deviludo/core/secrets/core.crt:/run/secrets/core.crt:ro
+      - /etc/deviludo/core/secrets/core.key:/run/secrets/core.key:ro
+      - /etc/deviludo/core/secrets/e2e-ca.crt:/run/secrets/e2e-ca.crt:ro
+    ports: ["${DEVILUDO_CORE_BIND_ADDRESS:?}:8443:8080"]
+  scheduler:
+    <<: *core
+    environment:
+      <<: *environment
+      DEVILUDO_CORE_ROLE: scheduler
+      DEVILUDO_CORE_SCHEDULER_DATABASE_URL_FILE: /run/secrets/database-scheduler.url
+    volumes:
+      - /etc/deviludo/core/secrets/database-scheduler.url:/run/secrets/database-scheduler.url:ro
+  sandbox:
+    <<: *core
+    environment:
+      <<: *environment
+      DEVILUDO_CORE_ROLE: sandbox
+      DEVILUDO_CORE_SANDBOX_DATABASE_URL_FILE: /run/secrets/database-sandbox.url
+      DEVILUDO_S3_ENDPOINT: ${DEVILUDO_S3_ENDPOINT:?}
+      DEVILUDO_S3_REGION: ${DEVILUDO_S3_REGION:-us-east-1}
+      DEVILUDO_S3_PATH_STYLE: ${DEVILUDO_S3_PATH_STYLE:-0}
+      DEVILUDO_ARTIFACT_BUCKET: ${DEVILUDO_ARTIFACT_BUCKET:?}
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/s3.credentials
+      DEVILUDO_SANDBOX_EXECUTOR: /usr/local/bin/sandbox-executor-client
+      DEVILUDO_EXECUTOR_SOCKET: /run/deviludo-executor/executor.sock
+    volumes:
+      - /etc/deviludo/core/secrets/database-sandbox.url:/run/secrets/database-sandbox.url:ro
+      - /etc/deviludo/core/secrets/s3.credentials:/run/secrets/s3.credentials:ro
+      - executor-socket:/run/deviludo-executor
+  provider-proxy:
+    image: ${DEVILUDO_PROVIDER_PROXY_IMAGE:?immutable Provider proxy image is required}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /run:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+    environment:
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:?}
+    networks: [executor-agent, egress]
+  steam-proxy:
+    image: ${DEVILUDO_PROVIDER_PROXY_IMAGE:?immutable proxy image is required}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /run:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
+    environment:
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_STEAM_ALLOWLIST:?}
+    networks: [executor-steam, egress]
+  executor-smoke:
+    <<: *core
+    profiles: ["smoke"]
+    environment:
+      DEVILUDO_EXECUTOR_SOCKET: /run/deviludo-executor/executor.sock
+    volumes:
+      - executor-socket:/run/deviludo-executor
+    command: ["/usr/local/bin/sandbox-executor-client", "health"]
+volumes:
+  executor-socket:
+    name: deviludo-executor-socket
+networks:
+  executor-agent:
+    name: deviludo-executor-agent
+    internal: true
+  executor-steam:
+    name: deviludo-executor-steam
+    internal: true
+  egress:
+    name: deviludo-core-egress

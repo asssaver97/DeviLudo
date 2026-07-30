@@ -3,7 +3,9 @@ import { test, expect } from "../fixtures/stack";
 
 test("workspace selection persists, clears, and project creation is idempotent", async ({ stack }) => {
   const initial = await stack.web("/api/session");
-  expect(await initial.json()).toEqual({ session: { selectedWorkspace: null } });
+  expect(await initial.json()).toMatchObject({
+    session: { authenticated: true, setupRequired: false, selectedWorkspace: null },
+  });
   expect((await (await stack.web("/api/workspaces")).json() as { workspaces: unknown[] }).workspaces).toEqual([]);
 
   const manual = await stack.web("/api/workspaces", { method: "POST", data: { name: "北港工作区" } });

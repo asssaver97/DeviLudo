@@ -1,0 +1,152 @@
+import type {
+  ProductConversation,
+  ProductConversationMessage,
+  ProductProjectDetail,
+  WorkspaceSummary,
+} from "./contracts";
+
+export type ConversationStreamResult = Readonly<{
+  workspace: WorkspaceSummary;
+  project: ProductProjectDetail;
+  conversation: ProductConversation;
+}>;
+
+export class ConversationStreamError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "ConversationStreamError";
+    this.code = code;
+  }
+}
+
+export async function sendConversationMessageStream(
+  body: Readonly<{ content: string; conversationId?: string; projectId?: string | null }>,
+  idempotencyKey: string,
+  onDelta: (delta: string) => void,
+  onProjectDocument?: (project: ProductProjectDetail) => void,
+): Promise<ConversationStreamResult> {
+  const response = await fetch("/api/conversations/messages/stream", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const failure = await response.json().catch(() => ({})) as { code?: string; message?: string };
+    throw new ConversationStreamError(failure.code ?? "CONVERSATION_FAILED", failure.message ?? `消息发送失败 (${response.status})`);
+  }
+  if (!response.body) throw new ConversationStreamError("EMPTY_STREAM", "对话服务未返回数据流");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: ConversationStreamResult | null = null;
+  const consume = (line: string) => {
+    if (!line.trim()) return;
+    let event: Record<string, unknown>;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (!value || typeof value !== "object" || Array.isArray(value)) return;
+      event = value as Record<string, unknown>;
+    } catch {
+      throw new ConversationStreamError("INVALID_STREAM", "对话服务返回了无效数据");
+    }
+    if (event.type === "delta" && typeof event.delta === "string") {
+      onDelta(event.delta);
+      return;
+    }
+    if (event.type === "project_document" && event.project) {
+      onProjectDocument?.(event.project as ProductProjectDetail);
+      return;
+    }
+    if (event.type === "error") {
+      throw new ConversationStreamError(
+        typeof event.code === "string" ? event.code : "CONVERSATION_FAILED",
+        typeof event.message === "string" ? event.message : "消息发送失败",
+      );
+    }
+    if (event.type === "complete" && event.workspace && event.project && event.conversation) {
+      result = {
+        workspace: event.workspace as WorkspaceSummary,
+        project: event.project as ProductProjectDetail,
+        conversation: event.conversation as ProductConversation,
+      };
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) consume(line);
+    if (done) break;
+  }
+  if (buffer.trim()) consume(buffer);
+  if (!result) throw new ConversationStreamError("INCOMPLETE_STREAM", "对话尚未完成，请重试");
+  return result;
+}
+
+export function optimisticConversation(
+  current: ProductConversation | null,
+  projectId: string,
+  content: string,
+  title = "新游戏构想",
+): ProductConversation {
+  const now = new Date().toISOString();
+  const userMessage: ProductConversationMessage = Object.freeze({
+    id: `pending-${crypto.randomUUID()}`,
+    role: "USER",
+    content,
+    metadata: Object.freeze({ pending: true }),
+    createdAt: now,
+  });
+  if (current) {
+    return Object.freeze({
+      ...current,
+      updatedAt: now,
+      messages: Object.freeze([...current.messages, userMessage]),
+    });
+  }
+  return Object.freeze({
+    id: `pending-${crypto.randomUUID()}`,
+    projectId,
+    mode: projectId ? "PROJECT_FEEDBACK" : "NEW_GAME",
+    title,
+    createdAt: now,
+    updatedAt: now,
+    messages: Object.freeze([userMessage]),
+  });
+}
+
+export function chronologicalMessages(
+  messages: readonly ProductConversationMessage[],
+): readonly ProductConversationMessage[] {
+  return messages
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.message.createdAt);
+      const rightTime = Date.parse(right.message.createdAt);
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+      if (/^\d+$/.test(left.message.id) && /^\d+$/.test(right.message.id)) {
+        const leftId = BigInt(left.message.id);
+        const rightId = BigInt(right.message.id);
+        if (leftId !== rightId) return leftId < rightId ? -1 : 1;
+      }
+      return left.index - right.index;
+    })
+    .map(item => item.message);
+}
+
+export async function selectConversationWorkspace(workspaceId: string): Promise<void> {
+  const response = await fetch("/api/session/workspace", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspaceId }),
+  });
+  if (!response.ok) throw new ConversationStreamError("WORKSPACE_SELECTION_FAILED", "工作区选择失败");
+}

@@ -1,0 +1,30 @@
+[Unit]
+Description=Deviludo restricted sandbox executor
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/deviludo/current/executor.env
+ExecStartPre=-/usr/bin/docker rm -f deviludo-sandbox-executord
+ExecStartPre=/usr/bin/docker volume create deviludo-executor-socket
+ExecStartPre=/usr/bin/docker run --rm --user=0:0 --entrypoint=/bin/sh \
+  --mount=type=volume,src=deviludo-executor-socket,dst=/run/deviludo-executor ${DEVILUDO_EXECUTOR_IMAGE} \
+  -c "chown 10001:1001 /run/deviludo-executor && chmod 2770 /run/deviludo-executor"
+ExecStart=/usr/bin/docker run --name deviludo-sandbox-executord --user=10001:10001 --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --network=deviludo-core-egress \
+  --group-add=${DEVILUDO_DOCKER_GID} --group-add=1001 --mount=type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+  --mount=type=volume,src=deviludo-executor-socket,dst=/run/deviludo-executor \
+  --mount=type=bind,src=/var/lib/deviludo-executor,dst=/var/lib/deviludo-executor \
+  --tmpfs=/run/deviludo-secrets:rw,noexec,nosuid,nodev,size=4194304,mode=0700,uid=10001,gid=10001 \
+  --tmpfs=/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=0700,uid=10001,gid=10001 \
+  --mount=type=bind,src=/etc/deviludo/core/secrets/executor-ed25519.pem,dst=/run/service-secrets/identity.pem,readonly \
+  --mount=type=bind,src=/etc/deviludo/core/secrets/executor-vault.token,dst=/run/service-secrets/vault.token,readonly \
+  --mount=type=bind,src=/etc/deviludo/core/secrets/executor-s3.credentials,dst=/run/service-secrets/s3.credentials,readonly \
+  --env-file=/opt/deviludo/current/executor.env ${DEVILUDO_EXECUTOR_IMAGE}
+ExecStop=/usr/bin/docker stop deviludo-sandbox-executord
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

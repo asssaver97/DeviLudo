@@ -1,0 +1,22 @@
+{
+  "releaseVersion": "v1.0.0",
+  "releaseBaseUrl": "https://github.com/OWNER/DeviLudo/releases/download",
+  "cosignIdentityRegexp": "^https://github.com/OWNER/DeviLudo/.github/workflows/release.yml@",
+  "cosignIssuer": "https://token.actions.githubusercontent.com",
+  "releaseAuthHeaderFile": "C:\\ProgramData\\DeviludoInput\\github-release.header",
+  "coreUrl": "https://core.internal.example:8443",
+  "signingBrokerUrl": "https://signing.internal.example",
+  "enrollmentTokenFile": "C:\\ProgramData\\DeviludoInput\\enrollment.token",
+  "coreCaFile": "C:\\ProgramData\\DeviludoInput\\core-ca.crt",
+  "goldenVmFile": "D:\\DeviludoImages\\windows-golden.vmcz",
+  "guestCredentialFile": "C:\\ProgramData\\DeviludoInput\\guest-credential.xml",
+  "packageVersions": {
+    "node": "REPLACE_WITH_WINGET_VERSION",
+    "windowsSdk": "REPLACE_WITH_WINGET_VERSION",
+    "steam": "REPLACE_WITH_WINGET_VERSION",
+    "openssl": "REPLACE_WITH_WINGET_VERSION",
+    "nssm": "REPLACE_WITH_WINGET_VERSION",
+    "cosign": "REPLACE_WITH_WINGET_VERSION"
+  },
+  "toolPath": "C:\\Program Files\\nodejs;C:\\Program Files\\cosign;C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64;C:\\Windows\\System32;C:\\Windows"
+}

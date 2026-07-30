@@ -1,0 +1,17 @@
+services:
+  web:
+    image: ${DEVILUDO_WEB_IMAGE:?immutable Web image is required}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      DEVILUDO_CORE_API_URL: ${DEVILUDO_CORE_URL:?}
+      DEVILUDO_WEB_CORE_TOKEN_FILE: /run/secrets/core-token
+    volumes:
+      - /etc/deviludo/web/core.token:/run/secrets/core-token:ro
+    ports:
+      - "${DEVILUDO_WEB_BIND_ADDRESS:?}:3100:3000"

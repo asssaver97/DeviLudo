@@ -1,0 +1,18 @@
+[Unit]
+Description=Deviludo E2E host service
+After=network-online.target libvirtd.service
+
+[Service]
+User=deviludo-e2e
+Group=deviludo-e2e
+EnvironmentFile=/etc/deviludo/e2e/node.env
+ExecStart=/opt/deviludo/current/deviludo-e2e-host
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/deviludo-e2e
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+FROM ubuntu/squid:6.6-24.04_edge
+COPY services/sandbox-executor/proxy-entrypoint.sh /usr/local/bin/deviludo-provider-proxy
+RUN chmod 0555 /usr/local/bin/deviludo-provider-proxy
+USER proxy
+ENTRYPOINT ["/usr/local/bin/deviludo-provider-proxy"]

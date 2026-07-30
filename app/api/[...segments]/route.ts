@@ -1,4 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { externalRequestHost, requestOriginMatchesHost } from "@/lib/web/request-origin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,9 +11,11 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
   "authorization",
   "content-type",
   "cookie",
+  "origin",
   "if-none-match",
   "idempotency-key",
   "x-request-id",
+  "x-csrf-token",
 ]);
 const RESPONSE_HEADER_DENYLIST = new Set([
   "connection",
@@ -25,6 +29,7 @@ const RESPONSE_HEADER_DENYLIST = new Set([
   "upgrade",
 ]);
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_PROJECT_ARCHIVE_BYTES = 64 * 1024 * 1024;
 
 function coreBaseUrl(): URL {
   const raw = process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080";
@@ -40,13 +45,17 @@ function coreBaseUrl(): URL {
 }
 
 function serviceToken(): string {
-  const value = process.env.DEVILUDO_WEB_CORE_TOKEN ?? "";
+  const file = process.env.DEVILUDO_WEB_CORE_TOKEN_FILE;
+  if (file && process.env.DEVILUDO_WEB_CORE_TOKEN) throw new Error("Set only one Web-to-Core token source");
+  const value = file ? readFileSync(file, "utf8").trim() : process.env.DEVILUDO_WEB_CORE_TOKEN ?? "";
   if (process.env.NODE_ENV === "production" && value.length < 32) throw new Error("Web-to-Core token is required");
   return value;
 }
 
 async function proxy(request: Request, context: RouteContext): Promise<Response> {
   const { segments } = await context.params;
+  const routePath = segments.join("/");
+  const bodyLimit = routePath === "projects/import/archive" ? MAX_PROJECT_ARCHIVE_BYTES : MAX_BODY_BYTES;
   const base = coreBaseUrl();
   const target = new URL(`v1/${segments.map(encodeURIComponent).join("/")}`, base.href.endsWith("/") ? base : new URL(`${base.href}/`));
   target.search = new URL(request.url).search;
@@ -57,18 +66,28 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   });
   const token = serviceToken();
   if (token) headers.set("x-deviludo-web-auth", token);
-  headers.set("x-forwarded-host", new URL(request.url).host);
+  const externalHost = externalRequestHost(request);
+  headers.set("x-forwarded-host", externalHost);
+  if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+    const origin = request.headers.get("origin");
+    if (!requestOriginMatchesHost(origin, externalHost)) {
+      return Response.json({ code: "ORIGIN_REJECTED", message: "请求来源校验失败" }, { status: 403 });
+    }
+    headers.set("x-deviludo-origin-verified", "1");
+    const csrf = cookieValue(request.headers.get("cookie"), "deviludo_csrf");
+    if (csrf) headers.set("x-deviludo-csrf", csrf);
+  }
 
   const length = Number(request.headers.get("content-length") ?? "0");
-  if (!Number.isFinite(length) || length < 0 || length > MAX_BODY_BYTES) {
+  if (!Number.isFinite(length) || length < 0 || length > bodyLimit) {
     return Response.json({ code: "REQUEST_TOO_LARGE" }, { status: 413 });
   }
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
   const body = hasBody ? await request.arrayBuffer() : undefined;
-  if (body && body.byteLength > MAX_BODY_BYTES) return Response.json({ code: "REQUEST_TOO_LARGE" }, { status: 413 });
+  if (body && body.byteLength > bodyLimit) return Response.json({ code: "REQUEST_TOO_LARGE" }, { status: 413 });
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 65_000);
+  const timer = setTimeout(() => controller.abort(), routePath.startsWith("projects/import/") ? 120_000 : 65_000);
   try {
     const upstream = await fetch(target, {
       method: request.method,
@@ -80,8 +99,10 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     });
     const responseHeaders = new Headers();
     upstream.headers.forEach((value, name) => {
+      if (name.toLowerCase() === "set-cookie") return;
       if (!RESPONSE_HEADER_DENYLIST.has(name.toLowerCase())) responseHeaders.append(name, value);
     });
+    for (const value of upstream.headers.getSetCookie()) responseHeaders.append("set-cookie", value);
     responseHeaders.set("cache-control", upstream.headers.get("cache-control") ?? "no-store");
     return new Response(upstream.body, {
       status: upstream.status,
@@ -90,10 +111,20 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     });
   } catch (error) {
     const code = error instanceof Error && error.name === "AbortError" ? "CORE_TIMEOUT" : "CORE_UNAVAILABLE";
-    return Response.json({ code }, { status: 503, headers: { "cache-control": "no-store" } });
+    const message = code === "CORE_TIMEOUT" ? "Core 请求超时" : "Core 暂时不可用";
+    return Response.json({ code, message }, { status: 503, headers: { "cache-control": "no-store" } });
   } finally {
     clearTimeout(timer);
   }
+}
+
+function cookieValue(header: string | null, name: string): string | null {
+  if (!header) return null;
+  for (const item of header.split(";")) {
+    const [key, ...value] = item.trim().split("=");
+    if (key === name) return value.join("=");
+  }
+  return null;
 }
 
 export const GET = proxy;

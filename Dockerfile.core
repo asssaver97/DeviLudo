@@ -6,7 +6,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --chown=core:core lib ./lib
 COPY --chown=core:core services/core ./services/core
+COPY --chown=core:core scripts ./scripts
+COPY --chown=core:core infra/postgres ./infra/postgres
+COPY --chown=core:core services/sandbox-executor/client.mjs /usr/local/bin/sandbox-executor-client
 COPY --chown=core:core tsconfig.json ./
+RUN chmod 0555 /usr/local/bin/sandbox-executor-client
 RUN install -d -o core -g core -m 0700 /var/lib/deviludo/agent-secrets
 USER core
 CMD ["node", "--import", "tsx", "services/core/src/main.ts"]

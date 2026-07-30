@@ -1,85 +1,453 @@
 openapi: 3.1.0
 info:
   title: DeviLudo Core API
-  version: 1.0.0
+  version: 4.0.0
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: deviludo_session
+    e2eMtls:
+      type: mutualTLS
+  parameters:
+    jobId:
+      in: path
+      name: jobId
+      required: true
+      schema: { type: string, format: uuid }
 paths:
   /health/live:
     get:
       operationId: coreLiveness
       responses:
-        "200":
-          description: Core process is alive
+        "200": { description: Core process is alive }
   /health/ready:
     get:
       operationId: coreReadiness
       responses:
-        "200":
-          description: Required fixed pools and the database are ready
-        "503":
-          description: A required pool or the database is unavailable
-  /v1/admin/server-pools:
-    get:
-      operationId: listServerPools
-      responses:
-        "200":
-          description: The five fixed server pools
-  /v1/admin/server-nodes:
-    get:
-      operationId: listServerNodes
-      responses:
-        "200":
-          description: Registered server nodes
+        "200": { description: Required fixed pools and instance setup are ready }
+        "503": { description: A pool is unavailable or the first administrator has not been created }
+  /v1/auth/setup:
     post:
-      operationId: createServerNode
+      operationId: setupInitialAdministrator
       responses:
-        "201":
-          description: Node registered in a fixed pool
+        "201": { description: The first instance administrator and authenticated session were created atomically }
+        "400": { description: Username, password, or confirmation is invalid }
+        "409": { description: The instance already has an administrator }
+  /v1/auth/login:
+    post:
+      operationId: login
+      responses:
+        "200": { description: Session and CSRF cookies created }
+        "401": { description: Invalid credentials }
+        "429": { description: Login rate limit reached }
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Session revoked and cookies cleared }
+  /v1/auth/password:
+    post:
+      operationId: changePassword
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Password changed and all sessions revoked }
+  /v1/auth/invitations/accept:
+    post:
+      operationId: acceptWorkspaceInvitation
+      responses:
+        "201": { description: Account and workspace membership created }
+        "404": { description: Invitation is invalid, expired, or already used }
   /v1/session:
     get:
-      operationId: readLocalSession
+      operationId: readSession
       responses:
-        "200":
-          description: Current optional workspace selection
+        "200": { description: User, first-run setup state, and selected workspace }
   /v1/workspaces:
     get:
       operationId: listWorkspaces
+      security: [{ sessionCookie: [] }]
       responses:
-        "200":
-          description: Workspaces visible to the local operator
+        "200": { description: Workspaces for which the current user has membership }
     post:
       operationId: createWorkspace
+      security: [{ sessionCookie: [] }]
       responses:
-        "201":
-          description: Workspace created and selected
+        "201": { description: Workspace created, owned, and selected }
   /v1/session/workspace:
     put:
       operationId: selectWorkspace
+      security: [{ sessionCookie: [] }]
       responses:
-        "200":
-          description: Workspace selection persisted in an HttpOnly cookie
+        "200": { description: Membership-verified workspace selection persisted in an HttpOnly cookie }
+        "404": { description: Workspace is not visible to the current user }
     delete:
       operationId: clearWorkspace
+      security: [{ sessionCookie: [] }]
       responses:
-        "200":
-          description: Workspace selection cleared
+        "200": { description: Workspace selection cleared }
+  /v1/workspaces/current/members:
+    get:
+      operationId: listWorkspaceMembers
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Members of the selected workspace }
+        "409": { description: A workspace has not been selected }
+  /v1/workspaces/current/members/{userId}:
+    parameters:
+      - in: path
+        name: userId
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      operationId: changeWorkspaceMemberRole
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Non-owner membership role changed }
+        "403": { description: Owner or admin permission required }
+    delete:
+      operationId: removeWorkspaceMember
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Non-owner membership removed }
+        "403": { description: Owner or admin permission required }
+  /v1/workspaces/current/invitations:
+    post:
+      operationId: createWorkspaceInvitation
+      security: [{ sessionCookie: [] }]
+      responses:
+        "201": { description: Single-use 24-hour invitation created }
+        "403": { description: Owner or admin permission required }
+  /v1/settings/agent:
+    get:
+      operationId: readGlobalAgentSettings
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Masked instance Agent settings and runtime versions }
+    put:
+      operationId: saveGlobalAgentSettings
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Instance Agent settings stored with a Vault secret reference }
+        "403": { description: Instance administrator permission required }
   /v1/projects:
     get:
       operationId: listProjects
+      security: [{ sessionCookie: [] }]
       responses:
-        "200":
-          description: Projects in the selected workspace
-        "409":
-          description: A workspace has not been selected
+        "200": { description: Projects in the selected workspace }
+        "409": { description: A workspace has not been selected }
     post:
       operationId: createProject
+      security: [{ sessionCookie: [] }]
       responses:
-        "201":
-          description: Project created; a same-name workspace is also created when none is selected
-        "424":
-          description: Global Agent configuration is required to generate a missing project name
+        "201": { description: Project created; a same-name workspace is created when none is selected }
+        "424": { description: Global Agent configuration or name generation failed }
+  /v1/projects/import/git:
+    post:
+      operationId: importGitProject
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repositoryUrl]
+              properties:
+                repositoryUrl: { type: string, format: uri, maxLength: 2000 }
+      responses:
+        "201": { description: Public Git source snapshot, Agent project document, and initial conversation created }
+        "422": { description: Repository URL, archive, or source boundary is invalid }
+        "424": { description: Global Agent configuration or project analysis failed }
+  /v1/projects/import/archive:
+    post:
+      operationId: importLocalProjectArchive
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: query
+          name: name
+          schema: { type: string, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: { type: string, format: binary, maxLength: 67108864 }
+      responses:
+        "201": { description: Local source snapshot, Agent project document, and initial conversation created }
+        "413": { description: Archive exceeds the 64 MiB compressed limit }
+        "422": { description: Archive or source boundary is invalid }
+        "424": { description: Global Agent configuration or project analysis failed }
+  /v1/projects/{projectId}/approve:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: approveProjectSpecification
+      security: [{ sessionCookie: [] }]
+      responses:
+        "202": { description: Immutable specification object registered and workflow started }
+  /v1/projects/{projectId}/retry-agent:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: header
+        name: Idempotency-Key
+        required: false
+        schema: { type: string, minLength: 8, maxLength: 300 }
+    post:
+      operationId: retryFailedAgentGeneration
+      security: [{ sessionCookie: [] }]
+      responses:
+        "202": { description: A new Agent job was created with the currently verified runtime image }
+        "200": { description: The same retry request was already accepted }
+        "409": { description: The current workflow did not fail during Agent generation }
+        "424": { description: Global Agent configuration is unavailable }
+  /v1/projects/{projectId}/retry-artifact-build:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: header
+        name: Idempotency-Key
+        required: false
+        schema: { type: string, minLength: 8, maxLength: 300 }
+    post:
+      operationId: retryFailedArtifactBuild
+      security: [{ sessionCookie: [] }]
+      responses:
+        "202": { description: A new build job was created from the latest verified Agent source }
+        "200": { description: The same retry request was already accepted }
+        "409": { description: The current workflow did not fail during artifact build }
+  /v1/projects/{projectId}/retry-e2e:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: header
+        name: Idempotency-Key
+        required: false
+        schema: { type: string, minLength: 8, maxLength: 300 }
+    post:
+      operationId: retryFailedE2e
+      security: [{ sessionCookie: [] }]
+      responses:
+        "202": { description: New E2E jobs were created for target platforms without a successful test }
+        "200": { description: The same retry request was already accepted }
+        "409": { description: The current workflow did not fail during E2E }
+  /v1/projects/{projectId}:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: readProject
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Project, current collaborative document, revision history, and workflow state }
+        "404": { description: Project is not visible in the selected workspace }
+    delete:
+      operationId: deleteProject
+      security: [{ sessionCookie: [] }]
+      responses:
+        "204": { description: Project records, conversations, workflow state, and stored objects deleted }
+        "403": { description: Workspace owner or admin permission required }
+        "409": { description: An active delivery must be cancelled before deletion }
+  /v1/projects/{projectId}/artifacts:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: listProjectArtifacts
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Immutable source, build, E2E report, signature, and publication artifacts for this project }
+        "404": { description: Project is not visible in the selected workspace }
+  /v1/projects/{projectId}/artifacts/{artifactId}/download:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: artifactId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: authorizeProjectArtifactDownload
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: A workspace-scoped download URL valid for 120 seconds }
+        "404": { description: Artifact is not visible in the selected workspace and project }
+  /v1/projects/{projectId}/conversations:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: listProjectConversations
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Most recently active project conversations with previews and message counts }
+        "404": { description: Project is not visible in the selected workspace }
+  /v1/projects/{projectId}/agent-progress/stream:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: query
+        name: after
+        schema: { type: integer, minimum: 0, default: 0 }
+    get:
+      operationId: streamAgentGenerationProgress
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Newline-delimited Agent phases, visible output, accepted player guidance, and completion state
+          content:
+            application/x-ndjson:
+              schema: { type: string }
+        "404": { description: Project is not visible in the selected workspace }
+  /v1/projects/{projectId}/document:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: updateProjectDocument
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Collaborative project document updated with a new immutable revision }
+        "409": { description: Expected revision is stale }
+  /v1/conversations/{conversationId}:
+    parameters:
+      - in: path
+        name: conversationId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: readConversation
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Conversation messages in chronological order }
+        "404": { description: Conversation is not visible in the selected workspace }
+  /v1/conversations/messages:
+    post:
+      operationId: sendConversationMessage
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Existing conversation updated }
+        "201": { description: Project conversation created }
+        "424": { description: Global Agent configuration or provider call failed }
+  /v1/conversations/messages/stream:
+    post:
+      operationId: streamConversationMessage
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Newline-delimited design reply and persisted result; during Agent generation the user message is stored as live task guidance
+          content:
+            application/x-ndjson:
+              schema: { type: string }
+  /v1/admin/server-pools:
+    get:
+      operationId: listServerPools
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: The five fixed server pools }
+        "403": { description: Instance administrator permission required }
+  /v1/admin/server-nodes:
+    get:
+      operationId: listServerNodes
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Registered server nodes }
+    post:
+      operationId: createServerNode
+      security: [{ sessionCookie: [] }]
+      responses:
+        "201": { description: Node registered in a fixed pool }
+  /v1/admin/e2e-enrollment-tokens:
+    post:
+      operationId: createE2eEnrollmentToken
+      security: [{ sessionCookie: [] }]
+      responses:
+        "201": { description: Single-use 30-minute E2E enrollment token created }
+  /v1/e2e/enroll:
+    post:
+      operationId: enrollE2eNode
+      responses:
+        "201": { description: Node registered and SPIFFE client certificate issued }
+  /v1/e2e/nodes/{nodeId}/renew:
+    parameters:
+      - in: path
+        name: nodeId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: renewE2eNodeCertificate
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: A replacement short-lived certificate was issued }
   /v1/e2e/jobs/claim:
     post:
       operationId: claimE2eJob
+      security: [{ e2eMtls: [] }]
       responses:
-        "200":
-          description: Exclusive platform-matched job lease or no work
+        "200": { description: Exclusive platform-matched job lease or no work }
+  /v1/e2e/jobs/{jobId}/heartbeat:
+    parameters: [{ $ref: "#/components/parameters/jobId" }]
+    post:
+      operationId: heartbeatE2eJob
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: Lease extended when fencing identity matches }
+  /v1/e2e/jobs/{jobId}/complete:
+    parameters: [{ $ref: "#/components/parameters/jobId" }]
+    post:
+      operationId: completeE2eJob
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: Signed receipt and isolation proofs accepted }
+  /v1/e2e/jobs/{jobId}/fail:
+    parameters: [{ $ref: "#/components/parameters/jobId" }]
+    post:
+      operationId: failE2eJob
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: Failure recorded when fencing identity matches }
+  /v1/e2e/jobs/{jobId}/signing-grant:
+    parameters: [{ $ref: "#/components/parameters/jobId" }]
+    post:
+      operationId: issueE2eSigningGrant
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: Short-lived platform-matched signing grant issued after reimage proof }
+  /v1/e2e/jobs/{jobId}/objects:
+    parameters: [{ $ref: "#/components/parameters/jobId" }]
+    post:
+      operationId: authorizeE2eJobInputs
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: Short-lived job/workspace/digest-bound download URLs }
+  /v1/e2e/jobs/{jobId}/outputs:
+    parameters: [{ $ref: "#/components/parameters/jobId" }]
+    post:
+      operationId: authorizeE2eJobOutput
+      security: [{ e2eMtls: [] }]
+      responses:
+        "200": { description: Short-lived job/workspace/digest-bound upload URL }

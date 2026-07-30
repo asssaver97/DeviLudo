@@ -10,9 +10,12 @@ const eslintConfig = defineConfig([
     // Default ignores of eslint-config-next:
     ".next/**",
     ".deviludo/**",
+    "blob-report/**",
     "coverage/**",
     "dist/**",
     "out/**",
+    "playwright-report/**",
+    "test-results/**",
     "build/**",
     "next-env.d.ts",
   ]),

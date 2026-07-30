@@ -1,0 +1,91 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}/deviludo
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          : > images.txt
+          for spec in web:Dockerfile.web core:Dockerfile.core executor:Dockerfile.executor provider-proxy:Dockerfile.provider-proxy agent-claude:Dockerfile.agent-claude agent-codex:Dockerfile.agent-codex godot-builder:Dockerfile.godot-builder; do
+            name=${spec%%:*}; file=${spec#*:}
+            docker buildx build --platform linux/amd64,linux/arm64 --file "$file" --tag "$REGISTRY-$name:$VERSION" --push .
+            digest=$(docker buildx imagetools inspect "$REGISTRY-$name:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            printf '%s@%s\n' "$REGISTRY-$name" "$digest" >> images.txt
+          done
+          docker buildx build --platform linux/amd64 --file Dockerfile.steam-publisher --tag "$REGISTRY-steam-publisher:$VERSION" --push .
+          digest=$(docker buildx imagetools inspect "$REGISTRY-steam-publisher:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          printf '%s@%s\n' "$REGISTRY-steam-publisher" "$digest" >> images.txt
+          while read -r image; do cosign sign --yes "$image"; done < images.txt
+      - name: Package role bundles
+        run: |
+          set -Eeuo pipefail
+          mkdir -p release/app
+          cp -R services lib package.json package-lock.json tsconfig.json release/app/
+          node_modules/.bin/esbuild services/e2e-node/src/main.ts --bundle --platform=node --format=esm --target=node22 --alias:@=. --outfile=release/e2e-node.mjs
+          cp scripts/e2e-enroll.mjs scripts/e2e-renew.mjs release/
+          cp deploy/assets/web.compose.yaml release/
+          cp deploy/web/deploy.sh release/web-deploy.sh
+          cp deploy/web/deploy.env.example release/web-deploy.env.example
+          cp deploy/common/lib.sh release/deploy-common.sh
+          tar -czf WEB.tar.gz -C release web.compose.yaml web-deploy.sh web-deploy.env.example deploy-common.sh
+          cp deploy/assets/core.compose.yaml deploy/assets/deviludo-executord.service deploy/assets/vault-*.hcl release/
+          cp deploy/core/deploy.sh release/core-deploy.sh
+          cp deploy/core/deploy.env.example release/core-deploy.env.example
+          tar -czf CORE.tar.gz -C release core.compose.yaml deviludo-executord.service vault-api.hcl vault-executor.hcl vault-pki.hcl core-deploy.sh core-deploy.env.example deploy-common.sh app
+          cp deploy/assets/deviludo-e2e-host deploy/assets/deviludo-e2e-renew deploy/assets/deviludo-e2e.service deploy/assets/deviludo-e2e-renew.service deploy/assets/deviludo-e2e-renew.timer deploy/assets/com.deviludo.e2e.plist deploy/assets/com.deviludo.e2e-renew.plist deploy/assets/e2e-* release/
+          cp deploy/e2e-linux/deploy.sh release/e2e-linux-deploy.sh
+          cp deploy/e2e-linux/deploy.env.example release/e2e-linux-deploy.env.example
+          cp deploy/e2e-macos/deploy.sh release/e2e-macos-deploy.sh
+          cp deploy/e2e-macos/deploy.env.example release/e2e-macos-deploy.env.example
+          cp deploy/e2e-windows/deploy.ps1 release/e2e-windows-deploy.ps1
+          cp deploy/e2e-windows/deploy.json.example release/e2e-windows-deploy.json.example
+          tar -czf E2E_LINUX.tar.gz -C release deviludo-e2e-host deviludo-e2e.service deviludo-e2e-renew.service deviludo-e2e-renew.timer e2e-linux-isolation.sh e2e-linux-guest-runner.sh e2e-job-executor.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-linux-deploy.sh e2e-linux-deploy.env.example deploy-common.sh
+          tar -czf E2E_MACOS.tar.gz -C release deviludo-e2e-host deviludo-e2e-renew com.deviludo.e2e.plist com.deviludo.e2e-renew.plist e2e-macos-isolation.sh e2e-macos-guest-runner.sh e2e-job-executor.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-macos-deploy.sh e2e-macos-deploy.env.example deploy-common.sh
+          (cd release && zip -q -r ../E2E_WINDOWS.zip e2e-windows-isolation.ps1 e2e-windows-isolation.cmd e2e-windows-guest-runner.ps1 e2e-windows-guest-runner.cmd e2e-windows-job-executor.cmd e2e-windows-renew.ps1 e2e-job-executor.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-windows-deploy.ps1 e2e-windows-deploy.json.example)
+      - name: Manifest and signatures
+        env:
+          DEVILUDO_RELEASE_VERSION: ${{ github.ref_name }}
+          DEVILUDO_E2E_RUNTIME_DIGESTS: ${{ vars.DEVILUDO_E2E_RUNTIME_DIGESTS }}
+          DEVILUDO_KATA_VERSION: ${{ vars.DEVILUDO_KATA_VERSION }}
+          DEVILUDO_KATA_URL: ${{ vars.DEVILUDO_KATA_URL }}
+          DEVILUDO_KATA_SHA256: ${{ vars.DEVILUDO_KATA_SHA256 }}
+        run: |
+          export DEVILUDO_RELEASE_IMAGES="$(jq -R -s 'split("\n") | map(select(length>0))' images.txt)"
+          node scripts/release-manifest.mjs
+          cosign sign-blob --yes --bundle release-manifest.bundle release-manifest.json
+          jq -r '.base64Signature' release-manifest.bundle > release-manifest.json.sig
+          jq -r '.cert' release-manifest.bundle > release-manifest.json.pem
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            WEB.tar.gz
+            CORE.tar.gz
+            E2E_LINUX.tar.gz
+            E2E_WINDOWS.zip
+            E2E_MACOS.tar.gz
+            release-manifest.json
+            release-manifest.json.sig
+            release-manifest.json.pem

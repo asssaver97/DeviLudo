@@ -1,0 +1,638 @@
+import { spawn } from "node:child_process";
+import { createHash, sign } from "node:crypto";
+import { createServer } from "node:http";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { Readable } from "node:stream";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import type { SandboxPlan, SandboxReceipt } from "@/services/core/src/sandbox";
+import { executorReceiptSigningPayload, parseJobProtocolV4 } from "@/services/core/src/contracts";
+
+const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
+const executorId = process.env.DEVILUDO_EXECUTOR_ID ?? "";
+const identityKeyFile = process.env.DEVILUDO_EXECUTOR_IDENTITY_KEY_FILE ?? "";
+const allowlistedImages = new Set((process.env.DEVILUDO_EXECUTOR_ALLOWED_IMAGES ?? "").split(",").filter(Boolean));
+const providerHosts = new Set((process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com").split(",").map(value => value.trim()).filter(Boolean));
+const workRoot = process.env.DEVILUDO_EXECUTOR_WORK_ROOT ?? "/var/lib/deviludo-executor";
+const secretRoot = process.env.DEVILUDO_EXECUTOR_SECRET_ROOT ?? "/run/deviludo-secrets";
+const microvmRuntime = process.env.DEVILUDO_EXECUTOR_MICROVM_RUNTIME ?? "";
+const microvmSmokeImage = process.env.DEVILUDO_EXECUTOR_MICROVM_SMOKE_IMAGE ?? "";
+const developmentContainersAllowed = process.env.NODE_ENV !== "production"
+  && process.env.DEVILUDO_EXECUTOR_ALLOW_DEVELOPMENT_CONTAINER === "1";
+const fixtureAgentImage = developmentContainersAllowed
+  && allowlistedImages.has(process.env.DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE ?? "")
+  ? process.env.DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE ?? ""
+  : "";
+const activeTasks = new Map<string, string>();
+if (!executorId || !identityKeyFile || allowlistedImages.size < 1
+  || !workRoot.startsWith("/var/lib/deviludo-executor") || secretRoot !== "/run/deviludo-secrets") {
+  throw new Error("Executor identity, allowlist, and fixed storage roots are required");
+}
+if (process.env.NODE_ENV === "production"
+  && (!/^[A-Za-z0-9._-]{3,80}$/.test(microvmRuntime) || !allowlistedImages.has(microvmSmokeImage))) {
+  throw new Error("Production executor requires a fixed microVM runtime and an allowlisted smoke image");
+}
+
+const s3 = new S3Client({
+  region: process.env.DEVILUDO_S3_REGION ?? "us-east-1",
+  endpoint: process.env.DEVILUDO_S3_ENDPOINT,
+  forcePathStyle: process.env.DEVILUDO_S3_PATH_STYLE === "1",
+  credentials: process.env.DEVILUDO_S3_ACCESS_KEY_ID && process.env.DEVILUDO_S3_SECRET_ACCESS_KEY
+    ? { accessKeyId: process.env.DEVILUDO_S3_ACCESS_KEY_ID, secretAccessKey: process.env.DEVILUDO_S3_SECRET_ACCESS_KEY }
+    : undefined,
+});
+
+const server = createServer(async (request, response) => {
+  try {
+    if (request.method === "POST" && request.url === "/v2/health") {
+      const smoke = await executorSmoke();
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify(smoke));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v2/guidance") {
+      const body = JSON.parse((await readRequestBody(request, 16 * 1024)).toString("utf8")) as Record<string, unknown>;
+      const jobId = typeof body.jobId === "string" && /^[0-9a-f-]{36}$/i.test(body.jobId) ? body.jobId : "";
+      const content = typeof body.content === "string" ? body.content.replaceAll(/\u0000/g, "").trim() : "";
+      const taskName = activeTasks.get(jobId);
+      if (!jobId || content.length < 2 || content.length > 4_000 || !taskName) {
+        throw new Error("Active Agent task guidance is invalid");
+      }
+      await inject(taskName, "guidance", Buffer.from(`${JSON.stringify({ content, receivedAt: new Date().toISOString() })}\n`));
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ accepted: true }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v2/execute") {
+      response.writeHead(404).end();
+      return;
+    }
+    const plan = validatePlan(JSON.parse((await readRequestBody(request, 2 * 1024 * 1024)).toString("utf8")));
+    const execution = new AbortController();
+    response.once("close", () => { if (!response.writableEnded) execution.abort(); });
+    response.writeHead(200, {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store, no-transform",
+      "x-accel-buffering": "no",
+    });
+    const receipt = await execute(plan, execution.signal, (kind, content) => {
+      if (!response.destroyed && !response.writableEnded) {
+        response.write(`${JSON.stringify({ type: "progress", event: { kind, content } })}\n`);
+      }
+    });
+    response.end(`${JSON.stringify({ type: "complete", receipt })}\n`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Executor failed";
+    if (response.headersSent) {
+      if (!response.destroyed && !response.writableEnded) response.end(`${JSON.stringify({ type: "error", message })}\n`);
+    } else {
+      response.writeHead(422, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ code: "EXECUTOR_REJECTED", message }));
+    }
+  }
+});
+void start().catch(error => {
+  console.error(JSON.stringify({ level: "fatal", event: "executor_start_failed", message: error instanceof Error ? error.message : String(error) }));
+  process.exitCode = 1;
+});
+
+async function start() {
+  await mkdir(dirname(socketPath), { recursive: true, mode: 0o750 });
+  await mkdir(workRoot, { recursive: true, mode: 0o700 });
+  await mkdir(secretRoot, { recursive: true, mode: 0o700 });
+  await cleanupOrphans();
+  await rm(socketPath, { force: true });
+  server.listen(socketPath, () => void configureSocket());
+}
+
+async function cleanupOrphans() {
+  const ids = (await docker(["ps", "-aq", "--filter", "label=deviludo.managed=true"], 30_000))
+    .split("\n").map(value => value.trim()).filter(Boolean);
+  for (const id of ids) await docker(["rm", "-f", id], 30_000);
+  for (const root of [workRoot, secretRoot]) {
+    for (const entry of await readdir(root)) {
+      if (entry.startsWith("job-")) await rm(join(root, entry), { recursive: true, force: true });
+    }
+  }
+}
+
+async function configureSocket() {
+  await chmod(socketPath, 0o660);
+}
+
+async function executorSmoke() {
+  const image = allowlistedImages.values().next().value as string | undefined;
+  if (!image) throw new Error("Executor image allowlist is empty");
+  const name = `deviludo-smoke-${process.pid}-${Date.now()}`;
+  let created = false;
+  try {
+    const arguments_ = [
+      "create", "--name", name, "--read-only", "--cap-drop=ALL",
+      "--security-opt=no-new-privileges", "--network=none", "--pids-limit=16",
+      `--memory=${microvmRuntime ? "512m" : "64m"}`, "--cpus=0.10", "--entrypoint=/bin/true",
+    ];
+    if (microvmRuntime) arguments_.push(`--runtime=${microvmRuntime}`);
+    arguments_.push(microvmSmokeImage || image);
+    await docker(arguments_, 30_000);
+    created = true;
+    await docker(["start", "-a", name], 60_000);
+    return Object.freeze({
+      schemaVersion: "deviludo.executor-health.v1",
+      executorId,
+      isolation: microvmRuntime ? "microvm" : "development-container",
+      disposableTask: "started-and-removed",
+    });
+  } finally {
+    if (created) await docker(["rm", "-f", name], 30_000).catch(() => undefined);
+  }
+}
+
+async function execute(
+  plan: SandboxPlan,
+  signal: AbortSignal,
+  onProgress: (kind: "PHASE" | "AGENT_OUTPUT", content: string) => void,
+): Promise<SandboxReceipt> {
+  const startedAt = new Date().toISOString();
+  const taskName = `deviludo-${plan.job.jobId}`;
+  const temporary = await mkdtemp(join(workRoot, "job-"));
+  const secretDirectory = await mkdtemp(join(secretRoot, "job-"));
+  const planFile = join(temporary, "plan.json");
+  const secretFile = join(secretDirectory, "provider.key");
+  const steamFile = join(secretDirectory, "steam.json");
+  const readyFile = join(temporary, "ready");
+  const collectedFile = join(temporary, "collected");
+  const inputDirectory = join(temporary, "inputs");
+  const sensitiveValues: Buffer[] = [];
+  let containerCreated = false;
+  const abortTask = () => {
+    if (containerCreated) void docker(["rm", "-f", taskName], 30_000).catch(() => undefined);
+  };
+  signal.addEventListener("abort", abortTask, { once: true });
+  try {
+    if (signal.aborted) throw new Error("Task execution was cancelled");
+    onProgress("PHASE", "正在创建任务级隔离环境");
+    await mkdir(inputDirectory, { mode: 0o700 });
+    await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
+    await writeFile(readyFile, "ready\n", { mode: 0o600 });
+    if (plan.agentConfiguration && plan.job.runtimeImage !== fixtureAgentImage) {
+      const providerSecret = Buffer.from(await resolveSecret(plan.agentConfiguration.credentialRef));
+      sensitiveValues.push(providerSecret);
+      await writeFile(secretFile, providerSecret, { mode: 0o600 });
+    }
+    if (plan.job.jobKind === "STEAM_PUBLISH") {
+      const steamConfiguration = await resolveSteamConfiguration();
+      const steamSecret = Buffer.from(JSON.stringify(steamConfiguration));
+      sensitiveValues.push(
+        steamSecret,
+        Buffer.from(String(steamConfiguration.username)),
+        Buffer.from(String(steamConfiguration.loginToken)),
+      );
+      await writeFile(steamFile, steamSecret, { mode: 0o600 });
+    }
+    const network = plan.job.runtimeImage === fixtureAgentImage ? "none" : plan.networkPolicy === "AGENT_EGRESS_ALLOWLIST"
+      ? process.env.DEVILUDO_EXECUTOR_AGENT_NETWORK ?? "none"
+      : plan.networkPolicy === "STEAM_ONLY" ? process.env.DEVILUDO_EXECUTOR_STEAM_NETWORK ?? "none" : "none";
+    const createArguments = [
+      "create", "--name", taskName, "--read-only", "--cap-drop=ALL",
+      "--security-opt=no-new-privileges", "--pids-limit=256",
+      `--memory=${Math.max(64 * 1024 * 1024, plan.job.budget.memoryBytes)}`,
+      `--cpus=${Math.max(0.1, plan.job.budget.cpuMillis / Math.max(1, plan.job.timeoutSeconds) / 1000).toFixed(2)}`,
+      `--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=2m,mode=0700,uid=10001,gid=10001`,
+      `--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001`,
+      `--tmpfs=/workspace:rw,nosuid,nodev,size=2147483648,mode=0700,uid=10001,gid=10001`,
+      "--user=10001:10001",
+      `--network=${network}`,
+      "--label=deviludo.managed=true", `--label=deviludo.job=${plan.job.jobId}`,
+    ];
+    if (plan.mode === "MICROVM") createArguments.push(`--runtime=${microvmRuntime}`);
+    createArguments.push(plan.job.runtimeImage);
+    if (network !== "none") {
+      const proxy = plan.networkPolicy === "STEAM_ONLY"
+        ? process.env.DEVILUDO_EXECUTOR_STEAM_PROXY ?? ""
+        : process.env.DEVILUDO_EXECUTOR_EGRESS_PROXY ?? "";
+      if (!proxy.startsWith("http://")) throw new Error("Executor egress proxy is required");
+      createArguments.splice(createArguments.length - 1, 0, "--env", `HTTPS_PROXY=${proxy}`, "--env", `HTTP_PROXY=${proxy}`);
+    }
+    await docker(createArguments, 60_000);
+    containerCreated = true;
+    activeTasks.set(plan.job.jobId, taskName);
+    if (signal.aborted) throw new Error("Task execution was cancelled");
+    for (const input of plan.job.inputObjects) {
+      const destination = join(inputDirectory, basename(input.key));
+      const result = await s3.send(new GetObjectCommand({ Bucket: input.bucket, Key: input.key }));
+      if (!result.Body) throw new Error(`Artifact body is missing: ${input.key}`);
+      const content = await streamBuffer(result.Body as Readable, input.sizeBytes);
+      if (content.length !== input.sizeBytes) throw new Error(`Artifact size mismatch: ${input.key}`);
+      if (`sha256:${createHash("sha256").update(content).digest("hex")}` !== input.sha256) throw new Error(`Artifact digest mismatch: ${input.key}`);
+      await writeFile(destination, content, { mode: 0o600 });
+    }
+    await docker(["start", taskName], 30_000);
+    onProgress("PHASE", "隔离环境已启动，正在注入已批准的输入");
+    await inject(taskName, "plan", await readFile(planFile));
+    for (const input of plan.job.inputObjects) {
+      const filename = basename(input.key);
+      await inject(taskName, `input:${filename}`, await readFile(join(inputDirectory, filename)));
+    }
+    if (plan.agentConfiguration && plan.job.runtimeImage !== fixtureAgentImage) {
+      await inject(taskName, "provider", await readFile(secretFile));
+    }
+    if (plan.job.jobKind === "STEAM_PUBLISH") await inject(taskName, "steam", await readFile(steamFile));
+    await inject(taskName, "ready", await readFile(readyFile));
+    onProgress("PHASE", taskStartedMessage(plan.job.jobKind));
+    const taskResult = await waitForTaskResult(taskName, plan.job.timeoutSeconds * 1000, onProgress);
+    if (!taskResult.ok) {
+      await acknowledgeCollection(taskName, collectedFile);
+      await docker(["wait", taskName], 10_000).catch(() => undefined);
+      throw new Error(taskResult.error || "Task container failed");
+    }
+    const manifestRaw = (await dockerRead(["exec", taskName, "/usr/local/bin/deviludo-task-io", "read-manifest"], 30_000, 2 * 1024 * 1024)).toString("utf8");
+    const manifest = JSON.parse(manifestRaw) as { outputs?: unknown };
+    const outputObjects = await uploadOutputs(plan, taskName, manifest.outputs, sensitiveValues);
+    onProgress("PHASE", taskOutputMessage(plan.job.jobKind));
+    await acknowledgeCollection(taskName, collectedFile);
+    const wait = await docker(["wait", taskName], 10_000);
+    const exitCode = Number(wait.trim());
+    if (exitCode !== 0) throw new Error(`Task container exited with ${exitCode}`);
+    const finishedAt = new Date().toISOString();
+    const identity = await readFile(identityKeyFile, "utf8");
+    const isolationProof = signedProof(identity, plan, "isolated");
+    const cleanupProof = signedProof(identity, plan, "cleaned");
+    const unsigned = {
+      schemaVersion: "deviludo.executor-receipt.v2" as const,
+      executorId,
+      startedAt,
+      finishedAt,
+      exitCode,
+      simulated: false as const,
+      outputObjects,
+      isolationProof,
+      cleanupProof,
+    };
+    const signature = sign(null, executorReceiptSigningPayload(unsigned), identity).toString("base64url");
+    return Object.freeze({
+      ...unsigned,
+      signature,
+      details: Object.freeze({ taskName, runtimeImage: plan.job.runtimeImage, outputCount: outputObjects.length }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Executor task failed";
+    throw new Error(redactSensitive(message, sensitiveValues));
+  } finally {
+    activeTasks.delete(plan.job.jobId);
+    signal.removeEventListener("abort", abortTask);
+    if (containerCreated) await docker(["rm", "-f", taskName], 30_000).catch(() => undefined);
+    await rm(temporary, { recursive: true, force: true });
+    await rm(secretDirectory, { recursive: true, force: true });
+  }
+}
+
+function taskStartedMessage(kind: SandboxPlan["job"]["jobKind"]): string {
+  if (kind === "ARTIFACT_BUILD") return "Builder 已开始验证并构建项目";
+  if (kind === "STEAM_PUBLISH") return "Steam Publisher 已开始执行已登记的发布操作";
+  if (kind === "PROJECT_DOCUMENT_MAINTENANCE") return "Agent 已开始维护项目说明";
+  return "Agent 已开始生成项目";
+}
+
+function taskOutputMessage(kind: SandboxPlan["job"]["jobKind"]): string {
+  if (kind === "ARTIFACT_BUILD") return "构建结果已完成，正在上传并校验制品";
+  if (kind === "STEAM_PUBLISH") return "发布回执已生成，正在上传并校验";
+  if (kind === "PROJECT_DOCUMENT_MAINTENANCE") return "项目说明已更新，正在上传并校验";
+  return "生成结果已完成，正在上传并校验制品";
+}
+
+async function waitForTaskResult(
+  taskName: string,
+  timeout: number,
+  onProgress: (kind: "PHASE" | "AGENT_OUTPUT", content: string) => void,
+) {
+  const deadline = Date.now() + timeout;
+  let progressBytes = 0;
+  let progressLineBuffer = "";
+  while (Date.now() < deadline) {
+    try {
+      const progress = await dockerRead(
+        ["exec", taskName, "/usr/local/bin/deviludo-task-io", "read-progress"],
+        5_000,
+        1024 * 1024,
+      );
+      if (progress.length > progressBytes) {
+        const appended = progress.subarray(progressBytes).toString("utf8");
+        progressBytes = progress.length;
+        const lines = `${progressLineBuffer}${appended}`.split(/\r?\n/);
+        progressLineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as { kind?: unknown; content?: unknown };
+          if ((event.kind === "PHASE" || event.kind === "AGENT_OUTPUT") && typeof event.content === "string") {
+            onProgress(event.kind, event.content.slice(0, 4_000));
+          }
+        }
+      }
+    } catch {
+      // The task creates its progress file after startup.
+    }
+    try {
+      const content = await dockerRead(["exec", taskName, "/usr/local/bin/deviludo-task-io", "read-result"], 5_000, 4 * 1024);
+      const parsed = JSON.parse(content.toString("utf8")) as { ok?: unknown; error?: unknown };
+      if (typeof parsed.ok !== "boolean" || (parsed.error !== null && typeof parsed.error !== "string")) {
+        throw new Error("Task result is malformed");
+      }
+      return { ok: parsed.ok, error: typeof parsed.error === "string" ? parsed.error : null };
+    } catch (error) {
+      if (error instanceof Error && error.message === "Task result is malformed") throw error;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  throw new Error("Task container exceeded its timeout");
+}
+
+async function readRequestBody(request: import("node:http").IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const raw of request) {
+    const chunk = Buffer.from(raw);
+    bytes += chunk.length;
+    if (bytes > limit) throw new Error("Executor request is too large");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function acknowledgeCollection(taskName: string, collectedFile: string) {
+  await writeFile(collectedFile, "collected\n", { mode: 0o600 });
+  await inject(taskName, "collected", await readFile(collectedFile));
+}
+
+async function inject(taskName: string, target: string, content: Buffer) {
+  await docker(["exec", "-i", taskName, "/usr/local/bin/deviludo-task-io", target], 60_000, content);
+}
+
+async function uploadOutputs(plan: SandboxPlan, taskName: string, raw: unknown, sensitiveValues: readonly Buffer[]) {
+  if (!Array.isArray(raw) || raw.length < 1) throw new Error("Task output manifest is empty");
+  const outputs = [];
+  let total = 0;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Task output manifest is invalid");
+    const item = entry as Record<string, unknown>;
+    const file = typeof item.file === "string" && /^[A-Za-z0-9._-]+$/.test(item.file) ? item.file : "";
+    const kind = typeof item.kind === "string" ? item.kind : "";
+    if (!file || !kind) throw new Error("Task output file or kind is invalid");
+    if (!plan.job.outputContract.kinds.includes(kind)) throw new Error(`Task output kind is not allowed: ${kind}`);
+    const remaining = plan.job.outputContract.maxBytes - total;
+    const content = await dockerRead(["exec", taskName, "/usr/local/bin/deviludo-task-io", `read-output:${file}`], 60_000, remaining);
+    if (sensitiveValues.some(secret => secret.length >= 8 && content.includes(secret))) {
+      throw new Error("Task output contains injected credentials");
+    }
+    total += content.length;
+    if (total > plan.job.outputContract.maxBytes) throw new Error("Task outputs exceed the contract budget");
+    const sha256 = `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
+    const key = `${plan.objectPrefix}/${file}`;
+    const bucket = process.env.DEVILUDO_ARTIFACT_BUCKET ?? "deviludo-artifacts";
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: content, Metadata: { sha256 } }));
+    outputs.push(Object.freeze({
+      kind,
+      ...(typeof item.targetPlatform === "string"
+        ? { targetPlatform: item.targetPlatform as "linux" | "windows" | "macos" }
+        : {}),
+      bucket,
+      key,
+      sha256,
+      sizeBytes: content.length,
+      metadata: Object.freeze({ contentType: typeof item.contentType === "string" ? item.contentType : "application/octet-stream" }),
+    }));
+  }
+  return Object.freeze(outputs);
+}
+
+function validatePlan(value: unknown): SandboxPlan {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Sandbox plan must be an object");
+  const raw = value as Record<string, unknown>;
+  if (raw.schemaVersion !== "deviludo.sandbox-plan.v2" || !raw.job) throw new Error("Unsupported sandbox protocol");
+  const job = parseJobProtocolV4(raw.job);
+  const plan = Object.freeze({ ...raw, job }) as unknown as SandboxPlan;
+  if (job.poolKind !== "CORE" || job.exclusive
+    || !["AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE", "ARTIFACT_BUILD", "STEAM_PUBLISH"].includes(job.jobKind)) {
+    throw new Error("Executor accepts only non-exclusive Core jobs");
+  }
+  if (!allowlistedImages.has(plan.job.runtimeImage)) throw new Error("Runtime image is not in the signed release allowlist");
+  const agentJob = job.jobKind === "AGENT_GENERATION" || job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE";
+  const expectedMode = agentJob && !developmentContainersAllowed
+    ? "MICROVM"
+    : "RESTRICTED_CONTAINER";
+  if (plan.mode !== expectedMode || (plan.mode === "MICROVM" && !microvmRuntime)) {
+    throw new Error("Sandbox isolation mode does not satisfy the job contract");
+  }
+  const expectedNetwork = agentJob
+    ? "AGENT_EGRESS_ALLOWLIST"
+    : job.jobKind === "STEAM_PUBLISH" ? "STEAM_ONLY" : "BUILD_EGRESS_DENY";
+  if (plan.networkPolicy !== expectedNetwork) throw new Error("Sandbox network policy does not satisfy the job contract");
+  if (agentJob) {
+    if (!plan.agentConfiguration) throw new Error("Agent configuration is required");
+    const providerUrl = new URL(plan.agentConfiguration.baseUrl);
+    if (providerUrl.protocol !== "https:"
+      || (job.runtimeImage !== fixtureAgentImage && !providerHosts.has(providerUrl.hostname))) {
+      throw new Error("Provider host is not in the executor egress allowlist");
+    }
+    validateAgentConfiguration(plan.agentConfiguration);
+  } else if (plan.agentConfiguration !== null) {
+    throw new Error("Agent credentials cannot be exposed to non-Agent jobs");
+  }
+  const objectPrefix = `workspaces/${job.workspaceId}/projects/${job.projectId}/`;
+  if (plan.objectPrefix !== `${objectPrefix}jobs/${job.jobId}`
+    || plan.workspace !== `/var/lib/deviludo/workspaces/${job.workspaceId}/${job.projectId}/${job.jobId}/g${job.isolationGeneration}`
+    || plan.vaultPath !== `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`) {
+    throw new Error("Sandbox paths escape the workspace/project boundary");
+  }
+  const bucket = process.env.DEVILUDO_ARTIFACT_BUCKET ?? "deviludo-artifacts";
+  if (job.inputObjects.some(input => input.bucket !== bucket || !input.key.startsWith(objectPrefix))) {
+    throw new Error("Input object escapes the executor artifact boundary");
+  }
+  if (new Set(job.inputObjects.map(input => basename(input.key))).size !== job.inputObjects.length) {
+    throw new Error("Input object filenames collide inside the task workspace");
+  }
+  if (job.jobKind === "AGENT_GENERATION" && job.runtimeImage !== fixtureAgentImage) {
+    const specifications = job.inputObjects.filter(input => input.kind === "SPECIFICATION"
+      && basename(input.key) === "specification.json");
+    if (specifications.length !== 1) throw new Error("Agent requires exactly one approved specification input");
+    const sources = job.inputObjects.filter(input => input.kind === "SOURCE");
+    if (sources.length > 1 || sources.some(input => !basename(input.key).endsWith(".tar.gz"))) {
+      throw new Error("Agent accepts at most one imported source snapshot");
+    }
+  }
+  if (job.inputObjects.reduce((sum, input) => sum + input.sizeBytes, 0) > 2_147_483_648) {
+    throw new Error("Task inputs exceed the fixed executor limit");
+  }
+  if (job.jobKind === "STEAM_PUBLISH") {
+    const operation = job.payload.operation;
+    if (!operation || typeof operation !== "object" || Array.isArray(operation)
+      || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(String((operation as Record<string, unknown>).id ?? ""))) {
+      throw new Error("Steam publish operation registration is required");
+    }
+  }
+  if (Date.parse(job.lease.expiresAt) <= Date.now()) throw new Error("Job lease expired before execution");
+  return plan;
+}
+
+function validateAgentConfiguration(configuration: NonNullable<SandboxPlan["agentConfiguration"]>) {
+  const credentialReference = /^vault:\/\/instance\/agent-runtime\/api-key\/versions\/[0-9a-f]{8}-[0-9a-f-]{27}$/i;
+  if (!Number.isSafeInteger(configuration.revision) || configuration.revision < 1
+    || !credentialReference.test(configuration.credentialRef)) {
+    throw new Error("Agent configuration reference is invalid");
+  }
+  const environment = configuration.environment;
+  if (!environment || typeof environment !== "object" || Array.isArray(environment)
+    || Object.values(environment).some(value => typeof value !== "string" || value.length > 512 || /[\r\n\0]/.test(value))) {
+    throw new Error("Agent environment is invalid");
+  }
+  if (configuration.runtime === "CLAUDE_CODE") {
+    const allowed = new Set([
+      "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
+    ]);
+    if (configuration.credentialEnvironmentVariable !== "ANTHROPIC_AUTH_TOKEN"
+      || environment.ANTHROPIC_BASE_URL !== configuration.baseUrl
+      || Object.keys(environment).some(key => !allowed.has(key))) {
+      throw new Error("Claude Code environment is invalid");
+    }
+  } else if (configuration.runtime === "CODEX_CLI") {
+    if (configuration.credentialEnvironmentVariable !== "CODEX_API_KEY"
+      || environment.DEVILUDO_CODEX_BASE_URL !== configuration.baseUrl
+      || Object.keys(environment).some(key => key !== "DEVILUDO_CODEX_BASE_URL")) {
+      throw new Error("Codex environment is invalid");
+    }
+  } else {
+    throw new Error("Agent runtime is invalid");
+  }
+}
+
+async function resolveSecret(reference: string): Promise<string> {
+  const prefix = "vault://instance/agent-runtime/api-key/versions/";
+  if (!reference.startsWith(prefix)) throw new Error("Executor secret reference is invalid");
+  const version = reference.slice(prefix.length);
+  if (!/^[0-9a-f-]{36}$/i.test(version)) throw new Error("Executor secret version is invalid");
+  const localRoot = process.env.DEVILUDO_AGENT_SECRET_ROOT;
+  if (localRoot) return readFile(join(localRoot, "instance", "agent-runtime", "api-key", "versions", `${version}.key`), "utf8");
+  const vaultAddress = process.env.DEVILUDO_VAULT_ADDR ?? "";
+  const tokenFile = process.env.DEVILUDO_VAULT_TOKEN_FILE ?? "";
+  const vaultUrl = new URL(vaultAddress);
+  if ((vaultUrl.protocol !== "https:" && !(process.env.NODE_ENV !== "production" && vaultUrl.protocol === "http:"))
+    || !tokenFile.startsWith("/")) throw new Error("Vault executor configuration is required");
+  const token = (await readFile(tokenFile, "utf8")).trim();
+  const response = await fetch(new URL(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, vaultAddress), {
+    headers: { "x-vault-token": token }, signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`Vault returned ${response.status}`);
+  const body = await response.json() as { data?: { data?: { value?: unknown } } };
+  if (typeof body.data?.data?.value !== "string") throw new Error("Vault secret payload is invalid");
+  return body.data.data.value;
+}
+
+async function resolveSteamConfiguration() {
+  const value = await readVaultSecret("secret/data/deviludo/steam/publisher");
+  const configuration = {
+    username: value.username,
+    loginToken: value.loginToken,
+    appId: process.env.DEVILUDO_STEAM_APP_ID,
+    depots: {
+      linux: process.env.DEVILUDO_STEAM_DEPOT_LINUX,
+      windows: process.env.DEVILUDO_STEAM_DEPOT_WINDOWS,
+      macos: process.env.DEVILUDO_STEAM_DEPOT_MACOS,
+    },
+  };
+  if (typeof configuration.username !== "string" || typeof configuration.loginToken !== "string"
+    || !/^\d{2,12}$/.test(configuration.appId ?? "")
+    || Object.values(configuration.depots).some(value => !/^\d{2,12}$/.test(value ?? ""))) {
+    throw new Error("Steam publisher credentials or depot configuration is invalid");
+  }
+  return Object.freeze(configuration);
+}
+
+async function readVaultSecret(path: string): Promise<Record<string, unknown>> {
+  const vaultAddress = process.env.DEVILUDO_VAULT_ADDR ?? "";
+  const tokenFile = process.env.DEVILUDO_VAULT_TOKEN_FILE ?? "";
+  const vaultUrl = new URL(vaultAddress);
+  if ((vaultUrl.protocol !== "https:" && !(process.env.NODE_ENV !== "production" && vaultUrl.protocol === "http:"))
+    || !tokenFile.startsWith("/") || !/^secret\/data\/deviludo\/[A-Za-z0-9/_-]+$/.test(path)) {
+    throw new Error("Vault executor configuration is required");
+  }
+  const token = (await readFile(tokenFile, "utf8")).trim();
+  const response = await fetch(new URL(`/v1/${path}`, vaultAddress), {
+    headers: { "x-vault-token": token }, signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`Vault returned ${response.status}`);
+  const body = await response.json() as { data?: { data?: Record<string, unknown> } };
+  if (!body.data?.data) throw new Error("Vault secret payload is invalid");
+  return body.data.data;
+}
+
+async function docker(arguments_: readonly string[], timeout: number, input?: Buffer): Promise<string> {
+  const child = spawn("docker", arguments_, {
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, PATH: "/usr/local/bin:/usr/bin:/bin", NODE_ENV: process.env.NODE_ENV ?? "production" },
+  });
+  child.stdin.end(input);
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", chunk => stdout.push(Buffer.from(chunk)));
+  child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
+  const timer = setTimeout(() => child.kill("SIGKILL"), timeout);
+  const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+  clearTimeout(timer);
+  if (code !== 0) throw new Error(`Docker executor operation failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2000)}`);
+  return Buffer.concat(stdout).toString("utf8");
+}
+
+async function dockerRead(arguments_: readonly string[], timeout: number, maxBytes: number): Promise<Buffer> {
+  const child = spawn("docker", arguments_, {
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PATH: "/usr/local/bin:/usr/bin:/bin", NODE_ENV: process.env.NODE_ENV ?? "production" },
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let bytes = 0;
+  let exceeded = false;
+  child.stdout.on("data", chunk => {
+    bytes += chunk.length;
+    if (bytes <= maxBytes) stdout.push(Buffer.from(chunk));
+    else { exceeded = true; child.kill("SIGKILL"); }
+  });
+  child.stderr.on("data", chunk => {
+    if (Buffer.concat(stderr).length < 65_536) stderr.push(Buffer.from(chunk));
+  });
+  const timer = setTimeout(() => child.kill("SIGKILL"), timeout);
+  const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+  clearTimeout(timer);
+  if (exceeded) throw new Error("Task output exceeds its fixed limit");
+  if (code !== 0) throw new Error(`Docker executor read failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2000)}`);
+  return Buffer.concat(stdout);
+}
+
+async function streamBuffer(stream: Readable, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of stream) {
+    bytes += chunk.length;
+    if (bytes > maxBytes) throw new Error("Artifact exceeds its declared size or job budget");
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+function redactSensitive(message: string, sensitiveValues: readonly Buffer[]): string {
+  let safe = message;
+  for (const value of sensitiveValues) {
+    const secret = value.toString("utf8");
+    if (secret.length >= 4) safe = safe.replaceAll(secret, "[REDACTED]");
+  }
+  return safe
+    .replace(/\b(sk|key|token)-[A-Za-z0-9._-]{8,}\b/gi, "$1-[REDACTED]")
+    .replace(/[A-Za-z0-9+/=_-]{40,}/g, "[REDACTED]")
+    .slice(0, 2_000);
+}
+
+function signedProof(identity: string, plan: SandboxPlan, stage: string): string {
+  const payload = `${stage}:${plan.job.jobId}:${plan.job.isolationGeneration}:${plan.job.lease.fencingToken}`;
+  return `${stage}:ed25519:${sign(null, Buffer.from(payload), identity).toString("base64url")}`;
+}

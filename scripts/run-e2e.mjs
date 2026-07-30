@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const projectName = `deviludo-e2e-${process.pid}-${randomBytes(4).toString("hex")}`;
 if (!/^deviludo-e2e-[a-z0-9-]+$/.test(projectName)) throw new Error("Unsafe E2E Compose project name");
 
-const [webPort, corePort] = await Promise.all([availablePort(), availablePort()]);
+const [webPort, corePort, minioPort] = await Promise.all([availablePort(), availablePort(), availablePort()]);
 const composeFiles = ["infra/docker-compose.yml", "infra/docker-compose.e2e.yml"];
 const compose = [
   "compose",
@@ -23,6 +23,7 @@ const environment = {
   NODE_ENV: "test",
   DEVILUDO_WEB_HOST_PORT: String(webPort),
   DEVILUDO_CORE_HOST_PORT: String(corePort),
+  DEVILUDO_MINIO_HOST_PORT: String(minioPort),
   DEVILUDO_E2E_PROJECT_NAME: projectName,
   DEVILUDO_E2E_WEB_URL: `http://127.0.0.1:${webPort}`,
   DEVILUDO_E2E_CORE_URL: `http://127.0.0.1:${corePort}`,
@@ -45,6 +46,7 @@ for (const event of ["SIGINT", "SIGTERM"]) {
 try {
   await runDocker([...compose, "up", "-d", "--build", "--wait"], environment, 10 * 60_000);
   composeStarted = true;
+  await runDocker([...compose, "--profile", "init", "run", "--rm", "migrate"], environment, 2 * 60_000);
   await Promise.all([
     waitForJson(`${environment.DEVILUDO_E2E_WEB_URL}/api/health/live`),
     waitForJson(`${environment.DEVILUDO_E2E_CORE_URL}/health/live`),

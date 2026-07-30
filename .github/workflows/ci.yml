@@ -1,46 +1,61 @@
-name: CI
+name: ci
 
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  quality:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.22.0
           cache: npm
       - run: npm ci
+      - name: Install deployment script analyzers
+        run: sudo apt-get update && sudo apt-get install -y bats shellcheck
+      - name: Analyze Bash deployment scripts
+        run: shellcheck -e SC1090,SC1091,SC2317,SC2329 deploy/common/*.sh deploy/web/*.sh deploy/core/*.sh deploy/e2e-linux/*.sh deploy/e2e-macos/*.sh deploy/assets/*.sh deploy/assets/deviludo-e2e-host deploy/assets/deviludo-e2e-renew
+      - name: Exercise Bash deployment contracts
+        run: bats deploy/tests/bash-deploy.bats
       - run: npm run check
+      - name: Start isolated local stack without native macOS host
+        run: npm run local:up
+        env:
+          DEVILUDO_LOCAL_CI: "1"
+      - name: Exercise executor, fixture Agent, Godot builder, and object storage
+        run: npm run local:executor:test
+        env:
+          DEVILUDO_SKIP_NATIVE_E2E: "1"
+      - name: Exercise PostgreSQL RLS, claiming, fencing, recovery, and cancellation
+        run: npm run local:database:test
+      - name: Capture diagnostics
+        if: failure()
+        run: npm run local:status && npm run local:logs
+      - name: Remove local stack and volumes
+        if: always()
+        run: npm run local:reset
 
-  e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+  windows-deploy-scripts:
+    runs-on: windows-2025
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium firefox webkit
-      - run: npm run test:e2e
-      - name: Upload E2E diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-e2e-report
-          path: |
-            playwright-report/
-            test-results/
-          if-no-files-found: ignore
-          retention-days: 14
+      - name: Install PowerShell analyzers
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+      - name: Analyze PowerShell deployment scripts
+        shell: pwsh
+        run: Invoke-ScriptAnalyzer -Path deploy/e2e-windows -Recurse -EnableExit
+      - name: Exercise PowerShell deployment contracts
+        shell: pwsh
+        run: Invoke-Pester -Path deploy/tests/windows-deploy.Tests.ps1 -CI

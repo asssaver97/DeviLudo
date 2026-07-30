@@ -1,45 +1,56 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ProductConversation, ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
-import { WORKFLOW_LABELS } from "@/lib/product/contracts";
+import {
+  chronologicalMessages,
+  ConversationStreamError,
+  optimisticConversation,
+  selectConversationWorkspace,
+  sendConversationMessageStream,
+} from "@/lib/product/conversation-stream";
+import { ConversationBox } from "./conversation/ConversationBox";
 import { ProductShell } from "./ProductShell";
-import { GamepadIcon, PlusIcon, SendIcon, SparkIcon } from "./console/Icons";
+import { GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
+import { useLanguage } from "./i18n/LanguageProvider";
 
-const STARTERS = Object.freeze([
+const STARTERS_ZH = Object.freeze([
   "我想做一款能在十分钟内完成一局的合作游戏",
   "设计一个以时间循环为核心的像素冒险游戏",
   "帮我梳理一款轻量策略游戏的核心玩法",
 ]);
+const STARTERS_EN = Object.freeze([
+  "Design a co-op game that takes ten minutes per run",
+  "Design a pixel adventure built around a time loop",
+  "Help me shape the core loop of a lightweight strategy game",
+]);
 
 export function HomeChat() {
+  const { locale, text } = useLanguage();
   const [projects, setProjects] = useState<readonly ProductProjectSummary[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [conversation, setConversation] = useState<ProductConversation | null>(null);
   const [content, setContent] = useState("");
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [sending, setSending] = useState(false);
+  const [startingDevelopment, setStartingDevelopment] = useState(false);
+  const [streamingReply, setStreamingReply] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const threadEnd = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/projects", { signal: controller.signal })
       .then(async response => {
         if (response.status === 409) return [];
-        if (!response.ok) throw new Error("项目列表加载失败");
+        if (!response.ok) throw new Error(text("项目列表加载失败", "Unable to load projects"));
         return (await response.json() as { projects: readonly ProductProjectSummary[] }).projects;
       })
       .then(value => { if (!controller.signal.aborted) setProjects(value); })
-      .catch(() => { if (!controller.signal.aborted) setError("暂时无法加载现有项目，但仍可开始新游戏对话。"); })
+      .catch(() => { if (!controller.signal.aborted) setError(text("暂时无法加载现有项目，但仍可开始新游戏对话。", "Existing projects could not be loaded, but you can still start a new game conversation.")); })
       .finally(() => { if (!controller.signal.aborted) setLoadingProjects(false); });
     return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
-    if (conversation) threadEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [conversation]);
+  }, [text]);
 
   const activeProjectId = conversation?.projectId || selectedProjectId;
   const activeProject = useMemo(
@@ -47,54 +58,62 @@ export function HomeChat() {
     [activeProjectId, projects],
   );
   const placeholder = activeProject
-    ? `告诉我想如何继续开发或修改《${activeProject.name}》…`
-    : "描述你想做的游戏、玩家体验，或任何还没有想清楚的细节…";
+    ? text(`告诉我想如何继续开发或修改《${activeProject.name}》…`, `Tell me how you want to continue or change “${activeProject.name}”…`)
+    : text("描述你想做的游戏、玩家体验，或任何还没有想清楚的细节…", "Describe the game, player experience, or any idea you have not fully worked out yet…");
+  const starters = locale === "en" ? STARTERS_EN : STARTERS_ZH;
+  const orderedMessages = useMemo(
+    () => chronologicalMessages(conversation?.messages ?? Object.freeze([])),
+    [conversation],
+  );
+  const latestConversationMessage = orderedMessages.at(-1);
+  const requirementsReady = activeProject?.workflowState === "DRAFT"
+    && latestConversationMessage?.role === "ASSISTANT"
+    && latestConversationMessage.metadata.readyForDevelopment === true;
 
-  async function sendMessage(event?: FormEvent<HTMLFormElement>) {
+  async function sendMessage(event?: FormEvent<HTMLFormElement>, selectedOption?: string) {
     event?.preventDefault();
-    const message = content.trim();
+    const message = (selectedOption ?? content).trim();
     if (message.length < 2 || sending) return;
+    const previousConversation = conversation;
+    const projectId = previousConversation?.projectId || selectedProjectId;
+    const pendingConversation = optimisticConversation(
+      previousConversation,
+      projectId,
+      message,
+      activeProject?.name ?? text("新游戏构想", "New game concept"),
+    );
     setSending(true);
     setError(null);
+    setStreamingReply("");
+    setConversation(pendingConversation);
+    setContent("");
     try {
-      const body = conversation
-        ? { conversationId: conversation.id, content: message }
+      const body = previousConversation
+        ? { conversationId: previousConversation.id, content: message }
         : { projectId: selectedProjectId || null, content: message };
-      const response = await fetch("/api/conversations/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `conversation:${crypto.randomUUID()}` },
-        body: JSON.stringify(body),
-      });
-      const result = await response.json() as {
-        code?: string;
-        message?: string;
-        workspace?: WorkspaceSummary;
-        project?: ProductProjectSummary;
-        conversation?: ProductConversation;
-      };
-      if (!response.ok || !result.conversation) {
-        if (result.code === "AGENT_CONFIG_REQUIRED" || result.code === "AGENT_NAMING_FAILED") {
-          window.location.assign("/settings?required=project-name");
-          return;
-        }
-        throw new Error(response.status === 404 ? "所选项目或对话已不存在" : result.message ?? "消息发送失败");
-      }
-      if (result.workspace) window.dispatchEvent(new CustomEvent("deviludo:workspace-changed", { detail: result.workspace }));
-      if (result.project) setProjects(current => current.some(project => project.id === result.project!.id) ? current : Object.freeze([result.project!, ...current]));
+      const result = await sendConversationMessageStream(
+        body,
+        `conversation:${crypto.randomUUID()}`,
+        delta => setStreamingReply(current => current + delta),
+      );
+      await selectConversationWorkspace(result.workspace.id);
+      window.dispatchEvent(new CustomEvent<WorkspaceSummary>("deviludo:workspace-changed", { detail: result.workspace }));
+      setProjects(current => current.some(project => project.id === result.project.id)
+        ? current.map(project => project.id === result.project.id ? result.project : project)
+        : Object.freeze([result.project, ...current]));
       setConversation(result.conversation);
       setSelectedProjectId(result.conversation.projectId);
-      setContent("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "消息发送失败，请稍后重试");
+      if (cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
+        window.location.assign("/settings?required=conversation");
+        return;
+      }
+      setConversation(previousConversation);
+      setContent(message);
+      setError(cause instanceof ConversationStreamError ? cause.message : text("消息发送失败，请稍后重试", "Message failed. Please try again."));
     } finally {
+      setStreamingReply("");
       setSending(false);
-    }
-  }
-
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
     }
   }
 
@@ -104,6 +123,75 @@ export function HomeChat() {
     setContent("");
     setError(null);
   }
+
+  async function startDevelopment() {
+    if (!activeProject || activeProject.workflowState !== "DRAFT" || !requirementsReady || startingDevelopment) return;
+    setStartingDevelopment(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(activeProject.id)}/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const payload = await response.json().catch(() => ({})) as { message?: string };
+      if (!response.ok) throw new Error(payload.message ?? text(`操作失败 (${response.status})`, `Operation failed (${response.status})`));
+      window.location.assign(`/projects/${activeProject.id}`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("暂时无法开始开发", "Unable to start development"));
+      setStartingDevelopment(false);
+    }
+  }
+
+  const projectSelector = (
+    <div className="homeChat-contextRow">
+      <label>
+        <GamepadIcon />
+        <span>{text("关联项目", "PROJECT")}</span>
+        <select
+          aria-label={text("关联项目", "Related project")}
+          disabled={Boolean(conversation) || loadingProjects}
+          onChange={event => setSelectedProjectId(event.target.value)}
+          value={activeProjectId}
+        >
+          <option value="">{text("创建新项目", "Create new project")}</option>
+          {projects.map(project => (
+            <option key={project.id} value={project.id}>
+              {project.name} · {workflowLabel(project.workflowState, text)}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+
+  const developmentAction = requirementsReady && !sending ? (
+    <button className="button button-secondary conversation-box-develop" disabled={startingDevelopment} onClick={() => void startDevelopment()} type="button">
+      {startingDevelopment ? text("正在开始开发…", "STARTING…") : text("按照当前需求开发", "BUILD CURRENT REQUIREMENTS")}
+    </button>
+  ) : null;
+
+  const conversationBox = (
+    <ConversationBox
+      autoFocus={!conversation}
+      className="home-conversation-box"
+      composerPrefix={projectSelector}
+      conversationKey={conversation?.id ?? null}
+      intro={conversation ? <div className="conversation-date"><span>{text("设计会话", "DESIGN SESSION")}</span></div> : null}
+      messages={orderedMessages}
+      onOptionSelect={option => void sendMessage(undefined, option)}
+      onSubmit={sendMessage}
+      onValueChange={setContent}
+      placeholder={placeholder}
+      primaryAction={developmentAction}
+      sendButtonLabel={text("发送消息", "Send message")}
+      sending={sending}
+      showMessages={Boolean(conversation)}
+      streamingReply={streamingReply}
+      textareaLabel={text("游戏想法或修改意见", "Game idea or feedback")}
+      value={content}
+    />
+  );
 
   return (
     <ProductShell>
@@ -115,95 +203,49 @@ export function HomeChat() {
                 <span className="assistant-mark"><SparkIcon /></span>
                 <span>
                   <b>{conversation.title}</b>
-                  <small>{activeProject ? `正在继续开发《${activeProject.name}》` : "正在梳理一个全新的游戏方向"}</small>
+                  <small>{activeProject ? text(`正在继续开发《${activeProject.name}》`, `Continuing “${activeProject.name}”`) : text("正在梳理一个全新的游戏方向", "Shaping a new game direction")}</small>
                 </span>
               </div>
               <div className="homeChat-threadActions">
-                {activeProject ? <Link className="button button-secondary" href={`/projects/${activeProject.id}`}>打开项目</Link> : null}
-                <button className="button button-secondary" onClick={startFreshConversation} type="button"><PlusIcon />新对话</button>
+                {activeProject ? <Link className="button button-secondary" href={`/projects/${activeProject.id}`}>{text("打开项目", "OPEN PROJECT")}</Link> : null}
+                <button className="button button-secondary" onClick={startFreshConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button>
               </div>
             </header>
-
-            <div aria-live="polite" className="conversation-stream homeChat-messages">
-              <div className="conversation-date"><span>设计会话</span></div>
-              {conversation.messages.map(message => (
-                <article className={`message ${message.role === "USER" ? "user" : "assistant"} homeChat-message`} key={message.id}>
-                  {message.role === "ASSISTANT" ? <span className="message-avatar">DL</span> : null}
-                  <div>
-                    <header>
-                      <b>{message.role === "ASSISTANT" ? "DeviLudo 设计搭档" : "你"}</b>
-                      {message.role === "ASSISTANT" && message.metadata.appliedToDraft === true
-                        ? <span className="homeChat-applied">已写入规格草案</span>
-                        : null}
-                    </header>
-                    <p>{message.content}</p>
-                  </div>
-                </article>
-              ))}
-              {sending ? (
-                <article className="message assistant homeChat-message homeChat-thinking">
-                  <span className="message-avatar">DL</span>
-                  <div><header><b>DeviLudo 设计搭档</b></header><p>正在整理你的想法<span>...</span></p></div>
-                </article>
-              ) : null}
-              <div ref={threadEnd} />
-            </div>
+            {conversationBox}
           </div>
         ) : (
           <header className="simple-home-hero homeChat-hero">
             <span className="assistant-mark"><SparkIcon /></span>
-            <span className="eyebrow">FROM IDEA TO PLAYABLE / 从想法到可玩</span>
-            <h1>今天想做什么游戏？</h1>
+            <span className="eyebrow">{text("FROM IDEA TO PLAYABLE / 从想法到可玩", "FROM IDEA TO PLAYABLE")}</span>
+            <h1>{text("今天想做什么游戏？", "WHAT WILL YOU BUILD TODAY?")}</h1>
           </header>
         )}
-
-        <form className="homeChat-composer" onSubmit={sendMessage}>
-          <div className="homeChat-contextRow">
-            <label>
-              <GamepadIcon />
-              <span>关联项目</span>
-              <select
-                aria-label="关联项目"
-                disabled={Boolean(conversation) || loadingProjects}
-                onChange={event => setSelectedProjectId(event.target.value)}
-                value={activeProjectId}
-              >
-                <option value="">创建新项目</option>
-                {projects.map(project => (
-                  <option key={project.id} value={project.id}>
-                    {project.name} · {WORKFLOW_LABELS[project.workflowState] ?? project.workflowState}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <textarea
-            aria-label="游戏想法或修改意见"
-            autoFocus={!conversation}
-            disabled={sending}
-            maxLength={4000}
-            onChange={event => setContent(event.target.value)}
-            onKeyDown={handleComposerKeyDown}
-            placeholder={placeholder}
-            rows={conversation ? 3 : 5}
-            value={content}
-          />
-          <footer>
-            <span><kbd>⌘</kbd><kbd>↵</kbd> 发送 · Enter 换行</span>
-            <span className="homeChat-count">{content.length}/4000</span>
-            <button aria-label="发送消息" className="button button-acid" disabled={content.trim().length < 2 || sending} type="submit">
-              {sending ? "整理中" : "发送"}<SendIcon />
-            </button>
-          </footer>
-        </form>
+        {!conversation ? conversationBox : null}
 
         {!conversation ? (
-          <div aria-label="灵感示例" className="homeChat-starters">
-            {STARTERS.map(starter => <button key={starter} onClick={() => setContent(starter)} type="button">{starter}</button>)}
+          <div aria-label={text("灵感示例", "Idea starters")} className="homeChat-starters">
+            {starters.map(starter => <button key={starter} onClick={() => setContent(starter)} type="button">{starter}</button>)}
           </div>
         ) : null}
         {error ? <p className="homeChat-error" role="alert">{error}</p> : null}
       </section>
     </ProductShell>
   );
+}
+
+function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
+  const labels: Record<string, readonly [string, string]> = {
+    DRAFT: ["需求讨论中", "Requirements discussion"],
+    AGENT_RUNNING: ["Agent 生成中", "Agent running"],
+    ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"],
+    E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
+    SIGNING: ["平台签名中", "Signing"],
+    STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
+    CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"],
+    SUCCEEDED: ["交付完成", "Delivered"],
+    FAILED: ["流程失败", "Failed"],
+    CANCELLED: ["已取消", "Cancelled"],
+  };
+  const label = labels[state];
+  return label ? text(label[0], label[1]) : state;
 }

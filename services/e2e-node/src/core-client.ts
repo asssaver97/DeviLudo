@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest, type RequestOptions } from "node:https";
-import type { JobCompletion, JobProtocolV3 } from "@/services/core/src/contracts";
+import type { JobCompletion, JobProtocolV4 } from "@/services/core/src/contracts";
 import type { E2eNodeConfig } from "./config";
+import type { E2eInfrastructureFailure } from "@/lib/runtime/e2e-failure";
 
 export type SigningGrant = Readonly<{
   grantId: string;
@@ -26,20 +27,20 @@ export class CoreE2eClient {
     return new CoreE2eClient(config, Object.freeze({ cert, key, ca }));
   }
 
-  async claim(): Promise<JobProtocolV3 | null> {
-    const response = await this.call<{ job: JobProtocolV3 | null }>("/v1/e2e/jobs/claim", {
+  async claim(): Promise<JobProtocolV4 | null> {
+    const response = await this.call<{ job: JobProtocolV4 | null }>("/v1/e2e/jobs/claim", {
       nodeId: this.config.nodeId,
       poolKind: this.config.poolKind,
     });
     return response.job;
   }
 
-  async heartbeat(job: JobProtocolV3): Promise<boolean> {
+  async heartbeat(job: JobProtocolV4): Promise<boolean> {
     const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/heartbeat`, identity(job));
     return response.accepted;
   }
 
-  async complete(job: JobProtocolV3, completion: JobCompletion): Promise<boolean> {
+  async complete(job: JobProtocolV4, completion: JobCompletion): Promise<boolean> {
     const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/complete`, {
       ...identity(job),
       ...completion,
@@ -47,19 +48,35 @@ export class CoreE2eClient {
     return response.accepted;
   }
 
-  async fail(job: JobProtocolV3, reason: string): Promise<boolean> {
+  async fail(job: JobProtocolV4, failure: E2eInfrastructureFailure): Promise<boolean> {
     const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/fail`, {
       ...identity(job),
-      reason,
+      ...failure,
     });
     return response.accepted;
   }
 
-  async issueSigningGrant(job: JobProtocolV3, beforeReimageProof: string): Promise<SigningGrant> {
+  async issueSigningGrant(job: JobProtocolV4, beforeReimageProof: string): Promise<SigningGrant> {
     return await this.call<SigningGrant>(`/v1/e2e/jobs/${job.jobId}/signing-grant`, {
       ...identity(job),
       beforeReimageProof,
     });
+  }
+
+  async authorizeObjects(job: JobProtocolV4): Promise<readonly Readonly<{ object: JobProtocolV4["inputObjects"][number]; url: string; expiresAt: string }>[]> {
+    const response = await this.call<{ inputs: readonly Readonly<{ object: JobProtocolV4["inputObjects"][number]; url: string; expiresAt: string }>[] }>(
+      `/v1/e2e/jobs/${job.jobId}/objects`, { ...identity(job) },
+    );
+    return response.inputs;
+  }
+
+  async uploadOutput(job: JobProtocolV4, input: Readonly<{ kind: string; sha256: string; sizeBytes: number }>) {
+    return this.call<{
+      uploadUrl: string;
+      expiresAt: string;
+      object: JobProtocolV4["inputObjects"][number];
+      requiredHeaders: Readonly<Record<string, string>>;
+    }>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job), ...input });
   }
 
   private async call<T>(path: string, body: Readonly<Record<string, unknown>>): Promise<T> {
@@ -113,7 +130,7 @@ export class CoreE2eClient {
   }
 }
 
-function identity(job: JobProtocolV3) {
+function identity(job: JobProtocolV4) {
   return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token });
 }
 

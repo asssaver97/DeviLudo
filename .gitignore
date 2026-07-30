@@ -65,6 +65,7 @@ dist/
 /outputs/
 /work/
 /.deviludo/
+/Godot/app_userdata/
 
 # local databases and runtime credentials
 *.db
