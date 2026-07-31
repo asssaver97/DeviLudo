@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { SandboxPlan, SandboxReceipt } from "@/services/core/src/sandbox";
 import { executorReceiptSigningPayload, parseJobProtocolV4 } from "@/services/core/src/contracts";
+import { ProjectSourceStore, type PublishedSourceRevision } from "@/services/core/src/project-sources";
 
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
 const executorId = process.env.DEVILUDO_EXECUTOR_ID ?? "";
@@ -15,6 +16,8 @@ const allowlistedImages = new Set((process.env.DEVILUDO_EXECUTOR_ALLOWED_IMAGES 
 const providerHosts = new Set((process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com").split(",").map(value => value.trim()).filter(Boolean));
 const workRoot = process.env.DEVILUDO_EXECUTOR_WORK_ROOT ?? "/var/lib/deviludo-executor";
 const secretRoot = process.env.DEVILUDO_EXECUTOR_SECRET_ROOT ?? "/run/deviludo-secrets";
+const projectsRoot = process.env.DEVILUDO_PROJECTS_ROOT ?? "/var/lib/deviludo-projects";
+const projectSources = new ProjectSourceStore(projectsRoot);
 const microvmRuntime = process.env.DEVILUDO_EXECUTOR_MICROVM_RUNTIME ?? "";
 const microvmSmokeImage = process.env.DEVILUDO_EXECUTOR_MICROVM_SMOKE_IMAGE ?? "";
 const developmentContainersAllowed = process.env.NODE_ENV !== "production"
@@ -179,7 +182,7 @@ async function execute(
       sensitiveValues.push(providerSecret);
       await writeFile(secretFile, providerSecret, { mode: 0o600 });
     }
-    if (plan.job.jobKind === "STEAM_PUBLISH") {
+    if (plan.job.jobKind === "STEAM_PUBLISH" && plan.job.runtimeImage !== fixtureAgentImage) {
       const steamConfiguration = await resolveSteamConfiguration();
       const steamSecret = Buffer.from(JSON.stringify(steamConfiguration));
       sensitiveValues.push(
@@ -226,6 +229,14 @@ async function execute(
       if (`sha256:${createHash("sha256").update(content).digest("hex")}` !== input.sha256) throw new Error(`Artifact digest mismatch: ${input.key}`);
       await writeFile(destination, content, { mode: 0o600 });
     }
+    const sourceRelativePath = typeof plan.job.payload.sourceRelativePath === "string"
+      ? plan.job.payload.sourceRelativePath
+      : null;
+    if (sourceRelativePath) {
+      const source = await projectSources.archive(sourceRelativePath);
+      if (source.digest !== plan.job.payload.sourceDigest) throw new Error("Source revision digest changed");
+      await writeFile(join(inputDirectory, "source.tar.gz"), source.bytes, { mode: 0o600 });
+    }
     await docker(["start", taskName], 30_000);
     onProgress("PHASE", "隔离环境已启动，正在注入已批准的输入");
     await inject(taskName, "plan", await readFile(planFile));
@@ -233,10 +244,13 @@ async function execute(
       const filename = basename(input.key);
       await inject(taskName, `input:${filename}`, await readFile(join(inputDirectory, filename)));
     }
+    if (sourceRelativePath) await inject(taskName, "input:source.tar.gz", await readFile(join(inputDirectory, "source.tar.gz")));
     if (plan.agentConfiguration && plan.job.runtimeImage !== fixtureAgentImage) {
       await inject(taskName, "provider", await readFile(secretFile));
     }
-    if (plan.job.jobKind === "STEAM_PUBLISH") await inject(taskName, "steam", await readFile(steamFile));
+    if (plan.job.jobKind === "STEAM_PUBLISH" && plan.job.runtimeImage !== fixtureAgentImage) {
+      await inject(taskName, "steam", await readFile(steamFile));
+    }
     await inject(taskName, "ready", await readFile(readyFile));
     onProgress("PHASE", taskStartedMessage(plan.job.jobKind));
     const taskResult = await waitForTaskResult(taskName, plan.job.timeoutSeconds * 1000, onProgress);
@@ -247,6 +261,20 @@ async function execute(
     }
     const manifestRaw = (await dockerRead(["exec", taskName, "/usr/local/bin/deviludo-task-io", "read-manifest"], 30_000, 2 * 1024 * 1024)).toString("utf8");
     const manifest = JSON.parse(manifestRaw) as { outputs?: unknown };
+    let sourceRevision: PublishedSourceRevision | null = null;
+    if (plan.job.jobKind === "AGENT_GENERATION") {
+      const revision = Number(plan.job.payload.publishSourceRevision);
+      if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("Agent source publication revision is missing");
+      const sourceStream = await dockerRead([
+        "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
+      ], 60_000, 1024 * 1024 * 1024 + 16 * 1024 * 1024);
+      sourceRevision = await projectSources.publishFiles({
+        workspaceId: plan.job.workspaceId,
+        projectId: plan.job.projectId,
+        revision,
+        files: parseSourceStream(sourceStream),
+      });
+    }
     const outputObjects = await uploadOutputs(plan, taskName, manifest.outputs, sensitiveValues);
     onProgress("PHASE", taskOutputMessage(plan.job.jobKind));
     await acknowledgeCollection(taskName, collectedFile);
@@ -257,6 +285,12 @@ async function execute(
     const identity = await readFile(identityKeyFile, "utf8");
     const isolationProof = signedProof(identity, plan, "isolated");
     const cleanupProof = signedProof(identity, plan, "cleaned");
+    const details = Object.freeze({
+      taskName,
+      runtimeImage: plan.job.runtimeImage,
+      outputCount: outputObjects.length,
+      ...(sourceRevision ? { sourceRevision } : {}),
+    });
     const unsigned = {
       schemaVersion: "deviludo.executor-receipt.v2" as const,
       executorId,
@@ -265,15 +299,12 @@ async function execute(
       exitCode,
       simulated: false as const,
       outputObjects,
+      details,
       isolationProof,
       cleanupProof,
     };
     const signature = sign(null, executorReceiptSigningPayload(unsigned), identity).toString("base64url");
-    return Object.freeze({
-      ...unsigned,
-      signature,
-      details: Object.freeze({ taskName, runtimeImage: plan.job.runtimeImage, outputCount: outputObjects.length }),
-    });
+    return Object.freeze({ ...unsigned, signature });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Executor task failed";
     throw new Error(redactSensitive(message, sensitiveValues));
@@ -454,9 +485,11 @@ function validatePlan(value: unknown): SandboxPlan {
     const specifications = job.inputObjects.filter(input => input.kind === "SPECIFICATION"
       && basename(input.key) === "specification.json");
     if (specifications.length !== 1) throw new Error("Agent requires exactly one approved specification input");
-    const sources = job.inputObjects.filter(input => input.kind === "SOURCE");
-    if (sources.length > 1 || sources.some(input => !basename(input.key).endsWith(".tar.gz"))) {
-      throw new Error("Agent accepts at most one imported source snapshot");
+    const sourceRelativePath = job.payload.sourceRelativePath;
+    if (sourceRelativePath !== undefined && (typeof sourceRelativePath !== "string"
+      || !sourceRelativePath.startsWith(`workspaces/${job.workspaceId}/projects/${job.projectId}/revisions/`)
+      || !/^sha256:[0-9a-f]{64}$/.test(String(job.payload.sourceDigest ?? "")))) {
+      throw new Error("Agent source revision is invalid");
     }
   }
   if (job.inputObjects.reduce((sum, input) => sum + input.sizeBytes, 0) > 2_147_483_648) {
@@ -618,6 +651,35 @@ async function streamBuffer(stream: Readable, maxBytes: number): Promise<Buffer>
     chunks.push(Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+}
+
+function parseSourceStream(value: Buffer): readonly Readonly<{ path: string; bytes: Buffer }>[] {
+  const magic = Buffer.from("DEVILUDO_SOURCE_V1\0");
+  if (value.length < magic.length || !value.subarray(0, magic.length).equals(magic)) {
+    throw new Error("Task source stream protocol is invalid");
+  }
+  const files: Readonly<{ path: string; bytes: Buffer }>[] = [];
+  let offset = magic.length;
+  while (offset < value.length) {
+    if (offset + 12 > value.length) throw new Error("Task source stream is truncated");
+    const pathBytesLength = value.readUInt32BE(offset);
+    const contentBytes = value.readBigUInt64BE(offset + 4);
+    offset += 12;
+    if (pathBytesLength < 1 || pathBytesLength > 4096 || contentBytes > BigInt(100 * 1024 * 1024)) {
+      throw new Error("Task source stream entry exceeds its fixed limit");
+    }
+    const contentLength = Number(contentBytes);
+    if (offset + pathBytesLength + contentLength > value.length) throw new Error("Task source stream is truncated");
+    const encodedPath = value.subarray(offset, offset + pathBytesLength);
+    const path = encodedPath.toString("utf8");
+    if (!Buffer.from(path, "utf8").equals(encodedPath)) throw new Error("Task source path is not valid UTF-8");
+    offset += pathBytesLength;
+    const bytes = Buffer.from(value.subarray(offset, offset + contentLength));
+    offset += contentLength;
+    files.push(Object.freeze({ path, bytes }));
+  }
+  if (files.length < 1 || files.length > 10_000) throw new Error("Task source file count is invalid");
+  return Object.freeze(files);
 }
 
 function redactSensitive(message: string, sensitiveValues: readonly Buffer[]): string {

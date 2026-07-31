@@ -9,11 +9,47 @@ const plan = JSON.parse(await readFile("/run/deviludo/plan.json", "utf8"));
 await progress("PHASE", "Fixture Agent 已启动并读取项目需求");
 let taskError = null;
 try {
-  if (!["AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE"].includes(plan.job?.jobKind)
-    || plan.agentConfiguration?.runtime !== "CLAUDE_CODE") {
-    throw new Error("Fixture Agent accepts only the fixed Agent contracts");
+  if (!["AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE", "ARTIFACT_BUILD", "STEAM_PUBLISH"].includes(plan.job?.jobKind)) {
+    throw new Error("Fixture task accepts only the fixed E2E contracts");
   }
-  if (plan.job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE") {
+  if (plan.job.jobKind === "STEAM_PUBLISH") {
+    const operationId = plan.job.payload?.operation?.id;
+    if (!/^[0-9a-f-]{36}$/i.test(operationId ?? "")) throw new Error("Fixture Steam operation is invalid");
+    await progress("PHASE", "Fixture Publisher 已登记固定的 Steam 发布回执");
+    await writeFile("/workspace/outputs/steam-publish.json", JSON.stringify({
+      schemaVersion: "deviludo.fixture-steam-publish.v1",
+      published: true,
+      operationId,
+      buildId: "1000001",
+      remoteCalled: false,
+    }));
+    await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
+      schemaVersion: "deviludo.task-outputs.v1",
+      outputs: [{ file: "steam-publish.json", kind: "PUBLISH_RECEIPT", contentType: "application/json" }],
+    }));
+  } else if (plan.job.jobKind === "ARTIFACT_BUILD") {
+    const platforms = plan.job.payload?.targetPlatforms;
+    if (!Array.isArray(platforms) || platforms.length < 1
+      || platforms.some(platform => !["linux", "windows", "macos"].includes(platform))) {
+      throw new Error("Fixture build platforms are invalid");
+    }
+    const outputs = [];
+    for (const platform of [...new Set(platforms)]) {
+      const directory = `/tmp/deviludo-fixture-build-${platform}`;
+      const archive = `godot-build-${platform}.tar.gz`;
+      await mkdir(directory, { recursive: true });
+      await writeFile(`${directory}/deviludo-fixture-game.txt`, `platform=${platform}\njob=${plan.job.jobId}\n`);
+      await command("tar", ["-czf", `/workspace/outputs/${archive}`, "-C", directory, "."]);
+      outputs.push({ file: archive, kind: "BUILD", targetPlatform: platform, contentType: "application/gzip" });
+    }
+    await progress("PHASE", "Fixture Builder 已生成固定的三平台构建制品");
+    await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
+      schemaVersion: "deviludo.task-outputs.v1",
+      outputs,
+    }));
+  } else if (plan.agentConfiguration?.runtime !== "CLAUDE_CODE") {
+    throw new Error("Fixture Agent requires the fixed Claude Code contract");
+  } else if (plan.job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE") {
     const current = plan.job.payload?.document ?? {};
     await writeFile("/workspace/outputs/project-document.json", JSON.stringify({
       schemaVersion: "deviludo.project-document.v1",
@@ -32,8 +68,7 @@ try {
     await progress("AGENT_OUTPUT", "正在生成 Godot 项目结构、主场景和自动化测试。");
     await observeGuidance();
     await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
-    await progress("AGENT_OUTPUT", "项目结构生成完成，正在打包源码制品。");
-    await command("tar", ["-czf", "/workspace/outputs/source.tar.gz", "-C", "/workspace/project", "."]);
+    await progress("AGENT_OUTPUT", "项目结构生成完成，正在发布源码 revision。");
     await writeFile("/workspace/outputs/agent.json", JSON.stringify({
       schemaVersion: "deviludo.fixture-agent.v1",
       generated: true,
@@ -43,7 +78,6 @@ try {
     await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
       schemaVersion: "deviludo.task-outputs.v1",
       outputs: [
-        { file: "source.tar.gz", kind: "SOURCE", contentType: "application/gzip" },
         { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
       ],
     }));

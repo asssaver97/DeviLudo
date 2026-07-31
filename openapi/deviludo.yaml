@@ -1,13 +1,18 @@
 openapi: 3.1.0
 info:
   title: DeviLudo Core API
-  version: 4.0.0
+  version: 6.0.0
 components:
   securitySchemes:
-    sessionCookie:
+    platformSession:
       type: apiKey
       in: cookie
-      name: deviludo_session
+      name: platform_session
+      description: Forwarded to Platform for assertion only when DEVILUDO_ACCESS_MODE=platform; standalone has no browser authentication.
+    platformInternal:
+      type: http
+      scheme: bearer
+      description: Service credential shared only by Platform and Core.
     e2eMtls:
       type: mutualTLS
   parameters:
@@ -26,146 +31,43 @@ paths:
     get:
       operationId: coreReadiness
       responses:
-        "200": { description: Required fixed pools and instance setup are ready }
-        "503": { description: A pool is unavailable or the first administrator has not been created }
-  /v1/auth/setup:
-    post:
-      operationId: setupInitialAdministrator
-      responses:
-        "201": { description: The first instance administrator and authenticated session were created atomically }
-        "400": { description: Username, password, or confirmation is invalid }
-        "409": { description: The instance already has an administrator }
-  /v1/auth/login:
-    post:
-      operationId: login
-      responses:
-        "200": { description: Session and CSRF cookies created }
-        "401": { description: Invalid credentials }
-        "429": { description: Login rate limit reached }
-  /v1/auth/logout:
-    post:
-      operationId: logout
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Session revoked and cookies cleared }
-  /v1/auth/password:
-    post:
-      operationId: changePassword
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Password changed and all sessions revoked }
-  /v1/auth/invitations/accept:
-    post:
-      operationId: acceptWorkspaceInvitation
-      responses:
-        "201": { description: Account and workspace membership created }
-        "404": { description: Invitation is invalid, expired, or already used }
+        "200": { description: Required fixed pools, persistent source root, and access-mode dependencies are ready }
+        "503": { description: A required fixed pool is unavailable }
   /v1/session:
     get:
       operationId: readSession
+      security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: User, first-run setup state, and selected workspace }
-  /v1/workspaces:
-    get:
-      operationId: listWorkspaces
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Workspaces for which the current user has membership }
-    post:
-      operationId: createWorkspace
-      security: [{ sessionCookie: [] }]
-      responses:
-        "201": { description: Workspace created, owned, and selected }
-  /v1/session/workspace:
-    put:
-      operationId: selectWorkspace
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Membership-verified workspace selection persisted in an HttpOnly cookie }
-        "404": { description: Workspace is not visible to the current user }
-    delete:
-      operationId: clearWorkspace
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Workspace selection cleared }
-  /v1/workspaces/current/members:
-    get:
-      operationId: listWorkspaceMembers
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Members of the selected workspace }
-        "409": { description: A workspace has not been selected }
-  /v1/workspaces/current/members/{userId}:
-    parameters:
-      - in: path
-        name: userId
-        required: true
-        schema: { type: string, format: uuid }
-    patch:
-      operationId: changeWorkspaceMemberRole
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Non-owner membership role changed }
-        "403": { description: Owner or admin permission required }
-    delete:
-      operationId: removeWorkspaceMember
-      security: [{ sessionCookie: [] }]
-      responses:
-        "200": { description: Non-owner membership removed }
-        "403": { description: Owner or admin permission required }
-  /v1/workspaces/current/invitations:
-    post:
-      operationId: createWorkspaceInvitation
-      security: [{ sessionCookie: [] }]
-      responses:
-        "201": { description: Single-use 24-hour invitation created }
-        "403": { description: Owner or admin permission required }
+        "200": { description: STANDALONE anonymous principal or a fresh Platform account/workspace/role assertion }
+        "401": { description: Platform assertion is missing, invalid, or unavailable }
   /v1/settings/agent:
     get:
       operationId: readGlobalAgentSettings
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Masked instance Agent settings and runtime versions }
     put:
       operationId: saveGlobalAgentSettings
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Instance Agent settings stored with a Vault secret reference }
         "403": { description: Instance administrator permission required }
   /v1/projects:
     get:
       operationId: listProjects
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Projects in the selected workspace }
-        "409": { description: A workspace has not been selected }
+        "200": { description: Projects in the asserted workspace, including the latest persistent source revision }
     post:
       operationId: createProject
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
-        "201": { description: Project created; a same-name workspace is created when none is selected }
+        "201": { description: Local project created without any repository binding }
         "424": { description: Global Agent configuration or name generation failed }
-  /v1/projects/import/git:
-    post:
-      operationId: importGitProject
-      security: [{ sessionCookie: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [repositoryUrl]
-              properties:
-                repositoryUrl: { type: string, format: uri, maxLength: 2000 }
-      responses:
-        "201": { description: Public Git source snapshot, Agent project document, and initial conversation created }
-        "422": { description: Repository URL, archive, or source boundary is invalid }
-        "424": { description: Global Agent configuration or project analysis failed }
   /v1/projects/import/archive:
     post:
       operationId: importLocalProjectArchive
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       parameters:
         - in: query
           name: name
@@ -188,7 +90,7 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: approveProjectSpecification
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: Immutable specification object registered and workflow started }
   /v1/projects/{projectId}/retry-agent:
@@ -199,11 +101,10 @@ paths:
         schema: { type: string, format: uuid }
       - in: header
         name: Idempotency-Key
-        required: false
         schema: { type: string, minLength: 8, maxLength: 300 }
     post:
       operationId: retryFailedAgentGeneration
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: A new Agent job was created with the currently verified runtime image }
         "200": { description: The same retry request was already accepted }
@@ -221,7 +122,7 @@ paths:
         schema: { type: string, minLength: 8, maxLength: 300 }
     post:
       operationId: retryFailedArtifactBuild
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: A new build job was created from the latest verified Agent source }
         "200": { description: The same retry request was already accepted }
@@ -238,7 +139,7 @@ paths:
         schema: { type: string, minLength: 8, maxLength: 300 }
     post:
       operationId: retryFailedE2e
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: New E2E jobs were created for target platforms without a successful test }
         "200": { description: The same retry request was already accepted }
@@ -251,15 +152,15 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: readProject
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Project, current collaborative document, revision history, and workflow state }
         "404": { description: Project is not visible in the selected workspace }
     delete:
       operationId: deleteProject
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
-        "204": { description: Project records, conversations, workflow state, and stored objects deleted }
+        "204": { description: Project database rows, object artifacts, and its exact persistent source directory were deleted }
         "403": { description: Workspace owner or admin permission required }
         "409": { description: An active delivery must be cancelled before deletion }
   /v1/projects/{projectId}/artifacts:
@@ -270,9 +171,9 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: listProjectArtifacts
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Immutable source, build, E2E report, signature, and publication artifacts for this project }
+        "200": { description: Build, E2E report, signature, and publication artifacts; source remains in persistent revisions }
         "404": { description: Project is not visible in the selected workspace }
   /v1/projects/{projectId}/artifacts/{artifactId}/download:
     parameters:
@@ -286,7 +187,7 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: authorizeProjectArtifactDownload
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: A workspace-scoped download URL valid for 120 seconds }
         "404": { description: Artifact is not visible in the selected workspace and project }
@@ -298,7 +199,7 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: listProjectConversations
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Most recently active project conversations with previews and message counts }
         "404": { description: Project is not visible in the selected workspace }
@@ -313,7 +214,7 @@ paths:
         schema: { type: integer, minimum: 0, default: 0 }
     get:
       operationId: streamAgentGenerationProgress
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200":
           description: Newline-delimited Agent phases, visible output, accepted player guidance, and completion state
@@ -329,7 +230,7 @@ paths:
         schema: { type: string, format: uuid }
     put:
       operationId: updateProjectDocument
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Collaborative project document updated with a new immutable revision }
         "409": { description: Expected revision is stale }
@@ -341,14 +242,14 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: readConversation
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Conversation messages in chronological order }
         "404": { description: Conversation is not visible in the selected workspace }
   /v1/conversations/messages:
     post:
       operationId: sendConversationMessage
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Existing conversation updated }
         "201": { description: Project conversation created }
@@ -356,7 +257,7 @@ paths:
   /v1/conversations/messages/stream:
     post:
       operationId: streamConversationMessage
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200":
           description: Newline-delimited design reply and persisted result; during Agent generation the user message is stored as live task guidance
@@ -366,27 +267,82 @@ paths:
   /v1/admin/server-pools:
     get:
       operationId: listServerPools
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: The five fixed server pools }
         "403": { description: Instance administrator permission required }
   /v1/admin/server-nodes:
     get:
       operationId: listServerNodes
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Registered server nodes }
     post:
       operationId: createServerNode
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "201": { description: Node registered in a fixed pool }
   /v1/admin/e2e-enrollment-tokens:
     post:
       operationId: createE2eEnrollmentToken
-      security: [{ sessionCookie: [] }]
+      security: [{ platformSession: [] }, {}]
       responses:
         "201": { description: Single-use 30-minute E2E enrollment token created }
+  /v1/internal/platform/source-events:
+    get:
+      operationId: pullPlatformSourceReadyEvents
+      security: [{ platformInternal: [] }]
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: Unacknowledged project.source.ready events ordered for replay }
+        "401": { description: Platform service credential is invalid }
+  /v1/internal/platform/source-events/ack:
+    post:
+      operationId: acknowledgePlatformSourceReadyEvents
+      security: [{ platformInternal: [] }]
+      responses:
+        "200": { description: Events atomically acknowledged after Platform persisted scheduling state }
+  /v1/internal/platform/projects/import:
+    post:
+      operationId: importPlatformRepositoryArchive
+      security: [{ platformInternal: [] }]
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: { type: string, format: binary, maxLength: 67108864 }
+      responses:
+        "201": { description: Platform-authenticated archive imported into a new persistent Core project directory }
+        "422": { description: Archive violates the source boundary }
+  /v1/internal/platform/workspaces/{workspaceId}/projects/{projectId}:
+    parameters:
+      - { in: path, name: workspaceId, required: true, schema: { type: string, format: uuid } }
+      - { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: readPlatformProjectBoundary
+      security: [{ platformInternal: [] }]
+      responses:
+        "200": { description: Project identity and latest source revision for Platform repository operations }
+        "404": { description: Project does not exist in the requested workspace }
+    delete:
+      operationId: deletePlatformProject
+      security: [{ platformInternal: [] }]
+      responses:
+        "204": { description: Active tasks stopped and all Core project data, object artifacts, and source directories deleted }
+        "404": { description: Project does not exist in the requested workspace }
+  /v1/internal/platform/workspaces/{workspaceId}/projects/{projectId}/source/{revision}/archive:
+    parameters:
+      - { in: path, name: workspaceId, required: true, schema: { type: string, format: uuid } }
+      - { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
+      - { in: path, name: revision, required: true, schema: { type: integer, minimum: 1 } }
+    get:
+      operationId: downloadDeterministicSourceRevisionArchive
+      security: [{ platformInternal: [] }]
+      responses:
+        "200": { description: Deterministic tar.gz plus digest, file-count, and byte-count headers }
+        "404": { description: Source revision does not exist }
+        "409": { description: Persistent source content does not match its database receipt }
   /v1/e2e/enroll:
     post:
       operationId: enrollE2eNode

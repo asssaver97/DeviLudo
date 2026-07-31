@@ -72,7 +72,7 @@ test("the BFF forwards product requests, enforces its body limit and reports Cor
   const session = await stack.web("/api/session?source=e2e");
   expect(session.ok()).toBeTruthy();
   expect(await session.json()).toMatchObject({
-    session: { selectedWorkspace: null },
+    session: { authenticated:true,authMode:"STANDALONE",selectedWorkspace: { name:"Local workspace" } },
   });
   expect(session.headers()["cache-control"]).toContain("no-store");
 

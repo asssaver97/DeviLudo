@@ -3,7 +3,10 @@ import pg from "pg";
 
 const databaseUrl = process.env.DEVILUDO_BOOTSTRAP_DATABASE_URL ?? "postgresql://deviludo:deviludo-local@postgres:5432/deviludo";
 const images = JSON.parse(process.env.DEVILUDO_RUNTIME_IMAGES_JSON ?? "{}");
-const runtimeKeys = ["AGENT_CLAUDE", "AGENT_CODEX", "GODOT_BUILDER", "STEAM_PUBLISHER", "E2E_MACOS"];
+const runtimeKeys = [
+  "AGENT_CLAUDE", "AGENT_CODEX", "GODOT_BUILDER", "STEAM_PUBLISHER",
+  "E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS",
+];
 if (!images || typeof images !== "object" || Array.isArray(images)
   || runtimeKeys.some(key => !/^sha256:[0-9a-f]{64}$/.test(images[key] ?? ""))) {
   throw new Error("DEVILUDO_RUNTIME_IMAGES_JSON must contain every immutable local runtime image digest");
@@ -22,7 +25,10 @@ try {
   }
   for (const definition of [
     ["WEB", "linux", ["CUSTOMER_WEB", "STREAMING_BFF"]],
-    ["CORE", "linux", ["BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH"]],
+    ["CORE", "linux", [
+      "BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+      "RESTRICTED_CONTAINER", "NETWORK_POLICY",
+    ]],
     ["E2E_MACOS", "macos", ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]],
   ]) {
     await pool.query(

@@ -24,11 +24,12 @@ test("local project import creates a source snapshot, Agent document, and resuma
       id: string;
       name: string;
       workflowId: string;
+      source:{revision:number;digest:string;relativePath:string;fileCount:number};
       document: { maintainedBy: string; content: { gameplay: string; categories: string[] } };
     };
     conversation: { id: string; messages: readonly { role: string; content: string }[] };
   };
-  expect(body.workspace.name).toBe("时序回廊");
+  expect(body.workspace.name).toBe("Local workspace");
   expect(body.project.name).toBe("时序回廊");
   expect(body.project.document).toMatchObject({
     maintainedBy: "AGENT",
@@ -37,21 +38,14 @@ test("local project import creates a source snapshot, Agent document, and resuma
   expect(body.conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
   expect(body.conversation.messages[1].content).toContain("源码已解析");
 
-  const artifacts = await stack.queryRows<{
-    kind: string;
-    producing_job_id: string | null;
-    object_key: string;
-    metadata: { imported: boolean; fileCount: number };
-  }>(`SELECT kind::text, producing_job_id::text, object_key, metadata
-        FROM deviludo.artifacts
+  const sources = await stack.queryRows<{
+    revision:number;content_digest:string;relative_path:string;file_count:number;
+  }>(`SELECT revision::int,content_digest,relative_path,file_count::int
+        FROM deviludo.project_source_revisions
        WHERE project_id = '${body.project.id}'::uuid`);
-  expect(artifacts).toHaveLength(1);
-  expect(artifacts[0]).toMatchObject({
-    kind: "SOURCE",
-    producing_job_id: null,
-    metadata: { imported: true, fileCount: 3 },
-  });
-  expect(artifacts[0].object_key).toContain(`workspaces/${body.workspace.id}/projects/${body.project.id}/imports/`);
+  expect(sources).toHaveLength(1);
+  expect(sources[0]).toMatchObject({revision:1,content_digest:body.project.source.digest,file_count:3});
+  expect(sources[0].relative_path).toContain(`workspaces/${body.workspace.id}/projects/${body.project.id}/revisions/`);
 
   const continued = await stack.web("/api/conversations/messages", {
     method: "POST",
@@ -79,22 +73,16 @@ test("local project import creates a source snapshot, Agent document, and resuma
     data: {},
   });
   expect(approved.status(), await approved.text()).toBe(202);
-  const generationInputs = await stack.queryRows<{ kind: string; imported: boolean }>(`
-    SELECT artifact.kind::text AS kind,
-           coalesce((artifact.metadata->>'imported')::boolean, false) AS imported
-      FROM deviludo.artifact_inputs input
-      JOIN deviludo.jobs job
-        ON job.workspace_id = input.workspace_id AND job.id = input.job_id
-      JOIN deviludo.artifacts artifact
-        ON artifact.workspace_id = input.workspace_id AND artifact.id = input.artifact_id
+  const generationInputs = await stack.queryRows<{ kind: string;source_revision:number }>(`
+    SELECT artifact.kind::text AS kind,(job.payload->>'sourceRevision')::int source_revision
+      FROM deviludo.jobs job
+      JOIN deviludo.artifact_inputs input ON job.workspace_id=input.workspace_id AND job.id=input.job_id
+      JOIN deviludo.artifacts artifact ON artifact.workspace_id=input.workspace_id AND artifact.id=input.artifact_id
      WHERE job.project_id = '${body.project.id}'::uuid
        AND job.kind = 'AGENT_GENERATION'
      ORDER BY artifact.kind
   `);
-  expect(generationInputs).toEqual([
-    { kind: "SOURCE", imported: true },
-    { kind: "SPECIFICATION", imported: false },
-  ]);
+  expect(generationInputs).toEqual([{kind:"SPECIFICATION",source_revision:1}]);
 });
 
 test("project import fails before any workspace write when Agent is not configured", async ({ stack }) => {

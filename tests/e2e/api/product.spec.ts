@@ -3,8 +3,8 @@ import { test, expect } from "../fixtures/stack";
 
 test("project, specification and workflow APIs cover validation, idempotency and terminal behavior", async ({ stack }) => {
   const empty = await stack.web("/api/projects");
-  expect(empty.status()).toBe(409);
-  expect(await empty.json()).toMatchObject({ code: "WORKSPACE_REQUIRED" });
+  expect(empty.status()).toBe(200);
+  expect(await empty.json()).toEqual({ projects: [] });
 
   for (const invalid of [
     null,
@@ -142,7 +142,7 @@ test("a failed Agent generation retries with the currently registered runtime im
     ) VALUES (
       '${project.workspaceId}'::uuid, '${failedJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
       'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false, '${obsoleteRuntime}',
-      '{"kinds":["SOURCE","SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
+      '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'FAILED', 5, 'obsolete-agent-runtime',
       'Sandbox executor failed: {"code":"EXECUTOR_REJECTED","message":"Runtime image is not in the signed release allowlist"}'
     );

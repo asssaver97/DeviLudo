@@ -16,7 +16,7 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "instance_agent_settings", "project_creation_receipts", "workflow_instances",
     "workflow_events", "jobs", "external_signals", "job_progress_events",
     "job_guidance_messages", "operation_receipts",
-    "users", "sessions", "workspace_memberships", "workspace_invitations",
+    "project_source_revisions", "project_source_ready_outbox",
     "artifacts", "artifact_inputs", "executor_receipts",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
@@ -28,7 +28,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /current_setting\('app\.workspace_id', true\)/);
   assert.match(sql, /ALTER TABLE deviludo\.workspaces FORCE ROW LEVEL SECURITY/);
   for (const table of [
-    "projects", "project_documents", "project_document_revisions",
+    "projects", "project_source_revisions", "project_source_ready_outbox", "project_documents", "project_document_revisions",
     "project_conversations", "conversation_messages", "agent_installations",
     "workflow_instances", "workflow_events",
     "jobs", "external_signals", "job_progress_events", "job_guidance_messages",
@@ -44,16 +44,16 @@ test("every workspace-owned table fails closed with forced row isolation", async
     assert.match(sql, new RegExp(`CREATE ROLE deviludo_${role} NOLOGIN NOBYPASSRLS`));
   }
   assert.match(sql, /CREATE ROLE deviludo_claim_executor NOLOGIN BYPASSRLS/);
-  assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.current_user_id\(\) TO deviludo_claim_executor/);
   assert.match(sql, /GRANT SELECT, INSERT, DELETE ON deviludo\.project_creation_receipts TO deviludo_api/);
   assert.match(sql, /FUNCTION deviludo\.reconcile_p0_capacity\(\)[\s\S]*SECURITY INVOKER/);
-  assert.match(sql, /FUNCTION deviludo\.cleanup_expired_auth_state\(\)[\s\S]*SECURITY DEFINER/);
+  assert.match(sql, /FUNCTION deviludo\.cleanup_expired_executor_state\(\)[\s\S]*SECURITY DEFINER/);
   assert.match(sql, /CREATE TABLE deviludo\.project_conversations \([\s\S]*project_id uuid NOT NULL/);
-  assert.match(sql, /CREATE TABLE deviludo\.users\b/);
-  assert.match(sql, /password_hash text NOT NULL CHECK \(password_hash LIKE '\$argon2id\$%'/);
-  assert.match(sql, /CREATE TABLE deviludo\.workspace_memberships\b/);
-  assert.doesNotMatch(sql, /must_change_password/);
-  assert.match(sql, /'INSTANCE_SETUP'/);
+  assert.match(sql, /CREATE TABLE deviludo\.project_source_revisions[\s\S]*relative_path text NOT NULL[\s\S]*content_digest text NOT NULL/);
+  assert.match(sql, /CREATE TABLE deviludo\.project_source_ready_outbox[\s\S]*development_actor_account_id uuid NOT NULL[\s\S]*acknowledged_at timestamptz/);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.pull_source_ready_events/);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.acknowledge_source_ready_events/);
+  assert.doesNotMatch(sql, /users|sessions|membership|invitation|github|repository_connection|password_hash|argon2/i);
+  assert.doesNotMatch(sql, /'GITHUB_SYNC'|'REPOSITORY_SYNC_RECEIPT'|'SOURCE'/);
   assert.match(sql, /CREATE TABLE deviludo\.executor_receipts[\s\S]*receipt->>'simulated' = 'false'/);
   assert.match(sql, /CREATE TABLE deviludo\.job_progress_events[\s\S]*event_kind IN \('PHASE', 'AGENT_OUTPUT', 'GUIDANCE_ACCEPTED', 'COMPLETED', 'FAILED'\)/);
   assert.match(sql, /CREATE TABLE deviludo\.job_guidance_messages[\s\S]*state IN \('PENDING', 'DELIVERED', 'REJECTED'\)/);
@@ -64,14 +64,14 @@ test("every workspace-owned table fails closed with forced row isolation", async
   }
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
-  assert.match(sql, /WHEN 'ARTIFACT_BUILD' THEN artifact\.kind IN \('SOURCE', 'SPECIFICATION'\)[\s\S]*source_job\.kind = 'AGENT_GENERATION'[\s\S]*source_job\.state = 'SUCCEEDED'/);
+  assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
   assert.match(sql, /PROJECT_DOCUMENT_MAINTENANCE/);
   assert.match(sql, /schedule_idle_project_document_maintenance/);
   assert.match(sql, /project\.last_activity_at <= clock_timestamp\(\) - make_interval/);
   assert.match(sql, /document\.last_agent_maintained_at < project\.last_activity_at/);
   assert.match(sql, /project document maintenance result is stale/);
-  assert.match(sql, /p_kind = 'AGENT_GENERATION' AND p_payload \? 'repairFromE2eJobId' AND v_input_count <> 3/);
-  assert.match(sql, /p_kind = 'AGENT_GENERATION' AND NOT \(p_payload \? 'repairFromE2eJobId'\) AND v_input_count NOT BETWEEN 1 AND 2/);
+  assert.match(sql, /p_kind = 'AGENT_GENERATION' AND p_payload \? 'repairFromE2eJobId' AND v_input_count <> 2/);
+  assert.match(sql, /p_kind = 'AGENT_GENERATION' AND NOT \(p_payload \? 'repairFromE2eJobId'\) AND v_input_count <> 1/);
   assert.match(sql, /E2E_CONTENT_FAILED/);
   assert.match(sql, /last_error = 'E2E_PRODUCT: ' \|\| failure_summary/);
   assert.match(sql, /repair_count < 3/);
@@ -90,27 +90,26 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.doesNotMatch(sql, /api_key\s+text/i);
 });
 
-test("the fresh baseline contains no default account and setup is single-winner", async () => {
+test("Core stores only opaque external actor identifiers and has no account authority", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
   const bootstrap = await readFile(new URL("../scripts/bootstrap-instance.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(sql, /VALUES\s*\(\s*'admin'/i);
   assert.doesNotMatch(bootstrap, /password_hash|admin\/admin|argon2/i);
-  assert.match(repository, /pg_advisory_xact_lock\(hashtextextended\('deviludo\.instance\.setup'/);
-  assert.match(repository, /INSTANCE_ALREADY_CONFIGURED/);
-  assert.match(repository, /INSERT INTO deviludo\.sessions[\s\S]*INSTANCE_SETUP[\s\S]*COMMIT/);
+  assert.match(sql, /created_by_actor_account_id uuid NOT NULL/);
+  assert.match(sql, /development_actor_account_id uuid/);
+  assert.doesNotMatch(repository, /github|oauth|session|membership|invitation/i);
 });
 
-test("current baseline deployments reconcile the claim helper permission", async () => {
+test("migration refuses legacy compatibility and requires the destructive reset", async () => {
   const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
-  assert.match(migration, /enqueueJobDefinition/);
-  assert.match(migration, /await client\.query\(enqueueJobDefinition\)/);
-  assert.match(migration, /await client\.query\(requiredCapabilitiesDefinition\)/);
-  assert.match(migration, /await client\.query\(scheduleDocumentMaintenanceDefinition\)/);
-  assert.match(migration, /await client\.query\(completeJobDefinition\)/);
-  assert.match(migration, /ALTER FUNCTION deviludo\.claim_job\(text, deviludo\.server_pool_kind, integer\) OWNER TO deviludo_claim_executor/);
-  assert.match(migration, /ALTER FUNCTION deviludo\.reconcile_p0_capacity\(\) SECURITY INVOKER/);
-  assert.match(migration, /GRANT EXECUTE ON FUNCTION deviludo\.current_user_id\(\) TO deviludo_claim_executor/);
+  assert.match(migration, /deviludo-core-source-v1/);
+  assert.match(migration, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
+  assert.doesNotMatch(migration, /ALTER TYPE|CREATE TABLE IF NOT EXISTS/);
+  const reset = await readFile(new URL("../scripts/reset-source-baseline.mjs", import.meta.url), "utf8");
+  assert.match(reset, /--confirm=RESET_DEVILUDO_SOURCE_V1/);
+  assert.match(reset, /remoteResourcesDeleted: false/);
+  assert.match(reset, /DEVILUDO_PROJECTS_ROOT/);
 });
 
 test("instance Agent settings are frozen into new workspace jobs by secret reference", async () => {
@@ -141,7 +140,4 @@ test("a new attempt and successful completion clear stale job errors", async () 
   const complete = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
   assert.match(claim, /SET state = 'RUNNING',[\s\S]*last_error = NULL/);
   assert.match(complete, /SET state = 'SUCCEEDED',[\s\S]*last_error = NULL/);
-  const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
-  assert.match(migration, /client\.query\(claimJobDefinition\)/);
-  assert.match(migration, /state IN \('RUNNING', 'SUCCEEDED'\)[\s\S]*last_error IS NOT NULL/);
 });

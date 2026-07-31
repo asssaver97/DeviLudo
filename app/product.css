@@ -229,7 +229,35 @@ textarea {
 .auth-card input:focus { border-color: var(--blue); box-shadow: 3px 3px 0 #020305, inset 3px 0 var(--acid); }
 .auth-card .button { justify-self: stretch; min-height: 50px; width: 100%; }
 .auth-card .button:disabled { cursor: wait; opacity: .6; }
-.auth-password-rule { color: var(--ink-muted); font-size: 8px; line-height: 1.6; margin: -8px 0 0; }
+.auth-card .auth-consent-form { gap: 12px; margin-top: 24px; }
+.auth-card .auth-consent {
+  align-items: flex-start;
+  background: rgba(7, 12, 20, .66);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-strong);
+  cursor: pointer;
+  display: flex;
+  font-size: 9px;
+  gap: 10px;
+  letter-spacing: .02em;
+  line-height: 1.6;
+  padding: 11px 12px;
+  text-transform: none;
+}
+.auth-card .auth-consent:hover { border-color: #586b88; }
+.auth-card .auth-consent input {
+  accent-color: var(--blue);
+  appearance: auto;
+  flex: 0 0 auto;
+  height: 16px;
+  margin: 0;
+  min-height: 16px;
+  padding: 0;
+  width: 16px;
+}
+.auth-card .auth-consent input:focus { border: 0; box-shadow: none; outline: 2px solid var(--blue); outline-offset: 2px; }
+.auth-card .auth-consent-form .button { margin-top: 8px; }
+.auth-card .auth-consent-form .button:disabled { cursor: not-allowed; opacity: .42; }
 .form-error { border: 1px solid #903c48; color: #ffadb8; margin: 0; padding: 10px 12px; }
 
 @media (max-width: 560px) {
@@ -240,6 +268,7 @@ textarea {
 .access-settings { margin-top: 24px; padding: 28px; }
 .access-user-row, .access-members > div, .access-invite { align-items: center; display: flex; gap: 16px; justify-content: space-between; }
 .access-user-row { border-bottom: 1px solid var(--line); padding: 18px 0; }
+.access-user-row > img { border: 1px solid var(--line-strong); border-radius: 50%; flex: 0 0 auto; }
 .access-user-row div { display: grid; gap: 5px; }
 .access-user-row small, .access-invite-url { color: var(--ink-muted); }
 .access-members { display: grid; margin: 16px 0; }
@@ -252,6 +281,56 @@ textarea {
 .access-invite label, .access-invite-url { display: grid; gap: 6px; }
 .access-invite select, .access-invite-url input { background: var(--field); border: 1px solid var(--line-strong); color: var(--ink-strong); min-height: 42px; padding: 0 12px; }
 .access-invite-url { margin-top: 16px; }
+
+.project-catalog-card.is-disabled {
+  filter: grayscale(.7);
+  opacity: .58;
+}
+
+.project-catalog-card.is-disabled .project-catalog-card-footer > span {
+  color: #934452;
+}
+
+.repository-sync-panel {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 24px;
+  padding: 24px;
+}
+
+.repository-sync-panel .section-heading,
+.repository-sync-panel p {
+  margin: 0;
+}
+
+.repository-sync-panel code {
+  color: var(--cyan);
+  overflow-wrap: anywhere;
+}
+
+.platform-repository-actions,
+.platform-repository-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.platform-repository-picker select {
+  min-width: min(420px, 100%);
+  min-height: 42px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-deep);
+  color: var(--text-primary);
+  padding: 0 12px;
+}
+
+.platform-github-import {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
 
 .workspace-menu .workspace-switcher {
   cursor: pointer;

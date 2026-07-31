@@ -1,6 +1,10 @@
 import { CORE_ROLES, type CoreRole } from "./contracts";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { isServerPoolKind, SERVER_POOL_KINDS, type ServerPoolKind } from "@/lib/runtime/server-pools";
+
+export const ACCESS_MODES = ["standalone", "platform"] as const;
+export type AccessMode = typeof ACCESS_MODES[number];
 
 export type CoreConfig = Readonly<{
   role: CoreRole;
@@ -16,6 +20,10 @@ export type CoreConfig = Readonly<{
   tlsCertificateFile: string | null;
   tlsKeyFile: string | null;
   tlsClientCaFile: string | null;
+  accessMode: AccessMode;
+  platformAccountApiUrl: string | null;
+  platformInternalToken: string | null;
+  projectsRoot: string;
 }>;
 
 export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
@@ -63,6 +71,27 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   if (env.NODE_ENV === "production" && (![tlsCertificateFile, tlsKeyFile, tlsClientCaFile].every(value => value?.startsWith("/")))) {
     throw new Error("Production Core API requires TLS certificate, key, and E2E client CA files");
   }
+  const configuredAccessMode = env.DEVILUDO_ACCESS_MODE?.trim();
+  if (env.NODE_ENV === "production" && !configuredAccessMode) {
+    throw new Error("DEVILUDO_ACCESS_MODE must be explicitly configured in production");
+  }
+  const accessMode = configuredAccessMode || "standalone";
+  if (!(ACCESS_MODES as readonly string[]).includes(accessMode)) {
+    throw new Error("DEVILUDO_ACCESS_MODE must be standalone or platform");
+  }
+  const platformAccountApiUrl = accessMode === "platform"
+    ? normalizeServiceBaseUrl(env.DEVILUDO_PLATFORM_ACCOUNT_API_URL ?? "", env.NODE_ENV)
+    : null;
+  const platformInternalToken = accessMode === "platform"
+    ? secretValue(env, "DEVILUDO_PLATFORM_INTERNAL_TOKEN")
+    : null;
+  if (accessMode === "platform" && (!platformInternalToken || platformInternalToken.length < 32)) {
+    throw new Error("DEVILUDO_PLATFORM_INTERNAL_TOKEN is required in platform mode");
+  }
+  const projectsRoot = resolve(env.DEVILUDO_PROJECTS_ROOT?.trim() || ".deviludo/projects");
+  if (env.NODE_ENV === "production" && !env.DEVILUDO_PROJECTS_ROOT?.startsWith("/")) {
+    throw new Error("DEVILUDO_PROJECTS_ROOT must be an absolute path in production");
+  }
   return Object.freeze({
     role: typedRole,
     port,
@@ -77,7 +106,23 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     tlsCertificateFile,
     tlsKeyFile,
     tlsClientCaFile,
+    accessMode: accessMode as AccessMode,
+    platformAccountApiUrl,
+    platformInternalToken,
+    projectsRoot,
   });
+}
+
+function normalizeServiceBaseUrl(value: string, environment: string | undefined): string {
+  if (!value) throw new Error("DEVILUDO_PLATFORM_ACCOUNT_API_URL is required in platform mode");
+  const url = new URL(value);
+  const clusterLocal = url.hostname.endsWith(".svc") || !url.hostname.includes(".");
+  if (url.username || url.password || url.search || url.hash || url.pathname !== "/"
+    || !["http:", "https:"].includes(url.protocol)
+    || (environment === "production" && url.protocol !== "https:" && !clusterLocal)) {
+    throw new Error("DEVILUDO_PLATFORM_ACCOUNT_API_URL is invalid");
+  }
+  return url.href.replace(/\/$/, "");
 }
 
 function secretValue(env: NodeJS.ProcessEnv, key: string): string {

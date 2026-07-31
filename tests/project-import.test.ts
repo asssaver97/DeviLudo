@@ -4,7 +4,6 @@ import test from "node:test";
 import { createStoredZip } from "@/lib/product/source-archive";
 import {
   analyzeImportedProject,
-  downloadGitProject,
   inspectProjectZip,
 } from "@/services/core/src/project-import";
 import type { StoredInstanceAgentSettings } from "@/services/core/src/repository";
@@ -59,21 +58,6 @@ test("project import rejects credentials even when the archive is otherwise vali
     sourceKind: "LOCAL_ARCHIVE",
     displayName: "game",
   }), /不允许导入的凭据文件/);
-});
-
-test("Git import resolves a public repository default branch and analyzes its archive", async () => {
-  const requested: string[] = [];
-  const snapshot = await downloadGitProject("https://github.com/example/clock-game.git", (async input => {
-    requested.push(String(input));
-    if (String(input).startsWith("https://api.github.com/")) return Response.json({ default_branch: "main" });
-    return new Response(Uint8Array.from(sourceZip).buffer, { status: 200, headers: { "content-type": "application/zip" } });
-  }) as typeof fetch);
-  assert.deepEqual(requested, [
-    "https://api.github.com/repos/example/clock-game",
-    "https://codeload.github.com/example/clock-game/zip/refs/heads/main",
-  ]);
-  assert.equal(snapshot.repositoryUrl, "https://github.com/example/clock-game.git");
-  assert.equal(snapshot.sourceKind, "GIT");
 });
 
 test("import analysis creates the collaborative document and development specification", async () => {

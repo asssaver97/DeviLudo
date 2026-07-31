@@ -47,10 +47,10 @@ try {
       runtimeImage: fixtureImage,
       requiredCapabilities: ["MICROVM", "NETWORK_POLICY"],
       inputObjects: [],
-      outputContract: { kinds: ["SOURCE", "SPECIFICATION"], maxBytes: 134_217_728 },
+      outputContract: { kinds: ["SPECIFICATION"], maxBytes: 134_217_728 },
       budget: { cpuMillis: 120_000, memoryBytes: 536_870_912, networkBytes: 0 },
       timeoutSeconds: 120,
-      payload: { fixture: true },
+      payload: { fixture: true, publishSourceRevision: 1 },
     }),
   };
   const agentProgress = [];
@@ -66,13 +66,13 @@ try {
   const guidance = "保留键盘操作，并优先完成清晰的时间循环提示。";
   await sendGuidance(agentJobId, guidance);
   const agentReceipt = await agentReceiptPromise;
-  assertReceipt(agentReceipt, ["SOURCE", "SPECIFICATION"]);
+  assertReceipt(agentReceipt, ["SPECIFICATION"]);
   if (!agentProgress.some(event => event.kind === "AGENT_OUTPUT" && event.content === `已收到玩家引导：${guidance}`)) {
     throw new Error("Fixture Agent did not receive player guidance through the executor stream");
   }
   createdKeys.push(...agentReceipt.outputObjects.map(object => object.key));
-  const source = agentReceipt.outputObjects.find(object => object.kind === "SOURCE");
-  if (!source) throw new Error("Fixture Agent did not produce a source artifact");
+  const source = agentReceipt.details?.sourceRevision;
+  if (!source?.relativePath || !source?.digest) throw new Error("Fixture Agent did not publish a persistent source revision");
 
   const buildJobId = randomUUID();
   const buildReceipt = await runClient({
@@ -88,11 +88,16 @@ try {
       jobKind: "ARTIFACT_BUILD",
       runtimeImage: await imageId("deviludo-godot-builder:local"),
       requiredCapabilities: ["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"],
-      inputObjects: [source],
+      inputObjects: agentReceipt.outputObjects,
       outputContract: { kinds: ["BUILD"], maxBytes: 1_073_741_824 },
       budget: { cpuMillis: 300_000, memoryBytes: 2_147_483_648, networkBytes: 0 },
       timeoutSeconds: 300,
-      payload: { targetPlatforms: ["macos"] },
+      payload: {
+        targetPlatforms: ["macos"],
+        sourceRevision: source.revision,
+        sourceRelativePath: source.relativePath,
+        sourceDigest: source.digest,
+      },
     }),
   });
   assertReceipt(buildReceipt, ["BUILD"]);

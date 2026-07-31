@@ -7,9 +7,7 @@ import {
   type AgentModelConfiguration,
   type AgentRuntimeKind,
   type ArtifactRecord,
-  type UserRecord,
-  type WorkspaceMembershipRecord,
-  type WorkspaceRole,
+  type ProjectSourceRevision,
   type WorkspaceSummary,
 } from "@/lib/product/contracts";
 import {
@@ -44,144 +42,63 @@ export class CoreRepository {
     await this.database.pool.query("SELECT 1");
   }
 
-  async hasUsers(): Promise<boolean> {
-    const result = await this.database.pool.query("SELECT 1 FROM deviludo.users LIMIT 1");
-    return result.rowCount === 1;
+  async listSourceReadyEvents(limit = 100): Promise<readonly SourceReadyEvent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Source event page size is invalid");
+    const result = await this.database.pool.query<SourceReadyEventRow>(
+      `SELECT event_id::text, workspace_id::text, project_id::text, workflow_id::text,
+              source_revision::text, content_digest, development_actor_account_id::text,
+              created_at::text
+         FROM deviludo.pull_source_ready_events($1::integer)`,
+      [limit],
+    );
+    return Object.freeze(result.rows.map(row => Object.freeze({
+      eventId: row.event_id,
+      workspaceId: row.workspace_id,
+      projectId: row.project_id,
+      workflowId: row.workflow_id,
+      sourceRevision: Number(row.source_revision),
+      digest: row.content_digest,
+      developmentActorAccountId: row.development_actor_account_id,
+      createdAt: row.created_at,
+    })));
   }
 
-  async createInitialAdmin(input: Readonly<{
-    username: string;
-    passwordHash: string;
-    tokenHash: string;
-    csrfHash: string;
-    remoteAddress: string | null;
-  }>): Promise<LoginUser> {
-    const client = await this.database.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('deviludo.instance.setup', 0))");
-      const existing = await client.query("SELECT 1 FROM deviludo.users LIMIT 1");
-      if (existing.rowCount) {
-        throw Object.assign(new Error("实例管理员已经设置"), {
-          statusCode: 409,
-          code: "INSTANCE_ALREADY_CONFIGURED",
-        });
-      }
-      const result = await client.query<LoginUserRow>(
-        `INSERT INTO deviludo.users(
-           username, password_hash, instance_admin, password_changed_at
-         ) VALUES ($1, $2, true, clock_timestamp())
-         RETURNING id::text, username, password_hash, instance_admin,
-                   disabled_at::text, created_at::text`,
-        [input.username, input.passwordHash],
-      );
-      const user = loginUserFromRow(result.rows[0]);
-      await client.query(
-        `INSERT INTO deviludo.sessions(user_id, token_hash, csrf_hash, expires_at)
-         VALUES ($1::uuid, $2, $3, clock_timestamp() + interval '7 days')`,
-        [user.id, input.tokenHash, input.csrfHash],
-      );
-      await client.query(
-        `INSERT INTO deviludo.authentication_events(
-           user_id, username, event_kind, remote_address
-         ) VALUES ($1::uuid, $2, 'INSTANCE_SETUP', $3::inet)`,
-        [user.id, user.username, input.remoteAddress],
-      );
-      await client.query("COMMIT");
-      return user;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
+  async acknowledgeSourceReadyEvents(eventIds: readonly string[]): Promise<number> {
+    if (eventIds.length < 1 || eventIds.length > 500 || eventIds.some(id => !UUID.test(id))) {
+      throw new Error("Source event acknowledgement is invalid");
     }
+    const result = await this.database.pool.query<{ acknowledged: string }>(
+      "SELECT deviludo.acknowledge_source_ready_events($1::uuid[])::text AS acknowledged",
+      [eventIds],
+    );
+    return Number(result.rows[0]?.acknowledged ?? 0);
   }
 
-  async readLoginUser(username: string): Promise<LoginUser | null> {
-    const result = await this.database.pool.query<LoginUserRow>(
-      `SELECT id::text, username, password_hash, instance_admin,
-              disabled_at::text, created_at::text
-         FROM deviludo.users WHERE lower(username) = lower($1)`,
-      [username],
-    );
-    return result.rows[0] ? loginUserFromRow(result.rows[0]) : null;
-  }
-
-  async loginFailureCount(username: string, remoteAddress: string | null): Promise<number> {
-    const result = await this.database.pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM deviludo.authentication_events
-        WHERE lower(username) = lower($1) AND event_kind = 'LOGIN_FAILED'
-          AND created_at > clock_timestamp() - interval '15 minutes'
-          AND ($2::inet IS NULL OR remote_address = $2::inet)`,
-      [username, remoteAddress],
-    );
-    return Number(result.rows[0]?.count ?? 0);
-  }
-
-  async recordAuthenticationEvent(input: Readonly<{
-    userId?: string | null;
-    username: string;
-    kind: AuthenticationEventKind;
-    remoteAddress?: string | null;
-    metadata?: Readonly<Record<string, unknown>>;
-  }>): Promise<void> {
-    await this.database.pool.query(
-      `INSERT INTO deviludo.authentication_events(user_id, username, event_kind, remote_address, metadata)
-       VALUES ($1::uuid, $2, $3, $4::inet, $5::jsonb)`,
-      [input.userId ?? null, input.username, input.kind, input.remoteAddress ?? null, JSON.stringify(input.metadata ?? {})],
-    );
-  }
-
-  async createSession(input: Readonly<{
-    userId: string;
-    tokenHash: string;
-    csrfHash: string;
-  }>): Promise<void> {
-    await this.database.pool.query(
-      `INSERT INTO deviludo.sessions(user_id, token_hash, csrf_hash, expires_at)
-       VALUES ($1::uuid, $2, $3, clock_timestamp() + interval '7 days')`,
-      [input.userId, input.tokenHash, input.csrfHash],
-    );
-  }
-
-  async readSession(tokenHash: string): Promise<AuthenticatedSession | null> {
-    const result = await this.database.pool.query<SessionRow>(
-      `UPDATE deviludo.sessions session
-          SET last_seen_at = clock_timestamp()
-         FROM deviludo.users app_user
-        WHERE session.token_hash = $1
-          AND session.user_id = app_user.id
-          AND session.revoked_at IS NULL
-          AND session.expires_at > clock_timestamp()
-          AND app_user.disabled_at IS NULL
-        RETURNING session.id::text, session.user_id::text, session.csrf_hash,
-                  session.expires_at::text, app_user.username, app_user.instance_admin,
-                  app_user.created_at::text`,
-      [tokenHash],
-    );
-    return result.rows[0] ? sessionFromRow(result.rows[0]) : null;
-  }
-
-  async revokeSession(sessionId: string): Promise<void> {
-    await this.database.pool.query(
-      "UPDATE deviludo.sessions SET revoked_at = clock_timestamp() WHERE id = $1::uuid",
-      [sessionId],
-    );
-  }
-
-  async changePassword(userId: string, passwordHash: string): Promise<void> {
-    await this.database.pool.query(
-      `UPDATE deviludo.users
-          SET password_hash = $2, password_changed_at = clock_timestamp(),
-              updated_at = clock_timestamp()
-        WHERE id = $1::uuid`,
-      [userId, passwordHash],
-    );
-    await this.database.pool.query(
-      `UPDATE deviludo.sessions SET revoked_at = clock_timestamp()
-        WHERE user_id = $1::uuid AND revoked_at IS NULL`,
-      [userId],
-    );
+  async readSourceRevision(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    revision: number;
+  }>): Promise<Readonly<{ relativePath: string; digest: string; fileCount: number; totalBytes: number }> | null> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{
+        relative_path: string;
+        content_digest: string;
+        file_count: string;
+        total_bytes: string;
+      }>(
+        `SELECT relative_path, content_digest, file_count::text, total_bytes::text
+           FROM deviludo.project_source_revisions
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND revision = $3::bigint`,
+        [input.workspaceId, input.projectId, input.revision],
+      );
+      const row = result.rows[0];
+      return row ? Object.freeze({
+        relativePath: row.relative_path,
+        digest: row.content_digest,
+        fileCount: Number(row.file_count),
+        totalBytes: Number(row.total_bytes),
+      }) : null;
+    });
   }
 
   async readServerNodes(): Promise<readonly ServerNodeRecord[]> {
@@ -199,34 +116,7 @@ export class CoreRepository {
     return fixedPoolRecords(await this.readServerNodes());
   }
 
-  async listWorkspaces(userId: string): Promise<readonly WorkspaceSummary[]> {
-    return this.database.withUser(userId, async client => {
-      const result = await client.query<WorkspaceRow>(
-        `SELECT id::text, name, created_at::text FROM deviludo.list_workspaces()`,
-      );
-      return Object.freeze(result.rows.map(workspaceFromRow));
-    });
-  }
-
-  async createWorkspace(input: Readonly<{ id: string; name: string; ownerUserId: string }>): Promise<WorkspaceSummary> {
-    return this.database.withWorkspace(input.id, async client => {
-      const result = await client.query<WorkspaceRow>(
-        `INSERT INTO deviludo.workspaces(id, name)
-         VALUES ($1::uuid, $2)
-         RETURNING id::text, name, created_at::text`,
-        [input.id, input.name],
-      );
-      await client.query(
-        `INSERT INTO deviludo.workspace_memberships(workspace_id, user_id, role)
-         VALUES ($1::uuid, $2::uuid, 'OWNER')`,
-        [input.id, input.ownerUserId],
-      );
-      return workspaceFromRow(result.rows[0]);
-    }, input.ownerUserId);
-  }
-
-  async readWorkspace(workspaceId: string, userId?: string): Promise<WorkspaceSummary | null> {
-    if (userId && !(await this.readMembership(userId, workspaceId))) return null;
+  async readWorkspace(workspaceId: string): Promise<WorkspaceSummary | null> {
     return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<WorkspaceRow>(
         `SELECT id::text, name, created_at::text
@@ -235,100 +125,7 @@ export class CoreRepository {
         [workspaceId],
       );
       return result.rows[0] ? workspaceFromRow(result.rows[0]) : null;
-    }, userId);
-  }
-
-  async readMembership(userId: string, workspaceId: string): Promise<WorkspaceRole | null> {
-    return this.database.withWorkspace(workspaceId, async client => {
-      const result = await client.query<{ role: WorkspaceRole }>(
-        `SELECT role::text FROM deviludo.workspace_memberships
-          WHERE workspace_id = $1::uuid AND user_id = $2::uuid`,
-        [workspaceId, userId],
-      );
-      return result.rows[0]?.role ?? null;
-    }, userId);
-  }
-
-  async listWorkspaceMembers(userId: string, workspaceId: string): Promise<readonly WorkspaceMembershipRecord[]> {
-    return this.database.withWorkspace(workspaceId, async client => {
-      const result = await client.query<MembershipRow>(
-        `SELECT membership.workspace_id::text, membership.user_id::text, app_user.username,
-                membership.role::text, membership.created_at::text
-           FROM deviludo.workspace_memberships membership
-           JOIN deviludo.users app_user ON app_user.id = membership.user_id
-          ORDER BY membership.created_at, membership.user_id`,
-      );
-      return Object.freeze(result.rows.map(row => Object.freeze({
-        workspaceId: row.workspace_id,
-        userId: row.user_id,
-        username: row.username,
-        role: row.role,
-        createdAt: row.created_at,
-      })));
-    }, userId);
-  }
-
-  async createInvitation(input: Readonly<{
-    workspaceId: string;
-    createdBy: string;
-    tokenHash: string;
-    role: Exclude<WorkspaceRole, "OWNER">;
-  }>): Promise<{ id: string; expiresAt: string }> {
-    return this.database.withWorkspace(input.workspaceId, async client => {
-      const result = await client.query<{ id: string; expires_at: string }>(
-        `INSERT INTO deviludo.workspace_invitations(workspace_id, token_hash, role, created_by, expires_at)
-         VALUES ($1::uuid, $2, $3::deviludo.workspace_role, $4::uuid, clock_timestamp() + interval '24 hours')
-         RETURNING id::text, expires_at::text`,
-        [input.workspaceId, input.tokenHash, input.role, input.createdBy],
-      );
-      return Object.freeze({ id: result.rows[0].id, expiresAt: result.rows[0].expires_at });
-    }, input.createdBy);
-  }
-
-  async acceptInvitation(input: Readonly<{
-    tokenHash: string;
-    username: string;
-    passwordHash: string;
-  }>): Promise<UserRecord> {
-    try {
-      const user = await this.database.pool.query<UserRow>(
-        `SELECT id::text, username, instance_admin, created_at::text
-           FROM deviludo.accept_workspace_invitation($1, $2, $3)`,
-        [input.tokenHash, input.username, input.passwordHash],
-      );
-      return userFromRow(user.rows[0]);
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("invitation not found")) {
-        throw Object.assign(new Error("邀请无效或已过期"), { statusCode: 404, code: "INVITATION_NOT_FOUND" });
-      }
-      throw error;
-    }
-  }
-
-  async updateMembership(input: Readonly<{
-    actorUserId: string;
-    workspaceId: string;
-    userId: string;
-    role: WorkspaceRole | null;
-  }>): Promise<void> {
-    await this.database.withWorkspace(input.workspaceId, async client => {
-      if (input.role === null) {
-        const result = await client.query(
-          `DELETE FROM deviludo.workspace_memberships
-            WHERE user_id = $1::uuid AND role <> 'OWNER'`,
-          [input.userId],
-        );
-        if (result.rowCount !== 1) throw Object.assign(new Error("不能移除 Owner 或成员不存在"), { statusCode: 409 });
-      } else {
-        const result = await client.query(
-          `UPDATE deviludo.workspace_memberships SET role = $2::deviludo.workspace_role,
-                  updated_at = clock_timestamp()
-            WHERE user_id = $1::uuid AND role <> 'OWNER'`,
-          [input.userId, input.role],
-        );
-        if (result.rowCount !== 1) throw Object.assign(new Error("不能修改 Owner 或成员不存在"), { statusCode: 409 });
-      }
-    }, input.actorUserId);
+    });
   }
 
   async readAgentSettings(): Promise<StoredInstanceAgentSettings | null> {
@@ -408,7 +205,13 @@ export class CoreRepository {
                 workflow.profile::text AS profile,
                 workflow.target_platforms,
                 workflow.state_data,
-                workflow.updated_at::text AS workflow_updated_at
+                workflow.updated_at::text AS workflow_updated_at,
+                source.revision::text AS source_revision,
+                source.relative_path AS source_relative_path,
+                source.content_digest AS source_digest,
+                source.file_count::text AS source_file_count,
+                source.total_bytes::text AS source_total_bytes,
+                source.created_at::text AS source_created_at
            FROM deviludo.projects p
            LEFT JOIN LATERAL (
              SELECT id, state, profile, target_platforms, state_data, updated_at
@@ -417,6 +220,12 @@ export class CoreRepository {
               ORDER BY created_at DESC
               LIMIT 1
            ) workflow ON true
+           LEFT JOIN LATERAL (
+             SELECT revision, relative_path, content_digest, file_count, total_bytes, created_at
+               FROM deviludo.project_source_revisions
+              WHERE workspace_id = p.workspace_id AND project_id = p.id
+              ORDER BY revision DESC LIMIT 1
+           ) source ON true
           ORDER BY p.created_at DESC`,
       );
       return Object.freeze(result.rows.map(projectSummaryFromRow));
@@ -443,14 +252,9 @@ export class CoreRepository {
         [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.workspace_memberships(workspace_id, user_id, role)
-         VALUES ($1::uuid, $2::uuid, 'OWNER') ON CONFLICT DO NOTHING`,
-        [input.workspaceId, input.actorUserId],
-      );
-      await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, name)
-         VALUES ($1::uuid, $2::uuid, $3)`,
-        [input.workspaceId, input.projectId, input.name],
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
+        [input.workspaceId, input.projectId, input.actorUserId, input.name],
       );
       await insertInitialProjectDocument(client, input);
       await client.query(
@@ -478,7 +282,7 @@ export class CoreRepository {
          ) VALUES ($1, 'PROJECT', $2::uuid, $3::uuid)`,
         [input.idempotencyKey, input.workspaceId, input.projectId],
       );
-    }, input.actorUserId);
+    });
     const created = await this.readProject(input.workspaceId, input.projectId);
     if (!created) throw new Error("Created project could not be read");
     return created;
@@ -491,7 +295,6 @@ export class CoreRepository {
     projectId: string;
     workflowId: string;
     conversationId: string;
-    artifactId: string;
     idempotencyKey: string;
     name: string;
     concept: string;
@@ -506,10 +309,9 @@ export class CoreRepository {
       displayName: string;
       fileCount: number;
       totalBytes: number;
-      bucket: string;
-      key: string;
+      revision: number;
+      relativePath: string;
       sha256: string;
-      sizeBytes: number;
     }>;
     profile: "VALIDATE" | "RELEASE";
     targetPlatforms: readonly ServerOperatingSystem[];
@@ -521,14 +323,9 @@ export class CoreRepository {
         [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.workspace_memberships(workspace_id, user_id, role)
-         VALUES ($1::uuid, $2::uuid, 'OWNER') ON CONFLICT DO NOTHING`,
-        [input.workspaceId, input.actorUserId],
-      );
-      await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, name)
-         VALUES ($1::uuid, $2::uuid, $3)`,
-        [input.workspaceId, input.projectId, input.name],
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
+        [input.workspaceId, input.projectId, input.actorUserId, input.name],
       );
       const markdown = projectDocumentMarkdown(input.name, input.document);
       await client.query(
@@ -573,20 +370,13 @@ export class CoreRepository {
         })],
       );
       await client.query(
-        `INSERT INTO deviludo.artifacts(
-           workspace_id, id, project_id, workflow_id, kind,
-           bucket, object_key, sha256, size_bytes, metadata
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'SOURCE', $5, $6, $7, $8, $9::jsonb)`,
-        [input.workspaceId, input.artifactId, input.projectId, input.workflowId,
-          input.source.bucket, input.source.key, input.source.sha256, input.source.sizeBytes,
-          JSON.stringify({
-            imported: true,
-            sourceKind: input.source.kind,
-            repositoryUrl: input.source.repositoryUrl,
-            displayName: input.source.displayName,
-            fileCount: input.source.fileCount,
-            totalBytes: input.source.totalBytes,
-          })],
+        `INSERT INTO deviludo.project_source_revisions(
+           workspace_id, project_id, revision, relative_path, content_digest,
+           file_count, total_bytes, workflow_id, actor_account_id
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4, $5, $6, $7, $8::uuid, $9::uuid)`,
+        [input.workspaceId, input.projectId, input.source.revision, input.source.relativePath,
+          input.source.sha256, input.source.fileCount, input.source.totalBytes,
+          input.workflowId, input.actorUserId],
       );
       await client.query(
         `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
@@ -613,7 +403,7 @@ export class CoreRepository {
          ) VALUES ($1, 'PROJECT', $2::uuid, $3::uuid)`,
         [input.idempotencyKey, input.workspaceId, input.projectId],
       );
-    }, input.actorUserId);
+    });
     const [project, conversation] = await Promise.all([
       this.readProject(input.workspaceId, input.projectId),
       this.readConversation(input.workspaceId, input.conversationId),
@@ -622,13 +412,14 @@ export class CoreRepository {
     return Object.freeze({ project, conversation });
   }
 
-  async readProjectCreationReceipt(userId: string, idempotencyKey: string): Promise<CreationReceipt | null> {
-    return this.database.withUser(userId, async client => {
+  async readProjectCreationReceipt(workspaceId: string, idempotencyKey: string): Promise<CreationReceipt | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<CreationReceiptRow>(
       `SELECT idempotency_key, operation_kind, workspace_id::text, project_id::text,
               conversation_id::text
-         FROM deviludo.read_project_creation_receipt($1)`,
-      [idempotencyKey],
+         FROM deviludo.project_creation_receipts
+        WHERE workspace_id = $1::uuid AND idempotency_key = $2`,
+      [workspaceId, idempotencyKey],
     );
       return result.rows[0] ? creationReceiptFromRow(result.rows[0]) : null;
     });
@@ -659,13 +450,9 @@ export class CoreRepository {
         [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.workspace_memberships(workspace_id, user_id, role)
-         VALUES ($1::uuid, $2::uuid, 'OWNER') ON CONFLICT DO NOTHING`,
-        [input.workspaceId, input.actorUserId],
-      );
-      await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, name) VALUES ($1::uuid, $2::uuid, $3)`,
-        [input.workspaceId, input.projectId, input.name],
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
+        [input.workspaceId, input.projectId, input.actorUserId, input.name],
       );
       await insertInitialProjectDocument(client, input);
       await client.query(
@@ -712,7 +499,7 @@ export class CoreRepository {
          ) VALUES ($1, 'CONVERSATION', $2::uuid, $3::uuid, $4::uuid)`,
         [input.idempotencyKey, input.workspaceId, input.projectId, input.conversationId],
       );
-    }, input.actorUserId);
+    });
     const [project, conversation] = await Promise.all([
       this.readProject(input.workspaceId, input.projectId),
       this.readConversation(input.workspaceId, input.conversationId),
@@ -760,7 +547,13 @@ export class CoreRepository {
                 workflow.profile::text AS profile,
                 workflow.target_platforms,
                 workflow.state_data,
-                workflow.updated_at::text AS workflow_updated_at
+                workflow.updated_at::text AS workflow_updated_at,
+                source.revision::text AS source_revision,
+                source.relative_path AS source_relative_path,
+                source.content_digest AS source_digest,
+                source.file_count::text AS source_file_count,
+                source.total_bytes::text AS source_total_bytes,
+                source.created_at::text AS source_created_at
            FROM deviludo.projects p
            LEFT JOIN LATERAL (
              SELECT id, state, profile, target_platforms, state_data, updated_at
@@ -769,6 +562,12 @@ export class CoreRepository {
               ORDER BY created_at DESC
               LIMIT 1
            ) workflow ON true
+           LEFT JOIN LATERAL (
+             SELECT revision, relative_path, content_digest, file_count, total_bytes, created_at
+               FROM deviludo.project_source_revisions
+              WHERE workspace_id = p.workspace_id AND project_id = p.id
+              ORDER BY revision DESC LIMIT 1
+           ) source ON true
           WHERE p.id = $1::uuid`,
         [projectId],
       );
@@ -800,9 +599,8 @@ export class CoreRepository {
         ),
         client.query<ProjectDocumentRevisionRow>(
           `SELECT revision.revision::text, revision.source,
-                  author.username AS author_username, revision.created_at::text
+                  revision.author_actor_account_id::text AS author_username, revision.created_at::text
              FROM deviludo.project_document_revisions revision
-             LEFT JOIN deviludo.users author ON author.id = revision.author_user_id
             WHERE revision.project_id = $1::uuid
             ORDER BY revision.revision DESC
             LIMIT 30`,
@@ -894,18 +692,18 @@ export class CoreRepository {
       await client.query(
         `UPDATE deviludo.project_documents
             SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
-                maintained_by = 'USER', updated_by_user_id = $5::uuid,
+                maintained_by = 'USER', updated_by_actor_account_id = $5::uuid,
                 updated_at = clock_timestamp()
           WHERE project_id = $1::uuid`,
         [input.projectId, revision, JSON.stringify(content), markdown, input.actorUserId],
       );
       await client.query(
         `INSERT INTO deviludo.project_document_revisions(
-           workspace_id, project_id, revision, content, markdown, source, author_user_id
+           workspace_id, project_id, revision, content, markdown, source, author_actor_account_id
          ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5, 'USER_EDIT', $6::uuid)`,
         [input.workspaceId, input.projectId, revision, JSON.stringify(content), markdown, input.actorUserId],
       );
-    }, input.actorUserId);
+    });
     return this.readProject(input.workspaceId, input.projectId);
   }
 
@@ -931,10 +729,22 @@ export class CoreRepository {
       );
       const state = workflow.rows[0]?.state ?? "DRAFT";
       if (!["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(state)) {
-        throw Object.assign(new Error("请先取消正在执行的交付，再删除项目"), {
-          statusCode: 409,
-          code: "PROJECT_DELETE_BLOCKED",
-        });
+        await client.query(
+          `UPDATE deviludo.workflow_instances
+              SET state = 'CANCELLED', updated_at = clock_timestamp()
+            WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+              AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')`,
+          [workspaceId, projectId],
+        );
+        await client.query(
+          `UPDATE deviludo.jobs
+              SET state = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
+                  lease_expires_at = NULL, heartbeat_at = NULL,
+                  fencing_token = fencing_token + 1, updated_at = clock_timestamp()
+            WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+              AND state IN ('QUEUED', 'RETRY', 'RUNNING')`,
+          [workspaceId, projectId],
+        );
       }
 
       await beforeDelete?.();
@@ -1375,7 +1185,7 @@ export class CoreRepository {
           await client.query(
             `UPDATE deviludo.project_documents
                 SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
-                    maintained_by = 'AGENT', updated_by_user_id = NULL,
+                    maintained_by = 'AGENT', updated_by_actor_account_id = NULL,
                     last_agent_maintained_at = clock_timestamp(), updated_at = clock_timestamp()
               WHERE project_id = $1::uuid`,
             [input.projectId, revision, JSON.stringify(content), markdown],
@@ -1475,7 +1285,7 @@ export class CoreRepository {
     createdBy: string;
   }>): Promise<{ id: string; expiresAt: string }> {
     const result = await this.database.pool.query<{ id: string; expires_at: string }>(
-      `INSERT INTO deviludo.e2e_enrollment_tokens(token_hash, pool_kind, expires_at, created_by)
+      `INSERT INTO deviludo.e2e_enrollment_tokens(token_hash, pool_kind, expires_at, created_by_actor_account_id)
        VALUES ($1, $2::deviludo.server_pool_kind, clock_timestamp() + interval '30 minutes', $3::uuid)
        RETURNING id::text, expires_at::text`,
       [input.tokenHash, input.poolKind, input.createdBy],
@@ -1659,7 +1469,7 @@ export class CoreRepository {
 
   async cleanupExpiredAuthState(): Promise<number> {
     const result = await this.database.pool.query<{ removed: string }>(
-      "SELECT deviludo.cleanup_expired_auth_state()::text AS removed",
+      "SELECT deviludo.cleanup_expired_executor_state()::text AS removed",
     );
     return Number(result.rows[0]?.removed ?? 0);
   }
@@ -1932,42 +1742,26 @@ function serverNodeFromRow(row: ServerNodeRow): ServerNodeRecord {
 }
 
 type ClaimRow = { jobId: string; workspaceId: string; leaseToken: string };
-type AuthenticationEventKind =
-  | "INSTANCE_SETUP" | "LOGIN_SUCCEEDED" | "LOGIN_FAILED" | "LOGOUT" | "PASSWORD_CHANGED"
-  | "INVITATION_CREATED" | "INVITATION_ACCEPTED" | "MEMBERSHIP_CHANGED";
-type LoginUserRow = {
-  id: string;
-  username: string;
-  password_hash: string;
-  instance_admin: boolean;
-  disabled_at: string | null;
-  created_at: string;
-};
-export type LoginUser = UserRecord & Readonly<{ passwordHash: string; disabledAt: string | null }>;
-type UserRow = {
-  id: string;
-  username: string;
-  instance_admin: boolean;
-  created_at: string;
-};
-type SessionRow = UserRow & {
-  user_id: string;
-  csrf_hash: string;
-  expires_at: string;
-};
-export type AuthenticatedSession = Readonly<{
-  id: string;
-  user: UserRecord;
-  csrfHash: string;
-  expiresAt: string;
-}>;
-type MembershipRow = {
+type SourceReadyEventRow = {
+  event_id: string;
   workspace_id: string;
-  user_id: string;
-  username: string;
-  role: WorkspaceRole;
+  project_id: string;
+  workflow_id: string;
+  source_revision: string;
+  content_digest: string;
+  development_actor_account_id: string;
   created_at: string;
 };
+export type SourceReadyEvent = Readonly<{
+  eventId: string;
+  workspaceId: string;
+  projectId: string;
+  workflowId: string;
+  sourceRevision: number;
+  digest: string;
+  developmentActorAccountId: string;
+  createdAt: string;
+}>;
 type AgentSettingsRow = {
   agent_runtime: string;
   base_url: string;
@@ -2061,6 +1855,7 @@ export type ProductProjectSummary = Readonly<{
   targetPlatforms: readonly ServerOperatingSystem[];
   concept: string;
   specification: Readonly<Record<string, unknown>>;
+  source: ProjectSourceRevision | null;
 }>;
 
 export type ProductProjectDetail = ProductProjectSummary & Readonly<{
@@ -2182,6 +1977,12 @@ type ProductProjectRow = {
   workflow_updated_at: string | null;
   profile: "VALIDATE" | "RELEASE" | null;
   target_platforms: ServerOperatingSystem[] | null;
+  source_revision: string | null;
+  source_relative_path: string | null;
+  source_digest: string | null;
+  source_file_count: string | null;
+  source_total_bytes: string | null;
+  source_created_at: string | null;
 };
 
 type ProductJobRow = {
@@ -2249,6 +2050,16 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
     specification: specification && typeof specification === "object" && !Array.isArray(specification)
       ? Object.freeze({ ...(specification as Record<string, unknown>) })
       : Object.freeze({}),
+    source: row.source_revision && row.source_relative_path && row.source_digest && row.source_created_at
+      ? Object.freeze({
+          revision: Number(row.source_revision),
+          relativePath: row.source_relative_path,
+          digest: row.source_digest,
+          fileCount: Number(row.source_file_count ?? 0),
+          totalBytes: Number(row.source_total_bytes ?? 0),
+          createdAt: row.source_created_at,
+        })
+      : null,
   });
 }
 
@@ -2352,32 +2163,6 @@ async function touchProjectActivity(
   );
 }
 
-function userFromRow(row: UserRow): UserRecord {
-  return Object.freeze({
-    id: row.id,
-    username: row.username,
-    instanceAdmin: row.instance_admin,
-    createdAt: row.created_at,
-  });
-}
-
-function loginUserFromRow(row: LoginUserRow): LoginUser {
-  return Object.freeze({
-    ...userFromRow(row),
-    passwordHash: row.password_hash,
-    disabledAt: row.disabled_at,
-  });
-}
-
-function sessionFromRow(row: SessionRow): AuthenticatedSession {
-  return Object.freeze({
-    id: row.id,
-    user: userFromRow({ ...row, id: row.user_id }),
-    csrfHash: row.csrf_hash,
-    expiresAt: row.expires_at,
-  });
-}
-
 function workspaceFromRow(row: WorkspaceRow): WorkspaceSummary {
   return Object.freeze({ id: row.id, name: row.name, createdAt: row.created_at });
 }
@@ -2411,3 +2196,5 @@ function appendRevisionNote(
     revisionNotes: Object.freeze([...previous, note].slice(-12)),
   });
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

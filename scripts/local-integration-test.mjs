@@ -2,20 +2,13 @@ import { randomUUID } from "node:crypto";
 
 const webUrl = new URL(process.env.DEVILUDO_WEB_URL ?? "http://127.0.0.1:3100");
 const coreUrl = new URL(process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080");
-const username = process.env.DEVILUDO_LOCAL_TEST_USERNAME ?? "";
-const password = process.env.DEVILUDO_LOCAL_TEST_PASSWORD ?? "";
-if (!username || !password) {
-  throw new Error("DEVILUDO_LOCAL_TEST_USERNAME and DEVILUDO_LOCAL_TEST_PASSWORD are required; local:test never creates a guessed administrator");
-}
-
 await json(new URL("/api/health/live", webUrl));
 await json(new URL("/health/live", coreUrl));
-const cookies = new Map();
 const current = await request("/api/session");
-const login = current.session?.setupRequired
-  ? await request("/api/auth/setup", { method: "POST", body: { username, password, passwordConfirmation: password } })
-  : await request("/api/auth/login", { method: "POST", body: { username, password } });
-if (!login.user?.instanceAdmin) throw new Error("Local integration user must be an instance administrator");
+if (!current.session?.authenticated || current.session.authMode !== "STANDALONE"
+  || !current.session.user?.instanceAdmin || current.session.canLogout !== false) {
+  throw new Error("Local integration requires standalone anonymous administrator access");
+}
 
 const agent = await request("/api/settings/agent");
 if (!agent.settings?.apiKeyConfigured) {
@@ -63,16 +56,12 @@ async function waitForProject(projectId, timeout) {
 async function request(path, options = {}) {
   const headers = new Headers(options.headers);
   headers.set("content-type", "application/json");
-  if (cookies.size) headers.set("cookie", [...cookies].map(([name, value]) => `${name}=${value}`).join("; "));
+  headers.set("origin", webUrl.origin);
   const response = await fetch(new URL(path, webUrl), {
     method: options.method ?? "GET", headers,
     ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
     signal: AbortSignal.timeout(70_000),
   });
-  for (const setCookie of response.headers.getSetCookie()) {
-    const [pair] = setCookie.split(";", 1); const separator = pair.indexOf("=");
-    if (separator > 0) { const name = pair.slice(0, separator); const value = pair.slice(separator + 1); if (value) cookies.set(name, value); else cookies.delete(name); }
-  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`${path} returned ${response.status}: ${JSON.stringify(body)}`);
   return body;

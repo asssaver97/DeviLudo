@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
 const ciMode = process.env.DEVILUDO_LOCAL_CI === "1";
+const resetIncompatibleBaseline = process.argv.includes("--reset-incompatible-baseline");
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
   throw new Error("DEVILUDO_WEB_HOST_PORT must be a valid TCP port");
@@ -43,9 +44,15 @@ const imageIds = await Promise.all([
   "deviludo-agent-claude:local", "deviludo-agent-codex:local", "deviludo-godot-builder:local",
   "deviludo-steam-publisher:local", "deviludo-e2e-macos:local", "deviludo-agent-fixture:local",
 ].map(async image => (await execute("docker", ["image", "inspect", "--format", "{{.Id}}", image])).stdout.trim()));
-const runtimeImages = JSON.stringify(Object.fromEntries([
-  "AGENT_CLAUDE", "AGENT_CODEX", "GODOT_BUILDER", "STEAM_PUBLISHER", "E2E_MACOS",
-].map((key, index) => [key, imageIds[index]])));
+const runtimeImages = JSON.stringify({
+  AGENT_CLAUDE: imageIds[0],
+  AGENT_CODEX: imageIds[1],
+  GODOT_BUILDER: imageIds[2],
+  STEAM_PUBLISHER: imageIds[3],
+  E2E_LINUX: imageIds[4],
+  E2E_WINDOWS: imageIds[4],
+  E2E_MACOS: imageIds[4],
+});
 const dockerSocketGid = await resolveDockerSocketGid();
 const environment = {
   ...baseEnvironment,
@@ -57,9 +64,7 @@ const environment = {
   DEVILUDO_DOCKER_GID: dockerSocketGid,
   DEVILUDO_RUNTIME_IMAGES_JSON: runtimeImages,
 };
-await execute("docker", [
-  "compose", "-f", "infra/docker-compose.yml", "--profile", "init", "run", "--rm", "migrate",
-], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
+await migrateWithOptionalBaselineReset(environment);
 const bootstrap = await execute("docker", [
   "compose", "-f", "infra/docker-compose.yml", "--profile", "init", "run", "--rm",
   "-e", "DEVILUDO_RUNTIME_IMAGES_JSON", "bootstrap-instance",
@@ -167,4 +172,42 @@ async function retainActiveJobRuntimeImages(environment) {
   } catch {
     return [];
   }
+}
+
+async function migrateWithOptionalBaselineReset(environment) {
+  try {
+    await runMigration(environment);
+  } catch (error) {
+    if (!isIncompatibleBaselineError(error)) throw error;
+    if (!resetIncompatibleBaseline) {
+      throw Object.assign(new Error([
+        "检测到不兼容的旧版 DeviLudo 本地数据基线。持久源码 v1 不支持原地迁移。",
+        "如确认删除本地 PostgreSQL、MinIO 制品、项目源码目录和 Vault 数据，请运行：",
+        "  npm run local:reset:source-v1",
+        "任何远端服务的数据都不会被删除。",
+      ].join("\n")), { code: "INCOMPATIBLE_BASELINE_RESET_REQUIRED" });
+    }
+
+    console.warn("正在重置不兼容的本地 PostgreSQL、MinIO、项目源码和 Vault 数据；不会删除任何远端数据。");
+    await execute("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "down", "--volumes", "--remove-orphans",
+    ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
+    await execute("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres",
+    ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
+    await runMigration(environment);
+    console.warn("持久源码 v1 本地数据基线已重建，继续启动服务。");
+  }
+}
+
+async function runMigration(environment) {
+  await execute("docker", [
+    "compose", "-f", "infra/docker-compose.yml", "--profile", "init", "run", "--rm", "migrate",
+  ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
+}
+
+function isIncompatibleBaselineError(error) {
+  if (!(error instanceof Error)) return false;
+  const details = `${error.message}\n${typeof error.stderr === "string" ? error.stderr : ""}`;
+  return details.includes("INCOMPATIBLE_BASELINE_RESET_REQUIRED");
 }

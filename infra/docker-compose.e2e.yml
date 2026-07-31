@@ -3,6 +3,7 @@ services:
     environment:
       NODE_ENV: test
       DEVILUDO_CORE_POLL_MS: "100"
+      DEVILUDO_DEFAULT_WORKFLOW_PROFILE: RELEASE
       DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
       DEVILUDO_PROJECT_NAMING_TEST_RESPONSE: 时间回廊
       DEVILUDO_CONVERSATION_AGENT_TEST_RESPONSE: '{"reply":"测试设计 Agent 已结合项目上下文生成回复。","options":["强化资源管理","增加随机事件"],"applyToDraft":true,"readyForDevelopment":true,"projectDocument":{"introduction":"测试设计 Agent 已整理当前游戏需求。","gameplay":"围绕玩家确认的核心循环进行操作、反馈与结算。","categories":["自动化测试","游戏设计"],"features":["需求对话实时同步","可执行的核心循环"]}}'

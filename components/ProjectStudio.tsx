@@ -15,6 +15,7 @@ import type {
   ProductConversation,
   ProductConversationSummary,
   ProductProjectDetail,
+  ProductSession,
 } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import {
@@ -37,6 +38,27 @@ const PIPELINE = [
   ["STEAM_CLEAN_INSTALL", "干净回装", "Clean Install"],
 ] as const;
 
+type RepositoryConnection = Readonly<{
+  repositoryId: string;
+  fullName: string;
+  htmlUrl: string;
+  private: boolean;
+  defaultBranch: string;
+  syncBranch: string;
+  syncState: "PENDING" | "SYNCING" | "SYNCED" | "FAILED" | "REMOTE_DIVERGED";
+  lastPushedCommitSha: string | null;
+  lastSourceRevision: number | null;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+}>;
+
+type GitHubRepositoryOption = Readonly<{
+  id: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+}>;
+
 export function ProjectStudio({ projectId }: { projectId: string }) {
   const { locale, text } = useLanguage();
   const [project, setProject] = useState<ProductProjectDetail | null>(null);
@@ -57,6 +79,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [documentCollapsed, setDocumentCollapsed] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
+  const [platformManaged, setPlatformManaged] = useState(false);
+  const [repository, setRepository] = useState<RepositoryConnection | null>(null);
+  const [repositoryOptions, setRepositoryOptions] = useState<readonly GitHubRepositoryOption[]>([]);
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
+  const [repositoryBusy, setRepositoryBusy] = useState(false);
+  const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
 
   const loadProject = useCallback(async () => {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" });
@@ -93,6 +121,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setArtifacts(payload.artifacts);
   }, [projectId, text]);
 
+  const loadRepository = useCallback(async () => {
+    const sessionResponse = await fetch("/api/session", { cache: "no-store" });
+    if (!sessionResponse.ok) return;
+    const sessionPayload = await sessionResponse.json() as { session?: ProductSession };
+    if (sessionPayload.session?.authMode !== "PLATFORM") return;
+    setPlatformManaged(true);
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection | null; error?: { code?: string } };
+    if (!response.ok) throw new Error(payload.error?.code ?? text("仓库状态读取失败", "Unable to load repository status"));
+    setRepository(payload.data ?? null);
+  }, [projectId, text]);
+
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
@@ -101,6 +141,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           await loadProject();
           await loadConversations();
           await loadArtifacts();
+          await loadRepository();
         } catch (reason) {
           if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
         }
@@ -109,9 +150,65 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     const timer = setInterval(() => void Promise.all([
       loadProject(),
       loadArtifacts(),
+      ...(platformManaged ? [loadRepository()] : []),
     ]).catch(() => undefined), 1500);
     return () => { active = false; clearTimeout(initial); clearInterval(timer); };
-  }, [loadArtifacts, loadConversations, loadProject, text]);
+  }, [loadArtifacts, loadConversations, loadProject, loadRepository, platformManaged, text]);
+
+  async function createPrivateRepository() {
+    if (!project || repositoryBusy) return;
+    setRepositoryBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/create`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectName: project.name }),
+      });
+      const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection; error?: { code?: string } };
+      if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
+      setRepository(payload.data);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库创建失败", "Unable to create repository")); }
+    finally { setRepositoryBusy(false); }
+  }
+
+  async function openRepositoryPicker() {
+    if (repositoryBusy) return;
+    setRepositoryBusy(true); setError(null);
+    try {
+      const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as { data?: GitHubRepositoryOption[]; error?: { code?: string } };
+      if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
+      setRepositoryOptions(payload.data);
+      setSelectedRepositoryId(payload.data[0]?.id ?? "");
+      setRepositoryPickerOpen(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库列表读取失败", "Unable to list repositories")); }
+    finally { setRepositoryBusy(false); }
+  }
+
+  async function bindRepository() {
+    if (!project || !selectedRepositoryId || repositoryBusy) return;
+    setRepositoryBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositoryId: selectedRepositoryId, projectSlug: project.name }),
+      });
+      const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection; error?: { code?: string } };
+      if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
+      setRepository(payload.data); setRepositoryPickerOpen(false);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库绑定失败", "Unable to bind repository")); }
+    finally { setRepositoryBusy(false); }
+  }
+
+  async function retryRepositorySync() {
+    if (repositoryBusy) return;
+    setRepositoryBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/sync/retry`, { method: "POST" });
+      const payload = await response.json().catch(() => ({})) as { error?: { code?: string } };
+      if (!response.ok) throw new Error(repositoryMessage(payload.error?.code, text));
+      await loadRepository();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : text("同步重试失败", "Unable to retry synchronization")); }
+    finally { setRepositoryBusy(false); }
+  }
 
   const activeAgentJobId = project?.jobs
     .filter(job => job.kind === "AGENT_GENERATION")
@@ -374,6 +471,24 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
 
+      {project.source ? <section className="panel-card repository-sync-panel" aria-label={text("本地源码", "Local source")}>
+        <header className="section-heading"><div><span className="eyebrow">LOCAL SOURCE</span><h2>{text(`源码修订 r${project.source.revision}`, `SOURCE REVISION r${project.source.revision}`)}</h2></div><span className="revision-badge">{project.source.digest.slice(0, 18)}</span></header>
+        <p>{text("受控目录", "Managed path")}: <code>{project.source.relativePath}</code> · {project.source.fileCount} files · {project.source.totalBytes} bytes</p>
+      </section> : null}
+
+      {platformManaged ? <section className="panel-card repository-sync-panel" aria-label={text("GitHub 仓库", "GitHub repository")}>
+        <header className="section-heading"><div><span className="eyebrow">GITHUB REPOSITORY</span><h2>{repository ? repository.fullName : text("尚未绑定仓库", "NO REPOSITORY CONNECTED")}</h2></div>{repository ? <span className={`revision-badge repository-state-${repository.syncState.toLowerCase()}`}>{repository.syncState}</span> : null}</header>
+        {repository ? <>
+          <p><a href={repository.htmlUrl} rel="noreferrer" target="_blank">{repository.fullName}</a> · <code>{repository.syncBranch}</code>{repository.lastSourceRevision ? ` · r${repository.lastSourceRevision}` : ""}</p>
+          {repository.lastError ? <p className="repository-onboarding-error">{repository.lastError}</p> : null}
+          <div className="platform-repository-actions">
+            <button className="button button-secondary" disabled={repositoryBusy} onClick={() => void openRepositoryPicker()} type="button">{text("重新绑定", "RECONNECT")}</button>
+            {repository.syncState === "FAILED" || repository.syncState === "REMOTE_DIVERGED" ? <button className="button button-primary" disabled={repositoryBusy} onClick={() => void retryRepositorySync()} type="button">{text("重试同步", "RETRY SYNC")}</button> : null}
+          </div>
+        </> : <><p>{text("项目源码仍以 Core 本地 revision 为准；绑定后，成功工作流由 Platform 独立同步。", "Core source revisions remain authoritative; after binding, Platform independently syncs successful workflows.")}</p><div className="platform-repository-actions"><button className="button button-primary" disabled={repositoryBusy} onClick={() => void createPrivateRepository()} type="button">{text("创建私有仓库", "CREATE PRIVATE REPOSITORY")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => void openRepositoryPicker()} type="button">{text("绑定已有仓库", "CONNECT EXISTING")}</button><Link className="button button-secondary" href="/account">{text("GitHub 授权", "GITHUB ACCESS")}</Link></div></>}
+        {repositoryPickerOpen ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} onChange={event => setSelectedRepositoryId(event.target.value)} value={selectedRepositoryId}>{repositoryOptions.map(option => <option key={option.id} value={option.id}>{option.fullName}{option.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={!selectedRepositoryId || repositoryBusy} onClick={() => void bindRepository()} type="button">{text("确认绑定", "CONNECT")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => setRepositoryPickerOpen(false)} type="button">{text("取消", "CANCEL")}</button></div> : null}
+      </section> : null}
+
       <section aria-label={text("交付流程", "Delivery pipeline")} className="product-delivery-pipeline">
         <header className="product-delivery-pipeline-header">
           <div>
@@ -562,8 +677,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <section aria-labelledby="project-delete-title" aria-modal="true" className="workspace-dialog project-delete-dialog" role="dialog">
             <span className="eyebrow">DELETE PROJECT</span>
             <h2 id="project-delete-title">{text(`删除《${project.name}》？`, `DELETE “${project.name}”?`)}</h2>
-            <p>{deliveryActive ? text("项目仍在执行交付。请先取消本次交付，等待状态变为已取消后再删除。", "This project is still being delivered. Cancel the delivery and wait for it to stop before deleting it.") : text("历史会话、说明文档、工作流、制品记录和对象文件都会永久删除。", "Conversation history, the project document, workflows, artifacts, and object files will be deleted permanently.")}</p>
-            <div><button className="button button-secondary" disabled={deleting} onClick={() => setConfirmingDelete(false)} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting || deliveryActive} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : text("确认删除", "CONFIRM DELETE")}</button></div>
+            <p>{deliveryActive ? text("正在执行的任务会先被停止；随后删除历史会话、说明文档、工作流、对象制品和本地源码目录。", "Active tasks will be stopped first; conversations, documents, workflows, object artifacts, and the local source directory will then be deleted.") : text("历史会话、说明文档、工作流、对象制品和本地源码目录都会永久删除。", "Conversations, documents, workflows, object artifacts, and the local source directory will be deleted permanently.")}</p>
+            <div><button className="button button-secondary" disabled={deleting} onClick={() => setConfirmingDelete(false)} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : text("确认删除", "CONFIRM DELETE")}</button></div>
           </section>
         </div>
       ) : null}
@@ -752,7 +867,6 @@ function artifactLabel(
   text: (chinese: string, english: string) => string,
 ): string {
   const labels: Record<ArtifactRecord["kind"], readonly [string, string]> = {
-    SOURCE: ["源码快照", "SOURCE SNAPSHOT"],
     SPECIFICATION: ["需求快照", "REQUIREMENTS SNAPSHOT"],
     PROJECT_DOCUMENT: ["项目说明", "PROJECT DOCUMENT"],
     BUILD: ["游戏构建", "GAME BUILD"],
@@ -806,6 +920,14 @@ function formatConversationTime(value: string, locale: string, text: (chinese: s
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function repositoryMessage(code: string | undefined, text: (chinese: string, english: string) => string): string {
+  if (code === "GITHUB_REAUTHORIZE_REQUIRED") return text("请先在账号设置中连接或重新授权 GitHub", "Connect or reauthorize GitHub in Account settings first");
+  if (code === "GITHUB_PERMISSION_OR_RATE_LIMIT" || code === "GITHUB_PUSH_REQUIRED") return text("当前 GitHub 账号没有推送权限，或组织 SSO 尚未授权", "The current GitHub account cannot push, or organization SSO is not authorized");
+  if (code === "ORGANIZATION_ADMIN_REQUIRED") return text("只有组织 Owner 或 Admin 可以重新绑定仓库", "Only an organization Owner or Admin can reconnect a repository");
+  if (code === "SYNC_NOT_RETRYABLE") return text("当前没有可重试的仓库同步", "There is no repository synchronization to retry");
+  return code ?? text("仓库操作失败", "Repository operation failed");
 }
 
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {

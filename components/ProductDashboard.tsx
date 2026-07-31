@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
-import type { ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
+import type { ProductProjectSummary, ProductSession, WorkspaceSummary } from "@/lib/product/contracts";
 import { createStoredZip, shouldIncludeProjectPath } from "@/lib/product/source-archive";
 import { ProductShell } from "./ProductShell";
-import { ArrowIcon, FileIcon, GithubIcon, PlusIcon, SparkIcon } from "./console/Icons";
+import { ArrowIcon, FileIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 
 export function ProductDashboard({
@@ -24,13 +24,14 @@ export function ProductDashboard({
   const [name, setName] = useState("");
   const [concept, setConcept] = useState("");
   const [creationMode, setCreationMode] = useState(initialMode);
-  const [importKind, setImportKind] = useState<"GIT" | "LOCAL">("GIT");
-  const [repositoryUrl, setRepositoryUrl] = useState("");
   const [folderFiles, setFolderFiles] = useState<readonly File[]>([]);
   const [archiveFile, setArchiveFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [platformManaged, setPlatformManaged] = useState(false);
+  const [githubRepositories, setGitHubRepositories] = useState<readonly { id: string; fullName: string; private: boolean }[]>([]);
+  const [selectedGitHubRepositoryId, setSelectedGitHubRepositoryId] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -41,6 +42,9 @@ export function ProductDashboard({
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false);
     });
+    fetch("/api/session", { cache: "no-store", signal: controller.signal }).then(response => response.ok ? response.json() : null).then((payload: { session?: ProductSession } | null) => {
+      if (!controller.signal.aborted) setPlatformManaged(payload?.session?.authMode === "PLATFORM");
+    }).catch(() => undefined);
     if (creationOnly && initialMode === "IDEA") setTimeout(() => conceptRef.current?.focus(), 0);
     return () => controller.abort();
   }, [creationOnly, initialMode, text]);
@@ -69,26 +73,17 @@ export function ProductDashboard({
   }
 
   async function importProject() {
-    if (creating || (importKind === "GIT" ? repositoryUrl.trim().length < 10 : (!archiveFile && folderFiles.length === 0))) return;
+    if (creating || (!archiveFile && folderFiles.length === 0)) return;
     setCreating(true);
     setError(null);
     operationKey.current ??= `project-import:${crypto.randomUUID()}`;
     try {
-      let response: Response;
-      if (importKind === "GIT") {
-        response = await fetch("/api/projects/import/git", {
-          method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": operationKey.current },
-          body: JSON.stringify({ repositoryUrl: repositoryUrl.trim() }),
-        });
-      } else {
-        const local = await localProjectArchive(archiveFile, folderFiles, text);
-        response = await fetch(`/api/projects/import/archive?name=${encodeURIComponent(local.name)}`, {
-          method: "POST",
-          headers: { "content-type": "application/zip", "idempotency-key": operationKey.current },
-          body: local.bytes,
-        });
-      }
+      const local = await localProjectArchive(archiveFile, folderFiles, text);
+      const response = await fetch(`/api/projects/import/archive?name=${encodeURIComponent(local.name)}`, {
+        method: "POST",
+        headers: { "content-type": "application/zip", "idempotency-key": operationKey.current },
+        body: local.bytes,
+      });
       const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       operationKey.current = null;
       window.dispatchEvent(new CustomEvent("deviludo:workspace-changed", { detail: payload.workspace }));
@@ -101,6 +96,33 @@ export function ProductDashboard({
       setError(messageFor(reason, text));
       setCreating(false);
     }
+  }
+
+  async function loadGitHubRepositories() {
+    if (creating) return;
+    setCreating(true); setError(null);
+    try {
+      const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
+      const payload = await readPlatformJson(response) as { data: { id: string; fullName: string; private: boolean }[] };
+      setGitHubRepositories(payload.data);
+      setSelectedGitHubRepositoryId(payload.data[0]?.id ?? "");
+    } catch (reason) { setError(platformRepositoryMessage(reason, text)); }
+    finally { setCreating(false); }
+  }
+
+  async function importGitHubProject() {
+    if (creating || !selectedGitHubRepositoryId) return;
+    setCreating(true); setError(null);
+    try {
+      const response = await fetch("/api/projects/import/github", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositoryId: selectedGitHubRepositoryId }),
+      });
+      const payload = await readPlatformJson(response) as { data?: { project?: { project?: { id?: string } } } };
+      const projectId = payload.data?.project?.project?.id;
+      if (!projectId) throw new Error(text("GitHub 导入响应无效", "GitHub import returned an invalid project"));
+      router.push(`/projects/${projectId}`);
+    } catch (reason) { setError(platformRepositoryMessage(reason, text)); setCreating(false); }
   }
 
   if (creationOnly) {
@@ -126,21 +148,15 @@ export function ProductDashboard({
             </div>
           ) : (
             <div className="repository-onboarding-form project-import-form">
-              <div className="import-source-switch" role="tablist">
-                <button aria-selected={importKind === "GIT"} className={importKind === "GIT" ? "is-active" : ""} onClick={() => { setImportKind("GIT"); setError(null); }} role="tab" type="button"><GithubIcon /> {text("Git 仓库", "GIT REPOSITORY")}</button>
-                <button aria-selected={importKind === "LOCAL"} className={importKind === "LOCAL" ? "is-active" : ""} onClick={() => { setImportKind("LOCAL"); setError(null); }} role="tab" type="button"><FileIcon /> {text("本地项目", "LOCAL PROJECT")}</button>
+              <p>{text("Core 只从本地目录或 ZIP 导入源码；GitHub 导入由 DeviLudo Platform 完成。", "Core imports source only from a local folder or ZIP; GitHub imports are handled by DeviLudo Platform.")}</p>
+              <div className="local-project-inputs">
+                <label className="project-file-picker">{text("选择项目文件夹", "Choose project folder")}<input aria-label={text("本地项目文件夹", "Local project folder")} multiple onChange={event => { setArchiveFile(null); setFolderFiles(Array.from(event.target.files ?? [])); }} type="file" {...({ webkitdirectory: "" } as InputHTMLAttributes<HTMLInputElement>)} /></label>
+                <span>{text("或", "OR")}</span>
+                <label className="project-file-picker">{text("选择 ZIP", "Choose ZIP")}<input accept=".zip,application/zip" aria-label={text("项目 ZIP", "Project ZIP")} onChange={event => { setFolderFiles([]); setArchiveFile(event.target.files?.[0] ?? null); }} type="file" /></label>
+                {archiveFile ? <b>{archiveFile.name}</b> : folderFiles.length ? <b>{text(`已选择 ${folderFiles.length} 个文件`, `${folderFiles.length} files selected`)}</b> : null}
               </div>
-              {importKind === "GIT" ? (
-                <label>{text("Git 仓库地址", "Git repository URL")}<input aria-label={text("Git 仓库地址", "Git repository URL")} autoCapitalize="none" autoCorrect="off" onChange={event => setRepositoryUrl(event.target.value)} placeholder="https://github.com/owner/game.git" spellCheck={false} value={repositoryUrl} /></label>
-              ) : (
-                <div className="local-project-inputs">
-                  <label className="project-file-picker">{text("选择项目文件夹", "Choose project folder")}<input aria-label={text("本地项目文件夹", "Local project folder")} multiple onChange={event => { setArchiveFile(null); setFolderFiles(Array.from(event.target.files ?? [])); }} type="file" {...({ webkitdirectory: "" } as InputHTMLAttributes<HTMLInputElement>)} /></label>
-                  <span>{text("或", "OR")}</span>
-                  <label className="project-file-picker">{text("选择 ZIP", "Choose ZIP")}<input accept=".zip,application/zip" aria-label={text("项目 ZIP", "Project ZIP")} onChange={event => { setFolderFiles([]); setArchiveFile(event.target.files?.[0] ?? null); }} type="file" /></label>
-                  {archiveFile ? <b>{archiveFile.name}</b> : folderFiles.length ? <b>{text(`已选择 ${folderFiles.length} 个文件`, `${folderFiles.length} files selected`)}</b> : null}
-                </div>
-              )}
-              <div className="idea-submit-row"><button className="button button-acid" disabled={creating || (importKind === "GIT" ? repositoryUrl.trim().length < 10 : (!archiveFile && folderFiles.length === 0))} onClick={() => void importProject()} type="button"><FileIcon />{creating ? text("Agent 正在解析项目…", "AGENT IS ANALYZING…") : text("导入并解析", "IMPORT & ANALYZE")}</button></div>
+              <div className="idea-submit-row"><button className="button button-acid" disabled={creating || (!archiveFile && folderFiles.length === 0)} onClick={() => void importProject()} type="button"><FileIcon />{creating ? text("Agent 正在解析项目…", "AGENT IS ANALYZING…") : text("导入并解析", "IMPORT & ANALYZE")}</button></div>
+              {platformManaged ? <div className="platform-github-import"><span className="eyebrow">GITHUB IMPORT</span><p>{text("只列出当前 GitHub 账号具有 push 权限的仓库。导入后会绑定来源仓库。", "Only repositories your GitHub account can push to are listed. The imported project is bound to its source repository.")}</p>{githubRepositories.length ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} value={selectedGitHubRepositoryId} onChange={event => setSelectedGitHubRepositoryId(event.target.value)}>{githubRepositories.map(repository => <option key={repository.id} value={repository.id}>{repository.fullName}{repository.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={creating || !selectedGitHubRepositoryId} onClick={() => void importGitHubProject()} type="button">{text("从 GitHub 导入", "IMPORT FROM GITHUB")}</button></div> : <div className="platform-repository-actions"><button className="button button-secondary" disabled={creating} onClick={() => void loadGitHubRepositories()} type="button">{text("选择 GitHub 仓库", "CHOOSE GITHUB REPOSITORY")}</button><Link className="button button-secondary" href="/account">{text("连接 GitHub", "CONNECT GITHUB")}</Link></div>}</div> : null}
             </div>
           )}
           {error ? <p className="repository-onboarding-error" role="alert">{error}</p> : null}
@@ -169,6 +185,8 @@ export function ProductDashboard({
               <dl>
                 <div><dt>{text("当前阶段", "Stage")}</dt><dd>{workflowLabel(project.workflowState, text)}</dd></div>
                 <div><dt>{text("创建时间", "Created")}</dt><dd>{formatDate(project.createdAt, localeTag(locale))}</dd></div>
+                <div><dt>{text("源码修订", "Source revision")}</dt><dd>{project.source ? `r${project.source.revision}` : "—"}</dd></div>
+                <div><dt>{text("源码大小", "Source size")}</dt><dd>{project.source ? `${project.source.fileCount} files` : "—"}</dd></div>
               </dl>
               <div className="project-catalog-card-footer"><Link aria-label={text(`打开${project.name}项目`, `Open ${project.name} project`)} href={`/projects/${project.id}`}>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></Link></div>
             </article>
@@ -211,6 +229,19 @@ async function readJson(response: Response): Promise<unknown> {
     typeof payload.message === "string" ? payload.message : `请求失败 (${response.status})`,
   );
   return payload;
+}
+
+async function readPlatformJson(response: Response): Promise<unknown> {
+  const payload = await response.json().catch(() => ({})) as { error?: { code?: string } };
+  if (!response.ok) throw new ApiError(payload.error?.code ?? "REQUEST_FAILED", payload.error?.code ?? `请求失败 (${response.status})`);
+  return payload;
+}
+
+function platformRepositoryMessage(reason: unknown, text: (chinese: string, english: string) => string): string {
+  const code = reason instanceof ApiError ? reason.code : "";
+  if (code === "GITHUB_REAUTHORIZE_REQUIRED") return text("请先在账号设置中连接或重新授权 GitHub", "Connect or reauthorize GitHub in Account settings first");
+  if (code === "GITHUB_PERMISSION_OR_RATE_LIMIT") return text("GitHub 权限、组织 SSO 或限流阻止了本次操作", "GitHub permissions, organization SSO, or rate limits blocked this operation");
+  return reason instanceof Error ? reason.message : text("GitHub 操作失败", "GitHub operation failed");
 }
 
 class ApiError extends Error {

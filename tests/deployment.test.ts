@@ -12,6 +12,7 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(compose, /core-api:[\s\S]*127\.0\.0\.1:\$\{DEVILUDO_CORE_HOST_PORT:-8080\}:8080/);
   assert.match(compose, /DEVILUDO_CLAUDE_CODE_VERSION/);
   assert.match(compose, /DEVILUDO_CODEX_CLI_VERSION/);
+  assert.match(compose, /project-sources-init:[\s\S]*cap_add: \["CHOWN", "FOWNER", "FSETID"\][\s\S]*chmod 2770 \/var\/lib\/deviludo-projects/);
   const webSection = compose.match(/\n  web:([\s\S]*?)\nnetworks:/)?.[1] ?? "";
   assert.doesNotMatch(webSection, /DATABASE_URL|VAULT|OBJECT_STORE|S3_/);
   assert.match(webSection, /- edge[\s\S]*- core/);
@@ -32,14 +33,30 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(localUp, /state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(localUp, /deviludo-retained-job-runtime/);
   assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\.\.\.imageIds, \.\.\.retainedJobRuntimeImages\]\)\]/);
+  assert.match(localUp, /--reset-incompatible-baseline/);
+  assert.match(localUp, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
+  assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);
+  assert.match(localUp, /npm run local:reset:source-v1/);
+  assert.doesNotMatch(compose, /deviludo-local-client(?:-secret)?/);
 });
 
-test("Agent generation continues from an imported source snapshot instead of an empty project", async () => {
+test("the isolated E2E launcher maps the actual Docker socket group into executord", async () => {
+  const launcher = await readFile(new URL("../scripts/run-e2e.mjs", import.meta.url), "utf8");
+  assert.match(launcher, /resolveDockerSocketGid\(\)/);
+  assert.match(launcher, /DEVILUDO_DOCKER_GID: dockerSocketGid/);
+  assert.match(launcher, /\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/);
+});
+
+test("Agent generation continues from the persistent source revision instead of an object artifact", async () => {
   const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
-  assert.match(runner, /input\.kind === "SOURCE"/);
-  assert.match(runner, /tar", \["-xzf", `\/workspace\/inputs\/\$\{filename\}`, "-C", "\/workspace\/project"\]/);
+  const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
+  assert.match(runner, /typeof plan\.job\.payload\.sourceRelativePath === "string"/);
+  assert.match(daemon, /projectSources\.archive\(sourceRelativePath\)/);
+  assert.match(daemon, /"read-source"/);
+  assert.match(daemon, /projectSources\.publishFiles\(/);
   assert.match(runner, /Continue developing the existing Godot 4 project/);
   assert.match(runner, /Create a complete Godot 4 project/);
+  assert.doesNotMatch(runner, /input\.kind === "SOURCE"/);
 });
 
 test("production deployment has exactly five role-local idempotent entrypoints", async () => {
@@ -110,6 +127,7 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(compose, /steam-proxy:[\s\S]*networks: \[executor-steam, egress\]/);
   assert.match(compose, /executor-agent:[\s\S]*internal: true/);
   assert.match(compose, /executor-steam:[\s\S]*internal: true/);
+  assert.doesNotMatch(compose, /github-proxy|executor-github/);
   const service = await readFile(new URL("../deploy/assets/deviludo-executord.service", import.meta.url), "utf8");
   assert.match(service, /src=\/var\/run\/docker\.sock,dst=\/var\/run\/docker\.sock/);
   const proxy = await readFile(new URL("../Dockerfile.provider-proxy", import.meta.url), "utf8");
@@ -134,6 +152,9 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   const executor = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
   assert.match(executor, /progressLineBuffer/);
   assert.match(executor, /Builder 已开始验证并构建项目/);
+  assert.match(executor, /ProjectSourceStore/);
+  assert.doesNotMatch(executor, /resolveGitHubCredential|GITHUB_ONLY|GIT_ASKPASS|REMOTE_DIVERGED/);
+  assert.doesNotMatch(taskRunner, /GIT_ASKPASS|REMOTE_DIVERGED|https:\/\/x-access-token:/);
   const e2eToolPath = await readFile(new URL("../services/e2e-node/src/tool-path.ts", import.meta.url), "utf8");
   assert.match(e2eToolPath, /executable\.endsWith\("\.mjs"\)/);
   assert.match(e2eToolPath, /executable: nodeExecutable/);
@@ -218,13 +239,13 @@ test("connection variables do not render helper copy below their inputs", async 
   assert.doesNotMatch(component, /<small>\{variable\}<\/small>/);
 });
 
-test("product surfaces omit technical helper copy and start without a workspace selection", async () => {
+test("Core product surfaces use their asserted workspace without an account selector", async () => {
   const shell = await readFile(new URL("../components/ProductShell.tsx", import.meta.url), "utf8");
   const home = await readFile(new URL("../components/HomeChat.tsx", import.meta.url), "utf8");
   const projects = await readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8");
-  assert.match(shell, /aria-label=\{text\("选择工作区", "Select workspace"\)\}/);
-  assert.match(shell, /className="workspace-add-option"[\s\S]*<PlusIcon \/>[\s\S]*text\("添加工作区", "Add workspace"\)/);
-  assert.match(shell, /text\("未选择工作区", "No workspace selected"\)[\s\S]*text\("选择或新建工作区", "Select or create a workspace"\)/);
+  assert.match(shell, /const workspace = session\.selectedWorkspace/);
+  assert.match(shell, /session\.authMode === "STANDALONE"/);
+  assert.doesNotMatch(shell, /Select workspace|Add workspace|No workspace selected/);
   assert.doesNotMatch(shell, /displayName|WorkspaceAdmin|SANDBOX LOCKED|PRODUCTION SLOT/);
   assert.doesNotMatch(home, /选择一个项目继续修改|从需求和细节开始沟通/);
   assert.doesNotMatch(projects, /这里只展示当前账号|PostgreSQL 工作区|CORE 工作流已绑定|隔离命名空间/);

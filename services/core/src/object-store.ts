@@ -71,24 +71,6 @@ export class CoreObjectStore {
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: content.length });
   }
 
-  async putImportedSource(input: Readonly<{
-    workspaceId: string;
-    projectId: string;
-    archive: Buffer;
-    sourceKind: "GIT" | "LOCAL_ARCHIVE";
-  }>) {
-    const sha256 = `sha256:${createHash("sha256").update(input.archive).digest("hex")}`;
-    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}/imports/imported-source-${sha256.slice(7, 23)}.tar.gz`;
-    await this.client.send(new PutObjectCommand({
-      Bucket: this.bucket,
-      Key: key,
-      Body: input.archive,
-      ContentType: "application/gzip",
-      Metadata: { sha256, "source-kind": input.sourceKind.toLowerCase() },
-    }));
-    return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: input.archive.length });
-  }
-
   async deleteProjectObjects(workspaceId: string, projectId: string): Promise<void> {
     const prefix = `workspaces/${workspaceId}/projects/${projectId}/`;
     let continuationToken: string | undefined;
@@ -188,6 +170,7 @@ export class CoreObjectStore {
     const projectName = typeof job.payload.projectName === "string" ? job.payload.projectName : "游戏项目";
     return Object.freeze({ content, markdown: projectDocumentMarkdown(projectName, content) });
   }
+
 }
 
 export function isValidOutputAuthorizationInput(

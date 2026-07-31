@@ -74,6 +74,7 @@ export type JobCompletion = Readonly<{
     exitCode: number;
     simulated: false;
     outputObjects: readonly ObjectReference[];
+    details?: Readonly<Record<string, unknown>>;
     isolationProof?: string;
     cleanupProof?: string;
     signature: string;
@@ -94,6 +95,7 @@ export function executorReceiptSigningPayload(
     exitCode: receipt.exitCode,
     simulated: receipt.simulated,
     outputObjects: receipt.outputObjects,
+    ...(receipt.details ? { details: receipt.details } : {}),
     ...(receipt.isolationProof ? { isolationProof: receipt.isolationProof } : {}),
     ...(receipt.cleanupProof ? { cleanupProof: receipt.cleanupProof } : {}),
   }));
@@ -193,6 +195,7 @@ export function parseCompletion(value: unknown): JobCompletion {
     || !Number.isSafeInteger(executor.exitCode)
     || executor.simulated !== false
     || !Array.isArray(executor.outputObjects) || executor.outputObjects.some(item => !isObjectReference(item))
+    || (executor.details !== undefined && (!executor.details || typeof executor.details !== "object" || Array.isArray(executor.details)))
     || typeof executor.signature !== "string" || executor.signature.length < 32) {
     throw new Error("Executor receipt v2 is invalid or simulated");
   }

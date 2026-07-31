@@ -64,11 +64,9 @@ async function runAgent(plan) {
   if (!specification || typeof specification !== "object" || Array.isArray(specification)) {
     throw new Error("Approved project specification input is invalid");
   }
-  const importedSource = plan.job.inputObjects.find(input => input.kind === "SOURCE");
+  const importedSource = typeof plan.job.payload.sourceRelativePath === "string";
   if (importedSource) {
-    const filename = importedSource.key.split("/").pop();
-    if (!filename || !filename.endsWith(".tar.gz")) throw new Error("Imported source snapshot is invalid");
-    await command("tar", ["-xzf", `/workspace/inputs/${filename}`, "-C", "/workspace/project"], safeEnvironment());
+    await command("tar", ["-xzf", "/workspace/inputs/source.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "现有项目源码已展开，Agent 正在分析工程结构");
   }
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
@@ -144,10 +142,8 @@ async function runAgent(plan) {
   );
   flushAgentOutput();
   await writeFile("/workspace/outputs/agent.json", result.stdout, "utf8");
-  emitProgress("PHASE", "Agent 已完成代码修改，正在打包源码");
-  await command("tar", ["-czf", "/workspace/outputs/source.tar.gz", "-C", "/workspace/project", "."], safeEnvironment());
+  emitProgress("PHASE", "Agent 已完成代码修改，正在发布源码 revision");
   await manifest([
-    { file: "source.tar.gz", kind: "SOURCE", contentType: "application/gzip" },
     { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
   ]);
 }

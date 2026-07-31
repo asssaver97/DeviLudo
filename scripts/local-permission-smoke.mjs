@@ -23,12 +23,14 @@ await inService("core-api", `
   test ! -r /run/deviludo-vault/executor.token
   test ! -e /var/run/docker.sock
   test ! -w /app
+  test -w /var/lib/deviludo-projects
 `);
 await inService("core-scheduler", `
   test "$(id -u)" = 1001
   test ! -e /run/deviludo-vault
   test ! -e /var/run/docker.sock
   test ! -w /app
+  test -w /var/lib/deviludo-projects
 `);
 await inService("core-sandbox", `
   test "$(id -u)" = 1001
@@ -38,6 +40,7 @@ await inService("core-sandbox", `
   test ! -e /run/deviludo-vault
   test ! -e /var/run/docker.sock
   test ! -w /app
+  test -w /var/lib/deviludo-projects
 `);
 await inService("web", `
   test "$(id -u)" = 1001
@@ -55,6 +58,7 @@ await inService("sandbox-executord", `
   test -r /var/run/docker.sock
   test -w /var/run/docker.sock
   test ! -w /app
+  test -w /var/lib/deviludo-projects
 `);
 
 for (const service of ["core-api", "core-scheduler", "core-sandbox", "sandbox-executord", "provider-proxy", "steam-proxy", "web"]) {
@@ -75,16 +79,20 @@ for (const service of ["core-api", "core-scheduler", "core-sandbox", "sandbox-ex
 const apiCapabilities = await vaultCapabilities("core-api", "/run/deviludo-vault/api.token", [
   "secret/data/deviludo/instance/agent-runtime/api-key/versions/permission-smoke",
   "secret/data/deviludo/steam/publisher",
+  "secret/data/deviludo-platform/accounts/00000000-0000-4000-8000-000000000000/github/oauth/versions/00000000-0000-4000-8000-000000000001",
 ]);
 expectCapabilities(apiCapabilities[0], ["create", "read", "update"], "Core API Agent secret");
 expectCapabilities(apiCapabilities[1], ["deny"], "Core API Steam secret");
+expectCapabilities(apiCapabilities[2], ["deny"], "Core API Platform GitHub secret");
 
 const executorCapabilities = await vaultCapabilities("sandbox-executord", "/run/service-secrets/vault.token", [
   "secret/data/deviludo/instance/agent-runtime/api-key/versions/permission-smoke",
   "secret/data/deviludo/steam/publisher",
+  "secret/data/deviludo-platform/accounts/00000000-0000-4000-8000-000000000000/github/oauth/versions/00000000-0000-4000-8000-000000000001",
 ]);
 expectCapabilities(executorCapabilities[0], ["read"], "executor Agent secret");
 expectCapabilities(executorCapabilities[1], ["read"], "executor Steam secret");
+expectCapabilities(executorCapabilities[2], ["deny"], "executor Platform GitHub secret");
 
 await expectModes(new URL("../.deviludo/local/", import.meta.url), 0o700);
 await expectModes(new URL("../.deviludo/local/executor-ed25519.pem", import.meta.url), 0o600);

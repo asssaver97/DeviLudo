@@ -161,9 +161,10 @@ export async function runSandbox(
           leaseToken: job.lease.token,
           fencingToken: job.lease.fencingToken,
           isolationGeneration: job.isolationGeneration,
-          receipt: projectDocument
-            ? Object.freeze({ ...receipt.details, projectDocument })
-            : receipt.details,
+          receipt: Object.freeze({
+            ...receipt.details,
+            ...(projectDocument ? { projectDocument } : {}),
+          }),
           executorReceipt: receipt,
         });
         if (!completed) throw new Error("Sandbox completion was rejected by fencing");
@@ -203,7 +204,8 @@ export function sandboxPlan(job: JobProtocolV4, operationId: string | null = nul
     : "RESTRICTED_CONTAINER";
   const networkPolicy = agentJob
     ? "AGENT_EGRESS_ALLOWLIST"
-    : job.jobKind === "STEAM_PUBLISH" ? "STEAM_ONLY" : "BUILD_EGRESS_DENY";
+    : job.jobKind === "STEAM_PUBLISH" ? "STEAM_ONLY"
+      : "BUILD_EGRESS_DENY";
   return Object.freeze({
     schemaVersion: "deviludo.sandbox-plan.v2",
     mode,

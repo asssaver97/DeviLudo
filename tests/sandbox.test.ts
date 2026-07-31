@@ -18,7 +18,7 @@ const baseJob: JobProtocolV4 = Object.freeze({
   runtimeImage: `sha256:${"a".repeat(64)}`,
   workflowProfile: "VALIDATE",
   inputObjects: Object.freeze([]),
-  outputContract: Object.freeze({ kinds: Object.freeze(["SOURCE", "SPECIFICATION"]), maxBytes: 1_073_741_824 }),
+  outputContract: Object.freeze({ kinds: Object.freeze(["SPECIFICATION"]), maxBytes: 1_073_741_824 }),
   budget: Object.freeze({ cpuMillis: 900_000, memoryBytes: 4_294_967_296, networkBytes: 1_073_741_824 }),
   timeoutSeconds: 1800,
   payload: Object.freeze({}),

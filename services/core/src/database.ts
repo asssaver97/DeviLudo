@@ -3,8 +3,7 @@ import type { CoreConfig } from "./config";
 
 export type Database = Readonly<{
   pool: Pool;
-  withUser<T>(userId: string, callback: (client: PoolClient) => Promise<T>): Promise<T>;
-  withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>, userId?: string): Promise<T>;
+  withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }>;
 
@@ -25,14 +24,9 @@ export function createDatabase(config: CoreConfig): Database {
 
   return Object.freeze({
     pool,
-    async withUser<T>(userId: string, callback: (client: PoolClient) => Promise<T>): Promise<T> {
-      if (!UUID.test(userId)) throw new Error("User id is invalid");
-      return withTransaction(pool, callback, { userId });
-    },
-    async withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>, userId?: string): Promise<T> {
+    async withWorkspace<T>(workspaceId: string, callback: (client: PoolClient) => Promise<T>): Promise<T> {
       if (!UUID.test(workspaceId)) throw new Error("Workspace id is invalid");
-      if (userId !== undefined && !UUID.test(userId)) throw new Error("User id is invalid");
-      return withTransaction(pool, callback, { workspaceId, userId });
+      return withTransaction(pool, callback, { workspaceId });
     },
     close: () => pool.end(),
   });
@@ -41,12 +35,11 @@ export function createDatabase(config: CoreConfig): Database {
 async function withTransaction<T>(
   pool: Pool,
   callback: (client: PoolClient) => Promise<T>,
-  context: Readonly<{ workspaceId?: string; userId?: string }>,
+  context: Readonly<{ workspaceId?: string }>,
 ): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    if (context.userId) await client.query("SELECT set_config('app.user_id', $1, true)", [context.userId]);
     if (context.workspaceId) await client.query("SELECT set_config('app.workspace_id', $1, true)", [context.workspaceId]);
     const result = await callback(client);
     await client.query("COMMIT");

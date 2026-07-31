@@ -14,19 +14,12 @@ export type UserRecord = Readonly<{
   createdAt: string;
 }>;
 
-export type WorkspaceMembershipRecord = Readonly<{
-  workspaceId: string;
-  userId: string;
-  username: string;
-  role: WorkspaceRole;
-  createdAt: string;
-}>;
-
 export type ProductSession = Readonly<{
-  user: UserRecord | null;
-  authenticated: boolean;
-  setupRequired: boolean;
-  selectedWorkspace: WorkspaceSummary | null;
+  user: UserRecord;
+  authenticated: true;
+  authMode: "STANDALONE" | "PLATFORM";
+  canLogout: boolean;
+  selectedWorkspace: WorkspaceSummary;
 }>;
 
 export const WORKFLOW_PROFILES = ["VALIDATE", "RELEASE"] as const;
@@ -44,7 +37,7 @@ export type ArtifactRecord = Readonly<{
   workspaceId: string;
   projectId: string;
   workflowId: string;
-  kind: "SOURCE" | "SPECIFICATION" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
+  kind: "SPECIFICATION" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
   targetPlatform: "linux" | "windows" | "macos" | null;
   object: ObjectReference;
   createdAt: string;
@@ -90,6 +83,16 @@ export type ProductProjectSummary = Readonly<{
   targetPlatforms: readonly ("linux" | "windows" | "macos")[];
   concept: string;
   specification: Readonly<Record<string, unknown>>;
+  source: ProjectSourceRevision | null;
+}>;
+
+export type ProjectSourceRevision = Readonly<{
+  revision: number;
+  digest: string;
+  relativePath: string;
+  fileCount: number;
+  totalBytes: number;
+  createdAt: string;
 }>;
 
 export type ProductJob = Readonly<{

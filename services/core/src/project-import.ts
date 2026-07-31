@@ -19,6 +19,7 @@ export type ImportedSourceSnapshot = Readonly<{
   fileCount: number;
   totalBytes: number;
   archive: Buffer;
+  files: readonly SourceFile[];
   context: string;
 }>;
 
@@ -33,7 +34,7 @@ export type ImportedProjectAnalysis = Readonly<{
   settingsRevision: number;
 }>;
 
-type SourceFile = Readonly<{ path: string; bytes: Buffer }>;
+export type SourceFile = Readonly<{ path: string; bytes: Buffer }>;
 
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
@@ -76,31 +77,8 @@ export function inspectProjectZip(input: Readonly<{
     fileCount: accepted.length,
     totalBytes,
     archive: createTarGzip(accepted),
+    files: Object.freeze(accepted),
     context,
-  });
-}
-
-export async function downloadGitProject(
-  repositoryUrl: string,
-  fetchImpl: FetchLike = fetch,
-): Promise<ImportedSourceSnapshot> {
-  const repository = parseGitRepositoryUrl(repositoryUrl);
-  const branch = await defaultBranch(repository, fetchImpl);
-  const archiveUrl = repository.provider === "GITHUB"
-    ? `https://codeload.github.com/${repository.path}/zip/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`
-    : `https://gitlab.com/api/v4/projects/${encodeURIComponent(repository.path)}/repository/archive.zip?sha=${encodeURIComponent(branch)}`;
-  const response = await fetchImpl(archiveUrl, {
-    headers: { accept: "application/zip", "user-agent": "DeviLudo-Project-Importer/1.0" },
-    redirect: "error",
-    signal: AbortSignal.timeout(45_000),
-  });
-  if (!response.ok) throw new Error(`Git 仓库下载失败（HTTP ${response.status}）`);
-  const bytes = await limitedResponseBytes(response, MAX_ARCHIVE_BYTES);
-  return inspectProjectZip({
-    bytes,
-    sourceKind: "GIT",
-    repositoryUrl: repository.canonicalUrl,
-    displayName: repository.name,
   });
 }
 
@@ -330,7 +308,7 @@ function sourcePriority(path: string): number {
   return 10;
 }
 
-function createTarGzip(files: readonly SourceFile[]): Buffer {
+export function createTarGzip(files: readonly SourceFile[]): Buffer {
   const parts: Buffer[] = [];
   for (const file of files) {
     const { name, prefix } = tarPath(file.path);
@@ -370,67 +348,6 @@ function tarPath(path: string): { name: string; prefix: string } {
 function writeOctal(buffer: Buffer, offset: number, length: number, value: number): void {
   const octal = value.toString(8).padStart(length - 2, "0");
   buffer.write(`${octal}\0 `, offset, length, "ascii");
-}
-
-function parseGitRepositoryUrl(raw: string) {
-  let url: URL;
-  try { url = new URL(raw); } catch { throw new Error("Git 仓库 URL 无效"); }
-  if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash) {
-    throw new Error("Git 仓库必须使用不含凭据、参数或分支片段的 HTTPS URL");
-  }
-  const segments = url.pathname.split("/").filter(Boolean);
-  const provider = url.hostname === "github.com" ? "GITHUB" : url.hostname === "gitlab.com" ? "GITLAB" : null;
-  if (!provider || segments.length < 2 || (provider === "GITHUB" && segments.length !== 2)) {
-    throw new Error("目前支持公开 GitHub 或 GitLab 仓库");
-  }
-  segments[segments.length - 1] = segments[segments.length - 1].replace(/\.git$/i, "");
-  if (segments.some(segment => !/^[A-Za-z0-9_.-]{1,100}$/.test(segment))) throw new Error("Git 仓库路径无效");
-  const path = segments.join("/");
-  return Object.freeze({
-    provider,
-    path,
-    name: segments[segments.length - 1],
-    canonicalUrl: `https://${url.hostname}/${path}.git`,
-  });
-}
-
-async function defaultBranch(
-  repository: ReturnType<typeof parseGitRepositoryUrl>,
-  fetchImpl: FetchLike,
-): Promise<string> {
-  const url = repository.provider === "GITHUB"
-    ? `https://api.github.com/repos/${repository.path}`
-    : `https://gitlab.com/api/v4/projects/${encodeURIComponent(repository.path)}`;
-  const response = await fetchImpl(url, {
-    headers: { accept: "application/json", "user-agent": "DeviLudo-Project-Importer/1.0" },
-    redirect: "error",
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`Git 仓库不可访问（HTTP ${response.status}）`);
-  const body = await response.json() as { default_branch?: unknown };
-  if (typeof body.default_branch !== "string" || !/^[A-Za-z0-9._/-]{1,200}$/.test(body.default_branch)
-    || body.default_branch.includes("..")) throw new Error("Git 仓库默认分支无效");
-  return body.default_branch;
-}
-
-async function limitedResponseBytes(response: Response, limit: number): Promise<Buffer> {
-  const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > limit) throw new Error("Git 项目压缩包超过 64 MiB 上限");
-  if (!response.body) throw new Error("Git 仓库未返回源码内容");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > limit) {
-      await reader.cancel();
-      throw new Error("Git 项目压缩包超过 64 MiB 上限");
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks.map(chunk => Buffer.from(chunk)), size);
 }
 
 function requiredText(value: unknown, label: string, maxLength: number): string {

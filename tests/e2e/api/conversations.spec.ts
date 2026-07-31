@@ -84,7 +84,7 @@ test("new-game conversations validate, persist and keep their context locked", a
   expect(first.mode).toBe("NEW_GAME");
   expect(first.projectId).toBe(startedBody.project.id);
   expect(startedBody.project.name).toBe("时间回廊");
-  expect(startedBody.workspace.name).toBe(startedBody.project.name);
+  expect(startedBody.workspace.name).toBe("Local workspace");
   expect(first.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
   expect(first.messages[1].content).toContain("测试设计 Agent");
   expect(first.messages[1].metadata).toMatchObject({
@@ -199,7 +199,7 @@ test("messages sent during Agent generation become durable live guidance", async
     ) VALUES (
       '${project.workspaceId}'::uuid, '${jobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
       'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
-      'sha256:${"a".repeat(64)}', '{"kinds":["SOURCE","SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
+      'sha256:${"a".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'RUNNING', 'agent-guidance-e2e', 'e2e-held-agent', '${leaseToken}'::uuid,
       clock_timestamp() + interval '1 hour', 1
     );

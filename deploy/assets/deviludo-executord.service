@@ -16,6 +16,7 @@ ExecStart=/usr/bin/docker run --name deviludo-sandbox-executord --user=10001:100
   --group-add=${DEVILUDO_DOCKER_GID} --group-add=1001 --mount=type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
   --mount=type=volume,src=deviludo-executor-socket,dst=/run/deviludo-executor \
   --mount=type=bind,src=/var/lib/deviludo-executor,dst=/var/lib/deviludo-executor \
+  --mount=type=bind,src=/var/lib/deviludo-projects,dst=/var/lib/deviludo-projects \
   --tmpfs=/run/deviludo-secrets:rw,noexec,nosuid,nodev,size=4194304,mode=0700,uid=10001,gid=10001 \
   --tmpfs=/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=0700,uid=10001,gid=10001 \
   --mount=type=bind,src=/etc/deviludo/core/secrets/executor-ed25519.pem,dst=/run/service-secrets/identity.pem,readonly \

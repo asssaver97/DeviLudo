@@ -7,9 +7,6 @@ test("display typography, readable body copy and English locale persist across t
     name: "Pixel Language Lab",
     concept: "A compact arcade tactics game used to verify localized project screens.",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok(), await selected.text()).toBeTruthy();
-
   await page.goto("/");
   const chineseHeading = page.getByRole("heading", { name: "今天想做什么游戏？" });
   await expect(chineseHeading).toBeVisible();
@@ -47,8 +44,6 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
     name: "横向流水线",
     concept: "一款用于验证交付阶段展示顺序的像素动作游戏。",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok(), await selected.text()).toBeTruthy();
   const detailResponse = await stack.web(`/api/projects/${project.id}`);
   expect(detailResponse.ok(), await detailResponse.text()).toBeTruthy();
   const detail = await detailResponse.json() as { project: Record<string, unknown> };
@@ -97,8 +92,6 @@ test("an Agent runtime failure is explained without exposing raw executor JSON",
     name: "失败原因面板",
     concept: "验证 Agent 生成失败时显示清晰原因和安全重试入口。",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok(), await selected.text()).toBeTruthy();
   const detailResponse = await stack.web(`/api/projects/${project.id}`);
   const detail = await detailResponse.json() as { project: Record<string, unknown> };
   detail.project = {
@@ -130,8 +123,6 @@ test("confirmed requirements update the project document before the streamed tur
     name: "需求同步面板",
     concept: "验证玩家确认需求后，项目说明会在同一轮对话中同步刷新。",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok(), await selected.text()).toBeTruthy();
   await page.goto(`/projects/${project.id}`);
 
   const input = page.getByLabel("继续项目会话");
@@ -148,8 +139,6 @@ test("the project chat streams Agent generation progress and accepts live player
     name: "生成进度控制台",
     concept: "验证玩家可以在开发 Agent 工作时查看输出并继续引导。",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok(), await selected.text()).toBeTruthy();
   const jobId = randomUUID();
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
@@ -162,7 +151,7 @@ test("the project chat streams Agent generation progress and accepts live player
     ) VALUES (
       '${project.workspaceId}'::uuid, '${jobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
       'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
-      'sha256:${"b".repeat(64)}', '{"kinds":["SOURCE","SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
+      'sha256:${"b".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'RUNNING', 'browser-agent-progress', 'browser-held-agent', gen_random_uuid(),
       clock_timestamp() + interval '1 hour', 1
     );
@@ -242,9 +231,6 @@ test("an Agent reply follows the conversation without moving the whole page", as
     name: "稳定视窗",
     concept: "用于验证流式回复不会把整个项目页面拖到最底部。",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok(), await selected.text()).toBeTruthy();
-
   let releaseRequest: () => void = () => {};
   const requestGate = new Promise<void>(resolve => { releaseRequest = resolve; });
   await page.route("**/api/conversations/messages/stream", async route => {
@@ -277,12 +263,9 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await expect(page.getByRole("link", { name: "首页", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "开始新游戏" })).toHaveCount(0);
-  await page.locator("summary.workspace-switcher").click();
-  await expect(page.getByRole("menu", { name: "工作区菜单" })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "添加工作区" })).toBeVisible();
   await page.getByRole("link", { name: "项目", exact: true }).click();
   await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
-  await expect(page.getByText("未选择工作区", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Local workspace", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("SYSTEM ONLINE")).toBeVisible();
   await expect(page.getByRole("heading", { name: "还没有游戏项目" })).toBeVisible();
   await page.getByRole("button", { name: "通知" }).click();
@@ -386,7 +369,7 @@ test("keyboard creation derives a name and an active delivery can be cancelled",
   await page.getByRole("button", { name: "按照当前需求开发" }).click();
   await expect(page.getByRole("button", { name: "取消本次交付" })).toBeVisible();
   await page.getByRole("button", { name: "取消本次交付" }).click();
-  await expect(page.getByText("已取消", { exact: true })).toBeVisible();
+  await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
 
   await page.getByRole("link", { name: "项目", exact: true }).click();
@@ -401,8 +384,6 @@ test("the home chat supports both project feedback and a fresh game conversation
     name: "雾港列车",
     concept: "玩家在风暴中调度幽灵列车并营救乘客。",
   });
-  const selected = await page.request.put("/api/session/workspace", { data: { workspaceId: project.workspaceId } });
-  expect(selected.ok()).toBeTruthy();
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await page.getByLabel("关联项目").selectOption(project.id);
@@ -494,7 +475,7 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     await page.getByLabel("游戏想法或修改意见").fill(concept);
     await page.getByRole("button", { name: "发送消息" }).click();
     await expect(page.getByText(concept, { exact: true })).toBeVisible();
-    const waiting = page.locator(".homeChat-thinking [aria-label='等待回复']");
+    const waiting = page.locator(".home-conversation-box .conversation-box-message.is-thinking [aria-label='等待回复']");
     await expect(waiting).toBeVisible();
     await expect(waiting.locator("i")).toHaveCount(3);
   } finally {
@@ -510,7 +491,6 @@ test("a creator can import a local project and continue its Agent analysis conve
   await page.locator(".project-catalog-heading").getByRole("link", { name: "导入项目" }).click();
   await expect(page).toHaveURL(/\/projects\/import$/);
   await expect(page.getByRole("heading", { name: "导入已有项目" })).toBeVisible();
-  await page.getByRole("tab", { name: "本地项目" }).click();
   const encoder = new TextEncoder();
   const archive = createStoredZip([
     { path: "clock-game/project.godot", bytes: encoder.encode("[application]\nrun/main_scene=\"res://main.tscn\"") },
@@ -538,8 +518,6 @@ test("a creator can import a local project and continue its Agent analysis conve
 
 test("an unknown project presents a stable product error", async ({ page, stack }) => {
   expect(stack.webUrl.protocol).toBe("http:");
-  const selected = await page.request.post("/api/workspaces", { data: { name: "错误边界工作区" } });
-  expect(selected.status()).toBe(201);
   await page.goto(`/projects/${randomUUID()}`);
   await expect(page.getByText("项目读取失败 (404)")).toBeVisible();
   await page.getByRole("link", { name: "DeviLudo 首页" }).click();

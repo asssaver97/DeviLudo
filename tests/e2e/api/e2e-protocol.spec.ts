@@ -1,6 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, sign } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { APIResponse } from "@playwright/test";
-import type { JobProtocolV4 } from "../../../services/core/src/contracts";
+import {
+  executorReceiptSigningPayload,
+  type JobCompletion,
+  type JobProtocolV4,
+} from "../../../services/core/src/contracts";
 import {
   StackHarness,
   test,
@@ -8,6 +13,11 @@ import {
   type NodeRecord,
   type ProjectDetail,
 } from "../fixtures/stack";
+
+test.describe.configure({ timeout: 180_000 });
+
+const claimedExecutorIds = new Map<string, string>();
+const cachedExecutorReceipts = new Map<string, JobCompletion["executorReceipt"]>();
 
 test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E jobs", async ({ stack }) => {
   const { project, nodes } = await prepareE2eStage(stack);
@@ -173,6 +183,7 @@ async function prepareE2eStage(stack: StackHarness): Promise<Readonly<{
   project: ProjectDetail;
   nodes: readonly NodeRecord[];
 }>> {
+  await stack.configureAgent();
   const nodes = await stack.registerFixedNodes();
   const project = await stack.createProject({
     name: "协议验证项目",
@@ -180,7 +191,7 @@ async function prepareE2eStage(stack: StackHarness): Promise<Readonly<{
   });
   const approved = await stack.web(`/api/projects/${project.id}/approve`, { method: "POST", data: {} });
   expect(approved.status()).toBe(202);
-  const staged = await stack.waitForProject(project.id, value => value.workflowState === "E2E_TESTING");
+  const staged = await stack.waitForProject(project.id, value => value.workflowState === "E2E_TESTING", 120_000);
   return Object.freeze({ project: staged, nodes });
 }
 
@@ -196,6 +207,7 @@ async function claim(stack: StackHarness, node: NodeRecord): Promise<JobProtocol
   expect(response.ok()).toBeTruthy();
   const job = (await response.json() as { job: JobProtocolV4 | null }).job;
   expect(job).not.toBeNull();
+  claimedExecutorIds.set((job as JobProtocolV4).jobId, node.id);
   return job as JobProtocolV4;
 }
 
@@ -210,22 +222,80 @@ async function completeResponse(
     afterReimageProof?: string;
   }> = {},
 ): Promise<APIResponse> {
+  const executorId = claimedExecutorIds.get(job.jobId);
+  if (!executorId) throw new Error(`Missing claimed executor identity for ${job.jobId}`);
+  const identityKey = await readFile(process.env.DEVILUDO_E2E_IDENTITY_KEY_FILE ?? "", "utf8");
+  let executorReceipt = cachedExecutorReceipts.get(job.jobId);
+  if (!executorReceipt) {
+    const outputContent = Buffer.from(JSON.stringify({
+      schemaVersion: "deviludo.playwright-protocol-output.v1",
+      jobId: job.jobId,
+      kind: job.jobKind,
+    }));
+    const outputSha256 = `sha256:${createHash("sha256").update(outputContent).digest("hex")}`;
+    const outputKind = job.jobKind === "E2E_TEST" ? "E2E_REPORT"
+      : job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT";
+    const authorization = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/outputs`, {
+      method: "POST",
+      data: {
+        ...identity(job),
+        kind: outputKind,
+        sha256: outputSha256,
+        sizeBytes: outputContent.length,
+      },
+    });
+    if (!authorization.ok()) return authorization;
+    const upload = await authorization.json() as {
+      uploadUrl: string;
+      requiredHeaders: Record<string, string>;
+      object: JobProtocolV4["inputObjects"][number];
+    };
+    const uploaded = await fetch(upload.uploadUrl, {
+      method: "PUT",
+      body: outputContent,
+      headers: upload.requiredHeaders,
+    });
+    expect(uploaded.ok).toBeTruthy();
+    const now = new Date().toISOString();
+    const unsignedExecutorReceipt = {
+      schemaVersion: "deviludo.executor-receipt.v2" as const,
+      executorId,
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      simulated: false as const,
+      outputObjects: [upload.object],
+    };
+    executorReceipt = {
+      ...unsignedExecutorReceipt,
+      signature: sign(null, executorReceiptSigningPayload(unsignedExecutorReceipt), identityKey).toString("base64url"),
+    };
+    cachedExecutorReceipts.set(job.jobId, executorReceipt);
+  }
   return await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/complete`, {
     method: "POST",
     data: {
       ...identity(job),
       fencingToken: job.lease.fencingToken,
       isolationGeneration: overrides.isolationGeneration ?? job.isolationGeneration,
-      receipt: overrides.receipt ?? { executor: "playwright-protocol-driver", succeeded: true },
+      receipt: overrides.receipt ?? {
+        executor: "playwright-protocol-driver",
+        execution: {
+          outcome: "PASSED",
+          failureDomain: null,
+          summary: "Playwright protocol completion passed",
+        },
+      },
+      executorReceipt,
       beforeReimageProof: Object.prototype.hasOwnProperty.call(overrides, "beforeReimageProof")
         ? overrides.beforeReimageProof
-        : proof("before"),
+        : signedIsolationProof(job, "reimage", "before", identityKey),
       cleanupProof: Object.prototype.hasOwnProperty.call(overrides, "cleanupProof")
         ? overrides.cleanupProof
-        : proof("cleanup"),
+        : signedIsolationProof(job, "cleanup", "after", identityKey),
       afterReimageProof: Object.prototype.hasOwnProperty.call(overrides, "afterReimageProof")
         ? overrides.afterReimageProof
-        : proof("after"),
+        : signedIsolationProof(job, "reimage", "after", identityKey),
     },
   });
 }
@@ -233,7 +303,7 @@ async function completeResponse(
 async function fail(stack: StackHarness, job: JobProtocolV4, reason: string): Promise<APIResponse> {
   return await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/fail`, {
     method: "POST",
-    data: { ...identity(job), reason },
+    data: { ...identity(job), classification: "INFRASTRUCTURE", domain: "NODE", reason },
   });
 }
 
@@ -243,6 +313,27 @@ function identity(job: JobProtocolV4): Readonly<{ workspaceId: string; leaseToke
 
 function proof(stage: string): string {
   return `playwright-trusted-${stage}-proof`;
+}
+
+function signedIsolationProof(
+  job: JobProtocolV4,
+  action: "reimage" | "cleanup",
+  stage: "before" | "after",
+  identityKey: string,
+): string {
+  const evidence = `playwright-protocol:${action}:${stage}:${job.jobId}`;
+  const payload = {
+    schemaVersion: "deviludo.isolation-proof.v1",
+    action,
+    stage,
+    jobId: job.jobId,
+    workspaceId: job.workspaceId,
+    isolationGeneration: job.isolationGeneration,
+    fencingToken: job.lease.fencingToken,
+    evidenceSha256: `sha256:${createHash("sha256").update(evidence).digest("hex")}`,
+  };
+  const raw = Buffer.from(JSON.stringify(payload));
+  return `${raw.toString("base64url")}.${sign(null, raw, identityKey).toString("base64url")}`;
 }
 
 function requiredNode(nodes: readonly NodeRecord[], poolKind: NodeRecord["poolKind"]): NodeRecord {

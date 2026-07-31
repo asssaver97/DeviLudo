@@ -1,4 +1,4 @@
-import { createPublicKey, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
@@ -17,18 +17,8 @@ import {
   type AgentSecretStore,
 } from "./agent-settings";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
-import {
-  CSRF_COOKIE,
-  SESSION_COOKIE,
-  assertPassword,
-  csrfCookie,
-  digest,
-  hashPassword,
-  newSessionSecrets,
-  sessionCookie,
-  verifyPassword,
-} from "./auth";
 import type { CoreConfig } from "./config";
+import { AccessResolver, type AccessPrincipal } from "./access";
 import {
   assertE2eCompletion,
   parseCompletion,
@@ -41,7 +31,6 @@ import { CoreObjectStore } from "./object-store";
 import { generateProjectName } from "./project-naming";
 import {
   analyzeImportedProject,
-  downloadGitProject,
   inspectProjectZip,
   type ImportedSourceSnapshot,
 } from "./project-import";
@@ -51,11 +40,12 @@ import {
   type ConversationAgentProjectContext,
   type ProductConversationAgentReply,
 } from "./product-conversation";
-import type { AuthenticatedSession, CoreRepository, StoredInstanceAgentSettings } from "./repository";
+import type { CoreRepository, StoredInstanceAgentSettings } from "./repository";
 import { HttpSigningGrantBroker, type SigningGrantBroker } from "./signing-grants";
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
 import { createInitialProjectDocument, parseProjectDocumentContent } from "@/lib/product/project-document";
+import { ProjectSourceStore } from "./project-sources";
 
 export async function runApi(
   repository: CoreRepository,
@@ -66,7 +56,9 @@ export async function runApi(
   agentSecrets: AgentSecretStore = createAgentSecretStore(),
 ): Promise<void> {
   const objectStore = new CoreObjectStore();
+  const projectSources = new ProjectSourceStore(config.projectsRoot);
   const pki = new E2ePkiIssuer();
+  const access = new AccessResolver(config);
   const app = Fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
@@ -102,13 +94,15 @@ export async function runApi(
   app.addHook("preHandler", async request => {
     const path = request.url.split("?", 1)[0];
     if (!path.startsWith("/v1/") || path.startsWith("/v1/e2e/")) return;
+    if (path.startsWith("/v1/internal/platform/")) return;
     authorizeWeb(request, config);
     if (path.startsWith("/v1/dev/")) return;
-    const session = await authenticateRequest(request, repository);
-    if (session) authenticatedRequests.set(request, session);
-    if (["/v1/auth/setup", "/v1/auth/login", "/v1/auth/invitations/accept", "/v1/session"].includes(path)) return;
-    if (!session) throw unauthorized("请先登录");
-    if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) assertCsrf(request, session);
+    const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
+    const principal = await access.resolve(request, mutating);
+    authenticatedRequests.set(request, principal);
+    if (mutating && request.headers["x-deviludo-origin-verified"] !== "1") {
+      throw httpError(403, "ORIGIN_REJECTED", "请求来源校验失败");
+    }
   });
 
   app.get("/health/live", async () => ({
@@ -126,84 +120,135 @@ export async function runApi(
     const ready = pools
       .filter(pool => required.has(pool.kind))
       .every(pool => pool.readiness === "READY" || pool.readiness === "ON_DEMAND_READY");
-    const setupRequired = !(await repository.hasUsers());
-    return reply.code(ready && !setupRequired ? 200 : 503).send({
+    return reply.code(ready ? 200 : 503).send({
       schemaVersion: "deviludo.platform-readiness.v1",
-      status: setupRequired ? "setup_required" : ready ? "ready" : "not_ready",
+      status: ready ? "ready" : "not_ready",
       pools: Object.fromEntries(pools.map(pool => [pool.kind, pool.readiness])),
       requiredPools: config.requiredReadyPools,
     });
   });
 
-  app.post("/v1/auth/setup", async (request, reply) => {
-    const body = objectBody(request.body);
-    const username = typeof body.username === "string" ? body.username.trim() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    const passwordConfirmation = typeof body.passwordConfirmation === "string" ? body.passwordConfirmation : "";
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(username)) {
-      throw httpError(400, "INVALID_USERNAME", "用户名需为 3–64 位字母、数字、点、下划线或连字符");
-    }
-    if (password !== passwordConfirmation) {
-      throw httpError(400, "PASSWORD_MISMATCH", "两次输入的密码不一致");
-    }
-    assertPassword(password);
-    const secrets = newSessionSecrets();
-    const user = await repository.createInitialAdmin({
-      username,
-      passwordHash: await hashPassword(password),
-      tokenHash: secrets.tokenHash,
-      csrfHash: secrets.csrfHash,
-      remoteAddress: request.ip || null,
+  app.get<{ Querystring: { limit?: string } }>("/v1/internal/platform/source-events", async (request, reply) => {
+    authorizePlatformService(request, config);
+    const limit = Number(request.query.limit ?? "100");
+    return reply.header("cache-control", "no-store").send({
+      events: await repository.listSourceReadyEvents(limit),
     });
-    return reply
-      .header("set-cookie", [sessionCookie(secrets.token), csrfCookie(secrets.csrfToken)])
-      .code(201)
-      .send({ user: publicUser(user), setupRequired: false });
   });
 
-  app.post("/v1/auth/login", async (request, reply) => {
+  app.post("/v1/internal/platform/source-events/ack", async (request, reply) => {
+    authorizePlatformService(request, config);
     const body = objectBody(request.body);
-    const username = typeof body.username === "string" ? body.username.trim() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    const remoteAddress = request.ip || null;
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(username) || !password || password.length > 1024) {
-      throw unauthorized("用户名或密码错误");
+    if (!Array.isArray(body.eventIds) || body.eventIds.some(value => typeof value !== "string")) {
+      throw httpError(400, "INVALID_SOURCE_EVENT_ACK", "源码事件确认格式无效");
     }
-    if (await repository.loginFailureCount(username, remoteAddress) >= 5) {
-      throw httpError(429, "LOGIN_RATE_LIMITED", "登录失败次数过多，请 15 分钟后重试");
-    }
-    const user = await repository.readLoginUser(username);
-    if (!user || user.disabledAt || !(await verifyPassword(user.passwordHash, password))) {
-      await repository.recordAuthenticationEvent({ userId: user?.id, username, kind: "LOGIN_FAILED", remoteAddress });
-      throw unauthorized("用户名或密码错误");
-    }
-    const secrets = newSessionSecrets();
-    await repository.createSession({ userId: user.id, tokenHash: secrets.tokenHash, csrfHash: secrets.csrfHash });
-    await repository.recordAuthenticationEvent({ userId: user.id, username: user.username, kind: "LOGIN_SUCCEEDED", remoteAddress });
-    return reply
-      .header("set-cookie", [sessionCookie(secrets.token), csrfCookie(secrets.csrfToken)])
-      .send({ user: publicUser(user) });
+    return reply.send({ acknowledged: await repository.acknowledgeSourceReadyEvents(body.eventIds as string[]) });
   });
 
-  app.post("/v1/auth/logout", async (request, reply) => {
-    const session = productAccess(request, config);
-    await repository.revokeSession(session.id);
-    await repository.recordAuthenticationEvent({ userId: session.user.id, username: session.user.username, kind: "LOGOUT", remoteAddress: request.ip || null });
-    return reply.header("set-cookie", [sessionCookie(null), csrfCookie(null), selectedWorkspaceCookie(null)]).send({ loggedOut: true });
-  });
+  app.post(
+    "/v1/internal/platform/projects/import",
+    { bodyLimit: 64 * 1024 * 1024 },
+    async (request, reply) => {
+      authorizePlatformService(request, config);
+      const workspaceId = header(request, "x-deviludo-workspace-id");
+      const actorAccountId = header(request, "x-deviludo-actor-account-id");
+      const encodedName = header(request, "x-deviludo-project-name");
+      const workspaceName = decodeHeader(header(request, "x-deviludo-workspace-name") || "Organization");
+      if (!UUID.test(workspaceId) || !UUID.test(actorAccountId) || !Buffer.isBuffer(request.body)) {
+        throw httpError(400, "INVALID_PLATFORM_IMPORT", "Platform 项目导入请求无效");
+      }
+      const displayName = decodeHeader(encodedName || "GitHub project");
+      const principal: AccessPrincipal = Object.freeze({
+        id: "platform-import",
+        user: Object.freeze({ id: actorAccountId, username: "Platform actor", instanceAdmin: false, createdAt: "" }),
+        workspace: Object.freeze({ id: workspaceId, name: workspaceName, createdAt: "" }),
+        role: "MEMBER",
+        csrfHash: null,
+        expiresAt: null,
+        platformAdminRoles: Object.freeze([]),
+      });
+      const result = await processProjectImport({
+        request,
+        principal,
+        repository,
+        agentSecrets,
+        projectSources,
+        source: async () => inspectProjectZip({
+          bytes: request.body as Buffer,
+          sourceKind: "GIT",
+          displayName,
+        }),
+      });
+      return reply.code(result.statusCode).send(result.payload);
+    },
+  );
 
-  app.post("/v1/auth/password", async (request, reply) => {
-    const session = productAccess(request, config);
-    const body = objectBody(request.body);
-    const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
-    const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
-    const stored = await repository.readLoginUser(session.user.username);
-    if (!stored || !(await verifyPassword(stored.passwordHash, currentPassword))) throw unauthorized("当前密码错误");
-    assertPassword(newPassword);
-    await repository.changePassword(session.user.id, await hashPassword(newPassword));
-    await repository.recordAuthenticationEvent({ userId: session.user.id, username: session.user.username, kind: "PASSWORD_CHANGED", remoteAddress: request.ip || null });
-    return reply.header("set-cookie", [sessionCookie(null), csrfCookie(null), selectedWorkspaceCookie(null)]).send({ changed: true, loginRequired: true });
-  });
+  app.get<{ Params: { workspaceId: string; projectId: string } }>(
+    "/v1/internal/platform/workspaces/:workspaceId/projects/:projectId",
+    async (request, reply) => {
+      authorizePlatformService(request, config);
+      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
+        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      }
+      const project = await repository.readProject(request.params.workspaceId, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      return reply.header("cache-control", "no-store").send({ project: {
+        id: project.id,
+        workspaceId: request.params.workspaceId,
+        name: project.name,
+        workflowState: project.workflowState,
+        source: project.source,
+      } });
+    },
+  );
+
+  app.delete<{ Params: { workspaceId: string; projectId: string } }>(
+    "/v1/internal/platform/workspaces/:workspaceId/projects/:projectId",
+    async (request, reply) => {
+      authorizePlatformService(request, config);
+      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
+        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      }
+      const deleted = await repository.deleteProject(
+        request.params.workspaceId,
+        request.params.projectId,
+        () => Promise.all([
+          objectStore.deleteProjectObjects(request.params.workspaceId, request.params.projectId),
+          projectSources.deleteProject(request.params.workspaceId, request.params.projectId),
+        ]).then(() => undefined),
+      );
+      return deleted ? reply.code(204).send() : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    },
+  );
+
+  app.get<{ Params: { workspaceId: string; projectId: string; revision: string } }>(
+    "/v1/internal/platform/workspaces/:workspaceId/projects/:projectId/source/:revision/archive",
+    async (request, reply) => {
+      authorizePlatformService(request, config);
+      const revision = Number(request.params.revision);
+      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)
+        || !Number.isSafeInteger(revision) || revision < 1) {
+        return reply.code(404).send({ code: "SOURCE_REVISION_NOT_FOUND" });
+      }
+      const source = await repository.readSourceRevision({
+        workspaceId: request.params.workspaceId,
+        projectId: request.params.projectId,
+        revision,
+      });
+      if (!source) return reply.code(404).send({ code: "SOURCE_REVISION_NOT_FOUND" });
+      const archive = await projectSources.archive(source.relativePath);
+      if (archive.digest !== source.digest || archive.fileCount !== source.fileCount || archive.totalBytes !== source.totalBytes) {
+        throw httpError(409, "SOURCE_REVISION_CORRUPTED", "源码 revision 与数据库摘要不一致");
+      }
+      return reply
+        .header("content-type", "application/gzip")
+        .header("content-disposition", `attachment; filename=source-r${revision}.tar.gz`)
+        .header("x-deviludo-source-digest", source.digest)
+        .header("x-deviludo-source-files", String(source.fileCount))
+        .header("x-deviludo-source-bytes", String(source.totalBytes))
+        .send(archive.bytes);
+    },
+  );
 
   app.get("/v1/admin/server-pools", async (request, reply) => {
     requireInstanceAdmin(request);
@@ -217,129 +262,30 @@ export async function runApi(
   });
 
   app.get("/v1/session", async (request, reply) => {
-    const principal = authenticatedRequests.get(request) ?? null;
-    const setupRequired = !(await repository.hasUsers());
-    const selectedWorkspace = principal
-      ? await selectedWorkspaceFromRequest(request, repository, principal)
-      : null;
+    const principal = productAccess(request, config);
     return reply.header("cache-control", "no-store").send({ session: {
-      user: principal ? publicUser(principal.user) : null,
-      authenticated: principal !== null,
-      setupRequired,
-      selectedWorkspace,
+      user: publicUser(principal.user),
+      authenticated: true,
+      authMode: config.accessMode === "standalone" ? "STANDALONE" : "PLATFORM",
+      canLogout: config.accessMode === "platform",
+      selectedWorkspace: principal.workspace,
     } });
-  });
-
-  app.get("/v1/workspaces", async (request, reply) => {
-    const principal = productAccess(request, config);
-    return reply.header("cache-control", "no-store").send({ workspaces: await repository.listWorkspaces(principal.user.id) });
-  });
-
-  app.post("/v1/workspaces", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const body = objectBody(request.body);
-    const name = typeof body.name === "string" ? body.name.trim() : "";
-    if (name.length < 1 || name.length > 200) return reply.code(400).send({ code: "INVALID_WORKSPACE_NAME" });
-    const workspace = await repository.createWorkspace({ id: randomUUID(), name, ownerUserId: principal.user.id });
-    return reply
-      .header("set-cookie", selectedWorkspaceCookie(workspace.id))
-      .code(201)
-      .send({ workspace, selectedWorkspace: workspace });
   });
 
   app.put("/v1/session/workspace", async (request, reply) => {
     const principal = productAccess(request, config);
-    const body = objectBody(request.body);
-    if (typeof body.workspaceId !== "string" || !UUID.test(body.workspaceId)) {
-      return reply.code(400).send({ code: "INVALID_WORKSPACE" });
+    const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+      ? request.body as Record<string, unknown>
+      : {};
+    if (body.workspaceId !== principal.workspace.id) {
+      throw httpError(409, "WORKSPACE_ASSERTION_CHANGED", "当前工作区由访问模式决定，请刷新后重试");
     }
-    const workspace = await repository.readWorkspace(body.workspaceId, principal.user.id);
-    if (!workspace) return reply.code(404).send({ code: "WORKSPACE_NOT_FOUND" });
-    return reply.header("set-cookie", selectedWorkspaceCookie(workspace.id)).send({ selectedWorkspace: workspace });
+    return reply.header("cache-control", "no-store").send({ workspace: principal.workspace });
   });
 
-  app.delete("/v1/session/workspace", async (request, reply) => {
-    productAccess(request, config);
-    return reply.header("set-cookie", selectedWorkspaceCookie(null)).send({ selectedWorkspace: null });
-  });
-
-  app.get("/v1/workspaces/current/members", async (request, reply) => {
+  app.get("/v1/workspaces", async (request, reply) => {
     const principal = productAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository, principal);
-    return reply.send({ members: await repository.listWorkspaceMembers(principal.user.id, workspace.id) });
-  });
-
-  app.post("/v1/workspaces/current/invitations", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository, principal);
-    const membership = await repository.readMembership(principal.user.id, workspace.id);
-    if (membership !== "OWNER" && membership !== "ADMIN") throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "需要工作区管理员权限");
-    const body = objectBody(request.body);
-    const role = body.role === "ADMIN" ? "ADMIN" : body.role === "MEMBER" ? "MEMBER" : null;
-    if (!role) throw httpError(400, "INVALID_WORKSPACE_ROLE", "邀请角色无效");
-    const token = randomBytes(32).toString("base64url");
-    const invitation = await repository.createInvitation({
-      workspaceId: workspace.id,
-      createdBy: principal.user.id,
-      tokenHash: digest(token),
-      role,
-    });
-    await repository.recordAuthenticationEvent({
-      userId: principal.user.id,
-      username: principal.user.username,
-      kind: "INVITATION_CREATED",
-      metadata: { workspaceId: workspace.id, invitationId: invitation.id, role },
-    });
-    return reply.code(201).send({
-      invitation: { ...invitation, role, url: `/accept-invitation?token=${encodeURIComponent(token)}` },
-    });
-  });
-
-  app.post("/v1/auth/invitations/accept", async (request, reply) => {
-    const body = objectBody(request.body);
-    const token = typeof body.token === "string" ? body.token : "";
-    const username = typeof body.username === "string" ? body.username.trim() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(username) || token.length < 32) {
-      throw httpError(400, "INVALID_INVITATION_ACCEPTANCE", "邀请注册信息无效");
-    }
-    assertPassword(password);
-    const user = await repository.acceptInvitation({ tokenHash: digest(token), username, passwordHash: await hashPassword(password) });
-    await repository.recordAuthenticationEvent({ userId: user.id, username: user.username, kind: "INVITATION_ACCEPTED", remoteAddress: request.ip || null });
-    return reply.code(201).send({ user });
-  });
-
-  app.patch<{ Params: { userId: string } }>("/v1/workspaces/current/members/:userId", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository, principal);
-    const membership = await repository.readMembership(principal.user.id, workspace.id);
-    if (membership !== "OWNER" && membership !== "ADMIN") throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "需要工作区管理员权限");
-    const body = objectBody(request.body);
-    const role = body.role === "ADMIN" ? "ADMIN" : body.role === "MEMBER" ? "MEMBER" : null;
-    if (!role) throw httpError(400, "INVALID_WORKSPACE_ROLE", "成员角色无效");
-    await repository.updateMembership({ actorUserId: principal.user.id, workspaceId: workspace.id, userId: request.params.userId, role });
-    await repository.recordAuthenticationEvent({
-      userId: principal.user.id,
-      username: principal.user.username,
-      kind: "MEMBERSHIP_CHANGED",
-      metadata: { workspaceId: workspace.id, targetUserId: request.params.userId, role },
-    });
-    return reply.send({ updated: true });
-  });
-
-  app.delete<{ Params: { userId: string } }>("/v1/workspaces/current/members/:userId", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository, principal);
-    const membership = await repository.readMembership(principal.user.id, workspace.id);
-    if (membership !== "OWNER" && membership !== "ADMIN") throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "需要工作区管理员权限");
-    await repository.updateMembership({ actorUserId: principal.user.id, workspaceId: workspace.id, userId: request.params.userId, role: null });
-    await repository.recordAuthenticationEvent({
-      userId: principal.user.id,
-      username: principal.user.username,
-      kind: "MEMBERSHIP_CHANGED",
-      metadata: { workspaceId: workspace.id, targetUserId: request.params.userId, role: null },
-    });
-    return reply.send({ removed: true });
+    return reply.header("cache-control", "no-store").send({ workspaces: [principal.workspace] });
   });
 
   app.get("/v1/settings/agent", async (request, reply) => {
@@ -411,25 +357,26 @@ export async function runApi(
     }
     const idempotencyKey = requestIdempotencyKey(request, "project");
     const currentWorkspace = await selectedWorkspaceFromRequest(request, repository, principal);
-    const prior = await repository.readProjectCreationReceipt(principal.user.id, idempotencyKey);
+    const prior = await repository.readProjectCreationReceipt(principal.workspace.id, idempotencyKey);
     if (prior) {
       if (prior.operationKind !== "PROJECT" || (currentWorkspace && currentWorkspace.id !== prior.workspaceId)) {
         return reply.code(409).send({ code: "IDEMPOTENCY_KEY_REUSED" });
       }
       const [workspace, project] = await Promise.all([
-        repository.readWorkspace(prior.workspaceId, principal.user.id),
+        repository.readWorkspace(prior.workspaceId),
         repository.readProject(prior.workspaceId, prior.projectId),
       ]);
       if (!workspace || !project) throw new Error("Project creation receipt is incomplete");
-      return reply.header("set-cookie", selectedWorkspaceCookie(workspace.id)).send({ workspace, project });
+      return reply.send({ workspace, project });
     }
     const name = suppliedName || await agentProjectName(concept, repository, agentSecrets);
     const workspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
+    const projectId = deterministicProjectId(principal.user.id, idempotencyKey);
     const project = await repository.createProject({
       actorUserId: principal.user.id,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
-      projectId: randomUUID(),
+      projectId,
       workflowId: randomUUID(),
       idempotencyKey,
       name,
@@ -437,33 +384,11 @@ export async function runApi(
       specification: specificationFromConcept(name, concept),
       ...defaultWorkflowConfiguration(),
     });
-    const selectedWorkspace = currentWorkspace ?? await repository.readWorkspace(workspace.id, principal.user.id);
+    const selectedWorkspace = currentWorkspace ?? await repository.readWorkspace(workspace.id);
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
     return reply
-      .header("set-cookie", selectedWorkspaceCookie(selectedWorkspace.id))
       .code(201)
       .send({ workspace: selectedWorkspace, project });
-  });
-
-  app.post("/v1/projects/import/git", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const body = objectBody(request.body);
-    const repositoryUrl = typeof body.repositoryUrl === "string" ? body.repositoryUrl.trim() : "";
-    if (repositoryUrl.length < 10 || repositoryUrl.length > 2_000) {
-      throw httpError(400, "INVALID_GIT_REPOSITORY", "请输入公开 GitHub 或 GitLab 仓库地址");
-    }
-    const result = await processProjectImport({
-      request,
-      principal,
-      repository,
-      agentSecrets,
-      objectStore,
-      source: () => downloadGitProject(repositoryUrl),
-    });
-    return reply
-      .header("set-cookie", selectedWorkspaceCookie(result.workspace.id))
-      .code(result.statusCode)
-      .send(result.payload);
   });
 
   app.post<{ Querystring: { name?: string } }>(
@@ -480,7 +405,7 @@ export async function runApi(
         principal,
         repository,
         agentSecrets,
-        objectStore,
+        projectSources,
         source: async () => inspectProjectZip({
           bytes: request.body as Buffer,
           sourceKind: "LOCAL_ARCHIVE",
@@ -488,7 +413,6 @@ export async function runApi(
         }),
       });
       return reply
-        .header("set-cookie", selectedWorkspaceCookie(result.workspace.id))
         .code(result.statusCode)
         .send(result.payload);
     },
@@ -578,14 +502,16 @@ export async function runApi(
   app.delete<{ Params: { projectId: string } }>("/v1/projects/:projectId", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
-    const membership = await repository.readMembership(principal.user.id, workspace.id);
-    if (membership !== "OWNER" && membership !== "ADMIN") {
+    if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
       throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区管理员可以删除项目");
     }
     const deleted = await repository.deleteProject(
       workspace.id,
       request.params.projectId,
-      () => objectStore.deleteProjectObjects(workspace.id, request.params.projectId),
+      () => Promise.all([
+        objectStore.deleteProjectObjects(workspace.id, request.params.projectId),
+        projectSources.deleteProject(workspace.id, request.params.projectId),
+      ]).then(() => undefined),
     );
     return deleted
       ? reply.code(204).send()
@@ -627,9 +553,10 @@ export async function runApi(
         return reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
       }
       const conversation = await repository.readConversation(workspace.id, request.params.conversationId);
-      return conversation
-        ? reply.send({ conversation })
-        : reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
+      if (!conversation) return reply.code(404).send({ code: "CONVERSATION_NOT_FOUND" });
+      const project = await repository.readProject(workspace.id, conversation.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      return reply.send({ conversation });
     },
   );
 
@@ -637,7 +564,6 @@ export async function runApi(
     const principal = productAccess(request, config);
     const command = conversationMessageCommand(request.body);
     const result = await processConversationMessage({ request, principal, repository, agentSecrets, command });
-    if (result.setWorkspaceCookie) reply.header("set-cookie", selectedWorkspaceCookie(result.payload.workspace.id));
     return reply.code(result.statusCode).send(result.payload);
   });
 
@@ -723,7 +649,7 @@ export async function runApi(
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "SPEC_APPROVED",
       idempotencyKey: `spec-approved:${project.workflowId}`,
-      payload: { specificationObject },
+      payload: { specificationObject, requestedByAccountId: principal.user.id },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -758,6 +684,7 @@ export async function runApi(
       payload: {
         previousJobId: failedJob.id,
         requestedBy: principal.user.username,
+        requestedByAccountId: principal.user.id,
       },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
@@ -787,6 +714,7 @@ export async function runApi(
       payload: {
         previousJobId: failedJob.id,
         requestedBy: principal.user.username,
+        requestedByAccountId: principal.user.id,
       },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
@@ -811,7 +739,7 @@ export async function runApi(
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "E2E_RETRY_REQUESTED",
       idempotencyKey,
-      payload: { previousJobId: failedJob.id, requestedBy: principal.user.username },
+      payload: { previousJobId: failedJob.id, requestedBy: principal.user.username, requestedByAccountId: principal.user.id },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -824,7 +752,7 @@ export async function runApi(
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "CANCEL_REQUESTED",
       idempotencyKey: `cancel:${project.workflowId}`,
-      payload: { requestedBy: principal.user.username },
+      payload: { requestedBy: principal.user.username, requestedByAccountId: principal.user.id },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -1011,12 +939,16 @@ export async function runApi(
       || !body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) {
       return reply.code(400).send({ code: "INVALID_WORKFLOW_SIGNAL" });
     }
-    const workspace = await repository.readWorkspace(body.workspaceId, principal.user.id);
-    if (!workspace) return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND" });
+    if (body.workspaceId !== principal.workspace.id) return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND" });
+    const workspace = principal.workspace;
+    const projectSummary = (await repository.listProjects(workspace.id))
+      .find(project => project.workflowId === request.params.workflowId);
+    const project = projectSummary ? await repository.readProject(workspace.id, projectSummary.id) : null;
+    if (!project) return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND" });
     const accepted = await repository.appendSignal(body.workspaceId, request.params.workflowId, {
       kind: body.kind,
       idempotencyKey: body.idempotencyKey,
-      payload: body.payload,
+      payload: { ...(body.payload as Record<string, unknown>), requestedByAccountId: principal.user.id },
     } as WorkflowSignalInput);
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -1064,7 +996,7 @@ function conversationMessageCommand(value: unknown): ConversationMessageCommand 
 
 async function processConversationMessage(input: Readonly<{
   request: FastifyRequest;
-  principal: AuthenticatedSession;
+  principal: AccessPrincipal;
   repository: CoreRepository;
   agentSecrets: AgentSecretStore;
   command: ConversationMessageCommand;
@@ -1091,14 +1023,14 @@ async function processConversationMessage(input: Readonly<{
   const created = command.conversationId === null;
   if (created && !projectId) {
     const idempotencyKey = requestIdempotencyKey(request, "conversation");
-    const prior = await repository.readProjectCreationReceipt(principal.user.id, idempotencyKey);
+    const prior = await repository.readProjectCreationReceipt(principal.workspace.id, idempotencyKey);
     if (prior) {
       if (prior.operationKind !== "CONVERSATION" || !prior.conversationId
         || (workspace && workspace.id !== prior.workspaceId)) {
         throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他操作");
       }
       const [priorWorkspace, project, conversation] = await Promise.all([
-        repository.readWorkspace(prior.workspaceId, principal.user.id),
+        repository.readWorkspace(prior.workspaceId),
         repository.readProject(prior.workspaceId, prior.projectId),
         repository.readConversation(prior.workspaceId, prior.conversationId),
       ]);
@@ -1127,11 +1059,12 @@ async function processConversationMessage(input: Readonly<{
     }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
+    const projectId = deterministicProjectId(principal.user.id, idempotencyKey);
     const createdBundle = await repository.createProjectConversation({
       actorUserId: principal.user.id,
       workspaceId: targetWorkspace.id,
       workspaceName: targetWorkspace.name,
-      projectId: randomUUID(),
+      projectId,
       workflowId: randomUUID(),
       conversationId: randomUUID(),
       idempotencyKey,
@@ -1144,7 +1077,7 @@ async function processConversationMessage(input: Readonly<{
       assistantMetadata: conversationAgentMetadata(agentReply),
       ...defaultWorkflowConfiguration(),
     });
-    const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id, principal.user.id);
+    const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id);
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
     return Object.freeze({
       statusCode: 201,
@@ -1215,6 +1148,16 @@ function authorizeWeb(request: FastifyRequest, config: CoreConfig): void {
   if (!secureEqual(actual, config.webToken)) throw unauthorized("Web service authentication failed");
 }
 
+function authorizePlatformService(request: FastifyRequest, config: CoreConfig): void {
+  if (config.accessMode !== "platform" || !config.platformInternalToken) {
+    throw httpError(404, "NOT_FOUND", "接口不存在");
+  }
+  const authorization = String(request.headers.authorization ?? "");
+  if (!authorization.startsWith("Bearer ") || !secureEqual(authorization.slice(7), config.platformInternalToken)) {
+    throw unauthorized("Platform service authentication failed");
+  }
+}
+
 function authorizeE2e(request: FastifyRequest, config: CoreConfig): string | null {
   if (process.env.NODE_ENV === "production") {
     const socket = request.raw.socket as Socket & {
@@ -1247,6 +1190,15 @@ function objectBody(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function header(request: FastifyRequest, name: string): string {
+  const value = request.headers[name];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function decodeHeader(value: string): string {
+  try { return decodeURIComponent(value).slice(0, 200); } catch { throw httpError(400, "INVALID_PLATFORM_IMPORT", "Platform 项目导入元数据无效"); }
+}
+
 function secureEqual(actual: string, expected: string): boolean {
   const left = Buffer.from(actual);
   const right = Buffer.from(expected);
@@ -1258,10 +1210,9 @@ function unauthorized(message: string): Error & { statusCode: number } {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const WORKSPACE_COOKIE = "deviludo_workspace";
-const authenticatedRequests = new WeakMap<FastifyRequest, AuthenticatedSession>();
+const authenticatedRequests = new WeakMap<FastifyRequest, AccessPrincipal>();
 
-function productAccess(request: FastifyRequest, config: CoreConfig): AuthenticatedSession {
+function productAccess(request: FastifyRequest, config: CoreConfig): AccessPrincipal {
   authorizeWeb(request, config);
   const session = authenticatedRequests.get(request);
   if (!session) throw unauthorized("请先登录");
@@ -1269,71 +1220,26 @@ function productAccess(request: FastifyRequest, config: CoreConfig): Authenticat
 }
 
 async function selectedWorkspaceFromRequest(
-  request: FastifyRequest,
-  repository: CoreRepository,
-  session: AuthenticatedSession,
+  _request: FastifyRequest,
+  _repository: CoreRepository,
+  session: AccessPrincipal,
 ) {
-  const workspaceId = cookieValue(request.headers.cookie, WORKSPACE_COOKIE);
-  return workspaceId && UUID.test(workspaceId) ? repository.readWorkspace(workspaceId, session.user.id) : null;
+  return session.workspace;
 }
 
 async function requireSelectedWorkspace(
   request: FastifyRequest,
   repository: CoreRepository,
-  session: AuthenticatedSession,
+  session: AccessPrincipal,
 ) {
-  const workspace = await selectedWorkspaceFromRequest(request, repository, session);
-  if (!workspace) throw httpError(409, "WORKSPACE_REQUIRED", "请先选择工作区");
-  return workspace;
+  return selectedWorkspaceFromRequest(request, repository, session);
 }
 
-async function authenticateRequest(request: FastifyRequest, repository: CoreRepository) {
-  const token = cookieValue(request.headers.cookie, SESSION_COOKIE);
-  return token && token.length >= 32 ? repository.readSession(digest(token)) : null;
-}
-
-function assertCsrf(request: FastifyRequest, session: AuthenticatedSession): void {
-  if (request.headers["x-deviludo-origin-verified"] !== "1") {
-    throw httpError(403, "ORIGIN_REJECTED", "请求来源无效");
-  }
-  const header = String(request.headers["x-deviludo-csrf"] ?? request.headers["x-csrf-token"] ?? "");
-  const cookie = cookieValue(request.headers.cookie, CSRF_COOKIE);
-  if (!header || !cookie || !secureEqual(digest(header), session.csrfHash) || !secureEqual(header, cookie)) {
-    throw httpError(403, "CSRF_REJECTED", "CSRF 校验失败");
-  }
-}
-
-function requireInstanceAdmin(request: FastifyRequest): AuthenticatedSession {
+function requireInstanceAdmin(request: FastifyRequest): AccessPrincipal {
   const principal = authenticatedRequests.get(request);
   if (!principal) throw unauthorized("请先登录");
   if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
   return principal;
-}
-
-function selectedWorkspaceCookie(workspaceId: string | null): string {
-  const attributes = [
-    `${WORKSPACE_COOKIE}=${workspaceId ?? ""}`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Lax",
-    workspaceId ? "Max-Age=31536000" : "Max-Age=0",
-  ];
-  if (process.env.NODE_ENV === "production") attributes.push("Secure");
-  return attributes.join("; ");
-}
-
-function cookieValue(header: string | undefined, name: string): string | null {
-  if (!header) return null;
-  for (const item of header.split(";")) {
-    const separator = item.indexOf("=");
-    if (separator < 0 || item.slice(0, separator).trim() !== name) continue;
-    try {
-      return decodeURIComponent(item.slice(separator + 1).trim());
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }
 
 function requestIdempotencyKey(request: FastifyRequest, prefix: string): string {
@@ -1365,10 +1271,10 @@ async function agentProjectName(
 
 async function processProjectImport(input: Readonly<{
   request: FastifyRequest;
-  principal: AuthenticatedSession;
+  principal: AccessPrincipal;
   repository: CoreRepository;
   agentSecrets: AgentSecretStore;
-  objectStore: CoreObjectStore;
+  projectSources: ProjectSourceStore;
   source: () => Promise<ImportedSourceSnapshot>;
 }>): Promise<Readonly<{
   statusCode: 200 | 201;
@@ -1381,13 +1287,13 @@ async function processProjectImport(input: Readonly<{
 }>> {
   const idempotencyKey = requestIdempotencyKey(input.request, "project-import");
   const currentWorkspace = await selectedWorkspaceFromRequest(input.request, input.repository, input.principal);
-  const prior = await input.repository.readProjectCreationReceipt(input.principal.user.id, idempotencyKey);
+  const prior = await input.repository.readProjectCreationReceipt(input.principal.workspace.id, idempotencyKey);
   if (prior) {
     if (prior.operationKind !== "PROJECT" || (currentWorkspace && currentWorkspace.id !== prior.workspaceId)) {
       throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他操作");
     }
     const [workspace, project, conversations] = await Promise.all([
-      input.repository.readWorkspace(prior.workspaceId, input.principal.user.id),
+      input.repository.readWorkspace(prior.workspaceId),
       input.repository.readProject(prior.workspaceId, prior.projectId),
       input.repository.listProjectConversations(prior.workspaceId, prior.projectId),
     ]);
@@ -1422,13 +1328,13 @@ async function processProjectImport(input: Readonly<{
   }
 
   const targetWorkspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name: analysis.name, createdAt: "" });
-  const projectId = randomUUID();
+  const projectId = deterministicProjectId(input.principal.user.id, idempotencyKey);
   const workflowId = randomUUID();
-  const stored = await input.objectStore.putImportedSource({
+  const stored = await input.projectSources.publishFiles({
     workspaceId: targetWorkspace.id,
     projectId,
-    archive: source.archive,
-    sourceKind: source.sourceKind,
+    revision: 1,
+    files: source.files,
   });
   let bundle;
   try {
@@ -1439,7 +1345,6 @@ async function processProjectImport(input: Readonly<{
       projectId,
       workflowId,
       conversationId: randomUUID(),
-      artifactId: randomUUID(),
       idempotencyKey,
       name: analysis.name,
       concept: analysis.concept,
@@ -1460,18 +1365,17 @@ async function processProjectImport(input: Readonly<{
         displayName: source.displayName,
         fileCount: source.fileCount,
         totalBytes: source.totalBytes,
-        bucket: stored.bucket,
-        key: stored.key,
-        sha256: stored.sha256,
-        sizeBytes: stored.sizeBytes,
+        revision: stored.revision,
+        relativePath: stored.relativePath,
+        sha256: stored.digest,
       },
       ...defaultWorkflowConfiguration(),
     });
   } catch (error) {
-    await input.objectStore.deleteProjectObjects(targetWorkspace.id, projectId).catch(() => undefined);
+    await input.projectSources.deleteProject(targetWorkspace.id, projectId).catch(() => undefined);
     throw error;
   }
-  const workspace = currentWorkspace ?? await input.repository.readWorkspace(targetWorkspace.id, input.principal.user.id);
+  const workspace = currentWorkspace ?? await input.repository.readWorkspace(targetWorkspace.id);
   if (!workspace) throw new Error("Imported workspace could not be read");
   return Object.freeze({
     statusCode: 201,
@@ -1574,6 +1478,18 @@ function publicUser(user: UserRecord) {
     instanceAdmin: user.instanceAdmin,
     createdAt: user.createdAt,
   });
+}
+
+function deterministicProjectId(userId: string, idempotencyKey: string): string {
+  const bytes = createHash("sha256").update("deviludo-project\0").update(userId).update("\0").update(idempotencyKey).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function digest(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function defaultWorkflowConfiguration(): Readonly<{

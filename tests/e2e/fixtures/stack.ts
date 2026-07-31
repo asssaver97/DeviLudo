@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { createPublicKey } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
   expect,
@@ -56,7 +58,10 @@ const NODE_DEFINITIONS: readonly Readonly<{
   {
     poolKind: "CORE",
     operatingSystem: "linux",
-    capabilities: ["BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH"],
+    capabilities: [
+      "BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+      "RESTRICTED_CONTAINER", "NETWORK_POLICY",
+    ],
   },
   { poolKind: "E2E_LINUX", operatingSystem: "linux", capabilities: ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"] },
   { poolKind: "E2E_WINDOWS", operatingSystem: "windows", capabilities: ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"] },
@@ -78,16 +83,15 @@ export class StackHarness {
 
   async reset(): Promise<void> {
     await this.stopLogicalNodes();
-    await this.executeSql(`
-      SET lock_timeout = '5s';
+    const runtimeImages = configuredRuntimeImages();
+    await retryDatabaseReset(() => this.executeSql(`
+      BEGIN;
+      SET LOCAL lock_timeout = '5s';
       TRUNCATE TABLE
-        deviludo.authentication_events,
-        deviludo.sessions,
-        deviludo.workspace_invitations,
-        deviludo.workspace_memberships,
-        deviludo.users,
         deviludo.workspace_claim_fairness,
         deviludo.project_creation_receipts,
+        deviludo.project_source_ready_outbox,
+        deviludo.project_source_revisions,
         deviludo.instance_agent_settings,
         deviludo.operation_receipts,
         deviludo.external_signals,
@@ -102,13 +106,22 @@ export class StackHarness {
         deviludo.server_nodes
       RESTART IDENTITY CASCADE;
       DELETE FROM deviludo.pool_capacity_intents WHERE reason <> 'P0_BASELINE';
+      DELETE FROM deviludo.runtime_images;
+      INSERT INTO deviludo.runtime_images(runtime_key, image_reference, release_version, verified_at)
+      VALUES ${runtimeImages.map(([key, image]) => `('${key}', '${image}', 'e2e', clock_timestamp())`).join(",\n             ")};
+      COMMIT;
+    `));
+    const publicKeyFile = process.env.DEVILUDO_CORE_EXECUTOR_PUBLIC_KEY_FILE ?? "";
+    const publicKeyBase64 = Buffer.from(await readFile(publicKeyFile, "utf8")).toString("base64");
+    await this.executeSql(`
+      INSERT INTO deviludo.executor_identities(executor_id, identity_kind, public_key_pem)
+      VALUES ('local-core-executor', 'CORE', convert_from(decode('${publicKeyBase64}', 'base64'), 'UTF8'))
+      ON CONFLICT (executor_id) DO UPDATE SET public_key_pem = EXCLUDED.public_key_pem,
+        enabled = true, updated_at = clock_timestamp();
     `);
-    const password = "E2e-admin!2026";
-    const setup = await this.web("/api/auth/setup", {
-      method: "POST",
-      data: { username: "e2e-admin", password, passwordConfirmation: password },
-    });
-    expect(setup.status(), await setup.text()).toBe(201);
+    const session = await this.web("/api/session");
+    expect(session.ok(), await session.text()).toBeTruthy();
+    expect(await session.json()).toMatchObject({ session: { authenticated: true, authMode: "STANDALONE", canLogout: false, user: { instanceAdmin: true } } });
   }
 
   async web(path: string, options: FetchOptions = {}): Promise<APIResponse> {
@@ -174,11 +187,9 @@ export class StackHarness {
   }
 
   async selectWorkspace(workspaceId: string): Promise<void> {
-    const response = await this.web("/api/session/workspace", {
-      method: "PUT",
-      data: { workspaceId },
-    });
-    expect(response.ok(), await response.text()).toBeTruthy();
+    const session=await this.web("/api/session");
+    const body=await session.json() as {session:{selectedWorkspace:{id:string}}};
+    expect(body.session.selectedWorkspace.id).toBe(workspaceId);
   }
 
   async waitForProject(
@@ -209,6 +220,19 @@ export class StackHarness {
       expect(activated.ok()).toBeTruthy();
       nodes.push((await activated.json() as { node: NodeRecord }).node);
     }
+    const identityKeyFile = process.env.DEVILUDO_E2E_IDENTITY_KEY_FILE ?? "";
+    const publicKey = createPublicKey(await readFile(identityKeyFile, "utf8"))
+      .export({ format: "pem", type: "spki" }).toString();
+    const publicKeyBase64 = Buffer.from(publicKey).toString("base64");
+    for (const node of nodes.filter(candidate => candidate.poolKind.startsWith("E2E_"))) {
+      assertUuid(node.id);
+      await this.executeSql(`
+        INSERT INTO deviludo.executor_identities(executor_id, identity_kind, node_id, public_key_pem)
+        VALUES ('${node.id}', 'E2E', '${node.id}'::uuid, convert_from(decode('${publicKeyBase64}', 'base64'), 'UTF8'))
+        ON CONFLICT (executor_id) DO UPDATE SET public_key_pem = EXCLUDED.public_key_pem,
+          node_id = EXCLUDED.node_id, enabled = true, updated_at = clock_timestamp();
+      `);
+    }
     return Object.freeze(nodes);
   }
 
@@ -222,6 +246,7 @@ export class StackHarness {
         DEVILUDO_E2E_OPERATING_SYSTEM_OVERRIDE: node.operatingSystem,
         DEVILUDO_CORE_API_URL: this.coreUrl.href,
         DEVILUDO_E2E_NODE_TOKEN: nodeToken,
+        DEVILUDO_E2E_IDENTITY_KEY_FILE: process.env.DEVILUDO_E2E_IDENTITY_KEY_FILE,
         DEVILUDO_E2E_POLL_MS: "100",
       });
       this.nodeControllers.push(controller);
@@ -339,4 +364,36 @@ function assertUuid(value: string): void {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds));
+}
+
+async function retryDatabaseReset(operation: () => Promise<unknown>): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try { await operation(); return; }
+    catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/deadlock detected|lock timeout/i.test(message) || attempt === 5) throw error;
+      await delay(attempt * 200);
+    }
+  }
+  throw lastError;
+}
+
+function configuredRuntimeImages(): readonly (readonly [string, string])[] {
+  const value: unknown = JSON.parse(process.env.DEVILUDO_RUNTIME_IMAGES_JSON ?? "null");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("DEVILUDO_RUNTIME_IMAGES_JSON is required by the E2E harness");
+  }
+  const keys = [
+    "AGENT_CLAUDE", "AGENT_CODEX", "GODOT_BUILDER", "STEAM_PUBLISHER",
+    "E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS",
+  ] as const;
+  return Object.freeze(keys.map(key => {
+    const image = (value as Record<string, unknown>)[key];
+    if (typeof image !== "string" || !/^sha256:[0-9a-f]{64}$/.test(image)) {
+      throw new Error(`Invalid E2E runtime image for ${key}`);
+    }
+    return Object.freeze([key, image] as const);
+  }));
 }
