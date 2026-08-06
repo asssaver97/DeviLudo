@@ -65,6 +65,27 @@ Windows 使用相同动作：
 
 项目源码不再作为 `SOURCE` 对象制品传递。每个项目的源码 revision 持久保存在 `DEVILUDO_PROJECTS_ROOT/workspaces/{workspaceId}/projects/{projectId}/revisions/`；Agent、构建和重试从指定 revision 创建隔离副本，Agent 成功输出经校验后以同文件系统 staging 和原子 rename 发布。构建、E2E、签名和下载制品仍使用 S3/MinIO。
 
+### 功能验收测试体系
+
+Agent 生成源码时同时输出 `testManifest`（协议 `deviludo.test-manifest.v1`），声明每个核心功能及其验证方法。E2E 阶段不再盲跑 120 秒，而是：
+
+1. 读取 `agent.json` 中的 `testManifest`
+2. 执行 Godot 测试脚本（`--headless --script res://tests/e2e.gd`）
+3. 解析 `DEVILUDO_E2E_RESULT` 结构化输出
+4. 验证所有声明的 `checkNames` 都被执行
+5. 报告具体失败的功能点（而非盲目的退出码）
+
+测试脚本要求：
+- 继承 `SceneTree`，在 `_initialize()` 执行所有测试
+- 用 `check(condition: bool, name: String)` 记录每个断言
+- 断言名称必须 kebab-case 且匹配 `testManifest.features[].checkNames`
+- 输出 `DEVILUDO_E2E_RESULT:{"suite":"...","checks":[],"failures":[],"duration_ms":...}`
+- 用 `quit(0 if failures.is_empty() else 1)` 退出
+
+参考实现：`fixtures/godot-smoke/tests/e2e.gd` + `fixtures/godot-smoke/agent.json`
+
+E2E 失败时，Agent 修复任务会收到 `testDetails.failures` 列表，精确知道哪些功能点坏了。
+
 工作流成功后，Core 写入可重放的 `project.source.ready` outbox。托管部署中的 DeviLudo Platform 使用服务认证拉取事件和确定性源码归档，再独立完成 GitHub 同步；Core 不保存 GitHub token、仓库连接或同步任务，主工作流也不依赖远端同步结果。
 
 ## 本地 macOS

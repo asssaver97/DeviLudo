@@ -1,13 +1,11 @@
 "use client";
 
 import { ServerPoolDashboard } from "@/components/ServerPoolDashboard";
-import { ProductShell } from "@/components/ProductShell";
 import { useLanguage } from "@/components/i18n/LanguageProvider";
 
 export default function ServerPoolsPage() {
   const { text } = useLanguage();
   return (
-    <ProductShell>
       <section className="adminPage">
         <header className="page-heading">
           <div>
@@ -18,6 +16,5 @@ export default function ServerPoolsPage() {
         </header>
         <ServerPoolDashboard />
       </section>
-    </ProductShell>
   );
 }

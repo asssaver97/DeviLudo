@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
-import type { ProductProjectSummary, ProductSession, WorkspaceSummary } from "@/lib/product/contracts";
+import { cachedValue, clientCacheKeys, expireCached, loadCached, storeCached } from "@/lib/product/client-cache";
+import type { ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
 import { createStoredZip, shouldIncludeProjectPath } from "@/lib/product/source-archive";
-import { ProductShell } from "./ProductShell";
 import { ArrowIcon, FileIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
+import { useProductSession } from "./ProductShell";
 
 export function ProductDashboard({
   creationOnly = false,
@@ -17,36 +18,40 @@ export function ProductDashboard({
   initialMode?: "IDEA" | "IMPORT";
 }) {
   const { locale, text } = useLanguage();
+  const session = useProductSession();
   const router = useRouter();
   const conceptRef = useRef<HTMLTextAreaElement>(null);
   const operationKey = useRef<string | null>(null);
-  const [projects, setProjects] = useState<readonly ProductProjectSummary[]>([]);
+  const initialProjects = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
+  const initialRepositories = cachedValue<readonly { id: string; fullName: string; private: boolean }[]>(clientCacheKeys.githubRepositories);
+  const [projects, setProjects] = useState<readonly ProductProjectSummary[]>(initialProjects ?? []);
   const [name, setName] = useState("");
   const [concept, setConcept] = useState("");
   const [creationMode, setCreationMode] = useState(initialMode);
   const [folderFiles, setFolderFiles] = useState<readonly File[]>([]);
   const [archiveFile, setArchiveFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialProjects);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [platformManaged, setPlatformManaged] = useState(false);
-  const [githubRepositories, setGitHubRepositories] = useState<readonly { id: string; fullName: string; private: boolean }[]>([]);
-  const [selectedGitHubRepositoryId, setSelectedGitHubRepositoryId] = useState("");
+  const [githubRepositories, setGitHubRepositories] = useState<readonly { id: string; fullName: string; private: boolean }[]>(initialRepositories ?? []);
+  const [selectedGitHubRepositoryId, setSelectedGitHubRepositoryId] = useState(initialRepositories?.[0]?.id ?? "");
+  const platformManaged = session.authMode === "PLATFORM";
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/projects", { signal: controller.signal }).then(response => response.status === 409 ? { projects: [] } : readJson(response)).then(projectsPayload => {
-      setProjects((projectsPayload as { projects: ProductProjectSummary[] }).projects);
+    let active = true;
+    void loadCached(clientCacheKeys.projects, 10_000, async () => {
+      const response = await fetch("/api/projects");
+      const payload = response.status === 409 ? { projects: [] } : await readJson(response);
+      return (payload as { projects: readonly ProductProjectSummary[] }).projects;
+    }).then(value => {
+      if (active) setProjects(value);
     }).catch(reason => {
-      if (!controller.signal.aborted) setError(messageFor(reason, text));
+      if (active) setError(messageFor(reason, text));
     }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (active) setLoading(false);
     });
-    fetch("/api/session", { cache: "no-store", signal: controller.signal }).then(response => response.ok ? response.json() : null).then((payload: { session?: ProductSession } | null) => {
-      if (!controller.signal.aborted) setPlatformManaged(payload?.session?.authMode === "PLATFORM");
-    }).catch(() => undefined);
     if (creationOnly && initialMode === "IDEA") setTimeout(() => conceptRef.current?.focus(), 0);
-    return () => controller.abort();
+    return () => { active = false; };
   }, [creationOnly, initialMode, text]);
 
   async function createProject() {
@@ -60,11 +65,11 @@ export function ProductDashboard({
         body: JSON.stringify({ name: name.trim(), concept: concept.trim() }),
       });
       const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
-      window.dispatchEvent(new CustomEvent("deviludo:workspace-changed", { detail: payload.workspace }));
+      cacheProjectSummary(payload.project);
       router.push(`/projects/${payload.project.id}`);
     } catch (reason) {
       if (reason instanceof ApiError && (reason.code === "AGENT_CONFIG_REQUIRED" || reason.code === "AGENT_NAMING_FAILED")) {
-        window.location.assign("/settings?required=project-name");
+        router.push("/settings?required=project-name");
         return;
       }
       setError(messageFor(reason, text));
@@ -86,11 +91,11 @@ export function ProductDashboard({
       });
       const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       operationKey.current = null;
-      window.dispatchEvent(new CustomEvent("deviludo:workspace-changed", { detail: payload.workspace }));
+      cacheProjectSummary(payload.project);
       router.push(`/projects/${payload.project.id}`);
     } catch (reason) {
       if (reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
-        window.location.assign("/settings?required=project-import");
+        router.push("/settings?required=project-import");
         return;
       }
       setError(messageFor(reason, text));
@@ -102,10 +107,13 @@ export function ProductDashboard({
     if (creating) return;
     setCreating(true); setError(null);
     try {
-      const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
-      const payload = await readPlatformJson(response) as { data: { id: string; fullName: string; private: boolean }[] };
-      setGitHubRepositories(payload.data);
-      setSelectedGitHubRepositoryId(payload.data[0]?.id ?? "");
+      const repositories = await loadCached(clientCacheKeys.githubRepositories, 120_000, async () => {
+        const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
+        const payload = await readPlatformJson(response) as { data: { id: string; fullName: string; private: boolean }[] };
+        return payload.data;
+      });
+      setGitHubRepositories(repositories);
+      setSelectedGitHubRepositoryId(repositories[0]?.id ?? "");
     } catch (reason) { setError(platformRepositoryMessage(reason, text)); }
     finally { setCreating(false); }
   }
@@ -121,13 +129,14 @@ export function ProductDashboard({
       const payload = await readPlatformJson(response) as { data?: { project?: { project?: { id?: string } } } };
       const projectId = payload.data?.project?.project?.id;
       if (!projectId) throw new Error(text("GitHub 导入响应无效", "GitHub import returned an invalid project"));
+      expireCached(clientCacheKeys.projects);
       router.push(`/projects/${projectId}`);
     } catch (reason) { setError(platformRepositoryMessage(reason, text)); setCreating(false); }
   }
 
   if (creationOnly) {
     return (
-      <ProductShell>
+      <>
         <section className="project-page-header">
           <div>
             <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{creationMode === "IDEA" ? text("开始新构想", "NEW CONCEPT") : text("导入已有项目", "IMPORT PROJECT")}</b></div>
@@ -161,12 +170,12 @@ export function ProductDashboard({
           )}
           {error ? <p className="repository-onboarding-error" role="alert">{error}</p> : null}
         </section>
-      </ProductShell>
+      </>
     );
   }
 
   return (
-    <ProductShell>
+    <>
       <section className="page-heading project-catalog-heading">
         <div><span className="eyebrow">PROJECTS</span><h1>{text("游戏项目", "GAME PROJECTS")}</h1></div>
         <div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import"><FileIcon /> {text("导入项目", "IMPORT")}</Link><Link className="button button-primary" href="/projects/new"><PlusIcon /> {text("开始新构想", "NEW CONCEPT")}</Link></div>
@@ -179,7 +188,12 @@ export function ProductDashboard({
       {projects.length > 0 ? (
         <section className="project-catalog-grid" aria-label={text("可访问项目", "Accessible projects")}>
           {projects.map(project => (
-            <article className="project-catalog-card" key={project.id}>
+            <Link
+              aria-label={text(`打开${project.name}项目`, `Open ${project.name} project`)}
+              className="project-catalog-card"
+              href={`/projects/${project.id}`}
+              key={project.id}
+            >
               <div className="project-catalog-card-top"><span className="project-catalog-glyph">{project.name.slice(0, 1)}</span></div>
               <h2>{project.name}</h2>
               <dl>
@@ -188,13 +202,18 @@ export function ProductDashboard({
                 <div><dt>{text("源码修订", "Source revision")}</dt><dd>{project.source ? `r${project.source.revision}` : "—"}</dd></div>
                 <div><dt>{text("源码大小", "Source size")}</dt><dd>{project.source ? `${project.source.fileCount} files` : "—"}</dd></div>
               </dl>
-              <div className="project-catalog-card-footer"><Link aria-label={text(`打开${project.name}项目`, `Open ${project.name} project`)} href={`/projects/${project.id}`}>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></Link></div>
-            </article>
+              <div className="project-catalog-card-footer"><span>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></span></div>
+            </Link>
           ))}
         </section>
       ) : null}
-    </ProductShell>
+    </>
   );
+}
+
+function cacheProjectSummary(project: ProductProjectSummary): void {
+  const current = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects) ?? [];
+  storeCached(clientCacheKeys.projects, Object.freeze([project, ...current.filter(item => item.id !== project.id)]), 10_000);
 }
 
 async function localProjectArchive(

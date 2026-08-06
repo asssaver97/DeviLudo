@@ -2046,6 +2046,27 @@ textarea {
   justify-content: flex-end;
 }
 
+.project-catalog-card {
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.project-catalog-card:hover,
+.project-catalog-card:focus-visible {
+  border-color: var(--blue);
+  box-shadow: 4px 4px 0 #07151d;
+}
+
+.project-catalog-card:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.project-catalog-card-footer > span {
+  color: var(--blue);
+}
+
 .product-studio-loading {
   margin: 10vh auto 0;
   max-width: 700px;
@@ -2749,4 +2770,100 @@ textarea {
   .conversation-box-composer .button {
     flex: 1;
   }
+}
+
+/* Keep long project documents inside the workspace instead of expanding the page. */
+.product-document-sidebar {
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  height: min(620px, calc(100dvh - 112px));
+  max-height: 620px;
+  min-height: 420px;
+  overflow: hidden;
+  position: sticky;
+  top: 78px;
+}
+
+.product-document-sidebar-content,
+.product-document-sidebar-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #405069 transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.product-document-sidebar-content:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: -3px;
+}
+
+.document-is-collapsed .product-document-sidebar {
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (max-width: 800px) {
+  .product-document-sidebar {
+    height: min(560px, calc(100dvh - 96px));
+    max-height: 560px;
+    min-height: 360px;
+    position: static;
+  }
+
+  .document-is-collapsed .product-document-sidebar {
+    min-height: 0;
+  }
+}
+/* E2E Test Details */
+.e2e-test-details {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-top: 12px;
+  padding: 12px 14px;
+}
+
+.e2e-test-details .test-summary {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 9px;
+  font-weight: 700;
+  gap: 8px;
+  text-transform: uppercase;
+}
+
+.e2e-test-details .test-passed {
+  color: #2ea44f;
+}
+
+.e2e-test-details .test-failed {
+  color: #d73a49;
+}
+
+.e2e-test-details .test-failures {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.e2e-test-details .test-failures li {
+  border-left: 2px solid #d73a49;
+  font-size: 10px;
+  margin: 6px 0;
+  padding: 4px 0 4px 10px;
+}
+
+.e2e-test-details .test-failures code {
+  background: transparent;
+  color: #d73a49;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  padding: 0;
 }

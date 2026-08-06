@@ -86,6 +86,7 @@ services:
       DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
       DEVILUDO_VAULT_ADDR: http://vault:8200
       DEVILUDO_VAULT_TOKEN_FILE: /run/deviludo-vault/api.token
+      DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"
       PORT: "8080"
     volumes:
       - vault-tokens:/run/deviludo-vault:ro
@@ -212,6 +213,7 @@ services:
       DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,www.sotamodel.net}
       DEVILUDO_VAULT_ADDR: http://vault:8200
       DEVILUDO_VAULT_TOKEN_FILE: /run/service-secrets/vault.token
+      DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"
       DEVILUDO_S3_ENDPOINT: http://minio:9000
       DEVILUDO_S3_REGION: us-east-1
       DEVILUDO_S3_PATH_STYLE: "1"
@@ -256,6 +258,7 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
     environment:
       DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,www.sotamodel.net}
+      DEVILUDO_PROVIDER_UPSTREAM_PROXY: ${DEVILUDO_PROVIDER_UPSTREAM_PROXY:-}
     networks:
       - executor-agent
       - egress

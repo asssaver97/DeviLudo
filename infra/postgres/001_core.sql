@@ -715,21 +715,23 @@ BEGIN
     IF p_kind = 'ARTIFACT_BUILD' AND v_source.revision IS NULL THEN
       RAISE EXCEPTION 'artifact build requires a published source revision';
     END IF;
-    p_payload := p_payload || jsonb_build_object(
-      'publishSourceRevision', coalesce(v_source.revision, 0) + 1,
-      'sourceRevision', v_source.revision,
-      'sourceRelativePath', v_source.relative_path,
-      'sourceDigest', v_source.content_digest
-    );
+    p_payload := p_payload
+      || jsonb_build_object('publishSourceRevision', coalesce(v_source.revision, 0) + 1)
+      || CASE WHEN v_source.revision IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(
+        'sourceRevision', v_source.revision,
+        'sourceRelativePath', v_source.relative_path,
+        'sourceDigest', v_source.content_digest
+      ) END;
   END IF;
   INSERT INTO deviludo.jobs (
     workspace_id, workflow_id, project_id, kind, pool_kind, target_operating_system,
-    required_capabilities, exclusive, runtime_image, max_attempts, output_contract, idempotency_key, payload
+    required_capabilities, exclusive, runtime_image, timeout_seconds, max_attempts, output_contract, idempotency_key, payload
   )
   VALUES (
     p_workspace_id, p_workflow_id, p_project_id, p_kind, v_pool,
     CASE WHEN v_pool = 'CORE' THEN NULL ELSE p_operating_system END,
     deviludo.required_capabilities(p_kind), v_pool <> 'CORE', v_runtime_image,
+    CASE WHEN p_kind = 'AGENT_GENERATION' THEN 5400 ELSE 1800 END,
     3,
     jsonb_build_object(
       'kinds', CASE p_kind

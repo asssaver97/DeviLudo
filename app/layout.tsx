@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import "@fontsource/dotgothic16/400.css";
 import "@fontsource/press-start-2p/400.css";
 import { LanguageProvider, type Locale } from "@/components/i18n/LanguageProvider";
+import { ProductShell } from "@/components/ProductShell";
 import "./globals.css";
 import "./product.css";
 
@@ -21,7 +22,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   const initialLocale: Locale = storedLocale === "en" ? "en" : "zh";
   return (
     <html lang={initialLocale === "en" ? "en" : "zh-CN"} suppressHydrationWarning>
-      <body className="antialiased"><LanguageProvider initialLocale={initialLocale}>{children}</LanguageProvider></body>
+      <body className="antialiased"><LanguageProvider initialLocale={initialLocale}><ProductShell>{children}</ProductShell></LanguageProvider></body>
     </html>
   );
 }

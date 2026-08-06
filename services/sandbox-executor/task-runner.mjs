@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { appendFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
-import { godotExportTarget, prepareGodotProject } from "./godot-build.mjs";
 
 let progressWrites = Promise.resolve();
 let agentOutputBuffer = "";
@@ -69,6 +68,11 @@ async function runAgent(plan) {
     await command("tar", ["-xzf", "/workspace/inputs/source.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "现有项目源码已展开，Agent 正在分析工程结构");
   }
+  const restoredCheckpoint = await exists("/workspace/inputs/checkpoint.tar.gz");
+  if (restoredCheckpoint) {
+    await command("tar", ["-xzf", "/workspace/inputs/checkpoint.tar.gz", "-C", "/workspace/project"], safeEnvironment());
+    emitProgress("PHASE", "上次尝试的源码检查点已恢复，Agent 将从现有成果继续");
+  }
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
   let e2eRepairContext = null;
   if (e2eReportObject) {
@@ -87,7 +91,7 @@ async function runAgent(plan) {
     emitProgress("PHASE", `Agent 正在修复 ${plan.job.payload.failedPlatform ?? "目标平台"} E2E 发现的游戏问题`);
   }
   const prompt = [
-    importedSource
+    importedSource || restoredCheckpoint
       ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
       : "Create a complete Godot 4 project in /workspace/project.",
     "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
@@ -97,26 +101,55 @@ async function runAgent(plan) {
     "Prioritize a complete playable vertical slice, required files, and deterministic tests before optional polish.",
     "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it.",
     "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
+    "",
+    "IMPORTANT: The generated agent.json must include a complete testManifest. The testManifest must declare every core feature from the project document with automated verification.",
+    "",
+    "testManifest structure:",
+    "- schemaVersion: \"deviludo.test-manifest.v1\"",
+    "- features: array of feature objects, each with:",
+    "  - id: unique kebab-case identifier (e.g. \"collect-ember\")",
+    "  - category: one of core-loop, player-control, data-integrity, runtime-quality, ui, audio",
+    "  - description: human-readable feature description",
+    "  - verificationMethod: \"unit\" for automated GDScript tests (required for all core game logic)",
+    "  - gdsTestPath: path to test script (typically \"res://tests/e2e.gd\")",
+    "  - checkNames: array of assertion names that verify this feature",
+    "",
+    "Test script requirements (res://tests/e2e.gd):",
+    "1. Must extend SceneTree and run all tests in _initialize()",
+    "2. Use check(condition: bool, name: String) for each assertion",
+    "3. Assertion names must be kebab-case and match checkNames in testManifest",
+    "4. Must output: print(\"DEVILUDO_E2E_RESULT:\", JSON.stringify({suite, checks, failures, duration_ms}))",
+    "5. Must exit with: quit(0 if failures.is_empty() else 1)",
+    "",
+    "Reference implementation: fixtures/godot-smoke/tests/e2e.gd demonstrates the required pattern.",
+    "",
+    "Every feature declared in the project document (gameplay mechanics, save/load, pause, win conditions, damage system, etc.) must have corresponding test checks.",
     ...(e2eRepairContext ? [
+      "",
       "This is an automatic repair pass after a trusted E2E product failure. Reproduce the reported game behavior from the existing source, fix the game content, scripts, scenes, or project configuration, and preserve unrelated working behavior.",
       "Do not dismiss the report as infrastructure failure and do not merely rewrite the report. Make concrete source changes that address its diagnostics.",
+      ...(e2eRepairContext.testDetails?.failures?.length > 0 ? [
+        `Failed feature checks: ${e2eRepairContext.testDetails.failures.join(", ")}`,
+        "Review the test script to understand what each failed check validates, then fix the game logic or configuration that caused the failure. Do not modify test assertions unless they are objectively incorrect.",
+      ] : []),
       `E2E failure report: ${JSON.stringify(e2eRepairContext)}`,
     ] : []),
     `Specification: ${JSON.stringify(specification)}`,
   ].join("\n");
   const environment = { ...safeEnvironment(), ...configuration.environment };
-  let executable;
-  let arguments_;
-  if (configuration.runtime === "CLAUDE_CODE") {
-    environment.ANTHROPIC_AUTH_TOKEN = apiKey;
-    executable = "claude";
-    arguments_ = [
-      "-p", "--no-session-persistence", "--disable-slash-commands",
-      "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--max-turns", "60",
-      "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
-      "--dangerously-skip-permissions", prompt,
-    ];
-  } else {
+  emitProgress("PHASE", "Agent 正在编写并验证游戏项目");
+  const result = await runGenerationAgent(configuration, environment, prompt, emitAgentOutput, apiKey);
+  flushAgentOutput();
+  await writeFile("/workspace/outputs/agent.json", result.stdout, "utf8");
+  emitProgress("PHASE", "Agent 已完成代码修改，正在发布源码 revision");
+  await manifest([
+    { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
+  ]);
+}
+
+async function runGenerationAgent(configuration, environment, prompt, onOutput, apiKey) {
+  if (configuration.runtime === "CLAUDE_CODE") environment.ANTHROPIC_AUTH_TOKEN = apiKey;
+  else {
     environment.CODEX_API_KEY = apiKey;
     environment.CODEX_HOME = "/workspace/codex-home";
     await mkdir(environment.CODEX_HOME, { recursive: true });
@@ -129,23 +162,58 @@ async function runAgent(plan) {
       'env_key = "CODEX_API_KEY"',
       'wire_api = "responses"',
     ].join("\n"), { mode: 0o600 });
-    executable = "codex";
-    arguments_ = ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-C", "/workspace/project", "-"];
   }
-  emitProgress("PHASE", "Agent 正在编写并验证游戏项目");
-  const result = await command(
-    executable,
-    arguments_,
-    environment,
-    configuration.runtime === "CODEX_CLI" ? prompt : undefined,
-    emitAgentOutput,
-  );
-  flushAgentOutput();
-  await writeFile("/workspace/outputs/agent.json", result.stdout, "utf8");
-  emitProgress("PHASE", "Agent 已完成代码修改，正在发布源码 revision");
-  await manifest([
-    { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
-  ]);
+
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const continuation = attempt === 1 ? prompt : [
+      "Continue from the files already present in /workspace/project after a transient Provider or CLI interruption.",
+      "Inspect the existing work first, preserve completed functionality, and finish only the missing validation and required files. Do not restart the project from scratch.",
+      prompt,
+    ].join("\n");
+    const executable = configuration.runtime === "CLAUDE_CODE" ? "claude" : "codex";
+    const arguments_ = configuration.runtime === "CLAUDE_CODE"
+      ? claudeGenerationArguments(configuration, continuation)
+      : ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-C", "/workspace/project", "-"];
+    try {
+      return await command(
+        executable,
+        arguments_,
+        environment,
+        configuration.runtime === "CODEX_CLI" ? continuation : undefined,
+        onOutput,
+        { idleTimeoutMs: 8 * 60_000 },
+      );
+    } catch (error) {
+      flushAgentOutput();
+      lastError = error instanceof Error ? error : new Error("Agent CLI failed");
+      if (attempt === 3 || !recoverableAgentFailure(lastError.message)) throw lastError;
+      const delaySeconds = attempt === 1 ? 5 : 15;
+      emitProgress("PHASE", `Provider 或 Agent CLI 暂时中断；已保留当前文件，${delaySeconds} 秒后继续（${attempt + 1}/3）`);
+      await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+    }
+  }
+  throw lastError ?? new Error("Agent CLI failed");
+}
+
+function claudeGenerationArguments(configuration, prompt) {
+  const arguments_ = [
+    "-p", "--no-session-persistence", "--disable-slash-commands",
+    "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--max-turns", "60",
+    "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
+    "--dangerously-skip-permissions",
+  ];
+  const primary = configuration.models?.primary;
+  const fallbacks = [configuration.models?.sonnet, configuration.models?.haiku, configuration.models?.opus]
+    .filter((model, index, models) => typeof model === "string" && model !== primary && models.indexOf(model) === index);
+  if (fallbacks.length > 0) arguments_.push("--fallback-model", fallbacks.join(","));
+  arguments_.push(prompt);
+  return arguments_;
+}
+
+function recoverableAgentFailure(message) {
+  if (/\b(?:401|403)\b|invalid api key|authentication|unauthorized|forbidden/i.test(message)) return false;
+  return /api error|timed? out|timeout|stalled without output|rate.?limit|overload|temporar|unavailable|connection|econn|socket|fetch failed|maximum turns|max turns|cli exited without a diagnostic/i.test(message);
 }
 
 async function runProjectDocumentMaintenance(plan) {
@@ -224,6 +292,7 @@ function validateProjectDocument(content) {
 }
 
 async function runGodotBuild(plan) {
+  const { godotExportTarget, prepareGodotProject } = await import("./godot-build.mjs");
   const input = "/workspace/inputs/source.tar.gz";
   emitProgress("PHASE", "正在展开并校验 Agent 生成的 Godot 项目");
   await command("tar", ["-xzf", input, "-C", "/workspace/project"], safeEnvironment());
@@ -314,14 +383,28 @@ function godotEnvironment() {
   };
 }
 
-async function command(executable, arguments_, env, stdin, onStdout) {
+async function command(executable, arguments_, env, stdin, onStdout, options = {}) {
   const child = spawn(executable, arguments_, { cwd: "/workspace/project", env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
   if (stdin) child.stdin.end(stdin); else child.stdin.end();
   const stdout = [];
   const stderr = [];
   const progressDecoder = new StringDecoder("utf8");
   let progressBuffer = "";
+  let inactivityError = null;
+  let inactivityTimer = null;
+  let forceKillTimer = null;
+  const resetInactivityTimer = () => {
+    if (!options.idleTimeoutMs || inactivityError) return;
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+    inactivityTimer = setTimeout(() => {
+      inactivityError = new Error(`${executable} stalled without output for ${Math.round(options.idleTimeoutMs / 60_000)} minutes`);
+      child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    }, options.idleTimeoutMs);
+  };
+  resetInactivityTimer();
   child.stdout.on("data", chunk => {
+    resetInactivityTimer();
     const data = Buffer.from(chunk);
     stdout.push(data);
     if (!onStdout) return;
@@ -330,15 +413,36 @@ async function command(executable, arguments_, env, stdin, onStdout) {
     progressBuffer = lines.pop() ?? "";
     for (const line of lines) onStdout(line);
   });
-  child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
+  child.stderr.on("data", chunk => {
+    resetInactivityTimer();
+    stderr.push(Buffer.from(chunk));
+  });
   const result = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
+  if (inactivityTimer) clearTimeout(inactivityTimer);
+  if (forceKillTimer) clearTimeout(forceKillTimer);
   progressBuffer += progressDecoder.end();
   if (onStdout && progressBuffer.trim()) onStdout(progressBuffer);
-  if (result.code !== 0) throw new Error(`${executable} exited ${result.code ?? `by ${result.signal ?? "signal"}`}: ${Buffer.concat(stderr).toString("utf8").slice(0, 4000)}`);
+  if (inactivityError) throw inactivityError;
+  if (result.code !== 0) {
+    const diagnostic = commandFailureDiagnostic(executable, Buffer.concat(stdout).toString("utf8"), Buffer.concat(stderr).toString("utf8"));
+    throw new Error(`${executable} exited ${result.code ?? `by ${result.signal ?? "signal"}`}: ${diagnostic}`);
+  }
   return { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") };
+}
+
+function commandFailureDiagnostic(executable, stdout, stderr) {
+  const direct = stderr.trim();
+  if (direct) return sanitizeError(direct);
+  const errorEvent = stdout.split(/\r?\n/).reverse().map(agentEventText)
+    .find(event => event && /api error|error|timed? out|timeout|rate.?limit|overload|unavailable|connection|maximum turns|max turns/i.test(event.text));
+  return errorEvent ? sanitizeError(errorEvent.text) : `${executable} CLI exited without a diagnostic`;
+}
+
+async function exists(path) {
+  try { await access(path); return true; } catch { return false; }
 }
 
 function emitProgress(kind, content) {

@@ -18,8 +18,8 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(webSection, /- edge[\s\S]*- core/);
   assert.doesNotMatch(webSection, /- data/);
   const vaultInit = await readFile(new URL("../infra/vault/local-init.sh", import.meta.url), "utf8");
-  assert.match(vaultInit, /chown 1001:1001 \/tokens\/api\.token/);
-  assert.match(vaultInit, /chmod 0400 \/tokens\/api\.token/);
+  assert.match(vaultInit, /issue_service_token api deviludo-api 1001:1001 0400/);
+  assert.match(vaultInit, /mv -f "\$temporary" "\/tokens\/\$\{name\}\.token"/);
   assert.doesNotMatch(vaultInit, /chown 1001:1001 \/tokens\/(?:root|executor)\.token/);
   const localMac = await readFile(new URL("../scripts/local-macos-e2e.mjs", import.meta.url), "utf8");
   assert.match(localMac, /const \{ main \} = await import\("\.\.\/services\/e2e-node\/src\/main\.ts"\);/);
@@ -33,6 +33,16 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(localUp, /state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(localUp, /deviludo-retained-job-runtime/);
   assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\.\.\.imageIds, \.\.\.retainedJobRuntimeImages\]\)\]/);
+  assert.match(localUp, /persistLocalComposeEnvironment\(environment\)/);
+  assert.match(localUp, /DEVILUDO_DOCKER_GID/);
+  assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);
+  assert.match(localUp, /detectLocalProviderUpstreamProxy\(\)/);
+  assert.match(localUp, /198\.18\.0\.0\/15 Fake-IP/);
+  assert.match(localUp, /supportsHttpConnectProxy/);
+  assert.match(compose, /DEVILUDO_PROVIDER_UPSTREAM_PROXY/);
+  const providerProxy = await readFile(new URL("../services/sandbox-executor/proxy-entrypoint.sh", import.meta.url), "utf8");
+  assert.match(providerProxy, /cache_peer %s parent %s 0 no-query default/);
+  assert.match(providerProxy, /never_direct allow all/);
   assert.match(localUp, /--reset-incompatible-baseline/);
   assert.match(localUp, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
   assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);
@@ -57,6 +67,35 @@ test("Agent generation continues from the persistent source revision instead of 
   assert.match(runner, /Continue developing the existing Godot 4 project/);
   assert.match(runner, /Create a complete Godot 4 project/);
   assert.doesNotMatch(runner, /input\.kind === "SOURCE"/);
+});
+
+test("Agent generation preserves partial work and retries transient Provider failures in place", async () => {
+  const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
+  const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
+  assert.match(runner, /attempt <= 3/);
+  assert.match(runner, /idleTimeoutMs: 8 \* 60_000/);
+  assert.match(runner, /recoverableAgentFailure/);
+  assert.match(runner, /checkpoint\.tar\.gz/);
+  assert.match(runner, /CLI exited without a diagnostic/);
+  assert.match(daemon, /projectSources\.saveCheckpoint/);
+  assert.match(daemon, /archiveCheckpoint\(plan\.job\.workspaceId, plan\.job\.projectId, plan\.job\.workflowId\)/);
+  assert.match(daemon, /本次已保存/);
+});
+
+test("Core waits for the sandbox executor before claiming jobs", async () => {
+  const sandbox = await readFile(new URL("../services/core/src/sandbox.ts", import.meta.url), "utf8");
+  const client = await readFile(new URL("../services/sandbox-executor/client.mjs", import.meta.url), "utf8");
+  const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
+  assert.match(sandbox, /await backend\.probe\(signal\)[\s\S]*repository\.claimJob/);
+  assert.match(sandbox, /sandbox_executor_unavailable/);
+  assert.match(client, /\/v2\/live/);
+  assert.match(daemon, /request\.url === "\/v2\/live"/);
+});
+
+test("non-Builder task images can start without the Godot-only helper module", async () => {
+  const taskRunner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(taskRunner, /^import .*godot-build\.mjs/m);
+  assert.match(taskRunner, /async function runGodotBuild\(plan\)[\s\S]*await import\("\.\/godot-build\.mjs"\)/);
 });
 
 test("production deployment has exactly five role-local idempotent entrypoints", async () => {
@@ -203,9 +242,24 @@ test("E2E signing failures and isolation cleanup remove transient workspaces", a
   assert.match(windows, /Filter "deviludo-\$JobId-\*"[\s\S]*Remove-Item -Recurse -Force/);
 });
 
-test("the settings route is rendered inside the shared product shell", async () => {
+test("the shared product shell is mounted once in the root layout so route changes preserve its session", async () => {
+  const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const page = await readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8");
-  assert.match(page, /<ProductShell>[\s\S]*<AgentSettings \/>[\s\S]*<\/ProductShell>/);
+  assert.match(layout, /<LanguageProvider[\s\S]*<ProductShell>\{children\}<\/ProductShell>[\s\S]*<\/LanguageProvider>/);
+  assert.match(page, /<AgentSettings \/>/);
+  assert.doesNotMatch(page, /ProductShell/);
+});
+
+test("product pages share session data and never poll an idle project", async () => {
+  const shell = await readFile(new URL("../components/ProductShell.tsx", import.meta.url), "utf8");
+  const dashboard = await readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8");
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const access = await readFile(new URL("../components/AccessSettings.tsx", import.meta.url), "utf8");
+  assert.match(shell, /fetch\("\/api\/session"/);
+  for (const source of [dashboard,studio,access]) assert.doesNotMatch(source,/fetch\("\/api\/session"/);
+  assert.doesNotMatch(studio,/setInterval|1500/);
+  assert.match(studio,/workflowNeedsPolling\(workflowState\)/);
+  assert.match(studio,/repositoryNeedsPolling\(repositorySyncState\)/);
 });
 
 test("the API Key field stays outside browser password managers", async () => {

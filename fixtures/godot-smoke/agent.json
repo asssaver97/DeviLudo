@@ -1,0 +1,56 @@
+{
+  "title": "DeviLudo Local Smoke",
+  "testManifest": {
+    "schemaVersion": "deviludo.test-manifest.v1",
+    "features": [
+      {
+        "id": "collect-ember",
+        "category": "core-loop",
+        "description": "玩家可以收集余烬道具，重复收集同一道具会被拒绝",
+        "verificationMethod": "unit",
+        "gdsTestPath": "res://tests/e2e.gd",
+        "checkNames": ["collect-first-ember", "reject-duplicate-ember"]
+      },
+      {
+        "id": "pause-system",
+        "category": "player-control",
+        "description": "暂停时游戏时间停止流逝",
+        "verificationMethod": "unit",
+        "gdsTestPath": "res://tests/e2e.gd",
+        "checkNames": ["pause-stops-clock"]
+      },
+      {
+        "id": "damage-system",
+        "category": "core-loop",
+        "description": "伤害正确减少船体完整度",
+        "verificationMethod": "unit",
+        "gdsTestPath": "res://tests/e2e.gd",
+        "checkNames": ["damage-reduces-hull"]
+      },
+      {
+        "id": "win-condition",
+        "category": "core-loop",
+        "description": "收集足够余烬且船体完整时胜利",
+        "verificationMethod": "unit",
+        "gdsTestPath": "res://tests/e2e.gd",
+        "checkNames": ["twenty-minute-core-loop-win"]
+      },
+      {
+        "id": "save-persistence",
+        "category": "data-integrity",
+        "description": "游戏状态可以保存并原样恢复",
+        "verificationMethod": "unit",
+        "gdsTestPath": "res://tests/e2e.gd",
+        "checkNames": ["save-open-write", "save-open-read", "save-json-valid", "save-round-trip"]
+      },
+      {
+        "id": "headless-performance",
+        "category": "runtime-quality",
+        "description": "headless 模式下测试套件在 250ms 内完成",
+        "verificationMethod": "unit",
+        "gdsTestPath": "res://tests/e2e.gd",
+        "checkNames": ["headless-performance-budget"]
+      }
+    ]
+  }
+}

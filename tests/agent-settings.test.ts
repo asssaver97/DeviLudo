@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -127,4 +127,50 @@ test("the local Secret store writes a versioned instance key and returns only sa
 
 test("production fails closed when the Agent Secret broker is not configured", () => {
   assert.throws(() => createAgentSecretStore({ NODE_ENV: "production" }), /broker URL is required/i);
+});
+
+test("the Vault Secret store rejects unsafe renewal intervals", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-vault-renewal-"));
+  const tokenFile = join(root, "api.token");
+  await writeFile(tokenFile, "valid-token-value", { mode: 0o600 });
+  try {
+    assert.throws(() => createAgentSecretStore({
+      NODE_ENV: "development",
+      DEVILUDO_VAULT_ADDR: "http://127.0.0.1:8200",
+      DEVILUDO_VAULT_TOKEN_FILE: tokenFile,
+      DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "30",
+    }), /renewal interval is invalid/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Vault Secret store retries once when its file-mounted token rotates", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-vault-token-"));
+  const tokenFile = join(root, "api.token");
+  await writeFile(tokenFile, "stale-token-value", { mode: 0o600 });
+  const originalFetch = globalThis.fetch;
+  const observedTokens: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const token = new Headers(init?.headers).get("x-vault-token") ?? "";
+    observedTokens.push(token);
+    if (token === "stale-token-value") {
+      await writeFile(tokenFile, "rotated-token-value", { mode: 0o600 });
+      return new Response(null, { status: 403 });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const store = createAgentSecretStore({
+      NODE_ENV: "development",
+      DEVILUDO_VAULT_ADDR: "http://127.0.0.1:8200",
+      DEVILUDO_VAULT_TOKEN_FILE: tokenFile,
+    });
+    const saved = await store.writeApiKey("sk-rotated-secret-value");
+    assert.match(saved.secretRef, /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//);
+    assert.deepEqual(observedTokens, ["stale-token-value", "rotated-token-value"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
 });

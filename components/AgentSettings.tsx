@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
 import {
   AGENT_RUNTIME_KINDS,
   type AgentModelConfiguration,
@@ -13,6 +14,7 @@ import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 
 type ConfigurationMode = "SIMPLE" | "SETTINGS_JSON";
 type ModelMode = "SINGLE" | "EXPANDED";
+type AgentSettingsPayload = Readonly<{ settings: InstanceAgentSettings; runtimes: readonly AgentRuntimeAvailability[] }>;
 
 const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE",
@@ -40,36 +42,39 @@ const EMPTY_MODELS: AgentModelConfiguration = Object.freeze({
 
 export function AgentSettings() {
   const { locale, text } = useLanguage();
-  const [settings, setSettings] = useState<InstanceAgentSettings>(DEFAULT_SETTINGS);
-  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(DEFAULT_SETTINGS.agentRuntime);
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_SETTINGS.baseUrl);
-  const [modelMode, setModelMode] = useState<ModelMode>("SINGLE");
-  const [singleModel, setSingleModel] = useState("");
-  const [expandedModels, setExpandedModels] = useState<AgentModelConfiguration>(EMPTY_MODELS);
+  const initialPayload = cachedValue<AgentSettingsPayload>(clientCacheKeys.agentSettings);
+  const initialSettings = initialPayload?.settings ?? DEFAULT_SETTINGS;
+  const initialModels = initialSettings.models ?? EMPTY_MODELS;
+  const [settings, setSettings] = useState<InstanceAgentSettings>(initialSettings);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(initialSettings.agentRuntime);
+  const [baseUrl, setBaseUrl] = useState(initialSettings.baseUrl);
+  const [modelMode, setModelMode] = useState<ModelMode>(hasDistinctModels(initialModels) ? "EXPANDED" : "SINGLE");
+  const [singleModel, setSingleModel] = useState(initialModels.primary);
+  const [expandedModels, setExpandedModels] = useState<AgentModelConfiguration>(initialModels);
   const [apiKey, setApiKey] = useState("");
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
-  const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(DEFAULT_SETTINGS.baseUrl, "", null));
-  const [runtimes, setRuntimes] = useState<readonly AgentRuntimeAvailability[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.models));
+  const [runtimes, setRuntimes] = useState<readonly AgentRuntimeAvailability[]>(initialPayload?.runtimes ?? []);
+  const [loading, setLoading] = useState(!initialPayload);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/settings/agent", { cache: "no-store", signal: controller.signal })
-      .then(async response => {
+    let active = true;
+    void loadCached<AgentSettingsPayload>(clientCacheKeys.agentSettings, 60_000, async () => {
+        const response = await fetch("/api/settings/agent", { cache: "no-store" });
         const body = await response.json() as {
           settings?: InstanceAgentSettings;
           runtimes?: readonly AgentRuntimeAvailability[];
           message?: string;
         };
         if (!response.ok || !body.settings) throw new Error(body.message ?? text("无法读取 Agent 设置", "Unable to load Agent settings"));
-        return body;
+        return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [] });
       })
       .then(body => {
-        if (controller.signal.aborted) return;
-        const value = body.settings!;
+        if (!active) return;
+        const value = body.settings;
         setSettings(value);
         setAgentRuntime(value.agentRuntime);
         setBaseUrl(value.baseUrl);
@@ -78,13 +83,13 @@ export function AgentSettings() {
         setSingleModel(loadedModels.primary);
         setModelMode(hasDistinctModels(loadedModels) ? "EXPANDED" : "SINGLE");
         setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.models));
-        setRuntimes(body.runtimes ?? []);
+        setRuntimes(body.runtimes);
       })
       .catch(fetchError => {
-        if (!controller.signal.aborted) setError(fetchError instanceof Error ? fetchError.message : text("无法读取 Agent 设置", "Unable to load Agent settings"));
+        if (active) setError(fetchError instanceof Error ? fetchError.message : text("无法读取 Agent 设置", "Unable to load Agent settings"));
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [text]);
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -107,6 +112,7 @@ export function AgentSettings() {
       });
       const body = await response.json() as { settings?: InstanceAgentSettings; message?: string };
       if (!response.ok || !body.settings) throw new Error(body.message ?? text("保存失败", "Save failed"));
+      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes }), 60_000);
       setSettings(body.settings);
       setAgentRuntime(body.settings.agentRuntime);
       setBaseUrl(body.settings.baseUrl);

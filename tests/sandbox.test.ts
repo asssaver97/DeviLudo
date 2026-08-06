@@ -34,6 +34,7 @@ test("sandbox plans isolate each Core job and select the fixed execution policy"
   const agent = sandboxPlan(baseJob);
   assert.equal(agent.mode, "RESTRICTED_CONTAINER");
   assert.equal(agent.networkPolicy, "AGENT_EGRESS_ALLOWLIST");
+  assert.equal(agent.job.timeoutSeconds, 5_400);
   assert.match(agent.workspace, new RegExp(`${baseJob.workspaceId}.+${baseJob.jobId}`));
 
   const build = sandboxPlan(Object.freeze({

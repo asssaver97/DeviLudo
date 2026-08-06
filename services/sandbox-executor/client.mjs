@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 
 const action = process.argv[2];
-if (!["execute", "health", "guidance"].includes(action)) throw new Error("Only execute, guidance, and health commands are supported");
+if (!["execute", "health", "live", "guidance"].includes(action)) throw new Error("Only execute, guidance, live, and health commands are supported");
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
 const chunks = [];
 if (action !== "health") for await (const chunk of process.stdin) chunks.push(chunk);
@@ -14,7 +14,10 @@ if (action === "guidance" && (body.length < 2 || body.length > 16 * 1024)) throw
 const response = await new Promise((resolve, reject) => {
   const execution = { error: false };
   const streamDecoder = new StringDecoder("utf8");
-  const path = action === "execute" ? "/v2/execute" : action === "guidance" ? "/v2/guidance" : "/v2/health";
+  const path = action === "execute"
+    ? "/v2/execute"
+    : action === "guidance" ? "/v2/guidance"
+      : action === "live" ? "/v2/live" : "/v2/health";
   const call = request({ socketPath, path, method: "POST", headers: {
     "content-type": "application/json",
     "content-length": String(body.length),
@@ -40,6 +43,7 @@ const response = await new Promise((resolve, reject) => {
     });
   });
   call.once("error", reject);
+  if (action !== "execute") call.setTimeout(5_000, () => call.destroy(new Error("Sandbox executor request timed out")));
   call.end(body);
 });
 if (response.status !== 200) {

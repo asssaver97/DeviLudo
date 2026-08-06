@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { cachedValue, clientCacheKeys, loadCached } from "@/lib/product/client-cache";
 import type { ServerNodeRecord, ServerPoolRecord } from "@/lib/runtime/server-pools";
 import { useLanguage } from "./i18n/LanguageProvider";
 
@@ -8,21 +9,22 @@ type PoolResponse = Readonly<{ pools: readonly ServerPoolRecord[]; nodes: readon
 
 export function ServerPoolDashboard() {
   const { text } = useLanguage();
-  const [state, setState] = useState<PoolResponse | null>(null);
+  const initialState = cachedValue<PoolResponse>(clientCacheKeys.serverPools);
+  const [state, setState] = useState<PoolResponse | null>(initialState ?? null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/admin/server-pools", { cache: "no-store", signal: controller.signal })
-      .then(async response => {
+    let active = true;
+    void loadCached<PoolResponse>(clientCacheKeys.serverPools, 15_000, async () => {
+        const response = await fetch("/api/admin/server-pools", { cache: "no-store" });
         if (!response.ok) throw new Error(text(`服务器池接口返回 ${response.status}`, `Server pool API returned ${response.status}`));
         return await response.json() as PoolResponse;
       })
-      .then(setState)
+      .then(value => { if (active) setState(value); })
       .catch(reason => {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : text("加载失败", "Unable to load"));
+        if (active) setError(reason instanceof Error ? reason.message : text("加载失败", "Unable to load"));
       });
-    return () => controller.abort();
+    return () => { active = false; };
   }, [text]);
 
   if (error) return <div className="inline-notice danger">{error}</div>;

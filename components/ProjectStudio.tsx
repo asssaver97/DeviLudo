@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -9,13 +10,14 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { cachedValue, clientCacheKeys, expireCached, loadCached, removeCached, storeCached } from "@/lib/product/client-cache";
 import type {
   AgentProgressEvent,
   ArtifactRecord,
   ProductConversation,
   ProductConversationSummary,
   ProductProjectDetail,
-  ProductSession,
+  ProductProjectSummary,
 } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import {
@@ -26,8 +28,8 @@ import {
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { FileIcon, PlusIcon } from "./console/Icons";
-import { ProductShell } from "./ProductShell";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
+import { useProductSession } from "./ProductShell";
 
 const PIPELINE = [
   ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
@@ -61,16 +63,24 @@ type GitHubRepositoryOption = Readonly<{
 
 export function ProjectStudio({ projectId }: { projectId: string }) {
   const { locale, text } = useLanguage();
-  const [project, setProject] = useState<ProductProjectDetail | null>(null);
-  const [conversations, setConversations] = useState<readonly ProductConversationSummary[]>([]);
-  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
-  const [conversation, setConversation] = useState<ProductConversation | null>(null);
+  const router = useRouter();
+  const session = useProductSession();
+  const initialProject = cachedValue<ProductProjectDetail>(clientCacheKeys.project(projectId));
+  const initialConversations = cachedValue<readonly ProductConversationSummary[]>(clientCacheKeys.conversations(projectId));
+  const initialConversationId = initialConversations?.[0]?.id ?? null;
+  const initialConversation = initialConversationId ? cachedValue<ProductConversation>(clientCacheKeys.conversation(initialConversationId)) : undefined;
+  const initialArtifacts = cachedValue<readonly ArtifactRecord[]>(clientCacheKeys.artifacts(projectId));
+  const initialRepository = cachedValue<RepositoryConnection | null>(clientCacheKeys.repository(projectId));
+  const [project, setProject] = useState<ProductProjectDetail | null>(initialProject ?? null);
+  const [conversations, setConversations] = useState<readonly ProductConversationSummary[]>(initialConversations ?? []);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(initialConversationId);
+  const [conversation, setConversation] = useState<ProductConversation | null>(initialConversation ?? null);
   const [conversationInput, setConversationInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [streamingReply, setStreamingReply] = useState("");
   const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
-  const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>([]);
+  const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>(initialArtifacts ?? []);
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null);
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
@@ -79,81 +89,106 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [documentCollapsed, setDocumentCollapsed] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
-  const [platformManaged, setPlatformManaged] = useState(false);
-  const [repository, setRepository] = useState<RepositoryConnection | null>(null);
+  const [repository, setRepository] = useState<RepositoryConnection | null>(initialRepository ?? null);
   const [repositoryOptions, setRepositoryOptions] = useState<readonly GitHubRepositoryOption[]>([]);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [repositoryBusy, setRepositoryBusy] = useState(false);
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
+  const platformManaged = session.authMode === "PLATFORM";
 
-  const loadProject = useCallback(async () => {
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" });
-    const payload = await response.json() as { project?: ProductProjectDetail; message?: string };
-    if (!response.ok || !payload.project) throw new Error(payload.message ?? text(`项目读取失败 (${response.status})`, `Unable to load project (${response.status})`));
-    setProject(current => newestProjectSnapshot(current, payload.project!));
+  const loadProject = useCallback(async (force = false) => {
+    const value = await loadCached(clientCacheKeys.project(projectId), 5_000, async () => {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" });
+      const payload = await response.json() as { project?: ProductProjectDetail; message?: string };
+      if (!response.ok || !payload.project) throw new Error(payload.message ?? text(`项目读取失败 (${response.status})`, `Unable to load project (${response.status})`));
+      return payload.project;
+    }, { force });
+    setProject(current => {
+      const next = newestProjectSnapshot(current, value);
+      storeCached(clientCacheKeys.project(projectId), next, 5_000);
+      return next;
+    });
   }, [projectId, text]);
 
   const loadConversations = useCallback(async () => {
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversations`, { cache: "no-store" });
-    const payload = await response.json() as { conversations?: readonly ProductConversationSummary[]; message?: string };
-    if (!response.ok || !payload.conversations) throw new Error(payload.message ?? text(`历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
-    setConversations(payload.conversations);
-    const initialId = payload.conversations[0]?.id ?? null;
+    const values = await loadCached(clientCacheKeys.conversations(projectId), 30_000, async () => {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversations`, { cache: "no-store" });
+      const payload = await response.json() as { conversations?: readonly ProductConversationSummary[]; message?: string };
+      if (!response.ok || !payload.conversations) throw new Error(payload.message ?? text(`历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
+      return payload.conversations;
+    });
+    setConversations(values);
+    const initialId = values[0]?.id ?? null;
     setSelectedConversationId(initialId);
     if (!initialId) {
       setConversation(null);
       return;
     }
-    const conversationResponse = await fetch(`/api/conversations/${encodeURIComponent(initialId)}`, { cache: "no-store" });
-    const conversationPayload = await conversationResponse.json() as { conversation?: ProductConversation; message?: string };
-    if (!conversationResponse.ok || !conversationPayload.conversation) {
-      throw new Error(conversationPayload.message ?? text(`会话读取失败 (${conversationResponse.status})`, `Unable to load conversation (${conversationResponse.status})`));
-    }
-    setConversation(conversationPayload.conversation);
+    const value = await loadCached(clientCacheKeys.conversation(initialId), 30_000, async () => {
+      const conversationResponse = await fetch(`/api/conversations/${encodeURIComponent(initialId)}`, { cache: "no-store" });
+      const conversationPayload = await conversationResponse.json() as { conversation?: ProductConversation; message?: string };
+      if (!conversationResponse.ok || !conversationPayload.conversation) throw new Error(conversationPayload.message ?? text(`会话读取失败 (${conversationResponse.status})`, `Unable to load conversation (${conversationResponse.status})`));
+      return conversationPayload.conversation;
+    });
+    setConversation(value);
   }, [projectId, text]);
 
-  const loadArtifacts = useCallback(async () => {
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts`, { cache: "no-store" });
-    const payload = await response.json() as { artifacts?: readonly ArtifactRecord[]; message?: string };
-    if (!response.ok || !payload.artifacts) {
-      throw new Error(payload.message ?? text(`制品读取失败 (${response.status})`, `Unable to load artifacts (${response.status})`));
-    }
-    setArtifacts(payload.artifacts);
+  const loadArtifacts = useCallback(async (force = false) => {
+    const values = await loadCached(clientCacheKeys.artifacts(projectId), 10_000, async () => {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts`, { cache: "no-store" });
+      const payload = await response.json() as { artifacts?: readonly ArtifactRecord[]; message?: string };
+      if (!response.ok || !payload.artifacts) throw new Error(payload.message ?? text(`制品读取失败 (${response.status})`, `Unable to load artifacts (${response.status})`));
+      return payload.artifacts;
+    }, { force });
+    setArtifacts(values);
   }, [projectId, text]);
 
-  const loadRepository = useCallback(async () => {
-    const sessionResponse = await fetch("/api/session", { cache: "no-store" });
-    if (!sessionResponse.ok) return;
-    const sessionPayload = await sessionResponse.json() as { session?: ProductSession };
-    if (sessionPayload.session?.authMode !== "PLATFORM") return;
-    setPlatformManaged(true);
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, { cache: "no-store" });
-    const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection | null; error?: { code?: string } };
-    if (!response.ok) throw new Error(payload.error?.code ?? text("仓库状态读取失败", "Unable to load repository status"));
-    setRepository(payload.data ?? null);
-  }, [projectId, text]);
+  const loadRepository = useCallback(async (force = false) => {
+    if (!platformManaged) return;
+    const value = await loadCached<RepositoryConnection | null>(clientCacheKeys.repository(projectId), 10_000, async () => {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection | null; error?: { code?: string } };
+      if (!response.ok) throw new Error(payload.error?.code ?? text("仓库状态读取失败", "Unable to load repository status"));
+      return payload.data ?? null;
+    }, { force });
+    setRepository(value);
+  }, [platformManaged, projectId, text]);
 
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
-      void (async () => {
-        try {
-          await loadProject();
-          await loadConversations();
-          await loadArtifacts();
-          await loadRepository();
-        } catch (reason) {
-          if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
-        }
-      })();
+      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadRepository()]).catch(reason => {
+        if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
+      });
     }, 0);
-    const timer = setInterval(() => void Promise.all([
-      loadProject(),
-      loadArtifacts(),
-      ...(platformManaged ? [loadRepository()] : []),
-    ]).catch(() => undefined), 1500);
-    return () => { active = false; clearTimeout(initial); clearInterval(timer); };
-  }, [loadArtifacts, loadConversations, loadProject, loadRepository, platformManaged, text]);
+    return () => { active = false; clearTimeout(initial); };
+  }, [loadArtifacts, loadConversations, loadProject, loadRepository, text]);
+
+  const workflowState = project?.workflowState;
+  useEffect(() => {
+    if (!workflowState || !workflowNeedsPolling(workflowState)) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      if (document.visibilityState === "visible") await Promise.all([loadProject(true), loadArtifacts(true)]).catch(() => undefined);
+      if (!stopped) timer = setTimeout(poll, 3_000);
+    };
+    timer = setTimeout(poll, 3_000);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [loadArtifacts, loadProject, workflowState]);
+
+  const repositorySyncState = repository?.syncState;
+  useEffect(() => {
+    if (!platformManaged || !repositorySyncState || !repositoryNeedsPolling(repositorySyncState)) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      if (document.visibilityState === "visible") await loadRepository(true).catch(() => undefined);
+      if (!stopped) timer = setTimeout(poll, 5_000);
+    };
+    timer = setTimeout(poll, 5_000);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [loadRepository, platformManaged, repositorySyncState]);
 
   async function createPrivateRepository() {
     if (!project || repositoryBusy) return;
@@ -165,6 +200,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection; error?: { code?: string } };
       if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
       setRepository(payload.data);
+      storeCached(clientCacheKeys.repository(projectId), payload.data, 10_000);
     } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库创建失败", "Unable to create repository")); }
     finally { setRepositoryBusy(false); }
   }
@@ -173,11 +209,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     if (repositoryBusy) return;
     setRepositoryBusy(true); setError(null);
     try {
-      const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
-      const payload = await response.json().catch(() => ({})) as { data?: GitHubRepositoryOption[]; error?: { code?: string } };
-      if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
-      setRepositoryOptions(payload.data);
-      setSelectedRepositoryId(payload.data[0]?.id ?? "");
+      const options = await loadCached(clientCacheKeys.githubRepositories, 120_000, async () => {
+        const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
+        const payload = await response.json().catch(() => ({})) as { data?: GitHubRepositoryOption[]; error?: { code?: string } };
+        if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
+        return payload.data;
+      });
+      setRepositoryOptions(options);
+      setSelectedRepositoryId(options[0]?.id ?? "");
       setRepositoryPickerOpen(true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库列表读取失败", "Unable to list repositories")); }
     finally { setRepositoryBusy(false); }
@@ -194,6 +233,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection; error?: { code?: string } };
       if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
       setRepository(payload.data); setRepositoryPickerOpen(false);
+      storeCached(clientCacheKeys.repository(projectId), payload.data, 10_000);
     } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库绑定失败", "Unable to bind repository")); }
     finally { setRepositoryBusy(false); }
   }
@@ -205,7 +245,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/sync/retry`, { method: "POST" });
       const payload = await response.json().catch(() => ({})) as { error?: { code?: string } };
       if (!response.ok) throw new Error(repositoryMessage(payload.error?.code, text));
-      await loadRepository();
+      expireCached(clientCacheKeys.repository(projectId));
+      await loadRepository(true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : text("同步重试失败", "Unable to retry synchronization")); }
     finally { setRepositoryBusy(false); }
   }
@@ -261,10 +302,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setError(null);
     setSelectedConversationId(conversationId);
     try {
-      const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { cache: "no-store" });
-      const payload = await response.json() as { conversation?: ProductConversation; message?: string };
-      if (!response.ok || !payload.conversation) throw new Error(payload.message ?? text(`会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
-      setConversation(payload.conversation);
+      const value = await loadCached(clientCacheKeys.conversation(conversationId), 30_000, async () => {
+        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { cache: "no-store" });
+        const payload = await response.json() as { conversation?: ProductConversation; message?: string };
+        if (!response.ok || !payload.conversation) throw new Error(payload.message ?? text(`会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
+        return payload.conversation;
+      });
+      setConversation(value);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("会话读取失败", "Unable to load conversation"));
     }
@@ -295,19 +339,30 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         previousConversation ? { conversationId: previousConversation.id, content } : { projectId, content },
         `conversation:${crypto.randomUUID()}`,
         delta => setStreamingReply(current => current + delta),
-        updatedProject => setProject(current => newestProjectSnapshot(current, updatedProject)),
+        updatedProject => setProject(current => {
+          const next = newestProjectSnapshot(current, updatedProject);
+          storeCached(clientCacheKeys.project(projectId), next, 5_000);
+          return next;
+        }),
       );
       const nextConversation = payload.conversation;
       setConversation(nextConversation);
+      storeCached(clientCacheKeys.conversation(nextConversation.id), nextConversation, 30_000);
       setSelectedConversationId(nextConversation.id);
-      setProject(current => newestProjectSnapshot(current, payload.project));
+      setProject(current => {
+        const next = newestProjectSnapshot(current, payload.project);
+        storeCached(clientCacheKeys.project(projectId), next, 5_000);
+        return next;
+      });
       setConversations(current => {
         const summary = conversationSummary(nextConversation);
-        return Object.freeze([summary, ...current.filter(item => item.id !== summary.id)]);
+        const next = Object.freeze([summary, ...current.filter(item => item.id !== summary.id)]);
+        storeCached(clientCacheKeys.conversations(projectId), next, 30_000);
+        return next;
       });
     } catch (reason) {
       if (reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
-        window.location.assign("/settings?required=conversation");
+        router.push("/settings?required=conversation");
         return;
       }
       setConversation(previousConversation);
@@ -336,11 +391,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       });
       const payload = await response.json().catch(() => ({})) as { code?: string; message?: string };
       if (payload.code === "AGENT_CONFIG_REQUIRED") {
-        window.location.assign("/settings?required=agent-retry");
+        router.push("/settings?required=agent-retry");
         return;
       }
       if (!response.ok) throw new Error(payload.message ?? text(`操作失败 (${response.status})`, `Operation failed (${response.status})`));
-      await loadProject();
+      await loadProject(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("操作失败", "Operation failed"));
     } finally {
@@ -380,7 +435,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
       if (!response.ok) throw new Error(payload.message ?? text(`说明文档保存失败 (${response.status})`, `Unable to save project document (${response.status})`));
       setEditingDocument(false);
-      await loadProject();
+      await loadProject(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("说明文档保存失败", "Unable to save project document"));
     } finally {
@@ -398,7 +453,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         const payload = await response.json().catch(() => ({})) as { message?: string };
         throw new Error(payload.message ?? text(`项目删除失败 (${response.status})`, `Unable to delete project (${response.status})`));
       }
-      window.location.assign("/projects");
+      removeCached(clientCacheKeys.project(projectId));
+      removeCached(clientCacheKeys.conversations(projectId));
+      removeCached(clientCacheKeys.artifacts(projectId));
+      removeCached(clientCacheKeys.repository(projectId));
+      const projectList = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
+      if (projectList) storeCached(clientCacheKeys.projects, projectList.filter(item => item.id !== projectId), 10_000);
+      router.push("/projects");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("项目删除失败", "Unable to delete project"));
       setConfirmingDelete(false);
@@ -447,7 +508,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     && latestConversationMessage.metadata.readyForDevelopment === true;
 
   if (!project) {
-    return <ProductShell><section className="project-catalog-empty product-studio-loading">{error ?? text("正在进入项目…", "LOADING PROJECT…")}</section></ProductShell>;
+    return <section className="project-catalog-empty product-studio-loading">{error ?? text("正在进入项目…", "LOADING PROJECT…")}</section>;
   }
 
   const deliveryActive = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
@@ -457,7 +518,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
 
   return (
-    <ProductShell>
+    <>
       <section className="project-page-header product-studio-header">
         <div>
           <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{project.name}</b></div>
@@ -565,6 +626,24 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <b>{artifactLabel(artifact, text)}</b>
                   <span>{artifact.targetPlatform ?? text("通用", "COMMON")} · {formatArtifactSize(artifact.object.sizeBytes)}</span>
                   <code>{artifact.object.sha256.slice(0, 23)}…</code>
+                  {artifact.kind === "E2E_REPORT" && (artifact as unknown as { testDetails?: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails ? (
+                    <div className="e2e-test-details">
+                      <div className="test-summary">
+                        {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.checks.length} {text("项检查", "checks")} ·
+                        {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.length === 0
+                          ? <span className="test-passed">{text("全部通过", "ALL PASSED")}</span>
+                          : <span className="test-failed">{(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.length} {text("项失败", "FAILED")}</span>
+                        } · {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.duration_ms.toFixed(1)}ms
+                      </div>
+                      {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.length > 0 && (
+                        <ul className="test-failures">
+                          {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.map(name => (
+                            <li key={name}><code>{name}</code></li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <button
                   className="button button-secondary"
@@ -660,7 +739,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <label><span>{text("主要特性", "Key features")}</span><textarea value={documentDraft.features} onChange={event => setDocumentDraft(current => ({ ...current, features: event.target.value }))} /></label>
                 </div>
               ) : (
-                <div className="product-document-sidebar-content">
+                <div
+                  aria-label={text("项目说明内容", "Project document content")}
+                  className="product-document-sidebar-content"
+                  role="region"
+                  tabIndex={0}
+                >
                   <article><span className="document-section-label">{text("游戏介绍", "GAME INTRODUCTION")}</span><p>{project.document.content.introduction}</p></article>
                   <article><span className="document-section-label">{text("玩法", "GAMEPLAY")}</span><p>{project.document.content.gameplay}</p></article>
                   <article><span className="document-section-label">{text("游戏分类", "CATEGORIES")}</span><div className="product-document-tags">{project.document.content.categories.map(category => <span key={category}>{category}</span>)}</div></article>
@@ -682,7 +766,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </section>
         </div>
       ) : null}
-    </ProductShell>
+    </>
   );
 }
 
@@ -777,6 +861,13 @@ function jobFailurePresentation(
       title,
       reason: text("Provider 拒绝了 Agent 凭据。", "The provider rejected the Agent credential."),
       action: text("请在设置中检查 API Key、Base URL 和模型后重试。", "Check the API key, base URL, and model in Settings, then retry."),
+    };
+  }
+  if (/deviludo-executor\/executor\.sock|sandbox executor unavailable|sandbox executor failed|docker executor operation failed|ECONNREFUSED.*executor\.sock/i.test(raw)) {
+    return {
+      title,
+      reason: text("Core 的 Agent 隔离执行器当前不可用，任务尚未连接到 Provider。", "The Core Agent sandbox executor is unavailable; the task did not reach the provider."),
+      action: text("恢复 Core 执行器后重新生成；本地环境请重新运行 npm run local:up。", "Restore the Core executor and retry; for local deployments, run npm run local:up again."),
     };
   }
   if (/timed? out|timeout|ECONN|ENOTFOUND|network|socket hang up/i.test(raw)) {
@@ -940,4 +1031,12 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
   };
   const label = labels[state];
   return label ? text(label[0], label[1]) : state;
+}
+
+function workflowNeedsPolling(state: string): boolean {
+  return ["AGENT_RUNNING", "ARTIFACT_BUILDING", "E2E_TESTING", "SIGNING", "STEAM_PUBLISHING", "CLEAN_INSTALL_VERIFYING"].includes(state);
+}
+
+function repositoryNeedsPolling(state: RepositoryConnection["syncState"]): boolean {
+  return state === "PENDING" || state === "SYNCING";
 }

@@ -1,17 +1,17 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import type { ProductConversation, ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
+import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
+import type { ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
 import {
   chronologicalMessages,
   ConversationStreamError,
   optimisticConversation,
-  selectConversationWorkspace,
   sendConversationMessageStream,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
-import { ProductShell } from "./ProductShell";
 import { GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
 
@@ -28,28 +28,30 @@ const STARTERS_EN = Object.freeze([
 
 export function HomeChat() {
   const { locale, text } = useLanguage();
-  const [projects, setProjects] = useState<readonly ProductProjectSummary[]>([]);
+  const router = useRouter();
+  const initialProjects = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
+  const [projects, setProjects] = useState<readonly ProductProjectSummary[]>(initialProjects ?? []);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [conversation, setConversation] = useState<ProductConversation | null>(null);
   const [content, setContent] = useState("");
-  const [loadingProjects, setLoadingProjects] = useState(true);
+  const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
   const [startingDevelopment, setStartingDevelopment] = useState(false);
   const [streamingReply, setStreamingReply] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/projects", { signal: controller.signal })
-      .then(async response => {
+    let active = true;
+    void loadCached(clientCacheKeys.projects, 10_000, async () => {
+        const response = await fetch("/api/projects");
         if (response.status === 409) return [];
         if (!response.ok) throw new Error(text("项目列表加载失败", "Unable to load projects"));
         return (await response.json() as { projects: readonly ProductProjectSummary[] }).projects;
       })
-      .then(value => { if (!controller.signal.aborted) setProjects(value); })
-      .catch(() => { if (!controller.signal.aborted) setError(text("暂时无法加载现有项目，但仍可开始新游戏对话。", "Existing projects could not be loaded, but you can still start a new game conversation.")); })
-      .finally(() => { if (!controller.signal.aborted) setLoadingProjects(false); });
-    return () => controller.abort();
+      .then(value => { if (active) setProjects(value); })
+      .catch(() => { if (active) setError(text("暂时无法加载现有项目，但仍可开始新游戏对话。", "Existing projects could not be loaded, but you can still start a new game conversation.")); })
+      .finally(() => { if (active) setLoadingProjects(false); });
+    return () => { active = false; };
   }, [text]);
 
   const activeProjectId = conversation?.projectId || selectedProjectId;
@@ -96,16 +98,18 @@ export function HomeChat() {
         `conversation:${crypto.randomUUID()}`,
         delta => setStreamingReply(current => current + delta),
       );
-      await selectConversationWorkspace(result.workspace.id);
-      window.dispatchEvent(new CustomEvent<WorkspaceSummary>("deviludo:workspace-changed", { detail: result.workspace }));
-      setProjects(current => current.some(project => project.id === result.project.id)
-        ? current.map(project => project.id === result.project.id ? result.project : project)
-        : Object.freeze([result.project, ...current]));
+      setProjects(current => {
+        const next = current.some(project => project.id === result.project.id)
+          ? current.map(project => project.id === result.project.id ? result.project : project)
+          : Object.freeze([result.project, ...current]);
+        storeCached(clientCacheKeys.projects, next, 10_000);
+        return next;
+      });
       setConversation(result.conversation);
       setSelectedProjectId(result.conversation.projectId);
     } catch (cause) {
       if (cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
-        window.location.assign("/settings?required=conversation");
+        router.push("/settings?required=conversation");
         return;
       }
       setConversation(previousConversation);
@@ -136,7 +140,7 @@ export function HomeChat() {
       });
       const payload = await response.json().catch(() => ({})) as { message?: string };
       if (!response.ok) throw new Error(payload.message ?? text(`操作失败 (${response.status})`, `Operation failed (${response.status})`));
-      window.location.assign(`/projects/${activeProject.id}`);
+      router.push(`/projects/${activeProject.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("暂时无法开始开发", "Unable to start development"));
       setStartingDevelopment(false);
@@ -194,7 +198,6 @@ export function HomeChat() {
   );
 
   return (
-    <ProductShell>
       <section className={`homeChat ${conversation ? "homeChat-active" : ""}`}>
         {conversation ? (
           <div className="conversation-panel homeChat-threadShell">
@@ -229,7 +232,6 @@ export function HomeChat() {
         ) : null}
         {error ? <p className="homeChat-error" role="alert">{error}</p> : null}
       </section>
-    </ProductShell>
   );
 }
 

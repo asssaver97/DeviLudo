@@ -1,23 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import type { ProductSession } from "@/lib/product/contracts";
 import { ShieldIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
+import { useProductSession } from "./ProductShell";
 
 export function AccessSettings() {
   const { text } = useLanguage();
-  const [session, setSession] = useState<ProductSession | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/session", { cache: "no-store", signal: controller.signal })
-      .then(response => response.ok ? response.json() : Promise.reject(new Error("SESSION_UNAVAILABLE")))
-      .then((body: { session: ProductSession }) => { if (!controller.signal.aborted) setSession(body.session); })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, []);
+  const session = useProductSession();
 
   return (
     <section className="access-settings panel-card">

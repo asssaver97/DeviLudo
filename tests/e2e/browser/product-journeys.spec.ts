@@ -2,6 +2,28 @@ import { randomUUID } from "node:crypto";
 import { createStoredZip } from "../../../lib/product/source-archive";
 import { test, expect } from "../fixtures/stack";
 
+test("product navigation preserves the shell and reuses project data without reconnecting",async({page})=>{
+  let sessionRequests=0;
+  let projectListRequests=0;
+  page.on("request",request=>{
+    const url=new URL(request.url());
+    if(url.pathname==="/api/session")sessionRequests++;
+    if(url.pathname==="/api/projects"&&request.method()==="GET")projectListRequests++;
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading",{name:"今天想做什么游戏？"})).toBeVisible();
+  await page.getByRole("link",{name:"项目",exact:true}).click();
+  await expect(page.getByRole("heading",{name:"游戏项目",exact:true})).toBeVisible();
+  await expect(page.getByText("正在连接…",{exact:true})).toHaveCount(0);
+  await page.getByRole("link",{name:"设置",exact:true}).click();
+  await expect(page.getByRole("heading",{name:"Agent 设置"})).toBeVisible();
+  await expect(page.getByText("正在连接…",{exact:true})).toHaveCount(0);
+  await page.getByRole("link",{name:"首页",exact:true}).click();
+  await expect(page.getByRole("heading",{name:"今天想做什么游戏？"})).toBeVisible();
+  expect(sessionRequests).toBe(1);
+  expect(projectListRequests).toBe(1);
+});
+
 test("display typography, readable body copy and English locale persist across the project journey", async ({ page, stack }) => {
   const project = await stack.createProject({
     name: "Pixel Language Lab",

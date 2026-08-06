@@ -194,6 +194,7 @@ export function createAgentSecretStore(env: NodeJS.ProcessEnv = process.env): Ag
 class VaultAgentSecretStore implements AgentSecretStore {
   private readonly address: URL;
   private readonly tokenFile: string;
+  private readonly renewalTimer: NodeJS.Timeout | null;
 
   constructor(env: NodeJS.ProcessEnv) {
     this.address = new URL(env.DEVILUDO_VAULT_ADDR ?? "");
@@ -203,15 +204,19 @@ class VaultAgentSecretStore implements AgentSecretStore {
     }
     this.tokenFile = env.DEVILUDO_VAULT_TOKEN_FILE ?? "";
     if (!isAbsolute(this.tokenFile)) throw new Error("Vault token must be file-mounted");
+    const renewalSeconds = parseRenewalInterval(env.DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS);
+    this.renewalTimer = renewalSeconds === null ? null : setInterval(() => {
+      void this.renewToken().catch(() => undefined);
+    }, renewalSeconds * 1_000);
+    this.renewalTimer?.unref();
   }
 
   async writeApiKey(apiKey: string): Promise<AgentSecretVersion> {
     const version = randomUUID();
-    const response = await fetch(new URL(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, this.address), {
+    const response = await this.request(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, {
       method: "POST",
-      headers: { "x-vault-token": await this.token(), "content-type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ data: { value: apiKey } }),
-      signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) throw new Error(`Vault returned ${response.status}`);
     return secretVersion(version, apiKey);
@@ -222,9 +227,7 @@ class VaultAgentSecretStore implements AgentSecretStore {
     if (!secretRef.startsWith(prefix)) return null;
     const version = secretRef.slice(prefix.length);
     if (!/^[0-9a-f-]{36}$/i.test(version)) return null;
-    const response = await fetch(new URL(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, this.address), {
-      headers: { "x-vault-token": await this.token() }, signal: AbortSignal.timeout(5_000),
-    });
+    const response = await this.request(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`);
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`Vault returned ${response.status}`);
     const body = await response.json() as { data?: { data?: { value?: unknown } } };
@@ -241,6 +244,47 @@ class VaultAgentSecretStore implements AgentSecretStore {
     if (token.length < 8 || token.length > 4096) throw new Error("Vault token file is invalid");
     return token;
   }
+
+  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+    const initialToken = await this.token();
+    let response = await this.requestWithToken(path, initialToken, init);
+    if (response.status !== 403) return response;
+    const rotatedToken = await this.token();
+    if (rotatedToken !== initialToken) response = await this.requestWithToken(path, rotatedToken, init);
+    return response;
+  }
+
+  private requestWithToken(path: string, token: string, init: RequestInit): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("x-vault-token", token);
+    return fetch(new URL(path, this.address), {
+      ...init,
+      headers,
+      signal: AbortSignal.timeout(5_000),
+    });
+  }
+
+  private async renewToken(): Promise<void> {
+    const initialToken = await this.token();
+    let response = await this.requestWithToken("/v1/auth/token/renew-self", initialToken, { method: "POST" });
+    if (response.status === 403) {
+      const rotatedToken = await this.token();
+      if (rotatedToken !== initialToken) {
+        response = await this.requestWithToken("/v1/auth/token/renew-self", rotatedToken, { method: "POST" });
+      }
+    }
+    if (!response.ok) throw new Error(`Vault token renewal returned ${response.status}`);
+  }
+}
+
+function parseRenewalInterval(value: string | undefined): number | null {
+  if (value === undefined || value === "") return null;
+  if (!/^\d+$/.test(value)) throw new Error("Vault token renewal interval is invalid");
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 86_400) {
+    throw new Error("Vault token renewal interval is invalid");
+  }
+  return seconds;
 }
 
 export class LocalAgentSecretStore implements AgentSecretStore {

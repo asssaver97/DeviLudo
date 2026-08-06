@@ -8,6 +8,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import type { SandboxPlan, SandboxReceipt } from "@/services/core/src/sandbox";
 import { executorReceiptSigningPayload, parseJobProtocolV4 } from "@/services/core/src/contracts";
 import { ProjectSourceStore, type PublishedSourceRevision } from "@/services/core/src/project-sources";
+import { validateAgentSourceReference } from "./source-revision";
 
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
 const executorId = process.env.DEVILUDO_EXECUTOR_ID ?? "";
@@ -47,6 +48,11 @@ const s3 = new S3Client({
 
 const server = createServer(async (request, response) => {
   try {
+    if (request.method === "POST" && request.url === "/v2/live") {
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ schemaVersion: "deviludo.executor-live.v1", executorId }));
+      return;
+    }
     if (request.method === "POST" && request.url === "/v2/health") {
       const smoke = await executorSmoke();
       response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -105,7 +111,39 @@ async function start() {
   await mkdir(secretRoot, { recursive: true, mode: 0o700 });
   await cleanupOrphans();
   await rm(socketPath, { force: true });
+  scheduleVaultTokenRenewal();
   server.listen(socketPath, () => void configureSocket());
+}
+
+function scheduleVaultTokenRenewal() {
+  const value = process.env.DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS;
+  if (value === undefined || value === "") return;
+  if (!/^\d+$/.test(value) || Number(value) < 60 || Number(value) > 86_400) {
+    throw new Error("Vault token renewal interval is invalid");
+  }
+  const timer = setInterval(() => void renewVaultToken().catch(error => {
+    console.error(JSON.stringify({
+      level: "error",
+      event: "vault_token_renewal_failed",
+      message: error instanceof Error ? error.message : "Vault token renewal failed",
+    }));
+  }), Number(value) * 1_000);
+  timer.unref();
+}
+
+async function renewVaultToken() {
+  const vaultAddress = process.env.DEVILUDO_VAULT_ADDR ?? "";
+  const tokenFile = process.env.DEVILUDO_VAULT_TOKEN_FILE ?? "";
+  const vaultUrl = new URL(vaultAddress);
+  if ((vaultUrl.protocol !== "https:" && !(process.env.NODE_ENV !== "production" && vaultUrl.protocol === "http:"))
+    || !tokenFile.startsWith("/")) throw new Error("Vault executor configuration is required");
+  const token = (await readFile(tokenFile, "utf8")).trim();
+  const response = await fetch(new URL("/v1/auth/token/renew-self", vaultUrl), {
+    method: "POST",
+    headers: { "x-vault-token": token },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`Vault token renewal returned ${response.status}`);
 }
 
 async function cleanupOrphans() {
@@ -199,7 +237,7 @@ async function execute(
       "create", "--name", taskName, "--read-only", "--cap-drop=ALL",
       "--security-opt=no-new-privileges", "--pids-limit=256",
       `--memory=${Math.max(64 * 1024 * 1024, plan.job.budget.memoryBytes)}`,
-      `--cpus=${Math.max(0.1, plan.job.budget.cpuMillis / Math.max(1, plan.job.timeoutSeconds) / 1000).toFixed(2)}`,
+      `--cpus=${Math.max(plan.job.jobKind === "AGENT_GENERATION" ? 0.5 : 0.1, plan.job.budget.cpuMillis / Math.max(1, plan.job.timeoutSeconds) / 1000).toFixed(2)}`,
       `--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=2m,mode=0700,uid=10001,gid=10001`,
       `--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001`,
       `--tmpfs=/workspace:rw,nosuid,nodev,size=2147483648,mode=0700,uid=10001,gid=10001`,
@@ -237,6 +275,12 @@ async function execute(
       if (source.digest !== plan.job.payload.sourceDigest) throw new Error("Source revision digest changed");
       await writeFile(join(inputDirectory, "source.tar.gz"), source.bytes, { mode: 0o600 });
     }
+    const checkpoint = plan.job.jobKind === "AGENT_GENERATION"
+      ? await projectSources.archiveCheckpoint(plan.job.workspaceId, plan.job.projectId, plan.job.workflowId)
+      : null;
+    if (checkpoint) {
+      await writeFile(join(inputDirectory, "checkpoint.tar.gz"), checkpoint.bytes, { mode: 0o600 });
+    }
     await docker(["start", taskName], 30_000);
     onProgress("PHASE", "隔离环境已启动，正在注入已批准的输入");
     await inject(taskName, "plan", await readFile(planFile));
@@ -245,6 +289,10 @@ async function execute(
       await inject(taskName, `input:${filename}`, await readFile(join(inputDirectory, filename)));
     }
     if (sourceRelativePath) await inject(taskName, "input:source.tar.gz", await readFile(join(inputDirectory, "source.tar.gz")));
+    if (checkpoint) {
+      await inject(taskName, "input:checkpoint.tar.gz", await readFile(join(inputDirectory, "checkpoint.tar.gz")));
+      onProgress("PHASE", `已恢复上次尝试保存的 ${checkpoint.fileCount} 个源码文件`);
+    }
     if (plan.agentConfiguration && plan.job.runtimeImage !== fixtureAgentImage) {
       await inject(taskName, "provider", await readFile(secretFile));
     }
@@ -255,6 +303,22 @@ async function execute(
     onProgress("PHASE", taskStartedMessage(plan.job.jobKind));
     const taskResult = await waitForTaskResult(taskName, plan.job.timeoutSeconds * 1000, onProgress);
     if (!taskResult.ok) {
+      if (plan.job.jobKind === "AGENT_GENERATION") {
+        try {
+          const sourceStream = await dockerRead([
+            "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
+          ], 60_000, 1024 * 1024 * 1024 + 16 * 1024 * 1024);
+          const saved = await projectSources.saveCheckpoint({
+            workspaceId: plan.job.workspaceId,
+            projectId: plan.job.projectId,
+            workflowId: plan.job.workflowId,
+            files: parseSourceStream(sourceStream),
+          });
+          onProgress("PHASE", `本次已保存 ${saved.fileCount} 个源码文件；重试将从检查点继续`);
+        } catch {
+          // Empty or invalid partial output is never persisted as a trusted checkpoint.
+        }
+      }
       await acknowledgeCollection(taskName, collectedFile);
       await docker(["wait", taskName], 10_000).catch(() => undefined);
       throw new Error(taskResult.error || "Task container failed");
@@ -485,12 +549,7 @@ function validatePlan(value: unknown): SandboxPlan {
     const specifications = job.inputObjects.filter(input => input.kind === "SPECIFICATION"
       && basename(input.key) === "specification.json");
     if (specifications.length !== 1) throw new Error("Agent requires exactly one approved specification input");
-    const sourceRelativePath = job.payload.sourceRelativePath;
-    if (sourceRelativePath !== undefined && (typeof sourceRelativePath !== "string"
-      || !sourceRelativePath.startsWith(`workspaces/${job.workspaceId}/projects/${job.projectId}/revisions/`)
-      || !/^sha256:[0-9a-f]{64}$/.test(String(job.payload.sourceDigest ?? "")))) {
-      throw new Error("Agent source revision is invalid");
-    }
+    validateAgentSourceReference(job.payload, job.workspaceId, job.projectId);
   }
   if (job.inputObjects.reduce((sum, input) => sum + input.sizeBytes, 0) > 2_147_483_648) {
     throw new Error("Task inputs exceed the fixed executor limit");
@@ -612,7 +671,12 @@ async function docker(arguments_: readonly string[], timeout: number, input?: Bu
   const timer = setTimeout(() => child.kill("SIGKILL"), timeout);
   const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
   clearTimeout(timer);
-  if (code !== 0) throw new Error(`Docker executor operation failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2000)}`);
+  if (code !== 0) {
+    const diagnostic = Buffer.concat(stderr).toString("utf8").trim()
+      || Buffer.concat(stdout).toString("utf8").trim()
+      || "Docker CLI returned no diagnostic output";
+    throw new Error(`Docker executor operation failed (exit ${code ?? "signal"}): ${diagnostic.slice(0, 2000)}`);
+  }
   return Buffer.concat(stdout).toString("utf8");
 }
 

@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { lookup } from "node:dns/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { request } from "node:http";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
@@ -24,13 +26,16 @@ if (!ciMode) {
   const { stopLocalE2e } = await import("./local-e2e-daemon.mjs");
   await stopLocalE2e();
 }
+const providerUpstreamProxy = await detectLocalProviderUpstreamProxy();
 const baseEnvironment = {
   ...process.env,
   DEVILUDO_WEB_HOST_PORT: webPort,
+  DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
 };
 await execute("docker", [
-  "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres",
+  "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault",
 ], { cwd: root, env: baseEnvironment, maxBuffer: 10 * 1024 * 1024 });
+await refreshLocalVaultTokens(baseEnvironment);
 const retainedJobRuntimeImages = await retainActiveJobRuntimeImages(baseEnvironment);
 await execute("docker", [
   "compose", "-f", "infra/docker-compose.yml", "stop",
@@ -64,6 +69,8 @@ const environment = {
   DEVILUDO_DOCKER_GID: dockerSocketGid,
   DEVILUDO_RUNTIME_IMAGES_JSON: runtimeImages,
 };
+await persistLocalComposeEnvironment(environment);
+await refreshLocalExecutorSecrets(environment);
 await migrateWithOptionalBaselineReset(environment);
 const bootstrap = await execute("docker", [
   "compose", "-f", "infra/docker-compose.yml", "--profile", "init", "run", "--rm",
@@ -146,6 +153,128 @@ async function resolveDockerSocketGid() {
   const gid = stdout.trim();
   if (!/^\d+$/.test(gid)) throw new Error("Docker socket group could not be determined");
   return gid;
+}
+
+async function persistLocalComposeEnvironment(environment) {
+  const target = new URL("../.env", import.meta.url);
+  const start = "# BEGIN DEVILUDO LOCAL RUNTIME (managed by npm run local:up)";
+  const end = "# END DEVILUDO LOCAL RUNTIME";
+  const keys = [
+    "DEVILUDO_WEB_HOST_PORT",
+    "DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE",
+    "DEVILUDO_CLAUDE_CODE_VERSION",
+    "DEVILUDO_CODEX_CLI_VERSION",
+    "DEVILUDO_EXECUTOR_ALLOWED_IMAGES",
+    "DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE",
+    "DEVILUDO_DOCKER_GID",
+    "DEVILUDO_PROVIDER_UPSTREAM_PROXY",
+    "DEVILUDO_RUNTIME_IMAGES_JSON",
+  ];
+  let existing = "";
+  try {
+    existing = await readFile(target, "utf8");
+  } catch (error) {
+    if (!(error && typeof error === "object" && error.code === "ENOENT")) throw error;
+  }
+  const retained = [];
+  let managed = false;
+  for (const line of existing.split(/\r?\n/)) {
+    if (line === start) { managed = true; continue; }
+    if (line === end) { managed = false; continue; }
+    if (!managed) retained.push(line);
+  }
+  while (retained.at(-1) === "") retained.pop();
+  const block = [
+    start,
+    ...keys.map(key => `${key}=${JSON.stringify(String(environment[key] ?? ""))}`),
+    end,
+  ];
+  await writeFile(target, `${[...retained, ...(retained.length ? [""] : []), ...block].join("\n")}\n`, { mode: 0o600 });
+}
+
+async function detectLocalProviderUpstreamProxy() {
+  const explicit = process.env.DEVILUDO_PROVIDER_UPSTREAM_PROXY?.trim();
+  if (explicit) return normalizeLocalUpstreamProxy(explicit);
+  if (process.platform !== "darwin") return "";
+  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,www.sotamodel.net")
+    .split(",").map(value => value.trim()).filter(Boolean);
+  let fakeIpDetected = false;
+  for (const host of hosts) {
+    try {
+      const addresses = await lookup(host, { all: true });
+      if (addresses.some(({ address }) => isFakeIp(address))) fakeIpDetected = true;
+    } catch {
+      // A later host may still prove that a local transparent proxy owns DNS.
+    }
+  }
+  if (!fakeIpDetected) return "";
+  const target = hosts.at(-1) ?? "api.anthropic.com";
+  for (const port of [6152, 7890, 1087]) {
+    if (await supportsHttpConnectProxy(port, target)) return `http://host.docker.internal:${port}`;
+  }
+  throw new Error([
+    "检测到 Provider DNS 返回 198.18.0.0/15 Fake-IP，但 Docker 无法使用宿主机透明代理。",
+    "请开启本机 HTTP 代理端口，并设置 DEVILUDO_PROVIDER_UPSTREAM_PROXY=http://host.docker.internal:<port> 后重试。",
+  ].join("\n"));
+}
+
+function normalizeLocalUpstreamProxy(value) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error("DEVILUDO_PROVIDER_UPSTREAM_PROXY is invalid"); }
+  if (url.protocol !== "http:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash
+    || !["host.docker.internal", "127.0.0.1", "localhost"].includes(url.hostname)
+    || !url.port || Number(url.port) < 1 || Number(url.port) > 65535) {
+    throw new Error("DEVILUDO_PROVIDER_UPSTREAM_PROXY must be an unauthenticated local HTTP proxy URL with an explicit port");
+  }
+  return `http://host.docker.internal:${url.port}`;
+}
+
+function isFakeIp(address) {
+  const octets = address.split(".").map(Number);
+  return octets.length === 4 && octets[0] === 198 && (octets[1] === 18 || octets[1] === 19);
+}
+
+function supportsHttpConnectProxy(port, target) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const call = request({
+      host: "127.0.0.1",
+      port,
+      method: "CONNECT",
+      path: `${target}:443`,
+    });
+    call.once("connect", (response, socket) => {
+      socket.destroy();
+      finish(response.statusCode === 200);
+    });
+    call.once("response", response => {
+      response.resume();
+      finish(false);
+    });
+    call.once("error", () => finish(false));
+    call.setTimeout(1_500, () => {
+      call.destroy();
+      finish(false);
+    });
+    call.end();
+  });
+}
+
+async function refreshLocalVaultTokens(environment) {
+  await execute("docker", [
+    "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "vault-init",
+  ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
+}
+
+async function refreshLocalExecutorSecrets(environment) {
+  await execute("docker", [
+    "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "sandbox-executor-init",
+  ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
 }
 
 async function retainActiveJobRuntimeImages(environment) {

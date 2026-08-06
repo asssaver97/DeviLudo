@@ -65,6 +65,8 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
   assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
+  assert.match(sql, /CASE WHEN p_kind = 'AGENT_GENERATION' THEN 5400 ELSE 1800 END/);
+  assert.match(sql, /p_payload := p_payload[\s\S]*CASE WHEN v_source\.revision IS NULL THEN '\{\}'::jsonb ELSE jsonb_build_object\([\s\S]*'sourceDigest', v_source\.content_digest/);
   assert.match(sql, /PROJECT_DOCUMENT_MAINTENANCE/);
   assert.match(sql, /schedule_idle_project_document_maintenance/);
   assert.match(sql, /project\.last_activity_at <= clock_timestamp\(\) - make_interval/);

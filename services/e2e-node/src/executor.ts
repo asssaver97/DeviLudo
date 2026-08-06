@@ -176,6 +176,17 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
     || (receipt.outcome === "FAILED" && guest.exitCode === 0)) {
     throw new Error("Godot guest outcome does not match its exit code");
   }
+  // Optional testDetails field for structured test results
+  if (receipt.testDetails !== undefined) {
+    const testDetails = receipt.testDetails as Record<string, unknown>;
+    if (!testDetails || typeof testDetails !== "object" || Array.isArray(testDetails)
+      || typeof testDetails.suite !== "string"
+      || !Array.isArray(testDetails.checks) || !testDetails.checks.every((c: unknown) => typeof c === "string")
+      || !Array.isArray(testDetails.failures) || !testDetails.failures.every((f: unknown) => typeof f === "string")
+      || typeof testDetails.duration_ms !== "number") {
+      throw new Error("Godot guest receipt testDetails is invalid");
+    }
+  }
 }
 
 async function runSigning(

@@ -51,6 +51,7 @@ export type SandboxReceipt = Readonly<{
 }>;
 
 export interface SandboxBackend {
+  probe?(signal: AbortSignal): Promise<void>;
   execute(
     plan: SandboxPlan,
     signal: AbortSignal,
@@ -60,9 +61,30 @@ export interface SandboxBackend {
 }
 
 export class ProcessSandboxBackend implements SandboxBackend {
+  private probeValidUntil = 0;
+  private probeError: Error | null = null;
+
   constructor(
     private readonly executable = process.env.DEVILUDO_SANDBOX_EXECUTOR ?? "",
   ) {}
+
+  async probe(signal: AbortSignal): Promise<void> {
+    if (!this.executable) throw new Error("A trusted sandbox executor is required");
+    if (!isAbsolute(this.executable)) throw new Error("Sandbox executor path must be absolute");
+    if (Date.now() < this.probeValidUntil) {
+      if (this.probeError) throw this.probeError;
+      return;
+    }
+    try {
+      await probeBackend(this.executable, signal);
+      this.probeError = null;
+    } catch (error) {
+      this.probeError = error instanceof Error ? error : new Error("Sandbox executor is unavailable");
+      throw this.probeError;
+    } finally {
+      this.probeValidUntil = Date.now() + 2_000;
+    }
+  }
 
   async execute(
     plan: SandboxPlan,
@@ -91,9 +113,30 @@ export async function runSandbox(
 ): Promise<void> {
   const workerId = process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
   const objectStore = new CoreObjectStore();
+  let executorAvailable: boolean | null = null;
   while (!signal.aborted) {
     let job: JobProtocolV4 | null = null;
     try {
+      if (backend.probe) {
+        try {
+          await backend.probe(signal);
+          if (executorAvailable === false) {
+            console.info(JSON.stringify({ level: "info", event: "sandbox_executor_recovered" }));
+          }
+          executorAvailable = true;
+        } catch (error) {
+          if (executorAvailable !== false) {
+            console.error(JSON.stringify({
+              level: "error",
+              event: "sandbox_executor_unavailable",
+              message: error instanceof Error ? error.message : String(error),
+            }));
+          }
+          executorAvailable = false;
+          await delay(Math.max(config.pollMilliseconds, 1_000), signal);
+          continue;
+        }
+      }
       job = await repository.claimJob({ workerId, poolKind: "CORE", leaseSeconds: 60 });
       if (!job) {
         await delay(config.pollMilliseconds, signal);
@@ -196,6 +239,12 @@ export async function runSandbox(
 
 export function sandboxPlan(job: JobProtocolV4, operationId: string | null = null): SandboxPlan {
   if (job.poolKind !== "CORE" || job.exclusive) throw new Error("Sandbox only accepts non-exclusive Core jobs");
+  const effectiveJob = job.jobKind === "AGENT_GENERATION" && job.timeoutSeconds < 5_400
+    ? Object.freeze({ ...job, timeoutSeconds: 5_400 })
+    : job;
+  const plannedJob = operationId
+    ? Object.freeze({ ...effectiveJob, payload: Object.freeze({ ...effectiveJob.payload, operation: Object.freeze({ id: operationId }) }) })
+    : effectiveJob;
   const developmentContainer = (process.env.NODE_ENV ?? "development") !== "production"
     && process.env.DEVILUDO_SANDBOX_ISOLATION_MODE === "RESTRICTED_CONTAINER";
   const agentJob = job.jobKind === "AGENT_GENERATION" || job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE";
@@ -209,7 +258,7 @@ export function sandboxPlan(job: JobProtocolV4, operationId: string | null = nul
   return Object.freeze({
     schemaVersion: "deviludo.sandbox-plan.v2",
     mode,
-    job: operationId ? Object.freeze({ ...job, payload: Object.freeze({ ...job.payload, operation: Object.freeze({ id: operationId }) }) }) : job,
+    job: plannedJob,
     workspace: `/var/lib/deviludo/workspaces/${job.workspaceId}/${job.projectId}/${job.jobId}/g${job.isolationGeneration}`,
     objectPrefix: `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`,
     vaultPath: `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`,
@@ -335,6 +384,29 @@ async function executeBackend(
     throw new Error("Sandbox receipt is invalid");
   }
   return Object.freeze(parsed as SandboxReceipt);
+}
+
+async function probeBackend(executable: string, signal: AbortSignal): Promise<void> {
+  const child = spawn(executable, ["live"], {
+    stdio: ["ignore", "ignore", "pipe"],
+    shell: false,
+    signal,
+    env: {
+      PATH: "/usr/local/bin:/usr/bin:/bin",
+      LANG: "C.UTF-8",
+      NODE_ENV: process.env.NODE_ENV ?? "production",
+    },
+  });
+  const stderr: Buffer[] = [];
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  if (code !== 0) {
+    const detail = Buffer.concat(stderr).toString("utf8").trim() || "executor live probe failed without a diagnostic";
+    throw new Error(`Sandbox executor unavailable: ${detail.slice(-2_000)}`);
+  }
 }
 
 const EXECUTOR_PROGRESS_PREFIX = "DEVILUDO_PROGRESS:";

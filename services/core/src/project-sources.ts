@@ -12,6 +12,12 @@ export type PublishedSourceRevision = Readonly<{
   totalBytes: number;
 }>;
 
+export type SourceCheckpoint = Readonly<{
+  digest: string;
+  fileCount: number;
+  totalBytes: number;
+}>;
+
 export class ProjectSourceStore {
   private readonly root: string;
 
@@ -99,6 +105,67 @@ export class ProjectSourceStore {
     return this.publishFiles({ ...input, files: await readSourceFiles(resolve(input.directory)) });
   }
 
+  async saveCheckpoint(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    files: readonly SourceFile[];
+  }>): Promise<SourceCheckpoint> {
+    assertIdentity(input.workspaceId, "workspace");
+    assertIdentity(input.projectId, "project");
+    assertIdentity(input.workflowId, "workflow");
+    const files = validateFiles(input.files);
+    const project = this.projectPath(input.workspaceId, input.projectId);
+    await ensureProjectTree(this.root, input.workspaceId, input.projectId);
+    const checkpoints = join(project, ".staging", "checkpoints");
+    await ensureSharedDirectory(checkpoints);
+    const target = join(checkpoints, input.workflowId);
+    const staging = join(checkpoints, `.${input.workflowId}-${randomUUID()}`);
+    await ensureSharedDirectory(staging);
+    try {
+      for (const file of files) {
+        const output = resolve(staging, file.path);
+        assertWithin(staging, output);
+        await ensureSharedParents(staging, dirname(output));
+        await writeFile(output, file.bytes, { flag: "wx", mode: SOURCE_FILE_MODE });
+      }
+      await rm(target, { recursive: true, force: true });
+      await rename(staging, target);
+      return checkpointDetails(files);
+    } catch (error) {
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async archiveCheckpoint(
+    workspaceId: string,
+    projectId: string,
+    workflowId: string,
+  ): Promise<Readonly<{ bytes: Buffer } & SourceCheckpoint> | null> {
+    assertIdentity(workspaceId, "workspace");
+    assertIdentity(projectId, "project");
+    assertIdentity(workflowId, "workflow");
+    const checkpoint = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", workflowId);
+    assertWithin(this.root, checkpoint);
+    try {
+      const files = await readSourceFiles(checkpoint);
+      return Object.freeze({ bytes: createTarGzip(files), ...checkpointDetails(files) });
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
+  async deleteCheckpoint(workspaceId: string, projectId: string, workflowId: string): Promise<void> {
+    assertIdentity(workspaceId, "workspace");
+    assertIdentity(projectId, "project");
+    assertIdentity(workflowId, "workflow");
+    const checkpoint = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", workflowId);
+    assertWithin(this.root, checkpoint);
+    await rm(checkpoint, { recursive: true, force: true });
+  }
+
   async deleteProject(workspaceId: string, projectId: string): Promise<void> {
     const project = this.projectPath(workspaceId, projectId);
     assertWithin(this.root, project);
@@ -172,6 +239,10 @@ function sourceDigest(files: readonly SourceFile[]): string {
 
 function sumBytes(files: readonly SourceFile[]): number {
   return files.reduce((total, file) => total + file.bytes.length, 0);
+}
+
+function checkpointDetails(files: readonly SourceFile[]): SourceCheckpoint {
+  return Object.freeze({ digest: sourceDigest(files), fileCount: files.length, totalBytes: sumBytes(files) });
 }
 
 async function ensureProjectTree(root: string, workspaceId: string, projectId: string): Promise<void> {

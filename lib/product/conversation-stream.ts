@@ -141,12 +141,3 @@ export function chronologicalMessages(
     })
     .map(item => item.message);
 }
-
-export async function selectConversationWorkspace(workspaceId: string): Promise<void> {
-  const response = await fetch("/api/session/workspace", {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
-  });
-  if (!response.ok) throw new ConversationStreamError("WORKSPACE_SELECTION_FAILED", "工作区选择失败");
-}

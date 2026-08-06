@@ -7,6 +7,7 @@ import { ProjectSourceStore } from "@/services/core/src/project-sources";
 
 const workspaceId = "30000000-0000-4000-8000-000000000003";
 const projectId = "30000000-0000-4000-8000-000000000004";
+const workflowId = "30000000-0000-4000-8000-000000000005";
 
 test("persistent source revisions are immutable, deterministic, and project-scoped", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-sources-"));
@@ -71,4 +72,26 @@ test("a stale crashed writer is fenced and its uncommitted staging is discarded"
     const store=new ProjectSourceStore(root);await store.publishFiles({workspaceId,projectId,revision:1,files:[{path:"project.godot",bytes:Buffer.from("[application]\n")}]});
     assert.deepEqual(await readdir(join(project,".staging")),[]);
   }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test("validated Agent checkpoints survive an attempt and disappear after source publication", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-source-checkpoint-"));
+  try {
+    const store = new ProjectSourceStore(root);
+    const files = [
+      { path: "project.godot", bytes: Buffer.from("[application]\n") },
+      { path: "scripts/main.gd", bytes: Buffer.from("extends Node\n") },
+    ];
+    const saved = await store.saveCheckpoint({ workspaceId, projectId, workflowId, files });
+    assert.equal(saved.fileCount, 2);
+    assert.equal((await store.archiveCheckpoint(workspaceId, projectId, workflowId))?.digest, saved.digest);
+    await assert.rejects(
+      store.saveCheckpoint({ workspaceId, projectId, workflowId, files: [{ path: ".env", bytes: Buffer.from("TOKEN=x") }] }),
+      /forbidden credential/,
+    );
+    await store.publishFiles({ workspaceId, projectId, revision: 1, files });
+    assert.equal(await store.archiveCheckpoint(workspaceId, projectId, workflowId), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

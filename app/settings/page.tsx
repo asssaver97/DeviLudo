@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { AgentSettings } from "@/components/AgentSettings";
 import { AccessSettings } from "@/components/AccessSettings";
-import { ProductShell } from "@/components/ProductShell";
 
 export const metadata: Metadata = {
   title: "设置 · DeviLudo",
@@ -10,9 +9,9 @@ export const metadata: Metadata = {
 
 export default function SettingsPage() {
   return (
-    <ProductShell>
+    <>
       <AgentSettings />
       <AccessSettings />
-    </ProductShell>
+    </>
   );
 }

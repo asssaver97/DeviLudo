@@ -3,31 +3,38 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { ProductSession } from "@/lib/product/contracts";
+import { cachedValue, clientCacheKeys, loadCached } from "@/lib/product/client-cache";
 import { LanguageSwitcher, useLanguage } from "./i18n/LanguageProvider";
 import { BellIcon, GamepadIcon, HomeIcon, ServerIcon, SettingsIcon } from "./console/Icons";
 
 type HealthState = "checking" | "ok" | "degraded";
+const ProductSessionContext = createContext<ProductSession | undefined>(undefined);
 
 export function ProductShell({ children }: { children: ReactNode }) {
   const { text } = useLanguage();
   const pathname = usePathname();
-  const [session, setSession] = useState<ProductSession | null>(null);
-  const [sessionLoaded, setSessionLoaded] = useState(false);
-  const [health, setHealth] = useState<HealthState>("checking");
+  const cachedSession = cachedValue<ProductSession>(clientCacheKeys.session);
+  const [session, setSession] = useState<ProductSession | null>(cachedSession ?? null);
+  const [sessionLoaded, setSessionLoaded] = useState(Boolean(cachedSession));
+  const [health, setHealth] = useState<HealthState>(cachedValue<HealthState>(clientCacheKeys.health) ?? "checking");
 
   useEffect(() => {
     const controller = new AbortController();
-    void fetch("/api/session", { cache: "no-store", signal: controller.signal })
-      .then(async response => {
-        if (!response.ok) return;
-        const body = await response.json() as { session: ProductSession };
-        if (!controller.signal.aborted) setSession(body.session);
-      })
+    void loadCached(clientCacheKeys.session, 30_000, async () => {
+      const response = await fetch("/api/session", { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error("SESSION_UNAVAILABLE");
+      return (await response.json() as { session: ProductSession }).session;
+    })
+      .then(value => { if (!controller.signal.aborted) setSession(value); })
+      .catch(() => undefined)
       .finally(() => { if (!controller.signal.aborted) setSessionLoaded(true); });
-    void fetch("/api/health/live", { signal: controller.signal })
-      .then(response => { if (!controller.signal.aborted) setHealth(response.ok ? "ok" : "degraded"); })
+    void loadCached<HealthState>(clientCacheKeys.health, 30_000, async () => {
+      const response = await fetch("/api/health/live", { signal: controller.signal });
+      return response.ok ? "ok" : "degraded";
+    })
+      .then(value => { if (!controller.signal.aborted) setHealth(value); })
       .catch(() => { if (!controller.signal.aborted) setHealth("degraded"); });
     return () => controller.abort();
   }, []);
@@ -45,7 +52,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <aside className="shell-sidebar">
         <Link aria-label={text("DeviLudo 首页", "DeviLudo home")} className="brand" href="/">
-          <span className="brand-mark"><Image alt="" height={36} priority src="/deviludo-brand-mark.png" width={36} /></span>
+          <span className="brand-mark"><Image alt="" height={36} priority src="/deviludo-brand-mark.png" unoptimized width={36} /></span>
           <span className="brand-copy"><b>DeviLudo</b><small>GAMEFORGE OS</small></span>
         </Link>
 
@@ -80,10 +87,16 @@ export function ProductShell({ children }: { children: ReactNode }) {
             <button aria-label={text("通知", "Notifications")} className="icon-button" type="button"><BellIcon /></button>
           </div>
         </header>
-        <main className="shell-content">{children}</main>
+        <main className="shell-content"><ProductSessionContext.Provider value={session}>{children}</ProductSessionContext.Provider></main>
       </div>
     </div>
   );
+}
+
+export function useProductSession(): ProductSession {
+  const session = useContext(ProductSessionContext);
+  if (!session) throw new Error("ProductSessionContext is missing");
+  return session;
 }
 
 function workspaceMonogram(name: string): string {
