@@ -6,6 +6,7 @@ import { LanguageProvider, type Locale } from "@/components/i18n/LanguageProvide
 import { ProductShell } from "@/components/ProductShell";
 import "./globals.css";
 import "./product.css";
+import "./asset-manifest.css";
 
 export const metadata: Metadata = {
   title: "DeviLudo · 游戏 AI 开发平台",

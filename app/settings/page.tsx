@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { AgentSettings } from "@/components/AgentSettings";
 import { AccessSettings } from "@/components/AccessSettings";
+import { ImageGenerationSettings } from "@/components/ImageGenerationSettings";
 
 export const metadata: Metadata = {
   title: "设置 · DeviLudo",
@@ -11,6 +12,7 @@ export default function SettingsPage() {
   return (
     <>
       <AgentSettings />
+      <ImageGenerationSettings />
       <AccessSettings />
     </>
   );

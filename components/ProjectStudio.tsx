@@ -27,6 +27,7 @@ import {
   sendConversationMessageStream,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
+import { AssetManifestPanel } from "./AssetManifestPanel";
 import { FileIcon, PlusIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 import { useProductSession } from "./ProductShell";
@@ -656,6 +657,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </div>
         </section>
       ) : null}
+
+      <AssetManifestPanel projectId={projectId} />
 
       <div className={`project-workspace-layout ${documentCollapsed ? "document-is-collapsed" : ""}`}>
         <main className="project-workspace-main">
