@@ -177,25 +177,29 @@
   margin-bottom: 8px;
 }
 
-.asset-prompt {
+.asset-prompt-box {
   margin-top: 8px;
-  font-size: 13px;
-}
-
-.asset-prompt summary {
-  cursor: pointer;
-  color: var(--link-color);
-  user-select: none;
-}
-
-.asset-prompt pre {
-  margin-top: 8px;
-  padding: 8px;
+  padding: 10px;
   background: var(--code-bg);
   border-radius: 4px;
-  font-size: 12px;
-  overflow-x: auto;
+  border-left: 3px solid var(--primary-color);
+}
+
+.asset-prompt-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  letter-spacing: 0.5px;
+}
+
+.asset-prompt-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .asset-upload {

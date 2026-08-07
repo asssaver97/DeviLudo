@@ -163,10 +163,10 @@ export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
               </div>
             )}
             {item.generationPrompt && (
-              <details className="asset-prompt">
-                <summary>生成提示词</summary>
-                <pre>{item.generationPrompt}</pre>
-              </details>
+              <div className="asset-prompt-box">
+                <div className="asset-prompt-label">生成提示词:</div>
+                <div className="asset-prompt-content">{item.generationPrompt}</div>
+              </div>
             )}
             {item.status === "planned" && !autoGenerateEnabled && (
               <div className="asset-upload">

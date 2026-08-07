@@ -34,6 +34,7 @@ import { useProductSession } from "./ProductShell";
 
 const PIPELINE = [
   ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
+  ["ASSET_GENERATION", "素材生成", "Asset Generation"],
   ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
   ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
   ["ARTIFACT_SIGN", "平台签名", "Platform Signing"],
@@ -617,34 +618,15 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       {artifacts.length ? (
         <section aria-label={text("项目制品", "Project artifacts")} className="product-artifacts-panel">
           <header>
-            <div><span className="eyebrow">ARTIFACTS</span><h2>{text("项目制品", "PROJECT ARTIFACTS")}</h2></div>
-            <span>{text(`${artifacts.length} 个文件`, `${artifacts.length} files`)}</span>
+            <div><span className="eyebrow">ARTIFACTS</span><h2>{text("游戏制品下载", "GAME BUILDS")}</h2></div>
+            <span>{text(`${artifacts.filter(a => a.kind === "BUILD" || a.kind === "SIGNED_BUILD").length} 个平台`, `${artifacts.filter(a => a.kind === "BUILD" || a.kind === "SIGNED_BUILD").length} platforms`)}</span>
           </header>
           <div className="product-artifact-list">
-            {artifacts.map(artifact => (
+            {artifacts.filter(artifact => artifact.kind === "BUILD" || artifact.kind === "SIGNED_BUILD").map(artifact => (
               <article key={artifact.id}>
                 <div>
                   <b>{artifactLabel(artifact, text)}</b>
                   <span>{artifact.targetPlatform ?? text("通用", "COMMON")} · {formatArtifactSize(artifact.object.sizeBytes)}</span>
-                  <code>{artifact.object.sha256.slice(0, 23)}…</code>
-                  {artifact.kind === "E2E_REPORT" && (artifact as unknown as { testDetails?: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails ? (
-                    <div className="e2e-test-details">
-                      <div className="test-summary">
-                        {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.checks.length} {text("项检查", "checks")} ·
-                        {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.length === 0
-                          ? <span className="test-passed">{text("全部通过", "ALL PASSED")}</span>
-                          : <span className="test-failed">{(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.length} {text("项失败", "FAILED")}</span>
-                        } · {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.duration_ms.toFixed(1)}ms
-                      </div>
-                      {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.length > 0 && (
-                        <ul className="test-failures">
-                          {(artifact as unknown as { testDetails: { suite: string; checks: string[]; failures: string[]; duration_ms: number } }).testDetails.failures.map(name => (
-                            <li key={name}><code>{name}</code></li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  ) : null}
                 </div>
                 <button
                   className="button button-secondary"
