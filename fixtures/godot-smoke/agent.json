@@ -20,6 +20,22 @@
         "checkNames": ["pause-stops-clock"]
       },
       {
+        "id": "menu-interaction",
+        "category": "player-control",
+        "description": "主菜单响应键盘输入",
+        "verificationMethod": "interactive",
+        "interactionScript": {
+          "version": "1",
+          "events": [
+            { "type": "wait", "delay_ms": 1000 },
+            { "type": "key_press", "key": "KEY_DOWN", "delay_ms": 200 },
+            { "type": "key_release", "key": "KEY_DOWN", "delay_ms": 200 },
+            { "type": "key_press", "key": "KEY_ENTER", "delay_ms": 200 },
+            { "type": "key_release", "key": "KEY_ENTER" }
+          ]
+        }
+      },
+      {
         "id": "damage-system",
         "category": "core-loop",
         "description": "伤害正确减少船体完整度",
@@ -50,6 +66,18 @@
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
         "checkNames": ["headless-performance-budget"]
+      },
+      {
+        "id": "main-menu-visual",
+        "category": "ui",
+        "description": "主菜单视觉呈现符合预期",
+        "verificationMethod": "visual",
+        "expectedVisual": {
+          "version": "1",
+          "referenceImage": "screenshots/main_menu.png",
+          "threshold": 0.02,
+          "captureDelay": 1500
+        }
       }
     ]
   }

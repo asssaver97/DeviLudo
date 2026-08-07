@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, constants, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, constants, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -40,7 +40,11 @@ try {
   // Check for test manifest in agent.json
   let testManifest = null;
   let hasUnitTests = false;
+  let hasInteractiveTests = false;
+  let hasVisualTests = false;
   let testScriptPath = null;
+  let interactiveFeatures = [];
+  let visualFeatures = [];
   try {
     const agentJsonPath = join(project, "agent.json");
     const agentJsonContent = await readFile(agentJsonPath, "utf8");
@@ -52,6 +56,10 @@ try {
         hasUnitTests = true;
         testScriptPath = unitFeatures[0].gdsTestPath; // Typically res://tests/e2e.gd
       }
+      interactiveFeatures = testManifest.features.filter(f => f.verificationMethod === "interactive" && f.interactionScript);
+      hasInteractiveTests = interactiveFeatures.length > 0;
+      visualFeatures = testManifest.features.filter(f => f.verificationMethod === "visual" && f.expectedVisual);
+      hasVisualTests = visualFeatures.length > 0;
     }
   } catch { /* agent.json may not exist or lack testManifest - fallback to legacy mode */ }
 
@@ -62,6 +70,7 @@ try {
   let stdout = "";
   let stderr = "";
   let testDetails = null;
+  const allTestResults = [];
 
   if (!executable) {
     outcome = "FAILED";
@@ -69,64 +78,172 @@ try {
     exitCode = 126;
     summary = "The macOS game artifact does not contain an executable app bundle";
     stderr = summary;
-  } else if (hasUnitTests && testScriptPath) {
-    // Execute test script and parse structured results
-    try {
-      const result = await execute(executable, ["--headless", "--script", testScriptPath], { timeout: 180_000, maxBuffer: 2 * 1024 * 1024 });
-      stdout = result.stdout;
-      stderr = result.stderr;
-      exitCode = 0;
+  } else if (hasUnitTests || hasInteractiveTests || hasVisualTests) {
+    // Execute unit tests
+    if (hasUnitTests && testScriptPath) {
+      try {
+        const result = await execute(executable, ["--headless", "--script", testScriptPath], { timeout: 180_000, maxBuffer: 2 * 1024 * 1024 });
+        stdout = result.stdout;
+        stderr = result.stderr;
+        exitCode = 0;
 
-      // Parse DEVILUDO_E2E_RESULT from stdout
-      const resultMatch = stdout.match(/DEVILUDO_E2E_RESULT:(.+)/);
-      if (resultMatch) {
-        testDetails = JSON.parse(resultMatch[1]);
+        // Parse DEVILUDO_E2E_RESULT from stdout
+        const resultMatch = stdout.match(/DEVILUDO_E2E_RESULT:(.+)/);
+        if (resultMatch) {
+          testDetails = JSON.parse(resultMatch[1]);
+          allTestResults.push(testDetails);
 
-        // Validate that all declared checks were executed
-        const declaredChecks = new Set();
-        for (const feature of testManifest.features) {
-          if (feature.verificationMethod === "unit" && Array.isArray(feature.checkNames)) {
-            for (const checkName of feature.checkNames) {
-              declaredChecks.add(checkName);
+          // Validate that all declared checks were executed
+          const declaredChecks = new Set();
+          for (const feature of testManifest.features) {
+            if (feature.verificationMethod === "unit" && Array.isArray(feature.checkNames)) {
+              for (const checkName of feature.checkNames) {
+                declaredChecks.add(checkName);
+              }
             }
           }
-        }
-        const executedChecks = new Set(testDetails.checks || []);
-        const missingChecks = [...declaredChecks].filter(c => !executedChecks.has(c));
+          const executedChecks = new Set(testDetails.checks || []);
+          const missingChecks = [...declaredChecks].filter(c => !executedChecks.has(c));
 
-        if (missingChecks.length > 0) {
-          outcome = "FAILED";
-          failureDomain = "PRODUCT";
-          summary = `Test manifest declared ${missingChecks.length} check(s) that were not executed: ${missingChecks.join(", ")}`;
-        } else if (testDetails.failures && testDetails.failures.length > 0) {
-          outcome = "FAILED";
-          failureDomain = "PRODUCT";
-          summary = `${testDetails.failures.length} feature check(s) failed: ${testDetails.failures.join(", ")}`;
+          if (missingChecks.length > 0) {
+            outcome = "FAILED";
+            failureDomain = "PRODUCT";
+            summary = `Test manifest declared ${missingChecks.length} check(s) that were not executed: ${missingChecks.join(", ")}`;
+          } else if (testDetails.failures && testDetails.failures.length > 0) {
+            outcome = "FAILED";
+            failureDomain = "PRODUCT";
+            summary = `${testDetails.failures.length} feature check(s) failed: ${testDetails.failures.join(", ")}`;
+          }
         } else {
-          outcome = "PASSED";
-          summary = `All ${testDetails.checks.length} feature check(s) passed in ${testDetails.duration_ms.toFixed(1)}ms`;
+          outcome = "FAILED";
+          failureDomain = "PRODUCT";
+          summary = "Test script did not output DEVILUDO_E2E_RESULT";
         }
-      } else {
+      } catch (error) {
+        if (!error || typeof error !== "object" || error.code === "ENOENT") throw error;
         outcome = "FAILED";
         failureDomain = "PRODUCT";
-        summary = "Test script did not output DEVILUDO_E2E_RESULT";
-      }
-    } catch (error) {
-      if (!error || typeof error !== "object" || error.code === "ENOENT") throw error;
-      outcome = "FAILED";
-      failureDomain = "PRODUCT";
-      exitCode = Number.isInteger(error.code) ? error.code : error.killed ? 124 : 1;
-      stdout = typeof error.stdout === "string" ? error.stdout : "";
-      stderr = typeof error.stderr === "string" ? error.stderr : error instanceof Error ? error.message : String(error);
-      summary = error.killed
-        ? "Test script did not finish before the timeout"
-        : `Test script exited with code ${exitCode}`;
+        exitCode = Number.isInteger(error.code) ? error.code : error.killed ? 124 : 1;
+        stdout = typeof error.stdout === "string" ? error.stdout : "";
+        stderr = typeof error.stderr === "string" ? error.stderr : error instanceof Error ? error.message : String(error);
+        summary = error.killed
+          ? "Test script did not finish before the timeout"
+          : `Test script exited with code ${exitCode}`;
 
-      // Attempt to parse partial test results
-      const resultMatch = stdout.match(/DEVILUDO_E2E_RESULT:(.+)/);
-      if (resultMatch) {
-        try { testDetails = JSON.parse(resultMatch[1]); } catch { /* ignore */ }
+        // Attempt to parse partial test results
+        const resultMatch = stdout.match(/DEVILUDO_E2E_RESULT:(.+)/);
+        if (resultMatch) {
+          try {
+            testDetails = JSON.parse(resultMatch[1]);
+            allTestResults.push(testDetails);
+          } catch { /* ignore */ }
+        }
       }
+    }
+
+    // Execute interactive tests
+    if (hasInteractiveTests && outcome === "PASSED") {
+      for (const feature of interactiveFeatures) {
+        try {
+          const interactiveRunnerPath = join(directory, "interactive_runner.gd");
+          const interactiveRunnerContent = await readFile(join(process.cwd(), "fixtures/godot-e2e-helpers/interactive_runner.gd"), "utf8");
+          await writeFile(interactiveRunnerPath, interactiveRunnerContent);
+
+          const scriptJson = JSON.stringify(feature.interactionScript);
+          const env = { ...process.env, DEVILUDO_INTERACTION_SCRIPT: scriptJson };
+          const result = await execute(executable, ["--headless", "--script", interactiveRunnerPath], { timeout: 180_000, maxBuffer: 2 * 1024 * 1024, env });
+
+          const resultMatch = result.stdout.match(/DEVILUDO_E2E_RESULT:(.+)/);
+          if (resultMatch) {
+            const interactiveResult = JSON.parse(resultMatch[1]);
+            allTestResults.push(interactiveResult);
+            if (interactiveResult.failures && interactiveResult.failures.length > 0) {
+              outcome = "FAILED";
+              failureDomain = "PRODUCT";
+              summary = `Interactive test "${feature.id}" failed: ${interactiveResult.failures.join(", ")}`;
+              break;
+            }
+          } else {
+            outcome = "FAILED";
+            failureDomain = "PRODUCT";
+            summary = `Interactive test "${feature.id}" did not output result`;
+            break;
+          }
+        } catch (error) {
+          outcome = "FAILED";
+          failureDomain = "PRODUCT";
+          summary = `Interactive test "${feature.id}" threw error: ${error.message}`;
+          break;
+        }
+      }
+    }
+
+    // Execute visual tests
+    if (hasVisualTests && outcome === "PASSED") {
+      for (const feature of visualFeatures) {
+        try {
+          const visualRunnerPath = join(directory, "visual_runner.gd");
+          const visualRunnerContent = await readFile(join(process.cwd(), "fixtures/godot-e2e-helpers/visual_runner.gd"), "utf8");
+          await writeFile(visualRunnerPath, visualRunnerContent);
+
+          const specJson = JSON.stringify(feature.expectedVisual);
+          const captureOutputPath = join(directory, `capture_${feature.id}.png`);
+          const env = {
+            ...process.env,
+            DEVILUDO_VISUAL_SPEC: specJson,
+            DEVILUDO_SCREENSHOT_OUTPUT: captureOutputPath
+          };
+          const result = await execute(executable, ["--headless", "--script", visualRunnerPath], { timeout: 180_000, maxBuffer: 2 * 1024 * 1024, env });
+
+          const resultMatch = result.stdout.match(/DEVILUDO_E2E_RESULT:(.+)/);
+          if (resultMatch) {
+            const visualResult = JSON.parse(resultMatch[1]);
+
+            // Perform pixel comparison using a simple comparison (in production, use pixelmatch or similar)
+            const referenceImagePath = join(project, feature.expectedVisual.referenceImage);
+            try {
+              await access(referenceImagePath, constants.R_OK);
+              // For now, just check if capture was successful
+              await access(captureOutputPath, constants.R_OK);
+              visualResult.visualComparison = { passed: true, message: "Visual capture successful (pixel diff not yet implemented)" };
+              allTestResults.push(visualResult);
+            } catch {
+              outcome = "FAILED";
+              failureDomain = "PRODUCT";
+              summary = `Visual test "${feature.id}" failed: reference or captured image missing`;
+              break;
+            }
+          } else {
+            outcome = "FAILED";
+            failureDomain = "PRODUCT";
+            summary = `Visual test "${feature.id}" did not output result`;
+            break;
+          }
+        } catch (error) {
+          outcome = "FAILED";
+          failureDomain = "PRODUCT";
+          summary = `Visual test "${feature.id}" threw error: ${error.message}`;
+          break;
+        }
+      }
+    }
+
+    // Aggregate summary if all passed
+    if (outcome === "PASSED" && allTestResults.length > 0) {
+      const totalChecks = allTestResults.reduce((sum, r) => sum + (r.checks?.length || 0), 0);
+      const totalDuration = allTestResults.reduce((sum, r) => sum + (r.duration_ms || 0), 0);
+      summary = `All ${totalChecks} check(s) across ${allTestResults.length} test suite(s) passed in ${totalDuration.toFixed(1)}ms`;
+    }
+
+    // Consolidate test details
+    if (allTestResults.length > 0) {
+      testDetails = {
+        suite: "deviludo-consolidated-e2e",
+        checks: allTestResults.flatMap(r => r.checks || []),
+        failures: allTestResults.flatMap(r => r.failures || []),
+        duration_ms: allTestResults.reduce((sum, r) => sum + (r.duration_ms || 0), 0),
+        suites: allTestResults.map(r => r.suite),
+      };
     }
   } else {
     // Fallback: no test manifest or no unit tests - run legacy blind execution

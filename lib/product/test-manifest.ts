@@ -1,3 +1,6 @@
+import type { InteractionScript } from "./interaction-script.js";
+import type { VisualTestSpec } from "./visual-comparison.js";
+
 export const TEST_MANIFEST_SCHEMA_VERSION = "deviludo.test-manifest.v1" as const;
 
 export const VERIFICATION_METHODS = ["unit", "interactive", "visual", "manual"] as const;
@@ -21,8 +24,8 @@ export type TestManifestFeature = Readonly<{
   verificationMethod: VerificationMethod;
   gdsTestPath?: string;
   checkNames?: readonly string[];
-  interactionScript?: string;
-  expectedVisual?: string;
+  interactionScript?: InteractionScript;
+  expectedVisual?: VisualTestSpec;
 }>;
 
 export type TestManifest = Readonly<{

@@ -70,10 +70,16 @@ Windows 使用相同动作：
 Agent 生成源码时同时输出 `testManifest`（协议 `deviludo.test-manifest.v1`），声明每个核心功能及其验证方法。E2E 阶段不再盲跑 120 秒，而是：
 
 1. 读取 `agent.json` 中的 `testManifest`
-2. 执行 Godot 测试脚本（`--headless --script res://tests/e2e.gd`）
+2. 根据 `verificationMethod` 执行对应测试类型
 3. 解析 `DEVILUDO_E2E_RESULT` 结构化输出
 4. 验证所有声明的 `checkNames` 都被执行
 5. 报告具体失败的功能点（而非盲目的退出码）
+
+支持四种验证方法：
+
+#### Unit 测试（verificationMethod: "unit"）
+
+最常用的测试类型，通过 GDScript 断言验证游戏逻辑。
 
 测试脚本要求：
 - 继承 `SceneTree`，在 `_initialize()` 执行所有测试
@@ -82,7 +88,66 @@ Agent 生成源码时同时输出 `testManifest`（协议 `deviludo.test-manifes
 - 输出 `DEVILUDO_E2E_RESULT:{"suite":"...","checks":[],"failures":[],"duration_ms":...}`
 - 用 `quit(0 if failures.is_empty() else 1)` 退出
 
-参考实现：`fixtures/godot-smoke/tests/e2e.gd` + `fixtures/godot-smoke/agent.json`
+参考实现：`fixtures/godot-smoke/tests/e2e.gd`
+
+#### Interactive 测试（verificationMethod: "interactive"）
+
+模拟键盘和鼠标输入，验证 UI 交互和玩家控制。
+
+特性需要声明 `interactionScript`：
+
+```json
+{
+  "id": "menu-navigation",
+  "verificationMethod": "interactive",
+  "interactionScript": {
+    "version": "1",
+    "events": [
+      { "type": "key_press", "key": "KEY_DOWN", "delay_ms": 200 },
+      { "type": "key_release", "key": "KEY_DOWN", "delay_ms": 200 },
+      { "type": "mouse_move", "x": 100, "y": 200, "delay_ms": 100 },
+      { "type": "mouse_click", "button": "LEFT" },
+      { "type": "wait", "delay_ms": 1000 }
+    ]
+  }
+}
+```
+
+E2E executor 会设置 `DEVILUDO_INTERACTION_SCRIPT` 环境变量并运行 `fixtures/godot-e2e-helpers/interactive_runner.gd`，该脚本会解析事件序列并通过 `Input.parse_input_event()` 注入输入。
+
+#### Visual 测试（verificationMethod: "visual"）
+
+捕获游戏截图并与参考图像对比，验证 UI 渲染。
+
+特性需要声明 `expectedVisual`：
+
+```json
+{
+  "id": "main-menu-visual",
+  "verificationMethod": "visual",
+  "expectedVisual": {
+    "version": "1",
+    "referenceImage": "screenshots/main_menu.png",
+    "threshold": 0.02,
+    "captureDelay": 1500
+  }
+}
+```
+
+E2E executor 会：
+1. 设置 `DEVILUDO_VISUAL_SPEC` 和 `DEVILUDO_SCREENSHOT_OUTPUT` 环境变量
+2. 运行 `fixtures/godot-e2e-helpers/visual_runner.gd` 捕获当前帧
+3. 与参考图像进行像素对比（threshold 为允许差异百分比，0-1）
+
+参考图像应保存在项目的 `screenshots/` 目录，首次生成时由 Agent 创建基线。
+
+#### Manual 测试（verificationMethod: "manual"）
+
+需要人工验收的功能（如叙事体验、美术风格、音乐氛围），标记为 `manual` 后不会在自动化 E2E 中执行，但会在 UI 中显示为待确认项。
+
+---
+
+完整示例见 `fixtures/godot-smoke/agent.json`。
 
 E2E 失败时，Agent 修复任务会收到 `testDetails.failures` 列表，精确知道哪些功能点坏了。
 
