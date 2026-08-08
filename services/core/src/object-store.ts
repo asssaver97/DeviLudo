@@ -71,6 +71,32 @@ export class CoreObjectStore {
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: content.length });
   }
 
+  /**
+   * Store a user-supplied game asset. Assets live under the project prefix so
+   * they are removed with `deleteProjectObjects`, and the digest is computed
+   * here rather than trusted from the client.
+   */
+  async putProjectAsset(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    assetKey: string;
+    extension: string;
+    contentType: string;
+    content: Buffer;
+  }>) {
+    const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
+    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}`
+      + `/assets/${input.assetKey}.${input.extension}`;
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      Body: input.content,
+      ContentType: input.contentType,
+      Metadata: { sha256 },
+    }));
+    return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: input.content.length });
+  }
+
   async deleteProjectObjects(workspaceId: string, projectId: string): Promise<void> {
     const prefix = `workspaces/${workspaceId}/projects/${projectId}/`;
     let continuationToken: string | undefined;

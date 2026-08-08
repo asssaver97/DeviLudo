@@ -31,7 +31,48 @@ export type WorkflowEvent =
   | Readonly<{ kind: "SPEC_APPROVED" }>
   | Readonly<{ kind: "CANCEL_REQUESTED" }>
   | Readonly<{ kind: "JOB_SUCCEEDED"; jobKind: JobKind; targetOperatingSystem: ServerOperatingSystem | null }>
-  | Readonly<{ kind: "JOB_FAILED"; jobKind: JobKind; reason: string }>;
+  | Readonly<{ kind: "JOB_FAILED"; jobKind: JobKind; reason: string }>
+  | Readonly<{ kind: "STAGE_RERUN_REQUESTED"; stage: RerunStage; signalId: string }>;
+
+/**
+ * Delivery chain in order. Rerunning a stage supersedes it and everything after
+ * it, so this order is load-bearing and must match `deviludo.delivery_stages`.
+ */
+export const DELIVERY_STAGES = [
+  "AGENT_GENERATION",
+  "ARTIFACT_BUILD",
+  "E2E_TEST",
+  "ARTIFACT_SIGN",
+  "STEAM_PUBLISH",
+  "STEAM_CLEAN_INSTALL",
+] as const;
+export type RerunStage = typeof DELIVERY_STAGES[number];
+
+export function deliveryStagesFor(profile: "VALIDATE" | "RELEASE"): readonly RerunStage[] {
+  return profile === "VALIDATE" ? DELIVERY_STAGES.slice(0, 3) : DELIVERY_STAGES;
+}
+
+// Workflow state a stage occupies while it runs.
+const STAGE_RUNNING_STATE: Readonly<Record<RerunStage, WorkflowState>> = Object.freeze({
+  AGENT_GENERATION: "AGENT_RUNNING",
+  ARTIFACT_BUILD: "ARTIFACT_BUILDING",
+  E2E_TEST: "E2E_TESTING",
+  ARTIFACT_SIGN: "SIGNING",
+  STEAM_PUBLISH: "STEAM_PUBLISHING",
+  STEAM_CLEAN_INSTALL: "CLEAN_INSTALL_VERIFYING",
+});
+
+// Stages that fan out one job per target platform.
+const PER_PLATFORM_STAGES: ReadonlySet<RerunStage> = new Set<RerunStage>([
+  "E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL",
+]);
+
+// Per-platform progress that a rerun of a given stage invalidates.
+const STAGE_PROGRESS_KEY: Readonly<Partial<Record<RerunStage, keyof WorkflowSnapshot>>> = Object.freeze({
+  E2E_TEST: "completedE2e",
+  ARTIFACT_SIGN: "completedSigning",
+  STEAM_CLEAN_INSTALL: "completedCleanInstall",
+});
 
 export type EnqueueCommand = Readonly<{
   jobKind: JobKind;
@@ -71,6 +112,9 @@ export function initialWorkflowSnapshot(
 }
 
 export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEvent): WorkflowTransition {
+  // A rerun is the one event that legitimately reopens a terminal workflow, so
+  // it has to be handled before the terminal-state guard below.
+  if (event.kind === "STAGE_RERUN_REQUESTED") return rerunStage(snapshot, event.stage, event.signalId);
   if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
     return Object.freeze({ snapshot, enqueue: Object.freeze([]) });
   }
@@ -124,6 +168,36 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
     }, []);
   }
   throw new Error(`Job ${event.jobKind} is invalid for ${snapshot.state}`);
+}
+
+/**
+ * Re-enter the chain at `stage`. Everything downstream was derived from inputs
+ * this rerun replaces, so the caller supersedes those jobs and this drops the
+ * matching per-platform progress; only the selected stage is enqueued, and
+ * ordinary JOB_SUCCEEDED handling walks the chain forward from there.
+ */
+function rerunStage(snapshot: WorkflowSnapshot, stage: RerunStage, signalId: string): WorkflowTransition {
+  const stages = deliveryStagesFor(snapshot.profile);
+  if (!stages.includes(stage)) {
+    throw new Error(`Stage ${stage} is not part of the ${snapshot.profile} delivery chain`);
+  }
+  if (!["SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
+    throw new Error("Stage rerun requires a terminal workflow; cancel the running delivery first");
+  }
+  const supersededFrom = stages.indexOf(stage);
+  const reset: Record<string, unknown> = {};
+  for (const downstream of stages.slice(supersededFrom)) {
+    const key = STAGE_PROGRESS_KEY[downstream];
+    if (key) reset[key] = Object.freeze([]);
+  }
+  const next = { ...snapshot, ...reset, state: STAGE_RUNNING_STATE[stage] } as WorkflowSnapshot;
+  const platforms = PER_PLATFORM_STAGES.has(stage) ? snapshot.targetPlatforms : [null];
+  return result(
+    next,
+    platforms.map(platform => command(
+      snapshot, stage, platform, `rerun:${stage}:${platform ?? "all"}:${signalId}`,
+    )),
+  );
 }
 
 function command(

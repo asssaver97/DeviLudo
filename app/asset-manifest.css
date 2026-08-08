@@ -84,6 +84,20 @@
   background: var(--primary-hover);
 }
 
+.rebuild-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.asset-manifest-error {
+  background: rgba(220, 80, 80, 0.12);
+  border-left: 3px solid #dc5050;
+  color: #ff9b9b;
+  font-size: 12px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+}
+
 .asset-items-list {
   display: flex;
   flex-direction: column;

@@ -60,10 +60,13 @@ for (const event of ["SIGINT", "SIGTERM"]) {
 }
 
 try {
+  // Buildx's default provenance attestation stamps a fresh timestamp into the image
+  // config, so a fully cached rebuild still yields a new image id. Nothing reads that
+  // provenance, and a stable id keeps the allowlist below matching across runs.
   await runDocker([
     ...compose, "--profile", "images", "build",
     "agent-fixture-image", "e2e-macos-image",
-  ], environment, 10 * 60_000);
+  ], { ...environment, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" }, 10 * 60_000);
   const [fixtureImage, e2eImage] = await Promise.all([
     inspectImage("deviludo-agent-fixture:local", environment),
     inspectImage("deviludo-e2e-macos:local", environment),

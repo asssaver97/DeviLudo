@@ -30,6 +30,19 @@ const RESPONSE_HEADER_DENYLIST = new Set([
 ]);
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_PROJECT_ARCHIVE_BYTES = 64 * 1024 * 1024;
+/**
+ * Asset uploads carry an 8 MB image base64-encoded in JSON, so the envelope is
+ * 4/3 the size of the file. Core enforces the real per-asset ceiling on the
+ * decoded bytes; this only has to be loose enough to let a legal upload through.
+ */
+const MAX_ASSET_UPLOAD_BYTES = 12 * 1024 * 1024;
+const ASSET_UPLOAD_PATH = /^projects\/[^/]+\/asset-manifest\/uploads$/;
+
+function bodyLimitFor(routePath: string): number {
+  if (routePath === "projects/import/archive") return MAX_PROJECT_ARCHIVE_BYTES;
+  if (ASSET_UPLOAD_PATH.test(routePath)) return MAX_ASSET_UPLOAD_BYTES;
+  return MAX_BODY_BYTES;
+}
 
 function coreBaseUrl(): URL {
   const raw = process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080";
@@ -55,7 +68,7 @@ function serviceToken(): string {
 async function proxy(request: Request, context: RouteContext): Promise<Response> {
   const { segments } = await context.params;
   const routePath = segments.join("/");
-  const bodyLimit = routePath === "projects/import/archive" ? MAX_PROJECT_ARCHIVE_BYTES : MAX_BODY_BYTES;
+  const bodyLimit = bodyLimitFor(routePath);
   const base = coreBaseUrl();
   const target = new URL(`v1/${segments.map(encodeURIComponent).join("/")}`, base.href.endsWith("/") ? base : new URL(`${base.href}/`));
   target.search = new URL(request.url).search;

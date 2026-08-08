@@ -39,14 +39,28 @@ export type AssetManifest = Readonly<{
   items?: readonly AssetItem[];
 }>;
 
-export type ImageGenerationProvider = "dalle-3" | "stable-diffusion-xl" | "midjourney" | "replicate";
+export const IMAGE_GENERATION_PROVIDERS = [
+  "dalle-3", "stable-diffusion-xl", "midjourney", "replicate",
+] as const;
+export type ImageGenerationProvider = typeof IMAGE_GENERATION_PROVIDERS[number];
 
+export function isImageGenerationProvider(value: unknown): value is ImageGenerationProvider {
+  return typeof value === "string" && (IMAGE_GENERATION_PROVIDERS as readonly string[]).includes(value);
+}
+
+/**
+ * Image generation settings as exposed to the browser. The API key itself never
+ * leaves Core; `apiKeyMask` is the same first-three/last-four mask used for the
+ * Agent runtime credential.
+ */
 export type ImageGenerationConfig = Readonly<{
   provider: ImageGenerationProvider;
-  apiKey?: string;
-  apiEndpoint?: string;
-  model?: string;
-  defaultParameters?: Record<string, unknown>;
+  apiKeyMask: string;
+  apiEndpoint: string | null;
+  model: string | null;
+  revision: number;
+  updatedBy: string;
+  updatedAt: string;
 }>;
 
 export function validateAssetManifest(value: unknown): value is AssetManifest {

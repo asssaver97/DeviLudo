@@ -21,11 +21,36 @@ export type AgentSecretVersion = Readonly<{
   version: string;
 }>;
 
+/**
+ * Secret namespaces this store manages. Each scope is a separate Vault path, so
+ * the image generation key can never be read through an Agent-runtime ref.
+ */
+export const SECRET_SCOPES = ["agent-runtime", "image-generation"] as const;
+export type SecretScope = typeof SECRET_SCOPES[number];
+
 export interface AgentSecretStore {
-  writeApiKey(apiKey: string): Promise<AgentSecretVersion>;
-  readApiKey(secretRef: string): Promise<string | null>;
-  readApiKeyMask(secretRef: string): Promise<string | null>;
+  writeApiKey(apiKey: string, scope?: SecretScope): Promise<AgentSecretVersion>;
+  readApiKey(secretRef: string, scope?: SecretScope): Promise<string | null>;
+  readApiKeyMask(secretRef: string, scope?: SecretScope): Promise<string | null>;
 }
+
+function secretRefPrefix(scope: SecretScope): string {
+  return `vault://instance/${scope}/api-key/versions/`;
+}
+
+function secretVaultPath(scope: SecretScope, version: string): string {
+  return `/v1/secret/data/deviludo/instance/${scope}/api-key/versions/${version}`;
+}
+
+/** Extract the version from a scoped secret ref, or null if it does not match. */
+function secretRefVersion(secretRef: string, scope: SecretScope): string | null {
+  const prefix = secretRefPrefix(scope);
+  if (!secretRef.startsWith(prefix)) return null;
+  const version = secretRef.slice(prefix.length);
+  return UUID_V4.test(version) ? version : null;
+}
+
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function parseAgentSettingsInput(
   value: unknown,
@@ -211,31 +236,29 @@ class VaultAgentSecretStore implements AgentSecretStore {
     this.renewalTimer?.unref();
   }
 
-  async writeApiKey(apiKey: string): Promise<AgentSecretVersion> {
+  async writeApiKey(apiKey: string, scope: SecretScope = "agent-runtime"): Promise<AgentSecretVersion> {
     const version = randomUUID();
-    const response = await this.request(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`, {
+    const response = await this.request(secretVaultPath(scope, version), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ data: { value: apiKey } }),
     });
     if (!response.ok) throw new Error(`Vault returned ${response.status}`);
-    return secretVersion(version, apiKey);
+    return secretVersion(version, apiKey, scope);
   }
 
-  async readApiKey(secretRef: string): Promise<string | null> {
-    const prefix = "vault://instance/agent-runtime/api-key/versions/";
-    if (!secretRef.startsWith(prefix)) return null;
-    const version = secretRef.slice(prefix.length);
-    if (!/^[0-9a-f-]{36}$/i.test(version)) return null;
-    const response = await this.request(`/v1/secret/data/deviludo/instance/agent-runtime/api-key/versions/${version}`);
+  async readApiKey(secretRef: string, scope: SecretScope = "agent-runtime"): Promise<string | null> {
+    const version = secretRefVersion(secretRef, scope);
+    if (!version) return null;
+    const response = await this.request(secretVaultPath(scope, version));
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`Vault returned ${response.status}`);
     const body = await response.json() as { data?: { data?: { value?: unknown } } };
     return typeof body.data?.data?.value === "string" ? body.data.data.value : null;
   }
 
-  async readApiKeyMask(secretRef: string): Promise<string | null> {
-    const value = await this.readApiKey(secretRef);
+  async readApiKeyMask(secretRef: string, scope: SecretScope = "agent-runtime"): Promise<string | null> {
+    const value = await this.readApiKey(secretRef, scope);
     return value ? maskApiKey(value) : null;
   }
 
@@ -292,33 +315,29 @@ export class LocalAgentSecretStore implements AgentSecretStore {
     if (!isAbsolute(root)) throw new Error("Local Agent secret root must be absolute");
   }
 
-  async writeApiKey(apiKey: string): Promise<AgentSecretVersion> {
+  async writeApiKey(apiKey: string, scope: SecretScope = "agent-runtime"): Promise<AgentSecretVersion> {
     const version = randomUUID();
-    const directory = join(this.root, "instance", "agent-runtime", "api-key", "versions");
+    const directory = join(this.root, "instance", scope, "api-key", "versions");
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const target = join(directory, `${version}.key`);
     const temporary = join(directory, `${version}.${process.pid}.tmp`);
     await writeFile(temporary, apiKey, { encoding: "utf8", flag: "wx", mode: 0o600 });
     await rename(temporary, target);
-    return secretVersion(version, apiKey);
+    return secretVersion(version, apiKey, scope);
   }
 
-  async readApiKey(secretRef: string): Promise<string | null> {
-    const prefix = "vault://instance/agent-runtime/api-key/versions/";
-    if (!secretRef.startsWith(prefix)) return null;
-    const version = secretRef.slice(prefix.length);
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(version)) {
-      return null;
-    }
+  async readApiKey(secretRef: string, scope: SecretScope = "agent-runtime"): Promise<string | null> {
+    const version = secretRefVersion(secretRef, scope);
+    if (!version) return null;
     try {
-      return await readFile(join(this.root, "instance", "agent-runtime", "api-key", "versions", `${version}.key`), "utf8");
+      return await readFile(join(this.root, "instance", scope, "api-key", "versions", `${version}.key`), "utf8");
     } catch {
       return null;
     }
   }
 
-  async readApiKeyMask(secretRef: string): Promise<string | null> {
-    const apiKey = await this.readApiKey(secretRef);
+  async readApiKeyMask(secretRef: string, scope: SecretScope = "agent-runtime"): Promise<string | null> {
+    const apiKey = await this.readApiKey(secretRef, scope);
     return apiKey ? maskApiKey(apiKey) : null;
   }
 }
@@ -344,18 +363,18 @@ class BrokerAgentSecretStore implements AgentSecretStore {
     if (!isAbsolute(this.tokenFile)) throw new Error("Agent secret broker token must be file-mounted");
   }
 
-  async writeApiKey(apiKey: string): Promise<AgentSecretVersion> {
+  async writeApiKey(apiKey: string, scope: SecretScope = "agent-runtime"): Promise<AgentSecretVersion> {
     const version = randomUUID();
-    const expected = secretVersion(version, apiKey);
+    const expected = secretVersion(version, apiKey, scope);
     const token = await this.readToken();
     const response = await fetch(this.writeEndpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
-        "idempotency-key": `instance-agent-key:${version}`,
+        "idempotency-key": `instance-${scope}-key:${version}`,
       },
-      body: JSON.stringify({ version, apiKey }),
+      body: JSON.stringify({ version, apiKey, scope }),
       signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) throw new Error(`Agent secret broker returned ${response.status}`);
@@ -364,8 +383,8 @@ class BrokerAgentSecretStore implements AgentSecretStore {
     return expected;
   }
 
-  async readApiKey(secretRef: string): Promise<string | null> {
-    if (!secretRef.startsWith("vault://instance/agent-runtime/api-key/versions/")) return null;
+  async readApiKey(secretRef: string, scope: SecretScope = "agent-runtime"): Promise<string | null> {
+    if (!secretRefVersion(secretRef, scope)) return null;
     const response = await fetch(this.readEndpoint, {
       method: "POST",
       headers: {
@@ -380,8 +399,8 @@ class BrokerAgentSecretStore implements AgentSecretStore {
     return typeof body.apiKey === "string" && body.apiKey.length >= 8 ? body.apiKey : null;
   }
 
-  async readApiKeyMask(secretRef: string): Promise<string | null> {
-    const apiKey = await this.readApiKey(secretRef);
+  async readApiKeyMask(secretRef: string, scope: SecretScope = "agent-runtime"): Promise<string | null> {
+    const apiKey = await this.readApiKey(secretRef, scope);
     return apiKey ? maskApiKey(apiKey) : null;
   }
 
@@ -392,9 +411,9 @@ class BrokerAgentSecretStore implements AgentSecretStore {
   }
 }
 
-function secretVersion(version: string, apiKey: string): AgentSecretVersion {
+function secretVersion(version: string, apiKey: string, scope: SecretScope = "agent-runtime"): AgentSecretVersion {
   return Object.freeze({
-    secretRef: `vault://instance/agent-runtime/api-key/versions/${version}`,
+    secretRef: `${secretRefPrefix(scope)}${version}`,
     mask: maskApiKey(apiKey),
     fingerprint: `sha256:${createHash("sha256").update(apiKey).digest("hex").slice(0, 12)}`,
     version,

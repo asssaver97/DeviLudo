@@ -1264,6 +1264,7 @@ textarea {
 
 @media (prefers-reduced-motion: reduce) {
   .typing-dots i { animation: none; }
+  .product-delivery-stage.status-active .product-delivery-stage-marker { animation: none; }
 }
 
 /* Core project workspace */
@@ -1739,6 +1740,7 @@ textarea {
   margin-bottom: 18px;
   min-width: 0;
   overflow-x: auto;
+  position: relative;
   scrollbar-color: #405069 transparent;
   scrollbar-width: thin;
 }
@@ -1770,13 +1772,62 @@ textarea {
   padding: 0 14px;
 }
 
+.product-delivery-canvas {
+  min-height: 240px;
+  padding: 20px 18px 22px;
+  position: relative;
+}
+
 .product-delivery-track {
   display: flex;
   list-style: none;
   margin: 0;
   min-width: 920px;
   overflow: visible;
-  padding: 20px 18px 22px;
+  padding: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.product-delivery-async-track {
+  left: calc(8.333% + 18px);
+  position: absolute;
+  top: 102px;
+  width: 140px;
+  z-index: 0;
+}
+
+.product-delivery-branch-line {
+  color: #2f3b4d;
+  left: 50%;
+  position: absolute;
+  top: -82px;
+  transform: translateX(-50%);
+  width: 2px;
+}
+
+.product-delivery-async-node {
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  font: inherit;
+  padding: 8px 12px;
+  text-align: center;
+  transition: opacity 0.2s;
+  width: 100%;
+}
+
+.product-delivery-async-node:hover {
+  opacity: 0.85;
+}
+
+.product-delivery-async-node.is-expanded .product-delivery-stage-marker {
+  border-color: var(--blue);
+  box-shadow: 0 0 12px rgba(53, 196, 239, 0.3);
 }
 
 .product-delivery-stage {
@@ -1787,6 +1838,11 @@ textarea {
   padding: 0 12px;
   position: relative;
   text-align: center;
+}
+
+.product-delivery-stage:hover .product-delivery-stage-rerun-icon {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .product-delivery-stage::after {
@@ -1817,6 +1873,47 @@ textarea {
   position: relative;
   width: 36px;
   z-index: 1;
+}
+
+.product-delivery-stage-rerun-icon {
+  align-items: center;
+  background: #0a111b;
+  border: 2px solid var(--blue);
+  border-radius: 50%;
+  color: var(--blue);
+  cursor: pointer;
+  display: flex;
+  height: 28px;
+  justify-content: center;
+  left: 50%;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 48px;
+  transform: translateX(-50%);
+  transition: opacity 0.2s, transform 0.15s;
+  width: 28px;
+  z-index: 2;
+}
+
+.product-delivery-stage-rerun-icon:hover {
+  background: #0b2938;
+  transform: translateX(-50%) scale(1.1);
+}
+
+.product-delivery-stage-rerun-icon:active {
+  transform: translateX(-50%) scale(0.95);
+}
+
+.product-delivery-stage-rerun-icon:disabled {
+  cursor: not-allowed;
+  opacity: 0.3;
+}
+
+.product-delivery-stage-rerun-icon svg {
+  height: 14px;
+  width: 14px;
 }
 
 .product-delivery-stage-number,
@@ -1964,6 +2061,14 @@ textarea {
   align-self: center;
   min-height: 40px;
   white-space: nowrap;
+}
+
+.product-delivery-rerun-hint {
+  color: #7b8798;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  margin: 10px 0 0;
+  padding: 0 18px 14px;
 }
 
 .product-artifacts-panel {

@@ -1,5 +1,10 @@
 import type { PoolClient } from "pg";
 import { verify } from "node:crypto";
+import { AssetManifestStore } from "./asset-manifest";
+import {
+  IMAGE_GENERATION_PROVIDERS,
+  type ImageGenerationProvider,
+} from "@/lib/product/asset-manifest";
 import {
   AGENT_RUNTIME_KINDS,
   type AgentProgressEvent,
@@ -194,6 +199,60 @@ export class CoreRepository {
         ],
       );
       return agentSettingsFromRow(result.rows[0]);
+  }
+
+  async readImageGenerationSettings(): Promise<StoredImageGenerationSettings | null> {
+    const result = await this.database.pool.query<ImageGenerationSettingsRow>(
+      `SELECT provider, api_endpoint, model, credential_secret_ref,
+              api_key_mask, api_key_fingerprint, credential_version::text,
+              revision::text, updated_by, updated_at::text
+         FROM deviludo.instance_image_generation_settings
+        WHERE singleton = true`,
+    );
+    return result.rows[0] ? imageGenerationSettingsFromRow(result.rows[0]) : null;
+  }
+
+  async saveImageGenerationSettings(input: Readonly<{
+    provider: ImageGenerationProvider;
+    apiEndpoint: string | null;
+    model: string | null;
+    credentialSecretRef: string;
+    apiKeyMask: string;
+    apiKeyFingerprint: string;
+    credentialVersion: string;
+    updatedBy: string;
+  }>): Promise<StoredImageGenerationSettings> {
+    const result = await this.database.pool.query<ImageGenerationSettingsRow>(
+      `INSERT INTO deviludo.instance_image_generation_settings(
+         singleton, provider, api_endpoint, model, credential_secret_ref,
+         api_key_mask, api_key_fingerprint, credential_version, updated_by
+       ) VALUES (true, $1, $2, $3, $4, $5, $6, $7::uuid, $8)
+       ON CONFLICT (singleton) DO UPDATE SET
+         provider = EXCLUDED.provider,
+         api_endpoint = EXCLUDED.api_endpoint,
+         model = EXCLUDED.model,
+         credential_secret_ref = EXCLUDED.credential_secret_ref,
+         api_key_mask = EXCLUDED.api_key_mask,
+         api_key_fingerprint = EXCLUDED.api_key_fingerprint,
+         credential_version = EXCLUDED.credential_version,
+         revision = deviludo.instance_image_generation_settings.revision + 1,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = clock_timestamp()
+       RETURNING provider, api_endpoint, model, credential_secret_ref,
+                 api_key_mask, api_key_fingerprint, credential_version::text,
+                 revision::text, updated_by, updated_at::text`,
+      [
+        input.provider,
+        input.apiEndpoint,
+        input.model,
+        input.credentialSecretRef,
+        input.apiKeyMask,
+        input.apiKeyFingerprint,
+        input.credentialVersion,
+        input.updatedBy,
+      ],
+    );
+    return imageGenerationSettingsFromRow(result.rows[0]);
   }
 
   async listProjects(workspaceId: string): Promise<readonly ProductProjectSummary[]> {
@@ -646,6 +705,15 @@ export class CoreRepository {
       );
       return Object.freeze(result.rows.map(artifactFromRow));
     });
+  }
+
+  /**
+   * Asset manifest reads and mutations. Assets sit outside the serial delivery
+   * chain: the Agent plans them, generation and upload run asynchronously, and
+   * the results reach the game through an ARTIFACT_BUILD rerun.
+   */
+  get assets(): AssetManifestStore {
+    return new AssetManifestStore(this.database);
   }
 
   async readProjectArtifact(workspaceId: string, projectId: string, artifactId: string): Promise<ArtifactRecord | null> {
@@ -1812,6 +1880,55 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
     agentRuntime: row.agent_runtime as AgentRuntimeKind,
     baseUrl: row.base_url,
     models,
+    credentialSecretRef: row.credential_secret_ref,
+    apiKeyMask: row.api_key_mask,
+    apiKeyFingerprint: row.api_key_fingerprint,
+    credentialVersion: row.credential_version,
+    revision,
+    updatedBy: row.updated_by,
+    updatedAt: row.updated_at,
+  });
+}
+
+type ImageGenerationSettingsRow = {
+  provider: string;
+  api_endpoint: string | null;
+  model: string | null;
+  credential_secret_ref: string;
+  api_key_mask: string;
+  api_key_fingerprint: string;
+  credential_version: string;
+  revision: string;
+  updated_by: string;
+  updated_at: string;
+};
+
+export type StoredImageGenerationSettings = Readonly<{
+  provider: ImageGenerationProvider;
+  apiEndpoint: string | null;
+  model: string | null;
+  credentialSecretRef: string;
+  apiKeyMask: string;
+  apiKeyFingerprint: string;
+  credentialVersion: string;
+  revision: number;
+  updatedBy: string;
+  updatedAt: string;
+}>;
+
+function imageGenerationSettingsFromRow(row: ImageGenerationSettingsRow): StoredImageGenerationSettings {
+  const revision = Number(row.revision);
+  if (!(IMAGE_GENERATION_PROVIDERS as readonly string[]).includes(row.provider)
+    || !Number.isSafeInteger(revision) || revision < 1
+    || !row.credential_secret_ref.startsWith("vault://instance/image-generation/api-key/versions/")
+    || !/^.{3}\*{8}.{4}$/.test(row.api_key_mask)
+    || !/^sha256:[0-9a-f]{12}$/.test(row.api_key_fingerprint)) {
+    throw new Error("Stored image generation settings are invalid");
+  }
+  return Object.freeze({
+    provider: row.provider as ImageGenerationProvider,
+    apiEndpoint: row.api_endpoint,
+    model: row.model,
     credentialSecretRef: row.credential_secret_ref,
     apiKeyMask: row.api_key_mask,
     apiKeyFingerprint: row.api_key_fingerprint,

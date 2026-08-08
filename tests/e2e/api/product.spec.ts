@@ -169,22 +169,22 @@ test("a failed Agent generation retries with the currently registered runtime im
     expiresAt: expect.any(String),
   });
 
-  const retryKey = `agent-retry:${randomUUID()}`;
-  const retry = await stack.web(`/api/projects/${project.id}/retry-agent`, {
+  const retryKey = `stage-rerun:AGENT_GENERATION:${randomUUID()}`;
+  const retry = await stack.web(`/api/projects/${project.id}/rerun-stage`, {
     method: "POST",
-    data: {},
+    data: { stage: "AGENT_GENERATION" },
     headers: { "idempotency-key": retryKey },
   });
   expect(retry.status(), await retry.text()).toBe(202);
-  expect(await retry.json()).toEqual({ accepted: true });
+  expect(await retry.json()).toEqual({ accepted: true, stage: "AGENT_GENERATION" });
 
-  const duplicate = await stack.web(`/api/projects/${project.id}/retry-agent`, {
+  const duplicate = await stack.web(`/api/projects/${project.id}/rerun-stage`, {
     method: "POST",
-    data: {},
+    data: { stage: "AGENT_GENERATION" },
     headers: { "idempotency-key": retryKey },
   });
   expect(duplicate.status(), await duplicate.text()).toBe(200);
-  expect(await duplicate.json()).toEqual({ accepted: false });
+  expect(await duplicate.json()).toEqual({ accepted: false, stage: "AGENT_GENERATION" });
   const jobs = await stack.queryRows<{ id: string; runtime_image: string; state: string }>(`
     SELECT id::text, runtime_image, state::text
       FROM deviludo.jobs

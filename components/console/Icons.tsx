@@ -101,6 +101,16 @@ export function PlusIcon(props: IconProps) {
   );
 }
 
+/** A near-closed loop with an arrowhead: the "run this again" glyph. */
+export function RerunIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" {...stroke} />
+      <path d="M14.2 6.3h3.5V2.8" {...stroke} />
+    </IconBase>
+  );
+}
+
 export function CheckIcon(props: IconProps) {
   return (
     <IconBase {...props}>

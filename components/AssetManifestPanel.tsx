@@ -5,59 +5,93 @@ import type { AssetManifest, AssetItem, ImageGenerationConfig } from "@/lib/prod
 
 type AssetManifestPanelProps = {
   projectId: string;
+  /** Lets the studio refresh the delivery view once a rerun has been accepted. */
+  onRerunStarted?: () => void;
 };
 
-export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
+type AssetCompletion = Readonly<{
+  total: number;
+  uploaded: number;
+  failed: number;
+  complete: boolean;
+}>;
+
+/** Core answers with nulls for a project whose assets have not been planned yet. */
+type AssetManifestPayload = Readonly<{
+  manifest: AssetManifest | null;
+  items: readonly AssetItem[] | null;
+  completion: AssetCompletion | null;
+}>;
+
+const EMPTY_COMPLETION: AssetCompletion = Object.freeze({
+  total: 0, uploaded: 0, failed: 0, complete: false,
+});
+
+export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestPanelProps) {
   const [manifest, setManifest] = useState<AssetManifest | null>(null);
   const [items, setItems] = useState<readonly AssetItem[]>([]);
   const [autoGenerateEnabled, setAutoGenerateEnabled] = useState(false);
   const [generationConfig, setGenerationConfig] = useState<ImageGenerationConfig | null>(null);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [completion, setCompletion] = useState({ total: 0, uploaded: 0, failed: 0, complete: false });
+  const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildError, setRebuildError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [completion, setCompletion] = useState<AssetCompletion>(EMPTY_COMPLETION);
+
+  const applyManifest = useCallback((data: AssetManifestPayload) => {
+    setManifest(data.manifest);
+    setItems(data.items ?? []);
+    setAutoGenerateEnabled(data.manifest?.autoGenerateEnabled ?? false);
+    setCompletion(data.completion ?? EMPTY_COMPLETION);
+  }, []);
 
   const loadManifest = useCallback(async () => {
     try {
       const response = await fetch(`/api/projects/${projectId}/asset-manifest`);
-      if (response.ok) {
-        const data = await response.json();
-        setManifest(data.manifest);
-        setItems(data.items || []);
-        setAutoGenerateEnabled(data.manifest?.autoGenerateEnabled || false);
-        setCompletion(data.completion || { total: 0, uploaded: 0, failed: 0, complete: false });
-      }
+      if (response.ok) applyManifest(await response.json() as AssetManifestPayload);
     } catch (error) {
       console.error("Failed to load asset manifest:", error);
     } finally {
       setLoading(false);
     }
+  }, [applyManifest, projectId]);
+
+  // Fetching is kept separate from applying so the effect below can set state in
+  // a promise callback rather than synchronously in the effect body.
+  const fetchManifest = useCallback(async (signal: AbortSignal): Promise<AssetManifestPayload | null> => {
+    const response = await fetch(`/api/projects/${projectId}/asset-manifest`, { signal });
+    return response.ok ? await response.json() as AssetManifestPayload : null;
   }, [projectId]);
 
-  const loadGenerationConfig = useCallback(async () => {
-    try {
-      const response = await fetch("/api/settings/image-generation");
-      if (response.ok) {
-        const data = await response.json();
-        setGenerationConfig(data);
-      }
-    } catch (error) {
-      console.error("Failed to load generation config:", error);
-    }
+  const fetchGenerationConfig = useCallback(async (signal: AbortSignal): Promise<ImageGenerationConfig | null> => {
+    const response = await fetch("/api/settings/image-generation", { signal });
+    return response.ok ? await response.json() as ImageGenerationConfig | null : null;
   }, []);
 
   useEffect(() => {
-    loadManifest();
-    loadGenerationConfig();
-  }, [loadManifest, loadGenerationConfig]);
+    const controller = new AbortController();
+    void fetchManifest(controller.signal)
+      .then(data => {
+        if (controller.signal.aborted || !data) return;
+        applyManifest(data);
+      })
+      .catch(() => undefined)
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    void fetchGenerationConfig(controller.signal)
+      .then(config => { if (!controller.signal.aborted) setGenerationConfig(config); })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [applyManifest, fetchGenerationConfig, fetchManifest]);
 
   const toggleAutoGenerate = async () => {
     if (!manifest) return;
 
     const newValue = !autoGenerateEnabled;
     try {
-      const response = await fetch(`/api/projects/${projectId}/asset-manifest/toggle`, {
+      const response = await fetch(`/api/projects/${projectId}/asset-manifest/auto-generate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ enabled: newValue }),
       });
 
@@ -70,39 +104,55 @@ export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
   };
 
   const handleUpload = async (assetKey: string, file: File) => {
+    setUploadError(null);
     setUploading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("assetKey", assetKey);
-
-      const response = await fetch(`/api/projects/${projectId}/asset-manifest/upload`, {
+      // Core takes the bytes base64-encoded in JSON so the upload travels the
+      // same authenticated proxy path as every other project mutation.
+      const content = await fileToBase64(file);
+      const response = await fetch(`/api/projects/${projectId}/asset-manifest/uploads`, {
         method: "POST",
-        body: formData,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assetKey, contentType: file.type, content }),
       });
-
-      if (response.ok) {
-        await loadManifest();
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setUploadError(payload?.message ?? "素材上传失败，请确认格式为 PNG/JPEG/WebP");
+        return;
       }
-    } catch (error) {
-      console.error("Failed to upload asset:", error);
+      await loadManifest();
+    } catch {
+      setUploadError("素材上传失败，请稍后再试");
     } finally {
       setUploading(false);
     }
   };
 
+  // Uploaded assets only reach the game through a build, so "rebuild with
+  // assets" is an ARTIFACT_BUILD rerun: it keeps the Agent's generated source
+  // and re-runs packaging plus every stage after it.
   const triggerRebuild = async () => {
+    setRebuildError(null);
+    setRebuilding(true);
     try {
-      const response = await fetch(`/api/projects/${projectId}/rebuild-with-assets`, {
+      const response = await fetch(`/api/projects/${projectId}/rerun-stage`, {
         method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `stage-rerun:ARTIFACT_BUILD:${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({ stage: "ARTIFACT_BUILD" }),
       });
-
-      if (response.ok) {
-        // Notify user that rebuild started
-        alert("重新构建已启动");
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setRebuildError(payload?.message ?? "重新构建启动失败，请稍后再试");
+        return;
       }
-    } catch (error) {
-      console.error("Failed to trigger rebuild:", error);
+      onRerunStarted?.();
+    } catch {
+      setRebuildError("重新构建启动失败，请稍后再试");
+    } finally {
+      setRebuilding(false);
     }
   };
 
@@ -115,7 +165,7 @@ export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
   }
 
   const configComplete = generationConfig && generationConfig.provider &&
-    (generationConfig.apiKey || generationConfig.apiEndpoint);
+    (generationConfig.apiKeyMask || generationConfig.apiEndpoint);
 
   return (
     <div className="asset-manifest-panel">
@@ -142,11 +192,14 @@ export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
         <span>已完成: {completion.uploaded}</span>
         {completion.failed > 0 && <span className="failed">失败: {completion.failed}</span>}
         {completion.complete && (
-          <button className="rebuild-button" onClick={triggerRebuild}>
-            ✓ 使用素材重新构建
+          <button className="rebuild-button" disabled={rebuilding} onClick={() => void triggerRebuild()} type="button">
+            {rebuilding ? "正在启动重新构建..." : "✓ 使用素材重新构建"}
           </button>
         )}
       </div>
+
+      {rebuildError && <p className="asset-manifest-error" role="alert">{rebuildError}</p>}
+      {uploadError && <p className="asset-manifest-error" role="alert">{uploadError}</p>}
 
       <div className="asset-items-list">
         {items.map(item => (
@@ -172,10 +225,10 @@ export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
               <div className="asset-upload">
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp"
                   onChange={e => {
                     const file = e.target.files?.[0];
-                    if (file) handleUpload(item.assetKey, file);
+                    if (file) void handleUpload(item.assetKey, file);
                   }}
                   disabled={uploading}
                 />
@@ -189,4 +242,14 @@ export function AssetManifestPanel({ projectId }: AssetManifestPanelProps) {
       </div>
     </div>
   );
+}
+
+/** Base64-encode in chunks so a multi-megabyte asset cannot blow the call stack. */
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
 }

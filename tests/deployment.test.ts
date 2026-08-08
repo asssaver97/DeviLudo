@@ -305,6 +305,87 @@ test("Core product surfaces use their asserted workspace without an account sele
   assert.doesNotMatch(projects, /这里只展示当前账号|PostgreSQL 工作区|CORE 工作流已绑定|隔离命名空间/);
 });
 
+test("asset generation is an asynchronous panel rather than a delivery stage", async () => {
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const panel = await readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8");
+  // The serial pipeline must not contain an asset stage: it produces no job, so
+  // the chain would stall waiting for one.
+  const pipeline = studio.match(/const PIPELINE = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
+  assert.doesNotMatch(pipeline, /ASSET/);
+  assert.deepEqual([...pipeline.matchAll(/\["([A-Z0-9_]+)"/g)].map(match => match[1]), [
+    "AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST",
+    "ARTIFACT_SIGN", "STEAM_PUBLISH", "STEAM_CLEAN_INSTALL",
+  ]);
+  assert.match(studio, /<AssetManifestPanel onRerunStarted=\{\(\) => void loadProject\(true\)\} projectId=\{projectId\} \/>/);
+  // Uploaded assets only reach the game through a build, so the panel's rebuild
+  // is an ARTIFACT_BUILD rerun rather than a bespoke endpoint.
+  assert.match(panel, /\/api\/projects\/\$\{projectId\}\/rerun-stage/);
+  assert.match(panel, /stage: "ARTIFACT_BUILD"/);
+  assert.doesNotMatch(panel, /rebuild-with-assets/);
+  // The panel goes through the authenticated Core proxy, never straight to S3 or
+  // the database, and the key is only ever shown masked.
+  assert.doesNotMatch(panel, /FormData|s3|S3Client|aws-sdk/);
+  assert.match(panel, /generationConfig\.apiKeyMask/);
+  assert.doesNotMatch(panel, /generationConfig\.apiKey\b/);
+  assert.match(panel, /accept="image\/png,image\/jpeg,image\/webp"/);
+});
+
+test("every delivery node stays visible, including stages this run will not reach", async () => {
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  // A profile filter on the rendered list made the signing and publication nodes
+  // disappear from a VALIDATE project, so the pipeline no longer showed what was
+  // still ahead. The track iterates the whole chain; the profile only decides how a
+  // node is labelled and whether its rerun is offered.
+  assert.match(studio, /<ol className="product-delivery-track">\s*\{PIPELINE\.map\(/);
+  assert.doesNotMatch(studio, /visibleStages/);
+  assert.match(studio, /const inProfile = profileStages\.has\(kind\);/);
+  assert.match(studio, /view = inProfile \? pipelineStageView\(state, text\) : OUT_OF_PROFILE_STAGE_VIEW\(text\)/);
+  // An out-of-profile stage is not merely "not started": this run never runs it.
+  assert.match(studio, /label: text\("不适用", "NOT APPLICABLE"\)/);
+  // A failed stage outside the profile must not be offered as a retry target.
+  assert.match(studio, /latestFailedJob && profileStages\.has\(latestFailedJob\.kind\)/);
+  // The rerun control is now an icon that appears on hover.
+  assert.match(studio, /className="product-delivery-stage-rerun-icon"/);
+  assert.match(studio, /<RerunIcon \/>/);
+});
+
+test("one rerun endpoint covers every delivery node once the workflow is at rest", async () => {
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const api = await readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8");
+  // The three per-stage retry endpoints collapsed into one parameterized rerun.
+  for (const retired of ["retry-agent", "retry-artifact-build", "retry-e2e"]) {
+    assert.ok(!studio.includes(retired), `${retired} must no longer be called`);
+    assert.ok(!api.includes(retired), `${retired} must no longer be served`);
+  }
+  assert.match(api, /"\/v1\/projects\/:projectId\/rerun-stage"/);
+  assert.match(studio, /mutate\("rerun-stage", \{ stage: kind \}\)/);
+  assert.match(studio, /mutate\("rerun-stage", \{ stage: rerunnableFailedStage \}\)/);
+  // A rerun supersedes downstream jobs, so it stays closed while executors may
+  // still hold leases.
+  assert.match(studio, /RERUNNABLE_WORKFLOW_STATES = new Set\(\["FAILED", "SUCCEEDED", "CANCELLED"\]\)/);
+  assert.match(studio, /RERUNNABLE_WORKFLOW_STATES\.has\(project\.workflowState\)\s*&&\s*project\.jobs\.length > 0/);
+  // VALIDATE has no signing or publication stages to offer, so their rerun is
+  // withheld — but the node itself still renders, see the visibility test below.
+  assert.match(studio, /canRerunStages && inProfile \?/);
+  assert.match(studio, /"idempotency-key": `stage-rerun:\$\{String\(body\?\.stage\)\}:\$\{crypto\.randomUUID\(\)\}`/);
+});
+
+test("Web holds no database pool or object store credentials of its own", async () => {
+  const proxy = await readFile(new URL("../app/api/[...segments]/route.ts", import.meta.url), "utf8");
+  // Every project mutation goes through Core, which is where workspace isolation
+  // and authentication live. Web keeping a pool would bypass both.
+  assert.doesNotMatch(proxy, /\bPool\b|aws-sdk|S3Client/);
+  assert.match(proxy, /x-deviludo-web-auth/);
+  // An 8 MB asset is 4/3 that size once base64-encoded in JSON, so the asset
+  // route needs its own ceiling or legal uploads would be rejected in transit.
+  assert.match(proxy, /ASSET_UPLOAD_PATH = \/\^projects\\\/\[\^\/\]\+\\\/asset-manifest\\\/uploads\$\//);
+  assert.match(proxy, /MAX_ASSET_UPLOAD_BYTES = 12 \* 1024 \* 1024/);
+  assert.match(proxy, /if \(ASSET_UPLOAD_PATH\.test\(routePath\)\) return MAX_ASSET_UPLOAD_BYTES/);
+  const api = await readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /MAX_ASSET_REQUEST_BYTES = Math\.ceil\(MAX_ASSET_BYTES \* 4 \/ 3\)/);
+  assert.match(api, /\{ bodyLimit: MAX_ASSET_REQUEST_BYTES \}/);
+});
+
 test("project delivery is a top horizontal pipeline without the game specification panel", async () => {
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
   const styles = await readFile(new URL("../app/product.css", import.meta.url), "utf8");

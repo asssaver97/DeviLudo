@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { ImageGenerationConfig, ImageGenerationProvider } from "@/lib/product/asset-manifest";
 
 const PROVIDERS: readonly ImageGenerationProvider[] = ["dalle-3", "stable-diffusion-xl", "midjourney", "replicate"];
@@ -38,28 +38,40 @@ export function ImageGenerationSettings() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
 
-  useEffect(() => {
-    loadConfig();
+  const applyConfig = useCallback((data: ImageGenerationConfig | null) => {
+    setConfig(data);
+    if (!data) return;
+    setProvider(data.provider);
+    setApiEndpoint(data.apiEndpoint || "");
+    setModel(data.model || "");
   }, []);
 
-  const loadConfig = async () => {
+  // Core answers with null until a provider is configured, and the key only ever
+  // comes back as a mask. Fetching stays separate from applying so the effect
+  // below sets state in a promise callback rather than synchronously.
+  const fetchConfig = useCallback(async (signal?: AbortSignal): Promise<ImageGenerationConfig | null> => {
+    const response = await fetch("/api/settings/image-generation", { signal });
+    return response.ok ? await response.json() as ImageGenerationConfig | null : null;
+  }, []);
+
+  const loadConfig = useCallback(async () => {
     try {
-      const response = await fetch("/api/settings/image-generation");
-      if (response.ok) {
-        const data = await response.json();
-        setConfig(data);
-        if (data) {
-          setProvider(data.provider);
-          setApiEndpoint(data.apiEndpoint || "");
-          setModel(data.model || "");
-        }
-      }
+      applyConfig(await fetchConfig());
     } catch (error) {
       console.error("Failed to load image generation config:", error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [applyConfig, fetchConfig]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchConfig(controller.signal)
+      .then(data => { if (!controller.signal.aborted) applyConfig(data); })
+      .catch(() => undefined)
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [applyConfig, fetchConfig]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -67,18 +79,23 @@ export function ImageGenerationSettings() {
     setNotice("");
 
     try {
-      const payload: Partial<ImageGenerationConfig> & { provider: ImageGenerationProvider } = {
+      // Core rejects unknown fields, and JSON.stringify drops the undefined
+      // ones, so an omitted endpoint/model/key means "leave unchanged".
+      const payload: {
+        provider: ImageGenerationProvider;
+        apiKey?: string;
+        apiEndpoint?: string;
+        model?: string;
+      } = {
         provider,
         apiEndpoint: apiEndpoint || undefined,
         model: model || undefined,
       };
 
-      if (apiKey) {
-        (payload as any).apiKey = apiKey;
-      }
+      if (apiKey) payload.apiKey = apiKey;
 
       const response = await fetch("/api/settings/image-generation", {
-        method: "POST",
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -137,11 +154,11 @@ export function ImageGenerationSettings() {
               type="password"
               value={apiKey}
               onChange={e => setApiKey(e.target.value)}
-              placeholder={config?.apiKey ? "••••••••（已配置）" : "输入 API Key"}
+              placeholder={config?.apiKeyMask ? `${config.apiKeyMask}（已配置）` : "输入 API Key"}
               className="form-control"
             />
             <div className="form-help">
-              {config?.apiKey ? "已配置 API Key，留空表示不修改" : "必填"}
+              {config?.apiKeyMask ? "已配置 API Key，留空表示不修改" : "必填"}
             </div>
           </div>
         )}
@@ -173,7 +190,7 @@ export function ImageGenerationSettings() {
         </div>
 
         <div className="form-actions">
-          <button type="submit" disabled={saving || (!apiKey && !config?.apiKey)} className="btn-primary">
+          <button type="submit" disabled={saving || (!apiKey && !config?.apiKeyMask)} className="btn-primary">
             {saving ? "保存中..." : "保存配置"}
           </button>
         </div>
@@ -191,10 +208,10 @@ export function ImageGenerationSettings() {
           <dl>
             <dt>提供商</dt>
             <dd>{PROVIDER_INFO[config.provider].name}</dd>
-            {config.apiKey && (
+            {config.apiKeyMask && (
               <>
                 <dt>API Key</dt>
-                <dd>已配置 ✓</dd>
+                <dd>{config.apiKeyMask} ✓</dd>
               </>
             )}
             {config.apiEndpoint && (

@@ -13,14 +13,21 @@ import {
 import {
   createAgentSecretStore,
   isMaskedApiKey,
+  normalizeBaseUrl,
   parseAgentSettingsInput,
   type AgentSecretStore,
 } from "./agent-settings";
+import {
+  isImageGenerationProvider,
+  type ImageGenerationProvider,
+} from "@/lib/product/asset-manifest";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
 import type { CoreConfig } from "./config";
 import { AccessResolver, type AccessPrincipal } from "./access";
 import {
   assertE2eCompletion,
+  deliveryStages,
+  isRerunnableStage,
   parseCompletion,
   type ClaimedJobIdentity,
   type WorkflowSignalInput,
@@ -40,7 +47,7 @@ import {
   type ConversationAgentProjectContext,
   type ProductConversationAgentReply,
 } from "./product-conversation";
-import type { CoreRepository, StoredInstanceAgentSettings } from "./repository";
+import type { CoreRepository, StoredInstanceAgentSettings, StoredImageGenerationSettings } from "./repository";
 import { HttpSigningGrantBroker, type SigningGrantBroker } from "./signing-grants";
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
@@ -341,6 +348,48 @@ export async function runApi(
     return reply.header("cache-control", "no-store").send({ settings: publicAgentSettings(saved) });
   });
 
+  app.get("/v1/settings/image-generation", async (request, reply) => {
+    const principal = productAccess(request, config);
+    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
+    const settings = await repository.readImageGenerationSettings();
+    return reply.header("cache-control", "no-store")
+      .send({ settings: publicImageGenerationSettings(settings) });
+  });
+
+  app.put("/v1/settings/image-generation", async (request, reply) => {
+    const principal = productAccess(request, config);
+    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
+    const input = parseImageGenerationInput(request.body);
+    const current = await repository.readImageGenerationSettings();
+    // Re-submitting the mask means "keep the stored key"; anything else is a
+    // replacement. This mirrors how the Agent runtime credential is handled.
+    if (input.apiKey && isMaskedApiKey(input.apiKey) && input.apiKey !== current?.apiKeyMask) {
+      throw new Error("API Key 掩码与已保存凭据不匹配");
+    }
+    const replacementApiKey = input.apiKey && input.apiKey !== current?.apiKeyMask ? input.apiKey : null;
+    if (!replacementApiKey && !current) throw new Error("首次配置必须提供 API Key");
+    const credential = replacementApiKey
+      ? await agentSecrets.writeApiKey(replacementApiKey, "image-generation")
+      : {
+          secretRef: current?.credentialSecretRef ?? "",
+          mask: current?.apiKeyMask ?? "",
+          fingerprint: current?.apiKeyFingerprint ?? "",
+          version: current?.credentialVersion ?? "",
+        };
+    const saved = await repository.saveImageGenerationSettings({
+      provider: input.provider,
+      apiEndpoint: input.apiEndpoint,
+      model: input.model,
+      credentialSecretRef: credential.secretRef,
+      apiKeyMask: credential.mask,
+      apiKeyFingerprint: credential.fingerprint,
+      credentialVersion: credential.version,
+      updatedBy: principal.user.username,
+    });
+    return reply.header("cache-control", "no-store")
+      .send({ settings: publicImageGenerationSettings(saved) });
+  });
+
   app.get("/v1/projects", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
@@ -432,6 +481,87 @@ export async function runApi(
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     return reply.send({ artifacts: await repository.listProjectArtifacts(workspace.id, project.id) });
   });
+
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/asset-manifest", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const view = await repository.assets.read(workspace.id, project.id);
+    // A project without a manifest is ordinary, not an error: the Agent has not
+    // planned assets for it yet.
+    if (!view) return reply.send({ manifest: null, items: [], completion: null });
+    return reply.send(view);
+  });
+
+  app.post<{ Params: { projectId: string } }>(
+    "/v1/projects/:projectId/asset-manifest/auto-generate",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const body = objectBody(request.body);
+      if (typeof body.enabled !== "boolean") {
+        return reply.code(400).send({ code: "INVALID_AUTO_GENERATE", message: "enabled 必须是布尔值" });
+      }
+      const updated = await repository.assets.setAutoGenerate(workspace.id, project.id, body.enabled);
+      if (!updated) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
+      return reply.send({ enabled: body.enabled });
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>(
+    "/v1/projects/:projectId/asset-manifest/uploads",
+    { bodyLimit: MAX_ASSET_REQUEST_BYTES },
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const body = objectBody(request.body);
+      const assetKey = typeof body.assetKey === "string" ? body.assetKey : "";
+      const contentType = typeof body.contentType === "string" ? body.contentType : "";
+      const encoded = typeof body.content === "string" ? body.content : "";
+      const extension = ASSET_CONTENT_TYPES[contentType];
+      if (!assetKey || assetKey.length > 200 || !extension || !encoded) {
+        return reply.code(400).send({
+          code: "INVALID_ASSET_UPLOAD",
+          message: "请提供素材键名和受支持的图片内容 (PNG/JPEG/WebP)",
+        });
+      }
+      // Decoded length is what actually lands in the bucket, so bound that
+      // rather than the base64 envelope.
+      const content = Buffer.from(encoded, "base64");
+      if (content.length < 1 || content.length > MAX_ASSET_BYTES) {
+        return reply.code(413).send({
+          code: "ASSET_TOO_LARGE",
+          message: `单个素材不能超过 ${MAX_ASSET_BYTES / (1024 * 1024)} MB`,
+        });
+      }
+      // Store first, then record: an orphaned object is harmless and gets swept
+      // with the project, whereas a row pointing at a missing object is not.
+      const stored = await objectStore.putProjectAsset({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        assetKey,
+        extension,
+        contentType,
+        content,
+      });
+      const item = await repository.assets.attachUpload({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        assetKey,
+        bucket: stored.bucket,
+        objectKey: stored.key,
+        sha256: stored.sha256,
+        sizeBytes: stored.sizeBytes,
+      });
+      if (!item) return reply.code(404).send({ code: "ASSET_ITEM_NOT_FOUND" });
+      return reply.send({ item });
+    },
+  );
 
   app.post<{ Params: { projectId: string; artifactId: string } }>(
     "/v1/projects/:projectId/artifacts/:artifactId/download",
@@ -654,94 +784,56 @@ export async function runApi(
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
-  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/retry-agent", async (request, reply) => {
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/rerun-stage", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    const idempotencyKey = requestIdempotencyKey(request, "agent-retry");
-    const failedJob = [...project.jobs]
-      .reverse()
-      .find(job => job.state === "FAILED");
-    if (project.workflowState !== "FAILED" || failedJob?.kind !== "AGENT_GENERATION") {
+    const body = objectBody(request.body);
+    if (!isRerunnableStage(body.stage)) {
+      return reply.code(400).send({
+        code: "INVALID_RERUN_STAGE",
+        message: "重跑节点不是已知的流程阶段",
+      });
+    }
+    const stage = body.stage;
+    const stages = deliveryStages(project.workflowProfile);
+    if (!stages.includes(stage)) {
+      return reply.code(409).send({
+        code: "STAGE_NOT_IN_PROFILE",
+        message: `${stage} 不属于当前 ${project.workflowProfile} 流程，不能从这里重跑`,
+      });
+    }
+    // The rerun key is scoped to the stage so picking a different node is a new
+    // request, while double-clicking the same node collapses into one signal.
+    const idempotencyKey = requestIdempotencyKey(request, `stage-rerun:${stage}`);
+    // Superseding downstream jobs would race executors that still hold leases,
+    // so a rerun only makes sense once the delivery has come to rest.
+    if (!["FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
       if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
         return reply.send({ accepted: false });
       }
       return reply.code(409).send({
-        code: "AGENT_RETRY_UNAVAILABLE",
-        message: "当前失败阶段不是 Agent 生成，不能从这里重试",
+        code: "STAGE_RERUN_UNAVAILABLE",
+        message: "流程正在运行中，请先取消当前交付再选择重跑节点",
       });
     }
-    if (!await repository.readAgentSettings()) {
+    if (stage === "AGENT_GENERATION" && !await repository.readAgentSettings()) {
       return reply.code(424).send({
         code: "AGENT_CONFIG_REQUIRED",
         message: "请先完成全局 Agent 配置，再重新生成",
       });
     }
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
-      kind: "AGENT_RETRY_REQUESTED",
+      kind: "STAGE_RERUN_REQUESTED",
       idempotencyKey,
       payload: {
-        previousJobId: failedJob.id,
+        stage,
         requestedBy: principal.user.username,
         requestedByAccountId: principal.user.id,
       },
     });
-    return reply.code(accepted ? 202 : 200).send({ accepted });
-  });
-
-  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/retry-artifact-build", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository, principal);
-    const project = await repository.readProject(workspace.id, request.params.projectId);
-    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    const idempotencyKey = requestIdempotencyKey(request, "artifact-build-retry");
-    const failedJob = [...project.jobs]
-      .reverse()
-      .find(job => job.state === "FAILED");
-    if (project.workflowState !== "FAILED" || failedJob?.kind !== "ARTIFACT_BUILD") {
-      if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
-        return reply.send({ accepted: false });
-      }
-      return reply.code(409).send({
-        code: "ARTIFACT_BUILD_RETRY_UNAVAILABLE",
-        message: "当前失败阶段不是制品构建，不能从这里重试",
-      });
-    }
-    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
-      kind: "ARTIFACT_BUILD_RETRY_REQUESTED",
-      idempotencyKey,
-      payload: {
-        previousJobId: failedJob.id,
-        requestedBy: principal.user.username,
-        requestedByAccountId: principal.user.id,
-      },
-    });
-    return reply.code(accepted ? 202 : 200).send({ accepted });
-  });
-
-  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/retry-e2e", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const workspace = await requireSelectedWorkspace(request, repository, principal);
-    const project = await repository.readProject(workspace.id, request.params.projectId);
-    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    const idempotencyKey = requestIdempotencyKey(request, "e2e-retry");
-    const failedJob = [...project.jobs].reverse().find(job => job.state === "FAILED");
-    if (project.workflowState !== "FAILED" || failedJob?.kind !== "E2E_TEST") {
-      if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
-        return reply.send({ accepted: false });
-      }
-      return reply.code(409).send({
-        code: "E2E_RETRY_UNAVAILABLE",
-        message: "当前失败阶段不是跨平台 E2E，不能从这里重试",
-      });
-    }
-    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
-      kind: "E2E_RETRY_REQUESTED",
-      idempotencyKey,
-      payload: { previousJobId: failedJob.id, requestedBy: principal.user.username, requestedByAccountId: principal.user.id },
-    });
-    return reply.code(accepted ? 202 : 200).send({ accepted });
+    return reply.code(accepted ? 202 : 200).send({ accepted, stage });
   });
 
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/cancel", async (request, reply) => {
@@ -1210,6 +1302,20 @@ function unauthorized(message: string): Error & { statusCode: number } {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Raster formats only, and the extension is derived here rather than taken from
+// the client filename so an upload cannot choose its own key suffix.
+const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+});
+const MAX_ASSET_BYTES = 8 * 1024 * 1024;
+/**
+ * Transport budget for an asset upload. The bytes arrive base64-encoded inside a
+ * JSON envelope, which inflates them by 4/3, so the route limit has to clear
+ * that before `MAX_ASSET_BYTES` can be enforced on the decoded buffer.
+ */
+const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_ASSET_BYTES * 4 / 3) + 4 * 1024;
 const authenticatedRequests = new WeakMap<FastifyRequest, AccessPrincipal>();
 
 function productAccess(request: FastifyRequest, config: CoreConfig): AccessPrincipal {
@@ -1452,6 +1558,42 @@ function publicAgentSettings(
     revision: settings?.revision ?? 0,
     updatedAt: settings?.updatedAt ?? null,
   });
+}
+
+function publicImageGenerationSettings(settings: StoredImageGenerationSettings | null) {
+  // Null means "not configured": the asset panel uses this to tell users assets
+  // must be uploaded by hand rather than generated.
+  if (!settings) return null;
+  return Object.freeze({
+    provider: settings.provider,
+    apiKeyMask: settings.apiKeyMask,
+    apiEndpoint: settings.apiEndpoint,
+    model: settings.model,
+    revision: settings.revision,
+    updatedBy: settings.updatedBy,
+    updatedAt: settings.updatedAt,
+  });
+}
+
+function parseImageGenerationInput(value: unknown): Readonly<{
+  provider: ImageGenerationProvider;
+  apiKey: string | null;
+  apiEndpoint: string | null;
+  model: string | null;
+}> {
+  const body = objectBody(value);
+  const unsupported = Object.keys(body)
+    .filter(key => !["provider", "apiKey", "apiEndpoint", "model"].includes(key));
+  if (unsupported.length > 0) throw new Error("图片生成配置包含不支持的字段");
+  if (!isImageGenerationProvider(body.provider)) throw new Error("图片生成提供商无效");
+  const apiKey = typeof body.apiKey === "string" && body.apiKey !== "" ? body.apiKey : null;
+  if (apiKey && (apiKey.length < 8 || apiKey.length > 512)) throw new Error("API Key 格式无效");
+  const endpoint = typeof body.apiEndpoint === "string" && body.apiEndpoint !== ""
+    ? normalizeBaseUrl(body.apiEndpoint, process.env.NODE_ENV ?? "development")
+    : null;
+  const model = typeof body.model === "string" && body.model !== "" ? body.model : null;
+  if (model && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model)) throw new Error("模型名称无效");
+  return Object.freeze({ provider: body.provider, apiKey, apiEndpoint: endpoint, model });
 }
 
 function specificationFromConcept(name: string, concept: string): Readonly<Record<string, unknown>> {

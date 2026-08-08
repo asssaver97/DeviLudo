@@ -28,19 +28,25 @@ import {
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetManifestPanel } from "./AssetManifestPanel";
-import { FileIcon, PlusIcon } from "./console/Icons";
+import { FileIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 import { useProductSession } from "./ProductShell";
 
+// The serial delivery chain, in order. Asset generation is deliberately absent:
+// it runs asynchronously alongside delivery and has its own panel, so putting it
+// here would stall the chain on a stage that never produces a job.
 const PIPELINE = [
   ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
-  ["ASSET_GENERATION", "素材生成", "Asset Generation"],
   ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
   ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
   ["ARTIFACT_SIGN", "平台签名", "Platform Signing"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
   ["STEAM_CLEAN_INSTALL", "干净回装", "Clean Install"],
 ] as const;
+
+// Stages after E2E only exist in the RELEASE profile.
+const VALIDATE_STAGES = new Set(["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]);
+const RERUNNABLE_WORKFLOW_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 
 type RepositoryConnection = Readonly<{
   repositoryId: string;
@@ -96,6 +102,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [repositoryBusy, setRepositoryBusy] = useState(false);
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
+  const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
   const platformManaged = session.authMode === "PLATFORM";
 
   const loadProject = useCallback(async (force = false) => {
@@ -385,9 +392,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(path === "retry-agent" ? { "idempotency-key": `agent-retry:${crypto.randomUUID()}` } : {}),
-          ...(path === "retry-artifact-build" ? { "idempotency-key": `artifact-build-retry:${crypto.randomUUID()}` } : {}),
-          ...(path === "retry-e2e" ? { "idempotency-key": `e2e-retry:${crypto.randomUUID()}` } : {}),
+          // A rerun keys on the chosen stage: repeated clicks on one node collapse
+          // into a single signal, while switching nodes is a genuinely new request.
+          ...(path === "rerun-stage" ? { "idempotency-key": `stage-rerun:${String(body?.stage)}:${crypto.randomUUID()}` } : {}),
         },
         body: JSON.stringify(body ?? {}),
       });
@@ -518,6 +525,22 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     ? latestPipelineJobs(project.jobs).find(job => job.state === "FAILED") ?? null
     : null;
   const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
+  // Every stage of the chain stays on screen so the pipeline shows what is still
+  // ahead, not just what has already run. A VALIDATE run never reaches signing or
+  // publication, so those nodes are marked as outside the profile and their rerun
+  // is withheld — the API would reject it as out-of-profile — but they are still
+  // rendered rather than dropped.
+  const profileStages = project.workflowProfile === "VALIDATE"
+    ? new Set(VALIDATE_STAGES)
+    : new Set(PIPELINE.map(([kind]) => kind));
+  // Reruns supersede downstream jobs, which would race executors still holding
+  // leases, so they only open up once the workflow has come to rest. A DRAFT has
+  // nothing to rerun yet.
+  const canRerunStages = RERUNNABLE_WORKFLOW_STATES.has(project.workflowState)
+    && project.jobs.length > 0;
+  const rerunnableFailedStage = latestFailedJob && profileStages.has(latestFailedJob.kind)
+    ? latestFailedJob.kind
+    : null;
 
   return (
     <>
@@ -565,22 +588,68 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             </div>
           ) : null}
         </header>
-        <ol className="product-delivery-track">
-          {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
-            const jobs = latestPipelineJobs(project.jobs.filter(job => job.kind === kind));
-            const state = aggregateJobState(jobs.map(job => job.state));
-            const view = pipelineStageView(state, text);
-            return (
-              <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
-                <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
-                <span className="product-delivery-stage-number">{String(index + 1).padStart(2, "0")}</span>
-                <b>{text(chineseLabel, englishLabel)}</b>
-                <strong>{view.label}</strong>
-                <small>{pipelineJobDetails(jobs, text)}</small>
-              </li>
-            );
-          })}
-        </ol>
+        <div className="product-delivery-canvas">
+          <ol className="product-delivery-track">
+            {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
+              const jobs = latestPipelineJobs(project.jobs.filter(job => job.kind === kind));
+              const inProfile = profileStages.has(kind);
+              const state = aggregateJobState(jobs.map(job => job.state));
+              const view = inProfile ? pipelineStageView(state, text) : OUT_OF_PROFILE_STAGE_VIEW(text);
+              return (
+                <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
+                  <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
+                  <span className="product-delivery-stage-number">{String(index + 1).padStart(2, "0")}</span>
+                  <b>{text(chineseLabel, englishLabel)}</b>
+                  <strong>{view.label}</strong>
+                  <small>{inProfile
+                    ? pipelineJobDetails(jobs, text)
+                    : text("当前为验证流程，不含此阶段", "Not part of the current VALIDATE run")}</small>
+                  {canRerunStages && inProfile ? (
+                    <button
+                      aria-label={text(
+                        `从「${chineseLabel}」重新执行，之后的阶段都会重跑`,
+                        `Re-run from ${englishLabel}; every later stage runs again`,
+                      )}
+                      className="product-delivery-stage-rerun-icon"
+                      disabled={busy}
+                      onClick={() => void mutate("rerun-stage", { stage: kind })}
+                      type="button"
+                    >
+                      <RerunIcon />
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+
+          <div className="product-delivery-async-track">
+            <svg className="product-delivery-branch-line" height="120" preserveAspectRatio="none" viewBox="0 0 200 120" width="100%">
+              <path d="M 100 0 Q 100 30, 100 60 L 100 120" fill="none" stroke="currentColor" strokeDasharray="3,3" strokeWidth="2" />
+            </svg>
+            <button
+              aria-expanded={assetPanelExpanded}
+              aria-label={text("游戏素材生成", "Asset generation")}
+              className={`product-delivery-async-node ${assetPanelExpanded ? "is-expanded" : ""}`}
+              onClick={() => setAssetPanelExpanded(!assetPanelExpanded)}
+              type="button"
+            >
+              <div className="product-delivery-stage-marker" aria-hidden="true">◈</div>
+              <span className="product-delivery-stage-number">A1</span>
+              <b>{text("图片素材", "ASSET GEN")}</b>
+              <strong>{text("异步", "ASYNC")}</strong>
+              <small>{text("点击查看素材清单", "Click to view assets")}</small>
+            </button>
+          </div>
+        </div>
+        {canRerunStages ? (
+          <p className="product-delivery-rerun-hint">
+            {text(
+              "选择任意节点重跑，该节点之后的阶段会作废并重新执行。",
+              "Pick any node to re-run: that stage and everything after it are superseded and run again.",
+            )}
+          </p>
+        ) : null}
         {pipelineFailure && latestFailedJob ? (
           <section aria-label={text("交付失败原因", "Delivery failure reason")} className="product-delivery-failure" role="alert">
             <div className="product-delivery-failure-icon" aria-hidden="true">!</div>
@@ -598,22 +667,25 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 </details>
               ) : null}
             </div>
-            {latestFailedJob.kind === "AGENT_GENERATION" ? (
-              <button className="button button-primary product-delivery-retry" disabled={busy} onClick={() => void mutate("retry-agent")} type="button">
-                {busy ? text("正在重新启动…", "RESTARTING…") : text("重新生成", "RETRY AGENT")}
-              </button>
-            ) : latestFailedJob.kind === "ARTIFACT_BUILD" ? (
-              <button className="button button-primary product-delivery-retry" disabled={busy} onClick={() => void mutate("retry-artifact-build")} type="button">
-                {busy ? text("正在重新构建…", "REBUILDING…") : text("重新构建", "RETRY BUILD")}
-              </button>
-            ) : latestFailedJob.kind === "E2E_TEST" ? (
-              <button className="button button-primary product-delivery-retry" disabled={busy} onClick={() => void mutate("retry-e2e")} type="button">
-                {busy ? text("正在重新测试…", "RETESTING…") : text("重新测试", "RETRY E2E")}
+            {/* The failed stage is the natural retry point; any other node stays
+                reachable from the track above. */}
+            {rerunnableFailedStage ? (
+              <button
+                className="button button-primary product-delivery-retry"
+                disabled={busy}
+                onClick={() => void mutate("rerun-stage", { stage: rerunnableFailedStage })}
+                type="button"
+              >
+                {busy ? text("正在重新执行…", "RE-RUNNING…") : text("重跑失败阶段", "RE-RUN FAILED STAGE")}
               </button>
             ) : null}
           </section>
         ) : null}
       </section>
+
+      {assetPanelExpanded ? (
+        <AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} />
+      ) : null}
 
       {artifacts.length ? (
         <section aria-label={text("项目制品", "Project artifacts")} className="product-artifacts-panel">
@@ -639,8 +711,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </div>
         </section>
       ) : null}
-
-      <AssetManifestPanel projectId={projectId} />
 
       <div className={`project-workspace-layout ${documentCollapsed ? "document-is-collapsed" : ""}`}>
         <main className="project-workspace-main">
@@ -784,6 +854,14 @@ function pipelineStageView(state: string, text: (chinese: string, english: strin
   if (state === "FAILED") return { kind: "failed", label: text("失败", "FAILED"), symbol: "!" };
   if (state === "CANCELLED") return { kind: "cancelled", label: text("已取消", "CANCELLED"), symbol: "×" };
   return { kind: "pending", label: text("未开始", "NOT STARTED"), symbol: "○" };
+}
+
+/**
+ * A stage the current profile never reaches. It stays on the track so the chain
+ * reads as a whole, but it is not "not started" — this run will never run it.
+ */
+function OUT_OF_PROFILE_STAGE_VIEW(text: (chinese: string, english: string) => string): PipelineStageView {
+  return { kind: "pending", label: text("不适用", "NOT APPLICABLE"), symbol: "–" };
 }
 
 function pipelineJobDetails(jobs: ProductProjectDetail["jobs"], text: (chinese: string, english: string) => string): string {

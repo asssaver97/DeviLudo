@@ -19,3 +19,22 @@ test("local startup rotates renewable Vault service tokens before Core starts", 
   const compose = await readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
   assert.equal((compose.match(/DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"/g) ?? []).length, 2);
 });
+
+test("the Core Vault policy grants each secret scope its own path", async () => {
+  // Local and deployed policies have to stay in step, otherwise saving an image
+  // generation key succeeds locally and is denied in a real cluster.
+  const [local, deployed] = await Promise.all([
+    readFile(new URL("../infra/vault/api.hcl", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/vault-api.hcl", import.meta.url), "utf8"),
+  ]);
+  for (const policy of [local, deployed]) {
+    for (const scope of ["agent-runtime", "image-generation"]) {
+      assert.match(policy, new RegExp(
+        `path "secret/data/deviludo/instance/${scope}/api-key/versions/\\*" \\{\\s*capabilities = \\["create", "update", "read"\\]`,
+      ));
+    }
+    // Core writes and reads keys; it never enumerates or deletes them.
+    assert.doesNotMatch(policy, /"delete"|"list"|"sudo"/);
+  }
+  assert.equal(local.trim(), deployed.trim());
+});

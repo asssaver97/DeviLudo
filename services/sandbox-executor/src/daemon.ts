@@ -28,6 +28,13 @@ const fixtureAgentImage = developmentContainersAllowed
   ? process.env.DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE ?? ""
   : "";
 const activeTasks = new Map<string, string>();
+/**
+ * In-flight executions, so a shutdown can abort them deliberately instead of
+ * being killed with their task containers still running.
+ */
+type LiveExecution = Readonly<{ abort: () => void; settled: Promise<void> }>;
+const liveExecutions = new Set<LiveExecution>();
+let shuttingDown = false;
 if (!executorId || !identityKeyFile || allowlistedImages.size < 1
   || !workRoot.startsWith("/var/lib/deviludo-executor") || secretRoot !== "/run/deviludo-secrets") {
   throw new Error("Executor identity, allowlist, and fixed storage roots are required");
@@ -76,6 +83,7 @@ const server = createServer(async (request, response) => {
       response.writeHead(404).end();
       return;
     }
+    if (shuttingDown) throw new Error("Executor is shutting down");
     const plan = validatePlan(JSON.parse((await readRequestBody(request, 2 * 1024 * 1024)).toString("utf8")));
     const execution = new AbortController();
     response.once("close", () => { if (!response.writableEnded) execution.abort(); });
@@ -84,7 +92,7 @@ const server = createServer(async (request, response) => {
       "cache-control": "no-store, no-transform",
       "x-accel-buffering": "no",
     });
-    const receipt = await execute(plan, execution.signal, (kind, content) => {
+    const receipt = await trackedExecute(plan, execution, (kind, content) => {
       if (!response.destroyed && !response.writableEnded) {
         response.write(`${JSON.stringify({ type: "progress", event: { kind, content } })}\n`);
       }
@@ -112,7 +120,68 @@ async function start() {
   await cleanupOrphans();
   await rm(socketPath, { force: true });
   scheduleVaultTokenRenewal();
+  installShutdownHandlers();
   server.listen(socketPath, () => void configureSocket());
+}
+
+/**
+ * The daemon runs as PID 1, where the kernel drops signals that have no handler
+ * installed. Without these, SIGTERM is ignored outright and every stop waits the
+ * full grace period before Docker resorts to SIGKILL — which also means task
+ * containers are abandoned rather than removed.
+ */
+function installShutdownHandlers() {
+  for (const event of ["SIGTERM", "SIGINT"] as const) {
+    process.once(event, () => void shutdown(event).catch(error => {
+      console.error(JSON.stringify({
+        level: "error",
+        event: "executor_shutdown_failed",
+        message: error instanceof Error ? error.message : "Executor shutdown failed",
+      }));
+      process.exit(1);
+    }));
+  }
+}
+
+async function shutdown(signalName: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // Stop accepting work first so nothing new starts while we unwind.
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  // Aborting each execution removes its task container through the same finally
+  // block a cancelled request uses, so no orphan survives the restart.
+  for (const execution of liveExecutions) execution.abort();
+  await Promise.allSettled([...liveExecutions].map(execution => execution.settled));
+  await rm(socketPath, { force: true }).catch(() => undefined);
+  console.log(JSON.stringify({
+    level: "info",
+    event: "executor_stopped",
+    signal: signalName,
+    executorId,
+  }));
+  process.exit(0);
+}
+
+/**
+ * Runs an execution while keeping it cancellable from the shutdown path.
+ */
+async function trackedExecute(
+  plan: SandboxPlan,
+  execution: AbortController,
+  onProgress: (kind: "PHASE" | "AGENT_OUTPUT", content: string) => void,
+): Promise<SandboxReceipt> {
+  let settle = () => {};
+  const entry: LiveExecution = Object.freeze({
+    abort: () => execution.abort(),
+    settled: new Promise<void>(resolve => { settle = resolve; }),
+  });
+  liveExecutions.add(entry);
+  try {
+    return await execute(plan, execution.signal, onProgress);
+  } finally {
+    liveExecutions.delete(entry);
+    settle();
+  }
 }
 
 function scheduleVaultTokenRenewal() {

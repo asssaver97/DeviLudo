@@ -46,12 +46,19 @@ export function parseRuntimeVersion(output: string): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * These CLIs are Node programs that can take several seconds to answer on a cold
+ * start, and a timeout is indistinguishable from an absent command: both surface as
+ * `installed: false`, so too short a limit reports an installed runtime as missing.
+ * A command that does not exist still fails immediately, so the longer allowance
+ * only costs time for one that is present and slow.
+ */
 async function probeRuntimeVersion(command: "claude" | "codex"): Promise<string | null> {
   try {
     const result = await executeFile(command, ["--version"], {
       encoding: "utf8",
       maxBuffer: 16 * 1024,
-      timeout: 2_500,
+      timeout: 30_000,
     });
     return parseRuntimeVersion(`${result.stdout}\n${result.stderr}`);
   } catch {

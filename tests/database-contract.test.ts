@@ -18,6 +18,7 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "job_guidance_messages", "operation_receipts",
     "project_source_revisions", "project_source_ready_outbox",
     "artifacts", "artifact_inputs", "executor_receipts",
+    "instance_image_generation_settings", "asset_manifests", "asset_items",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
   }
@@ -34,6 +35,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
     "jobs", "external_signals", "job_progress_events", "job_guidance_messages",
     "operation_receipts", "workspace_claim_fairness",
     "artifacts", "artifact_inputs", "executor_receipts", "project_creation_receipts",
+    "asset_manifests", "asset_items",
   ]) {
     assert.ok(sql.includes(`'${table}'`), `${table} must be enumerated by the forced isolation block`);
   }
@@ -78,15 +80,12 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /last_error = 'E2E_PRODUCT: ' \|\| failure_summary/);
   assert.match(sql, /repair_count < 3/);
   assert.match(sql, /'repairFromE2eJobId', job\.id/);
-  assert.match(sql, /p_signal_kind = 'AGENT_RETRY_REQUESTED'/);
-  assert.match(sql, /failed_job\.kind <> 'AGENT_GENERATION'/);
-  assert.match(sql, /:agent:retry:/);
-  assert.match(sql, /p_signal_kind = 'ARTIFACT_BUILD_RETRY_REQUESTED'/);
-  assert.match(sql, /failed_job\.kind <> 'ARTIFACT_BUILD'/);
-  assert.match(sql, /:artifact:retry:/);
-  assert.match(sql, /p_signal_kind = 'E2E_RETRY_REQUESTED'/);
-  assert.match(sql, /failed_job\.kind <> 'E2E_TEST'/);
-  assert.match(sql, /:e2e:retry:/);
+  assert.match(sql, /p_signal_kind = 'STAGE_RERUN_REQUESTED'/);
+  assert.match(sql, /rerun_stage := \(p_payload->>'stage'\)::deviludo\.job_kind/);
+  assert.match(sql, /stage_list := deviludo\.delivery_stages\(workflow\.profile\)/);
+  assert.match(sql, /downstream_stages := stage_list\[stage_index:/);
+  assert.match(sql, /last_error = 'superseded by stage rerun from ' \|\| rerun_stage::text[\s\S]*AND kind = ANY\(downstream_stages\)/);
+  assert.match(sql, /:rerun:/);
   assert.match(sql, /successful_test\.target_operating_system = required_platform\.operating_system/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
@@ -142,4 +141,53 @@ test("a new attempt and successful completion clear stale job errors", async () 
   const complete = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
   assert.match(claim, /SET state = 'RUNNING',[\s\S]*last_error = NULL/);
   assert.match(complete, /SET state = 'SUCCEEDED',[\s\S]*last_error = NULL/);
+});
+
+test("Agent generation lands its planned asset manifest, validated and whole", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const complete = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
+  // Ingestion belongs to the Agent stage only, and an absent manifest is normal.
+  assert.match(complete, /IF p_receipt \? 'assetManifest' THEN/);
+  assert.match(complete, /jsonb_array_length\(p_receipt #> '\{assetManifest,items\}'\) NOT BETWEEN 1 AND 500/);
+  // A partially-accepted manifest would leave the source referencing assets that
+  // were never planned, so every item is validated before anything is written.
+  assert.match(complete, /RAISE EXCEPTION 'asset manifest items are invalid'/);
+  assert.match(complete, /RAISE EXCEPTION 'asset manifest keys must be unique'/);
+  assert.match(complete, /NOT IN\s*\n?\s*\('sprite', 'animation', 'background', 'ui', 'icon', 'tileset'\)/);
+  // Re-planning keeps one manifest per project so the user's auto-generate choice
+  // and any already-uploaded asset survive a rerun.
+  assert.match(complete, /ON CONFLICT \(workspace_id, project_id\) DO UPDATE/);
+  assert.match(complete, /ON CONFLICT \(workspace_id, manifest_id, asset_key\) DO UPDATE/);
+  assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status NOT IN \('generated', 'uploaded'\)[\s\S]*asset_key NOT IN/);
+  // complete_job is SECURITY INVOKER and the Agent stage is completed by the
+  // sandbox role, so that role must hold the DELETE the re-plan performs.
+  assert.doesNotMatch(complete, /SECURITY DEFINER/);
+  assert.match(sql, /GRANT DELETE ON deviludo\.asset_items TO deviludo_sandbox/);
+});
+
+test("asset generation stays off the serial delivery chain", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  // Assets are planned by the Agent and delivered by a later ARTIFACT_BUILD
+  // rerun, so no asset stage may exist as a job kind or delivery step.
+  const jobKinds = sql.match(/CREATE TYPE deviludo\.job_kind AS ENUM \(([\s\S]*?)\);/)?.[1] ?? "";
+  assert.deepEqual([...jobKinds.matchAll(/'([^']+)'/g)].map(match => match[1]), [
+    "AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+    "E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL",
+  ]);
+  const stages = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.delivery_stages\([\s\S]*?\$\$;/)?.[0] ?? "";
+  assert.doesNotMatch(stages, /ASSET/);
+  assert.doesNotMatch(stages, /PROJECT_DOCUMENT_MAINTENANCE/);
+});
+
+test("the image generation key is held by reference and never stored in the row", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const table = sql.match(/CREATE TABLE deviludo\.instance_image_generation_settings \(([\s\S]*?)\n\);/)?.[1] ?? "";
+  assert.match(table, /credential_secret_ref text NOT NULL/);
+  // Its own Vault scope: an Agent-runtime ref must not resolve this key.
+  assert.match(table, /LIKE 'vault:\/\/instance\/image-generation\/api-key\/versions\/%'/);
+  assert.match(table, /api_key_mask text NOT NULL CHECK \(api_key_mask ~ '\^\.\{3\}\\\*\{8\}\.\{4\}\$'\)/);
+  assert.doesNotMatch(table, /\bapi_key text\b|\bapi_key_value\b|\bsecret text\b/);
+  assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON deviludo\.instance_image_generation_settings TO deviludo_api/);
+  // Instance-wide singleton, like the Agent runtime settings.
+  assert.match(table, /singleton boolean PRIMARY KEY DEFAULT true CHECK \(singleton\)/);
 });

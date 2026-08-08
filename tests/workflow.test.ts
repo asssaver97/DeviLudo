@@ -76,6 +76,67 @@ test("local validation targets only macOS and ends after E2E", () => {
   assert.deepEqual(complete.enqueue, []);
 });
 
+test("rerunning a stage reopens a terminal workflow and enqueues only that stage", () => {
+  let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]);
+  snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "E2E_TEST", targetOperatingSystem: "macos" }).snapshot;
+  assert.equal(snapshot.state, "SUCCEEDED");
+  assert.deepEqual(snapshot.completedE2e, ["macos"]);
+
+  // A succeeded run is rerunnable: this is how uploaded assets get built in.
+  const rerun = transitionWorkflow(snapshot, {
+    kind: "STAGE_RERUN_REQUESTED", stage: "ARTIFACT_BUILD", signalId: "signal-1",
+  });
+  assert.equal(rerun.snapshot.state, "ARTIFACT_BUILDING");
+  assert.deepEqual(rerun.enqueue.map(command => command.jobKind), ["ARTIFACT_BUILD"]);
+  // E2E is downstream of the build, so its platform progress is invalidated.
+  assert.deepEqual(rerun.snapshot.completedE2e, []);
+  assert.match(rerun.enqueue[0].idempotencyKey, /:rerun:ARTIFACT_BUILD:all:signal-1$/);
+
+  // The chain then advances normally from the rerun point.
+  const advanced = transitionWorkflow(rerun.snapshot, {
+    kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null,
+  });
+  assert.deepEqual(advanced.enqueue.map(command => command.poolKind), ["E2E_MACOS"]);
+});
+
+test("rerunning a per-platform stage fans out across every target platform", () => {
+  let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "RELEASE", ["linux", "windows", "macos"]);
+  snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_FAILED", jobKind: "AGENT_GENERATION", reason: "boom" }).snapshot;
+  assert.equal(snapshot.state, "FAILED");
+
+  const rerun = transitionWorkflow(snapshot, {
+    kind: "STAGE_RERUN_REQUESTED", stage: "E2E_TEST", signalId: "signal-2",
+  });
+  assert.equal(rerun.snapshot.state, "E2E_TESTING");
+  assert.deepEqual(rerun.enqueue.map(command => command.poolKind), ["E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS"]);
+  assert.equal(new Set(rerun.enqueue.map(command => command.idempotencyKey)).size, 3);
+});
+
+test("stage rerun rejects out-of-profile stages and non-terminal workflows", () => {
+  const validating = transitionWorkflow(
+    initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]),
+    { kind: "JOB_FAILED", jobKind: "AGENT_GENERATION", reason: "boom" },
+  ).snapshot;
+  assert.throws(
+    () => transitionWorkflow(validating, { kind: "STAGE_RERUN_REQUESTED", stage: "STEAM_PUBLISH", signalId: "s" }),
+    /not part of the VALIDATE delivery chain/,
+  );
+
+  const running = transitionWorkflow(
+    initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]),
+    { kind: "SPEC_APPROVED" },
+  ).snapshot;
+  assert.equal(running.state, "AGENT_RUNNING");
+  assert.throws(
+    () => transitionWorkflow(running, { kind: "STAGE_RERUN_REQUESTED", stage: "AGENT_GENERATION", signalId: "s" }),
+    /requires a terminal workflow/,
+  );
+});
+
 test("cancellation is terminal and does not enqueue more work", () => {
   const snapshot = transitionWorkflow(
     initialWorkflowSnapshot(workflowId, workspaceId, projectId),
