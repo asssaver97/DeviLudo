@@ -57,6 +57,33 @@ export type AssetManifestView = Readonly<{
   completion: AssetCompletion;
 }>;
 
+/** One leased asset awaiting generation. */
+export type AssetGenerationLease = Readonly<{
+  workspaceId: string;
+  projectId: string;
+  itemId: string;
+  assetKey: string;
+  assetType: string;
+  description: string;
+  generationPrompt: string;
+  dimensions: string | null;
+  frameCount: number | null;
+  attempt: number;
+}>;
+
+type AssetGenerationLeaseRow = Readonly<{
+  workspaceId: string;
+  projectId: string;
+  itemId: string;
+  assetKey: string;
+  assetType: string;
+  description: string;
+  generationPrompt: string;
+  dimensions: string | null;
+  frameCount: string | null;
+  attempt: string;
+}>;
+
 function itemFromRow(row: AssetItemRow): AssetItem {
   return Object.freeze({
     id: row.id,
@@ -151,6 +178,63 @@ export class AssetManifestStore {
   }
 
   /**
+   * Lease planned assets for generation.
+   *
+   * Runs on the pool rather than `withWorkspace`: the generator sweeps every
+   * workspace, and the definer function it calls sets `row_security = off` for
+   * exactly that reason. The lease is what keeps two scheduler replicas from
+   * generating the same asset twice.
+   */
+  async claimGeneration(leaseSeconds: number, batchSize: number): Promise<readonly AssetGenerationLease[]> {
+    const result = await this.database.pool.query<AssetGenerationLeaseRow>(
+      `SELECT "workspaceId"::text, "projectId"::text, "itemId"::text, "assetKey",
+              "assetType", "description", "generationPrompt", "dimensions",
+              "frameCount"::text, "attempt"::text
+         FROM deviludo.claim_asset_generation($1::integer, $2::integer)`,
+      [leaseSeconds, batchSize],
+    );
+    return Object.freeze(result.rows.map(row => Object.freeze({
+      workspaceId: row.workspaceId,
+      projectId: row.projectId,
+      itemId: row.itemId,
+      assetKey: row.assetKey,
+      assetType: row.assetType,
+      description: row.description,
+      generationPrompt: row.generationPrompt,
+      dimensions: row.dimensions,
+      frameCount: row.frameCount === null ? null : Number(row.frameCount),
+      attempt: Number(row.attempt),
+    })));
+  }
+
+  /** Settle a leased item as generated. False means the lease no longer held it. */
+  async completeGeneration(input: Readonly<{
+    workspaceId: string;
+    itemId: string;
+    bucket: string;
+    objectKey: string;
+    sha256: string;
+    sizeBytes: number;
+  }>): Promise<boolean> {
+    const result = await this.database.pool.query<{ settled: boolean }>(
+      `SELECT deviludo.complete_asset_generation(
+         $1::uuid, $2::uuid, $3::text, $4::text, $5::text, $6::bigint
+       ) AS settled`,
+      [input.workspaceId, input.itemId, input.bucket, input.objectKey, input.sha256, String(input.sizeBytes)],
+    );
+    return result.rows[0]?.settled === true;
+  }
+
+  /** Release a leased item after a failed attempt. */
+  async failGeneration(workspaceId: string, itemId: string, error: string): Promise<boolean> {
+    const result = await this.database.pool.query<{ released: boolean }>(
+      "SELECT deviludo.fail_asset_generation($1::uuid, $2::uuid, $3::text) AS released",
+      [workspaceId, itemId, error],
+    );
+    return result.rows[0]?.released === true;
+  }
+
+  /**
    * Attach a stored object to a planned asset. The schema requires bucket, key,
    * digest and size to arrive together with an `uploaded` status, so this is the
    * only supported way to mark an asset supplied.
@@ -166,9 +250,16 @@ export class AssetManifestStore {
   }>): Promise<AssetItem | null> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const result = await client.query<AssetItemRow>(
+        // The lease has to be cleared alongside the status: the schema ties
+        // `generation_lease_expires_at` to the 'generating' status, so leaving it
+        // set while moving to 'uploaded' violates that CHECK. An upload landing
+        // mid-generation wins — `complete_asset_generation` only settles items
+        // still in 'generating', so the generator's result is dropped rather than
+        // overwriting the file the user chose.
         `UPDATE deviludo.asset_items item
             SET status = 'uploaded', bucket = $3, object_key = $4, sha256 = $5,
-                size_bytes = $6, error_message = NULL, updated_at = clock_timestamp()
+                size_bytes = $6, error_message = NULL,
+                generation_lease_expires_at = NULL, updated_at = clock_timestamp()
           WHERE item.asset_key = $2
             AND item.manifest_id = (
               SELECT id FROM deviludo.asset_manifests WHERE project_id = $1::uuid

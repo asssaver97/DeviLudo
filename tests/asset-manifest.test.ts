@@ -307,4 +307,119 @@ describe("Asset manifest store", () => {
     });
     assert.equal(item, null);
   });
+
+  it("clears the generation lease when an upload lands mid-generation", async () => {
+    const { database, calls } = fakeDatabase(() => ({
+      rows: [itemRow({ status: "uploaded", object_key: "assets/sprites/player_idle.png" })],
+    }));
+    await new AssetManifestStore(database).attachUpload({
+      workspaceId,
+      projectId,
+      assetKey: "sprites/player_idle",
+      bucket: "deviludo",
+      objectKey: "assets/sprites/player_idle.png",
+      sha256: `sha256:${"a".repeat(64)}`,
+      sizeBytes: 2048,
+    });
+    // The schema ties the lease column to the 'generating' status, so leaving it
+    // set while moving to 'uploaded' violates that CHECK.
+    assert.match(calls[0].text, /generation_lease_expires_at = NULL/);
+  });
+});
+
+describe("Asset generation leasing", () => {
+  /**
+   * The generation sweep spans every workspace, so unlike every other method here
+   * it runs on the pool against definer functions rather than inside
+   * `withWorkspace`. These tests assert exactly that.
+   */
+  function poolDatabase(respond: (call: QueryCall) => QueryResult) {
+    const calls: QueryCall[] = [];
+    const workspaces: string[] = [];
+    const database = {
+      pool: {
+        async query(text: string, values: readonly unknown[] = []) {
+          const call = Object.freeze({ text, values });
+          calls.push(call);
+          return respond(call);
+        },
+      },
+      async withWorkspace<T>(id: string, callback: (client: never) => Promise<T>): Promise<T> {
+        workspaces.push(id);
+        return callback({ async query() { return { rows: [] }; } } as never);
+      },
+      close: async () => undefined,
+    };
+    return { database: database as unknown as Database, calls, workspaces };
+  }
+
+  it("claims leases on the pool and converts the numeric columns pg returns as text", async () => {
+    const { database, calls, workspaces } = poolDatabase(() => ({
+      rows: [{
+        workspaceId,
+        projectId,
+        itemId: "item-1",
+        assetKey: "sprites/player_idle",
+        assetType: "animation",
+        description: "Player idle animation",
+        generationPrompt: "pixel art character idle",
+        dimensions: "32x32",
+        frameCount: "4",
+        attempt: "1",
+      }, {
+        workspaceId,
+        projectId,
+        itemId: "item-2",
+        assetKey: "backgrounds/menu",
+        assetType: "background",
+        description: "Menu backdrop",
+        generationPrompt: "painted landscape",
+        dimensions: null,
+        frameCount: null,
+        attempt: "3",
+      }],
+    }));
+    const leases = await new AssetManifestStore(database).claimGeneration(300, 4);
+    assert.match(calls[0].text, /deviludo\.claim_asset_generation/);
+    assert.deepEqual(calls[0].values, [300, 4]);
+    // A workspace transaction would scope the sweep to one workspace, which is the
+    // opposite of what this does.
+    assert.deepEqual(workspaces, []);
+    assert.equal(leases[0].frameCount, 4);
+    assert.equal(leases[0].attempt, 1);
+    // An absent frame count stays null rather than becoming 0, which would be a
+    // request for zero animation frames.
+    assert.equal(leases[1].frameCount, null);
+    assert.equal(leases[1].attempt, 3);
+  });
+
+  it("reports whether settling still held the lease", async () => {
+    const settled = poolDatabase(() => ({ rows: [{ settled: true }] }));
+    assert.equal(await new AssetManifestStore(settled.database).completeGeneration({
+      workspaceId, itemId: "item-1", bucket: "deviludo",
+      objectKey: "assets/sprites/player_idle.png",
+      sha256: `sha256:${"c".repeat(64)}`, sizeBytes: 4096,
+    }), true);
+    // size_bytes is bigint, so it travels as text.
+    assert.equal(settled.calls[0].values.at(-1), "4096");
+
+    // False is the case that matters: a user upload landed while generation was in
+    // flight, so the generated image is dropped rather than replacing their art.
+    const lost = poolDatabase(() => ({ rows: [{ settled: false }] }));
+    assert.equal(await new AssetManifestStore(lost.database).completeGeneration({
+      workspaceId, itemId: "item-1", bucket: "deviludo",
+      objectKey: "assets/sprites/player_idle.png",
+      sha256: `sha256:${"c".repeat(64)}`, sizeBytes: 4096,
+    }), false);
+  });
+
+  it("releases a lease with the failure reason", async () => {
+    const { database, calls } = poolDatabase(() => ({ rows: [{ released: true }] }));
+    assert.equal(
+      await new AssetManifestStore(database).failGeneration(workspaceId, "item-1", "Provider 429"),
+      true,
+    );
+    assert.match(calls[0].text, /deviludo\.fail_asset_generation/);
+    assert.deepEqual(calls[0].values, [workspaceId, "item-1", "Provider 429"]);
+  });
 });

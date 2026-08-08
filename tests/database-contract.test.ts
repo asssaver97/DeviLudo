@@ -179,6 +179,63 @@ test("asset generation stays off the serial delivery chain", async () => {
   assert.doesNotMatch(stages, /PROJECT_DOCUMENT_MAINTENANCE/);
 });
 
+test("asset generation is leased, attempt-bounded, and never overwrites a user upload", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const claim = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.claim_asset_generation\([\s\S]*?\$\$;/)?.[0] ?? "";
+  const complete = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_asset_generation\([\s\S]*?\$\$;/)?.[0] ?? "";
+  const fail = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.fail_asset_generation\([\s\S]*?\$\$;/)?.[0] ?? "";
+  assert.ok(claim && complete && fail, "the asset generation functions must exist");
+
+  // Two scheduler replicas must not generate the same asset, and a generator that
+  // dies must not strand an item: the claim locks rows and takes a timed lease.
+  assert.match(claim, /FOR UPDATE OF item SKIP LOCKED/);
+  assert.match(claim, /SET status = 'generating'/);
+  assert.match(claim, /generation_lease_expires_at = clock_timestamp\(\) \+ make_interval/);
+  // An expired lease is a crashed generator, so it is reclaimable.
+  assert.match(claim, /item\.status = 'generating' AND item\.generation_lease_expires_at <= clock_timestamp\(\)/);
+  // Only opted-in manifests, only items that actually have a prompt to send, and
+  // only while attempts remain.
+  assert.match(claim, /manifest\.auto_generate_enabled = true/);
+  assert.match(claim, /item\.generation_prompt IS NOT NULL/);
+  assert.match(claim, /item\.generation_attempt < 3/);
+  assert.match(claim, /generation_attempt = item\.generation_attempt \+ 1/);
+  // Without configured settings there is no credential to call with, so claiming
+  // would only burn attempts.
+  assert.match(claim, /IF NOT EXISTS \(\s*SELECT 1 FROM deviludo\.instance_image_generation_settings WHERE singleton = true\s*\) THEN RETURN; END IF;/);
+
+  // A user upload that lands mid-generation wins: settlement only applies to items
+  // still leased, so a generated image cannot replace the art they chose.
+  assert.match(complete, /AND status = 'generating'/);
+  assert.match(complete, /SET status = 'generated', bucket = p_bucket/);
+  assert.match(complete, /generation_lease_expires_at = NULL/);
+  // A transient provider error retries; the last attempt settles as failed so the
+  // panel stops presenting it as pending work.
+  assert.match(fail, /CASE WHEN generation_attempt >= 3 THEN 'failed' ELSE 'planned' END/);
+  assert.match(fail, /generation_lease_expires_at = NULL/);
+  assert.match(fail, /AND status = 'generating'/);
+
+  // The lease columns are bounded and tied to the status they describe.
+  assert.match(sql, /ADD COLUMN generation_attempt integer NOT NULL DEFAULT 0\s*\n\s*CHECK \(generation_attempt BETWEEN 0 AND 3\)/);
+  assert.match(sql, /CONSTRAINT asset_items_lease_requires_generating CHECK \(\s*\n?\s*\(generation_lease_expires_at IS NOT NULL\) = \(status = 'generating'\)/);
+
+  // Generation is driven by the scheduler role, not an executor lease.
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.claim_asset_generation\(integer, integer\) TO deviludo_scheduler/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.fail_asset_generation\(uuid, uuid, text\) TO deviludo_scheduler/);
+  assert.match(sql, /GRANT SELECT ON deviludo\.instance_image_generation_settings TO deviludo_scheduler/);
+  // These sweep every workspace, so they are definer functions owned by the role
+  // that bypasses row-level security.
+  for (const definer of [claim, complete, fail]) {
+    assert.match(definer, /SECURITY DEFINER/);
+    assert.match(definer, /SET row_security = off/);
+  }
+
+  // A re-plan replaces the prompt, so previous attempts no longer apply and an
+  // exhausted item becomes generatable again — but a settled asset is untouched.
+  const completeJob = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
+  assert.match(completeJob, /generation_attempt = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.generation_attempt\s*\n\s*ELSE 0 END/);
+  assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
+});
+
 test("the image generation key is held by reference and never stored in the row", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const table = sql.match(/CREATE TABLE deviludo\.instance_image_generation_settings \(([\s\S]*?)\n\);/)?.[1] ?? "";

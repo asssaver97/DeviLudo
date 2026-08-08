@@ -678,6 +678,17 @@ CREATE TABLE deviludo.asset_items (
 CREATE INDEX asset_items_manifest_status
   ON deviludo.asset_items (workspace_id, manifest_id, status);
 
+-- Generation attempts are bounded per item so a prompt the provider always
+-- rejects cannot be retried forever, and the lease columns let one generator
+-- claim an item without a second one picking it up.
+ALTER TABLE deviludo.asset_items
+  ADD COLUMN generation_attempt integer NOT NULL DEFAULT 0
+    CHECK (generation_attempt BETWEEN 0 AND 3),
+  ADD COLUMN generation_lease_expires_at timestamptz,
+  ADD CONSTRAINT asset_items_lease_requires_generating CHECK (
+    (generation_lease_expires_at IS NOT NULL) = (status = 'generating')
+  );
+
 CREATE OR REPLACE FUNCTION deviludo.current_workspace_id()
 RETURNS uuid
 LANGUAGE sql
@@ -1008,6 +1019,149 @@ BEGIN
 END
 $$;
 ALTER FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, integer)
+  OWNER TO deviludo_claim_executor;
+
+-- Lease planned assets for generation.
+--
+-- Asset generation is not a delivery job: it has no `deviludo.jobs` row, no pool,
+-- and never blocks the chain. This is its claim primitive, and it is deliberately
+-- shaped like `claim_job` — a lease with an expiry, so a generator that dies mid
+-- request cannot strand an item in 'generating' forever.
+--
+-- Only items whose manifest has auto-generate on are returned, and only when the
+-- instance actually has image-generation settings configured: without a
+-- credential there is nothing to call, and flipping to 'generating' would just
+-- burn an attempt.
+CREATE OR REPLACE FUNCTION deviludo.claim_asset_generation(
+  p_lease_seconds integer,
+  p_batch_size integer DEFAULT 4
+)
+RETURNS TABLE (
+  "workspaceId" uuid,
+  "projectId" uuid,
+  "itemId" uuid,
+  "assetKey" text,
+  "assetType" text,
+  "description" text,
+  "generationPrompt" text,
+  "dimensions" text,
+  "frameCount" integer,
+  "attempt" integer
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+BEGIN
+  IF p_lease_seconds NOT BETWEEN 30 AND 3600 OR p_batch_size NOT BETWEEN 1 AND 50 THEN
+    RAISE EXCEPTION 'invalid asset generation claim';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM deviludo.instance_image_generation_settings WHERE singleton = true
+  ) THEN RETURN; END IF;
+
+  RETURN QUERY
+  WITH candidate AS (
+    SELECT item.workspace_id, item.id
+      FROM deviludo.asset_items item
+      JOIN deviludo.asset_manifests manifest
+        ON manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
+     WHERE manifest.auto_generate_enabled = true
+       AND item.generation_prompt IS NOT NULL
+       AND item.generation_attempt < 3
+       AND (
+         item.status = 'planned'
+         -- An expired lease is a crashed generator, not a running one.
+         OR (item.status = 'generating' AND item.generation_lease_expires_at <= clock_timestamp())
+       )
+     ORDER BY item.generation_attempt, item.created_at, item.id
+     FOR UPDATE OF item SKIP LOCKED
+     LIMIT p_batch_size
+  )
+  UPDATE deviludo.asset_items item
+     SET status = 'generating',
+         generation_attempt = item.generation_attempt + 1,
+         generation_lease_expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds),
+         error_message = NULL,
+         updated_at = clock_timestamp()
+    FROM candidate
+   WHERE item.workspace_id = candidate.workspace_id AND item.id = candidate.id
+  RETURNING item.workspace_id, (
+    SELECT manifest.project_id FROM deviludo.asset_manifests manifest
+     WHERE manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
+  ), item.id, item.asset_key, item.asset_type, item.description,
+     item.generation_prompt, item.dimensions, item.frame_count, item.generation_attempt;
+END
+$$;
+ALTER FUNCTION deviludo.claim_asset_generation(integer, integer)
+  OWNER TO deviludo_claim_executor;
+
+-- Record a generated asset. The status/object CHECK on asset_items requires
+-- bucket, key, digest and size to arrive together, so this is the only supported
+-- way to settle a leased item as generated.
+CREATE OR REPLACE FUNCTION deviludo.complete_asset_generation(
+  p_workspace_id uuid,
+  p_item_id uuid,
+  p_bucket text,
+  p_object_key text,
+  p_sha256 text,
+  p_size_bytes bigint
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  updated integer;
+BEGIN
+  UPDATE deviludo.asset_items
+     SET status = 'generated', bucket = p_bucket, object_key = p_object_key,
+         sha256 = p_sha256, size_bytes = p_size_bytes, error_message = NULL,
+         generation_lease_expires_at = NULL, updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND id = p_item_id
+     -- A user upload that landed while generation was in flight wins: it is an
+     -- explicit choice, and overwriting it with a generated image would silently
+     -- discard their art.
+     AND status = 'generating';
+  GET DIAGNOSTICS updated = ROW_COUNT;
+  RETURN updated = 1;
+END
+$$;
+ALTER FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, text, text, bigint)
+  OWNER TO deviludo_claim_executor;
+
+-- Release a leased item after a failed attempt. Items go back to 'planned' while
+-- attempts remain so a transient provider error is retried; the last attempt
+-- settles as 'failed' so the panel stops showing it as pending work and the user
+-- can upload the asset instead.
+CREATE OR REPLACE FUNCTION deviludo.fail_asset_generation(
+  p_workspace_id uuid,
+  p_item_id uuid,
+  p_error text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  updated integer;
+BEGIN
+  UPDATE deviludo.asset_items
+     SET status = CASE WHEN generation_attempt >= 3 THEN 'failed' ELSE 'planned' END,
+         error_message = left(coalesce(nullif(btrim(p_error), ''), 'generation failed'), 2000),
+         generation_lease_expires_at = NULL,
+         updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND id = p_item_id AND status = 'generating';
+  GET DIAGNOSTICS updated = ROW_COUNT;
+  RETURN updated = 1;
+END
+$$;
+ALTER FUNCTION deviludo.fail_asset_generation(uuid, uuid, text)
   OWNER TO deviludo_claim_executor;
 
 CREATE OR REPLACE FUNCTION deviludo.claim_job(
@@ -1411,6 +1565,20 @@ BEGIN
             generation_prompt = excluded.generation_prompt,
             frame_count = excluded.frame_count,
             dimensions = excluded.dimensions,
+            -- A re-plan is a new prompt, so the previous attempts no longer apply:
+            -- an item that had exhausted its budget becomes generatable again. The
+            -- lease has to be cleared with the status or the CHECK tying the two
+            -- together fails.
+            generation_attempt = CASE
+              WHEN deviludo.asset_items.status IN ('generated', 'uploaded') THEN deviludo.asset_items.generation_attempt
+              ELSE 0 END,
+            generation_lease_expires_at = NULL,
+            status = CASE
+              WHEN deviludo.asset_items.status IN ('generated', 'uploaded') THEN deviludo.asset_items.status
+              ELSE 'planned' END,
+            error_message = CASE
+              WHEN deviludo.asset_items.status IN ('generated', 'uploaded') THEN deviludo.asset_items.error_message
+              ELSE NULL END,
             updated_at = clock_timestamp();
 
       DELETE FROM deviludo.asset_items
@@ -1889,6 +2057,10 @@ GRANT SELECT, INSERT, UPDATE ON
   deviludo.operation_receipts,
   deviludo.artifacts, deviludo.artifact_inputs, deviludo.executor_receipts
   TO deviludo_scheduler;
+-- The asset generator resolves the configured provider and credential ref through
+-- an ordinary pooled read before calling out, so the scheduler reads this row
+-- directly rather than through a definer function.
+GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_scheduler;
 GRANT SELECT, INSERT, UPDATE ON
   deviludo.projects, deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
   deviludo.project_documents, deviludo.project_document_revisions,
@@ -1925,6 +2097,12 @@ GRANT EXECUTE ON FUNCTION deviludo.fail_job(uuid, uuid, bigint, text)
   TO deviludo_api, deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.recover_expired_jobs(), deviludo.reconcile_p0_capacity()
   TO deviludo_scheduler;
+-- Asset generation is driven by the scheduler role: it is periodic background work
+-- like the other scheduler tasks, not something an executor leases.
+GRANT EXECUTE ON FUNCTION deviludo.claim_asset_generation(integer, integer) TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, text, text, bigint)
+  TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.fail_asset_generation(uuid, uuid, text) TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.pull_source_ready_events(integer),
   deviludo.acknowledge_source_ready_events(uuid[]) TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, integer)
@@ -1937,6 +2115,11 @@ GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.project_documents,
   deviludo.project_source_revisions, deviludo.workflow_instances, deviludo.instance_agent_settings,
   deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs
+  TO deviludo_claim_executor;
+-- The asset generation lease and its settlement run as this role, which is the
+-- owner of those SECURITY DEFINER functions.
+GRANT SELECT, UPDATE ON deviludo.asset_items TO deviludo_claim_executor;
+GRANT SELECT ON deviludo.asset_manifests, deviludo.instance_image_generation_settings
   TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE ON deviludo.workspace_claim_fairness TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.workspaces TO deviludo_claim_executor;

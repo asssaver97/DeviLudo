@@ -17,7 +17,19 @@ test("local startup rotates renewable Vault service tokens before Core starts", 
   assert.match(startup, /"run", "--rm", "--no-deps", "vault-init"/);
   assert.match(startup, /"run", "--rm", "--no-deps", "sandbox-executor-init"/);
   const compose = await readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
-  assert.equal((compose.match(/DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"/g) ?? []).length, 2);
+  // Every service holding a Vault token has to renew it on the same cadence, or the
+  // one that does not will start failing reads once its lease lapses. Asserted per
+  // service rather than as a count so adding a token holder without renewal is what
+  // fails, not merely changing how many there are.
+  for (const service of ["core-api", "core-scheduler", "sandbox-executord"]) {
+    const block = compose.match(new RegExp(` {2}${service}:([\\s\\S]*?)\\n {2}[a-z][a-z0-9-]*:`))?.[1] ?? "";
+    assert.match(block, /DEVILUDO_VAULT_TOKEN_FILE/, `${service} must be given a Vault token`);
+    assert.match(
+      block,
+      /DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"/,
+      `${service} must renew its Vault token`,
+    );
+  }
 });
 
 test("the Core Vault policy grants each secret scope its own path", async () => {

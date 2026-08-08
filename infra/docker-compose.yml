@@ -116,13 +116,37 @@ services:
       DEVILUDO_CORE_ROLE: scheduler
       DEVILUDO_CORE_SCHEDULER_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
       DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS: "${DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS:-86400}"
+      # Asynchronous asset generation writes generated images into the asset
+      # bucket, so the scheduler needs the same object store as the sandbox.
+      DEVILUDO_S3_ENDPOINT: http://minio:9000
+      DEVILUDO_S3_REGION: us-east-1
+      DEVILUDO_S3_PATH_STYLE: "1"
+      DEVILUDO_S3_ACCESS_KEY_ID: deviludo-local
+      DEVILUDO_S3_SECRET_ACCESS_KEY: deviludo-local-secret
+      DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
+      DEVILUDO_ASSET_GENERATION_POLL_SECONDS: "${DEVILUDO_ASSET_GENERATION_POLL_SECONDS:-15}"
+      # The image-generation API key lives in Vault under its own scope, so the
+      # generator needs a Vault token exactly as the API does.
+      DEVILUDO_VAULT_ADDR: http://vault:8200
+      DEVILUDO_VAULT_TOKEN_FILE: /run/deviludo-vault/api.token
+      DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"
     volumes:
       - projects-data:/var/lib/deviludo-projects
+      - vault-tokens:/run/deviludo-vault:ro
     depends_on:
       postgres:
         condition: service_healthy
       project-sources-init:
         condition: service_completed_successfully
+      vault-init:
+        condition: service_completed_successfully
+    networks:
+      # `data` is internal, so it alone cannot reach an image-generation provider.
+      # Generation calls out directly like the design Agent's conversation calls in
+      # core-api, so the scheduler needs an egress path — it stays unpublished, so
+      # this grants outbound reach without making it reachable.
+      - data
+      - egress
 
   core-sandbox:
     <<: *core

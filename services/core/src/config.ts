@@ -16,6 +16,7 @@ export type CoreConfig = Readonly<{
   e2eDevelopmentToken: string | null;
   pollMilliseconds: number;
   projectDocumentIdleSeconds: number;
+  assetGenerationPollMilliseconds: number;
   requiredReadyPools: readonly ServerPoolKind[];
   tlsCertificateFile: string | null;
   tlsKeyFile: string | null;
@@ -47,6 +48,15 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     2_592_000,
     "DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS",
   );
+  // Asset generation sweeps on its own cadence rather than the sub-second
+  // scheduler tick: each item takes tens of seconds of provider time, so claiming
+  // more often would only add database churn.
+  const assetGenerationPollMilliseconds = parseInteger(
+    env.DEVILUDO_ASSET_GENERATION_POLL_SECONDS ?? "15",
+    1,
+    3_600,
+    "DEVILUDO_ASSET_GENERATION_POLL_SECONDS",
+  ) * 1_000;
   const webToken = secretValue(env, "DEVILUDO_WEB_CORE_TOKEN");
   if (typedRole === "api" && env.NODE_ENV === "production" && webToken.length < 32) {
     throw new Error("The Web-to-Core token is required in production");
@@ -102,6 +112,7 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     e2eDevelopmentToken,
     pollMilliseconds,
     projectDocumentIdleSeconds,
+    assetGenerationPollMilliseconds,
     requiredReadyPools: Object.freeze(requiredReadyPools),
     tlsCertificateFile,
     tlsKeyFile,

@@ -1265,6 +1265,7 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .typing-dots i { animation: none; }
   .product-delivery-stage.status-active .product-delivery-stage-marker { animation: none; }
+  .product-delivery-stage-rerun-icon:active svg { animation: none; }
 }
 
 /* Core project workspace */
@@ -1845,6 +1846,12 @@ textarea {
   pointer-events: auto;
 }
 
+/* A not-started stage is dimmed, but its rerun overlay has to stay legible once
+   you are pointing at it. */
+.product-delivery-stage.status-pending:hover {
+  opacity: 1;
+}
+
 .product-delivery-stage::after {
   background: var(--stage-line);
   content: "";
@@ -1875,45 +1882,93 @@ textarea {
   z-index: 1;
 }
 
+/* The rerun control takes the marker's own square rather than floating beside it:
+   the marker states what the stage did, the overlay states what you can do to it,
+   and one occupies that space at a time. Same 36px box, same sharp corners as the
+   rest of the panel. */
 .product-delivery-stage-rerun-icon {
   align-items: center;
   background: #0a111b;
-  border: 2px solid var(--blue);
-  border-radius: 50%;
-  color: var(--blue);
+  border: 2px solid var(--stage-color);
+  color: var(--stage-color);
   cursor: pointer;
   display: flex;
-  height: 28px;
+  height: 36px;
   justify-content: center;
   left: 50%;
   opacity: 0;
   padding: 0;
   pointer-events: none;
   position: absolute;
-  top: 48px;
+  top: 0;
   transform: translateX(-50%);
-  transition: opacity 0.2s, transform 0.15s;
-  width: 28px;
-  z-index: 2;
+  transition: opacity .12s linear;
+  width: 36px;
+  z-index: 3;
 }
 
 .product-delivery-stage-rerun-icon:hover {
   background: #0b2938;
-  transform: translateX(-50%) scale(1.1);
+  border-color: var(--blue);
+  color: var(--blue);
 }
 
 .product-delivery-stage-rerun-icon:active {
-  transform: translateX(-50%) scale(0.95);
+  box-shadow: none;
+  transform: translate(-50%, 2px);
+}
+
+.product-delivery-stage-rerun-icon:focus-visible {
+  border-color: var(--blue);
+  color: var(--blue);
+  opacity: 1;
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  pointer-events: auto;
 }
 
 .product-delivery-stage-rerun-icon:disabled {
-  cursor: not-allowed;
-  opacity: 0.3;
+  cursor: progress;
 }
 
 .product-delivery-stage-rerun-icon svg {
-  height: 14px;
-  width: 14px;
+  height: 17px;
+  width: 17px;
+}
+
+/* Held down, the glyph spins once to acknowledge the click before the request
+   lands and the whole track re-renders. */
+.product-delivery-stage-rerun-icon:active svg {
+  animation: rerun-spin .45s linear;
+}
+
+@keyframes rerun-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Without a pointer there is no hover to reveal the overlay, so it would be
+   unreachable. Touch gets it as a small corner badge instead, which leaves the
+   marker's status glyph readable. */
+@media (hover: none) {
+  .product-delivery-stage-rerun-icon {
+    height: 22px;
+    left: auto;
+    opacity: 1;
+    pointer-events: auto;
+    right: 4px;
+    top: -4px;
+    transform: none;
+    width: 22px;
+  }
+
+  .product-delivery-stage-rerun-icon:active {
+    transform: translateY(2px);
+  }
+
+  .product-delivery-stage-rerun-icon svg {
+    height: 12px;
+    width: 12px;
+  }
 }
 
 .product-delivery-stage-number,

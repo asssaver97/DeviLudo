@@ -84,6 +84,22 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     return () => controller.abort();
   }, [applyManifest, fetchGenerationConfig, fetchManifest]);
 
+  // Generation settles in the background with nothing to push the result here, so
+  // the panel polls while work is outstanding and stops once it is not.
+  const generationOutstanding = autoGenerateEnabled
+    && items.some(item => item.status === "planned" || item.status === "generating");
+  useEffect(() => {
+    if (!generationOutstanding) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      if (document.visibilityState === "visible") await loadManifest().catch(() => undefined);
+      if (!stopped) timer = setTimeout(poll, 5_000);
+    };
+    timer = setTimeout(poll, 5_000);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [generationOutstanding, loadManifest]);
+
   const toggleAutoGenerate = async () => {
     if (!manifest) return;
 
@@ -97,6 +113,9 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
 
       if (response.ok) {
         setAutoGenerateEnabled(newValue);
+        // Turning it on makes planned assets claimable, so reload to start the
+        // poll above rather than waiting for the next manual refresh.
+        if (newValue) await loadManifest();
       }
     } catch (error) {
       console.error("Failed to toggle auto-generate:", error);
@@ -164,8 +183,15 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     return <div className="asset-manifest-empty">项目尚未生成素材清单</div>;
   }
 
-  const configComplete = generationConfig && generationConfig.provider &&
-    (generationConfig.apiKeyMask || generationConfig.apiEndpoint);
+  const generatingCount = items.filter(item => item.status === "generating").length;
+
+  // A credential is what generation actually needs; an endpoint alone cannot
+  // authenticate a request. Treating endpoint-only as configured let the toggle be
+  // switched on for a setup that could never generate anything.
+  const configComplete = Boolean(generationConfig?.provider && generationConfig.apiKeyMask);
+  // Midjourney has no synchronous HTTP generation API, so the generator rejects
+  // it per asset. Saying so here is better than letting every asset fail.
+  const providerSupported = generationConfig?.provider !== "midjourney";
 
   return (
     <div className="asset-manifest-panel">
@@ -177,19 +203,28 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
               type="checkbox"
               checked={autoGenerateEnabled}
               onChange={toggleAutoGenerate}
-              disabled={!configComplete}
+              disabled={!configComplete || !providerSupported}
             />
             <span>自动生成素材</span>
           </label>
-          {autoGenerateEnabled && !configComplete && (
-            <span className="config-warning">⚠️ 请在设置中配置图片生成模型</span>
-          )}
+          {/* The toggle used to be disabled with no explanation, which read as a
+              bug. Whenever it cannot be used, say which condition is missing. */}
+          {!configComplete ? (
+            <span className="config-warning">
+              ⚠️ 需要先在<a href="/settings">设置</a>里配置图片生成模型和 API Key
+            </span>
+          ) : !providerSupported ? (
+            <span className="config-warning">
+              ⚠️ Midjourney 没有可用的同步生成接口，请在设置里改用 DALL-E 3、Stable Diffusion XL 或 Replicate
+            </span>
+          ) : null}
         </div>
       </div>
 
       <div className="asset-manifest-status">
         <span>总计: {completion.total}</span>
         <span>已完成: {completion.uploaded}</span>
+        {generatingCount > 0 && <span className="generating">正在生成: {generatingCount}</span>}
         {completion.failed > 0 && <span className="failed">失败: {completion.failed}</span>}
         {completion.complete && (
           <button className="rebuild-button" disabled={rebuilding} onClick={() => void triggerRebuild()} type="button">
@@ -197,6 +232,14 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
           </button>
         )}
       </div>
+      {/* A failed asset is not a dead end: its prompt can be re-planned by a rerun,
+          or the art can be uploaded directly. Say so rather than leaving a red
+          count with no next step. */}
+      {completion.failed > 0 && (
+        <p className="asset-manifest-note">
+          有 {completion.failed} 个素材自动生成失败（已达重试上限）。可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词。
+        </p>
+      )}
 
       {rebuildError && <p className="asset-manifest-error" role="alert">{rebuildError}</p>}
       {uploadError && <p className="asset-manifest-error" role="alert">{uploadError}</p>}
@@ -221,7 +264,13 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
                 <div className="asset-prompt-content">{item.generationPrompt}</div>
               </div>
             )}
-            {item.status === "planned" && !autoGenerateEnabled && (
+            {/* Upload stays available whatever the toggle says. Auto-generate is a
+                convenience, not a commitment: hiding this while generation was on
+                left an asset with no way forward if the provider kept rejecting
+                its prompt, and a user who has the art on disk should never have to
+                turn a setting off to use it. Only an asset already being generated
+                hides it, because that write would race the generator. */}
+            {item.status !== "generating" && (
               <div className="asset-upload">
                 <input
                   type="file"
@@ -232,6 +281,12 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
                   }}
                   disabled={uploading}
                 />
+                {item.status === "planned" && autoGenerateEnabled ? (
+                  <small className="asset-upload-hint">排队自动生成中，也可以直接上传自备素材</small>
+                ) : null}
+                {item.status === "generated" || item.status === "uploaded" ? (
+                  <small className="asset-upload-hint">已有素材，上传新文件会替换它</small>
+                ) : null}
               </div>
             )}
             {item.errorMessage && (

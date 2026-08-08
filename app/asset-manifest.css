@@ -1,8 +1,8 @@
 /* Asset manifest panel styles */
 
 .asset-manifest-panel {
-  background: var(--panel-bg);
-  border: 1px solid var(--border-color);
+  background: #0e1723;
+  border: 1px solid #334157;
   border-radius: 8px;
   padding: 16px;
   margin-top: 16px;
@@ -14,7 +14,7 @@
   align-items: center;
   margin-bottom: 16px;
   padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid #334157;
 }
 
 .asset-manifest-header h3 {
@@ -48,9 +48,17 @@
   cursor: not-allowed;
 }
 
+/* `--amber` is the theme's warning token; the panel previously referenced a
+   `--warning-color` that no theme defines, so this text fell back to inheriting. */
 .config-warning {
-  color: var(--warning-color);
+  color: var(--amber);
   font-size: 13px;
+  line-height: 1.5;
+}
+
+.config-warning a {
+  color: inherit;
+  text-decoration: underline;
 }
 
 .asset-manifest-status {
@@ -58,20 +66,42 @@
   gap: 16px;
   align-items: center;
   padding: 12px;
-  background: var(--secondary-bg);
+  background: #0a111b;
   border-radius: 6px;
   margin-bottom: 16px;
   font-size: 14px;
 }
 
 .asset-manifest-status .failed {
-  color: var(--error-color);
+  color: var(--danger);
+}
+
+.asset-manifest-status .generating {
+  color: var(--blue);
+}
+
+/* A failure count needs a next step next to it, not just a red number. */
+.asset-manifest-note {
+  background: rgba(69, 120, 255, 0.08);
+  border-left: 3px solid var(--blue);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+}
+
+.asset-upload-hint {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
 }
 
 .rebuild-button {
   margin-left: auto;
   padding: 8px 16px;
-  background: var(--primary-color);
+  background: var(--blue);
   color: white;
   border: none;
   border-radius: 6px;
@@ -81,7 +111,7 @@
 }
 
 .rebuild-button:hover {
-  background: var(--primary-hover);
+  background: #2f6fe0;
 }
 
 .rebuild-button:disabled {
@@ -105,27 +135,27 @@
 }
 
 .asset-item {
-  background: var(--secondary-bg);
-  border: 1px solid var(--border-color);
+  background: #0a111b;
+  border: 1px solid #334157;
   border-radius: 6px;
   padding: 12px;
   transition: border-color 0.2s;
 }
 
 .asset-item-uploaded {
-  border-color: var(--success-color);
+  border-color: var(--green);
 }
 
 .asset-item-generated {
-  border-color: var(--success-color);
+  border-color: var(--green);
 }
 
 .asset-item-failed {
-  border-color: var(--error-color);
+  border-color: var(--danger);
 }
 
 .asset-item-generating {
-  border-color: var(--info-color);
+  border-color: var(--blue);
 }
 
 .asset-item-header {
@@ -143,7 +173,7 @@
 
 .asset-type {
   padding: 2px 8px;
-  background: var(--tag-bg);
+  background: #1a2536;
   border-radius: 4px;
   font-size: 12px;
   text-transform: uppercase;
@@ -158,52 +188,52 @@
 }
 
 .asset-item-planned .asset-status {
-  background: var(--neutral-bg);
-  color: var(--neutral-text);
+  background: #1a2536;
+  color: var(--muted);
 }
 
 .asset-item-generating .asset-status {
-  background: var(--info-bg);
-  color: var(--info-text);
+  background: #0b2938;
+  color: var(--blue);
 }
 
 .asset-item-uploaded .asset-status,
 .asset-item-generated .asset-status {
-  background: var(--success-bg);
-  color: var(--success-text);
+  background: #11251f;
+  color: var(--green);
 }
 
 .asset-item-failed .asset-status {
-  background: var(--error-bg);
-  color: var(--error-text);
+  background: #251518;
+  color: #ff9baa;
 }
 
 .asset-description {
   font-size: 14px;
   line-height: 1.5;
-  color: var(--text-secondary);
+  color: #b6c2d1;
   margin-bottom: 8px;
 }
 
 .asset-meta {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--muted);
   margin-bottom: 8px;
 }
 
 .asset-prompt-box {
   margin-top: 8px;
   padding: 10px;
-  background: var(--code-bg);
+  background: #080d15;
   border-radius: 4px;
-  border-left: 3px solid var(--primary-color);
+  border-left: 3px solid var(--blue);
 }
 
 .asset-prompt-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--muted);
   margin-bottom: 6px;
   letter-spacing: 0.5px;
 }
@@ -211,7 +241,7 @@
 .asset-prompt-content {
   font-size: 13px;
   line-height: 1.6;
-  color: var(--text-primary);
+  color: var(--ink);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -227,8 +257,8 @@
 .asset-error {
   margin-top: 8px;
   padding: 8px;
-  background: var(--error-bg);
-  color: var(--error-text);
+  background: #251518;
+  color: #ff9baa;
   border-radius: 4px;
   font-size: 13px;
 }
@@ -237,5 +267,5 @@
 .asset-manifest-empty {
   padding: 32px;
   text-align: center;
-  color: var(--text-muted);
+  color: var(--muted);
 }

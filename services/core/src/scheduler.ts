@@ -1,4 +1,7 @@
+import { createAgentSecretStore } from "./agent-settings";
+import { runAssetGenerationBatch, type AssetGenerationDependencies } from "./asset-generation";
 import type { CoreConfig } from "./config";
+import { CoreObjectStore } from "./object-store";
 import type { CoreRepository } from "./repository";
 
 export async function runScheduler(
@@ -6,6 +9,20 @@ export async function runScheduler(
   config: CoreConfig,
   signal: AbortSignal,
 ): Promise<void> {
+  // Built once and shared across ticks, but only if this deployment configured an
+  // object store. `ObjectStore` requires a bucket, and asset generation is the
+  // scheduler's only use for one: a deployment without it should keep running the
+  // rest of the tick rather than crash-loop on a bucket it does not need.
+  const assetGeneration = assetGenerationDependencies(repository);
+  if (!assetGeneration) {
+    console.log(JSON.stringify({
+      level: "info",
+      event: "asset_generation_disabled",
+      reason: "object store is not configured for the scheduler role",
+    }));
+  }
+  // Swept on the first tick, then on its own slower cadence.
+  let nextAssetSweepAt = 0;
   while (!signal.aborted) {
     const startedAt = Date.now();
     try {
@@ -15,12 +32,26 @@ export async function runScheduler(
         config.projectDocumentIdleSeconds,
       );
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
+      // Generation is off the delivery chain, so a provider outage shows up as
+      // failed assets on the panel and never as a stalled workflow. It also runs
+      // far less often than the tick: the tick is sub-second so job recovery is
+      // responsive, while claiming assets that often would be pure database churn
+      // against work that takes tens of seconds per item.
+      const assets = assetGeneration && Date.now() >= nextAssetSweepAt
+        ? await runAssetGenerationBatch(assetGeneration, signal)
+        : null;
+      if (assets) nextAssetSweepAt = Date.now() + config.assetGenerationPollMilliseconds;
       console.log(JSON.stringify({
         level: "info",
         event: "scheduler_tick",
         recovered,
         projectDocumentsScheduled,
         expiredAuthRecordsRemoved,
+        ...(assets ? {
+          assetsClaimed: assets.claimed,
+          assetsGenerated: assets.generated,
+          assetsFailed: assets.failed,
+        } : {}),
         elapsedMilliseconds: Date.now() - startedAt,
       }));
     } catch (error) {
@@ -31,6 +62,23 @@ export async function runScheduler(
       }));
     }
     await delay(config.pollMilliseconds, signal);
+  }
+}
+
+/**
+ * Wire the asset generator, or return null when this deployment has no object
+ * store. Nothing else on the tick needs one, so its absence disables generation
+ * rather than failing the scheduler.
+ */
+function assetGenerationDependencies(repository: CoreRepository): AssetGenerationDependencies | null {
+  try {
+    return Object.freeze({
+      repository,
+      objectStore: new CoreObjectStore(),
+      secrets: createAgentSecretStore(),
+    });
+  } catch {
+    return null;
   }
 }
 

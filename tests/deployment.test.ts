@@ -330,6 +330,76 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   assert.match(panel, /accept="image\/png,image\/jpeg,image\/webp"/);
 });
 
+test("auto-generate never removes the user's own way to supply an asset", async () => {
+  const panel = await readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8");
+  // Hiding upload while auto-generate was on was a trap: an asset whose prompt the
+  // provider kept rejecting had no way forward, and a user holding the art had to
+  // turn a setting off to use it. Only an in-flight generation hides it, because
+  // that write would race the generator.
+  assert.match(panel, /\{item\.status !== "generating" && \(/);
+  assert.doesNotMatch(panel, /item\.status === "planned" && !autoGenerateEnabled/);
+  // A disabled toggle with no explanation reads as a bug, so each blocking
+  // condition names itself.
+  assert.match(panel, /disabled=\{!configComplete \|\| !providerSupported\}/);
+  assert.match(panel, /需要先在.*设置.*里配置图片生成模型和 API Key/);
+  assert.match(panel, /providerSupported = generationConfig\?\.provider !== "midjourney"/);
+  // An endpoint cannot authenticate a request, so endpoint-only is not configured.
+  assert.match(panel, /configComplete = Boolean\(generationConfig\?\.provider && generationConfig\.apiKeyMask\)/);
+  assert.doesNotMatch(panel, /generationConfig\.apiKeyMask \|\| generationConfig\.apiEndpoint/);
+  // Generation settles in the background with nothing to push the result, so the
+  // panel polls while work is outstanding and stops when it is not.
+  assert.match(panel, /const generationOutstanding = autoGenerateEnabled/);
+  assert.match(panel, /if \(!generationOutstanding\) return;/);
+  // A red failure count with no next step is a dead end; say what to do.
+  assert.match(panel, /可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词/);
+});
+
+test("the asset panel only uses custom properties the themes actually define", async () => {
+  const [assets, globals, product] = await Promise.all([
+    readFile(new URL("../app/asset-manifest.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/product.css", import.meta.url), "utf8"),
+  ]);
+  // The panel was written against a token vocabulary this project never had
+  // (--panel-bg, --error-color, …), so it rendered with no background, no borders,
+  // and no status colours — the very thing that distinguishes "generating" from
+  // "failed". An undefined custom property silently inherits, so nothing warns.
+  const defined = new Set([...`${globals}\n${product}`.matchAll(/--([a-z][a-z0-9-]*)\s*:/g)].map(match => match[1]));
+  const missing = [...new Set([...assets.matchAll(/var\(--([a-z][a-z0-9-]*)\)/g)].map(match => match[1]))]
+    .filter(token => !defined.has(token));
+  assert.deepEqual(missing, [], `asset-manifest.css references undefined tokens: ${missing.join(", ")}`);
+});
+
+test("asset generation runs off the delivery chain on its own cadence", async () => {
+  const scheduler = await readFile(new URL("../services/core/src/scheduler.ts", import.meta.url), "utf8");
+  const generation = await readFile(new URL("../services/core/src/asset-generation.ts", import.meta.url), "utf8");
+  const compose = await readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
+  // Driven by the scheduler tick, not by a job kind: a job would put assets back on
+  // the serial chain they were deliberately taken off.
+  assert.match(scheduler, /runAssetGenerationBatch/);
+  assert.doesNotMatch(generation, /ASSET_GENERATION|enqueue_job|jobKind/);
+  // The tick is sub-second so job recovery stays responsive; claiming assets that
+  // often would be database churn against work that takes tens of seconds.
+  assert.match(scheduler, /Date\.now\(\) >= nextAssetSweepAt/);
+  assert.match(scheduler, /config\.assetGenerationPollMilliseconds/);
+  // A deployment with no object store keeps running the rest of the tick rather
+  // than crash-looping on a bucket it does not need.
+  assert.match(scheduler, /if \(!assetGeneration\) \{/);
+  assert.match(scheduler, /event: "asset_generation_disabled"/);
+  // One asset failing must not abandon the batch, and the failure is recorded
+  // against that item rather than thrown.
+  assert.match(generation, /if \(settled\) generated \+= 1;\s*\n\s*else failed \+= 1;/);
+  assert.match(generation, /repository\.assets\.failGeneration/);
+  // The credential is resolved once per batch, not per asset.
+  assert.match(generation, /Resolve the credential once per batch/);
+  // The scheduler now needs the object store, a Vault token, and egress: `data` is
+  // an internal network and cannot reach a provider on its own.
+  const schedulerService = compose.match(/ {2}core-scheduler:([\s\S]*?)\n {2}core-sandbox:/)?.[1] ?? "";
+  assert.match(schedulerService, /DEVILUDO_ARTIFACT_BUCKET/);
+  assert.match(schedulerService, /DEVILUDO_VAULT_TOKEN_FILE/);
+  assert.match(schedulerService, /networks:[\s\S]*- egress/);
+});
+
 test("every delivery node stays visible, including stages this run will not reach", async () => {
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
   // A profile filter on the rendered list made the signing and publication nodes
@@ -347,6 +417,42 @@ test("every delivery node stays visible, including stages this run will not reac
   // The rerun control is now an icon that appears on hover.
   assert.match(studio, /className="product-delivery-stage-rerun-icon"/);
   assert.match(studio, /<RerunIcon \/>/);
+});
+
+test("the rerun control overlays the stage marker and stays reachable without hover", async () => {
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../app/product.css", import.meta.url), "utf8");
+  const icons = await readFile(new URL("../components/console/Icons.tsx", import.meta.url), "utf8");
+  assert.match(icons, /export function RerunIcon/);
+  // The icon carries no text, so the label has to name the stage it reruns and the
+  // downstream supersession — a bare "rerun" tooltip would not say what is lost.
+  assert.match(studio, /aria-label=\{text\(\s*`从「\$\{chineseLabel\}」重新执行，之后的阶段都会重跑`/);
+  const overlay = styles.match(/^\.product-delivery-stage-rerun-icon \{([\s\S]*?)\n\}/m)?.[1] ?? "";
+  // It occupies the marker's own 36px square rather than floating below, where it
+  // used to sit on top of the stage number and label.
+  assert.match(overlay, /height: 36px/);
+  assert.match(overlay, /width: 36px/);
+  assert.match(overlay, /top: 0/);
+  assert.doesNotMatch(overlay, /border-radius/);
+  // Above the marker (z-index 1), so the two never blend into each other.
+  assert.match(overlay, /z-index: 3/);
+  // Hidden until the stage is hovered, and non-interactive while hidden so a click
+  // on an invisible control cannot fire a rerun.
+  assert.match(overlay, /opacity: 0/);
+  assert.match(overlay, /pointer-events: none/);
+  assert.match(styles, /\.product-delivery-stage:hover \.product-delivery-stage-rerun-icon \{\s*opacity: 1;\s*pointer-events: auto;/);
+  // Keyboard users never hover, so focus has to reveal it too.
+  assert.match(styles, /\.product-delivery-stage-rerun-icon:focus-visible \{[^}]*opacity: 1/);
+  assert.match(styles, /\.product-delivery-stage-rerun-icon:focus-visible \{[^}]*pointer-events: auto/);
+  // Neither does a touch screen: there the overlay is a persistent corner badge.
+  assert.match(styles, /@media \(hover: none\) \{\s*\.product-delivery-stage-rerun-icon \{[^}]*opacity: 1/);
+  // A dimmed not-started stage has to become legible once it is the hover target.
+  assert.match(styles, /\.product-delivery-stage\.status-pending:hover \{\s*opacity: 1;/);
+  // The click acknowledgement is motion, so it has to be dropped under reduce.
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.product-delivery-stage-rerun-icon:active svg \{ animation: none; \}/);
+  // The old text button is gone from both the markup and the stylesheet.
+  assert.doesNotMatch(studio, /product-delivery-stage-rerun"|从这里重跑|RE-RUN FROM HERE/);
+  assert.doesNotMatch(styles, /\.product-delivery-stage-rerun \{/);
 });
 
 test("one rerun endpoint covers every delivery node once the workflow is at rest", async () => {
