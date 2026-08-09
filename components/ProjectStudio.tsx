@@ -28,7 +28,7 @@ import {
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetManifestPanel } from "./AssetManifestPanel";
-import { FileIcon, PlusIcon, RerunIcon } from "./console/Icons";
+import { ArrowIcon, FileIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 import { useProductSession } from "./ProductShell";
 
@@ -618,29 +618,34 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       <RerunIcon />
                     </button>
                   ) : null}
+                  {/* The asynchronous asset branch hangs off this stage rather than
+                      being absolutely positioned in the canvas: the Agent plans the
+                      manifest, so the branch belongs to that node and follows it
+                      wherever the flex track puts it. */}
+                  {kind === "AGENT_GENERATION" ? (
+                    <div className="product-delivery-async-branch">
+                      <span aria-hidden="true" className="product-delivery-branch-line" />
+                      <button
+                        aria-expanded={assetPanelExpanded}
+                        className={`product-delivery-async-node ${assetPanelExpanded ? "is-expanded" : ""}`}
+                        onClick={() => setAssetPanelExpanded(!assetPanelExpanded)}
+                        type="button"
+                      >
+                        <span aria-hidden="true" className="product-delivery-async-marker">◈</span>
+                        <span className="product-delivery-async-copy">
+                          <b>{text("图片素材", "ASSET GEN")}</b>
+                          <small>{assetPanelExpanded
+                            ? text("收起素材清单", "Hide asset list")
+                            : text("异步 · 查看清单", "Async · view list")}</small>
+                        </span>
+                        <ArrowIcon aria-hidden="true" className="product-delivery-async-chevron" />
+                      </button>
+                    </div>
+                  ) : null}
                 </li>
               );
             })}
           </ol>
-
-          <div className="product-delivery-async-track">
-            <svg className="product-delivery-branch-line" height="120" preserveAspectRatio="none" viewBox="0 0 200 120" width="100%">
-              <path d="M 100 0 Q 100 30, 100 60 L 100 120" fill="none" stroke="currentColor" strokeDasharray="3,3" strokeWidth="2" />
-            </svg>
-            <button
-              aria-expanded={assetPanelExpanded}
-              aria-label={text("游戏素材生成", "Asset generation")}
-              className={`product-delivery-async-node ${assetPanelExpanded ? "is-expanded" : ""}`}
-              onClick={() => setAssetPanelExpanded(!assetPanelExpanded)}
-              type="button"
-            >
-              <div className="product-delivery-stage-marker" aria-hidden="true">◈</div>
-              <span className="product-delivery-stage-number">A1</span>
-              <b>{text("图片素材", "ASSET GEN")}</b>
-              <strong>{text("异步", "ASYNC")}</strong>
-              <small>{text("点击查看素材清单", "Click to view assets")}</small>
-            </button>
-          </div>
         </div>
         {canRerunStages ? (
           <p className="product-delivery-rerun-hint">

@@ -506,6 +506,43 @@ test("project delivery is a top horizontal pipeline without the game specificati
   assert.match(styles, /\.product-delivery-stage\.status-pending/);
 });
 
+test("the async asset branch is anchored to its stage, not placed by a guessed offset", async () => {
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../app/product.css", import.meta.url), "utf8");
+  // The branch used to be a sibling of the track positioned at `calc(8.333% + 18px)`
+  // — one twelfth of the canvas, chosen to look like the first of six stages. That
+  // is wrong the moment anything changes: the fraction is of the padded canvas, the
+  // track carries a min-width so it stops tracking the percentage once the panel
+  // scrolls, and adding or reordering a stage silently moves the anchor. It now
+  // renders inside the AGENT_GENERATION cell, which is also the stage that actually
+  // plans the manifest.
+  assert.match(studio, /kind === "AGENT_GENERATION" \? \(\s*<div className="product-delivery-async-branch">/);
+  assert.doesNotMatch(styles, /8\.333%/);
+  const branch = styles.match(/^\.product-delivery-async-branch \{([\s\S]*?)\n\}/m)?.[1] ?? "";
+  assert.match(branch, /top: 100%/);
+  assert.match(branch, /left: 50%/);
+  assert.match(branch, /transform: translateX\(-50%\)/);
+  // Capped by the stage's own width, so the branch cannot spill under a neighbour
+  // however narrow the track gets.
+  assert.match(branch, /width: min\(190px, 100%\)/);
+  // Absolute positioning contributes no height, so the track has to reserve the
+  // room or the branch overlaps whatever follows the pipeline.
+  assert.match(styles, /^\.product-delivery-track \{[\s\S]*?margin: 0 0 88px;/m);
+  // The branch inherits --stage-line from the stage, so it is themed by the same
+  // status that colours the node it hangs from instead of a hardcoded grey.
+  assert.match(styles, /\.product-delivery-branch-line \{[\s\S]*?border-left: 2px dashed var\(--stage-line\)/);
+  assert.match(styles, /\.product-delivery-async-node \{[\s\S]*?border: 2px solid var\(--stage-line\)/);
+  // A disclosure needs a disclosure glyph: the cycle icon means "run again" and is
+  // already the rerun affordance on every stage in this same track.
+  assert.match(studio, /<ArrowIcon aria-hidden="true" className="product-delivery-async-chevron"/);
+  assert.match(styles, /\.product-delivery-async-node\.is-expanded \.product-delivery-async-chevron \{[\s\S]*?transform: rotate\(-90deg\)/);
+  // aria-expanded is the state a screen reader announces, and the visible label has
+  // to agree with it rather than always inviting the user to open.
+  assert.match(studio, /aria-expanded=\{assetPanelExpanded\}/);
+  assert.match(studio, /assetPanelExpanded\s*\?\s*text\("收起素材清单", "Hide asset list"\)/);
+  assert.match(styles, /\.product-delivery-async-node:focus-visible \{[\s\S]*?outline: 2px solid var\(--blue\)/);
+});
+
 test("the baseline repair replays functions from the baseline rather than copying them", async () => {
   const repair = await readFile(new URL("../scripts/repair-local-baseline.mjs", import.meta.url), "utf8");
   const ddl = await readFile(

@@ -1266,6 +1266,8 @@ textarea {
   .typing-dots i { animation: none; }
   .product-delivery-stage.status-active .product-delivery-stage-marker { animation: none; }
   .product-delivery-stage-rerun-icon:active svg { animation: none; }
+  /* The chevron still turns to show the open state; only the tween is dropped. */
+  .product-delivery-async-chevron { transition: none; }
 }
 
 /* Core project workspace */
@@ -1774,7 +1776,6 @@ textarea {
 }
 
 .product-delivery-canvas {
-  min-height: 240px;
   padding: 20px 18px 22px;
   position: relative;
 }
@@ -1782,7 +1783,10 @@ textarea {
 .product-delivery-track {
   display: flex;
   list-style: none;
-  margin: 0;
+  /* The async branch below is absolutely positioned and contributes no height, so
+     the room for it is reserved here. Keeping the reserve on the track means it
+     travels with the branch instead of being a canvas min-height to remember. */
+  margin: 0 0 88px;
   min-width: 920px;
   overflow: visible;
   padding: 0;
@@ -1790,45 +1794,124 @@ textarea {
   z-index: 1;
 }
 
-.product-delivery-async-track {
-  left: calc(8.333% + 18px);
+/* The branch hangs from the Agent Generation cell rather than being placed by a
+   percentage of the canvas: the track is a flex row with a min-width, so any
+   fraction of the container stops describing where a stage actually is as soon as
+   the panel scrolls. Anchoring to the cell means the branch follows its stage at
+   every width, with no number to keep in sync. */
+.product-delivery-async-branch {
+  left: 50%;
+  padding-top: 16px;
   position: absolute;
-  top: 102px;
-  width: 140px;
-  z-index: 0;
+  top: 100%;
+  transform: translateX(-50%);
+  width: min(190px, 100%);
+  z-index: 2;
 }
 
+/* Drawn as a bordered box rather than an SVG path: two dashed rules that inherit
+   the stage's own colour, so the branch reads as part of the pipeline instead of a
+   separately-themed graphic. */
 .product-delivery-branch-line {
-  color: #2f3b4d;
-  left: 50%;
+  border-bottom-left-radius: 3px;
+  border-left: 2px dashed var(--stage-line);
+  bottom: 12px;
+  left: calc(50% - 1px);
   position: absolute;
-  top: -82px;
-  transform: translateX(-50%);
+  top: 0;
   width: 2px;
 }
 
 .product-delivery-async-node {
   align-items: center;
-  background: transparent;
-  border: none;
+  background: #0c1420;
+  border: 2px solid var(--stage-line);
   color: inherit;
   cursor: pointer;
   display: flex;
-  flex-direction: column;
   font: inherit;
-  padding: 8px 12px;
-  text-align: center;
-  transition: opacity 0.2s;
+  gap: 9px;
+  padding: 8px 10px;
+  position: relative;
+  text-align: left;
+  transition: background .14s linear, border-color .14s linear;
   width: 100%;
 }
 
 .product-delivery-async-node:hover {
-  opacity: 0.85;
+  background: #0b2130;
+  border-color: var(--blue);
 }
 
-.product-delivery-async-node.is-expanded .product-delivery-stage-marker {
+.product-delivery-async-node:focus-visible {
   border-color: var(--blue);
-  box-shadow: 0 0 12px rgba(53, 196, 239, 0.3);
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.product-delivery-async-node.is-expanded {
+  background: #0b2938;
+  border-color: var(--blue);
+}
+
+.product-delivery-async-marker {
+  align-items: center;
+  border: 2px solid var(--stage-line);
+  color: var(--blue);
+  display: flex;
+  flex: none;
+  font: 900 10px var(--font-geist-mono), monospace;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.product-delivery-async-node.is-expanded .product-delivery-async-marker,
+.product-delivery-async-node:hover .product-delivery-async-marker {
+  border-color: var(--blue);
+}
+
+/* min-width: 0 lets the label ellipsize instead of forcing the row wider than the
+   stage it hangs under. */
+.product-delivery-async-copy {
+  display: block;
+  min-width: 0;
+  flex: 1;
+}
+
+.product-delivery-async-copy b {
+  color: var(--ink);
+  display: block;
+  font: 800 9px/1.35 var(--font-geist-mono), monospace;
+  text-transform: uppercase;
+}
+
+.product-delivery-async-copy small {
+  color: #66758a;
+  display: block;
+  font: 7px/1.45 var(--font-geist-mono), monospace;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-delivery-async-chevron {
+  color: #66758a;
+  flex: none;
+  height: 14px;
+  transform: rotate(90deg);
+  transition: color .14s linear, transform .16s ease;
+  width: 14px;
+}
+
+.product-delivery-async-node.is-expanded .product-delivery-async-chevron {
+  color: var(--blue);
+  transform: rotate(-90deg);
+}
+
+.product-delivery-async-node:hover .product-delivery-async-chevron {
+  color: var(--blue);
 }
 
 .product-delivery-stage {
@@ -1840,6 +1923,7 @@ textarea {
   position: relative;
   text-align: center;
 }
+
 
 .product-delivery-stage:hover .product-delivery-stage-rerun-icon {
   opacity: 1;
