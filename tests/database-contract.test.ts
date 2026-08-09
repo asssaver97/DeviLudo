@@ -121,6 +121,23 @@ test("migration upgrades compatible databases in order and still rejects incompa
   assert.match(reset, /DEVILUDO_PROJECTS_ROOT/);
 });
 
+test("upgraded databases restore workflow helper privileges after revoking PUBLIC execute", async () => {
+  const privileges = await readFile(
+    new URL("../infra/postgres/migrations/009_workflow_helper_privileges.sql", import.meta.url),
+    "utf8",
+  );
+  for (const helper of [
+    "delivery_stages(deviludo.workflow_profile)",
+    "stage_running_state(deviludo.job_kind)",
+  ]) {
+    assert.match(
+      privileges,
+      new RegExp(`GRANT EXECUTE ON FUNCTION deviludo\\.${helper.replace(/[().]/g, "\\$&")}[\\s\\S]*deviludo_api, deviludo_scheduler, deviludo_sandbox`),
+    );
+  }
+  assert.doesNotMatch(privileges, /\bPUBLIC\b[^\n]*;/);
+});
+
 test("an unroutable signal kind is rejected rather than accepted and ignored", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   // The routing below the guard is a chain of conditionals with no fallback, so a
