@@ -505,3 +505,41 @@ test("project delivery is a top horizontal pipeline without the game specificati
   assert.match(styles, /\.product-delivery-stage\.status-active/);
   assert.match(styles, /\.product-delivery-stage\.status-pending/);
 });
+
+test("the baseline repair replays functions from the baseline rather than copying them", async () => {
+  const repair = await readFile(new URL("../scripts/repair-local-baseline.mjs", import.meta.url), "utf8");
+  const ddl = await readFile(
+    new URL("../infra/postgres/repair/001_asset_baseline_catchup.sql", import.meta.url),
+    "utf8",
+  );
+  // Duplicating the function bodies into the repair file is what would let the two
+  // drift apart, recreating the problem the repair exists to fix. They are read out
+  // of the baseline instead, and the count is checked against the file so a body the
+  // scanner cannot parse fails loudly rather than being skipped.
+  assert.doesNotMatch(ddl, /CREATE OR REPLACE FUNCTION/);
+  assert.match(repair, /extractFunctions\(baseline\)/);
+  assert.match(repair, /functions\.length !== declared/);
+  // A SECURITY DEFINER function replaced without its owner would run as whoever ran
+  // the repair, silently widening what the sweep can reach.
+  assert.match(repair, /ALTER FUNCTION deviludo[\\.]+\$\{match\[1\]\}/);
+  assert.match(repair, /OWNER TO \[a-z_\]\+/);
+  // The repair rewrites function bodies in place, which is a local recovery step;
+  // shared databases get the reviewed baseline.
+  assert.match(repair, /NODE_ENV === "production"/);
+  assert.match(repair, /Refusing to repair a production database/);
+  // The digest is the claim that the repair completed, so it has to be written last.
+  assert.ok(
+    repair.indexOf("SET source_digest = $1") > repair.indexOf("applied.functions.push"),
+    "the source digest must be stamped only after the functions are replaced",
+  );
+  // Re-running it must be safe: this is aimed at databases that already hold the
+  // user's projects, so the DDL adds what is missing and never recreates a table.
+  assert.match(ddl, /CREATE TABLE IF NOT EXISTS deviludo\.asset_manifests/);
+  assert.match(ddl, /CREATE TABLE IF NOT EXISTS deviludo\.asset_items/);
+  assert.doesNotMatch(ddl, /DROP TABLE|TRUNCATE|DELETE FROM/);
+  // The asset tables carry workspace data, so isolation has to arrive with them.
+  assert.match(ddl, /ENABLE ROW LEVEL SECURITY/);
+  assert.match(ddl, /FORCE ROW LEVEL SECURITY/);
+  assert.match(ddl, /workspace_id = deviludo\.current_workspace_id\(\)/);
+  assert.match(ddl, /GRANT SELECT, UPDATE ON deviludo\.asset_items TO deviludo_claim_executor/);
+});

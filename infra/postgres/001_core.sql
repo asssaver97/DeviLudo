@@ -56,10 +56,17 @@ CREATE TYPE deviludo.artifact_kind AS ENUM (
   'PUBLISH_RECEIPT', 'CLEAN_INSTALL_REPORT'
 );
 
+-- `compatibility` states which shape of the schema this is and only changes when
+-- that shape changes incompatibly, so it cannot distinguish a current database
+-- from one whose functions predate this file. `source_digest` records the exact
+-- bytes that were applied, which is what lets the migration detect drift instead
+-- of skipping over it. It is written by the migration after applying this file,
+-- because the file cannot hash itself.
 CREATE TABLE deviludo.schema_metadata (
   singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
   baseline text NOT NULL,
   compatibility text NOT NULL,
+  source_digest text CHECK (source_digest IS NULL OR source_digest ~ '^sha256:[0-9a-f]{64}$'),
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility)
@@ -1260,6 +1267,18 @@ DECLARE
   stage_index integer;
   downstream_stages deviludo.job_kind[];
 BEGIN
+  -- The routing below is a chain of guarded branches, so a kind this version does
+  -- not know falls through it: the signal row inserts, the function returns true,
+  -- and nothing moves. That reaches the user as a button that does nothing, with
+  -- no error anywhere to explain it -- the exact shape of a database whose
+  -- functions predate the caller. Reject the kind up front instead, where it is
+  -- still distinguishable from a known kind whose state guard legitimately did
+  -- not match.
+  IF p_signal_kind NOT IN (
+    'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED', 'EXTERNAL_APPROVAL'
+  ) THEN
+    RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version', p_signal_kind;
+  END IF;
   SELECT * INTO workflow
     FROM deviludo.workflow_instances
    WHERE id = p_workflow_id

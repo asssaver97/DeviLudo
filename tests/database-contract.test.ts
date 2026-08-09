@@ -113,6 +113,47 @@ test("migration refuses legacy compatibility and requires the destructive reset"
   assert.match(reset, /DEVILUDO_PROJECTS_ROOT/);
 });
 
+test("an unroutable signal kind is rejected rather than accepted and ignored", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  // The routing below the guard is a chain of conditionals with no fallback, so a
+  // kind this schema does not know would insert its row, return true, and move
+  // nothing -- which reaches the user as a control that does nothing and produces
+  // no error to explain it. That is what a database running functions older than
+  // its caller actually looks like, so the kind is checked before any of it.
+  assert.match(
+    sql,
+    /IF p_signal_kind NOT IN \(\s*'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED', 'EXTERNAL_APPROVAL'\s*\) THEN\s*RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version'/,
+  );
+  // The guard has to precede the routing, or an unknown kind reaches the branches
+  // it is meant to protect.
+  const guard = sql.indexOf("cannot be routed by this schema version");
+  const firstBranch = sql.indexOf("IF p_signal_kind = 'STAGE_RERUN_REQUESTED' THEN");
+  assert.ok(guard > 0 && firstBranch > guard, "the signal kind guard must precede signal routing");
+  // Every kind the API is allowed to send must be routable, or that endpoint is
+  // shipping a control the database will reject.
+  const api = await readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8");
+  const declared = [...api.matchAll(/kind: "([A-Z_]+)"/g)].map(match => match[1]);
+  for (const kind of new Set(declared.filter(value => value.endsWith("_REQUESTED") || value.endsWith("_APPROVED")))) {
+    assert.match(sql, new RegExp(`'${kind}'`), `${kind} is sent by the API but unknown to accept_workflow_signal`);
+  }
+});
+
+test("the migration reports a stale baseline instead of skipping over it", async () => {
+  const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
+  // The baseline is a full snapshot, and its compatibility string only changes on
+  // an incompatible reshape, so it cannot distinguish a current database from one
+  // whose functions predate the file. Without a content digest every edit made
+  // after a volume was created is skipped in silence.
+  assert.match(migration, /createHash\("sha256"\)\.update\(source, "utf8"\)/);
+  assert.match(migration, /STALE_BASELINE_RESET_REQUIRED/);
+  assert.match(migration, /source_digest !== sourceDigest/);
+  // The digest has to be stamped when the baseline is applied, or a fresh database
+  // reports itself as drifted on the very next start.
+  assert.match(migration, /UPDATE deviludo\.schema_metadata SET source_digest = \$1/);
+  const sql = await readFile(sqlUrl, "utf8");
+  assert.match(sql, /source_digest text CHECK \(source_digest IS NULL OR source_digest ~ '\^sha256:\[0-9a-f\]\{64\}\$'\)/);
+});
+
 test("instance Agent settings are frozen into new workspace jobs by secret reference", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   assert.match(sql, /agent_settings deviludo\.instance_agent_settings%ROWTYPE/);
