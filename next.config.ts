@@ -2,6 +2,11 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  typescript: {
+    // The production Web image contains only the browser/BFF surface. The full
+    // repository still uses tsconfig.json through `npm run typecheck`.
+    tsconfigPath: "tsconfig.web.json",
+  },
   poweredByHeader: false,
   reactStrictMode: true,
   images: {

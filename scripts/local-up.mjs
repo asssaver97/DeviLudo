@@ -1,14 +1,20 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { readFile, writeFile } from "node:fs/promises";
+import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstat, readFile, readlink, readdir, writeFile } from "node:fs/promises";
 import { request } from "node:http";
+import { relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
+const rootPath = fileURLToPath(root);
 const composeProject = process.env.COMPOSE_PROJECT_NAME?.trim() || "deviludo-local";
 const startupCacheFile = new URL("../.deviludo/local/startup-cache.json", import.meta.url);
+const startupLockFile = fileURLToPath(new URL("../.deviludo/local/local-up.lock", import.meta.url));
+const startupStartedAt = Date.now();
 /**
  * Vault issues the service tokens with a 720h period and the services renew them
  * while they run, so a cache older than a fraction of that window is discarded: a
@@ -16,8 +22,22 @@ const startupCacheFile = new URL("../.deviludo/local/startup-cache.json", import
  * a fingerprint that says nothing about the token's remaining life.
  */
 const startupCacheMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
+const imageCacheMaxAgeMs = 24 * 60 * 60 * 1000;
+const localImageBuilds = Object.freeze([
+  { service: "agent-claude-image", image: "deviludo-agent-claude:local" },
+  { service: "agent-codex-image", image: "deviludo-agent-codex:local" },
+  { service: "godot-builder-image", image: "deviludo-godot-builder:local" },
+  { service: "steam-publisher-image", image: "deviludo-steam-publisher:local" },
+  { service: "e2e-macos-image", image: "deviludo-e2e-macos:local" },
+  { service: "agent-fixture-image", image: "deviludo-agent-fixture:local" },
+  { service: "sandbox-executor-init", image: "deviludo-sandbox-executor:local" },
+  { service: "provider-proxy", image: "deviludo-provider-proxy:local" },
+  { service: "core-api", image: "deviludo-core:local" },
+  { service: "web", image: "deviludo-web:local" },
+]);
 const ciMode = process.env.DEVILUDO_LOCAL_CI === "1";
 const resetIncompatibleBaseline = process.argv.includes("--reset-incompatible-baseline");
+const releaseStartupLock = acquireStartupLock();
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
   throw new Error("DEVILUDO_WEB_HOST_PORT must be a valid TCP port");
@@ -43,10 +63,6 @@ const startupCache = await readStartupCache(dockerIdentity);
 // below describe, so it suppresses the cache write and the next start redoes the
 // initialisation from scratch.
 let baselineReset = false;
-if (!ciMode) {
-  const { stopLocalE2e } = await import("./local-e2e-daemon.mjs");
-  await stopLocalE2e();
-}
 const providerUpstreamProxy = await detectLocalProviderUpstreamProxy();
 const baseEnvironment = {
   ...process.env,
@@ -60,38 +76,46 @@ await execute("docker", [
 // and its service tokens have to be reissued. Both facts follow from the container
 // start time, which is why the fingerprint is built from it.
 const vaultFingerprint = await fingerprintVaultInit();
-if (!matchesStartupCache("vaultInit", vaultFingerprint)) await refreshLocalVaultTokens(baseEnvironment);
+let credentialConsumersStopped = false;
+if (!matchesStartupCache("vaultInit", vaultFingerprint)) {
+  await stopCredentialConsumers(baseEnvironment);
+  credentialConsumersStopped = true;
+  await refreshLocalVaultTokens(baseEnvironment);
+}
 const retainedJobRuntimeImages = await retainActiveJobRuntimeImages(baseEnvironment);
-await execute("docker", [
-  "compose", "-f", "infra/docker-compose.yml", "stop",
-  "web", "core-api", "core-scheduler", "core-sandbox", "sandbox-executord",
-], { cwd: root, env: baseEnvironment, maxBuffer: 2 * 1024 * 1024 });
 await import("./local-identity.mjs");
 // Buildx stamps a fresh provenance attestation into the image config on every
 // build, so an entirely cached rebuild still mints a new image id. Nothing here
 // consumes that provenance, and the churn would re-register every runtime digest
 // and rewrite the executor's allowlist on each start, so it is turned off to keep
 // an unchanged source tree producing an unchanged image.
-console.log(JSON.stringify({ event: "local_up_stage", stage: "building_images", message: "正在构建本地运行镜像，这一步首次运行可能需要数分钟" }));
-await executeVisible("docker", ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build",
-  "agent-claude-image", "agent-codex-image", "godot-builder-image", "steam-publisher-image", "e2e-macos-image",
-  "agent-fixture-image", "sandbox-executor-init", "provider-proxy", "core-api", "web"], {
-  cwd: root,
-  env: { ...process.env, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" },
-});
-console.log(JSON.stringify({ event: "local_up_stage", stage: "images_ready" }));
-const imageIds = await Promise.all([
-  "deviludo-agent-claude:local", "deviludo-agent-codex:local", "deviludo-godot-builder:local",
-  "deviludo-steam-publisher:local", "deviludo-e2e-macos:local", "deviludo-agent-fixture:local",
-].map(async image => (await execute("docker", ["image", "inspect", "--format", "{{.Id}}", image])).stdout.trim()));
+const imageInputFingerprint = await fingerprintLocalImageInputs();
+let imageIds = await reusableLocalImageIds(imageInputFingerprint);
+let imagesBuilt = false;
+let imageBuiltAt = startupCache.imageBuiltAt;
+if (!imageIds) {
+  const imageBuildStartedAt = Date.now();
+  console.log(JSON.stringify({ event: "local_up_stage", stage: "building_images", message: "源码或镜像基线已变化，正在构建本地运行镜像" }));
+  await executeVisible("docker", ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build",
+    ...localImageBuilds.map(entry => entry.service)], {
+    cwd: root,
+    env: { ...process.env, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" },
+  });
+  imageIds = await inspectLocalImageIds();
+  imagesBuilt = true;
+  imageBuiltAt = new Date().toISOString();
+  console.log(JSON.stringify({ event: "local_up_stage", stage: "images_ready", durationMs: Date.now() - imageBuildStartedAt }));
+} else {
+  console.log(JSON.stringify({ event: "local_up_stage", stage: "images_reused", message: "源码未变化，复用已验证镜像" }));
+}
 const runtimeImages = JSON.stringify({
-  AGENT_CLAUDE: imageIds[0],
-  AGENT_CODEX: imageIds[1],
-  GODOT_BUILDER: imageIds[2],
-  STEAM_PUBLISHER: imageIds[3],
-  E2E_LINUX: imageIds[4],
-  E2E_WINDOWS: imageIds[4],
-  E2E_MACOS: imageIds[4],
+  AGENT_CLAUDE: imageIds["deviludo-agent-claude:local"],
+  AGENT_CODEX: imageIds["deviludo-agent-codex:local"],
+  GODOT_BUILDER: imageIds["deviludo-godot-builder:local"],
+  STEAM_PUBLISHER: imageIds["deviludo-steam-publisher:local"],
+  E2E_LINUX: imageIds["deviludo-e2e-macos:local"],
+  E2E_WINDOWS: imageIds["deviludo-e2e-macos:local"],
+  E2E_MACOS: imageIds["deviludo-e2e-macos:local"],
 });
 // Reading the socket group means starting a container purely to stat one file,
 // which is the most expensive probe here. The group belongs to the daemon, so the
@@ -103,8 +127,10 @@ const environment = {
   DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE: "LOCAL_HOST",
   DEVILUDO_CLAUDE_CODE_VERSION: claudeVersion ?? "NOT_INSTALLED",
   DEVILUDO_CODEX_CLI_VERSION: codexVersion ?? "NOT_INSTALLED",
-  DEVILUDO_EXECUTOR_ALLOWED_IMAGES: [...new Set([...imageIds, ...retainedJobRuntimeImages])].join(","),
-  DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE: imageIds[5],
+  DEVILUDO_EXECUTOR_ALLOWED_IMAGES: [...new Set([
+    ...Object.values(JSON.parse(runtimeImages)), ...retainedJobRuntimeImages,
+  ])].join(","),
+  DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE: imageIds["deviludo-agent-fixture:local"],
   DEVILUDO_DOCKER_GID: dockerSocketGid,
   DEVILUDO_RUNTIME_IMAGES_JSON: runtimeImages,
 };
@@ -113,13 +139,20 @@ await persistLocalComposeEnvironment(environment);
 // the host, so it has to re-run when either side changes: the volume identity, or
 // the bytes it copies in.
 const executorSecretsFingerprint = await fingerprintExecutorSecrets();
-if (!matchesStartupCache("executorSecrets", executorSecretsFingerprint)) await refreshLocalExecutorSecrets(environment);
+if (!matchesStartupCache("executorSecrets", executorSecretsFingerprint)) {
+  if (!credentialConsumersStopped) {
+    await stopCredentialConsumers(environment);
+    credentialConsumersStopped = true;
+  }
+  await refreshLocalExecutorSecrets(environment);
+}
 // Both remaining init containers are reachable only through the init profile, so
 // nothing else runs them and a skip has to be justified by the committed database
 // state rather than a recorded fingerprint. One query reads everything the two
 // containers would write, for a fraction of the cost of starting either.
 const instanceState = await readLocalInstanceState(environment);
-const migrationRan = await migrateWithOptionalBaselineReset(environment);
+const expectedMigrationLedger = await readExpectedMigrationLedger();
+const migrationRan = await migrateWithOptionalBaselineReset(environment, instanceState, expectedMigrationLedger);
 const initialized = await bootstrapInstance(environment, runtimeImages, instanceState, migrationRan);
 await execute("docker", [
   "compose",
@@ -128,8 +161,31 @@ await execute("docker", [
   "-d",
   "--wait",
 ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
-// Recorded only once the stack is up, so a start that fails midway leaves the
-// previous fingerprints in place and the next attempt redoes the work.
+let e2ePid = null;
+let e2eConfigurationFingerprint = null;
+if (!ciMode) {
+  if (!initialized.macNodeId) throw new Error("Local macOS E2E node initialization failed");
+  const e2eConfiguration = {
+    nodeId: initialized.macNodeId,
+    poolKind: "E2E_MACOS",
+    coreUrl: process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080",
+    token: process.env.DEVILUDO_E2E_NODE_TOKEN ?? "local-e2e-node-token",
+    identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
+  };
+  await writeFile(new URL("../.deviludo/local/e2e-macos.json", import.meta.url), JSON.stringify(e2eConfiguration, null, 2), { mode: 0o600 });
+  e2eConfigurationFingerprint = digest([
+    "e2e-macos", imageInputFingerprint, JSON.stringify(e2eConfiguration),
+    await readOptionalFile(new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url)),
+  ]);
+  const { runningPid, startLocalE2e, stopLocalE2e } = await import("./local-e2e-daemon.mjs");
+  const previousE2ePid = await runningPid();
+  if (previousE2ePid && !matchesStartupCache("e2eConfiguration", e2eConfigurationFingerprint)) {
+    await stopLocalE2e();
+  }
+  e2ePid = await startLocalE2e();
+}
+// Recorded only once the complete stack is up, so a start that fails midway
+// leaves the previous fingerprints in place and the next attempt redoes work.
 if (!baselineReset) {
   await writeStartupCache({
     dockerIdentity,
@@ -137,31 +193,27 @@ if (!baselineReset) {
     dockerSocketGid,
     vaultInit: vaultFingerprint,
     executorSecrets: executorSecretsFingerprint,
+    imageInputFingerprint,
+    imageIds,
+    imageBuiltAt,
+    e2eConfiguration: e2eConfigurationFingerprint,
   });
-}
-let e2ePid = null;
-if (!ciMode) {
-  if (!initialized.macNodeId) throw new Error("Local macOS E2E node initialization failed");
-  await writeFile(new URL("../.deviludo/local/e2e-macos.json", import.meta.url), JSON.stringify({
-    nodeId: initialized.macNodeId,
-    poolKind: "E2E_MACOS",
-    coreUrl: process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080",
-    token: process.env.DEVILUDO_E2E_NODE_TOKEN ?? "local-e2e-node-token",
-    identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
-  }, null, 2), { mode: 0o600 });
-  const { startLocalE2e } = await import("./local-e2e-daemon.mjs");
-  e2ePid = await startLocalE2e();
 }
 console.log(JSON.stringify({
   ready: true,
   ciMode,
   webUrl: `http://127.0.0.1:${webPort}`,
   macE2ePid: e2ePid,
+  startupMs: Date.now() - startupStartedAt,
+  images: imagesBuilt ? "built" : "reused",
+  migrations: migrationRan ? "applied" : "verified",
+  bootstrap: initialized.reused ? "reused" : "refreshed",
   runtimes: {
     claudeCode: claudeVersion,
     codexCli: codexVersion,
   },
 }));
+releaseStartupLock();
 
 /** Stream long-running BuildKit output so local startup never looks frozen. */
 function executeVisible(command, arguments_, options) {
@@ -173,6 +225,158 @@ function executeVisible(command, arguments_, options) {
       else rejectPromise(new Error(`${command} exited with ${code ?? signal ?? "unknown status"}`));
     });
   });
+}
+
+/**
+ * Serialises local startup. Two concurrent BuildKit graphs compete for the same
+ * cache and can turn a warm start into several minutes of duplicate work.
+ */
+function acquireStartupLock() {
+  mkdirSync(resolve(rootPath, ".deviludo/local"), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const token = randomUUID();
+    try {
+      const descriptor = openSync(startupLockFile, "wx", 0o600);
+      writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })}\n`);
+      closeSync(descriptor);
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        try {
+          const current = JSON.parse(readFileSync(startupLockFile, "utf8"));
+          if (current?.token === token) unlinkSync(startupLockFile);
+        } catch { /* already removed or replaced */ }
+      };
+      process.once("exit", release);
+      return release;
+    } catch (error) {
+      if (!(error && typeof error === "object" && error.code === "EEXIST")) throw error;
+      let owner = null;
+      try { owner = JSON.parse(readFileSync(startupLockFile, "utf8")); } catch { /* stale malformed lock */ }
+      const age = Date.now() - Date.parse(owner?.createdAt ?? "");
+      let running = false;
+      if (Number.isSafeInteger(owner?.pid) && owner.pid > 1) {
+        try {
+          process.kill(owner.pid, 0);
+          running = true;
+        } catch (error) {
+          if (error && typeof error === "object" && error.code === "EPERM") running = true;
+        }
+      }
+      if (running && Number.isFinite(age) && age >= 0 && age < 12 * 60 * 60 * 1000) {
+        throw Object.assign(new Error(`LOCAL_UP_ALREADY_RUNNING: PID ${owner.pid} 正在启动本地服务`), {
+          code: "LOCAL_UP_ALREADY_RUNNING",
+        });
+      }
+      try { unlinkSync(startupLockFile); } catch { /* another starter won the race */ }
+    }
+  }
+  throw new Error("LOCAL_UP_LOCK_UNAVAILABLE: 无法获取本地启动锁");
+}
+
+/**
+ * Hashes every tracked or new repository file that survives .dockerignore. The
+ * same context drives every local Dockerfile, so docs and test-only changes no
+ * longer trigger a rebuild while a new COPY input is picked up automatically.
+ */
+async function fingerprintLocalImageInputs() {
+  let stdout;
+  try {
+    ({ stdout } = await execute("git", [
+      "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+    ], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }));
+  } catch {
+    // Source archives without Git metadata remain supported; they simply use
+    // Docker's own cache validation on every start.
+    return null;
+  }
+  const dockerIgnore = await readFile(resolve(rootPath, ".dockerignore"), "utf8");
+  const ignoreRules = dockerIgnore.split(/\r?\n/)
+    .map(rule => rule.trim())
+    .filter(rule => rule && !rule.startsWith("#"));
+  const paths = stdout.split("\0")
+    .filter(path => path && (path === ".dockerignore" || !isDockerIgnored(path, ignoreRules)))
+    .sort();
+  if (paths.length === 0) return null;
+  const hash = createHash("sha256");
+  hash.update("deviludo-local-images-v1\0", "utf8");
+  for (const relativePath of paths) {
+    const absolutePath = resolve(rootPath, relativePath);
+    const bounded = relative(rootPath, absolutePath);
+    if (!bounded || bounded === ".." || bounded.startsWith(`..${sep}`)) {
+      throw new Error(`Image input escapes the repository: ${relativePath}`);
+    }
+    const entry = await lstat(absolutePath);
+    hash.update(`${Buffer.byteLength(relativePath)}:${relativePath}:`, "utf8");
+    if (entry.isSymbolicLink()) {
+      const target = await readlink(absolutePath);
+      hash.update(`link:${Buffer.byteLength(target)}:${target}`, "utf8");
+    } else if (entry.isFile()) {
+      const content = await readFile(absolutePath);
+      hash.update(`file:${content.length}:`, "utf8");
+      hash.update(content);
+    } else {
+      throw new Error(`Unsupported image input: ${relativePath}`);
+    }
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+function isDockerIgnored(path, rules) {
+  let ignored = false;
+  for (const sourceRule of rules) {
+    const negated = sourceRule.startsWith("!");
+    const rule = (negated ? sourceRule.slice(1) : sourceRule).replace(/^\/+|\/+$/g, "");
+    if (!rule) continue;
+    const expression = globExpression(rule);
+    const matched = rule.includes("/")
+      ? expression.test(path) || expression.test(path.split("/").slice(0, -1).join("/"))
+      : path.split("/").some(segment => expression.test(segment));
+    if (matched) ignored = !negated;
+  }
+  return ignored;
+}
+
+function globExpression(pattern) {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === "*" && pattern[index + 1] === "*") {
+      source += ".*";
+      index += 1;
+    } else if (character === "*") source += "[^/]*";
+    else if (character === "?") source += "[^/]";
+    else source += character.replace(/[|\\{}()[\]^$+?.-]/g, "\\$&");
+  }
+  return new RegExp(`${source}$`);
+}
+
+async function reusableLocalImageIds(inputFingerprint) {
+  if (typeof inputFingerprint !== "string" || startupCache.imageInputFingerprint !== inputFingerprint) return null;
+  const builtAt = Date.parse(startupCache.imageBuiltAt ?? "");
+  const age = Date.now() - builtAt;
+  if (!Number.isFinite(builtAt) || age < 0 || age >= imageCacheMaxAgeMs) return null;
+  if (!startupCache.imageIds || typeof startupCache.imageIds !== "object" || Array.isArray(startupCache.imageIds)) return null;
+  try {
+    const current = await inspectLocalImageIds();
+    return localImageBuilds.every(({ image }) => current[image] === startupCache.imageIds[image]) ? current : null;
+  } catch {
+    return null;
+  }
+}
+
+async function inspectLocalImageIds() {
+  const pairs = await Promise.all(localImageBuilds.map(async ({ image }) => {
+    const { stdout } = await execute("docker", ["image", "inspect", "--format", "{{.Id}}", image], {
+      timeout: 15_000,
+      maxBuffer: 64 * 1024,
+    });
+    const id = stdout.trim();
+    if (!/^sha256:[0-9a-f]{64}$/.test(id)) throw new Error(`Local image has an invalid id: ${image}`);
+    return [image, id];
+  }));
+  return Object.freeze(Object.fromEntries(pairs));
 }
 
 /**
@@ -503,6 +707,13 @@ async function refreshLocalVaultTokens(environment) {
   ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
 }
 
+async function stopCredentialConsumers(environment) {
+  await execute("docker", [
+    "compose", "-f", "infra/docker-compose.yml", "stop",
+    "web", "core-api", "core-scheduler", "core-sandbox", "sandbox-executord",
+  ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
+}
+
 async function refreshLocalExecutorSecrets(environment) {
   await execute("docker", [
     "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "sandbox-executor-init",
@@ -540,7 +751,13 @@ async function retainActiveJobRuntimeImages(environment) {
  * not enough to prove that all later migrations are present, and skipping on that
  * signal was exactly how a persistent local volume could keep stale functions.
  */
-async function migrateWithOptionalBaselineReset(environment) {
+async function migrateWithOptionalBaselineReset(environment, state, expectedLedger) {
+  // This is still a full immutable-ledger verification on every start. It avoids
+  // creating a migration container only when the database reports exactly the
+  // versions and checksums present in this checkout.
+  if (state?.baseline === "001 deviludo-core-source-v1" && state.migrations === expectedLedger) {
+    return false;
+  }
   try {
     await runMigration(environment);
     return true;
@@ -586,13 +803,27 @@ async function runMigration(environment) {
 async function bootstrapInstance(environment, runtimeImages, state, migrationRan) {
   if (!migrationRan && !baselineReset) {
     const macNodeId = await matchesBootstrappedInstance(runtimeImages, state);
-    if (macNodeId) return { initialized: true, macNodeId };
+    if (macNodeId) return { initialized: true, macNodeId, reused: true };
   }
   const bootstrap = await execute("docker", [
     "compose", "-f", "infra/docker-compose.yml", "--profile", "init", "run", "--rm",
     "-e", "DEVILUDO_RUNTIME_IMAGES_JSON", "bootstrap-instance",
   ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 });
-  return JSON.parse(bootstrap.stdout);
+  return { ...JSON.parse(bootstrap.stdout), reused: false };
+}
+
+async function readExpectedMigrationLedger() {
+  const migrations = new URL("../infra/postgres/migrations/", import.meta.url);
+  const names = (await readdir(migrations))
+    .filter(name => /^\d{3}_[a-z0-9_]+\.sql$/.test(name))
+    .sort();
+  if (names.length === 0) throw new Error("No versioned database migrations were found");
+  const rows = await Promise.all(names.map(async name => {
+    const source = await readFile(new URL(name, migrations), "utf8");
+    const checksum = `sha256:${createHash("sha256").update(source, "utf8").digest("hex")}`;
+    return `${name.slice(0, -4)}=${checksum}`;
+  }));
+  return rows.join(",");
 }
 
 /**
@@ -630,7 +861,7 @@ async function matchesBootstrappedInstance(runtimeImages, state) {
  * otherwise fail the statement at parse time.
  */
 async function readLocalInstanceState(environment) {
-  const tables = ["schema_metadata", "runtime_images", "server_nodes", "executor_identities"];
+  const tables = ["schema_metadata", "schema_migrations", "runtime_images", "server_nodes", "executor_identities"];
   const present = await queryPostgres(environment, `SELECT ${
     tables.map(table => `to_regclass('deviludo.${table}') IS NOT NULL`).join(" AND ")
   }`);
@@ -645,11 +876,13 @@ async function readLocalInstanceState(environment) {
     "',' ORDER BY executor_id COLLATE \"C\"), '') FROM deviludo.executor_identities WHERE enabled)",
     "|| '|' || coalesce((SELECT id::text FROM deviludo.server_nodes WHERE pool_kind = 'E2E_MACOS'",
     "ORDER BY created_at LIMIT 1), '')",
+    "|| '|' || (SELECT coalesce(string_agg(version || '=' || checksum, ',' ORDER BY version COLLATE \"C\"), '')",
+    "FROM deviludo.schema_migrations)",
   ].join(" "));
   const fields = recorded?.split("|");
-  if (fields?.length !== 5) return null;
-  const [baseline, images, pools, identities, macNodeId] = fields;
-  return { baseline, runtimeImages: images, pools, identities, macNodeId };
+  if (fields?.length !== 6) return null;
+  const [baseline, images, pools, identities, macNodeId, migrations] = fields;
+  return { baseline, runtimeImages: images, pools, identities, macNodeId, migrations };
 }
 
 /**

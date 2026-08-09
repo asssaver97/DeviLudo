@@ -8,15 +8,62 @@ test("cacheable local initialisation is gated while the migration ledger is alwa
   const startup = await readStartup();
   // Each of these steps costs a container creation, so a repeat start must be able
   // to skip the ones whose inputs are unchanged.
-  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", vaultFingerprint\)\) await refreshLocalVaultTokens/);
-  assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", executorSecretsFingerprint\)\) await refreshLocalExecutorSecrets/);
+  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", vaultFingerprint\)\) \{[\s\S]*?await refreshLocalVaultTokens/);
+  assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", executorSecretsFingerprint\)\) \{[\s\S]*?await refreshLocalExecutorSecrets/);
   assert.match(startup, /cachedStartupValue\("dockerSocketGid", dockerIdentity, \/\^\\d\+\$\/\)\s*\?\? await resolveDockerSocketGid\(\)/);
   // Baseline compatibility cannot prove that later versioned migrations are
-  // present, so every start verifies the immutable ledger before bootstrapping.
-  assert.match(startup, /migrateWithOptionalBaselineReset\(environment\)/);
+  // present, so every start compares the complete immutable ledger before it
+  // decides whether creating a migration container is necessary.
+  assert.match(startup, /readExpectedMigrationLedger\(\)/);
+  assert.match(startup, /migrateWithOptionalBaselineReset\(environment, instanceState, expectedMigrationLedger\)/);
+  assert.match(startup, /state\?\.baseline === "001 deviludo-core-source-v1" && state\.migrations === expectedLedger/);
   assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, migrationRan\)/);
   assert.match(startup, /await runMigration\(environment\)/);
-  assert.doesNotMatch(startup, /if \(state\?\.baseline === "001 deviludo-core-source-v1"\) return false;/);
+  assert.match(startup, /if \(!migrationRan && !baselineReset\)/);
+});
+
+test("an unchanged checkout reuses verified images and never runs two local starts concurrently", async () => {
+  const startup = await readStartup();
+  assert.match(startup, /openSync\(startupLockFile, "wx", 0o600\)/);
+  assert.match(startup, /LOCAL_UP_ALREADY_RUNNING/);
+  assert.match(startup, /"ls-files", "--cached", "--others", "--exclude-standard", "-z"/);
+  assert.match(startup, /path === "\.dockerignore" \|\| !isDockerIgnored\(path, ignoreRules\)/);
+  assert.match(startup, /startupCache\.imageInputFingerprint !== inputFingerprint/);
+  assert.match(startup, /age >= imageCacheMaxAgeMs/);
+  assert.match(startup, /current\[image\] === startupCache\.imageIds\[image\]/);
+  assert.match(startup, /if \(!imageIds\) \{[\s\S]*executeVisible\("docker"/);
+  assert.match(startup, /stage: "images_reused"/);
+  // Healthy services are retained. A stop is reserved for rotated credentials,
+  // whose in-memory consumers must reload their token files.
+  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", vaultFingerprint\)\) \{\s*await stopCredentialConsumers/);
+  assert.doesNotMatch(startup, /const startupCache = await readStartupCache\(dockerIdentity\);[\s\S]{0,500}await stopLocalE2e\(\)/);
+});
+
+test("Docker dependency downloads are cached and health checks probe quickly only during startup", async () => {
+  const [compose, dockerignore, web, webTsconfig, ...dockerfiles] = await Promise.all([
+    readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
+    readFile(new URL("../.dockerignore", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile.web", import.meta.url), "utf8"),
+    readFile(new URL("../tsconfig.web.json", import.meta.url), "utf8"),
+    ...["Dockerfile.web", "Dockerfile.core", "Dockerfile.executor", "Dockerfile.agent-claude", "Dockerfile.agent-codex"]
+      .map(name => readFile(new URL(`../${name}`, import.meta.url), "utf8")),
+  ]);
+  for (const dockerfile of dockerfiles) {
+    assert.match(dockerfile, /# syntax=docker\/dockerfile:1\.7/);
+    assert.match(dockerfile, /--mount=type=cache,target=\/root\/\.npm/);
+    assert.match(dockerfile, /--no-audit --no-fund/);
+  }
+  assert.doesNotMatch(web, /COPY \. \./);
+  assert.match(web, /COPY package\.json package-lock\.json \.\//);
+  assert.match(web, /COPY app \.\/app/);
+  assert.match(web, /COPY next\.config\.ts next-env\.d\.ts tsconfig\.json tsconfig\.web\.json/);
+  assert.match(webTsconfig, /"app\/\*\*\/\*\.tsx"/);
+    for (const ignored of ["test-results", "playwright-report", "*.tsbuildinfo"]) {
+    assert.match(dockerignore, new RegExp(`^${ignored.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+  }
+  assert.equal((compose.match(/start_interval: 500ms/g) ?? []).length, 4);
+  assert.equal((compose.match(/start_period: 30s/g) ?? []).length, 4);
+  assert.equal((compose.match(/interval: 10s/g) ?? []).length, 4);
 });
 
 test("a fingerprint that cannot be computed never satisfies a gate", async () => {

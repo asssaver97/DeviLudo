@@ -32,7 +32,7 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(localUp, /retainActiveJobRuntimeImages\(baseEnvironment\)/);
   assert.match(localUp, /state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(localUp, /deviludo-retained-job-runtime/);
-  assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\.\.\.imageIds, \.\.\.retainedJobRuntimeImages\]\)\]/);
+  assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\s*\.\.\.Object\.values\(JSON\.parse\(runtimeImages\)\), \.\.\.retainedJobRuntimeImages/);
   assert.match(localUp, /persistLocalComposeEnvironment\(environment\)/);
   assert.match(localUp, /DEVILUDO_DOCKER_GID/);
   assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);

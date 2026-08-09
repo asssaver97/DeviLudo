@@ -42,9 +42,11 @@ services:
       - ./postgres/001_core.sql:/docker-entrypoint-initdb.d/001_core.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deviludo -d deviludo"]
-      interval: 2s
+      interval: 10s
+      start_interval: 500ms
+      start_period: 30s
       timeout: 3s
-      retries: 30
+      retries: 6
     networks:
       - data
 
@@ -102,9 +104,11 @@ services:
       - "127.0.0.1:${DEVILUDO_CORE_HOST_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
-      interval: 2s
+      interval: 10s
+      start_interval: 500ms
+      start_period: 30s
       timeout: 3s
-      retries: 30
+      retries: 6
     networks:
       - core
       - data
@@ -314,9 +318,11 @@ services:
       - minio-data:/data
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
-      interval: 2s
+      interval: 10s
+      start_interval: 500ms
+      start_period: 30s
       timeout: 3s
-      retries: 30
+      retries: 6
     ports:
       - "127.0.0.1:${DEVILUDO_MINIO_HOST_PORT:-39000}:9000"
     networks:
@@ -431,9 +437,11 @@ services:
       - "127.0.0.1:${DEVILUDO_WEB_HOST_PORT:-3100}:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health/live"]
-      interval: 2s
+      interval: 10s
+      start_interval: 500ms
+      start_period: 30s
       timeout: 3s
-      retries: 30
+      retries: 6
     networks:
       - edge
       - core
