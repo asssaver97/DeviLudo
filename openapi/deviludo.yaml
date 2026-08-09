@@ -93,6 +93,20 @@ paths:
       security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: Immutable specification object registered and workflow started }
+  /v1/projects/{projectId}/approve-release:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: approveSteamRelease
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "202": { description: Owner or admin approved the signed builds for Steam upload }
+        "200": { description: The deterministic approval was already accepted }
+        "403": { description: Workspace owner or admin permission required }
+        "409": { description: Release is not waiting for approval after three-platform signing }
   /v1/projects/{projectId}/retry-agent:
     parameters:
       - in: path

@@ -38,6 +38,34 @@ test("persistent source revisions are immutable, deterministic, and project-scop
   }
 });
 
+test("a bounded manifest can be read from its immutable source revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-source-manifest-"));
+  try {
+    const store = new ProjectSourceStore(root);
+    const agent = Buffer.from(JSON.stringify({ assetManifest: { items: [{ assetKey: "ui/icon" }] } }));
+    const revision = await store.publishFiles({
+      workspaceId,
+      projectId,
+      revision: 1,
+      files: [
+        { path: "project.godot", bytes: Buffer.from("[application]\n") },
+        { path: "agent.json", bytes: agent },
+      ],
+    });
+    assert.deepEqual(await store.readRevisionFile(revision.relativePath, "agent.json", 1024), agent);
+    await assert.rejects(
+      store.readRevisionFile(revision.relativePath, "agent.json", agent.length - 1),
+      /file size is invalid/,
+    );
+    await assert.rejects(
+      store.readRevisionFile(revision.relativePath, "../project.godot", 1024),
+      /路径|path/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("persistent source publication rejects credentials, traversal, and symlinked path components", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-sources-boundary-"));
   try {

@@ -19,13 +19,19 @@ test("the deterministic workflow covers generation, build, three-platform gates 
   snapshot = transition.snapshot;
 
   transition = transitionWorkflow(snapshot, {
-    kind: "JOB_SUCCEEDED", jobKind: "AGENT_GENERATION", targetOperatingSystem: null,
+    kind: "JOB_SUCCEEDED", jobId: "agent-job-1", jobKind: "AGENT_GENERATION", targetOperatingSystem: null,
+    waitForAssets: true,
+  });
+  assert.equal(transition.snapshot.state, "ASSET_GENERATING");
+  assert.deepEqual(transition.enqueue, []);
+  transition = transitionWorkflow(transition.snapshot, {
+    kind: "ASSETS_READY", predecessorJobId: "agent-job-1",
   });
   assert.deepEqual(transition.enqueue.map(command => command.jobKind), ["ARTIFACT_BUILD"]);
   snapshot = transition.snapshot;
 
   transition = transitionWorkflow(snapshot, {
-    kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null,
+    kind: "JOB_SUCCEEDED", jobId: "build-job-1", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null,
   });
   assert.deepEqual(transition.enqueue.map(command => command.poolKind), [
     "E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS",
@@ -34,7 +40,7 @@ test("the deterministic workflow covers generation, build, three-platform gates 
 
   for (const operatingSystem of ["linux", "windows", "macos"] as const) {
     transition = transitionWorkflow(snapshot, {
-      kind: "JOB_SUCCEEDED", jobKind: "E2E_TEST", targetOperatingSystem: operatingSystem,
+      kind: "JOB_SUCCEEDED", jobId: `e2e-job-${operatingSystem}`, jobKind: "E2E_TEST", targetOperatingSystem: operatingSystem,
     });
     snapshot = transition.snapshot;
   }
@@ -43,22 +49,28 @@ test("the deterministic workflow covers generation, build, three-platform gates 
 
   for (const operatingSystem of ["linux", "windows", "macos"] as const) {
     transition = transitionWorkflow(snapshot, {
-      kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_SIGN", targetOperatingSystem: operatingSystem,
+      kind: "JOB_SUCCEEDED", jobId: `sign-job-${operatingSystem}`, jobKind: "ARTIFACT_SIGN", targetOperatingSystem: operatingSystem,
     });
     snapshot = transition.snapshot;
   }
+  assert.equal(snapshot.state, "RELEASE_APPROVAL_PENDING");
+  assert.deepEqual(transition.enqueue, []);
+
+  transition = transitionWorkflow(snapshot, { kind: "RELEASE_APPROVED", approvalId: "approval-1" });
+  snapshot = transition.snapshot;
   assert.equal(snapshot.state, "STEAM_PUBLISHING");
   assert.deepEqual(transition.enqueue.map(command => command.poolKind), ["CORE"]);
+  assert.match(transition.enqueue[0].idempotencyKey, /:publish:approved:approval-1$/);
 
   transition = transitionWorkflow(snapshot, {
-    kind: "JOB_SUCCEEDED", jobKind: "STEAM_PUBLISH", targetOperatingSystem: null,
+    kind: "JOB_SUCCEEDED", jobId: "publish-job-1", jobKind: "STEAM_PUBLISH", targetOperatingSystem: null,
   });
   snapshot = transition.snapshot;
   assert.equal(snapshot.state, "CLEAN_INSTALL_VERIFYING");
 
   for (const operatingSystem of ["linux", "windows", "macos"] as const) {
     transition = transitionWorkflow(snapshot, {
-      kind: "JOB_SUCCEEDED", jobKind: "STEAM_CLEAN_INSTALL", targetOperatingSystem: operatingSystem,
+      kind: "JOB_SUCCEEDED", jobId: `clean-job-${operatingSystem}`, jobKind: "STEAM_CLEAN_INSTALL", targetOperatingSystem: operatingSystem,
     });
     snapshot = transition.snapshot;
   }
@@ -68,10 +80,10 @@ test("the deterministic workflow covers generation, build, three-platform gates 
 test("local validation targets only macOS and ends after E2E", () => {
   let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]);
   snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;
-  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
-  const build = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null });
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "agent-job-1", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
+  const build = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "build-job-1", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null });
   assert.deepEqual(build.enqueue.map(item => item.poolKind), ["E2E_MACOS"]);
-  const complete = transitionWorkflow(build.snapshot, { kind: "JOB_SUCCEEDED", jobKind: "E2E_TEST", targetOperatingSystem: "macos" });
+  const complete = transitionWorkflow(build.snapshot, { kind: "JOB_SUCCEEDED", jobId: "e2e-job-macos", jobKind: "E2E_TEST", targetOperatingSystem: "macos" });
   assert.equal(complete.snapshot.state, "SUCCEEDED");
   assert.deepEqual(complete.enqueue, []);
 });
@@ -79,9 +91,9 @@ test("local validation targets only macOS and ends after E2E", () => {
 test("rerunning a stage reopens a terminal workflow and enqueues only that stage", () => {
   let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]);
   snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;
-  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
-  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null }).snapshot;
-  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobKind: "E2E_TEST", targetOperatingSystem: "macos" }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "agent-job-1", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "build-job-1", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "e2e-job-macos", jobKind: "E2E_TEST", targetOperatingSystem: "macos" }).snapshot;
   assert.equal(snapshot.state, "SUCCEEDED");
   assert.deepEqual(snapshot.completedE2e, ["macos"]);
 
@@ -97,9 +109,10 @@ test("rerunning a stage reopens a terminal workflow and enqueues only that stage
 
   // The chain then advances normally from the rerun point.
   const advanced = transitionWorkflow(rerun.snapshot, {
-    kind: "JOB_SUCCEEDED", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null,
+    kind: "JOB_SUCCEEDED", jobId: "rerun-build-job", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null,
   });
   assert.deepEqual(advanced.enqueue.map(command => command.poolKind), ["E2E_MACOS"]);
+  assert.match(advanced.enqueue[0].idempotencyKey, /:e2e:macos:after:rerun-build-job$/);
 });
 
 test("rerunning a per-platform stage fans out across every target platform", () => {

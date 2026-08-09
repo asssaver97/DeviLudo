@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const execute = promisify(execFile);
@@ -74,7 +74,21 @@ try {
   const source = agentReceipt.details?.sourceRevision;
   if (!source?.relativePath || !source?.digest) throw new Error("Fixture Agent did not publish a persistent source revision");
 
+  const assetContent = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Avv1AAAAAElFTkSuQmCC", "base64");
+  const assetDigest = `sha256:${createHash("sha256").update(assetContent).digest("hex")}`;
+  const assetKey = "ui/smoke-icon";
+  const assetObjectKey = `workspaces/${workspaceId}/projects/${projectId}/assets/${assetKey}-${assetDigest.slice(7, 23)}.png`;
+  await localS3().send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: assetObjectKey,
+    Body: assetContent,
+    ContentType: "image/png",
+    Metadata: { sha256: assetDigest },
+  }));
+  createdKeys.push(assetObjectKey);
+
   const buildJobId = randomUUID();
+  const buildProgress = [];
   const buildReceipt = await runClient({
     schemaVersion: "deviludo.sandbox-plan.v2",
     mode: "RESTRICTED_CONTAINER",
@@ -88,7 +102,14 @@ try {
       jobKind: "ARTIFACT_BUILD",
       runtimeImage: await imageId("deviludo-godot-builder:local"),
       requiredCapabilities: ["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"],
-      inputObjects: agentReceipt.outputObjects,
+      inputObjects: [...agentReceipt.outputObjects, {
+        kind: "ASSET",
+        assetKey,
+        bucket,
+        key: assetObjectKey,
+        sha256: assetDigest,
+        sizeBytes: assetContent.length,
+      }],
       outputContract: { kinds: ["BUILD"], maxBytes: 1_073_741_824 },
       budget: { cpuMillis: 300_000, memoryBytes: 2_147_483_648, networkBytes: 0 },
       timeoutSeconds: 300,
@@ -99,8 +120,11 @@ try {
         sourceDigest: source.digest,
       },
     }),
-  });
+  }, event => buildProgress.push(event));
   assertReceipt(buildReceipt, ["BUILD"]);
+  if (!buildProgress.some(event => event.kind === "PHASE" && /已同步 1 个图片素材/.test(event.content))) {
+    throw new Error("Godot Builder did not materialize the supplied image into the source tree");
+  }
   const build = buildReceipt.outputObjects[0];
   if (build.targetPlatform !== "macos") throw new Error("Godot Builder did not produce a macOS artifact");
   createdKeys.push(build.key);
@@ -122,7 +146,7 @@ try {
       progressEvents: agentProgress.length,
       playerGuidance: "delivered-and-observed",
     },
-    build: { receipt: buildReceipt.schemaVersion, simulated: buildReceipt.simulated },
+    build: { receipt: buildReceipt.schemaVersion, simulated: buildReceipt.simulated, materializedAssets: 1 },
     artifact: { kind: build.kind, targetPlatform: build.targetPlatform, sha256: build.sha256, sizeBytes: build.sizeBytes },
     macE2e: macReport && {
       schemaVersion: macReport.schemaVersion,
@@ -194,12 +218,7 @@ async function assertObjectBytes(object) {
 }
 
 async function runNativeMacE2e(object) {
-  const client = new S3Client({
-    region: "us-east-1",
-    endpoint: "http://127.0.0.1:39000",
-    forcePathStyle: true,
-    credentials: { accessKeyId: "deviludo-local", secretAccessKey: "deviludo-local-secret" },
-  });
+  const client = localS3();
   const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: object.bucket, Key: object.key }), { expiresIn: 300 });
   return runJson(process.execPath, [new URL("./executors/local-macos-job.mjs", import.meta.url).pathname, "test"], {
     schemaVersion: "deviludo.e2e-execution.v1",
@@ -209,6 +228,15 @@ async function runNativeMacE2e(object) {
     projectId,
     payload: {},
     inputs: [{ object, url, expiresAt: new Date(Date.now() + 300_000).toISOString() }],
+  });
+}
+
+function localS3() {
+  return new S3Client({
+    region: "us-east-1",
+    endpoint: "http://127.0.0.1:39000",
+    forcePathStyle: true,
+    credentials: { accessKeyId: "deviludo-local", secretAccessKey: "deviludo-local-secret" },
   });
 }
 

@@ -11,6 +11,7 @@ import type { CoreConfig } from "./config";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
+import { ProjectSourceStore } from "./project-sources";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -113,6 +114,7 @@ export async function runSandbox(
 ): Promise<void> {
   const workerId = process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
   const objectStore = new CoreObjectStore();
+  const projectSources = new ProjectSourceStore(config.projectsRoot);
   let executorAvailable: boolean | null = null;
   while (!signal.aborted) {
     let job: JobProtocolV4 | null = null;
@@ -196,6 +198,9 @@ export async function runSandbox(
         const projectDocument = job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE"
           ? await objectStore.readProjectDocument(job, receipt.outputObjects)
           : null;
+        const agentCompletion = job.jobKind === "AGENT_GENERATION"
+          ? await readAgentCompletion(objectStore, projectSources, job, receipt)
+          : null;
         if (operationId) await repository.finishOperation(job, operationId, receipt.details);
         if (job.jobKind === "AGENT_GENERATION") {
           await repository.appendJobProgress(job, "COMPLETED", "Agent 生成完成，正在登记源码制品");
@@ -207,6 +212,7 @@ export async function runSandbox(
           receipt: Object.freeze({
             ...receipt.details,
             ...(projectDocument ? { projectDocument } : {}),
+            ...(agentCompletion ?? {}),
           }),
           executorReceipt: receipt,
         });
@@ -234,6 +240,46 @@ export async function runSandbox(
         await repository.fail(job, message).catch(() => undefined);
       }
     }
+  }
+}
+
+/**
+ * New runners upload the generated agent.json as the SPECIFICATION object. Jobs
+ * already running during a deployment still use the legacy runner, whose object
+ * contains CLI event output; their source revision is already durably published
+ * by the trusted executor, so fall back to its canonical agent.json instead of
+ * failing an otherwise complete generation during a rolling upgrade.
+ */
+async function readAgentCompletion(
+  objectStore: CoreObjectStore,
+  projectSources: ProjectSourceStore,
+  job: JobProtocolV4,
+  receipt: SandboxReceipt,
+): Promise<Readonly<{ assetManifest: unknown }>> {
+  try {
+    return await objectStore.readAgentCompletion(receipt.outputObjects);
+  } catch {
+    const source = receipt.details.sourceRevision;
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      throw new Error("Agent completion does not contain a published source revision");
+    }
+    const relativePath = (source as Record<string, unknown>).relativePath;
+    const expectedPrefix = `workspaces/${job.workspaceId}/projects/${job.projectId}/revisions/`;
+    if (typeof relativePath !== "string" || !relativePath.startsWith(expectedPrefix)) {
+      throw new Error("Agent completion source revision escaped the project boundary");
+    }
+    const bytes = await projectSources.readRevisionFile(relativePath, "agent.json", 2 * 1024 * 1024);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      throw new Error("Generated source agent.json is not valid JSON");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || !("assetManifest" in parsed)) {
+      throw new Error("Generated source agent.json does not contain an assetManifest");
+    }
+    return Object.freeze({ assetManifest: (parsed as Record<string, unknown>).assetManifest });
   }
 }
 

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { readFile, writeFile } from "node:fs/promises";
@@ -72,13 +72,14 @@ await import("./local-identity.mjs");
 // consumes that provenance, and the churn would re-register every runtime digest
 // and rewrite the executor's allowlist on each start, so it is turned off to keep
 // an unchanged source tree producing an unchanged image.
-await execute("docker", ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build",
+console.log(JSON.stringify({ event: "local_up_stage", stage: "building_images", message: "正在构建本地运行镜像，这一步首次运行可能需要数分钟" }));
+await executeVisible("docker", ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build",
   "agent-claude-image", "agent-codex-image", "godot-builder-image", "steam-publisher-image", "e2e-macos-image",
   "agent-fixture-image", "sandbox-executor-init", "provider-proxy", "core-api", "web"], {
   cwd: root,
   env: { ...process.env, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" },
-  maxBuffer: 20 * 1024 * 1024,
 });
+console.log(JSON.stringify({ event: "local_up_stage", stage: "images_ready" }));
 const imageIds = await Promise.all([
   "deviludo-agent-claude:local", "deviludo-agent-codex:local", "deviludo-godot-builder:local",
   "deviludo-steam-publisher:local", "deviludo-e2e-macos:local", "deviludo-agent-fixture:local",
@@ -118,7 +119,7 @@ if (!matchesStartupCache("executorSecrets", executorSecretsFingerprint)) await r
 // state rather than a recorded fingerprint. One query reads everything the two
 // containers would write, for a fraction of the cost of starting either.
 const instanceState = await readLocalInstanceState(environment);
-const migrationRan = await migrateWithOptionalBaselineReset(environment, instanceState);
+const migrationRan = await migrateWithOptionalBaselineReset(environment);
 const initialized = await bootstrapInstance(environment, runtimeImages, instanceState, migrationRan);
 await execute("docker", [
   "compose",
@@ -161,6 +162,18 @@ console.log(JSON.stringify({
     codexCli: codexVersion,
   },
 }));
+
+/** Stream long-running BuildKit output so local startup never looks frozen. */
+function executeVisible(command, arguments_, options) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, arguments_, { ...options, stdio: "inherit" });
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolvePromise();
+      else rejectPromise(new Error(`${command} exited with ${code ?? signal ?? "unknown status"}`));
+    });
+  });
+}
 
 /**
  * Reads the recorded fingerprints of the previous successful start. Anything
@@ -523,13 +536,12 @@ async function retainActiveJobRuntimeImages(environment) {
 }
 
 /**
- * Applies the baseline unless the database already reports a compatible one. The
- * migration is itself idempotent; skipping it only avoids starting a container to
- * be told so. Returns whether the migration actually ran.
+ * Runs the idempotent migration ledger on every start. Baseline compatibility is
+ * not enough to prove that all later migrations are present, and skipping on that
+ * signal was exactly how a persistent local volume could keep stale functions.
  */
-async function migrateWithOptionalBaselineReset(environment, state) {
+async function migrateWithOptionalBaselineReset(environment) {
   try {
-    if (state?.baseline === "001 deviludo-core-source-v1") return false;
     await runMigration(environment);
     return true;
   } catch (error) {

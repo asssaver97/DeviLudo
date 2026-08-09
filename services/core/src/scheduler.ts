@@ -32,15 +32,14 @@ export async function runScheduler(
         config.projectDocumentIdleSeconds,
       );
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
-      // Generation is off the delivery chain, so a provider outage shows up as
-      // failed assets on the panel and never as a stalled workflow. It also runs
-      // far less often than the tick: the tick is sub-second so job recovery is
-      // responsive, while claiming assets that often would be pure database churn
-      // against work that takes tens of seconds per item.
+      // Provider calls run less often than the sub-second recovery tick. The
+      // durable asset gate is checked on every tick, however, so the last image or
+      // a user's explicit "use placeholders" choice advances immediately.
       const assets = assetGeneration && Date.now() >= nextAssetSweepAt
         ? await runAssetGenerationBatch(assetGeneration, signal)
         : null;
       if (assets) nextAssetSweepAt = Date.now() + config.assetGenerationPollMilliseconds;
+      const assetWorkflowsAdvanced = await repository.assets.advanceReadyWorkflows();
       console.log(JSON.stringify({
         level: "info",
         event: "scheduler_tick",
@@ -52,6 +51,7 @@ export async function runScheduler(
           assetsGenerated: assets.generated,
           assetsFailed: assets.failed,
         } : {}),
+        assetWorkflowsAdvanced,
         elapsedMilliseconds: Date.now() - startedAt,
       }));
     } catch (error) {

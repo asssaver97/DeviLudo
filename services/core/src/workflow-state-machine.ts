@@ -4,9 +4,11 @@ import type { ServerOperatingSystem } from "@/lib/runtime/server-pools";
 export const WORKFLOW_STATES = [
   "DRAFT",
   "AGENT_RUNNING",
+  "ASSET_GENERATING",
   "ARTIFACT_BUILDING",
   "E2E_TESTING",
   "SIGNING",
+  "RELEASE_APPROVAL_PENDING",
   "STEAM_PUBLISHING",
   "CLEAN_INSTALL_VERIFYING",
   "SUCCEEDED",
@@ -29,8 +31,17 @@ export type WorkflowSnapshot = Readonly<{
 
 export type WorkflowEvent =
   | Readonly<{ kind: "SPEC_APPROVED" }>
+  | Readonly<{ kind: "ASSETS_READY"; predecessorJobId: string }>
+  | Readonly<{ kind: "RELEASE_APPROVED"; approvalId: string }>
   | Readonly<{ kind: "CANCEL_REQUESTED" }>
-  | Readonly<{ kind: "JOB_SUCCEEDED"; jobKind: JobKind; targetOperatingSystem: ServerOperatingSystem | null }>
+  | Readonly<{
+      kind: "JOB_SUCCEEDED";
+      jobId: string;
+      jobKind: JobKind;
+      targetOperatingSystem: ServerOperatingSystem | null;
+      /** Agent completion waits here only when this run has auto-generated art. */
+      waitForAssets?: boolean;
+    }>
   | Readonly<{ kind: "JOB_FAILED"; jobKind: JobKind; reason: string }>
   | Readonly<{ kind: "STAGE_RERUN_REQUESTED"; stage: RerunStage; signalId: string }>;
 
@@ -123,15 +134,33 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   if (event.kind === "SPEC_APPROVED" && snapshot.state === "DRAFT") {
     return result({ ...snapshot, state: "AGENT_RUNNING" }, [command(snapshot, "AGENT_GENERATION", null, "agent")]);
   }
+  if (event.kind === "ASSETS_READY" && snapshot.state === "ASSET_GENERATING") {
+    return result(
+      { ...snapshot, state: "ARTIFACT_BUILDING" },
+      [command(snapshot, "ARTIFACT_BUILD", null, `artifact:after:${event.predecessorJobId}`)],
+    );
+  }
+  if (event.kind === "RELEASE_APPROVED" && snapshot.state === "RELEASE_APPROVAL_PENDING") {
+    return result(
+      { ...snapshot, state: "STEAM_PUBLISHING" },
+      [command(snapshot, "STEAM_PUBLISH", null, `publish:approved:${event.approvalId}`)],
+    );
+  }
   if (event.kind !== "JOB_SUCCEEDED") throw new Error(`Event ${event.kind} is invalid for ${snapshot.state}`);
 
   if (snapshot.state === "AGENT_RUNNING" && event.jobKind === "AGENT_GENERATION") {
-    return result({ ...snapshot, state: "ARTIFACT_BUILDING" }, [command(snapshot, "ARTIFACT_BUILD", null, "artifact")]);
+    if (event.waitForAssets) return result({ ...snapshot, state: "ASSET_GENERATING" }, []);
+    return result(
+      { ...snapshot, state: "ARTIFACT_BUILDING" },
+      [command(snapshot, "ARTIFACT_BUILD", null, `artifact:after:${event.jobId}`)],
+    );
   }
   if (snapshot.state === "ARTIFACT_BUILDING" && event.jobKind === "ARTIFACT_BUILD") {
     return result(
       { ...snapshot, state: "E2E_TESTING" },
-      snapshot.targetPlatforms.map(platform => command(snapshot, "E2E_TEST", platform, `e2e:${platform}`)),
+      snapshot.targetPlatforms.map(platform => command(
+        snapshot, "E2E_TEST", platform, `e2e:${platform}:after:${event.jobId}`,
+      )),
     );
   }
   if (snapshot.state === "E2E_TESTING" && event.jobKind === "E2E_TEST" && event.targetOperatingSystem) {
@@ -140,21 +169,24 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
     if (snapshot.profile === "VALIDATE") return result({ ...snapshot, state: "SUCCEEDED", completedE2e }, []);
     return result(
       { ...snapshot, state: "SIGNING", completedE2e },
-      snapshot.targetPlatforms.map(platform => command(snapshot, "ARTIFACT_SIGN", platform, `sign:${platform}`)),
+      snapshot.targetPlatforms.map(platform => command(
+        snapshot, "ARTIFACT_SIGN", platform, `sign:${platform}:after:${event.jobId}`,
+      )),
     );
   }
   if (snapshot.state === "SIGNING" && event.jobKind === "ARTIFACT_SIGN" && event.targetOperatingSystem) {
     const completedSigning = appendPlatform(snapshot.completedSigning, event.targetOperatingSystem);
     if (completedSigning.length < snapshot.targetPlatforms.length) return result({ ...snapshot, completedSigning }, []);
-    return result(
-      { ...snapshot, state: "STEAM_PUBLISHING", completedSigning },
-      [command(snapshot, "STEAM_PUBLISH", null, "publish")],
-    );
+    // Signing proves that the exact build is releasable. Publishing is an
+    // irreversible external mutation, so it waits for a separate human signal.
+    return result({ ...snapshot, state: "RELEASE_APPROVAL_PENDING", completedSigning }, []);
   }
   if (snapshot.state === "STEAM_PUBLISHING" && event.jobKind === "STEAM_PUBLISH") {
     return result(
       { ...snapshot, state: "CLEAN_INSTALL_VERIFYING" },
-      snapshot.targetPlatforms.map(platform => command(snapshot, "STEAM_CLEAN_INSTALL", platform, `clean-install:${platform}`)),
+      snapshot.targetPlatforms.map(platform => command(
+        snapshot, "STEAM_CLEAN_INSTALL", platform, `clean-install:${platform}:after:${event.jobId}`,
+      )),
     );
   }
   if (snapshot.state === "CLEAN_INSTALL_VERIFYING"

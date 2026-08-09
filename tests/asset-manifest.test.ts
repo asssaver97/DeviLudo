@@ -81,6 +81,19 @@ describe("Asset manifest validation", () => {
     assert.ok(!validateAssetItem(item));
   });
 
+  it("rejects an asset key that could escape the generated asset directory", () => {
+    assert.equal(validateAssetItem({
+      id: "item-1",
+      manifestId: "manifest-1",
+      assetKey: "../outside",
+      assetType: "sprite",
+      description: "Unsafe asset",
+      status: "planned",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    }), false);
+  });
+
   it("rejects invalid item status", () => {
     const item = {
       id: "item-1",
@@ -421,5 +434,13 @@ describe("Asset generation leasing", () => {
     );
     assert.match(calls[0].text, /deviludo\.fail_asset_generation/);
     assert.deepEqual(calls[0].values, [workspaceId, "item-1", "Provider 429"]);
+  });
+
+  it("advances asset-ready workflows through the cross-workspace scheduler primitive", async () => {
+    const { database, calls, workspaces } = poolDatabase(() => ({ rows: [{ advanced: "2" }] }));
+    assert.equal(await new AssetManifestStore(database).advanceReadyWorkflows(12), 2);
+    assert.match(calls[0].text, /deviludo\.advance_asset_workflows/);
+    assert.deepEqual(calls[0].values, [12]);
+    assert.deepEqual(workspaces, []);
   });
 });

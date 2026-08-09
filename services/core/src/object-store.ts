@@ -84,9 +84,11 @@ export class CoreObjectStore {
     contentType: string;
     content: Buffer;
   }>) {
+    if (!isSafeAssetKey(input.assetKey)) throw new Error("Asset key is invalid");
+    if (!/^(?:png|jpg|webp)$/.test(input.extension)) throw new Error("Asset extension is invalid");
     const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
     const key = `workspaces/${input.workspaceId}/projects/${input.projectId}`
-      + `/assets/${input.assetKey}.${input.extension}`;
+      + `/assets/${input.assetKey}-${sha256.slice(7, 23)}.${input.extension}`;
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -171,32 +173,64 @@ export class CoreObjectStore {
     job: JobProtocolV4,
     objects: readonly JobProtocolV4["inputObjects"][number][],
   ) {
-    const matches = objects.filter(object => object.kind === "PROJECT_DOCUMENT");
-    if (matches.length !== 1) throw new Error("Executor must produce exactly one project document");
+    const parsed = await this.readJsonOutput(objects, "PROJECT_DOCUMENT", 131_072, "Project document");
+    if (parsed.schemaVersion !== "deviludo.project-document.v1") {
+      throw new Error("Project document output schema is invalid");
+    }
+    const content = parseProjectDocumentContent(parsed.content);
+    const projectName = typeof job.payload.projectName === "string" ? job.payload.projectName : "游戏项目";
+    return Object.freeze({ content, markdown: projectDocumentMarkdown(projectName, content) });
+  }
+
+  /**
+   * Read the generated project's agent.json back from the verified output
+   * object. The executor receipt contains object metadata only; without this
+   * read the assetManifest never reaches complete_job and no image work can be
+   * planned even though the Agent wrote it successfully.
+   */
+  async readAgentCompletion(
+    objects: readonly JobProtocolV4["inputObjects"][number][],
+  ): Promise<Readonly<{ assetManifest: unknown }>> {
+    const parsed = await this.readJsonOutput(objects, "SPECIFICATION", 2 * 1024 * 1024, "Agent manifest");
+    if (!("assetManifest" in parsed)) throw new Error("Agent output does not contain an assetManifest");
+    return Object.freeze({ assetManifest: parsed.assetManifest });
+  }
+
+  private async readJsonOutput(
+    objects: readonly JobProtocolV4["inputObjects"][number][],
+    kind: string,
+    maximumBytes: number,
+    label: string,
+  ): Promise<Record<string, unknown>> {
+    const matches = objects.filter(object => object.kind === kind);
+    if (matches.length !== 1) throw new Error(`Executor must produce exactly one ${label.toLowerCase()}`);
     const object = matches[0];
-    if (object.sizeBytes > 131_072) throw new Error("Project document output is too large");
+    if (object.sizeBytes > maximumBytes) throw new Error(`${label} output is too large`);
     const result = await this.client.send(new GetObjectCommand({ Bucket: object.bucket, Key: object.key }));
-    if (!result.Body) throw new Error("Project document output body is missing");
+    if (!result.Body) throw new Error(`${label} output body is missing`);
     const bytes = Buffer.from(await result.Body.transformToByteArray());
     if (bytes.length !== object.sizeBytes
       || `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== object.sha256) {
-      throw new Error("Project document output digest or size is invalid");
+      throw new Error(`${label} output digest or size is invalid`);
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(bytes.toString("utf8"));
     } catch {
-      throw new Error("Project document output is not valid JSON");
+      throw new Error(`${label} output is not valid JSON`);
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-      || (parsed as Record<string, unknown>).schemaVersion !== "deviludo.project-document.v1") {
-      throw new Error("Project document output schema is invalid");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${label} output schema is invalid`);
     }
-    const content = parseProjectDocumentContent((parsed as Record<string, unknown>).content);
-    const projectName = typeof job.payload.projectName === "string" ? job.payload.projectName : "游戏项目";
-    return Object.freeze({ content, markdown: projectDocumentMarkdown(projectName, content) });
+    return parsed as Record<string, unknown>;
   }
 
+}
+
+function isSafeAssetKey(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value)
+    && !value.endsWith("/");
 }
 
 export function isValidOutputAuthorizationInput(

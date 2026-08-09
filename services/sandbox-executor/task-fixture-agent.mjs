@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { appendFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, copyFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 await mkdir("/workspace/project", { recursive: true });
 await mkdir("/workspace/outputs", { recursive: true });
@@ -39,6 +41,22 @@ try {
       const archive = `godot-build-${platform}.tar.gz`;
       await mkdir(directory, { recursive: true });
       await writeFile(`${directory}/deviludo-fixture-game.txt`, `platform=${platform}\njob=${plan.job.jobId}\n`);
+      const materialized = [];
+      for (const asset of plan.job.inputObjects.filter(input => input.kind === "ASSET")) {
+        const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
+        if (!extension || typeof asset.assetKey !== "string") throw new Error("Fixture build asset input is invalid");
+        const relativePath = `assets/generated/${asset.assetKey}.${extension}`;
+        const target = `${directory}/${relativePath}`;
+        await mkdir(dirname(target), { recursive: true });
+        await copyFile(`/workspace/inputs/${assetInputFilename(asset)}`, target);
+        materialized.push({ assetKey: asset.assetKey, resourcePath: `res://${relativePath}`, sha256: asset.sha256 });
+      }
+      if (materialized.length > 0) {
+        await writeFile(`${directory}/assets/generated/manifest.json`, JSON.stringify({
+          schemaVersion: "deviludo.generated-assets.v1",
+          items: materialized,
+        }));
+      }
       await command("tar", ["-czf", `/workspace/outputs/${archive}`, "-C", directory, "."]);
       outputs.push({ file: archive, kind: "BUILD", targetPlatform: platform, contentType: "application/gzip" });
     }
@@ -69,12 +87,12 @@ try {
     await observeGuidance();
     await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
     await progress("AGENT_OUTPUT", "项目结构生成完成，正在发布源码 revision。");
-    await writeFile("/workspace/outputs/agent.json", JSON.stringify({
-      schemaVersion: "deviludo.fixture-agent.v1",
-      generated: true,
-      providerCalled: false,
-      jobId: plan.job.jobId,
-    }));
+    // Match the real Agent runner: the output contract is the generated
+    // project's agent.json, not diagnostic metadata about the fixture process.
+    await writeFile(
+      "/workspace/outputs/agent.json",
+      await readFile("/workspace/project/agent.json", "utf8"),
+    );
     await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
       schemaVersion: "deviludo.task-outputs.v1",
       outputs: [
@@ -84,6 +102,12 @@ try {
   }
 } catch (error) {
   taskError = error instanceof Error ? error : new Error("Fixture Agent failed");
+}
+
+function assetInputFilename(input) {
+  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  if (!extension) throw new Error("Fixture build asset extension is invalid");
+  return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }
 await writeFile("/run/deviludo/task-result.json", JSON.stringify({
   ok: taskError === null,
@@ -117,7 +141,9 @@ async function progress(kind, content) {
 
 async function observeGuidance() {
   let observed = "";
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  // The guidance request crosses Core, a Unix socket, and docker exec. Eight
+  // 100ms polls made this deterministic fixture flaky on a busy local builder.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 100));
     try {
       const current = await readFile("/run/deviludo/guidance.ndjson", "utf8");

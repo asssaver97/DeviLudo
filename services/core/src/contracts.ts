@@ -16,6 +16,7 @@ export type CoreRole = typeof CORE_ROLES[number];
 export type ObjectReference = Readonly<{
   kind?: string;
   targetPlatform?: ServerOperatingSystem;
+  assetKey?: string;
   bucket: string;
   key: string;
   sha256: `sha256:${string}`;
@@ -102,7 +103,7 @@ export function executorReceiptSigningPayload(
 }
 
 export type WorkflowSignalInput = Readonly<{
-  kind: "SPEC_APPROVED" | "STAGE_RERUN_REQUESTED" | "CANCEL_REQUESTED" | "EXTERNAL_APPROVAL";
+  kind: "SPEC_APPROVED" | "RELEASE_APPROVED" | "STAGE_RERUN_REQUESTED" | "CANCEL_REQUESTED" | "EXTERNAL_APPROVAL";
   idempotencyKey: string;
   payload: Readonly<Record<string, unknown>>;
 }>;
@@ -252,10 +253,18 @@ function isObjectReference(value: unknown): value is ObjectReference {
   const item = value as Record<string, unknown>;
   return (item.kind === undefined || typeof item.kind === "string")
     && (item.targetPlatform === undefined || ["linux", "windows", "macos"].includes(String(item.targetPlatform)))
+    && (item.assetKey === undefined || isAssetKey(item.assetKey))
     && typeof item.bucket === "string" && item.bucket.length > 0
     && typeof item.key === "string" && /^workspaces\/[0-9a-f-]+\/projects\/[0-9a-f-]+\//i.test(item.key)
     && typeof item.sha256 === "string" && /^sha256:[0-9a-f]{64}$/i.test(item.sha256)
     && Number.isSafeInteger(item.sizeBytes) && Number(item.sizeBytes) >= 0;
+}
+
+function isAssetKey(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value)
+    && !value.endsWith("/");
 }
 
 function stableJson(value: unknown): string {

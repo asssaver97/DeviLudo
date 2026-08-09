@@ -84,6 +84,9 @@ export function validateAssetItem(value: unknown): value is AssetItem {
   return typeof item.id === "string"
     && typeof item.manifestId === "string"
     && typeof item.assetKey === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(item.assetKey)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(item.assetKey)
+    && !item.assetKey.endsWith("/")
     && typeof item.assetType === "string"
     && ASSET_TYPES.includes(item.assetType as AssetType)
     && typeof item.description === "string"

@@ -67,6 +67,9 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
   assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
+  assert.match(sql, /CREATE TRIGGER jobs_snapshot_artifact_build_assets[\s\S]*BEFORE INSERT ON deviludo\.jobs/);
+  assert.match(sql, /'assetInputs', inputs/);
+  assert.match(sql, /asset_key ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9\._\/\-\]\{0,199\}\$'/);
   assert.match(sql, /CASE WHEN p_kind = 'AGENT_GENERATION' THEN 5400 ELSE 1800 END/);
   assert.match(sql, /p_payload := p_payload[\s\S]*CASE WHEN v_source\.revision IS NULL THEN '\{\}'::jsonb ELSE jsonb_build_object\([\s\S]*'sourceDigest', v_source\.content_digest/);
   assert.match(sql, /PROJECT_DOCUMENT_MAINTENANCE/);
@@ -102,11 +105,16 @@ test("Core stores only opaque external actor identifiers and has no account auth
   assert.doesNotMatch(repository, /github|oauth|session|membership|invitation/i);
 });
 
-test("migration refuses legacy compatibility and requires the destructive reset", async () => {
+test("migration upgrades compatible databases in order and still rejects incompatible baselines", async () => {
   const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
   assert.match(migration, /deviludo-core-source-v1/);
   assert.match(migration, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
-  assert.doesNotMatch(migration, /ALTER TYPE|CREATE TABLE IF NOT EXISTS/);
+  assert.match(migration, /infra\/postgres\/migrations/);
+  assert.match(migration, /pg_advisory_lock/);
+  assert.match(migration, /schema_migrations/);
+  assert.match(migration, /MIGRATION_CHECKSUM_MISMATCH/);
+  assert.match(migration, /DATABASE_SCHEMA_AHEAD/);
+  assert.match(migration, /await client\.query\(migration\.source\)/);
   const reset = await readFile(new URL("../scripts/reset-source-baseline.mjs", import.meta.url), "utf8");
   assert.match(reset, /--confirm=RESET_DEVILUDO_SOURCE_V1/);
   assert.match(reset, /remoteResourcesDeleted: false/);
@@ -122,7 +130,7 @@ test("an unroutable signal kind is rejected rather than accepted and ignored", a
   // its caller actually looks like, so the kind is checked before any of it.
   assert.match(
     sql,
-    /IF p_signal_kind NOT IN \(\s*'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED', 'EXTERNAL_APPROVAL'\s*\) THEN\s*RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version'/,
+    /IF p_signal_kind NOT IN \(\s*'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED',\s*'RELEASE_APPROVED', 'EXTERNAL_APPROVAL'\s*\) THEN\s*RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version'/,
   );
   // The guard has to precede the routing, or an unknown kind reaches the branches
   // it is meant to protect.
@@ -138,20 +146,15 @@ test("an unroutable signal kind is rejected rather than accepted and ignored", a
   }
 });
 
-test("the migration reports a stale baseline instead of skipping over it", async () => {
+test("applied migrations are immutable and fresh baselines stamp incorporated versions", async () => {
   const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
-  // The baseline is a full snapshot, and its compatibility string only changes on
-  // an incompatible reshape, so it cannot distinguish a current database from one
-  // whose functions predate the file. Without a content digest every edit made
-  // after a volume was created is skipped in silence.
   assert.match(migration, /createHash\("sha256"\)\.update\(source, "utf8"\)/);
-  assert.match(migration, /STALE_BASELINE_RESET_REQUIRED/);
-  assert.match(migration, /source_digest !== sourceDigest/);
-  // The digest has to be stamped when the baseline is applied, or a fresh database
-  // reports itself as drifted on the very next start.
-  assert.match(migration, /UPDATE deviludo\.schema_metadata SET source_digest = \$1/);
+  assert.match(migration, /previousChecksum !== migration\.checksum/);
+  assert.match(migration, /INSERT INTO deviludo\.schema_migrations\(version, checksum\)/);
+  assert.match(migration, /SET source_digest = \$1, current_version = \$2/);
   const sql = await readFile(sqlUrl, "utf8");
   assert.match(sql, /source_digest text CHECK \(source_digest IS NULL OR source_digest ~ '\^sha256:\[0-9a-f\]\{64\}\$'\)/);
+  assert.match(sql, /CREATE TABLE deviludo\.schema_migrations/);
 });
 
 test("instance Agent settings are frozen into new workspace jobs by secret reference", async () => {
@@ -195,15 +198,30 @@ test("Agent generation lands its planned asset manifest, validated and whole", a
   assert.match(complete, /RAISE EXCEPTION 'asset manifest items are invalid'/);
   assert.match(complete, /RAISE EXCEPTION 'asset manifest keys must be unique'/);
   assert.match(complete, /NOT IN\s*\n?\s*\('sprite', 'animation', 'background', 'ui', 'icon', 'tileset'\)/);
-  // Re-planning keeps one manifest per project so the user's auto-generate choice
-  // and any already-uploaded asset survive a rerun.
+  // Re-planning keeps one manifest per project, gates the build only when a real
+  // image provider exists, and preserves any already-uploaded asset.
   assert.match(complete, /ON CONFLICT \(workspace_id, project_id\) DO UPDATE/);
+  assert.match(complete, /EXISTS \(SELECT 1 FROM deviludo\.instance_image_generation_settings WHERE singleton = true\)/);
+  assert.match(complete, /RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate/);
   assert.match(complete, /ON CONFLICT \(workspace_id, manifest_id, asset_key\) DO UPDATE/);
   assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status NOT IN \('generated', 'uploaded'\)[\s\S]*asset_key NOT IN/);
   // complete_job is SECURITY INVOKER and the Agent stage is completed by the
   // sandbox role, so that role must hold the DELETE the re-plan performs.
   assert.doesNotMatch(complete, /SECURITY DEFINER/);
   assert.match(sql, /GRANT DELETE ON deviludo\.asset_items TO deviludo_sandbox/);
+});
+
+test("forward workflow jobs use their successful predecessor as the idempotency generation", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const complete = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
+  // Superseded rows retain their unique keys. Every forward edge therefore has
+  // to derive a fresh key from the job that just succeeded, or a stage rerun
+  // advances the workflow state while enqueue_job returns the old CANCELLED row.
+  for (const prefix of ["artifact", "e2e:", "sign:", "clean-install:"]) {
+    assert.match(complete, new RegExp(`${prefix.replace("-", "\\-")}[^\\n]*:after:' \\|\\| job\\.id::text`));
+  }
+  const signal = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.accept_workflow_signal\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.complete_job\()/)?.[0] ?? "";
+  assert.match(signal, /':publish:approved:' \|\| inserted_id::text/);
 });
 
 test("asset generation stays off the serial delivery chain", async () => {

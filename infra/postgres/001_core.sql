@@ -36,8 +36,9 @@ CREATE TYPE deviludo.server_node_state AS ENUM (
   'PROVISIONING', 'ACTIVE', 'DRAINING', 'DISABLED', 'REIMAGING'
 );
 CREATE TYPE deviludo.workflow_state AS ENUM (
-  'DRAFT', 'AGENT_RUNNING', 'ARTIFACT_BUILDING', 'E2E_TESTING', 'SIGNING',
-  'STEAM_PUBLISHING', 'CLEAN_INSTALL_VERIFYING', 'SUCCEEDED', 'FAILED', 'CANCELLED'
+  'DRAFT', 'AGENT_RUNNING', 'ASSET_GENERATING', 'ARTIFACT_BUILDING', 'E2E_TESTING', 'SIGNING',
+  'RELEASE_APPROVAL_PENDING', 'STEAM_PUBLISHING', 'CLEAN_INSTALL_VERIFYING',
+  'SUCCEEDED', 'FAILED', 'CANCELLED'
 );
 CREATE TYPE deviludo.job_kind AS ENUM (
   'AGENT_GENERATION', 'PROJECT_DOCUMENT_MAINTENANCE', 'ARTIFACT_BUILD', 'STEAM_PUBLISH',
@@ -66,11 +67,21 @@ CREATE TABLE deviludo.schema_metadata (
   singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
   baseline text NOT NULL,
   compatibility text NOT NULL,
+  current_version text NOT NULL DEFAULT '001',
   source_digest text CHECK (source_digest IS NULL OR source_digest ~ '^sha256:[0-9a-f]{64}$'),
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility)
 VALUES (true, '001', 'deviludo-core-source-v1');
+
+-- Every post-baseline change is immutable and checksummed. Fresh databases are
+-- created from this full snapshot and then stamp the migrations incorporated by
+-- it; existing databases apply the same files in lexical order.
+CREATE TABLE deviludo.schema_migrations (
+  version text PRIMARY KEY CHECK (version ~ '^[0-9]{3}_[a-z0-9_]+$'),
+  checksum text NOT NULL CHECK (checksum ~ '^sha256:[0-9a-f]{64}$'),
+  applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
 
 CREATE TABLE deviludo.server_pools (
   kind deviludo.server_pool_kind PRIMARY KEY,
@@ -641,7 +652,10 @@ CREATE TABLE deviludo.asset_manifests (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   project_id uuid NOT NULL,
   workflow_id uuid,
-  auto_generate_enabled boolean NOT NULL DEFAULT false,
+  -- Auto-generation is enabled only when the instance can actually render the
+  -- plan. Without a provider the build continues with the Agent's placeholders;
+  -- the player can still upload art and explicitly rebuild later.
+  auto_generate_enabled boolean NOT NULL DEFAULT true,
   planned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, id),
@@ -655,7 +669,13 @@ CREATE TABLE deviludo.asset_items (
   workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   manifest_id uuid NOT NULL,
-  asset_key text NOT NULL CHECK (length(asset_key) BETWEEN 1 AND 200),
+  asset_key text NOT NULL CHECK (
+    length(asset_key) BETWEEN 1 AND 200
+    AND asset_key ~ '^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$'
+    AND asset_key !~ '(^|/)\.{1,2}(/|$)'
+    AND asset_key !~ '//'
+    AND asset_key !~ '/$'
+  ),
   asset_type text NOT NULL
     CHECK (asset_type IN ('sprite', 'animation', 'background', 'ui', 'icon', 'tileset')),
   description text NOT NULL CHECK (length(description) BETWEEN 1 AND 2000),
@@ -695,6 +715,43 @@ ALTER TABLE deviludo.asset_items
   ADD CONSTRAINT asset_items_lease_requires_generating CHECK (
     (generation_lease_expires_at IS NOT NULL) = (status = 'generating')
   );
+
+-- Freeze the exact image objects into every artifact-build job. The builder
+-- reads this immutable snapshot rather than whichever upload happens to be the
+-- latest when a queued job is eventually claimed.
+CREATE OR REPLACE FUNCTION deviludo.snapshot_artifact_build_assets()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  inputs jsonb;
+BEGIN
+  IF NEW.kind <> 'ARTIFACT_BUILD' THEN RETURN NEW; END IF;
+  SELECT coalesce(jsonb_agg(jsonb_build_object(
+    'assetKey', item.asset_key,
+    'bucket', item.bucket,
+    'objectKey', item.object_key,
+    'sha256', item.sha256,
+    'sizeBytes', item.size_bytes
+  ) ORDER BY item.asset_key), '[]'::jsonb)
+    INTO inputs
+    FROM deviludo.asset_manifests manifest
+    JOIN deviludo.asset_items item
+      ON item.workspace_id = manifest.workspace_id AND item.manifest_id = manifest.id
+   WHERE manifest.workspace_id = NEW.workspace_id
+     AND manifest.project_id = NEW.project_id
+     AND manifest.workflow_id = NEW.workflow_id
+     AND item.status IN ('generated', 'uploaded');
+  NEW.payload := NEW.payload || jsonb_build_object('assetInputs', inputs);
+  RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER jobs_snapshot_artifact_build_assets
+BEFORE INSERT ON deviludo.jobs
+FOR EACH ROW EXECUTE FUNCTION deviludo.snapshot_artifact_build_assets();
 
 CREATE OR REPLACE FUNCTION deviludo.current_workspace_id()
 RETURNS uuid
@@ -1030,8 +1087,8 @@ ALTER FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, inte
 
 -- Lease planned assets for generation.
 --
--- Asset generation is not a delivery job: it has no `deviludo.jobs` row, no pool,
--- and never blocks the chain. This is its claim primitive, and it is deliberately
+-- Asset generation is not a delivery job: it has no `deviludo.jobs` row or pool,
+-- but its durable manifest gates the build. This is its claim primitive, and it is deliberately
 -- shaped like `claim_job` — a lease with an expiry, so a generator that dies mid
 -- request cannot strand an item in 'generating' forever.
 --
@@ -1171,6 +1228,84 @@ $$;
 ALTER FUNCTION deviludo.fail_asset_generation(uuid, uuid, text)
   OWNER TO deviludo_claim_executor;
 
+-- Advance deliveries whose generated/uploaded art is now complete. This is a
+-- cross-workspace scheduler primitive, so it owns the same narrow BYPASSRLS role
+-- as job claiming. Turning auto-generation off is an explicit request to use
+-- placeholders and therefore also releases the gate.
+CREATE OR REPLACE FUNCTION deviludo.advance_asset_workflows(p_batch_size integer DEFAULT 20)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  candidate record;
+  advanced integer := 0;
+BEGIN
+  IF p_batch_size NOT BETWEEN 1 AND 100 THEN
+    RAISE EXCEPTION 'invalid asset workflow batch size';
+  END IF;
+  FOR candidate IN
+    SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
+           workflow.target_platforms, agent.id AS agent_job_id
+      FROM deviludo.workflow_instances workflow
+      JOIN deviludo.asset_manifests manifest
+        ON manifest.workspace_id = workflow.workspace_id
+       AND manifest.project_id = workflow.project_id
+       AND manifest.workflow_id = workflow.id
+      JOIN LATERAL (
+        SELECT source.id
+          FROM deviludo.jobs source
+         WHERE source.workspace_id = workflow.workspace_id
+           AND source.workflow_id = workflow.id
+           AND source.kind = 'AGENT_GENERATION'
+           AND source.state = 'SUCCEEDED'
+         ORDER BY source.updated_at DESC, source.created_at DESC
+         LIMIT 1
+      ) agent ON true
+     WHERE workflow.state = 'ASSET_GENERATING'
+       AND (
+         manifest.auto_generate_enabled = false
+         OR NOT EXISTS (
+           SELECT 1 FROM deviludo.asset_items item
+            WHERE item.workspace_id = manifest.workspace_id
+              AND item.manifest_id = manifest.id
+              AND item.status NOT IN ('generated', 'uploaded')
+         )
+       )
+     ORDER BY workflow.updated_at, workflow.id
+     FOR UPDATE OF workflow SKIP LOCKED
+     LIMIT p_batch_size
+  LOOP
+    UPDATE deviludo.workflow_instances
+       SET state = 'ARTIFACT_BUILDING', version = version + 1,
+           updated_at = clock_timestamp()
+     WHERE workspace_id = candidate.workspace_id AND id = candidate.workflow_id
+       AND state = 'ASSET_GENERATING';
+    IF FOUND THEN
+      PERFORM deviludo.enqueue_job(
+        candidate.workspace_id, candidate.workflow_id, candidate.project_id,
+        'ARTIFACT_BUILD', NULL,
+        candidate.workflow_id::text || ':artifact:after:' || candidate.agent_job_id::text,
+        jsonb_build_object('targetPlatforms', candidate.target_platforms)
+      );
+      INSERT INTO deviludo.workflow_events(
+        workspace_id, workflow_id, event_kind, event_data, idempotency_key
+      ) VALUES (
+        candidate.workspace_id, candidate.workflow_id, 'ASSETS_READY',
+        jsonb_build_object('agentJobId', candidate.agent_job_id),
+        'assets-ready:' || candidate.agent_job_id::text
+      ) ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING;
+      advanced := advanced + 1;
+    END IF;
+  END LOOP;
+  RETURN advanced;
+END
+$$;
+ALTER FUNCTION deviludo.advance_asset_workflows(integer)
+  OWNER TO deviludo_claim_executor;
+
 CREATE OR REPLACE FUNCTION deviludo.claim_job(
   p_executor_id text,
   p_pool_kind deviludo.server_pool_kind,
@@ -1275,7 +1410,8 @@ BEGIN
   -- still distinguishable from a known kind whose state guard legitimately did
   -- not match.
   IF p_signal_kind NOT IN (
-    'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED', 'EXTERNAL_APPROVAL'
+    'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED',
+    'RELEASE_APPROVED', 'EXTERNAL_APPROVAL'
   ) THEN
     RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version', p_signal_kind;
   END IF;
@@ -1308,6 +1444,11 @@ BEGIN
       IF agent_settings.singleton IS NULL THEN
         RAISE EXCEPTION 'Agent configuration is required before rerunning agent generation';
       END IF;
+    END IF;
+  END IF;
+  IF p_signal_kind = 'RELEASE_APPROVED' THEN
+    IF workflow.state <> 'RELEASE_APPROVAL_PENDING' THEN
+      RAISE EXCEPTION 'Release approval requires signed builds awaiting approval';
     END IF;
   END IF;
   INSERT INTO deviludo.external_signals(
@@ -1414,6 +1555,21 @@ BEGIN
         jsonb_build_object('targetPlatforms', workflow.target_platforms)
       );
     END IF;
+  ELSIF p_signal_kind = 'RELEASE_APPROVED' THEN
+    UPDATE deviludo.workflow_instances
+       SET state = 'STEAM_PUBLISHING', version = version + 1,
+           updated_at = clock_timestamp()
+     WHERE workspace_id = workflow.workspace_id AND id = workflow.id
+       AND state = 'RELEASE_APPROVAL_PENDING';
+    PERFORM deviludo.enqueue_job(
+      workflow.workspace_id, workflow.id, workflow.project_id, 'STEAM_PUBLISH', NULL,
+      workflow.id::text || ':publish:approved:' || inserted_id::text,
+      jsonb_build_object(
+        'targetPlatforms', workflow.target_platforms,
+        'approvalSignalId', inserted_id,
+        'approvedByAccountId', p_payload->>'requestedByAccountId'
+      )
+    );
   ELSIF p_signal_kind = 'CANCEL_REQUESTED' THEN
     UPDATE deviludo.workflow_instances
        SET state = 'CANCELLED', version = version + 1, updated_at = clock_timestamp()
@@ -1463,6 +1619,7 @@ DECLARE
   failure_summary text;
   agent_settings deviludo.instance_agent_settings%ROWTYPE;
   asset_manifest_id uuid;
+  asset_auto_generate boolean := false;
 BEGIN
   -- Serialize all terminal job mutations on the workflow before taking a job
   -- row lock. Platform workers complete sibling jobs concurrently, and taking
@@ -1528,9 +1685,9 @@ BEGIN
     ) ON CONFLICT (workspace_id, project_id, revision) DO NOTHING;
 
     -- The Agent plans the game's assets while writing the source that expects
-    -- them. Landing that plan here is what gives the asset panel something to
-    -- show; generation and upload then proceed asynchronously, off the delivery
-    -- chain, and reach the game through a later ARTIFACT_BUILD rerun.
+    -- them. When an image provider is configured this delivery waits for those
+    -- exact assets before building; without one it deliberately keeps the
+    -- placeholder path so a local/code-only project is never stranded.
     IF p_receipt ? 'assetManifest' THEN
       IF jsonb_typeof(p_receipt->'assetManifest') <> 'object'
         OR jsonb_typeof(p_receipt #> '{assetManifest,items}') <> 'array'
@@ -1548,9 +1705,13 @@ BEGIN
            OR length(coalesce(item->>'description', '')) NOT BETWEEN 1 AND 2000
            OR (item ? 'generationPrompt'
              AND length(coalesce(item->>'generationPrompt', '')) NOT BETWEEN 1 AND 4000)
-           OR (item ? 'frameCount'
-             AND coalesce((item->>'frameCount')::integer, 0) NOT BETWEEN 1 AND 4096)
-           OR (item ? 'dimensions' AND coalesce(item->>'dimensions', '') !~ '^[0-9]{1,5}x[0-9]{1,5}$')
+           OR (item ? 'frameCount' AND item->'frameCount' <> 'null'::jsonb
+             AND (jsonb_typeof(item->'frameCount') <> 'number'
+               OR coalesce(item->>'frameCount', '') !~ '^[0-9]+$'
+               OR (item->>'frameCount')::integer NOT BETWEEN 1 AND 4096))
+           OR (item ? 'dimensions' AND item->'dimensions' <> 'null'::jsonb
+             AND (jsonb_typeof(item->'dimensions') <> 'string'
+               OR coalesce(item->>'dimensions', '') !~ '^[0-9]{1,5}x[0-9]{1,5}$'))
       ) THEN RAISE EXCEPTION 'asset manifest items are invalid'; END IF;
       IF (
         SELECT count(DISTINCT item->>'assetKey')
@@ -1558,13 +1719,21 @@ BEGIN
       ) <> jsonb_array_length(p_receipt #> '{assetManifest,items}')
       THEN RAISE EXCEPTION 'asset manifest keys must be unique'; END IF;
 
-      -- One manifest per project: a rerun re-plans against the same row so the
-      -- user's auto-generate choice and already-uploaded assets survive.
-      INSERT INTO deviludo.asset_manifests(workspace_id, project_id, workflow_id)
-      VALUES (job.workspace_id, job.project_id, job.workflow_id)
+      -- One manifest per project. Every new Agent plan starts its image branch;
+      -- generated/uploaded assets still survive the re-plan below, and the user
+      -- can pause new claims from the asset panel after planning completes.
+      INSERT INTO deviludo.asset_manifests(
+        workspace_id, project_id, workflow_id, auto_generate_enabled
+      )
+      VALUES (
+        job.workspace_id, job.project_id, job.workflow_id,
+        EXISTS (SELECT 1 FROM deviludo.instance_image_generation_settings WHERE singleton = true)
+      )
       ON CONFLICT (workspace_id, project_id) DO UPDATE
-        SET workflow_id = excluded.workflow_id, updated_at = clock_timestamp()
-      RETURNING id INTO asset_manifest_id;
+        SET workflow_id = excluded.workflow_id,
+            auto_generate_enabled = excluded.auto_generate_enabled,
+            updated_at = clock_timestamp()
+      RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate;
 
       -- Assets the user already supplied keep their object; only the planning
       -- fields are refreshed. Re-planned keys that no longer appear are dropped
@@ -1779,17 +1948,27 @@ BEGIN
   IF job.kind = 'PROJECT_DOCUMENT_MAINTENANCE' THEN
     NULL;
   ELSIF workflow.state = 'AGENT_RUNNING' AND job.kind = 'AGENT_GENERATION' THEN
-    UPDATE deviludo.workflow_instances SET state = 'ARTIFACT_BUILDING', version = version + 1,
-      updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
-    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'ARTIFACT_BUILD', NULL,
-      job.workflow_id::text || ':artifact', jsonb_build_object('targetPlatforms', workflow.target_platforms));
+    IF asset_auto_generate THEN
+      UPDATE deviludo.workflow_instances SET state = 'ASSET_GENERATING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
+    ELSE
+      UPDATE deviludo.workflow_instances SET state = 'ARTIFACT_BUILDING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
+      -- The predecessor job id is part of every forward idempotency key. A stage
+      -- rerun leaves the superseded job row (and its unique key) behind; reusing
+      -- the first delivery's fixed key would return that CANCELLED row and move
+      -- the workflow into a running state with no runnable downstream job.
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'ARTIFACT_BUILD', NULL,
+        job.workflow_id::text || ':artifact:after:' || job.id::text,
+        jsonb_build_object('targetPlatforms', workflow.target_platforms));
+    END IF;
   ELSIF workflow.state = 'ARTIFACT_BUILDING' AND job.kind = 'ARTIFACT_BUILD' THEN
     UPDATE deviludo.workflow_instances SET state = 'E2E_TESTING', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     FOREACH platform IN ARRAY workflow.target_platforms
     LOOP
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'E2E_TEST', platform,
-        job.workflow_id::text || ':e2e:' || platform::text);
+        job.workflow_id::text || ':e2e:' || platform::text || ':after:' || job.id::text);
     END LOOP;
   ELSIF workflow.state = 'E2E_TESTING' AND job.kind = 'E2E_TEST'
     AND NOT EXISTS (
@@ -1813,7 +1992,7 @@ BEGIN
       FOREACH platform IN ARRAY workflow.target_platforms
       LOOP
         PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'ARTIFACT_SIGN', platform,
-          job.workflow_id::text || ':sign:' || platform::text);
+          job.workflow_id::text || ':sign:' || platform::text || ':after:' || job.id::text);
       END LOOP;
     END IF;
   ELSIF workflow.state = 'SIGNING' AND job.kind = 'ARTIFACT_SIGN'
@@ -1823,17 +2002,17 @@ BEGIN
          AND kind = 'ARTIFACT_SIGN' AND state <> 'SUCCEEDED'
     )
   THEN
-    UPDATE deviludo.workflow_instances SET state = 'STEAM_PUBLISHING', version = version + 1,
+    -- Signing is reversible; publishing to Steam is not. Hold the exact signed
+    -- builds until a workspace administrator explicitly approves this release.
+    UPDATE deviludo.workflow_instances SET state = 'RELEASE_APPROVAL_PENDING', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
-    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'STEAM_PUBLISH', NULL,
-      job.workflow_id::text || ':publish', jsonb_build_object('targetPlatforms', workflow.target_platforms));
   ELSIF workflow.state = 'STEAM_PUBLISHING' AND job.kind = 'STEAM_PUBLISH' THEN
     UPDATE deviludo.workflow_instances SET state = 'CLEAN_INSTALL_VERIFYING', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     FOREACH platform IN ARRAY workflow.target_platforms
     LOOP
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'STEAM_CLEAN_INSTALL', platform,
-        job.workflow_id::text || ':clean-install:' || platform::text);
+        job.workflow_id::text || ':clean-install:' || platform::text || ':after:' || job.id::text);
     END LOOP;
   ELSIF workflow.state = 'CLEAN_INSTALL_VERIFYING' AND job.kind = 'STEAM_CLEAN_INSTALL'
     AND NOT EXISTS (
@@ -2122,6 +2301,7 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_asset_generation(integer, integer) TO d
 GRANT EXECUTE ON FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, text, text, bigint)
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.fail_asset_generation(uuid, uuid, text) TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.advance_asset_workflows(integer) TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.pull_source_ready_events(integer),
   deviludo.acknowledge_source_ready_events(uuid[]) TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, integer)
@@ -2131,10 +2311,13 @@ GRANT EXECUTE ON FUNCTION deviludo.cleanup_expired_executor_state() TO deviludo_
 GRANT SELECT, UPDATE ON deviludo.jobs TO deviludo_claim_executor;
 GRANT INSERT ON deviludo.jobs, deviludo.artifact_inputs TO deviludo_claim_executor;
 GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;
+GRANT UPDATE ON deviludo.workflow_instances TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.project_documents,
-  deviludo.project_source_revisions, deviludo.workflow_instances, deviludo.instance_agent_settings,
+  deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
+  deviludo.workflow_instances, deviludo.instance_agent_settings,
   deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs
   TO deviludo_claim_executor;
+GRANT UPDATE ON deviludo.project_source_ready_outbox TO deviludo_claim_executor;
 -- The asset generation lease and its settlement run as this role, which is the
 -- owner of those SECURITY DEFINER functions.
 GRANT SELECT, UPDATE ON deviludo.asset_items TO deviludo_claim_executor;

@@ -38,10 +38,6 @@ func _initialize() -> void:
 	state.apply_damage(25)
 	check(state.hull == 75, "damage-reduces-hull")
 
-	# Feature: damage-system (core-loop)
-	state.apply_damage(25)
-	check(state.hull == 75, "damage-reduces-hull")
-
 	# Feature: win-condition (core-loop)
 	state.collect_ember("ember-b")
 	state.collect_ember("ember-c")

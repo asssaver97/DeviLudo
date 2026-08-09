@@ -46,7 +46,7 @@ Windows 使用相同动作：
 .\deploy\e2e-windows\deploy.ps1 -Action deploy
 ```
 
-部署配置默认位于 `/etc/deviludo/deploy.env`，Windows 位于 `C:\ProgramData\Deviludo\deploy.json`。数据库 URL、GHCR、Vault、TLS、签名和 Steam 凭据必须通过权限受限的文件提供，不接受命令行明文。Core 必须显式选择 `DEVILUDO_ACCESS_MODE=standalone|platform`；生产环境缺失该配置时拒绝启动。首次部署只接受空数据库并应用 persistent-source `001` 基线，旧基线不会原地迁移。
+部署配置默认位于 `/etc/deviludo/deploy.env`，Windows 位于 `C:\ProgramData\Deviludo\deploy.json`。数据库 URL、GHCR、Vault、TLS、签名和 Steam 凭据必须通过权限受限的文件提供，不接受命令行明文。Core 必须显式选择 `DEVILUDO_ACCESS_MODE=standalone|platform`；生产环境缺失该配置时拒绝启动。首次部署从 persistent-source `001` 完整快照创建数据库；后续由 `infra/postgres/migrations/` 中带校验和的迁移顺序升级，并通过 PostgreSQL advisory lock 防止多副本并发迁移。只有 compatibility 不匹配的旧架构才要求重建。
 
 `standalone` 不存在账号或登录，任何能访问 Web 的人都具有产品与实例管理权限。`platform` 不保存用户、会话或成员关系，而是通过 `DEVILUDO_PLATFORM_ACCOUNT_API_URL` 对每个浏览器会话进行内部断言；写操作强制刷新，Platform 不可用或成员关系失效时失败关闭。
 
@@ -60,12 +60,16 @@ Windows 使用相同动作：
 
 工作流 profile：
 
-- `VALIDATE`：Agent → Godot 构建 → 指定平台 E2E。
-- `RELEASE`：Agent → 构建 → 三平台 E2E → 三平台签名 → Steam 发布 → 三平台干净回装。
+- `VALIDATE`：Agent → 图片素材就绪门禁 → Godot 构建 → 指定平台 E2E。
+- `RELEASE`：Agent → 图片素材就绪门禁 → 构建 → 三平台 E2E → 三平台签名 → 人工批准 → Steam 发布 → 三平台干净回装。
+
+Agent 的 `assetManifest` 会在同一次交付中创建图片任务。配置了图片 Provider 时，流程停在 `ASSET_GENERATING`，直到所有计划素材已生成或由用户上传；用户也可明确关闭自动生成，以占位素材继续。就绪素材以内容寻址对象固化到构建任务，并在 Godot 导入前写入 `res://assets/generated/{assetKey}.{png|jpg|webp}`，同时生成带摘要的 `manifest.json`，因此图片实际进入同一组三平台制品，而不只是显示在素材面板。签名完成后流程停在 `RELEASE_APPROVAL_PENDING`，只有工作区 Owner/Admin 的批准接口才能创建 Steam 上传任务。
 
 项目源码不再作为 `SOURCE` 对象制品传递。每个项目的源码 revision 持久保存在 `DEVILUDO_PROJECTS_ROOT/workspaces/{workspaceId}/projects/{projectId}/revisions/`；Agent、构建和重试从指定 revision 创建隔离副本，Agent 成功输出经校验后以同文件系统 staging 和原子 rename 发布。构建、E2E、签名和下载制品仍使用 S3/MinIO。
 
 ### 功能验收测试体系
+
+发布 tag 还会在 GitHub 托管的 Ubuntu、Windows 和 macOS 原生 runner 上分别安装固定 Godot 4.5.1，运行 `npm run test:e2e:platform` 并上传逐平台验收报告；任意平台缺席或失败都会阻止 release job 构建发布包。
 
 Agent 生成源码时同时输出 `testManifest`（协议 `deviludo.test-manifest.v1`），声明每个核心功能及其验证方法。E2E 阶段不再盲跑 120 秒，而是：
 
@@ -185,7 +189,27 @@ npm run local:reset:source-v1
 
 该命令会完整重建本地 Compose volumes 并继续启动，不调用任何远端删除接口。后续恢复使用 `npm run local:up`。生产环境使用 `npm run db:reset:source-v1 -- --confirm=RESET_DEVILUDO_SOURCE_V1`，并必须提供精确且非宽泛的 `DEVILUDO_PROJECTS_ROOT`。
 
-`local:up` 只做检查、构建和启动，不会静默安装宿主依赖。`npm run local:executor:test` 使用固定 Fixture Agent 验证 executor、Godot、MinIO 和原生 macOS E2E，不访问 Provider；`npm run local:database:test` 验证真实 PostgreSQL RLS、并发领取、fencing 和租约回收。设置真实 Provider 后可显式运行 `npm run local:test` 完成付费链路冒烟。
+`local:up` 只做检查、构建和启动，不会静默安装宿主依赖。`npm run local:executor:test` 使用固定 Fixture Agent 验证 executor、图片素材注入、Godot、MinIO 和原生 macOS E2E，不访问 Provider；`npm run local:database:test` 验证真实 PostgreSQL RLS、并发领取、fencing、图片门禁/快照、发布审批和租约回收。设置真实 Provider 后可显式运行 `npm run local:test` 完成付费链路冒烟。
+
+首次构建镜像可能需要数分钟；`local:up` 会输出 `building_images` 阶段和 BuildKit 实时进度。看到基础设施仍在运行、应用容器暂时停止，表示脚本正在用新镜像替换服务，并非流程卡死。
+
+## 备份与恢复
+
+Core 镜像内置 PostgreSQL client。备份同时覆盖数据库、`DEVILUDO_PROJECTS_ROOT` 和 `DEVILUDO_ARTIFACT_BUCKET`，并记录数据库迁移、每个源码文件和对象的 SHA-256。备份期间数据库表处于只读屏障，结束后以原子 rename 发布目录：
+
+```bash
+npm run state:backup -- --output=/srv/backups/deviludo-2026-08-09
+```
+
+生产环境必须通过 `DEVILUDO_MIGRATION_DATABASE_URL_FILE` 提供数据库凭据，同时配置 `DEVILUDO_PROJECTS_ROOT`、S3 endpoint/region/credentials 和 `DEVILUDO_ARTIFACT_BUCKET`。恢复只接受空数据库、尚不存在的项目源码根目录和空对象桶，并在写入前验证整个备份：
+
+```bash
+npm run state:restore -- \
+  --input=/srv/backups/deviludo-2026-08-09 \
+  --confirm=RESTORE_DEVILUDO_BACKUP
+```
+
+Vault/KMS 中的 Provider、签名和 Steam 密钥应使用托管 Vault 自身的快照/灾备机制恢复，不会被应用级备份导出为明文。
 
 ## 数据与访问边界
 

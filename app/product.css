@@ -2210,6 +2210,40 @@ textarea {
   padding: 0 18px 14px;
 }
 
+.product-release-approval {
+  align-items: center;
+  background: #10231f;
+  border-top: 1px solid #337b68;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 620px;
+  padding: 16px 20px 18px;
+}
+
+.product-release-approval-icon {
+  align-items: center;
+  border: 2px solid var(--success);
+  color: var(--success);
+  display: flex;
+  font: 900 13px var(--font-geist-mono), monospace;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.product-release-approval strong {
+  color: #9ff7d5;
+  font: 800 13px var(--font-geist-mono), monospace;
+}
+
+.product-release-approval p,
+.product-release-approval small {
+  color: #b4cfc5;
+  font: 12px/1.6 var(--font-geist-sans), sans-serif;
+  margin: 5px 0 0;
+}
+
 .product-artifacts-panel {
   background: #0e1723;
   border: 2px solid #334157;

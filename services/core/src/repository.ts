@@ -29,6 +29,7 @@ import type {
   ClaimedJobIdentity,
   JobCompletion,
   JobProtocolV4,
+  ObjectReference,
   WorkflowSignalInput,
 } from "./contracts";
 import { executorReceiptSigningPayload } from "./contracts";
@@ -708,9 +709,9 @@ export class CoreRepository {
   }
 
   /**
-   * Asset manifest reads and mutations. Assets sit outside the serial delivery
-   * chain: the Agent plans them, generation and upload run asynchronously, and
-   * the results reach the game through an ARTIFACT_BUILD rerun.
+   * Asset manifest reads and mutations. Generation and upload run asynchronously
+   * without occupying a delivery worker; the readiness gate then freezes their
+   * exact objects into the next ARTIFACT_BUILD.
    */
   get assets(): AssetManifestStore {
     return new AssetManifestStore(this.database);
@@ -1697,6 +1698,15 @@ export class CoreRepository {
         ORDER BY artifact.created_at, artifact.id`,
       [row.id],
     );
+    const artifactObjects = inputObjects.rows.map(item => Object.freeze({
+      kind: item.kind,
+      ...(item.target_platform ? { targetPlatform: item.target_platform } : {}),
+      bucket: item.bucket,
+      key: item.object_key,
+      sha256: item.sha256,
+      sizeBytes: Number(item.size_bytes),
+    }));
+    const assetObjects = buildAssetInputObjects(row);
     return Object.freeze({
       schemaVersion: "deviludo.job.v4",
       jobId: row.id,
@@ -1711,14 +1721,7 @@ export class CoreRepository {
       isolationGeneration: Number(row.isolation_generation),
       runtimeImage: row.runtime_image,
       workflowProfile: row.workflow_profile,
-      inputObjects: Object.freeze(inputObjects.rows.map(item => Object.freeze({
-        kind: item.kind,
-        ...(item.target_platform ? { targetPlatform: item.target_platform } : {}),
-        bucket: item.bucket,
-        key: item.object_key,
-        sha256: item.sha256,
-        sizeBytes: Number(item.size_bytes),
-      }))),
+      inputObjects: Object.freeze([...artifactObjects, ...assetObjects]),
       outputContract: Object.freeze({
         kinds: Object.freeze(Array.isArray(row.output_contract.kinds)
           ? row.output_contract.kinds.filter((item): item is string => typeof item === "string")
@@ -1937,6 +1940,47 @@ function imageGenerationSettingsFromRow(row: ImageGenerationSettingsRow): Stored
     updatedBy: row.updated_by,
     updatedAt: row.updated_at,
   });
+}
+
+function buildAssetInputObjects(row: JobRow): readonly ObjectReference[] {
+  if (row.kind !== "ARTIFACT_BUILD") return Object.freeze([]);
+  const value = row.payload.assetInputs;
+  // Jobs queued before the asset-materialization migration have no snapshot and
+  // remain runnable during a rolling deployment.
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > 500) throw new Error("Stored build asset inputs are invalid");
+  const seenKeys = new Set<string>();
+  const seenObjects = new Set<string>();
+  const prefix = `workspaces/${row.workspace_id}/projects/${row.project_id}/assets/`;
+  const objects = value.map(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("Stored build asset input is invalid");
+    }
+    const item = entry as Record<string, unknown>;
+    const assetKey = item.assetKey;
+    const bucket = item.bucket;
+    const key = item.objectKey;
+    const sha256 = item.sha256;
+    const sizeBytes = Number(item.sizeBytes);
+    if (typeof assetKey !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(assetKey)
+      || /(^|\/)\.{1,2}(\/|$)|\/\//.test(assetKey) || assetKey.endsWith("/")
+      || typeof bucket !== "string" || bucket.length < 3 || bucket.length > 255
+      || typeof key !== "string" || !key.startsWith(prefix)
+      || typeof sha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(sha256)
+      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 100 * 1024 * 1024
+      || seenKeys.has(assetKey) || seenObjects.has(key)) {
+      throw new Error("Stored build asset input is invalid");
+    }
+    seenKeys.add(assetKey);
+    seenObjects.add(key);
+    return Object.freeze({
+      kind: "ASSET", assetKey, bucket, key,
+      sha256: sha256 as ObjectReference["sha256"],
+      sizeBytes,
+    }) satisfies ObjectReference;
+  });
+  return Object.freeze(objects);
 }
 
 type JobRow = {

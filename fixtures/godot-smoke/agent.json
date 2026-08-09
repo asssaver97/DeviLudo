@@ -80,5 +80,18 @@
         }
       }
     ]
+  },
+  "assetManifest": {
+    "schemaVersion": "deviludo.asset-manifest.v1",
+    "items": [
+      {
+        "assetKey": "ui/ember-icon",
+        "assetType": "icon",
+        "description": "A compact glowing ember icon used by the collection counter",
+        "generationPrompt": "single warm orange ember icon, crisp game UI asset, transparent background, no text",
+        "frameCount": null,
+        "dimensions": "64x64"
+      }
+    ]
   }
 }

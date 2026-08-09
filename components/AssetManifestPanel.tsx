@@ -84,8 +84,8 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     return () => controller.abort();
   }, [applyManifest, fetchGenerationConfig, fetchManifest]);
 
-  // Generation settles in the background with nothing to push the result here, so
-  // the panel polls while work is outstanding and stops once it is not.
+  // Generation settles in the background and gates artifact construction, so the
+  // panel polls while work is outstanding and stops once it is not.
   const generationOutstanding = autoGenerateEnabled
     && items.some(item => item.status === "planned" || item.status === "generating");
   useEffect(() => {
@@ -203,17 +203,17 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
               type="checkbox"
               checked={autoGenerateEnabled}
               onChange={toggleAutoGenerate}
-              disabled={!configComplete || !providerSupported}
+              disabled={!autoGenerateEnabled && (!configComplete || !providerSupported)}
             />
             <span>自动生成素材</span>
           </label>
           {/* The toggle used to be disabled with no explanation, which read as a
               bug. Whenever it cannot be used, say which condition is missing. */}
-          {!configComplete ? (
+          {!configComplete && !autoGenerateEnabled ? (
             <span className="config-warning">
               ⚠️ 需要先在<a href="/settings">设置</a>里配置图片生成模型和 API Key
             </span>
-          ) : !providerSupported ? (
+          ) : !providerSupported && !autoGenerateEnabled ? (
             <span className="config-warning">
               ⚠️ Midjourney 没有可用的同步生成接口，请在设置里改用 DALL-E 3、Stable Diffusion XL 或 Replicate
             </span>

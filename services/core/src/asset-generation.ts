@@ -2,9 +2,9 @@
 //
 // The Agent plans assets and writes their prompts while generating the source
 // that consumes them; this turns those prompts into images. It runs on the
-// scheduler tick rather than as a delivery job so a slow or failing provider can
-// never stall the delivery chain — the game builds with placeholders, and
-// generated assets reach it through a later ARTIFACT_BUILD rerun.
+// scheduler tick rather than consuming a serial delivery worker. The workflow's
+// ASSET_GENERATING gate waits for every required image (or an explicit user
+// placeholder choice), then freezes the settled objects into ARTIFACT_BUILD.
 
 import type { AgentSecretStore } from "./agent-settings";
 import type { AssetGenerationLease } from "./asset-manifest";

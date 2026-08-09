@@ -1,9 +1,8 @@
 // Asset manifest reads and mutations.
 //
-// Assets deliberately sit outside the serial delivery chain: the Agent plans them
-// while generating source, generation and upload happen asynchronously, and the
-// results reach the game through an ARTIFACT_BUILD rerun. Every query here runs
-// inside `withWorkspace` so the tables' forced row-level security applies.
+// The image calls run asynchronously, but an auto-generated manifest is a durable
+// gate between Agent completion and artifact build. Every workspace-scoped query
+// here runs inside `withWorkspace` so the tables' forced row-level security applies.
 
 import type { Database } from "./database";
 import type {
@@ -232,6 +231,15 @@ export class AssetManifestStore {
       [workspaceId, itemId, error],
     );
     return result.rows[0]?.released === true;
+  }
+
+  /** Release asset-gated workflows whose images are now all supplied. */
+  async advanceReadyWorkflows(batchSize = 20): Promise<number> {
+    const result = await this.database.pool.query<{ advanced: string }>(
+      "SELECT deviludo.advance_asset_workflows($1::integer)::text AS advanced",
+      [batchSize],
+    );
+    return Number(result.rows[0]?.advanced ?? 0);
   }
 
   /**

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS deviludo.asset_manifests (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   project_id uuid NOT NULL,
   workflow_id uuid,
-  auto_generate_enabled boolean NOT NULL DEFAULT false,
+  auto_generate_enabled boolean NOT NULL DEFAULT true,
   planned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, id),
@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS deviludo.asset_items (
 
 CREATE INDEX IF NOT EXISTS asset_items_manifest_status
   ON deviludo.asset_items (workspace_id, manifest_id, status);
+
+-- CREATE TABLE IF NOT EXISTS does not update the default on an asset table that
+-- the previous repair already created.
+ALTER TABLE deviludo.asset_manifests
+  ALTER COLUMN auto_generate_enabled SET DEFAULT true;
 
 -- Row-level security and its policy, applied only where absent so a re-run does
 -- not fail on the existing policy. These two tables carry workspace data, so

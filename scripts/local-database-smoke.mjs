@@ -82,7 +82,8 @@ async function runDatabaseSmoke(url) {
        ORDER BY function.proname
     `);
     const expectedDefiners = [
-      "acknowledge_source_ready_events", "claim_job", "cleanup_expired_executor_state",
+      "acknowledge_source_ready_events", "advance_asset_workflows", "claim_asset_generation", "claim_job",
+      "cleanup_expired_executor_state", "complete_asset_generation", "fail_asset_generation",
       "pull_source_ready_events", "recover_expired_jobs", "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
@@ -93,6 +94,8 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.pull_source_ready_events(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.cleanup_expired_executor_state()", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.cleanup_expired_executor_state()", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.advance_asset_workflows(integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.advance_asset_workflows(integer)", false);
     await scheduler.query("SELECT deviludo.reconcile_p0_capacity()");
 
     await owner.query(
@@ -136,11 +139,12 @@ async function runDatabaseSmoke(url) {
         [workspaceIds[0], projectIds[0], workflowIds[0], digest, actorId],
       );
     });
-    const events = await api.query("SELECT * FROM deviludo.pull_source_ready_events(10)");
-    if (events.rows.length !== 1 || events.rows[0].content_digest !== digest) throw new Error("Source outbox replay is invalid");
+    const events = await api.query("SELECT * FROM deviludo.pull_source_ready_events(500)");
+    const ownEvent = events.rows.find(row => row.workspace_id === workspaceIds[0] && row.content_digest === digest);
+    if (!ownEvent) throw new Error("Source outbox replay is invalid");
     const acknowledged = await api.query(
       "SELECT deviludo.acknowledge_source_ready_events($1::uuid[])::integer AS count",
-      [[events.rows[0].event_id]],
+      [[ownEvent.event_id]],
     );
     if (acknowledged.rows[0]?.count !== 1) throw new Error("Source outbox acknowledgement is invalid");
 
@@ -174,6 +178,104 @@ async function runDatabaseSmoke(url) {
     const recovered = await scheduler.query("SELECT deviludo.recover_expired_jobs()::integer AS count");
     if (Number(recovered.rows[0]?.count ?? 0) < 1) throw new Error("The expired lease was not recovered");
 
+    // Generated art is a durable build gate: a planned item holds the workflow,
+    // and the same scheduler sweep advances it exactly once after upload.
+    await owner.query(`UPDATE deviludo.jobs
+       SET state = 'SUCCEEDED', lease_owner = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL
+     WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0]]);
+    await owner.query(`UPDATE deviludo.workflow_instances SET state = 'ASSET_GENERATING'
+       WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], workflowIds[0]]);
+    await owner.query(`
+      INSERT INTO deviludo.artifacts(
+        workspace_id, project_id, workflow_id, producing_job_id, kind,
+        bucket, object_key, sha256, size_bytes
+      ) VALUES (
+        $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'SPECIFICATION',
+        'deviludo-artifacts',
+        'workspaces/' || $1::text || '/projects/' || $2::text || '/jobs/' || $4::text || '/agent.json',
+        'sha256:${"c".repeat(64)}', 128
+      )
+    `, [workspaceIds[0], projectIds[0], workflowIds[0], jobIds[0]]);
+    await owner.query(`
+      WITH manifest AS (
+        INSERT INTO deviludo.asset_manifests(workspace_id, project_id, workflow_id, auto_generate_enabled)
+        VALUES ($1::uuid, $2::uuid, $3::uuid, true)
+        RETURNING id
+      )
+      INSERT INTO deviludo.asset_items(workspace_id, manifest_id, asset_key, asset_type, description)
+      SELECT $1::uuid, id, 'ui/smoke', 'icon', 'database smoke asset' FROM manifest
+    `, [workspaceIds[0], projectIds[0], workflowIds[0]]);
+    const held = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
+    if (Number(held.rows[0]?.count) !== 0) throw new Error("A planned image did not hold the artifact build gate");
+    await owner.query(`
+      UPDATE deviludo.asset_items
+         SET status = 'uploaded', bucket = 'deviludo-artifacts',
+             object_key = 'workspaces/' || workspace_id::text || '/projects/${projectIds[0]}/assets/ui-smoke.png',
+             sha256 = 'sha256:${"b".repeat(64)}', size_bytes = 64
+       WHERE workspace_id = $1::uuid AND asset_key = 'ui/smoke'
+    `, [workspaceIds[0]]);
+    const advanced = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
+    if (Number(advanced.rows[0]?.count) !== 1) throw new Error("Uploaded art did not release the artifact build gate");
+    const gated = await owner.query(`
+      SELECT workflow.state::text,
+             count(job.id) FILTER (WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'QUEUED')::integer AS builds
+        FROM deviludo.workflow_instances workflow
+        LEFT JOIN deviludo.jobs job ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
+       WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+       GROUP BY workflow.state
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (gated.rows[0]?.state !== "ARTIFACT_BUILDING" || gated.rows[0]?.builds !== 1) {
+      throw new Error("Asset-ready workflow did not enqueue one artifact build");
+    }
+    const buildAssets = await owner.query(`
+      SELECT payload->'assetInputs' AS inputs
+        FROM deviludo.jobs
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+         AND kind = 'ARTIFACT_BUILD' AND state = 'QUEUED'
+    `, [workspaceIds[0], workflowIds[0]]);
+    const frozenAsset = buildAssets.rows[0]?.inputs?.[0];
+    if (buildAssets.rows[0]?.inputs?.length !== 1
+      || frozenAsset?.assetKey !== "ui/smoke"
+      || frozenAsset?.sha256 !== `sha256:${"b".repeat(64)}`) {
+      throw new Error("Artifact build did not freeze the supplied image object");
+    }
+    await owner.query(`
+      UPDATE deviludo.workflow_instances
+         SET profile = 'RELEASE', target_platforms = ARRAY['linux','windows','macos']::deviludo.server_os[],
+             state = 'RELEASE_APPROVAL_PENDING'
+       WHERE workspace_id = $1::uuid AND id = $2::uuid
+    `, [workspaceIds[0], workflowIds[0]]);
+    await owner.query(`
+      INSERT INTO deviludo.artifacts(
+        workspace_id, project_id, workflow_id, kind, target_platform,
+        bucket, object_key, sha256, size_bytes
+      )
+      SELECT $1::uuid, $2::uuid, $3::uuid, 'SIGNED_BUILD', platform,
+             'deviludo-artifacts',
+             'workspaces/' || $1::text || '/projects/' || $2::text || '/jobs/release-smoke/signed-build-' || platform::text || '.tar.gz',
+             'sha256:' || repeat(CASE platform
+               WHEN 'linux' THEN 'd' WHEN 'windows' THEN 'e' ELSE 'f' END, 64),
+             256
+        FROM unnest(ARRAY['linux','windows','macos']::deviludo.server_os[]) platform
+    `, [workspaceIds[0], projectIds[0], workflowIds[0]]);
+    const releaseAccepted = await withWorkspace(api, workspaceIds[0], client => client.query(
+      "SELECT deviludo.accept_workflow_signal($1::uuid, 'RELEASE_APPROVED', $2, jsonb_build_object('requestedByAccountId', $3::text)) AS accepted",
+      [workflowIds[0], `release-smoke:${workflowIds[0]}`, actorId],
+    ));
+    if (releaseAccepted.rows[0]?.accepted !== true) throw new Error("Release approval signal was not accepted");
+    const approvedRelease = await owner.query(`
+      SELECT workflow.state::text,
+             count(job.id) FILTER (WHERE job.kind = 'STEAM_PUBLISH' AND job.state = 'QUEUED')::integer AS publishes
+        FROM deviludo.workflow_instances workflow
+        LEFT JOIN deviludo.jobs job ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
+       WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+       GROUP BY workflow.state
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (approvedRelease.rows[0]?.state !== "STEAM_PUBLISHING" || approvedRelease.rows[0]?.publishes !== 1) {
+      throw new Error("Human release approval did not enqueue exactly one Steam publish");
+    }
+
     console.log(JSON.stringify({
       database: "verified",
       forcedRlsTables: forcedNames.size,
@@ -183,6 +285,8 @@ async function runDatabaseSmoke(url) {
       concurrentClaims: claims.length,
       repeatedClaimRejected: true,
       expiredLeaseRecovered: true,
+      assetReadinessGate: true,
+      humanReleaseApproval: true,
     }));
   } finally {
     await cleanup(owner, workspaceIds).catch(() => undefined);
@@ -237,6 +341,7 @@ async function expectRlsRejection(operation) {
 async function cleanup(owner, workspaceIds) {
   for (const table of [
     "executor_receipts", "artifact_inputs", "artifacts", "operation_receipts", "external_signals",
+    "asset_items", "asset_manifests",
     "workflow_events", "jobs", "workspace_claim_fairness", "conversation_messages",
     "project_conversations", "agent_installations", "project_source_ready_outbox",
     "project_source_revisions", "project_document_revisions", "project_documents",

@@ -7,7 +7,43 @@ permissions:
   packages: write
   id-token: write
 jobs:
+  real-platform-acceptance:
+    name: Godot acceptance (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: windows
+            runner: windows-2025
+          - platform: macos
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22.22.0, cache: npm }
+      - run: npm ci
+      - name: Install the production Godot version on the native host
+        uses: lihop/setup-godot@v3
+        with:
+          version: 4.5.1-stable
+          alias: godot
+          export-templates: false
+      - name: Run native platform acceptance
+        run: npm run test:e2e:platform -- --platform=${{ matrix.platform }}
+        env:
+          DEVILUDO_GODOT_VERSION: 4.5.1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-platform-acceptance-${{ matrix.platform }}
+          path: artifacts/platform-e2e-${{ matrix.platform }}.json
+          if-no-files-found: error
+
   release:
+    needs: real-platform-acceptance
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -17,6 +53,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
+      - name: Verify the exact tagged source
+        run: npm run check
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

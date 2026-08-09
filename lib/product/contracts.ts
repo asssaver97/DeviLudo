@@ -19,6 +19,7 @@ export type ProductSession = Readonly<{
   authenticated: true;
   authMode: "STANDALONE" | "PLATFORM";
   canLogout: boolean;
+  workspaceRole: WorkspaceRole;
   selectedWorkspace: WorkspaceSummary;
 }>;
 
@@ -191,9 +192,11 @@ export type AgentProgressEvent = Readonly<{
 export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   DRAFT: "需求讨论中",
   AGENT_RUNNING: "Agent 生成中",
+  ASSET_GENERATING: "图片素材生成中",
   ARTIFACT_BUILDING: "制品构建中",
   E2E_TESTING: "跨平台测试中",
   SIGNING: "平台签名中",
+  RELEASE_APPROVAL_PENDING: "等待发布批准",
   STEAM_PUBLISHING: "Steam 发布中",
   CLEAN_INSTALL_VERIFYING: "干净回装验证中",
   SUCCEEDED: "交付完成",

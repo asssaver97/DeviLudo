@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { access, appendFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, appendFile, copyFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 let progressWrites = Promise.resolve();
@@ -126,8 +128,10 @@ async function runAgent(plan) {
     "",
     "Asset planning guidelines:",
     "- List ALL sprites, backgrounds, UI elements, and tilesets the game needs",
+    "- assetKey is an ASCII relative path without a file extension; use only letters, digits, dots, underscores, hyphens, and slashes",
     "- For animations, specify exact frame count and describe the motion sequence",
-    "- Use placeholder colored rectangles in Godot code initially",
+    "- The controlled builder materializes supplied images at res://assets/generated/<assetKey>.png, .jpg, or .webp",
+    "- Game code must try those three generated paths at runtime and use its placeholder only when none exists",
     "- Write descriptions assuming the player may upload custom art or use image generation",
     "- generationPrompt should be optimized for DALL-E 3 or Stable Diffusion XL",
     "",
@@ -155,13 +159,62 @@ async function runAgent(plan) {
   ].join("\n");
   const environment = { ...safeEnvironment(), ...configuration.environment };
   emitProgress("PHASE", "Agent 正在编写并验证游戏项目");
-  const result = await runGenerationAgent(configuration, environment, prompt, emitAgentOutput, apiKey);
+  await runGenerationAgent(configuration, environment, prompt, emitAgentOutput, apiKey);
   flushAgentOutput();
-  await writeFile("/workspace/outputs/agent.json", result.stdout, "utf8");
+  // The CLI stdout is an event stream (Codex JSONL or Claude stream-json), not
+  // the agent.json contract. Upload the file the Agent wrote into the generated
+  // source so Core can ingest its test and asset manifests from the trusted,
+  // digest-checked output object.
+  const agentManifest = await readGeneratedAgentManifest();
+  await writeFile("/workspace/outputs/agent.json", JSON.stringify(agentManifest), "utf8");
   emitProgress("PHASE", "Agent 已完成代码修改，正在发布源码 revision");
   await manifest([
     { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
   ]);
+}
+
+async function readGeneratedAgentManifest() {
+  let value;
+  try {
+    value = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
+  } catch {
+    throw new Error("Agent did not produce a valid agent.json");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Agent did not produce a valid agent.json");
+  }
+  const testManifest = value.testManifest;
+  if (!testManifest || typeof testManifest !== "object" || Array.isArray(testManifest)
+    || testManifest.schemaVersion !== "deviludo.test-manifest.v1"
+    || !Array.isArray(testManifest.features)
+    || testManifest.features.length < 1 || testManifest.features.length > 500) {
+    throw new Error("Agent did not produce a valid testManifest");
+  }
+  const assetManifest = value.assetManifest;
+  if (!assetManifest || typeof assetManifest !== "object" || Array.isArray(assetManifest)
+    || assetManifest.schemaVersion !== "deviludo.asset-manifest.v1"
+    || !Array.isArray(assetManifest.items)
+    || assetManifest.items.length < 1 || assetManifest.items.length > 500
+    || assetManifest.items.some(item => !validPlannedAsset(item))) {
+    throw new Error("Agent did not produce a valid assetManifest");
+  }
+  if (new Set(assetManifest.items.map(item => item.assetKey)).size !== assetManifest.items.length) {
+    throw new Error("Agent assetManifest keys must be unique");
+  }
+  return value;
+}
+
+function validPlannedAsset(item) {
+  return item && typeof item === "object" && !Array.isArray(item)
+    && typeof item.assetKey === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(item.assetKey)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(item.assetKey) && !item.assetKey.endsWith("/")
+    && ["sprite", "animation", "background", "ui", "icon", "tileset"].includes(item.assetType)
+    && typeof item.description === "string" && item.description.length >= 1 && item.description.length <= 2000
+    && typeof item.generationPrompt === "string"
+    && item.generationPrompt.length >= 1 && item.generationPrompt.length <= 4000
+    && (item.frameCount == null || (Number.isInteger(item.frameCount) && item.frameCount >= 1 && item.frameCount <= 4096))
+    && (item.dimensions == null || (typeof item.dimensions === "string" && /^[0-9]{1,5}x[0-9]{1,5}$/.test(item.dimensions)));
 }
 
 async function runGenerationAgent(configuration, environment, prompt, onOutput, apiKey) {
@@ -313,6 +366,7 @@ async function runGodotBuild(plan) {
   const input = "/workspace/inputs/source.tar.gz";
   emitProgress("PHASE", "正在展开并校验 Agent 生成的 Godot 项目");
   await command("tar", ["-xzf", input, "-C", "/workspace/project"], safeEnvironment());
+  await materializeBuildAssets(plan);
   const platforms = await prepareGodotProject("/workspace/project", plan.job.payload.targetPlatforms);
   await mkdir("/workspace/.local/share/godot", { recursive: true });
   await symlink("/home/task/.local/share/godot/export_templates", "/workspace/.local/share/godot/export_templates");
@@ -332,6 +386,43 @@ async function runGodotBuild(plan) {
   }
   emitProgress("PHASE", "Godot 制品导出完成，正在生成制品清单");
   await manifest(outputs);
+}
+
+async function materializeBuildAssets(plan) {
+  const assets = plan.job.inputObjects.filter(input => input.kind === "ASSET");
+  if (assets.length === 0) return;
+  const root = resolve("/workspace/project/assets/generated");
+  const manifestItems = [];
+  for (const asset of assets) {
+    if (typeof asset.assetKey !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(asset.assetKey)
+      || /(^|\/)\.{1,2}(\/|$)|\/\//.test(asset.assetKey) || asset.assetKey.endsWith("/")) {
+      throw new Error("Build asset key is invalid");
+    }
+    const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
+    if (!extension) throw new Error("Build asset extension is invalid");
+    const target = resolve(root, `${asset.assetKey}.${extension}`);
+    if (!target.startsWith(`${root}/`)) throw new Error("Build asset path escaped the generated asset root");
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(`/workspace/inputs/${assetInputFilename(asset)}`, target);
+    manifestItems.push({
+      assetKey: asset.assetKey,
+      resourcePath: `res://assets/generated/${asset.assetKey}.${extension}`,
+      sha256: asset.sha256,
+      sizeBytes: asset.sizeBytes,
+    });
+  }
+  await writeFile(`${root}/manifest.json`, JSON.stringify({
+    schemaVersion: "deviludo.generated-assets.v1",
+    items: manifestItems,
+  }), "utf8");
+  emitProgress("PHASE", `已同步 ${assets.length} 个图片素材到构建源码`);
+}
+
+function assetInputFilename(input) {
+  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  if (!extension) throw new Error("Build asset extension is invalid");
+  return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }
 
 async function runSteamPublish(plan) {

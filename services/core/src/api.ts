@@ -275,6 +275,7 @@ export async function runApi(
       authenticated: true,
       authMode: config.accessMode === "standalone" ? "STANDALONE" : "PLATFORM",
       canLogout: config.accessMode === "platform",
+      workspaceRole: principal.role,
       selectedWorkspace: principal.workspace,
     } });
   });
@@ -780,6 +781,31 @@ export async function runApi(
       kind: "SPEC_APPROVED",
       idempotencyKey: `spec-approved:${project.workflowId}`,
       payload: { specificationObject, requestedByAccountId: principal.user.id },
+    });
+    return reply.code(accepted ? 202 : 200).send({ accepted });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/approve-release", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
+      throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区管理员可以批准 Steam 发布");
+    }
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    if (project.workflowProfile !== "RELEASE" || project.workflowState !== "RELEASE_APPROVAL_PENDING") {
+      return reply.code(409).send({
+        code: "RELEASE_APPROVAL_UNAVAILABLE",
+        message: "只有已完成三平台签名并等待批准的发布流程可以上传 Steam",
+      });
+    }
+    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
+      kind: "RELEASE_APPROVED",
+      idempotencyKey: `release-approved:${project.workflowId}`,
+      payload: {
+        requestedBy: principal.user.username,
+        requestedByAccountId: principal.user.id,
+      },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });

@@ -96,6 +96,27 @@ export class ProjectSourceStore {
     });
   }
 
+  /**
+   * Read one bounded regular file from an immutable published revision. This is
+   * used by Core to recover the canonical generated agent.json even while an
+   * Agent job created before the runner upgrade still uploads legacy CLI stdout
+   * as its object artifact.
+   */
+  async readRevisionFile(relativePath: string, filePath: string, maximumBytes: number): Promise<Buffer> {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) throw new Error("Source file limit is invalid");
+    const directory = resolve(this.root, relativePath);
+    assertWithin(this.root, directory);
+    const normalized = normalizeProjectPath(filePath);
+    const target = resolve(directory, normalized);
+    assertWithin(directory, target);
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Source revision entry is not a regular file");
+    if (info.size < 1 || info.size > maximumBytes) throw new Error("Source revision file size is invalid");
+    const bytes = await readFile(target);
+    if (bytes.length !== info.size) throw new Error("Source revision file changed while reading");
+    return bytes;
+  }
+
   async publishDirectory(input: Readonly<{
     workspaceId: string;
     projectId: string;

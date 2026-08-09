@@ -328,7 +328,7 @@ async function execute(
     activeTasks.set(plan.job.jobId, taskName);
     if (signal.aborted) throw new Error("Task execution was cancelled");
     for (const input of plan.job.inputObjects) {
-      const destination = join(inputDirectory, basename(input.key));
+      const destination = join(inputDirectory, inputFilename(input));
       const result = await s3.send(new GetObjectCommand({ Bucket: input.bucket, Key: input.key }));
       if (!result.Body) throw new Error(`Artifact body is missing: ${input.key}`);
       const content = await streamBuffer(result.Body as Readable, input.sizeBytes);
@@ -354,7 +354,7 @@ async function execute(
     onProgress("PHASE", "隔离环境已启动，正在注入已批准的输入");
     await inject(taskName, "plan", await readFile(planFile));
     for (const input of plan.job.inputObjects) {
-      const filename = basename(input.key);
+      const filename = inputFilename(input);
       await inject(taskName, `input:${filename}`, await readFile(join(inputDirectory, filename)));
     }
     if (sourceRelativePath) await inject(taskName, "input:source.tar.gz", await readFile(join(inputDirectory, "source.tar.gz")));
@@ -611,8 +611,17 @@ function validatePlan(value: unknown): SandboxPlan {
   if (job.inputObjects.some(input => input.bucket !== bucket || !input.key.startsWith(objectPrefix))) {
     throw new Error("Input object escapes the executor artifact boundary");
   }
-  if (new Set(job.inputObjects.map(input => basename(input.key))).size !== job.inputObjects.length) {
+  if (new Set(job.inputObjects.map(inputFilename)).size !== job.inputObjects.length) {
     throw new Error("Input object filenames collide inside the task workspace");
+  }
+  const assetInputs = job.inputObjects.filter(input => input.kind === "ASSET");
+  if ((job.jobKind !== "ARTIFACT_BUILD" && assetInputs.length > 0)
+    || job.inputObjects.some(input => input.kind !== "ASSET" && input.assetKey !== undefined)
+    || assetInputs.some(input => typeof input.assetKey !== "string"
+      || !input.key.startsWith(`${objectPrefix}assets/`)
+      || !/\.(?:png|jpg|webp)$/.test(input.key))
+    || new Set(assetInputs.map(input => input.assetKey)).size !== assetInputs.length) {
+    throw new Error("Build asset inputs do not satisfy the fixed materialization contract");
   }
   if (job.jobKind === "AGENT_GENERATION" && job.runtimeImage !== fixtureAgentImage) {
     const specifications = job.inputObjects.filter(input => input.kind === "SPECIFICATION"
@@ -632,6 +641,13 @@ function validatePlan(value: unknown): SandboxPlan {
   }
   if (Date.parse(job.lease.expiresAt) <= Date.now()) throw new Error("Job lease expired before execution");
   return plan;
+}
+
+function inputFilename(input: SandboxPlan["job"]["inputObjects"][number]): string {
+  if (input.kind !== "ASSET") return basename(input.key);
+  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  if (!extension) throw new Error("Build asset object extension is invalid");
+  return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }
 
 function validateAgentConfiguration(configuration: NonNullable<SandboxPlan["agentConfiguration"]>) {

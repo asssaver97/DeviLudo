@@ -235,6 +235,43 @@ test("CI uses the fixed no-provider Agent while local macOS keeps native E2E", a
   assert.match(smoke, /skipNativeE2e \? null : await runNativeMacE2e/);
 });
 
+test("release is blocked on native Linux, Windows, and macOS Godot acceptance", async () => {
+  const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const runner = await readFile(new URL("../scripts/real-platform-e2e.mjs", import.meta.url), "utf8");
+  for (const platform of ["linux", "windows", "macos"]) assert.match(release, new RegExp(`platform: ${platform}`));
+  assert.match(release, /runner: ubuntu-24\.04/);
+  assert.match(release, /runner: windows-2025/);
+  assert.match(release, /runner: macos-14/);
+  assert.match(release, /needs: real-platform-acceptance/);
+  assert.match(release, /npm run test:e2e:platform -- --platform=\$\{\{ matrix\.platform \}\}/);
+  assert.match(release, /npm run check/);
+  assert.match(runner, /REAL_PLATFORM_MISMATCH/);
+  assert.match(runner, /DEVILUDO_E2E_RESULT/);
+  assert.match(runner, /missingChecks/);
+  assert.match(runner, /deviludo\.real-platform-acceptance\.v1/);
+});
+
+test("state backup and restore cover all durable stores with integrity and empty-target guards", async () => {
+  const backup = await readFile(new URL("../scripts/backup-state.mjs", import.meta.url), "utf8");
+  const restore = await readFile(new URL("../scripts/restore-state.mjs", import.meta.url), "utf8");
+  const dockerfile = await readFile(new URL("../Dockerfile.core", import.meta.url), "utf8");
+  assert.match(dockerfile, /postgresql17-client/);
+  assert.match(backup, /LOCK TABLE .* IN SHARE MODE/);
+  assert.match(backup, /pg_dump/);
+  assert.match(backup, /DEVILUDO_PROJECTS_ROOT/);
+  assert.match(backup, /ListObjectsV2Command/);
+  assert.match(backup, /Referenced object is missing or inconsistent/);
+  assert.match(backup, /schemaVersion: "deviludo\.state-backup\.v1"/);
+  assert.match(restore, /--confirm=RESTORE_DEVILUDO_BACKUP/);
+  assert.match(restore, /already contains the deviludo schema/);
+  assert.match(restore, /Restore target database is not empty/);
+  assert.match(restore, /artifact bucket is not empty/);
+  assert.match(restore, /pg_restore/);
+  assert.match(restore, /--single-transaction/);
+  assert.match(restore, /ALTER FUNCTION %s OWNER TO deviludo_claim_executor/);
+  assert.match(restore, /Restored migration ledger does not match the backup/);
+});
+
 test("E2E signing failures and isolation cleanup remove transient workspaces", async () => {
   const executor = await readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8");
   const windows = await readFile(new URL("../deploy/assets/e2e-windows-isolation.ps1", import.meta.url), "utf8");
@@ -330,6 +367,31 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   assert.match(panel, /accept="image\/png,image\/jpeg,image\/webp"/);
 });
 
+test("image assets gate the first build and Steam upload waits for an administrator", async () => {
+  const sql = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
+  const api = await readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8");
+  const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
+  const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
+  const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const scheduler = await readFile(new URL("../services/core/src/scheduler.ts", import.meta.url), "utf8");
+  assert.match(sql, /state = 'ASSET_GENERATING'/);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.advance_asset_workflows/);
+  assert.match(sql, /item\.status NOT IN \('generated', 'uploaded'\)/);
+  assert.match(scheduler, /advanceReadyWorkflows\(\)/);
+  assert.match(sql, /snapshot_artifact_build_assets/);
+  assert.match(repository, /kind: "ASSET", assetKey, bucket, key,[\s\S]*sha256: sha256 as ObjectReference/);
+  assert.match(daemon, /Build asset inputs do not satisfy the fixed materialization contract/);
+  assert.match(runner, /materializeBuildAssets\(plan\)/);
+  assert.match(runner, /res:\/\/assets\/generated\/\$\{asset\.assetKey\}\.\$\{extension\}/);
+  assert.match(sql, /SET state = 'RELEASE_APPROVAL_PENDING'/);
+  assert.match(api, /"\/v1\/projects\/:projectId\/approve-release"/);
+  assert.match(api, /principal\.role !== "OWNER" && principal\.role !== "ADMIN"/);
+  assert.match(api, /kind: "RELEASE_APPROVED"/);
+  assert.match(studio, /mutate\("approve-release"\)/);
+  assert.match(studio, /APPROVE STEAM UPLOAD/);
+});
+
 test("auto-generate never removes the user's own way to supply an asset", async () => {
   const panel = await readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8");
   // Hiding upload while auto-generate was on was a trap: an asset whose prompt the
@@ -340,7 +402,7 @@ test("auto-generate never removes the user's own way to supply an asset", async 
   assert.doesNotMatch(panel, /item\.status === "planned" && !autoGenerateEnabled/);
   // A disabled toggle with no explanation reads as a bug, so each blocking
   // condition names itself.
-  assert.match(panel, /disabled=\{!configComplete \|\| !providerSupported\}/);
+  assert.match(panel, /disabled=\{!autoGenerateEnabled && \(!configComplete \|\| !providerSupported\)\}/);
   assert.match(panel, /需要先在.*设置.*里配置图片生成模型和 API Key/);
   assert.match(panel, /providerSupported = generationConfig\?\.provider !== "midjourney"/);
   // An endpoint cannot authenticate a request, so endpoint-only is not configured.
@@ -398,6 +460,31 @@ test("asset generation runs off the delivery chain on its own cadence", async ()
   assert.match(schedulerService, /DEVILUDO_ARTIFACT_BUCKET/);
   assert.match(schedulerService, /DEVILUDO_VAULT_TOKEN_FILE/);
   assert.match(schedulerService, /networks:[\s\S]*- egress/);
+});
+
+test("the trusted Agent manifest reaches automatic image generation", async () => {
+  const [runner, fixture, sandbox, objectStore, sql] = await Promise.all([
+    readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/task-fixture-agent.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/sandbox.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/object-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8"),
+  ]);
+  // CLI stdout is JSONL/stream-json diagnostics. The contract lives in the
+  // generated source's agent.json and both the real and fixture runners upload it.
+  assert.match(runner, /readFile\("\/workspace\/project\/agent\.json", "utf8"\)/);
+  assert.doesNotMatch(runner, /writeFile\("\/workspace\/outputs\/agent\.json", result\.stdout/);
+  assert.match(fixture, /readFile\("\/workspace\/project\/agent\.json", "utf8"\)/);
+  // Core re-reads the digest-checked output rather than trusting executor details,
+  // then includes the asset manifest in complete_job's receipt.
+  assert.match(objectStore, /async readAgentCompletion\(/);
+  assert.match(objectStore, /readJsonOutput\(objects, "SPECIFICATION"/);
+  assert.match(sandbox, /objectStore\.readAgentCompletion\(receipt\.outputObjects\)/);
+  assert.match(sandbox, /projectSources\.readRevisionFile\(relativePath, "agent\.json"/);
+  assert.match(sandbox, /\.\.\.\(agentCompletion \?\? \{\}\)/);
+  // Planning immediately enables the asynchronous scheduler branch.
+  assert.match(sql, /auto_generate_enabled boolean NOT NULL DEFAULT true/);
+  assert.match(sql, /auto_generate_enabled = true/);
 });
 
 test("every delivery node stays visible, including stages this run will not reach", async () => {

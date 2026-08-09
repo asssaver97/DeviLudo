@@ -4,18 +4,19 @@ import test from "node:test";
 
 const readStartup = () => readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8");
 
-test("every one-shot local initialisation step is gated instead of re-run unconditionally", async () => {
+test("cacheable local initialisation is gated while the migration ledger is always verified", async () => {
   const startup = await readStartup();
   // Each of these steps costs a container creation, so a repeat start must be able
   // to skip the ones whose inputs are unchanged.
   assert.match(startup, /if \(!matchesStartupCache\("vaultInit", vaultFingerprint\)\) await refreshLocalVaultTokens/);
   assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", executorSecretsFingerprint\)\) await refreshLocalExecutorSecrets/);
   assert.match(startup, /cachedStartupValue\("dockerSocketGid", dockerIdentity, \/\^\\d\+\$\/\)\s*\?\? await resolveDockerSocketGid\(\)/);
-  // The migration and bootstrap containers are reachable only through the init
-  // profile, so their skips are justified by the committed database state.
-  assert.match(startup, /migrateWithOptionalBaselineReset\(environment, instanceState\)/);
+  // Baseline compatibility cannot prove that later versioned migrations are
+  // present, so every start verifies the immutable ledger before bootstrapping.
+  assert.match(startup, /migrateWithOptionalBaselineReset\(environment\)/);
   assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, migrationRan\)/);
-  assert.match(startup, /if \(state\?\.baseline === "001 deviludo-core-source-v1"\) return false;/);
+  assert.match(startup, /await runMigration\(environment\)/);
+  assert.doesNotMatch(startup, /if \(state\?\.baseline === "001 deviludo-core-source-v1"\) return false;/);
 });
 
 test("a fingerprint that cannot be computed never satisfies a gate", async () => {

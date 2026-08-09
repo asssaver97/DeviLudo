@@ -32,9 +32,9 @@ import { ArrowIcon, FileIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 import { useProductSession } from "./ProductShell";
 
-// The serial delivery chain, in order. Asset generation is deliberately absent:
-// it runs asynchronously alongside delivery and has its own panel, so putting it
-// here would stall the chain on a stage that never produces a job.
+// The serial delivery chain, in order. Asset generation is shown as a branch off
+// Agent generation, but it is a real readiness gate: artifact builds cannot start
+// until every planned image is generated/uploaded or auto-generation is disabled.
 const PIPELINE = [
   ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
   ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
@@ -618,7 +618,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       <RerunIcon />
                     </button>
                   ) : null}
-                  {/* The asynchronous asset branch hangs off this stage rather than
+                  {/* The asset readiness branch hangs off this stage rather than
                       being absolutely positioned in the canvas: the Agent plans the
                       manifest, so the branch belongs to that node and follows it
                       wherever the flex track puts it. */}
@@ -636,7 +636,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                           <b>{text("图片素材", "ASSET GEN")}</b>
                           <small>{assetPanelExpanded
                             ? text("收起素材清单", "Hide asset list")
-                            : text("异步 · 查看清单", "Async · view list")}</small>
+                            : text("构建前门禁 · 查看清单", "Pre-build gate · view list")}</small>
                         </span>
                         <ArrowIcon aria-hidden="true" className="product-delivery-async-chevron" />
                       </button>
@@ -654,6 +654,20 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               "Pick any node to re-run: that stage and everything after it are superseded and run again.",
             )}
           </p>
+        ) : null}
+        {project.workflowState === "RELEASE_APPROVAL_PENDING" ? (
+          <section aria-label={text("Steam 发布批准", "Steam release approval")} className="product-release-approval">
+            <div className="product-release-approval-icon" aria-hidden="true">✓</div>
+            <div>
+              <strong>{text("三平台签名已完成，等待人工批准", "All three platforms are signed and awaiting human approval")}</strong>
+              <p>{text("批准后会把已签名构建上传至 Steam，并继续执行干净回装验证。此操作不会自动撤销。", "Approval uploads the signed builds to Steam and continues to clean-install verification. This action is not automatically reversible.")}</p>
+            </div>
+            {session.workspaceRole === "OWNER" || session.workspaceRole === "ADMIN" ? (
+              <button className="button button-primary" disabled={busy} onClick={() => void mutate("approve-release")} type="button">
+                {busy ? text("正在批准…", "APPROVING…") : text("批准上传 Steam", "APPROVE STEAM UPLOAD")}
+              </button>
+            ) : <small>{text("请由工作区 Owner 或 Admin 批准发布。", "Ask a workspace Owner or Admin to approve the release.")}</small>}
+          </section>
         ) : null}
         {pipelineFailure && latestFailedJob ? (
           <section aria-label={text("交付失败原因", "Delivery failure reason")} className="product-delivery-failure" role="alert">
@@ -1092,8 +1106,9 @@ function repositoryMessage(code: string | undefined, text: (chinese: string, eng
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
     DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
+    ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
     ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"], E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
-    SIGNING: ["平台签名中", "Signing"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
+    SIGNING: ["平台签名中", "Signing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
     CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"], SUCCEEDED: ["交付完成", "Delivered"],
     FAILED: ["流程失败", "Failed"], CANCELLED: ["已取消", "Cancelled"],
   };
@@ -1102,7 +1117,7 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
 }
 
 function workflowNeedsPolling(state: string): boolean {
-  return ["AGENT_RUNNING", "ARTIFACT_BUILDING", "E2E_TESTING", "SIGNING", "STEAM_PUBLISHING", "CLEAN_INSTALL_VERIFYING"].includes(state);
+  return ["AGENT_RUNNING", "ASSET_GENERATING", "ARTIFACT_BUILDING", "E2E_TESTING", "SIGNING", "STEAM_PUBLISHING", "CLEAN_INSTALL_VERIFYING"].includes(state);
 }
 
 function repositoryNeedsPolling(state: RepositoryConnection["syncState"]): boolean {
