@@ -211,18 +211,14 @@ export class ProjectSourceStore {
 }
 
 function validateFiles(input: readonly SourceFile[]): readonly SourceFile[] {
-  if (input.length < 1 || input.length > 20_000) throw new Error("Source file count is invalid");
+  if (input.length < 1) throw new Error("Source file count is invalid");
   const seen = new Set<string>();
-  let total = 0;
   const files = input.map(file => {
     const path = normalizeProjectPath(file.path);
     if (isSensitiveProjectPath(path)) throw new Error(`Source contains a forbidden credential file: ${path}`);
     if (seen.has(path)) throw new Error(`Source contains a duplicate path: ${path}`);
     seen.add(path);
     const bytes = Buffer.from(file.bytes);
-    if (bytes.length > 100 * 1024 * 1024) throw new Error(`Source file exceeds the 100 MiB limit: ${path}`);
-    total += bytes.length;
-    if (total > 1024 * 1024 * 1024) throw new Error("Source exceeds the 1 GiB limit");
     return Object.freeze({ path, bytes });
   });
   return Object.freeze(files.sort((left, right) => left.path.localeCompare(right.path)));

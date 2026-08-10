@@ -9,6 +9,7 @@ import {
   type APIResponse,
 } from "@playwright/test";
 import type { ServerOperatingSystem, ServerPoolKind } from "../../../lib/runtime/server-pools";
+import type { ProductJob, ProductProjectDetail } from "../../../lib/product/contracts";
 import { loadE2eNodeConfig } from "../../../services/e2e-node/src/config";
 import { runE2eNode } from "../../../services/e2e-node/src/runner";
 
@@ -17,27 +18,9 @@ const root = process.cwd();
 const webToken = process.env.DEVILUDO_WEB_CORE_TOKEN ?? "local-web-to-core-token-0000000000000001";
 const nodeToken = process.env.DEVILUDO_E2E_NODE_TOKEN ?? "local-e2e-node-token";
 
-export type ProjectDetail = Readonly<{
-  workspaceId: string;
-  id: string;
-  name: string;
-  concept: string;
-  workflowId: string;
-  workflowState: string;
-  specification: Readonly<Record<string, unknown>>;
-  jobs: readonly JobRecord[];
-  events: readonly Readonly<{ id: string; kind: string; data: Readonly<Record<string, unknown>> }>[];
-}>;
+export type ProjectDetail = ProductProjectDetail & Readonly<{ workspaceId: string }>;
 
-export type JobRecord = Readonly<{
-  id: string;
-  kind: string;
-  poolKind: string;
-  targetOperatingSystem: string | null;
-  state: string;
-  attempt: number;
-  lastError: string | null;
-}>;
+export type JobRecord = ProductJob;
 
 export type NodeRecord = Readonly<{
   id: string;

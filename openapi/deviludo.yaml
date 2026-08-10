@@ -64,24 +64,55 @@ paths:
       responses:
         "201": { description: Local project created without any repository binding }
         "424": { description: Global Agent configuration or name generation failed }
-  /v1/projects/import/archive:
+  /v1/projects/bind/local-directory:
     post:
-      operationId: importLocalProjectArchive
+      operationId: bindLocalProjectDirectory
       security: [{ platformSession: [] }, {}]
-      parameters:
-        - in: query
-          name: name
-          schema: { type: string, maxLength: 200 }
       requestBody:
         required: true
         content:
-          application/zip:
-            schema: { type: string, format: binary, maxLength: 67108864 }
+          application/json:
+            schema:
+              type: object
+              required: [bindingId]
+              properties:
+                name: { type: string, maxLength: 200 }
+                bindingId: { type: string, format: uuid }
+                gitBranch: { type: string, maxLength: 200 }
       responses:
-        "201": { description: Local source snapshot, Agent project document, and initial conversation created }
-        "413": { description: Archive exceeds the 64 MiB compressed limit }
-        "422": { description: Archive or source boundary is invalid }
-        "424": { description: Global Agent configuration or project analysis failed }
+        "202": { description: Directory linked and project created; durable source analysis continues asynchronously }
+        "400": { description: Directory binding or project name is invalid }
+  /v1/projects/bind/github:
+    post:
+      operationId: bindClonedGitHubProject
+      security: [{ platformSession: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repositoryUrl, bindingId]
+              properties:
+                name: { type: string, maxLength: 200 }
+                repositoryUrl: { type: string }
+                bindingId: { type: string, format: uuid }
+                gitBranch: { type: string, maxLength: 200 }
+      responses:
+        "202": { description: Host-cloned working tree linked and project created; durable source analysis continues asynchronously }
+        "400": { description: Repository metadata, directory binding, or project name is invalid }
+  /v1/projects/{projectId}/analysis/retry:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: retryProjectImportAnalysis
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "202": { description: Failed initial analysis returned to the durable background queue }
+        "409": { description: Initial analysis has not failed }
   /v1/projects/{projectId}/approve:
     parameters:
       - in: path

@@ -69,6 +69,21 @@ test("Agent generation continues from the persistent source revision instead of 
   assert.doesNotMatch(runner, /input\.kind === "SOURCE"/);
 });
 
+test("bound local projects read the live directory and write back only when its baseline is unchanged", async () => {
+  const [daemon, repository, bridge] = await Promise.all([
+    readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(repository, /localDirectoryBindingId/);
+  assert.match(daemon, /readLocalProjectSource\(localDirectoryBindingId\)/);
+  assert.match(daemon, /syncLocalProjectSource\(localDirectoryBindingId, localDirectoryBaseDigest, sourceStream\)/);
+  assert.match(daemon, /projectSources\.saveCheckpoint/);
+  assert.match(bridge, /sourceDigest\(current\) !== expectedDigest/);
+  assert.match(bridge, /LOCAL_PROJECT_CHANGED/);
+  assert.match(bridge, /shouldIncludeProjectPath\(path\)/);
+});
+
 test("Agent generation preserves partial work and retries transient Provider failures in place", async () => {
   const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");

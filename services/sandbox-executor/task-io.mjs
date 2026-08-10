@@ -45,7 +45,8 @@ function resolveTarget(value) {
   if (value === "collected") return { path: "/run/deviludo/collected", maxBytes: 32 };
   if (value === "guidance") return { path: "/run/deviludo/guidance.ndjson", maxBytes: 8 * 1024, flags: "a" };
   const input = value.match(/^input:([A-Za-z0-9._-]{1,200})$/);
-  return input ? { path: `/workspace/inputs/${input[1]}`, maxBytes: 1024 * 1024 * 1024 } : null;
+  if (!input) return null;
+  return { path: `/workspace/inputs/${input[1]}`, maxBytes: input[1] === "source.tar.gz" ? Number.MAX_SAFE_INTEGER : 1024 * 1024 * 1024 };
 }
 
 function resolveReadable(value) {

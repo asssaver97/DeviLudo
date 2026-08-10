@@ -69,6 +69,11 @@ type GitHubRepositoryOption = Readonly<{
   defaultBranch: string;
 }>;
 
+type LocalGitState = Readonly<{
+  repository: boolean;
+  branch: string | null;
+}>;
+
 export function ProjectStudio({ projectId }: { projectId: string }) {
   const { locale, text } = useLanguage();
   const router = useRouter();
@@ -103,6 +108,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [repositoryBusy, setRepositoryBusy] = useState(false);
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
   const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
+  const [localGit, setLocalGit] = useState<LocalGitState | null>(null);
+  const [localGitError, setLocalGitError] = useState<string | null>(null);
+  const [newBranchName, setNewBranchName] = useState("");
+  const [branchBusy, setBranchBusy] = useState(false);
   const platformManaged = session.authMode === "PLATFORM";
 
   const loadProject = useCallback(async (force = false) => {
@@ -173,18 +182,36 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     return () => { active = false; clearTimeout(initial); };
   }, [loadArtifacts, loadConversations, loadProject, loadRepository, text]);
 
-  const workflowState = project?.workflowState;
+  const localDirectoryBindingId = project?.localDirectory?.bindingId ?? null;
   useEffect(() => {
-    if (!workflowState || !workflowNeedsPolling(workflowState)) return;
+    if (!localDirectoryBindingId) return;
+    let active = true;
+    void readLocalGitStatus(localDirectoryBindingId, text).then(value => {
+      if (active) {
+        setLocalGit(value);
+        setLocalGitError(null);
+      }
+    }).catch(reason => {
+      if (active) setLocalGitError(localGitMessage(reason, text));
+    });
+    return () => { active = false; };
+  }, [localDirectoryBindingId, text]);
+
+  const workflowState = project?.workflowState;
+  const projectAnalysisInProgress = project?.analysisStatus === "PENDING" || project?.analysisStatus === "ANALYZING";
+  useEffect(() => {
+    if ((!workflowState || !workflowNeedsPolling(workflowState)) && !projectAnalysisInProgress) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
-      if (document.visibilityState === "visible") await Promise.all([loadProject(true), loadArtifacts(true)]).catch(() => undefined);
+      if (document.visibilityState === "visible") {
+        await Promise.all([loadProject(true), loadArtifacts(true)]).catch(() => undefined);
+      }
       if (!stopped) timer = setTimeout(poll, 3_000);
     };
     timer = setTimeout(poll, 3_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [loadArtifacts, loadProject, workflowState]);
+  }, [loadArtifacts, loadProject, projectAnalysisInProgress, workflowState]);
 
   const repositorySyncState = repository?.syncState;
   useEffect(() => {
@@ -258,6 +285,33 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       await loadRepository(true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : text("同步重试失败", "Unable to retry synchronization")); }
     finally { setRepositoryBusy(false); }
+  }
+
+  async function createLocalBranch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const branchName = newBranchName.trim();
+    if (!project?.localDirectory || !branchName || branchBusy
+      || !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) return;
+    setBranchBusy(true);
+    setLocalGitError(null);
+    try {
+      const bridgeUrl = await localProjectBridgeUrl(text);
+      const response = await fetch(`${bridgeUrl}/directory/git/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bindingId: project.localDirectory.bindingId, branchName }),
+      });
+      const payload = await response.json().catch(() => ({})) as Partial<LocalGitState> & { code?: string; message?: string };
+      if (!response.ok || payload.repository !== true || typeof payload.branch !== "string") {
+        throw new LocalGitError(payload.code ?? "LOCAL_GIT_OPERATION_FAILED", payload.message);
+      }
+      setLocalGit(Object.freeze({ repository: true, branch: payload.branch }));
+      setNewBranchName("");
+    } catch (reason) {
+      setLocalGitError(localGitMessage(reason, text));
+    } finally {
+      setBranchBusy(false);
+    }
   }
 
   const activeAgentJobId = project?.jobs
@@ -560,6 +614,20 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       {project.source ? <section className="panel-card repository-sync-panel" aria-label={text("本地源码", "Local source")}>
         <header className="section-heading"><div><span className="eyebrow">LOCAL SOURCE</span><h2>{text(`源码修订 r${project.source.revision}`, `SOURCE REVISION r${project.source.revision}`)}</h2></div><span className="revision-badge">{project.source.digest.slice(0, 18)}</span></header>
         <p>{text("受控目录", "Managed path")}: <code>{project.source.relativePath}</code> · {project.source.fileCount} files · {project.source.totalBytes} bytes</p>
+        {project.localDirectory ? <div className="local-git-branch-panel">
+          <div className="local-git-branch-status">
+            <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
+            {localGit?.repository ? <strong>{text("当前分支", "CURRENT BRANCH")} <code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
+          </div>
+          {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
+          {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
+          {localGit?.repository ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
+            <label>{text("新建分支", "New branch")}<input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" disabled={branchBusy || deliveryActive} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
+            <button className="button button-secondary" disabled={branchBusy || deliveryActive || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button>
+          </form> : null}
+          {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支；请等待流程结束或先取消本次交付。", "Branches cannot be switched during delivery. Wait for it to finish or cancel the current delivery first.")}</small> : null}
+          {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
+        </div> : null}
       </section> : null}
 
       {platformManaged ? <section className="panel-card repository-sync-panel" aria-label={text("GitHub 仓库", "GitHub repository")}>
@@ -835,13 +903,62 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <section aria-labelledby="project-delete-title" aria-modal="true" className="workspace-dialog project-delete-dialog" role="dialog">
             <span className="eyebrow">DELETE PROJECT</span>
             <h2 id="project-delete-title">{text(`删除《${project.name}》？`, `DELETE “${project.name}”?`)}</h2>
-            <p>{deliveryActive ? text("正在执行的任务会先被停止；随后删除历史会话、说明文档、工作流、对象制品和本地源码目录。", "Active tasks will be stopped first; conversations, documents, workflows, object artifacts, and the local source directory will then be deleted.") : text("历史会话、说明文档、工作流、对象制品和本地源码目录都会永久删除。", "Conversations, documents, workflows, object artifacts, and the local source directory will be deleted permanently.")}</p>
+            <p>{deliveryActive ? text("正在执行的任务会先被停止；随后删除历史会话、说明文档、工作流、对象制品和 Core 源码快照。绑定的本地项目目录不会删除。", "Active tasks will be stopped first; conversations, documents, workflows, object artifacts, and Core source snapshots will then be deleted. A bound local project directory is retained.") : text("历史会话、说明文档、工作流、对象制品和 Core 源码快照都会永久删除；绑定的本地项目目录会保留。", "Conversations, documents, workflows, object artifacts, and Core source snapshots will be deleted permanently; a bound local project directory is retained.")}</p>
             <div><button className="button button-secondary" disabled={deleting} onClick={() => setConfirmingDelete(false)} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : text("确认删除", "CONFIRM DELETE")}</button></div>
           </section>
         </div>
       ) : null}
     </>
   );
+}
+
+async function readLocalGitStatus(
+  bindingId: string,
+  text: (chinese: string, english: string) => string,
+): Promise<LocalGitState> {
+  const bridgeUrl = await localProjectBridgeUrl(text);
+  const response = await fetch(`${bridgeUrl}/directory/git/status`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bindingId }),
+  });
+  const payload = await response.json().catch(() => ({})) as Partial<LocalGitState> & { code?: string; message?: string };
+  if (!response.ok || typeof payload.repository !== "boolean"
+    || (payload.branch !== null && typeof payload.branch !== "string")) {
+    throw new LocalGitError(payload.code ?? "LOCAL_GIT_STATUS_FAILED", payload.message);
+  }
+  return Object.freeze({ repository: payload.repository, branch: payload.branch ?? null });
+}
+
+async function localProjectBridgeUrl(text: (chinese: string, english: string) => string): Promise<string> {
+  const response = await fetch("/api/local-git-import/config", { cache: "no-store" });
+  const configuration = await response.json() as { available?: boolean; url?: string };
+  if (!response.ok || !configuration.available || !configuration.url) {
+    throw new LocalGitError("LOCAL_PROJECT_BRIDGE_UNAVAILABLE", text(
+      "本地项目服务未启动，请运行 npm run local:up",
+      "The local project service is not running. Run npm run local:up.",
+    ));
+  }
+  return configuration.url;
+}
+
+class LocalGitError extends Error {
+  constructor(readonly code: string, message?: string) { super(message); }
+}
+
+function localGitMessage(reason: unknown, text: (chinese: string, english: string) => string): string {
+  if (!(reason instanceof LocalGitError)) {
+    return reason instanceof Error ? reason.message : text("本地 Git 操作失败", "Local Git operation failed");
+  }
+  if (reason.code === "INVALID_GIT_BRANCH") return text("请输入有效的新分支名称", "Enter a valid new branch name");
+  if (reason.code === "GIT_BRANCH_EXISTS") return reason.message || text("该分支已存在，请输入新的分支名称", "That branch already exists. Enter a new branch name.");
+  if (reason.code === "NOT_A_GIT_REPOSITORY") return text("当前项目目录不是 Git 仓库，不能创建分支", "The current project directory is not a Git repository, so a branch cannot be created");
+  if (["DIRECTORY_BINDING_NOT_FOUND", "DIRECTORY_BINDING_CHANGED"].includes(reason.code)) {
+    return text("本地项目目录绑定已失效，请重新导入项目", "The local project directory binding is no longer valid. Import the project again.");
+  }
+  if (reason.code === "LOCAL_PROJECT_BUSY") return text("已有本地项目操作正在进行，请稍后重试", "Another local project operation is in progress. Try again shortly.");
+  if (reason.code === "LOCAL_PROJECT_BRIDGE_UNAVAILABLE") return reason.message || text("本地项目服务不可用", "The local project service is unavailable");
+  return reason.message || text("本地 Git 操作失败", "Local Git operation failed");
 }
 
 function newestProjectSnapshot(

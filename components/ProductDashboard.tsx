@@ -2,13 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
-import { cachedValue, clientCacheKeys, expireCached, loadCached, storeCached } from "@/lib/product/client-cache";
+import { useEffect, useRef, useState } from "react";
+import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
 import type { ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
-import { createStoredZip, shouldIncludeProjectPath } from "@/lib/product/source-archive";
 import { ArrowIcon, FileIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
-import { useProductSession } from "./ProductShell";
 
 export function ProductDashboard({
   creationOnly = false,
@@ -18,24 +16,19 @@ export function ProductDashboard({
   initialMode?: "IDEA" | "IMPORT";
 }) {
   const { locale, text } = useLanguage();
-  const session = useProductSession();
   const router = useRouter();
   const conceptRef = useRef<HTMLTextAreaElement>(null);
   const operationKey = useRef<string | null>(null);
   const initialProjects = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
-  const initialRepositories = cachedValue<readonly { id: string; fullName: string; private: boolean }[]>(clientCacheKeys.githubRepositories);
   const [projects, setProjects] = useState<readonly ProductProjectSummary[]>(initialProjects ?? []);
   const [name, setName] = useState("");
   const [concept, setConcept] = useState("");
-  const [creationMode, setCreationMode] = useState(initialMode);
-  const [folderFiles, setFolderFiles] = useState<readonly File[]>([]);
-  const [archiveFile, setArchiveFile] = useState<File | null>(null);
+  const [importSource, setImportSource] = useState<"LOCAL" | "GITHUB">("LOCAL");
+  const [githubRepositoryUrl, setGitHubRepositoryUrl] = useState("");
   const [loading, setLoading] = useState(!initialProjects);
   const [creating, setCreating] = useState(false);
+  const [retryingProjectId, setRetryingProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [githubRepositories, setGitHubRepositories] = useState<readonly { id: string; fullName: string; private: boolean }[]>(initialRepositories ?? []);
-  const [selectedGitHubRepositoryId, setSelectedGitHubRepositoryId] = useState(initialRepositories?.[0]?.id ?? "");
-  const platformManaged = session.authMode === "PLATFORM";
 
   useEffect(() => {
     let active = true;
@@ -53,6 +46,33 @@ export function ProductDashboard({
     if (creationOnly && initialMode === "IDEA") setTimeout(() => conceptRef.current?.focus(), 0);
     return () => { active = false; };
   }, [creationOnly, initialMode, text]);
+
+  const hasProjectAnalysisInProgress = projects.some(project =>
+    project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING",
+  );
+  useEffect(() => {
+    if (creationOnly || !hasProjectAnalysisInProgress) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      if (document.visibilityState === "visible") {
+        try {
+          const response = await fetch("/api/projects", { cache: "no-store" });
+          const payload = await readJson(response) as { projects: readonly ProductProjectSummary[] };
+          if (!stopped) {
+            setProjects(payload.projects);
+            storeCached(clientCacheKeys.projects, payload.projects, 10_000);
+          }
+        } catch {
+          // A later poll can recover from a transient refresh failure; the
+          // durable analysis task continues independently in Core.
+        }
+      }
+      if (!stopped) timer = setTimeout(poll, 1_500);
+    };
+    timer = setTimeout(poll, 600);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [creationOnly, hasProjectAnalysisInProgress]);
 
   async function createProject() {
     if (concept.trim().length < 10 || creating) return;
@@ -77,23 +97,37 @@ export function ProductDashboard({
     }
   }
 
-  async function importProject() {
-    if (creating || (!archiveFile && folderFiles.length === 0)) return;
+  async function bindLocalProject() {
+    if (creating) return;
     setCreating(true);
     setError(null);
-    operationKey.current ??= `project-import:${crypto.randomUUID()}`;
+    operationKey.current ??= `project-bind:${crypto.randomUUID()}`;
     try {
-      const local = await localProjectArchive(archiveFile, folderFiles, text);
-      const response = await fetch(`/api/projects/import/archive?name=${encodeURIComponent(local.name)}`, {
+      const bridgeUrl = await localProjectBridgeUrl(text);
+      const selectionResponse = await fetch(`${bridgeUrl}/directory/select`, {
         method: "POST",
-        headers: { "content-type": "application/zip", "idempotency-key": operationKey.current },
-        body: local.bytes,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const local = await bridgeProjectBinding(selectionResponse, text);
+      const response = await fetch("/api/projects/bind/local-directory", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": operationKey.current },
+        body: JSON.stringify({
+          name: local.name,
+          bindingId: local.bindingId,
+          ...(local.gitBranch ? { gitBranch: local.gitBranch } : {}),
+        }),
       });
       const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       operationKey.current = null;
       cacheProjectSummary(payload.project);
-      router.push(`/projects/${payload.project.id}`);
+      router.push("/projects");
     } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "DIRECTORY_SELECTION_CANCELLED") {
+        setCreating(false);
+        return;
+      }
       if (reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=project-import");
         return;
@@ -103,35 +137,67 @@ export function ProductDashboard({
     }
   }
 
-  async function loadGitHubRepositories() {
-    if (creating) return;
-    setCreating(true); setError(null);
+  async function cloneAndBindGitHubProject() {
+    const repositoryUrl = githubRepositoryUrl.trim();
+    if (creating || !repositoryUrl) return;
+    setCreating(true);
+    setError(null);
+    operationKey.current ??= `project-bind:${crypto.randomUUID()}`;
     try {
-      const repositories = await loadCached(clientCacheKeys.githubRepositories, 120_000, async () => {
-        const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
-        const payload = await readPlatformJson(response) as { data: { id: string; fullName: string; private: boolean }[] };
-        return payload.data;
+      const bridgeUrl = await localProjectBridgeUrl(text);
+      const cloneResponse = await fetch(`${bridgeUrl}/github/clone`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositoryUrl }),
       });
-      setGitHubRepositories(repositories);
-      setSelectedGitHubRepositoryId(repositories[0]?.id ?? "");
-    } catch (reason) { setError(platformRepositoryMessage(reason, text)); }
-    finally { setCreating(false); }
+      const local = await bridgeProjectBinding(cloneResponse, text);
+      const response = await fetch("/api/projects/bind/github", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": operationKey.current },
+        body: JSON.stringify({
+          name: local.name,
+          repositoryUrl,
+          bindingId: local.bindingId,
+          ...(local.gitBranch ? { gitBranch: local.gitBranch } : {}),
+        }),
+      });
+      const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
+      operationKey.current = null;
+      cacheProjectSummary(payload.project);
+      router.push("/projects");
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "DIRECTORY_SELECTION_CANCELLED") {
+        setCreating(false);
+        return;
+      }
+      if (reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
+        router.push("/settings?required=project-import");
+        return;
+      }
+      setError(messageFor(reason, text));
+      setCreating(false);
+    }
   }
 
-  async function importGitHubProject() {
-    if (creating || !selectedGitHubRepositoryId) return;
-    setCreating(true); setError(null);
+  async function retryProjectAnalysis(projectId: string) {
+    if (retryingProjectId) return;
+    setRetryingProjectId(projectId);
+    setError(null);
     try {
-      const response = await fetch("/api/projects/import/github", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ repositoryId: selectedGitHubRepositoryId }),
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/analysis/retry`, {
+        method: "POST",
       });
-      const payload = await readPlatformJson(response) as { data?: { project?: { project?: { id?: string } } } };
-      const projectId = payload.data?.project?.project?.id;
-      if (!projectId) throw new Error(text("GitHub 导入响应无效", "GitHub import returned an invalid project"));
-      expireCached(clientCacheKeys.projects);
-      router.push(`/projects/${projectId}`);
-    } catch (reason) { setError(platformRepositoryMessage(reason, text)); setCreating(false); }
+      const payload = await readJson(response) as { project: ProductProjectSummary };
+      setProjects(current => {
+        const next = current.map(project => project.id === projectId ? payload.project : project);
+        storeCached(clientCacheKeys.projects, next, 10_000);
+        return next;
+      });
+    } catch (reason) {
+      setError(messageFor(reason, text));
+    } finally {
+      setRetryingProjectId(null);
+    }
   }
 
   if (creationOnly) {
@@ -139,17 +205,13 @@ export function ProductDashboard({
       <>
         <section className="project-page-header">
           <div>
-            <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{creationMode === "IDEA" ? text("开始新构想", "NEW CONCEPT") : text("导入已有项目", "IMPORT PROJECT")}</b></div>
-            <span className="eyebrow">{creationMode === "IDEA" ? "IDEA TO PLAYABLE" : "SOURCE TO PLAYABLE"}</span>
-            <h1>{creationMode === "IDEA" ? text("描述你的新游戏", "DESCRIBE YOUR GAME") : text("导入已有项目", "IMPORT A PROJECT")}</h1>
+            <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{initialMode === "IDEA" ? text("开始新构想", "NEW CONCEPT") : text("关联已有项目", "LINK PROJECT")}</b></div>
+            <span className="eyebrow">{initialMode === "IDEA" ? "IDEA TO PLAYABLE" : "SOURCE TO PLAYABLE"}</span>
+            <h1>{initialMode === "IDEA" ? text("描述你的新游戏", "DESCRIBE YOUR GAME") : text("关联已有项目", "LINK AN EXISTING PROJECT")}</h1>
           </div>
         </section>
         <section className="repository-onboarding idea-onboarding">
-          <div className="creation-mode-switch" role="tablist">
-            <button aria-selected={creationMode === "IDEA"} className={creationMode === "IDEA" ? "is-active" : ""} onClick={() => { setCreationMode("IDEA"); setError(null); }} role="tab" type="button"><SparkIcon /> {text("新构想", "NEW CONCEPT")}</button>
-            <button aria-selected={creationMode === "IMPORT"} className={creationMode === "IMPORT" ? "is-active" : ""} onClick={() => { setCreationMode("IMPORT"); setError(null); }} role="tab" type="button"><FileIcon /> {text("导入项目", "IMPORT")}</button>
-          </div>
-          {creationMode === "IDEA" ? (
+          {initialMode === "IDEA" ? (
             <div className="repository-onboarding-form">
               <label>{text("游戏名称", "Game name")}<input aria-label={text("游戏名称", "Game name")} maxLength={200} onChange={event => setName(event.target.value)} placeholder={text("例如：余烬群岛", "e.g. Ember Archipelago")} value={name} /></label>
               <label>{text("游戏构想", "Game concept")}<textarea ref={conceptRef} aria-label={text("游戏构想", "Game concept")} maxLength={4000} onChange={event => setConcept(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void createProject(); }} placeholder={text("描述玩法、画面或你想让玩家感受到的体验……", "Describe the gameplay, visuals, or the experience you want players to have…")} value={concept} /></label>
@@ -157,15 +219,24 @@ export function ProductDashboard({
             </div>
           ) : (
             <div className="repository-onboarding-form project-import-form">
-              <p>{text("Core 只从本地目录或 ZIP 导入源码；GitHub 导入由 DeviLudo Platform 完成。", "Core imports source only from a local folder or ZIP; GitHub imports are handled by DeviLudo Platform.")}</p>
-              <div className="local-project-inputs">
-                <label className="project-file-picker">{text("选择项目文件夹", "Choose project folder")}<input aria-label={text("本地项目文件夹", "Local project folder")} multiple onChange={event => { setArchiveFile(null); setFolderFiles(Array.from(event.target.files ?? [])); }} type="file" {...({ webkitdirectory: "" } as InputHTMLAttributes<HTMLInputElement>)} /></label>
-                <span>{text("或", "OR")}</span>
-                <label className="project-file-picker">{text("选择 ZIP", "Choose ZIP")}<input accept=".zip,application/zip" aria-label={text("项目 ZIP", "Project ZIP")} onChange={event => { setFolderFiles([]); setArchiveFile(event.target.files?.[0] ?? null); }} type="file" /></label>
-                {archiveFile ? <b>{archiveFile.name}</b> : folderFiles.length ? <b>{text(`已选择 ${folderFiles.length} 个文件`, `${folderFiles.length} files selected`)}</b> : null}
+              <div aria-label={text("项目来源", "Project source")} className="import-source-switch" role="tablist">
+                <button aria-controls="local-project-import" aria-selected={importSource === "LOCAL"} className={importSource === "LOCAL" ? "is-active" : ""} onClick={() => { setImportSource("LOCAL"); setError(null); }} role="tab" type="button"><FileIcon /> {text("本地项目", "LOCAL PROJECT")}</button>
+                <button aria-controls="github-project-import" aria-selected={importSource === "GITHUB"} className={importSource === "GITHUB" ? "is-active" : ""} onClick={() => { setImportSource("GITHUB"); setError(null); }} role="tab" type="button">GITHUB</button>
               </div>
-              <div className="idea-submit-row"><button className="button button-acid" disabled={creating || (!archiveFile && folderFiles.length === 0)} onClick={() => void importProject()} type="button"><FileIcon />{creating ? text("Agent 正在解析项目…", "AGENT IS ANALYZING…") : text("导入并解析", "IMPORT & ANALYZE")}</button></div>
-              {platformManaged ? <div className="platform-github-import"><span className="eyebrow">GITHUB IMPORT</span><p>{text("只列出当前 GitHub 账号具有 push 权限的仓库。导入后会绑定来源仓库。", "Only repositories your GitHub account can push to are listed. The imported project is bound to its source repository.")}</p>{githubRepositories.length ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} value={selectedGitHubRepositoryId} onChange={event => setSelectedGitHubRepositoryId(event.target.value)}>{githubRepositories.map(repository => <option key={repository.id} value={repository.id}>{repository.fullName}{repository.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={creating || !selectedGitHubRepositoryId} onClick={() => void importGitHubProject()} type="button">{text("从 GitHub 导入", "IMPORT FROM GITHUB")}</button></div> : <div className="platform-repository-actions"><button className="button button-secondary" disabled={creating} onClick={() => void loadGitHubRepositories()} type="button">{text("选择 GitHub 仓库", "CHOOSE GITHUB REPOSITORY")}</button><Link className="button button-secondary" href="/account">{text("连接 GitHub", "CONNECT GITHUB")}</Link></div>}</div> : null}
+              {importSource === "LOCAL" ? (
+                <div id="local-project-import" role="tabpanel">
+                  <p>{text("选择本地 Godot 项目目录后，DeviLudo 只记录目录关联，不上传、不复制项目。Agent 始终读取原目录的最新源码，并把成功修改直接写回原目录。", "Choose a local Godot project directory and DeviLudo only records the directory link—it does not upload or copy the project. The Agent always reads and writes the original directory.")}</p>
+                  <small>{text("如果目录是 Git 仓库，关联后可在项目页新建并切换分支。", "If the directory is a Git repository, you can create and switch branches from the project page after linking it.")}</small>
+                  <div className="idea-submit-row"><button className="button button-acid" disabled={creating} onClick={() => void bindLocalProject()} type="button"><FileIcon />{creating ? text("正在选择并关联目录…", "SELECTING & LINKING…") : text("选择项目文件夹并关联", "CHOOSE FOLDER & LINK")}</button></div>
+                </div>
+              ) : (
+                <div className="local-github-import" id="github-project-import" role="tabpanel">
+                  <p>{text("输入 GitHub 仓库地址并选择本地保存位置。DeviLudo 使用本机 Git 凭证直接克隆到该位置，随后只关联这个工作目录；项目内容和凭证都不会经浏览器上传。", "Enter a GitHub repository URL and choose a local destination. DeviLudo clones there with the host's Git credentials, then only links that working directory; neither project contents nor credentials are uploaded through the browser.")}</p>
+                  <label>{text("GitHub 仓库地址", "GitHub repository URL")}<input aria-label={text("GitHub 仓库地址", "GitHub repository URL")} autoCapitalize="none" autoComplete="off" onChange={event => setGitHubRepositoryUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" spellCheck={false} value={githubRepositoryUrl} /></label>
+                  <small>{text("支持 HTTPS 和 git@github.com SSH 地址，包括本地凭证可访问的私有仓库；关联后可在项目页新建分支。", "Supports HTTPS and git@github.com SSH URLs, including private repositories available to your local credentials; create branches from the project page after linking it.")}</small>
+                  <div className="idea-submit-row"><button className="button button-acid" disabled={creating || !githubRepositoryUrl.trim()} onClick={() => void cloneAndBindGitHubProject()} type="button">{creating ? text("正在选择位置并克隆…", "SELECTING & CLONING…") : text("选择保存位置、克隆并关联", "CHOOSE, CLONE & LINK")}</button></div>
+                </div>
+              )}
             </div>
           )}
           {error ? <p className="repository-onboarding-error" role="alert">{error}</p> : null}
@@ -178,33 +249,49 @@ export function ProductDashboard({
     <>
       <section className="page-heading project-catalog-heading">
         <div><span className="eyebrow">PROJECTS</span><h1>{text("游戏项目", "GAME PROJECTS")}</h1></div>
-        <div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import"><FileIcon /> {text("导入项目", "IMPORT")}</Link><Link className="button button-primary" href="/projects/new"><PlusIcon /> {text("开始新构想", "NEW CONCEPT")}</Link></div>
+        <div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import"><FileIcon /> {text("关联项目", "LINK PROJECT")}</Link><Link className="button button-primary" href="/projects/new"><PlusIcon /> {text("开始新构想", "NEW CONCEPT")}</Link></div>
       </section>
       {error ? <div className="inline-notice danger" role="alert">{error}</div> : null}
       {loading ? <section className="project-catalog-empty">{text("正在加载项目…", "LOADING PROJECTS…")}</section> : null}
       {!loading && !error && projects.length === 0 ? (
-        <section className="project-catalog-empty"><span><SparkIcon /></span><h2>{text("还没有游戏项目", "NO GAME PROJECTS YET")}</h2><div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import">{text("导入已有项目", "IMPORT PROJECT")}</Link><Link className="button button-acid" href="/projects/new">{text("创建第一个项目", "CREATE FIRST PROJECT")}</Link></div></section>
+        <section className="project-catalog-empty"><span><SparkIcon /></span><h2>{text("还没有游戏项目", "NO GAME PROJECTS YET")}</h2><div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import">{text("关联已有项目", "LINK PROJECT")}</Link><Link className="button button-acid" href="/projects/new">{text("创建第一个项目", "CREATE FIRST PROJECT")}</Link></div></section>
       ) : null}
       {projects.length > 0 ? (
         <section className="project-catalog-grid" aria-label={text("可访问项目", "Accessible projects")}>
-          {projects.map(project => (
-            <Link
-              aria-label={text(`打开${project.name}项目`, `Open ${project.name} project`)}
-              className="project-catalog-card"
-              href={`/projects/${project.id}`}
-              key={project.id}
-            >
+          {projects.map(project => {
+            const analyzing = project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING";
+            const analysisFailed = project.analysisStatus === "FAILED";
+            const contents = <>
               <div className="project-catalog-card-top"><span className="project-catalog-glyph">{project.name.slice(0, 1)}</span></div>
               <h2>{project.name}</h2>
               <dl>
-                <div><dt>{text("当前阶段", "Stage")}</dt><dd>{workflowLabel(project.workflowState, text)}</dd></div>
+                <div><dt>{text("当前阶段", "Stage")}</dt><dd>{analyzing ? text("正在分析项目", "ANALYZING PROJECT") : analysisFailed ? text("分析失败", "ANALYSIS FAILED") : workflowLabel(project.workflowState, text)}</dd></div>
                 <div><dt>{text("创建时间", "Created")}</dt><dd>{formatDate(project.createdAt, localeTag(locale))}</dd></div>
                 <div><dt>{text("源码修订", "Source revision")}</dt><dd>{project.source ? `r${project.source.revision}` : "—"}</dd></div>
                 <div><dt>{text("源码大小", "Source size")}</dt><dd>{project.source ? `${project.source.fileCount} files` : "—"}</dd></div>
               </dl>
-              <div className="project-catalog-card-footer"><span>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></span></div>
-            </Link>
-          ))}
+              <div className="project-catalog-card-footer">
+                <span>{analyzing ? <><i aria-hidden="true" className="project-analysis-spinner" /> {text("后台分析中", "ANALYZING")}</> : analysisFailed ? text("分析未完成", "ANALYSIS INCOMPLETE") : <>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></>}</span>
+                {analysisFailed ? <button className="button button-secondary project-analysis-retry" disabled={retryingProjectId !== null} onClick={() => void retryProjectAnalysis(project.id)} type="button">{retryingProjectId === project.id ? text("正在重试…", "RETRYING…") : text("重试分析", "RETRY ANALYSIS")}</button> : null}
+              </div>
+              {analysisFailed && project.analysisError ? <small className="project-analysis-error">{project.analysisError}</small> : null}
+            </>;
+            return analyzing || analysisFailed ? (
+              <article
+                aria-label={analyzing ? text(`${project.name}正在分析`, `${project.name} is being analyzed`) : text(`${project.name}分析失败`, `${project.name} analysis failed`)}
+                aria-live="polite"
+                className={`project-catalog-card is-disabled ${analyzing ? "is-analyzing" : "is-analysis-failed"}`}
+                key={project.id}
+              >{contents}</article>
+            ) : (
+              <Link
+                aria-label={text(`打开${project.name}项目`, `Open ${project.name} project`)}
+                className="project-catalog-card"
+                href={`/projects/${project.id}`}
+                key={project.id}
+              >{contents}</Link>
+            );
+          })}
         </section>
       ) : null}
     </>
@@ -216,29 +303,38 @@ function cacheProjectSummary(project: ProductProjectSummary): void {
   storeCached(clientCacheKeys.projects, Object.freeze([project, ...current.filter(item => item.id !== project.id)]), 10_000);
 }
 
-async function localProjectArchive(
-  archiveFile: File | null,
-  folderFiles: readonly File[],
+async function localProjectBridgeUrl(
   text: (chinese: string, english: string) => string,
-): Promise<Readonly<{ name: string; bytes: ArrayBuffer }>> {
-  if (archiveFile) {
-    if (archiveFile.size > 64 * 1024 * 1024) throw new Error(text("ZIP 项目超过 64 MiB 导入上限", "ZIP project exceeds the 64 MiB import limit"));
-    return Object.freeze({ name: archiveFile.name.replace(/\.zip$/i, "") || text("本地项目", "Local project"), bytes: await archiveFile.arrayBuffer() });
+): Promise<string> {
+  const response = await fetch("/api/local-git-import/config", { cache: "no-store" });
+  const configuration = await response.json() as { available?: boolean; url?: string };
+  if (!response.ok || !configuration.available || !configuration.url) {
+    throw new ApiError("LOCAL_PROJECT_BRIDGE_UNAVAILABLE", text(
+      "本地项目服务未启动，请运行 npm run local:up",
+      "The local project service is not running. Run npm run local:up.",
+    ));
   }
-  const entries = [];
-  let projectName = text("本地项目", "Local project");
-  for (const file of folderFiles) {
-    const browserPath = file.webkitRelativePath || file.name;
-    const segments = browserPath.replaceAll("\\", "/").split("/").filter(Boolean);
-    if (segments.length > 1) projectName = segments[0];
-    const path = segments.length > 1 ? segments.slice(1).join("/") : segments.join("/");
-    if (!path || !shouldIncludeProjectPath(path)) continue;
-    entries.push(Object.freeze({ path, bytes: new Uint8Array(await file.arrayBuffer()) }));
+  return configuration.url;
+}
+
+async function bridgeProjectBinding(
+  response: Response,
+  text: (chinese: string, english: string) => string,
+): Promise<Readonly<{ name: string; bindingId: string; gitBranch: string | null }>> {
+  if (!response.ok) {
+    const failure = await response.json().catch(() => ({})) as { code?: string; message?: string };
+    throw new ApiError(failure.code ?? "LOCAL_PROJECT_OPERATION_FAILED", localProjectOperationMessage(failure.code, failure.message, text));
   }
-  if (!entries.length) throw new Error(text("所选文件夹中没有可导入的项目文件", "The selected folder has no importable project files"));
-  const bytes = createStoredZip(entries);
-  if (bytes.length > 64 * 1024 * 1024) throw new Error(text("本地项目超过 64 MiB 导入上限", "Local project exceeds the 64 MiB import limit"));
-  return Object.freeze({ name: projectName, bytes: Uint8Array.from(bytes).buffer });
+  const result = await response.json().catch(() => ({})) as { bindingId?: unknown; displayName?: unknown; gitBranch?: unknown };
+  const bindingId = typeof result.bindingId === "string" ? result.bindingId : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bindingId)) {
+    throw new ApiError("INVALID_DIRECTORY_BINDING", text("本地项目目录绑定无效", "The local project directory binding is invalid"));
+  }
+  const name = typeof result.displayName === "string" && result.displayName.trim()
+    ? result.displayName.trim()
+    : text("本地项目", "Local project");
+  const branch = typeof result.gitBranch === "string" ? result.gitBranch.trim() : "";
+  return Object.freeze({ name, bindingId, gitBranch: branch || null });
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -250,17 +346,22 @@ async function readJson(response: Response): Promise<unknown> {
   return payload;
 }
 
-async function readPlatformJson(response: Response): Promise<unknown> {
-  const payload = await response.json().catch(() => ({})) as { error?: { code?: string } };
-  if (!response.ok) throw new ApiError(payload.error?.code ?? "REQUEST_FAILED", payload.error?.code ?? `请求失败 (${response.status})`);
-  return payload;
-}
-
-function platformRepositoryMessage(reason: unknown, text: (chinese: string, english: string) => string): string {
-  const code = reason instanceof ApiError ? reason.code : "";
-  if (code === "GITHUB_REAUTHORIZE_REQUIRED") return text("请先在账号设置中连接或重新授权 GitHub", "Connect or reauthorize GitHub in Account settings first");
-  if (code === "GITHUB_PERMISSION_OR_RATE_LIMIT") return text("GitHub 权限、组织 SSO 或限流阻止了本次操作", "GitHub permissions, organization SSO, or rate limits blocked this operation");
-  return reason instanceof Error ? reason.message : text("GitHub 操作失败", "GitHub operation failed");
+function localProjectOperationMessage(
+  code: string | undefined,
+  fallback: string | undefined,
+  text: (chinese: string, english: string) => string,
+): string {
+  if (code === "GIT_CREDENTIALS_REQUIRED") return text(
+    "本地 Git 凭证无法访问该仓库，请先在终端确认 git clone 可用",
+    "Local Git credentials cannot access this repository. Confirm that git clone works in a terminal.",
+  );
+  if (code === "GIT_IMPORT_BUSY") return text("已有 GitHub 项目正在克隆，请稍后重试", "Another GitHub project is being cloned. Try again shortly.");
+  if (code === "INVALID_GITHUB_REPOSITORY") return text("请输入有效的 GitHub 仓库地址", "Enter a valid GitHub repository URL");
+  if (code === "GITHUB_TARGET_EXISTS") return fallback ?? text("目标目录已存在，请改从本地项目关联", "The destination already exists. Link it as a local project instead.");
+  if (code === "NOT_A_GODOT_PROJECT") return text("请选择包含 project.godot 的项目根目录", "Choose the project root containing project.godot");
+  if (code === "LOCAL_PROJECT_CHANGED") return text("本地项目在 Agent 运行期间已变化，为避免覆盖，本次写回已停止", "The local project changed while the Agent was running, so write-back was stopped to prevent overwriting it");
+  if (code === "LOCAL_PROJECT_BUSY") return text("已有本地项目正在处理，请稍后重试", "Another local project is being processed. Try again shortly.");
+  return fallback ?? text("本地项目操作失败", "Local project operation failed");
 }
 
 class ApiError extends Error {

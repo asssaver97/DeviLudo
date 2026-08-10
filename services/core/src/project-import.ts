@@ -10,15 +10,16 @@ import { parseProjectDocumentContent, type ProjectDocumentContent } from "@/lib/
 
 type FetchLike = typeof fetch;
 
-export type ImportedSourceKind = "GIT" | "LOCAL_ARCHIVE";
+export type ImportedSourceKind = "GIT" | "LOCAL_ARCHIVE" | "LOCAL_DIRECTORY";
 
 export type ImportedSourceSnapshot = Readonly<{
   sourceKind: ImportedSourceKind;
   repositoryUrl: string | null;
+  localDirectoryBindingId: string | null;
+  gitBranch: string | null;
   displayName: string;
   fileCount: number;
   totalBytes: number;
-  archive: Buffer;
   files: readonly SourceFile[];
   context: string;
 }>;
@@ -36,50 +37,172 @@ export type ImportedProjectAnalysis = Readonly<{
 
 export type SourceFile = Readonly<{ path: string; bytes: Buffer }>;
 
+export type GitHubRepository = Readonly<{
+  cloneUrl: string;
+  canonicalUrl: string;
+  displayName: string;
+}>;
+
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
 const MAX_FILES = 10_000;
+// Initial analysis includes a complete structured project summary and is often
+// slower than an ordinary chat turn, especially behind a local Provider proxy.
+const PROJECT_ANALYSIS_TIMEOUT_MS = 10 * 60 * 1_000;
+const PROVIDER_RETRY_DELAYS_MS = Object.freeze([500, 1_500, 4_000]);
 const TEXT_EXTENSIONS = new Set([
   ".md", ".txt", ".gd", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cs", ".cpp", ".cc",
   ".c", ".h", ".hpp", ".json", ".toml", ".yaml", ".yml", ".cfg", ".ini", ".godot", ".tres",
   ".tscn", ".gdshader", ".glsl", ".py", ".lua", ".rs", ".go", ".html", ".css", ".xml",
 ]);
 
+/**
+ * Accept only ordinary GitHub repository roots. The clone URL keeps the user's
+ * chosen HTTPS or SSH transport so the host `git` process can use its existing
+ * credential helper or SSH agent; persisted metadata always uses a credential-
+ * free canonical HTTPS URL.
+ */
+export function normalizeGitHubRepositoryUrl(value: string): GitHubRepository {
+  const raw = value.trim();
+  let owner = "";
+  let repository = "";
+  const cloneUrl = raw;
+  const scp = raw.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (scp) {
+    [, owner, repository] = scp;
+  } else {
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error("请输入有效的 GitHub 仓库地址"); }
+    if (!["https:", "ssh:"].includes(url.protocol)
+      || url.hostname.toLowerCase() !== "github.com"
+      || url.search || url.hash
+      || (url.protocol === "https:" && (url.username || url.password))
+      || (url.protocol === "ssh:" && url.username !== "git")) {
+      throw new Error("只支持使用本地凭证访问 github.com 仓库");
+    }
+    const segments = url.pathname.replace(/^\/+|\/+$/g, "").split("/");
+    if (segments.length !== 2) throw new Error("GitHub 地址必须指向仓库根目录");
+    [owner, repository] = segments;
+    repository = repository.replace(/\.git$/i, "");
+  }
+  const segmentPattern = /^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}$/;
+  if (!segmentPattern.test(owner) || !segmentPattern.test(repository)) {
+    throw new Error("GitHub 仓库所有者或名称无效");
+  }
+  return Object.freeze({
+    cloneUrl,
+    canonicalUrl: `https://github.com/${owner}/${repository}`,
+    displayName: repository,
+  });
+}
+
+export function normalizeGitBranchName(value: string): string | null {
+  const branch = value.trim();
+  if (!branch) return null;
+  if (branch.length > 200 || /[\u0000-\u0020\u007f]/.test(branch)
+    || [...branch].some(character => "~^:?*[\\".includes(character))
+    || branch.startsWith("-") || branch.startsWith("/") || branch.endsWith("/")
+    || branch.startsWith(".") || branch.endsWith(".") || branch.endsWith(".lock")
+    || branch.includes("..") || branch.includes("//") || branch.includes("@{")) {
+    throw new Error("新分支名称无效");
+  }
+  return branch;
+}
+
 export function inspectProjectZip(input: Readonly<{
   bytes: Uint8Array;
   sourceKind: ImportedSourceKind;
   repositoryUrl?: string | null;
+  localDirectoryBindingId?: string | null;
+  gitBranch?: string | null;
   displayName: string;
 }>): ImportedSourceSnapshot {
   if (input.bytes.length < 22 || input.bytes.length > MAX_ARCHIVE_BYTES) {
     throw new Error("项目压缩包大小必须在 1 B 到 64 MiB 之间");
   }
   const files = stripArchiveRoot(parseZipEntries(Buffer.from(input.bytes)));
+  return inspectProjectFiles({ ...input, files });
+}
+
+/**
+ * Validate source read from an already-bound working directory. Unlike the
+ * legacy ZIP entry point this has no transport-size ceiling: the directory is
+ * the source of truth and was never uploaded by the browser.
+ */
+export function inspectProjectFiles(input: Readonly<{
+  files: readonly SourceFile[];
+  sourceKind: ImportedSourceKind;
+  repositoryUrl?: string | null;
+  localDirectoryBindingId?: string | null;
+  gitBranch?: string | null;
+  displayName: string;
+}>): ImportedSourceSnapshot {
   const accepted: SourceFile[] = [];
   const seen = new Set<string>();
   let totalBytes = 0;
-  for (const file of files) {
-    if (isSensitiveProjectPath(file.path)) throw new Error(`项目包含不允许导入的凭据文件：${file.path}`);
+  for (const file of input.files) {
+    if (isSensitiveProjectPath(file.path)) throw new Error(`项目包含不允许读取的凭据文件：${file.path}`);
     if (!shouldIncludeProjectPath(file.path)) continue;
     const path = normalizeProjectPath(file.path);
-    if (seen.has(path)) throw new Error(`项目压缩包包含重复路径：${path}`);
+    if (seen.has(path)) throw new Error(`项目包含重复路径：${path}`);
     seen.add(path);
-    totalBytes += file.bytes.length;
-    if (totalBytes > MAX_UNCOMPRESSED_BYTES) throw new Error("项目解压后超过 256 MiB 上限");
-    accepted.push(Object.freeze({ path, bytes: file.bytes }));
+    const bytes = Buffer.from(file.bytes);
+    totalBytes += bytes.length;
+    if (!Number.isSafeInteger(totalBytes)) throw new Error("项目源码大小无效");
+    accepted.push(Object.freeze({ path, bytes }));
   }
-  if (accepted.length < 1) throw new Error("项目中没有可导入的文件");
+  if (accepted.length < 1) throw new Error("项目中没有可读取的文件");
   const context = sourceContext(accepted);
+  const localDirectoryBindingId = input.localDirectoryBindingId?.trim() || null;
+  if (localDirectoryBindingId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(localDirectoryBindingId)) {
+    throw new Error("本地项目目录绑定无效");
+  }
   return Object.freeze({
     sourceKind: input.sourceKind,
     repositoryUrl: input.repositoryUrl ?? null,
+    localDirectoryBindingId,
+    gitBranch: normalizeGitBranchName(input.gitBranch ?? ""),
     displayName: normalizeDisplayName(input.displayName),
     fileCount: accepted.length,
     totalBytes,
-    archive: createTarGzip(accepted),
     files: Object.freeze(accepted),
     context,
   });
+}
+
+export function decodeProjectSourceStream(value: Uint8Array): readonly SourceFile[] {
+  const source = Buffer.from(value);
+  const magic = Buffer.from("DEVILUDO_SOURCE_V1\0");
+  if (source.length < magic.length || !source.subarray(0, magic.length).equals(magic)) {
+    throw new Error("本地项目源码流无效");
+  }
+  const files: SourceFile[] = [];
+  const seen = new Set<string>();
+  let offset = magic.length;
+  while (offset < source.length) {
+    if (offset + 12 > source.length) throw new Error("本地项目源码流已截断");
+    const pathLength = source.readUInt32BE(offset);
+    const contentLength = Number(source.readBigUInt64BE(offset + 4));
+    offset += 12;
+    if (pathLength < 1 || pathLength > 4096 || !Number.isSafeInteger(contentLength)
+      || contentLength < 0 || offset + pathLength + contentLength > source.length) {
+      throw new Error("本地项目源码条目无效");
+    }
+    const encodedPath = source.subarray(offset, offset + pathLength);
+    const decodedPath = encodedPath.toString("utf8");
+    if (!Buffer.from(decodedPath, "utf8").equals(encodedPath)) throw new Error("本地项目源码路径编码无效");
+    const path = normalizeProjectPath(decodedPath);
+    if (!shouldIncludeProjectPath(path) || seen.has(path)) throw new Error(`本地项目源码路径无效：${path}`);
+    offset += pathLength;
+    const bytes = Buffer.from(source.subarray(offset, offset + contentLength));
+    offset += contentLength;
+    seen.add(path);
+    files.push(Object.freeze({ path, bytes }));
+  }
+  // Preserve the authenticated bridge stream order for digest verification.
+  // Re-sorting here would make the digest depend on ICU collation differences
+  // between the macOS host and the Linux Core container.
+  return Object.freeze(files);
 }
 
 export async function analyzeImportedProject(input: Readonly<{
@@ -118,31 +241,31 @@ async function requestAnalysis(
     "name 长度 2-200；文本与数组必须非空；summary 长度不超过 4000。",
   ].join("\n");
   const endpoint = providerEndpoint(settings.baseUrl, settings.agentRuntime === "CLAUDE_CODE" ? "messages" : "responses");
-  const response = await fetchImpl(endpoint, {
+  const headers: Record<string, string> = settings.agentRuntime === "CLAUDE_CODE"
+    ? {
+        authorization: `Bearer ${apiKey}`,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+      }
+    : { authorization: `Bearer ${apiKey}`, "content-type": "application/json" };
+  const request: RequestInit = {
     method: "POST",
-    headers: settings.agentRuntime === "CLAUDE_CODE"
-      ? {
-          authorization: `Bearer ${apiKey}`,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-        }
-      : { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    headers,
     body: JSON.stringify(settings.agentRuntime === "CLAUDE_CODE" ? {
       model,
       system,
-      max_tokens: 2_800,
+      max_tokens: 4_500,
       temperature: 0.2,
       messages: [{ role: "user", content: sourceContext }],
     } : {
       model,
       instructions: system,
       input: sourceContext,
-      max_output_tokens: 2_800,
+      max_output_tokens: 4_500,
     }),
-    signal: AbortSignal.timeout(55_000),
-  });
-  if (!response.ok) throw new Error(`项目分析 Agent 调用失败（Provider ${response.status}）`);
+  };
+  const response = await fetchProviderWithRetry(fetchImpl, endpoint, request);
   const body = await response.json() as Record<string, unknown>;
   if (settings.agentRuntime === "CLAUDE_CODE") {
     const content = Array.isArray(body.content) ? body.content : [];
@@ -161,10 +284,56 @@ async function requestAnalysis(
   throw new Error("项目分析 Agent 未返回有效结果");
 }
 
+/**
+ * Provider gateways occasionally drop a connection while Docker networking or
+ * an upstream proxy is warming up. Retrying here keeps an asynchronous import
+ * from becoming a user-visible failure after one ten-second connect timeout.
+ * The overall analysis deadline still applies across all attempts.
+ */
+async function fetchProviderWithRetry(
+  fetchImpl: FetchLike,
+  endpoint: string,
+  request: RequestInit,
+): Promise<Response> {
+  const deadline = Date.now() + PROJECT_ANALYSIS_TIMEOUT_MS;
+  let lastFailure: unknown;
+  for (let attempt = 0; attempt <= PROVIDER_RETRY_DELAYS_MS.length; attempt += 1) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    try {
+      const response = await fetchImpl(endpoint, {
+        ...request,
+        signal: AbortSignal.timeout(remainingMs),
+      });
+      if (response.ok) return response;
+      if (!isRetryableProviderStatus(response.status) || attempt === PROVIDER_RETRY_DELAYS_MS.length) {
+        throw new Error(`项目分析 Agent 调用失败（Provider ${response.status}）`);
+      }
+      lastFailure = new Error(`Provider ${response.status}`);
+      if (response.body) await response.body.cancel().catch(() => undefined);
+    } catch (error) {
+      if (!isRetryableProviderNetworkError(error) || attempt === PROVIDER_RETRY_DELAYS_MS.length) throw error;
+      lastFailure = error;
+    }
+    const delayMs = Math.min(PROVIDER_RETRY_DELAYS_MS[attempt], Math.max(0, deadline - Date.now()));
+    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  throw new Error("项目分析 Agent 调用超时", { cause: lastFailure });
+}
+
+function isRetryableProviderStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function isRetryableProviderNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const name = "name" in error ? String(error.name) : "";
+  return name !== "AbortError" && name !== "TimeoutError";
+}
+
 function parseAnalysis(raw: string): Omit<ImportedProjectAnalysis, "runtime" | "model" | "settingsRevision"> {
-  const normalized = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
   let value: unknown;
-  try { value = JSON.parse(normalized); } catch { throw new Error("项目分析 Agent 返回的 JSON 无效"); }
+  try { value = parseProviderJsonObject(raw); } catch { throw new Error("项目分析 Agent 返回的 JSON 无效"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("项目分析 Agent 返回格式无效");
   const result = value as Record<string, unknown>;
   const name = requiredText(result.name, "项目名称", 200);
@@ -192,6 +361,102 @@ function parseAnalysis(raw: string): Omit<ImportedProjectAnalysis, "runtime" | "
     document,
     assistantContent,
   });
+}
+
+/**
+ * Provider-compatible models do not always honor "JSON only" literally. Keep
+ * validation strict after parsing, but accept the common transport defects we
+ * can repair without guessing field values: prose around an object, Markdown
+ * fences, literal control characters inside strings, and trailing commas.
+ */
+function parseProviderJsonObject(raw: string): unknown {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string) => {
+    const candidate = value.trim().replace(/^\uFEFF/, "");
+    if (candidate && !seen.has(candidate)) {
+      seen.add(candidate);
+      candidates.push(candidate);
+    }
+  };
+  add(raw);
+  add(raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  for (const match of raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) add(match[1]);
+  for (const object of balancedJsonObjects(raw)) add(object);
+
+  for (const candidate of candidates) {
+    try { return JSON.parse(candidate); } catch { /* Try safe lexical repairs below. */ }
+    try { return JSON.parse(repairProviderJson(candidate)); } catch { /* Continue to the next candidate. */ }
+  }
+  throw new Error("Provider JSON is invalid");
+}
+
+function balancedJsonObjects(raw: string): readonly string[] {
+  const objects: string[] = [];
+  for (let start = 0; start < raw.length; start += 1) {
+    if (raw[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < raw.length; index += 1) {
+      const character = raw[index];
+      if (inString) {
+        if (!escaped && character === '"') inString = false;
+        escaped = !escaped && character === "\\";
+        if (character !== "\\") escaped = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === "{") depth += 1;
+      else if (character === "}" && --depth === 0) {
+        objects.push(raw.slice(start, index + 1));
+        start = index;
+        break;
+      }
+    }
+  }
+  return Object.freeze(objects);
+}
+
+function repairProviderJson(raw: string): string {
+  let escapedControls = "";
+  let inString = false;
+  let escaped = false;
+  for (const character of raw) {
+    if (inString && !escaped && ["\n", "\r", "\t"].includes(character)) {
+      escapedControls += character === "\n" ? "\\n" : character === "\r" ? "\\r" : "\\t";
+      continue;
+    }
+    escapedControls += character;
+    if (inString) {
+      if (!escaped && character === '"') inString = false;
+      escaped = !escaped && character === "\\";
+      if (character !== "\\") escaped = false;
+    } else if (character === '"') {
+      inString = true;
+    }
+  }
+
+  let withoutTrailingCommas = "";
+  inString = false;
+  escaped = false;
+  for (let index = 0; index < escapedControls.length; index += 1) {
+    const character = escapedControls[index];
+    if (!inString && character === ",") {
+      let next = index + 1;
+      while (/\s/.test(escapedControls[next] ?? "")) next += 1;
+      if (["}", "]"].includes(escapedControls[next] ?? "")) continue;
+    }
+    withoutTrailingCommas += character;
+    if (inString) {
+      if (!escaped && character === '"') inString = false;
+      escaped = !escaped && character === "\\";
+      if (character !== "\\") escaped = false;
+    } else if (character === '"') {
+      inString = true;
+    }
+  }
+  return withoutTrailingCommas;
 }
 
 function parseZipEntries(archive: Buffer): SourceFile[] {

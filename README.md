@@ -9,6 +9,8 @@ DeviLudo 是面向 Godot 的 AI 游戏交付平台。它把游戏需求和对话
 ## 能做什么
 
 - 使用 Claude Code 或 Codex CLI Agent 生成、修改并修复 Godot 项目。
+- 直接关联已有的本地 Godot 项目目录，或把 GitHub 仓库克隆到指定位置后关联；Agent 成功修改会原地写回工作目录。
+- 本地 Git 和 GitHub 项目关联后可在项目页新建并切换分支；GitHub 私有仓库复用宿主机 Git 凭证。
 - 按 revision 持久保存源码，支持对话式迭代、失败修复与阶段重跑。
 - 根据 Agent 的素材清单自动生成图片，也支持用户上传或使用占位素材。
 - 构建 Godot 制品，并按功能清单执行单元、交互、视觉和人工验收测试。
@@ -39,6 +41,8 @@ npm run local:up
 ```
 
 打开 <http://127.0.0.1:3100>。本地默认使用 `standalone`，无需账号；进入设置页配置 Claude Code 或 Codex CLI Provider。图片生成 Provider 为可选配置。
+
+关联本地项目不会上传或复制项目：选择项目根目录后，DeviLudo 会立即以目录名创建项目，源码读取和 Agent 分析在后台异步完成；分析期间项目卡片置灰并显示进度。DeviLudo 只记录受限的目录绑定，每次 Agent 运行前从原目录读取最新源码，并在目录未被并发修改时安全原地写回。关联 GitHub 项目时，DeviLudo 调用宿主机的 `git` 克隆到你选择的位置，再以仓库名关联该工作目录；不经过浏览器上传，因此没有 64 MiB 项目导入上限。Git credential helper 或 SSH agent 只由宿主机 `git` 使用，凭证不会挂载到容器或保存到 DeviLudo。
 
 常用命令：
 

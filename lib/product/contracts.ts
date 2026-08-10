@@ -85,6 +85,8 @@ export type ProductProjectSummary = Readonly<{
   concept: string;
   specification: Readonly<Record<string, unknown>>;
   source: ProjectSourceRevision | null;
+  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "FAILED";
+  analysisError: string | null;
 }>;
 
 export type ProjectSourceRevision = Readonly<{
@@ -116,6 +118,12 @@ export type ProductEvent = Readonly<{
 }>;
 
 export type ProductProjectDetail = ProductProjectSummary & Readonly<{
+  localDirectory: Readonly<{
+    bindingId: string;
+    sourceKind: "LOCAL_DIRECTORY" | "GIT";
+    repositoryUrl: string | null;
+    initialGitBranch: string | null;
+  }> | null;
   document: ProjectDocument;
   jobs: readonly ProductJob[];
   events: readonly ProductEvent[];

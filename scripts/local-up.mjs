@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { lstat, readFile, readlink, readdir, writeFile } from "node:fs/promises";
@@ -39,18 +39,35 @@ const ciMode = process.env.DEVILUDO_LOCAL_CI === "1";
 const resetIncompatibleBaseline = process.argv.includes("--reset-incompatible-baseline");
 const releaseStartupLock = acquireStartupLock();
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
+const gitImportPort = process.env.DEVILUDO_LOCAL_GIT_IMPORT_PORT?.trim() || "3199";
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
   throw new Error("DEVILUDO_WEB_HOST_PORT must be a valid TCP port");
 }
 if (webPort === "3000") {
   throw new Error("Port 3000 is reserved; choose another DEVILUDO_WEB_HOST_PORT");
 }
+if (!/^\d+$/.test(gitImportPort) || Number(gitImportPort) < 1 || Number(gitImportPort) > 65535
+  || gitImportPort === webPort) {
+  throw new Error("DEVILUDO_LOCAL_GIT_IMPORT_PORT must be a valid unused TCP port");
+}
+const previousGitImportConfiguration = await readLocalProjectBridgeConfiguration();
+const gitImportConfiguration = {
+  port: Number(gitImportPort),
+  allowedOrigin: `http://127.0.0.1:${webPort}`,
+  internalToken: previousGitImportConfiguration?.internalToken ?? randomBytes(32).toString("base64url"),
+};
+await writeFile(
+  new URL("../.deviludo/local/git-import.json", import.meta.url),
+  `${JSON.stringify(gitImportConfiguration, null, 2)}\n`,
+  { mode: 0o600 },
+);
 const [claudeVersion, codexVersion] = await Promise.all([
   detectLocalRuntime("claude"),
   detectLocalRuntime("codex"),
 ]);
 await requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 await requireCommand("docker", ["compose", "version"]);
+await requireCommand("git", ["--version"]);
 if (!ciMode) await requireGodot();
 // Each one-shot initialisation step below is guarded by a fingerprint of the
 // inputs that could change its answer, because a repeat start otherwise pays a
@@ -67,6 +84,12 @@ const providerUpstreamProxy = await detectLocalProviderUpstreamProxy();
 const baseEnvironment = {
   ...process.env,
   DEVILUDO_WEB_HOST_PORT: webPort,
+  DEVILUDO_LOCAL_GIT_IMPORT_PORT: gitImportPort,
+  DEVILUDO_LOCAL_GIT_IMPORT_PUBLIC_URL: `http://127.0.0.1:${gitImportPort}`,
+  DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: `http://local-project-bridge-proxy:${gitImportPort}`,
+  DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL: `http://host.docker.internal:${gitImportPort}`,
+  DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: gitImportConfiguration.internalToken,
+  DEVILUDO_LOCAL_DIRECTORY_BINDINGS: "1",
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
 };
 await execute("docker", [
@@ -161,6 +184,15 @@ await execute("docker", [
   "-d",
   "--wait",
 ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
+const gitImportConfigurationFingerprint = digest([
+  "git-import", imageInputFingerprint, JSON.stringify(gitImportConfiguration),
+]);
+const { runningGitImportPid, startLocalGitImport, stopLocalGitImport } = await import("./local-git-import-daemon.mjs");
+const previousGitImportPid = await runningGitImportPid();
+if (previousGitImportPid && !matchesStartupCache("gitImportConfiguration", gitImportConfigurationFingerprint)) {
+  await stopLocalGitImport();
+}
+const gitImportPid = await startLocalGitImport();
 let e2ePid = null;
 let e2eConfigurationFingerprint = null;
 if (!ciMode) {
@@ -196,6 +228,7 @@ if (!baselineReset) {
     imageInputFingerprint,
     imageIds,
     imageBuiltAt,
+    gitImportConfiguration: gitImportConfigurationFingerprint,
     e2eConfiguration: e2eConfigurationFingerprint,
   });
 }
@@ -203,6 +236,7 @@ console.log(JSON.stringify({
   ready: true,
   ciMode,
   webUrl: `http://127.0.0.1:${webPort}`,
+  gitImportPid,
   macE2ePid: e2ePid,
   startupMs: Date.now() - startupStartedAt,
   images: imagesBuilt ? "built" : "reused",
@@ -605,6 +639,10 @@ async function persistLocalComposeEnvironment(environment) {
     "DEVILUDO_DOCKER_GID",
     "DEVILUDO_PROVIDER_UPSTREAM_PROXY",
     "DEVILUDO_RUNTIME_IMAGES_JSON",
+    "DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL",
+    "DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL",
+    "DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN",
+    "DEVILUDO_LOCAL_DIRECTORY_BINDINGS",
   ];
   let existing = "";
   try {
@@ -626,6 +664,18 @@ async function persistLocalComposeEnvironment(environment) {
     end,
   ];
   await writeFile(target, `${[...retained, ...(retained.length ? [""] : []), ...block].join("\n")}\n`, { mode: 0o600 });
+}
+
+async function readLocalProjectBridgeConfiguration() {
+  try {
+    const value = JSON.parse(await readFile(new URL("../.deviludo/local/git-import.json", import.meta.url), "utf8"));
+    if (value && typeof value === "object" && !Array.isArray(value)
+      && typeof value.internalToken === "string"
+      && /^[A-Za-z0-9_-]{40,200}$/.test(value.internalToken)) {
+      return Object.freeze({ internalToken: value.internalToken });
+    }
+  } catch { /* first start or an obsolete local bridge configuration */ }
+  return null;
 }
 
 async function detectLocalProviderUpstreamProxy() {

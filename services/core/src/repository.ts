@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { verify } from "node:crypto";
+import { randomUUID, verify } from "node:crypto";
 import { AssetManifestStore } from "./asset-manifest";
 import {
   IMAGE_GENERATION_PROVIDERS,
@@ -364,8 +364,10 @@ export class CoreRepository {
     assistantContent: string;
     assistantMetadata: Readonly<Record<string, unknown>>;
     source: Readonly<{
-      kind: "GIT" | "LOCAL_ARCHIVE";
+      kind: "GIT" | "LOCAL_ARCHIVE" | "LOCAL_DIRECTORY";
       repositoryUrl: string | null;
+      localDirectoryBindingId: string | null;
+      gitBranch: string | null;
       displayName: string;
       fileCount: number;
       totalBytes: number;
@@ -410,6 +412,8 @@ export class CoreRepository {
           source: {
             kind: input.source.kind,
             repositoryUrl: input.source.repositoryUrl,
+            localDirectoryBindingId: input.source.localDirectoryBindingId,
+            gitBranch: input.source.gitBranch,
             displayName: input.source.displayName,
             fileCount: input.source.fileCount,
             totalBytes: input.source.totalBytes,
@@ -424,6 +428,8 @@ export class CoreRepository {
         [input.workspaceId, input.workflowId, JSON.stringify({
           sourceKind: input.source.kind,
           repositoryUrl: input.source.repositoryUrl,
+          localDirectoryBindingId: input.source.localDirectoryBindingId,
+          gitBranch: input.source.gitBranch,
           fileCount: input.source.fileCount,
           totalBytes: input.source.totalBytes,
           sha256: input.source.sha256,
@@ -470,6 +476,328 @@ export class CoreRepository {
     ]);
     if (!project || !conversation) throw new Error("Imported project could not be read");
     return Object.freeze({ project, conversation });
+  }
+
+  /**
+   * Persist the directory link before any source read or Provider call. This is
+   * deliberately a small transaction so the browser can leave the picker as
+   * soon as a durable project card exists.
+   */
+  async createPendingImportedProject(input: Readonly<{
+    actorUserId: string;
+    workspaceId: string;
+    workspaceName: string;
+    projectId: string;
+    workflowId: string;
+    idempotencyKey: string;
+    name: string;
+    source: Readonly<{
+      kind: "GIT" | "LOCAL_DIRECTORY";
+      repositoryUrl: string | null;
+      localDirectoryBindingId: string;
+      gitBranch: string | null;
+      displayName: string;
+    }>;
+    profile: "VALIDATE" | "RELEASE";
+    targetPlatforms: readonly ServerOperatingSystem[];
+  }>): Promise<ProductProjectDetail> {
+    const concept = `正在分析《${input.name}》的现有源码。`;
+    const specification = Object.freeze({ title: input.name });
+    await this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.workspaces(id, name) VALUES ($1::uuid, $2)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.workspaceId, input.workspaceName],
+      );
+      await client.query(
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
+        [input.workspaceId, input.projectId, input.actorUserId, input.name],
+      );
+      await insertInitialProjectDocument(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        name: input.name,
+        concept,
+        specification,
+      });
+      await client.query(
+        `INSERT INTO deviludo.workflow_instances(
+           workspace_id, id, project_id, profile, target_platforms, state_data
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.workflow_profile, $5::deviludo.server_os[], $6::jsonb)`,
+        [input.workspaceId, input.workflowId, input.projectId, input.profile, input.targetPlatforms, JSON.stringify({
+          concept,
+          specification,
+          source: {
+            ...input.source,
+            fileCount: 0,
+            totalBytes: 0,
+          },
+          importAnalysis: {
+            status: "PENDING",
+            attempts: 0,
+            error: null,
+          },
+        })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
+         ) VALUES ($1::uuid, $2::uuid, 'PROJECT_LINKED', $3::jsonb, 'project-linked')`,
+        [input.workspaceId, input.workflowId, JSON.stringify({
+          sourceKind: input.source.kind,
+          repositoryUrl: input.source.repositoryUrl,
+          localDirectoryBindingId: input.source.localDirectoryBindingId,
+          gitBranch: input.source.gitBranch,
+        })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_creation_receipts(
+           idempotency_key, operation_kind, workspace_id, project_id
+         ) VALUES ($1, 'PROJECT', $2::uuid, $3::uuid)`,
+        [input.idempotencyKey, input.workspaceId, input.projectId],
+      );
+    });
+    const project = await this.readProject(input.workspaceId, input.projectId);
+    if (!project) throw new Error("Linked project could not be read");
+    return project;
+  }
+
+  async claimProjectImportAnalysis(leaseSeconds: number): Promise<PendingProjectImportAnalysis | null> {
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 60 || leaseSeconds > 3_600) {
+      throw new Error("Project analysis lease is invalid");
+    }
+    const result = await this.database.pool.query<PendingProjectImportAnalysisRow>(
+      "SELECT * FROM deviludo.claim_project_import_analysis($1::integer)",
+      [leaseSeconds],
+    );
+    const row = result.rows[0];
+    return row ? Object.freeze({
+      workspaceId: row.workspaceId,
+      projectId: row.projectId,
+      workflowId: row.workflowId,
+      actorUserId: row.actorUserId,
+      leaseToken: row.leaseToken,
+      sourceKind: row.sourceKind,
+      repositoryUrl: row.repositoryUrl,
+      localDirectoryBindingId: row.localDirectoryBindingId,
+      gitBranch: row.gitBranch,
+      displayName: row.displayName,
+    }) : null;
+  }
+
+  async completeProjectImportAnalysis(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    actorUserId: string;
+    leaseToken: string;
+    concept: string;
+    specification: Readonly<Record<string, unknown>>;
+    document: ProjectDocumentContent;
+    assistantContent: string;
+    assistantMetadata: Readonly<Record<string, unknown>>;
+    source: Readonly<{
+      kind: "GIT" | "LOCAL_DIRECTORY";
+      repositoryUrl: string | null;
+      localDirectoryBindingId: string;
+      gitBranch: string | null;
+      displayName: string;
+      fileCount: number;
+      totalBytes: number;
+      revision: number;
+      relativePath: string;
+      sha256: string;
+    }>;
+  }>): Promise<boolean> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const workflow = await client.query<{ state_data: Record<string, unknown>; project_name: string }>(
+        `SELECT workflow.state_data, project.name AS project_name
+           FROM deviludo.workflow_instances workflow
+           JOIN deviludo.projects project
+             ON project.workspace_id = workflow.workspace_id AND project.id = workflow.project_id
+          WHERE workflow.id = $1::uuid AND workflow.project_id = $2::uuid
+          FOR UPDATE OF workflow`,
+        [input.workflowId, input.projectId],
+      );
+      const row = workflow.rows[0];
+      if (!row || !analysisLeaseMatches(row.state_data, input.leaseToken)) return false;
+
+      const currentDocument = await client.query<{ revision: string }>(
+        "SELECT revision::text FROM deviludo.project_documents WHERE project_id = $1::uuid FOR UPDATE",
+        [input.projectId],
+      );
+      const revision = Number(currentDocument.rows[0]?.revision ?? 0) + 1;
+      const document = parseProjectDocumentContent(input.document);
+      const markdown = projectDocumentMarkdown(row.project_name, document);
+      await client.query(
+        `UPDATE deviludo.project_documents
+            SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
+                maintained_by = 'AGENT', last_agent_maintained_at = clock_timestamp(),
+                updated_at = clock_timestamp()
+          WHERE project_id = $1::uuid`,
+        [input.projectId, revision, JSON.stringify(document), markdown],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_document_revisions(
+           workspace_id, project_id, revision, content, markdown, source
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5, 'PROJECT_IMPORTED')`,
+        [input.workspaceId, input.projectId, revision, JSON.stringify(document), markdown],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_source_revisions(
+           workspace_id, project_id, revision, relative_path, content_digest,
+           file_count, total_bytes, workflow_id, actor_account_id
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4, $5, $6, $7, $8::uuid, $9::uuid)`,
+        [input.workspaceId, input.projectId, input.source.revision, input.source.relativePath,
+          input.source.sha256, input.source.fileCount, input.source.totalBytes,
+          input.workflowId, input.actorUserId],
+      );
+
+      const currentState = row.state_data ?? {};
+      const currentAnalysis = objectValue(currentState.importAnalysis);
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = $2::jsonb, version = version + 1, updated_at = clock_timestamp()
+          WHERE id = $1::uuid`,
+        [input.workflowId, JSON.stringify({
+          ...currentState,
+          concept: input.concept,
+          specification: input.specification,
+          source: {
+            kind: input.source.kind,
+            repositoryUrl: input.source.repositoryUrl,
+            localDirectoryBindingId: input.source.localDirectoryBindingId,
+            gitBranch: input.source.gitBranch,
+            displayName: input.source.displayName,
+            fileCount: input.source.fileCount,
+            totalBytes: input.source.totalBytes,
+            sha256: input.source.sha256,
+          },
+          importAnalysis: {
+            ...currentAnalysis,
+            status: "READY",
+            error: null,
+            completedAt: new Date().toISOString(),
+            leaseToken: null,
+            leaseExpiresAt: null,
+          },
+        })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
+         ) VALUES ($1::uuid, $2::uuid, 'PROJECT_IMPORTED', $3::jsonb, 'project-imported')`,
+        [input.workspaceId, input.workflowId, JSON.stringify({
+          sourceKind: input.source.kind,
+          repositoryUrl: input.source.repositoryUrl,
+          localDirectoryBindingId: input.source.localDirectoryBindingId,
+          gitBranch: input.source.gitBranch,
+          fileCount: input.source.fileCount,
+          totalBytes: input.source.totalBytes,
+          sha256: input.source.sha256,
+        })],
+      );
+      const conversationId = randomUUID();
+      await client.query(
+        `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'PROJECT_FEEDBACK', $4)`,
+        [input.workspaceId, conversationId, input.projectId, `${row.project_name} · 关联分析`],
+      );
+      await client.query(
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content)
+         VALUES ($1::uuid, $2::uuid, 'USER', $3)`,
+        [input.workspaceId, conversationId, input.source.repositoryUrl
+          ? `关联并分析 Git 项目：${input.source.repositoryUrl}`
+          : `关联并分析本地项目：${input.source.displayName}`],
+      );
+      await client.query(
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+        [input.workspaceId, conversationId, input.assistantContent, JSON.stringify({
+          ...input.assistantMetadata,
+          source: "PROJECT_IMPORT_AGENT",
+          appliedToDraft: true,
+        })],
+      );
+      return true;
+    });
+  }
+
+  async failProjectImportAnalysis(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    projectId: string;
+    leaseToken: string;
+    error: string;
+  }>): Promise<boolean> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{ state_data: Record<string, unknown> }>(
+        `SELECT state_data FROM deviludo.workflow_instances
+          WHERE id = $1::uuid AND project_id = $2::uuid FOR UPDATE`,
+        [input.workflowId, input.projectId],
+      );
+      const stateData = result.rows[0]?.state_data;
+      if (!stateData || !analysisLeaseMatches(stateData, input.leaseToken)) return false;
+      const analysis = objectValue(stateData.importAnalysis);
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = $2::jsonb, version = version + 1, updated_at = clock_timestamp()
+          WHERE id = $1::uuid`,
+        [input.workflowId, JSON.stringify({
+          ...stateData,
+          importAnalysis: {
+            ...analysis,
+            status: "FAILED",
+            error: input.error.slice(0, 2_000),
+            failedAt: new Date().toISOString(),
+            leaseToken: null,
+            leaseExpiresAt: null,
+          },
+        })],
+      );
+      return true;
+    });
+  }
+
+  async retryProjectImportAnalysis(workspaceId: string, projectId: string): Promise<ProductProjectDetail | null> {
+    const queued = await this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<{ id: string; state_data: Record<string, unknown> }>(
+        `SELECT id::text, state_data
+           FROM deviludo.workflow_instances
+          WHERE project_id = $1::uuid
+          ORDER BY created_at DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [projectId],
+      );
+      const row = result.rows[0];
+      if (!row) return false;
+      const analysis = objectValue(row.state_data.importAnalysis);
+      if (analysis.status !== "FAILED") {
+        throw Object.assign(new Error("只有失败的项目分析可以重试"), {
+          statusCode: 409,
+          code: "PROJECT_ANALYSIS_NOT_FAILED",
+        });
+      }
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = $2::jsonb, version = version + 1, updated_at = clock_timestamp()
+          WHERE id = $1::uuid`,
+        [row.id, JSON.stringify({
+          ...row.state_data,
+          importAnalysis: {
+            ...analysis,
+            status: "PENDING",
+            error: null,
+            leaseToken: null,
+            leaseExpiresAt: null,
+          },
+        })],
+      );
+      return true;
+    });
+    return queued ? this.readProject(workspaceId, projectId) : null;
   }
 
   async readProjectCreationReceipt(workspaceId: string, idempotencyKey: string): Promise<CreationReceipt | null> {
@@ -671,6 +999,7 @@ export class CoreRepository {
       if (!currentDocument) throw new Error("Project document is missing");
       return Object.freeze({
         ...projectSummaryFromRow(row),
+        localDirectory: localDirectoryFromState(row.state_data),
         document: projectDocumentFromRows(currentDocument, documentRevisions.rows),
         jobs: Object.freeze(jobs.rows.map(job => Object.freeze({
           id: job.id,
@@ -1661,7 +1990,7 @@ export class CoreRepository {
               job.pool_kind::text, job.kind::text, job.target_operating_system::text,
               job.required_capabilities, job.exclusive, job.isolation_generation::text, job.payload,
               job.runtime_image, job.timeout_seconds, job.budget, job.output_contract,
-              workflow.profile::text AS workflow_profile,
+              workflow.profile::text AS workflow_profile, workflow.state_data AS workflow_state_data,
               lease_token::text, lease_expires_at::text, fencing_token::text
          FROM deviludo.jobs job
          JOIN deviludo.workflow_instances workflow
@@ -1707,6 +2036,12 @@ export class CoreRepository {
       sizeBytes: Number(item.size_bytes),
     }));
     const assetObjects = buildAssetInputObjects(row);
+    const sourceState = row.workflow_state_data?.source as Record<string, unknown> | undefined;
+    const localDirectoryBindingId = sourceState && typeof sourceState === "object" && !Array.isArray(sourceState)
+      && typeof sourceState.localDirectoryBindingId === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sourceState.localDirectoryBindingId)
+      ? sourceState.localDirectoryBindingId
+      : null;
     return Object.freeze({
       schemaVersion: "deviludo.job.v4",
       jobId: row.id,
@@ -1734,7 +2069,10 @@ export class CoreRepository {
         networkBytes: Number(row.budget.networkBytes ?? 0),
       }),
       timeoutSeconds: row.timeout_seconds,
-      payload: Object.freeze({ ...row.payload }),
+      payload: Object.freeze({
+        ...row.payload,
+        ...(row.kind === "AGENT_GENERATION" && localDirectoryBindingId ? { localDirectoryBindingId } : {}),
+      }),
       lease: Object.freeze({
         token: row.lease_token,
         expiresAt: row.lease_expires_at,
@@ -1997,6 +2335,7 @@ type JobRow = {
   payload: Record<string, unknown>;
   runtime_image: string;
   workflow_profile: "VALIDATE" | "RELEASE";
+  workflow_state_data: Record<string, unknown> | null;
   timeout_seconds: number;
   budget: Record<string, unknown>;
   output_contract: Record<string, unknown>;
@@ -2017,9 +2356,17 @@ export type ProductProjectSummary = Readonly<{
   concept: string;
   specification: Readonly<Record<string, unknown>>;
   source: ProjectSourceRevision | null;
+  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "FAILED";
+  analysisError: string | null;
 }>;
 
 export type ProductProjectDetail = ProductProjectSummary & Readonly<{
+  localDirectory: Readonly<{
+    bindingId: string;
+    sourceKind: "LOCAL_DIRECTORY" | "GIT";
+    repositoryUrl: string | null;
+    initialGitBranch: string | null;
+  }> | null;
   document: Readonly<{
     revision: number;
     content: ProjectDocumentContent;
@@ -2128,6 +2475,32 @@ export type CreationReceipt = Readonly<{
   conversationId: string | null;
 }>;
 
+export type PendingProjectImportAnalysis = Readonly<{
+  workspaceId: string;
+  projectId: string;
+  workflowId: string;
+  actorUserId: string;
+  leaseToken: string;
+  sourceKind: "GIT" | "LOCAL_DIRECTORY";
+  repositoryUrl: string | null;
+  localDirectoryBindingId: string;
+  gitBranch: string | null;
+  displayName: string;
+}>;
+
+type PendingProjectImportAnalysisRow = {
+  workspaceId: string;
+  projectId: string;
+  workflowId: string;
+  actorUserId: string;
+  leaseToken: string;
+  sourceKind: "GIT" | "LOCAL_DIRECTORY";
+  repositoryUrl: string | null;
+  localDirectoryBindingId: string;
+  gitBranch: string | null;
+  displayName: string;
+};
+
 type ProductProjectRow = {
   id: string;
   name: string;
@@ -2198,6 +2571,13 @@ type ProjectDocumentRevisionRow = {
 function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
   const stateData = row.state_data ?? {};
   const specification = stateData.specification;
+  const analysis = stateData.importAnalysis && typeof stateData.importAnalysis === "object"
+    && !Array.isArray(stateData.importAnalysis)
+    ? stateData.importAnalysis as Record<string, unknown>
+    : null;
+  const analysisStatus = analysis && ["PENDING", "ANALYZING", "FAILED", "READY"].includes(String(analysis.status))
+    ? analysis.status as ProductProjectSummary["analysisStatus"]
+    : "READY";
   return Object.freeze({
     id: row.id,
     name: row.name,
@@ -2221,6 +2601,37 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
           createdAt: row.source_created_at,
         })
       : null,
+    analysisStatus,
+    analysisError: analysisStatus === "FAILED" && typeof analysis?.error === "string"
+      ? analysis.error
+      : null,
+  });
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function analysisLeaseMatches(stateData: Record<string, unknown>, leaseToken: string): boolean {
+  const analysis = objectValue(stateData.importAnalysis);
+  return analysis.status === "ANALYZING" && analysis.leaseToken === leaseToken;
+}
+
+function localDirectoryFromState(stateData: Record<string, unknown> | null): ProductProjectDetail["localDirectory"] {
+  const source = stateData?.source;
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  const value = source as Record<string, unknown>;
+  if (!UUID.test(typeof value.localDirectoryBindingId === "string" ? value.localDirectoryBindingId : "")
+    || !["LOCAL_DIRECTORY", "GIT"].includes(typeof value.kind === "string" ? value.kind : "")) {
+    return null;
+  }
+  return Object.freeze({
+    bindingId: value.localDirectoryBindingId as string,
+    sourceKind: value.kind as "LOCAL_DIRECTORY" | "GIT",
+    repositoryUrl: typeof value.repositoryUrl === "string" ? value.repositoryUrl : null,
+    initialGitBranch: typeof value.gitBranch === "string" ? value.gitBranch : null,
   });
 }
 

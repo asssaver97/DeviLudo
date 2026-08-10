@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { runningPid } from "./local-e2e-daemon.mjs";
+import { runningGitImportPid } from "./local-git-import-daemon.mjs";
 
 const execute = promisify(execFile);
 const { stdout } = await execute("docker", ["compose", "-f", "infra/docker-compose.yml", "ps", "--format", "json"], {
@@ -14,4 +15,5 @@ const services = stdout.trim().split("\n").filter(Boolean).map(line => JSON.pars
     .filter(publisher => publisher.PublishedPort)
     .map(publisher => `${publisher.URL || "0.0.0.0"}:${publisher.PublishedPort}->${publisher.TargetPort}/${publisher.Protocol}`),
 }));
-console.log(JSON.stringify({ services, macE2ePid: await runningPid() }, null, 2));
+const [macE2ePid, gitImportPid] = await Promise.all([runningPid(), runningGitImportPid()]);
+console.log(JSON.stringify({ services, macE2ePid, gitImportPid }, null, 2));

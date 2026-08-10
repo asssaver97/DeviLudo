@@ -25,6 +25,7 @@ const STARTERS_EN = Object.freeze([
   "Design a pixel adventure built around a time loop",
   "Help me shape the core loop of a lightweight strategy game",
 ]);
+const IMPORT_PROJECT_VALUE = "__import_existing_project__";
 
 export function HomeChat() {
   const { locale, text } = useLanguage();
@@ -155,13 +156,24 @@ export function HomeChat() {
         <select
           aria-label={text("关联项目", "Related project")}
           disabled={Boolean(conversation) || loadingProjects}
-          onChange={event => setSelectedProjectId(event.target.value)}
+          onChange={event => {
+            if (event.target.value === IMPORT_PROJECT_VALUE) {
+              router.push("/projects/import");
+              return;
+            }
+            setSelectedProjectId(event.target.value);
+          }}
           value={activeProjectId}
         >
           <option value="">{text("创建新项目", "Create new project")}</option>
+          <option value={IMPORT_PROJECT_VALUE}>{text("关联已有项目…", "Link existing project…")}</option>
           {projects.map(project => (
-            <option key={project.id} value={project.id}>
-              {project.name} · {workflowLabel(project.workflowState, text)}
+            <option disabled={project.analysisStatus !== "READY"} key={project.id} value={project.id}>
+              {project.name} · {project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING"
+                ? text("正在分析", "Analyzing")
+                : project.analysisStatus === "FAILED"
+                  ? text("分析失败", "Analysis failed")
+                  : workflowLabel(project.workflowState, text)}
             </option>
           ))}
         </select>

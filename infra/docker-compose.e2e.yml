@@ -3,6 +3,9 @@ services:
     environment:
       NODE_ENV: test
       DEVILUDO_CORE_POLL_MS: "100"
+      DEVILUDO_LOCAL_DIRECTORY_BINDINGS: "1"
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: http://local-project-bridge-proxy:3199
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: e2e-local-project-bridge-token-0000000000000000000000000000000000000000
       DEVILUDO_DEFAULT_WORKFLOW_PROFILE: RELEASE
       DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
       DEVILUDO_PROJECT_NAMING_TEST_RESPONSE: 时间回廊
@@ -20,3 +23,15 @@ services:
       NODE_ENV: test
       DEVILUDO_CORE_POLL_MS: "100"
       DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
+
+  sandbox-executord:
+    environment:
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: http://local-project-bridge-proxy:3199
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: e2e-local-project-bridge-token-0000000000000000000000000000000000000000
+
+  local-project-bridge-proxy:
+    environment:
+      NODE_ENV: test
+      PORT: "3199"
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: e2e-local-project-bridge-token-0000000000000000000000000000000000000000
+    command: ["node", "scripts/local-project-bridge-fixture.mjs"]

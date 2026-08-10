@@ -22,6 +22,9 @@ x-core: &core
     DEVILUDO_PLATFORM_ACCOUNT_API_URL: ${DEVILUDO_PLATFORM_ACCOUNT_API_URL:-}
     DEVILUDO_PLATFORM_INTERNAL_TOKEN: ${DEVILUDO_PLATFORM_INTERNAL_TOKEN:-}
     DEVILUDO_PROJECTS_ROOT: /var/lib/deviludo-projects
+    DEVILUDO_LOCAL_DIRECTORY_BINDINGS: ${DEVILUDO_LOCAL_DIRECTORY_BINDINGS:-0}
+    DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL:-}
+    DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN:-}
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
   depends_on:
     postgres:
@@ -247,6 +250,8 @@ services:
       DEVILUDO_S3_PATH_STYLE: "1"
       DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
       DEVILUDO_PROJECTS_ROOT: /var/lib/deviludo-projects
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL:-}
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN:-}
       AWS_SHARED_CREDENTIALS_FILE: /run/service-secrets/s3.credentials
     group_add:
       - "${DEVILUDO_DOCKER_GID:-0}"
@@ -270,6 +275,32 @@ services:
     networks:
       - data
       - executor-agent
+
+  local-project-bridge-proxy:
+    image: deviludo-core:local
+    restart: unless-stopped
+    user: "1001:1001"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_ENV: development
+      PORT: "${DEVILUDO_LOCAL_GIT_IMPORT_PORT:-3199}"
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL:-http://host.docker.internal:3199}
+      DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN:-disabled-local-project-bridge-token-00000000000000000000000000000000}
+    command: ["node", "scripts/local-project-bridge-proxy.mjs"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - data
+      - local-host
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${DEVILUDO_LOCAL_GIT_IMPORT_PORT:-3199}/health"]
+      interval: 10s
+      start_interval: 500ms
+      start_period: 30s
+      timeout: 3s
+      retries: 6
 
   provider-proxy:
     image: deviludo-provider-proxy:local
@@ -430,6 +461,7 @@ services:
       HOSTNAME: "0.0.0.0"
       DEVILUDO_CORE_API_URL: http://core-api:8080
       DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
+      DEVILUDO_LOCAL_GIT_IMPORT_PUBLIC_URL: ${DEVILUDO_LOCAL_GIT_IMPORT_PUBLIC_URL:-http://127.0.0.1:3199}
     depends_on:
       core-api:
         condition: service_healthy
@@ -461,6 +493,7 @@ networks:
     internal: true
   native-artifact: {}
   egress: {}
+  local-host: {}
 
 volumes:
   postgres-data: {}

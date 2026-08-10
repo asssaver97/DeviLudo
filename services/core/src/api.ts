@@ -38,8 +38,13 @@ import { CoreObjectStore } from "./object-store";
 import { generateProjectName } from "./project-naming";
 import {
   analyzeImportedProject,
+  decodeProjectSourceStream,
+  inspectProjectFiles,
   inspectProjectZip,
+  normalizeGitBranchName,
+  normalizeGitHubRepositoryUrl,
   type ImportedSourceSnapshot,
+  type SourceFile,
 } from "./project-import";
 import {
   generateProductConversationReply,
@@ -47,7 +52,12 @@ import {
   type ConversationAgentProjectContext,
   type ProductConversationAgentReply,
 } from "./product-conversation";
-import type { CoreRepository, StoredInstanceAgentSettings, StoredImageGenerationSettings } from "./repository";
+import type {
+  CoreRepository,
+  PendingProjectImportAnalysis,
+  StoredInstanceAgentSettings,
+  StoredImageGenerationSettings,
+} from "./repository";
 import { HttpSigningGrantBroker, type SigningGrantBroker } from "./signing-grants";
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
@@ -441,30 +451,67 @@ export async function runApi(
       .send({ workspace: selectedWorkspace, project });
   });
 
-  app.post<{ Querystring: { name?: string } }>(
-    "/v1/projects/import/archive",
-    { bodyLimit: 64 * 1024 * 1024 },
+  app.post<{ Body: { name?: unknown; bindingId?: unknown; gitBranch?: unknown } }>(
+    "/v1/projects/bind/local-directory",
+    { bodyLimit: 16 * 1024 },
     async (request, reply) => {
       const principal = productAccess(request, config);
-      if (!Buffer.isBuffer(request.body)) {
-        throw httpError(400, "INVALID_PROJECT_ARCHIVE", "请选择 ZIP 项目压缩包或本地项目文件夹");
+      if (!config.localDirectoryBindings) {
+        throw httpError(409, "LOCAL_DIRECTORY_BINDING_UNAVAILABLE", "本地目录关联仅在本机部署中可用");
       }
-      const displayName = typeof request.query.name === "string" ? request.query.name.trim() : "本地项目";
-      const result = await processProjectImport({
+      const body = objectBody(request.body);
+      if (typeof body.bindingId !== "string" || !UUID.test(body.bindingId)) {
+        throw httpError(400, "INVALID_DIRECTORY_BINDING", "本地项目目录绑定无效");
+      }
+      const displayName = typeof body.name === "string" ? body.name.trim() : "本地项目";
+      const gitBranch = typeof body.gitBranch === "string" ? body.gitBranch : "";
+      const result = await queueBoundProjectImport({
         request,
         principal,
         repository,
-        agentSecrets,
-        projectSources,
-        source: async () => inspectProjectZip({
-          bytes: request.body as Buffer,
-          sourceKind: "LOCAL_ARCHIVE",
+        name: displayName,
+        source: {
+          sourceKind: "LOCAL_DIRECTORY",
+          localDirectoryBindingId: body.bindingId as string,
+          gitBranch,
           displayName,
-        }),
+          repositoryUrl: null,
+        },
       });
-      return reply
-        .code(result.statusCode)
-        .send(result.payload);
+      return reply.code(result.statusCode).send(result.payload);
+    },
+  );
+
+  app.post<{ Body: { name?: unknown; repositoryUrl?: unknown; bindingId?: unknown; gitBranch?: unknown } }>(
+    "/v1/projects/bind/github",
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      if (!config.localDirectoryBindings) {
+        throw httpError(409, "LOCAL_DIRECTORY_BINDING_UNAVAILABLE", "GitHub 本地工作目录关联仅在本机部署中可用");
+      }
+      const body = objectBody(request.body);
+      if (typeof body.bindingId !== "string" || !UUID.test(body.bindingId)) {
+        throw httpError(400, "INVALID_DIRECTORY_BINDING", "GitHub 项目缺少本地工作目录绑定");
+      }
+      const repositoryUrl = typeof body.repositoryUrl === "string" ? body.repositoryUrl : "";
+      const displayName = typeof body.name === "string" ? body.name.trim() : "";
+      const gitBranch = typeof body.gitBranch === "string" ? body.gitBranch : "";
+      const github = normalizeGitHubRepositoryUrl(repositoryUrl);
+      const result = await queueBoundProjectImport({
+        request,
+        principal,
+        repository,
+        name: displayName || github.displayName,
+        source: {
+          sourceKind: "GIT",
+          repositoryUrl: github.canonicalUrl,
+          localDirectoryBindingId: body.bindingId as string,
+          gitBranch,
+          displayName: displayName || github.displayName,
+        },
+      });
+      return reply.code(result.statusCode).send(result.payload);
     },
   );
 
@@ -473,6 +520,15 @@ export async function runApi(
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/analysis/retry", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.retryProjectImportAnalysis(workspace.id, request.params.projectId);
+    return project
+      ? reply.code(202).send({ project })
+      : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
   });
 
   app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/artifacts", async (request, reply) => {
@@ -765,6 +821,9 @@ export async function runApi(
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    if (project.analysisStatus !== "READY") {
+      throw httpError(409, "PROJECT_ANALYSIS_INCOMPLETE", "项目源码分析完成后才能开始开发");
+    }
     const specificationObject = await objectStore.putSpecification({
       workspaceId: workspace.id,
       projectId: project.id,
@@ -1073,7 +1132,16 @@ export async function runApi(
 
   signal.addEventListener("abort", () => void app.close(), { once: true });
   await app.listen({ host: "0.0.0.0", port: config.port });
+  const importAnalysisWorker = runProjectImportAnalysisWorker({
+    repository,
+    agentSecrets,
+    projectSources,
+    config,
+    signal,
+    logFailure: (message, error) => app.log.error({ err: error }, message),
+  });
   await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+  await importAnalysisWorker;
   await database.close();
 }
 
@@ -1401,6 +1469,233 @@ async function agentProjectName(
   }
 }
 
+async function readBoundProjectSource(
+  config: CoreConfig,
+  metadata: Readonly<{
+    sourceKind: "GIT" | "LOCAL_DIRECTORY";
+    repositoryUrl?: string | null;
+    localDirectoryBindingId: string;
+    gitBranch?: string | null;
+    displayName: string;
+  }>,
+): Promise<ImportedSourceSnapshot> {
+  if (!config.localProjectBridgeUrl || !config.localProjectBridgeToken) {
+    throw new Error("本地项目桥接尚未配置");
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10 * 60 * 1_000);
+  try {
+    const response = await fetch(`${config.localProjectBridgeUrl}/internal/directory/source`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-deviludo-bridge-token": config.localProjectBridgeToken,
+      },
+      body: JSON.stringify({ bindingId: metadata.localDirectoryBindingId }),
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { message?: unknown };
+      throw new Error(typeof failure.message === "string" ? failure.message : "无法读取已关联的本地项目目录");
+    }
+    if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/x-deviludo-source-v1") {
+      throw new Error("本地项目桥接返回了无效的源码格式");
+    }
+    const files = decodeProjectSourceStream(new Uint8Array(await response.arrayBuffer()));
+    const expectedDigest = response.headers.get("x-deviludo-source-digest") ?? "";
+    if (!/^sha256:[0-9a-f]{64}$/.test(expectedDigest) || projectSourceDigest(files) !== expectedDigest) {
+      throw new Error("本地项目源码完整性校验失败");
+    }
+    return inspectProjectFiles({ ...metadata, files });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function projectSourceDigest(files: readonly SourceFile[]): string {
+  const hash = createHash("sha256");
+  for (const file of files) {
+    const path = Buffer.from(file.path, "utf8");
+    const size = Buffer.allocUnsafe(8);
+    size.writeBigUInt64BE(BigInt(file.bytes.length));
+    hash.update(path).update("\0").update(size).update(file.bytes);
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+async function queueBoundProjectImport(input: Readonly<{
+  request: FastifyRequest;
+  principal: AccessPrincipal;
+  repository: CoreRepository;
+  name: string;
+  source: Readonly<{
+    sourceKind: "GIT" | "LOCAL_DIRECTORY";
+    repositoryUrl: string | null;
+    localDirectoryBindingId: string;
+    gitBranch: string;
+    displayName: string;
+  }>;
+}>): Promise<Readonly<{
+  statusCode: 200 | 202;
+  payload: Readonly<{
+    workspace: WorkspaceSummary;
+    project: ProductProjectDetail;
+    conversation: null;
+  }>;
+}>> {
+  const name = input.name.trim();
+  if (name.length < 1 || name.length > 200) {
+    throw httpError(400, "INVALID_PROJECT_NAME", "项目目录或仓库名称长度必须在 1 至 200 个字符之间");
+  }
+  const idempotencyKey = requestIdempotencyKey(input.request, "project-import");
+  const currentWorkspace = await selectedWorkspaceFromRequest(input.request, input.repository, input.principal);
+  const prior = await input.repository.readProjectCreationReceipt(input.principal.workspace.id, idempotencyKey);
+  if (prior) {
+    if (prior.operationKind !== "PROJECT" || (currentWorkspace && currentWorkspace.id !== prior.workspaceId)) {
+      throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他操作");
+    }
+    const [workspace, project] = await Promise.all([
+      input.repository.readWorkspace(prior.workspaceId),
+      input.repository.readProject(prior.workspaceId, prior.projectId),
+    ]);
+    if (!workspace || !project) throw new Error("Project link receipt is incomplete");
+    return Object.freeze({
+      statusCode: 200,
+      payload: Object.freeze({ workspace, project, conversation: null }),
+    });
+  }
+
+  const targetWorkspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
+  const project = await input.repository.createPendingImportedProject({
+    actorUserId: input.principal.user.id,
+    workspaceId: targetWorkspace.id,
+    workspaceName: targetWorkspace.name,
+    projectId: deterministicProjectId(input.principal.user.id, idempotencyKey),
+    workflowId: randomUUID(),
+    idempotencyKey,
+    name,
+    source: {
+      kind: input.source.sourceKind,
+      repositoryUrl: input.source.repositoryUrl,
+      localDirectoryBindingId: input.source.localDirectoryBindingId,
+      gitBranch: normalizeGitBranchName(input.source.gitBranch),
+      displayName: name,
+    },
+    ...defaultWorkflowConfiguration(),
+  });
+  const workspace = currentWorkspace ?? await input.repository.readWorkspace(targetWorkspace.id);
+  if (!workspace) throw new Error("Linked workspace could not be read");
+  return Object.freeze({
+    statusCode: 202,
+    payload: Object.freeze({ workspace, project, conversation: null }),
+  });
+}
+
+async function runProjectImportAnalysisWorker(input: Readonly<{
+  repository: CoreRepository;
+  agentSecrets: AgentSecretStore;
+  projectSources: ProjectSourceStore;
+  config: CoreConfig;
+  signal: AbortSignal;
+  logFailure: (message: string, error: unknown) => void;
+}>): Promise<void> {
+  while (!input.signal.aborted) {
+    let claimed: PendingProjectImportAnalysis | null;
+    try {
+      claimed = await input.repository.claimProjectImportAnalysis(30 * 60);
+    } catch (error) {
+      input.logFailure("Unable to claim pending project analysis", error);
+      await abortableDelay(2_000, input.signal);
+      continue;
+    }
+    if (!claimed) {
+      await abortableDelay(1_000, input.signal);
+      continue;
+    }
+
+    try {
+      const source = await readBoundProjectSource(input.config, {
+        sourceKind: claimed.sourceKind,
+        repositoryUrl: claimed.repositoryUrl,
+        localDirectoryBindingId: claimed.localDirectoryBindingId,
+        gitBranch: claimed.gitBranch,
+        displayName: claimed.displayName,
+      });
+      const settings = await input.repository.readAgentSettings();
+      if (!settings) throw new Error("请先在设置中配置全局 Agent 连接");
+      const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
+      if (!apiKey) throw new Error("无法读取全局 Agent 凭据，请重新保存配置");
+      const analysis = await analyzeImportedProject({ source, settings, apiKey });
+      const stored = await input.projectSources.publishFiles({
+        workspaceId: claimed.workspaceId,
+        projectId: claimed.projectId,
+        revision: 1,
+        files: source.files,
+      });
+      const completed = await input.repository.completeProjectImportAnalysis({
+        workspaceId: claimed.workspaceId,
+        projectId: claimed.projectId,
+        workflowId: claimed.workflowId,
+        actorUserId: claimed.actorUserId,
+        leaseToken: claimed.leaseToken,
+        concept: analysis.concept,
+        specification: analysis.specification,
+        document: analysis.document,
+        assistantContent: analysis.assistantContent,
+        assistantMetadata: {
+          agentRuntime: analysis.runtime,
+          model: analysis.model,
+          settingsRevision: analysis.settingsRevision,
+          analyzedProjectName: analysis.name,
+        },
+        source: {
+          kind: source.sourceKind as "GIT" | "LOCAL_DIRECTORY",
+          repositoryUrl: source.repositoryUrl,
+          localDirectoryBindingId: claimed.localDirectoryBindingId,
+          gitBranch: source.gitBranch,
+          displayName: claimed.displayName,
+          fileCount: source.fileCount,
+          totalBytes: source.totalBytes,
+          revision: stored.revision,
+          relativePath: stored.relativePath,
+          sha256: stored.digest,
+        },
+      });
+      if (!completed) {
+        input.logFailure("Project analysis lease expired before completion", new Error(claimed.projectId));
+      }
+    } catch (error) {
+      const message = projectAnalysisFailureMessage(error);
+      await input.repository.failProjectImportAnalysis({
+        workspaceId: claimed.workspaceId,
+        workflowId: claimed.workflowId,
+        projectId: claimed.projectId,
+        leaseToken: claimed.leaseToken,
+        error: message,
+      }).catch(failure => input.logFailure("Unable to persist project analysis failure", failure));
+      input.logFailure(`Project analysis failed for ${claimed.projectId}`, error);
+    }
+  }
+}
+
+function projectAnalysisFailureMessage(error: unknown): string {
+  if (isTimeoutFailure(error)) return "项目分析超时，请检查本地目录、Agent 服务或网络后重试。";
+  const message = error instanceof Error ? error.message.trim() : "项目分析失败";
+  return message || "项目分析失败";
+}
+
+async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, milliseconds);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
 async function processProjectImport(input: Readonly<{
   request: FastifyRequest;
   principal: AccessPrincipal;
@@ -1444,6 +1739,9 @@ async function processProjectImport(input: Readonly<{
   try {
     source = await input.source();
   } catch (error) {
+    if (isTimeoutFailure(error)) {
+      throw httpError(408, "PROJECT_SOURCE_TIMEOUT", "读取本地项目目录超时，请确认磁盘可用后重试");
+    }
     const message = error instanceof Error ? error.message : "项目源码读取失败";
     throw httpError(422, "PROJECT_IMPORT_SOURCE_FAILED", message);
   }
@@ -1455,6 +1753,9 @@ async function processProjectImport(input: Readonly<{
   try {
     analysis = await analyzeImportedProject({ source, settings, apiKey });
   } catch (error) {
+    if (isTimeoutFailure(error)) {
+      throw httpError(408, "AGENT_IMPORT_TIMEOUT", "项目目录已读取完成，但 Agent 分析超时，请重试关联");
+    }
     const message = error instanceof Error ? error.message : "项目分析 Agent 调用失败";
     throw httpError(424, "AGENT_IMPORT_FAILED", message);
   }
@@ -1483,8 +1784,8 @@ async function processProjectImport(input: Readonly<{
       specification: analysis.specification,
       document: analysis.document,
       userContent: source.repositoryUrl
-        ? `导入并分析 Git 项目：${source.repositoryUrl}`
-        : `导入并分析本地项目：${source.displayName}`,
+        ? `关联并分析 Git 项目：${source.repositoryUrl}`
+        : `关联并分析本地项目：${source.displayName}`,
       assistantContent: analysis.assistantContent,
       assistantMetadata: {
         agentRuntime: analysis.runtime,
@@ -1494,6 +1795,8 @@ async function processProjectImport(input: Readonly<{
       source: {
         kind: source.sourceKind,
         repositoryUrl: source.repositoryUrl,
+        localDirectoryBindingId: source.localDirectoryBindingId,
+        gitBranch: source.gitBranch,
         displayName: source.displayName,
         fileCount: source.fileCount,
         totalBytes: source.totalBytes,
@@ -1568,6 +1871,11 @@ function conversationAgentMetadata(reply: ProductConversationAgentReply): Readon
 
 function httpError(statusCode: number, code: string, message: string): Error & { statusCode: number; code: string } {
   return Object.assign(new Error(message), { statusCode, code });
+}
+
+function isTimeoutFailure(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"
+    || /aborted due to timeout|timed?\s*out/i.test(error.message));
 }
 
 function publicAgentSettings(

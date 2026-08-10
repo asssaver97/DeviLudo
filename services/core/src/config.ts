@@ -25,6 +25,9 @@ export type CoreConfig = Readonly<{
   platformAccountApiUrl: string | null;
   platformInternalToken: string | null;
   projectsRoot: string;
+  localDirectoryBindings: boolean;
+  localProjectBridgeUrl: string | null;
+  localProjectBridgeToken: string | null;
 }>;
 
 export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
@@ -102,6 +105,16 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   if (env.NODE_ENV === "production" && !env.DEVILUDO_PROJECTS_ROOT?.startsWith("/")) {
     throw new Error("DEVILUDO_PROJECTS_ROOT must be an absolute path in production");
   }
+  const localDirectoryBindings = env.NODE_ENV !== "production" && env.DEVILUDO_LOCAL_DIRECTORY_BINDINGS === "1";
+  const localProjectBridgeUrl = localDirectoryBindings
+    ? normalizeLocalProjectBridgeUrl(env.DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL ?? "")
+    : null;
+  const localProjectBridgeToken = localDirectoryBindings
+    ? env.DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN?.trim() ?? ""
+    : null;
+  if (localDirectoryBindings && !/^[A-Za-z0-9_-]{40,200}$/.test(localProjectBridgeToken ?? "")) {
+    throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN is invalid");
+  }
   return Object.freeze({
     role: typedRole,
     port,
@@ -121,7 +134,20 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     platformAccountApiUrl,
     platformInternalToken,
     projectsRoot,
+    localDirectoryBindings,
+    localProjectBridgeUrl,
+    localProjectBridgeToken,
   });
+}
+
+function normalizeLocalProjectBridgeUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL is invalid"); }
+  if (url.protocol !== "http:" || url.hostname !== "local-project-bridge-proxy"
+    || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL is invalid");
+  }
+  return url.href.replace(/\/$/, "");
 }
 
 function normalizeServiceBaseUrl(value: string, environment: string | undefined): string {

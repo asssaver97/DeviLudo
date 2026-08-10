@@ -8,6 +8,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import type { SandboxPlan, SandboxReceipt } from "@/services/core/src/sandbox";
 import { executorReceiptSigningPayload, parseJobProtocolV4 } from "@/services/core/src/contracts";
 import { ProjectSourceStore, type PublishedSourceRevision } from "@/services/core/src/project-sources";
+import { createTarGzip } from "@/services/core/src/project-import";
 import { validateAgentSourceReference } from "./source-revision";
 
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
@@ -19,6 +20,8 @@ const workRoot = process.env.DEVILUDO_EXECUTOR_WORK_ROOT ?? "/var/lib/deviludo-e
 const secretRoot = process.env.DEVILUDO_EXECUTOR_SECRET_ROOT ?? "/run/deviludo-secrets";
 const projectsRoot = process.env.DEVILUDO_PROJECTS_ROOT ?? "/var/lib/deviludo-projects";
 const projectSources = new ProjectSourceStore(projectsRoot);
+const localProjectBridgeUrl = process.env.DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL ?? "";
+const localProjectBridgeToken = process.env.DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN ?? "";
 const microvmRuntime = process.env.DEVILUDO_EXECUTOR_MICROVM_RUNTIME ?? "";
 const microvmSmokeImage = process.env.DEVILUDO_EXECUTOR_MICROVM_SMOKE_IMAGE ?? "";
 const developmentContainersAllowed = process.env.NODE_ENV !== "production"
@@ -274,6 +277,7 @@ async function execute(
   const inputDirectory = join(temporary, "inputs");
   const sensitiveValues: Buffer[] = [];
   let containerCreated = false;
+  let localDirectoryBaseDigest: string | null = null;
   const abortTask = () => {
     if (containerCreated) void docker(["rm", "-f", taskName], 30_000).catch(() => undefined);
   };
@@ -340,9 +344,18 @@ async function execute(
       ? plan.job.payload.sourceRelativePath
       : null;
     if (sourceRelativePath) {
-      const source = await projectSources.archive(sourceRelativePath);
-      if (source.digest !== plan.job.payload.sourceDigest) throw new Error("Source revision digest changed");
-      await writeFile(join(inputDirectory, "source.tar.gz"), source.bytes, { mode: 0o600 });
+      const localDirectoryBindingId = localBindingId(plan);
+      if (localDirectoryBindingId) {
+        const live = await readLocalProjectSource(localDirectoryBindingId);
+        const files = parseSourceStream(live.source);
+        localDirectoryBaseDigest = live.digest;
+        await writeFile(join(inputDirectory, "source.tar.gz"), createTarGzip(files), { mode: 0o600 });
+        onProgress("PHASE", `已读取绑定目录中的 ${files.length} 个最新源码文件`);
+      } else {
+        const source = await projectSources.archive(sourceRelativePath);
+        if (source.digest !== plan.job.payload.sourceDigest) throw new Error("Source revision digest changed");
+        await writeFile(join(inputDirectory, "source.tar.gz"), source.bytes, { mode: 0o600 });
+      }
     }
     const checkpoint = plan.job.jobKind === "AGENT_GENERATION"
       ? await projectSources.archiveCheckpoint(plan.job.workspaceId, plan.job.projectId, plan.job.workflowId)
@@ -376,7 +389,7 @@ async function execute(
         try {
           const sourceStream = await dockerRead([
             "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
-          ], 60_000, 1024 * 1024 * 1024 + 16 * 1024 * 1024);
+          ], 60_000, Number.MAX_SAFE_INTEGER);
           const saved = await projectSources.saveCheckpoint({
             workspaceId: plan.job.workspaceId,
             projectId: plan.job.projectId,
@@ -400,12 +413,29 @@ async function execute(
       if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("Agent source publication revision is missing");
       const sourceStream = await dockerRead([
         "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
-      ], 60_000, 1024 * 1024 * 1024 + 16 * 1024 * 1024);
+      ], 60_000, Number.MAX_SAFE_INTEGER);
+      const generatedFiles = parseSourceStream(sourceStream);
+      const localDirectoryBindingId = localBindingId(plan);
+      if (localDirectoryBindingId) {
+        if (!localDirectoryBaseDigest) throw new Error("Local project directory baseline is missing");
+        try {
+          await syncLocalProjectSource(localDirectoryBindingId, localDirectoryBaseDigest, sourceStream);
+          onProgress("PHASE", `Agent 修改已安全写回绑定的本地项目目录`);
+        } catch (error) {
+          await projectSources.saveCheckpoint({
+            workspaceId: plan.job.workspaceId,
+            projectId: plan.job.projectId,
+            workflowId: plan.job.workflowId,
+            files: generatedFiles,
+          }).catch(() => undefined);
+          throw error;
+        }
+      }
       sourceRevision = await projectSources.publishFiles({
         workspaceId: plan.job.workspaceId,
         projectId: plan.job.projectId,
         revision,
-        files: parseSourceStream(sourceStream),
+        files: generatedFiles,
       });
     }
     const outputObjects = await uploadOutputs(plan, taskName, manifest.outputs, sensitiveValues);
@@ -629,6 +659,17 @@ function validatePlan(value: unknown): SandboxPlan {
     if (specifications.length !== 1) throw new Error("Agent requires exactly one approved specification input");
     validateAgentSourceReference(job.payload, job.workspaceId, job.projectId);
   }
+  const bindingId = job.payload.localDirectoryBindingId;
+  if (bindingId !== undefined && bindingId !== null) {
+    if (job.jobKind !== "AGENT_GENERATION"
+      || typeof bindingId !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bindingId)
+      || !developmentContainersAllowed
+      || !localProjectBridgeUrl
+      || !/^[A-Za-z0-9_-]{40,200}$/.test(localProjectBridgeToken)) {
+      throw new Error("Local project directory binding is not available to this executor");
+    }
+  }
   if (job.inputObjects.reduce((sum, input) => sum + input.sizeBytes, 0) > 2_147_483_648) {
     throw new Error("Task inputs exceed the fixed executor limit");
   }
@@ -814,8 +855,8 @@ function parseSourceStream(value: Buffer): readonly Readonly<{ path: string; byt
     const pathBytesLength = value.readUInt32BE(offset);
     const contentBytes = value.readBigUInt64BE(offset + 4);
     offset += 12;
-    if (pathBytesLength < 1 || pathBytesLength > 4096 || contentBytes > BigInt(100 * 1024 * 1024)) {
-      throw new Error("Task source stream entry exceeds its fixed limit");
+    if (pathBytesLength < 1 || pathBytesLength > 4096 || contentBytes > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error("Task source stream entry is invalid");
     }
     const contentLength = Number(contentBytes);
     if (offset + pathBytesLength + contentLength > value.length) throw new Error("Task source stream is truncated");
@@ -827,8 +868,70 @@ function parseSourceStream(value: Buffer): readonly Readonly<{ path: string; byt
     offset += contentLength;
     files.push(Object.freeze({ path, bytes }));
   }
-  if (files.length < 1 || files.length > 10_000) throw new Error("Task source file count is invalid");
+  if (files.length < 1) throw new Error("Task source file count is invalid");
   return Object.freeze(files);
+}
+
+function localBindingId(plan: SandboxPlan): string | null {
+  const value = plan.job.payload.localDirectoryBindingId;
+  return typeof value === "string" ? value : null;
+}
+
+async function readLocalProjectSource(bindingId: string): Promise<Readonly<{ source: Buffer; digest: string }>> {
+  const response = await localProjectBridgeRequest("/internal/directory/source", {
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bindingId }),
+    timeout: 60_000,
+  });
+  const length = Number(response.headers.get("content-length") ?? "0");
+  if (!response.ok) throw new Error(await localProjectBridgeError(response));
+  if (!Number.isSafeInteger(length) || length < 1) {
+    throw new Error("Local project source length is invalid");
+  }
+  const source = Buffer.from(await response.arrayBuffer());
+  if (source.length !== length) throw new Error("Local project source was truncated");
+  const digest = response.headers.get("x-deviludo-source-digest") ?? "";
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error("Local project source digest is invalid");
+  return Object.freeze({ source, digest });
+}
+
+async function syncLocalProjectSource(bindingId: string, baseDigest: string, source: Buffer): Promise<void> {
+  const response = await localProjectBridgeRequest("/internal/directory/sync", {
+    headers: {
+      "content-type": "application/x-deviludo-source-v1",
+      "x-deviludo-directory-binding": bindingId,
+      "x-deviludo-base-digest": baseDigest,
+    },
+    body: source,
+    timeout: 120_000,
+  });
+  if (!response.ok) throw new Error(await localProjectBridgeError(response));
+  await response.arrayBuffer();
+}
+
+async function localProjectBridgeRequest(
+  path: string,
+  input: Readonly<{ headers: Record<string, string>; body: string | Buffer; timeout: number }>,
+): Promise<Response> {
+  const base = new URL(localProjectBridgeUrl);
+  if (base.protocol !== "http:" || base.hostname !== "host.docker.internal"
+    || base.username || base.password || base.pathname !== "/" || base.search || base.hash) {
+    throw new Error("Local project bridge URL is invalid");
+  }
+  return fetch(new URL(path, base), {
+    method: "POST",
+    headers: { ...input.headers, "x-deviludo-bridge-token": localProjectBridgeToken },
+    body: typeof input.body === "string" ? input.body : Uint8Array.from(input.body).buffer,
+    signal: AbortSignal.timeout(input.timeout),
+  });
+}
+
+async function localProjectBridgeError(response: Response): Promise<string> {
+  try {
+    const payload = await response.json() as { message?: unknown };
+    if (typeof payload.message === "string") return payload.message.slice(0, 2_000);
+  } catch { /* use the bounded status fallback */ }
+  return `Local project bridge returned ${response.status}`;
 }
 
 function redactSensitive(message: string, sensitiveValues: readonly Buffer[]): string {

@@ -9,6 +9,8 @@ DeviLudo is an AI game delivery platform for Godot. It turns game requirements a
 ## What it can do
 
 - Generate, modify, and repair Godot projects with Claude Code or Codex CLI agents.
+- Link an existing local Godot project directory directly, or clone a GitHub repository to a chosen location and link it; successful Agent changes are written back in place.
+- After linking, local Git and GitHub projects can create and switch to a new branch from the project page; private GitHub repositories reuse the host's Git credentials.
 - Persist source revisions for conversational iteration, failure repair, and stage reruns.
 - Generate images from an Agent-authored asset manifest, accept user uploads, or continue with placeholders.
 - Build Godot artifacts and run unit, interactive, visual, and manual acceptance checks from a feature manifest.
@@ -39,6 +41,8 @@ npm run local:up
 ```
 
 Open <http://127.0.0.1:3100>. Local installations use `standalone` by default and require no account. Configure a Claude Code or Codex CLI provider in Settings; an image-generation provider is optional.
+
+Linking a local project never uploads or copies it. Once you choose the project root, DeviLudo immediately creates a project named after the directory; source reading and Agent analysis continue asynchronously while the project card is dimmed and shows progress. DeviLudo records only a restricted directory binding, reads the latest source from the original directory before each Agent run, and safely writes results back in place when the directory has not changed concurrently. For GitHub, DeviLudo runs the host's `git`, clones into the location you choose, and links that working tree under the repository name. Project contents never travel through a browser upload, so the former 64 MiB import ceiling does not apply. Credential helpers and SSH agents remain host-only; credentials are never mounted into containers or stored by DeviLudo.
 
 Common commands:
 

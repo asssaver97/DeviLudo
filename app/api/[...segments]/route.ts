@@ -29,7 +29,7 @@ const RESPONSE_HEADER_DENYLIST = new Set([
   "upgrade",
 ]);
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const MAX_PROJECT_ARCHIVE_BYTES = 64 * 1024 * 1024;
+const PROJECT_BIND_TIMEOUT_MS = 12 * 60 * 1_000;
 /**
  * Asset uploads carry an 8 MB image base64-encoded in JSON, so the envelope is
  * 4/3 the size of the file. Core enforces the real per-asset ceiling on the
@@ -39,7 +39,6 @@ const MAX_ASSET_UPLOAD_BYTES = 12 * 1024 * 1024;
 const ASSET_UPLOAD_PATH = /^projects\/[^/]+\/asset-manifest\/uploads$/;
 
 function bodyLimitFor(routePath: string): number {
-  if (routePath === "projects/import/archive") return MAX_PROJECT_ARCHIVE_BYTES;
   if (ASSET_UPLOAD_PATH.test(routePath)) return MAX_ASSET_UPLOAD_BYTES;
   return MAX_BODY_BYTES;
 }
@@ -100,7 +99,10 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   if (body && body.byteLength > bodyLimit) return Response.json({ code: "REQUEST_TOO_LARGE" }, { status: 413 });
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), routePath.startsWith("projects/import/") ? 120_000 : 65_000);
+  const timer = setTimeout(
+    () => controller.abort(),
+    routePath.startsWith("projects/bind/") ? PROJECT_BIND_TIMEOUT_MS : 65_000,
+  );
   try {
     const upstream = await fetch(target, {
       method: request.method,

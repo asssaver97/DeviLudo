@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { createStoredZip } from "../../../lib/product/source-archive";
 import { test, expect } from "../fixtures/stack";
 
 test("product navigation preserves the shell and reuses project data without reconnecting",async({page})=>{
@@ -476,6 +475,7 @@ test("the home chat supports both project feedback and a fresh game conversation
 
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await expect(page.getByLabel("关联项目")).toHaveValue("");
+  await expect(page.getByLabel("关联项目").locator('option[value="__import_existing_project__"]')).toHaveText("导入已有项目…");
   const concept = "我想做一款以时间循环为核心的像素冒险游戏。";
   await page.getByLabel("游戏想法或修改意见").fill(concept);
   await page.getByLabel("游戏想法或修改意见").press("Control+Enter");
@@ -506,31 +506,86 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
   await expect(page.locator(".homeChat-error")).toContainText("消息发送失败");
 });
 
-test("a creator can import a local project and continue its Agent analysis conversation", async ({ page, stack }) => {
+test("a creator can link a local project without uploading it and continue its Agent analysis conversation", async ({ page, stack }) => {
   await stack.configureAgent();
   await page.goto("/projects");
-  await expect(page.locator(".project-catalog-heading").getByRole("link", { name: "导入项目" })).toBeVisible();
-  await page.locator(".project-catalog-heading").getByRole("link", { name: "导入项目" }).click();
+  await expect(page.locator(".project-catalog-heading").getByRole("link", { name: "关联项目" })).toBeVisible();
+  await page.locator(".project-catalog-heading").getByRole("link", { name: "关联项目" }).click();
   await expect(page).toHaveURL(/\/projects\/import$/);
-  await expect(page.getByRole("heading", { name: "导入已有项目" })).toBeVisible();
-  const encoder = new TextEncoder();
-  const archive = createStoredZip([
-    { path: "clock-game/project.godot", bytes: encoder.encode("[application]\nrun/main_scene=\"res://main.tscn\"") },
-    { path: "clock-game/README.md", bytes: encoder.encode("# Clock Game\nA time-loop puzzle adventure.") },
-    { path: "clock-game/scripts/main.gd", bytes: encoder.encode("extends Node\nfunc reset_timeline(): pass") },
-  ]);
-  await page.getByLabel("项目 ZIP").setInputFiles({
-    name: "clock-game.zip",
-    mimeType: "application/zip",
-    buffer: Buffer.from(archive),
+  await expect(page.getByRole("heading", { name: "关联已有项目" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "新构想" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "导入项目" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "本地项目" })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("tab", { name: "GITHUB" }).click();
+  await expect(page.getByLabel("GitHub 仓库地址")).toBeVisible();
+  await expect(page.getByLabel("GitHub 新分支")).toHaveCount(0);
+  await page.getByRole("tab", { name: "本地项目" }).click();
+  await expect(page.getByLabel("本地项目新分支")).toHaveCount(0);
+  const bindingId = randomUUID();
+  let currentBranch = "main";
+  await page.route("http://127.0.0.1:3199/directory/select", async route => {
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: {
+        "access-control-allow-origin": stack.webUrl.origin,
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+      } });
+      return;
+    }
+    expect(route.request().postDataJSON()).toEqual({});
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      json: { bindingId, displayName: "clock-game", gitRepository: true, gitBranch: currentBranch },
+      headers: { "access-control-allow-origin": stack.webUrl.origin },
+    });
   });
-  await expect(page.getByText("clock-game.zip", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "导入并解析" }).click();
+  await page.route("http://127.0.0.1:3199/directory/git/status", async route => {
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: {
+        "access-control-allow-origin": stack.webUrl.origin,
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+      } });
+      return;
+    }
+    expect(route.request().postDataJSON()).toEqual({ bindingId });
+    await route.fulfill({ status: 200, contentType: "application/json", json: {
+      repository: true,
+      branch: currentBranch,
+    }, headers: { "access-control-allow-origin": stack.webUrl.origin } });
+  });
+  await page.route("http://127.0.0.1:3199/directory/git/branch", async route => {
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: {
+        "access-control-allow-origin": stack.webUrl.origin,
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+      } });
+      return;
+    }
+    expect(route.request().postDataJSON()).toEqual({ bindingId, branchName: "codex/local-import" });
+    currentBranch = "codex/local-import";
+    await route.fulfill({ status: 200, contentType: "application/json", json: {
+      repository: true,
+      branch: currentBranch,
+    }, headers: { "access-control-allow-origin": stack.webUrl.origin } });
+  });
+  await expect(page.getByLabel("项目 ZIP")).toHaveCount(0);
+  await page.getByRole("button", { name: "选择项目文件夹并关联" }).click();
+  await expect(page).toHaveURL(/\/projects$/);
+  const linkedProject = page.getByRole("link", { name: "打开clock-game项目" });
+  await expect(linkedProject).toBeVisible({ timeout: 30_000 });
+  await linkedProject.click();
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]{36}$/);
-  await expect(page.getByRole("heading", { name: "时序回廊" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "clock-game" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "项目会话" })).toBeVisible();
   await expect(page.getByText("源码已解析。我整理了现有玩法和后续开发计划，可以继续讨论下一步修改。", { exact: true })).toBeVisible();
   await expect(page.getByText("探索场景、记录线索并重置时间线来改变事件结果。", { exact: true })).toBeVisible();
+  await expect(page.getByText("main", { exact: true })).toBeVisible();
+  await page.getByLabel("新建 Git 分支").fill("codex/local-import");
+  await page.getByRole("button", { name: "新建并切换" }).click();
+  await expect(page.getByText("codex/local-import", { exact: true })).toBeVisible();
   const followUp = "加入一个跨循环保留线索的玩家日志。";
   await page.getByLabel("继续项目会话").fill(followUp);
   await page.getByRole("button", { name: "发送项目消息" }).click();
