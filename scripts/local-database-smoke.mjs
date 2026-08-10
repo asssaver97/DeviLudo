@@ -83,7 +83,8 @@ async function runDatabaseSmoke(url) {
     `);
     const expectedDefiners = [
       "acknowledge_source_ready_events", "advance_asset_workflows", "claim_asset_generation", "claim_job",
-      "cleanup_expired_executor_state", "complete_asset_generation", "fail_asset_generation",
+      "claim_local_git_commit", "claim_project_import_analysis", "cleanup_expired_executor_state",
+      "complete_asset_generation", "complete_local_git_commit", "fail_asset_generation", "fail_local_git_commit",
       "pull_source_ready_events", "recover_expired_jobs", "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
@@ -96,6 +97,8 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.cleanup_expired_executor_state()", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.advance_asset_workflows(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.advance_asset_workflows(integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_local_git_commit(integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_local_git_commit(integer)", false);
     await scheduler.query("SELECT deviludo.reconcile_p0_capacity()");
 
     await owner.query(
@@ -147,6 +150,38 @@ async function runDatabaseSmoke(url) {
       [[ownEvent.event_id]],
     );
     if (acknowledged.rows[0]?.count !== 1) throw new Error("Source outbox acknowledgement is invalid");
+
+    const gitRequestId = randomUUID();
+    const bindingId = randomUUID();
+    await owner.query(`
+      UPDATE deviludo.workflow_instances
+         SET state_data = jsonb_build_object('gitCommit', jsonb_build_object(
+           'requestId', $3::uuid, 'state', 'PENDING', 'bindingId', $4::uuid,
+           'expectedSourceDigest', $5::text, 'iterationNumber', 1,
+           'attempts', 0, 'availableAt', clock_timestamp()
+         ))
+       WHERE workspace_id = $1::uuid AND id = $2::uuid
+    `, [workspaceIds[1], workflowIds[1], gitRequestId, bindingId, digest]);
+    const gitClaim = await scheduler.query(`
+      SELECT "workflowId"::text, "requestId"::text, "leaseToken"::text, "bindingId"::text
+        FROM deviludo.claim_local_git_commit(60)
+    `);
+    if (gitClaim.rows[0]?.workflowId !== workflowIds[1]
+      || gitClaim.rows[0]?.requestId !== gitRequestId
+      || gitClaim.rows[0]?.bindingId !== bindingId) {
+      throw new Error("Local Git commit request was not leased durably");
+    }
+    const gitSettled = await scheduler.query(`
+      SELECT deviludo.complete_local_git_commit(
+        $1::uuid, $2::uuid, $3::uuid, 'NOT_GIT', NULL, NULL
+      ) AS completed
+    `, [workflowIds[1], gitRequestId, gitClaim.rows[0].leaseToken]);
+    if (gitSettled.rows[0]?.completed !== true) throw new Error("Local Git commit lease was not settled");
+    const gitState = await owner.query(`
+      SELECT state_data #>> '{gitCommit,state}' AS state
+        FROM deviludo.workflow_instances WHERE workspace_id = $1::uuid AND id = $2::uuid
+    `, [workspaceIds[1], workflowIds[1]]);
+    if (gitState.rows[0]?.state !== "SKIPPED") throw new Error("Local Git commit result was not persisted");
 
     const runtime = await owner.query("SELECT image_reference FROM deviludo.runtime_images WHERE runtime_key = 'AGENT_CLAUDE'");
     if (!runtime.rows[0]?.image_reference) throw new Error("Local Agent runtime digest is missing");
@@ -287,6 +322,7 @@ async function runDatabaseSmoke(url) {
       expiredLeaseRecovered: true,
       assetReadinessGate: true,
       humanReleaseApproval: true,
+      localGitCommitLease: true,
     }));
   } finally {
     await cleanup(owner, workspaceIds).catch(() => undefined);

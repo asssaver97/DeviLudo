@@ -44,6 +44,11 @@ const server = createServer((request, response) => {
     sendJson(response, 200, { synced: true, digest });
     return;
   }
+  if (request.url === "/internal/directory/git/commit") {
+    request.resume();
+    sendJson(response, 200, { outcome: "NOT_GIT", commitHash: null, branch: null });
+    return;
+  }
   request.resume();
   sendJson(response, 404, { code: "NOT_FOUND" });
 });

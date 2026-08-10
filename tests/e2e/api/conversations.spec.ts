@@ -174,6 +174,31 @@ test("project conversations apply draft feedback and preserve locked deliveries"
   expect((await stack.readProject(project.id)).specification.revisionNotes).toEqual(notesBefore);
 });
 
+test("an explicit development command in a draft conversation automatically approves the workflow", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "对话批准验证",
+    concept: "一个规格完整、可以直接进入开发的双人合作游戏。",
+  });
+  const started = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "按照当前需求开始开发" },
+  });
+  expect(started.status()).toBe(201);
+  expect((await started.json() as { project: { workflowState: string } }).project.workflowState).not.toBe("DRAFT");
+
+  const discussionProject = await stack.createProject({
+    name: "对话不误触验证",
+    concept: "验证关于执行的提问不会被当成批准。",
+  });
+  const discussed = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: discussionProject.id, content: "如果现在开始开发，会发生什么？" },
+  });
+  expect(discussed.status()).toBe(201);
+  expect((await discussed.json() as { project: { workflowState: string } }).project.workflowState).toBe("DRAFT");
+});
+
 test("messages sent during Agent generation become durable live guidance", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({

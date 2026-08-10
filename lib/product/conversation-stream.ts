@@ -98,6 +98,13 @@ export function optimisticConversation(
   title = "新游戏构想",
 ): ProductConversation {
   const now = new Date().toISOString();
+  const currentMessages = current?.messages ?? Object.freeze([]);
+  const lastMessage = currentMessages.at(-1);
+  const messages = lastMessage?.role === "USER"
+      && lastMessage.content === content
+      && lastMessage.metadata.failed === true
+    ? currentMessages.slice(0, -1)
+    : currentMessages;
   const userMessage: ProductConversationMessage = Object.freeze({
     id: `pending-${crypto.randomUUID()}`,
     role: "USER",
@@ -109,7 +116,7 @@ export function optimisticConversation(
     return Object.freeze({
       ...current,
       updatedAt: now,
-      messages: Object.freeze([...current.messages, userMessage]),
+      messages: Object.freeze([...messages, userMessage]),
     });
   }
   return Object.freeze({
@@ -121,6 +128,28 @@ export function optimisticConversation(
     updatedAt: now,
     messages: Object.freeze([userMessage]),
   });
+}
+
+export function failedOptimisticConversation(
+  current: ProductConversation,
+  failureMessage: string,
+): ProductConversation {
+  const messages = [...current.messages];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "USER" || message.metadata.pending !== true) continue;
+    messages[index] = Object.freeze({
+      ...message,
+      metadata: Object.freeze({
+        ...message.metadata,
+        pending: false,
+        failed: true,
+        failureMessage,
+      }),
+    });
+    break;
+  }
+  return Object.freeze({ ...current, messages: Object.freeze(messages) });
 }
 
 export function chronologicalMessages(

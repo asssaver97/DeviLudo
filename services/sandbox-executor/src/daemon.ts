@@ -914,7 +914,7 @@ async function localProjectBridgeRequest(
   input: Readonly<{ headers: Record<string, string>; body: string | Buffer; timeout: number }>,
 ): Promise<Response> {
   const base = new URL(localProjectBridgeUrl);
-  if (base.protocol !== "http:" || base.hostname !== "host.docker.internal"
+  if (base.protocol !== "http:" || base.hostname !== "local-project-bridge-proxy"
     || base.username || base.password || base.pathname !== "/" || base.search || base.hash) {
     throw new Error("Local project bridge URL is invalid");
   }

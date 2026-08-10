@@ -32,6 +32,7 @@ export async function runScheduler(
         config.projectDocumentIdleSeconds,
       );
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
+      const localGitCommit = await runLocalGitCommit(repository, config, signal);
       // Provider calls run less often than the sub-second recovery tick. The
       // durable asset gate is checked on every tick, however, so the last image or
       // a user's explicit "use placeholders" choice advances immediately.
@@ -46,6 +47,7 @@ export async function runScheduler(
         recovered,
         projectDocumentsScheduled,
         expiredAuthRecordsRemoved,
+        ...(localGitCommit ? { localGitCommit } : {}),
         ...(assets ? {
           assetsClaimed: assets.claimed,
           assetsGenerated: assets.generated,
@@ -63,6 +65,78 @@ export async function runScheduler(
     }
     await delay(config.pollMilliseconds, signal);
   }
+}
+
+async function runLocalGitCommit(
+  repository: CoreRepository,
+  config: CoreConfig,
+  signal: AbortSignal,
+): Promise<Readonly<Record<string, unknown>> | null> {
+  if (!config.localProjectBridgeUrl || !config.localProjectBridgeToken || signal.aborted) return null;
+  const request = await repository.claimLocalGitCommit(180);
+  if (!request) return null;
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const response = await fetch(`${config.localProjectBridgeUrl}/internal/directory/git/commit`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-deviludo-bridge-token": config.localProjectBridgeToken,
+      },
+      body: JSON.stringify({
+        bindingId: request.bindingId,
+        workflowId: request.workflowId,
+        iterationNumber: request.iterationNumber,
+        expectedDigest: request.expectedSourceDigest,
+      }),
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new Error(`${typeof body.code === "string" ? `${body.code}: ` : ""}${
+        typeof body.message === "string" ? body.message : `本地 Git bridge 返回 ${response.status}`
+      }`);
+    }
+    const outcome = body.outcome;
+    const commitHash = body.commitHash;
+    const branch = body.branch;
+    if (!isGitCommitOutcome(outcome)
+      || !(commitHash === null || (typeof commitHash === "string" && /^[0-9a-f]{40,64}$/i.test(commitHash)))
+      || !(branch === null || (typeof branch === "string" && branch.length >= 1 && branch.length <= 255))) {
+      throw new Error("本地 Git bridge 返回了无效的提交结果");
+    }
+    const completed = await repository.completeLocalGitCommit({
+      workflowId: request.workflowId,
+      requestId: request.requestId,
+      leaseToken: request.leaseToken,
+      outcome,
+      commitHash,
+      branch,
+    });
+    if (!completed) throw new Error("Local Git commit completion lease was rejected");
+    return Object.freeze({ workflowId: request.workflowId, outcome, commitHash, branch });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await repository.failLocalGitCommit({
+      workflowId: request.workflowId,
+      requestId: request.requestId,
+      leaseToken: request.leaseToken,
+      error: message,
+    }).catch(() => undefined);
+    return Object.freeze({ workflowId: request.workflowId, outcome: "FAILED", error: message });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+function isGitCommitOutcome(value: unknown): value is "COMMITTED" | "NO_CHANGES" | "NOT_GIT" {
+  return value === "COMMITTED" || value === "NO_CHANGES" || value === "NOT_GIT";
 }
 
 /**

@@ -78,6 +78,7 @@ export type ProductProjectSummary = Readonly<{
   name: string;
   createdAt: string;
   workflowId: string;
+  iterationNumber: number;
   workflowState: string;
   workflowUpdatedAt: string;
   workflowProfile: WorkflowProfile;
@@ -115,6 +116,30 @@ export type ProductEvent = Readonly<{
   kind: string;
   data: Readonly<Record<string, unknown>>;
   createdAt: string;
+}>;
+
+export type ProductWorkflowIterationSummary = Readonly<{
+  workflowId: string;
+  iterationNumber: number;
+  parentWorkflowId: string | null;
+  state: string;
+  profile: WorkflowProfile;
+  targetPlatforms: readonly ("linux" | "windows" | "macos")[];
+  baseSourceRevision: number | null;
+  outputSourceRevision: number | null;
+  baseDocumentRevision: number;
+  approvedDocumentRevision: number | null;
+  createdAt: string;
+  updatedAt: string;
+  current: boolean;
+}>;
+
+export type ProductWorkflowIterationDetail = ProductWorkflowIterationSummary & Readonly<{
+  concept: string;
+  specification: Readonly<Record<string, unknown>>;
+  jobs: readonly ProductJob[];
+  events: readonly ProductEvent[];
+  artifacts: readonly ArtifactRecord[];
 }>;
 
 export type ProductProjectDetail = ProductProjectSummary & Readonly<{

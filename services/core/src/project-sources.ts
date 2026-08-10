@@ -43,8 +43,6 @@ export class ProjectSourceStore {
     const lock = join(project, ".source-write.lock");
     await acquireSourceLock(lock);
     try {
-      await rm(stagingRoot, { recursive: true, force: true });
-      await ensureSharedDirectory(stagingRoot);
       const name = `r${String(input.revision).padStart(12, "0")}-${digest.slice(7, 23)}`;
       const target = join(revisions, name);
       const relativePath = relative(this.root, target).split(sep).join("/");
@@ -56,11 +54,13 @@ export class ProjectSourceStore {
         if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error("Stored source revision is not a safe directory");
         const stored = await readSourceFiles(target);
         if (sourceDigest(stored) !== digest) throw new Error("Stored source revision content is corrupted");
+        await resetStagingRoot(stagingRoot);
         return Object.freeze({ revision: input.revision, relativePath, digest, fileCount: files.length, totalBytes: sumBytes(files) });
       } catch (error) {
         if (!isMissing(error)) throw error;
       }
 
+      await resetStagingRoot(stagingRoot);
       const staging = join(stagingRoot, `${name}-${randomUUID()}`);
       await ensureSharedDirectory(staging);
       try {
@@ -187,6 +187,44 @@ export class ProjectSourceStore {
     await rm(checkpoint, { recursive: true, force: true });
   }
 
+  /**
+   * Remove a filesystem revision only after the caller has verified that no
+   * matching durable database row exists. A sandbox can publish the directory
+   * before Core commits its completion transaction; if a later verification
+   * step fails, that directory is provisional and must not fence the retry.
+   */
+  async discardUnregisteredRevision(
+    workspaceId: string,
+    projectId: string,
+    revision: number,
+  ): Promise<boolean> {
+    assertIdentity(workspaceId, "workspace");
+    assertIdentity(projectId, "project");
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("Source revision is invalid");
+    const project = this.projectPath(workspaceId, projectId);
+    const revisions = join(project, "revisions");
+    await ensureProjectTree(this.root, workspaceId, projectId);
+    const lock = join(project, ".source-write.lock");
+    await acquireSourceLock(lock);
+    try {
+      const prefix = `r${String(revision).padStart(12, "0")}-`;
+      const matches = (await readdir(revisions)).filter(entry => entry.startsWith(prefix));
+      for (const entry of matches) {
+        const target = join(revisions, entry);
+        assertWithin(revisions, target);
+        const info = await lstat(target);
+        if (!info.isDirectory() || info.isSymbolicLink()) {
+          throw new Error("Stored source revision is not a safe directory");
+        }
+        await rm(target, { recursive: true, force: false });
+      }
+      if (matches.length > 0) await refreshCurrentPointer(this.root, project, revisions);
+      return matches.length > 0;
+    } finally {
+      await rm(lock, { recursive: true, force: true });
+    }
+  }
+
   async deleteProject(workspaceId: string, projectId: string): Promise<void> {
     const project = this.projectPath(workspaceId, projectId);
     assertWithin(this.root, project);
@@ -260,6 +298,31 @@ function sumBytes(files: readonly SourceFile[]): number {
 
 function checkpointDetails(files: readonly SourceFile[]): SourceCheckpoint {
   return Object.freeze({ digest: sourceDigest(files), fileCount: files.length, totalBytes: sumBytes(files) });
+}
+
+async function resetStagingRoot(stagingRoot: string): Promise<void> {
+  await rm(stagingRoot, { recursive: true, force: true });
+  await ensureSharedDirectory(stagingRoot);
+}
+
+async function refreshCurrentPointer(root: string, project: string, revisions: string): Promise<void> {
+  const current = join(project, "CURRENT");
+  await rm(current, { force: true });
+  const entries = (await readdir(revisions))
+    .map(name => ({ name, match: /^r([0-9]{12})-[0-9a-f]{16}$/.exec(name) }))
+    .filter((entry): entry is { name: string; match: RegExpExecArray } => entry.match !== null)
+    .sort((left, right) => Number(right.match[1]) - Number(left.match[1]) || right.name.localeCompare(left.name));
+  const latest = entries[0];
+  if (!latest) return;
+  const target = join(revisions, latest.name);
+  const info = await lstat(target);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Stored source revision is not a safe directory");
+  const digest = sourceDigest(await readSourceFiles(target));
+  const revision = Number(latest.match[1]);
+  const relativePath = relative(root, target).split(sep).join("/");
+  const pointer = join(project, `.CURRENT-${randomUUID()}`);
+  await writeFile(pointer, `${JSON.stringify({ revision, relativePath, digest })}\n`, { flag: "wx", mode: SOURCE_FILE_MODE });
+  await rename(pointer, current);
 }
 
 async function ensureProjectTree(root: string, workspaceId: string, projectId: string): Promise<void> {

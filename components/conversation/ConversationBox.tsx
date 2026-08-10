@@ -30,6 +30,8 @@ type ConversationBoxProps = Readonly<{
   sendButtonLabel: string;
   showMessages?: boolean;
   autoFocus?: boolean;
+  disabled?: boolean;
+  focusKey?: string | number;
   composerPrefix?: ReactNode;
   primaryAction?: ReactNode;
   intro?: ReactNode;
@@ -54,6 +56,8 @@ export function ConversationBox({
   sendButtonLabel,
   showMessages = true,
   autoFocus = false,
+  disabled = false,
+  focusKey,
   composerPrefix,
   primaryAction,
   intro,
@@ -64,6 +68,7 @@ export function ConversationBox({
   const { text } = useLanguage();
   const messageViewport = useRef<HTMLDivElement | null>(null);
   const progressViewport = useRef<HTMLDivElement | null>(null);
+  const textarea = useRef<HTMLTextAreaElement | null>(null);
   const followLatestMessage = useRef(true);
   const followLatestProgress = useRef(true);
   const progressRows = useMemo(
@@ -96,6 +101,11 @@ export function ConversationBox({
     viewport.scrollTop = viewport.scrollHeight;
   }, [agentProgress?.running, progressRows]);
 
+  useLayoutEffect(() => {
+    if (focusKey === undefined || disabled) return;
+    textarea.current?.focus();
+  }, [disabled, focusKey]);
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
@@ -117,11 +127,12 @@ export function ConversationBox({
         >
           {intro}
           {messages.length ? messages.map((message, index) => {
+            const failed = message.role === "USER" && message.metadata.failed === true;
             const options = index === messages.length - 1 && message.role === "ASSISTANT" && !sending
               ? conversationOptions(message.metadata)
               : Object.freeze([]);
             return (
-            <article className={`conversation-box-message ${message.role === "USER" ? "user" : "assistant"}`} key={message.id}>
+            <article className={`conversation-box-message ${message.role === "USER" ? "user" : "assistant"}${failed ? " is-failed" : ""}`} key={message.id}>
               {message.role === "ASSISTANT" ? <span className="message-avatar">DL</span> : null}
               <div>
                 <header>
@@ -129,12 +140,23 @@ export function ConversationBox({
                   {message.role === "ASSISTANT" && message.metadata.appliedToDraft === true
                     ? <span className="conversation-box-applied">{text("已同步项目", "PROJECT SYNCED")}</span>
                     : null}
+                  {failed ? (
+                    <span
+                      className="conversation-box-failed"
+                      title={typeof message.metadata.failureMessage === "string" ? message.metadata.failureMessage : undefined}
+                    >
+                      {text("未保存 · 可重试", "NOT SAVED · RETRY")}
+                    </span>
+                  ) : null}
                 </header>
                 <p>{message.content}</p>
+                {failed && typeof message.metadata.failureMessage === "string" ? (
+                  <small className="conversation-box-failure-detail">{message.metadata.failureMessage}</small>
+                ) : null}
                 {options.length && onOptionSelect ? (
                   <div aria-label={text("可选回复", "Suggested replies")} className="conversation-box-options" role="group">
                     {options.map(option => (
-                      <button disabled={sending} key={option} onClick={() => onOptionSelect(option)} type="button">{option}</button>
+                      <button disabled={sending || disabled} key={option} onClick={() => onOptionSelect(option)} type="button">{option}</button>
                     ))}
                   </div>
                 ) : null}
@@ -195,19 +217,20 @@ export function ConversationBox({
         <textarea
           aria-label={textareaLabel}
           autoFocus={autoFocus}
-          disabled={sending}
+          disabled={sending || disabled}
           maxLength={4000}
           onChange={event => onValueChange(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           rows={3}
+          ref={textarea}
           value={value}
         />
         <footer>
           <span><kbd>⌘</kbd><kbd>↵</kbd> {text("发送 · Enter 换行", "SEND · ENTER FOR NEW LINE")}</span>
           <span className="conversation-box-count">{value.length}/4000</span>
-          {primaryAction}
-          <button aria-label={sendButtonLabel} className="button button-acid" disabled={value.trim().length < 2 || sending} type="submit">
+          {disabled ? null : primaryAction}
+          <button aria-label={sendButtonLabel} className="button button-acid" disabled={value.trim().length < 2 || sending || disabled} type="submit">
             {sending ? <TypingDots /> : <>{text("发送", "SEND")}<SendIcon /></>}
           </button>
         </footer>

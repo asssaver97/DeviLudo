@@ -55,6 +55,7 @@ test("the isolated E2E launcher maps the actual Docker socket group into executo
   assert.match(launcher, /resolveDockerSocketGid\(\)/);
   assert.match(launcher, /DEVILUDO_DOCKER_GID: dockerSocketGid/);
   assert.match(launcher, /\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/);
+  assert.match(launcher, /"e2e-macos-image", "migrate"[\s\S]*?run", "--rm", "migrate"/);
 });
 
 test("Agent generation continues from the persistent source revision instead of an object artifact", async () => {
@@ -82,6 +83,25 @@ test("bound local projects read the live directory and write back only when its 
   assert.match(bridge, /sourceDigest\(current\) !== expectedDigest/);
   assert.match(bridge, /LOCAL_PROJECT_CHANGED/);
   assert.match(bridge, /shouldIncludeProjectPath\(path\)/);
+});
+
+test("successful E2E queues a safe host-side Git commit without pushing", async () => {
+  const [scheduler, repository, bridge, proxy, gitCommit] = await Promise.all([
+    readFile(new URL("../services/core/src/scheduler.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-project-bridge-proxy.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-commit.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(scheduler, /claimLocalGitCommit\(180\)/);
+  assert.match(scheduler, /\/internal\/directory\/git\/commit/);
+  assert.match(repository, /deviludo\.complete_local_git_commit/);
+  assert.match(bridge, /commitVerifiedGitDirectory/);
+  assert.match(proxy, /\/internal\/directory\/git\/commit/);
+  assert.match(gitCommit, /GIT_INDEX_NOT_CLEAN/);
+  assert.match(gitCommit, /--pathspec-from-file=/);
+  assert.match(gitCommit, /DeviLudo-Workflow:/);
+  assert.doesNotMatch(gitCommit, /\bpush\b/);
 });
 
 test("Agent generation preserves partial work and retries transient Provider failures in place", async () => {
@@ -222,6 +242,8 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(builderImage, /COPY services\/sandbox-executor\/godot-build\.mjs \/usr\/local\/bin\/godot-build\.mjs/);
   const coreSandbox = await readFile(new URL("../services/core/src/sandbox.ts", import.meta.url), "utf8");
   assert.match(coreSandbox, /parseExecutorStderrLine/);
+  assert.match(coreSandbox, /discardOrphanedAgentSource\(repository, projectSources, job\)/);
+  assert.match(coreSandbox, /projectSourceRevisionExists[\s\S]*discardUnregisteredRevision/);
   assert.doesNotMatch(coreSandbox, /Sandbox executor failed: \$\{Buffer\.concat\(stderr\)/);
 });
 

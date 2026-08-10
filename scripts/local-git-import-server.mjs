@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { promisify } from "node:util";
 import sourceArchive from "../lib/product/source-archive.ts";
 import projectImport from "../services/core/src/project-import.ts";
+import { commitVerifiedGitDirectory } from "./local-git-commit.mjs";
 
 const { normalizeGitBranchName, normalizeGitHubRepositoryUrl } = projectImport;
 const { normalizeProjectPath, shouldIncludeProjectPath } = sourceArchive;
@@ -143,6 +144,39 @@ async function handleInternalRequest(request, response) {
     const files = parseSourceStream(source);
     const digest = await syncProjectDirectory(binding.path, files, expectedDigest);
     sendJson(response, 200, { synced: true, digest });
+    return;
+  }
+  if (request.method === "POST" && request.url === "/internal/directory/git/commit") {
+    const body = await readJsonBody(request);
+    const binding = await requireBinding(body.bindingId);
+    const expectedDigest = typeof body.expectedDigest === "string" ? body.expectedDigest : "";
+    const workflowId = typeof body.workflowId === "string" ? body.workflowId : "";
+    const iterationNumber = Number(body.iterationNumber);
+    if (!/^sha256:[0-9a-f]{64}$/.test(expectedDigest)) {
+      throw failure("INVALID_SOURCE_DIGEST", "E2E 源码 digest 无效");
+    }
+    if (!UUID.test(workflowId) || !Number.isSafeInteger(iterationNumber) || iterationNumber < 1) {
+      throw failure("INVALID_GIT_COMMIT_REQUEST", "自动 Git 提交请求无效");
+    }
+    const verifySource = async () => {
+      const current = await readProjectFiles(binding.path);
+      if (sourceDigest(current) !== expectedDigest) {
+        throw failure("LOCAL_PROJECT_CHANGED", "E2E 完成后本地项目又发生了变化，已停止自动提交以避免提交未经测试的内容");
+      }
+      return current;
+    };
+    const current = await verifySource();
+    const result = await commitVerifiedGitDirectory({
+      directory: binding.path,
+      workflowId,
+      iterationNumber,
+      sourcePaths: current.map(file => file.path),
+      includePath: path => {
+        try { return shouldIncludeProjectPath(path); } catch { return false; }
+      },
+      verifySource,
+    });
+    sendJson(response, 200, result);
     return;
   }
   sendJson(response, 404, { code: "NOT_FOUND", message: "本地项目内部接口不存在" });
@@ -493,9 +527,11 @@ function importFailure(error) {
     INVALID_DIRECTORY_BINDING: 400,
     INVALID_SOURCE_DIGEST: 400,
     INVALID_SOURCE_STREAM: 400,
+    INVALID_GIT_COMMIT_REQUEST: 400,
     DIRECTORY_SELECTION_CANCELLED: 409,
     GIT_BRANCH_EXISTS: 409,
     GITHUB_TARGET_EXISTS: 409,
+    GIT_INDEX_NOT_CLEAN: 409,
     LOCAL_PROJECT_CHANGED: 409,
     LOCAL_PROJECT_BUSY: 429,
     NOT_A_GODOT_PROJECT: 422,

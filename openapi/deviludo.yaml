@@ -113,6 +113,50 @@ paths:
       responses:
         "202": { description: Failed initial analysis returned to the durable background queue }
         "409": { description: Initial analysis has not failed }
+  /v1/projects/{projectId}/iterations:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: listProjectIterations
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: All immutable delivery iterations, newest first }
+        "404": { description: Project is not visible in the selected workspace }
+    post:
+      operationId: createProjectIteration
+      security: [{ platformSession: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseWorkflowId]
+              properties:
+                baseWorkflowId: { type: string, format: uuid }
+      responses:
+        "201": { description: New draft iteration created from the latest terminal workflow }
+        "200": { description: The child iteration already exists and is returned idempotently }
+        "409": { description: Base workflow is stale, non-terminal, or belongs to another project }
+  /v1/projects/{projectId}/iterations/{workflowId}:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: workflowId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: readProjectIteration
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: Read-only iteration state, jobs, events, artifacts, and E2E evidence }
+        "404": { description: Workflow is not an iteration of the selected project }
   /v1/projects/{projectId}/approve:
     parameters:
       - in: path
@@ -218,7 +262,7 @@ paths:
       operationId: listProjectArtifacts
       security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Build, E2E report, signature, and publication artifacts; source remains in persistent revisions }
+        "200": { description: Current iteration build, E2E report, signature, and publication artifacts; source remains in persistent revisions }
         "404": { description: Project is not visible in the selected workspace }
   /v1/projects/{projectId}/artifacts/{artifactId}/download:
     parameters:

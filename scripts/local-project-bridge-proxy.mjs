@@ -4,7 +4,11 @@ import { request as httpRequest, createServer } from "node:http";
 const port = Number(process.env.PORT ?? "3199");
 const target = new URL(process.env.DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL ?? "");
 const token = process.env.DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN ?? "";
-const allowedPaths = new Set(["/internal/directory/source", "/internal/directory/sync"]);
+const allowedPaths = new Set([
+  "/internal/directory/source",
+  "/internal/directory/sync",
+  "/internal/directory/git/commit",
+]);
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535
   || target.protocol !== "http:" || target.hostname !== "host.docker.internal"
   || target.username || target.password || target.pathname !== "/" || target.search || target.hash

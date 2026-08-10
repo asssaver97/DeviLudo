@@ -12,6 +12,10 @@ import {
   type AgentModelConfiguration,
   type AgentRuntimeKind,
   type ArtifactRecord,
+  type ProductEvent,
+  type ProductJob,
+  type ProductWorkflowIterationDetail,
+  type ProductWorkflowIterationSummary,
   type ProjectSourceRevision,
   type WorkspaceSummary,
 } from "@/lib/product/contracts";
@@ -104,6 +108,23 @@ export class CoreRepository {
         fileCount: Number(row.file_count),
         totalBytes: Number(row.total_bytes),
       }) : null;
+    });
+  }
+
+  async projectSourceRevisionExists(
+    workspaceId: string,
+    projectId: string,
+    revision: number,
+  ): Promise<boolean> {
+    if (!UUID.test(projectId) || !Number.isSafeInteger(revision) || revision < 1) return false;
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query(
+        `SELECT 1 FROM deviludo.project_source_revisions
+          WHERE project_id = $1::uuid AND revision = $2::bigint
+          LIMIT 1`,
+        [projectId, revision],
+      );
+      return result.rowCount === 1;
     });
   }
 
@@ -261,9 +282,10 @@ export class CoreRepository {
       const result = await client.query<ProductProjectRow>(
         `SELECT p.id::text, p.name, p.created_at::text,
                 workflow.id::text AS workflow_id,
+                workflow.iteration_number,
                 workflow.state::text AS workflow_state,
                 workflow.profile::text AS profile,
-                workflow.target_platforms,
+                workflow.target_platforms::text[] AS target_platforms,
                 workflow.state_data,
                 workflow.updated_at::text AS workflow_updated_at,
                 source.revision::text AS source_revision,
@@ -274,10 +296,10 @@ export class CoreRepository {
                 source.created_at::text AS source_created_at
            FROM deviludo.projects p
            LEFT JOIN LATERAL (
-             SELECT id, state, profile, target_platforms, state_data, updated_at
+             SELECT id, iteration_number, state, profile, target_platforms, state_data, updated_at
                FROM deviludo.workflow_instances
               WHERE workspace_id = p.workspace_id AND project_id = p.id
-              ORDER BY created_at DESC
+              ORDER BY iteration_number DESC
               LIMIT 1
            ) workflow ON true
            LEFT JOIN LATERAL (
@@ -327,7 +349,11 @@ export class CoreRepository {
           input.projectId,
           input.profile,
           input.targetPlatforms,
-          JSON.stringify({ concept: input.concept, specification: input.specification }),
+          JSON.stringify({
+            concept: input.concept,
+            specification: input.specification,
+            iteration: initialIterationState(),
+          }),
         ],
       );
       await client.query(
@@ -419,6 +445,7 @@ export class CoreRepository {
             totalBytes: input.source.totalBytes,
             sha256: input.source.sha256,
           },
+          iteration: initialIterationState(),
         })],
       );
       await client.query(
@@ -538,6 +565,7 @@ export class CoreRepository {
             attempts: 0,
             error: null,
           },
+          iteration: initialIterationState(),
         })],
       );
       await client.query(
@@ -766,7 +794,7 @@ export class CoreRepository {
         `SELECT id::text, state_data
            FROM deviludo.workflow_instances
           WHERE project_id = $1::uuid
-          ORDER BY created_at DESC
+          ORDER BY iteration_number DESC
           LIMIT 1
           FOR UPDATE`,
         [projectId],
@@ -853,7 +881,11 @@ export class CoreRepository {
           input.projectId,
           input.profile,
           input.targetPlatforms,
-          JSON.stringify({ concept: input.concept, specification: input.specification }),
+          JSON.stringify({
+            concept: input.concept,
+            specification: input.specification,
+            iteration: initialIterationState(),
+          }),
         ],
       );
       await client.query(
@@ -931,9 +963,10 @@ export class CoreRepository {
       const project = await client.query<ProductProjectRow>(
         `SELECT p.id::text, p.name, p.created_at::text,
                 workflow.id::text AS workflow_id,
+                workflow.iteration_number,
                 workflow.state::text AS workflow_state,
                 workflow.profile::text AS profile,
-                workflow.target_platforms,
+                workflow.target_platforms::text[] AS target_platforms,
                 workflow.state_data,
                 workflow.updated_at::text AS workflow_updated_at,
                 source.revision::text AS source_revision,
@@ -944,10 +977,10 @@ export class CoreRepository {
                 source.created_at::text AS source_created_at
            FROM deviludo.projects p
            LEFT JOIN LATERAL (
-             SELECT id, state, profile, target_platforms, state_data, updated_at
+             SELECT id, iteration_number, state, profile, target_platforms, state_data, updated_at
                FROM deviludo.workflow_instances
               WHERE workspace_id = p.workspace_id AND project_id = p.id
-              ORDER BY created_at DESC
+              ORDER BY iteration_number DESC
               LIMIT 1
            ) workflow ON true
            LEFT JOIN LATERAL (
@@ -1022,7 +1055,205 @@ export class CoreRepository {
     });
   }
 
-  async listProjectArtifacts(workspaceId: string, projectId: string): Promise<readonly ArtifactRecord[]> {
+  async createProjectIteration(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    baseWorkflowId: string;
+    actorUserId: string;
+  }>): Promise<Readonly<{ project: ProductProjectDetail; created: boolean }>> {
+    if (!UUID.test(input.projectId) || !UUID.test(input.baseWorkflowId) || !UUID.test(input.actorUserId)) {
+      throw iterationError("INVALID_PROJECT_ITERATION", "项目迭代请求无效", 400);
+    }
+    const result = await this.database.withWorkspace(input.workspaceId, async client => {
+      const project = await client.query<{ id: string }>(
+        `SELECT id::text FROM deviludo.projects
+          WHERE id = $1::uuid
+          FOR UPDATE`,
+        [input.projectId],
+      );
+      if (!project.rows[0]) return null;
+
+      const base = await client.query<WorkflowIterationRow>(
+        `${WORKFLOW_ITERATION_SELECT}
+          WHERE workflow.project_id = $1::uuid AND workflow.id = $2::uuid
+          FOR UPDATE OF workflow`,
+        [input.projectId, input.baseWorkflowId],
+      );
+      if (!base.rows[0]) {
+        throw iterationError("ITERATION_BASE_NOT_FOUND", "上一轮工作流不存在或不属于当前项目", 409);
+      }
+      const latest = await client.query<WorkflowIterationRow>(
+        `${WORKFLOW_ITERATION_SELECT}
+          WHERE workflow.project_id = $1::uuid
+          ORDER BY workflow.iteration_number DESC
+          LIMIT 1
+          FOR UPDATE OF workflow`,
+        [input.projectId],
+      );
+      const current = latest.rows[0];
+      if (!current) throw new Error("Project workflow is missing");
+
+      const existing = await client.query<{ id: string }>(
+        `SELECT id::text FROM deviludo.workflow_instances
+          WHERE project_id = $1::uuid AND parent_workflow_id = $2::uuid`,
+        [input.projectId, input.baseWorkflowId],
+      );
+      if (existing.rows[0]) {
+        if (current.workflow_id !== existing.rows[0].id) {
+          throw iterationError("PROJECT_ITERATION_STALE", "项目已经进入更新的迭代，请刷新后重试", 409);
+        }
+        return Object.freeze({ workflowId: existing.rows[0].id, created: false });
+      }
+      if (current.workflow_id !== input.baseWorkflowId) {
+        throw iterationError("PROJECT_ITERATION_STALE", "项目状态已经变化，请刷新后重试", 409);
+      }
+      if (!["SUCCEEDED", "FAILED", "CANCELLED"].includes(current.state)) {
+        throw iterationError("PROJECT_ITERATION_UNAVAILABLE", "当前交付仍在进行中，请完成或取消后再继续修改", 409);
+      }
+
+      const document = await client.query<{ revision: string }>(
+        `SELECT revision::text FROM deviludo.project_documents
+          WHERE project_id = $1::uuid
+          FOR UPDATE`,
+        [input.projectId],
+      );
+      const latestSource = await client.query<{ revision: string }>(
+        `SELECT revision::text FROM deviludo.project_source_revisions
+          WHERE project_id = $1::uuid
+          ORDER BY revision DESC
+          LIMIT 1`,
+        [input.projectId],
+      );
+      const iterationNumber = current.iteration_number + 1;
+      const workflowId = randomUUID();
+      const previousState = current.state_data ?? {};
+      const analysis = objectValue(previousState.importAnalysis);
+      const stateData = {
+        concept: typeof previousState.concept === "string" ? previousState.concept : "",
+        specification: productSpecificationFromState(previousState),
+        ...(previousState.source && typeof previousState.source === "object"
+          ? { source: previousState.source }
+          : {}),
+        ...(analysis.status === "READY" ? { importAnalysis: { ...analysis, error: null } } : {}),
+        iteration: {
+          number: iterationNumber,
+          parentWorkflowId: input.baseWorkflowId,
+          baseSourceRevision: latestSource.rows[0] ? Number(latestSource.rows[0].revision) : null,
+          baseDocumentRevision: Number(document.rows[0]?.revision ?? 1),
+          approvedDocumentRevision: null,
+        },
+      };
+      await client.query(
+        `INSERT INTO deviludo.workflow_instances(
+           workspace_id, id, project_id, iteration_number, parent_workflow_id,
+           profile, target_platforms, state_data
+         ) VALUES (
+           $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid,
+           $6::deviludo.workflow_profile, $7::deviludo.server_os[], $8::jsonb
+         )`,
+        [input.workspaceId, workflowId, input.projectId, iterationNumber, input.baseWorkflowId,
+          current.profile, current.target_platforms, JSON.stringify(stateData)],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
+         ) VALUES ($1::uuid, $2::uuid, 'ITERATION_STARTED', $3::jsonb, 'iteration-started')`,
+        [input.workspaceId, workflowId, JSON.stringify({
+          iterationNumber,
+          parentWorkflowId: input.baseWorkflowId,
+          baseSourceRevision: stateData.iteration.baseSourceRevision,
+          baseDocumentRevision: stateData.iteration.baseDocumentRevision,
+          requestedByAccountId: input.actorUserId,
+        })],
+      );
+      await touchProjectActivity(client, input.workspaceId, input.projectId);
+      return Object.freeze({ workflowId, created: true });
+    });
+    if (!result) throw iterationError("PROJECT_NOT_FOUND", "项目不存在", 404);
+    const project = await this.readProject(input.workspaceId, input.projectId);
+    if (!project || project.workflowId !== result.workflowId) throw new Error("Created project iteration is not current");
+    return Object.freeze({ project, created: result.created });
+  }
+
+  async listProjectIterations(
+    workspaceId: string,
+    projectId: string,
+  ): Promise<readonly ProductWorkflowIterationSummary[] | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const project = await client.query("SELECT 1 FROM deviludo.projects WHERE id = $1::uuid", [projectId]);
+      if (!project.rows[0]) return null;
+      const result = await client.query<WorkflowIterationRow>(
+        `${WORKFLOW_ITERATION_SELECT}
+          WHERE workflow.project_id = $1::uuid
+          ORDER BY workflow.iteration_number DESC`,
+        [projectId],
+      );
+      const currentId = result.rows[0]?.workflow_id ?? "";
+      return Object.freeze(result.rows.map(row => workflowIterationSummary(row, row.workflow_id === currentId)));
+    });
+  }
+
+  async readProjectIteration(
+    workspaceId: string,
+    projectId: string,
+    workflowId: string,
+  ): Promise<ProductWorkflowIterationDetail | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const iteration = await client.query<WorkflowIterationRow>(
+        `${WORKFLOW_ITERATION_SELECT}
+          WHERE workflow.project_id = $1::uuid AND workflow.id = $2::uuid`,
+        [projectId, workflowId],
+      );
+      const row = iteration.rows[0];
+      if (!row) return null;
+      const current = await client.query<{ id: string }>(
+        `SELECT id::text FROM deviludo.workflow_instances
+          WHERE project_id = $1::uuid
+          ORDER BY iteration_number DESC
+          LIMIT 1`,
+        [projectId],
+      );
+      const [jobs, events, artifacts] = await Promise.all([
+        client.query<ProductJobRow>(
+          `SELECT id::text, kind::text, pool_kind::text, target_operating_system::text,
+                  state::text, attempt, last_error, created_at::text, updated_at::text
+             FROM deviludo.jobs WHERE workflow_id = $1::uuid
+            ORDER BY created_at, kind, target_operating_system NULLS FIRST`,
+          [workflowId],
+        ),
+        client.query<ProductEventRow>(
+          `SELECT event_id::text, event_kind, event_data, created_at::text
+             FROM deviludo.workflow_events WHERE workflow_id = $1::uuid
+            ORDER BY event_id DESC LIMIT 40`,
+          [workflowId],
+        ),
+        client.query<ArtifactRow>(
+          `SELECT id::text, workspace_id::text, project_id::text, workflow_id::text,
+                  kind::text, target_platform::text, bucket, object_key, sha256,
+                  size_bytes::text, created_at::text
+             FROM deviludo.artifacts
+            WHERE project_id = $1::uuid AND workflow_id = $2::uuid
+            ORDER BY created_at DESC, id DESC`,
+          [projectId, workflowId],
+        ),
+      ]);
+      const summary = workflowIterationSummary(row, current.rows[0]?.id === row.workflow_id);
+      return Object.freeze({
+        ...summary,
+        concept: typeof row.state_data?.concept === "string" ? row.state_data.concept : "",
+        specification: Object.freeze({ ...productSpecificationFromState(row.state_data ?? {}) }),
+        jobs: Object.freeze(jobs.rows.map(productJobFromRow)),
+        events: Object.freeze(events.rows.map(productEventFromRow)),
+        artifacts: Object.freeze(artifacts.rows.map(artifactFromRow)),
+      });
+    });
+  }
+
+  async listProjectArtifacts(
+    workspaceId: string,
+    projectId: string,
+    workflowId?: string,
+  ): Promise<readonly ArtifactRecord[]> {
     return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<ArtifactRow>(
         `SELECT id::text, workspace_id::text, project_id::text, workflow_id::text,
@@ -1030,8 +1261,9 @@ export class CoreRepository {
                 size_bytes::text, created_at::text
            FROM deviludo.artifacts
           WHERE project_id = $1::uuid
+            AND ($2::uuid IS NULL OR workflow_id = $2::uuid)
           ORDER BY created_at DESC, id DESC`,
-        [projectId],
+        [projectId, workflowId ?? null],
       );
       return Object.freeze(result.rows.map(artifactFromRow));
     });
@@ -1122,7 +1354,7 @@ export class CoreRepository {
       const workflow = await client.query<{ state: string }>(
         `SELECT state::text FROM deviludo.workflow_instances
           WHERE workspace_id = $1::uuid AND project_id = $2::uuid
-          ORDER BY created_at DESC LIMIT 1`,
+          ORDER BY iteration_number DESC LIMIT 1`,
         [workspaceId, projectId],
       );
       const state = workflow.rows[0]?.state ?? "DRAFT";
@@ -1310,7 +1542,7 @@ export class CoreRepository {
         `SELECT id::text, state::text
            FROM deviludo.workflow_instances
           WHERE project_id = $1::uuid
-          ORDER BY created_at DESC
+          ORDER BY iteration_number DESC
           LIMIT 1
           FOR UPDATE`,
         [input.projectId],
@@ -1496,7 +1728,7 @@ export class CoreRepository {
           `SELECT id::text, state::text, state_data
              FROM deviludo.workflow_instances
             WHERE project_id = $1::uuid
-            ORDER BY created_at DESC
+            ORDER BY iteration_number DESC
             LIMIT 1
             FOR UPDATE`,
           [input.projectId],
@@ -1861,6 +2093,63 @@ export class CoreRepository {
     return Number(result.rows[0]?.recovered ?? 0);
   }
 
+  async claimLocalGitCommit(leaseSeconds: number): Promise<PendingLocalGitCommit | null> {
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) {
+      throw new Error("Local Git commit lease is invalid");
+    }
+    const result = await this.database.pool.query<PendingLocalGitCommitRow>(
+      `SELECT "workspaceId"::text, "projectId"::text, "workflowId"::text,
+              "requestId"::text, "leaseToken"::text, "bindingId"::text,
+              "expectedSourceDigest", "iterationNumber", attempt
+         FROM deviludo.claim_local_git_commit($1::integer)`,
+      [leaseSeconds],
+    );
+    const row = result.rows[0];
+    return row ? Object.freeze({
+      workspaceId: row.workspaceId,
+      projectId: row.projectId,
+      workflowId: row.workflowId,
+      requestId: row.requestId,
+      leaseToken: row.leaseToken,
+      bindingId: row.bindingId,
+      expectedSourceDigest: row.expectedSourceDigest,
+      iterationNumber: row.iterationNumber,
+      attempt: row.attempt,
+    }) : null;
+  }
+
+  async completeLocalGitCommit(input: Readonly<{
+    workflowId: string;
+    requestId: string;
+    leaseToken: string;
+    outcome: "COMMITTED" | "NO_CHANGES" | "NOT_GIT";
+    commitHash: string | null;
+    branch: string | null;
+  }>): Promise<boolean> {
+    const result = await this.database.pool.query<{ completed: boolean }>(
+      `SELECT deviludo.complete_local_git_commit(
+         $1::uuid, $2::uuid, $3::uuid, $4::text, $5::text, $6::text
+       ) AS completed`,
+      [input.workflowId, input.requestId, input.leaseToken, input.outcome, input.commitHash, input.branch],
+    );
+    return result.rows[0]?.completed === true;
+  }
+
+  async failLocalGitCommit(input: Readonly<{
+    workflowId: string;
+    requestId: string;
+    leaseToken: string;
+    error: string;
+  }>): Promise<boolean> {
+    const result = await this.database.pool.query<{ failed: boolean }>(
+      `SELECT deviludo.fail_local_git_commit(
+         $1::uuid, $2::uuid, $3::uuid, $4::text
+       ) AS failed`,
+      [input.workflowId, input.requestId, input.leaseToken, input.error.slice(0, 2_000)],
+    );
+    return result.rows[0]?.failed === true;
+  }
+
   async reconcileCapacity(): Promise<void> {
     await this.database.pool.query("SELECT deviludo.reconcile_p0_capacity()");
   }
@@ -1891,6 +2180,24 @@ export class CoreRepository {
         [workflowId],
       );
       if (workflow.rows[0]) await touchProjectActivity(client, workspaceId, workflow.rows[0].project_id);
+      if (signal.kind === "SPEC_APPROVED" && workflow.rows[0]) {
+        await client.query(
+          `UPDATE deviludo.workflow_instances target
+              SET state_data = coalesce(target.state_data, '{}'::jsonb)
+                    || jsonb_build_object(
+                      'iteration',
+                      coalesce(target.state_data->'iteration', '{}'::jsonb)
+                        || jsonb_build_object('approvedDocumentRevision', document.revision)
+                    ),
+                  version = version + 1,
+                  updated_at = clock_timestamp()
+             FROM deviludo.project_documents document
+            WHERE target.id = $1::uuid
+              AND target.project_id = document.project_id
+              AND target.state = 'DRAFT'`,
+          [workflowId],
+        );
+      }
       const result = await client.query<{ accepted: boolean }>(
         `SELECT deviludo.accept_workflow_signal(
           $1::uuid, $2::text, $3::text, $4::jsonb
@@ -2151,6 +2458,18 @@ function serverNodeFromRow(row: ServerNodeRow): ServerNodeRecord {
 }
 
 type ClaimRow = { jobId: string; workspaceId: string; leaseToken: string };
+type PendingLocalGitCommitRow = {
+  workspaceId: string;
+  projectId: string;
+  workflowId: string;
+  requestId: string;
+  leaseToken: string;
+  bindingId: string;
+  expectedSourceDigest: `sha256:${string}`;
+  iterationNumber: number;
+  attempt: number;
+};
+export type PendingLocalGitCommit = Readonly<PendingLocalGitCommitRow>;
 type SourceReadyEventRow = {
   event_id: string;
   workspace_id: string;
@@ -2349,6 +2668,7 @@ export type ProductProjectSummary = Readonly<{
   name: string;
   createdAt: string;
   workflowId: string;
+  iterationNumber: number;
   workflowState: string;
   workflowUpdatedAt: string;
   workflowProfile: "VALIDATE" | "RELEASE";
@@ -2506,6 +2826,7 @@ type ProductProjectRow = {
   name: string;
   created_at: string;
   workflow_id: string | null;
+  iteration_number: number | null;
   workflow_state: string | null;
   state_data: Record<string, unknown> | null;
   workflow_updated_at: string | null;
@@ -2518,6 +2839,41 @@ type ProductProjectRow = {
   source_total_bytes: string | null;
   source_created_at: string | null;
 };
+
+type WorkflowIterationRow = {
+  workflow_id: string;
+  iteration_number: number;
+  parent_workflow_id: string | null;
+  state: string;
+  profile: "VALIDATE" | "RELEASE";
+  target_platforms: ServerOperatingSystem[];
+  state_data: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  output_source_revision: string | null;
+};
+
+const WORKFLOW_ITERATION_SELECT = `
+  SELECT workflow.id::text AS workflow_id,
+         workflow.iteration_number,
+         workflow.parent_workflow_id::text,
+         workflow.state::text,
+         workflow.profile::text,
+         workflow.target_platforms::text[] AS target_platforms,
+         workflow.state_data,
+         workflow.created_at::text,
+         workflow.updated_at::text,
+         output_source.revision::text AS output_source_revision
+    FROM deviludo.workflow_instances workflow
+    LEFT JOIN LATERAL (
+      SELECT revision
+        FROM deviludo.project_source_revisions source
+       WHERE source.workspace_id = workflow.workspace_id
+         AND source.project_id = workflow.project_id
+         AND source.workflow_id = workflow.id
+       ORDER BY revision DESC
+       LIMIT 1
+    ) output_source ON true`;
 
 type ProductJobRow = {
   id: string;
@@ -2583,6 +2939,7 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
     name: row.name,
     createdAt: row.created_at,
     workflowId: row.workflow_id ?? "",
+    iterationNumber: row.iteration_number ?? 1,
     workflowState: row.workflow_state ?? "DRAFT",
     workflowUpdatedAt: row.workflow_updated_at ?? row.created_at,
     workflowProfile: row.profile ?? "VALIDATE",
@@ -2606,6 +2963,60 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
       ? analysis.error
       : null,
   });
+}
+
+function workflowIterationSummary(
+  row: WorkflowIterationRow,
+  current: boolean,
+): ProductWorkflowIterationSummary {
+  const metadata = objectValue(row.state_data?.iteration);
+  return Object.freeze({
+    workflowId: row.workflow_id,
+    iterationNumber: row.iteration_number,
+    parentWorkflowId: row.parent_workflow_id,
+    state: row.state,
+    profile: row.profile,
+    targetPlatforms: Object.freeze([...row.target_platforms]),
+    baseSourceRevision: nullablePositiveInteger(metadata.baseSourceRevision),
+    outputSourceRevision: row.output_source_revision ? Number(row.output_source_revision) : null,
+    baseDocumentRevision: nullablePositiveInteger(metadata.baseDocumentRevision) ?? 1,
+    approvedDocumentRevision: nullablePositiveInteger(metadata.approvedDocumentRevision),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    current,
+  });
+}
+
+function productJobFromRow(job: ProductJobRow): ProductJob {
+  return Object.freeze({
+    id: job.id,
+    kind: job.kind,
+    poolKind: job.pool_kind,
+    targetOperatingSystem: job.target_operating_system,
+    state: job.state,
+    attempt: job.attempt,
+    lastError: job.last_error,
+    createdAt: job.created_at,
+    updatedAt: job.updated_at,
+  });
+}
+
+function productEventFromRow(event: ProductEventRow): ProductEvent {
+  return Object.freeze({
+    id: event.event_id,
+    kind: event.event_kind,
+    data: Object.freeze({ ...event.event_data }),
+    createdAt: event.created_at,
+  });
+}
+
+function nullablePositiveInteger(value: unknown): number | null {
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+function iterationError(code: string, message: string, statusCode: number): Error {
+  return Object.assign(new Error(message), { code, statusCode });
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -2754,6 +3165,16 @@ function productSpecificationFromState(stateData: Record<string, unknown>): Read
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : Object.freeze({});
+}
+
+function initialIterationState(): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    number: 1,
+    parentWorkflowId: null,
+    baseSourceRevision: null,
+    baseDocumentRevision: 1,
+    approvedDocumentRevision: null,
+  });
 }
 
 function appendRevisionNote(

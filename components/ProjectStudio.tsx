@@ -18,11 +18,14 @@ import type {
   ProductConversationSummary,
   ProductProjectDetail,
   ProductProjectSummary,
+  ProductWorkflowIterationDetail,
+  ProductWorkflowIterationSummary,
 } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import {
   chronologicalMessages,
   ConversationStreamError,
+  failedOptimisticConversation,
   optimisticConversation,
   sendConversationMessageStream,
 } from "@/lib/product/conversation-stream";
@@ -94,6 +97,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [streamingReply, setStreamingReply] = useState("");
   const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
   const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>(initialArtifacts ?? []);
+  const [iterations, setIterations] = useState<readonly ProductWorkflowIterationSummary[]>([]);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  const [historicalIteration, setHistoricalIteration] = useState<ProductWorkflowIterationDetail | null>(null);
+  const [conversationFocusKey, setConversationFocusKey] = useState(0);
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null);
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
@@ -161,6 +168,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setArtifacts(values);
   }, [projectId, text]);
 
+  const loadIterations = useCallback(async () => {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/iterations`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({})) as {
+      iterations?: readonly ProductWorkflowIterationSummary[];
+      message?: string;
+    };
+    if (!response.ok || !payload.iterations) {
+      throw new Error(payload.message ?? text(`迭代历史读取失败 (${response.status})`, `Unable to load iteration history (${response.status})`));
+    }
+    setIterations(payload.iterations);
+  }, [projectId, text]);
+
   const loadRepository = useCallback(async (force = false) => {
     if (!platformManaged) return;
     const value = await loadCached<RepositoryConnection | null>(clientCacheKeys.repository(projectId), 10_000, async () => {
@@ -175,12 +194,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
-      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadRepository()]).catch(reason => {
+      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadIterations(), loadRepository()]).catch(reason => {
         if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
       });
     }, 0);
     return () => { active = false; clearTimeout(initial); };
-  }, [loadArtifacts, loadConversations, loadProject, loadRepository, text]);
+  }, [loadArtifacts, loadConversations, loadIterations, loadProject, loadRepository, text]);
 
   const localDirectoryBindingId = project?.localDirectory?.bindingId ?? null;
   useEffect(() => {
@@ -205,13 +224,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
       if (document.visibilityState === "visible") {
-        await Promise.all([loadProject(true), loadArtifacts(true)]).catch(() => undefined);
+        await Promise.all([loadProject(true), loadArtifacts(true), loadIterations()]).catch(() => undefined);
       }
       if (!stopped) timer = setTimeout(poll, 3_000);
     };
     timer = setTimeout(poll, 3_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [loadArtifacts, loadProject, projectAnalysisInProgress, workflowState]);
+  }, [loadArtifacts, loadIterations, loadProject, projectAnalysisInProgress, workflowState]);
 
   const repositorySyncState = repository?.syncState;
   useEffect(() => {
@@ -227,7 +246,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }, [loadRepository, platformManaged, repositorySyncState]);
 
   async function createPrivateRepository() {
-    if (!project || repositoryBusy) return;
+    if (!project || repositoryBusy || selectedWorkflowId !== null) return;
     setRepositoryBusy(true); setError(null);
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/create`, {
@@ -242,7 +261,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   async function openRepositoryPicker() {
-    if (repositoryBusy) return;
+    if (repositoryBusy || selectedWorkflowId !== null) return;
     setRepositoryBusy(true); setError(null);
     try {
       const options = await loadCached(clientCacheKeys.githubRepositories, 120_000, async () => {
@@ -259,7 +278,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   async function bindRepository() {
-    if (!project || !selectedRepositoryId || repositoryBusy) return;
+    if (!project || !selectedRepositoryId || repositoryBusy || selectedWorkflowId !== null) return;
     setRepositoryBusy(true); setError(null);
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, {
@@ -275,7 +294,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   async function retryRepositorySync() {
-    if (repositoryBusy) return;
+    if (repositoryBusy || selectedWorkflowId !== null) return;
     setRepositoryBusy(true); setError(null);
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/sync/retry`, { method: "POST" });
@@ -291,6 +310,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     event.preventDefault();
     const branchName = newBranchName.trim();
     if (!project?.localDirectory || !branchName || branchBusy
+      || selectedWorkflowId !== null
       || !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) return;
     setBranchBusy(true);
     setLocalGitError(null);
@@ -384,12 +404,86 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setError(null);
   }
 
+  async function selectIteration(workflowId: string) {
+    if (!project || busy) return;
+    setRepositoryPickerOpen(false);
+    setEditingDocument(false);
+    if (workflowId === project.workflowId) {
+      setSelectedWorkflowId(null);
+      setHistoricalIteration(null);
+      setAssetPanelExpanded(false);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(workflowId)}`,
+        { cache: "no-store" },
+      );
+      const payload = await response.json().catch(() => ({})) as {
+        iteration?: ProductWorkflowIterationDetail;
+        message?: string;
+      };
+      if (!response.ok || !payload.iteration) {
+        throw new Error(payload.message ?? text(`迭代详情读取失败 (${response.status})`, `Unable to load iteration details (${response.status})`));
+      }
+      setSelectedWorkflowId(workflowId);
+      setHistoricalIteration(payload.iteration);
+      setAssetPanelExpanded(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("迭代详情读取失败", "Unable to load iteration details"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createNextIteration() {
+    if (!project || busy || selectedWorkflowId !== null || !RERUNNABLE_WORKFLOW_STATES.has(project.workflowState)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/iterations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseWorkflowId: project.workflowId }),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        project?: ProductProjectDetail;
+        message?: string;
+      };
+      if (!response.ok || !payload.project) {
+        throw new Error(payload.message ?? text(`新一轮创建失败 (${response.status})`, `Unable to create the next iteration (${response.status})`));
+      }
+      setProject(payload.project);
+      storeCached(clientCacheKeys.project(projectId), payload.project, 5_000);
+      const projectList = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
+      if (projectList) {
+        storeCached(clientCacheKeys.projects, Object.freeze([
+          payload.project,
+          ...projectList.filter(item => item.id !== projectId),
+        ]), 10_000);
+      }
+      setSelectedWorkflowId(null);
+      setHistoricalIteration(null);
+      setArtifacts([]);
+      setAssetPanelExpanded(false);
+      startConversation();
+      setConversationFocusKey(value => value + 1);
+      expireCached(clientCacheKeys.artifacts(projectId));
+      await Promise.all([loadIterations(), loadArtifacts(true)]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("新一轮创建失败", "Unable to create the next iteration"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function sendConversationMessage(event?: FormEvent<HTMLFormElement>, selectedOption?: string) {
     event?.preventDefault();
     const content = (selectedOption ?? conversationInput).trim();
-    if (content.length < 2 || sendingMessage) return;
+    if (content.length < 2 || sendingMessage || selectedWorkflowId !== null) return;
     const previousConversation = conversation;
-    const previousSelectedConversationId = selectedConversationId;
     const pendingConversation = optimisticConversation(previousConversation, projectId, content, project?.name ?? text("项目会话", "Project conversation"));
     setSendingMessage(true);
     setError(null);
@@ -399,7 +493,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setConversationInput("");
     try {
       const payload = await sendConversationMessageStream(
-        previousConversation ? { conversationId: previousConversation.id, content } : { projectId, content },
+        previousConversation && !previousConversation.id.startsWith("pending-")
+          ? { conversationId: previousConversation.id, content }
+          : { projectId, content },
         `conversation:${crypto.randomUUID()}`,
         delta => setStreamingReply(current => current + delta),
         updatedProject => setProject(current => {
@@ -424,14 +520,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         return next;
       });
     } catch (reason) {
+      const failureMessage = reason instanceof ConversationStreamError
+        ? reason.message
+        : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
+      const failedConversation = failedOptimisticConversation(pendingConversation, failureMessage);
+      setConversation(failedConversation);
+      setSelectedConversationId(failedConversation.id);
+      setConversationInput(content);
+      setError(failureMessage);
       if (reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
         return;
       }
-      setConversation(previousConversation);
-      setSelectedConversationId(previousSelectedConversationId);
-      setConversationInput(content);
-      setError(reason instanceof ConversationStreamError ? reason.message : text("消息发送失败，请稍后重试", "Message failed. Please try again."));
     } finally {
       setStreamingReply("");
       setSendingMessage(false);
@@ -439,6 +539,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   async function mutate(path: string, body?: Record<string, unknown>) {
+    if (selectedWorkflowId !== null) return;
     setBusy(true);
     setError(null);
     try {
@@ -467,7 +568,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   function beginDocumentEdit() {
-    if (!project) return;
+    if (!project || selectedWorkflowId !== null) return;
     setDocumentDraft({
       introduction: project.document.content.introduction,
       gameplay: project.document.content.gameplay,
@@ -478,7 +579,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   async function saveDocument() {
-    if (!project) return;
+    if (!project || selectedWorkflowId !== null) return;
     setBusy(true);
     setError(null);
     try {
@@ -507,7 +608,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   async function deleteProject() {
-    if (!project || deleting) return;
+    if (!project || deleting || selectedWorkflowId !== null) return;
     setDeleting(true);
     setError(null);
     try {
@@ -574,9 +675,20 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     return <section className="project-catalog-empty product-studio-loading">{error ?? text("正在进入项目…", "LOADING PROJECT…")}</section>;
   }
 
+  const viewingHistoricalIteration = selectedWorkflowId !== null
+    && selectedWorkflowId !== project.workflowId
+    && historicalIteration?.workflowId === selectedWorkflowId;
+  const viewedWorkflowState = viewingHistoricalIteration ? historicalIteration.state : project.workflowState;
+  const viewedWorkflowProfile = viewingHistoricalIteration ? historicalIteration.profile : project.workflowProfile;
+  const viewedJobs = viewingHistoricalIteration ? historicalIteration.jobs : project.jobs;
+  const viewedArtifacts = viewingHistoricalIteration ? historicalIteration.artifacts : artifacts;
+  const viewedIterationNumber = viewingHistoricalIteration
+    ? historicalIteration.iterationNumber
+    : project.iterationNumber;
   const deliveryActive = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
-  const latestFailedJob = project.workflowState === "FAILED"
-    ? latestPipelineJobs(project.jobs).find(job => job.state === "FAILED") ?? null
+  const viewedDeliveryActive = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
+  const latestFailedJob = viewedWorkflowState === "FAILED"
+    ? latestPipelineJobs(viewedJobs).find(job => job.state === "FAILED") ?? null
     : null;
   const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
   // Every stage of the chain stays on screen so the pipeline shows what is still
@@ -584,13 +696,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   // publication, so those nodes are marked as outside the profile and their rerun
   // is withheld — the API would reject it as out-of-profile — but they are still
   // rendered rather than dropped.
-  const profileStages = project.workflowProfile === "VALIDATE"
+  const profileStages = viewedWorkflowProfile === "VALIDATE"
     ? new Set(VALIDATE_STAGES)
     : new Set(PIPELINE.map(([kind]) => kind));
   // Reruns supersede downstream jobs, which would race executors still holding
   // leases, so they only open up once the workflow has come to rest. A DRAFT has
   // nothing to rerun yet.
-  const canRerunStages = RERUNNABLE_WORKFLOW_STATES.has(project.workflowState)
+  const canRerunStages = !viewingHistoricalIteration
+    && RERUNNABLE_WORKFLOW_STATES.has(project.workflowState)
     && project.jobs.length > 0;
   const rerunnableFailedStage = latestFailedJob && profileStages.has(latestFailedJob.kind)
     ? latestFailedJob.kind
@@ -603,10 +716,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{project.name}</b></div>
           <span className="eyebrow">{text("PROJECT · 项目", "PROJECT")}</span>
           <h1>{project.name}</h1>
-          <p>{project.concept}</p>
+          <p>{viewingHistoricalIteration ? historicalIteration.concept : project.concept}</p>
         </div>
         <div className="product-studio-header-actions">
-          <button className="button project-delete-button" onClick={() => setConfirmingDelete(true)} type="button">{text("删除项目", "DELETE PROJECT")}</button>
+          <button className="button project-delete-button" disabled={viewingHistoricalIteration} onClick={() => setConfirmingDelete(true)} type="button">{text("删除项目", "DELETE PROJECT")}</button>
         </div>
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
@@ -622,10 +735,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
           {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
           {localGit?.repository ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
-            <label>{text("新建分支", "New branch")}<input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" disabled={branchBusy || deliveryActive} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
-            <button className="button button-secondary" disabled={branchBusy || deliveryActive || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button>
+            <label>{text("新建分支", "New branch")}<input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
+            <button className="button button-secondary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button>
           </form> : null}
           {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支；请等待流程结束或先取消本次交付。", "Branches cannot be switched during delivery. Wait for it to finish or cancel the current delivery first.")}</small> : null}
+          {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图，切回当前轮后才能切换分支。", "Historical iterations are read-only. Return to the current iteration to switch branches.")}</small> : null}
           {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
         </div> : null}
       </section> : null}
@@ -636,30 +750,64 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <p><a href={repository.htmlUrl} rel="noreferrer" target="_blank">{repository.fullName}</a> · <code>{repository.syncBranch}</code>{repository.lastSourceRevision ? ` · r${repository.lastSourceRevision}` : ""}</p>
           {repository.lastError ? <p className="repository-onboarding-error">{repository.lastError}</p> : null}
           <div className="platform-repository-actions">
-            <button className="button button-secondary" disabled={repositoryBusy} onClick={() => void openRepositoryPicker()} type="button">{text("重新绑定", "RECONNECT")}</button>
-            {repository.syncState === "FAILED" || repository.syncState === "REMOTE_DIVERGED" ? <button className="button button-primary" disabled={repositoryBusy} onClick={() => void retryRepositorySync()} type="button">{text("重试同步", "RETRY SYNC")}</button> : null}
+            <button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("重新绑定", "RECONNECT")}</button>
+            {repository.syncState === "FAILED" || repository.syncState === "REMOTE_DIVERGED" ? <button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void retryRepositorySync()} type="button">{text("重试同步", "RETRY SYNC")}</button> : null}
           </div>
-        </> : <><p>{text("项目源码仍以 Core 本地 revision 为准；绑定后，成功工作流由 Platform 独立同步。", "Core source revisions remain authoritative; after binding, Platform independently syncs successful workflows.")}</p><div className="platform-repository-actions"><button className="button button-primary" disabled={repositoryBusy} onClick={() => void createPrivateRepository()} type="button">{text("创建私有仓库", "CREATE PRIVATE REPOSITORY")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => void openRepositoryPicker()} type="button">{text("绑定已有仓库", "CONNECT EXISTING")}</button><Link className="button button-secondary" href="/account">{text("GitHub 授权", "GITHUB ACCESS")}</Link></div></>}
-        {repositoryPickerOpen ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} onChange={event => setSelectedRepositoryId(event.target.value)} value={selectedRepositoryId}>{repositoryOptions.map(option => <option key={option.id} value={option.id}>{option.fullName}{option.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={!selectedRepositoryId || repositoryBusy} onClick={() => void bindRepository()} type="button">{text("确认绑定", "CONNECT")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => setRepositoryPickerOpen(false)} type="button">{text("取消", "CANCEL")}</button></div> : null}
+        </> : <><p>{text("项目源码仍以 Core 本地 revision 为准；绑定后，成功工作流由 Platform 独立同步。", "Core source revisions remain authoritative; after binding, Platform independently syncs successful workflows.")}</p><div className="platform-repository-actions"><button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void createPrivateRepository()} type="button">{text("创建私有仓库", "CREATE PRIVATE REPOSITORY")}</button><button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("绑定已有仓库", "CONNECT EXISTING")}</button><Link aria-disabled={viewingHistoricalIteration} className="button button-secondary" href="/account">{text("GitHub 授权", "GITHUB ACCESS")}</Link></div></>}
+        {repositoryPickerOpen ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} disabled={viewingHistoricalIteration} onChange={event => setSelectedRepositoryId(event.target.value)} value={selectedRepositoryId}>{repositoryOptions.map(option => <option key={option.id} value={option.id}>{option.fullName}{option.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={!selectedRepositoryId || repositoryBusy || viewingHistoricalIteration} onClick={() => void bindRepository()} type="button">{text("确认绑定", "CONNECT")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => setRepositoryPickerOpen(false)} type="button">{text("取消", "CANCEL")}</button></div> : null}
       </section> : null}
 
       <section aria-label={text("交付流程", "Delivery pipeline")} className="product-delivery-pipeline">
         <header className="product-delivery-pipeline-header">
           <div>
             <span className="eyebrow">DELIVERY PIPELINE</span>
-            <h2>{text("交付流程", "DELIVERY PIPELINE")}</h2>
+            <h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2>
           </div>
-          {project.workflowState !== "DRAFT" ? (
-            <div className="product-delivery-pipeline-actions">
-              <span className="revision-badge">{deliveryActive ? text("自动刷新", "AUTO REFRESH") : workflowLabel(project.workflowState, text)}</span>
-              {deliveryActive ? <button className="button button-secondary" disabled={busy} onClick={() => void mutate("cancel")} type="button">{text("取消本次交付", "CANCEL DELIVERY")}</button> : null}
-            </div>
-          ) : null}
+          <div className="product-delivery-pipeline-actions">
+            <label className="product-iteration-selector">
+              <span>{text("查看轮次", "ITERATION")}</span>
+              <select
+                aria-label={text("选择交付轮次", "Select delivery iteration")}
+                disabled={busy}
+                onChange={event => void selectIteration(event.target.value)}
+                value={selectedWorkflowId ?? project.workflowId}
+              >
+                {(iterations.length ? iterations : [Object.freeze({
+                  workflowId: project.workflowId,
+                  iterationNumber: project.iterationNumber,
+                  state: project.workflowState,
+                })]).map(iteration => (
+                  <option key={iteration.workflowId} value={iteration.workflowId}>
+                    {text(`第 ${iteration.iterationNumber} 轮`, `Iteration ${iteration.iterationNumber}`)} · {workflowLabel(iteration.state, text)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="revision-badge">
+              {viewingHistoricalIteration
+                ? text("历史只读", "READ ONLY")
+                : viewedDeliveryActive ? text("自动刷新", "AUTO REFRESH") : workflowLabel(viewedWorkflowState, text)}
+            </span>
+            {!viewingHistoricalIteration && deliveryActive ? (
+              <button className="button button-secondary" disabled={busy} onClick={() => void mutate("cancel")} type="button">
+                {text("取消本次交付", "CANCEL DELIVERY")}
+              </button>
+            ) : null}
+            {!viewingHistoricalIteration && RERUNNABLE_WORKFLOW_STATES.has(project.workflowState) ? (
+              <button className="button button-primary" disabled={busy} onClick={() => void createNextIteration()} type="button">
+                {busy
+                  ? text("正在创建新一轮…", "CREATING ITERATION…")
+                  : project.workflowState === "SUCCEEDED"
+                    ? text("继续修改", "CONTINUE EDITING")
+                    : text("调整需求并重新开发", "REVISE & DEVELOP AGAIN")}
+              </button>
+            ) : null}
+          </div>
         </header>
         <div className="product-delivery-canvas">
           <ol className="product-delivery-track">
             {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
-              const jobs = latestPipelineJobs(project.jobs.filter(job => job.kind === kind));
+              const jobs = latestPipelineJobs(viewedJobs.filter(job => job.kind === kind));
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
               const view = inProfile ? pipelineStageView(state, text) : OUT_OF_PROFILE_STAGE_VIEW(text);
@@ -690,7 +838,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       being absolutely positioned in the canvas: the Agent plans the
                       manifest, so the branch belongs to that node and follows it
                       wherever the flex track puts it. */}
-                  {kind === "AGENT_GENERATION" ? (
+                  {kind === "AGENT_GENERATION" && !viewingHistoricalIteration ? (
                     <div className="product-delivery-async-branch">
                       <span aria-hidden="true" className="product-delivery-branch-line" />
                       <button
@@ -709,6 +857,17 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                         <ArrowIcon aria-hidden="true" className="product-delivery-async-chevron" />
                       </button>
                     </div>
+                  ) : kind === "AGENT_GENERATION" ? (
+                    <div className="product-delivery-async-branch">
+                      <span aria-hidden="true" className="product-delivery-branch-line" />
+                      <div className="product-delivery-async-node is-read-only">
+                        <span aria-hidden="true" className="product-delivery-async-marker">◈</span>
+                        <span className="product-delivery-async-copy">
+                          <b>{text("图片素材", "ASSET GEN")}</b>
+                          <small>{text("历史轮不展示当前素材规划", "Current asset plan hidden in history")}</small>
+                        </span>
+                      </div>
+                    </div>
                   ) : null}
                 </li>
               );
@@ -723,7 +882,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             )}
           </p>
         ) : null}
-        {project.workflowState === "RELEASE_APPROVAL_PENDING" ? (
+        {!viewingHistoricalIteration && project.workflowState === "RELEASE_APPROVAL_PENDING" ? (
           <section aria-label={text("Steam 发布批准", "Steam release approval")} className="product-release-approval">
             <div className="product-release-approval-icon" aria-hidden="true">✓</div>
             <div>
@@ -770,18 +929,39 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         ) : null}
       </section>
 
-      {assetPanelExpanded ? (
+      {viewingHistoricalIteration ? (
+        <section aria-label={text("历史轮次摘要", "Historical iteration summary")} className="panel-card product-iteration-history-summary">
+          <header className="section-heading">
+            <div><span className="eyebrow">ITERATION HISTORY</span><h2>{text(`第 ${historicalIteration.iterationNumber} 轮记录`, `ITERATION ${historicalIteration.iterationNumber} RECORD`)}</h2></div>
+            <span className="revision-badge">{workflowLabel(historicalIteration.state, text)}</span>
+          </header>
+          <dl>
+            <div><dt>{text("基础源码", "Base source")}</dt><dd>{historicalIteration.baseSourceRevision ? `r${historicalIteration.baseSourceRevision}` : "—"}</dd></div>
+            <div><dt>{text("产出源码", "Output source")}</dt><dd>{historicalIteration.outputSourceRevision ? `r${historicalIteration.outputSourceRevision}` : "—"}</dd></div>
+            <div><dt>{text("基础文档", "Base document")}</dt><dd>R{historicalIteration.baseDocumentRevision}</dd></div>
+            <div><dt>{text("批准文档", "Approved document")}</dt><dd>{historicalIteration.approvedDocumentRevision ? `R${historicalIteration.approvedDocumentRevision}` : "—"}</dd></div>
+          </dl>
+          {historicalIteration.events.length ? (
+            <details>
+              <summary>{text(`查看 ${historicalIteration.events.length} 条工作流事件`, `View ${historicalIteration.events.length} workflow events`)}</summary>
+              <ol>{historicalIteration.events.map(event => <li key={event.id}><code>{event.kind}</code><time>{formatConversationTime(event.createdAt, localeTag(locale), text)}</time></li>)}</ol>
+            </details>
+          ) : null}
+        </section>
+      ) : null}
+
+      {assetPanelExpanded && !viewingHistoricalIteration ? (
         <AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} />
       ) : null}
 
-      {artifacts.length ? (
+      {viewedArtifacts.length ? (
         <section aria-label={text("项目制品", "Project artifacts")} className="product-artifacts-panel">
           <header>
             <div><span className="eyebrow">ARTIFACTS</span><h2>{text("游戏制品下载", "GAME BUILDS")}</h2></div>
-            <span>{text(`${artifacts.filter(a => a.kind === "BUILD" || a.kind === "SIGNED_BUILD").length} 个平台`, `${artifacts.filter(a => a.kind === "BUILD" || a.kind === "SIGNED_BUILD").length} platforms`)}</span>
+            <span>{text(`${viewedArtifacts.length} 个制品`, `${viewedArtifacts.length} artifacts`)}</span>
           </header>
           <div className="product-artifact-list">
-            {artifacts.filter(artifact => artifact.kind === "BUILD" || artifact.kind === "SIGNED_BUILD").map(artifact => (
+            {viewedArtifacts.map(artifact => (
               <article key={artifact.id}>
                 <div>
                   <b>{artifactLabel(artifact, text)}</b>
@@ -804,8 +984,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <section className="conversation-panel project-conversation-panel">
             <div className="conversation-header product-panel-heading">
               <div><span className="step-number">01</span><span><h2>{text("项目会话", "PROJECT CONVERSATIONS")}</h2><small>{conversations.length ? text(`${conversations.length} 个历史会话`, `${conversations.length} saved conversation${conversations.length === 1 ? "" : "s"}`) : text("还没有历史会话", "No conversation history")}</small></span></div>
-              <button className="button button-secondary project-new-conversation" onClick={startConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button>
+              <button className="button button-secondary project-new-conversation" disabled={viewingHistoricalIteration} onClick={startConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button>
             </div>
+            {viewingHistoricalIteration ? <p className="product-iteration-readonly-notice">{text("正在查看历史轮次。会话和项目说明仅供参考；切回当前轮后才能修改。", "You are viewing a historical iteration. Conversations and the project document are reference-only until you return to the current iteration.")}</p> : null}
             <div className="project-conversation-layout">
               <nav aria-label={text("历史会话", "Conversation history")} className="project-conversation-history">
                 <span className="project-conversation-history-title">{text("历史会话", "HISTORY")}</span>
@@ -824,9 +1005,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               </nav>
 
               <ConversationBox
-                agentProgress={{ running: agentRunning, events: activeAgentProgress }}
+                agentProgress={{
+                  running: !viewingHistoricalIteration && agentRunning,
+                  events: viewingHistoricalIteration ? Object.freeze([]) : activeAgentProgress,
+                }}
                 className="project-conversation-box"
                 conversationKey={activeConversation?.id ?? null}
+                disabled={viewingHistoricalIteration}
+                focusKey={conversationFocusKey}
                 messages={orderedMessages}
                 onOptionSelect={option => void sendConversationMessage(undefined, option)}
                 onSubmit={sendConversationMessage}
@@ -834,7 +1020,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 placeholder={agentRunning
                   ? text("向正在生成的 Agent 发送引导…", "Guide the Agent while it is generating…")
                   : activeConversation ? text("继续这段会话…", "Continue this conversation…") : text("开始一个新的项目会话…", "Start a new project conversation…")}
-                primaryAction={requirementsReady && !sendingMessage ? (
+                primaryAction={!viewingHistoricalIteration && requirementsReady && !sendingMessage ? (
                   <button
                     className="button button-secondary conversation-box-develop"
                     disabled={busy}
@@ -871,7 +1057,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 <span className="revision-badge">R{project.document.revision} · {documentMaintainer(project.document.maintainedBy, text)}</span>
                 {editingDocument ? (
                   <div><button className="button button-secondary" disabled={busy} onClick={() => setEditingDocument(false)}>{text("取消", "CANCEL")}</button><button className="button button-primary" disabled={busy} onClick={() => void saveDocument()}>{text("保存", "SAVE")}</button></div>
-                ) : <button className="button button-secondary" disabled={busy} onClick={beginDocumentEdit}>{text("编辑", "EDIT")}</button>}
+                ) : <button className="button button-secondary" disabled={busy || viewingHistoricalIteration} onClick={beginDocumentEdit}>{text("编辑", "EDIT")}</button>}
               </div>
               {editingDocument ? (
                 <div className="product-document-sidebar-editor">
@@ -1017,7 +1203,7 @@ function latestPipelineJobs(jobs: ProductProjectDetail["jobs"]): ProductProjectD
 
 type JobFailurePresentation = Readonly<{ title: string; reason: string; action: string }>;
 
-function jobFailurePresentation(
+export function jobFailurePresentation(
   job: ProductProjectDetail["jobs"][number],
   text: (chinese: string, english: string) => string,
 ): JobFailurePresentation {
@@ -1062,7 +1248,14 @@ function jobFailurePresentation(
       action: text("请在设置中检查 API Key、Base URL 和模型后重试。", "Check the API key, base URL, and model in Settings, then retry."),
     };
   }
-  if (/deviludo-executor\/executor\.sock|sandbox executor unavailable|sandbox executor failed|docker executor operation failed|ECONNREFUSED.*executor\.sock/i.test(raw)) {
+  if (/source revision is already published with different content/i.test(raw)) {
+    return {
+      title,
+      reason: text("上一次 Agent 已写入源码，但后续登记没有完成，遗留的未登记 revision 阻塞了自动重试。", "The previous Agent wrote source files but did not finish registration, so an unregistered revision blocked the retry."),
+      action: text("重新执行 Agent；系统会先回收未登记 revision，再安全生成。", "Rerun the Agent; the unregistered revision will be reclaimed before generation starts."),
+    };
+  }
+  if (/deviludo-executor\/executor\.sock|sandbox executor unavailable|docker executor operation failed|ECONNREFUSED.*executor\.sock/i.test(raw)) {
     return {
       title,
       reason: text("Core 的 Agent 隔离执行器当前不可用，任务尚未连接到 Provider。", "The Core Agent sandbox executor is unavailable; the task did not reach the provider."),

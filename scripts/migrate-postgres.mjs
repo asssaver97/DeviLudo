@@ -60,7 +60,9 @@ try {
       throw error;
     }
   } else {
-    const metadata = await client.query("SELECT baseline, compatibility FROM deviludo.schema_metadata WHERE singleton = true");
+    const metadata = await client.query(
+      "SELECT baseline, compatibility, current_version, source_digest FROM deviludo.schema_metadata WHERE singleton = true",
+    );
     if (metadata.rows[0]?.baseline !== "001" || metadata.rows[0]?.compatibility !== "deviludo-core-source-v1") {
       throw Object.assign(new Error(
         "INCOMPATIBLE_BASELINE_RESET_REQUIRED: this database is not compatible with persistent source v1",
@@ -85,7 +87,34 @@ try {
       throw error;
     }
 
-    const applied = await client.query("SELECT version, checksum FROM deviludo.schema_migrations ORDER BY version");
+    let applied = await client.query("SELECT version, checksum FROM deviludo.schema_migrations ORDER BY version");
+    const baselineHasAllMigrations = applied.rows.length === 0
+      && metadata.rows[0]?.source_digest === null
+      && metadata.rows[0]?.current_version === migrations.at(-1)?.version;
+    if (baselineHasAllMigrations) {
+      // postgres' init directory applies the full baseline before this runner is
+      // invoked. The version embedded in that snapshot proves its DDL already
+      // includes every migration in this release, so only stamp the immutable
+      // ledger instead of replaying ALTER statements over the same schema.
+      await client.query("BEGIN");
+      try {
+        await client.query(
+          "UPDATE deviludo.schema_metadata SET source_digest = $1 WHERE singleton = true",
+          [baselineDigest],
+        );
+        for (const migration of migrations) {
+          await client.query(
+            "INSERT INTO deviludo.schema_migrations(version, checksum) VALUES ($1, $2)",
+            [migration.version, migration.checksum],
+          );
+        }
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+      applied = await client.query("SELECT version, checksum FROM deviludo.schema_migrations ORDER BY version");
+    }
     const appliedByVersion = new Map(applied.rows.map(row => [row.version, row.checksum]));
     const knownVersions = new Set(migrations.map(migration => migration.version));
     const unknownVersions = applied.rows

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const sqlUrl = new URL("../infra/postgres/001_core.sql", import.meta.url);
@@ -90,6 +90,11 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /last_error = 'superseded by stage rerun from ' \|\| rerun_stage::text[\s\S]*AND kind = ANY\(downstream_stages\)/);
   assert.match(sql, /:rerun:/);
   assert.match(sql, /successful_test\.target_operating_system = required_platform\.operating_system/);
+  assert.match(sql, /CREATE TRIGGER jobs_queue_local_git_commit[\s\S]*AFTER UPDATE OF state ON deviludo\.jobs/);
+  assert.match(sql, /queue_local_git_commit_after_e2e\(\)[\s\S]*NEW\.kind <> 'E2E_TEST'[\s\S]*'expectedSourceDigest', source_digest/);
+  assert.match(sql, /claim_local_git_commit\(p_lease_seconds integer\)[\s\S]*FOR UPDATE OF workflow SKIP LOCKED/);
+  assert.match(sql, /complete_local_git_commit[\s\S]*GIT_COMMIT_COMPLETED/);
+  assert.match(sql, /fail_local_git_commit[\s\S]*attempts >= 3[\s\S]*GIT_COMMIT_FAILED/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
 });
@@ -138,6 +143,14 @@ test("upgraded databases restore workflow helper privileges after revoking PUBLI
   assert.doesNotMatch(privileges, /\bPUBLIC\b[^\n]*;/);
 });
 
+test("upgraded databases revoke the default PUBLIC grant from import analysis claiming", async () => {
+  const privileges = await readFile(
+    new URL("../infra/postgres/migrations/012_revoke_import_analysis_public.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(privileges, /REVOKE ALL ON FUNCTION deviludo\.claim_project_import_analysis\(integer\) FROM PUBLIC/);
+});
+
 test("an unroutable signal kind is rejected rather than accepted and ignored", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   // The routing below the guard is a chain of conditionals with no fallback, so a
@@ -169,9 +182,14 @@ test("applied migrations are immutable and fresh baselines stamp incorporated ve
   assert.match(migration, /previousChecksum !== migration\.checksum/);
   assert.match(migration, /INSERT INTO deviludo\.schema_migrations\(version, checksum\)/);
   assert.match(migration, /SET source_digest = \$1, current_version = \$2/);
+  assert.match(migration, /baselineHasAllMigrations[\s\S]*metadata\.rows\[0\]\?\.current_version === migrations\.at\(-1\)\?\.version/);
   const sql = await readFile(sqlUrl, "utf8");
   assert.match(sql, /source_digest text CHECK \(source_digest IS NULL OR source_digest ~ '\^sha256:\[0-9a-f\]\{64\}\$'\)/);
   assert.match(sql, /CREATE TABLE deviludo\.schema_migrations/);
+  const migrationNames = (await readdir(new URL("../infra/postgres/migrations/", import.meta.url)))
+    .filter(name => /^\d{3}_[a-z0-9_]+\.sql$/.test(name))
+    .sort();
+  assert.match(sql, new RegExp(`'${migrationNames.at(-1)?.slice(0, -4)}'`));
 });
 
 test("instance Agent settings are frozen into new workspace jobs by secret reference", async () => {

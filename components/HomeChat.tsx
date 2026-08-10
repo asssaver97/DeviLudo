@@ -8,6 +8,7 @@ import type { ProductConversation, ProductProjectSummary } from "@/lib/product/c
 import {
   chronologicalMessages,
   ConversationStreamError,
+  failedOptimisticConversation,
   optimisticConversation,
   sendConversationMessageStream,
 } from "@/lib/product/conversation-stream";
@@ -91,7 +92,7 @@ export function HomeChat() {
     setConversation(pendingConversation);
     setContent("");
     try {
-      const body = previousConversation
+      const body = previousConversation && !previousConversation.id.startsWith("pending-")
         ? { conversationId: previousConversation.id, content: message }
         : { projectId: selectedProjectId || null, content: message };
       const result = await sendConversationMessageStream(
@@ -108,14 +109,20 @@ export function HomeChat() {
       });
       setConversation(result.conversation);
       setSelectedProjectId(result.conversation.projectId);
+      if ((activeProject?.workflowState ?? "DRAFT") === "DRAFT" && result.project.workflowState !== "DRAFT") {
+        router.push(`/projects/${result.project.id}`);
+      }
     } catch (cause) {
+      const failureMessage = cause instanceof ConversationStreamError
+        ? cause.message
+        : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
+      setConversation(failedOptimisticConversation(pendingConversation, failureMessage));
+      setContent(message);
+      setError(failureMessage);
       if (cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
         return;
       }
-      setConversation(previousConversation);
-      setContent(message);
-      setError(cause instanceof ConversationStreamError ? cause.message : text("消息发送失败，请稍后重试", "Message failed. Please try again."));
     } finally {
       setStreamingReply("");
       setSending(false);

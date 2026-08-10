@@ -265,7 +265,7 @@ export function ProductDashboard({
               <div className="project-catalog-card-top"><span className="project-catalog-glyph">{project.name.slice(0, 1)}</span></div>
               <h2>{project.name}</h2>
               <dl>
-                <div><dt>{text("当前阶段", "Stage")}</dt><dd>{analyzing ? text("正在分析项目", "ANALYZING PROJECT") : analysisFailed ? text("分析失败", "ANALYSIS FAILED") : workflowLabel(project.workflowState, text)}</dd></div>
+                <div><dt>{text("当前阶段", "Stage")}</dt><dd>{text(`第 ${project.iterationNumber} 轮`, `Iteration ${project.iterationNumber}`)} · {analyzing ? text("正在分析项目", "ANALYZING PROJECT") : analysisFailed ? text("分析失败", "ANALYSIS FAILED") : workflowLabel(project.workflowState, text)}</dd></div>
                 <div><dt>{text("创建时间", "Created")}</dt><dd>{formatDate(project.createdAt, localeTag(locale))}</dd></div>
                 <div><dt>{text("源码修订", "Source revision")}</dt><dd>{project.source ? `r${project.source.revision}` : "—"}</dd></div>
                 <div><dt>{text("源码大小", "Source size")}</dt><dd>{project.source ? `${project.source.fileCount} files` : "—"}</dd></div>

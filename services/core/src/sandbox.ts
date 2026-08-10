@@ -178,6 +178,10 @@ export async function runSandbox(
         : null;
       try {
         if (job.jobKind === "AGENT_GENERATION") {
+          const discarded = await discardOrphanedAgentSource(repository, projectSources, job);
+          if (discarded) {
+            await repository.appendJobProgress(job, "PHASE", "已清理上次未完成登记的源码 revision，正在安全重试");
+          }
           await repository.appendJobProgress(job, "PHASE", "Agent 任务已领取，正在准备隔离环境");
         }
         const operationId = job.jobKind === "STEAM_PUBLISH"
@@ -235,12 +239,34 @@ export async function runSandbox(
       if (job) {
         const message = error instanceof Error ? error.message : String(error);
         if (job.jobKind === "AGENT_GENERATION") {
+          await discardOrphanedAgentSource(repository, projectSources, job).catch(cleanupError => {
+            console.error(JSON.stringify({
+              level: "error",
+              event: "sandbox_orphan_source_cleanup_failed",
+              jobId: job?.jobId,
+              message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            }));
+          });
           await repository.appendJobProgress(job, "FAILED", message).catch(() => undefined);
         }
         await repository.fail(job, message).catch(() => undefined);
       }
     }
   }
+}
+
+async function discardOrphanedAgentSource(
+  repository: CoreRepository,
+  projectSources: ProjectSourceStore,
+  job: JobProtocolV4,
+): Promise<boolean> {
+  if (job.jobKind !== "AGENT_GENERATION") return false;
+  const revision = Number(job.payload.publishSourceRevision);
+  if (!Number.isSafeInteger(revision) || revision < 1) return false;
+  const registered = await repository.projectSourceRevisionExists(job.workspaceId, job.projectId, revision);
+  return registered
+    ? false
+    : projectSources.discardUnregisteredRevision(job.workspaceId, job.projectId, revision);
 }
 
 /**

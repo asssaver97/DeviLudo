@@ -1849,6 +1849,100 @@ textarea {
   padding: 0 14px;
 }
 
+.product-iteration-selector {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.product-iteration-selector span {
+  color: #66758a;
+  font: 800 8px var(--font-geist-mono), monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.product-iteration-selector select {
+  background: #0e1723;
+  border: 1px solid #45546b;
+  color: var(--ink);
+  font: 800 10px var(--font-geist-mono), monospace;
+  min-height: 36px;
+  padding: 0 28px 0 10px;
+}
+
+.product-delivery-async-node.is-read-only {
+  cursor: default;
+  opacity: .72;
+}
+
+.product-iteration-history-summary {
+  margin-bottom: 18px;
+}
+
+.product-iteration-history-summary dl {
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 16px 0;
+}
+
+.product-iteration-history-summary dl > div {
+  background: #0b121c;
+  border: 1px solid var(--line);
+  padding: 12px;
+}
+
+.product-iteration-history-summary dt,
+.product-iteration-history-summary dd,
+.product-iteration-history-summary summary,
+.product-iteration-history-summary li {
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.product-iteration-history-summary dt {
+  color: #66758a;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.product-iteration-history-summary dd {
+  color: var(--ink);
+  font-size: 11px;
+  margin: 5px 0 0;
+}
+
+.product-iteration-history-summary summary {
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.product-iteration-history-summary ol {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.product-iteration-history-summary li {
+  align-items: center;
+  color: #8c99aa;
+  display: flex;
+  font-size: 9px;
+  justify-content: space-between;
+}
+
+.product-iteration-readonly-notice {
+  background: #101b29;
+  border-bottom: 1px solid #334157;
+  color: #8ea1b8;
+  font: 9px/1.6 var(--font-geist-mono), monospace;
+  margin: 0;
+  padding: 9px 16px;
+}
+
 .product-delivery-canvas {
   padding: 20px 18px 22px;
   position: relative;
@@ -2592,6 +2686,10 @@ textarea {
     flex-wrap: wrap;
   }
 
+  .product-iteration-history-summary dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .project-workspace-layout,
   .project-workspace-layout.document-is-collapsed {
     grid-template-columns: 1fr;
@@ -2840,6 +2938,28 @@ textarea {
   color: var(--green);
   font: 800 10px var(--font-geist-mono), monospace;
   padding: 4px 7px;
+}
+
+.conversation-box-failed {
+  background: #2b1118;
+  border: 1px solid #a63b52;
+  color: #ff8da4;
+  font: 800 10px var(--font-geist-mono), monospace;
+  padding: 4px 7px;
+}
+
+.conversation-box-message.user.is-failed p {
+  border-color: #a63b52;
+}
+
+.conversation-box-failure-detail {
+  color: #ff8da4;
+  display: block;
+  font: 10px/1.5 var(--font-geist-mono), monospace;
+  margin-top: 6px;
+  max-width: 520px;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .agent-generation-progress {

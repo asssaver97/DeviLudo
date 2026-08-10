@@ -40,10 +40,11 @@ test("an unchanged checkout reuses verified images and never runs two local star
 });
 
 test("local project directories use a reusable host bridge without exposing Git credentials to task containers", async () => {
-  const [startup, bridge, daemon, proxy, compose] = await Promise.all([
+  const [startup, bridge, bridgeDaemon, executorDaemon, proxy, compose] = await Promise.all([
     readStartup(),
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-git-import-daemon.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-project-bridge-proxy.mjs", import.meta.url), "utf8"),
     readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
   ]);
@@ -59,12 +60,16 @@ test("local project directories use a reusable host bridge without exposing Git 
   assert.match(bridge, /"\/directory\/git\/branch"/);
   assert.match(bridge, /"\/internal\/directory\/source"/);
   assert.match(bridge, /"\/internal\/directory\/sync"/);
+  assert.match(bridge, /"\/internal\/directory\/git\/commit"/);
   assert.match(bridge, /LOCAL_PROJECT_CHANGED/);
   assert.match(bridge, /"switch", "-c", branchName/);
   assert.match(bridge, /request\.headers\.origin/);
-  assert.match(daemon, /if \(await healthReady\(port\)\) return started/);
-  assert.match(proxy, /allowedPaths = new Set\(\["\/internal\/directory\/source", "\/internal\/directory\/sync"\]\)/);
+  assert.match(bridgeDaemon, /if \(await healthReady\(port\)\) return started/);
+  assert.match(executorDaemon, /base\.hostname !== "local-project-bridge-proxy"/);
+  assert.doesNotMatch(executorDaemon, /base\.hostname !== "host\.docker\.internal"/);
+  assert.match(proxy, /allowedPaths = new Set\([\s\S]*"\/internal\/directory\/source"[\s\S]*"\/internal\/directory\/sync"[\s\S]*"\/internal\/directory\/git\/commit"/);
   assert.match(proxy, /equalToken/);
+  assert.match(proxy, /target\.hostname !== "host\.docker\.internal"/);
   assert.doesNotMatch(proxy, /\/directory\/select|\/github\/clone/);
   assert.match(compose, /host\.docker\.internal:host-gateway/);
   assert.match(compose, /local-project-bridge-proxy:[\s\S]*?networks:[\s\S]*?- data[\s\S]*?- local-host/);

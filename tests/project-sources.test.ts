@@ -119,6 +119,48 @@ test("validated Agent checkpoints survive an attempt and disappear after source 
     );
     await store.publishFiles({ workspaceId, projectId, revision: 1, files });
     assert.equal(await store.archiveCheckpoint(workspaceId, projectId, workflowId), null);
+    await store.saveCheckpoint({ workspaceId, projectId, workflowId, files });
+    await assert.rejects(
+      store.publishFiles({
+        workspaceId,
+        projectId,
+        revision: 1,
+        files: [{ path: "project.godot", bytes: Buffer.from("changed") }],
+      }),
+      /already published with different content/,
+    );
+    assert.equal((await store.archiveCheckpoint(workspaceId, projectId, workflowId))?.digest, saved.digest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unregistered filesystem revision can be reclaimed without losing the last committed pointer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-source-orphan-"));
+  try {
+    const store = new ProjectSourceStore(root);
+    const first = await store.publishFiles({
+      workspaceId,
+      projectId,
+      revision: 1,
+      files: [{ path: "project.godot", bytes: Buffer.from("first") }],
+    });
+    const orphan = await store.publishFiles({
+      workspaceId,
+      projectId,
+      revision: 2,
+      files: [{ path: "project.godot", bytes: Buffer.from("orphan") }],
+    });
+    assert.equal(await store.discardUnregisteredRevision(workspaceId, projectId, 2), true);
+    assert.equal(await store.discardUnregisteredRevision(workspaceId, projectId, 2), false);
+    await assert.rejects(store.archive(orphan.relativePath), /ENOENT/);
+    assert.equal((await store.archive(first.relativePath)).digest, first.digest);
+    const current = await readFile(join(root, "workspaces", workspaceId, "projects", projectId, "CURRENT"), "utf8");
+    assert.deepEqual(JSON.parse(current), {
+      revision: 1,
+      relativePath: first.relativePath,
+      digest: first.digest,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

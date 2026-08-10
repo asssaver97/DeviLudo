@@ -48,6 +48,7 @@ import {
 } from "./project-import";
 import {
   generateProductConversationReply,
+  isDevelopmentApprovalRequest,
   streamProductConversationReply,
   type ConversationAgentProjectContext,
   type ProductConversationAgentReply,
@@ -522,6 +523,61 @@ export async function runApi(
     return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
   });
 
+  app.post<{ Params: { projectId: string }; Body: { baseWorkflowId?: unknown } }>(
+    "/v1/projects/:projectId/iterations",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const body = objectBody(request.body);
+      if (!UUID.test(request.params.projectId)
+        || typeof body.baseWorkflowId !== "string"
+        || !UUID.test(body.baseWorkflowId)) {
+        throw httpError(400, "INVALID_PROJECT_ITERATION", "项目迭代请求无效");
+      }
+      const result = await repository.createProjectIteration({
+        workspaceId: workspace.id,
+        projectId: request.params.projectId,
+        baseWorkflowId: body.baseWorkflowId,
+        actorUserId: principal.user.id,
+      });
+      return reply.code(result.created ? 201 : 200).send(result);
+    },
+  );
+
+  app.get<{ Params: { projectId: string } }>(
+    "/v1/projects/:projectId/iterations",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      if (!UUID.test(request.params.projectId)) {
+        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      }
+      const iterations = await repository.listProjectIterations(workspace.id, request.params.projectId);
+      return iterations
+        ? reply.send({ iterations })
+        : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    },
+  );
+
+  app.get<{ Params: { projectId: string; workflowId: string } }>(
+    "/v1/projects/:projectId/iterations/:workflowId",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      if (!UUID.test(request.params.projectId) || !UUID.test(request.params.workflowId)) {
+        return reply.code(404).send({ code: "PROJECT_ITERATION_NOT_FOUND" });
+      }
+      const iteration = await repository.readProjectIteration(
+        workspace.id,
+        request.params.projectId,
+        request.params.workflowId,
+      );
+      return iteration
+        ? reply.send({ iteration })
+        : reply.code(404).send({ code: "PROJECT_ITERATION_NOT_FOUND" });
+    },
+  );
+
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/analysis/retry", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
@@ -536,7 +592,9 @@ export async function runApi(
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    return reply.send({ artifacts: await repository.listProjectArtifacts(workspace.id, project.id) });
+    return reply.send({
+      artifacts: await repository.listProjectArtifacts(workspace.id, project.id, project.workflowId),
+    });
   });
 
   app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/asset-manifest", async (request, reply) => {
@@ -750,7 +808,7 @@ export async function runApi(
   app.post("/v1/conversations/messages", async (request, reply) => {
     const principal = productAccess(request, config);
     const command = conversationMessageCommand(request.body);
-    const result = await processConversationMessage({ request, principal, repository, agentSecrets, command });
+    const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, command });
     return reply.code(result.statusCode).send(result.payload);
   });
 
@@ -774,6 +832,7 @@ export async function runApi(
         request,
         principal,
         repository,
+        objectStore,
         agentSecrets,
         command,
         signal: abortController.signal,
@@ -787,6 +846,10 @@ export async function runApi(
       write({ type: "complete", ...result.payload });
     } catch (error) {
       const failure = publicStreamError(error);
+      request.log.warn({
+        code: failure.code,
+        error: failure.message,
+      }, "conversation stream failed");
       write({ type: "error", ...failure });
     } finally {
       if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
@@ -824,22 +887,12 @@ export async function runApi(
     if (project.analysisStatus !== "READY") {
       throw httpError(409, "PROJECT_ANALYSIS_INCOMPLETE", "项目源码分析完成后才能开始开发");
     }
-    const specificationObject = await objectStore.putSpecification({
+    const accepted = await approveProjectDevelopment({
+      repository,
+      objectStore,
       workspaceId: workspace.id,
-      projectId: project.id,
-      workflowId: project.workflowId,
-      specification: project.specification,
-    });
-    await repository.registerSpecificationArtifact({
-      workspaceId: workspace.id,
-      projectId: project.id,
-      workflowId: project.workflowId,
-      object: specificationObject,
-    });
-    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
-      kind: "SPEC_APPROVED",
-      idempotencyKey: `spec-approved:${project.workflowId}`,
-      payload: { specificationObject, requestedByAccountId: principal.user.id },
+      project,
+      requestedByAccountId: principal.user.id,
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -1184,13 +1237,14 @@ async function processConversationMessage(input: Readonly<{
   request: FastifyRequest;
   principal: AccessPrincipal;
   repository: CoreRepository;
+  objectStore: CoreObjectStore;
   agentSecrets: AgentSecretStore;
   command: ConversationMessageCommand;
   signal?: AbortSignal;
   onStage?: (phase: "NAMING" | "RESPONDING" | "SAVING") => void;
   onDelta?: (delta: string) => void;
 }>): Promise<ConversationMessageResult> {
-  const { request, principal, repository, agentSecrets, command } = input;
+  const { request, principal, repository, objectStore, agentSecrets, command } = input;
   let workspace = await selectedWorkspaceFromRequest(request, repository, principal);
   let projectId = command.projectId;
   let existingConversation: ProductConversation | null = null;
@@ -1265,10 +1319,22 @@ async function processConversationMessage(input: Readonly<{
     });
     const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id);
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
+    let createdProject = createdBundle.project;
+    if (createdProject.workflowState === "DRAFT" && createdProject.analysisStatus === "READY"
+      && isDevelopmentApprovalRequest(command.content)) {
+      await approveProjectDevelopment({
+        repository,
+        objectStore,
+        workspaceId: targetWorkspace.id,
+        project: createdProject,
+        requestedByAccountId: principal.user.id,
+      });
+      createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? createdProject;
+    }
     return Object.freeze({
       statusCode: 201,
       setWorkspaceCookie: true,
-      payload: Object.freeze({ workspace: selectedWorkspace, ...createdBundle }),
+      payload: Object.freeze({ workspace: selectedWorkspace, ...createdBundle, project: createdProject }),
     });
   }
 
@@ -1309,12 +1375,49 @@ async function processConversationMessage(input: Readonly<{
     assistantProjectDocument: agentReply.projectDocument,
     assistantMetadata: conversationAgentMetadata(agentReply),
   });
-  const updatedProject = await repository.readProject(workspace.id, projectId);
+  let updatedProject = await repository.readProject(workspace.id, projectId);
   if (!updatedProject) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
+  if (updatedProject.workflowState === "DRAFT" && updatedProject.analysisStatus === "READY"
+    && isDevelopmentApprovalRequest(command.content)) {
+    await approveProjectDevelopment({
+      repository,
+      objectStore,
+      workspaceId: workspace.id,
+      project: updatedProject,
+      requestedByAccountId: principal.user.id,
+    });
+    updatedProject = await repository.readProject(workspace.id, projectId) ?? updatedProject;
+  }
   return Object.freeze({
     statusCode: created ? 201 : 200,
     setWorkspaceCookie: false,
     payload: Object.freeze({ workspace, project: updatedProject, conversation }),
+  });
+}
+
+async function approveProjectDevelopment(input: Readonly<{
+  repository: CoreRepository;
+  objectStore: CoreObjectStore;
+  workspaceId: string;
+  project: ProductProjectDetail;
+  requestedByAccountId: string;
+}>): Promise<boolean> {
+  const specificationObject = await input.objectStore.putSpecification({
+    workspaceId: input.workspaceId,
+    projectId: input.project.id,
+    workflowId: input.project.workflowId,
+    specification: input.project.specification,
+  });
+  await input.repository.registerSpecificationArtifact({
+    workspaceId: input.workspaceId,
+    projectId: input.project.id,
+    workflowId: input.project.workflowId,
+    object: specificationObject,
+  });
+  return input.repository.appendSignal(input.workspaceId, input.project.workflowId, {
+    kind: "SPEC_APPROVED",
+    idempotencyKey: `spec-approved:${input.project.workflowId}`,
+    payload: { specificationObject, requestedByAccountId: input.requestedByAccountId },
   });
 }
 

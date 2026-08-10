@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   generateProductConversationReply,
+  isDevelopmentApprovalRequest,
   streamProductConversationReply,
 } from "../services/core/src/product-conversation";
 
@@ -16,6 +17,32 @@ const project = Object.freeze({
     categories: Object.freeze(["合作", "动作"]),
     features: Object.freeze(["十分钟一局"]),
   }),
+});
+
+test("explicit development commands approve while discussions and negative commands do not", () => {
+  for (const command of [
+    "执行",
+    "开始开发",
+    "继续开发",
+    "按照当前需求开发",
+    "帮我实现这个需求",
+    "让 Agent 按照当前需求执行",
+    "先做新手引导与前 10 回合反馈层次",
+    "需求没问题，就按这个方案开始开发",
+    "Go ahead and implement it",
+    "Let's start building",
+    "Have the agent implement the current requirements",
+  ]) assert.equal(isDevelopmentApprovalRequest(command), true, command);
+
+  for (const discussion of [
+    "我想做一款合作游戏",
+    "不要开始开发",
+    "先别执行，继续讨论",
+    "如果现在开始开发，会发生什么？",
+    "可以开始执行吗？",
+    "What happens if we start building?",
+    "Do not implement this yet",
+  ]) assert.equal(isDevelopmentApprovalRequest(discussion), false, discussion);
 });
 
 test("Claude design Agent receives project context and conversation history", async () => {
@@ -64,8 +91,10 @@ test("Claude design Agent receives project context and conversation history", as
 
   assert.equal(requestedUrl, "https://provider.example/v1/messages");
   assert.equal(requestedBody.model, "claude-primary");
+  assert.equal(requestedBody.max_tokens, 4_000);
   assert.match(String(requestedBody.system), /星港维修队/);
   assert.match(String(requestedBody.system), /十分钟一局/);
+  assert.match(String(requestedBody.system), /projectDocumentPatch/);
   assert.deepEqual((requestedBody.messages as { role: string; content: string }[]).map(message => message.role), [
     "user", "assistant", "user",
   ]);
@@ -116,8 +145,8 @@ test("Codex design Agent uses Responses API and cannot mutate a locked workflow"
   assert.equal(result.runtime, "CODEX_CLI");
 });
 
-test("draft conversations reject replies that omit the synchronized project document", async () => {
-  await assert.rejects(() => generateProductConversationReply({
+test("draft conversations allow exploratory replies without repeating the project document", async () => {
+  const result = await generateProductConversationReply({
     userContent: "给我三个玩法方向",
     history: Object.freeze([]),
     project,
@@ -138,7 +167,110 @@ test("draft conversations reject replies that omit the synchronized project docu
     fetchImpl: async () => new Response(JSON.stringify({
       content: [{ type: "text", text: "可以从分工、资源冲突和限时事件三个方向探索。" }],
     }), { status: 200, headers: { "content-type": "application/json" } }),
-  }), /未返回完整项目说明/);
+  });
+  assert.equal(result.content, "可以从分工、资源冲突和限时事件三个方向探索。");
+  assert.equal(result.applyToDraft, false);
+  assert.equal(result.projectDocument, null);
+});
+
+test("draft conversations merge a project document patch with the current document", async () => {
+  const result = await generateProductConversationReply({
+    userContent: "把每局时间调整为十五分钟",
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: true,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example",
+      models: Object.freeze({
+        primary: "claude-primary",
+        opus: "claude-opus",
+        sonnet: "claude-sonnet",
+        haiku: "claude-haiku",
+        subagent: "claude-subagent",
+      }),
+      revision: 1,
+    }),
+    apiKey: "sk-test-secret",
+    fetchImpl: async () => new Response(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify({
+        reply: "已将单局时长调整为十五分钟，并同步到项目说明。",
+        options: [],
+        applyToDraft: true,
+        readyForDevelopment: true,
+        projectDocumentPatch: {
+          gameplay: "分工处理火灾、电力和导航故障，每局十五分钟。",
+          features: ["十五分钟一局"],
+        },
+      }) }],
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  assert.equal(result.applyToDraft, true);
+  assert.deepEqual(result.projectDocument, {
+    introduction: project.document.introduction,
+    gameplay: "分工处理火灾、电力和导航故障，每局十五分钟。",
+    categories: project.document.categories,
+    features: ["十五分钟一局"],
+  });
+});
+
+test("draft conversations reject an asserted mutation without a document patch", async () => {
+  await assert.rejects(() => generateProductConversationReply({
+    userContent: "把每局时间调整为十五分钟",
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: true,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example",
+      models: Object.freeze({
+        primary: "claude-primary",
+        opus: "claude-opus",
+        sonnet: "claude-sonnet",
+        haiku: "claude-haiku",
+        subagent: "claude-subagent",
+      }),
+      revision: 1,
+    }),
+    apiKey: "sk-test-secret",
+    fetchImpl: async () => new Response(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify({
+        reply: "已调整。",
+        applyToDraft: true,
+        readyForDevelopment: true,
+        projectDocumentPatch: null,
+      }) }],
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  }), /未返回有效的项目说明增量/);
+});
+
+test("design Agent provider failures use a resettable idle timeout with a clear error", async () => {
+  await assert.rejects(() => generateProductConversationReply({
+    userContent: "继续完善新手引导",
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: true,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example",
+      models: Object.freeze({
+        primary: "claude-primary",
+        opus: "claude-opus",
+        sonnet: "claude-sonnet",
+        haiku: "claude-haiku",
+        subagent: "claude-subagent",
+      }),
+      revision: 1,
+    }),
+    apiKey: "sk-test-secret",
+    providerIdleTimeoutMs: 20,
+    fetchImpl: async (_url, init) => await new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return reject(new Error("missing request signal"));
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+  }), /设计 Agent 超过 1 秒未返回数据，请重试/);
 });
 
 test("malformed JSON newlines never leak the reply envelope into chat", async () => {

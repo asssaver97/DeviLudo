@@ -64,8 +64,8 @@ try {
   // config, so a fully cached rebuild still yields a new image id. Nothing reads that
   // provenance, and a stable id keeps the allowlist below matching across runs.
   await runDocker([
-    ...compose, "--profile", "images", "build",
-    "agent-fixture-image", "e2e-macos-image",
+    ...compose, "--profile", "images", "--profile", "init", "build",
+    "agent-fixture-image", "e2e-macos-image", "migrate",
   ], { ...environment, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" }, 10 * 60_000);
   const [fixtureImage, e2eImage] = await Promise.all([
     inspectImage("deviludo-agent-fixture:local", environment),
