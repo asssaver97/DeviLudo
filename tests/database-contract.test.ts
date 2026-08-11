@@ -316,6 +316,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.claim_asset_generation\(integer, integer\) TO deviludo_scheduler/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.fail_asset_generation\(uuid, uuid, text\) TO deviludo_scheduler/);
   assert.match(sql, /GRANT SELECT ON deviludo\.instance_image_generation_settings TO deviludo_scheduler/);
+  assert.match(sql, /GRANT SELECT ON deviludo\.instance_image_generation_settings TO deviludo_sandbox/);
   // These sweep every workspace, so they are definer functions owned by the role
   // that bypasses row-level security.
   for (const definer of [claim, complete, fail]) {

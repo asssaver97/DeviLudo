@@ -3,3 +3,4 @@
 -- functions, so upgraded databases need the same fail-closed privilege set as
 -- fresh databases.
 REVOKE ALL ON FUNCTION deviludo.claim_project_import_analysis(integer) FROM PUBLIC;
+

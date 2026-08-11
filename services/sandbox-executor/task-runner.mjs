@@ -55,7 +55,6 @@ async function runAgent(plan) {
   emitProgress("PHASE", "正在读取已批准的项目需求与现有源码");
   const configuration = plan.agentConfiguration;
   if (!configuration) throw new Error("Agent configuration is required");
-  const apiKey = (await readFile("/run/deviludo/provider.key", "utf8")).trim();
   let specification;
   try {
     specification = JSON.parse(await readFile("/workspace/inputs/specification.json", "utf8"));
@@ -71,6 +70,9 @@ async function runAgent(plan) {
     emitProgress("PHASE", "现有项目源码已展开，Agent 正在分析工程结构");
   }
   const restoredCheckpoint = await exists("/workspace/inputs/checkpoint.tar.gz");
+  const checkpointMetadata = restoredCheckpoint
+    ? await readCheckpointMetadata()
+    : null;
   if (restoredCheckpoint) {
     await command("tar", ["-xzf", "/workspace/inputs/checkpoint.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "上次尝试的源码检查点已恢复，Agent 将从现有成果继续");
@@ -101,6 +103,13 @@ async function runAgent(plan) {
     "The result must run headlessly and expose a deterministic smoke-test path.",
     "Godot and Python may be absent from this Agent container. Do not search for or install them, and do not treat their absence as a failure. The next controlled builder stage performs real Godot validation; use Node-based static checks here when useful.",
     "Prioritize a complete playable vertical slice, required files, and deterministic tests before optional polish.",
+    "Implement the current revision notes and missing behavior without re-auditing unrelated code that is already complete.",
+    "Do not spawn subagents, background agents, background tasks, or delegated code reviews. Work directly with the available file and shell tools.",
+    "Run at most one bounded static validation pass. The controlled Builder and E2E stages perform the exhaustive runtime validation, so finish once the requested source and manifests are complete.",
+    ...(restoredCheckpoint ? [
+      "A source checkpoint from an interrupted attempt is already restored. Continue only the interrupted implementation; do not start a general project audit, add unrelated improvements, invent new validators, or rewrite documentation outside the current requirement.",
+      "Treat completed checkpoint files as authoritative. Inspect only the files needed to finish the interrupted requirement, run one existing bounded static check, update the required manifests, and finish immediately.",
+    ] : []),
     "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it.",
     "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
     "",
@@ -157,10 +166,25 @@ async function runAgent(plan) {
     ] : []),
     `Specification: ${JSON.stringify(specification)}`,
   ].join("\n");
-  const environment = { ...safeEnvironment(), ...configuration.environment };
-  emitProgress("PHASE", "Agent 正在编写并验证游戏项目");
-  await runGenerationAgent(configuration, environment, prompt, emitAgentOutput, apiKey);
-  flushAgentOutput();
+  const completedCheckpoint = checkpointMetadata?.state === "AGENT_COMPLETE"
+    && checkpointMetadata.originJobId === plan.job.jobId;
+  if (completedCheckpoint) {
+    emitProgress("PHASE", "已恢复本任务完成的 Agent 检查点，跳过重复模型调用");
+  } else {
+    const apiKey = (await readFile("/run/deviludo/provider.key", "utf8")).trim();
+    const environment = { ...safeEnvironment(), ...configuration.environment };
+    emitProgress("PHASE", "Agent 正在编写并验证游戏项目");
+    await runGenerationAgent(
+      configuration,
+      environment,
+      prompt,
+      emitAgentOutput,
+      apiKey,
+      plan.job.jobId,
+      plan.job.timeoutSeconds,
+    );
+    flushAgentOutput();
+  }
   // The CLI stdout is an event stream (Codex JSONL or Claude stream-json), not
   // the agent.json contract. Upload the file the Agent wrote into the generated
   // source so Core can ingest its test and asset manifests from the trusted,
@@ -171,6 +195,19 @@ async function runAgent(plan) {
   await manifest([
     { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
   ]);
+}
+
+async function readCheckpointMetadata() {
+  try {
+    const value = JSON.parse(await readFile("/workspace/inputs/checkpoint.json", "utf8"));
+    if (value?.schemaVersion !== "deviludo.source-checkpoint.v1"
+      || !["PARTIAL", "AGENT_COMPLETE"].includes(value.state)
+      || typeof value.originJobId !== "string") return null;
+    return value;
+  } catch {
+    // Legacy checkpoints have no metadata and remain valid partial source.
+    return null;
+  }
 }
 
 async function readGeneratedAgentManifest() {
@@ -217,7 +254,7 @@ function validPlannedAsset(item) {
     && (item.dimensions == null || (typeof item.dimensions === "string" && /^[0-9]{1,5}x[0-9]{1,5}$/.test(item.dimensions)));
 }
 
-async function runGenerationAgent(configuration, environment, prompt, onOutput, apiKey) {
+async function runGenerationAgent(configuration, environment, prompt, onOutput, apiKey, jobId, timeoutSeconds) {
   if (configuration.runtime === "CLAUDE_CODE") environment.ANTHROPIC_AUTH_TOKEN = apiKey;
   else {
     environment.CODEX_API_KEY = apiKey;
@@ -234,45 +271,56 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     ].join("\n"), { mode: 0o600 });
   }
 
+  const deadline = Date.now() + Math.max(60_000, Math.min(80 * 60_000, (timeoutSeconds - 600) * 1_000));
   let lastError;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const continuation = attempt === 1 ? prompt : [
-      "Continue from the files already present in /workspace/project after a transient Provider or CLI interruption.",
-      "Inspect the existing work first, preserve completed functionality, and finish only the missing validation and required files. Do not restart the project from scratch.",
-      prompt,
-    ].join("\n");
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const resumedClaude = configuration.runtime === "CLAUDE_CODE" && attempt > 1;
+    const continuation = attempt === 1 ? prompt : resumedClaude
+      ? "Resume from the current session and files. Finish only the remaining requested implementation and one bounded validation pass. Do not restart analysis or spawn background agents."
+      : [
+        "Continue from the files already present in /workspace/project after a transient Provider or CLI interruption.",
+        "Inspect the existing work first, preserve completed functionality, and finish only the missing validation and required files. Do not restart the project from scratch.",
+        prompt,
+      ].join("\n");
     const executable = configuration.runtime === "CLAUDE_CODE" ? "claude" : "codex";
     const arguments_ = configuration.runtime === "CLAUDE_CODE"
-      ? claudeGenerationArguments(configuration, continuation)
+      ? claudeGenerationArguments(configuration, continuation, jobId, resumedClaude)
       : ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-C", "/workspace/project", "-"];
     try {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
       return await command(
         executable,
         arguments_,
         environment,
         configuration.runtime === "CODEX_CLI" ? continuation : undefined,
         onOutput,
-        { idleTimeoutMs: 8 * 60_000 },
+        { idleTimeoutMs: 8 * 60_000, overallTimeoutMs: remaining },
       );
     } catch (error) {
       flushAgentOutput();
       lastError = error instanceof Error ? error : new Error("Agent CLI failed");
-      if (attempt === 3 || !recoverableAgentFailure(lastError.message)) throw lastError;
-      const delaySeconds = attempt === 1 ? 5 : 15;
-      emitProgress("PHASE", `Provider 或 Agent CLI 暂时中断；已保留当前文件，${delaySeconds} 秒后继续（${attempt + 1}/3）`);
+      const failure = classifyAgentFailure(lastError.message);
+      if (attempt === 2 || !failure.recoverable) {
+        throw new Error(`Agent CLI failed [${failure.code}]: ${failure.detail}`);
+      }
+      const delaySeconds = 5;
+      emitProgress("PHASE", `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（2/2）`);
       await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
     }
   }
   throw lastError ?? new Error("Agent CLI failed");
 }
 
-function claudeGenerationArguments(configuration, prompt) {
+function claudeGenerationArguments(configuration, prompt, sessionId, resume) {
   const arguments_ = [
-    "-p", "--no-session-persistence", "--disable-slash-commands",
-    "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--max-turns", "60",
-    "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
+    "-p", "--disable-slash-commands",
+    "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--max-turns", "100",
+    "--tools", "Read,Write,Edit,Glob,Grep,Bash",
+    "--disallowedTools", "Agent,Task",
     "--dangerously-skip-permissions",
   ];
+  arguments_.push(resume ? "--resume" : "--session-id", sessionId);
   const primary = configuration.models?.primary;
   const fallbacks = [configuration.models?.sonnet, configuration.models?.haiku, configuration.models?.opus]
     .filter((model, index, models) => typeof model === "string" && model !== primary && models.indexOf(model) === index);
@@ -281,9 +329,21 @@ function claudeGenerationArguments(configuration, prompt) {
   return arguments_;
 }
 
-function recoverableAgentFailure(message) {
-  if (/\b(?:401|403)\b|invalid api key|authentication|unauthorized|forbidden/i.test(message)) return false;
-  return /api error|timed? out|timeout|stalled without output|rate.?limit|overload|temporar|unavailable|connection|econn|socket|fetch failed|maximum turns|max turns|cli exited without a diagnostic/i.test(message);
+function classifyAgentFailure(message) {
+  const detail = sanitizeError(message.replace(/^claude exited [^:]+:\s*/i, "").replace(/^codex exited [^:]+:\s*/i, ""));
+  if (/\b(?:401|403)\b|invalid api key|authentication|unauthorized|forbidden/i.test(detail)) {
+    return { code: "AUTH_ERROR", detail, recoverable: false };
+  }
+  if (/maximum[ _-]?turns|max[ _-]?turns/i.test(detail)) return { code: "MAX_TURNS", detail, recoverable: true };
+  if (/stalled without output/i.test(detail)) return { code: "IDLE_TIMEOUT", detail, recoverable: true };
+  if (/deadline exceeded|task container exceeded|timed? out|timeout/i.test(detail)) return { code: "DEADLINE_EXCEEDED", detail, recoverable: true };
+  if (/self error/i.test(detail)) return { code: "SELF_ERROR", detail, recoverable: true };
+  if (/background tasks still running/i.test(detail)) return { code: "BACKGROUND_TASK_WAIT", detail, recoverable: true };
+  if (/api error|rate.?limit|overload|temporar|unavailable|connection|econn|socket|fetch failed/i.test(detail)) {
+    return { code: "PROVIDER_ERROR", detail, recoverable: true };
+  }
+  if (/cli exited without a diagnostic/i.test(detail)) return { code: "CLI_ERROR", detail, recoverable: true };
+  return { code: "CLI_ERROR", detail, recoverable: false };
 }
 
 async function runProjectDocumentMaintenance(plan) {
@@ -330,7 +390,8 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
     return command("claude", [
       "-p", "--no-session-persistence", "--disable-slash-commands",
       "--output-format", "json", "--max-turns", "12",
-      "--allowedTools", "Read,Write,Edit,Glob,Grep",
+      "--tools", "Read,Write,Edit,Glob,Grep",
+      "--disallowedTools", "Agent,Task",
       "--dangerously-skip-permissions", prompt,
     ], environment);
   }
@@ -496,25 +557,37 @@ async function command(executable, arguments_, env, stdin, onStdout, options = {
   if (stdin) child.stdin.end(stdin); else child.stdin.end();
   const stdout = [];
   const stderr = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
   const progressDecoder = new StringDecoder("utf8");
   let progressBuffer = "";
   let inactivityError = null;
   let inactivityTimer = null;
+  let overallTimer = null;
   let forceKillTimer = null;
+  const terminate = error => {
+    if (inactivityError) return;
+    inactivityError = error;
+    child.kill("SIGTERM");
+    forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+  };
   const resetInactivityTimer = () => {
     if (!options.idleTimeoutMs || inactivityError) return;
     if (inactivityTimer) clearTimeout(inactivityTimer);
     inactivityTimer = setTimeout(() => {
-      inactivityError = new Error(`${executable} stalled without output for ${Math.round(options.idleTimeoutMs / 60_000)} minutes`);
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      terminate(new Error(`${executable} stalled without output for ${Math.round(options.idleTimeoutMs / 60_000)} minutes`));
     }, options.idleTimeoutMs);
   };
   resetInactivityTimer();
+  if (options.overallTimeoutMs) {
+    overallTimer = setTimeout(() => terminate(new Error(`${executable} deadline exceeded after 80 minutes`)), options.overallTimeoutMs);
+  }
   child.stdout.on("data", chunk => {
     resetInactivityTimer();
     const data = Buffer.from(chunk);
     stdout.push(data);
+    stdoutBytes += data.length;
+    if (onStdout) stdoutBytes = trimBufferedTail(stdout, stdoutBytes, 2 * 1024 * 1024);
     if (!onStdout) return;
     progressBuffer += progressDecoder.write(data);
     const lines = progressBuffer.split(/\r?\n/);
@@ -523,13 +596,17 @@ async function command(executable, arguments_, env, stdin, onStdout, options = {
   });
   child.stderr.on("data", chunk => {
     resetInactivityTimer();
-    stderr.push(Buffer.from(chunk));
+    const data = Buffer.from(chunk);
+    stderr.push(data);
+    stderrBytes += data.length;
+    stderrBytes = trimBufferedTail(stderr, stderrBytes, 2 * 1024 * 1024);
   });
   const result = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
   if (inactivityTimer) clearTimeout(inactivityTimer);
+  if (overallTimer) clearTimeout(overallTimer);
   if (forceKillTimer) clearTimeout(forceKillTimer);
   progressBuffer += progressDecoder.end();
   if (onStdout && progressBuffer.trim()) onStdout(progressBuffer);
@@ -541,12 +618,35 @@ async function command(executable, arguments_, env, stdin, onStdout, options = {
   return { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") };
 }
 
+function trimBufferedTail(chunks, total, maximum) {
+  while (total > maximum && chunks.length > 1) total -= chunks.shift().length;
+  if (total > maximum && chunks.length === 1) {
+    chunks[0] = chunks[0].subarray(total - maximum);
+    return maximum;
+  }
+  return total;
+}
+
 function commandFailureDiagnostic(executable, stdout, stderr) {
-  const direct = stderr.trim();
-  if (direct) return sanitizeError(direct);
-  const errorEvent = stdout.split(/\r?\n/).reverse().map(agentEventText)
-    .find(event => event && /api error|error|timed? out|timeout|rate.?limit|overload|unavailable|connection|maximum turns|max turns/i.test(event.text));
-  return errorEvent ? sanitizeError(errorEvent.text) : `${executable} CLI exited without a diagnostic`;
+  const diagnostic = [...stderr.split(/\r?\n/), ...stdout.split(/\r?\n/)]
+    .reverse()
+    .map(agentDiagnosticText)
+    .find(Boolean);
+  return diagnostic ? sanitizeError(diagnostic) : `${executable} CLI exited without a diagnostic`;
+}
+
+function agentDiagnosticText(line) {
+  const value = line.trim();
+  if (!value) return null;
+  try {
+    const event = JSON.parse(value);
+    const candidates = [event.error, event.result, event.message, event.reason, event.subtype]
+      .filter(candidate => typeof candidate === "string");
+    return candidates.find(candidate => /api error|error|timed? out|timeout|rate.?limit|overload|unavailable|connection|maximum[ _-]?turns|max[ _-]?turns|background tasks/i.test(candidate)) ?? null;
+  } catch {
+    if (value.length <= 1_000 && !value.startsWith("{")) return value;
+    return null;
+  }
 }
 
 async function exists(path) {

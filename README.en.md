@@ -55,6 +55,8 @@ npm run local:reset    # Stop services and remove local data
 
 The first image build may take several minutes. Later `local:up` runs reuse images, migrations, bootstrap state, and the native macOS E2E process.
 
+The Agent runs one task at a time by default for Docker environments around 8 GiB. On a larger machine, set `DEVILUDO_SANDBOX_CONCURRENCY=2` before startup to process two Core tasks concurrently; this increases memory use and Provider traffic, and only `1` or `2` is accepted.
+
 ## Production deployment
 
 Production uses five server pools:

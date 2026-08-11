@@ -12,6 +12,7 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(compose, /core-api:[\s\S]*127\.0\.0\.1:\$\{DEVILUDO_CORE_HOST_PORT:-8080\}:8080/);
   assert.match(compose, /DEVILUDO_CLAUDE_CODE_VERSION/);
   assert.match(compose, /DEVILUDO_CODEX_CLI_VERSION/);
+  assert.match(compose, /DEVILUDO_SANDBOX_CONCURRENCY: \$\{DEVILUDO_SANDBOX_CONCURRENCY:-1\}/);
   assert.match(compose, /project-sources-init:[\s\S]*cap_add: \["CHOWN", "FOWNER", "FSETID"\][\s\S]*chmod 2770 \/var\/lib\/deviludo-projects/);
   const webSection = compose.match(/\n  web:([\s\S]*?)\nnetworks:/)?.[1] ?? "";
   assert.doesNotMatch(webSection, /DATABASE_URL|VAULT|OBJECT_STORE|S3_/);
@@ -32,7 +33,7 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(localUp, /retainActiveJobRuntimeImages\(baseEnvironment\)/);
   assert.match(localUp, /state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(localUp, /deviludo-retained-job-runtime/);
-  assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\s*\.\.\.Object\.values\(JSON\.parse\(runtimeImages\)\), \.\.\.retainedJobRuntimeImages/);
+  assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\s*\.\.\.Object\.values\(JSON\.parse\(runtimeImages\)\), imageIds\["deviludo-agent-fixture:local"\], \.\.\.retainedJobRuntimeImages/);
   assert.match(localUp, /persistLocalComposeEnvironment\(environment\)/);
   assert.match(localUp, /DEVILUDO_DOCKER_GID/);
   assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);
@@ -48,6 +49,16 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);
   assert.match(localUp, /npm run local:reset:source-v1/);
   assert.doesNotMatch(compose, /deviludo-local-client(?:-secret)?/);
+});
+
+test("Core sandbox concurrency is bounded and assigns independent worker ids", async () => {
+  const [config, main] = await Promise.all([
+    readFile(new URL("../services/core/src/config.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/main.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(config, /DEVILUDO_SANDBOX_CONCURRENCY[\s\S]*?1,[\s\S]*?2,/);
+  assert.match(main, /Array\.from\(\{ length: config\.sandboxConcurrency \}/);
+  assert.match(main, /`\$\{baseWorkerId\}-\$\{index \+ 1\}`/);
 });
 
 test("the isolated E2E launcher maps the actual Docker socket group into executord", async () => {
@@ -107,14 +118,24 @@ test("successful E2E queues a safe host-side Git commit without pushing", async 
 test("Agent generation preserves partial work and retries transient Provider failures in place", async () => {
   const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
-  assert.match(runner, /attempt <= 3/);
+  assert.match(runner, /attempt <= 2/);
   assert.match(runner, /idleTimeoutMs: 8 \* 60_000/);
-  assert.match(runner, /recoverableAgentFailure/);
+  assert.match(runner, /classifyAgentFailure/);
+  assert.match(runner, /maximum\[ _-\]\?turns\|max\[ _-\]\?turns/);
+  assert.match(runner, /"--resume" : "--session-id"/);
+  assert.match(runner, /"--tools", "Read,Write,Edit,Glob,Grep,Bash"/);
+  assert.match(runner, /"--disallowedTools", "Agent,Task"/);
+  assert.match(runner, /Math\.min\(80 \* 60_000/);
+  assert.match(runner, /trimBufferedTail\(stdout, stdoutBytes, 2 \* 1024 \* 1024\)/);
   assert.match(runner, /checkpoint\.tar\.gz/);
+  assert.match(runner, /Continue only the interrupted implementation; do not start a general project audit/);
   assert.match(runner, /CLI exited without a diagnostic/);
   assert.match(daemon, /projectSources\.saveCheckpoint/);
   assert.match(daemon, /archiveCheckpoint\(plan\.job\.workspaceId, plan\.job\.projectId, plan\.job\.workflowId\)/);
   assert.match(daemon, /本次已保存/);
+  assert.match(daemon, /"AGENT_COMPLETE"/);
+  assert.match(daemon, /saveAgentCheckpoint\(taskName, plan, "PARTIAL"/);
+  assert.match(daemon, /LOCAL_PROJECT_CHANGED/);
 });
 
 test("Core waits for the sandbox executor before claiming jobs", async () => {
@@ -210,9 +231,10 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   const taskRunner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
   assert.match(taskRunner, /readFile\("\/workspace\/inputs\/specification\.json"/);
   assert.doesNotMatch(taskRunner, /Specification: \$\{JSON\.stringify\(plan\.job\.payload\)\}/);
-  assert.match(taskRunner, /"--no-session-persistence", "--disable-slash-commands"/);
+  assert.match(taskRunner, /"-p", "--disable-slash-commands"/);
   assert.match(taskRunner, /"--output-format", "stream-json", "--include-partial-messages"/);
-  assert.match(taskRunner, /"--max-turns", "60"/);
+  assert.match(taskRunner, /"--max-turns", "100"/);
+  assert.match(taskRunner, /"--disallowedTools", "Agent,Task"/);
   assert.match(taskRunner, /The next controlled builder stage performs real Godot validation/);
   assert.match(taskRunner, /prepareGodotProject\("\/workspace\/project", plan\.job\.payload\.targetPlatforms\)/);
   assert.match(taskRunner, /read \/run\/deviludo\/guidance\.ndjson/);

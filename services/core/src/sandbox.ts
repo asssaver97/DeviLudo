@@ -111,8 +111,9 @@ export async function runSandbox(
   config: CoreConfig,
   signal: AbortSignal,
   backend: SandboxBackend = new ProcessSandboxBackend(),
+  requestedWorkerId?: string,
 ): Promise<void> {
-  const workerId = process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
+  const workerId = requestedWorkerId ?? process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   let executorAvailable: boolean | null = null;
@@ -221,6 +222,16 @@ export async function runSandbox(
           executorReceipt: receipt,
         });
         if (!completed) throw new Error("Sandbox completion was rejected by fencing");
+        if (job.jobKind === "AGENT_GENERATION") {
+          await projectSources.deleteCheckpoint(job.workspaceId, job.projectId, job.workflowId).catch(error => {
+            console.error(JSON.stringify({
+              level: "error",
+              event: "sandbox_checkpoint_cleanup_failed",
+              jobId: job?.jobId,
+              message: error instanceof Error ? error.message : String(error),
+            }));
+          });
+        }
       } finally {
         clearInterval(heartbeat);
         if (guidance) clearInterval(guidance);

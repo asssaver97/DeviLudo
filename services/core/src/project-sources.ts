@@ -16,6 +16,11 @@ export type SourceCheckpoint = Readonly<{
   digest: string;
   fileCount: number;
   totalBytes: number;
+  state: "PARTIAL" | "AGENT_COMPLETE";
+  originJobId: string | null;
+  specificationDigest: string | null;
+  sourceDigest: string | null;
+  localDirectoryBaseDigest: string | null;
 }>;
 
 export class ProjectSourceStore {
@@ -38,7 +43,7 @@ export class ProjectSourceStore {
     const digest = sourceDigest(files);
     const project = this.projectPath(input.workspaceId, input.projectId);
     const revisions = join(project, "revisions");
-    const stagingRoot = join(project, ".staging");
+    const stagingRoot = join(project, ".staging", "publish");
     await ensureProjectTree(this.root, input.workspaceId, input.projectId);
     const lock = join(project, ".source-write.lock");
     await acquireSourceLock(lock);
@@ -131,6 +136,11 @@ export class ProjectSourceStore {
     projectId: string;
     workflowId: string;
     files: readonly SourceFile[];
+    state?: "PARTIAL" | "AGENT_COMPLETE";
+    originJobId?: string | null;
+    specificationDigest?: string | null;
+    sourceDigest?: string | null;
+    localDirectoryBaseDigest?: string | null;
   }>): Promise<SourceCheckpoint> {
     assertIdentity(input.workspaceId, "workspace");
     assertIdentity(input.projectId, "project");
@@ -141,7 +151,10 @@ export class ProjectSourceStore {
     const checkpoints = join(project, ".staging", "checkpoints");
     await ensureSharedDirectory(checkpoints);
     const target = join(checkpoints, input.workflowId);
+    const metadata = join(checkpoints, `${input.workflowId}.json`);
     const staging = join(checkpoints, `.${input.workflowId}-${randomUUID()}`);
+    const stagingMetadata = join(checkpoints, `.${input.workflowId}-${randomUUID()}.json`);
+    const details = checkpointDetails(files, checkpointMetadata(input));
     await ensureSharedDirectory(staging);
     try {
       for (const file of files) {
@@ -150,11 +163,22 @@ export class ProjectSourceStore {
         await ensureSharedParents(staging, dirname(output));
         await writeFile(output, file.bytes, { flag: "wx", mode: SOURCE_FILE_MODE });
       }
+      await writeFile(stagingMetadata, `${JSON.stringify({
+        schemaVersion: "deviludo.source-checkpoint.v1",
+        state: details.state,
+        originJobId: details.originJobId,
+        specificationDigest: details.specificationDigest,
+        sourceDigest: details.sourceDigest,
+        localDirectoryBaseDigest: details.localDirectoryBaseDigest,
+      })}\n`, { flag: "wx", mode: SOURCE_FILE_MODE });
       await rm(target, { recursive: true, force: true });
       await rename(staging, target);
-      return checkpointDetails(files);
+      await rm(metadata, { force: true });
+      await rename(stagingMetadata, metadata);
+      return details;
     } catch (error) {
       await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      await rm(stagingMetadata, { force: true }).catch(() => undefined);
       throw error;
     }
   }
@@ -168,10 +192,17 @@ export class ProjectSourceStore {
     assertIdentity(projectId, "project");
     assertIdentity(workflowId, "workflow");
     const checkpoint = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", workflowId);
+    const metadata = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", `${workflowId}.json`);
     assertWithin(this.root, checkpoint);
     try {
       const files = await readSourceFiles(checkpoint);
-      return Object.freeze({ bytes: createTarGzip(files), ...checkpointDetails(files) });
+      let stored: ReturnType<typeof checkpointMetadata> | null = null;
+      try {
+        stored = parseCheckpointMetadata(JSON.parse(await readFile(metadata, "utf8")));
+      } catch (error) {
+        if (!isMissing(error) && !(error instanceof SyntaxError)) throw error;
+      }
+      return Object.freeze({ bytes: createTarGzip(files), ...checkpointDetails(files, stored ?? checkpointMetadata({})) });
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
@@ -183,8 +214,10 @@ export class ProjectSourceStore {
     assertIdentity(projectId, "project");
     assertIdentity(workflowId, "workflow");
     const checkpoint = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", workflowId);
+    const metadata = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", `${workflowId}.json`);
     assertWithin(this.root, checkpoint);
     await rm(checkpoint, { recursive: true, force: true });
+    await rm(metadata, { force: true });
   }
 
   /**
@@ -234,7 +267,7 @@ export class ProjectSourceStore {
   async cleanupStaging(workspaceId: string, projectId: string): Promise<void> {
     const project = this.projectPath(workspaceId, projectId);
     await ensureProjectTree(this.root, workspaceId, projectId);
-    const staging = join(project, ".staging");
+    const staging = join(project, ".staging", "publish");
     assertWithin(this.root, staging);
     await rm(staging, { recursive: true, force: true });
     await ensureSharedDirectory(staging);
@@ -296,8 +329,51 @@ function sumBytes(files: readonly SourceFile[]): number {
   return files.reduce((total, file) => total + file.bytes.length, 0);
 }
 
-function checkpointDetails(files: readonly SourceFile[]): SourceCheckpoint {
-  return Object.freeze({ digest: sourceDigest(files), fileCount: files.length, totalBytes: sumBytes(files) });
+function checkpointDetails(
+  files: readonly SourceFile[],
+  metadata: ReturnType<typeof checkpointMetadata>,
+): SourceCheckpoint {
+  return Object.freeze({ digest: sourceDigest(files), fileCount: files.length, totalBytes: sumBytes(files), ...metadata });
+}
+
+function checkpointMetadata(input: Readonly<{
+  state?: "PARTIAL" | "AGENT_COMPLETE";
+  originJobId?: string | null;
+  specificationDigest?: string | null;
+  sourceDigest?: string | null;
+  localDirectoryBaseDigest?: string | null;
+}>): Readonly<Omit<SourceCheckpoint, "digest" | "fileCount" | "totalBytes">> {
+  const state = input.state ?? "PARTIAL";
+  const originJobId = input.originJobId ?? null;
+  const specificationDigest = input.specificationDigest ?? null;
+  const baseSourceDigest = input.sourceDigest ?? null;
+  const localDirectoryBaseDigest = input.localDirectoryBaseDigest ?? null;
+  if (![originJobId].every(value => value === null || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value))) {
+    throw new Error("Source checkpoint job identity is invalid");
+  }
+  if (![specificationDigest, baseSourceDigest, localDirectoryBaseDigest]
+    .every(value => value === null || /^sha256:[0-9a-f]{64}$/.test(value))) {
+    throw new Error("Source checkpoint digest metadata is invalid");
+  }
+  return Object.freeze({ state, originJobId, specificationDigest, sourceDigest: baseSourceDigest, localDirectoryBaseDigest });
+}
+
+function parseCheckpointMetadata(value: unknown): ReturnType<typeof checkpointMetadata> {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || (value as Record<string, unknown>).schemaVersion !== "deviludo.source-checkpoint.v1") {
+    throw new Error("Source checkpoint metadata is invalid");
+  }
+  const metadata = value as Record<string, unknown>;
+  if (!['PARTIAL', 'AGENT_COMPLETE'].includes(String(metadata.state))) {
+    throw new Error("Source checkpoint state is invalid");
+  }
+  return checkpointMetadata({
+    state: metadata.state as "PARTIAL" | "AGENT_COMPLETE",
+    originJobId: typeof metadata.originJobId === "string" ? metadata.originJobId : null,
+    specificationDigest: typeof metadata.specificationDigest === "string" ? metadata.specificationDigest : null,
+    sourceDigest: typeof metadata.sourceDigest === "string" ? metadata.sourceDigest : null,
+    localDirectoryBaseDigest: typeof metadata.localDirectoryBaseDigest === "string" ? metadata.localDirectoryBaseDigest : null,
+  });
 }
 
 async function resetStagingRoot(stagingRoot: string): Promise<void> {
@@ -334,6 +410,8 @@ async function ensureProjectTree(root: string, workspaceId: string, projectId: s
     join(root, "workspaces", workspaceId, "projects", projectId),
     join(root, "workspaces", workspaceId, "projects", projectId, "revisions"),
     join(root, "workspaces", workspaceId, "projects", projectId, ".staging"),
+    join(root, "workspaces", workspaceId, "projects", projectId, ".staging", "publish"),
+    join(root, "workspaces", workspaceId, "projects", projectId, ".staging", "checkpoints"),
   ];
   for (const directory of directories) {
     assertWithin(root, directory);

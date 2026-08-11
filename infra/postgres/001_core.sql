@@ -72,7 +72,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '013_local_git_commit_after_e2e');
+VALUES (true, '001', 'deviludo-core-source-v1', '014_sandbox_image_generation_settings_privilege');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -2615,6 +2615,9 @@ GRANT SELECT, INSERT, UPDATE ON
 -- an ordinary pooled read before calling out, so the scheduler reads this row
 -- directly rather than through a definer function.
 GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_scheduler;
+-- complete_job is SECURITY INVOKER and Agent generation is completed by the
+-- sandbox role, which checks whether automatic image generation is configured.
+GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_sandbox;
 GRANT SELECT, INSERT, UPDATE ON
   deviludo.projects, deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
   deviludo.project_documents, deviludo.project_document_revisions,

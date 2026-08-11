@@ -343,12 +343,17 @@ async function execute(
     const sourceRelativePath = typeof plan.job.payload.sourceRelativePath === "string"
       ? plan.job.payload.sourceRelativePath
       : null;
+    const specificationDigest = plan.job.inputObjects.find(input => input.kind === "SPECIFICATION")?.sha256 ?? null;
+    let inputSourceDigest = typeof plan.job.payload.sourceDigest === "string"
+      ? plan.job.payload.sourceDigest
+      : null;
     if (sourceRelativePath) {
       const localDirectoryBindingId = localBindingId(plan);
       if (localDirectoryBindingId) {
         const live = await readLocalProjectSource(localDirectoryBindingId);
         const files = parseSourceStream(live.source);
         localDirectoryBaseDigest = live.digest;
+        inputSourceDigest = live.digest;
         await writeFile(join(inputDirectory, "source.tar.gz"), createTarGzip(files), { mode: 0o600 });
         onProgress("PHASE", `已读取绑定目录中的 ${files.length} 个最新源码文件`);
       } else {
@@ -361,6 +366,22 @@ async function execute(
       ? await projectSources.archiveCheckpoint(plan.job.workspaceId, plan.job.projectId, plan.job.workflowId)
       : null;
     if (checkpoint) {
+      if (checkpoint.specificationDigest && checkpoint.specificationDigest !== specificationDigest) {
+        throw new Error("Agent checkpoint specification changed; refusing to restore stale source");
+      }
+      if (!localDirectoryBaseDigest && checkpoint.sourceDigest && inputSourceDigest && checkpoint.sourceDigest !== inputSourceDigest) {
+        throw new Error("Agent checkpoint source revision changed; refusing to restore stale source");
+      }
+      if (localDirectoryBaseDigest && checkpoint.localDirectoryBaseDigest) {
+        const completedForThisJob = checkpoint.state === "AGENT_COMPLETE"
+          && checkpoint.originJobId === plan.job.jobId;
+        const acceptedDigests = completedForThisJob
+          ? [checkpoint.localDirectoryBaseDigest, checkpoint.digest]
+          : [checkpoint.localDirectoryBaseDigest];
+        if (!acceptedDigests.includes(localDirectoryBaseDigest)) {
+          throw new Error("LOCAL_PROJECT_CHANGED: Local project changed after the Agent checkpoint was created");
+        }
+      }
       await writeFile(join(inputDirectory, "checkpoint.tar.gz"), checkpoint.bytes, { mode: 0o600 });
     }
     await docker(["start", taskName], 30_000);
@@ -373,7 +394,17 @@ async function execute(
     if (sourceRelativePath) await inject(taskName, "input:source.tar.gz", await readFile(join(inputDirectory, "source.tar.gz")));
     if (checkpoint) {
       await inject(taskName, "input:checkpoint.tar.gz", await readFile(join(inputDirectory, "checkpoint.tar.gz")));
-      onProgress("PHASE", `已恢复上次尝试保存的 ${checkpoint.fileCount} 个源码文件`);
+      await inject(taskName, "input:checkpoint.json", Buffer.from(JSON.stringify({
+        schemaVersion: "deviludo.source-checkpoint.v1",
+        state: checkpoint.state,
+        originJobId: checkpoint.originJobId,
+        specificationDigest: checkpoint.specificationDigest,
+        sourceDigest: checkpoint.sourceDigest,
+        localDirectoryBaseDigest: checkpoint.localDirectoryBaseDigest,
+      })));
+      onProgress("PHASE", checkpoint.state === "AGENT_COMPLETE" && checkpoint.originJobId === plan.job.jobId
+        ? `已恢复本任务完成的 ${checkpoint.fileCount} 个源码文件，将跳过重复生成`
+        : `已恢复上次尝试保存的 ${checkpoint.fileCount} 个源码文件`);
     }
     if (plan.agentConfiguration && plan.job.runtimeImage !== fixtureAgentImage) {
       await inject(taskName, "provider", await readFile(secretFile));
@@ -383,23 +414,26 @@ async function execute(
     }
     await inject(taskName, "ready", await readFile(readyFile));
     onProgress("PHASE", taskStartedMessage(plan.job.jobKind));
-    const taskResult = await waitForTaskResult(taskName, plan.job.timeoutSeconds * 1000, onProgress);
+    let taskResult: Awaited<ReturnType<typeof waitForTaskResult>>;
+    try {
+      taskResult = await waitForTaskResult(taskName, plan.job.timeoutSeconds * 1000, onProgress);
+    } catch (error) {
+      if (plan.job.jobKind === "AGENT_GENERATION") {
+        await saveAgentCheckpoint(taskName, plan, "PARTIAL", {
+          specificationDigest,
+          sourceDigest: inputSourceDigest,
+          localDirectoryBaseDigest,
+        }, onProgress).catch(() => undefined);
+      }
+      throw error;
+    }
     if (!taskResult.ok) {
       if (plan.job.jobKind === "AGENT_GENERATION") {
-        try {
-          const sourceStream = await dockerRead([
-            "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
-          ], 60_000, Number.MAX_SAFE_INTEGER);
-          const saved = await projectSources.saveCheckpoint({
-            workspaceId: plan.job.workspaceId,
-            projectId: plan.job.projectId,
-            workflowId: plan.job.workflowId,
-            files: parseSourceStream(sourceStream),
-          });
-          onProgress("PHASE", `本次已保存 ${saved.fileCount} 个源码文件；重试将从检查点继续`);
-        } catch {
-          // Empty or invalid partial output is never persisted as a trusted checkpoint.
-        }
+        await saveAgentCheckpoint(taskName, plan, "PARTIAL", {
+          specificationDigest,
+          sourceDigest: inputSourceDigest,
+          localDirectoryBaseDigest,
+        }, onProgress).catch(() => undefined);
       }
       await acknowledgeCollection(taskName, collectedFile);
       await docker(["wait", taskName], 10_000).catch(() => undefined);
@@ -415,6 +449,18 @@ async function execute(
         "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
       ], 60_000, Number.MAX_SAFE_INTEGER);
       const generatedFiles = parseSourceStream(sourceStream);
+      await projectSources.saveCheckpoint({
+        workspaceId: plan.job.workspaceId,
+        projectId: plan.job.projectId,
+        workflowId: plan.job.workflowId,
+        files: generatedFiles,
+        state: "AGENT_COMPLETE",
+        originJobId: plan.job.jobId,
+        specificationDigest,
+        sourceDigest: inputSourceDigest,
+        localDirectoryBaseDigest,
+      });
+      onProgress("PHASE", `已保存 ${generatedFiles.length} 个完成态源码文件，正在安全登记结果`);
       const localDirectoryBindingId = localBindingId(plan);
       if (localDirectoryBindingId) {
         if (!localDirectoryBaseDigest) throw new Error("Local project directory baseline is missing");
@@ -422,12 +468,6 @@ async function execute(
           await syncLocalProjectSource(localDirectoryBindingId, localDirectoryBaseDigest, sourceStream);
           onProgress("PHASE", `Agent 修改已安全写回绑定的本地项目目录`);
         } catch (error) {
-          await projectSources.saveCheckpoint({
-            workspaceId: plan.job.workspaceId,
-            projectId: plan.job.projectId,
-            workflowId: plan.job.workflowId,
-            files: generatedFiles,
-          }).catch(() => undefined);
           throw error;
         }
       }
@@ -478,6 +518,35 @@ async function execute(
     await rm(temporary, { recursive: true, force: true });
     await rm(secretDirectory, { recursive: true, force: true });
   }
+}
+
+async function saveAgentCheckpoint(
+  taskName: string,
+  plan: SandboxPlan,
+  state: "PARTIAL" | "AGENT_COMPLETE",
+  metadata: Readonly<{
+    specificationDigest: string | null;
+    sourceDigest: string | null;
+    localDirectoryBaseDigest: string | null;
+  }>,
+  onProgress: (kind: "PHASE" | "AGENT_OUTPUT", content: string) => void,
+) {
+  const sourceStream = await dockerRead([
+    "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-source",
+  ], 60_000, Number.MAX_SAFE_INTEGER);
+  const saved = await projectSources.saveCheckpoint({
+    workspaceId: plan.job.workspaceId,
+    projectId: plan.job.projectId,
+    workflowId: plan.job.workflowId,
+    files: parseSourceStream(sourceStream),
+    state,
+    originJobId: plan.job.jobId,
+    ...metadata,
+  });
+  onProgress("PHASE", state === "AGENT_COMPLETE"
+    ? `已保存 ${saved.fileCount} 个完成态源码文件，重试不会再次调用模型`
+    : `本次已保存 ${saved.fileCount} 个源码文件；重试将从检查点继续`);
+  return saved;
 }
 
 function taskStartedMessage(kind: SandboxPlan["job"]["jobKind"]): string {

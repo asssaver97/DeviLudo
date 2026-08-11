@@ -136,7 +136,7 @@ $rls$;
 -- Grants mirroring the baseline's. GRANT is idempotent, so these are unconditional.
 GRANT SELECT, INSERT, UPDATE ON deviludo.instance_image_generation_settings TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.asset_manifests, deviludo.asset_items TO deviludo_api;
-GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_scheduler;
+GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_scheduler, deviludo_sandbox;
 GRANT SELECT, INSERT, UPDATE ON deviludo.asset_manifests, deviludo.asset_items TO deviludo_sandbox;
 GRANT DELETE ON deviludo.asset_items TO deviludo_sandbox;
 GRANT SELECT, UPDATE ON deviludo.asset_items TO deviludo_claim_executor;

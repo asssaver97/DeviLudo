@@ -151,7 +151,7 @@ const environment = {
   DEVILUDO_CLAUDE_CODE_VERSION: claudeVersion ?? "NOT_INSTALLED",
   DEVILUDO_CODEX_CLI_VERSION: codexVersion ?? "NOT_INSTALLED",
   DEVILUDO_EXECUTOR_ALLOWED_IMAGES: [...new Set([
-    ...Object.values(JSON.parse(runtimeImages)), ...retainedJobRuntimeImages,
+    ...Object.values(JSON.parse(runtimeImages)), imageIds["deviludo-agent-fixture:local"], ...retainedJobRuntimeImages,
   ])].join(","),
   DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE: imageIds["deviludo-agent-fixture:local"],
   DEVILUDO_DOCKER_GID: dockerSocketGid,

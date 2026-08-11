@@ -95,14 +95,15 @@ test("a stale crashed writer is fenced and its uncommitted staging is discarded"
   const root=await mkdtemp(join(tmpdir(),"deviludo-source-recovery-"));
   try{
     const project=join(root,"workspaces",workspaceId,"projects",projectId);
-    await mkdir(join(project,"revisions"),{recursive:true});await mkdir(join(project,".staging","crashed"),{recursive:true});await writeFile(join(project,".staging","crashed","partial"),"partial");
+    await mkdir(join(project,"revisions"),{recursive:true});await mkdir(join(project,".staging","publish","crashed"),{recursive:true});await writeFile(join(project,".staging","publish","crashed","partial"),"partial");
     const lock=join(project,".source-write.lock");await mkdir(lock);const stale=new Date(Date.now()-20*60_000);await utimes(lock,stale,stale);
     const store=new ProjectSourceStore(root);await store.publishFiles({workspaceId,projectId,revision:1,files:[{path:"project.godot",bytes:Buffer.from("[application]\n")}]});
-    assert.deepEqual(await readdir(join(project,".staging")),[]);
+    assert.deepEqual(await readdir(join(project,".staging","publish")),[]);
+    assert.deepEqual(await readdir(join(project,".staging","checkpoints")),[]);
   }finally{await rm(root,{recursive:true,force:true});}
 });
 
-test("validated Agent checkpoints survive an attempt and disappear after source publication", async () => {
+test("validated Agent checkpoints survive source publication and carry completion metadata", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-source-checkpoint-"));
   try {
     const store = new ProjectSourceStore(root);
@@ -110,14 +111,32 @@ test("validated Agent checkpoints survive an attempt and disappear after source 
       { path: "project.godot", bytes: Buffer.from("[application]\n") },
       { path: "scripts/main.gd", bytes: Buffer.from("extends Node\n") },
     ];
-    const saved = await store.saveCheckpoint({ workspaceId, projectId, workflowId, files });
+    const sourceDigest = `sha256:${"a".repeat(64)}`;
+    const specificationDigest = `sha256:${"b".repeat(64)}`;
+    const saved = await store.saveCheckpoint({
+      workspaceId,
+      projectId,
+      workflowId,
+      files,
+      state: "AGENT_COMPLETE",
+      originJobId: "30000000-0000-4000-8000-000000000006",
+      sourceDigest,
+      specificationDigest,
+    });
     assert.equal(saved.fileCount, 2);
-    assert.equal((await store.archiveCheckpoint(workspaceId, projectId, workflowId))?.digest, saved.digest);
+    const restored = await store.archiveCheckpoint(workspaceId, projectId, workflowId);
+    assert.equal(restored?.digest, saved.digest);
+    assert.equal(restored?.state, "AGENT_COMPLETE");
+    assert.equal(restored?.originJobId, "30000000-0000-4000-8000-000000000006");
+    assert.equal(restored?.sourceDigest, sourceDigest);
+    assert.equal(restored?.specificationDigest, specificationDigest);
     await assert.rejects(
       store.saveCheckpoint({ workspaceId, projectId, workflowId, files: [{ path: ".env", bytes: Buffer.from("TOKEN=x") }] }),
       /forbidden credential/,
     );
     await store.publishFiles({ workspaceId, projectId, revision: 1, files });
+    assert.equal((await store.archiveCheckpoint(workspaceId, projectId, workflowId))?.digest, saved.digest);
+    await store.deleteCheckpoint(workspaceId, projectId, workflowId);
     assert.equal(await store.archiveCheckpoint(workspaceId, projectId, workflowId), null);
     await store.saveCheckpoint({ workspaceId, projectId, workflowId, files });
     await assert.rejects(
@@ -129,7 +148,9 @@ test("validated Agent checkpoints survive an attempt and disappear after source 
       }),
       /already published with different content/,
     );
-    assert.equal((await store.archiveCheckpoint(workspaceId, projectId, workflowId))?.digest, saved.digest);
+    const legacyCompatible = await store.archiveCheckpoint(workspaceId, projectId, workflowId);
+    assert.equal(legacyCompatible?.digest, saved.digest);
+    assert.equal(legacyCompatible?.state, "PARTIAL");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

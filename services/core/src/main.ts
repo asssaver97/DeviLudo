@@ -16,7 +16,12 @@ async function main(): Promise<void> {
   if (config.role === "api") return runApi(repository, database, config, controller.signal);
   try {
     if (config.role === "scheduler") await runScheduler(repository, config, controller.signal);
-    else await runSandbox(repository, config, controller.signal);
+    else {
+      const baseWorkerId = process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
+      await Promise.all(Array.from({ length: config.sandboxConcurrency }, (_, index) => (
+        runSandbox(repository, config, controller.signal, undefined, `${baseWorkerId}-${index + 1}`)
+      )));
+    }
   } finally {
     await database.close();
   }

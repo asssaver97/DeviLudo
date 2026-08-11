@@ -17,6 +17,7 @@ export type CoreConfig = Readonly<{
   pollMilliseconds: number;
   projectDocumentIdleSeconds: number;
   assetGenerationPollMilliseconds: number;
+  sandboxConcurrency: number;
   requiredReadyPools: readonly ServerPoolKind[];
   tlsCertificateFile: string | null;
   tlsKeyFile: string | null;
@@ -60,6 +61,12 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     3_600,
     "DEVILUDO_ASSET_GENERATION_POLL_SECONDS",
   ) * 1_000;
+  const sandboxConcurrency = parseInteger(
+    env.DEVILUDO_SANDBOX_CONCURRENCY ?? "1",
+    1,
+    2,
+    "DEVILUDO_SANDBOX_CONCURRENCY",
+  );
   const webToken = secretValue(env, "DEVILUDO_WEB_CORE_TOKEN");
   if (typedRole === "api" && env.NODE_ENV === "production" && webToken.length < 32) {
     throw new Error("The Web-to-Core token is required in production");
@@ -126,6 +133,7 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     pollMilliseconds,
     projectDocumentIdleSeconds,
     assetGenerationPollMilliseconds,
+    sandboxConcurrency,
     requiredReadyPools: Object.freeze(requiredReadyPools),
     tlsCertificateFile,
     tlsKeyFile,

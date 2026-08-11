@@ -97,6 +97,12 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.cleanup_expired_executor_state()", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.advance_asset_workflows(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.advance_asset_workflows(integer)", false);
+    const sandboxImageSettings = await sandbox.query(
+      "SELECT count(*)::integer AS count FROM deviludo.instance_image_generation_settings",
+    );
+    if (!Number.isInteger(sandboxImageSettings.rows[0]?.count)) {
+      throw new Error("Sandbox cannot read image generation settings required by complete_job");
+    }
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_local_git_commit(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_local_git_commit(integer)", false);
     await scheduler.query("SELECT deviludo.reconcile_p0_capacity()");

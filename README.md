@@ -55,6 +55,8 @@ npm run local:reset    # 停止服务并清空本地数据
 
 首次构建镜像可能需要数分钟；后续 `local:up` 会复用镜像、数据库迁移、初始化状态和 macOS E2E 进程。
 
+Agent 默认单任务运行以适配约 8 GiB 的 Docker 环境。资源充足时可在启动前设置 `DEVILUDO_SANDBOX_CONCURRENCY=2` 并行处理两个 Core 任务；这会提高内存占用和 Provider 调用量，允许值仅为 `1` 或 `2`。
+
 ## 生产部署
 
 生产环境由五类服务器池组成：

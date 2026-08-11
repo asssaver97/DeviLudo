@@ -27,7 +27,9 @@ await inService("core-api", `
 `);
 await inService("core-scheduler", `
   test "$(id -u)" = 1001
-  test ! -e /run/deviludo-vault
+  test -r /run/deviludo-vault/api.token
+  test ! -r /run/deviludo-vault/root.token
+  test ! -r /run/deviludo-vault/executor.token
   test ! -e /var/run/docker.sock
   test ! -w /app
   test -w /var/lib/deviludo-projects
