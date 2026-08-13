@@ -1,7 +1,9 @@
 import type {
   AgentModelConfiguration,
+  AgentRoleModelConfiguration,
   AgentRuntimeKind,
   ProductConversationMessage,
+  ProjectAgentRole,
   ProjectDocumentContent,
 } from "@/lib/product/contracts";
 import {
@@ -22,7 +24,12 @@ export type ConversationAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
   models: AgentModelConfiguration | null;
+  roleModels?: AgentRoleModelConfiguration;
   revision: number;
+}>;
+
+export type ProductConversationGroupReply = ProductConversationAgentReply & Readonly<{
+  agentRole: ProjectAgentRole;
 }>;
 
 export type ProductConversationAgentReply = Readonly<{
@@ -71,10 +78,11 @@ type ConversationReplyInput = Readonly<{
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   providerIdleTimeoutMs?: number;
+  agentRole?: ProjectAgentRole;
 }>;
 
 export async function generateProductConversationReply(input: ConversationReplyInput): Promise<ProductConversationAgentReply> {
-  const model = conversationModel(input.settings);
+  const model = conversationModel(input.settings, input.agentRole ?? "DESIGN");
   const fixture = process.env.NODE_ENV === "test"
     ? process.env.DEVILUDO_CONVERSATION_AGENT_TEST_RESPONSE?.trim()
     : "";
@@ -83,7 +91,7 @@ export async function generateProductConversationReply(input: ConversationReplyI
     return reply(input, model, parsed, input.allowDraftMutation);
   }
 
-  const system = systemPrompt(input.project, input.allowDraftMutation);
+  const system = systemPrompt(input.project, input.allowDraftMutation, input.agentRole ?? "DESIGN");
   const history = compactHistory(input.history);
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
@@ -97,7 +105,7 @@ export async function streamProductConversationReply(
   input: ConversationReplyInput,
   onDelta: (delta: string) => void,
 ): Promise<ProductConversationAgentReply> {
-  const model = conversationModel(input.settings);
+  const model = conversationModel(input.settings, input.agentRole ?? "DESIGN");
   const fixture = process.env.NODE_ENV === "test"
     ? process.env.DEVILUDO_CONVERSATION_AGENT_TEST_RESPONSE?.trim()
     : "";
@@ -107,7 +115,7 @@ export async function streamProductConversationReply(
     return reply(input, model, parsed, input.allowDraftMutation);
   }
 
-  const system = systemPrompt(input.project, input.allowDraftMutation);
+  const system = systemPrompt(input.project, input.allowDraftMutation, input.agentRole ?? "DESIGN");
   const history = compactHistory(input.history);
   const fetchImpl = input.fetchImpl ?? fetch;
   let emitted = "";
@@ -146,7 +154,57 @@ export async function streamProductConversationReply(
   return reply(input, model, parsed, input.allowDraftMutation);
 }
 
-function systemPrompt(project: ConversationAgentProjectContext, allowDraftMutation: boolean): string {
+export async function generateProductConversationGroupReply(
+  input: ConversationReplyInput,
+): Promise<readonly ProductConversationGroupReply[]> {
+  return groupReply(input);
+}
+
+export async function streamProductConversationGroupReply(
+  input: ConversationReplyInput,
+  onDelta: (role: ProjectAgentRole, delta: string) => void,
+): Promise<readonly ProductConversationGroupReply[]> {
+  return groupReply(input, onDelta);
+}
+
+async function groupReply(
+  input: ConversationReplyInput,
+  onDelta?: (role: ProjectAgentRole, delta: string) => void,
+): Promise<readonly ProductConversationGroupReply[]> {
+  const roles = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
+  const replies: ProductConversationGroupReply[] = [];
+  const history = [...input.history];
+  for (const agentRole of roles) {
+    const roleInput = Object.freeze({
+      ...input,
+      history: Object.freeze([...history]),
+      agentRole,
+      allowDraftMutation: agentRole === "DESIGN" && input.allowDraftMutation,
+    });
+    let generated: ProductConversationAgentReply;
+    try {
+      generated = onDelta
+        ? await streamProductConversationReply(roleInput, delta => onDelta(agentRole, delta))
+        : await generateProductConversationReply(roleInput);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "调用失败";
+      throw new Error(`${agentRoleLabel(agentRole)}：${message}`, { cause: error });
+    }
+    replies.push(Object.freeze({ ...generated, agentRole }));
+    history.push(Object.freeze({
+      role: "ASSISTANT" as const,
+      content: `[${agentRoleLabel(agentRole)}本轮意见]\n${generated.content}`,
+    }));
+  }
+  const readyForDevelopment = replies.every(candidate => candidate.readyForDevelopment);
+  return Object.freeze(replies.map(candidate => Object.freeze({ ...candidate, readyForDevelopment })));
+}
+
+function systemPrompt(
+  project: ConversationAgentProjectContext,
+  allowDraftMutation: boolean,
+  agentRole: ProjectAgentRole,
+): string {
   const context = JSON.stringify({
     project: {
       name: project.name,
@@ -159,8 +217,18 @@ function systemPrompt(project: ConversationAgentProjectContext, allowDraftMutati
       mayApplyUserMessageToDraft: allowDraftMutation,
     },
   });
+  const roleInstructions = agentRole === "DESIGN" ? [
+    "你是 DeviLudo 项目群聊中的设计 Agent，负责玩法、体验、范围取舍、规格和项目说明。",
+    "你可以代表群聊同步玩家已经确认的需求，但不得声称已经写代码或完成测试。",
+  ] : agentRole === "DEVELOPMENT" ? [
+    "你是 DeviLudo 项目群聊中的开发 Agent，负责技术可行性、实现拆分、工程风险和开发边界。",
+    "你要结合设计 Agent 的本轮意见进行评审，指出阻塞实现的歧义；不得修改项目说明，projectDocumentPatch 必须为 null。",
+  ] : [
+    "你是 DeviLudo 项目群聊中的测试 Agent，负责验收标准、真实玩家操作旅程、边界条件和回归风险。",
+    "你要结合设计与开发 Agent 的本轮意见判断需求是否可验证；不得修改项目说明，projectDocumentPatch 必须为 null。",
+  ];
   return [
-    "你是 DeviLudo 设计搭档，是与玩家共同设计和迭代游戏的 AI Agent。",
+    ...roleInstructions,
     "使用玩家正在使用的语言回答，优先给出具体、可执行的设计建议；必要时提出一到三个关键追问。",
     "充分利用会话历史、项目说明、规格和工作流状态，避免重复询问已经明确的信息。",
     "不要声称执行了构建、测试、发布或其他尚未发生的操作。",
@@ -210,10 +278,10 @@ async function requestClaudeReply(
       signal: deadline.signal,
     });
     deadline.touch();
-    if (!response.ok) throw new Error(`设计 Agent 调用失败（Provider ${response.status}）`);
+    if (!response.ok) throw new Error(`Agent 调用失败（Provider ${response.status}）`);
     const body = await response.json() as { content?: readonly { type?: unknown; text?: unknown }[] };
     const text = body.content?.find(item => item.type === "text" && typeof item.text === "string")?.text;
-    if (typeof text !== "string") throw new Error("设计 Agent 未返回有效回复");
+    if (typeof text !== "string") throw new Error("Agent 未返回有效回复");
     return text;
   } finally {
     deadline.dispose();
@@ -247,14 +315,14 @@ async function requestCodexReply(
       signal: deadline.signal,
     });
     deadline.touch();
-    if (!response.ok) throw new Error(`设计 Agent 调用失败（Provider ${response.status}）`);
+    if (!response.ok) throw new Error(`Agent 调用失败（Provider ${response.status}）`);
     const body = await response.json() as {
       output_text?: unknown;
       output?: readonly { content?: readonly { text?: unknown }[] }[];
     };
     const nested = body.output?.flatMap(item => item.content ?? []).find(item => typeof item.text === "string")?.text;
     const text = typeof body.output_text === "string" ? body.output_text : nested;
-    if (typeof text !== "string") throw new Error("设计 Agent 未返回有效回复");
+    if (typeof text !== "string") throw new Error("Agent 未返回有效回复");
     return text;
   } finally {
     deadline.dispose();
@@ -294,11 +362,11 @@ async function requestClaudeReplyStream(
       signal: deadline.signal,
     });
     deadline.touch();
-    if (!response.ok) throw new Error(`设计 Agent 调用失败（Provider ${response.status}）`);
+    if (!response.ok) throw new Error(`Agent 调用失败（Provider ${response.status}）`);
     if (!isEventStream(response)) {
       const body = await response.json() as { content?: readonly { type?: unknown; text?: unknown }[] };
       const text = body.content?.find(item => item.type === "text" && typeof item.text === "string")?.text;
-      if (typeof text !== "string") throw new Error("设计 Agent 未返回有效回复");
+      if (typeof text !== "string") throw new Error("Agent 未返回有效回复");
       onRawText(text);
       return text;
     }
@@ -344,7 +412,7 @@ async function requestCodexReplyStream(
       signal: deadline.signal,
     });
     deadline.touch();
-    if (!response.ok) throw new Error(`设计 Agent 调用失败（Provider ${response.status}）`);
+    if (!response.ok) throw new Error(`Agent 调用失败（Provider ${response.status}）`);
     if (!isEventStream(response)) {
       const body = await response.json() as {
         output_text?: unknown;
@@ -352,7 +420,7 @@ async function requestCodexReplyStream(
       };
       const nested = body.output?.flatMap(item => item.content ?? []).find(item => typeof item.text === "string")?.text;
       const text = typeof body.output_text === "string" ? body.output_text : nested;
-      if (typeof text !== "string") throw new Error("设计 Agent 未返回有效回复");
+      if (typeof text !== "string") throw new Error("Agent 未返回有效回复");
       onRawText(text);
       return text;
     }
@@ -379,7 +447,7 @@ async function readProviderEventStream(
   onRawText: (raw: string) => void,
   onActivity: () => void,
 ): Promise<string> {
-  if (!response.body) throw new Error("设计 Agent 未返回流式响应");
+  if (!response.body) throw new Error("Agent 未返回流式响应");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -414,7 +482,7 @@ async function readProviderEventStream(
     if (done) break;
   }
   if (buffer.trim()) consume(buffer);
-  if (!raw) throw new Error("设计 Agent 未返回有效回复");
+  if (!raw) throw new Error("Agent 未返回有效回复");
   return raw;
 }
 
@@ -462,7 +530,7 @@ function parseAgentReply(raw: string): ParsedAgentReply {
     });
   }
   if (/^[{[]|"reply"\s*:/.test(withoutFence)) {
-    throw new Error("设计 Agent 返回了无效的结构化回复");
+    throw new Error("Agent 返回了无效的结构化回复");
   }
   return Object.freeze({
     content: normalizeReply(normalized),
@@ -599,19 +667,33 @@ function mergeProjectDocumentPatch(
 
 function normalizeReply(value: string): string {
   const reply = value.trim();
-  if (reply.length < 1) throw new Error("设计 Agent 返回了空回复");
+  if (reply.length < 1) throw new Error("Agent 返回了空回复");
   return truncate(reply, 4_000);
 }
 
-function conversationModel(settings: ConversationAgentSettings): string {
+function conversationModel(settings: ConversationAgentSettings, role: ProjectAgentRole): string {
+  const configured = role === "DESIGN"
+    ? settings.roleModels?.design
+    : role === "DEVELOPMENT"
+      ? settings.roleModels?.development
+      : settings.roleModels?.test;
+  if (configured?.trim()) return configured.trim();
   if (settings.agentRuntime === "CLAUDE_CODE") {
-    const model = settings.models?.primary?.trim();
-    if (!model) throw new Error("Claude Code 主模型尚未配置");
-    return model;
+    const model = role === "DESIGN"
+      ? settings.models?.sonnet
+      : role === "TEST"
+        ? settings.models?.haiku
+        : settings.models?.primary;
+    if (!model?.trim()) throw new Error("Claude Code Agent 角色模型尚未配置");
+    return model.trim();
   }
   return process.env.DEVILUDO_CODEX_CONVERSATION_MODEL
     ?? process.env.DEVILUDO_CODEX_NAMING_MODEL
     ?? "codex-mini-latest";
+}
+
+function agentRoleLabel(role: ProjectAgentRole): string {
+  return role === "DESIGN" ? "设计 Agent" : role === "DEVELOPMENT" ? "开发 Agent" : "测试 Agent";
 }
 
 function providerEndpoint(baseUrl: string, resource: "messages" | "responses"): string {
@@ -673,7 +755,7 @@ function providerDeadline(
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       controller.abort(new DOMException(
-        `设计 Agent 超过 ${Math.ceil(idleTimeoutMs / 1_000)} 秒未返回数据，请重试`,
+        `Agent 超过 ${Math.ceil(idleTimeoutMs / 1_000)} 秒未返回数据，请重试`,
         "TimeoutError",
       ));
     }, idleTimeoutMs);

@@ -104,7 +104,7 @@ export function executorReceiptSigningPayload(
 }
 
 export type WorkflowSignalInput = Readonly<{
-  kind: "SPEC_APPROVED" | "RELEASE_APPROVED" | "STAGE_RERUN_REQUESTED" | "CANCEL_REQUESTED" | "EXTERNAL_APPROVAL";
+  kind: "SPEC_APPROVED" | "RELEASE_APPROVED" | "RELEASE_SKIPPED" | "STAGE_RERUN_REQUESTED" | "CANCEL_REQUESTED" | "EXTERNAL_APPROVAL";
   idempotencyKey: string;
   payload: Readonly<Record<string, unknown>>;
 }>;
@@ -118,9 +118,7 @@ export const RERUNNABLE_STAGES = [
   "AGENT_GENERATION",
   "ARTIFACT_BUILD",
   "E2E_TEST",
-  "ARTIFACT_SIGN",
   "STEAM_PUBLISH",
-  "STEAM_CLEAN_INSTALL",
 ] as const;
 
 export type RerunnableStage = (typeof RERUNNABLE_STAGES)[number];
@@ -130,12 +128,13 @@ export function isRerunnableStage(value: unknown): value is RerunnableStage {
 }
 
 /**
- * Ordered delivery chain for a profile. VALIDATE stops after E2E; RELEASE keeps
- * going through signing and publication. Mirrors `deviludo.delivery_stages` so
- * the API can reject an out-of-profile stage before it reaches the database.
+ * Ordered delivery chain. Every workflow reaches a release decision after E2E;
+ * Steam upload is optional and explicitly approved. The profile argument is
+ * retained for stored workflow compatibility.
  */
 export function deliveryStages(profile: "VALIDATE" | "RELEASE"): readonly RerunnableStage[] {
-  return profile === "VALIDATE" ? RERUNNABLE_STAGES.slice(0, 3) : RERUNNABLE_STAGES;
+  void profile;
+  return RERUNNABLE_STAGES;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -403,7 +403,8 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
     DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
     ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
     ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"], E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
-    SIGNING: ["平台签名中", "Signing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
+    RELEASE_DECISION_PENDING: ["等待发布决策", "Awaiting release decision"],
+    SIGNING: ["平台签名中（历史）", "Signing (legacy)"], RELEASE_APPROVAL_PENDING: ["等待发布批准（历史）", "Awaiting release approval (legacy)"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
     CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"], SUCCEEDED: ["交付完成", "Delivered"],
     FAILED: ["流程失败", "Failed"], CANCELLED: ["已取消", "Cancelled"],
   };

@@ -2,6 +2,7 @@ import type {
   ProductConversation,
   ProductConversationMessage,
   ProductProjectDetail,
+  ProjectAgentRole,
   WorkspaceSummary,
 } from "./contracts";
 
@@ -24,7 +25,7 @@ export class ConversationStreamError extends Error {
 export async function sendConversationMessageStream(
   body: Readonly<{ content: string; conversationId?: string; projectId?: string | null }>,
   idempotencyKey: string,
-  onDelta: (delta: string) => void,
+  onDelta: (agentRole: ProjectAgentRole, delta: string) => void,
   onProjectDocument?: (project: ProductProjectDetail) => void,
 ): Promise<ConversationStreamResult> {
   const response = await fetch("/api/conversations/messages/stream", {
@@ -55,8 +56,13 @@ export async function sendConversationMessageStream(
     } catch {
       throw new ConversationStreamError("INVALID_STREAM", "对话服务返回了无效数据");
     }
+    if (event.type === "agent_delta" && typeof event.delta === "string"
+      && isProjectAgentRole(event.agentRole)) {
+      onDelta(event.agentRole, event.delta);
+      return;
+    }
     if (event.type === "delta" && typeof event.delta === "string") {
-      onDelta(event.delta);
+      onDelta("DESIGN", event.delta);
       return;
     }
     if (event.type === "project_document" && event.project) {
@@ -89,6 +95,10 @@ export async function sendConversationMessageStream(
   if (buffer.trim()) consume(buffer);
   if (!result) throw new ConversationStreamError("INCOMPLETE_STREAM", "对话尚未完成，请重试");
   return result;
+}
+
+function isProjectAgentRole(value: unknown): value is ProjectAgentRole {
+  return value === "DESIGN" || value === "DEVELOPMENT" || value === "TEST";
 }
 
 export function optimisticConversation(

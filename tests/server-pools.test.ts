@@ -30,8 +30,8 @@ test("job placement cannot escape its fixed pool", () => {
   assert.equal(routeJob("ARTIFACT_BUILD"), "CORE");
   assert.equal(routeJob("STEAM_PUBLISH"), "CORE");
   assert.equal(routeJob("E2E_TEST", "linux"), "E2E_LINUX");
-  assert.equal(routeJob("ARTIFACT_SIGN", "windows"), "E2E_WINDOWS");
-  assert.equal(routeJob("STEAM_CLEAN_INSTALL", "macos"), "E2E_MACOS");
+  assert.throws(() => routeJob("ARTIFACT_SIGN", "windows"), /retired historical job kind/);
+  assert.throws(() => routeJob("STEAM_CLEAN_INSTALL", "macos"), /retired historical job kind/);
   assert.throws(() => routeJob("AGENT_GENERATION", "linux"));
   assert.throws(() => routeJob("ARTIFACT_SIGN"));
   assert.throws(() => assertJobPlacement({
@@ -40,6 +40,9 @@ test("job placement cannot escape its fixed pool", () => {
     targetOperatingSystem: "macos",
   }));
   assert.throws(() => assertPoolOperatingSystem("E2E_MACOS", "linux"));
+  for (const pool of ["E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS"] as const) {
+    assert.deepEqual(SERVER_POOL_DEFINITIONS[pool].capabilities, ["E2E_TEST"]);
+  }
 });
 
 test("macOS reports on-demand readiness with zero resident nodes", () => {

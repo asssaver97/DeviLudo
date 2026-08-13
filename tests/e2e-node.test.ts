@@ -86,7 +86,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     })]),
   });
   assert.doesNotThrow(() => validateExecutionReceipt(job, Object.freeze({
-    schemaVersion: "deviludo.godot-guest-report.v3",
+    schema: "deviludo.godot-guest-report",
     action: "test",
     jobId: job.jobId,
     inputDigest: digest,
@@ -94,15 +94,19 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     failureDomain: "PRODUCT",
     summary: "The exported game crashed while entering the first level",
     guest: Object.freeze({ exitCode: 1 }),
-    evidence: Object.freeze({ protocol: "deviludo.e2e-evidence.v2", result: "FAILED", headlessCheckCount: 2,
-      interactiveJourneyCount: 0, realInputCount: 0, coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
-      screenshotCount: 1, visualBaselineCount: 0, hasVisualDiff: false, packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
+    evidence: Object.freeze({ schema: "deviludo.e2e-evidence", result: "FAILED", headlessCheckCount: 2,
+      interactiveJourneyCount: 0, deterministicInputCount: 0, realInputCount: 0, keyboardMouseInputCount: 0,
+      gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
+      coveredPlayerRequirementCount: 0, playerRequirementCount: 1, screenshotCount: 1,
+      visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
+      regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
+      packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
     outputPath: "/tmp/deviludo-e2e/evidence.zip",
     outputSha256: `sha256:${"c".repeat(64)}`,
     outputSizeBytes: 1024,
   })));
   assert.throws(() => validateExecutionReceipt(job, Object.freeze({
-    schemaVersion: "deviludo.godot-guest-report.v3",
+    schema: "deviludo.godot-guest-report",
     action: "test",
     jobId: job.jobId,
     inputDigest: digest,
@@ -110,9 +114,13 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     failureDomain: "NETWORK",
     summary: "network unavailable",
     guest: Object.freeze({ exitCode: 1 }),
-    evidence: Object.freeze({ protocol: "deviludo.e2e-evidence.v2", result: "FAILED", headlessCheckCount: 2,
-      interactiveJourneyCount: 0, realInputCount: 0, coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
-      screenshotCount: 1, visualBaselineCount: 0, hasVisualDiff: false, packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
+    evidence: Object.freeze({ schema: "deviludo.e2e-evidence", result: "FAILED", headlessCheckCount: 2,
+      interactiveJourneyCount: 0, deterministicInputCount: 0, realInputCount: 0, keyboardMouseInputCount: 0,
+      gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
+      coveredPlayerRequirementCount: 0, playerRequirementCount: 1, screenshotCount: 1,
+      visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
+      regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
+      packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
     outputPath: "/tmp/deviludo-e2e/evidence.zip",
     outputSha256: `sha256:${"c".repeat(64)}`,
     outputSizeBytes: 1024,
@@ -120,56 +128,19 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
 });
 
 test("ordinary E2E tests never receive signing authority", async () => {
-  let grantRequests = 0;
   const client = {
     async authorizeObjects() { return []; },
-    async issueSigningGrant() {
-      grantRequests += 1;
-      throw new Error("must not be called");
-    },
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
   const isolation = fakeIsolation(calls);
   await assert.rejects(() => executeE2eJob(baseJob, config, client, isolation, new AbortController().signal), AggregateError);
-  assert.equal(grantRequests, 0);
   assert.deepEqual(calls, ["agent-absent", "reimage-before", "cleanup", "reimage-after"]);
 });
 
-test("signing is platform matched, exclusive and receives one short-lived grant", async () => {
-  let grantRequests = 0;
-  const client = {
-    async authorizeObjects() { return []; },
-    async issueSigningGrant() {
-      grantRequests += 1;
-      return {
-        grantId: "grant-1",
-        wrappedToken: "wrapped-one-time-token",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        operationId: "20000000-0000-4000-8000-000000000006",
-      };
-    },
-  } as unknown as CoreE2eClient;
+test("retired signing jobs are rejected before isolation", async () => {
   const job: JobProtocolV4 = Object.freeze({
     ...baseJob,
     jobKind: "ARTIFACT_SIGN",
-    requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
-  });
-  await assert.rejects(() => executeE2eJob(
-    job,
-    config,
-    client,
-    fakeIsolation([]),
-    new AbortController().signal,
-  ), AggregateError);
-  assert.equal(grantRequests, 1);
-});
-
-test("a signing job for another platform is rejected before isolation", async () => {
-  const job: JobProtocolV4 = Object.freeze({
-    ...baseJob,
-    jobKind: "ARTIFACT_SIGN",
-    poolKind: "E2E_WINDOWS",
-    targetOperatingSystem: "windows",
     requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
   });
   const calls: string[] = [];
@@ -179,7 +150,7 @@ test("a signing job for another platform is rejected before isolation", async ()
     {} as CoreE2eClient,
     fakeIsolation(calls),
     new AbortController().signal,
-  ));
+  ), /retired historical job kind/);
   assert.deepEqual(calls, []);
 });
 
@@ -204,20 +175,12 @@ test("logical operating-system overrides are restricted to test mode and still p
 });
 
 test("execution failures still attempt cleanup and the final trusted reimage", async () => {
-  const signingJob: JobProtocolV4 = Object.freeze({
-    ...baseJob,
-    jobKind: "ARTIFACT_SIGN",
-    requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
-  });
   const client = {
-    async authorizeObjects() { return []; },
-    async issueSigningGrant() {
-      throw new Error("signing broker unavailable");
-    },
+    async authorizeObjects() { throw new Error("artifact authorization unavailable"); },
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
   await assert.rejects(() => executeE2eJob(
-    signingJob,
+    baseJob,
     config,
     client,
     fakeIsolation(calls),

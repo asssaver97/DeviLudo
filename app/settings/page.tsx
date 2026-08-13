@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { AgentSettings } from "@/components/AgentSettings";
 import { AccessSettings } from "@/components/AccessSettings";
 import { ImageGenerationSettings } from "@/components/ImageGenerationSettings";
+import { SteamSettings } from "@/components/SteamSettings";
 
 export const metadata: Metadata = {
   title: "设置 · DeviLudo",
@@ -13,6 +14,7 @@ export default function SettingsPage() {
     <>
       <AgentSettings />
       <ImageGenerationSettings />
+      <SteamSettings />
       <AccessSettings />
     </>
   );

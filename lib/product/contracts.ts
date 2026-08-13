@@ -38,27 +38,31 @@ export type ArtifactRecord = Readonly<{
   workspaceId: string;
   projectId: string;
   workflowId: string;
-  kind: "SPECIFICATION" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
+  kind: "SPECIFICATION" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "E2E_REGRESSION" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
   targetPlatform: "linux" | "windows" | "macos" | null;
   object: ObjectReference;
   e2eEvidence?: Readonly<{
-    protocol: "deviludo.e2e-evidence.v2";
+    schema: "deviludo.e2e-evidence";
     result: "PASSED" | "FAILED";
     headlessCheckCount: number;
     interactiveJourneyCount: number;
+    deterministicInputCount: number;
     realInputCount: number;
+    keyboardMouseInputCount: number;
+    gamepadInputCount: number;
+    adaptiveRolloutCount: number;
+    adaptiveSuccessCount: number;
+    adaptiveDecisionCount: number;
     coveredPlayerRequirementCount: number;
     playerRequirementCount: number;
     screenshotCount: number;
     visualBaselineCount: number;
+    videoCount: number;
     hasVisualDiff: boolean;
+    regressionTraceDigest: string | null;
+    regressionInputProfile: "KEYBOARD_MOUSE" | "GAMEPAD" | null;
+    regressionEstimatedDurationMs: number | null;
     packageLaunchMode: "MACOS_LAUNCH_SERVICES" | "WINDOWS_FINAL_EXE" | "LINUX_RELEASE_EXECUTABLE" | null;
-  } | {
-    protocol: "deviludo.e2e-evidence.v1";
-    result: "PASSED" | "FAILED";
-    checkCount: number;
-    screenshotCount: number;
-    hasVisualDiff: boolean;
   }>;
   createdAt: string;
 }>;
@@ -81,14 +85,25 @@ export type AgentModelConfiguration = Readonly<{
   subagent: string;
 }>;
 
+export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
+export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
+
+export type AgentRoleModelConfiguration = Readonly<{
+  design: string;
+  development: string;
+  test: string;
+}>;
+
 export type InstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
   models: AgentModelConfiguration | null;
+  roleModels: AgentRoleModelConfiguration;
   apiKeyConfigured: boolean;
   apiKeyMasked: string | null;
   apiKeyFingerprint: string | null;
   revision: number;
+  testPolicyReady: boolean;
   updatedAt: string | null;
 }>;
 
@@ -220,8 +235,43 @@ export type ProductConversationSummary = Readonly<{
   title: string;
   preview: string;
   messageCount: number;
+  userMessageCount: number;
+  systemGenerated: boolean;
   createdAt: string;
   updatedAt: string;
+}>;
+
+export type WorkspaceSteamSettings = Readonly<{
+  builderUsername: string;
+  credentialMask: string;
+  revision: number;
+  updatedAt: string;
+}>;
+
+export type ProjectSteamSettings = Readonly<{
+  projectId: string;
+  appId: string;
+  depots: Readonly<Partial<Record<"linux" | "windows" | "macos", string>>>;
+  testBranch: string;
+  revision: number;
+  updatedAt: string;
+}>;
+
+export type SteamRelease = Readonly<{
+  id: string;
+  projectId: string;
+  workflowId: string;
+  iterationNumber: number;
+  version: string;
+  releaseNumber: number;
+  channel: "TEST" | "DEFAULT";
+  targetBranch: string;
+  state: "UPLOADING" | "FAILED" | "LIVE_TEST" | "AWAITING_DEFAULT_PROMOTION" | "LIVE_DEFAULT";
+  steamBuildId: string | null;
+  failureMessage: string | null;
+  createdAt: string;
+  uploadedAt: string | null;
+  liveAt: string | null;
 }>;
 
 export const AGENT_PROGRESS_EVENT_KINDS = [
@@ -247,6 +297,7 @@ export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   ASSET_GENERATING: "图片素材生成中",
   ARTIFACT_BUILDING: "制品构建中",
   E2E_TESTING: "跨平台测试中",
+  RELEASE_DECISION_PENDING: "等待发布决策",
   SIGNING: "平台签名中",
   RELEASE_APPROVAL_PENDING: "等待发布批准",
   STEAM_PUBLISHING: "Steam 发布中",

@@ -10,7 +10,7 @@ import {
   type JobProtocolV4,
 } from "@/services/core/src/contracts";
 import type { E2eNodeConfig } from "./config";
-import type { CoreE2eClient, SigningGrant } from "./core-client";
+import type { CoreE2eClient } from "./core-client";
 import type { IsolationController } from "./isolation";
 import { e2eExecutableInvocation, e2eToolPath } from "./tool-path";
 
@@ -31,38 +31,25 @@ export async function executeE2eJob(
     poolKind: job.poolKind,
     targetOperatingSystem: job.targetOperatingSystem ?? undefined,
   });
-  if (!["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"].includes(job.jobKind)) {
+  if (job.jobKind !== "E2E_TEST") {
     throw new Error("E2E nodes cannot execute Core jobs or install Agent software");
   }
 
   await isolation.assertAgentAbsent();
   const beforeReimageProof = await isolation.reimage(job, "before");
-  const inputs = await client.authorizeObjects(job);
   let executionReceipt: Readonly<Record<string, unknown>> | null = null;
   let preparedOutputContent: Buffer | null = null;
+  let preparedRegressionContent: Buffer | null = null;
   let preparedPublicReceipt: Readonly<Record<string, unknown>> | null = null;
   let executionFailure: unknown;
   try {
-    if (job.jobKind === "ARTIFACT_SIGN") {
-      const grant = await client.issueSigningGrant(job, beforeReimageProof);
-      executionReceipt = await runSigning(job, grant, inputs, signal);
-    } else if (job.jobKind === "E2E_TEST") {
-      executionReceipt = await runUnprivileged(job, "test", inputs, process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", signal);
-    } else {
-      executionReceipt = await runUnprivileged(
-        job,
-        "clean-install",
-        inputs,
-        process.env.DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR ?? "",
-        signal,
-      );
-    }
+    const inputs = await client.authorizeObjects(job);
+    executionReceipt = await runUnprivileged(job, "test", inputs, process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", client, signal);
     validateExecutionReceipt(job, executionReceipt);
-    if (job.jobKind === "ARTIFACT_SIGN" || job.jobKind === "E2E_TEST" || job.jobKind === "STEAM_CLEAN_INSTALL") {
-      const prepared = await readExecutorArtifact(executionReceipt, job.jobKind);
-      preparedOutputContent = prepared.content;
-      preparedPublicReceipt = prepared.publicReceipt;
-    }
+    const prepared = await readExecutorArtifact(executionReceipt);
+    preparedOutputContent = prepared.content;
+    preparedRegressionContent = prepared.regressionContent;
+    preparedPublicReceipt = prepared.publicReceipt;
   } catch (error) {
     executionFailure = error;
   }
@@ -86,8 +73,6 @@ export async function executeE2eJob(
     );
   }
   const finishedAt = new Date().toISOString();
-  const artifactKind = job.jobKind === "E2E_TEST" ? "E2E_REPORT"
-    : job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT";
   let outputContent: Buffer;
   const publicExecutionReceipt = preparedPublicReceipt ?? executionReceipt;
   if (preparedOutputContent) {
@@ -95,21 +80,25 @@ export async function executeE2eJob(
   } else {
     outputContent = Buffer.from(JSON.stringify(executionReceipt));
   }
-  const outputDigest = `sha256:${createHash("sha256").update(outputContent).digest("hex")}`;
-  const upload = await client.uploadOutput(job, { kind: artifactKind, sha256: outputDigest, sizeBytes: outputContent.length });
-  const uploaded = await fetch(upload.uploadUrl, { method: "PUT", body: new Uint8Array(outputContent), headers: upload.requiredHeaders, signal: AbortSignal.timeout(120_000) });
-  if (!uploaded.ok) {
-    const detail = (await uploaded.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
-    throw new Error(`Artifact upload returned ${uploaded.status}${detail ? `: ${detail}` : ""}`);
+  const outputs = [{ kind: "E2E_REPORT", content: outputContent }];
+  if (preparedRegressionContent) outputs.push({ kind: "E2E_REGRESSION", content: preparedRegressionContent });
+  const outputObjects = [];
+  for (const output of outputs) {
+    const digest = `sha256:${createHash("sha256").update(output.content).digest("hex")}`;
+    const upload = await client.uploadOutput(job, { kind: output.kind, sha256: digest, sizeBytes: output.content.length });
+    const uploaded = await fetch(upload.uploadUrl, { method: "PUT", body: new Uint8Array(output.content), headers: upload.requiredHeaders, signal: AbortSignal.timeout(120_000) });
+    if (!uploaded.ok) {
+      const detail = (await uploaded.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
+      throw new Error(`Artifact upload returned ${uploaded.status}${detail ? `: ${detail}` : ""}`);
+    }
+    outputObjects.push(Object.freeze({
+      ...upload.object, kind: output.kind, targetPlatform: job.targetOperatingSystem ?? undefined,
+      ...(output.kind === "E2E_REPORT" && executionReceipt.evidence && typeof executionReceipt.evidence === "object"
+        ? { metadata: Object.freeze({ e2eEvidence: executionReceipt.evidence }) }
+        : output.kind === "E2E_REGRESSION" && executionReceipt.evidence && typeof executionReceipt.evidence === "object"
+          ? { metadata: Object.freeze({ e2eRegression: executionReceipt.evidence }) } : {}),
+    }));
   }
-  const outputObjects = Object.freeze([Object.freeze({
-    ...upload.object,
-    kind: artifactKind,
-    targetPlatform: job.targetOperatingSystem ?? undefined,
-    ...(["E2E_TEST", "STEAM_CLEAN_INSTALL"].includes(job.jobKind) && executionReceipt.evidence && typeof executionReceipt.evidence === "object"
-      ? { metadata: Object.freeze({ e2eEvidence: executionReceipt.evidence }) }
-      : {}),
-  })]);
   const unsigned = Object.freeze({
     schemaVersion: "deviludo.executor-receipt.v2" as const,
     executorId: config.nodeId,
@@ -117,7 +106,7 @@ export async function executeE2eJob(
     finishedAt,
     exitCode: 0,
     simulated: false as const,
-    outputObjects,
+    outputObjects: Object.freeze(outputObjects),
   });
   const identityKey = await readFile(config.identityKeyFile, "utf8");
   const signature = sign(null, executorReceiptSigningPayload(unsigned), identityKey).toString("base64url");
@@ -126,7 +115,7 @@ export async function executeE2eJob(
     fencingToken: job.lease.fencingToken,
     isolationGeneration: job.isolationGeneration,
     receipt: Object.freeze({
-      schemaVersion: "deviludo.e2e-receipt.v1",
+      schema: "deviludo.e2e-receipt",
       jobKind: job.jobKind,
       poolKind: job.poolKind,
       operatingSystem: config.operatingSystem,
@@ -141,10 +130,9 @@ export async function executeE2eJob(
 
 async function readExecutorArtifact(
   receipt: Readonly<Record<string, unknown>>,
-  kind: "ARTIFACT_SIGN" | "E2E_TEST" | "STEAM_CLEAN_INSTALL",
-): Promise<Readonly<{ content: Buffer; publicReceipt: Readonly<Record<string, unknown>> }>> {
+): Promise<Readonly<{ content: Buffer; regressionContent: Buffer | null; publicReceipt: Readonly<Record<string, unknown>> }>> {
   const outputPath = typeof receipt.outputPath === "string" ? receipt.outputPath : "";
-  if (!isAbsolute(outputPath)) throw new Error(`${kind === "ARTIFACT_SIGN" ? "Signing" : "E2E"} executor did not return an absolute artifact path`);
+  if (!isAbsolute(outputPath)) throw new Error("E2E executor did not return an absolute artifact path");
   const configuredJobRoot = process.env.DEVILUDO_E2E_JOB_ROOT ?? "";
   if (!isAbsolute(configuredJobRoot)) throw new Error("A fixed E2E job root is required for external artifacts");
   const jobRoot = resolve(configuredJobRoot);
@@ -157,7 +145,19 @@ async function readExecutorArtifact(
     throw new Error("Executor receipt does not match its artifact bytes");
   }
   const safeReceipt = Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "outputPath"));
-  return Object.freeze({ content, publicReceipt: Object.freeze(safeReceipt) });
+  let regressionContent: Buffer | null = null;
+  if (typeof receipt.regressionOutputPath === "string") {
+    const resolvedRegression = resolve(receipt.regressionOutputPath);
+    const relativeRegression = relative(jobRoot, resolvedRegression);
+    if (relativeRegression.startsWith("..") || isAbsolute(relativeRegression)) throw new Error("Regression output escaped the fixed E2E job root");
+    regressionContent = await readFile(resolvedRegression);
+    const regressionSha256 = `sha256:${createHash("sha256").update(regressionContent).digest("hex")}`;
+    if (receipt.regressionOutputSha256 !== regressionSha256 || receipt.regressionOutputSizeBytes !== regressionContent.length) {
+      throw new Error("Executor regression receipt does not match its artifact bytes");
+    }
+  }
+  delete safeReceipt.regressionOutputPath;
+  return Object.freeze({ content, regressionContent, publicReceipt: Object.freeze(safeReceipt) });
 }
 
 export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<Record<string, unknown>>): void {
@@ -165,18 +165,8 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
   if (receipt.jobId !== job.jobId || typeof receipt.inputDigest !== "string" || !inputDigests.has(receipt.inputDigest as `sha256:${string}`)) {
     throw new Error("E2E executor receipt does not match the leased job inputs");
   }
-  if (job.jobKind === "ARTIFACT_SIGN") {
-    if (receipt.schemaVersion !== "deviludo.platform-sign-receipt.v1"
-      || receipt.targetPlatform !== job.targetOperatingSystem
-      || typeof receipt.outputSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.outputSha256)
-      || !Number.isSafeInteger(receipt.outputSizeBytes) || Number(receipt.outputSizeBytes) < 1) {
-      throw new Error("Platform signing receipt is invalid");
-    }
-    return;
-  }
-  const expectedAction = job.jobKind === "E2E_TEST" ? "test" : "clean-install";
-  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v3"
-    || receipt.action !== expectedAction
+  if (receipt.schema !== "deviludo.godot-guest-report" || Object.hasOwn(receipt, "schemaVersion")
+    || receipt.action !== "test"
     || !["PASSED", "FAILED"].includes(String(receipt.outcome))
     || (receipt.outcome === "FAILED" ? receipt.failureDomain !== "PRODUCT" : receipt.failureDomain !== null)
     || typeof receipt.summary !== "string" || receipt.summary.trim().length < 1 || receipt.summary.length > 2_000
@@ -189,21 +179,39 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
     || (receipt.outcome === "FAILED" && guest.exitCode === 0)) {
     throw new Error("Godot guest outcome does not match its exit code");
   }
-  if (job.jobKind === "E2E_TEST" || job.jobKind === "STEAM_CLEAN_INSTALL") {
+  {
     const evidence = receipt.evidence as Record<string, unknown> | undefined;
     if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)
-      || evidence.protocol !== "deviludo.e2e-evidence.v2" || evidence.result !== receipt.outcome
+      || evidence.schema !== "deviludo.e2e-evidence" || Object.hasOwn(evidence, "protocol") || evidence.result !== receipt.outcome
       || !Number.isSafeInteger(evidence.headlessCheckCount) || Number(evidence.headlessCheckCount) < 0
       || !Number.isSafeInteger(evidence.interactiveJourneyCount) || Number(evidence.interactiveJourneyCount) < 0
       || !Number.isSafeInteger(evidence.realInputCount) || Number(evidence.realInputCount) < 0
+      || !Number.isSafeInteger(evidence.deterministicInputCount) || Number(evidence.deterministicInputCount) < 0
+      || !Number.isSafeInteger(evidence.keyboardMouseInputCount) || Number(evidence.keyboardMouseInputCount) < 0
+      || !Number.isSafeInteger(evidence.gamepadInputCount) || Number(evidence.gamepadInputCount) < 0
+      || !Number.isSafeInteger(evidence.adaptiveRolloutCount) || Number(evidence.adaptiveRolloutCount) < 0 || Number(evidence.adaptiveRolloutCount) > 3
+      || !Number.isSafeInteger(evidence.adaptiveSuccessCount) || Number(evidence.adaptiveSuccessCount) < 0
+      || Number(evidence.adaptiveSuccessCount) > Number(evidence.adaptiveRolloutCount)
+      || !Number.isSafeInteger(evidence.adaptiveDecisionCount) || Number(evidence.adaptiveDecisionCount) < 0
       || !Number.isSafeInteger(evidence.coveredPlayerRequirementCount) || Number(evidence.coveredPlayerRequirementCount) < 0
       || !Number.isSafeInteger(evidence.playerRequirementCount) || Number(evidence.playerRequirementCount) < 0
       || Number(evidence.coveredPlayerRequirementCount) > Number(evidence.playerRequirementCount)
       || !Number.isSafeInteger(evidence.screenshotCount) || Number(evidence.screenshotCount) < 0
       || (receipt.outcome === "PASSED" && Number(evidence.screenshotCount) < 3)
       || !Number.isSafeInteger(evidence.visualBaselineCount) || Number(evidence.visualBaselineCount) < 0
-      || (receipt.outcome === "PASSED" && (Number(evidence.interactiveJourneyCount) < 1
+      || !Number.isSafeInteger(evidence.videoCount) || Number(evidence.videoCount) < 0
+      || (evidence.regressionTraceDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(String(evidence.regressionTraceDigest)))
+      || ![null, "KEYBOARD_MOUSE", "GAMEPAD"].includes(evidence.regressionInputProfile as never)
+      || (evidence.regressionEstimatedDurationMs !== null
+        && (!Number.isSafeInteger(evidence.regressionEstimatedDurationMs)
+          || Number(evidence.regressionEstimatedDurationMs) < 1 || Number(evidence.regressionEstimatedDurationMs) > 300_000))
+      || ((evidence.regressionTraceDigest === null) !== (evidence.regressionInputProfile === null))
+      || ((evidence.regressionTraceDigest === null) !== (evidence.regressionEstimatedDurationMs === null))
+      || (receipt.outcome === "PASSED" && (Number(evidence.adaptiveRolloutCount) !== 3
+        || Number(evidence.interactiveJourneyCount) < 1
         || Number(evidence.realInputCount) < 2
+        || Number(evidence.adaptiveSuccessCount) < 2
+        || Number(evidence.videoCount) < 1
         || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount)))
       || typeof evidence.hasVisualDiff !== "boolean"
       || ![null, "MACOS_LAUNCH_SERVICES", "WINDOWS_FINAL_EXE", "LINUX_RELEASE_EXECUTABLE"].includes(evidence.packageLaunchMode as never)
@@ -212,6 +220,11 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
       || !Number.isSafeInteger(receipt.outputSizeBytes) || Number(receipt.outputSizeBytes) < 1) {
       throw new Error("Godot E2E evidence receipt is invalid");
     }
+  }
+  if (receipt.outcome === "PASSED" && (typeof receipt.regressionOutputPath !== "string" || !isAbsolute(receipt.regressionOutputPath)
+    || typeof receipt.regressionOutputSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.regressionOutputSha256)
+    || !Number.isSafeInteger(receipt.regressionOutputSizeBytes) || Number(receipt.regressionOutputSizeBytes) < 1)) {
+    throw new Error("Godot E2E regression receipt is invalid");
   }
   // Optional testDetails field for structured test results
   if (receipt.testDetails !== undefined) {
@@ -226,59 +239,31 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
   }
 }
 
-async function runSigning(
-  job: JobProtocolV4,
-  grant: SigningGrant,
-  inputs: readonly unknown[],
-  signal: AbortSignal,
-): Promise<Readonly<Record<string, unknown>>> {
-  if (Date.parse(grant.expiresAt) <= Date.now() || Date.parse(grant.expiresAt) > Date.now() + 5 * 60_000) {
-    throw new Error("Signing grant lifetime is invalid");
-  }
-  const executable = process.env.DEVILUDO_E2E_SIGN_EXECUTOR ?? "";
-  const receipt = await runExternal(executable, {
-    schemaVersion: "deviludo.sign-request.v1",
-    jobId: job.jobId,
-    workspaceId: job.workspaceId,
-    projectId: job.projectId,
-    operatingSystem: job.targetOperatingSystem,
-    payload: job.payload,
-    inputs,
-    grant: {
-      grantId: grant.grantId,
-      wrappedToken: grant.wrappedToken,
-      expiresAt: grant.expiresAt,
-    },
-  }, signal, "sign");
-  return Object.freeze({
-    ...receipt,
-    grantId: grant.grantId,
-    operationId: grant.operationId,
-    grantExpiresAt: grant.expiresAt,
-  });
-}
-
 async function runUnprivileged(
   job: JobProtocolV4,
-  action: "test" | "clean-install",
+  action: "test",
   inputs: readonly unknown[],
   executable: string,
+  client: CoreE2eClient,
   signal: AbortSignal,
 ): Promise<Readonly<Record<string, unknown>>> {
   return runExternal(executable, {
-    schemaVersion: "deviludo.e2e-execution.v1",
+    schema: "deviludo.e2e-execution",
     action,
     jobId: job.jobId,
     workspaceId: job.workspaceId,
     projectId: job.projectId,
     payload: job.payload,
+    timeoutSeconds: job.timeoutSeconds,
     inputs,
-  }, signal, action);
+  }, job, client, signal, action);
 }
 
 async function runExternal(
   executable: string,
   request: Readonly<Record<string, unknown>>,
+  job: JobProtocolV4,
+  client: CoreE2eClient,
   signal: AbortSignal,
   action: string,
 ): Promise<Readonly<Record<string, unknown>>> {
@@ -298,16 +283,34 @@ async function runExternal(
       ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
       ...(process.env.DEVILUDO_E2E_GUEST_RUNNER ? { DEVILUDO_E2E_GUEST_RUNNER: process.env.DEVILUDO_E2E_GUEST_RUNNER } : {}),
       ...(process.env.DEVILUDO_E2E_JOB_ROOT ? { DEVILUDO_E2E_JOB_ROOT: process.env.DEVILUDO_E2E_JOB_ROOT } : {}),
-      ...(process.env.DEVILUDO_E2E_SIGNING_BROKER_URL ? { DEVILUDO_E2E_SIGNING_BROKER_URL: process.env.DEVILUDO_E2E_SIGNING_BROKER_URL } : {}),
     },
   });
-  child.stdin.end(JSON.stringify(request));
-  const stdout: Buffer[] = [];
+  child.stdin.write(`${JSON.stringify({ type: "execute", request })}\n`);
+  let result: Readonly<Record<string, unknown>> | null = null;
+  let stdoutBuffer = "";
   const stderr: Buffer[] = [];
   let bytes = 0;
   child.stdout.on("data", (chunk: Buffer) => {
     bytes += chunk.length;
-    if (bytes <= 1_048_576) stdout.push(chunk);
+    if (bytes > 4_194_304) return;
+    stdoutBuffer += chunk.toString("utf8");
+    let newline = stdoutBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = stdoutBuffer.slice(0, newline); stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      if (line.trim()) {
+        try {
+          const message = JSON.parse(line) as Record<string, unknown>;
+          if (message.type === "result" && message.value && typeof message.value === "object" && !Array.isArray(message.value)) {
+            result = Object.freeze(message.value as Record<string, unknown>);
+          } else if (message.type === "policy_request" && typeof message.id === "string" && message.request && typeof message.request === "object" && !Array.isArray(message.request)) {
+            void client.decidePlayerPolicy(job, message.request as Record<string, unknown>)
+              .then(response => child.stdin.write(`${JSON.stringify({ type: "policy_response", id: message.id, response })}\n`))
+              .catch(error => child.stdin.write(`${JSON.stringify({ type: "policy_response", id: message.id, error: error instanceof Error ? error.message.slice(0, 1_000) : "Player policy failed" })}\n`));
+          }
+        } catch { /* Invalid frames make the executor fail after exit. */ }
+      }
+      newline = stdoutBuffer.indexOf("\n");
+    }
   });
   child.stderr.on("data", (chunk: Buffer) => {
     if (Buffer.concat(stderr).length < 65_536) stderr.push(chunk);
@@ -316,10 +319,9 @@ async function runExternal(
     child.once("error", reject);
     child.once("close", resolve);
   });
-  if (code !== 0 || bytes > 1_048_576) {
+  if (code !== 0 || bytes > 4_194_304 || !result) {
     throw new Error(`${action} executor failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2_000)}`);
   }
-  const value = JSON.parse(Buffer.concat(stdout).toString("utf8")) as unknown;
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${action} receipt is invalid`);
-  return Object.freeze(value as Record<string, unknown>);
+  child.stdin.end();
+  return result;
 }

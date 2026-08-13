@@ -51,5 +51,51 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(proxy, /PROJECT_BIND_TIMEOUT_MS = 12 \* 60 \* 1_000/);
   assert.match(proxy, /CONVERSATION_STREAM_TIMEOUT_MS = 12 \* 60 \* 1_000/);
   assert.match(proxy, /routePath === "conversations\/messages\/stream"[\s\S]*CONVERSATION_STREAM_TIMEOUT_MS/);
+  assert.match(proxy, /PROJECT_DELETE_TIMEOUT_MS = 10 \* 60 \* 1_000/);
   assert.match(configuration, /\["127\.0\.0\.1", "localhost"\]/);
+});
+
+test("project deletion only removes a local directory through its server-owned binding", async () => {
+  const [studio, core, bridge, bridgeProxy] = await Promise.all([
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-project-bridge-proxy.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(studio, /type="checkbox"[\s\S]*deleteLocalDirectory/);
+  assert.match(studio, /JSON\.stringify\(\{ deleteLocalDirectory \}\)/);
+  assert.match(core, /project\.localDirectory\?\.bindingId/);
+  assert.match(core, /\/internal\/directory\/delete/);
+  assert.doesNotMatch(core, /deleteBoundProjectDirectory\(config,\s*body\./);
+  assert.match(bridge, /const binding = await requireBinding\(value\)/);
+  assert.match(bridge, /await rename\(binding\.path, quarantine\)/);
+  assert.match(bridge, /await rm\(quarantine, \{ force: false, maxRetries: 3, recursive: true/);
+  assert.match(bridge, /delete remaining\[binding\.id\]/);
+  assert.match(bridgeProxy, /"\/internal\/directory\/delete"/);
+});
+
+test("project Git controls share one compact row and destructive actions stay in the upper-right header", async () => {
+  const [studio, styles] = await Promise.all([
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/product.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(studio, /className="local-git-branch-toolbar"[\s\S]*className="local-git-branch-status"[\s\S]*className="local-git-branch-form"/);
+  assert.match(styles, /\.local-git-branch-toolbar \{[\s\S]*grid-template-columns: minmax\(220px, \.42fr\) minmax\(420px, 1fr\)/);
+  assert.match(studio, /className="product-studio-header-actions"[\s\S]*className="button project-delete-button"/);
+  assert.match(styles, /\.product-studio-header-actions \{[\s\S]*position: absolute;[\s\S]*right: 0;[\s\S]*top: 0;/);
+});
+
+test("group-chat activity counts user prompts and labels automatic import analysis separately", async () => {
+  const [studio, repository, contracts] = await Promise.all([
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/product/contracts.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(repository, /count\(message\.message_id\) FILTER \(WHERE message\.role = 'USER'\)::text AS user_message_count/);
+  assert.match(repository, /message\.metadata ->> 'source' = 'PROJECT_IMPORT_AGENT'/);
+  assert.match(studio, /conversationActivityLabel\(item\.userMessageCount, item\.systemGenerated, text\)/);
+  assert.match(studio, /text\("系统分析", "SYSTEM ANALYSIS"\)/);
+  assert.match(studio, /text\(`\$\{count\} 次用户发言`/);
+  assert.doesNotMatch(studio, /Math\.ceil\(messageCount \/ 2\)/);
+  assert.match(contracts, /userMessageCount: number;[\s\S]*systemGenerated: boolean;/);
 });

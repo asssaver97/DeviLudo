@@ -17,7 +17,7 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "workflow_events", "jobs", "external_signals", "job_progress_events",
     "job_guidance_messages", "operation_receipts",
     "project_source_revisions", "project_source_ready_outbox",
-    "artifacts", "artifact_inputs", "executor_receipts",
+    "artifacts", "artifact_inputs", "object_cleanup_queue", "executor_receipts",
     "instance_image_generation_settings", "asset_manifests", "asset_items",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
@@ -34,7 +34,8 @@ test("every workspace-owned table fails closed with forced row isolation", async
     "workflow_instances", "workflow_events",
     "jobs", "external_signals", "job_progress_events", "job_guidance_messages",
     "operation_receipts", "workspace_claim_fairness",
-    "artifacts", "artifact_inputs", "executor_receipts", "project_creation_receipts",
+    "artifacts", "artifact_inputs", "object_cleanup_queue", "e2e_policy_locks", "e2e_policy_decisions", "e2e_regression_traces",
+    "executor_receipts", "project_creation_receipts",
     "asset_manifests", "asset_items",
   ]) {
     assert.ok(sql.includes(`'${table}'`), `${table} must be enumerated by the forced isolation block`);
@@ -68,13 +69,15 @@ test("every workspace-owned table fails closed with forced row isolation", async
   for (const column of ["primary_model", "opus_model", "sonnet_model", "haiku_model", "subagent_model"]) {
     assert.match(sql, new RegExp(`${column} text CHECK`));
   }
+  assert.match(sql, /role_models jsonb NOT NULL CHECK/);
+  assert.match(sql, /role_models->>'development'/);
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
-  assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
+  assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD', 'E2E_TEST'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
   assert.match(sql, /CREATE TRIGGER jobs_snapshot_artifact_build_assets[\s\S]*BEFORE INSERT ON deviludo\.jobs/);
   assert.match(sql, /'assetInputs', inputs/);
   assert.match(sql, /asset_key ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9\._\/\-\]\{0,199\}\$'/);
-  assert.match(sql, /CASE WHEN p_kind = 'AGENT_GENERATION' THEN 5400 ELSE 1800 END/);
+  assert.match(sql, /CASE WHEN p_kind = 'AGENT_GENERATION' THEN 5400[\s\S]*WHEN p_kind = 'E2E_TEST' THEN v_source\.e2e_timeout_seconds[\s\S]*ELSE 1800 END/);
   assert.match(sql, /p_payload := p_payload[\s\S]*CASE WHEN v_source\.revision IS NULL THEN '\{\}'::jsonb ELSE jsonb_build_object\([\s\S]*'sourceDigest', v_source\.content_digest/);
   assert.match(sql, /PROJECT_DOCUMENT_MAINTENANCE/);
   assert.match(sql, /schedule_idle_project_document_maintenance/);
@@ -86,8 +89,10 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /E2E_CONTENT_FAILED/);
   assert.match(sql, /last_error = 'E2E_PRODUCT: ' \|\| failure_summary/);
   assert.match(sql, /repair_count < 5/);
-  assert.match(sql, /test_manifest_protocol text CHECK/);
-  assert.match(sql, /testManifest,schemaVersion\}', ''\) <> 'deviludo\.test-manifest\.v3'/);
+  assert.match(sql, /test_manifest_schema text CHECK/);
+  assert.match(sql, /testManifest,schema\}', ''\) <> 'deviludo\.test-manifest'/);
+  assert.match(sql, /e2e_timeout_seconds integer CHECK/);
+  assert.match(sql, /e2e_contract_digest text CHECK/);
   assert.match(sql, /previous_repair\.created_at > coalesce\(\([\s\S]*max\(manual_agent\.created_at\)[\s\S]*NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
   assert.match(sql, /'repairFromE2eJobId', job\.id/);
   assert.match(sql, /p_signal_kind = 'STAGE_RERUN_REQUESTED'/);
@@ -102,12 +107,12 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /claim_local_git_commit\(p_lease_seconds integer\)[\s\S]*FOR UPDATE OF workflow SKIP LOCKED/);
   assert.match(sql, /complete_local_git_commit[\s\S]*GIT_COMMIT_COMPLETED/);
   assert.match(sql, /fail_local_git_commit[\s\S]*attempts >= 3[\s\S]*GIT_COMMIT_FAILED/);
-  assert.match(sql, /schedule_e2e_protocol_revalidation/);
-  assert.match(sql, /state_data #>> '\{e2eProtocolRevalidation,protocol\}' = p_protocol/);
-  assert.match(sql, /latest_test_manifest_protocol IS DISTINCT FROM 'deviludo\.test-manifest\.v3'[\s\S]*rerun_stage := 'AGENT_GENERATION'/);
-  assert.match(sql, /artifact\.kind = 'BUILD'[\s\S]*rerun_stage := 'E2E_TEST'/);
-  assert.match(sql, /project_source_revisions[\s\S]*rerun_stage := 'ARTIFACT_BUILD'/);
-  assert.match(sql, /LIMIT p_batch_size/);
+  assert.doesNotMatch(sql, /schedule_e2e_protocol_revalidation|e2eProtocolRevalidation/);
+  assert.match(sql, /E2E_REGRESSION/);
+  assert.match(sql, /e2e_policy_decisions/);
+  assert.match(sql, /current E2E output set is invalid/);
+  assert.match(sql, /claim_object_cleanup\(p_lease_seconds integer\)[\s\S]*FOR UPDATE SKIP LOCKED/);
+  assert.match(sql, /replaced E2E regression trace/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
 });
@@ -149,17 +154,18 @@ test("migration upgrades compatible databases in order and still rejects incompa
   assert.match(reset, /DEVILUDO_PROJECTS_ROOT/);
 });
 
-test("the E2E protocol migration freezes only the deployment-time latest terminal cohort", async () => {
+test("the adaptive E2E migration retires old evidence and reruns only each latest active cohort", async () => {
   const migration = await readFile(
-    new URL("../infra/postgres/migrations/015_real_window_e2e_revalidation.sql", import.meta.url),
+    new URL("../infra/postgres/migrations/029_adaptive_e2e.sql", import.meta.url),
     "utf8",
   );
-  assert.match(migration, /UPDATE deviludo\.workflow_instances workflow[\s\S]*e2eProtocolRevalidation/);
-  assert.match(migration, /workflow\.state IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
+  assert.match(migration, /DELETE FROM deviludo\.artifacts WHERE kind = 'E2E_REPORT'/);
+  assert.match(migration, /INSERT INTO deviludo\.object_cleanup_queue[\s\S]*retired E2E evidence contract/);
+  assert.match(migration, /kind IN \('ARTIFACT_BUILD', 'E2E_TEST'\)[\s\S]*state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(migration, /newer\.iteration_number > workflow\.iteration_number/);
-  assert.match(migration, /state_data #>> '\{e2eProtocolRevalidation,protocol\}' = p_protocol/);
-  assert.match(migration, /e2e-protocol-revalidate:/);
-  assert.match(migration, /GRANT EXECUTE ON FUNCTION deviludo\.schedule_e2e_protocol_revalidation/);
+  assert.match(migration, /'STAGE_RERUN_REQUESTED', 'adaptive-e2e-current'/);
+  assert.match(migration, /'stage', 'AGENT_GENERATION'/);
+  assert.doesNotMatch(migration, /allowLegacy/);
 });
 
 test("upgraded schedulers can inspect idempotent workflow signals", async () => {
@@ -178,7 +184,7 @@ test("upgraded schedulers can inspect idempotent workflow signals", async () => 
   );
   assert.match(
     sql,
-    /deviludo\.runtime_images, deviludo\.artifacts, deviludo\.artifact_inputs,\s*deviludo\.external_signals\s*TO deviludo_claim_executor/,
+    /deviludo\.runtime_images, deviludo\.artifacts, deviludo\.artifact_inputs,\s*deviludo\.external_signals, deviludo\.steam_releases, deviludo\.e2e_regression_traces\s*TO deviludo_claim_executor/,
   );
 });
 
@@ -239,7 +245,7 @@ test("an unroutable signal kind is rejected rather than accepted and ignored", a
   // its caller actually looks like, so the kind is checked before any of it.
   assert.match(
     sql,
-    /IF p_signal_kind NOT IN \(\s*'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED',\s*'RELEASE_APPROVED', 'EXTERNAL_APPROVAL'\s*\) THEN\s*RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version'/,
+    /IF p_signal_kind NOT IN \(\s*'SPEC_APPROVED', 'STAGE_RERUN_REQUESTED', 'CANCEL_REQUESTED',\s*'RELEASE_APPROVED', 'RELEASE_SKIPPED', 'EXTERNAL_APPROVAL'\s*\) THEN\s*RAISE EXCEPTION 'Signal kind % cannot be routed by this schema version'/,
   );
   // The guard has to precede the routing, or an unknown kind reaches the branches
   // it is meant to protect.
@@ -331,11 +337,13 @@ test("forward workflow jobs use their successful predecessor as the idempotency 
   // Superseded rows retain their unique keys. Every forward edge therefore has
   // to derive a fresh key from the job that just succeeded, or a stage rerun
   // advances the workflow state while enqueue_job returns the old CANCELLED row.
-  for (const prefix of ["artifact", "e2e:", "sign:", "clean-install:"]) {
+  for (const prefix of ["artifact", "e2e:"]) {
     assert.match(complete, new RegExp(`${prefix.replace("-", "\\-")}[^\\n]*:after:' \\|\\| job\\.id::text`));
   }
   const signal = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.accept_workflow_signal\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.complete_job\()/)?.[0] ?? "";
   assert.match(signal, /':publish:approved:' \|\| inserted_id::text/);
+  assert.match(complete, /SET state = 'RELEASE_DECISION_PENDING'/);
+  assert.doesNotMatch(complete, /enqueue_job\([^;]*'ARTIFACT_SIGN'|enqueue_job\([^;]*'STEAM_CLEAN_INSTALL'/);
 });
 
 test("asset generation stays off the serial delivery chain", async () => {
@@ -350,6 +358,7 @@ test("asset generation stays off the serial delivery chain", async () => {
   const stages = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.delivery_stages\([\s\S]*?\$\$;/)?.[0] ?? "";
   assert.doesNotMatch(stages, /ASSET/);
   assert.doesNotMatch(stages, /PROJECT_DOCUMENT_MAINTENANCE/);
+  assert.doesNotMatch(stages, /ARTIFACT_SIGN|STEAM_CLEAN_INSTALL/);
 });
 
 test("asset generation is leased, attempt-bounded, and never overwrites a user upload", async () => {

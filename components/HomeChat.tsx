@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
-import type { ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
+import type { ProductConversation, ProductProjectSummary, ProjectAgentRole } from "@/lib/product/contracts";
 import {
   chronologicalMessages,
   ConversationStreamError,
@@ -39,7 +39,7 @@ export function HomeChat() {
   const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
   const [startingDevelopment, setStartingDevelopment] = useState(false);
-  const [streamingReply, setStreamingReply] = useState("");
+  const [streamingReplies, setStreamingReplies] = useState<Partial<Record<ProjectAgentRole, string>>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -88,7 +88,7 @@ export function HomeChat() {
     );
     setSending(true);
     setError(null);
-    setStreamingReply("");
+    setStreamingReplies({});
     setConversation(pendingConversation);
     setContent("");
     try {
@@ -98,7 +98,10 @@ export function HomeChat() {
       const result = await sendConversationMessageStream(
         body,
         `conversation:${crypto.randomUUID()}`,
-        delta => setStreamingReply(current => current + delta),
+        (agentRole, delta) => setStreamingReplies(current => ({
+          ...current,
+          [agentRole]: `${current[agentRole] ?? ""}${delta}`,
+        })),
       );
       setProjects(current => {
         const next = current.some(project => project.id === result.project.id)
@@ -124,7 +127,7 @@ export function HomeChat() {
         return;
       }
     } finally {
-      setStreamingReply("");
+      setStreamingReplies({});
       setSending(false);
     }
   }
@@ -200,7 +203,7 @@ export function HomeChat() {
       className="home-conversation-box"
       composerPrefix={projectSelector}
       conversationKey={conversation?.id ?? null}
-      intro={conversation ? <div className="conversation-date"><span>{text("设计会话", "DESIGN SESSION")}</span></div> : null}
+      intro={conversation ? <div className="conversation-date"><span>{text("项目群聊", "PROJECT GROUP CHAT")}</span></div> : null}
       messages={orderedMessages}
       onOptionSelect={option => void sendMessage(undefined, option)}
       onSubmit={sendMessage}
@@ -210,7 +213,7 @@ export function HomeChat() {
       sendButtonLabel={text("发送消息", "Send message")}
       sending={sending}
       showMessages={Boolean(conversation)}
-      streamingReply={streamingReply}
+      streamingReplies={streamingReplies}
       textareaLabel={text("游戏想法或修改意见", "Game idea or feedback")}
       value={content}
     />
@@ -261,6 +264,7 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
     ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
     ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"],
     E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
+    RELEASE_DECISION_PENDING: ["等待发布决策", "Awaiting release decision"],
     SIGNING: ["平台签名中", "Signing"],
     RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
     STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],

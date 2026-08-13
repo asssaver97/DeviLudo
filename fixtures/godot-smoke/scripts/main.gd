@@ -165,7 +165,7 @@ func _publish_probe() -> void:
 		return
 	probe_sequence += 1
 	var snapshot := {
-		"schemaVersion": "deviludo.e2e-ui-probe.v1",
+		"schema": "deviludo.e2e-ui-probe",
 		"sessionNonce": nonce,
 		"pid": OS.get_process_id(),
 		"sequence": probe_sequence,

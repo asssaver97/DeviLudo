@@ -1,7 +1,19 @@
 {
   "title": "DeviLudo Local Smoke",
   "testManifest": {
-    "schemaVersion": "deviludo.test-manifest.v3",
+    "schema": "deviludo.test-manifest",
+    "inputProfiles": ["KEYBOARD_MOUSE"],
+    "primaryInputProfile": "KEYBOARD_MOUSE",
+    "adaptivePlayer": {
+      "goal": "Start from a clean profile, select a route and complete one full playable loop.",
+      "requirementIds": ["req-core-loop"],
+      "allowedActions": ["KEYBOARD", "POINTER"],
+      "successAssertions": [{ "source": "PROGRESS", "key": "loop", "operator": "GREATER_THAN", "value": 0 }],
+      "failureAssertions": [{ "source": "STATE", "key": "failed", "operator": "EQUALS", "value": true }],
+      "rolloutTimeoutMs": 60000,
+      "maxDecisions": 8,
+      "seedStrategy": "STABLE_PROJECT_PLATFORM"
+    },
     "requirements": [
       {
         "requirementId": "req-core-loop",
@@ -40,7 +52,8 @@
         "description": "玩家可以收集余烬道具，重复收集同一道具会被拒绝",
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["collect-first-ember", "reject-duplicate-ember"]
+        "checkNames": ["collect-first-ember", "reject-duplicate-ember"],
+        "timeoutMs": 60000
       },
       {
         "id": "pause-system",
@@ -49,7 +62,8 @@
         "description": "暂停时游戏时间停止流逝",
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["pause-stops-clock"]
+        "checkNames": ["pause-stops-clock"],
+        "timeoutMs": 60000
       },
       {
         "id": "core-loop-journey",
@@ -61,7 +75,6 @@
         "launchProfile": { "type": "FRESH" },
         "timeoutMs": 300000,
         "interactionScript": {
-          "version": "3",
           "events": [
             {
               "type": "checkpoint",
@@ -170,7 +183,8 @@
         "description": "伤害正确减少船体完整度",
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["damage-reduces-hull"]
+        "checkNames": ["damage-reduces-hull"],
+        "timeoutMs": 60000
       },
       {
         "id": "win-condition",
@@ -179,7 +193,8 @@
         "description": "收集足够余烬且船体完整时胜利",
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["twenty-minute-core-loop-win"]
+        "checkNames": ["twenty-minute-core-loop-win"],
+        "timeoutMs": 60000
       },
       {
         "id": "save-persistence",
@@ -188,7 +203,8 @@
         "description": "游戏状态可以保存并原样恢复",
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["save-open-write", "save-open-read", "save-json-valid", "save-round-trip"]
+        "checkNames": ["save-open-write", "save-open-read", "save-json-valid", "save-round-trip"],
+        "timeoutMs": 60000
       },
       {
         "id": "headless-performance",
@@ -197,7 +213,8 @@
         "description": "headless 模式下测试套件在 250ms 内完成",
         "verificationMethod": "unit",
         "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["headless-performance-budget"]
+        "checkNames": ["headless-performance-budget"],
+        "timeoutMs": 60000
       }
     ]
   },

@@ -5,7 +5,6 @@
   "cosignIssuer": "https://token.actions.githubusercontent.com",
   "releaseAuthHeaderFile": "C:\\ProgramData\\DeviludoInput\\github-release.header",
   "coreUrl": "https://core.internal.example:8443",
-  "signingBrokerUrl": "https://signing.internal.example",
   "enrollmentTokenFile": "C:\\ProgramData\\DeviludoInput\\enrollment.token",
   "coreCaFile": "C:\\ProgramData\\DeviludoInput\\core-ca.crt",
   "goldenVmFile": "D:\\DeviludoImages\\windows-golden.vmcz",
@@ -13,7 +12,6 @@
   "packageVersions": {
     "node": "REPLACE_WITH_WINGET_VERSION",
     "windowsSdk": "REPLACE_WITH_WINGET_VERSION",
-    "steam": "REPLACE_WITH_WINGET_VERSION",
     "openssl": "REPLACE_WITH_WINGET_VERSION",
     "nssm": "REPLACE_WITH_WINGET_VERSION",
     "cosign": "REPLACE_WITH_WINGET_VERSION"

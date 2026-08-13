@@ -1,6 +1,6 @@
 import type { ProbeAssertion } from "../lib/product/interaction-script.js";
 
-export const E2E_UI_PROBE_PROTOCOL: "deviludo.e2e-ui-probe.v1";
+export const E2E_UI_PROBE_SCHEMA: "deviludo.e2e-ui-probe";
 export const E2E_CLIENT_WIDTH: 1280;
 export const E2E_CLIENT_HEIGHT: 720;
 
@@ -15,7 +15,7 @@ export type E2EProbeControl = Readonly<{
   value?: E2EProbeValue;
 }>;
 export type E2EProbeSnapshot = Readonly<{
-  schemaVersion: typeof E2E_UI_PROBE_PROTOCOL;
+  schema: typeof E2E_UI_PROBE_SCHEMA;
   sessionNonce: string;
   pid: number;
   sequence: number;

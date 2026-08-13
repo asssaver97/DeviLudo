@@ -10,6 +10,7 @@ import {
   type AgentProgressEvent,
   type AgentProgressEventKind,
   type AgentModelConfiguration,
+  type AgentRoleModelConfiguration,
   type AgentRuntimeKind,
   type ArtifactRecord,
   type ProductEvent,
@@ -17,6 +18,9 @@ import {
   type ProductWorkflowIterationDetail,
   type ProductWorkflowIterationSummary,
   type ProjectSourceRevision,
+  type ProjectSteamSettings,
+  type SteamRelease,
+  type WorkspaceSteamSettings,
   type WorkspaceSummary,
 } from "@/lib/product/contracts";
 import {
@@ -37,7 +41,7 @@ import type {
   WorkflowSignalInput,
 } from "./contracts";
 import { executorReceiptSigningPayload } from "./contracts";
-import { normalizeAgentModels } from "./agent-settings";
+import { normalizeAgentModels, normalizeAgentRoleModels } from "./agent-settings";
 import {
   createInitialProjectDocument,
   parseProjectDocumentContent,
@@ -155,10 +159,295 @@ export class CoreRepository {
     });
   }
 
+  async readWorkspaceSteamSettings(workspaceId: string): Promise<StoredWorkspaceSteamSettings | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<WorkspaceSteamSettingsRow>(
+        `SELECT builder_username, credential_secret_ref, credential_mask,
+                credential_fingerprint, credential_version::text, revision::text, updated_at::text
+           FROM deviludo.workspace_steam_settings
+          WHERE workspace_id = $1::uuid`,
+        [workspaceId],
+      );
+      return result.rows[0] ? workspaceSteamSettingsFromRow(result.rows[0]) : null;
+    });
+  }
+
+  async saveWorkspaceSteamSettings(input: Readonly<{
+    workspaceId: string;
+    builderUsername: string;
+    credentialSecretRef: string;
+    credentialMask: string;
+    credentialFingerprint: string;
+    credentialVersion: string;
+    updatedByAccountId: string;
+  }>): Promise<StoredWorkspaceSteamSettings> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<WorkspaceSteamSettingsRow>(
+        `INSERT INTO deviludo.workspace_steam_settings(
+           workspace_id, builder_username, credential_secret_ref, credential_mask,
+           credential_fingerprint, credential_version, revision, updated_by_actor_account_id
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, 1, $7::uuid)
+         ON CONFLICT (workspace_id) DO UPDATE SET
+           builder_username = EXCLUDED.builder_username,
+           credential_secret_ref = EXCLUDED.credential_secret_ref,
+           credential_mask = EXCLUDED.credential_mask,
+           credential_fingerprint = EXCLUDED.credential_fingerprint,
+           credential_version = EXCLUDED.credential_version,
+           revision = deviludo.workspace_steam_settings.revision + 1,
+           updated_by_actor_account_id = EXCLUDED.updated_by_actor_account_id,
+           updated_at = clock_timestamp()
+         RETURNING builder_username, credential_secret_ref, credential_mask,
+                   credential_fingerprint, credential_version::text, revision::text, updated_at::text`,
+        [input.workspaceId, input.builderUsername, input.credentialSecretRef, input.credentialMask,
+          input.credentialFingerprint, input.credentialVersion, input.updatedByAccountId],
+      );
+      return workspaceSteamSettingsFromRow(result.rows[0]);
+    });
+  }
+
+  async readProjectSteamSettings(workspaceId: string, projectId: string): Promise<ProjectSteamSettings | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<ProjectSteamSettingsRow>(
+        `SELECT project_id::text, app_id::text, depot_linux::text, depot_windows::text,
+                depot_macos::text, test_branch, revision::text, updated_at::text
+           FROM deviludo.project_steam_settings
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+        [workspaceId, projectId],
+      );
+      return result.rows[0] ? projectSteamSettingsFromRow(result.rows[0]) : null;
+    });
+  }
+
+  async saveProjectSteamSettings(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    appId: string;
+    depots: Readonly<Partial<Record<ServerOperatingSystem, string>>>;
+    testBranch: string;
+    updatedByAccountId: string;
+  }>): Promise<ProjectSteamSettings> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<ProjectSteamSettingsRow>(
+        `INSERT INTO deviludo.project_steam_settings(
+           workspace_id, project_id, app_id, depot_linux, depot_windows, depot_macos,
+           test_branch, revision, updated_by_actor_account_id
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::bigint, $5::bigint, $6::bigint, $7, 1, $8::uuid)
+         ON CONFLICT (workspace_id, project_id) DO UPDATE SET
+           app_id = EXCLUDED.app_id, depot_linux = EXCLUDED.depot_linux,
+           depot_windows = EXCLUDED.depot_windows, depot_macos = EXCLUDED.depot_macos,
+           test_branch = EXCLUDED.test_branch,
+           revision = deviludo.project_steam_settings.revision + 1,
+           updated_by_actor_account_id = EXCLUDED.updated_by_actor_account_id,
+           updated_at = clock_timestamp()
+         RETURNING project_id::text, app_id::text, depot_linux::text, depot_windows::text,
+                   depot_macos::text, test_branch, revision::text, updated_at::text`,
+        [input.workspaceId, input.projectId, input.appId, input.depots.linux ?? null,
+          input.depots.windows ?? null, input.depots.macos ?? null, input.testBranch,
+          input.updatedByAccountId],
+      );
+      return projectSteamSettingsFromRow(result.rows[0]);
+    });
+  }
+
+  async listSteamReleases(workspaceId: string, projectId: string): Promise<readonly SteamRelease[]> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<SteamReleaseRow>(
+        `SELECT release.id::text, release.project_id::text, release.workflow_id::text,
+                workflow.iteration_number, release.version, release.release_number::text,
+                release.channel::text, release.target_branch, release.state::text,
+                release.steam_build_id, release.failure_message, release.created_at::text,
+                release.uploaded_at::text, release.live_at::text
+           FROM deviludo.steam_releases release
+           JOIN deviludo.workflow_instances workflow
+             ON workflow.workspace_id = release.workspace_id AND workflow.id = release.workflow_id
+          WHERE release.workspace_id = $1::uuid AND release.project_id = $2::uuid
+          ORDER BY release.release_number DESC`,
+        [workspaceId, projectId],
+      );
+      return Object.freeze(result.rows.map(steamReleaseFromRow));
+    });
+  }
+
+  async createSteamRelease(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    version: string;
+    channel: "TEST" | "DEFAULT";
+    requestedByAccountId: string;
+  }>): Promise<Readonly<{ release: SteamRelease; accepted: boolean }>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `SELECT 1 FROM deviludo.projects
+          WHERE workspace_id = $1::uuid AND id = $2::uuid FOR UPDATE`,
+        [input.workspaceId, input.projectId],
+      );
+      const existing = await client.query<SteamReleaseRow>(steamReleaseSelectSql("release.workflow_id = $3::uuid"),
+        [input.workspaceId, input.projectId, input.workflowId]);
+      if (existing.rows[0]) {
+        if (existing.rows[0].version !== input.version || existing.rows[0].channel !== input.channel) {
+          throw new Error("This iteration already has a different Steam release");
+        }
+        return Object.freeze({ release: steamReleaseFromRow(existing.rows[0]), accepted: false });
+      }
+
+      const context = await client.query<{
+        iteration_number: number;
+        state: string;
+        target_platforms: ServerOperatingSystem[];
+        app_id: string;
+        depot_linux: string | null;
+        depot_windows: string | null;
+        depot_macos: string | null;
+        test_branch: string;
+        project_revision: string;
+        builder_username: string;
+        credential_secret_ref: string;
+        credential_revision: string;
+      }>(
+        `SELECT workflow.iteration_number, workflow.state::text, workflow.target_platforms,
+                project.app_id::text, project.depot_linux::text, project.depot_windows::text,
+                project.depot_macos::text, project.test_branch, project.revision::text AS project_revision,
+                workspace.builder_username, workspace.credential_secret_ref,
+                workspace.revision::text AS credential_revision
+           FROM deviludo.workflow_instances workflow
+           JOIN deviludo.project_steam_settings project
+             ON project.workspace_id = workflow.workspace_id AND project.project_id = workflow.project_id
+           JOIN deviludo.workspace_steam_settings workspace
+             ON workspace.workspace_id = workflow.workspace_id
+          WHERE workflow.workspace_id = $1::uuid AND workflow.project_id = $2::uuid
+            AND workflow.id = $3::uuid
+            AND workflow.iteration_number = (
+              SELECT max(latest.iteration_number) FROM deviludo.workflow_instances latest
+               WHERE latest.workspace_id = workflow.workspace_id AND latest.project_id = workflow.project_id
+            )
+          FOR UPDATE OF workflow`,
+        [input.workspaceId, input.projectId, input.workflowId],
+      );
+      const settings = context.rows[0];
+      if (!settings) throw new Error("Steam workspace and project configuration is required");
+      if (settings.state !== "RELEASE_DECISION_PENDING") throw new Error("Workflow is not awaiting a release decision");
+      const depots = { linux: settings.depot_linux, windows: settings.depot_windows, macos: settings.depot_macos };
+      for (const platform of settings.target_platforms) {
+        if (!depots[platform]) throw new Error(`Steam depot is missing for ${platform}`);
+      }
+      const artifacts = await client.query<{ target_platform: ServerOperatingSystem; sha256: string }>(
+        `SELECT artifact.target_platform, artifact.sha256
+           FROM deviludo.artifacts artifact
+           JOIN deviludo.jobs build ON build.workspace_id = artifact.workspace_id
+             AND build.id = artifact.producing_job_id
+          WHERE artifact.workspace_id = $1::uuid AND artifact.workflow_id = $2::uuid
+            AND artifact.kind = 'BUILD' AND build.kind = 'ARTIFACT_BUILD' AND build.state = 'SUCCEEDED'
+            AND build.id = (
+              SELECT latest.id FROM deviludo.jobs latest
+               WHERE latest.workspace_id = $1::uuid AND latest.workflow_id = $2::uuid
+                 AND latest.kind = 'ARTIFACT_BUILD' AND latest.state = 'SUCCEEDED'
+               ORDER BY latest.updated_at DESC, latest.created_at DESC LIMIT 1
+            )`,
+        [input.workspaceId, input.workflowId],
+      );
+      const buildDigests = Object.fromEntries(artifacts.rows.map(row => [row.target_platform, row.sha256]));
+      if (settings.target_platforms.some(platform => !buildDigests[platform])) {
+        throw new Error("Validated build artifacts are incomplete");
+      }
+      const nextNumber = await client.query<{ value: string }>(
+        `SELECT (coalesce(max(release_number), 0) + 1)::text AS value
+           FROM deviludo.steam_releases
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+        [input.workspaceId, input.projectId],
+      );
+      const releaseId = randomUUID();
+      const targetBranch = input.channel === "TEST" ? settings.test_branch : "default";
+      await client.query(
+        `INSERT INTO deviludo.steam_releases(
+           workspace_id, id, project_id, workflow_id, version, release_number, channel,
+           target_branch, app_id, depot_linux, depot_windows, depot_macos,
+           project_settings_revision, builder_username, credential_secret_ref,
+           credential_revision, build_digests, requested_by_actor_account_id
+         ) VALUES (
+           $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::bigint, $7::deviludo.steam_release_channel,
+           $8, $9::bigint, $10::bigint, $11::bigint, $12::bigint, $13::bigint,
+           $14, $15, $16::bigint, $17::jsonb, $18::uuid
+         )`,
+        [input.workspaceId, releaseId, input.projectId, input.workflowId, input.version,
+          nextNumber.rows[0].value, input.channel, targetBranch, settings.app_id,
+          settings.depot_linux, settings.depot_windows, settings.depot_macos,
+          settings.project_revision, settings.builder_username, settings.credential_secret_ref,
+          settings.credential_revision, JSON.stringify(buildDigests), input.requestedByAccountId],
+      );
+      const accepted = await client.query<{ accepted: boolean }>(
+        `SELECT deviludo.start_steam_release($1::uuid, $2::uuid, $3, $4::jsonb) AS accepted`,
+        [input.workflowId, releaseId, `release-approved:${releaseId}`,
+          JSON.stringify({ requestedByAccountId: input.requestedByAccountId })],
+      );
+      const release = await client.query<SteamReleaseRow>(steamReleaseSelectSql("release.id = $3::uuid"),
+        [input.workspaceId, input.projectId, releaseId]);
+      return Object.freeze({ release: steamReleaseFromRow(release.rows[0]), accepted: accepted.rows[0]?.accepted === true });
+    });
+  }
+
+  async completeWorkflowIteration(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    idempotencyKey: string;
+    requestedByAccountId: string;
+  }>): Promise<boolean> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{ accepted: boolean }>(
+        `SELECT deviludo.complete_workflow_iteration($1::uuid, $2, $3::jsonb) AS accepted`,
+        [input.workflowId, input.idempotencyKey,
+          JSON.stringify({ requestedByAccountId: input.requestedByAccountId })],
+      );
+      return result.rows[0]?.accepted === true;
+    });
+  }
+
+  async retrySteamRelease(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    idempotencyKey: string;
+    requestedByAccountId: string;
+  }>): Promise<boolean> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{ accepted: boolean }>(
+        `SELECT deviludo.retry_steam_release($1::uuid, $2, $3::jsonb) AS accepted`,
+        [input.workflowId, input.idempotencyKey,
+          JSON.stringify({ requestedByAccountId: input.requestedByAccountId })],
+      );
+      return result.rows[0]?.accepted === true;
+    });
+  }
+
+  async confirmSteamReleaseLive(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    releaseId: string;
+  }>): Promise<SteamRelease | null> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const updated = await client.query<SteamReleaseRow>(
+        `${steamReleaseSelectSql("release.id = $3::uuid", true)}
+         `,
+        [input.workspaceId, input.projectId, input.releaseId],
+      );
+      if (!updated.rows[0] || updated.rows[0].state !== "AWAITING_DEFAULT_PROMOTION") return null;
+      await client.query(
+        `UPDATE deviludo.steam_releases SET state = 'LIVE_DEFAULT', live_at = clock_timestamp(),
+          updated_at = clock_timestamp()
+         WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND id = $3::uuid
+           AND state = 'AWAITING_DEFAULT_PROMOTION'`,
+        [input.workspaceId, input.projectId, input.releaseId],
+      );
+      const result = await client.query<SteamReleaseRow>(steamReleaseSelectSql("release.id = $3::uuid"),
+        [input.workspaceId, input.projectId, input.releaseId]);
+      return result.rows[0] ? steamReleaseFromRow(result.rows[0]) : null;
+    });
+  }
+
   async readAgentSettings(): Promise<StoredInstanceAgentSettings | null> {
     const result = await this.database.pool.query<AgentSettingsRow>(
         `SELECT agent_runtime::text, base_url, primary_model, opus_model,
-                sonnet_model, haiku_model, subagent_model, credential_secret_ref,
+                sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
+                test_policy_ready, test_policy_checked_revision::text,
                 api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                 updated_by, updated_at::text
            FROM deviludo.instance_agent_settings
@@ -171,6 +460,7 @@ export class CoreRepository {
     agentRuntime: AgentRuntimeKind;
     baseUrl: string;
     models: AgentModelConfiguration | null;
+    roleModels: AgentRoleModelConfiguration;
     credentialSecretRef: string;
     apiKeyMask: string;
     apiKeyFingerprint: string;
@@ -180,11 +470,11 @@ export class CoreRepository {
       const result = await this.database.pool.query<AgentSettingsRow>(
         `INSERT INTO deviludo.instance_agent_settings(
            singleton, agent_runtime, base_url, primary_model, opus_model,
-           sonnet_model, haiku_model, subagent_model, credential_secret_ref,
+           sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
            api_key_mask, api_key_fingerprint, credential_version, updated_by
          ) VALUES (
            true, $1::deviludo.agent_runtime, $2, $3, $4, $5, $6, $7,
-           $8, $9, $10, $11::uuid, $12
+           $8::jsonb, $9, $10, $11, $12::uuid, $13
          )
          ON CONFLICT (singleton) DO UPDATE SET
            agent_runtime = EXCLUDED.agent_runtime,
@@ -194,15 +484,19 @@ export class CoreRepository {
            sonnet_model = EXCLUDED.sonnet_model,
            haiku_model = EXCLUDED.haiku_model,
            subagent_model = EXCLUDED.subagent_model,
+           role_models = EXCLUDED.role_models,
            credential_secret_ref = EXCLUDED.credential_secret_ref,
            api_key_mask = EXCLUDED.api_key_mask,
            api_key_fingerprint = EXCLUDED.api_key_fingerprint,
            credential_version = EXCLUDED.credential_version,
+           test_policy_ready = false,
+           test_policy_checked_revision = NULL,
            revision = deviludo.instance_agent_settings.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = clock_timestamp()
          RETURNING agent_runtime::text, base_url, primary_model, opus_model,
-                   sonnet_model, haiku_model, subagent_model, credential_secret_ref,
+                   sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
+                   test_policy_ready, test_policy_checked_revision::text,
                    api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                    updated_by, updated_at::text`,
         [
@@ -213,6 +507,7 @@ export class CoreRepository {
           input.models?.sonnet ?? null,
           input.models?.haiku ?? null,
           input.models?.subagent ?? null,
+          JSON.stringify(input.roleModels),
           input.credentialSecretRef,
           input.apiKeyMask,
           input.apiKeyFingerprint,
@@ -221,6 +516,130 @@ export class CoreRepository {
         ],
       );
       return agentSettingsFromRow(result.rows[0]);
+  }
+
+  async markTestPolicyReady(settingsRevision: number): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `UPDATE deviludo.instance_agent_settings
+          SET test_policy_ready = true, test_policy_checked_revision = revision,
+              updated_at = clock_timestamp()
+        WHERE singleton = true AND revision = $1::bigint`,
+      [settingsRevision],
+    );
+    return (result.rowCount ?? 0) === 1;
+  }
+
+  async lockE2ePlayerPolicy(input: Readonly<{
+    workspaceId: string;
+    jobId: string;
+    settingsRevision: number;
+    runtime: AgentRuntimeKind;
+    baseUrl: string;
+    model: string;
+    credentialSecretRef: string;
+    configurationDigest: string;
+  }>): Promise<Readonly<{
+    settingsRevision: number;
+    runtime: AgentRuntimeKind;
+    baseUrl: string;
+    model: string;
+    credentialSecretRef: string;
+    configurationDigest: string;
+  }>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.e2e_policy_locks(
+           workspace_id, job_id, settings_revision, runtime, base_url, model,
+           credential_secret_ref, configuration_digest
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::deviludo.agent_runtime, $5, $6, $7, $8)
+         ON CONFLICT (workspace_id, job_id) DO NOTHING`,
+        [input.workspaceId, input.jobId, input.settingsRevision, input.runtime, input.baseUrl,
+          input.model, input.credentialSecretRef, input.configurationDigest],
+      );
+      const locked = await client.query<{
+        settings_revision: string; runtime: AgentRuntimeKind; base_url: string; model: string;
+        credential_secret_ref: string; configuration_digest: string;
+      }>(
+        `SELECT settings_revision::text, runtime::text, base_url, model,
+                credential_secret_ref, configuration_digest FROM deviludo.e2e_policy_locks
+          WHERE workspace_id = $1::uuid AND job_id = $2::uuid FOR UPDATE`,
+        [input.workspaceId, input.jobId],
+      );
+      const row = locked.rows[0];
+      if (!row) throw new Error("E2E Test Agent policy lock could not be created");
+      return Object.freeze({
+        settingsRevision: Number(row.settings_revision), runtime: row.runtime, baseUrl: row.base_url,
+        model: row.model, credentialSecretRef: row.credential_secret_ref,
+        configurationDigest: row.configuration_digest,
+      });
+    });
+  }
+
+  async readE2ePlayerDecision(input: Readonly<{
+    workspaceId: string;
+    jobId: string;
+    rolloutIndex: number;
+    decisionIndex: number;
+    requestDigest: string;
+  }>): Promise<Readonly<Record<string, unknown>> | null> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{ request_digest: string; decision: unknown }>(
+        `SELECT request_digest, decision FROM deviludo.e2e_policy_decisions
+          WHERE workspace_id = $1::uuid AND job_id = $2::uuid
+            AND rollout_index = $3::integer AND decision_index = $4::integer`,
+        [input.workspaceId, input.jobId, input.rolloutIndex, input.decisionIndex],
+      );
+      if (!result.rows[0]) return null;
+      if (result.rows[0].request_digest !== input.requestDigest) throw new Error("E2E policy decision idempotency input changed");
+      if (!result.rows[0].decision || typeof result.rows[0].decision !== "object" || Array.isArray(result.rows[0].decision)) {
+        throw new Error("Stored E2E policy decision is invalid");
+      }
+      return Object.freeze(result.rows[0].decision as Record<string, unknown>);
+    });
+  }
+
+  async withE2ePlayerDecisionLock<T>(input: Readonly<{
+    workspaceId: string;
+    jobId: string;
+    rolloutIndex: number;
+    decisionIndex: number;
+  }>, operation: () => Promise<T>): Promise<T> {
+    const client = await this.database.pool.connect();
+    const lockKey = [input.workspaceId, input.jobId, input.rolloutIndex, input.decisionIndex].join(":");
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+      return await operation();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  async saveE2ePlayerDecision(input: Readonly<{
+    workspaceId: string;
+    jobId: string;
+    rolloutIndex: number;
+    decisionIndex: number;
+    requestDigest: string;
+    screenshotDigest: string;
+    decision: Readonly<Record<string, unknown>>;
+    latencyMs: number;
+    inputTokens: number;
+    outputTokens: number;
+  }>): Promise<Readonly<Record<string, unknown>>> {
+    await this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.e2e_policy_decisions(
+           workspace_id, job_id, rollout_index, decision_index, request_digest,
+           screenshot_digest, decision, latency_ms, input_tokens, output_tokens
+         ) VALUES ($1::uuid, $2::uuid, $3::integer, $4::integer, $5, $6, $7::jsonb, $8::integer, $9::integer, $10::integer)
+         ON CONFLICT (workspace_id, job_id, rollout_index, decision_index) DO NOTHING`,
+        [input.workspaceId, input.jobId, input.rolloutIndex, input.decisionIndex,
+          input.requestDigest, input.screenshotDigest, JSON.stringify(input.decision), input.latencyMs,
+          input.inputTokens, input.outputTokens],
+      );
+    });
+    return await this.readE2ePlayerDecision(input) ?? input.decision;
   }
 
   async readImageGenerationSettings(): Promise<StoredImageGenerationSettings | null> {
@@ -854,8 +1273,10 @@ export class CoreRepository {
     specification: Readonly<Record<string, unknown>>;
     document: ProjectDocumentContent;
     userContent: string;
-    assistantContent: string;
-    assistantMetadata: Readonly<Record<string, unknown>>;
+    assistantMessages: readonly Readonly<{
+      content: string;
+      metadata: Readonly<Record<string, unknown>>;
+    }>[];
     profile: "VALIDATE" | "RELEASE";
     targetPlatforms: readonly ServerOperatingSystem[];
   }>): Promise<Readonly<{ project: ProductProjectDetail; conversation: ProductConversation }>> {
@@ -904,15 +1325,18 @@ export class CoreRepository {
          VALUES ($1::uuid, $2::uuid, 'USER', $3)`,
         [input.workspaceId, input.conversationId, input.userContent],
       );
-      await client.query(
-        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
-         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
-        [input.workspaceId, input.conversationId, input.assistantContent, JSON.stringify({
-          ...input.assistantMetadata,
-          appliedToDraft: true,
-          projectDocumentUpdated: true,
-        })],
-      );
+      for (const message of input.assistantMessages) {
+        const design = message.metadata.agentRole === "DESIGN";
+        await client.query(
+          `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+           VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+          [input.workspaceId, input.conversationId, message.content, JSON.stringify({
+            ...message.metadata,
+            appliedToDraft: design,
+            projectDocumentUpdated: design,
+          })],
+        );
+      }
       await client.query(
         `INSERT INTO deviludo.project_creation_receipts(
            idempotency_key, operation_kind, workspace_id, project_id, conversation_id
@@ -1498,7 +1922,9 @@ export class CoreRepository {
                 conversation.mode, conversation.title,
                 conversation.created_at::text, conversation.updated_at::text,
                 first_user.content AS preview,
-                count(message.message_id)::text AS message_count
+                count(message.message_id)::text AS message_count,
+                count(message.message_id) FILTER (WHERE message.role = 'USER')::text AS user_message_count,
+                coalesce(bool_or(message.metadata ->> 'source' = 'PROJECT_IMPORT_AGENT'), false) AS system_generated
            FROM deviludo.project_conversations conversation
            LEFT JOIN deviludo.conversation_messages message
              ON message.workspace_id = conversation.workspace_id
@@ -1524,6 +1950,8 @@ export class CoreRepository {
         title: conversation.title,
         preview: conversation.preview ?? conversation.title,
         messageCount: Number(conversation.message_count),
+        userMessageCount: Number(conversation.user_message_count),
+        systemGenerated: conversation.system_generated,
         createdAt: conversation.created_at,
         updatedAt: conversation.updated_at,
       })));
@@ -1713,10 +2141,12 @@ export class CoreRepository {
     projectId: string;
     userContent: string;
     expectedWorkflowState: string;
-    assistantContent: string;
+    assistantMessages: readonly Readonly<{
+      content: string;
+      metadata: Readonly<Record<string, unknown>>;
+    }>[];
     assistantApplyToDraft: boolean;
     assistantProjectDocument: ProjectDocumentContent | null;
-    assistantMetadata: Readonly<Record<string, unknown>>;
   }>): Promise<ProductConversation> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const existing = await client.query<ProductConversationRow>(
@@ -1847,16 +2277,23 @@ export class CoreRepository {
         }
       }
 
-      await client.query(
-        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
-         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
-        [
-          input.workspaceId,
-          input.conversationId,
-          input.assistantContent,
-          JSON.stringify({ ...input.assistantMetadata, appliedToDraft, projectDocumentUpdated }),
-        ],
-      );
+      for (const message of input.assistantMessages) {
+        const design = message.metadata.agentRole === "DESIGN";
+        await client.query(
+          `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+           VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+          [
+            input.workspaceId,
+            input.conversationId,
+            message.content,
+            JSON.stringify({
+              ...message.metadata,
+              appliedToDraft: design && appliedToDraft,
+              projectDocumentUpdated: design && projectDocumentUpdated,
+            }),
+          ],
+        );
+      }
       const updated = await client.query<ProductConversationRow>(
         `UPDATE deviludo.project_conversations
             SET updated_at = clock_timestamp()
@@ -1960,7 +2397,7 @@ export class CoreRepository {
       const node = await client.query<{ id: string }>(
         `INSERT INTO deviludo.server_nodes(pool_kind, operating_system, state, capabilities)
          VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, 'PROVISIONING',
-                 ARRAY['E2E_TEST','ARTIFACT_SIGN','STEAM_CLEAN_INSTALL'])
+                 ARRAY['E2E_TEST'])
          RETURNING id::text`,
         [input.poolKind, input.operatingSystem],
       );
@@ -2167,6 +2604,34 @@ export class CoreRepository {
     return result.rows[0]?.failed === true;
   }
 
+  async claimObjectCleanup(leaseSeconds: number): Promise<PendingObjectCleanup | null> {
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) {
+      throw new Error("Object cleanup lease is invalid");
+    }
+    const result = await this.database.pool.query<PendingObjectCleanupRow>(
+      `SELECT "workspaceId"::text, bucket, "objectKey", "leaseToken"::text, attempt
+         FROM deviludo.claim_object_cleanup($1::integer)`,
+      [leaseSeconds],
+    );
+    return result.rows[0] ? Object.freeze(result.rows[0]) : null;
+  }
+
+  async completeObjectCleanup(input: PendingObjectCleanup): Promise<boolean> {
+    const result = await this.database.pool.query<{ completed: boolean }>(
+      "SELECT deviludo.complete_object_cleanup($1::uuid, $2::text, $3::text, $4::uuid) AS completed",
+      [input.workspaceId, input.bucket, input.objectKey, input.leaseToken],
+    );
+    return result.rows[0]?.completed === true;
+  }
+
+  async failObjectCleanup(input: PendingObjectCleanup, error: string): Promise<boolean> {
+    const result = await this.database.pool.query<{ failed: boolean }>(
+      "SELECT deviludo.fail_object_cleanup($1::uuid, $2::text, $3::text, $4::uuid, $5::text) AS failed",
+      [input.workspaceId, input.bucket, input.objectKey, input.leaseToken, error.slice(0, 2_000)],
+    );
+    return result.rows[0]?.failed === true;
+  }
+
   async reconcileCapacity(): Promise<void> {
     await this.database.pool.query("SELECT deviludo.reconcile_p0_capacity()");
   }
@@ -2182,14 +2647,6 @@ export class CoreRepository {
     const result = await this.database.pool.query<{ scheduled: string }>(
       "SELECT deviludo.schedule_idle_project_document_maintenance($1::integer, 20)::text AS scheduled",
       [idleSeconds],
-    );
-    return Number(result.rows[0]?.scheduled ?? 0);
-  }
-
-  async scheduleE2eProtocolRevalidation(protocol: string, batchSize: number): Promise<number> {
-    const result = await this.database.pool.query<{ scheduled: string }>(
-      "SELECT deviludo.schedule_e2e_protocol_revalidation($1::text, $2::integer)::text AS scheduled",
-      [protocol, batchSize],
     );
     return Number(result.rows[0]?.scheduled ?? 0);
   }
@@ -2495,6 +2952,16 @@ type PendingLocalGitCommitRow = {
   attempt: number;
 };
 export type PendingLocalGitCommit = Readonly<PendingLocalGitCommitRow>;
+
+type PendingObjectCleanupRow = {
+  workspaceId: string;
+  bucket: string;
+  objectKey: string;
+  leaseToken: string;
+  attempt: number;
+};
+
+export type PendingObjectCleanup = Readonly<PendingObjectCleanupRow>;
 type SourceReadyEventRow = {
   event_id: string;
   workspace_id: string;
@@ -2523,7 +2990,10 @@ type AgentSettingsRow = {
   sonnet_model: string | null;
   haiku_model: string | null;
   subagent_model: string | null;
+  role_models: unknown;
   credential_secret_ref: string;
+  test_policy_ready: boolean;
+  test_policy_checked_revision: string | null;
   api_key_mask: string | null;
   api_key_fingerprint: string;
   credential_version: string;
@@ -2536,7 +3006,10 @@ export type StoredInstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
   models: AgentModelConfiguration | null;
+  roleModels: AgentRoleModelConfiguration;
   credentialSecretRef: string;
+  testPolicyReady: boolean;
+  testPolicyCheckedRevision: number | null;
   apiKeyMask: string | null;
   apiKeyFingerprint: string;
   credentialVersion: string;
@@ -2554,6 +3027,8 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
     haiku: row.haiku_model,
     subagent: row.subagent_model,
   });
+  const roleModels = normalizeAgentRoleModels(row.role_models);
+  const testPolicyCheckedRevision = row.test_policy_checked_revision === null ? null : Number(row.test_policy_checked_revision);
   if (!(AGENT_RUNTIME_KINDS as readonly string[]).includes(row.agent_runtime)
     || !Number.isSafeInteger(revision) || revision < 1
     || !row.credential_secret_ref.startsWith("vault://instance/agent-runtime/api-key/versions/")
@@ -2565,7 +3040,10 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
     agentRuntime: row.agent_runtime as AgentRuntimeKind,
     baseUrl: row.base_url,
     models,
+    roleModels,
     credentialSecretRef: row.credential_secret_ref,
+    testPolicyReady: row.test_policy_ready,
+    testPolicyCheckedRevision,
     apiKeyMask: row.api_key_mask,
     apiKeyFingerprint: row.api_key_fingerprint,
     credentialVersion: row.credential_version,
@@ -2768,6 +3246,8 @@ export type ProductConversationSummary = Readonly<{
   title: string;
   preview: string;
   messageCount: number;
+  userMessageCount: number;
+  systemGenerated: boolean;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -2784,6 +3264,8 @@ type ProductConversationRow = {
 type ProductConversationSummaryRow = ProductConversationRow & {
   preview: string | null;
   message_count: string;
+  user_message_count: string;
+  system_generated: boolean;
 };
 
 type ProductConversationMessageRow = {
@@ -2803,6 +3285,50 @@ type AgentProgressEventRow = {
 };
 
 type WorkspaceRow = { id: string; name: string; created_at: string };
+
+type WorkspaceSteamSettingsRow = {
+  builder_username: string;
+  credential_secret_ref: string;
+  credential_mask: string;
+  credential_fingerprint: string;
+  credential_version: string;
+  revision: string;
+  updated_at: string;
+};
+
+export type StoredWorkspaceSteamSettings = WorkspaceSteamSettings & Readonly<{
+  credentialSecretRef: string;
+  credentialFingerprint: string;
+  credentialVersion: string;
+}>;
+
+type ProjectSteamSettingsRow = {
+  project_id: string;
+  app_id: string;
+  depot_linux: string | null;
+  depot_windows: string | null;
+  depot_macos: string | null;
+  test_branch: string;
+  revision: string;
+  updated_at: string;
+};
+
+type SteamReleaseRow = {
+  id: string;
+  project_id: string;
+  workflow_id: string;
+  iteration_number: number;
+  version: string;
+  release_number: string;
+  channel: "TEST" | "DEFAULT";
+  target_branch: string;
+  state: SteamRelease["state"];
+  steam_build_id: string | null;
+  failure_message: string | null;
+  created_at: string;
+  uploaded_at: string | null;
+  live_at: string | null;
+};
 
 type CreationReceiptRow = {
   idempotency_key: string;
@@ -3098,24 +3624,37 @@ function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | nul
   if (!["PASSED", "FAILED"].includes(String(summary.result))
     || !Number.isSafeInteger(summary.screenshotCount) || Number(summary.screenshotCount) < 0
     || typeof summary.hasVisualDiff !== "boolean") return null;
-  if (summary.protocol === "deviludo.e2e-evidence.v1") {
-    if (!Number.isSafeInteger(summary.checkCount) || Number(summary.checkCount) < 0) return null;
-    return Object.freeze({
-      protocol: "deviludo.e2e-evidence.v1", result: summary.result as "PASSED" | "FAILED",
-      checkCount: Number(summary.checkCount), screenshotCount: Number(summary.screenshotCount), hasVisualDiff: summary.hasVisualDiff,
-    });
-  }
-  const counts = ["headlessCheckCount", "interactiveJourneyCount", "realInputCount", "coveredPlayerRequirementCount", "playerRequirementCount", "visualBaselineCount"] as const;
-  if (summary.protocol !== "deviludo.e2e-evidence.v2"
+  const counts = [
+    "headlessCheckCount", "interactiveJourneyCount", "deterministicInputCount", "realInputCount",
+    "keyboardMouseInputCount", "gamepadInputCount", "adaptiveRolloutCount", "adaptiveSuccessCount",
+    "adaptiveDecisionCount", "coveredPlayerRequirementCount", "playerRequirementCount", "visualBaselineCount", "videoCount",
+  ] as const;
+  if (summary.schema !== "deviludo.e2e-evidence" || Object.hasOwn(summary, "protocol")
     || counts.some(key => !Number.isSafeInteger(summary[key]) || Number(summary[key]) < 0)
     || Number(summary.coveredPlayerRequirementCount) > Number(summary.playerRequirementCount)
+    || Number(summary.adaptiveRolloutCount) > 3
+    || Number(summary.adaptiveSuccessCount) > Number(summary.adaptiveRolloutCount)
+    || (summary.regressionTraceDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(String(summary.regressionTraceDigest)))
+    || ![null, "KEYBOARD_MOUSE", "GAMEPAD"].includes(summary.regressionInputProfile as never)
+    || (summary.regressionEstimatedDurationMs !== null
+      && (!Number.isSafeInteger(summary.regressionEstimatedDurationMs)
+        || Number(summary.regressionEstimatedDurationMs) < 1 || Number(summary.regressionEstimatedDurationMs) > 300_000))
+    || ((summary.regressionTraceDigest === null) !== (summary.regressionInputProfile === null))
+    || ((summary.regressionTraceDigest === null) !== (summary.regressionEstimatedDurationMs === null))
     || ![null, "MACOS_LAUNCH_SERVICES", "WINDOWS_FINAL_EXE", "LINUX_RELEASE_EXECUTABLE"].includes(summary.packageLaunchMode as never)) return null;
   return Object.freeze({
-    protocol: "deviludo.e2e-evidence.v2", result: summary.result as "PASSED" | "FAILED",
+    schema: "deviludo.e2e-evidence", result: summary.result as "PASSED" | "FAILED",
     headlessCheckCount: Number(summary.headlessCheckCount), interactiveJourneyCount: Number(summary.interactiveJourneyCount),
-    realInputCount: Number(summary.realInputCount), coveredPlayerRequirementCount: Number(summary.coveredPlayerRequirementCount),
+    deterministicInputCount: Number(summary.deterministicInputCount), realInputCount: Number(summary.realInputCount),
+    keyboardMouseInputCount: Number(summary.keyboardMouseInputCount), gamepadInputCount: Number(summary.gamepadInputCount),
+    adaptiveRolloutCount: Number(summary.adaptiveRolloutCount), adaptiveSuccessCount: Number(summary.adaptiveSuccessCount),
+    adaptiveDecisionCount: Number(summary.adaptiveDecisionCount),
+    coveredPlayerRequirementCount: Number(summary.coveredPlayerRequirementCount),
     playerRequirementCount: Number(summary.playerRequirementCount), screenshotCount: Number(summary.screenshotCount),
-    visualBaselineCount: Number(summary.visualBaselineCount), hasVisualDiff: summary.hasVisualDiff,
+    visualBaselineCount: Number(summary.visualBaselineCount), videoCount: Number(summary.videoCount), hasVisualDiff: summary.hasVisualDiff,
+    regressionTraceDigest: summary.regressionTraceDigest as string | null,
+    regressionInputProfile: summary.regressionInputProfile as "KEYBOARD_MOUSE" | "GAMEPAD" | null,
+    regressionEstimatedDurationMs: summary.regressionEstimatedDurationMs as number | null,
     packageLaunchMode: summary.packageLaunchMode as "MACOS_LAUNCH_SERVICES" | "WINDOWS_FINAL_EXE" | "LINUX_RELEASE_EXECUTABLE" | null,
   });
 }
@@ -3204,6 +3743,65 @@ async function touchProjectActivity(
 
 function workspaceFromRow(row: WorkspaceRow): WorkspaceSummary {
   return Object.freeze({ id: row.id, name: row.name, createdAt: row.created_at });
+}
+
+function workspaceSteamSettingsFromRow(row: WorkspaceSteamSettingsRow): StoredWorkspaceSteamSettings {
+  return Object.freeze({
+    builderUsername: row.builder_username,
+    credentialMask: row.credential_mask,
+    credentialSecretRef: row.credential_secret_ref,
+    credentialFingerprint: row.credential_fingerprint,
+    credentialVersion: row.credential_version,
+    revision: Number(row.revision),
+    updatedAt: row.updated_at,
+  });
+}
+
+function projectSteamSettingsFromRow(row: ProjectSteamSettingsRow): ProjectSteamSettings {
+  return Object.freeze({
+    projectId: row.project_id,
+    appId: row.app_id,
+    depots: Object.freeze({
+      ...(row.depot_linux ? { linux: row.depot_linux } : {}),
+      ...(row.depot_windows ? { windows: row.depot_windows } : {}),
+      ...(row.depot_macos ? { macos: row.depot_macos } : {}),
+    }),
+    testBranch: row.test_branch,
+    revision: Number(row.revision),
+    updatedAt: row.updated_at,
+  });
+}
+
+function steamReleaseSelectSql(where: string, forUpdate = false): string {
+  return `SELECT release.id::text, release.project_id::text, release.workflow_id::text,
+                 workflow.iteration_number, release.version, release.release_number::text,
+                 release.channel::text, release.target_branch, release.state::text,
+                 release.steam_build_id, release.failure_message, release.created_at::text,
+                 release.uploaded_at::text, release.live_at::text
+            FROM deviludo.steam_releases release
+            JOIN deviludo.workflow_instances workflow
+              ON workflow.workspace_id = release.workspace_id AND workflow.id = release.workflow_id
+           WHERE release.workspace_id = $1::uuid AND release.project_id = $2::uuid AND ${where}
+           ${forUpdate ? "FOR UPDATE OF release" : ""}`;
+}
+
+function steamReleaseFromRow(row: SteamReleaseRow): SteamRelease {
+  return Object.freeze({
+    id: row.id,
+    projectId: row.project_id,
+    workflowId: row.workflow_id,
+    iterationNumber: row.iteration_number,
+    version: row.version,
+    releaseNumber: Number(row.release_number),
+    channel: row.channel,
+    targetBranch: row.target_branch,
+    state: row.state,
+    steamBuildId: row.steam_build_id,
+    failureMessage: row.failure_message,
+    createdAt: row.created_at,
+    uploadedAt: row.uploaded_at,
+    liveAt: row.live_at,
+  });
 }
 
 function creationReceiptFromRow(row: CreationReceiptRow): CreationReceipt {

@@ -12,10 +12,11 @@ const keyFile = resolve(localRoot, "tart-guest-ed25519");
 const knownHostsFile = resolve(localRoot, "tart-known-hosts");
 const guestHostKeyAlias = "deviludo-tart-guest";
 const hostGuiDriverFile = resolve(localRoot, "deviludo-gui-driver");
-const goldenName = "deviludo-e2e-sequoia-v2";
+const hostGamepadDriverFile = resolve(localRoot, "deviludo-gamepad-driver");
+const goldenName = "deviludo-e2e-tahoe";
 const stagingName = `${goldenName}-building`;
-const baseCacheName = "deviludo-e2e-sequoia-base-cache";
-const baseImage = "ghcr.io/cirruslabs/macos-sequoia-base:latest";
+const baseCacheName = "deviludo-e2e-tahoe-base-cache";
+const baseImage = "ghcr.io/cirruslabs/macos-tahoe-base:latest";
 
 export async function prepareLocalTartE2e({ refresh = false } = {}) {
   if (platform() !== "darwin" || arch() !== "arm64") throw new Error("本地真实窗口 E2E 仅支持 Apple Silicon macOS，且不会降级到宿主机执行");
@@ -26,17 +27,15 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   const baseImageDigest = await ensureCachedBaseImage(refresh);
   const fingerprint = await configurationFingerprint(baseImageDigest);
   const previous = await readFile(stateFile, "utf8").then(JSON.parse).catch(() => null);
-  const legacyFingerprint = previous?.baseImageDigest && previous.baseImageDigest !== baseImageDigest
-    ? await configurationFingerprint(previous.baseImageDigest)
-    : null;
   if (!refresh && previous?.baseImage === baseImage && previous?.goldenName === goldenName
-    && [fingerprint, legacyFingerprint].includes(previous?.fingerprint) && await tartVmExists(goldenName)) {
+    && previous?.schema === "deviludo.local-tart-e2e" && previous?.fingerprint === fingerprint
+    && await tartVmExists(goldenName)) {
     await ensureAliasedKnownHosts();
     const migrated = { ...previous, baseImageDigest, fingerprint, verifiedAt: new Date().toISOString() };
     await writeState(migrated);
     return Object.freeze({ ...migrated, reused: true });
   }
-  await compileHostGuiDriver();
+  await compileHostDrivers();
   console.log(JSON.stringify({ event: "local_up_stage", stage: "e2e_vm_initializing", message: "正在从固定的本地基础镜像构建真实窗口 E2E 金镜像" }));
   if (await tartVmExists(stagingName)) await run("tart", ["delete", stagingName], 120_000);
   await visible("tart", ["clone", baseCacheName, stagingName]);
@@ -90,7 +89,7 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   }
   if (await tartVmExists(goldenName)) await run("tart", ["delete", goldenName], 120_000);
   await run("tart", ["rename", stagingName, goldenName], 120_000);
-  const state = { schemaVersion: "deviludo.local-tart-e2e.v1", goldenName, baseImage, baseCacheName, baseImageDigest, fingerprint, guestUser: "admin", keyFile, knownHostsFile, createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString() };
+  const state = { schema: "deviludo.local-tart-e2e", goldenName, baseImage, baseCacheName, baseImageDigest, fingerprint, guestUser: "admin", keyFile, knownHostsFile, createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString() };
   await writeState(state);
   return Object.freeze({ ...state, reused: false });
 }
@@ -220,7 +219,7 @@ async function ensureAliasedKnownHosts() {
   await writeFile(knownHostsFile, `${aliased.join("\n")}\n`, { mode: 0o600 });
 }
 
-async function compileHostGuiDriver() {
+async function compileHostDrivers() {
   const moduleCache = resolve(localRoot, "swift-module-cache");
   await mkdir(moduleCache, { recursive: true, mode: 0o700 });
   await execute("swiftc", [
@@ -231,21 +230,31 @@ async function compileHostGuiDriver() {
     resolve(root, "scripts/executors/macos-gui-driver.swift"),
   ], { timeout: 5 * 60_000, maxBuffer: 4 * 1024 * 1024 });
   await chmod(hostGuiDriverFile, 0o755);
+  await execute("swiftc", [
+    "-Onone", "-target", "arm64-apple-macosx15.0", "-module-cache-path", moduleCache,
+    "-o", hostGamepadDriverFile, resolve(root, "scripts/executors/macos-gamepad-driver.swift"),
+  ], { timeout: 5 * 60_000, maxBuffer: 4 * 1024 * 1024 });
+  await chmod(hostGamepadDriverFile, 0o755);
 }
 
 async function installGuestRuntime(ip) {
   const ssh = sshArguments();
   for (const [source, destination] of [
     [resolve(root, "scripts/executors/godot-window-e2e-guest.mjs"), "/Users/Shared/godot-window-e2e-guest.mjs"],
+    [resolve(root, "scripts/executors/game-test-environment.mjs"), "/Users/Shared/game-test-environment.mjs"],
     [resolve(root, "scripts/executors/gui-event-batches.mjs"), "/Users/Shared/gui-event-batches.mjs"],
     [resolve(root, "scripts/e2e-evidence.mjs"), "/Users/Shared/e2e-evidence.mjs"],
     [resolve(root, "scripts/e2e-ui-probe.mjs"), "/Users/Shared/e2e-ui-probe.mjs"],
-    [resolve(root, "scripts/executors/steam-clean-install.mjs"), "/Users/Shared/steam-clean-install.mjs"],
+    [resolve(root, "scripts/executors/godot-system-gamepad-smoke.mjs"), "/Users/Shared/godot-system-gamepad-smoke.mjs"],
+    [resolve(root, "fixtures/godot-input-smoke/project.godot"), "/Users/Shared/godot-input-smoke-project.godot"],
+    [resolve(root, "fixtures/godot-input-smoke/main.tscn"), "/Users/Shared/godot-input-smoke-main.tscn"],
+    [resolve(root, "fixtures/godot-input-smoke/main.gd"), "/Users/Shared/godot-input-smoke-main.gd"],
     [hostGuiDriverFile, "/Users/Shared/deviludo-gui-driver"],
+    [hostGamepadDriverFile, "/Users/Shared/deviludo-gamepad-driver"],
     [resolve(root, "scripts/local-tart-provision.sh"), "/Users/Shared/local-tart-provision.sh"],
   ]) await run("scp", [...ssh, source, `admin@${ip}:${destination}`], 120_000);
   // loginwindow silently rejects longer auto-login secrets on current
-  // Sequoia images and restores the base image's stale kcpassword. Twenty-four
+  // Tahoe images and restores the base image's stale kcpassword. Twenty-four
   // base64url characters still provide 144 bits of random entropy while
   // remaining compatible with the persisted desktop login path.
   const password = randomBytes(12).toString("hex");
@@ -254,9 +263,9 @@ async function installGuestRuntime(ip) {
 
 async function smokeGuestRuntime(ip) {
   const ssh = sshArguments();
-  const command = "set -e; printf 'DeviLudo real-window E2E smoke\\n' > /Users/Shared/deviludo-smoke.txt; open -a TextEdit /Users/Shared/deviludo-smoke.txt; sleep 3; pid=$(pgrep -x TextEdit | head -n1); test -n \"$pid\"; /usr/local/bin/deviludo-gui-driver wait --pid \"$pid\" --width 1 --height 1; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_press\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_release\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver capture --pid \"$pid\" --output /Users/Shared/deviludo-smoke.png; /usr/local/bin/node -e \"import('/usr/local/lib/deviludo/e2e-evidence.mjs').then(m=>m.inspectScreenshot('/Users/Shared/deviludo-smoke.png')).then(()=>process.stdout.write('smoke-ok'))\"";
+  const command = "set -e; printf 'DeviLudo real-window E2E smoke\\n' > /Users/Shared/deviludo-smoke.txt; open -a TextEdit /Users/Shared/deviludo-smoke.txt; sleep 3; pid=$(pgrep -x TextEdit | head -n1); test -n \"$pid\"; /usr/local/bin/deviludo-gui-driver wait --pid \"$pid\" --width 1 --height 1; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_press\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_release\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver capture --pid \"$pid\" --output /Users/Shared/deviludo-smoke.png; /usr/local/bin/node -e \"import('/usr/local/lib/deviludo/e2e-evidence.mjs').then(m=>m.inspectScreenshot('/Users/Shared/deviludo-smoke.png')).then(()=>process.stdout.write('smoke-ok'))\"; mkdir -p /Users/Shared/godot-input-smoke; cp /Users/Shared/godot-input-smoke-project.godot /Users/Shared/godot-input-smoke/project.godot; cp /Users/Shared/godot-input-smoke-main.tscn /Users/Shared/godot-input-smoke/main.tscn; cp /Users/Shared/godot-input-smoke-main.gd /Users/Shared/godot-input-smoke/main.gd; DEVILUDO_GAMEPAD_DRIVER=/usr/local/bin/deviludo-gamepad-driver /usr/local/bin/node /Users/Shared/godot-system-gamepad-smoke.mjs /Users/Shared/godot-input-smoke";
   const { stdout } = await execute("ssh", [...ssh, `admin@${ip}`, command], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
-  if (!stdout.includes("smoke-ok")) throw new Error("Tart guest 截图/输入 smoke 未通过（检查 Screen Recording 与 Accessibility 权限）");
+  if (!stdout.includes("smoke-ok") || !stdout.includes("gamepad-smoke-ok")) throw new Error("Tart guest 截图/键鼠/系统手柄 smoke 未通过（检查 Screen Recording、Accessibility 与 Core HID 权限）");
 }
 
 async function waitForGuestSsh(ip) {
@@ -298,9 +307,9 @@ async function waitForGuestDesktop(ip) {
 
 function sshArguments() { return ["-i", keyFile, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", `HostKeyAlias=${guestHostKeyAlias}`, "-o", `UserKnownHostsFile=${knownHostsFile}`]; }
 async function configurationFingerprint(baseImageDigest) {
-  const hash = createHash("sha256").update("deviludo-tart-e2e-v2\0node-22.22.0\0godot-4.5.1\0memory-6144\0display-1440x900\0swift-Onone\0").update(baseImageDigest);
+  const hash = createHash("sha256").update("deviludo-tart-adaptive-e2e\0tahoe-26\0node-22.22.0\0godot-4.5.1\0ffmpeg\0memory-6144\0display-1440x900\0swift-Onone\0").update(baseImageDigest);
   hash.update(await readFile(`${keyFile}.pub`));
-  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/steam-clean-install.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
+  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/game-test-environment.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/godot-system-gamepad-smoke.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/executors/macos-gamepad-driver.swift", "fixtures/godot-input-smoke/project.godot", "fixtures/godot-input-smoke/main.tscn", "fixtures/godot-input-smoke/main.gd", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
   return `sha256:${hash.digest("hex")}`;
 }
 async function tartVmExists(name) {

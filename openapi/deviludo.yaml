@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DeviLudo Core API
-  version: 6.0.0
+  version: 7.1.1
 components:
   securitySchemes:
     platformSession:
@@ -45,13 +45,25 @@ paths:
       operationId: readGlobalAgentSettings
       security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Masked instance Agent settings and runtime versions }
+        "200": { description: Masked instance Agent settings, independent design/development/test model routes, and runtime versions }
     put:
       operationId: saveGlobalAgentSettings
       security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Instance Agent settings stored with a Vault secret reference }
+        "200": { description: Instance Agent settings and three role model routes stored with a Vault secret reference }
         "403": { description: Instance administrator permission required }
+  /v1/settings/steam:
+    get:
+      operationId: readWorkspaceSteamSettings
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: Masked workspace SteamPipe build account }
+    put:
+      operationId: saveWorkspaceSteamSettings
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: Workspace Steam credential stored as a versioned secret reference }
+        "403": { description: Workspace owner or admin permission required }
   /v1/projects:
     get:
       operationId: listProjects
@@ -168,20 +180,73 @@ paths:
       security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: Immutable specification object registered and workflow started }
-  /v1/projects/{projectId}/approve-release:
+  /v1/projects/{projectId}/steam-settings:
     parameters:
       - in: path
         name: projectId
         required: true
         schema: { type: string, format: uuid }
-    post:
-      operationId: approveSteamRelease
+    get:
+      operationId: readProjectSteamSettings
       security: [{ platformSession: [] }, {}]
       responses:
-        "202": { description: Owner or admin approved the signed builds for Steam upload }
-        "200": { description: The deterministic approval was already accepted }
+        "200": { description: Project App ID, depot mapping, and test branch }
+    put:
+      operationId: saveProjectSteamSettings
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: Project SteamPipe settings saved }
         "403": { description: Workspace owner or admin permission required }
-        "409": { description: Release is not waiting for approval after three-platform signing }
+  /v1/projects/{projectId}/steam-releases:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: listProjectSteamReleases
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: Persistent release history across project iterations }
+    post:
+      operationId: createProjectSteamRelease
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "202": { description: Versioned release created and SteamPipe upload queued }
+        "200": { description: The iteration's existing release was returned idempotently }
+        "409": { description: Latest iteration has not reached the release decision gate }
+  /v1/projects/{projectId}/iterations/{workflowId}/complete:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: workflowId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: completeIterationWithoutPublishing
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "202": { description: E2E-passed iteration completed without a Steam release }
+        "409": { description: Iteration is not awaiting a release decision }
+  /v1/projects/{projectId}/steam-releases/{releaseId}/confirm-live:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: releaseId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: confirmDefaultSteamReleaseLive
+      security: [{ platformSession: [] }, {}]
+      responses:
+        "200": { description: Manual default-branch promotion recorded }
+        "409": { description: Release is not awaiting default-branch promotion }
   /v1/projects/{projectId}/retry-agent:
     parameters:
       - in: path
@@ -248,10 +313,24 @@ paths:
     delete:
       operationId: deleteProject
       security: [{ platformSession: [] }, {}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                deleteLocalDirectory:
+                  type: boolean
+                  default: false
+                  description: Permanently delete the server-bound local project directory as part of project deletion; arbitrary client paths are never accepted.
       responses:
-        "204": { description: Project database rows, object artifacts, and its exact persistent source directory were deleted }
+        "204": { description: Project database rows, object artifacts, and Core source snapshots were deleted; the bound local directory was also deleted only when explicitly requested }
+        "400": { description: The delete-local-directory option is invalid }
         "403": { description: Workspace owner or admin permission required }
-        "409": { description: An active delivery must be cancelled before deletion }
+        "409": { description: The requested project has no local binding or local directory deletion is unavailable }
+        "502": { description: The local directory bridge could not safely complete deletion; the Core project record is retained }
   /v1/projects/{projectId}/artifacts:
     parameters:
       - in: path
@@ -290,7 +369,7 @@ paths:
       operationId: listProjectConversations
       security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Most recently active project conversations with previews and message counts }
+        "200": { description: Most recently active project conversations with previews, total and user-message counts, and a system-generated import-analysis marker }
         "404": { description: Project is not visible in the selected workspace }
   /v1/projects/{projectId}/agent-progress/stream:
     parameters:
@@ -333,7 +412,7 @@ paths:
       operationId: readConversation
       security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Conversation messages in chronological order }
+        "200": { description: Group-chat messages in chronological order; assistant metadata identifies DESIGN, DEVELOPMENT, or TEST }
         "404": { description: Conversation is not visible in the selected workspace }
   /v1/conversations/messages:
     post:
@@ -349,7 +428,7 @@ paths:
       security: [{ platformSession: [] }, {}]
       responses:
         "200":
-          description: Newline-delimited design reply and persisted result; during Agent generation the user message is stored as live task guidance
+          description: Newline-delimited agent_delta events for design, development, and test replies followed by the atomically persisted group-chat result; during Agent generation the user message is stored as live task guidance
           content:
             application/x-ndjson:
               schema: { type: string }
@@ -475,13 +554,6 @@ paths:
       security: [{ e2eMtls: [] }]
       responses:
         "200": { description: Failure recorded when fencing identity matches }
-  /v1/e2e/jobs/{jobId}/signing-grant:
-    parameters: [{ $ref: "#/components/parameters/jobId" }]
-    post:
-      operationId: issueE2eSigningGrant
-      security: [{ e2eMtls: [] }]
-      responses:
-        "200": { description: Short-lived platform-matched signing grant issued after reimage proof }
   /v1/e2e/jobs/{jobId}/objects:
     parameters: [{ $ref: "#/components/parameters/jobId" }]
     post:

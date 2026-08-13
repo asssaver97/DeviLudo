@@ -5,13 +5,6 @@ import type { JobCompletion, JobProtocolV4 } from "@/services/core/src/contracts
 import type { E2eNodeConfig } from "./config";
 import type { E2eInfrastructureFailure } from "@/lib/runtime/e2e-failure";
 
-export type SigningGrant = Readonly<{
-  grantId: string;
-  wrappedToken: string;
-  expiresAt: string;
-  operationId: string;
-}>;
-
 export class CoreE2eClient {
   private constructor(
     private readonly config: E2eNodeConfig,
@@ -56,13 +49,6 @@ export class CoreE2eClient {
     return response.accepted;
   }
 
-  async issueSigningGrant(job: JobProtocolV4, beforeReimageProof: string): Promise<SigningGrant> {
-    return await this.call<SigningGrant>(`/v1/e2e/jobs/${job.jobId}/signing-grant`, {
-      ...identity(job),
-      beforeReimageProof,
-    });
-  }
-
   async authorizeObjects(job: JobProtocolV4): Promise<readonly Readonly<{ object: JobProtocolV4["inputObjects"][number]; url: string; expiresAt: string }>[]> {
     const response = await this.call<{ inputs: readonly Readonly<{ object: JobProtocolV4["inputObjects"][number]; url: string; expiresAt: string }>[] }>(
       `/v1/e2e/jobs/${job.jobId}/objects`, { ...identity(job) },
@@ -77,6 +63,14 @@ export class CoreE2eClient {
       object: JobProtocolV4["inputObjects"][number];
       requiredHeaders: Readonly<Record<string, string>>;
     }>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job), ...input });
+  }
+
+  async decidePlayerPolicy(job: JobProtocolV4, request: Readonly<Record<string, unknown>>) {
+    return this.call<Readonly<{
+      decision: Readonly<Record<string, unknown>>;
+      policy: Readonly<{ configurationDigest: string; settingsRevision: number; model: string }>;
+      cached: boolean;
+    }>>(`/v1/e2e/jobs/${job.jobId}/player-policy`, { ...identity(job), request });
   }
 
   private async call<T>(path: string, body: Readonly<Record<string, unknown>>): Promise<T> {
@@ -99,7 +93,7 @@ export class CoreE2eClient {
       ca: this.tls.ca,
       minVersion: "TLSv1.3",
       rejectUnauthorized: url.protocol === "https:",
-      timeout: 10_000,
+      timeout: path.endsWith("/player-policy") ? 35_000 : 10_000,
     };
     return await new Promise<T>((resolve, reject) => {
       const requester = url.protocol === "https:" ? httpsRequest : httpRequest;

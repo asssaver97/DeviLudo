@@ -161,11 +161,13 @@ try {
   await assertObjectBytes(build);
 
   const macReport = skipRealWindowE2e ? null : await runTartMacE2e(build);
-  if (macReport && (macReport.schemaVersion !== "deviludo.godot-guest-report.v3"
+  if (macReport && (macReport.schema !== "deviludo.godot-guest-report" || Object.hasOwn(macReport, "schemaVersion")
     || macReport.outcome !== "PASSED" || macReport.failureDomain !== null
     || macReport.guest?.isolation !== "EPHEMERAL_VM" || macReport.guest?.exitCode !== 0
-    || macReport.evidence?.protocol !== "deviludo.e2e-evidence.v2" || macReport.evidence?.screenshotCount < 3
-    || macReport.evidence?.interactiveJourneyCount < 1 || macReport.evidence?.realInputCount < 2
+    || macReport.evidence?.schema !== "deviludo.e2e-evidence" || Object.hasOwn(macReport.evidence ?? {}, "protocol")
+    || macReport.evidence?.screenshotCount < 3 || macReport.evidence?.interactiveJourneyCount < 1
+    || macReport.evidence?.realInputCount < 2 || macReport.evidence?.adaptiveRolloutCount !== 3
+    || macReport.evidence?.adaptiveSuccessCount < 2 || macReport.evidence?.videoCount < 1
     || macReport.inputDigest !== build.sha256)) {
     throw new Error(`Tart macOS E2E report is invalid: ${JSON.stringify(macReport)}`);
   }
@@ -181,7 +183,7 @@ try {
     build: { receipt: buildReceipt.schemaVersion, simulated: buildReceipt.simulated, materializedAssets: 1 },
     artifact: { kind: build.kind, targetPlatform: build.targetPlatform, sha256: build.sha256, sizeBytes: build.sizeBytes },
     macE2e: macReport && {
-      schemaVersion: macReport.schemaVersion,
+      schema: macReport.schema,
       isolation: macReport.guest.isolation,
       exitCode: macReport.guest.exitCode,
     },
@@ -261,7 +263,7 @@ async function runTartMacE2e(object) {
   await runJsonless(process.execPath, [isolation, "reimage", ...isolationArguments], { DEVILUDO_E2E_JOB_ROOT: jobRoot });
   try {
     return await runJson(process.execPath, [executor, "test"], {
-      schemaVersion: "deviludo.e2e-execution.v1",
+      schema: "deviludo.e2e-execution",
       action: "test",
       jobId: e2eJobId,
       workspaceId,

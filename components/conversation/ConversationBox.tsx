@@ -8,7 +8,12 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import type { AgentProgressEvent, ProductConversationMessage } from "@/lib/product/contracts";
+import {
+  PROJECT_AGENT_ROLES,
+  type AgentProgressEvent,
+  type ProductConversationMessage,
+  type ProjectAgentRole,
+} from "@/lib/product/contracts";
 import { agentProgressDisplayRows } from "@/lib/product/agent-progress";
 import { PlusIcon, SendIcon } from "../console/Icons";
 import { TypingDots } from "../console/TypingDots";
@@ -18,7 +23,7 @@ type ConversationBoxProps = Readonly<{
   conversationKey: string | null;
   messages: readonly ProductConversationMessage[];
   sending: boolean;
-  streamingReply: string;
+  streamingReplies: Readonly<Partial<Record<ProjectAgentRole, string>>>;
   agentProgress?: Readonly<{ running: boolean; events: readonly AgentProgressEvent[] }>;
   showSendingReply?: boolean;
   value: string;
@@ -44,7 +49,7 @@ export function ConversationBox({
   conversationKey,
   messages,
   sending,
-  streamingReply,
+  streamingReplies,
   agentProgress,
   showSendingReply = true,
   value,
@@ -76,6 +81,14 @@ export function ConversationBox({
     [agentProgress?.events],
   );
   const progressJobId = agentProgress?.events.at(-1)?.jobId ?? null;
+  const latestOptionMessageId = useMemo(() => {
+    if (sending) return null;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === "ASSISTANT" && conversationOptions(message.metadata).length > 0) return message.id;
+    }
+    return null;
+  }, [messages, sending]);
 
   useLayoutEffect(() => {
     followLatestMessage.current = true;
@@ -87,7 +100,7 @@ export function ConversationBox({
     const viewport = messageViewport.current;
     if (!showMessages || !viewport || !followLatestMessage.current) return;
     viewport.scrollTop = viewport.scrollHeight;
-  }, [agentProgress, messages, sending, showMessages, streamingReply]);
+  }, [agentProgress, messages, sending, showMessages, streamingReplies]);
 
   useLayoutEffect(() => {
     followLatestProgress.current = true;
@@ -125,18 +138,28 @@ export function ConversationBox({
           }}
           ref={messageViewport}
         >
+          <div className="conversation-agent-roster" role="list" aria-label={text("群聊成员", "Group chat members")}>
+            {PROJECT_AGENT_ROLES.map(role => {
+              const member = agentIdentity(role, text);
+              return <span className={`agent-member role-${role.toLowerCase()}`} key={role} role="listitem"><i>{member.avatar}</i><b>{member.shortName}</b><small>{member.responsibility}</small></span>;
+            })}
+          </div>
           {intro}
-          {messages.length ? messages.map((message, index) => {
+          {messages.length ? messages.map(message => {
             const failed = message.role === "USER" && message.metadata.failed === true;
-            const options = index === messages.length - 1 && message.role === "ASSISTANT" && !sending
+            const identity = message.role === "ASSISTANT" ? agentIdentity(messageAgentRole(message), text) : null;
+            const options = message.id === latestOptionMessageId && message.role === "ASSISTANT"
               ? conversationOptions(message.metadata)
               : Object.freeze([]);
             return (
-            <article className={`conversation-box-message ${message.role === "USER" ? "user" : "assistant"}${failed ? " is-failed" : ""}`} key={message.id}>
-              {message.role === "ASSISTANT" ? <span className="message-avatar">DL</span> : null}
+            <article className={`conversation-box-message ${message.role === "USER" ? "user" : `assistant role-${messageAgentRole(message).toLowerCase()}`}${failed ? " is-failed" : ""}`} key={message.id}>
+              {identity ? <span className="message-avatar">{identity.avatar}</span> : null}
               <div>
                 <header>
-                  <b>{message.role === "ASSISTANT" ? text("DeviLudo 设计搭档", "DeviLudo Design Partner") : text("你", "You")}</b>
+                  <b>{identity?.name ?? text("你", "You")}</b>
+                  {identity && typeof message.metadata.model === "string"
+                    ? <span className="conversation-agent-model">{message.metadata.model}</span>
+                    : null}
                   {message.role === "ASSISTANT" && message.metadata.appliedToDraft === true
                     ? <span className="conversation-box-applied">{text("已同步项目", "PROJECT SYNCED")}</span>
                     : null}
@@ -195,13 +218,20 @@ export function ConversationBox({
             </article>
           ) : null}
           {sending && showSendingReply ? (
-            <article className="conversation-box-message assistant is-thinking">
-              <span className="message-avatar">DL</span>
-              <div>
-                <header><b>{text("DeviLudo 设计搭档", "DeviLudo Design Partner")}</b></header>
-                <p>{streamingReply || <TypingDots />}</p>
-              </div>
-            </article>
+            (PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).length
+              ? PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role]))
+              : ["DESIGN" as const]).map(role => {
+                const identity = agentIdentity(role, text);
+                return (
+                  <article className={`conversation-box-message assistant is-thinking role-${role.toLowerCase()}`} key={`stream-${role}`}>
+                    <span className="message-avatar">{identity.avatar}</span>
+                    <div>
+                      <header><b>{identity.name}</b><span className="conversation-agent-working">{text("正在回复", "RESPONDING")}</span></header>
+                      <p>{streamingReplies[role] || <TypingDots />}</p>
+                    </div>
+                  </article>
+                );
+              })
           ) : null}
         </div>
       ) : null}
@@ -237,6 +267,35 @@ export function ConversationBox({
       </form>
     </div>
   );
+}
+
+function messageAgentRole(message: ProductConversationMessage): ProjectAgentRole {
+  const role = message.metadata.agentRole;
+  return role === "DEVELOPMENT" || role === "TEST" || role === "DESIGN" ? role : "DESIGN";
+}
+
+function agentIdentity(
+  role: ProjectAgentRole,
+  text: (chinese: string, english: string) => string,
+): Readonly<{ avatar: string; name: string; shortName: string; responsibility: string }> {
+  if (role === "DEVELOPMENT") return Object.freeze({
+    avatar: "DV",
+    name: text("DeviLudo 开发 Agent", "DeviLudo Development Agent"),
+    shortName: text("开发", "DEV"),
+    responsibility: text("实现与工程", "Implementation"),
+  });
+  if (role === "TEST") return Object.freeze({
+    avatar: "QA",
+    name: text("DeviLudo 测试 Agent", "DeviLudo Test Agent"),
+    shortName: text("测试", "TEST"),
+    responsibility: text("验收与回归", "Acceptance"),
+  });
+  return Object.freeze({
+    avatar: "DS",
+    name: text("DeviLudo 设计 Agent", "DeviLudo Design Agent"),
+    shortName: text("设计", "DESIGN"),
+    responsibility: text("玩法与规格", "Game design"),
+  });
 }
 
 function conversationOptions(metadata: Readonly<Record<string, unknown>>): readonly string[] {

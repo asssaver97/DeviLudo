@@ -85,18 +85,17 @@ async function runAgent(plan) {
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
   let e2eRepairContext = null;
   if (e2eReportObject) {
-    if (e2eReportObject.sizeBytes > 256 * 1024 * 1024) throw new Error("E2E failure evidence exceeds the Agent repair input limit");
+    if (e2eReportObject.sizeBytes > 1024 * 1024 * 1024) throw new Error("E2E failure evidence exceeds the Agent repair input limit");
     const filename = e2eReportObject.key.split("/").pop();
     if (!filename) throw new Error("E2E failure report input is invalid");
-    e2eRepairContext = filename.endsWith(".zip")
-      ? await extractE2eRepairEvidence(`/workspace/inputs/${filename}`)
-      : await readLegacyE2eRepairReport(`/workspace/inputs/${filename}`);
+    if (!filename.endsWith(".zip")) throw new Error("E2E repair input must be the current evidence ZIP");
+    e2eRepairContext = await extractE2eRepairEvidence(`/workspace/inputs/${filename}`);
     emitProgress("PHASE", `Agent 正在修复 ${plan.job.payload.failedPlatform ?? "目标平台"} E2E 发现的游戏问题`);
   }
   const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
-  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe.v1 contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Every snapshot must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
+  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
   const manifestInstructions = existingManifestValid ? [
-    "Core has already validated the existing agent.json as a complete deviludo.test-manifest.v3 and asset manifest. Preserve its coverage and assertions unless the current change genuinely requires an update.",
+    "Core has already validated the existing agent.json as a complete deviludo.test-manifest and asset manifest. Preserve its coverage and assertions unless the current change genuinely requires an update.",
     checkpointEmitterInstruction,
     probeInstruction,
     ...(e2eRepairContext ? [
@@ -108,7 +107,9 @@ async function runAgent(plan) {
     "IMPORTANT: The generated agent.json must include a complete testManifest AND an assetManifest.",
     "",
     "testManifest structure:",
-    "- schemaVersion: \"deviludo.test-manifest.v3\"",
+    "- schema: \"deviludo.test-manifest\". Do not emit schemaVersion or any version field.",
+    "- inputProfiles: one or both of KEYBOARD_MOUSE and GAMEPAD; primaryInputProfile must be one declared profile. Every declared profile must appear in deterministic real-input coverage.",
+    "- adaptivePlayer: goal, requirementIds including every CORE_LOOP requirement, allowedActions (KEYBOARD, POINTER and/or GAMEPAD), non-empty successAssertions and failureAssertions, rolloutTimeoutMs 60000-300000, maxDecisions 8-40, seedStrategy STABLE_PROJECT_PLATFORM. successAssertions must include a PROGRESS CHANGED/NOT_EQUALS/GREATER_THAN/GREATER_THAN_OR_EQUALS assertion proving a real progress boundary relative to the clean rollout start.",
     "- requirements: copy the exact requirementId, description, source and default verificationClass pairs below; every CORE_LOOP remains PLAYER_INTERACTION. An ACCEPTANCE item may be SYSTEM only for DATA, RUNTIME or NETWORK and must include systemCategory plus a concrete exemptionReason of at least 10 characters.",
     "- features: array of feature objects, each with:",
     "  - id: unique kebab-case identifier (e.g. \"collect-ember\")",
@@ -117,10 +118,10 @@ async function runAgent(plan) {
     "  - description: human-readable feature description",
     "  - verificationMethod: unit, interactive, visual, or manual; manual must never be the only automated coverage for a requirement",
     "  - gdsTestPath: path to test script (typically \"res://tests/e2e.gd\")",
-    "  - checkNames: array of assertion names that verify this feature",
+    "  - checkNames: array of assertion names that verify this feature; every unit feature also requires timeoutMs no more than 300000",
     "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, launchProfile {type:\"FRESH\"}, and timeoutMs no more than 300000. Scenario fixtures are allowed only on non-core journeys and may initialize state but never perform the tested action.",
-    "- Its interactionScript must be version \"3\" with no more than 200 events. Use semantic target IDs only; fixed x/y coordinates and unrelated key presses are forbidden.",
-    "- Action event types are key_tap, key_hold, click, double_click, drag, scroll and text_input. Every action requires a unique stepId, intent, coversRequirementIds and at least one postcondition. Click/drag/scroll/text targets use stable probe control IDs.",
+    "- Its interactionScript contains only events and no version field, with no more than 200 events. Use semantic target IDs only; fixed x/y coordinates and unrelated key presses are forbidden.",
+    "- Action event types are key_tap, key_hold, click, double_click, drag, scroll, text_input, gamepad_button_tap, gamepad_button_hold, gamepad_axis, gamepad_trigger and gamepad_release_all. Every action requires a unique stepId, intent, coversRequirementIds and at least one postcondition. Click/drag/scroll/text targets use stable probe control IDs.",
     "- Example: {\"type\":\"click\",\"stepId\":\"roll-dice\",\"intent\":\"PRIMARY_ACTION\",\"targetId\":\"roll-dice\",\"coversRequirementIds\":[\"req-feature-001-...\"],\"postconditions\":[{\"source\":\"PROGRESS\",\"key\":\"turn\",\"operator\":\"CHANGED\"}],\"delay_ms\":100}.",
     "- Probe assertions use source STATE, PROGRESS, CONTROL or SCENE and operator EQUALS, NOT_EQUALS, GREATER_THAN, GREATER_THAN_OR_EQUALS, LESS_THAN, LESS_THAN_OR_EQUALS, CONTAINS, EXISTS or CHANGED.",
     "- Every PLAYER_INTERACTION requirement must be covered by at least one real action inside a feature that maps that requirement, and every such action must verify an operation-after state change through postconditions.",
@@ -131,7 +132,7 @@ async function runAgent(plan) {
     checkpointEmitterInstruction,
     probeInstruction,
     "- A checkpoint may declare referenceImage as a safe project-relative PNG and threshold from 0 to 1; the default threshold is 0.01.",
-    "- Across the manifest: at most 500 requirements, 500 features, 32 interactive journeys, and 64 checkpoints. Each journey is at most 300 seconds; the complete platform E2E has a hard 30 minute budget.",
+    "- Across the manifest: at most 500 requirements, 500 features, 32 interactive journeys, and 64 checkpoints. Each journey is at most 300 seconds. Core freezes a calculated 30-90 minute platform budget before E2E begins.",
     `- Frozen requirement catalog: ${JSON.stringify(requirementCatalog)}`,
     "",
     "assetManifest structure:",
@@ -283,7 +284,7 @@ async function readGeneratedAgentManifest(requirementCatalog) {
     throw new Error("Agent did not produce a valid agent.json");
   }
   const testManifest = value.testManifest;
-  if (!validTestManifestV3(testManifest, requirementCatalog)) {
+  if (!validTestManifest(testManifest, requirementCatalog)) {
     throw new Error("Agent did not produce a valid testManifest");
   }
   const assetManifest = value.assetManifest;
@@ -348,13 +349,18 @@ function stableRequirementId(kind, index, text) {
   return `req-${kind}-${String(index + 1).padStart(3, "0")}-${hash.toString(16).padStart(8, "0")}`;
 }
 
-function validTestManifestV3(value, expectedRequirements = null) {
+function validTestManifest(value, expectedRequirements = null) {
   if (!value || typeof value !== "object" || Array.isArray(value)
-    || value.schemaVersion !== "deviludo.test-manifest.v3"
+    || value.schema !== "deviludo.test-manifest" || Object.hasOwn(value, "schemaVersion")
     || !Array.isArray(value.requirements) || value.requirements.length < 1 || value.requirements.length > 500
     || !Array.isArray(value.features) || value.features.length < 1 || value.features.length > 500) return false;
+  if (!Array.isArray(value.inputProfiles) || value.inputProfiles.length < 1 || value.inputProfiles.length > 2
+    || value.inputProfiles.some(profile => !["KEYBOARD_MOUSE", "GAMEPAD"].includes(profile))
+    || new Set(value.inputProfiles).size !== value.inputProfiles.length
+    || !value.inputProfiles.includes(value.primaryInputProfile)) return false;
   const requirementIds = new Set();
   const playerRequirementIds = new Set();
+  const coreRequirementIds = new Set();
   for (const requirement of value.requirements) {
     if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)
       || typeof requirement.requirementId !== "string" || !stableId(requirement.requirementId)
@@ -371,7 +377,25 @@ function validTestManifestV3(value, expectedRequirements = null) {
     } else if (requirement.systemCategory !== undefined || requirement.exemptionReason !== undefined) return false;
     requirementIds.add(requirement.requirementId);
     if (requirement.verificationClass === "PLAYER_INTERACTION") playerRequirementIds.add(requirement.requirementId);
+    if (requirement.source === "CORE_LOOP") coreRequirementIds.add(requirement.requirementId);
   }
+  const adaptive = value.adaptivePlayer;
+  if (!adaptive || typeof adaptive !== "object" || Array.isArray(adaptive)
+    || typeof adaptive.goal !== "string" || adaptive.goal.trim().length < 10 || adaptive.goal.length > 4000
+    || !Array.isArray(adaptive.requirementIds) || adaptive.requirementIds.length < 1
+    || adaptive.requirementIds.some(id => !playerRequirementIds.has(id))
+    || [...coreRequirementIds].some(id => !adaptive.requirementIds.includes(id))
+    || !Array.isArray(adaptive.allowedActions) || adaptive.allowedActions.length < 1
+    || adaptive.allowedActions.some(item => !["KEYBOARD", "POINTER", "GAMEPAD"].includes(item))
+    || !Array.isArray(adaptive.successAssertions) || adaptive.successAssertions.length < 1 || !adaptive.successAssertions.every(validProbeAssertion)
+    || !adaptive.successAssertions.some(assertion => assertion && assertion.source === "PROGRESS"
+      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
+    || !Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1 || !adaptive.failureAssertions.every(validProbeAssertion)
+    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 60000 || adaptive.rolloutTimeoutMs > 300000
+    || !Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40
+    || adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM"
+    || adaptive.allowedActions.includes("GAMEPAD") !== value.inputProfiles.includes("GAMEPAD")
+    || (adaptive.allowedActions.includes("KEYBOARD") || adaptive.allowedActions.includes("POINTER")) !== value.inputProfiles.includes("KEYBOARD_MOUSE")) return false;
   if (expectedRequirements) {
     if (value.requirements.length !== expectedRequirements.length) return false;
     const actual = new Map(value.requirements.map(item => [item.requirementId, item]));
@@ -388,6 +412,7 @@ function validTestManifestV3(value, expectedRequirements = null) {
   let checkpoints = 0;
   let coreJourney = false;
   const interactiveCoverage = new Set();
+  const exercisedInputProfiles = new Set();
   for (const feature of value.features) {
     if (!feature || typeof feature !== "object" || Array.isArray(feature)
       || typeof feature.id !== "string" || !stableId(feature.id) || featureIds.has(feature.id)
@@ -403,10 +428,11 @@ function validTestManifestV3(value, expectedRequirements = null) {
         || !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(feature.gdsTestPath)
         || /(^|\/)\.{1,2}(\/|$)|\/\//.test(feature.gdsTestPath.slice(6))
         || !Array.isArray(feature.checkNames) || feature.checkNames.length < 1
+        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000
         || feature.checkNames.some(name => typeof name !== "string" || !stableId(name) || checkNames.has(name))) return false;
       for (const name of feature.checkNames) checkNames.add(name);
     } else if (feature.verificationMethod === "interactive") {
-      if (!validInteractionScriptV3(feature.interactionScript)
+      if (!validInteractionScript(feature.interactionScript)
         || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000
         || !validLaunchProfile(feature.launchProfile)) return false;
       journeys += 1;
@@ -415,6 +441,7 @@ function validTestManifestV3(value, expectedRequirements = null) {
         && !checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")) return false;
       checkpoints += checkpointEvents.length;
       const actionEvents = feature.interactionScript.events.filter(event => isInteractionActionType(event.type));
+      for (const event of actionEvents) exercisedInputProfiles.add(event.type.startsWith("gamepad_") ? "GAMEPAD" : "KEYBOARD_MOUSE");
       for (const action of actionEvents) {
         for (const requirementId of action.coversRequirementIds) {
           if (!feature.requirementIds.includes(requirementId) || !playerRequirementIds.has(requirementId)) return false;
@@ -438,12 +465,13 @@ function validTestManifestV3(value, expectedRequirements = null) {
     }
   }
   return journeys >= 1 && journeys <= 32 && checkpoints >= 3 && checkpoints <= 64 && coreJourney
+    && value.inputProfiles.every(profile => exercisedInputProfiles.has(profile))
     && [...requirementIds].every(id => automatedCoverage.has(id))
     && [...playerRequirementIds].every(id => interactiveCoverage.has(id));
 }
 
-function validInteractionScriptV3(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== "3"
+function validInteractionScript(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.hasOwn(value, "version")
     || !Array.isArray(value.events) || value.events.length < 1 || value.events.length > 200) return false;
   const checkpointIds = new Set();
   const stepIds = new Set();
@@ -468,7 +496,16 @@ function validInteractionScriptV3(value) {
         && validDuration(event.duration_ms) && (event.button === undefined || event.button === "LEFT");
       if (event.type === "scroll") return stableId(event.targetId) && Number.isInteger(event.deltaY)
         && event.deltaY !== 0 && Math.abs(event.deltaY) <= 10000;
-      return stableId(event.targetId) && typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1000;
+      if (event.type === "text_input") return stableId(event.targetId) && typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1000;
+      if (["gamepad_button_tap", "gamepad_button_hold"].includes(event.type)) return ["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK", "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"].includes(event.button)
+        && (event.type !== "gamepad_button_hold" || validDuration(event.duration_ms));
+      if (event.type === "gamepad_axis") return ["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"].includes(event.axis)
+        && typeof event.value === "number" && event.value >= -1 && event.value <= 1
+        && (event.duration_ms === undefined || validDuration(event.duration_ms));
+      if (event.type === "gamepad_trigger") return ["LEFT", "RIGHT"].includes(event.trigger)
+        && typeof event.value === "number" && event.value >= 0 && event.value <= 1
+        && (event.duration_ms === undefined || validDuration(event.duration_ms));
+      return event.type === "gamepad_release_all";
     }
     if (event.type === "wait") return true;
     if (event.type !== "checkpoint" || typeof event.id !== "string" || !stableId(event.id)
@@ -488,7 +525,7 @@ function validInteractionScriptV3(value) {
 }
 
 function isInteractionActionType(value) {
-  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input"].includes(value);
+  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all"].includes(value);
 }
 
 function validProbeAssertion(value) {
@@ -526,7 +563,7 @@ function checkpointOutputMarker(checkpointId) {
 }
 
 function validVisualSpec(value) {
-  return value && typeof value === "object" && !Array.isArray(value) && value.version === "1"
+  return value && typeof value === "object" && !Array.isArray(value) && !Object.hasOwn(value, "version")
     && safeProjectPngPath(value.referenceImage)
     && (value.threshold === undefined || (typeof value.threshold === "number" && Number.isFinite(value.threshold) && value.threshold >= 0 && value.threshold <= 1))
     && (value.captureDelay === undefined || (Number.isInteger(value.captureDelay) && value.captureDelay >= 0 && value.captureDelay <= 300000));
@@ -542,27 +579,15 @@ function safeProjectPngPath(value) {
     && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value) && /^[A-Za-z0-9][A-Za-z0-9._/-]*\.png$/i.test(value);
 }
 
-async function readLegacyE2eRepairReport(path) {
-  let report;
-  try { report = JSON.parse(await readFile(path, "utf8")); }
-  catch { throw new Error("Legacy E2E failure report input is unreadable"); }
-  if (report?.schemaVersion !== "deviludo.godot-guest-report.v1"
-    || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") throw new Error("Legacy E2E report is not a trusted product failure");
-  const root = "/workspace/inputs/e2e-repair";
-  await mkdir(root, { recursive: true });
-  await writeFile(`${root}/report.json`, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  return { legacy: true, report };
-}
-
 async function extractE2eRepairEvidence(path) {
   const root = "/workspace/inputs/e2e-repair";
   await rm(root, { recursive: true, force: true });
   const { extractAndValidateEvidenceBundle } = await import("/usr/local/lib/deviludo/e2e-evidence.mjs");
-  const { report } = await extractAndValidateEvidenceBundle(path, root, 512 * 1024 * 1024);
-  if (report?.schemaVersion !== "deviludo.e2e-evidence.v2" || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") {
+  const { report } = await extractAndValidateEvidenceBundle(path, root, 1024 * 1024 * 1024);
+  if (report?.schema !== "deviludo.e2e-evidence" || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") {
     throw new Error("E2E evidence is not a trusted product failure");
   }
-  return { legacy: false, report };
+  return { report };
 }
 
 function e2eRepairPromptSummary(context) {
@@ -581,7 +606,7 @@ function e2eRepairPromptSummary(context) {
       .slice(0, 20)
     : [];
   return {
-    schemaVersion: report.schemaVersion,
+    schema: report.schema,
     platform: report.platform,
     action: report.action,
     failureDomain: report.failureDomain,
@@ -872,7 +897,7 @@ async function preparePackagedE2eContract() {
   let agentManifest;
   try { agentManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8")); }
   catch { throw new Error("Build source is missing a valid agent.json test contract"); }
-  if (!validTestManifestV3(agentManifest?.testManifest)) throw new Error("Build source has an invalid deviludo.test-manifest.v3 contract");
+  if (!validTestManifest(agentManifest?.testManifest)) throw new Error("Build source has an invalid deviludo.test-manifest contract");
   const root = "/workspace/project/.deviludo-e2e-package";
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
@@ -958,20 +983,24 @@ async function runSteamPublish(plan) {
   const operation = plan.job.payload.operation;
   if (!operation || typeof operation !== "object") throw new Error("Steam publish operation is required");
   const steam = JSON.parse(await readFile("/run/deviludo/steam.json", "utf8"));
-  if (!steam.username || !steam.loginToken || !/^\d+$/.test(steam.appId)
-    || ["linux", "windows", "macos"].some(platform => !/^\d+$/.test(steam.depots?.[platform]))) {
-    throw new Error("Steam publisher configuration is invalid");
-  }
   const platforms = plan.job.payload.targetPlatforms;
   if (!Array.isArray(platforms) || platforms.length < 1
     || platforms.some(platform => !["linux", "windows", "macos"].includes(platform))) {
     throw new Error("Steam targetPlatforms are required");
   }
+  if (!steam.username || !steam.loginToken || !/^\d+$/.test(steam.appId)
+    || platforms.some(platform => !/^\d+$/.test(steam.depots?.[platform] ?? ""))
+    || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(steam.version ?? "")
+    || !Number.isSafeInteger(steam.releaseNumber) || steam.releaseNumber < 1
+    || !["TEST", "DEFAULT"].includes(steam.channel)
+    || (steam.channel === "DEFAULT" ? steam.targetBranch !== "default" : steam.targetBranch === "default")) {
+    throw new Error("Steam publisher configuration is invalid");
+  }
   const depotFiles = [];
   const inputFiles = await readdir("/workspace/inputs");
   for (const platform of [...new Set(platforms)]) {
-    const filename = inputFiles.find(file => file.startsWith(`signed-build-${platform}-`) && file.endsWith(".tar.gz"));
-    if (!filename) throw new Error(`Signed ${platform} build input is missing`);
+    const filename = inputFiles.find(file => file.startsWith(`build-${platform}-`) && file.endsWith(".tar.gz"));
+    if (!filename) throw new Error(`Validated ${platform} build input is missing`);
     const archive = `/workspace/inputs/${filename}`;
     const content = `/workspace/project/content/${platform}`;
     await mkdir(content, { recursive: true });
@@ -981,10 +1010,12 @@ async function runSteamPublish(plan) {
     depotFiles.push([steam.depots[platform], depotFile]);
   }
   const appBuild = "/tmp/app-build.vdf";
-  await writeFile(appBuild, `"AppBuild"\n{\n  "AppID" "${steam.appId}"\n  "Desc" "Deviludo ${operation.id}"\n  "ContentRoot" "/workspace/project/content"\n  "BuildOutput" "/tmp/steam-output"\n  "Depots"\n  {\n${depotFiles.map(([id, file]) => `    "${id}" "${file}"`).join("\n")}\n  }\n}\n`, { mode: 0o600 });
+  const setLive = steam.channel === "TEST" ? `  "SetLive" "${steam.targetBranch}"\n` : "";
+  await writeFile(appBuild, `"AppBuild"\n{\n  "AppID" "${steam.appId}"\n  "Desc" "DeviLudo ${steam.version} #${steam.releaseNumber}"\n${setLive}  "ContentRoot" "/workspace/project/content"\n  "BuildOutput" "/tmp/steam-output"\n  "Depots"\n  {\n${depotFiles.map(([id, file]) => `    "${id}" "${file}"`).join("\n")}\n  }\n}\n`, { mode: 0o600 });
   const uploadScript = "/tmp/steam-upload.vdf";
   await writeFile(uploadScript, `@ShutdownOnFailedCommand 1\n@NoPromptForPassword 1\nlogin ${steam.username} ${steam.loginToken}\nrun_app_build ${appBuild}\nquit\n`, { mode: 0o600 });
   const published = await command("steamcmd", ["+runscript", uploadScript], safeEnvironment());
+  await rm(uploadScript, { force: true });
   const buildId = published.stdout.match(/\bBuildID\s+(\d+)\b/i)?.[1];
   if (!buildId) throw new Error("Steam did not return a published BuildID");
   await writeFile("/workspace/outputs/steam-publish.json", JSON.stringify({
@@ -993,6 +1024,12 @@ async function runSteamPublish(plan) {
     appId: steam.appId,
     buildId,
     depots: steam.depots,
+    releaseId: steam.releaseId,
+    version: steam.version,
+    releaseNumber: steam.releaseNumber,
+    channel: steam.channel,
+    targetBranch: steam.targetBranch,
+    state: steam.channel === "TEST" ? "LIVE_TEST" : "AWAITING_DEFAULT_PROMOTION",
   }), "utf8");
   await manifest([{ file: "steam-publish.json", kind: "PUBLISH_RECEIPT", contentType: "application/json" }]);
 }

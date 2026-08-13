@@ -13,7 +13,7 @@ import {
 
 function snapshot(overrides: Record<string, unknown> = {}) {
   return {
-    schemaVersion: "deviludo.e2e-ui-probe.v1", sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234,
+    schema: "deviludo.e2e-ui-probe", sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234,
     sequence: 7, sceneId: "main", state: { paused: false, phase: "playing" }, progress: { turn: 2 },
     controls: [
       { id: "roll-dice", visible: true, enabled: true, text: "掷骰", value: 0, rect: { x: 100, y: 200, width: 120, height: 50 } },
@@ -22,13 +22,14 @@ function snapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("deviludo.e2e-ui-probe.v1", () => {
+describe("deviludo.e2e-ui-probe", () => {
   test("accepts a nonce/PID-scoped semantic UI and state snapshot", () => {
     assert.equal(validateProbeSnapshot(snapshot(), { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234 }), true);
     assert.deepEqual(resolveProbeControl(snapshot() as never, "roll-dice").control.rect, { x: 100, y: 200, width: 120, height: 50 });
   });
 
   test("rejects stale processes, non-monotonic sequences and duplicate or out-of-client controls", () => {
+    assert.equal(validateProbeSnapshot({ ...snapshot(), schemaVersion: "deviludo.e2e-ui-probe" }), false);
     assert.equal(validateProbeSnapshot(snapshot(), { sessionNonce: "ffffffffffffffffffffffffffffffff", pid: 1234 }), false);
     assert.equal(validateProbeSnapshot(snapshot(), { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234, afterSequence: 7 }), false);
     const duplicate = snapshot({ controls: [snapshot().controls[0], snapshot().controls[0]] });

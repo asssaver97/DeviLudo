@@ -6,7 +6,7 @@ done
 if [[ ${1:-} == preflight ]]; then
   [[ ${DEVILUDO_E2E_NODE_ID:-} =~ ^[0-9a-f-]{36}$ ]]
   [[ -x ${DEVILUDO_E2E_ISOLATION_EXECUTOR:-} && -x ${DEVILUDO_E2E_TEST_EXECUTOR:-} \
-    && -x ${DEVILUDO_E2E_SIGN_EXECUTOR:-} && -x ${DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR:-} ]]
+    ]]
   [[ -r ${DEVILUDO_E2E_CLIENT_CERT_FILE:-} && -r ${DEVILUDO_E2E_CLIENT_KEY_FILE:-} \
     && -r ${DEVILUDO_E2E_CORE_CA_FILE:-} && -r ${DEVILUDO_E2E_IDENTITY_KEY_FILE:-} ]]
   node_bin=${DEVILUDO_NODE_BIN:-}

@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { access, appendFile, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { createInterface } from "node:readline";
 import {
   E2E_CLIENT_HEIGHT,
   E2E_CLIENT_WIDTH,
-  E2E_EVIDENCE_PROTOCOL,
-  GUEST_REPORT_PROTOCOL,
+  E2E_EVIDENCE_SCHEMA,
+  GUEST_REPORT_SCHEMA,
   compareScreenshots,
   compareScreenshotRegion,
   createEvidenceBundle,
@@ -23,6 +24,7 @@ import {
   waitForProbeSnapshot,
 } from "../e2e-ui-probe.mjs";
 import { checkpointOutputSeen } from "./gui-event-batches.mjs";
+import { GameTestEnvironment, gamepadEventCount } from "./game-test-environment.mjs";
 
 const execute = promisify(execFile);
 const action = process.argv[2];
@@ -30,16 +32,25 @@ const artifact = process.argv[3];
 const jsonOutput = process.argv.includes("--json");
 const jobArgument = process.argv.indexOf("--job-id");
 const jobId = jobArgument >= 0 ? process.argv[jobArgument + 1] : process.env.DEVILUDO_E2E_JOB_ID ?? randomUUID();
+const regressionArgument = process.argv.indexOf("--regression");
+const currentRegressionPath = regressionArgument >= 0 ? process.argv[regressionArgument + 1] : "";
 const platform = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
 const CHECKPOINT_OUTPUT_TIMEOUT_MS = 15_000;
 const CHECKPOINT_VISUAL_SETTLE_MS = 1_500;
 const PROBE_TIMEOUT_MS = 15_000;
 const MIN_STATE_TRANSITION_DIFFERENCE_RATIO = 0.001;
-const PLATFORM_TIMEOUT_MS = 30 * 60_000;
 const MAX_SCREENSHOTS = 64;
+const ADAPTIVE_ROLLOUT_COUNT = 3;
+const ADAPTIVE_REQUIRED_SUCCESSES = 2;
+const streamProtocol = process.env.DEVILUDO_E2E_STREAM_PROTOCOL === "1";
+const policyLines = streamProtocol ? createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]() : null;
+const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
+const frozenContractDigest = process.env.DEVILUDO_E2E_CONTRACT_DIGEST ?? "";
 
-if (!["test", "clean-install"].includes(action) || !artifact || !isAbsolute(artifact)
+if (action !== "test" || !artifact || !isAbsolute(artifact)
   || !/^[0-9a-f-]{36}$/i.test(jobId)) throw new Error("Guest runner arguments are invalid");
+if (!Number.isSafeInteger(frozenTimeoutSeconds) || frozenTimeoutSeconds < 1800 || frozenTimeoutSeconds > 5400
+  || !/^sha256:[0-9a-f]{64}$/.test(frozenContractDigest)) throw new Error("INFRASTRUCTURE: frozen E2E execution plan is invalid");
 const guiDriver = process.env.DEVILUDO_GUI_DRIVER ?? "";
 if (!isAbsolute(guiDriver)) throw new Error("INFRASTRUCTURE: fixed GUI driver is required");
 
@@ -50,6 +61,9 @@ const stderrLogs = [];
 const screenshots = [];
 const diffs = [];
 const baselines = [];
+const videos = [];
+const trajectories = [];
+const regressions = [];
 const checkpoints = [];
 const steps = [];
 const headlessChecks = new Set();
@@ -57,52 +71,64 @@ const interactiveJourneys = new Set();
 const coveredPlayerRequirements = new Set();
 const failures = [];
 const launchRecords = [];
+const adaptiveRollouts = [];
+let currentRegressionResult = null;
+let keyboardMouseInputCount = 0;
+let gamepadInputCount = 0;
+let playerPolicy = null;
 let gameExitCode = 0;
 let activeManifest = null;
 const startedAt = Date.now();
-const platformDeadline = startedAt + PLATFORM_TIMEOUT_MS;
+let platformDeadline = startedAt + 90 * 60_000;
 
 try {
   await prepareInstalledArtifact();
   const gamePackage = await findGamePackage(workspace, platform);
   const manifest = JSON.parse(await readFile(join(workspace, ".deviludo-e2e/manifest.json"), "utf8").catch(() => {
-    throw productFailure("E2E_MANIFEST_MISSING", "构建制品缺少 deviludo.test-manifest.v3 测试清单");
+    throw productFailure("E2E_MANIFEST_MISSING", "构建制品缺少 deviludo.test-manifest 测试清单");
   }));
   assertManifest(manifest);
   activeManifest = manifest;
+  if (jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }) !== frozenContractDigest) {
+    throw new Error("INFRASTRUCTURE: built test contract does not match the frozen source revision");
+  }
+  const currentRegression = await readCurrentRegression(manifest);
+  const executionPlan = planExecution(manifest, currentRegression?.estimatedDurationMs ?? 0);
+  if (executionPlan.plannedTimeoutMs > frozenTimeoutSeconds * 1_000) {
+    throw new Error("INFRASTRUCTURE: frozen E2E budget is smaller than the current execution plan");
+  }
+  platformDeadline = startedAt + frozenTimeoutSeconds * 1_000;
 
-  if (action === "test") await runUnitTests(gamePackage.executable, manifest);
-  const journeys = manifest.features.filter(feature => feature.verificationMethod === "interactive"
-    && (action === "test" || feature.coreJourney === true));
+  await runUnitTests(gamePackage.executable, manifest);
+  const journeys = manifest.features.filter(feature => feature.verificationMethod === "interactive");
   for (const journey of journeys) {
     assertPlatformBudget();
     await runJourney(gamePackage, journey);
   }
-  if (action === "test") {
-    for (const visual of manifest.features.filter(feature => feature.verificationMethod === "visual")) {
-      assertPlatformBudget();
-      await runVisualCheck(gamePackage, visual);
+  for (const visual of manifest.features.filter(feature => feature.verificationMethod === "visual")) {
+    assertPlatformBudget();
+    await runVisualCheck(gamePackage, visual);
+  }
+  assertDeterministicCompletion(manifest, journeys);
+  if (currentRegression) {
+    try {
+      const passed = await replayRegression(gamePackage, currentRegression, "current");
+      currentRegressionResult = { status: passed ? "PASSED" : "FAILED", digest: jsonDigest(currentRegression) };
+    } catch (error) {
+      currentRegressionResult = { status: "FAILED", digest: jsonDigest(currentRegression), reason: error instanceof Error ? error.message : String(error) };
     }
   }
+  for (let rolloutIndex = 0; rolloutIndex < ADAPTIVE_ROLLOUT_COUNT; rolloutIndex += 1) {
+    assertPlatformBudget();
+    adaptiveRollouts.push(await runAdaptiveRollout(gamePackage, manifest, rolloutIndex));
+  }
+  const adaptiveSuccesses = adaptiveRollouts.filter(rollout => rollout.outcome === "PASSED");
+  if (adaptiveSuccesses.length < ADAPTIVE_REQUIRED_SUCCESSES) {
+    throw productFailure("ADAPTIVE_PLAYABILITY_FAILED", `Test Agent 仅有 ${adaptiveSuccesses.length}/${ADAPTIVE_ROLLOUT_COUNT} 次完成核心循环`);
+  }
+  await solidifyRegression(gamePackage, manifest, adaptiveSuccesses);
 
-  const declaredUnitChecks = new Set((action === "test" ? manifest.features : [])
-    .filter(feature => feature.verificationMethod === "unit").flatMap(feature => feature.checkNames));
-  const missingUnitChecks = [...declaredUnitChecks].filter(check => !headlessChecks.has(check));
-  if (missingUnitChecks.length) throw productFailure("CHECKS_MISSING", `测试清单声明但未执行：${missingUnitChecks.join(", ")}`);
-  const declaredJourneys = new Set(journeys.map(journey => journey.id));
-  const missingJourneys = [...declaredJourneys].filter(id => !interactiveJourneys.has(id));
-  if (missingJourneys.length) throw productFailure("JOURNEYS_MISSING", `真实操作旅程未执行：${missingJourneys.join(", ")}`);
-  const journeyRequirementIds = new Set(journeys.flatMap(journey => journey.interactionScript.events
-    .filter(isActionEvent).flatMap(event => event.coversRequirementIds)));
-  const playerRequirements = manifest.requirements.filter(requirement => requirement.verificationClass === "PLAYER_INTERACTION"
-    && (action === "test" || journeyRequirementIds.has(requirement.requirementId)));
-  const missingCoverage = playerRequirements.filter(requirement => !coveredPlayerRequirements.has(requirement.requirementId));
-  if (missingCoverage.length) throw productFailure("PLAYER_REQUIREMENT_COVERAGE_MISSING", `玩家需求未由真实输入验证：${missingCoverage.map(item => item.requirementId).join(", ")}`);
-  if (screenshots.length < 3 || screenshots.length > MAX_SCREENSHOTS) throw productFailure("SCREENSHOT_COUNT_INVALID", "E2E 截图数量不满足 3-64 张证据门禁");
-
-  await finish("PASSED", null, action === "test"
-    ? "玩家需求、原生包启动和真实键鼠旅程均已通过"
-    : "已安装游戏的原生启动与核心真实操作旅程已通过", manifest);
+  await finish("PASSED", null, "玩家需求、原生包启动、确定性真实输入和自适应游玩均已通过", manifest);
 } catch (error) {
   if (!isProductFailure(error)) throw error;
   failures.push(`${error.code}: ${error.message}`);
@@ -112,9 +138,25 @@ try {
   await rm(workspace, { recursive: true, force: true });
 }
 
+function assertDeterministicCompletion(manifest, journeys) {
+  const declaredUnitChecks = new Set(manifest.features
+    .filter(feature => feature.verificationMethod === "unit").flatMap(feature => feature.checkNames));
+  const missingUnitChecks = [...declaredUnitChecks].filter(check => !headlessChecks.has(check));
+  if (missingUnitChecks.length) throw productFailure("CHECKS_MISSING", `测试清单声明但未执行：${missingUnitChecks.join(", ")}`);
+  const declaredJourneys = new Set(journeys.map(journey => journey.id));
+  const missingJourneys = [...declaredJourneys].filter(id => !interactiveJourneys.has(id));
+  if (missingJourneys.length) throw productFailure("JOURNEYS_MISSING", `真实操作旅程未执行：${missingJourneys.join(", ")}`);
+  const journeyRequirementIds = new Set(journeys.flatMap(journey => journey.interactionScript.events
+    .filter(isActionEvent).flatMap(event => event.coversRequirementIds)));
+  const playerRequirements = manifest.requirements.filter(requirement => requirement.verificationClass === "PLAYER_INTERACTION"
+    && journeyRequirementIds.has(requirement.requirementId));
+  const missingCoverage = playerRequirements.filter(requirement => !coveredPlayerRequirements.has(requirement.requirementId));
+  if (missingCoverage.length) throw productFailure("PLAYER_REQUIREMENT_COVERAGE_MISSING", `玩家需求未由真实输入验证：${missingCoverage.map(item => item.requirementId).join(", ")}`);
+  if (screenshots.length < 3 || screenshots.length > MAX_SCREENSHOTS) throw productFailure("SCREENSHOT_COUNT_INVALID", "E2E 截图数量不满足 3-64 张证据门禁");
+}
+
 async function prepareInstalledArtifact() {
-  if (action === "clean-install") await installFromSteamReceipt();
-  else await execute("tar", ["-xzf", artifact, "-C", workspace], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 })
+  await execute("tar", ["-xzf", artifact, "-C", workspace], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 })
     .catch(error => { throw productFailure("ARTIFACT_INVALID", `构建制品无法安全展开：${error.message}`); });
   if (platform === "macos") {
     const zip = (await readdir(workspace)).find(name => name.toLowerCase().endsWith(".zip"));
@@ -122,63 +164,42 @@ async function prepareInstalledArtifact() {
   }
 }
 
-async function installFromSteamReceipt() {
-  let receipt;
-  try { receipt = JSON.parse(await readFile(artifact, "utf8")); }
-  catch { throw new Error("INFRASTRUCTURE: Steam 发布回执无法读取"); }
-  if (receipt?.published !== true || !/^\d{2,12}$/.test(String(receipt.appId ?? ""))
-    || !/^\d+$/.test(String(receipt.buildId ?? "")) || !/^\d{2,12}$/.test(String(receipt.depots?.[platform] ?? ""))) {
-    throw new Error("INFRASTRUCTURE: Steam 发布回执缺少目标平台的 App/Build/Depot 标识");
+async function readCurrentRegression(manifest) {
+  if (!currentRegressionPath) return null;
+  if (!isAbsolute(currentRegressionPath)) throw new Error("INFRASTRUCTURE: regression trace path must be absolute");
+  let trace;
+  try { trace = JSON.parse(await readFile(currentRegressionPath, "utf8")); }
+  catch { throw new Error("INFRASTRUCTURE: current regression trace cannot be decoded"); }
+  const expectedContract = jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" });
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)
+    || trace.schema !== "deviludo.e2e-regression" || trace.contractDigest !== expectedContract
+    || !["KEYBOARD_MOUSE", "GAMEPAD"].includes(trace.inputProfile)
+    || !Number.isInteger(trace.estimatedDurationMs) || trace.estimatedDurationMs < 1 || trace.estimatedDurationMs > 300_000
+    || !Array.isArray(trace.actions) || trace.actions.length < 1 || trace.actions.length > 160
+    || !Array.isArray(trace.successAssertions) || trace.successAssertions.length < 1) {
+    currentRegressionResult = { status: "STALE", reason: "contract digest or trace structure changed" };
+    return null;
   }
-  const installer = process.env.DEVILUDO_STEAM_CLEAN_INSTALLER ?? "";
-  if (!isAbsolute(installer)) throw new Error("INFRASTRUCTURE: fixed Steam clean-install client is required");
-  const installRoot = join(workspace, "steam-installed-game");
-  await mkdir(installRoot, { recursive: true });
-  const result = await runCaptured(installer, [
-    "--receipt", artifact, "--app-id", String(receipt.appId), "--build-id", String(receipt.buildId),
-    "--depot-id", String(receipt.depots[platform]), "--platform", platform, "--destination", installRoot,
-  ], Math.min(15 * 60_000, remainingPlatformBudget()), safeEnvironment({
-    DEVILUDO_STEAMCMD: process.env.DEVILUDO_STEAMCMD ?? "",
-    DEVILUDO_STEAM_INSTALL_USERNAME: process.env.DEVILUDO_STEAM_INSTALL_USERNAME ?? "",
-    DEVILUDO_STEAM_INSTALL_TOKEN: process.env.DEVILUDO_STEAM_INSTALL_TOKEN ?? "",
-  }));
-  stdoutLogs.push(result.stdout); stderrLogs.push(result.stderr);
-  if (result.timedOut || result.code !== 0) throw new Error(`INFRASTRUCTURE: Steam clean install failed (${result.code})`);
-  let installerReceipt;
-  try { installerReceipt = JSON.parse([...result.stdout.matchAll(/DEVILUDO_STEAM_INSTALL_RESULT:(.+)$/gm)].at(-1)?.[1] ?? ""); }
-  catch { throw new Error("INFRASTRUCTURE: Steam installer did not return a trusted receipt"); }
-  if (installerReceipt?.installed !== true || String(installerReceipt.appId) !== String(receipt.appId)
-    || String(installerReceipt.buildId) !== String(receipt.buildId)
-    || resolve(installerReceipt.destination ?? "") !== resolve(installRoot)) {
-    throw new Error("INFRASTRUCTURE: Steam installer receipt does not match the published build");
-  }
-  const installedEntries = await readdir(installRoot, { recursive: true, withFileTypes: true });
-  for (const entry of installedEntries) {
-    const source = join(entry.parentPath, entry.name);
-    const relativePath = source.slice(installRoot.length + 1);
-    const target = join(workspace, relativePath);
-    if (entry.isDirectory()) await mkdir(target, { recursive: true });
-    else if (entry.isFile()) { await mkdir(dirname(target), { recursive: true }); await copyFile(source, target); }
-  }
-  launchRecords.push({ journeyId: null, runLabel: "steam-clean-install", mode: "STEAM_CLIENT_INSTALL",
-    appId: String(receipt.appId), buildId: String(receipt.buildId), depotId: String(receipt.depots[platform]) });
+  return trace;
 }
 
 async function runUnitTests(executable, manifest) {
   const scripts = new Map();
   for (const feature of manifest.features.filter(item => item.verificationMethod === "unit")) {
-    const checks = scripts.get(feature.gdsTestPath) ?? new Set();
-    feature.checkNames.forEach(check => checks.add(check));
-    scripts.set(feature.gdsTestPath, checks);
+    const entry = scripts.get(feature.gdsTestPath) ?? { checks: new Set(), timeoutMs: 0 };
+    feature.checkNames.forEach(check => entry.checks.add(check));
+    entry.timeoutMs = Math.max(entry.timeoutMs, feature.timeoutMs);
+    scripts.set(feature.gdsTestPath, entry);
   }
   let unitIndex = 0;
-  for (const [script, expectedChecks] of scripts) {
+  for (const [script, entry] of scripts) {
+    const expectedChecks = entry.checks;
     assertPlatformBudget();
     unitIndex += 1;
     const result = await runCaptured(
       executable,
       ["--headless", "--script", script],
-      Math.min(300_000, remainingPlatformBudget()),
+      Math.min(entry.timeoutMs, remainingPlatformBudget()),
       await isolatedGameEnvironment(`unit-${unitIndex}`),
     );
     stdoutLogs.push(result.stdout); stderrLogs.push(result.stderr); gameExitCode = result.code;
@@ -236,7 +257,10 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
     DEVILUDO_E2E_SESSION_NONCE: sessionNonce,
     ...(journey.launchProfile.type === "SCENARIO" ? { DEVILUDO_E2E_SCENARIO: journey.launchProfile.scenarioId } : {}),
   });
-  const launched = await launchNativeGame(gamePackage, gameWindowArguments(gameLogPath), environment);
+  const { launched, testEnvironment } = await launchManagedGame(
+    gamePackage, gameWindowArguments(gameLogPath), environment, runId,
+    journey.interactionScript.events.some(event => String(event.type).startsWith("gamepad_")),
+  );
   launchRecords.push({ journeyId: journey.id, runLabel, ...launched.record });
   const captures = new Map();
   const priorInputs = [];
@@ -244,7 +268,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
   let currentProbe;
   const journeyStarted = Date.now();
   try {
-    await driver("wait", ["--pid", String(launched.pid), "--width", String(E2E_CLIENT_WIDTH), "--height", String(E2E_CLIENT_HEIGHT)]);
+    await testEnvironment.prepare();
     currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
     for (const event of journey.interactionScript.events) {
       assertPlatformBudget();
@@ -256,7 +280,10 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         const before = currentProbe;
         const targetRecord = actionTargetRecord(event, before);
         const nativeEvents = nativeInputEvents(event, before);
-        await driver("sequence", ["--pid", String(launched.pid), "--events", JSON.stringify(nativeEvents)], Math.min(journey.timeoutMs, remainingPlatformBudget()));
+        await testEnvironment.sequence(nativeEvents, Math.min(journey.timeoutMs, remainingPlatformBudget()));
+        const gamepadCount = gamepadEventCount(nativeEvents);
+        gamepadInputCount += gamepadCount;
+        keyboardMouseInputCount += nativeEvents.length - gamepadCount;
         priorInputs.push({ stepId: event.stepId, type: event.type, intent: event.intent, ...targetRecord });
         const after = await waitForProbeSnapshot(probePath, {
           sessionNonce, pid: launched.pid, afterSequence: before.sequence,
@@ -303,7 +330,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       const evidenceId = `${checkpointEvidenceId(journey.id, event.id)}${recordEvidence ? "" : "-replay"}`;
       const screenshotPath = join(workspace, "evidence-screenshots", `${evidenceId}.png`);
       await mkdir(dirname(screenshotPath), { recursive: true });
-      const capture = await driver("capture", ["--pid", String(launched.pid), "--output", screenshotPath]);
+      const capture = await testEnvironment.capture(screenshotPath);
       let screenshot;
       try { screenshot = await inspectScreenshot(screenshotPath); }
       catch (error) { throw productFailure("SCREENSHOT_INVALID", `${journey.id}/${event.id}: ${error.message}`); }
@@ -369,6 +396,8 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
     if (isProductFailure(error)) throw error;
     throw productFailure("INPUT_OR_WINDOW_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
+    const video = await testEnvironment.close();
+    if (video) videos.push(video);
     await launched.terminate();
     const logs = await launched.logs();
     const gameLog = await readOptionalLog(gameLogPath);
@@ -418,6 +447,328 @@ async function runVisualCheck(gamePackage, feature) {
   await runJourney(gamePackage, journey, false);
 }
 
+async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
+  const contract = manifest.adaptivePlayer;
+  const runId = `adaptive-${rolloutIndex + 1}`;
+  const gameLogPath = join(workspace, "game-logs", `${runId}.log`);
+  const probePath = join(workspace, "ui-probe", `${runId}.json`);
+  const trajectoryPath = join(workspace, "evidence-trajectories", `${runId}.jsonl`);
+  await Promise.all([gameLogPath, probePath, trajectoryPath].map(path => mkdir(dirname(path), { recursive: true })));
+  const sessionNonce = randomBytes(32).toString("hex");
+  const seed = stableRolloutSeed(manifest, rolloutIndex);
+  const environment = await isolatedGameEnvironment(runId, {
+    DEVILUDO_E2E_UI_PROBE_FILE: probePath,
+    DEVILUDO_E2E_SESSION_NONCE: sessionNonce,
+    DEVILUDO_E2E_SEED: String(seed),
+  });
+  const { launched, testEnvironment } = await launchManagedGame(
+    gamePackage, gameWindowArguments(gameLogPath), environment, runId,
+    contract.allowedActions.includes("GAMEPAD"),
+  );
+  launchRecords.push({ journeyId: runId, runLabel: "adaptive", seed, ...launched.record });
+  const history = [];
+  const decisions = [];
+  const loopSignatures = new Map();
+  let currentProbe;
+  let initialProbe;
+  let madeVerifiedProgress = false;
+  let noProgressDecisions = 0;
+  let lastProgressAt = Date.now();
+  let recoveryStartedAt = null;
+  let recoveryDecisionIndex = null;
+  let recovery = false;
+  let outcome = "FAILED";
+  let failureCode = "MAX_DECISIONS";
+  const rolloutStartedAt = Date.now();
+  try {
+    await testEnvironment.prepare();
+    currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
+    initialProbe = currentProbe;
+    for (let decisionIndex = 0; decisionIndex < contract.maxDecisions; decisionIndex += 1) {
+      assertPlatformBudget();
+      if (Date.now() - rolloutStartedAt > contract.rolloutTimeoutMs) { failureCode = "ADAPTIVE_TIMEOUT"; break; }
+      if (!await processAlive(launched.pid)) { failureCode = "GAME_CRASHED"; break; }
+      const success = evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe);
+      if (decisions.length > 0 && madeVerifiedProgress && success.every(assertion => assertion.passed)) {
+        outcome = "PASSED"; failureCode = null; break;
+      }
+      const failed = evaluateProbeAssertions(contract.failureAssertions, null, currentProbe);
+      if (failed.every(assertion => assertion.passed)) { failureCode = "ORACLE_FAILURE"; break; }
+
+      const screenshotPath = join(workspace, "adaptive-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
+      await mkdir(dirname(screenshotPath), { recursive: true });
+      await testEnvironment.capture(screenshotPath);
+      const screenshot = await inspectScreenshot(screenshotPath);
+      const policyScreenshotPath = join(workspace, "adaptive-policy-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
+      await mkdir(dirname(policyScreenshotPath), { recursive: true });
+      await execute("ffmpeg", [
+        "-nostdin", "-loglevel", "error", "-i", screenshotPath,
+        "-vf", "scale=640:360:flags=lanczos", "-frames:v", "1", "-y", policyScreenshotPath,
+      ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+      const screenshotBytes = await readFile(policyScreenshotPath);
+      const policyScreenshotSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
+      const policyRequest = {
+        rolloutIndex, decisionIndex, screenshotBase64: screenshotBytes.toString("base64"), screenshotSha256: policyScreenshotSha256,
+        goal: contract.goal, allowedActions: contract.allowedActions, history: history.slice(-6), recovery,
+      };
+      const policyResponse = await requestPlayerPolicy(policyRequest);
+      playerPolicy = policyResponse.policy;
+      const decision = policyResponse.decision;
+      const beforeDigest = probeStateDigest(currentProbe);
+      const nativeEvents = policyNativeEvents(decision.actions);
+      const signature = jsonDigest({ screenshot: screenshot.sha256, actions: decision.actions });
+      const seen = (loopSignatures.get(signature) ?? 0) + 1;
+      loopSignatures.set(signature, seen);
+      if (seen >= 3) { failureCode = "PLAYER_ACTION_LOOP"; break; }
+      if (nativeEvents.length > 0) {
+        await testEnvironment.sequence(nativeEvents, Math.min(30_000, remainingPlatformBudget()));
+        const gamepadCount = gamepadEventCount(nativeEvents);
+        gamepadInputCount += gamepadCount;
+        keyboardMouseInputCount += nativeEvents.length - gamepadCount;
+      }
+      let after = currentProbe;
+      if (nativeEvents.length > 0) {
+        after = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid, afterSequence: currentProbe.sequence }, PROBE_TIMEOUT_MS)
+          .catch(() => currentProbe);
+      }
+      const afterDigest = probeStateDigest(after);
+      const changed = after.sequence > currentProbe.sequence && beforeDigest !== afterDigest;
+      if (changed) {
+        madeVerifiedProgress = true;
+        noProgressDecisions = 0;
+        lastProgressAt = Date.now();
+        recovery = false;
+        recoveryStartedAt = null;
+        recoveryDecisionIndex = null;
+      } else {
+        noProgressDecisions += 1;
+        if (!recovery && (noProgressDecisions >= 5 || Date.now() - lastProgressAt >= 30_000)) {
+          recovery = true;
+          recoveryStartedAt = Date.now();
+          recoveryDecisionIndex = decisionIndex;
+        }
+      }
+      const successOracle = evaluateProbeAssertions(contract.successAssertions, initialProbe, after);
+      const failureOracle = evaluateProbeAssertions(contract.failureAssertions, null, after);
+      const record = {
+        schema: "deviludo.e2e-trajectory-event", rolloutIndex, decisionIndex, seed,
+        observedAt: new Date().toISOString(), screenshotSha256: screenshot.sha256,
+        policyScreenshotSha256,
+        status: decision.status, observation: decision.observation, rationale: decision.rationale,
+        actions: decision.actions, semanticActions: semanticizePolicyActions(decision.actions, currentProbe),
+        before: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: beforeDigest },
+        after: { sequence: after.sequence, sceneId: after.sceneId, digest: afterDigest },
+        stateChanged: changed, recovery,
+        oracle: { success: successOracle, failure: failureOracle }, policy: policyResponse.policy,
+      };
+      await appendFile(trajectoryPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      decisions.push(record);
+      history.push({ decisionIndex, observation: decision.observation, actions: decision.actions, result: changed ? "state changed" : "no verified progress" });
+      currentProbe = after;
+      if (decision.status === "UNRECOVERABLE") { failureCode = "PLAYER_UNRECOVERABLE"; break; }
+      if (decision.status === "GOAL_REACHED"
+        && (!madeVerifiedProgress
+          || !evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe).every(assertion => assertion.passed))) {
+        failureCode = "ORACLE_REJECTED_GOAL";
+        break;
+      }
+      if (recovery && recoveryStartedAt !== null && recoveryDecisionIndex !== null
+        && (decisionIndex - recoveryDecisionIndex >= 3 || Date.now() - recoveryStartedAt >= 20_000)) {
+        failureCode = "PLAYER_STUCK";
+        break;
+      }
+    }
+    const finalSuccess = evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe);
+    if (decisions.length > 0 && madeVerifiedProgress && finalSuccess.every(assertion => assertion.passed)) {
+      outcome = "PASSED"; failureCode = null;
+    }
+    const finalScreenshot = join(workspace, "evidence-screenshots", `${runId}-final.png`);
+    await mkdir(dirname(finalScreenshot), { recursive: true });
+    await testEnvironment.capture(finalScreenshot);
+    await inspectScreenshot(finalScreenshot);
+    if (screenshots.length < MAX_SCREENSHOTS) screenshots.push({ id: `${runId}-final`, path: finalScreenshot });
+  } finally {
+    const video = await testEnvironment.close();
+    if (video) videos.push(video);
+    await launched.terminate();
+    const logs = await launched.logs();
+    const gameLog = await readOptionalLog(gameLogPath);
+    const stdout = [logs.stdout, gameLog.toString("utf8")].filter(Boolean).join("\n");
+    stdoutLogs.push(stdout); stderrLogs.push(logs.stderr);
+    const errors = godotErrorLines(stdout, logs.stderr);
+    if (errors.length) throw productFailure("GODOT_SCRIPT_ERROR", errors[0]);
+  }
+  trajectories.push({ id: runId, path: trajectoryPath });
+  return Object.freeze({
+    rolloutIndex, seed, outcome, failureCode, decisionCount: decisions.length,
+    durationMs: Date.now() - rolloutStartedAt, decisions: Object.freeze(decisions),
+  });
+}
+
+async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
+  const candidate = [...successfulRollouts]
+    .sort((left, right) => left.decisionCount - right.decisionCount || left.durationMs - right.durationMs)
+    .find(rollout => rollout.decisions.flatMap(decision => decision.semanticActions)
+      .every(action => action.type === "drag" ? typeof action.fromTargetId === "string" && typeof action.toTargetId === "string"
+        : !["click", "double_click", "scroll"].includes(action.type) || typeof action.targetId === "string"));
+  if (!candidate) throw productFailure("REGRESSION_CANDIDATE_MISSING", "没有可固化的成功玩家轨迹");
+  const actions = candidate.decisions.flatMap(decision => decision.semanticActions).filter(action => action.type !== "wait");
+  if (!actions.length) throw productFailure("REGRESSION_CANDIDATE_INVALID", "成功轨迹不包含可回放的真实输入");
+  const trace = {
+    schema: "deviludo.e2e-regression", contractDigest: jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }),
+    inputProfile: manifest.primaryInputProfile, estimatedDurationMs: Math.min(300_000, Math.max(1, candidate.durationMs)),
+    goal: manifest.adaptivePlayer.goal, actions, successAssertions: manifest.adaptivePlayer.successAssertions,
+  };
+  for (let replayIndex = 0; replayIndex < 2; replayIndex += 1) {
+    const passed = await replayRegression(gamePackage, trace, replayIndex);
+    if (!passed) throw productFailure("REGRESSION_REPLAY_FAILED", `候选回归轨迹第 ${replayIndex + 1} 次干净回放失败`);
+  }
+  const path = join(workspace, "evidence-regression", "current.json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(trace, null, 2)}\n`, { mode: 0o600 });
+  regressions.push({ id: "current", path });
+}
+
+async function replayRegression(gamePackage, trace, replayIndex) {
+  const runId = replayIndex === "current" ? "regression-current" : `regression-replay-${replayIndex + 1}`;
+  const probePath = join(workspace, "ui-probe", `${runId}.json`);
+  const gameLogPath = join(workspace, "game-logs", `${runId}.log`);
+  await Promise.all([probePath, gameLogPath].map(path => mkdir(dirname(path), { recursive: true })));
+  const sessionNonce = randomBytes(32).toString("hex");
+  const { launched, testEnvironment } = await launchManagedGame(
+    gamePackage, gameWindowArguments(gameLogPath), await isolatedGameEnvironment(runId, {
+      DEVILUDO_E2E_UI_PROBE_FILE: probePath, DEVILUDO_E2E_SESSION_NONCE: sessionNonce,
+    }), runId, trace.inputProfile === "GAMEPAD",
+  );
+  try {
+    await testEnvironment.prepare();
+    let probe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
+    for (const action of trace.actions) {
+      const concrete = materializeRegressionAction(action, probe);
+      await testEnvironment.sequence(policyNativeEvents([concrete]), Math.min(30_000, remainingPlatformBudget()));
+      probe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid, afterSequence: probe.sequence }, PROBE_TIMEOUT_MS);
+    }
+    return evaluateProbeAssertions(trace.successAssertions, null, probe).every(assertion => assertion.passed);
+  } finally {
+    const video = await testEnvironment.close();
+    if (video) videos.push(video);
+    await launched.terminate();
+  }
+}
+
+function semanticizePolicyActions(actions, probe) {
+  return actions.map(action => {
+    const targetAt = (x, y) => {
+      const matches = probe.controls.filter(control => control.visible && control.enabled
+        && Number(x) >= control.rect.x && Number(x) < control.rect.x + control.rect.width
+        && Number(y) >= control.rect.y && Number(y) < control.rect.y + control.rect.height);
+      return matches.length === 1 ? matches[0].id : null;
+    };
+    if (["click", "double_click", "scroll"].includes(action.type)) {
+      const targetId = targetAt(action.x, action.y);
+      if (!targetId) return action;
+      const rest = { ...action };
+      delete rest.x;
+      delete rest.y;
+      return { ...rest, targetId };
+    }
+    if (action.type === "drag") {
+      const fromTargetId = targetAt(action.fromX, action.fromY);
+      const toTargetId = targetAt(action.toX, action.toY);
+      if (!fromTargetId || !toTargetId) return action;
+      const rest = { ...action };
+      delete rest.fromX;
+      delete rest.fromY;
+      delete rest.toX;
+      delete rest.toY;
+      return { ...rest, fromTargetId, toTargetId };
+    }
+    return action;
+  });
+}
+
+function materializeRegressionAction(action, probe) {
+  if (action.fromTargetId && action.toTargetId) {
+    const from = resolveProbeControl(probe, action.fromTargetId).center;
+    const to = resolveProbeControl(probe, action.toTargetId).center;
+    const rest = { ...action };
+    delete rest.fromTargetId;
+    delete rest.toTargetId;
+    return { ...rest, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
+  }
+  if (!action.targetId) return action;
+  const center = resolveProbeControl(probe, action.targetId).center;
+  const rest = { ...action };
+  delete rest.targetId;
+  return { ...rest, ...center };
+}
+
+function policyNativeEvents(actions) {
+  return actions.flatMap(action => {
+    if (action.type === "key_tap") return [{ type: "key_press", key: action.key, delay_ms: 0 }, { type: "key_release", key: action.key, delay_ms: 80 }];
+    if (action.type === "key_hold") return [{ type: "key_press", key: action.key, delay_ms: 0 }, { type: "wait", delay_ms: action.duration_ms }, { type: "key_release", key: action.key, delay_ms: 0 }];
+    if (action.type === "text_input") return [{ type: "text_input", text: action.text, delay_ms: 0 }];
+    if (["click", "double_click"].includes(action.type)) return [
+      { type: "mouse_move", x: action.x, y: action.y, delay_ms: 0 },
+      { type: "mouse_click", button: "LEFT", delay_ms: 80 },
+      ...(action.type === "double_click" ? [{ type: "mouse_click", button: "LEFT", delay_ms: 80 }] : []),
+    ];
+    if (action.type === "scroll") return [{ type: "mouse_move", x: action.x, y: action.y, delay_ms: 0 }, { type: "scroll", deltaY: action.deltaY, delay_ms: 80 }];
+    if (action.type === "drag") return [
+      { type: "mouse_move", x: action.fromX, y: action.fromY, delay_ms: 0 },
+      { type: "mouse_down", button: "LEFT", delay_ms: 80 },
+      { type: "wait", delay_ms: action.duration_ms },
+      { type: "mouse_move", x: action.toX, y: action.toY, delay_ms: 0 },
+      { type: "mouse_up", button: "LEFT", delay_ms: 80 },
+    ];
+    if (String(action.type).startsWith("gamepad_")) return [{ ...action, delay_ms: 0 }];
+    throw productFailure("PLAYER_POLICY_ACTION_INVALID", `Test Agent 返回了不安全输入 ${action.type}`);
+  });
+}
+
+async function requestPlayerPolicy(request) {
+  if (!streamProtocol || !policyLines) throw new Error("INFRASTRUCTURE: Test Agent player policy relay is unavailable");
+  const id = randomUUID();
+  process.stdout.write(`${JSON.stringify({ type: "policy_request", id, request })}\n`);
+  const responseLine = await Promise.race([
+    policyLines.next(),
+    delay(35_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
+  ]);
+  if (responseLine.done) throw new Error("INFRASTRUCTURE: Test Agent player policy relay closed");
+  const message = JSON.parse(responseLine.value);
+  if (message?.type !== "policy_response" || message.id !== id) throw new Error("INFRASTRUCTURE: Test Agent player policy response is invalid");
+  if (typeof message.error === "string") throw new Error(`INFRASTRUCTURE: ${message.error.slice(0, 1_000)}`);
+  if (!message.response?.decision || !message.response?.policy) throw new Error("INFRASTRUCTURE: Test Agent player policy omitted its decision");
+  return message.response;
+}
+
+function stableRolloutSeed(manifest, rolloutIndex) {
+  const project = process.env.DEVILUDO_E2E_PROJECT_ID ?? jobId;
+  return createHash("sha256").update(`${project}\0${platform}\0${jsonDigest(manifest)}\0${rolloutIndex}`).digest().readUInt32BE(0);
+}
+
+function planExecution(manifest, currentRegressionMs) {
+  const unitByPath = new Map();
+  for (const feature of manifest.features.filter(item => item.verificationMethod === "unit")) {
+    unitByPath.set(feature.gdsTestPath, Math.max(unitByPath.get(feature.gdsTestPath) ?? 0, feature.timeoutMs));
+  }
+  const unitMs = [...unitByPath.values()].reduce((sum, value) => sum + value, 0);
+  const deterministicMs = manifest.features.filter(item => item.verificationMethod === "interactive").reduce((sum, item) => sum + item.timeoutMs, 0);
+  const visualMs = manifest.features.filter(item => item.verificationMethod === "visual").reduce((sum, item) => sum + (item.expectedVisual.captureDelay ?? 1000) + 30000, 0);
+  const raw = Math.ceil(1.25 * (180000 + unitMs + deterministicMs + visualMs + currentRegressionMs
+    + 3 * manifest.adaptivePlayer.rolloutTimeoutMs + 2 * manifest.adaptivePlayer.rolloutTimeoutMs + 180000));
+  const plannedTimeoutMs = Math.ceil(Math.max(30 * 60000, raw) / 60000) * 60000;
+  if (plannedTimeoutMs > 90 * 60000) throw productFailure("E2E_PLAN_EXCEEDS_LIMIT", "冻结的单平台 E2E 计划超过 90 分钟");
+  return { plannedTimeoutMs, unitMs, deterministicMs, visualMs, currentRegressionMs };
+}
+
+function jsonDigest(value) {
+  const stable = input => Array.isArray(input) ? `[${input.map(stable).join(",")}]`
+    : input && typeof input === "object" ? `{${Object.keys(input).sort().map(key => `${JSON.stringify(key)}:${stable(input[key])}`).join(",")}}`
+      : JSON.stringify(input);
+  return `sha256:${createHash("sha256").update(stable(value)).digest("hex")}`;
+}
+
 function nativeInputEvents(event, snapshot) {
   const targetCenter = id => resolveProbeControl(snapshot, id).center;
   const move = point => ({ type: "mouse_move", ...point, delay_ms: 0 });
@@ -445,7 +796,12 @@ function nativeInputEvents(event, snapshot) {
     ];
     case "scroll": return [move(targetCenter(event.targetId)), { type: "scroll", deltaY: event.deltaY, delay_ms: 80 }];
     case "text_input": return [move(targetCenter(event.targetId)), click("LEFT"), { type: "text_input", text: event.text, delay_ms: 80 }];
-    default: throw productFailure("INPUT_EVENT_INVALID", `不支持的 v3 输入事件 ${event.type}`);
+    case "gamepad_button_tap": return [{ type: event.type, button: event.button, delay_ms: 0 }];
+    case "gamepad_button_hold": return [{ type: event.type, button: event.button, duration_ms: event.duration_ms, delay_ms: 0 }];
+    case "gamepad_axis": return [{ type: event.type, axis: event.axis, value: event.value, duration_ms: event.duration_ms ?? 0, delay_ms: 0 }];
+    case "gamepad_trigger": return [{ type: event.type, trigger: event.trigger, value: event.value, duration_ms: event.duration_ms ?? 0, delay_ms: 0 }];
+    case "gamepad_release_all": return [{ type: event.type, delay_ms: 0 }];
+    default: throw productFailure("INPUT_EVENT_INVALID", `不支持的输入事件 ${event.type}`);
   }
 }
 
@@ -478,6 +834,22 @@ async function launchNativeGame(gamePackage, arguments_, environment) {
     },
     logs: async () => ({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") }),
   };
+}
+
+async function launchManagedGame(gamePackage, arguments_, environment, runId, useGamepad) {
+  const testEnvironment = new GameTestEnvironment({
+    pid: null, runId, workspace, driver,
+    gamepadDriver: process.env.DEVILUDO_GAMEPAD_DRIVER ?? "", useGamepad,
+  });
+  await testEnvironment.prepareInputDevices();
+  try {
+    const launched = await launchNativeGame(gamePackage, arguments_, environment);
+    testEnvironment.attach(launched.pid);
+    return { launched, testEnvironment };
+  } catch (error) {
+    await testEnvironment.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function launchMacosApp(gamePackage, arguments_, environment) {
@@ -530,12 +902,18 @@ async function findGamePackage(root, operatingSystem) {
 }
 
 function assertManifest(value) {
-  if (!value || value.schemaVersion !== "deviludo.test-manifest.v3" || !Array.isArray(value.requirements) || !value.requirements.length
+  if (!value || value.schema !== "deviludo.test-manifest" || Object.hasOwn(value, "schemaVersion")
+    || Object.hasOwn(value, "version")
+    || !Array.isArray(value.inputProfiles) || !value.inputProfiles.length || value.inputProfiles.length > 2
+    || value.inputProfiles.some(profile => !["KEYBOARD_MOUSE", "GAMEPAD"].includes(profile))
+    || new Set(value.inputProfiles).size !== value.inputProfiles.length || !value.inputProfiles.includes(value.primaryInputProfile)
+    || !Array.isArray(value.requirements) || !value.requirements.length
     || value.requirements.length > 500 || !Array.isArray(value.features) || !value.features.length || value.features.length > 500) {
     throw productFailure("E2E_MANIFEST_INVALID", "测试清单结构无效");
   }
   const requirementIds = new Set();
   const playerRequirements = new Set();
+  const coreRequirements = new Set();
   for (const requirement of value.requirements) {
     if (!requirement || !stableId(requirement.requirementId) || requirementIds.has(requirement.requirementId)
       || typeof requirement.description !== "string" || !requirement.description.trim()
@@ -555,7 +933,25 @@ function assertManifest(value) {
     }
     requirementIds.add(requirement.requirementId);
     if (requirement.verificationClass === "PLAYER_INTERACTION") playerRequirements.add(requirement.requirementId);
+    if (requirement.source === "CORE_LOOP") coreRequirements.add(requirement.requirementId);
   }
+  const adaptive = value.adaptivePlayer;
+  if (!adaptive || typeof adaptive !== "object" || Array.isArray(adaptive)
+    || typeof adaptive.goal !== "string" || adaptive.goal.trim().length < 10 || adaptive.goal.length > 4000
+    || !Array.isArray(adaptive.requirementIds) || !adaptive.requirementIds.length
+    || adaptive.requirementIds.some(id => !playerRequirements.has(id))
+    || [...coreRequirements].some(id => !adaptive.requirementIds.includes(id))
+    || !Array.isArray(adaptive.allowedActions) || !adaptive.allowedActions.length
+    || adaptive.allowedActions.some(item => !["KEYBOARD", "POINTER", "GAMEPAD"].includes(item))
+    || adaptive.allowedActions.includes("GAMEPAD") !== value.inputProfiles.includes("GAMEPAD")
+    || (adaptive.allowedActions.includes("KEYBOARD") || adaptive.allowedActions.includes("POINTER")) !== value.inputProfiles.includes("KEYBOARD_MOUSE")
+    || !Array.isArray(adaptive.successAssertions) || !adaptive.successAssertions.length || !adaptive.successAssertions.every(validProbeAssertion)
+    || !adaptive.successAssertions.some(assertion => assertion && assertion.source === "PROGRESS"
+      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
+    || !Array.isArray(adaptive.failureAssertions) || !adaptive.failureAssertions.length || !adaptive.failureAssertions.every(validProbeAssertion)
+    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 60000 || adaptive.rolloutTimeoutMs > 300000
+    || !Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40
+    || adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM") throw productFailure("ADAPTIVE_CONTRACT_INVALID", "自适应玩家测试合同无效");
   const featureIds = new Set();
   const unitNames = new Set();
   const automatedCoverage = new Set();
@@ -563,6 +959,7 @@ function assertManifest(value) {
   let journeys = 0;
   let checkpointCount = 0;
   let hasCore = false;
+  const exercisedInputProfiles = new Set();
   for (const feature of value.features) {
     if (!feature || !stableId(feature.id) || featureIds.has(feature.id)
       || !["core-loop", "player-control", "data-integrity", "runtime-quality", "ui", "audio", "network"].includes(feature.category)
@@ -574,6 +971,7 @@ function assertManifest(value) {
     if (feature.verificationMethod !== "manual") feature.requirementIds.forEach(id => automatedCoverage.add(id));
     if (feature.verificationMethod === "unit") {
       if (!safeGodotPath(feature.gdsTestPath) || !Array.isArray(feature.checkNames) || !feature.checkNames.length
+        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300_000
         || feature.checkNames.some(name => !stableId(name) || unitNames.has(name))) throw productFailure("E2E_MANIFEST_INVALID", `单元测试项无效：${feature.id}`);
       feature.checkNames.forEach(name => unitNames.add(name));
     } else if (feature.verificationMethod === "interactive") {
@@ -581,6 +979,7 @@ function assertManifest(value) {
         || !validInteractionScript(feature.interactionScript, feature.requirementIds, playerRequirements)) throw productFailure("E2E_MANIFEST_INVALID", `真实操作旅程无效：${feature.id}`);
       journeys += 1;
       const events = feature.interactionScript.events;
+      events.filter(isActionEvent).forEach(event => exercisedInputProfiles.add(String(event.type).startsWith("gamepad_") ? "GAMEPAD" : "KEYBOARD_MOUSE"));
       const journeyCheckpoints = events.filter(event => event.type === "checkpoint");
       checkpointCount += journeyCheckpoints.length;
       if (feature.launchProfile.type === "SCENARIO"
@@ -597,7 +996,7 @@ function assertManifest(value) {
           && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")) hasCore = true;
       }
     } else if (feature.verificationMethod === "visual") {
-      if (!feature.expectedVisual || feature.expectedVisual.version !== "1" || !safePngPath(feature.expectedVisual.referenceImage)) {
+      if (!feature.expectedVisual || Object.hasOwn(feature.expectedVisual, "version") || !safePngPath(feature.expectedVisual.referenceImage)) {
         throw productFailure("E2E_MANIFEST_INVALID", `视觉测试项无效：${feature.id}`);
       }
       checkpointCount += 1;
@@ -608,10 +1007,12 @@ function assertManifest(value) {
   }
   if ([...requirementIds].some(id => !automatedCoverage.has(id))) throw productFailure("REQUIREMENT_COVERAGE_MISSING", "批准需求缺少自动化覆盖");
   if ([...playerRequirements].some(id => !interactiveCoverage.has(id))) throw productFailure("PLAYER_REQUIREMENT_COVERAGE_MISSING", "玩家需求没有映射到真实输入步骤");
+  if (value.inputProfiles.some(profile => !exercisedInputProfiles.has(profile))) throw productFailure("INPUT_PROFILE_COVERAGE_MISSING", "声明的输入方式没有确定性真实操作覆盖");
 }
 
 function validInteractionScript(value, journeyRequirements, playerRequirements) {
-  if (!value || value.version !== "3" || !Array.isArray(value.events) || !value.events.length || value.events.length > 200) return false;
+  if (!value || Object.hasOwn(value, "version") || Object.hasOwn(value, "schemaVersion")
+    || !Array.isArray(value.events) || !value.events.length || value.events.length > 200) return false;
   const steps = new Set(), checkpoints_ = new Set();
   return value.events.every(event => {
     if (!event || typeof event !== "object" || !validDelay(event.delay_ms, event.type === "wait")) return false;
@@ -638,7 +1039,16 @@ function validInteractionScript(value, journeyRequirements, playerRequirements) 
     if (["key_tap", "key_hold"].includes(event.type) && !supportedKey(event.key)) return false;
     if (event.type === "key_hold" && !validDuration(event.duration_ms)) return false;
     if (event.type === "scroll" && (!Number.isInteger(event.deltaY) || !event.deltaY || Math.abs(event.deltaY) > 10_000)) return false;
-    return event.type !== "text_input" || (typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1_000);
+    if (event.type === "text_input") return typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1_000;
+    if (["gamepad_button_tap", "gamepad_button_hold"].includes(event.type)) return ["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK", "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"].includes(event.button)
+      && (event.type !== "gamepad_button_hold" || validDuration(event.duration_ms));
+    if (event.type === "gamepad_axis") return ["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"].includes(event.axis)
+      && typeof event.value === "number" && event.value >= -1 && event.value <= 1
+      && (event.duration_ms === undefined || validDuration(event.duration_ms));
+    if (event.type === "gamepad_trigger") return ["LEFT", "RIGHT"].includes(event.trigger)
+      && typeof event.value === "number" && event.value >= 0 && event.value <= 1
+      && (event.duration_ms === undefined || validDuration(event.duration_ms));
+    return event.type === "gamepad_release_all";
   });
 }
 
@@ -652,33 +1062,34 @@ function validProbeAssertion(value) {
 }
 
 function validLaunchProfile(value) { return value?.type === "FRESH" || (value?.type === "SCENARIO" && stableId(value.scenarioId)); }
-function isActionEvent(event) { return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input"].includes(event?.type); }
+function isActionEvent(event) { return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all"].includes(event?.type); }
 function supportedKey(value) { return typeof value === "string" && /^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$/.test(value); }
 function validDuration(value) { return Number.isInteger(value) && value >= 1 && value <= 300_000; }
 function validDelay(value, required) { return value === undefined ? !required : Number.isInteger(value) && value >= 0 && value <= 300_000; }
 function checkpointOutputMarker(id) { return `DEVILUDO_E2E_CHECKPOINT:${id}`; }
 
 async function finish(outcome, failureDomain, summary, manifest) {
-  const cleanInstallRequirementIds = new Set((manifest?.features ?? [])
-    .filter(feature => feature.verificationMethod === "interactive" && feature.coreJourney === true)
-    .flatMap(feature => feature.interactionScript.events.filter(isActionEvent).flatMap(event => event.coversRequirementIds)));
-  const scopedRequirements = (manifest?.requirements ?? []).filter(item => action === "test"
-    || cleanInstallRequirementIds.has(item.requirementId));
-  const playerRequirementCount = scopedRequirements.filter(item => item.verificationClass === "PLAYER_INTERACTION"
-    && (action === "test" || cleanInstallRequirementIds.has(item.requirementId))).length ?? 0;
+  const scopedRequirements = manifest?.requirements ?? [];
+  const playerRequirementCount = scopedRequirements.filter(item => item.verificationClass === "PLAYER_INTERACTION").length;
   const report = {
-    schemaVersion: E2E_EVIDENCE_PROTOCOL, jobId, platform, action, outcome, failureDomain, summary,
+    schema: E2E_EVIDENCE_SCHEMA, jobId, platform, action, outcome, failureDomain, summary,
     packageLaunches: launchRecords,
     coverage: {
       headlessCheckCount: headlessChecks.size,
       interactiveJourneyCount: interactiveJourneys.size,
-      realInputCount: steps.length,
+      deterministicInputCount: steps.length,
+      realInputCount: keyboardMouseInputCount + gamepadInputCount,
+      keyboardMouseInputCount,
+      gamepadInputCount,
+      adaptiveRolloutCount: adaptiveRollouts.length,
+      adaptiveSuccessCount: adaptiveRollouts.filter(item => item.outcome === "PASSED").length,
+      adaptiveDecisionCount: adaptiveRollouts.reduce((sum, item) => sum + item.decisionCount, 0),
       coveredPlayerRequirementCount: coveredPlayerRequirements.size,
       playerRequirementCount,
       visualBaselineCount: baselines.length,
     },
     testDetails: {
-      suite: "deviludo-real-window-e2e-v3",
+      suite: "deviludo-real-window-e2e",
       checks: [...headlessChecks], interactiveJourneys: [...interactiveJourneys], failures,
       duration_ms: Date.now() - startedAt,
     },
@@ -693,23 +1104,56 @@ async function finish(outcome, failureDomain, summary, manifest) {
         evidenceSteps, ...(requirement.exemptionReason ? { exemptionReason: requirement.exemptionReason } : {}),
       };
     }),
-    steps, checkpoints, screenshotCount: screenshots.length, visualDiff: diffs.length > 0,
+    steps, checkpoints, adaptiveRollouts, playerPolicy,
+    regression: {
+      currentReplay: currentRegressionResult,
+      replacement: outcome === "PASSED" && regressions[0]
+        ? { stored: true, filename: "regression/current.json" }
+        : { stored: false },
+    },
+    screenshotCount: screenshots.length, videoCount: videos.length, visualDiff: diffs.length > 0,
   };
-  const bundle = await createEvidenceBundle({ outputRoot: evidenceRoot, jobId, platform, report, stdout: stdoutLogs.join("\n"), stderr: stderrLogs.join("\n"), screenshots, diffs, baselines });
+  const bundle = await createEvidenceBundle({
+    outputRoot: evidenceRoot, jobId, platform, report,
+    stdout: stdoutLogs.join("\n"), stderr: stderrLogs.join("\n"), screenshots, diffs, baselines,
+    videos, trajectories, regressions,
+  });
+  const regressionBytes = outcome === "PASSED" && regressions[0] ? await readFile(regressions[0].path) : null;
+  const regressionTrace = regressionBytes ? JSON.parse(regressionBytes.toString("utf8")) : null;
+  const regressionOutputPath = regressionBytes ? join(evidenceRoot, `e2e-regression-${platform}-${jobId}.json`) : null;
+  if (regressionBytes && regressionOutputPath) await writeFile(regressionOutputPath, regressionBytes, { mode: 0o600 });
   const receipt = {
-    schemaVersion: GUEST_REPORT_PROTOCOL, action, jobId, outcome, failureDomain, summary,
-    guest: { executor: "real-window-godot-v3", isolation: "EPHEMERAL_VM", exitCode: outcome === "PASSED" ? 0 : gameExitCode || 1 },
+    schema: GUEST_REPORT_SCHEMA, action, jobId, outcome, failureDomain, summary,
+    guest: { executor: "real-window-godot", isolation: "EPHEMERAL_VM", exitCode: outcome === "PASSED" ? 0 : gameExitCode || 1 },
     testDetails: report.testDetails,
     evidence: {
-      protocol: E2E_EVIDENCE_PROTOCOL, result: outcome,
+      schema: E2E_EVIDENCE_SCHEMA, result: outcome,
       headlessCheckCount: headlessChecks.size, interactiveJourneyCount: interactiveJourneys.size,
-      realInputCount: steps.length, coveredPlayerRequirementCount: coveredPlayerRequirements.size,
+      deterministicInputCount: steps.length,
+      realInputCount: keyboardMouseInputCount + gamepadInputCount,
+      keyboardMouseInputCount, gamepadInputCount,
+      adaptiveRolloutCount: adaptiveRollouts.length,
+      adaptiveSuccessCount: adaptiveRollouts.filter(item => item.outcome === "PASSED").length,
+      adaptiveDecisionCount: adaptiveRollouts.reduce((sum, item) => sum + item.decisionCount, 0),
+      coveredPlayerRequirementCount: coveredPlayerRequirements.size,
       playerRequirementCount, screenshotCount: screenshots.length, visualBaselineCount: baselines.length,
-      hasVisualDiff: diffs.length > 0, packageLaunchMode: launchRecords.find(record => record.packagePath)?.mode ?? null,
+      videoCount: videos.length, hasVisualDiff: diffs.length > 0,
+      regressionTraceDigest: regressionBytes ? `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}` : null,
+      regressionContractDigest: regressionTrace?.contractDigest ?? null,
+      regressionInputProfile: regressionTrace?.inputProfile ?? null,
+      regressionEstimatedDurationMs: regressionTrace?.estimatedDurationMs ?? null,
+      packageLaunchMode: launchRecords.find(record => record.packagePath)?.mode ?? null,
     },
     outputPath: bundle.outputPath, outputSha256: bundle.outputSha256, outputSizeBytes: bundle.outputSizeBytes,
+    ...(regressions[0] && regressionBytes ? {
+      regressionOutputPath,
+      regressionOutputSha256: `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}`,
+      regressionOutputSizeBytes: regressionBytes.length,
+    } : {}),
   };
-  process.stdout.write(jsonOutput ? JSON.stringify(receipt) : `${JSON.stringify(receipt, null, 2)}\n`);
+  process.stdout.write(streamProtocol
+    ? `${JSON.stringify({ type: "result", value: receipt })}\n`
+    : jsonOutput ? JSON.stringify(receipt) : `${JSON.stringify(receipt, null, 2)}\n`);
 }
 
 async function driver(command, arguments_, timeout = 30_000) {
@@ -755,7 +1199,7 @@ async function runCaptured(executable, arguments_, timeout, environment = safeEn
   });
 }
 
-function assertPlatformBudget() { if (Date.now() >= platformDeadline) throw productFailure("PLATFORM_TIMEOUT", "单个平台 E2E 超过 30 分钟总预算"); }
+function assertPlatformBudget() { if (Date.now() >= platformDeadline) throw productFailure("PLATFORM_TIMEOUT", "单个平台 E2E 超过冻结的动态总预算"); }
 function remainingPlatformBudget() { return Math.max(1, platformDeadline - Date.now()); }
 async function processAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 async function readOptionalLog(path) { return readFile(path).catch(() => Buffer.alloc(0)); }

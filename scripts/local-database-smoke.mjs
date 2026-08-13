@@ -40,7 +40,8 @@ async function runDatabaseSmoke(url) {
       "project_conversations", "conversation_messages", "agent_installations",
       "workflow_instances", "workflow_events", "jobs", "external_signals",
       "job_progress_events", "job_guidance_messages", "operation_receipts",
-      "workspace_claim_fairness", "artifacts", "artifact_inputs", "executor_receipts",
+      "workspace_claim_fairness", "artifacts", "artifact_inputs", "object_cleanup_queue",
+      "e2e_policy_locks", "e2e_policy_decisions", "e2e_regression_traces", "executor_receipts",
       "project_creation_receipts",
     ];
     const forcedNames = new Set(forced.rows.map(row => row.relname));
@@ -83,9 +84,10 @@ async function runDatabaseSmoke(url) {
     `);
     const expectedDefiners = [
       "acknowledge_source_ready_events", "advance_asset_workflows", "claim_asset_generation", "claim_job",
-      "claim_local_git_commit", "claim_project_import_analysis", "cleanup_expired_executor_state",
-      "complete_asset_generation", "complete_local_git_commit", "fail_asset_generation", "fail_local_git_commit",
-      "pull_source_ready_events", "recover_expired_jobs", "schedule_e2e_protocol_revalidation",
+      "claim_local_git_commit", "claim_object_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
+      "complete_asset_generation", "complete_local_git_commit", "complete_object_cleanup",
+      "fail_asset_generation", "fail_local_git_commit", "fail_object_cleanup",
+      "pull_source_ready_events", "recover_expired_jobs",
       "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
@@ -106,12 +108,25 @@ async function runDatabaseSmoke(url) {
     }
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_local_git_commit(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_local_git_commit(integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_object_cleanup(integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_object_cleanup(integer)", false);
     await scheduler.query("SELECT deviludo.reconcile_p0_capacity()");
 
     await owner.query(
       "INSERT INTO deviludo.workspaces(id, name) VALUES ($1::uuid, 'source-smoke-a'), ($2::uuid, 'source-smoke-b')",
       workspaceIds,
     );
+    const cleanupKey = `workspaces/${workspaceIds[0]}/retired-e2e.zip`;
+    await owner.query(`INSERT INTO deviludo.object_cleanup_queue(workspace_id, bucket, object_key, reason)
+      VALUES ($1::uuid, 'deviludo-artifacts', $2, 'database smoke')`, [workspaceIds[0], cleanupKey]);
+    const cleanupClaim = await scheduler.query(`SELECT "workspaceId"::text, bucket, "objectKey", "leaseToken"::text
+      FROM deviludo.claim_object_cleanup(60)`);
+    if (cleanupClaim.rows[0]?.workspaceId !== workspaceIds[0] || cleanupClaim.rows[0]?.objectKey !== cleanupKey) {
+      throw new Error("Object cleanup request was not leased durably");
+    }
+    const cleanupSettled = await scheduler.query(`SELECT deviludo.complete_object_cleanup(
+      $1::uuid, $2::text, $3::text, $4::uuid) AS completed`, [workspaceIds[0], "deviludo-artifacts", cleanupKey, cleanupClaim.rows[0].leaseToken]);
+    if (cleanupSettled.rows[0]?.completed !== true) throw new Error("Object cleanup lease was not settled");
     await expectRlsRejection(() => api.query(
       "INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name) VALUES ($1::uuid, $2::uuid, $3::uuid, 'missing-context')",
       [workspaceIds[0], randomUUID(), actorId],
@@ -282,28 +297,66 @@ async function runDatabaseSmoke(url) {
       || frozenAsset?.sha256 !== `sha256:${"b".repeat(64)}`) {
       throw new Error("Artifact build did not freeze the supplied image object");
     }
+    const steamReleaseId = randomUUID();
+    const steamCredentialVersion = randomUUID();
+    await owner.query(`
+      UPDATE deviludo.jobs
+         SET state = 'SUCCEEDED', updated_at = clock_timestamp()
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+         AND kind = 'ARTIFACT_BUILD' AND state = 'QUEUED'
+    `, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
       UPDATE deviludo.workflow_instances
          SET profile = 'RELEASE', target_platforms = ARRAY['linux','windows','macos']::deviludo.server_os[],
-             state = 'RELEASE_APPROVAL_PENDING'
+             state = 'RELEASE_DECISION_PENDING'
        WHERE workspace_id = $1::uuid AND id = $2::uuid
     `, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
       INSERT INTO deviludo.artifacts(
         workspace_id, project_id, workflow_id, kind, target_platform,
-        bucket, object_key, sha256, size_bytes
+        bucket, object_key, sha256, size_bytes, producing_job_id
       )
-      SELECT $1::uuid, $2::uuid, $3::uuid, 'SIGNED_BUILD', platform,
+      SELECT $1::uuid, $2::uuid, $3::uuid, 'BUILD', platform,
              'deviludo-artifacts',
-             'workspaces/' || $1::text || '/projects/' || $2::text || '/jobs/release-smoke/signed-build-' || platform::text || '.tar.gz',
+             'workspaces/' || $1::text || '/projects/' || $2::text || '/jobs/release-smoke/build-' || platform::text || '.tar.gz',
              'sha256:' || repeat(CASE platform
                WHEN 'linux' THEN 'd' WHEN 'windows' THEN 'e' ELSE 'f' END, 64),
-             256
+             256,
+             (SELECT id FROM deviludo.jobs
+               WHERE workspace_id = $1::uuid AND workflow_id = $3::uuid
+                 AND kind = 'ARTIFACT_BUILD' AND state = 'SUCCEEDED'
+               ORDER BY updated_at DESC LIMIT 1)
         FROM unnest(ARRAY['linux','windows','macos']::deviludo.server_os[]) platform
     `, [workspaceIds[0], projectIds[0], workflowIds[0]]);
+    await owner.query(`
+      INSERT INTO deviludo.workspace_steam_settings(
+        workspace_id, builder_username, credential_secret_ref, credential_mask,
+        credential_fingerprint, credential_version, updated_by_actor_account_id
+      ) VALUES ($1::uuid, 'deviludo_builder',
+        'vault://workspaces/' || $1::text || '/steam/build-token/versions/' || $3::text,
+        'tok********smoke', 'sha256:123456789abc', $3::uuid, $2::uuid)
+    `, [workspaceIds[0], actorId, steamCredentialVersion]);
+    await owner.query(`
+      INSERT INTO deviludo.project_steam_settings(
+        workspace_id, project_id, app_id, depot_linux, depot_windows, depot_macos,
+        test_branch, updated_by_actor_account_id
+      ) VALUES ($1::uuid, $3::uuid, 1000, 1001, 1002, 1003, 'deviludo-test', $2::uuid)
+    `, [workspaceIds[0], actorId, projectIds[0]]);
+    await owner.query(`
+      INSERT INTO deviludo.steam_releases(
+        workspace_id, id, project_id, workflow_id, version, release_number, channel,
+        target_branch, app_id, depot_linux, depot_windows, depot_macos,
+        project_settings_revision, builder_username, credential_secret_ref,
+        credential_revision, build_digests, requested_by_actor_account_id
+      ) VALUES ($1::uuid, $4::uuid, $3::uuid, $5::uuid, '1.0.0', 1, 'TEST',
+        'deviludo-test', 1000, 1001, 1002, 1003, 1, 'deviludo_builder',
+        'vault://workspaces/' || $1::text || '/steam/build-token/versions/' || $6::text,
+        1, jsonb_build_object('linux', 'sha256:${"d".repeat(64)}',
+          'windows', 'sha256:${"e".repeat(64)}', 'macos', 'sha256:${"f".repeat(64)}'), $2::uuid)
+    `, [workspaceIds[0], actorId, projectIds[0], steamReleaseId, workflowIds[0], steamCredentialVersion]);
     const releaseAccepted = await withWorkspace(api, workspaceIds[0], client => client.query(
-      "SELECT deviludo.accept_workflow_signal($1::uuid, 'RELEASE_APPROVED', $2, jsonb_build_object('requestedByAccountId', $3::text)) AS accepted",
-      [workflowIds[0], `release-smoke:${workflowIds[0]}`, actorId],
+      "SELECT deviludo.start_steam_release($1::uuid, $2::uuid, $3, jsonb_build_object('requestedByAccountId', $4::text)) AS accepted",
+      [workflowIds[0], steamReleaseId, `release-smoke:${workflowIds[0]}`, actorId],
     ));
     if (releaseAccepted.rows[0]?.accepted !== true) throw new Error("Release approval signal was not accepted");
     const approvedRelease = await owner.query(`

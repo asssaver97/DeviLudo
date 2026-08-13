@@ -1,6 +1,5 @@
 // Real desktop input protocol used by the guest GUI drivers.
 
-export const INTERACTION_SCRIPT_VERSION = "3" as const;
 export const GAME_CLIENT_WIDTH = 1280 as const;
 export const GAME_CLIENT_HEIGHT = 720 as const;
 export const MAX_INTERACTION_EVENTS = 200 as const;
@@ -56,7 +55,20 @@ export type InteractionActionEvent =
   | (ActionEventBase & { type: "double_click"; targetId: string; button?: "LEFT" | "RIGHT" | "MIDDLE" })
   | (ActionEventBase & { type: "drag"; fromTargetId: string; toTargetId: string; duration_ms: number; button?: "LEFT" })
   | (ActionEventBase & { type: "scroll"; targetId: string; deltaY: number })
-  | (ActionEventBase & { type: "text_input"; targetId: string; text: string });
+  | (ActionEventBase & { type: "text_input"; targetId: string; text: string })
+  | (ActionEventBase & { type: "gamepad_button_tap"; button: GamepadButton })
+  | (ActionEventBase & { type: "gamepad_button_hold"; button: GamepadButton; duration_ms: number })
+  | (ActionEventBase & { type: "gamepad_axis"; axis: GamepadAxis; value: number; duration_ms?: number })
+  | (ActionEventBase & { type: "gamepad_trigger"; trigger: "LEFT" | "RIGHT"; value: number; duration_ms?: number })
+  | (ActionEventBase & { type: "gamepad_release_all" });
+
+export const GAMEPAD_BUTTONS = [
+  "A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK",
+  "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+] as const;
+export type GamepadButton = typeof GAMEPAD_BUTTONS[number];
+export const GAMEPAD_AXES = ["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"] as const;
+export type GamepadAxis = typeof GAMEPAD_AXES[number];
 
 export type InteractionEvent =
   | InteractionActionEvent
@@ -75,15 +87,14 @@ export type InteractionEvent =
   };
 
 export type InteractionScript = Readonly<{
-  version: typeof INTERACTION_SCRIPT_VERSION;
   events: readonly InteractionEvent[];
 }>;
 
 export function validateInteractionScript(value: unknown): value is InteractionScript {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const script = value as Record<string, unknown>;
-  if (script.version !== INTERACTION_SCRIPT_VERSION) return false;
-  if (!Array.isArray(script.events) || script.events.length < 1 || script.events.length > MAX_INTERACTION_EVENTS) return false;
+  if (Object.hasOwn(script, "version") || Object.hasOwn(script, "schemaVersion")
+    || !Array.isArray(script.events) || script.events.length < 1 || script.events.length > MAX_INTERACTION_EVENTS) return false;
 
   const checkpointIds = new Set<string>();
   const stepIds = new Set<string>();
@@ -103,6 +114,13 @@ export function validateInteractionScript(value: unknown): value is InteractionS
         || !validDuration(e.duration_ms) || (e.button !== undefined && e.button !== "LEFT"))) return false;
       if (e.type === "scroll" && (!Number.isInteger(e.deltaY) || Number(e.deltaY) === 0 || Math.abs(Number(e.deltaY)) > 10_000)) return false;
       if (e.type === "text_input" && (typeof e.text !== "string" || e.text.length < 1 || e.text.length > 1_000)) return false;
+      if (["gamepad_button_tap", "gamepad_button_hold"].includes(e.type)
+        && !GAMEPAD_BUTTONS.includes(e.button as GamepadButton)) return false;
+      if (e.type === "gamepad_button_hold" && !validDuration(e.duration_ms)) return false;
+      if (e.type === "gamepad_axis" && (!GAMEPAD_AXES.includes(e.axis as GamepadAxis)
+        || !validUnitInput(e.value) || (e.duration_ms !== undefined && !validDuration(e.duration_ms)))) return false;
+      if (e.type === "gamepad_trigger" && (!['LEFT', 'RIGHT'].includes(String(e.trigger))
+        || !validTriggerInput(e.value) || (e.duration_ms !== undefined && !validDuration(e.duration_ms)))) return false;
       continue;
     }
 
@@ -187,7 +205,10 @@ function validateActionMetadata(event: Record<string, unknown>, stepIds: Set<str
 }
 
 function isActionEventType(value: string): value is InteractionActionEvent["type"] {
-  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input"].includes(value);
+  return [
+    "key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input",
+    "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all",
+  ].includes(value);
 }
 
 function isStableId(value: unknown): value is string {
@@ -200,6 +221,14 @@ function isStablePath(value: unknown): value is string {
 
 function validDuration(value: unknown): boolean {
   return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 300_000;
+}
+
+function validUnitInput(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= -1 && value <= 1;
+}
+
+function validTriggerInput(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 function validDelay(value: unknown, required: boolean): boolean {

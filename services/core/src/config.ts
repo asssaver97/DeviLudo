@@ -17,7 +17,6 @@ export type CoreConfig = Readonly<{
   pollMilliseconds: number;
   projectDocumentIdleSeconds: number;
   assetGenerationPollMilliseconds: number;
-  e2eRevalidationBatchSize: number;
   sandboxConcurrency: number;
   requiredReadyPools: readonly ServerPoolKind[];
   tlsCertificateFile: string | null;
@@ -67,12 +66,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     1,
     2,
     "DEVILUDO_SANDBOX_CONCURRENCY",
-  );
-  const e2eRevalidationBatchSize = parseInteger(
-    env.DEVILUDO_E2E_REVALIDATION_BATCH_SIZE ?? "2",
-    1,
-    20,
-    "DEVILUDO_E2E_REVALIDATION_BATCH_SIZE",
   );
   const webToken = secretValue(env, "DEVILUDO_WEB_CORE_TOKEN");
   if (typedRole === "api" && env.NODE_ENV === "production" && webToken.length < 32) {
@@ -140,7 +133,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     pollMilliseconds,
     projectDocumentIdleSeconds,
     assetGenerationPollMilliseconds,
-    e2eRevalidationBatchSize,
     sandboxConcurrency,
     requiredReadyPools: Object.freeze(requiredReadyPools),
     tlsCertificateFile,

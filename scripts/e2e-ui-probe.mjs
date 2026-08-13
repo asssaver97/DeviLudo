@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-export const E2E_UI_PROBE_PROTOCOL = "deviludo.e2e-ui-probe.v1";
+export const E2E_UI_PROBE_SCHEMA = "deviludo.e2e-ui-probe";
 export const E2E_CLIENT_WIDTH = 1280;
 export const E2E_CLIENT_HEIGHT = 720;
 
@@ -14,7 +14,8 @@ export async function readProbeSnapshot(path, expected) {
 
 export function validateProbeSnapshot(value, expected = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)
-    || value.schemaVersion !== E2E_UI_PROBE_PROTOCOL
+    || value.schema !== E2E_UI_PROBE_SCHEMA
+    || Object.hasOwn(value, "schemaVersion") || Object.hasOwn(value, "version")
     || typeof value.sessionNonce !== "string" || !/^[0-9a-f]{32,128}$/i.test(value.sessionNonce)
     || !Number.isSafeInteger(value.pid) || value.pid <= 1
     || !Number.isSafeInteger(value.sequence) || value.sequence < 1

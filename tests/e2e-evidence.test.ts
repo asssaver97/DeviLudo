@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import {
   E2E_CLIENT_HEIGHT,
   E2E_CLIENT_WIDTH,
-  E2E_EVIDENCE_PROTOCOL,
+  E2E_EVIDENCE_SCHEMA,
   compareScreenshotRegion,
   compareScreenshots,
   createEvidenceBundle,
@@ -98,7 +98,7 @@ describe("E2E evidence", () => {
       await writeFile(screenshot, testImage());
       const jobId = "11111111-1111-4111-8111-111111111111";
       const report = {
-        schemaVersion: E2E_EVIDENCE_PROTOCOL,
+        schema: E2E_EVIDENCE_SCHEMA,
         jobId,
         platform: "macos",
         outcome: "PASSED",
@@ -109,7 +109,10 @@ describe("E2E evidence", () => {
       const extracted = join(directory, "extracted");
       const validated = await extractAndValidateEvidenceBundle(bundle.outputPath, extracted);
       assert.equal(validated.report.outcome, "PASSED");
-      assert.match(await readFile(validated.indexPath, "utf8"), /data:image\/png;base64/);
+      const html = await readFile(validated.indexPath, "utf8");
+      assert.match(html, /data:image\/png;base64/);
+      assert.match(html, /Test Agent 自适应游玩与 Oracle/);
+      assert.match(html, /当前回归轨迹/);
       assert.ok((validated.manifest.files as unknown[]).length >= 5);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
@@ -127,6 +130,24 @@ describe("E2E evidence", () => {
       const archive = join(directory, "unsafe.zip");
       await execute("zip", ["-q", "-y", archive, "escape"], { cwd: source });
       await assert.rejects(extractAndValidateEvidenceBundle(archive, join(directory, "output")), /symbolic links/);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("enforces the aggregate 768 MiB video budget before copying evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "deviludo-evidence-video-budget-"));
+    try {
+      const first = join(directory, "first.mp4");
+      const second = join(directory, "second.mp4");
+      await Promise.all([writeFile(first, ""), writeFile(second, "")]);
+      await truncate(first, 400 * 1024 * 1024);
+      await truncate(second, 400 * 1024 * 1024);
+      await assert.rejects(createEvidenceBundle({
+        outputRoot: directory,
+        jobId: "11111111-1111-4111-8111-111111111111",
+        platform: "linux",
+        report: { schema: E2E_EVIDENCE_SCHEMA, outcome: "FAILED" },
+        videos: [{ id: "first", path: first }, { id: "second", path: second }],
+      }), /aggregate target limit/);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });

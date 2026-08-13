@@ -20,6 +20,7 @@ import type {
   ProductProjectSummary,
   ProductWorkflowIterationDetail,
   ProductWorkflowIterationSummary,
+  ProjectAgentRole,
 } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import {
@@ -31,6 +32,7 @@ import {
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetManifestPanel } from "./AssetManifestPanel";
+import { ProjectSteamPanel } from "./ProjectSteamPanel";
 import { ArrowIcon, FileIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 import { useProductSession } from "./ProductShell";
@@ -42,13 +44,8 @@ const PIPELINE = [
   ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
   ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
   ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
-  ["ARTIFACT_SIGN", "平台签名", "Platform Signing"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
-  ["STEAM_CLEAN_INSTALL", "干净回装", "Clean Install"],
 ] as const;
-
-// Stages after E2E only exist in the RELEASE profile.
-const VALIDATE_STAGES = new Set(["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]);
 const RERUNNABLE_WORKFLOW_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 
 type RepositoryConnection = Readonly<{
@@ -94,7 +91,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [conversationInput, setConversationInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
-  const [streamingReply, setStreamingReply] = useState("");
+  const [streamingReplies, setStreamingReplies] = useState<Partial<Record<ProjectAgentRole, string>>>({});
   const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
   const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>(initialArtifacts ?? []);
   const [iterations, setIterations] = useState<readonly ProductWorkflowIterationSummary[]>([]);
@@ -105,6 +102,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteLocalDirectory, setDeleteLocalDirectory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [documentCollapsed, setDocumentCollapsed] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
@@ -487,7 +485,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     const pendingConversation = optimisticConversation(previousConversation, projectId, content, project?.name ?? text("项目会话", "Project conversation"));
     setSendingMessage(true);
     setError(null);
-    setStreamingReply("");
+    setStreamingReplies({});
     setConversation(pendingConversation);
     setSelectedConversationId(pendingConversation.id);
     setConversationInput("");
@@ -497,7 +495,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           ? { conversationId: previousConversation.id, content }
           : { projectId, content },
         `conversation:${crypto.randomUUID()}`,
-        delta => setStreamingReply(current => current + delta),
+        (agentRole, delta) => setStreamingReplies(current => ({
+          ...current,
+          [agentRole]: `${current[agentRole] ?? ""}${delta}`,
+        })),
         updatedProject => setProject(current => {
           const next = newestProjectSnapshot(current, updatedProject);
           storeCached(clientCacheKeys.project(projectId), next, 5_000);
@@ -533,7 +534,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         return;
       }
     } finally {
-      setStreamingReply("");
+      setStreamingReplies({});
       setSendingMessage(false);
     }
   }
@@ -613,7 +614,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setDeleting(true);
     setError(null);
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deleteLocalDirectory }),
+      });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({})) as { message?: string };
         throw new Error(payload.message ?? text(`项目删除失败 (${response.status})`, `Unable to delete project (${response.status})`));
@@ -707,7 +712,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     && selectedWorkflowId !== project.workflowId
     && historicalIteration?.workflowId === selectedWorkflowId;
   const viewedWorkflowState = viewingHistoricalIteration ? historicalIteration.state : project.workflowState;
-  const viewedWorkflowProfile = viewingHistoricalIteration ? historicalIteration.profile : project.workflowProfile;
   const viewedJobs = viewingHistoricalIteration ? historicalIteration.jobs : project.jobs;
   const viewedArtifacts = latestArtifactsByKindAndPlatform(
     viewingHistoricalIteration ? historicalIteration.artifacts : artifacts,
@@ -715,20 +719,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const viewedIterationNumber = viewingHistoricalIteration
     ? historicalIteration.iterationNumber
     : project.iterationNumber;
-  const deliveryActive = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
-  const viewedDeliveryActive = !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
+  const deliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
+  const viewedDeliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
   const latestFailedJob = viewedWorkflowState === "FAILED"
     ? latestPipelineJobs(viewedJobs).find(job => job.state === "FAILED") ?? null
     : null;
   const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
-  // Every stage of the chain stays on screen so the pipeline shows what is still
-  // ahead, not just what has already run. A VALIDATE run never reaches signing or
-  // publication, so those nodes are marked as outside the profile and their rerun
-  // is withheld — the API would reject it as out-of-profile — but they are still
-  // rendered rather than dropped.
-  const profileStages = viewedWorkflowProfile === "VALIDATE"
-    ? new Set(VALIDATE_STAGES)
-    : new Set(PIPELINE.map(([kind]) => kind));
+  const profileStages = new Set<string>(PIPELINE.map(([kind]) => kind));
   // Reruns supersede downstream jobs, which would race executors still holding
   // leases, so they only open up once the workflow has come to rest. A DRAFT has
   // nothing to rerun yet.
@@ -749,7 +746,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <p>{viewingHistoricalIteration ? historicalIteration.concept : project.concept}</p>
         </div>
         <div className="product-studio-header-actions">
-          <button className="button project-delete-button" disabled={viewingHistoricalIteration} onClick={() => setConfirmingDelete(true)} type="button">{text("删除项目", "DELETE PROJECT")}</button>
+          <button className="button project-delete-button" disabled={viewingHistoricalIteration} onClick={() => { setDeleteLocalDirectory(false); setConfirmingDelete(true); }} type="button">{text("删除项目", "DELETE PROJECT")}</button>
         </div>
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
@@ -758,16 +755,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         <header className="section-heading"><div><span className="eyebrow">LOCAL SOURCE</span><h2>{text(`源码修订 r${project.source.revision}`, `SOURCE REVISION r${project.source.revision}`)}</h2></div><span className="revision-badge">{project.source.digest.slice(0, 18)}</span></header>
         <p>{text("受控目录", "Managed path")}: <code>{project.source.relativePath}</code> · {project.source.fileCount} files · {project.source.totalBytes} bytes</p>
         {project.localDirectory ? <div className="local-git-branch-panel">
-          <div className="local-git-branch-status">
-            <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
-            {localGit?.repository ? <strong>{text("当前分支", "CURRENT BRANCH")} <code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
+          <div className="local-git-branch-toolbar">
+            <div className="local-git-branch-status">
+              <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
+              {localGit?.repository ? <strong><span>{text("当前分支", "Current branch")}</span><code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
+            </div>
+            {localGit?.repository ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
+              <label><span>{text("新建分支", "New branch")}</span><input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
+              <button className="button button-secondary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button>
+            </form> : null}
           </div>
           {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
           {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
-          {localGit?.repository ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
-            <label>{text("新建分支", "New branch")}<input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
-            <button className="button button-secondary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button>
-          </form> : null}
           {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支；请等待流程结束或先取消本次交付。", "Branches cannot be switched during delivery. Wait for it to finish or cancel the current delivery first.")}</small> : null}
           {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图，切回当前轮后才能切换分支。", "Historical iterations are read-only. Return to the current iteration to switch branches.")}</small> : null}
           {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
@@ -850,7 +849,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <small>{inProfile
                     ? pipelineJobDetails(jobs, text)
                     : text("当前为验证流程，不含此阶段", "Not part of the current VALIDATE run")}</small>
-                  {canRerunStages && inProfile ? (
+                  {canRerunStages && inProfile && (kind !== "STEAM_PUBLISH" || project.workflowState === "FAILED") ? (
                     <button
                       aria-label={text(
                         `从「${chineseLabel}」重新执行，之后的阶段都会重跑`,
@@ -912,20 +911,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             )}
           </p>
         ) : null}
-        {!viewingHistoricalIteration && project.workflowState === "RELEASE_APPROVAL_PENDING" ? (
-          <section aria-label={text("Steam 发布批准", "Steam release approval")} className="product-release-approval">
-            <div className="product-release-approval-icon" aria-hidden="true">✓</div>
-            <div>
-              <strong>{text("三平台签名已完成，等待人工批准", "All three platforms are signed and awaiting human approval")}</strong>
-              <p>{text("批准后会把已签名构建上传至 Steam，并继续执行干净回装验证。此操作不会自动撤销。", "Approval uploads the signed builds to Steam and continues to clean-install verification. This action is not automatically reversible.")}</p>
-            </div>
-            {session.workspaceRole === "OWNER" || session.workspaceRole === "ADMIN" ? (
-              <button className="button button-primary" disabled={busy} onClick={() => void mutate("approve-release")} type="button">
-                {busy ? text("正在批准…", "APPROVING…") : text("批准上传 Steam", "APPROVE STEAM UPLOAD")}
-              </button>
-            ) : <small>{text("请由工作区 Owner 或 Admin 批准发布。", "Ask a workspace Owner or Admin to approve the release.")}</small>}
-          </section>
-        ) : null}
         {pipelineFailure && latestFailedJob ? (
           <section aria-label={text("交付失败原因", "Delivery failure reason")} className="product-delivery-failure" role="alert">
             <div className="product-delivery-failure-icon" aria-hidden="true">!</div>
@@ -958,6 +943,16 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </section>
         ) : null}
       </section>
+
+      <ProjectSteamPanel
+        iterationNumber={viewedIterationNumber}
+        onChanged={async () => { await Promise.all([loadProject(true), loadIterations(), loadArtifacts(true)]); }}
+        projectId={projectId}
+        readOnly={viewingHistoricalIteration}
+        workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
+        workflowState={viewedWorkflowState}
+        workspaceRole={session.workspaceRole}
+      />
 
       {viewingHistoricalIteration ? (
         <section aria-label={text("历史轮次摘要", "Historical iteration summary")} className="panel-card product-iteration-history-summary">
@@ -1038,7 +1033,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     type="button"
                   >
                     <b>{item.preview}</b>
-                    <small>{conversationTurns(item.messageCount, text)} · {formatConversationTime(item.updatedAt, localeTag(locale), text)}</small>
+                    <small>{conversationActivityLabel(item.userMessageCount, item.systemGenerated, text)} · {formatConversationTime(item.updatedAt, localeTag(locale), text)}</small>
                   </button>
                 )) : <p>{text("发送第一条消息后，会话会保存在这里。", "Your conversations will appear here after the first message.")}</p>}
               </nav>
@@ -1070,7 +1065,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 sendButtonLabel={text("发送项目消息", "Send project message")}
                 sending={sendingMessage}
                 showSendingReply={!agentRunning}
-                streamingReply={streamingReply}
+                streamingReplies={streamingReplies}
                 textareaLabel={text("继续项目会话", "Continue project conversation")}
                 value={conversationInput}
               />
@@ -1124,12 +1119,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       </div>
 
       {confirmingDelete ? (
-        <div className="workspace-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !deleting) setConfirmingDelete(false); }}>
+        <div className="workspace-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !deleting) { setDeleteLocalDirectory(false); setConfirmingDelete(false); } }}>
           <section aria-labelledby="project-delete-title" aria-modal="true" className="workspace-dialog project-delete-dialog" role="dialog">
             <span className="eyebrow">DELETE PROJECT</span>
             <h2 id="project-delete-title">{text(`删除《${project.name}》？`, `DELETE “${project.name}”?`)}</h2>
-            <p>{deliveryActive ? text("正在执行的任务会先被停止；随后删除历史会话、说明文档、工作流、对象制品和 Core 源码快照。绑定的本地项目目录不会删除。", "Active tasks will be stopped first; conversations, documents, workflows, object artifacts, and Core source snapshots will then be deleted. A bound local project directory is retained.") : text("历史会话、说明文档、工作流、对象制品和 Core 源码快照都会永久删除；绑定的本地项目目录会保留。", "Conversations, documents, workflows, object artifacts, and Core source snapshots will be deleted permanently; a bound local project directory is retained.")}</p>
-            <div><button className="button button-secondary" disabled={deleting} onClick={() => setConfirmingDelete(false)} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : text("确认删除", "CONFIRM DELETE")}</button></div>
+            <p>{deliveryActive ? text("正在执行的任务会先被停止；随后删除历史会话、说明文档、工作流、对象制品和 Core 源码快照。", "Active tasks will be stopped first; conversations, documents, workflows, object artifacts, and Core source snapshots will then be deleted.") : text("历史会话、说明文档、工作流、对象制品和 Core 源码快照都会永久删除。", "Conversations, documents, workflows, object artifacts, and Core source snapshots will be deleted permanently.")}</p>
+            {project.localDirectory ? (
+              <label className="project-delete-local-option">
+                <input checked={deleteLocalDirectory} disabled={deleting} onChange={event => setDeleteLocalDirectory(event.target.checked)} type="checkbox" />
+                <span><b>{text("同时删除本地项目目录", "ALSO DELETE LOCAL PROJECT DIRECTORY")}</b><small>{text("将永久删除已绑定的项目文件夹及其中所有文件，无法恢复。", "Permanently deletes the bound project folder and every file inside it. This cannot be undone.")}</small></span>
+              </label>
+            ) : null}
+            <div><button className="button button-secondary" disabled={deleting} onClick={() => { setDeleteLocalDirectory(false); setConfirmingDelete(false); }} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : deleteLocalDirectory ? text("删除项目和目录", "DELETE PROJECT & DIRECTORY") : text("确认删除", "CONFIRM DELETE")}</button></div>
           </section>
         </div>
       ) : null}
@@ -1393,6 +1394,7 @@ function artifactLabel(
     PROJECT_DOCUMENT: ["项目说明", "PROJECT DOCUMENT"],
     BUILD: ["游戏构建", "GAME BUILD"],
     E2E_REPORT: ["E2E 报告", "E2E REPORT"],
+    E2E_REGRESSION: ["托管回归轨迹", "MANAGED REGRESSION TRACE"],
     SIGNED_BUILD: ["签名构建", "SIGNED BUILD"],
     PUBLISH_RECEIPT: ["发布回执", "PUBLISH RECEIPT"],
     CLEAN_INSTALL_REPORT: ["回装报告", "CLEAN-INSTALL REPORT"],
@@ -1404,6 +1406,8 @@ function artifactLabel(
 function latestArtifactsByKindAndPlatform(values: readonly ArtifactRecord[]): readonly ArtifactRecord[] {
   const latest = new Map<string, ArtifactRecord>();
   for (const artifact of values) {
+    // Regression traces are managed inputs for the next E2E job, not user-facing downloads.
+    if (artifact.kind === "E2E_REGRESSION") continue;
     const key = `${artifact.kind}:${artifact.targetPlatform ?? "common"}`;
     const current = latest.get(key);
     if (!current || artifact.createdAt > current.createdAt
@@ -1427,18 +1431,12 @@ function e2eEvidenceLabel(
   text: (chinese: string, english: string) => string,
 ): string {
   const evidence = artifact.e2eEvidence;
-  if (!evidence) return text("旧版证据 · 打开 JSON", "LEGACY EVIDENCE · OPENS JSON");
+  if (!evidence) return text("证据摘要不可用", "EVIDENCE SUMMARY UNAVAILABLE");
   const outcome = evidence.result === "PASSED" ? text("通过", "PASSED") : text("失败", "FAILED");
   const visualDiff = evidence.hasVisualDiff ? text(" · 含视觉差异", " · VISUAL DIFF") : "";
-  if (evidence.protocol === "deviludo.e2e-evidence.v2") {
-    return text(
-      `${outcome} · ${evidence.interactiveJourneyCount} 条真实旅程 · ${evidence.realInputCount} 次真实输入 · ${evidence.screenshotCount} 张截图${visualDiff}`,
-      `${outcome} · ${evidence.interactiveJourneyCount} REAL JOURNEYS · ${evidence.realInputCount} REAL INPUTS · ${evidence.screenshotCount} SCREENSHOTS${visualDiff}`,
-    );
-  }
   return text(
-    `${outcome} · 旧版证据 · ${evidence.checkCount} 项检查 · ${evidence.screenshotCount} 张截图${visualDiff}`,
-    `${outcome} · LEGACY · ${evidence.checkCount} CHECKS · ${evidence.screenshotCount} SCREENSHOTS${visualDiff}`,
+    `${outcome} · 确定性检查 ${evidence.headlessCheckCount + evidence.interactiveJourneyCount} 项 · 自适应游玩 ${evidence.adaptiveSuccessCount}/3 · ${evidence.keyboardMouseInputCount} 次键鼠 · ${evidence.gamepadInputCount} 次手柄 · ${evidence.videoCount} 段视频${visualDiff}`,
+    `${outcome} · ${evidence.headlessCheckCount + evidence.interactiveJourneyCount} DETERMINISTIC CHECKS · ADAPTIVE ${evidence.adaptiveSuccessCount}/3 · ${evidence.keyboardMouseInputCount} KEYBOARD/POINTER · ${evidence.gamepadInputCount} GAMEPAD · ${evidence.videoCount} VIDEOS${visualDiff}`,
   );
 }
 
@@ -1457,14 +1455,21 @@ function conversationSummary(conversation: ProductConversation): ProductConversa
     title: conversation.title,
     preview: firstUserMessage?.content ?? conversation.title,
     messageCount: conversation.messages.length,
+    userMessageCount: conversation.messages.filter(message => message.role === "USER").length,
+    systemGenerated: conversation.messages.some(message => message.metadata.source === "PROJECT_IMPORT_AGENT"),
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
   });
 }
 
-function conversationTurns(messageCount: number, text: (chinese: string, english: string) => string): string {
-  const turns = Math.max(1, Math.ceil(messageCount / 2));
-  return text(`${turns} 轮`, `${turns} turn${turns === 1 ? "" : "s"}`);
+function conversationActivityLabel(
+  userMessageCount: number,
+  systemGenerated: boolean,
+  text: (chinese: string, english: string) => string,
+): string {
+  if (systemGenerated) return text("系统分析", "SYSTEM ANALYSIS");
+  const count = Math.max(1, userMessageCount);
+  return text(`${count} 次用户发言`, `${count} user message${count === 1 ? "" : "s"}`);
 }
 
 function formatConversationTime(value: string, locale: string, text: (chinese: string, english: string) => string): string {
@@ -1491,7 +1496,8 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
     DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
     ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
     ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"], E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
-    SIGNING: ["平台签名中", "Signing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
+    RELEASE_DECISION_PENDING: ["等待发布决策", "Awaiting release decision"],
+    SIGNING: ["平台签名中（历史）", "Signing (legacy)"], RELEASE_APPROVAL_PENDING: ["等待发布批准（历史）", "Awaiting release approval (legacy)"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
     CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"], SUCCEEDED: ["交付完成", "Delivered"],
     FAILED: ["流程失败", "Failed"], CANCELLED: ["已取消", "Cancelled"],
   };
@@ -1500,7 +1506,7 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
 }
 
 function workflowNeedsPolling(state: string): boolean {
-  return ["AGENT_RUNNING", "ASSET_GENERATING", "ARTIFACT_BUILDING", "E2E_TESTING", "SIGNING", "STEAM_PUBLISHING", "CLEAN_INSTALL_VERIFYING"].includes(state);
+  return ["AGENT_RUNNING", "ASSET_GENERATING", "ARTIFACT_BUILDING", "E2E_TESTING", "STEAM_PUBLISHING"].includes(state);
 }
 
 function repositoryNeedsPolling(state: RepositoryConnection["syncState"]): boolean {

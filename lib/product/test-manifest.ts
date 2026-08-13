@@ -6,16 +6,28 @@ import {
   validateInteractionScript,
   type CheckpointRole,
   type InteractionScript,
+  type ProbeAssertion,
 } from "./interaction-script.js";
+import { validateProbeAssertion } from "./interaction-script.js";
 import { validateVisualTestSpec, type VisualTestSpec } from "./visual-comparison.js";
 
-export const TEST_MANIFEST_SCHEMA_VERSION = "deviludo.test-manifest.v3" as const;
+export const TEST_MANIFEST_SCHEMA = "deviludo.test-manifest" as const;
 export const MAX_TEST_REQUIREMENTS = 500 as const;
 export const MAX_TEST_FEATURES = 500 as const;
 export const MAX_INTERACTIVE_JOURNEYS = 32 as const;
 export const MAX_SCREENSHOT_CHECKPOINTS = 64 as const;
 export const MAX_JOURNEY_TIMEOUT_MS = 300_000 as const;
-export const MAX_PLATFORM_E2E_TIMEOUT_MS = 30 * 60_000;
+export const MIN_PLATFORM_E2E_TIMEOUT_MS = 30 * 60_000;
+export const MAX_PLATFORM_E2E_TIMEOUT_MS = 90 * 60_000;
+export const MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS = 60_000;
+export const MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS = 300_000;
+export const ADAPTIVE_ROLLOUT_COUNT = 3 as const;
+export const ADAPTIVE_REQUIRED_SUCCESSES = 2 as const;
+
+export const TEST_INPUT_PROFILES = ["KEYBOARD_MOUSE", "GAMEPAD"] as const;
+export type TestInputProfile = typeof TEST_INPUT_PROFILES[number];
+export const ADAPTIVE_ACTION_GROUPS = ["KEYBOARD", "POINTER", "GAMEPAD"] as const;
+export type AdaptiveActionGroup = typeof ADAPTIVE_ACTION_GROUPS[number];
 
 export const VERIFICATION_METHODS = ["unit", "interactive", "visual", "manual"] as const;
 export type VerificationMethod = typeof VERIFICATION_METHODS[number];
@@ -55,10 +67,36 @@ export type TestManifestFeature = Readonly<{
   expectedVisual?: VisualTestSpec;
 }>;
 
+export type AdaptivePlayerContract = Readonly<{
+  goal: string;
+  requirementIds: readonly string[];
+  allowedActions: readonly AdaptiveActionGroup[];
+  successAssertions: readonly ProbeAssertion[];
+  failureAssertions: readonly ProbeAssertion[];
+  rolloutTimeoutMs: number;
+  maxDecisions: number;
+  seedStrategy: "STABLE_PROJECT_PLATFORM";
+}>;
+
 export type TestManifest = Readonly<{
-  schemaVersion: typeof TEST_MANIFEST_SCHEMA_VERSION;
+  schema: typeof TEST_MANIFEST_SCHEMA;
+  inputProfiles: readonly TestInputProfile[];
+  primaryInputProfile: TestInputProfile;
+  adaptivePlayer: AdaptivePlayerContract;
   requirements: readonly TestManifestRequirement[];
   features: readonly TestManifestFeature[];
+}>;
+
+export type E2eExecutionPlan = Readonly<{
+  plannedTimeoutMs: number;
+  setupMs: number;
+  unitMs: number;
+  deterministicMs: number;
+  visualMs: number;
+  currentRegressionMs: number;
+  adaptiveMs: number;
+  solidificationMs: number;
+  evidenceMs: number;
 }>;
 
 export type TestExecutionResult = Readonly<{
@@ -71,13 +109,20 @@ export type TestExecutionResult = Readonly<{
 export function validateTestManifest(value: unknown): value is TestManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const manifest = value as Record<string, unknown>;
-  if (manifest.schemaVersion !== TEST_MANIFEST_SCHEMA_VERSION
+  if (manifest.schema !== TEST_MANIFEST_SCHEMA || Object.hasOwn(manifest, "schemaVersion") || Object.hasOwn(manifest, "version")
     || !Array.isArray(manifest.requirements) || manifest.requirements.length < 1 || manifest.requirements.length > MAX_TEST_REQUIREMENTS
     || !Array.isArray(manifest.features) || manifest.features.length < 1 || manifest.features.length > MAX_TEST_FEATURES) return false;
+
+  if (!Array.isArray(manifest.inputProfiles) || manifest.inputProfiles.length < 1 || manifest.inputProfiles.length > TEST_INPUT_PROFILES.length
+    || manifest.inputProfiles.some(profile => !TEST_INPUT_PROFILES.includes(profile as TestInputProfile))
+    || new Set(manifest.inputProfiles).size !== manifest.inputProfiles.length
+    || !TEST_INPUT_PROFILES.includes(manifest.primaryInputProfile as TestInputProfile)
+    || !manifest.inputProfiles.includes(manifest.primaryInputProfile)) return false;
 
   const requirements = manifest.requirements as unknown[];
   const requirementIds = new Set<string>();
   const playerRequirementIds = new Set<string>();
+  const coreRequirementIds = new Set<string>();
   for (const requirement of requirements) {
     if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return false;
     const item = requirement as Record<string, unknown>;
@@ -94,7 +139,10 @@ export function validateTestManifest(value: unknown): value is TestManifest {
     } else if (item.systemCategory !== undefined || item.exemptionReason !== undefined) return false;
     requirementIds.add(item.requirementId);
     if (item.verificationClass === "PLAYER_INTERACTION") playerRequirementIds.add(item.requirementId);
+    if (item.source === "CORE_LOOP") coreRequirementIds.add(item.requirementId);
   }
+
+  if (!validateAdaptivePlayer(manifest.adaptivePlayer, requirementIds, playerRequirementIds, coreRequirementIds, manifest.inputProfiles as TestInputProfile[])) return false;
 
   const featureIds = new Set<string>();
   const checkNames = new Set<string>();
@@ -103,6 +151,7 @@ export function validateTestManifest(value: unknown): value is TestManifest {
   let checkpointCount = 0;
   let hasCoreJourney = false;
   const interactiveCoverage = new Set<string>();
+  const exercisedInputProfiles = new Set<TestInputProfile>();
   for (const feature of manifest.features as unknown[]) {
     if (!feature || typeof feature !== "object" || Array.isArray(feature)) return false;
     const item = feature as Record<string, unknown>;
@@ -120,7 +169,8 @@ export function validateTestManifest(value: unknown): value is TestManifest {
     if (item.verificationMethod === "unit") {
       if (typeof item.gdsTestPath !== "string" || !isSafeGodotTestPath(item.gdsTestPath)
         || !Array.isArray(item.checkNames) || item.checkNames.length < 1
-        || item.checkNames.some(name => typeof name !== "string" || !isStableId(name) || checkNames.has(name))) return false;
+        || item.checkNames.some(name => typeof name !== "string" || !isStableId(name) || checkNames.has(name))
+        || !Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS) return false;
       for (const name of item.checkNames as string[]) checkNames.add(name);
     } else if (item.verificationMethod === "interactive") {
       if (!validateInteractionScript(item.interactionScript)
@@ -129,6 +179,9 @@ export function validateTestManifest(value: unknown): value is TestManifest {
       interactiveJourneys += 1;
       checkpointCount += interactionCheckpointCount(item.interactionScript);
       const actions = interactionActionEvents(item.interactionScript);
+      for (const action of actions) {
+        exercisedInputProfiles.add(action.type.startsWith("gamepad_") ? "GAMEPAD" : "KEYBOARD_MOUSE");
+      }
       const journeyCheckpoints = item.interactionScript.events.filter(event => event.type === "checkpoint");
       if ((item.launchProfile as { type?: unknown } | undefined)?.type === "SCENARIO"
         && !journeyCheckpoints.some(event => event.visualMode === "STABLE_REPLAY")) return false;
@@ -161,8 +214,39 @@ export function validateTestManifest(value: unknown): value is TestManifest {
   return interactiveJourneys >= 1 && interactiveJourneys <= MAX_INTERACTIVE_JOURNEYS
     && checkpointCount >= 3 && checkpointCount <= MAX_SCREENSHOT_CHECKPOINTS
     && hasCoreJourney
+    && (manifest.inputProfiles as TestInputProfile[]).every(profile => exercisedInputProfiles.has(profile))
     && [...requirementIds].every(requirementId => automatedCoverage.has(requirementId))
     && [...playerRequirementIds].every(requirementId => interactiveCoverage.has(requirementId));
+}
+
+export function planE2eExecution(manifest: TestManifest, currentRegressionMs = 0): E2eExecutionPlan {
+  if (!validateTestManifest(manifest)) throw new Error("E2E test manifest is invalid");
+  if (!Number.isSafeInteger(currentRegressionMs) || currentRegressionMs < 0 || currentRegressionMs > MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS) {
+    throw new Error("E2E current regression estimate is invalid");
+  }
+  const setupMs = 3 * 60_000;
+  const evidenceMs = 3 * 60_000;
+  const unitByPath = new Map<string, number>();
+  for (const feature of manifest.features.filter(item => item.verificationMethod === "unit")) {
+    unitByPath.set(feature.gdsTestPath!, Math.max(unitByPath.get(feature.gdsTestPath!) ?? 0, feature.timeoutMs!));
+  }
+  const unitMs = [...unitByPath.values()].reduce((sum, value) => sum + value, 0);
+  const deterministicMs = manifest.features.filter(item => item.verificationMethod === "interactive")
+    .reduce((sum, item) => sum + item.timeoutMs!, 0);
+  const visualMs = manifest.features.filter(item => item.verificationMethod === "visual")
+    .reduce((sum, item) => sum + (item.expectedVisual?.captureDelay ?? 1_000) + 30_000, 0);
+  const adaptiveMs = ADAPTIVE_ROLLOUT_COUNT * manifest.adaptivePlayer.rolloutTimeoutMs;
+  const solidificationMs = 2 * manifest.adaptivePlayer.rolloutTimeoutMs;
+  const raw = Math.ceil(1.25 * (setupMs + unitMs + deterministicMs + visualMs
+    + currentRegressionMs + adaptiveMs + solidificationMs + evidenceMs));
+  const plannedTimeoutMs = Math.ceil(Math.max(MIN_PLATFORM_E2E_TIMEOUT_MS, raw) / 60_000) * 60_000;
+  if (plannedTimeoutMs > MAX_PLATFORM_E2E_TIMEOUT_MS) {
+    throw Object.assign(new Error("E2E_PLAN_EXCEEDS_LIMIT"), { code: "E2E_PLAN_EXCEEDS_LIMIT", plannedTimeoutMs });
+  }
+  return Object.freeze({
+    plannedTimeoutMs, setupMs, unitMs, deterministicMs, visualMs, currentRegressionMs,
+    adaptiveMs, solidificationMs, evidenceMs,
+  });
 }
 
 export function validateTestExecutionResult(value: unknown): value is TestExecutionResult {
@@ -208,6 +292,43 @@ function validLaunchProfile(value: unknown): boolean {
   if (profile.type === "FRESH") return Object.keys(profile).length === 1;
   return profile.type === "SCENARIO" && typeof profile.scenarioId === "string"
     && /^[a-z0-9][a-z0-9-]{0,119}$/.test(profile.scenarioId);
+}
+
+function validateAdaptivePlayer(
+  value: unknown,
+  requirementIds: ReadonlySet<string>,
+  playerRequirementIds: ReadonlySet<string>,
+  coreRequirementIds: ReadonlySet<string>,
+  inputProfiles: readonly TestInputProfile[],
+): value is AdaptivePlayerContract {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const adaptive = value as Record<string, unknown>;
+  if (!Array.isArray(adaptive.requirementIds) || !Array.isArray(adaptive.allowedActions)) return false;
+  const adaptiveRequirementIds = adaptive.requirementIds;
+  const adaptiveAllowedActions = adaptive.allowedActions;
+  if (typeof adaptive.goal !== "string" || adaptive.goal.trim().length < 10 || adaptive.goal.length > 4_000
+    || adaptiveRequirementIds.length < 1
+    || adaptiveRequirementIds.some(id => typeof id !== "string" || !requirementIds.has(id) || !playerRequirementIds.has(id))
+    || new Set(adaptiveRequirementIds).size !== adaptiveRequirementIds.length
+    || [...coreRequirementIds].some(id => !adaptiveRequirementIds.includes(id))
+    || adaptiveAllowedActions.length < 1
+    || adaptiveAllowedActions.some(action => !ADAPTIVE_ACTION_GROUPS.includes(action as AdaptiveActionGroup))
+    || new Set(adaptiveAllowedActions).size !== adaptiveAllowedActions.length
+    || !Array.isArray(adaptive.successAssertions) || adaptive.successAssertions.length < 1 || adaptive.successAssertions.length > 32
+    || !adaptive.successAssertions.every(validateProbeAssertion)
+    || !adaptive.successAssertions.some(assertion => assertion && typeof assertion === "object"
+      && assertion.source === "PROGRESS"
+      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
+    || !Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1 || adaptive.failureAssertions.length > 32
+    || !adaptive.failureAssertions.every(validateProbeAssertion)
+    || !Number.isInteger(adaptive.rolloutTimeoutMs)
+    || Number(adaptive.rolloutTimeoutMs) < MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS
+    || Number(adaptive.rolloutTimeoutMs) > MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS
+    || !Number.isInteger(adaptive.maxDecisions) || Number(adaptive.maxDecisions) < 8 || Number(adaptive.maxDecisions) > 40
+    || adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM") return false;
+  if (adaptiveAllowedActions.includes("GAMEPAD") !== inputProfiles.includes("GAMEPAD")) return false;
+  if ((adaptiveAllowedActions.includes("KEYBOARD") || adaptiveAllowedActions.includes("POINTER")) !== inputProfiles.includes("KEYBOARD_MOUSE")) return false;
+  return true;
 }
 
 function isStableId(value: string): boolean {

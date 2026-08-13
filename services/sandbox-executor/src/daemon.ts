@@ -295,7 +295,7 @@ async function execute(
       await writeFile(secretFile, providerSecret, { mode: 0o600 });
     }
     if (plan.job.jobKind === "STEAM_PUBLISH" && plan.job.runtimeImage !== fixtureAgentImage) {
-      const steamConfiguration = await resolveSteamConfiguration();
+      const steamConfiguration = await resolveSteamConfiguration(plan);
       const steamSecret = Buffer.from(JSON.stringify(steamConfiguration));
       sensitiveValues.push(
         steamSecret,
@@ -480,6 +480,14 @@ async function execute(
         files: generatedFiles,
       });
     }
+    const steamPublishResult = plan.job.jobKind === "STEAM_PUBLISH"
+      ? JSON.parse((await dockerRead([
+          "exec", taskName, "/usr/local/bin/deviludo-task-io", "read-output:steam-publish.json",
+        ], 5_000, 256 * 1024)).toString("utf8")) as Record<string, unknown>
+      : null;
+    if (steamPublishResult && !/^\d+$/.test(String(steamPublishResult.buildId ?? ""))) {
+      throw new Error("Steam publisher result is invalid");
+    }
     const outputObjects = await uploadOutputs(plan, taskName, manifest.outputs, sensitiveValues);
     onProgress("PHASE", taskOutputMessage(plan.job.jobKind));
     await acknowledgeCollection(taskName, collectedFile);
@@ -495,6 +503,11 @@ async function execute(
       runtimeImage: plan.job.runtimeImage,
       outputCount: outputObjects.length,
       ...(sourceRevision ? { sourceRevision } : {}),
+      ...(steamPublishResult ? {
+        steamBuildId: String(steamPublishResult.buildId),
+        steamReleaseState: steamPublishResult.state,
+        steamReleaseId: steamPublishResult.releaseId,
+      } : {}),
     });
     const unsigned = {
       schemaVersion: "deviludo.executor-receipt.v2" as const,
@@ -816,24 +829,63 @@ async function resolveSecret(reference: string): Promise<string> {
   return body.data.data.value;
 }
 
-async function resolveSteamConfiguration() {
-  const value = await readVaultSecret("secret/data/deviludo/steam/publisher");
+async function resolveSteamConfiguration(plan: SandboxPlan) {
+  const raw = plan.job.payload.steamRelease;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Steam release snapshot is missing");
+  }
+  const release = raw as Record<string, unknown>;
+  const credentialRef = String(release.credentialRef ?? "");
+  const prefix = `vault://workspaces/${plan.job.workspaceId}/steam/build-token/versions/`;
+  if (!credentialRef.startsWith(prefix) || !/^[0-9a-f-]{36}$/i.test(credentialRef.slice(prefix.length))) {
+    throw new Error("Steam credential reference is invalid");
+  }
+  const loginToken = await resolveWorkspaceSteamSecret(plan.job.workspaceId, credentialRef);
+  const rawDepots = release.depots && typeof release.depots === "object" && !Array.isArray(release.depots)
+    ? release.depots as Record<string, unknown>
+    : {};
   const configuration = {
-    username: value.username,
-    loginToken: value.loginToken,
-    appId: process.env.DEVILUDO_STEAM_APP_ID,
+    username: release.builderUsername,
+    loginToken,
+    appId: String(release.appId ?? ""),
     depots: {
-      linux: process.env.DEVILUDO_STEAM_DEPOT_LINUX,
-      windows: process.env.DEVILUDO_STEAM_DEPOT_WINDOWS,
-      macos: process.env.DEVILUDO_STEAM_DEPOT_MACOS,
+      linux: rawDepots.linux === null || rawDepots.linux === undefined ? undefined : String(rawDepots.linux),
+      windows: rawDepots.windows === null || rawDepots.windows === undefined ? undefined : String(rawDepots.windows),
+      macos: rawDepots.macos === null || rawDepots.macos === undefined ? undefined : String(rawDepots.macos),
     },
+    releaseId: String(release.releaseId ?? ""),
+    version: String(release.version ?? ""),
+    releaseNumber: Number(release.releaseNumber),
+    channel: release.channel,
+    targetBranch: release.targetBranch,
   };
+  const requiredPlatforms = Array.isArray(plan.job.payload.targetPlatforms)
+    ? plan.job.payload.targetPlatforms.map(String)
+    : [];
   if (typeof configuration.username !== "string" || typeof configuration.loginToken !== "string"
-    || !/^\d{2,12}$/.test(configuration.appId ?? "")
-    || Object.values(configuration.depots).some(value => !/^\d{2,12}$/.test(value ?? ""))) {
+    || !/^\d{1,12}$/.test(configuration.appId ?? "")
+    || requiredPlatforms.length < 1
+    || requiredPlatforms.some(platform => !/^\d{1,12}$/.test(configuration.depots[platform as keyof typeof configuration.depots] ?? ""))
+    || !/^[0-9a-f-]{36}$/i.test(configuration.releaseId)
+    || !Number.isSafeInteger(configuration.releaseNumber) || configuration.releaseNumber < 1
+    || !["TEST", "DEFAULT"].includes(String(configuration.channel))
+    || typeof configuration.targetBranch !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(configuration.targetBranch)) {
     throw new Error("Steam publisher credentials or depot configuration is invalid");
   }
   return Object.freeze(configuration);
+}
+
+async function resolveWorkspaceSteamSecret(workspaceId: string, reference: string): Promise<string> {
+  const prefix = `vault://workspaces/${workspaceId}/steam/build-token/versions/`;
+  const version = reference.slice(prefix.length);
+  const localRoot = process.env.DEVILUDO_AGENT_SECRET_ROOT;
+  if (localRoot) {
+    return readFile(join(localRoot, "workspaces", workspaceId, "steam", "build-token", "versions", `${version}.key`), "utf8");
+  }
+  const value = await readVaultSecret(`secret/data/deviludo/workspaces/${workspaceId}/steam/build-token/versions/${version}`);
+  if (typeof value.value !== "string") throw new Error("Vault Steam credential payload is invalid");
+  return value.value;
 }
 
 async function readVaultSecret(path: string): Promise<Record<string, unknown>> {

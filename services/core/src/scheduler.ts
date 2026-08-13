@@ -13,7 +13,8 @@ export async function runScheduler(
   // object store. `ObjectStore` requires a bucket, and asset generation is the
   // scheduler's only use for one: a deployment without it should keep running the
   // rest of the tick rather than crash-loop on a bucket it does not need.
-  const assetGeneration = assetGenerationDependencies(repository);
+  const objectStore = configuredObjectStore();
+  const assetGeneration = objectStore ? assetGenerationDependencies(repository, objectStore) : null;
   if (!assetGeneration) {
     console.log(JSON.stringify({
       level: "info",
@@ -23,7 +24,6 @@ export async function runScheduler(
   }
   // Swept on the first tick, then on its own slower cadence.
   let nextAssetSweepAt = 0;
-  let nextE2eRevalidationAt = 0;
   while (!signal.aborted) {
     const startedAt = Date.now();
     try {
@@ -32,12 +32,9 @@ export async function runScheduler(
       const projectDocumentsScheduled = await repository.scheduleIdleProjectDocumentMaintenance(
         config.projectDocumentIdleSeconds,
       );
-      const e2eRevalidationsScheduled = Date.now() >= nextE2eRevalidationAt
-        ? await repository.scheduleE2eProtocolRevalidation("deviludo.e2e-evidence.v2", config.e2eRevalidationBatchSize)
-        : 0;
-      if (Date.now() >= nextE2eRevalidationAt) nextE2eRevalidationAt = Date.now() + 30_000;
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
+      const objectCleanup = objectStore ? await runObjectCleanup(repository, objectStore) : null;
       // Provider calls run less often than the sub-second recovery tick. The
       // durable asset gate is checked on every tick, however, so the last image or
       // a user's explicit "use placeholders" choice advances immediately.
@@ -51,9 +48,9 @@ export async function runScheduler(
         event: "scheduler_tick",
         recovered,
         projectDocumentsScheduled,
-        e2eRevalidationsScheduled,
         expiredAuthRecordsRemoved,
         ...(localGitCommit ? { localGitCommit } : {}),
+        ...(objectCleanup ? { objectCleanup } : {}),
         ...(assets ? {
           assetsClaimed: assets.claimed,
           assetsGenerated: assets.generated,
@@ -146,19 +143,29 @@ function isGitCommitOutcome(value: unknown): value is "COMMITTED" | "NO_CHANGES"
 }
 
 /**
- * Wire the asset generator, or return null when this deployment has no object
- * store. Nothing else on the tick needs one, so its absence disables generation
- * rather than failing the scheduler.
+ * Wire the asset generator to the same object-store client used by durable
+ * artifact cleanup.
  */
-function assetGenerationDependencies(repository: CoreRepository): AssetGenerationDependencies | null {
+function assetGenerationDependencies(repository: CoreRepository, objectStore: CoreObjectStore): AssetGenerationDependencies {
+  return Object.freeze({ repository, objectStore, secrets: createAgentSecretStore() });
+}
+
+function configuredObjectStore(): CoreObjectStore | null {
+  try { return new CoreObjectStore(); }
+  catch { return null; }
+}
+
+async function runObjectCleanup(repository: CoreRepository, objectStore: CoreObjectStore) {
+  const request = await repository.claimObjectCleanup(120);
+  if (!request) return null;
   try {
-    return Object.freeze({
-      repository,
-      objectStore: new CoreObjectStore(),
-      secrets: createAgentSecretStore(),
-    });
-  } catch {
-    return null;
+    await objectStore.deleteQueuedObject({ workspaceId: request.workspaceId, bucket: request.bucket, key: request.objectKey });
+    if (!await repository.completeObjectCleanup(request)) throw new Error("Object cleanup completion lease was rejected");
+    return Object.freeze({ objectKey: request.objectKey, outcome: "DELETED", attempt: request.attempt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await repository.failObjectCleanup(request, message).catch(() => undefined);
+    return Object.freeze({ objectKey: request.objectKey, outcome: "FAILED", attempt: request.attempt, error: message });
   }
 }
 

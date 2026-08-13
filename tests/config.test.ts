@@ -17,9 +17,3 @@ test("sandbox concurrency rejects unsafe worker counts", () => {
   assert.throws(() => loadCoreConfig({ ...base, DEVILUDO_SANDBOX_CONCURRENCY: "0" }), /DEVILUDO_SANDBOX_CONCURRENCY/);
   assert.throws(() => loadCoreConfig({ ...base, DEVILUDO_SANDBOX_CONCURRENCY: "3" }), /DEVILUDO_SANDBOX_CONCURRENCY/);
 });
-
-test("E2E protocol revalidation is batch limited", () => {
-  assert.equal(loadCoreConfig(base).e2eRevalidationBatchSize, 2);
-  assert.equal(loadCoreConfig({ ...base, DEVILUDO_E2E_REVALIDATION_BATCH_SIZE: "20" }).e2eRevalidationBatchSize, 20);
-  assert.throws(() => loadCoreConfig({ ...base, DEVILUDO_E2E_REVALIDATION_BATCH_SIZE: "21" }), /DEVILUDO_E2E_REVALIDATION_BATCH_SIZE/);
-});

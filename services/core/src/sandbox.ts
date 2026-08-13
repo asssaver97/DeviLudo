@@ -13,7 +13,7 @@ import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
-import { validateTestManifest } from "@/lib/product/test-manifest";
+import { planE2eExecution, validateTestManifest } from "@/lib/product/test-manifest";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -206,7 +206,7 @@ export async function runSandbox(
           ? await objectStore.readProjectDocument(job, receipt.outputObjects)
           : null;
         const agentCompletion = job.jobKind === "AGENT_GENERATION"
-          ? await readAgentCompletion(objectStore, projectSources, job, receipt)
+          ? await readAgentCompletion(objectStore, job, receipt)
           : null;
         if (operationId) await repository.finishOperation(job, operationId, receipt.details);
         if (job.jobKind === "AGENT_GENERATION") {
@@ -282,55 +282,47 @@ async function discardOrphanedAgentSource(
     : projectSources.discardUnregisteredRevision(job.workspaceId, job.projectId, revision);
 }
 
-/**
- * New runners upload the generated agent.json as the SPECIFICATION object. Jobs
- * already running during a deployment still use the legacy runner, whose object
- * contains CLI event output; their source revision is already durably published
- * by the trusted executor, so fall back to its canonical agent.json instead of
- * failing an otherwise complete generation during a rolling upgrade.
- */
 async function readAgentCompletion(
   objectStore: CoreObjectStore,
-  projectSources: ProjectSourceStore,
   job: JobProtocolV4,
   receipt: SandboxReceipt,
-): Promise<Readonly<{ assetManifest: unknown; testManifest: unknown; testManifestDigest: string }>> {
-  try {
-    const completion = await objectStore.readAgentCompletion(receipt.outputObjects, job.inputObjects);
-    return Object.freeze({ ...completion, testManifestDigest: jsonDigest(completion.testManifest) });
-  } catch {
-    const source = receipt.details.sourceRevision;
-    if (!source || typeof source !== "object" || Array.isArray(source)) {
-      throw new Error("Agent completion does not contain a published source revision");
-    }
-    const relativePath = (source as Record<string, unknown>).relativePath;
-    const expectedPrefix = `workspaces/${job.workspaceId}/projects/${job.projectId}/revisions/`;
-    if (typeof relativePath !== "string" || !relativePath.startsWith(expectedPrefix)) {
-      throw new Error("Agent completion source revision escaped the project boundary");
-    }
-    const bytes = await projectSources.readRevisionFile(relativePath, "agent.json", 2 * 1024 * 1024);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(bytes.toString("utf8"));
-    } catch {
-      throw new Error("Generated source agent.json is not valid JSON");
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-      || !("assetManifest" in parsed) || !validateTestManifest((parsed as Record<string, unknown>).testManifest)) {
-      throw new Error("Generated source agent.json does not contain valid test and asset manifests");
-    }
-    const testManifest = (parsed as Record<string, unknown>).testManifest;
-    await objectStore.assertAgentTestManifest(testManifest, job.inputObjects);
-    return Object.freeze({
-      assetManifest: (parsed as Record<string, unknown>).assetManifest,
-      testManifest,
-      testManifestDigest: jsonDigest(testManifest),
-    });
-  }
+): Promise<Readonly<{
+  assetManifest: unknown;
+  testManifest: unknown;
+  testManifestDigest: string;
+  e2eExecutionPlan: Readonly<{ plannedTimeoutSeconds: number; contractDigest: string }>;
+}>> {
+  const completion = await objectStore.readAgentCompletion(receipt.outputObjects, job.inputObjects);
+  return agentCompletionContract(completion.assetManifest, completion.testManifest);
+}
+
+function agentCompletionContract(assetManifest: unknown, testManifest: unknown) {
+  if (!validateTestManifest(testManifest)) throw new Error("Generated test manifest is invalid");
+  // Reserve the full allowed current-regression duration. The pointer can be
+  // replaced after this source revision is published, but a frozen job budget
+  // must never become too small because the managed trace changed meanwhile.
+  const plan = planE2eExecution(testManifest, 300_000);
+  return Object.freeze({
+    assetManifest,
+    testManifest,
+    testManifestDigest: jsonDigest(testManifest),
+    e2eExecutionPlan: Object.freeze({
+      plannedTimeoutSeconds: Math.ceil(plan.plannedTimeoutMs / 1_000),
+      contractDigest: jsonDigest({ testManifest, runner: "adaptive-real-input" }),
+    }),
+  });
 }
 
 function jsonDigest(value: unknown): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+  return `sha256:${createHash("sha256").update(stableJson(value)).digest("hex")}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 export function sandboxPlan(job: JobProtocolV4, operationId: string | null = null): SandboxPlan {

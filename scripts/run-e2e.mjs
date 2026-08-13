@@ -42,8 +42,6 @@ const environment = {
   DEVILUDO_E2E_IDENTITY_KEY_FILE: resolve(root, ".deviludo/local/e2e-macos-ed25519.pem"),
   DEVILUDO_E2E_ISOLATION_EXECUTOR: resolve(root, "scripts/executors/local-macos-isolation.mjs"),
   DEVILUDO_E2E_TEST_EXECUTOR: resolve(root, "scripts/executors/e2e-fixture-job.mjs"),
-  DEVILUDO_E2E_SIGN_EXECUTOR: resolve(root, "scripts/executors/e2e-fixture-job.mjs"),
-  DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR: resolve(root, "scripts/executors/e2e-fixture-job.mjs"),
   DEVILUDO_E2E_JOB_ROOT: resolve(root, "test-results/e2e-jobs"),
 };
 

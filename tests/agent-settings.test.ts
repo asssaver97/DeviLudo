@@ -22,6 +22,11 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     baseUrl: "https://api.example.com/v1",
     apiKey: "sk-valid-secret",
     models: null,
+    roleModels: {
+      design: "codex-mini-latest",
+      development: "codex-mini-latest",
+      test: "codex-mini-latest",
+    },
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
@@ -78,6 +83,11 @@ test("Claude settings.json accepts only the supported connection fields", () => 
       sonnet: "claude-sonnet-route",
       haiku: "claude-haiku-route",
       subagent: "claude-subagent-route",
+    },
+    roleModels: {
+      design: "claude-sonnet-route",
+      development: "claude-fable-5-max",
+      test: "claude-haiku-route",
     },
   });
   assert.throws(() => parseAgentSettingsInput({

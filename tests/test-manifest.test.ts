@@ -1,7 +1,8 @@
 import assert from "node:assert";
 import { describe, test } from "node:test";
 import {
-  TEST_MANIFEST_SCHEMA_VERSION,
+  TEST_MANIFEST_SCHEMA,
+  planE2eExecution,
   stableRequirementId,
   specificationRequirementCatalog,
   validateTestExecutionResult,
@@ -20,7 +21,19 @@ function checkpoint(id: string, role: "START" | "READY" | "PROGRESS" | "COMPLETI
 
 function completeManifest(): TestManifest {
   return {
-    schemaVersion: TEST_MANIFEST_SCHEMA_VERSION,
+    schema: TEST_MANIFEST_SCHEMA,
+    inputProfiles: ["KEYBOARD_MOUSE"],
+    primaryInputProfile: "KEYBOARD_MOUSE",
+    adaptivePlayer: {
+      goal: "进入游戏并完成一个完整回合，使回合进度发生变化",
+      requirementIds: ["req-core-loop", "req-pause"],
+      allowedActions: ["KEYBOARD", "POINTER"],
+      successAssertions: [changedTurn],
+      failureAssertions: [{ source: "STATE", key: "game_over", operator: "EQUALS", value: true }],
+      rolloutTimeoutMs: 120_000,
+      maxDecisions: 20,
+      seedStrategy: "STABLE_PROJECT_PLATFORM",
+    },
     requirements: [
       { requirementId: "req-core-loop", description: "完成一轮游戏", source: "CORE_LOOP", verificationClass: "PLAYER_INTERACTION" },
       { requirementId: "req-pause", description: "通过暂停按钮停止时间", source: "ACCEPTANCE", verificationClass: "PLAYER_INTERACTION" },
@@ -31,7 +44,7 @@ function completeManifest(): TestManifest {
         id: "core-loop-journey", requirementIds: ["req-core-loop"], category: "core-loop",
         description: "从干净用户目录完成核心循环", verificationMethod: "interactive", coreJourney: true,
         launchProfile: { type: "FRESH" }, timeoutMs: 300_000,
-        interactionScript: { version: "3", events: [
+        interactionScript: { events: [
           checkpoint("game-start", "START", true), checkpoint("game-ready", "READY"),
           { type: "click", stepId: "roll", intent: "PRIMARY_ACTION", targetId: "roll-dice", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
           checkpoint("turn-progress", "PROGRESS"),
@@ -42,29 +55,30 @@ function completeManifest(): TestManifest {
       {
         id: "pause-journey", requirementIds: ["req-pause"], category: "player-control",
         description: "真实暂停操作", verificationMethod: "interactive", launchProfile: { type: "FRESH" }, timeoutMs: 30_000,
-        interactionScript: { version: "3", events: [
+        interactionScript: { events: [
           { type: "key_tap", stepId: "pause", intent: "FEATURE_ACTION", key: "KEY_P", coversRequirementIds: ["req-pause"], postconditions: [{ source: "STATE", key: "paused", operator: "EQUALS", value: true }] },
         ] },
       },
       {
         id: "save-data", requirementIds: ["req-save-data"], category: "data-integrity",
-        description: "存档格式", verificationMethod: "unit", gdsTestPath: "res://tests/e2e.gd", checkNames: ["save-round-trip"],
+        description: "存档格式", verificationMethod: "unit", gdsTestPath: "res://tests/e2e.gd", checkNames: ["save-round-trip"], timeoutMs: 30_000,
       },
     ],
   };
 }
 
-describe("test-manifest v3", () => {
+describe("test-manifest", () => {
   test("validates fresh core play, semantic real input, postconditions and system checks", () => {
     assert.equal(validateTestManifest(completeManifest()), true);
   });
 
-  test("rejects v2 and the former two-H blind-start contract", () => {
+  test("rejects versioned contracts and the former two-H blind-start contract", () => {
     const manifest = completeManifest();
-    assert.equal(validateTestManifest({ ...manifest, schemaVersion: "deviludo.test-manifest.v2" }), false);
+    assert.equal(validateTestManifest({ ...manifest, schema: "deviludo.test-manifest.v3" }), false);
+    assert.equal(validateTestManifest({ ...manifest, schemaVersion: "deviludo.test-manifest" }), false);
     assert.equal(validateTestManifest({ ...manifest, features: [{
       ...manifest.features[0], launchProfile: undefined,
-      interactionScript: { version: "2", events: [{ type: "key_press", key: "KEY_H" }, { type: "key_release", key: "KEY_H" }] },
+      interactionScript: { events: [{ type: "key_press", key: "KEY_H" }, { type: "key_release", key: "KEY_H" }] },
     }, ...manifest.features.slice(1)] }), false);
   });
 
@@ -98,7 +112,7 @@ describe("test-manifest v3", () => {
         ...manifest,
         features: [manifest.features[0], {
           ...pause, id: `${archetype.id}-journey`, description: `${archetype.id} 真实玩家操作`,
-          interactionScript: { version: "3" as const, events: [action] },
+          interactionScript: { events: [action] },
         }, manifest.features[2]],
       };
       assert.equal(validateTestManifest(candidate), true, `${archetype.id} contract should be game-genre neutral`);
@@ -109,18 +123,25 @@ describe("test-manifest v3", () => {
     const manifest = completeManifest();
     const core = manifest.features[0];
     const withoutPostcondition = core.interactionScript?.events.map(event => event.type === "click" ? { ...event, postconditions: [] } : event);
-    assert.equal(validateTestManifest({ ...manifest, features: [{ ...core, interactionScript: { version: "3", events: withoutPostcondition } }, ...manifest.features.slice(1)] }), false);
+    assert.equal(validateTestManifest({ ...manifest, features: [{ ...core, interactionScript: { events: withoutPostcondition } }, ...manifest.features.slice(1)] }), false);
     assert.equal(validateTestManifest({ ...manifest, features: [{ ...core, launchProfile: { type: "SCENARIO", scenarioId: "near-win" } }, ...manifest.features.slice(1)] }), false);
+    assert.equal(validateTestManifest({
+      ...manifest,
+      adaptivePlayer: {
+        ...manifest.adaptivePlayer,
+        successAssertions: [{ source: "CONTROL", targetId: "end-turn", property: "enabled", operator: "EQUALS", value: true }],
+      },
+    }), false);
   });
 
   test("rejects requirement coverage claimed only at journey level", () => {
     const manifest = completeManifest();
     const pause = manifest.features[1];
     const events = pause.interactionScript?.events.map(event => event.type === "key_tap" ? { ...event, coversRequirementIds: [] } : event);
-    assert.equal(validateTestManifest({ ...manifest, features: [manifest.features[0], { ...pause, interactionScript: { version: "3", events } }, manifest.features[2]] }), false);
+    assert.equal(validateTestManifest({ ...manifest, features: [manifest.features[0], { ...pause, interactionScript: { events } }, manifest.features[2]] }), false);
   });
 
-  test("derives stable v3 player requirements from frozen specifications", () => {
+  test("derives stable player requirements from frozen specifications", () => {
     const specification = { coreLoop: ["进入游戏"], acceptanceCriteria: ["可以获胜"] };
     const result = specificationRequirementCatalog(specification);
     assert.equal(result[0].requirementId, stableRequirementId("feature", 0, "进入游戏"));
@@ -132,5 +153,32 @@ describe("test-manifest v3", () => {
     assert.equal(validateTestExecutionResult(result), true);
     assert.equal(validateTestExecutionResult({ ...result, checks: "invalid" }), false);
     assert.equal(validateTestExecutionResult({ ...result, duration_ms: -1 }), false);
+  });
+
+  test("freezes a dynamic 30-90 minute platform execution budget", () => {
+    const manifest = completeManifest();
+    const withoutRegression = planE2eExecution(manifest);
+    const withRegression = planE2eExecution(manifest, 300_000);
+    assert.equal(withoutRegression.plannedTimeoutMs, 30 * 60_000);
+    assert.ok(withRegression.plannedTimeoutMs >= withoutRegression.plannedTimeoutMs);
+    assert.equal(withRegression.adaptiveMs, 3 * manifest.adaptivePlayer.rolloutTimeoutMs);
+    assert.equal(withRegression.solidificationMs, 2 * manifest.adaptivePlayer.rolloutTimeoutMs);
+
+    const expensiveUnits = Array.from({ length: 20 }, (_, index) => ({
+      id: `long-unit-${index}`,
+      requirementIds: ["req-save-data"],
+      category: "runtime-quality" as const,
+      description: `独立长时确定性检查 ${index}`,
+      verificationMethod: "unit" as const,
+      gdsTestPath: `res://tests/long-${index}.gd`,
+      checkNames: [`long-check-${index}`],
+      timeoutMs: 300_000,
+    }));
+    const overBudget = { ...manifest, features: [...manifest.features, ...expensiveUnits] };
+    assert.equal(validateTestManifest(overBudget), true);
+    assert.throws(() => planE2eExecution(overBudget), (error: unknown) => (
+      (error as { code?: string }).code === "E2E_PLAN_EXCEEDS_LIMIT"
+    ));
+    assert.throws(() => planE2eExecution(manifest, 300_001), /regression estimate/i);
   });
 });

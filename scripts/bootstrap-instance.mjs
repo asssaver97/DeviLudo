@@ -29,7 +29,7 @@ try {
       "BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
       "RESTRICTED_CONTAINER", "NETWORK_POLICY",
     ]],
-    ["E2E_MACOS", "macos", ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]],
+    ["E2E_MACOS", "macos", ["E2E_TEST"]],
   ]) {
     await pool.query(
       `INSERT INTO deviludo.server_nodes(pool_kind, operating_system, state, capabilities)

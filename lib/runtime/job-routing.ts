@@ -17,7 +17,7 @@ export const JOB_KINDS = [
 
 export type JobKind = typeof JOB_KINDS[number];
 export type CoreJobKind = Extract<JobKind, "AGENT_GENERATION" | "PROJECT_DOCUMENT_MAINTENANCE" | "ARTIFACT_BUILD" | "STEAM_PUBLISH">;
-export type E2eJobKind = Exclude<JobKind, CoreJobKind>;
+export type E2eJobKind = "E2E_TEST";
 
 const E2E_POOL_BY_OS: Readonly<Record<ServerOperatingSystem, ServerPoolKind>> = Object.freeze({
   linux: "E2E_LINUX",
@@ -30,6 +30,9 @@ export function isJobKind(value: unknown): value is JobKind {
 }
 
 export function routeJob(kind: JobKind, targetOperatingSystem?: ServerOperatingSystem): ServerPoolKind {
+  if (kind === "ARTIFACT_SIGN" || kind === "STEAM_CLEAN_INSTALL") {
+    throw new Error(`${kind} is a retired historical job kind`);
+  }
   if (kind === "AGENT_GENERATION" || kind === "PROJECT_DOCUMENT_MAINTENANCE" || kind === "ARTIFACT_BUILD" || kind === "STEAM_PUBLISH") {
     if (targetOperatingSystem !== undefined) throw new Error(`${kind} cannot target an E2E operating system`);
     return "CORE";
@@ -49,9 +52,10 @@ export function assertJobPlacement(input: Readonly<{
 }
 
 export function jobCapabilities(kind: JobKind): readonly string[] {
-  if (kind === "ARTIFACT_SIGN") return Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]);
+  if (kind === "ARTIFACT_SIGN" || kind === "STEAM_CLEAN_INSTALL") {
+    throw new Error(`${kind} is a retired historical job kind`);
+  }
   if (kind === "E2E_TEST") return Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]);
-  if (kind === "STEAM_CLEAN_INSTALL") return Object.freeze(["STEAM_CLIENT", "TRUSTED_REIMAGE"]);
   if (kind === "AGENT_GENERATION") return Object.freeze(["MICROVM", "NETWORK_POLICY"]);
   if (kind === "PROJECT_DOCUMENT_MAINTENANCE") return Object.freeze(["MICROVM", "NETWORK_POLICY"]);
   if (kind === "ARTIFACT_BUILD") return Object.freeze(["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"]);
@@ -59,7 +63,7 @@ export function jobCapabilities(kind: JobKind): readonly string[] {
 }
 
 export function isExclusiveJob(kind: JobKind): boolean {
-  return kind === "E2E_TEST" || kind === "ARTIFACT_SIGN" || kind === "STEAM_CLEAN_INSTALL";
+  return kind === "E2E_TEST";
 }
 
 export function poolOperatingSystem(poolKind: ServerPoolKind): ServerOperatingSystem {

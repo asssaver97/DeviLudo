@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   generateProductConversationReply,
+  generateProductConversationGroupReply,
   isDevelopmentApprovalRequest,
   streamProductConversationReply,
 } from "../services/core/src/product-conversation";
@@ -45,6 +46,59 @@ test("explicit development commands approve while discussions and negative comma
     "What happens if we start building?",
     "Do not implement this yet",
   ]) assert.equal(isDevelopmentApprovalRequest(discussion), false, discussion);
+});
+
+test("project group chat invokes design, development, and test Agents with independent models", async () => {
+  const models: string[] = [];
+  const prompts: string[] = [];
+  const histories: string[] = [];
+  const replies = await generateProductConversationGroupReply({
+    userContent: "增加一个合作维修任务",
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: true,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example/v1",
+      models: Object.freeze({
+        primary: "claude-primary",
+        opus: "claude-opus",
+        sonnet: "claude-sonnet",
+        haiku: "claude-haiku",
+        subagent: "claude-subagent",
+      }),
+      roleModels: Object.freeze({
+        design: "design-model",
+        development: "development-model",
+        test: "test-model",
+      }),
+      revision: 9,
+    }),
+    apiKey: "sk-test-secret",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      models.push(String(body.model));
+      prompts.push(String(body.system));
+      histories.push(JSON.stringify(body.messages));
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify({
+          reply: `来自 ${String(body.model)} 的意见`,
+          options: [],
+          applyToDraft: false,
+          readyForDevelopment: true,
+          projectDocumentPatch: null,
+        }) }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  assert.deepEqual(models, ["design-model", "development-model", "test-model"]);
+  assert.deepEqual(replies.map(reply => reply.agentRole), ["DESIGN", "DEVELOPMENT", "TEST"]);
+  assert.match(prompts[0], /设计 Agent/);
+  assert.match(prompts[1], /开发 Agent/);
+  assert.match(prompts[2], /测试 Agent/);
+  assert.match(histories[1], /design-model 的意见/);
+  assert.match(histories[2], /development-model 的意见/);
 });
 
 test("Claude design Agent receives project context and conversation history", async () => {
@@ -92,7 +146,7 @@ test("Claude design Agent receives project context and conversation history", as
   });
 
   assert.equal(requestedUrl, "https://provider.example/v1/messages");
-  assert.equal(requestedBody.model, "claude-primary");
+  assert.equal(requestedBody.model, "claude-sonnet");
   assert.equal(requestedBody.max_tokens, 4_000);
   assert.match(String(requestedBody.system), /星港维修队/);
   assert.match(String(requestedBody.system), /十分钟一局/);
@@ -113,7 +167,7 @@ test("Claude design Agent receives project context and conversation history", as
       features: ["十分钟一局", "实时分工"],
     },
     runtime: "CLAUDE_CODE",
-    model: "claude-primary",
+    model: "claude-sonnet",
     settingsRevision: 7,
   });
 });
@@ -308,7 +362,7 @@ test("design Agent provider failures use a resettable idle timeout with a clear 
       if (signal.aborted) return reject(signal.reason);
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
     }),
-  }), /设计 Agent 超过 1 秒未返回数据，请重试/);
+  }), /Agent 超过 1 秒未返回数据，请重试/);
 });
 
 test("malformed JSON newlines never leak the reply envelope into chat", async () => {

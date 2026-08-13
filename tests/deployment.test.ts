@@ -130,10 +130,10 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /"--tools", "Read,Write,Edit,Glob,Grep,Bash"/);
   assert.match(runner, /"--disallowedTools", "Agent,Task"/);
   assert.match(runner, /environment\.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"/);
-  assert.match(runner, /interactionScript must be version \\"3\\"/);
+  assert.match(runner, /interactionScript contains only events and no version field/);
   assert.match(runner, /fixed x\/y coordinates and unrelated key presses are forbidden/);
   assert.match(runner, /Every PLAYER_INTERACTION requirement must be covered/);
-  assert.match(runner, /deviludo\.e2e-ui-probe\.v1/);
+  assert.match(runner, /deviludo\.e2e-ui-probe/);
   assert.match(runner, /Math\.min\(80 \* 60_000/);
   assert.match(runner, /trimBufferedTail\(stdout, stdoutBytes, 2 \* 1024 \* 1024\)/);
   assert.match(runner, /checkpoint\.tar\.gz/);
@@ -315,7 +315,11 @@ test("production Agent execution requires a pinned Kata microVM runtime", async 
   assert.match(deployment, /verify_sha256 "\$expected" "\$archive"/);
   assert.match(manifest, /externalArtifacts: \{ kata \}/);
   assert.match(manifest, /artifactHostCommandsAllowed: false/);
-  assert.match(manifest, /guestReportProtocol: "deviludo\.godot-guest-report\.v3"/);
+  assert.match(manifest, /guestReportContract: "deviludo\.godot-guest-report"/);
+  assert.doesNotMatch(manifest, /GODOT:\s*\{\s*version:/);
+  assert.match(manifest, /runtimeInputSmoke: "GODOT_SYSTEM_KEYBOARD_POINTER_GAMEPAD"/);
+  assert.match(manifest, /gamepadBackends: \{ macos: "CORE_HID", linux: "UINPUT", windows: "KMDF_VHF" \}/);
+  assert.match(manifest, /macosGoldenImage: "TAHOE_26"/);
 });
 
 test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", async () => {
@@ -344,7 +348,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /canonicalPrefix/);
   assert.match(tartPrepare, /\^sha256:\[0-9a-f\]\{64\}/);
   assert.doesNotMatch(tartPrepare, /JSON\.stringify\(row, Object\.keys\(row\)\.sort\(\)\)/);
-  assert.match(tartPrepare, /legacyFingerprint/);
+  assert.doesNotMatch(tartPrepare, /legacyFingerprint/);
+  assert.match(tartPrepare, /macos-tahoe-base/);
   assert.match(tartPrepare, /rows\.some\(item => \[item\?\.Name, item\?\.name\]\.includes\(name\)\)/);
   assert.match(tartPrepare, /split\(\/\\s\+\/\)\.includes\(name\)/);
   assert.match(tartPrepare, /\["set", stagingName, "--memory", "6144", "--display", "1440x900"\]/);
@@ -357,6 +362,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /key_press/);
   assert.match(tartPrepare, /key_release/);
   assert.match(tartPrepare, /"-target", "arm64-apple-macosx15\.0"/);
+  assert.match(tartPrepare, /godot-system-gamepad-smoke/);
+  assert.match(tartPrepare, /gamepad-smoke-ok/);
   assert.match(tartPrepare, /"-Onone"/);
   assert.match(tartPrepare, /\[hostGuiDriverFile, "\/Users\/Shared\/deviludo-gui-driver"\]/);
   assert.match(tartPrepare, /gui-event-batches\.mjs"\), "\/Users\/Shared\/gui-event-batches\.mjs"/);
@@ -398,8 +405,8 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
     readFile(new URL("../scripts/executors/windows-gui-driver.ps1", import.meta.url), "utf8"),
     readFile(new URL("../deploy/assets/e2e-linux-isolation.sh", import.meta.url), "utf8"),
   ]);
-  assert.match(guest, /deviludo\.test-manifest\.v3/);
-  assert.match(guest, /deviludo\.e2e-ui-probe\.v1|waitForProbeSnapshot/);
+  assert.match(guest, /deviludo\.test-manifest/);
+  assert.match(guest, /deviludo\.e2e-ui-probe|waitForProbeSnapshot/);
   assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
   assert.match(guest, /"--log-file", logPath/);
   assert.match(guest, /DEVILUDO_E2E_CHECKPOINT_FILE: checkpointOutputPath/);
@@ -416,7 +423,7 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(guest, /JOURNEYS_MISSING/);
   assert.match(guest, /PLAYER_REQUIREMENT_COVERAGE_MISSING/);
   assert.match(guest, /nativeInputEvents\(event, before\)/);
-  assert.match(guest, /"sequence"[\s\S]*JSON\.stringify\(nativeEvents\)/);
+  assert.match(guest, /testEnvironment\.sequence\(nativeEvents/);
   assert.match(guest, /ACTION_STATE_UNCHANGED/);
   assert.match(guest, /MACOS_LAUNCH_SERVICES/);
   assert.match(guest, /launchArguments\.push\("--env"/);
@@ -424,8 +431,12 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.doesNotMatch(guest, /"launchctl", \["setenv"/);
   assert.match(guest, /WINDOWS_FINAL_EXE/);
   assert.match(guest, /LINUX_RELEASE_EXECUTABLE/);
-  assert.match(guest, /PLATFORM_TIMEOUT_MS = 30 \* 60_000/);
-  assert.match(guest, /STEAM_CLIENT_INSTALL/);
+  assert.match(guest, /plannedTimeoutMs/);
+  assert.match(guest, /ADAPTIVE_ROLLOUT_COUNT\s*=\s*3/);
+  assert.match(guest, /ADAPTIVE_REQUIRED_SUCCESSES\s*=\s*2/);
+  assert.match(guest, /PLAYER_STUCK/);
+  assert.match(guest, /solidifyRegression/);
+  assert.doesNotMatch(guest, /STEAM_CLIENT_INSTALL|steam-clean-install/);
   assert.match(guest, /journey\.timeoutMs/);
   assert.match(guest, /UNIT_TIMEOUT/);
   assert.match(guest, /timedOut = true/);
@@ -518,10 +529,11 @@ test("state backup and restore cover all durable stores with integrity and empty
   assert.match(restore, /Restored migration ledger does not match the backup/);
 });
 
-test("E2E signing failures and isolation cleanup remove transient workspaces", async () => {
+test("E2E failures and isolation cleanup remove transient workspaces", async () => {
   const executor = await readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8");
   const windows = await readFile(new URL("../deploy/assets/e2e-windows-isolation.ps1", import.meta.url), "utf8");
-  assert.match(executor, /if \(!signedOutputReady && !evidenceOutputReady\) await rm\(workspace/);
+  assert.match(executor, /if \(!evidenceOutputReady\) await rm\(workspace/);
+  assert.doesNotMatch(executor, /signedOutputReady|ARTIFACT_SIGN|STEAM_CLEAN_INSTALL/);
   assert.match(executor, /executable\.endsWith\("\.mjs"\)[\s\S]*process\.execPath[\s\S]*\[executable, \.\.\.arguments_\]/);
   assert.doesNotMatch(executor, /spawn\(guestRunner,/);
   assert.match(executor, /Guest runner outcome contract is invalid: \$\{JSON\.stringify\(diagnostic\)\}/);
@@ -599,8 +611,7 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   const pipeline = studio.match(/const PIPELINE = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
   assert.doesNotMatch(pipeline, /ASSET/);
   assert.deepEqual([...pipeline.matchAll(/\["([A-Z0-9_]+)"/g)].map(match => match[1]), [
-    "AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST",
-    "ARTIFACT_SIGN", "STEAM_PUBLISH", "STEAM_CLEAN_INSTALL",
+    "AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST", "STEAM_PUBLISH",
   ]);
   assert.match(studio, /<AssetManifestPanel onRerunStarted=\{\(\) => void loadProject\(true\)\} projectId=\{projectId\} \/>/);
   // Uploaded assets only reach the game through a build, so the panel's rebuild
@@ -616,13 +627,15 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   assert.match(panel, /accept="image\/png,image\/jpeg,image\/webp"/);
 });
 
-test("image assets gate the first build and Steam upload waits for an administrator", async () => {
+test("image assets gate the first build and Steam upload is an administrator-owned release decision", async () => {
   const sql = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
   const api = await readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8");
   const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
   const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const steamPanel = await readFile(new URL("../components/ProjectSteamPanel.tsx", import.meta.url), "utf8");
+  const steamSettings = await readFile(new URL("../components/SteamSettings.tsx", import.meta.url), "utf8");
   const scheduler = await readFile(new URL("../services/core/src/scheduler.ts", import.meta.url), "utf8");
   assert.match(sql, /state = 'ASSET_GENERATING'/);
   assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.advance_asset_workflows/);
@@ -633,12 +646,21 @@ test("image assets gate the first build and Steam upload waits for an administra
   assert.match(daemon, /Build asset inputs do not satisfy the fixed materialization contract/);
   assert.match(runner, /materializeBuildAssets\(plan\)/);
   assert.match(runner, /res:\/\/assets\/generated\/\$\{asset\.assetKey\}\.\$\{extension\}/);
-  assert.match(sql, /SET state = 'RELEASE_APPROVAL_PENDING'/);
-  assert.match(api, /"\/v1\/projects\/:projectId\/approve-release"/);
+  assert.match(sql, /SET state = 'RELEASE_DECISION_PENDING'/);
+  assert.match(sql, /CREATE TABLE deviludo\.workspace_steam_settings/);
+  assert.match(sql, /CREATE TABLE deviludo\.project_steam_settings/);
+  assert.match(sql, /CREATE TABLE deviludo\.steam_releases/);
+  assert.match(api, /"\/v1\/projects\/:projectId\/steam-releases"/);
+  assert.match(api, /"\/v1\/projects\/:projectId\/iterations\/:workflowId\/complete"/);
   assert.match(api, /principal\.role !== "OWNER" && principal\.role !== "ADMIN"/);
-  assert.match(api, /kind: "RELEASE_APPROVED"/);
-  assert.match(studio, /mutate\("approve-release"\)/);
-  assert.match(studio, /APPROVE STEAM UPLOAD/);
+  assert.doesNotMatch(api, /approve-release|signing-grant/);
+  assert.match(studio, /<ProjectSteamPanel/);
+  assert.match(steamPanel, /APPROVE & UPLOAD TO STEAM/);
+  assert.match(steamPanel, /FINISH WITHOUT PUBLISHING/);
+  assert.match(steamSettings, /WORKSPACE STEAM CREDENTIAL/);
+  assert.match(runner, /file\.startsWith\(`build-\$\{platform\}-`\)/);
+  assert.match(runner, /steam\.channel === "TEST" \? `  "SetLive"/);
+  assert.doesNotMatch(runner, /signed-build-|STEAM_APP_ID|STEAM_DEPOT_/);
 });
 
 test("auto-generate never removes the user's own way to supply an asset", async () => {
@@ -760,7 +782,7 @@ test("the trusted Agent manifest reaches automatic image generation", async () =
   assert.match(objectStore, /async readAgentCompletion\(/);
   assert.match(objectStore, /readJsonOutput\(objects, "SPECIFICATION"/);
   assert.match(sandbox, /objectStore\.readAgentCompletion\(receipt\.outputObjects, job\.inputObjects\)/);
-  assert.match(sandbox, /projectSources\.readRevisionFile\(relativePath, "agent\.json"/);
+  assert.doesNotMatch(sandbox, /projectSources\.readRevisionFile\(relativePath, "agent\.json"/);
   assert.match(sandbox, /\.\.\.\(agentCompletion \?\? \{\}\)/);
   // Planning immediately enables the asynchronous scheduler branch.
   assert.match(sql, /auto_generate_enabled boolean NOT NULL DEFAULT true/);
@@ -839,7 +861,7 @@ test("one rerun endpoint covers every delivery node once the workflow is at rest
   assert.match(studio, /RERUNNABLE_WORKFLOW_STATES\.has\(project\.workflowState\)\s*&&\s*project\.jobs\.length > 0/);
   // VALIDATE has no signing or publication stages to offer, so their rerun is
   // withheld — but the node itself still renders, see the visibility test below.
-  assert.match(studio, /canRerunStages && inProfile \?/);
+  assert.match(studio, /canRerunStages && inProfile &&/);
   assert.match(studio, /"idempotency-key": `stage-rerun:\$\{String\(body\?\.stage\)\}:\$\{crypto\.randomUUID\(\)\}`/);
   assert.match(studio, /"idempotency-key": `cancel:\$\{crypto\.randomUUID\(\)\}`/);
   assert.match(api, /requestIdempotencyKey\(request, `cancel:\$\{project\.workflowId\}`\)/);

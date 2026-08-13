@@ -4,6 +4,7 @@ import { isAbsolute, join } from "node:path";
 import {
   AGENT_RUNTIME_KINDS,
   type AgentModelConfiguration,
+  type AgentRoleModelConfiguration,
   type AgentRuntimeKind,
 } from "@/lib/product/contracts";
 
@@ -12,6 +13,7 @@ export type AgentSettingsInput = Readonly<{
   baseUrl: string;
   apiKey: string | null;
   models: AgentModelConfiguration | null;
+  roleModels: AgentRoleModelConfiguration;
 }>;
 
 export type AgentSecretVersion = Readonly<{
@@ -60,7 +62,7 @@ export function parseAgentSettingsInput(
     throw new Error("Agent settings must be an object");
   }
   const input = value as Record<string, unknown>;
-  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "models", "settingsJson"].includes(key));
+  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "models", "roleModels", "settingsJson"].includes(key));
   if (unknown.length > 0) throw new Error("Agent settings contain unsupported fields");
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.agentRuntime)) {
     throw new Error("Agent runtime must be Claude Code or Codex CLI");
@@ -95,11 +97,15 @@ export function parseAgentSettingsInput(
   if (input.agentRuntime === "CODEX_CLI" && models !== null) {
     throw new Error("Claude model routes cannot be used with Codex CLI");
   }
+  const roleModels = input.roleModels === undefined
+    ? defaultAgentRoleModels(input.agentRuntime as AgentRuntimeKind, models)
+    : normalizeAgentRoleModels(input.roleModels);
   return Object.freeze({
     agentRuntime: input.agentRuntime as AgentRuntimeKind,
     baseUrl,
     apiKey,
     models,
+    roleModels,
   });
 }
 
@@ -180,6 +186,37 @@ export function normalizeAgentModels(value: unknown): AgentModelConfiguration | 
   }
   const normalized = Object.fromEntries(keys.map(key => [key, normalizeAgentModel(input[key])])) as Record<string, string>;
   return Object.freeze(normalized as AgentModelConfiguration);
+}
+
+export function normalizeAgentRoleModels(value: unknown): AgentRoleModelConfiguration {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Agent role models must be an object");
+  }
+  const input = value as Record<string, unknown>;
+  const keys = ["design", "development", "test"] as const;
+  if (Object.keys(input).length !== keys.length || keys.some(key => !(key in input))) {
+    throw new Error("Agent role models must contain design, development, and test");
+  }
+  return Object.freeze(Object.fromEntries(
+    keys.map(key => [key, normalizeAgentModel(input[key])]),
+  ) as unknown as AgentRoleModelConfiguration);
+}
+
+function defaultAgentRoleModels(
+  runtime: AgentRuntimeKind,
+  models: AgentModelConfiguration | null,
+): AgentRoleModelConfiguration {
+  if (runtime === "CLAUDE_CODE" && models) {
+    return Object.freeze({
+      design: models.sonnet,
+      development: models.primary,
+      test: models.haiku,
+    });
+  }
+  const fallback = process.env.DEVILUDO_CODEX_CONVERSATION_MODEL
+    ?? process.env.DEVILUDO_CODEX_NAMING_MODEL
+    ?? "codex-mini-latest";
+  return Object.freeze({ design: fallback, development: fallback, test: fallback });
 }
 
 function normalizeAgentModel(value: unknown): string {

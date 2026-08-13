@@ -348,6 +348,22 @@ button {
 .steam-security-list li > svg { color: #3d7652; flex: 0 0 auto; height: 17px; margin-top: 2px; width: 17px; }
 .steam-security-list b, .steam-security-list small { display: block; }
 .steam-security-list small { color: var(--muted); line-height: 1.5; margin-top: 4px; }
+.product-steam-panel { display: grid; gap: 18px; }
+.product-steam-settings { border: 1px solid var(--line); padding: 14px; }
+.product-steam-settings summary { cursor: pointer; font-weight: 800; }
+.product-steam-field-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.product-steam-field-grid label, .product-release-form label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; }
+.product-steam-field-grid input, .product-release-form input, .product-release-form select { background: var(--panel); border: 1px solid var(--line); color: var(--text); min-height: 42px; padding: 9px 11px; }
+.product-release-decision { align-items: end; border: 1px solid color-mix(in srgb, var(--green) 55%, var(--line)); display: grid; gap: 14px; grid-template-columns: minmax(260px, 1fr) auto; padding: 16px; }
+.product-release-decision p { color: var(--muted); margin: 6px 0 0; }
+.product-release-form { align-items: end; display: flex; flex-wrap: wrap; gap: 10px; grid-column: 1 / -1; }
+.product-steam-release-list { display: grid; gap: 10px; }
+.product-steam-release-list article { align-items: center; border: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; padding: 13px; }
+.product-steam-release-list article > div:first-child { display: grid; gap: 3px; }
+.product-steam-release-list small { color: var(--muted); }
+.product-steam-promotion { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+.steam-release-live_test, .steam-release-live_default { color: var(--green); }
+.steam-release-failed { color: var(--danger); }
 .agent-settings-summary a, .project-agent-note a { color: #45664b; font-weight: 700; text-decoration: none; }
 .agent-settings-grid { display: grid; gap: 18px; grid-template-columns: minmax(280px, .72fr) minmax(480px, 1.28fr); }
 .settings-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; }

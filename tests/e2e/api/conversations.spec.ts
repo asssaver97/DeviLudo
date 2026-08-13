@@ -294,11 +294,27 @@ test("project conversations are listed by recency and project deletion removes t
   const history = await stack.web(`/api/projects/${project.id}/conversations`);
   expect(history.status()).toBe(200);
   const summaries = (await history.json() as {
-    conversations: readonly Readonly<{ id: string; preview: string; messageCount: number }>[];
+    conversations: readonly Readonly<{
+      id: string;
+      preview: string;
+      messageCount: number;
+      userMessageCount: number;
+      systemGenerated: boolean;
+    }>[];
   }).conversations;
   expect(summaries.map(item => item.id)).toEqual([secondConversation.id, firstConversation.id]);
-  expect(summaries[0]).toMatchObject({ preview: "再单独讨论美术风格和声音反馈。", messageCount: 2 });
-  expect(summaries[1]).toMatchObject({ preview: "先讨论录音回放与历史改写之间的核心循环。", messageCount: 4 });
+  expect(summaries[0]).toMatchObject({
+    preview: "再单独讨论美术风格和声音反馈。",
+    messageCount: 2,
+    userMessageCount: 1,
+    systemGenerated: false,
+  });
+  expect(summaries[1]).toMatchObject({
+    preview: "先讨论录音回放与历史改写之间的核心循环。",
+    messageCount: 4,
+    userMessageCount: 2,
+    systemGenerated: false,
+  });
 
   const deleted = await stack.web(`/api/projects/${project.id}`, { method: "DELETE" });
   expect(deleted.status()).toBe(204);

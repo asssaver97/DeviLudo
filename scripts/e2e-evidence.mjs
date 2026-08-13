@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   copyFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -16,13 +18,16 @@ import { promisify } from "node:util";
 import { deflateSync, inflateSync } from "node:zlib";
 
 const execute = promisify(execFile);
-export const E2E_EVIDENCE_PROTOCOL = "deviludo.e2e-evidence.v2";
-export const GUEST_REPORT_PROTOCOL = "deviludo.godot-guest-report.v3";
+export const E2E_EVIDENCE_SCHEMA = "deviludo.e2e-evidence";
+export const GUEST_REPORT_SCHEMA = "deviludo.godot-guest-report";
+export const E2E_EVIDENCE_MANIFEST_SCHEMA = "deviludo.e2e-evidence-manifest";
 export const E2E_CLIENT_WIDTH = 1280;
 export const E2E_CLIENT_HEIGHT = 720;
 export const DEFAULT_VISUAL_THRESHOLD = 0.01;
 export const MAX_SOLID_PIXEL_RATIO = 0.995;
 export const MIN_OPAQUE_PIXEL_RATIO = 0.995;
+export const MAX_E2E_EVIDENCE_BYTES = 1024 * 1024 * 1024;
+export const MAX_E2E_VIDEO_BYTES = 768 * 1024 * 1024;
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const GODOT_ERROR = /(?:SCRIPT ERROR|Parse Error|Parser Error|Compile Error|Failed to load script|Cannot load script|runtime error|Invalid call\.|GDScript::reload)/i;
@@ -140,6 +145,9 @@ export async function createEvidenceBundle({
   screenshots = [],
   diffs = [],
   baselines = [],
+  videos = [],
+  trajectories = [],
+  regressions = [],
 }) {
   if (!isAbsolute(outputRoot) || !/^[0-9a-f-]{36}$/i.test(jobId)) throw new Error("Evidence output contract is invalid");
   const bundleRoot = join(outputRoot, `evidence-${jobId}-${randomUUID()}`);
@@ -148,9 +156,20 @@ export async function createEvidenceBundle({
   await writeFile(join(bundleRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(bundleRoot, "logs/stdout.log"), String(stdout), { mode: 0o600 });
   await writeFile(join(bundleRoot, "logs/stderr.log"), String(stderr), { mode: 0o600 });
-  for (const item of screenshots) await copyEvidenceFile(item, bundleRoot, "screenshots");
-  for (const item of diffs) await copyEvidenceFile(item, bundleRoot, "diff");
-  for (const item of baselines) await copyEvidenceFile(item, bundleRoot, "baselines");
+  let totalVideoBytes = 0;
+  for (const item of videos) {
+    if (!item || typeof item.path !== "string" || !isAbsolute(item.path)) throw new Error("Evidence video contract is invalid");
+    totalVideoBytes += (await lstat(item.path)).size;
+    if (!Number.isSafeInteger(totalVideoBytes) || totalVideoBytes > MAX_E2E_VIDEO_BYTES) {
+      throw new Error("E2E videos exceed the 768 MiB aggregate target limit");
+    }
+  }
+  for (const item of screenshots) await copyEvidenceFile(item, bundleRoot, "screenshots", ".png");
+  for (const item of diffs) await copyEvidenceFile(item, bundleRoot, "diff", ".png");
+  for (const item of baselines) await copyEvidenceFile(item, bundleRoot, "baselines", ".png");
+  for (const item of videos) await copyEvidenceFile(item, bundleRoot, "videos", ".mp4");
+  for (const item of trajectories) await copyEvidenceFile(item, bundleRoot, "trajectories", ".jsonl");
+  for (const item of regressions) await copyEvidenceFile(item, bundleRoot, "regression", ".json");
 
   const html = await evidenceHtml(
     report,
@@ -159,19 +178,18 @@ export async function createEvidenceBundle({
       ...diffs.map(item => ({ ...item, label: `diff · ${item.id}` })),
       ...baselines.map(item => ({ ...item, label: `baseline · ${item.id}` })),
     ],
-    stdout,
-    stderr,
+    stdout, stderr, videos,
   );
   await writeFile(join(bundleRoot, "index.html"), html, { mode: 0o600 });
-  const payloadFiles = await regularFiles(bundleRoot);
+  const payloadFiles = await regularFiles(bundleRoot, MAX_E2E_EVIDENCE_BYTES);
   const entries = [];
   for (const path of payloadFiles) {
     const bytes = await readFile(join(bundleRoot, path));
     entries.push({ path, sha256: sha256(bytes), sizeBytes: bytes.length, mediaType: mediaType(path) });
   }
   const manifest = {
-    schemaVersion: "deviludo.e2e-evidence-manifest.v1",
-    evidenceProtocol: E2E_EVIDENCE_PROTOCOL,
+    schema: E2E_EVIDENCE_MANIFEST_SCHEMA,
+    evidenceSchema: E2E_EVIDENCE_SCHEMA,
     jobId,
     platform,
     files: entries,
@@ -179,16 +197,18 @@ export async function createEvidenceBundle({
   await writeFile(join(bundleRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   const outputPath = join(outputRoot, `e2e-evidence-${platform}-${jobId}.zip`);
   await execute("zip", ["-q", "-X", "-r", outputPath, "."], { cwd: bundleRoot, timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
-  const bytes = await readFile(outputPath);
+  const outputSizeBytes = (await lstat(outputPath)).size;
+  if (outputSizeBytes < 1 || outputSizeBytes > MAX_E2E_EVIDENCE_BYTES) throw new Error("E2E evidence ZIP exceeds the 1 GiB limit");
+  const outputSha256 = await sha256File(outputPath);
   await rm(bundleRoot, { recursive: true, force: true });
-  return Object.freeze({ outputPath, outputSha256: sha256(bytes), outputSizeBytes: bytes.length, manifest });
+  return Object.freeze({ outputPath, outputSha256, outputSizeBytes, manifest });
 }
 
-export async function extractAndValidateEvidenceBundle(zipPath, destination, maximumBytes = 1024 * 1024 * 1024, options = {}) {
+export async function extractAndValidateEvidenceBundle(zipPath, destination, maximumBytes = 1024 * 1024 * 1024) {
   if (!isAbsolute(zipPath) || !isAbsolute(destination)) throw new Error("Evidence paths must be absolute");
-  const archive = await readFile(zipPath);
-  if (archive.length < 22 || archive.length > maximumBytes) throw new Error("E2E evidence ZIP size is invalid");
-  inspectZipDirectory(archive, maximumBytes);
+  const archiveSize = (await lstat(zipPath)).size;
+  if (archiveSize < 22 || archiveSize > maximumBytes) throw new Error("E2E evidence ZIP size is invalid");
+  await inspectZipFile(zipPath, archiveSize, maximumBytes);
   await mkdir(destination, { recursive: true, mode: 0o700 });
   await execute("unzip", ["-q", zipPath, "-d", destination], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
   const files = await regularFiles(destination, maximumBytes);
@@ -198,10 +218,10 @@ export async function extractAndValidateEvidenceBundle(zipPath, destination, max
   const indexPath = join(destination, "index.html");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   const report = JSON.parse(await readFile(reportPath, "utf8"));
-  const acceptedProtocols = new Set([E2E_EVIDENCE_PROTOCOL, ...(options.allowLegacy === true ? ["deviludo.e2e-evidence.v1"] : [])]);
-  if (manifest?.schemaVersion !== "deviludo.e2e-evidence-manifest.v1"
-    || !acceptedProtocols.has(manifest.evidenceProtocol) || !Array.isArray(manifest.files)) throw new Error("E2E evidence manifest is invalid");
-  if (report?.schemaVersion !== manifest.evidenceProtocol || !["PASSED", "FAILED"].includes(report.outcome)) throw new Error("E2E evidence report is invalid");
+  if (manifest?.schema !== E2E_EVIDENCE_MANIFEST_SCHEMA || Object.hasOwn(manifest, "schemaVersion")
+    || manifest.evidenceSchema !== E2E_EVIDENCE_SCHEMA || !Array.isArray(manifest.files)) throw new Error("E2E evidence manifest is invalid");
+  if (report?.schema !== manifest.evidenceSchema || Object.hasOwn(report, "schemaVersion")
+    || !["PASSED", "FAILED"].includes(report.outcome)) throw new Error("E2E evidence report is invalid");
   if (!files.includes("index.html")) throw new Error("E2E evidence HTML report is missing");
   const declared = new Set();
   for (const item of manifest.files) {
@@ -209,46 +229,71 @@ export async function extractAndValidateEvidenceBundle(zipPath, destination, max
       || !/^sha256:[0-9a-f]{64}$/.test(item.sha256) || !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes < 0) {
       throw new Error("E2E evidence file manifest is invalid");
     }
-    const bytes = await readFile(join(destination, item.path));
-    if (bytes.length !== item.sizeBytes || sha256(bytes) !== item.sha256) throw new Error(`E2E evidence file failed integrity validation: ${item.path}`);
+    const path = join(destination, item.path);
+    const size = (await lstat(path)).size;
+    if (size !== item.sizeBytes || await sha256File(path) !== item.sha256) throw new Error(`E2E evidence file failed integrity validation: ${item.path}`);
     declared.add(item.path);
   }
   const payloadFiles = files.filter(path => path !== "manifest.json");
   if (payloadFiles.some(path => !declared.has(path)) || declared.size !== payloadFiles.length) throw new Error("E2E evidence ZIP contains undeclared files");
-  return Object.freeze({ manifest, report, indexPath, legacy: report.schemaVersion !== E2E_EVIDENCE_PROTOCOL });
+  return Object.freeze({ manifest, report, indexPath });
 }
 
-function inspectZipDirectory(archive, maximumBytes) {
-  const minimumEocd = Math.max(0, archive.length - 65_557);
-  let eocd = -1;
-  for (let offset = archive.length - 22; offset >= minimumEocd; offset -= 1) {
-    if (archive.readUInt32LE(offset) === 0x06054b50) { eocd = offset; break; }
+async function inspectZipFile(path, archiveSize, maximumBytes) {
+  const handle = await open(path, "r");
+  try {
+    const tailSize = Math.min(65_557, archiveSize);
+    const tail = Buffer.alloc(tailSize);
+    const { bytesRead } = await handle.read(tail, 0, tail.length, archiveSize - tailSize);
+    if (bytesRead !== tail.length) throw new Error("E2E evidence ZIP directory is truncated");
+    let eocd = -1;
+    for (let offset = tail.length - 22; offset >= 0; offset -= 1) {
+      if (tail.readUInt32LE(offset) === 0x06054b50
+        && offset + 22 + tail.readUInt16LE(offset + 20) === tail.length) { eocd = offset; break; }
+    }
+    if (eocd < 0) throw new Error("E2E evidence ZIP directory is missing");
+    if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0
+      || tail.readUInt16LE(eocd + 8) !== tail.readUInt16LE(eocd + 10)) {
+      throw new Error("E2E evidence ZIP cannot span disks");
+    }
+    const entryCount = tail.readUInt16LE(eocd + 10);
+    const directorySize = tail.readUInt32LE(eocd + 12);
+    const directoryOffset = tail.readUInt32LE(eocd + 16);
+    const absoluteEocd = archiveSize - tailSize + eocd;
+    if (entryCount < 1 || entryCount === 0xffff || directorySize < 46
+      || directoryOffset + directorySize !== absoluteEocd || directorySize > maximumBytes) {
+      throw new Error("E2E evidence ZIP directory is invalid");
+    }
+    const directory = Buffer.alloc(directorySize);
+    const read = await handle.read(directory, 0, directory.length, directoryOffset);
+    if (read.bytesRead !== directory.length) throw new Error("E2E evidence ZIP directory is truncated");
+    inspectZipDirectory(directory, entryCount, maximumBytes);
+  } finally {
+    await handle.close();
   }
-  if (eocd < 0) throw new Error("E2E evidence ZIP directory is missing");
-  const entryCount = archive.readUInt16LE(eocd + 10);
-  const directorySize = archive.readUInt32LE(eocd + 12);
-  const directoryOffset = archive.readUInt32LE(eocd + 16);
-  let offset = directoryOffset;
-  if (entryCount < 1 || entryCount === 0xffff || offset + directorySize > eocd) throw new Error("E2E evidence ZIP directory is invalid");
+}
+
+function inspectZipDirectory(directory, entryCount, maximumBytes) {
+  let offset = 0;
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const names = new Set();
   let totalBytes = 0;
   for (let index = 0; index < entryCount; index += 1) {
-    if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== 0x02014b50) throw new Error("E2E evidence ZIP entry is invalid");
-    const madeBy = archive.readUInt16LE(offset + 4);
-    const flags = archive.readUInt16LE(offset + 8);
-    const method = archive.readUInt16LE(offset + 10);
-    const uncompressedBytes = archive.readUInt32LE(offset + 24);
-    const nameLength = archive.readUInt16LE(offset + 28);
-    const extraLength = archive.readUInt16LE(offset + 30);
-    const commentLength = archive.readUInt16LE(offset + 32);
-    const externalAttributes = archive.readUInt32LE(offset + 38);
+    if (offset + 46 > directory.length || directory.readUInt32LE(offset) !== 0x02014b50) throw new Error("E2E evidence ZIP entry is invalid");
+    const madeBy = directory.readUInt16LE(offset + 4);
+    const flags = directory.readUInt16LE(offset + 8);
+    const method = directory.readUInt16LE(offset + 10);
+    const uncompressedBytes = directory.readUInt32LE(offset + 24);
+    const nameLength = directory.readUInt16LE(offset + 28);
+    const extraLength = directory.readUInt16LE(offset + 30);
+    const commentLength = directory.readUInt16LE(offset + 32);
+    const externalAttributes = directory.readUInt32LE(offset + 38);
     const end = offset + 46 + nameLength + extraLength + commentLength;
-    if (end > archive.length || nameLength < 1 || (flags & 1) !== 0 || ![0, 8].includes(method) || uncompressedBytes === 0xffffffff) {
+    if (end > directory.length || nameLength < 1 || (flags & 1) !== 0 || ![0, 8].includes(method) || uncompressedBytes === 0xffffffff) {
       throw new Error("E2E evidence ZIP entry contract is invalid");
     }
     let name;
-    try { name = decoder.decode(archive.subarray(offset + 46, offset + 46 + nameLength)); }
+    try { name = decoder.decode(directory.subarray(offset + 46, offset + 46 + nameLength)); }
     catch { throw new Error("E2E evidence ZIP path encoding is invalid"); }
     const normalized = name.replace(/^\.\//, "").replace(/\/$/, "");
     if (!safeArchivePath(name) || names.has(normalized)) throw new Error("E2E evidence ZIP contains an unsafe or duplicate path");
@@ -260,10 +305,10 @@ function inspectZipDirectory(archive, maximumBytes) {
     if (!Number.isSafeInteger(totalBytes) || totalBytes > maximumBytes) throw new Error("E2E evidence extracted size exceeds the limit");
     offset = end;
   }
-  if (offset !== directoryOffset + directorySize) throw new Error("E2E evidence ZIP directory size is invalid");
+  if (offset !== directory.length) throw new Error("E2E evidence ZIP directory size is invalid");
 }
 
-export async function readEvidenceRepairContext(zipPath, maximumBytes = 256 * 1024 * 1024) {
+export async function readEvidenceRepairContext(zipPath, maximumBytes = MAX_E2E_EVIDENCE_BYTES) {
   const directory = await mkdtemp(join(tmpdir(), "deviludo-e2e-repair-"));
   try {
     const validated = await extractAndValidateEvidenceBundle(zipPath, directory, maximumBytes);
@@ -279,22 +324,26 @@ export async function readEvidenceRepairContext(zipPath, maximumBytes = 256 * 10
   }
 }
 
-async function copyEvidenceFile(item, root, folder) {
+async function copyEvidenceFile(item, root, folder, extension) {
   if (!item || typeof item.path !== "string" || !isAbsolute(item.path) || typeof item.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,239}$/.test(item.id)) {
     throw new Error("Evidence file contract is invalid");
   }
   const targetDirectory = join(root, folder);
   await mkdir(targetDirectory, { recursive: true, mode: 0o700 });
-  await copyFile(item.path, join(targetDirectory, `${item.id}.png`));
+  if (folder === "videos" && (await lstat(item.path)).size > MAX_E2E_VIDEO_BYTES) {
+    throw new Error("E2E video exceeds the 768 MiB target limit");
+  }
+  await copyFile(item.path, join(targetDirectory, `${item.id}${extension}`));
 }
 
-async function evidenceHtml(report, imagesInput, stdout, stderr) {
+async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
   const images = [];
   for (const item of imagesInput) {
     const bytes = await readFile(item.path);
     images.push(`<figure><img alt="${escapeHtml(item.label)}" src="data:image/png;base64,${bytes.toString("base64")}"><figcaption>${escapeHtml(item.label)}</figcaption></figure>`);
   }
   const title = report.outcome === "PASSED" ? "E2E PASSED" : "E2E FAILED";
+  const videos = videosInput.map(item => `<figure><video controls preload="metadata" src="videos/${escapeHtml(item.id)}.mp4"></video><figcaption>gameplay · ${escapeHtml(item.id)}</figcaption></figure>`).join("");
   const coverage = report.coverage ?? {};
   const stats = [
     ["Headless 检查", coverage.headlessCheckCount ?? 0],
@@ -303,10 +352,21 @@ async function evidenceHtml(report, imagesInput, stdout, stderr) {
     ["玩家需求覆盖", `${coverage.coveredPlayerRequirementCount ?? 0}/${coverage.playerRequirementCount ?? 0}`],
     ["截图", report.screenshotCount ?? imagesInput.filter(item => item.label.startsWith("checkpoint")).length],
     ["稳定视觉基线", coverage.visualBaselineCount ?? 0],
+    ["自适应游玩", `${coverage.adaptiveSuccessCount ?? 0}/${coverage.adaptiveRolloutCount ?? 0}`],
+    ["手柄输入", coverage.gamepadInputCount ?? 0],
+    ["视频", videosInput.length],
   ].map(([label, value]) => `<article><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></article>`).join("");
   const requirementRows = (report.requirementCoverage ?? []).map(requirement => `<tr><td>${escapeHtml(requirement.requirementId)}</td><td>${escapeHtml(requirement.status)}</td><td>${escapeHtml((requirement.evidenceSteps ?? []).join(", ") || requirement.exemptionReason || "-")}</td></tr>`).join("");
   const stepRows = (report.steps ?? []).map(step => `<tr><td>${escapeHtml(step.journeyId)}</td><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.type)}</td><td>${escapeHtml(step.target?.controls?.map(control => control.id).join(", ") ?? "键盘")}</td><td>${escapeHtml(`${step.before?.sequence ?? "-"} → ${step.after?.sequence ?? "-"}`)}</td></tr>`).join("");
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{margin:0;background:#07111e;color:#e8f1ff;font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid #32506f}header{padding:24px}h1{color:${report.outcome === "PASSED" ? "#57e3b2" : "#ff718d"}}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.stats article{padding:16px;background:#0b1928}.stats strong,.stats span{display:block}.stats span{font-size:28px;color:#57e3b2;margin-top:8px}figure{margin:0;padding:12px;background:#0b1928}img{width:100%;height:auto;display:block}figcaption{padding-top:10px}table{width:100%;border-collapse:collapse;background:#0b1928}th,td{padding:10px;border:1px solid #253f5c;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#050b13;padding:16px}</style></head><body><main><header><h1>${title}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")} · ${escapeHtml(report.schemaVersion ?? "")}</p></header><div class="stats">${stats}</div><h2>玩家需求覆盖</h2><table><thead><tr><th>需求</th><th>状态</th><th>真实操作证据</th></tr></thead><tbody>${requirementRows || "<tr><td colspan=\"3\">无已覆盖玩家需求</td></tr>"}</tbody></table><h2>真实键鼠步骤</h2><table><thead><tr><th>旅程</th><th>步骤</th><th>输入</th><th>语义目标</th><th>Probe 序号</th></tr></thead><tbody>${stepRows || "<tr><td colspan=\"5\">无真实输入步骤</td></tr>"}</tbody></table><section>${images.join("")}</section><h2>完整结构化结果</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main></body></html>`;
+  const rolloutRows = (report.adaptiveRollouts ?? []).map(rollout => {
+    const recoveries = (rollout.decisions ?? []).filter(decision => decision.recovery === true).length;
+    const oracle = rollout.outcome === "PASSED" ? "核心循环 Oracle 通过" : rollout.failureCode ?? "未通过";
+    return `<tr><td>${escapeHtml(Number(rollout.rolloutIndex) + 1)}</td><td>${escapeHtml(rollout.seed)}</td><td>${escapeHtml(rollout.outcome)}</td><td>${escapeHtml(rollout.decisionCount)}</td><td>${escapeHtml(recoveries)}</td><td>${escapeHtml(oracle)}</td></tr>`;
+  }).join("");
+  const regression = report.regression ?? {};
+  const currentRegression = regression.currentReplay?.status ?? "无当前轨迹";
+  const replacementRegression = regression.replacement?.stored ? "已通过两次干净回放并替换" : "未生成替换轨迹";
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{margin:0;background:#07111e;color:#e8f1ff;font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid #32506f}header{padding:24px}h1{color:${report.outcome === "PASSED" ? "#57e3b2" : "#ff718d"}}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.stats article{padding:16px;background:#0b1928}.stats strong,.stats span{display:block}.stats span{font-size:28px;color:#57e3b2;margin-top:8px}figure{margin:0;padding:12px;background:#0b1928}img,video{width:100%;height:auto;display:block}figcaption{padding-top:10px}table{width:100%;border-collapse:collapse;background:#0b1928}th,td{padding:10px;border:1px solid #253f5c;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#050b13;padding:16px}</style></head><body><main><header><h1>${title}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")}</p></header><div class="stats">${stats}</div><h2>玩家需求覆盖</h2><table><thead><tr><th>需求</th><th>状态</th><th>真实操作证据</th></tr></thead><tbody>${requirementRows || "<tr><td colspan=\"3\">无已覆盖玩家需求</td></tr>"}</tbody></table><h2>确定性真实操作</h2><table><thead><tr><th>旅程</th><th>步骤</th><th>输入</th><th>语义目标</th><th>Probe 序号</th></tr></thead><tbody>${stepRows || "<tr><td colspan=\"5\">无真实输入步骤</td></tr>"}</tbody></table><h2>Test Agent 自适应游玩与 Oracle</h2><table><thead><tr><th>Rollout</th><th>种子</th><th>结果</th><th>决策数</th><th>卡死恢复</th><th>Oracle</th></tr></thead><tbody>${rolloutRows || "<tr><td colspan=\"6\">未执行自适应游玩</td></tr>"}</tbody></table><h2>当前回归轨迹</h2><table><tbody><tr><th>既有轨迹回放</th><td>${escapeHtml(currentRegression)}</td></tr><tr><th>成功轨迹固化</th><td>${escapeHtml(replacementRegression)}</td></tr></tbody></table><h2>完整游戏视频</h2><section>${videos || "<p>无视频</p>"}</section><h2>截图与差异</h2><section>${images.join("")}</section><h2>完整结构化结果</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main></body></html>`;
 }
 
 async function regularFiles(root, maximumBytes = Number.MAX_SAFE_INTEGER) {
@@ -350,6 +410,8 @@ function mediaType(path) {
   if (path.endsWith(".html")) return "text/html; charset=utf-8";
   if (path.endsWith(".json")) return "application/json";
   if (path.endsWith(".png")) return "image/png";
+  if (path.endsWith(".mp4")) return "video/mp4";
+  if (path.endsWith(".jsonl")) return "application/x-ndjson";
   return "text/plain; charset=utf-8";
 }
 
@@ -359,6 +421,12 @@ function escapeHtml(value) {
 
 function sha256(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return `sha256:${hash.digest("hex")}`;
 }
 
 function decodePng(buffer) {

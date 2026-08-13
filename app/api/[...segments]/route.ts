@@ -30,6 +30,7 @@ const RESPONSE_HEADER_DENYLIST = new Set([
 ]);
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const PROJECT_BIND_TIMEOUT_MS = 12 * 60 * 1_000;
+const PROJECT_DELETE_TIMEOUT_MS = 10 * 60 * 1_000;
 // A design-Agent stream can legitimately take several minutes while it updates
 // the specification and project document. Cutting the proxy at the ordinary
 // 65-second request budget leaves the streamed answer visible temporarily but
@@ -106,6 +107,8 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   const controller = new AbortController();
   const timeoutMilliseconds = routePath.startsWith("projects/bind/")
     ? PROJECT_BIND_TIMEOUT_MS
+    : request.method === "DELETE" && /^projects\/[^/]+$/.test(routePath)
+      ? PROJECT_DELETE_TIMEOUT_MS
     : routePath === "conversations/messages/stream"
       ? CONVERSATION_STREAM_TIMEOUT_MS
       : 65_000;

@@ -10,7 +10,7 @@ const workflowId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const projectId = "10000000-0000-4000-8000-000000000003";
 
-test("the deterministic workflow covers generation, build, three-platform gates and release", () => {
+test("the deterministic workflow reaches a release decision and uploads Steam only when approved", () => {
   let snapshot: WorkflowSnapshot = initialWorkflowSnapshot(
     workflowId, workspaceId, projectId, "RELEASE", ["linux", "windows", "macos"],
   );
@@ -44,16 +44,7 @@ test("the deterministic workflow covers generation, build, three-platform gates 
     });
     snapshot = transition.snapshot;
   }
-  assert.equal(snapshot.state, "SIGNING");
-  assert.equal(transition.enqueue.length, 3);
-
-  for (const operatingSystem of ["linux", "windows", "macos"] as const) {
-    transition = transitionWorkflow(snapshot, {
-      kind: "JOB_SUCCEEDED", jobId: `sign-job-${operatingSystem}`, jobKind: "ARTIFACT_SIGN", targetOperatingSystem: operatingSystem,
-    });
-    snapshot = transition.snapshot;
-  }
-  assert.equal(snapshot.state, "RELEASE_APPROVAL_PENDING");
+  assert.equal(snapshot.state, "RELEASE_DECISION_PENDING");
   assert.deepEqual(transition.enqueue, []);
 
   transition = transitionWorkflow(snapshot, { kind: "RELEASE_APPROVED", approvalId: "approval-1" });
@@ -65,27 +56,22 @@ test("the deterministic workflow covers generation, build, three-platform gates 
   transition = transitionWorkflow(snapshot, {
     kind: "JOB_SUCCEEDED", jobId: "publish-job-1", jobKind: "STEAM_PUBLISH", targetOperatingSystem: null,
   });
-  snapshot = transition.snapshot;
-  assert.equal(snapshot.state, "CLEAN_INSTALL_VERIFYING");
-
-  for (const operatingSystem of ["linux", "windows", "macos"] as const) {
-    transition = transitionWorkflow(snapshot, {
-      kind: "JOB_SUCCEEDED", jobId: `clean-job-${operatingSystem}`, jobKind: "STEAM_CLEAN_INSTALL", targetOperatingSystem: operatingSystem,
-    });
-    snapshot = transition.snapshot;
-  }
-  assert.equal(snapshot.state, "SUCCEEDED");
+  assert.equal(transition.snapshot.state, "SUCCEEDED");
+  assert.deepEqual(transition.enqueue, []);
 });
 
-test("local validation targets only macOS and ends after E2E", () => {
+test("local validation targets only macOS and can finish without publishing", () => {
   let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]);
   snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;
   snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "agent-job-1", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
   const build = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "build-job-1", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null });
   assert.deepEqual(build.enqueue.map(item => item.poolKind), ["E2E_MACOS"]);
   const complete = transitionWorkflow(build.snapshot, { kind: "JOB_SUCCEEDED", jobId: "e2e-job-macos", jobKind: "E2E_TEST", targetOperatingSystem: "macos" });
-  assert.equal(complete.snapshot.state, "SUCCEEDED");
+  assert.equal(complete.snapshot.state, "RELEASE_DECISION_PENDING");
   assert.deepEqual(complete.enqueue, []);
+  const skipped = transitionWorkflow(complete.snapshot, { kind: "RELEASE_SKIPPED" });
+  assert.equal(skipped.snapshot.state, "SUCCEEDED");
+  assert.deepEqual(skipped.enqueue, []);
 });
 
 test("rerunning a stage reopens a terminal workflow and enqueues only that stage", () => {
@@ -94,6 +80,7 @@ test("rerunning a stage reopens a terminal workflow and enqueues only that stage
   snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "agent-job-1", jobKind: "AGENT_GENERATION", targetOperatingSystem: null }).snapshot;
   snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "build-job-1", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null }).snapshot;
   snapshot = transitionWorkflow(snapshot, { kind: "JOB_SUCCEEDED", jobId: "e2e-job-macos", jobKind: "E2E_TEST", targetOperatingSystem: "macos" }).snapshot;
+  snapshot = transitionWorkflow(snapshot, { kind: "RELEASE_SKIPPED" }).snapshot;
   assert.equal(snapshot.state, "SUCCEEDED");
   assert.deepEqual(snapshot.completedE2e, ["macos"]);
 
@@ -129,13 +116,13 @@ test("rerunning a per-platform stage fans out across every target platform", () 
   assert.equal(new Set(rerun.enqueue.map(command => command.idempotencyKey)).size, 3);
 });
 
-test("stage rerun rejects out-of-profile stages and non-terminal workflows", () => {
+test("stage rerun rejects retired stages and non-terminal workflows", () => {
   const validating = transitionWorkflow(
     initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]),
     { kind: "JOB_FAILED", jobKind: "AGENT_GENERATION", reason: "boom" },
   ).snapshot;
   assert.throws(
-    () => transitionWorkflow(validating, { kind: "STAGE_RERUN_REQUESTED", stage: "STEAM_PUBLISH", signalId: "s" }),
+    () => transitionWorkflow(validating, { kind: "STAGE_RERUN_REQUESTED", stage: "ARTIFACT_SIGN" as never, signalId: "s" }),
     /not part of the VALIDATE delivery chain/,
   );
 

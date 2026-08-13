@@ -69,6 +69,8 @@ yarn-error.log*
 next-env.d.ts
 *.tsbuildinfo
 dist/
+**/bin/
+**/obj/
 /.wrangler/
 /outputs/
 /work/

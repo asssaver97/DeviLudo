@@ -7,6 +7,8 @@ export const WORKFLOW_STATES = [
   "ASSET_GENERATING",
   "ARTIFACT_BUILDING",
   "E2E_TESTING",
+  "RELEASE_DECISION_PENDING",
+  // Legacy states are retained so historical workflows remain readable.
   "SIGNING",
   "RELEASE_APPROVAL_PENDING",
   "STEAM_PUBLISHING",
@@ -25,14 +27,13 @@ export type WorkflowSnapshot = Readonly<{
   profile: "VALIDATE" | "RELEASE";
   targetPlatforms: readonly ServerOperatingSystem[];
   completedE2e: readonly ServerOperatingSystem[];
-  completedSigning: readonly ServerOperatingSystem[];
-  completedCleanInstall: readonly ServerOperatingSystem[];
 }>;
 
 export type WorkflowEvent =
   | Readonly<{ kind: "SPEC_APPROVED" }>
   | Readonly<{ kind: "ASSETS_READY"; predecessorJobId: string }>
   | Readonly<{ kind: "RELEASE_APPROVED"; approvalId: string }>
+  | Readonly<{ kind: "RELEASE_SKIPPED" }>
   | Readonly<{ kind: "CANCEL_REQUESTED" }>
   | Readonly<{
       kind: "JOB_SUCCEEDED";
@@ -53,14 +54,13 @@ export const DELIVERY_STAGES = [
   "AGENT_GENERATION",
   "ARTIFACT_BUILD",
   "E2E_TEST",
-  "ARTIFACT_SIGN",
   "STEAM_PUBLISH",
-  "STEAM_CLEAN_INSTALL",
 ] as const;
 export type RerunStage = typeof DELIVERY_STAGES[number];
 
 export function deliveryStagesFor(profile: "VALIDATE" | "RELEASE"): readonly RerunStage[] {
-  return profile === "VALIDATE" ? DELIVERY_STAGES.slice(0, 3) : DELIVERY_STAGES;
+  void profile;
+  return DELIVERY_STAGES;
 }
 
 // Workflow state a stage occupies while it runs.
@@ -68,21 +68,15 @@ const STAGE_RUNNING_STATE: Readonly<Record<RerunStage, WorkflowState>> = Object.
   AGENT_GENERATION: "AGENT_RUNNING",
   ARTIFACT_BUILD: "ARTIFACT_BUILDING",
   E2E_TEST: "E2E_TESTING",
-  ARTIFACT_SIGN: "SIGNING",
   STEAM_PUBLISH: "STEAM_PUBLISHING",
-  STEAM_CLEAN_INSTALL: "CLEAN_INSTALL_VERIFYING",
 });
 
 // Stages that fan out one job per target platform.
-const PER_PLATFORM_STAGES: ReadonlySet<RerunStage> = new Set<RerunStage>([
-  "E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL",
-]);
+const PER_PLATFORM_STAGES: ReadonlySet<RerunStage> = new Set<RerunStage>(["E2E_TEST"]);
 
 // Per-platform progress that a rerun of a given stage invalidates.
 const STAGE_PROGRESS_KEY: Readonly<Partial<Record<RerunStage, keyof WorkflowSnapshot>>> = Object.freeze({
   E2E_TEST: "completedE2e",
-  ARTIFACT_SIGN: "completedSigning",
-  STEAM_CLEAN_INSTALL: "completedCleanInstall",
 });
 
 export type EnqueueCommand = Readonly<{
@@ -117,8 +111,6 @@ export function initialWorkflowSnapshot(
     profile,
     targetPlatforms: Object.freeze([...targetPlatforms]),
     completedE2e: Object.freeze([]),
-    completedSigning: Object.freeze([]),
-    completedCleanInstall: Object.freeze([]),
   });
 }
 
@@ -140,7 +132,10 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
       [command(snapshot, "ARTIFACT_BUILD", null, `artifact:after:${event.predecessorJobId}`)],
     );
   }
-  if (event.kind === "RELEASE_APPROVED" && snapshot.state === "RELEASE_APPROVAL_PENDING") {
+  if (event.kind === "RELEASE_SKIPPED" && snapshot.state === "RELEASE_DECISION_PENDING") {
+    return result({ ...snapshot, state: "SUCCEEDED" }, []);
+  }
+  if (event.kind === "RELEASE_APPROVED" && snapshot.state === "RELEASE_DECISION_PENDING") {
     return result(
       { ...snapshot, state: "STEAM_PUBLISHING" },
       [command(snapshot, "STEAM_PUBLISH", null, `publish:approved:${event.approvalId}`)],
@@ -166,38 +161,10 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   if (snapshot.state === "E2E_TESTING" && event.jobKind === "E2E_TEST" && event.targetOperatingSystem) {
     const completedE2e = appendPlatform(snapshot.completedE2e, event.targetOperatingSystem);
     if (completedE2e.length < snapshot.targetPlatforms.length) return result({ ...snapshot, completedE2e }, []);
-    if (snapshot.profile === "VALIDATE") return result({ ...snapshot, state: "SUCCEEDED", completedE2e }, []);
-    return result(
-      { ...snapshot, state: "SIGNING", completedE2e },
-      snapshot.targetPlatforms.map(platform => command(
-        snapshot, "ARTIFACT_SIGN", platform, `sign:${platform}:after:${event.jobId}`,
-      )),
-    );
-  }
-  if (snapshot.state === "SIGNING" && event.jobKind === "ARTIFACT_SIGN" && event.targetOperatingSystem) {
-    const completedSigning = appendPlatform(snapshot.completedSigning, event.targetOperatingSystem);
-    if (completedSigning.length < snapshot.targetPlatforms.length) return result({ ...snapshot, completedSigning }, []);
-    // Signing proves that the exact build is releasable. Publishing is an
-    // irreversible external mutation, so it waits for a separate human signal.
-    return result({ ...snapshot, state: "RELEASE_APPROVAL_PENDING", completedSigning }, []);
+    return result({ ...snapshot, state: "RELEASE_DECISION_PENDING", completedE2e }, []);
   }
   if (snapshot.state === "STEAM_PUBLISHING" && event.jobKind === "STEAM_PUBLISH") {
-    return result(
-      { ...snapshot, state: "CLEAN_INSTALL_VERIFYING" },
-      snapshot.targetPlatforms.map(platform => command(
-        snapshot, "STEAM_CLEAN_INSTALL", platform, `clean-install:${platform}:after:${event.jobId}`,
-      )),
-    );
-  }
-  if (snapshot.state === "CLEAN_INSTALL_VERIFYING"
-    && event.jobKind === "STEAM_CLEAN_INSTALL"
-    && event.targetOperatingSystem) {
-    const completedCleanInstall = appendPlatform(snapshot.completedCleanInstall, event.targetOperatingSystem);
-    return result({
-      ...snapshot,
-      state: completedCleanInstall.length === snapshot.targetPlatforms.length ? "SUCCEEDED" : snapshot.state,
-      completedCleanInstall,
-    }, []);
+    return result({ ...snapshot, state: "SUCCEEDED" }, []);
   }
   throw new Error(`Job ${event.jobKind} is invalid for ${snapshot.state}`);
 }

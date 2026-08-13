@@ -6,6 +6,7 @@ const target = new URL(process.env.DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL ?? "")
 const token = process.env.DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN ?? "";
 const allowedPaths = new Set([
   "/internal/directory/source",
+  "/internal/directory/delete",
   "/internal/directory/sync",
   "/internal/directory/git/commit",
 ]);

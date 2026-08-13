@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
-import type { ProductConversation, ProductProjectDetail, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
+import type { ProductConversation, ProductProjectDetail, ProjectAgentRole, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -47,31 +47,36 @@ import {
   type SourceFile,
 } from "./project-import";
 import {
-  generateProductConversationReply,
+  generateProductConversationGroupReply,
   isDevelopmentApprovalRequest,
-  streamProductConversationReply,
+  streamProductConversationGroupReply,
   type ConversationAgentProjectContext,
-  type ProductConversationAgentReply,
+  type ProductConversationGroupReply,
 } from "./product-conversation";
+import { generateE2ePlayerDecision, parsePlayerPolicyRequest } from "./e2e-player-policy";
 import type {
   CoreRepository,
   PendingProjectImportAnalysis,
   StoredInstanceAgentSettings,
   StoredImageGenerationSettings,
 } from "./repository";
-import { HttpSigningGrantBroker, type SigningGrantBroker } from "./signing-grants";
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
 import { createInitialProjectDocument, parseProjectDocumentContent } from "@/lib/product/project-document";
 import { ProjectSourceStore } from "./project-sources";
+import {
+  createSteamSecretStore,
+  validateSteamBuildToken,
+  type SteamSecretStore,
+} from "./steam-settings";
 
 export async function runApi(
   repository: CoreRepository,
   database: Database,
   config: CoreConfig,
   signal: AbortSignal,
-  signingGrants: SigningGrantBroker = new HttpSigningGrantBroker(),
   agentSecrets: AgentSecretStore = createAgentSecretStore(),
+  steamSecrets: SteamSecretStore = createSteamSecretStore(),
 ): Promise<void> {
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
@@ -351,6 +356,7 @@ export async function runApi(
       agentRuntime: input.agentRuntime,
       baseUrl: input.baseUrl,
       models: input.models,
+      roleModels: input.roleModels,
       credentialSecretRef: credential.secretRef,
       apiKeyMask: credential.mask,
       apiKeyFingerprint: credential.fingerprint,
@@ -400,6 +406,59 @@ export async function runApi(
     });
     return reply.header("cache-control", "no-store")
       .send({ settings: publicImageGenerationSettings(saved) });
+  });
+
+  app.get("/v1/settings/steam", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const settings = await repository.readWorkspaceSteamSettings(workspace.id);
+    return reply.header("cache-control", "no-store").send({
+      settings: settings ? {
+        builderUsername: settings.builderUsername,
+        buildToken: settings.credentialMask,
+        revision: settings.revision,
+        updatedAt: settings.updatedAt,
+      } : null,
+      editable: principal.role === "OWNER" || principal.role === "ADMIN",
+    });
+  });
+
+  app.put("/v1/settings/steam", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    requireWorkspaceAdmin(principal);
+    const body = objectBody(request.body);
+    const builderUsername = typeof body.builderUsername === "string" ? body.builderUsername.trim() : "";
+    const buildToken = typeof body.buildToken === "string" ? body.buildToken : "";
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(builderUsername)) {
+      return reply.code(400).send({ code: "INVALID_STEAM_BUILDER_USERNAME" });
+    }
+    const current = await repository.readWorkspaceSteamSettings(workspace.id);
+    const keepCredential = current !== null && buildToken === current.credentialMask;
+    if (!keepCredential && !buildToken) {
+      return reply.code(400).send({ code: "STEAM_BUILD_TOKEN_REQUIRED" });
+    }
+    const credential = keepCredential ? {
+      secretRef: current.credentialSecretRef,
+      mask: current.credentialMask,
+      fingerprint: current.credentialFingerprint,
+      version: current.credentialVersion,
+    } : await steamSecrets.writeBuildToken(workspace.id, validateSteamBuildToken(buildToken));
+    const saved = await repository.saveWorkspaceSteamSettings({
+      workspaceId: workspace.id,
+      builderUsername,
+      credentialSecretRef: credential.secretRef,
+      credentialMask: credential.mask,
+      credentialFingerprint: credential.fingerprint,
+      credentialVersion: credential.version,
+      updatedByAccountId: principal.user.id,
+    });
+    return reply.header("cache-control", "no-store").send({ settings: {
+      builderUsername: saved.builderUsername,
+      buildToken: saved.credentialMask,
+      revision: saved.revision,
+      updatedAt: saved.updatedAt,
+    } });
   });
 
   app.get("/v1/projects", async (request, reply) => {
@@ -744,19 +803,40 @@ export async function runApi(
     },
   );
 
-  app.delete<{ Params: { projectId: string } }>("/v1/projects/:projectId", async (request, reply) => {
+  app.delete<{ Params: { projectId: string }; Body?: { deleteLocalDirectory?: unknown } }>("/v1/projects/:projectId", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
       throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区管理员可以删除项目");
     }
+    const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+      ? request.body
+      : {};
+    if (body.deleteLocalDirectory !== undefined && typeof body.deleteLocalDirectory !== "boolean") {
+      throw httpError(400, "INVALID_PROJECT_DELETE_REQUEST", "本地目录删除选项无效");
+    }
+    const deleteLocalDirectory = body.deleteLocalDirectory === true;
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    if (deleteLocalDirectory && !project.localDirectory) {
+      throw httpError(409, "LOCAL_DIRECTORY_NOT_BOUND", "该项目没有绑定可删除的本地项目目录");
+    }
+    if (deleteLocalDirectory && (!config.localDirectoryBindings || !config.localProjectBridgeUrl || !config.localProjectBridgeToken)) {
+      throw httpError(409, "LOCAL_DIRECTORY_DELETE_UNAVAILABLE", "当前环境不支持删除本地项目目录");
+    }
+    const localDirectoryBindingId = project.localDirectory?.bindingId ?? null;
     const deleted = await repository.deleteProject(
       workspace.id,
       request.params.projectId,
-      () => Promise.all([
-        objectStore.deleteProjectObjects(workspace.id, request.params.projectId),
-        projectSources.deleteProject(workspace.id, request.params.projectId),
-      ]).then(() => undefined),
+      async () => {
+        await Promise.all([
+          objectStore.deleteProjectObjects(workspace.id, request.params.projectId),
+          projectSources.deleteProject(workspace.id, request.params.projectId),
+        ]);
+        if (deleteLocalDirectory && localDirectoryBindingId) {
+          await deleteBoundProjectDirectory(config, localDirectoryBindingId);
+        }
+      },
     );
     return deleted
       ? reply.code(204).send()
@@ -837,10 +917,11 @@ export async function runApi(
         command,
         signal: abortController.signal,
         onStage: phase => write({ type: "status", phase }),
-        onDelta: delta => write({ type: "delta", delta }),
+        onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
       });
-      const latestMessage = result.payload.conversation.messages.at(-1);
-      if (latestMessage?.metadata.projectDocumentUpdated === true) {
+      if (result.payload.conversation.messages.slice(-3).some(
+        message => message.metadata.projectDocumentUpdated === true,
+      )) {
         write({ type: "project_document", project: result.payload.project });
       }
       write({ type: "complete", ...result.payload });
@@ -897,30 +978,110 @@ export async function runApi(
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
-  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/approve-release", async (request, reply) => {
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-settings", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
-    if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
-      throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区管理员可以批准 Steam 发布");
-    }
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    if (project.workflowProfile !== "RELEASE" || project.workflowState !== "RELEASE_APPROVAL_PENDING") {
+    return reply.header("cache-control", "no-store").send({
+      settings: await repository.readProjectSteamSettings(workspace.id, project.id),
+      editable: principal.role === "OWNER" || principal.role === "ADMIN",
+    });
+  });
+
+  app.put<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-settings", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    requireWorkspaceAdmin(principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const input = parseProjectSteamSettings(request.body);
+    const settings = await repository.saveProjectSteamSettings({
+      workspaceId: workspace.id,
+      projectId: project.id,
+      ...input,
+      updatedByAccountId: principal.user.id,
+    });
+    return reply.send({ settings });
+  });
+
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-releases", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return reply.header("cache-control", "no-store").send({
+      releases: await repository.listSteamReleases(workspace.id, project.id),
+    });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-releases", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    requireWorkspaceAdmin(principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const body = objectBody(request.body);
+    const workflowId = typeof body.workflowId === "string" ? body.workflowId : "";
+    const version = typeof body.version === "string" ? body.version.trim() : "";
+    const channel = body.channel === "TEST" || body.channel === "DEFAULT" ? body.channel : null;
+    if (workflowId !== project.workflowId || !SEMVER.test(version) || !channel) {
+      return reply.code(400).send({ code: "INVALID_STEAM_RELEASE" });
+    }
+    if (project.workflowState !== "RELEASE_DECISION_PENDING") {
       return reply.code(409).send({
-        code: "RELEASE_APPROVAL_UNAVAILABLE",
-        message: "只有已完成三平台签名并等待批准的发布流程可以上传 Steam",
+        code: "RELEASE_DECISION_UNAVAILABLE",
+        message: "当前轮次必须先通过真实操作 E2E，才能上传 Steam",
       });
     }
-    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
-      kind: "RELEASE_APPROVED",
-      idempotencyKey: `release-approved:${project.workflowId}`,
-      payload: {
-        requestedBy: principal.user.username,
-        requestedByAccountId: principal.user.id,
-      },
+    const result = await repository.createSteamRelease({
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workflowId,
+      version,
+      channel,
+      requestedByAccountId: principal.user.id,
     });
-    return reply.code(accepted ? 202 : 200).send({ accepted });
+    return reply.code(result.accepted ? 202 : 200).send(result);
   });
+
+  app.post<{ Params: { projectId: string; workflowId: string } }>(
+    "/v1/projects/:projectId/iterations/:workflowId/complete",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      if (project.workflowId !== request.params.workflowId || project.workflowState !== "RELEASE_DECISION_PENDING") {
+        return reply.code(409).send({ code: "RELEASE_DECISION_UNAVAILABLE" });
+      }
+      const accepted = await repository.completeWorkflowIteration({
+        workspaceId: workspace.id,
+        workflowId: project.workflowId,
+        idempotencyKey: requestIdempotencyKey(request, `release-skipped:${project.workflowId}`),
+        requestedByAccountId: principal.user.id,
+      });
+      return reply.code(accepted ? 202 : 200).send({ accepted });
+    },
+  );
+
+  app.post<{ Params: { projectId: string; releaseId: string } }>(
+    "/v1/projects/:projectId/steam-releases/:releaseId/confirm-live",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      requireWorkspaceAdmin(principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const release = await repository.confirmSteamReleaseLive({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        releaseId: request.params.releaseId,
+      });
+      if (!release) return reply.code(409).send({ code: "DEFAULT_PROMOTION_NOT_PENDING" });
+      return reply.send({ release });
+    },
+  );
 
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/rerun-stage", async (request, reply) => {
     const principal = productAccess(request, config);
@@ -962,7 +1123,7 @@ export async function runApi(
         message: "请先完成全局 Agent 配置，再重新生成",
       });
     }
-    const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
+    const signalInput = {
       kind: "STAGE_RERUN_REQUESTED",
       idempotencyKey,
       payload: {
@@ -970,7 +1131,15 @@ export async function runApi(
         requestedBy: principal.user.username,
         requestedByAccountId: principal.user.id,
       },
-    });
+    } as const;
+    const accepted = stage === "STEAM_PUBLISH"
+      ? await repository.retrySteamRelease({
+          workspaceId: workspace.id,
+          workflowId: project.workflowId,
+          idempotencyKey,
+          requestedByAccountId: principal.user.id,
+        })
+      : await repository.appendSignal(workspace.id, project.workflowId, signalInput);
     return reply.code(accepted ? 202 : 200).send({ accepted, stage });
   });
 
@@ -1127,19 +1296,6 @@ export async function runApi(
     return reply.send({ accepted: await repository.fail(job, reason) });
   });
 
-  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/signing-grant", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
-    const body = objectBody(request.body);
-    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
-    if (job.jobKind !== "ARTIFACT_SIGN") return reply.code(403).send({ code: "SIGNING_GRANT_FORBIDDEN" });
-    if (typeof body.beforeReimageProof !== "string" || body.beforeReimageProof.length < 16) {
-      return reply.code(409).send({ code: "REIMAGE_PROOF_REQUIRED" });
-    }
-    const operationId = await repository.beginOperation(job, "PLATFORM_SIGN");
-    const grant = await signingGrants.issue(job);
-    return reply.send({ ...grant, operationId });
-  });
-
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/objects", async (request, reply) => {
     const nodeId = authorizeE2e(request, config);
     const body = objectBody(request.body);
@@ -1157,6 +1313,60 @@ export async function runApi(
       sizeBytes: Number(body.sizeBytes),
       targetPlatform: job.targetOperatingSystem,
     }));
+  });
+
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", async (request, reply) => {
+    const nodeId = authorizeE2e(request, config);
+    const body = objectBody(request.body);
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    if (job.jobKind !== "E2E_TEST") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
+    const policyRequest = parsePlayerPolicyRequest(body.request);
+    const settings = await repository.readAgentSettings();
+    if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
+    const model = settings.roleModels.test;
+    const configurationDigest = jsonDigest({
+      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
+      settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
+    });
+    const policy = await repository.lockE2ePlayerPolicy({
+      workspaceId: job.workspaceId, jobId: job.jobId, settingsRevision: settings.revision,
+      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
+      credentialSecretRef: settings.credentialSecretRef, configurationDigest,
+    });
+    const requestDigest = jsonDigest({
+      rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex,
+      screenshotSha256: policyRequest.screenshotSha256, goal: policyRequest.goal,
+      allowedActions: policyRequest.allowedActions, history: policyRequest.history, recovery: policyRequest.recovery,
+    });
+    return repository.withE2ePlayerDecisionLock({
+      workspaceId: job.workspaceId, jobId: job.jobId,
+      rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex,
+    }, async () => {
+      const cached = await repository.readE2ePlayerDecision({
+        workspaceId: job.workspaceId, jobId: job.jobId,
+        rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex, requestDigest,
+      });
+      if (cached) return reply.send({ decision: cached, policy: {
+        configurationDigest: policy.configurationDigest, settingsRevision: policy.settingsRevision, model: policy.model,
+      }, cached: true });
+      const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
+      if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
+      const startedAt = Date.now();
+      const generated = await generateE2ePlayerDecision({
+        request: policyRequest, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
+      });
+      const stored = await repository.saveE2ePlayerDecision({
+        workspaceId: job.workspaceId, jobId: job.jobId,
+        rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex,
+        requestDigest, screenshotDigest: policyRequest.screenshotSha256,
+        decision: generated.decision, latencyMs: Date.now() - startedAt,
+        inputTokens: generated.inputTokens, outputTokens: generated.outputTokens,
+      });
+      await repository.markTestPolicyReady(policy.settingsRevision);
+      return reply.send({ decision: stored, policy: {
+        configurationDigest: policy.configurationDigest, settingsRevision: policy.settingsRevision, model: policy.model,
+      }, cached: false });
+    });
   });
 
   app.post<{ Params: { workflowId: string } }>("/v1/workflows/:workflowId/signals", async (request, reply) => {
@@ -1242,7 +1452,7 @@ async function processConversationMessage(input: Readonly<{
   command: ConversationMessageCommand;
   signal?: AbortSignal;
   onStage?: (phase: "NAMING" | "RESPONDING" | "SAVING") => void;
-  onDelta?: (delta: string) => void;
+  onDelta?: (agentRole: ProjectAgentRole, delta: string) => void;
 }>): Promise<ConversationMessageResult> {
   const { request, principal, repository, objectStore, agentSecrets, command } = input;
   let workspace = await selectedWorkspaceFromRequest(request, repository, principal);
@@ -1285,7 +1495,7 @@ async function processConversationMessage(input: Readonly<{
     const name = await agentProjectName(command.content, repository, agentSecrets);
     const specification = specificationFromConcept(name, command.content);
     input.onStage?.("RESPONDING");
-    const agentReply = await conversationAgentReply({
+    const agentReplies = await conversationAgentReplies({
       userContent: command.content,
       history: Object.freeze([]),
       project: Object.freeze({
@@ -1311,10 +1521,13 @@ async function processConversationMessage(input: Readonly<{
       name,
       concept: command.content,
       specification,
-      document: agentReply.projectDocument ?? createInitialProjectDocument(name, command.content, specification),
+      document: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument
+        ?? createInitialProjectDocument(name, command.content, specification),
       userContent: command.content,
-      assistantContent: agentReply.content,
-      assistantMetadata: conversationAgentMetadata(agentReply),
+      assistantMessages: agentReplies.map(reply => Object.freeze({
+        content: reply.content,
+        metadata: conversationAgentMetadata(reply),
+      })),
       ...defaultWorkflowConfiguration(),
     });
     const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id);
@@ -1357,7 +1570,7 @@ async function processConversationMessage(input: Readonly<{
     });
   }
   input.onStage?.("RESPONDING");
-  const agentReply = await conversationAgentReply({
+  const agentReplies = await conversationAgentReplies({
     userContent: command.content,
     history: existingConversation?.messages ?? Object.freeze([]),
     project: conversationProjectContext(project),
@@ -1370,10 +1583,12 @@ async function processConversationMessage(input: Readonly<{
     projectId,
     userContent: command.content,
     expectedWorkflowState: project.workflowState,
-    assistantContent: agentReply.content,
-    assistantApplyToDraft: agentReply.applyToDraft,
-    assistantProjectDocument: agentReply.projectDocument,
-    assistantMetadata: conversationAgentMetadata(agentReply),
+    assistantMessages: agentReplies.map(reply => Object.freeze({
+      content: reply.content,
+      metadata: conversationAgentMetadata(reply),
+    })),
+    assistantApplyToDraft: agentReplies.some(reply => reply.agentRole === "DESIGN" && reply.applyToDraft),
+    assistantProjectDocument: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument ?? null,
   });
   let updatedProject = await repository.readProject(workspace.id, projectId);
   if (!updatedProject) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
@@ -1477,6 +1692,18 @@ function jobIdentity(jobId: string, body: Record<string, unknown>): ClaimedJobId
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Request body must be an object");
   return value as Record<string, unknown>;
+}
+
+function jsonDigest(value: unknown): string {
+  const stable = (input: unknown): string => {
+    if (Array.isArray(input)) return `[${input.map(stable).join(",")}]`;
+    if (input && typeof input === "object") {
+      const object = input as Record<string, unknown>;
+      return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${stable(object[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(input);
+  };
+  return `sha256:${createHash("sha256").update(stable(value)).digest("hex")}`;
 }
 
 function header(request: FastifyRequest, name: string): string {
@@ -1611,6 +1838,40 @@ async function readBoundProjectSource(
       throw new Error("本地项目源码完整性校验失败");
     }
     return inspectProjectFiles({ ...metadata, files });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function deleteBoundProjectDirectory(config: CoreConfig, bindingId: string): Promise<void> {
+  if (!config.localProjectBridgeUrl || !config.localProjectBridgeToken) {
+    throw httpError(409, "LOCAL_DIRECTORY_DELETE_UNAVAILABLE", "当前环境不支持删除本地项目目录");
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10 * 60 * 1_000);
+  try {
+    const response = await fetch(`${config.localProjectBridgeUrl}/internal/directory/delete`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-deviludo-bridge-token": config.localProjectBridgeToken,
+      },
+      body: JSON.stringify({ bindingId }),
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { code?: unknown; message?: unknown };
+      const code = typeof failure.code === "string" ? failure.code : "LOCAL_DIRECTORY_DELETE_FAILED";
+      const message = typeof failure.message === "string" ? failure.message : "本地项目目录删除失败";
+      throw httpError(response.status >= 500 ? 502 : 409, code, message);
+    }
+  } catch (error) {
+    if (error instanceof Error && "statusCode" in error) throw error;
+    const message = error instanceof Error && error.name === "AbortError"
+      ? "删除本地项目目录超时，项目记录已保留"
+      : "无法连接本地项目桥接，项目记录已保留";
+    throw httpError(502, "LOCAL_DIRECTORY_DELETE_FAILED", message);
   } finally {
     clearTimeout(timer);
   }
@@ -1922,7 +2183,7 @@ async function processProjectImport(input: Readonly<{
   });
 }
 
-async function conversationAgentReply(
+async function conversationAgentReplies(
   input: Readonly<{
     userContent: string;
     history: readonly Pick<ProductConversation["messages"][number], "role" | "content">[];
@@ -1933,20 +2194,20 @@ async function conversationAgentReply(
   agentSecrets: AgentSecretStore,
   stream?: Readonly<{
     signal?: AbortSignal;
-    onDelta?: (delta: string) => void;
+    onDelta?: (agentRole: ProjectAgentRole, delta: string) => void;
   }>,
-): Promise<ProductConversationAgentReply> {
+): Promise<readonly ProductConversationGroupReply[]> {
   const settings = await repository.readAgentSettings();
   if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
   const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
   try {
     if (stream?.onDelta) {
-      return await streamProductConversationReply({ ...input, settings, apiKey, signal: stream.signal }, stream.onDelta);
+      return await streamProductConversationGroupReply({ ...input, settings, apiKey, signal: stream.signal }, stream.onDelta);
     }
-    return await generateProductConversationReply({ ...input, settings, apiKey });
+    return await generateProductConversationGroupReply({ ...input, settings, apiKey });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "设计 Agent 调用失败";
+    const message = error instanceof Error ? error.message : "项目群聊 Agent 调用失败";
     throw httpError(424, "AGENT_CONVERSATION_FAILED", message);
   }
 }
@@ -1961,9 +2222,12 @@ function conversationProjectContext(project: ProductProjectDetail): Conversation
   });
 }
 
-function conversationAgentMetadata(reply: ProductConversationAgentReply): Readonly<Record<string, unknown>> {
+function conversationAgentMetadata(reply: ProductConversationGroupReply): Readonly<Record<string, unknown>> {
   return Object.freeze({
     source: "AI_AGENT",
+    agentRole: reply.agentRole,
+    agentName: reply.agentRole === "DESIGN" ? "DeviLudo Design Agent"
+      : reply.agentRole === "DEVELOPMENT" ? "DeviLudo Development Agent" : "DeviLudo Test Agent",
     agentRuntime: reply.runtime,
     model: reply.model,
     settingsRevision: reply.settingsRevision,
@@ -1989,10 +2253,16 @@ function publicAgentSettings(
     agentRuntime: settings?.agentRuntime ?? "CLAUDE_CODE",
     baseUrl: settings?.baseUrl ?? "https://api.anthropic.com",
     models: settings?.models ?? null,
+    roleModels: settings?.roleModels ?? Object.freeze({
+      design: "codex-mini-latest",
+      development: "codex-mini-latest",
+      test: "codex-mini-latest",
+    }),
     apiKeyConfigured: settings !== null,
     apiKeyMasked: apiKeyMask,
     apiKeyFingerprint: settings?.apiKeyFingerprint ?? null,
     revision: settings?.revision ?? 0,
+    testPolicyReady: settings?.testPolicyReady ?? false,
     updatedAt: settings?.updatedAt ?? null,
   });
 }
@@ -2033,6 +2303,49 @@ function parseImageGenerationInput(value: unknown): Readonly<{
   return Object.freeze({ provider: body.provider, apiKey, apiEndpoint: endpoint, model });
 }
 
+function parseProjectSteamSettings(value: unknown): Readonly<{
+  appId: string;
+  depots: Readonly<Partial<Record<ServerOperatingSystem, string>>>;
+  testBranch: string;
+}> {
+  const body = objectBody(value);
+  if (Object.keys(body).some(key => !["appId", "depots", "testBranch"].includes(key))) {
+    throw new Error("Steam project settings contain unsupported fields");
+  }
+  const appId = steamNumericId(body.appId, "Steam App ID");
+  const rawDepots = body.depots && typeof body.depots === "object" && !Array.isArray(body.depots)
+    ? body.depots as Record<string, unknown>
+    : {};
+  if (Object.keys(rawDepots).some(key => !["linux", "windows", "macos"].includes(key))) {
+    throw new Error("Steam depot platform is invalid");
+  }
+  const depots = Object.freeze(Object.fromEntries(
+    (["linux", "windows", "macos"] as const)
+      .filter(platform => rawDepots[platform] !== undefined && rawDepots[platform] !== null && rawDepots[platform] !== "")
+      .map(platform => [platform, steamNumericId(rawDepots[platform], `Steam ${platform} Depot ID`)]),
+  ) as Partial<Record<ServerOperatingSystem, string>>);
+  if (Object.keys(depots).length === 0) throw new Error("At least one Steam depot is required");
+  const testBranch = typeof body.testBranch === "string" ? body.testBranch.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(testBranch) || testBranch === "default") {
+    throw new Error("Steam test branch is invalid");
+  }
+  return Object.freeze({ appId, depots, testBranch });
+}
+
+function steamNumericId(value: unknown, label: string): string {
+  const normalized = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : value;
+  if (typeof normalized !== "string" || !/^[1-9][0-9]{0,11}$/.test(normalized)) {
+    throw new Error(`${label} is invalid`);
+  }
+  return normalized;
+}
+
+function requireWorkspaceAdmin(principal: AccessPrincipal): void {
+  if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
+    throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区 Owner 或 Admin 可以修改 Steam 配置和发起发布");
+  }
+}
+
 function specificationFromConcept(name: string, concept: string): Readonly<Record<string, unknown>> {
   return Object.freeze({
     title: name,
@@ -2044,11 +2357,13 @@ function specificationFromConcept(name: string, concept: string): Readonly<Recor
       "新玩家无需外部说明即可完成第一局",
       "核心循环可在自动化测试中重复执行",
       "三个桌面平台使用同一规则与存档格式",
-      "发布前完成签名与 Steam 干净回装验证",
+      "发布前通过真实窗口 E2E，并由管理员明确选择是否上传 Steam",
     ]),
     revisionNotes: Object.freeze([]),
   });
 }
+
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
 function publicUser(user: UserRecord) {
   return Object.freeze({

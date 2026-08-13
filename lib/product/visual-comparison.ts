@@ -1,9 +1,6 @@
 // Visual testing protocol for screenshot-based E2E verification
 
-export const VISUAL_TEST_VERSION = "1" as const;
-
 export type VisualTestSpec = Readonly<{
-  version: typeof VISUAL_TEST_VERSION;
   referenceImage: string; // relative path to reference PNG
   threshold?: number; // pixel difference threshold (0-1, default 0.01)
   captureDelay?: number; // ms to wait before capture (default 1000)
@@ -21,7 +18,8 @@ export function validateVisualTestSpec(value: unknown): value is VisualTestSpec 
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const spec = value as Record<string, unknown>;
 
-  if (spec.version !== VISUAL_TEST_VERSION) return false;
+  if (Object.hasOwn(spec, "version") || Object.hasOwn(spec, "schemaVersion")) return false;
+
   if (typeof spec.referenceImage !== "string" || spec.referenceImage.length < 5 || spec.referenceImage.length > 240
     || !spec.referenceImage.toLowerCase().endsWith(".png") || spec.referenceImage.startsWith("/")
     || spec.referenceImage.startsWith("res://") || /(^|\/)\.{1,2}(\/|$)|\/\//.test(spec.referenceImage)

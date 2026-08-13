@@ -1,5 +1,6 @@
 import {
   DeleteObjectsCommand,
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
@@ -125,6 +126,15 @@ export class CoreObjectStore {
     } while (continuationToken);
   }
 
+  async deleteQueuedObject(input: Readonly<{ workspaceId: string; bucket: string; key: string }>): Promise<void> {
+    const prefix = `workspaces/${input.workspaceId}/`;
+    if (input.bucket !== this.bucket || !input.key.startsWith(prefix)
+      || input.key.includes("\0") || input.key.split("/").includes("..")) {
+      throw new Error("Queued object cleanup boundary is invalid");
+    }
+    await this.client.send(new DeleteObjectCommand({ Bucket: input.bucket, Key: input.key }));
+  }
+
   async authorizeOutput(job: JobProtocolV4, input: Readonly<{
     kind: string;
     sha256: string;
@@ -135,7 +145,9 @@ export class CoreObjectStore {
       throw new Error("Output authorization contract is invalid");
     }
     if (!job.outputContract.kinds.includes(input.kind)) throw new Error("Output kind is not allowed by the leased job");
-    const extension = input.kind === "SIGNED_BUILD" ? ".tar.gz" : input.kind === "E2E_REPORT" ? ".zip" : ".json";
+    const extension = input.kind === "BUILD" || input.kind === "SIGNED_BUILD"
+      ? ".tar.gz"
+      : input.kind === "E2E_REPORT" ? ".zip" : ".json";
     const platform = input.targetPlatform ? `-${input.targetPlatform}` : "";
     const filename = `${input.kind.toLowerCase().replaceAll("_", "-")}${platform}-${input.sha256.slice(7, 23)}${extension}`;
     const key = `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/${filename}`;

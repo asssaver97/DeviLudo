@@ -4,11 +4,17 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 guest_root=/usr/local/lib/deviludo
 sudo install -d -m 0755 "$guest_root" "$guest_root/executors"
 sudo install -m 0555 /Users/Shared/godot-window-e2e-guest.mjs "$guest_root/executors/godot-window-e2e-guest.mjs"
+sudo install -m 0444 /Users/Shared/game-test-environment.mjs "$guest_root/executors/game-test-environment.mjs"
 sudo install -m 0444 /Users/Shared/gui-event-batches.mjs "$guest_root/executors/gui-event-batches.mjs"
 sudo install -m 0444 /Users/Shared/e2e-evidence.mjs "$guest_root/e2e-evidence.mjs"
 sudo install -m 0444 /Users/Shared/e2e-ui-probe.mjs "$guest_root/e2e-ui-probe.mjs"
-sudo install -m 0555 /Users/Shared/steam-clean-install.mjs "$guest_root/executors/steam-clean-install.mjs"
 sudo install -m 0555 /Users/Shared/deviludo-gui-driver /usr/local/bin/deviludo-gui-driver
+sudo install -m 0555 /Users/Shared/deviludo-gamepad-driver /usr/local/bin/deviludo-gamepad-driver
+if [[ ! -x /opt/homebrew/bin/ffmpeg ]]; then
+  /opt/homebrew/bin/brew install ffmpeg
+fi
+sudo ln -sfn /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg
+sudo ln -sfn /opt/homebrew/bin/ffprobe /usr/local/bin/ffprobe
 if [[ ! -x /usr/local/bin/node ]]; then
   curl -fsSL "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz" -o /Users/Shared/node.tar.gz
   tar -xzf /Users/Shared/node.tar.gz -C /Users/Shared
@@ -33,7 +39,7 @@ sudo /usr/sbin/sysadminctl \
   -adminUser admin \
   -adminPassword admin
 sudo dscl . -authonly admin "$DEVILUDO_REPLACEMENT_PASSWORD"
-# On Sequoia, sysadminctl -autologin reports success while emitting
+# On Tahoe, sysadminctl -autologin reports success while emitting
 # SACSetAutoLoginPassword error:22 and leaves the old record untouched when it
 # runs through an SSH provisioning session. Generate the loginwindow record
 # explicitly, then prove it was installed before the VM is snapshotted.

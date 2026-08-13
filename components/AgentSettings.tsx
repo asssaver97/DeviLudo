@@ -5,6 +5,7 @@ import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/pro
 import {
   AGENT_RUNTIME_KINDS,
   type AgentModelConfiguration,
+  type AgentRoleModelConfiguration,
   type AgentRuntimeAvailability,
   type AgentRuntimeKind,
   type InstanceAgentSettings,
@@ -20,7 +21,13 @@ const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE",
   baseUrl: "https://api.anthropic.com",
   models: null,
+  roleModels: Object.freeze({
+    design: "codex-mini-latest",
+    development: "codex-mini-latest",
+    test: "codex-mini-latest",
+  }),
   apiKeyConfigured: false,
+  testPolicyReady: false,
   apiKeyMasked: null,
   apiKeyFingerprint: null,
   revision: 0,
@@ -45,12 +52,14 @@ export function AgentSettings() {
   const initialPayload = cachedValue<AgentSettingsPayload>(clientCacheKeys.agentSettings);
   const initialSettings = initialPayload?.settings ?? DEFAULT_SETTINGS;
   const initialModels = initialSettings.models ?? EMPTY_MODELS;
+  const initialRoleModels = initialSettings.roleModels ?? roleModelsFromRoutes(initialSettings.agentRuntime, initialModels);
   const [settings, setSettings] = useState<InstanceAgentSettings>(initialSettings);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(initialSettings.agentRuntime);
   const [baseUrl, setBaseUrl] = useState(initialSettings.baseUrl);
   const [modelMode, setModelMode] = useState<ModelMode>(hasDistinctModels(initialModels) ? "EXPANDED" : "SINGLE");
   const [singleModel, setSingleModel] = useState(initialModels.primary);
   const [expandedModels, setExpandedModels] = useState<AgentModelConfiguration>(initialModels);
+  const [roleModels, setRoleModels] = useState<AgentRoleModelConfiguration>(initialRoleModels);
   const [apiKey, setApiKey] = useState("");
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
   const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.models));
@@ -82,6 +91,7 @@ export function AgentSettings() {
         setExpandedModels(loadedModels);
         setSingleModel(loadedModels.primary);
         setModelMode(hasDistinctModels(loadedModels) ? "EXPANDED" : "SINGLE");
+        setRoleModels(value.roleModels ?? roleModelsFromRoutes(value.agentRuntime, loadedModels));
         setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.models));
         setRuntimes(body.runtimes);
       })
@@ -102,10 +112,11 @@ export function AgentSettings() {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(configurationMode === "SETTINGS_JSON"
-          ? { agentRuntime, settingsJson }
+          ? { agentRuntime, settingsJson, roleModels }
           : {
               agentRuntime,
               baseUrl,
+              roleModels,
               ...(agentRuntime === "CLAUDE_CODE" ? { models: effectiveModels(modelMode, singleModel, expandedModels) } : {}),
               ...(apiKey ? { apiKey } : {}),
             }),
@@ -120,6 +131,7 @@ export function AgentSettings() {
       setExpandedModels(savedModels);
       setSingleModel(savedModels.primary);
       setModelMode(hasDistinctModels(savedModels) ? "EXPANDED" : "SINGLE");
+      setRoleModels(body.settings.roleModels);
       setApiKey("");
       setSettingsJson(formatClaudeSettingsJson(
         body.settings.baseUrl,
@@ -175,6 +187,10 @@ export function AgentSettings() {
 
   function updateExpandedModel(key: keyof AgentModelConfiguration, value: string) {
     setExpandedModels(current => Object.freeze({ ...current, [key]: value }));
+  }
+
+  function updateRoleModel(key: keyof AgentRoleModelConfiguration, value: string) {
+    setRoleModels(current => Object.freeze({ ...current, [key]: value }));
   }
 
   const runtime = RUNTIME_COPY[agentRuntime];
@@ -290,6 +306,22 @@ export function AgentSettings() {
                 <textarea autoCapitalize="none" autoComplete="off" disabled={loading || saving} onChange={event => setSettingsJson(event.target.value)} spellCheck={false} value={settingsJson} />
               </label>
             )}
+
+            <fieldset className="agent-model-fieldset agent-role-model-fieldset">
+              <legend>{text("群聊 Agent", "GROUP CHAT AGENTS")}</legend>
+              <p className="agent-role-model-description">{text(
+                "三个角色会依次参与每轮项目群聊，并使用各自的模型。开发角色的模型同时用于后续代码生成任务。",
+                "All three roles participate in every project turn with their own model. The Development model also drives subsequent code-generation jobs.",
+              )}</p>
+              <div className="agent-model-expanded">
+                <ModelInput disabled={loading || saving} label={text("设计 Agent", "Design Agent")} onChange={value => updateRoleModel("design", value)} value={roleModels.design} />
+                <ModelInput disabled={loading || saving} label={text("开发 Agent", "Development Agent")} onChange={value => updateRoleModel("development", value)} value={roleModels.development} />
+                <ModelInput disabled={loading || saving} label={text("测试 Agent", "Test Agent")} onChange={value => updateRoleModel("test", value)} value={roleModels.test} />
+                <p className={`agent-config-notice ${settings.testPolicyReady ? "is-success" : ""}`} role="status">{settings.testPolicyReady
+                  ? text("测试 Agent 玩家策略已通过真实视觉决策校验", "Test Agent player policy is ready for visual decisions")
+                  : text("测试 Agent 玩家策略将在下一次 E2E 首次视觉决策时完成校验", "Test Agent player policy will be verified by the next E2E visual decision")}</p>
+              </div>
+            </fieldset>
 
             {notice ? <p className="agent-config-notice is-success" role="status">{notice}</p> : null}
             {error ? <p className="agent-config-notice is-error" role="alert">{error}</p> : null}
@@ -454,6 +486,22 @@ function connectionFromClaudeSettingsJson(value: string): Readonly<{
 
 function modelsFromSingle(value: string): AgentModelConfiguration {
   return Object.freeze({ primary: value, opus: value, sonnet: value, haiku: value, subagent: value });
+}
+
+function roleModelsFromRoutes(
+  runtime: AgentRuntimeKind,
+  models: AgentModelConfiguration,
+): AgentRoleModelConfiguration {
+  if (runtime === "CLAUDE_CODE") return Object.freeze({
+    design: models.sonnet || models.primary,
+    development: models.primary,
+    test: models.haiku || models.primary,
+  });
+  return Object.freeze({
+    design: "codex-mini-latest",
+    development: "codex-mini-latest",
+    test: "codex-mini-latest",
+  });
 }
 
 function effectiveModels(

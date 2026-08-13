@@ -75,10 +75,14 @@ download_release() {
     "$target/release-manifest.json" >/dev/null
   jq -e --arg role "$DEVILUDO_ROLE" --arg version "$DEVILUDO_RELEASE_VERSION" \
     '.schemaVersion == "deviludo.release.v1" and .version == $version and (.roles | index($role)) != null
-      and .plugins.GODOT.version == "3"
-      and .plugins.GODOT.testManifestProtocol == "deviludo.test-manifest.v3"
-      and .plugins.GODOT.guestReportProtocol == "deviludo.godot-guest-report.v3"
-      and .plugins.GODOT.evidenceProtocol == "deviludo.e2e-evidence.v2"
+      and (.plugins.GODOT | has("version") | not)
+      and .plugins.GODOT.testManifestContract == "deviludo.test-manifest"
+      and .plugins.GODOT.guestReportContract == "deviludo.godot-guest-report"
+      and .plugins.GODOT.evidenceContract == "deviludo.e2e-evidence"
+      and .plugins.GODOT.guestActions == ["test"]
+      and .plugins.GODOT.runtimeInputSmoke == "GODOT_SYSTEM_KEYBOARD_POINTER_GAMEPAD"
+      and .plugins.GODOT.gamepadBackends == {"macos":"CORE_HID","linux":"UINPUT","windows":"KMDF_VHF"}
+      and .plugins.GODOT.macosGoldenImage == "TAHOE_26"
       and .plugins.GODOT.artifactHostCommandsAllowed == false
       and (.plugins.GODOT.builderImage | test("@sha256:[0-9a-f]{64}$"))' \
     "$target/release-manifest.json" >/dev/null

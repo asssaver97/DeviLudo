@@ -52,7 +52,7 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     minimumNodes: 1,
     maximumNodes: 1,
     desiredNodes: 1,
-    capabilities: Object.freeze(["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]),
+    capabilities: Object.freeze(["E2E_TEST"]),
     publicIngress: false,
   }),
   E2E_WINDOWS: Object.freeze({
@@ -61,7 +61,7 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     minimumNodes: 1,
     maximumNodes: 1,
     desiredNodes: 1,
-    capabilities: Object.freeze(["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]),
+    capabilities: Object.freeze(["E2E_TEST"]),
     publicIngress: false,
   }),
   E2E_MACOS: Object.freeze({
@@ -70,7 +70,7 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     minimumNodes: 0,
     maximumNodes: 1,
     desiredNodes: 0,
-    capabilities: Object.freeze(["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"]),
+    capabilities: Object.freeze(["E2E_TEST"]),
     publicIngress: false,
   }),
 });

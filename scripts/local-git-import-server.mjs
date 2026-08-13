@@ -162,6 +162,11 @@ async function handleInternalRequest(request, response) {
     response.end(source);
     return;
   }
+  if (request.method === "POST" && request.url === "/internal/directory/delete") {
+    const body = await readJsonBody(request);
+    sendJson(response, 200, await deleteBoundDirectory(body.bindingId));
+    return;
+  }
   if (request.method === "POST" && request.url === "/internal/directory/sync") {
     const bindingId = String(request.headers["x-deviludo-directory-binding"] ?? "");
     const expectedDigest = String(request.headers["x-deviludo-base-digest"] ?? "");
@@ -333,7 +338,7 @@ async function openLocalArtifact(body) {
         }
       }
     } else if (kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")) {
-      await extractAndValidateEvidenceBundle(artifactFile, join(staging, "e2e-report"), 1024 * 1024 * 1024, { allowLegacy: true });
+      await extractAndValidateEvidenceBundle(artifactFile, join(staging, "e2e-report"), 1024 * 1024 * 1024);
     }
     await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
     await rm(destination, { recursive: true, force: true });
@@ -505,6 +510,33 @@ async function requireBinding(value) {
   const current = await validateProjectDirectory(binding.path);
   if (current !== binding.path) throw failure("DIRECTORY_BINDING_CHANGED", "本地项目目录位置已变化，请重新关联");
   return Object.freeze({ id: bindingId, path: current });
+}
+
+async function deleteBoundDirectory(value) {
+  const binding = await requireBinding(value);
+  const bindings = await readBindings();
+  const registered = bindings[binding.id];
+  if (!registered || registered.path !== binding.path) {
+    throw failure("DIRECTORY_BINDING_CHANGED", "本地项目目录绑定已变化，请重新加载后再试");
+  }
+  const quarantine = join(
+    dirname(binding.path),
+    `.${basename(binding.path)}.deviludo-delete-${randomUUID()}`,
+  );
+  await rename(binding.path, quarantine).catch(() => {
+    throw failure("LOCAL_DIRECTORY_DELETE_FAILED", "无法隔离本地项目目录，项目记录已保留");
+  });
+  const remaining = { ...bindings };
+  delete remaining[binding.id];
+  try {
+    await writeBindings(remaining);
+    await rm(quarantine, { force: false, maxRetries: 3, recursive: true, retryDelay: 100 });
+  } catch {
+    await rename(quarantine, binding.path).catch(() => undefined);
+    await writeBindings(bindings).catch(() => undefined);
+    throw failure("LOCAL_DIRECTORY_DELETE_FAILED", "本地项目目录删除失败，项目记录已保留");
+  }
+  return Object.freeze({ deleted: true });
 }
 
 async function readBindings() {
@@ -708,6 +740,7 @@ function importFailure(error) {
     INVALID_TARGET_DIRECTORY: 422,
     UNSAFE_LOCAL_PROJECT: 422,
     BINDING_REGISTRY_CORRUPTED: 500,
+    LOCAL_DIRECTORY_DELETE_FAILED: 500,
     DIRECTORY_PICKER_UNAVAILABLE: 501,
     ARTIFACT_OPEN_UNAVAILABLE: 501,
     UNSAFE_ARTIFACT_ARCHIVE: 422,

@@ -23,9 +23,9 @@ function Invoke-Preflight {
   $c=Read-Config; $os=Get-CimInstance Win32_OperatingSystem
   if($os.Caption -notmatch 'Windows 11 Pro'){throw 'Windows 11 Pro is required'}
   foreach($path in @($c.enrollmentTokenFile,$c.goldenVmFile,"$($c.goldenVmFile).pem","$($c.goldenVmFile).sig",$c.coreCaFile,$c.guestCredentialFile)){Require-File $path}
-  if($c.coreUrl -notmatch '^https://' -or $c.signingBrokerUrl -notmatch '^https://'){throw 'Core and signing broker must use HTTPS'}
+  if($c.coreUrl -notmatch '^https://'){throw 'Core must use HTTPS'}
   if(!$c.toolPath -or $c.toolPath -match "[`r`n]"){throw 'A fixed toolPath is required'}
-  foreach($name in @('node','windowsSdk','steam','openssl','nssm','cosign')){if($c.packageVersions.$name -notmatch '^[0-9][0-9A-Za-z.+-]{0,79}$'){throw "A fixed packageVersions.$name is required"}}
+  foreach($name in @('node','windowsSdk','openssl','nssm','cosign')){if($c.packageVersions.$name -notmatch '^[0-9][0-9A-Za-z.+-]{0,79}$'){throw "A fixed packageVersions.$name is required"}}
 }
 function Invoke-Bootstrap {
   Invoke-Preflight; $c=Read-Config
@@ -34,7 +34,6 @@ function Invoke-Bootstrap {
   $packages=@(
     @{Id='OpenJS.NodeJS.22';Version=$c.packageVersions.node},
     @{Id='Microsoft.WindowsSDK.10.0.26100';Version=$c.packageVersions.windowsSdk},
-    @{Id='Valve.Steam';Version=$c.packageVersions.steam},
     @{Id='ShiningLight.OpenSSL.Light';Version=$c.packageVersions.openssl},
     @{Id='NSSM.NSSM';Version=$c.packageVersions.nssm},
     @{Id='Sigstore.Cosign';Version=$c.packageVersions.cosign}
@@ -46,7 +45,7 @@ function Invoke-Bootstrap {
 function Verify-Manifest($c,$stage){
   & cosign verify-blob --certificate "$stage\release-manifest.json.pem" --signature "$stage\release-manifest.json.sig" --certificate-identity-regexp $c.cosignIdentityRegexp --certificate-oidc-issuer $c.cosignIssuer "$stage\release-manifest.json" | Out-Null
   $manifest=Get-Content "$stage\release-manifest.json" -Raw | ConvertFrom-Json
-  if($manifest.schemaVersion -ne 'deviludo.release.v1' -or $manifest.version -ne $c.releaseVersion -or $manifest.roles -notcontains 'E2E_WINDOWS' -or $manifest.plugins.GODOT.version -ne '3' -or $manifest.plugins.GODOT.testManifestProtocol -ne 'deviludo.test-manifest.v3' -or $manifest.plugins.GODOT.guestReportProtocol -ne 'deviludo.godot-guest-report.v3' -or $manifest.plugins.GODOT.evidenceProtocol -ne 'deviludo.e2e-evidence.v2' -or $manifest.plugins.GODOT.artifactHostCommandsAllowed -ne $false -or $manifest.plugins.GODOT.builderImage -notmatch '@sha256:[0-9a-f]{64}$'){throw 'Release manifest is invalid'}
+  if($manifest.schemaVersion -ne 'deviludo.release.v1' -or $manifest.version -ne $c.releaseVersion -or $manifest.roles -notcontains 'E2E_WINDOWS' -or $null -ne $manifest.plugins.GODOT.version -or $manifest.plugins.GODOT.testManifestContract -ne 'deviludo.test-manifest' -or $manifest.plugins.GODOT.guestReportContract -ne 'deviludo.godot-guest-report' -or $manifest.plugins.GODOT.evidenceContract -ne 'deviludo.e2e-evidence' -or @($manifest.plugins.GODOT.guestActions).Count -ne 1 -or $manifest.plugins.GODOT.guestActions[0] -ne 'test' -or $manifest.plugins.GODOT.runtimeInputSmoke -ne 'GODOT_SYSTEM_KEYBOARD_POINTER_GAMEPAD' -or $manifest.plugins.GODOT.gamepadBackends.windows -ne 'KMDF_VHF' -or $manifest.plugins.GODOT.gamepadBackends.linux -ne 'UINPUT' -or $manifest.plugins.GODOT.gamepadBackends.macos -ne 'CORE_HID' -or $manifest.plugins.GODOT.macosGoldenImage -ne 'TAHOE_26' -or $manifest.plugins.GODOT.artifactHostCommandsAllowed -ne $false -or $manifest.plugins.GODOT.builderImage -notmatch '@sha256:[0-9a-f]{64}$'){throw 'Release manifest is invalid'}
   return $manifest
 }
 function Verify-GoldenVm($c,$manifest){
@@ -70,8 +69,8 @@ function Service-Environment($c,$nodeId,$goldenVmFile){
   return @(
     'NODE_ENV=production',"DEVILUDO_E2E_NODE_ID=$nodeId",'DEVILUDO_E2E_POOL_KIND=E2E_WINDOWS',"DEVILUDO_CORE_API_URL=$($c.coreUrl)","DEVILUDO_E2E_TOOL_PATH=$($c.toolPath)",
     "DEVILUDO_E2E_CLIENT_CERT_FILE=$credentials\node.crt","DEVILUDO_E2E_CLIENT_KEY_FILE=$credentials\node-tls.key","DEVILUDO_E2E_CORE_CA_FILE=$credentials\core-ca.crt","DEVILUDO_E2E_IDENTITY_KEY_FILE=$credentials\receipt-ed25519.pem","DEVILUDO_E2E_CREDENTIAL_DIRECTORY=$credentials",
-    "DEVILUDO_E2E_ISOLATION_EXECUTOR=$current\e2e-windows-isolation.cmd","DEVILUDO_E2E_TEST_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_SIGN_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_CLEAN_INSTALL_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_GUEST_RUNNER=$current\e2e-windows-guest-runner.cmd",
-    "DEVILUDO_E2E_JOB_ROOT=$State\jobs","DEVILUDO_E2E_SIGNING_BROKER_URL=$($c.signingBrokerUrl)","DEVILUDO_GOLDEN_VM_FILE=$goldenVmFile","DEVILUDO_COSIGN_IDENTITY_REGEXP=$($c.cosignIdentityRegexp)","DEVILUDO_COSIGN_ISSUER=$($c.cosignIssuer)"
+    "DEVILUDO_E2E_ISOLATION_EXECUTOR=$current\e2e-windows-isolation.cmd","DEVILUDO_E2E_TEST_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_GUEST_RUNNER=$current\e2e-windows-guest-runner.cmd",
+    "DEVILUDO_E2E_JOB_ROOT=$State\jobs","DEVILUDO_GOLDEN_VM_FILE=$goldenVmFile","DEVILUDO_COSIGN_IDENTITY_REGEXP=$($c.cosignIdentityRegexp)","DEVILUDO_COSIGN_ISSUER=$($c.cosignIssuer)"
   )
 }
 function Configure-Service($c,$nodeId,$goldenVmFile){
