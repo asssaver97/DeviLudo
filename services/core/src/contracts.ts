@@ -17,6 +17,7 @@ export type ObjectReference = Readonly<{
   kind?: string;
   targetPlatform?: ServerOperatingSystem;
   assetKey?: string;
+  metadata?: Readonly<Record<string, unknown>>;
   bucket: string;
   key: string;
   sha256: `sha256:${string}`;
@@ -254,6 +255,7 @@ function isObjectReference(value: unknown): value is ObjectReference {
   return (item.kind === undefined || typeof item.kind === "string")
     && (item.targetPlatform === undefined || ["linux", "windows", "macos"].includes(String(item.targetPlatform)))
     && (item.assetKey === undefined || isAssetKey(item.assetKey))
+    && (item.metadata === undefined || Boolean(item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata)))
     && typeof item.bucket === "string" && item.bucket.length > 0
     && typeof item.key === "string" && /^workspaces\/[0-9a-f-]+\/projects\/[0-9a-f-]+\//i.test(item.key)
     && typeof item.sha256 === "string" && /^sha256:[0-9a-f]{64}$/i.test(item.sha256)

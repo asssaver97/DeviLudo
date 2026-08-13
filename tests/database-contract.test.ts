@@ -51,6 +51,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /FUNCTION deviludo\.cleanup_expired_executor_state\(\)[\s\S]*SECURITY DEFINER/);
   assert.match(sql, /CREATE TABLE deviludo\.project_conversations \([\s\S]*project_id uuid NOT NULL/);
   assert.match(sql, /CREATE TABLE deviludo\.project_source_revisions[\s\S]*relative_path text NOT NULL[\s\S]*content_digest text NOT NULL/);
+  assert.doesNotMatch(sql, /UNIQUE \(workspace_id, project_id, content_digest\)/);
   assert.match(sql, /CREATE TABLE deviludo\.project_source_ready_outbox[\s\S]*development_actor_account_id uuid NOT NULL[\s\S]*acknowledged_at timestamptz/);
   assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.pull_source_ready_events/);
   assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.acknowledge_source_ready_events/);
@@ -59,6 +60,9 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /CREATE TABLE deviludo\.executor_receipts[\s\S]*receipt->>'simulated' = 'false'/);
   assert.match(sql, /CREATE TABLE deviludo\.job_progress_events[\s\S]*event_kind IN \('PHASE', 'AGENT_OUTPUT', 'GUIDANCE_ACCEPTED', 'COMPLETED', 'FAILED'\)/);
   assert.match(sql, /CREATE TABLE deviludo\.job_guidance_messages[\s\S]*state IN \('PENDING', 'DELIVERED', 'REJECTED'\)/);
+  assert.match(sql, /FUNCTION deviludo\.fail_job[\s\S]*job\.kind = 'AGENT_GENERATION'[\s\S]*job_guidance_messages[\s\S]*state = 'PENDING'/);
+  assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*replay_guidance AS[\s\S]*job_guidance_messages/);
+  assert.match(sql, /GRANT SELECT, UPDATE ON deviludo\.job_guidance_messages TO deviludo_claim_executor/);
   assert.match(sql, /credential_secret_ref text NOT NULL/);
   assert.match(sql, /api_key_mask text NOT NULL/);
   for (const column of ["primary_model", "opus_model", "sonnet_model", "haiku_model", "subagent_model"]) {
@@ -82,6 +86,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /E2E_CONTENT_FAILED/);
   assert.match(sql, /last_error = 'E2E_PRODUCT: ' \|\| failure_summary/);
   assert.match(sql, /repair_count < 3/);
+  assert.match(sql, /previous_repair\.created_at > coalesce\(\([\s\S]*max\(manual_agent\.created_at\)[\s\S]*NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
   assert.match(sql, /'repairFromE2eJobId', job\.id/);
   assert.match(sql, /p_signal_kind = 'STAGE_RERUN_REQUESTED'/);
   assert.match(sql, /rerun_stage := \(p_payload->>'stage'\)::deviludo\.job_kind/);
@@ -95,8 +100,23 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /claim_local_git_commit\(p_lease_seconds integer\)[\s\S]*FOR UPDATE OF workflow SKIP LOCKED/);
   assert.match(sql, /complete_local_git_commit[\s\S]*GIT_COMMIT_COMPLETED/);
   assert.match(sql, /fail_local_git_commit[\s\S]*attempts >= 3[\s\S]*GIT_COMMIT_FAILED/);
+  assert.match(sql, /schedule_e2e_protocol_revalidation/);
+  assert.match(sql, /state_data #>> '\{e2eProtocolRevalidation,protocol\}' = p_protocol/);
+  assert.match(sql, /artifact\.kind = 'BUILD'[\s\S]*rerun_stage := 'E2E_TEST'/);
+  assert.match(sql, /project_source_revisions[\s\S]*rerun_stage := 'ARTIFACT_BUILD'/);
+  assert.match(sql, /LIMIT p_batch_size/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
+});
+
+test("manual Agent reruns reset the bounded E2E repair cycle", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/021_reset_e2e_repair_budget_after_manual_agent.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /complete_job\(uuid,uuid,bigint,bigint,jsonb,jsonb,text,text,text\)/);
+  assert.match(migration, /previous_repair\.created_at > coalesce/);
+  assert.match(migration, /NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
 });
 
 test("Core stores only opaque external actor identifiers and has no account authority", async () => {
@@ -124,6 +144,62 @@ test("migration upgrades compatible databases in order and still rejects incompa
   assert.match(reset, /--confirm=RESET_DEVILUDO_SOURCE_V1/);
   assert.match(reset, /remoteResourcesDeleted: false/);
   assert.match(reset, /DEVILUDO_PROJECTS_ROOT/);
+});
+
+test("the E2E protocol migration freezes only the deployment-time latest terminal cohort", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/015_real_window_e2e_revalidation.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /UPDATE deviludo\.workflow_instances workflow[\s\S]*e2eProtocolRevalidation/);
+  assert.match(migration, /workflow\.state IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
+  assert.match(migration, /newer\.iteration_number > workflow\.iteration_number/);
+  assert.match(migration, /state_data #>> '\{e2eProtocolRevalidation,protocol\}' = p_protocol/);
+  assert.match(migration, /e2e-protocol-revalidate:/);
+  assert.match(migration, /GRANT EXECUTE ON FUNCTION deviludo\.schedule_e2e_protocol_revalidation/);
+});
+
+test("upgraded schedulers can inspect idempotent workflow signals", async () => {
+  const sql = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/016_scheduler_external_signal_privilege.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    migration,
+    /GRANT SELECT, INSERT, UPDATE ON deviludo\.external_signals TO deviludo_scheduler/,
+  );
+  assert.match(
+    migration,
+    /GRANT SELECT ON deviludo\.external_signals TO deviludo_claim_executor/,
+  );
+  assert.match(
+    sql,
+    /deviludo\.runtime_images, deviludo\.artifacts, deviludo\.artifact_inputs,\s*deviludo\.external_signals\s*TO deviludo_claim_executor/,
+  );
+});
+
+test("the protocol scheduler definer can route its idempotent rerun signal", async () => {
+  const [sql, migration] = await Promise.all([
+    readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8"),
+    readFile(
+      new URL("../infra/postgres/migrations/017_protocol_revalidation_definer_privileges.sql", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.match(migration, /GRANT INSERT ON deviludo\.external_signals TO deviludo_claim_executor/);
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION deviludo\.delivery_stages\(deviludo\.workflow_profile\)[\s\S]*TO deviludo_claim_executor/,
+  );
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION deviludo\.stage_running_state\(deviludo\.job_kind\)[\s\S]*TO deviludo_claim_executor/,
+  );
+  assert.match(
+    sql,
+    /GRANT INSERT ON deviludo\.jobs, deviludo\.artifact_inputs, deviludo\.external_signals\s*TO deviludo_claim_executor/,
+  );
 });
 
 test("upgraded databases restore workflow helper privileges after revoking PUBLIC execute", async () => {

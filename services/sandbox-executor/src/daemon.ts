@@ -9,6 +9,7 @@ import type { SandboxPlan, SandboxReceipt } from "@/services/core/src/sandbox";
 import { executorReceiptSigningPayload, parseJobProtocolV4 } from "@/services/core/src/contracts";
 import { ProjectSourceStore, type PublishedSourceRevision } from "@/services/core/src/project-sources";
 import { createTarGzip } from "@/services/core/src/project-import";
+import { decideAgentCheckpointRestore } from "./checkpoint-restore";
 import { validateAgentSourceReference } from "./source-revision";
 
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
@@ -362,26 +363,27 @@ async function execute(
         await writeFile(join(inputDirectory, "source.tar.gz"), source.bytes, { mode: 0o600 });
       }
     }
-    const checkpoint = plan.job.jobKind === "AGENT_GENERATION"
+    let checkpoint = plan.job.jobKind === "AGENT_GENERATION"
       ? await projectSources.archiveCheckpoint(plan.job.workspaceId, plan.job.projectId, plan.job.workflowId)
       : null;
     if (checkpoint) {
-      if (checkpoint.specificationDigest && checkpoint.specificationDigest !== specificationDigest) {
-        throw new Error("Agent checkpoint specification changed; refusing to restore stale source");
+      const restoreDecision = decideAgentCheckpointRestore({
+        checkpoint,
+        jobId: plan.job.jobId,
+        specificationDigest,
+        inputSourceDigest,
+        localDirectoryBaseDigest,
+      });
+      if (restoreDecision.action === "REJECT_CURRENT_JOB") {
+        throw new Error(restoreDecision.reason);
       }
-      if (!localDirectoryBaseDigest && checkpoint.sourceDigest && inputSourceDigest && checkpoint.sourceDigest !== inputSourceDigest) {
-        throw new Error("Agent checkpoint source revision changed; refusing to restore stale source");
+      if (restoreDecision.action === "DISCARD_STALE") {
+        await projectSources.deleteCheckpoint(plan.job.workspaceId, plan.job.projectId, plan.job.workflowId);
+        onProgress("PHASE", "已丢弃输入不匹配的旧任务检查点，将从当前源码重新开始");
+        checkpoint = null;
       }
-      if (localDirectoryBaseDigest && checkpoint.localDirectoryBaseDigest) {
-        const completedForThisJob = checkpoint.state === "AGENT_COMPLETE"
-          && checkpoint.originJobId === plan.job.jobId;
-        const acceptedDigests = completedForThisJob
-          ? [checkpoint.localDirectoryBaseDigest, checkpoint.digest]
-          : [checkpoint.localDirectoryBaseDigest];
-        if (!acceptedDigests.includes(localDirectoryBaseDigest)) {
-          throw new Error("LOCAL_PROJECT_CHANGED: Local project changed after the Agent checkpoint was created");
-        }
-      }
+    }
+    if (checkpoint) {
       await writeFile(join(inputDirectory, "checkpoint.tar.gz"), checkpoint.bytes, { mode: 0o600 });
     }
     await docker(["start", taskName], 30_000);

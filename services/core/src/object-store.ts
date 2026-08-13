@@ -11,6 +11,7 @@ import type { JobProtocolV4 } from "./contracts";
 import type { ArtifactRecord } from "@/lib/product/contracts";
 import { createHash } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
+import { specificationRequirementCatalog, validateTestManifest } from "@/lib/product/test-manifest";
 
 export class CoreObjectStore {
   private readonly client: S3Client;
@@ -134,7 +135,7 @@ export class CoreObjectStore {
       throw new Error("Output authorization contract is invalid");
     }
     if (!job.outputContract.kinds.includes(input.kind)) throw new Error("Output kind is not allowed by the leased job");
-    const extension = input.kind === "SIGNED_BUILD" ? ".tar.gz" : ".json";
+    const extension = input.kind === "SIGNED_BUILD" ? ".tar.gz" : input.kind === "E2E_REPORT" ? ".zip" : ".json";
     const platform = input.targetPlatform ? `-${input.targetPlatform}` : "";
     const filename = `${input.kind.toLowerCase().replaceAll("_", "-")}${platform}-${input.sha256.slice(7, 23)}${extension}`;
     const key = `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/${filename}`;
@@ -190,10 +191,29 @@ export class CoreObjectStore {
    */
   async readAgentCompletion(
     objects: readonly JobProtocolV4["inputObjects"][number][],
-  ): Promise<Readonly<{ assetManifest: unknown }>> {
+    approvedInputs: readonly JobProtocolV4["inputObjects"][number][],
+  ): Promise<Readonly<{ assetManifest: unknown; testManifest: unknown }>> {
     const parsed = await this.readJsonOutput(objects, "SPECIFICATION", 2 * 1024 * 1024, "Agent manifest");
-    if (!("assetManifest" in parsed)) throw new Error("Agent output does not contain an assetManifest");
-    return Object.freeze({ assetManifest: parsed.assetManifest });
+    if (!("assetManifest" in parsed) || !validateTestManifest(parsed.testManifest)) {
+      throw new Error("Agent output does not contain valid test and asset manifests");
+    }
+    await this.assertAgentTestManifest(parsed.testManifest, approvedInputs);
+    return Object.freeze({ assetManifest: parsed.assetManifest, testManifest: parsed.testManifest });
+  }
+
+  async assertAgentTestManifest(
+    testManifest: unknown,
+    approvedInputs: readonly JobProtocolV4["inputObjects"][number][],
+  ): Promise<void> {
+    if (!validateTestManifest(testManifest)) throw new Error("Agent test manifest is invalid");
+    const approved = approvedInputs.filter(object => object.kind === "SPECIFICATION" && object.key.endsWith("/specification.json"));
+    const specification = await this.readJsonOutput(approved, "SPECIFICATION", 2 * 1024 * 1024, "Approved specification");
+    const expectedRequirements = specificationRequirementCatalog(specification);
+    const actualRequirements = new Map(testManifest.requirements.map(requirement => [requirement.requirementId, requirement.description]));
+    if (expectedRequirements.length < 1 || actualRequirements.size !== expectedRequirements.length
+      || expectedRequirements.some(requirement => actualRequirements.get(requirement.requirementId) !== requirement.description)) {
+      throw new Error("Agent test manifest does not cover the frozen approved requirements");
+    }
   }
 
   private async readJsonOutput(

@@ -41,6 +41,12 @@ try {
       const archive = `godot-build-${platform}.tar.gz`;
       await mkdir(directory, { recursive: true });
       await writeFile(`${directory}/deviludo-fixture-game.txt`, `platform=${platform}\njob=${plan.job.jobId}\n`);
+      const generatedManifest = JSON.parse(await readFile("/workspace/inputs/agent.json", "utf8"));
+      if (generatedManifest?.testManifest?.schemaVersion !== "deviludo.test-manifest.v2") {
+        throw new Error("Fixture build requires a v2 test manifest");
+      }
+      await mkdir(`${directory}/.deviludo-e2e`, { recursive: true });
+      await writeFile(`${directory}/.deviludo-e2e/manifest.json`, JSON.stringify(generatedManifest.testManifest));
       const materialized = [];
       for (const asset of plan.job.inputObjects.filter(input => input.kind === "ASSET")) {
         const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
@@ -86,6 +92,16 @@ try {
     await progress("AGENT_OUTPUT", "正在生成 Godot 项目结构、主场景和自动化测试。");
     await observeGuidance();
     await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
+    const specification = JSON.parse(await readFile("/workspace/inputs/specification.json", "utf8"));
+    const generatedManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
+    const requirements = specificationRequirementCatalog(specification);
+    if (requirements.length < 1) throw new Error("Fixture specification has no testable requirements");
+    generatedManifest.testManifest.requirements = requirements;
+    generatedManifest.testManifest.features = generatedManifest.testManifest.features.map(feature => ({
+      ...feature,
+      requirementIds: requirements.map(requirement => requirement.requirementId),
+    }));
+    await writeFile("/workspace/project/agent.json", `${JSON.stringify(generatedManifest, null, 2)}\n`);
     await progress("AGENT_OUTPUT", "项目结构生成完成，正在发布源码 revision。");
     // Match the real Agent runner: the output contract is the generated
     // project's agent.json, not diagnostic metadata about the fixture process.
@@ -108,6 +124,27 @@ function assetInputFilename(input) {
   const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
   if (!extension) throw new Error("Fixture build asset extension is invalid");
   return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
+}
+
+function specificationRequirementCatalog(specification) {
+  const catalog = [];
+  for (const [kind, value] of [["feature", specification.coreLoop], ["acceptance", specification.acceptanceCriteria]]) {
+    if (!Array.isArray(value)) continue;
+    value.forEach((item, index) => {
+      if (typeof item !== "string" || !item.trim()) return;
+      catalog.push({ requirementId: stableRequirementId(kind, index, item), description: item.trim() });
+    });
+  }
+  return catalog;
+}
+
+function stableRequirementId(kind, index, text) {
+  let hash = 0x811c9dc5;
+  for (const character of `${kind}\0${index}\0${text.normalize("NFKC").trim()}`) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `req-${kind}-${String(index + 1).padStart(3, "0")}-${hash.toString(16).padStart(8, "0")}`;
 }
 await writeFile("/run/deviludo/task-result.json", JSON.stringify({
   ok: taskError === null,

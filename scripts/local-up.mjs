@@ -37,9 +37,11 @@ const localImageBuilds = Object.freeze([
 ]);
 const ciMode = process.env.DEVILUDO_LOCAL_CI === "1";
 const resetIncompatibleBaseline = process.argv.includes("--reset-incompatible-baseline");
+const refreshE2eVm = process.argv.includes("--refresh-e2e-vm");
 const releaseStartupLock = acquireStartupLock();
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
 const gitImportPort = process.env.DEVILUDO_LOCAL_GIT_IMPORT_PORT?.trim() || "3199";
+const artifactPort = process.env.DEVILUDO_MINIO_HOST_PORT?.trim() || "39000";
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
   throw new Error("DEVILUDO_WEB_HOST_PORT must be a valid TCP port");
 }
@@ -50,10 +52,14 @@ if (!/^\d+$/.test(gitImportPort) || Number(gitImportPort) < 1 || Number(gitImpor
   || gitImportPort === webPort) {
   throw new Error("DEVILUDO_LOCAL_GIT_IMPORT_PORT must be a valid unused TCP port");
 }
+if (!/^\d+$/.test(artifactPort) || Number(artifactPort) < 1 || Number(artifactPort) > 65535) {
+  throw new Error("DEVILUDO_MINIO_HOST_PORT must be a valid TCP port");
+}
 const previousGitImportConfiguration = await readLocalProjectBridgeConfiguration();
 const gitImportConfiguration = {
   port: Number(gitImportPort),
   allowedOrigin: `http://127.0.0.1:${webPort}`,
+  artifactOrigin: `http://127.0.0.1:${artifactPort}`,
   internalToken: previousGitImportConfiguration?.internalToken ?? randomBytes(32).toString("base64url"),
 };
 await writeFile(
@@ -68,7 +74,8 @@ const [claudeVersion, codexVersion] = await Promise.all([
 await requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 await requireCommand("docker", ["compose", "version"]);
 await requireCommand("git", ["--version"]);
-if (!ciMode) await requireGodot();
+const tartE2e = ciMode ? null : await import("./local-tart-prepare.mjs")
+  .then(module => module.prepareLocalTartE2e({ refresh: refreshE2eVm }));
 // Each one-shot initialisation step below is guarded by a fingerprint of the
 // inputs that could change its answer, because a repeat start otherwise pays a
 // full container creation per step to redo work that is already done. A guard
@@ -203,7 +210,10 @@ if (!ciMode) {
     coreUrl: process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080",
     token: process.env.DEVILUDO_E2E_NODE_TOKEN ?? "local-e2e-node-token",
     identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
+    jobRoot: new URL("../.deviludo/local/tart-host-jobs", import.meta.url).pathname,
+    tartFingerprint: tartE2e?.fingerprint,
   };
+  mkdirSync(e2eConfiguration.jobRoot, { recursive: true, mode: 0o700 });
   await writeFile(new URL("../.deviludo/local/e2e-macos.json", import.meta.url), JSON.stringify(e2eConfiguration, null, 2), { mode: 0o600 });
   e2eConfigurationFingerprint = digest([
     "e2e-macos", imageInputFingerprint, JSON.stringify(e2eConfiguration),
@@ -245,6 +255,7 @@ console.log(JSON.stringify({
   runtimes: {
     claudeCode: claudeVersion,
     codexCli: codexVersion,
+    e2eVm: tartE2e ? (tartE2e.reused ? "reused" : "initialized") : "ci-skipped",
   },
 }));
 releaseStartupLock();
@@ -341,8 +352,18 @@ async function fingerprintLocalImageInputs() {
     if (!bounded || bounded === ".." || bounded.startsWith(`..${sep}`)) {
       throw new Error(`Image input escapes the repository: ${relativePath}`);
     }
-    const entry = await lstat(absolutePath);
     hash.update(`${Buffer.byteLength(relativePath)}:${relativePath}:`, "utf8");
+    let entry;
+    try {
+      entry = await lstat(absolutePath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      // `git ls-files --cached` intentionally includes tracked deletions in a
+      // dirty worktree. Keep the deletion in the fingerprint so it invalidates
+      // an image built from the formerly present file.
+      hash.update("missing", "utf8");
+      continue;
+    }
     if (entry.isSymbolicLink()) {
       const target = await readlink(absolutePath);
       hash.update(`link:${Buffer.byteLength(target)}:${target}`, "utf8");
@@ -597,19 +618,6 @@ async function requireCommand(command, arguments_) {
   } catch {
     throw new Error(`${command} 未就绪；请先显式运行 npm run local:bootstrap`);
   }
-}
-
-async function requireGodot() {
-  const candidates = process.platform === "darwin"
-    ? [["godot", ["--version"]], ["/Applications/Godot.app/Contents/MacOS/Godot", ["--version"]]]
-    : [["godot", ["--version"]]];
-  for (const [command, arguments_] of candidates) {
-    try {
-      await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
-      return;
-    } catch { /* try the next supported installation path */ }
-  }
-  throw new Error("Godot 未就绪；请先显式运行 npm run local:bootstrap");
 }
 
 async function resolveDockerSocketGid() {

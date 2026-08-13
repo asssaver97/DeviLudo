@@ -32,6 +32,10 @@ export function ProductDashboard({
 
   useEffect(() => {
     let active = true;
+    // Resolve the host bridge while the import page is rendering so a click can
+    // invoke the native folder chooser immediately instead of paying a Web API
+    // round trip first.
+    if (creationOnly && initialMode === "IMPORT") void preloadLocalProjectBridgeUrl();
     void loadCached(clientCacheKeys.projects, 10_000, async () => {
       const response = await fetch("/api/projects");
       const payload = response.status === 409 ? { projects: [] } : await readJson(response);
@@ -106,8 +110,6 @@ export function ProductDashboard({
       const bridgeUrl = await localProjectBridgeUrl(text);
       const selectionResponse = await fetch(`${bridgeUrl}/directory/select`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
       });
       const local = await bridgeProjectBinding(selectionResponse, text);
       const response = await fetch("/api/projects/bind/local-directory", {
@@ -306,15 +308,34 @@ function cacheProjectSummary(project: ProductProjectSummary): void {
 async function localProjectBridgeUrl(
   text: (chinese: string, english: string) => string,
 ): Promise<string> {
-  const response = await fetch("/api/local-git-import/config", { cache: "no-store" });
-  const configuration = await response.json() as { available?: boolean; url?: string };
-  if (!response.ok || !configuration.available || !configuration.url) {
+  const url = await preloadLocalProjectBridgeUrl();
+  if (!url) {
     throw new ApiError("LOCAL_PROJECT_BRIDGE_UNAVAILABLE", text(
       "本地项目服务未启动，请运行 npm run local:up",
       "The local project service is not running. Run npm run local:up.",
     ));
   }
-  return configuration.url;
+  return url;
+}
+
+let cachedLocalProjectBridgeUrl: string | null = null;
+let localProjectBridgeRequest: Promise<string | null> | null = null;
+
+function preloadLocalProjectBridgeUrl(): Promise<string | null> {
+  if (cachedLocalProjectBridgeUrl) return Promise.resolve(cachedLocalProjectBridgeUrl);
+  localProjectBridgeRequest ??= fetch("/api/local-git-import/config", { cache: "no-store" })
+    .then(async response => {
+      const configuration = await response.json() as { available?: boolean; url?: string };
+      if (!response.ok || !configuration.available || !configuration.url) return null;
+      cachedLocalProjectBridgeUrl = configuration.url;
+      return cachedLocalProjectBridgeUrl;
+    })
+    .catch(() => null)
+    .then(url => {
+      if (!url) localProjectBridgeRequest = null;
+      return url;
+    });
+  return localProjectBridgeRequest;
 }
 
 async function bridgeProjectBinding(

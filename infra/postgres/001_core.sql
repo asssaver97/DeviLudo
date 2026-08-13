@@ -72,7 +72,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '014_sandbox_image_generation_settings_privilege');
+VALUES (true, '001', 'deviludo-core-source-v1', '022_correct_iteration_base_source_revision');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -258,7 +258,6 @@ CREATE TABLE deviludo.project_source_revisions (
   fencing_token bigint CHECK (fencing_token IS NULL OR fencing_token > 0),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, project_id, revision),
-  UNIQUE (workspace_id, project_id, content_digest),
   FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE
 );
 
@@ -2222,7 +2221,18 @@ BEGIN
      WHERE previous_repair.workspace_id = job.workspace_id
        AND previous_repair.workflow_id = job.workflow_id
        AND previous_repair.kind = 'AGENT_GENERATION'
-       AND previous_repair.payload ? 'repairFromE2eJobId';
+       AND previous_repair.payload ? 'repairFromE2eJobId'
+       -- A user-requested Agent rerun starts a new repair cycle. Counting every
+       -- historical repair forever made independently regenerated source unable
+       -- to use the bounded automatic repair path.
+       AND previous_repair.created_at > coalesce((
+         SELECT max(manual_agent.created_at)
+           FROM deviludo.jobs manual_agent
+          WHERE manual_agent.workspace_id = job.workspace_id
+            AND manual_agent.workflow_id = job.workflow_id
+            AND manual_agent.kind = 'AGENT_GENERATION'
+            AND NOT (manual_agent.payload ? 'repairFromE2eJobId')
+       ), '-infinity'::timestamptz);
     SELECT * INTO agent_settings
       FROM deviludo.instance_agent_settings
      WHERE singleton = true;
@@ -2433,6 +2443,13 @@ BEGIN
          lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
          last_error = left(p_reason, 2000), updated_at = clock_timestamp()
    WHERE workspace_id = job.workspace_id AND id = job.id;
+  IF NOT terminal AND job.kind = 'AGENT_GENERATION' THEN
+    UPDATE deviludo.job_guidance_messages
+       SET state = 'PENDING', delivered_at = NULL
+     WHERE workspace_id = job.workspace_id
+       AND job_id = job.id
+       AND state = 'DELIVERED';
+  END IF;
   INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
   VALUES (
     job.workspace_id, job.workflow_id,
@@ -2470,6 +2487,15 @@ BEGIN
            last_error = 'lease expired', updated_at = clock_timestamp()
      WHERE state = 'RUNNING' AND lease_expires_at < clock_timestamp()
      RETURNING workspace_id, workflow_id, id, attempt, state
+  ), replay_guidance AS (
+    UPDATE deviludo.job_guidance_messages guidance
+       SET state = 'PENDING', delivered_at = NULL
+      FROM expired
+     WHERE expired.state = 'RETRY'
+       AND guidance.workspace_id = expired.workspace_id
+       AND guidance.job_id = expired.id
+       AND guidance.state = 'DELIVERED'
+    RETURNING guidance.id
   ), events AS (
     INSERT INTO deviludo.workflow_events(
       workspace_id, workflow_id, event_kind, event_data, idempotency_key
@@ -2574,6 +2600,97 @@ END
 $$;
 ALTER FUNCTION deviludo.cleanup_expired_executor_state() OWNER TO deviludo_claim_executor;
 
+-- A protocol bump revalidates only each project's latest terminal iteration.
+-- The signal's protocol-scoped idempotency key makes scheduler restarts safe;
+-- normal stage rerun semantics preserve historical artifacts and choose the
+-- earliest stage whose durable input is still available.
+CREATE OR REPLACE FUNCTION deviludo.schedule_e2e_protocol_revalidation(
+  p_protocol text,
+  p_batch_size integer DEFAULT 2
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  candidate record;
+  rerun_stage deviludo.job_kind;
+  requested_by uuid;
+  scheduled integer := 0;
+  signal_key text;
+BEGIN
+  IF p_protocol !~ '^deviludo\.e2e-evidence\.v[0-9]+$' THEN RAISE EXCEPTION 'invalid E2E evidence protocol'; END IF;
+  IF p_batch_size NOT BETWEEN 1 AND 20 THEN RAISE EXCEPTION 'invalid E2E revalidation batch size'; END IF;
+  signal_key := 'e2e-protocol-revalidate:' || p_protocol;
+  FOR candidate IN
+    SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
+           workflow.development_actor_account_id, project.created_by_actor_account_id
+      FROM deviludo.workflow_instances workflow
+      JOIN deviludo.projects project
+        ON project.workspace_id = workflow.workspace_id AND project.id = workflow.project_id
+     WHERE workflow.state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+       AND workflow.state_data #>> '{e2eProtocolRevalidation,protocol}' = p_protocol
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.workflow_instances newer
+          WHERE newer.workspace_id = workflow.workspace_id
+            AND newer.project_id = workflow.project_id
+            AND newer.iteration_number > workflow.iteration_number
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.external_signals signal
+          WHERE signal.workspace_id = workflow.workspace_id
+            AND signal.workflow_id = workflow.id
+           AND signal.idempotency_key = signal_key
+       )
+       AND (
+         EXISTS (
+           SELECT 1 FROM deviludo.project_source_revisions source
+            WHERE source.workspace_id = workflow.workspace_id AND source.project_id = workflow.project_id
+         )
+         OR EXISTS (SELECT 1 FROM deviludo.instance_agent_settings WHERE singleton = true)
+       )
+     ORDER BY workflow.updated_at, workflow.id
+     LIMIT p_batch_size
+  LOOP
+    requested_by := coalesce(candidate.development_actor_account_id, candidate.created_by_actor_account_id);
+    IF EXISTS (
+      SELECT 1 FROM deviludo.artifacts artifact
+      JOIN deviludo.jobs producing_job
+        ON producing_job.workspace_id = artifact.workspace_id AND producing_job.id = artifact.producing_job_id
+      WHERE artifact.workspace_id = candidate.workspace_id
+        AND artifact.workflow_id = candidate.workflow_id
+        AND artifact.kind = 'BUILD'
+        AND producing_job.state = 'SUCCEEDED'
+    ) THEN rerun_stage := 'E2E_TEST';
+    ELSIF EXISTS (
+      SELECT 1 FROM deviludo.project_source_revisions source
+       WHERE source.workspace_id = candidate.workspace_id AND source.project_id = candidate.project_id
+    ) THEN rerun_stage := 'ARTIFACT_BUILD';
+    ELSE rerun_stage := 'AGENT_GENERATION';
+    END IF;
+    IF rerun_stage = 'AGENT_GENERATION'
+      AND NOT EXISTS (SELECT 1 FROM deviludo.instance_agent_settings WHERE singleton = true)
+    THEN CONTINUE; END IF;
+    IF deviludo.accept_workflow_signal(
+      candidate.workflow_id,
+      'STAGE_RERUN_REQUESTED',
+      signal_key,
+      jsonb_build_object(
+        'stage', rerun_stage::text,
+        'requestedByAccountId', requested_by,
+        'reason', 'E2E_PROTOCOL_UPGRADE',
+        'evidenceProtocol', p_protocol
+      )
+    ) THEN scheduled := scheduled + 1; END IF;
+  END LOOP;
+  RETURN scheduled;
+END
+$$;
+ALTER FUNCTION deviludo.schedule_e2e_protocol_revalidation(text, integer)
+  OWNER TO deviludo_claim_executor;
+
 REVOKE ALL ON ALL TABLES IN SCHEMA deviludo FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA deviludo FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA deviludo FROM PUBLIC;
@@ -2638,9 +2755,9 @@ GRANT SELECT ON deviludo.project_creation_receipts TO deviludo_claim_executor;
 GRANT EXECUTE ON FUNCTION deviludo.required_capabilities(deviludo.job_kind) TO
   deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
 GRANT EXECUTE ON FUNCTION deviludo.delivery_stages(deviludo.workflow_profile) TO
-  deviludo_api, deviludo_scheduler, deviludo_sandbox;
+  deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
 GRANT EXECUTE ON FUNCTION deviludo.stage_running_state(deviludo.job_kind) TO
-  deviludo_api, deviludo_scheduler, deviludo_sandbox;
+  deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
 GRANT EXECUTE ON FUNCTION deviludo.enqueue_job(
   uuid, uuid, uuid, deviludo.job_kind, deviludo.server_os, text, jsonb
 ) TO deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
@@ -2648,6 +2765,8 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_job(text, deviludo.server_pool_kind, in
   TO deviludo_api, deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.accept_workflow_signal(uuid, text, text, jsonb)
   TO deviludo_api;
+GRANT EXECUTE ON FUNCTION deviludo.accept_workflow_signal(uuid, text, text, jsonb)
+  TO deviludo_claim_executor;
 GRANT EXECUTE ON FUNCTION deviludo.complete_job(uuid, uuid, bigint, bigint, jsonb, jsonb, text, text, text)
   TO deviludo_api, deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.fail_job(uuid, uuid, bigint, text)
@@ -2671,15 +2790,20 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_local_git_commit(integer),
   deviludo.fail_local_git_commit(uuid, uuid, uuid, text)
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.cleanup_expired_executor_state() TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.schedule_e2e_protocol_revalidation(text, integer)
+  TO deviludo_scheduler;
 
 GRANT SELECT, UPDATE ON deviludo.jobs TO deviludo_claim_executor;
-GRANT INSERT ON deviludo.jobs, deviludo.artifact_inputs TO deviludo_claim_executor;
+GRANT SELECT, UPDATE ON deviludo.job_guidance_messages TO deviludo_claim_executor;
+GRANT INSERT ON deviludo.jobs, deviludo.artifact_inputs, deviludo.external_signals
+  TO deviludo_claim_executor;
 GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.workflow_instances TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.project_documents,
   deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
   deviludo.workflow_instances, deviludo.instance_agent_settings,
-  deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs
+  deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs,
+  deviludo.external_signals
   TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.project_source_ready_outbox TO deviludo_claim_executor;
 -- The asset generation lease and its settlement run as this role, which is the

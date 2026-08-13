@@ -41,6 +41,13 @@ export type ArtifactRecord = Readonly<{
   kind: "SPECIFICATION" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
   targetPlatform: "linux" | "windows" | "macos" | null;
   object: ObjectReference;
+  e2eEvidence?: Readonly<{
+    protocol: "deviludo.e2e-evidence.v1";
+    result: "PASSED" | "FAILED";
+    checkCount: number;
+    screenshotCount: number;
+    hasVisualDiff: boolean;
+  }>;
   createdAt: string;
 }>;
 

@@ -13,8 +13,8 @@ DeviLudo 是面向 Godot 的 AI 游戏交付平台。它把游戏需求和对话
 - 本地 Git 和 GitHub 项目关联后可在项目页新建并切换分支；GitHub 私有仓库复用宿主机 Git 凭证。
 - 按 revision 持久保存源码，支持对话式迭代、失败修复与阶段重跑。
 - 根据 Agent 的素材清单自动生成图片，也支持用户上传或使用占位素材。
-- 构建 Godot 制品，并按功能清单执行单元、交互、视觉和人工验收测试。
-- 在 Linux、Windows 和 macOS 上完成隔离 E2E 验证。
+- 构建 Godot 制品，并强制按需求映射的测试清单执行单元测试、真实键鼠交互和视觉基线检查；不再以“能启动”代替测试。
+- 在 Linux、Windows 和 macOS 的一次性图形虚拟机中完成隔离 E2E，并生成包含 HTML、JSON、日志、真实游戏截图和视觉差异图的证据 ZIP。
 - 对发布制品进行签名，经人工批准后上传 Steam，并验证干净回装。
 - 提供 standalone 单机模式，以及接入外部账号系统的 platform 模式。
 - 内置 PostgreSQL/S3/源码备份恢复、可观测性和受限任务执行。
@@ -26,11 +26,11 @@ DeviLudo 是面向 Godot 的 AI 游戏交付平台。它把游戏需求和对话
 | `VALIDATE` | Agent 生成 → 图片素材就绪 → Godot 构建 → 指定平台 E2E |
 | `RELEASE` | Agent 生成 → 图片素材就绪 → 构建 → 三平台 E2E → 签名 → 人工批准 → Steam 发布 → 干净回装 |
 
-Agent 生成源码时会同时提交 `assetManifest` 和 `testManifest`。图片会在构建前写入 Godot 项目，测试结果会精确关联到声明的功能点，而不是只返回一个退出码。
+Agent 生成源码时会同时提交 `assetManifest` 和 `deviludo.test-manifest.v2`。图片会在构建前写入 Godot 项目。E2E 必须完成核心循环旅程、模拟真实输入并留下启动/关键状态/完成截图；缺少检查项、Godot 脚本错误、空白截图或视觉差异超限都会失败。本地点击 E2E 报告会直接打开自包含 HTML。
 
 ## 本地快速启动
 
-本地完整链路目前支持 macOS，使用 Node.js 22、Docker/Colima 和 Godot。
+本地完整链路目前仅支持 Apple Silicon macOS，使用 Node.js 22、Docker/Colima、Homebrew 和 Tart。Godot 在一次性 Tart 虚拟机内运行，不占用宿主机窗口焦点。
 
 ```bash
 git clone <repository-url>
@@ -53,7 +53,13 @@ npm run local:down     # 停止服务并保留数据
 npm run local:reset    # 停止服务并清空本地数据
 ```
 
-首次构建镜像可能需要数分钟；后续 `local:up` 会复用镜像、数据库迁移、初始化状态和 macOS E2E 进程。
+首次 `local:up` 会自动安装缺失的 Tart/SSH 辅助工具，拉取约 25 GB 的 macOS 基础镜像并构建版本化 E2E 金镜像，因此至少需要 35 GiB 可用空间；初始化失败会明确停止，不会退回宿主机执行。后续启动按配置指纹复用金镜像，不会因为远端 `latest` 变化而重新下载。需要主动刷新时运行：
+
+```bash
+npm run local:up -- --refresh-e2e-vm
+```
+
+基础镜像体积说明见 [Tart Quick Start](https://tart.run/quick-start/)。应用镜像首次构建也可能需要数分钟；后续 `local:up` 会复用镜像、数据库迁移、初始化状态和 Tart 金镜像。
 
 Agent 默认单任务运行以适配约 8 GiB 的 Docker 环境。资源充足时可在启动前设置 `DEVILUDO_SANDBOX_CONCURRENCY=2` 并行处理两个 Core 任务；这会提高内存占用和 Provider 调用量，允许值仅为 `1` 或 `2`。
 
@@ -65,9 +71,9 @@ Agent 默认单任务运行以适配约 8 GiB 的 Docker 环境。资源充足�
 | --- | --- | --- |
 | `WEB` | Ubuntu 24.04 | Next.js 网站、BFF、唯一公网入口 |
 | `CORE` | Ubuntu 24.04 x86_64 | API、调度、Agent、构建与发布任务 |
-| `E2E_LINUX` | Ubuntu 24.04 x86_64 | KVM 隔离的 Linux 验证 |
-| `E2E_WINDOWS` | Windows 11 Pro x86_64 | Hyper-V 隔离的 Windows 验证 |
-| `E2E_MACOS` | macOS 15+ Apple Silicon | Tart 隔离的 macOS 验证 |
+| `E2E_LINUX` | Ubuntu 24.04 x86_64 | KVM 图形会话中的 Linux 真实窗口验证 |
+| `E2E_WINDOWS` | Windows 11 Pro x86_64 | Hyper-V 交互会话中的 Windows 真实窗口验证 |
+| `E2E_MACOS` | macOS 15+ Apple Silicon | Tart 图形桌面中的 macOS 真实窗口验证 |
 
 还需要外部 PostgreSQL、S3、Vault/KMS、OpenTelemetry 和负载均衡。公网流量只能进入 WEB；E2E 节点仅通过出站 mTLS 访问 CORE。
 
@@ -79,7 +85,7 @@ Agent 默认单任务运行以适配约 8 GiB 的 Docker 环境。资源充足�
    - [Linux E2E](deploy/e2e-linux/deploy.env.example)
    - [Windows E2E](deploy/e2e-windows/deploy.json.example)
    - [macOS E2E](deploy/e2e-macos/deploy.env.example)
-2. 将数据库、S3、Vault、TLS、签名、Steam 和黄金 VM 凭据写入配置指定的权限受限文件。
+2. 将数据库、S3、Vault、TLS、签名、Steam 和黄金 VM 凭据写入配置指定的权限受限文件。三平台金镜像必须预装 Godot 4.5.1、Node 22、guest runner、对应 GUI driver，并通过窗口、输入和截图 smoke。
 3. 在每台目标服务器执行部署脚本。
 
 Bash 服务器：
@@ -100,6 +106,8 @@ Windows：
 ```
 
 部署使用带摘要和 Cosign 签名的 release，不在服务器现场编译。Bash 部署还支持 `rollback`，但只允许回滚到数据库 schema 兼容的已验证版本。
+
+首次部署新版 E2E 协议时，调度器只对升级当时每个项目的最新终态轮次分批重验：优先复用构建，其次从源码重建，缺少源码才重新运行 Agent。`DEVILUDO_E2E_REVALIDATION_BATCH_SIZE` 可设为 `1`–`20`（默认 `2`）；重验最终成功后，本地 Git 项目仍会自动 commit，但不会 push。
 
 ## 开发与验证
 

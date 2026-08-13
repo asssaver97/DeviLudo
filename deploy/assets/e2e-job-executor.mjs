@@ -15,6 +15,7 @@ const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 if (!/^[0-9a-f-]{36}$/i.test(request.jobId) || !Array.isArray(request.inputs)) throw new Error("E2E request is invalid");
 const workspace = await mkdtemp(join(process.env.DEVILUDO_E2E_JOB_ROOT ?? tmpdir(), `deviludo-${request.jobId}-`));
 let signedOutputReady = false;
+let evidenceOutputReady = false;
 try {
   const input = selectInput(request.inputs, action === "sign" ? "BUILD" : action === "test" ? "BUILD" : "PUBLISH_RECEIPT");
   const artifact = join(workspace, basename(input.object.key));
@@ -36,19 +37,24 @@ try {
   } else {
     const guestRunner = process.env.DEVILUDO_E2E_GUEST_RUNNER ?? "";
     if (!guestRunner.startsWith("/")) throw new Error("A fixed guest runner is required");
-    const receipt = await runJson(guestRunner, [action, "--job-id", request.jobId, "--artifact", artifact]);
+    const evidenceOutput = join(workspace, `e2e-evidence-${request.operatingSystem}-${request.jobId}.zip`);
+    const receipt = await runJson(guestRunner, [action, "--job-id", request.jobId, "--artifact", artifact], {
+      ...(action === "test" ? { DEVILUDO_E2E_HOST_OUTPUT: evidenceOutput } : {}),
+    });
     const outcome = normalizeGuestOutcome(receipt);
-    process.stdout.write(JSON.stringify({
-      schemaVersion: "deviludo.godot-guest-report.v1", jobId: request.jobId,
-      action, inputDigest: input.object.sha256,
-      outcome: outcome.outcome,
-      failureDomain: outcome.failureDomain,
-      summary: outcome.summary,
-      guest: receipt,
-    }));
+    if (action === "test") {
+      const evidence = await readFile(evidenceOutput);
+      const digest = `sha256:${createHash("sha256").update(evidence).digest("hex")}`;
+      if (receipt.outputPath !== evidenceOutput || receipt.outputSha256 !== digest || receipt.outputSizeBytes !== evidence.length) {
+        throw new Error("Guest evidence copy does not match its receipt");
+      }
+      evidenceOutputReady = true;
+    }
+    process.stdout.write(JSON.stringify({ ...receipt, jobId: request.jobId, action, inputDigest: input.object.sha256,
+      outcome: outcome.outcome, failureDomain: outcome.failureDomain, summary: outcome.summary }));
   }
 } finally {
-  if (!signedOutputReady) await rm(workspace, { recursive: true, force: true });
+  if (!signedOutputReady && !evidenceOutputReady) await rm(workspace, { recursive: true, force: true });
 }
 
 function selectInput(inputs, kind) {
@@ -106,9 +112,16 @@ async function walk(root) {
   return entries.map(entry => join(entry.parentPath, entry.name));
 }
 
-function runJson(executable, arguments_) {
+function runJson(executable, arguments_, extraEnvironment = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, arguments_, { stdio: ["ignore", "pipe", "pipe"], shell: false, env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" } });
+    // JavaScript runners are source files, not platform executables. Invoke them
+    // through the same trusted Node binary so a checkout that does not preserve
+    // executable mode (or a freshly generated local runner) cannot fail with
+    // EACCES before the guest VM is reached.
+    const invocation = executable.endsWith(".mjs")
+      ? { executable: process.execPath, arguments: [executable, ...arguments_] }
+      : { executable, arguments: arguments_ };
+    const child = spawn(invocation.executable, invocation.arguments, { stdio: ["ignore", "pipe", "pipe"], shell: false, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...extraEnvironment } });
     const stdout = [], stderr = []; child.stdout.on("data", value => stdout.push(Buffer.from(value))); child.stderr.on("data", value => stderr.push(Buffer.from(value)));
     child.once("error", reject); child.once("close", code => {
       try {
@@ -124,13 +137,22 @@ function runJson(executable, arguments_) {
 }
 
 function normalizeGuestOutcome(receipt) {
-  if (receipt.outcome === "PASSED" && receipt.exitCode === 0
+  const exitCode = receipt.guest?.exitCode ?? receipt.exitCode;
+  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v2") throw new Error("Guest runner protocol is obsolete");
+  if (receipt.outcome === "PASSED" && exitCode === 0
     && typeof receipt.summary === "string" && receipt.summary.trim()) {
     return { outcome: "PASSED", failureDomain: null, summary: receipt.summary.trim().slice(0, 2000) };
   }
   if (receipt.outcome === "FAILED" && receipt.failureDomain === "PRODUCT"
-    && receipt.exitCode !== 0 && typeof receipt.summary === "string" && receipt.summary.trim()) {
+    && exitCode !== 0 && typeof receipt.summary === "string" && receipt.summary.trim()) {
     return { outcome: "FAILED", failureDomain: "PRODUCT", summary: receipt.summary.trim().slice(0, 2000) };
   }
-  throw new Error("Guest runner outcome contract is invalid");
+  const diagnostic = {
+    schemaVersion: receipt.schemaVersion ?? null,
+    outcome: receipt.outcome ?? null,
+    failureDomain: receipt.failureDomain ?? null,
+    exitCode: Number.isInteger(exitCode) ? exitCode : null,
+    summary: typeof receipt.summary === "string" ? receipt.summary.trim().slice(0, 500) : null,
+  };
+  throw new Error(`Guest runner outcome contract is invalid: ${JSON.stringify(diagnostic)}`);
 }

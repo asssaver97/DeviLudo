@@ -98,9 +98,14 @@ test("project, specification and workflow APIs cover validation, idempotency and
   });
   expect(lockedRevision.status()).toBe(400);
 
-  const firstCancel = await stack.web(`/api/projects/${project.id}/cancel`, { method: "POST", data: {} });
+  const cancelKey = `cancel:${randomUUID()}`;
+  const firstCancel = await stack.web(`/api/projects/${project.id}/cancel`, {
+    method: "POST", data: {}, headers: { "idempotency-key": cancelKey },
+  });
   expect(firstCancel.status()).toBe(202);
-  const duplicateCancel = await stack.web(`/api/projects/${project.id}/cancel`, { method: "POST", data: {} });
+  const duplicateCancel = await stack.web(`/api/projects/${project.id}/cancel`, {
+    method: "POST", data: {}, headers: { "idempotency-key": cancelKey },
+  });
   expect(duplicateCancel.status()).toBe(200);
   const cancelled = await stack.waitForProject(project.id, value => value.workflowState === "CANCELLED");
   expect(cancelled.jobs.every(job => ["SUCCEEDED", "CANCELLED"].includes(job.state))).toBeTruthy();
@@ -123,18 +128,26 @@ test("a failed Agent generation retries with the currently registered runtime im
   });
   const failedJobId = randomUUID();
   const artifactId = randomUUID();
+  const obsoleteArtifactId = randomUUID();
   const obsoleteRuntime = `sha256:${"1".repeat(64)}`;
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
        SET state = 'FAILED', version = version + 1, updated_at = clock_timestamp()
      WHERE workspace_id = '${project.workspaceId}'::uuid AND id = '${project.workflowId}'::uuid;
     INSERT INTO deviludo.artifacts(
-      workspace_id, id, project_id, workflow_id, kind, bucket, object_key, sha256, size_bytes
-    ) VALUES (
+      workspace_id, id, project_id, workflow_id, kind, bucket, object_key, sha256, size_bytes, created_at
+    ) VALUES
+    (
+      '${project.workspaceId}'::uuid, '${obsoleteArtifactId}'::uuid, '${project.id}'::uuid, '${project.workflowId}'::uuid,
+      'SPECIFICATION', 'deviludo-artifacts',
+      'workspaces/${project.workspaceId}/projects/${project.id}/specification/obsolete.json',
+      'sha256:${"4".repeat(64)}', 1, clock_timestamp() - interval '1 minute'
+    ),
+    (
       '${project.workspaceId}'::uuid, '${artifactId}'::uuid, '${project.id}'::uuid, '${project.workflowId}'::uuid,
       'SPECIFICATION', 'deviludo-artifacts',
       'workspaces/${project.workspaceId}/projects/${project.id}/specification/retry.json',
-      'sha256:${"2".repeat(64)}', 1
+      'sha256:${"2".repeat(64)}', 1, clock_timestamp()
     );
     INSERT INTO deviludo.jobs(
       workspace_id, id, workflow_id, project_id, kind, pool_kind, required_capabilities,
@@ -150,7 +163,8 @@ test("a failed Agent generation retries with the currently registered runtime im
 
   const artifactsResponse = await stack.web(`/api/projects/${project.id}/artifacts`);
   expect(artifactsResponse.status(), await artifactsResponse.text()).toBe(200);
-  expect(await artifactsResponse.json()).toMatchObject({
+  const artifactsPayload = await artifactsResponse.json();
+  expect(artifactsPayload).toMatchObject({
     artifacts: [expect.objectContaining({
       id: artifactId,
       projectId: project.id,
@@ -158,6 +172,7 @@ test("a failed Agent generation retries with the currently registered runtime im
       kind: "SPECIFICATION",
     })],
   });
+  expect(artifactsPayload.artifacts).toHaveLength(1);
   const downloadResponse = await stack.web(`/api/projects/${project.id}/artifacts/${artifactId}/download`, {
     method: "POST",
     data: {},

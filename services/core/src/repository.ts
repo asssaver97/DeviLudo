@@ -1118,9 +1118,10 @@ export class CoreRepository {
         [input.projectId],
       );
       const latestSource = await client.query<{ revision: string }>(
-        `SELECT revision::text FROM deviludo.project_source_revisions
-          WHERE project_id = $1::uuid
-          ORDER BY revision DESC
+        `SELECT source.revision::text AS revision
+           FROM deviludo.project_source_revisions source
+          WHERE source.project_id = $1::uuid
+          ORDER BY source.revision DESC
           LIMIT 1`,
         [input.projectId],
       );
@@ -1228,11 +1229,19 @@ export class CoreRepository {
           [workflowId],
         ),
         client.query<ArtifactRow>(
-          `SELECT id::text, workspace_id::text, project_id::text, workflow_id::text,
-                  kind::text, target_platform::text, bucket, object_key, sha256,
-                  size_bytes::text, created_at::text
-             FROM deviludo.artifacts
-            WHERE project_id = $1::uuid AND workflow_id = $2::uuid
+          `SELECT id, workspace_id, project_id, workflow_id, kind, target_platform,
+                  bucket, object_key, sha256, size_bytes, metadata, created_at
+             FROM (
+               SELECT DISTINCT ON (artifact.kind, artifact.target_platform)
+                      artifact.id::text, artifact.workspace_id::text, artifact.project_id::text,
+                      artifact.workflow_id::text, artifact.kind::text, artifact.target_platform::text,
+                      artifact.bucket, artifact.object_key, artifact.sha256,
+                      artifact.size_bytes::text, artifact.metadata, artifact.created_at::text
+                 FROM deviludo.artifacts artifact
+                WHERE artifact.project_id = $1::uuid AND artifact.workflow_id = $2::uuid
+                ORDER BY artifact.kind, artifact.target_platform NULLS FIRST,
+                         artifact.created_at DESC, artifact.id DESC
+             ) latest
             ORDER BY created_at DESC, id DESC`,
           [projectId, workflowId],
         ),
@@ -1256,12 +1265,20 @@ export class CoreRepository {
   ): Promise<readonly ArtifactRecord[]> {
     return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<ArtifactRow>(
-        `SELECT id::text, workspace_id::text, project_id::text, workflow_id::text,
-                kind::text, target_platform::text, bucket, object_key, sha256,
-                size_bytes::text, created_at::text
-           FROM deviludo.artifacts
-          WHERE project_id = $1::uuid
-            AND ($2::uuid IS NULL OR workflow_id = $2::uuid)
+        `SELECT id, workspace_id, project_id, workflow_id, kind, target_platform,
+                bucket, object_key, sha256, size_bytes, metadata, created_at
+           FROM (
+             SELECT DISTINCT ON (artifact.kind, artifact.target_platform)
+                    artifact.id::text, artifact.workspace_id::text, artifact.project_id::text,
+                    artifact.workflow_id::text, artifact.kind::text, artifact.target_platform::text,
+                    artifact.bucket, artifact.object_key, artifact.sha256,
+                    artifact.size_bytes::text, artifact.metadata, artifact.created_at::text
+               FROM deviludo.artifacts artifact
+              WHERE artifact.project_id = $1::uuid
+                AND ($2::uuid IS NULL OR artifact.workflow_id = $2::uuid)
+              ORDER BY artifact.kind, artifact.target_platform NULLS FIRST,
+                       artifact.created_at DESC, artifact.id DESC
+           ) latest
           ORDER BY created_at DESC, id DESC`,
         [projectId, workflowId ?? null],
       );
@@ -1283,7 +1300,7 @@ export class CoreRepository {
       const result = await client.query<ArtifactRow>(
         `SELECT id::text, workspace_id::text, project_id::text, workflow_id::text,
                 kind::text, target_platform::text, bucket, object_key, sha256,
-                size_bytes::text, created_at::text
+                size_bytes::text, metadata, created_at::text
            FROM deviludo.artifacts
           WHERE project_id = $1::uuid AND id = $2::uuid`,
         [projectId, artifactId],
@@ -2169,6 +2186,14 @@ export class CoreRepository {
     return Number(result.rows[0]?.scheduled ?? 0);
   }
 
+  async scheduleE2eProtocolRevalidation(protocol: string, batchSize: number): Promise<number> {
+    const result = await this.database.pool.query<{ scheduled: string }>(
+      "SELECT deviludo.schedule_e2e_protocol_revalidation($1::text, $2::integer)::text AS scheduled",
+      [protocol, batchSize],
+    );
+    return Number(result.rows[0]?.scheduled ?? 0);
+  }
+
   async appendSignal(
     workspaceId: string,
     workflowId: string,
@@ -2905,6 +2930,7 @@ type ArtifactRow = {
   object_key: string;
   sha256: string;
   size_bytes: string;
+  metadata: Record<string, unknown>;
   created_at: string;
 };
 
@@ -3047,6 +3073,7 @@ function localDirectoryFromState(stateData: Record<string, unknown> | null): Pro
 }
 
 function artifactFromRow(row: ArtifactRow): ArtifactRecord {
+  const evidence = e2eEvidenceSummary(row.metadata?.e2eEvidence);
   return Object.freeze({
     id: row.id,
     workspaceId: row.workspace_id,
@@ -3060,7 +3087,24 @@ function artifactFromRow(row: ArtifactRow): ArtifactRecord {
       sha256: row.sha256,
       sizeBytes: Number(row.size_bytes),
     }),
+    ...(evidence ? { e2eEvidence: evidence } : {}),
     createdAt: row.created_at,
+  });
+}
+
+function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const summary = value as Record<string, unknown>;
+  if (summary.protocol !== "deviludo.e2e-evidence.v1" || !["PASSED", "FAILED"].includes(String(summary.result))
+    || !Number.isSafeInteger(summary.checkCount) || Number(summary.checkCount) < 0
+    || !Number.isSafeInteger(summary.screenshotCount) || Number(summary.screenshotCount) < 0
+    || typeof summary.hasVisualDiff !== "boolean") return null;
+  return Object.freeze({
+    protocol: "deviludo.e2e-evidence.v1",
+    result: summary.result as "PASSED" | "FAILED",
+    checkCount: Number(summary.checkCount),
+    screenshotCount: Number(summary.screenshotCount),
+    hasVisualDiff: summary.hasVisualDiff,
   });
 }
 

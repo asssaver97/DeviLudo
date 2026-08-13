@@ -101,7 +101,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [historicalIteration, setHistoricalIteration] = useState<ProductWorkflowIterationDetail | null>(null);
   const [conversationFocusKey, setConversationFocusKey] = useState(0);
-  const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null);
+  const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -550,6 +550,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           // A rerun keys on the chosen stage: repeated clicks on one node collapse
           // into a single signal, while switching nodes is a genuinely new request.
           ...(path === "rerun-stage" ? { "idempotency-key": `stage-rerun:${String(body?.stage)}:${crypto.randomUUID()}` } : {}),
+          ...(path === "cancel" ? { "idempotency-key": `cancel:${crypto.randomUUID()}` } : {}),
         },
         body: JSON.stringify(body ?? {}),
       });
@@ -631,18 +632,45 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
-  async function downloadArtifact(artifact: ArtifactRecord) {
-    if (downloadingArtifactId) return;
-    setDownloadingArtifactId(artifact.id);
+  async function accessArtifact(artifact: ArtifactRecord) {
+    if (openingArtifactId) return;
+    // Standalone artifacts already live in the local MinIO container. Hand all
+    // of them to the host bridge so reports and snapshots open in their default
+    // macOS application instead of taking an unnecessary browser download path.
+    const opensOnHost = session.authMode === "STANDALONE";
+    setOpeningArtifactId(artifact.id);
     setError(null);
     try {
-      const response = await fetch(
-        `/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.id)}/download`,
-        { method: "POST" },
-      );
+      const [response, bridgeUrl] = await Promise.all([
+        fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.id)}/download`,
+          { method: "POST" },
+        ),
+        opensOnHost ? localProjectBridgeUrl(text) : Promise.resolve(null),
+      ]);
       const payload = await response.json() as { url?: string; filename?: string; message?: string };
       if (!response.ok || !payload.url || !payload.filename) {
         throw new Error(payload.message ?? text(`制品下载授权失败 (${response.status})`, `Unable to authorize download (${response.status})`));
+      }
+      if (opensOnHost && bridgeUrl) {
+        const openResponse = await fetch(`${bridgeUrl}/artifact/open`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            artifactId: artifact.id,
+            kind: artifact.kind,
+            targetPlatform: artifact.targetPlatform,
+            url: payload.url,
+            filename: payload.filename,
+            sha256: artifact.object.sha256,
+            sizeBytes: artifact.object.sizeBytes,
+          }),
+        });
+        const openResult = await openResponse.json().catch(() => ({})) as { opened?: boolean; message?: string };
+        if (!openResponse.ok || openResult.opened !== true) {
+          throw new Error(openResult.message ?? text("本地制品打开失败", "Unable to open the local artifact"));
+        }
+        return;
       }
       const link = document.createElement("a");
       link.href = payload.url;
@@ -652,9 +680,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       link.click();
       link.remove();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : text("制品下载失败", "Artifact download failed"));
+      setError(reason instanceof Error ? reason.message : text("制品打开失败", "Unable to access artifact"));
     } finally {
-      setDownloadingArtifactId(null);
+      setOpeningArtifactId(null);
     }
   }
 
@@ -681,7 +709,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const viewedWorkflowState = viewingHistoricalIteration ? historicalIteration.state : project.workflowState;
   const viewedWorkflowProfile = viewingHistoricalIteration ? historicalIteration.profile : project.workflowProfile;
   const viewedJobs = viewingHistoricalIteration ? historicalIteration.jobs : project.jobs;
-  const viewedArtifacts = viewingHistoricalIteration ? historicalIteration.artifacts : artifacts;
+  const viewedArtifacts = latestArtifactsByKindAndPlatform(
+    viewingHistoricalIteration ? historicalIteration.artifacts : artifacts,
+  );
   const viewedIterationNumber = viewingHistoricalIteration
     ? historicalIteration.iterationNumber
     : project.iterationNumber;
@@ -957,7 +987,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       {viewedArtifacts.length ? (
         <section aria-label={text("项目制品", "Project artifacts")} className="product-artifacts-panel">
           <header>
-            <div><span className="eyebrow">ARTIFACTS</span><h2>{text("游戏制品下载", "GAME BUILDS")}</h2></div>
+            <div><span className="eyebrow">ARTIFACTS</span><h2>{session.authMode === "STANDALONE" ? text("游戏制品", "GAME BUILDS") : text("游戏制品下载", "GAME BUILDS")}</h2></div>
             <span>{text(`${viewedArtifacts.length} 个制品`, `${viewedArtifacts.length} artifacts`)}</span>
           </header>
           <div className="product-artifact-list">
@@ -966,13 +996,22 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 <div>
                   <b>{artifactLabel(artifact, text)}</b>
                   <span>{artifact.targetPlatform ?? text("通用", "COMMON")} · {formatArtifactSize(artifact.object.sizeBytes)}</span>
+                  {artifact.kind === "E2E_REPORT" ? (
+                    <span>{e2eEvidenceLabel(artifact, text)}</span>
+                  ) : null}
                 </div>
                 <button
                   className="button button-secondary"
-                  disabled={downloadingArtifactId !== null}
-                  onClick={() => void downloadArtifact(artifact)}
+                  disabled={openingArtifactId !== null}
+                  onClick={() => void accessArtifact(artifact)}
                   type="button"
-                >{downloadingArtifactId === artifact.id ? text("准备下载…", "PREPARING…") : text("下载", "DOWNLOAD")}</button>
+                >{openingArtifactId === artifact.id
+                    ? session.authMode === "STANDALONE"
+                      ? text("正在打开…", "OPENING…")
+                      : text("准备下载…", "PREPARING…")
+                    : session.authMode === "STANDALONE"
+                      ? text("打开", "OPEN")
+                      : text("下载", "DOWNLOAD")}</button>
               </article>
             ))}
           </div>
@@ -1362,11 +1401,39 @@ function artifactLabel(
   return text(label[0], label[1]);
 }
 
+function latestArtifactsByKindAndPlatform(values: readonly ArtifactRecord[]): readonly ArtifactRecord[] {
+  const latest = new Map<string, ArtifactRecord>();
+  for (const artifact of values) {
+    const key = `${artifact.kind}:${artifact.targetPlatform ?? "common"}`;
+    const current = latest.get(key);
+    if (!current || artifact.createdAt > current.createdAt
+      || (artifact.createdAt === current.createdAt && artifact.id > current.id)) {
+      latest.set(key, artifact);
+    }
+  }
+  return Object.freeze([...latest.values()].sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)));
+}
+
 function formatArtifactSize(sizeBytes: number): string {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
   if (sizeBytes < 1024 ** 2) return `${(sizeBytes / 1024).toFixed(1)} KiB`;
   if (sizeBytes < 1024 ** 3) return `${(sizeBytes / 1024 ** 2).toFixed(1)} MiB`;
   return `${(sizeBytes / 1024 ** 3).toFixed(1)} GiB`;
+}
+
+function e2eEvidenceLabel(
+  artifact: ArtifactRecord,
+  text: (chinese: string, english: string) => string,
+): string {
+  const evidence = artifact.e2eEvidence;
+  if (!evidence) return text("旧版证据 · 打开 JSON", "LEGACY EVIDENCE · OPENS JSON");
+  const outcome = evidence.result === "PASSED" ? text("通过", "PASSED") : text("失败", "FAILED");
+  const visualDiff = evidence.hasVisualDiff ? text(" · 含视觉差异", " · VISUAL DIFF") : "";
+  return text(
+    `${outcome} · ${evidence.checkCount} 项检查 · ${evidence.screenshotCount} 张截图${visualDiff}`,
+    `${outcome} · ${evidence.checkCount} CHECKS · ${evidence.screenshotCount} SCREENSHOTS${visualDiff}`,
+  );
 }
 
 function documentMaintainer(value: ProductProjectDetail["document"]["maintainedBy"], text: (chinese: string, english: string) => string): string {

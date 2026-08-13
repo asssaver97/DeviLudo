@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
+  open as openFile,
   readFile,
   readdir,
   realpath,
@@ -13,18 +14,31 @@ import {
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sourceArchive from "../lib/product/source-archive.ts";
 import projectImport from "../services/core/src/project-import.ts";
 import { commitVerifiedGitDirectory } from "./local-git-commit.mjs";
+import { extractAndValidateEvidenceBundle } from "./e2e-evidence.mjs";
 
 const { normalizeGitBranchName, normalizeGitHubRepositoryUrl } = projectImport;
 const { normalizeProjectPath, shouldIncludeProjectPath } = sourceArchive;
 const execute = promisify(execFile);
 const MAX_REQUEST_BYTES = 16 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ARTIFACT_KINDS = new Set([
+  "SPECIFICATION",
+  "PROJECT_DOCUMENT",
+  "BUILD",
+  "E2E_REPORT",
+  "SIGNED_BUILD",
+  "PUBLISH_RECEIPT",
+  "CLEAN_INSTALL_REPORT",
+]);
+const BUILD_ARTIFACT_KINDS = new Set(["BUILD", "SIGNED_BUILD"]);
 const configFile = new URL("../.deviludo/local/git-import.json", import.meta.url);
 const bindingsFile = new URL("../.deviludo/local/project-directories.json", import.meta.url);
+const openedArtifactsRoot = fileURLToPath(new URL("../.deviludo/local/opened-artifacts/", import.meta.url));
 const config = JSON.parse(await readFile(configFile, "utf8"));
 if (!Number.isSafeInteger(config.port) || config.port < 1 || config.port > 65_535) {
   throw new Error("Local project bridge port is invalid");
@@ -33,10 +47,16 @@ if (typeof config.internalToken !== "string" || !/^[A-Za-z0-9_-]{40,200}$/.test(
   throw new Error("Local project bridge internal token is invalid");
 }
 const allowedOrigin = new URL(config.allowedOrigin);
+const artifactOrigin = new URL(config.artifactOrigin);
 if (allowedOrigin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(allowedOrigin.hostname)
   || allowedOrigin.username || allowedOrigin.password || allowedOrigin.pathname !== "/"
   || allowedOrigin.search || allowedOrigin.hash) {
   throw new Error("Local project bridge origin is invalid");
+}
+if (artifactOrigin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(artifactOrigin.hostname)
+  || artifactOrigin.username || artifactOrigin.password || artifactOrigin.pathname !== "/"
+  || artifactOrigin.search || artifactOrigin.hash) {
+  throw new Error("Local artifact origin is invalid");
 }
 
 let activeOperations = 0;
@@ -62,6 +82,7 @@ const server = createServer(async (request, response) => {
       "/github/clone",
       "/directory/git/status",
       "/directory/git/branch",
+      "/artifact/open",
     ].includes(request.url ?? "")) {
       sendJson(response, 404, { code: "NOT_FOUND", message: "本地项目接口不存在" }, cors);
       return;
@@ -69,7 +90,9 @@ const server = createServer(async (request, response) => {
     if (activeOperations >= 1) throw failure("LOCAL_PROJECT_BUSY", "已有本地项目正在处理，请稍后重试");
     activeOperations += 1;
     try {
-      const body = await readJsonBody(request);
+      // Folder selection has no payload. Keeping it a simple CORS request avoids
+      // an OPTIONS round trip before macOS is asked to show the native chooser.
+      const body = request.url === "/directory/select" ? {} : await readJsonBody(request);
       if (request.url === "/directory/git/status") {
         const binding = await requireBinding(body.bindingId);
         sendJson(response, 200, await inspectGitDirectory(binding.path), cors);
@@ -79,6 +102,10 @@ const server = createServer(async (request, response) => {
         const binding = await requireBinding(body.bindingId);
         const branchName = requestedGitBranch(body.branchName);
         sendJson(response, 200, await createGitBranch(binding.path, branchName), cors);
+        return;
+      }
+      if (request.url === "/artifact/open") {
+        sendJson(response, 200, await openLocalArtifact(body), cors);
         return;
       }
       const result = request.url === "/directory/select"
@@ -232,6 +259,142 @@ async function cloneGitHubDirectory(repositoryUrl) {
     if (created) await rm(target, { recursive: true, force: true });
     throw error;
   }
+}
+
+async function openLocalArtifact(body) {
+  if (process.platform !== "darwin") {
+    throw failure("ARTIFACT_OPEN_UNAVAILABLE", "本地制品直接打开目前仅支持 macOS");
+  }
+  const artifactId = typeof body.artifactId === "string" ? body.artifactId : "";
+  const kind = typeof body.kind === "string" ? body.kind : "";
+  const targetPlatform = typeof body.targetPlatform === "string" ? body.targetPlatform : "";
+  const filename = typeof body.filename === "string" ? body.filename : "";
+  const expectedSha256 = typeof body.sha256 === "string" ? body.sha256 : "";
+  const expectedSize = Number(body.sizeBytes);
+  let sourceUrl;
+  try { sourceUrl = new URL(typeof body.url === "string" ? body.url : ""); }
+  catch { throw failure("INVALID_ARTIFACT_OPEN_REQUEST", "制品打开地址无效"); }
+  const buildArtifact = BUILD_ARTIFACT_KINDS.has(kind);
+  if (!UUID.test(artifactId) || !ARTIFACT_KINDS.has(kind)
+    || (buildArtifact && !["linux", "windows", "macos"].includes(targetPlatform))
+    || (!buildArtifact && targetPlatform !== "" && !["linux", "windows", "macos"].includes(targetPlatform))
+    || !/^[A-Za-z0-9._-]{1,180}$/.test(filename)
+    || !/^sha256:[0-9a-f]{64}$/.test(expectedSha256)
+    || !Number.isSafeInteger(expectedSize) || expectedSize < 1
+    || sourceUrl.origin !== artifactOrigin.origin || sourceUrl.username || sourceUrl.password) {
+    throw failure("INVALID_ARTIFACT_OPEN_REQUEST", "制品打开请求无效");
+  }
+
+  const destination = join(openedArtifactsRoot, artifactId);
+  const metadataPath = join(destination, "artifact.json");
+  const cached = await readFile(metadataPath, "utf8").then(JSON.parse).catch(() => null);
+  if (cached?.sha256 === expectedSha256 && cached?.kind === kind
+    && cached?.targetPlatform === targetPlatform && cached?.filename === filename) {
+    try { return await launchLocalArtifact(destination, kind, targetPlatform, filename); }
+    catch { await rm(destination, { recursive: true, force: true }); }
+  }
+
+  await mkdir(openedArtifactsRoot, { recursive: true, mode: 0o700 });
+  const staging = join(openedArtifactsRoot, `.staging-${artifactId}-${randomUUID()}`);
+  await mkdir(staging, { mode: 0o700 });
+  try {
+    const artifactFile = join(staging, filename);
+    const download = await fetch(sourceUrl, { redirect: "error", signal: AbortSignal.timeout(30 * 60 * 1_000) });
+    if (!download.ok || !download.body) throw failure("ARTIFACT_DOWNLOAD_FAILED", `制品读取失败 (${download.status})`);
+    const handle = await openFile(artifactFile, "wx", 0o600);
+    const hash = createHash("sha256");
+    let received = 0;
+    try {
+      for await (const chunk of download.body) {
+        const bytes = Buffer.from(chunk);
+        received += bytes.length;
+        hash.update(bytes);
+        await handle.write(bytes);
+      }
+    } finally {
+      await handle.close();
+    }
+    if (received !== expectedSize || `sha256:${hash.digest("hex")}` !== expectedSha256) {
+      throw failure("ARTIFACT_DIGEST_MISMATCH", "制品内容与登记信息不一致，已停止打开");
+    }
+    if (buildArtifact) {
+      const content = join(staging, "content");
+      await mkdir(content, { mode: 0o700 });
+      const { stdout: entries } = await execute("tar", ["-tzf", artifactFile], { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
+      assertSafeArchiveEntries(entries);
+      await execute("tar", ["-xzf", artifactFile, "-C", content], { timeout: 5 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+      if (targetPlatform === "macos") {
+        const exportedZip = (await readdir(content)).find(name => name.endsWith(".zip"));
+        if (exportedZip) {
+          const zipPath = join(content, exportedZip);
+          const { stdout: zipEntries } = await execute("unzip", ["-Z1", zipPath], { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
+          assertSafeArchiveEntries(zipEntries);
+          await execute("unzip", ["-q", zipPath, "-d", content], { timeout: 5 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+        }
+      }
+    } else if (kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")) {
+      await extractAndValidateEvidenceBundle(artifactFile, join(staging, "e2e-report"));
+    }
+    await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
+    await rm(destination, { recursive: true, force: true });
+    await rename(staging, destination);
+    return launchLocalArtifact(destination, kind, targetPlatform, filename);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    if ([
+      "ARTIFACT_DOWNLOAD_FAILED",
+      "ARTIFACT_DIGEST_MISMATCH",
+      "UNSAFE_ARTIFACT_ARCHIVE",
+    ].includes(String(error?.code ?? ""))) throw error;
+    console.error(JSON.stringify({
+      event: "local_artifact_open_failed",
+      artifactId,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    throw failure("ARTIFACT_OPEN_FAILED", "制品已获取，但无法在本机打开");
+  }
+}
+
+function assertSafeArchiveEntries(value) {
+  const unsafe = value.split("\n").map(entry => entry.trim()).filter(Boolean).some(entry => {
+    const normalized = entry.replace(/^\.\//, "");
+    return normalized.startsWith("/") || normalized.split("/").includes("..") || normalized.includes("\0");
+  });
+  if (unsafe) throw failure("UNSAFE_ARTIFACT_ARCHIVE", "制品压缩包包含不安全路径，已停止打开");
+}
+
+async function launchLocalArtifact(destination, kind, targetPlatform, filename) {
+  if (!BUILD_ARTIFACT_KINDS.has(kind)) {
+    const target = kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")
+      ? join(destination, "e2e-report/index.html")
+      : join(destination, filename);
+    await execute("/usr/bin/open", [target], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    return Object.freeze({ opened: true, action: "OPENED" });
+  }
+  const content = join(destination, "content");
+  if (targetPlatform === "macos") {
+    const app = await findAppBundle(content);
+    if (app) {
+      await execute("/usr/bin/open", [app], { timeout: 30_000, maxBuffer: 64 * 1024 });
+      return Object.freeze({ opened: true, action: "LAUNCHED" });
+    }
+  }
+  await execute("/usr/bin/open", [content], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  return Object.freeze({ opened: true, action: "REVEALED" });
+}
+
+async function findAppBundle(root) {
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.shift();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink?.()) continue;
+      const path = join(directory, entry.name);
+      if (entry.name.endsWith(".app")) return path;
+      pending.push(path);
+    }
+  }
+  return null;
 }
 
 async function inspectGitDirectory(directory) {
@@ -528,12 +691,16 @@ function importFailure(error) {
     INVALID_SOURCE_DIGEST: 400,
     INVALID_SOURCE_STREAM: 400,
     INVALID_GIT_COMMIT_REQUEST: 400,
+    INVALID_ARTIFACT_OPEN_REQUEST: 400,
     DIRECTORY_SELECTION_CANCELLED: 409,
     GIT_BRANCH_EXISTS: 409,
     GITHUB_TARGET_EXISTS: 409,
     GIT_INDEX_NOT_CLEAN: 409,
     LOCAL_PROJECT_CHANGED: 409,
     LOCAL_PROJECT_BUSY: 429,
+    ARTIFACT_DOWNLOAD_FAILED: 502,
+    ARTIFACT_DIGEST_MISMATCH: 502,
+    ARTIFACT_OPEN_FAILED: 502,
     NOT_A_GODOT_PROJECT: 422,
     NOT_A_GIT_REPOSITORY: 422,
     DIRECTORY_BINDING_NOT_FOUND: 422,
@@ -542,6 +709,8 @@ function importFailure(error) {
     UNSAFE_LOCAL_PROJECT: 422,
     BINDING_REGISTRY_CORRUPTED: 500,
     DIRECTORY_PICKER_UNAVAILABLE: 501,
+    ARTIFACT_OPEN_UNAVAILABLE: 501,
+    UNSAFE_ARTIFACT_ARCHIVE: 422,
   };
   if (code in statusByCode) return { status: statusByCode[code], code, message: error.message };
   console.error(JSON.stringify({ event: "local_project_bridge_failed", message: error instanceof Error ? error.message : String(error) }));

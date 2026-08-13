@@ -22,9 +22,12 @@ export function validateVisualTestSpec(value: unknown): value is VisualTestSpec 
   const spec = value as Record<string, unknown>;
 
   if (spec.version !== VISUAL_TEST_VERSION) return false;
-  if (typeof spec.referenceImage !== "string" || spec.referenceImage.length === 0) return false;
-  if (spec.threshold !== undefined && (typeof spec.threshold !== "number" || spec.threshold < 0 || spec.threshold > 1)) return false;
-  if (spec.captureDelay !== undefined && (typeof spec.captureDelay !== "number" || spec.captureDelay < 0)) return false;
+  if (typeof spec.referenceImage !== "string" || spec.referenceImage.length < 5 || spec.referenceImage.length > 240
+    || !spec.referenceImage.toLowerCase().endsWith(".png") || spec.referenceImage.startsWith("/")
+    || spec.referenceImage.startsWith("res://") || /(^|\/)\.{1,2}(\/|$)|\/\//.test(spec.referenceImage)
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]*\.png$/i.test(spec.referenceImage)) return false;
+  if (spec.threshold !== undefined && (typeof spec.threshold !== "number" || !Number.isFinite(spec.threshold) || spec.threshold < 0 || spec.threshold > 1)) return false;
+  if (spec.captureDelay !== undefined && (!Number.isInteger(spec.captureDelay) || Number(spec.captureDelay) < 0 || Number(spec.captureDelay) > 300_000)) return false;
 
   return true;
 }

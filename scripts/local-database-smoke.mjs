@@ -85,7 +85,8 @@ async function runDatabaseSmoke(url) {
       "acknowledge_source_ready_events", "advance_asset_workflows", "claim_asset_generation", "claim_job",
       "claim_local_git_commit", "claim_project_import_analysis", "cleanup_expired_executor_state",
       "complete_asset_generation", "complete_local_git_commit", "fail_asset_generation", "fail_local_git_commit",
-      "pull_source_ready_events", "recover_expired_jobs", "schedule_idle_project_document_maintenance",
+      "pull_source_ready_events", "recover_expired_jobs", "schedule_e2e_protocol_revalidation",
+      "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
       || definers.rows.some(row => row.owner !== "deviludo_claim_executor")) {

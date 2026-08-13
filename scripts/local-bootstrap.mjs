@@ -28,7 +28,7 @@ try {
   await access(brew);
 }
 let changed = false;
-for (const formula of ["node@22", "docker", "docker-compose", "colima", "cosign", "godot"]) {
+for (const formula of ["node@22", "docker", "docker-compose", "colima", "cosign"]) {
   try {
     await execute(brew, ["list", "--versions", formula]);
   } catch {

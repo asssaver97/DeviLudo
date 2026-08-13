@@ -12,6 +12,7 @@ import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
+import { validateTestManifest } from "@/lib/product/test-manifest";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -292,9 +293,9 @@ async function readAgentCompletion(
   projectSources: ProjectSourceStore,
   job: JobProtocolV4,
   receipt: SandboxReceipt,
-): Promise<Readonly<{ assetManifest: unknown }>> {
+): Promise<Readonly<{ assetManifest: unknown; testManifest: unknown }>> {
   try {
-    return await objectStore.readAgentCompletion(receipt.outputObjects);
+    return await objectStore.readAgentCompletion(receipt.outputObjects, job.inputObjects);
   } catch {
     const source = receipt.details.sourceRevision;
     if (!source || typeof source !== "object" || Array.isArray(source)) {
@@ -313,10 +314,12 @@ async function readAgentCompletion(
       throw new Error("Generated source agent.json is not valid JSON");
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-      || !("assetManifest" in parsed)) {
-      throw new Error("Generated source agent.json does not contain an assetManifest");
+      || !("assetManifest" in parsed) || !validateTestManifest((parsed as Record<string, unknown>).testManifest)) {
+      throw new Error("Generated source agent.json does not contain valid test and asset manifests");
     }
-    return Object.freeze({ assetManifest: (parsed as Record<string, unknown>).assetManifest });
+    const testManifest = (parsed as Record<string, unknown>).testManifest;
+    await objectStore.assertAgentTestManifest(testManifest, job.inputObjects);
+    return Object.freeze({ assetManifest: (parsed as Record<string, unknown>).assetManifest, testManifest });
   }
 }
 

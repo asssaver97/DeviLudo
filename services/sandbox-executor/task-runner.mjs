@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, appendFile, copyFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { access, appendFile, copyFile, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 let progressWrites = Promise.resolve();
@@ -77,53 +77,57 @@ async function runAgent(plan) {
     await command("tar", ["-xzf", "/workspace/inputs/checkpoint.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "上次尝试的源码检查点已恢复，Agent 将从现有成果继续");
   }
+  const requirementCatalog = specificationRequirementCatalog(specification);
+  if (requirementCatalog.length < 1) {
+    throw new Error("Approved specification does not contain testable coreLoop or acceptanceCriteria requirements");
+  }
+  const existingManifestValid = await existingAgentManifestIsValid(requirementCatalog);
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
   let e2eRepairContext = null;
   if (e2eReportObject) {
-    if (e2eReportObject.sizeBytes > 131_072) throw new Error("E2E failure report exceeds the Agent repair input limit");
+    if (e2eReportObject.sizeBytes > 256 * 1024 * 1024) throw new Error("E2E failure evidence exceeds the Agent repair input limit");
     const filename = e2eReportObject.key.split("/").pop();
-    if (!filename || !filename.endsWith(".json")) throw new Error("E2E failure report input is invalid");
-    try {
-      e2eRepairContext = JSON.parse(await readFile(`/workspace/inputs/${filename}`, "utf8"));
-    } catch {
-      throw new Error("E2E failure report input is unreadable");
-    }
-    if (e2eRepairContext?.schemaVersion !== "deviludo.godot-guest-report.v1"
-      || e2eRepairContext.outcome !== "FAILED" || e2eRepairContext.failureDomain !== "PRODUCT") {
-      throw new Error("E2E failure report is not a trusted product failure");
-    }
+    if (!filename) throw new Error("E2E failure report input is invalid");
+    e2eRepairContext = filename.endsWith(".zip")
+      ? await extractE2eRepairEvidence(`/workspace/inputs/${filename}`)
+      : await readLegacyE2eRepairReport(`/workspace/inputs/${filename}`);
     emitProgress("PHASE", `Agent 正在修复 ${plan.job.payload.failedPlatform ?? "目标平台"} E2E 发现的游戏问题`);
   }
-  const prompt = [
-    importedSource || restoredCheckpoint
-      ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
-      : "Create a complete Godot 4 project in /workspace/project.",
-    "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
-    "Enable rendering/textures/vram_compression/import_s3tc_bptc so release exports are portable.",
-    "The result must run headlessly and expose a deterministic smoke-test path.",
-    "Godot and Python may be absent from this Agent container. Do not search for or install them, and do not treat their absence as a failure. The next controlled builder stage performs real Godot validation; use Node-based static checks here when useful.",
-    "Prioritize a complete playable vertical slice, required files, and deterministic tests before optional polish.",
-    "Implement the current revision notes and missing behavior without re-auditing unrelated code that is already complete.",
-    "Do not spawn subagents, background agents, background tasks, or delegated code reviews. Work directly with the available file and shell tools.",
-    "Run at most one bounded static validation pass. The controlled Builder and E2E stages perform the exhaustive runtime validation, so finish once the requested source and manifests are complete.",
-    ...(restoredCheckpoint ? [
-      "A source checkpoint from an interrupted attempt is already restored. Continue only the interrupted implementation; do not start a general project audit, add unrelated improvements, invent new validators, or rewrite documentation outside the current requirement.",
-      "Treat completed checkpoint files as authoritative. Inspect only the files needed to finish the interrupted requirement, run one existing bounded static check, update the required manifests, and finish immediately.",
-    ] : []),
-    "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it.",
-    "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
-    "",
+  const checkpointEmitterInstruction = "Every expectedOutput checkpoint must use one real-game runtime emitter. It must print the exact DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> marker and, when the DEVILUDO_E2E_CHECKPOINT_FILE environment variable is non-empty, append that same marker plus a newline to that file and flush it immediately. Never emit markers from test-only setup or before the corresponding real semantic state exists.";
+  const manifestInstructions = existingManifestValid ? [
+    "Core has already validated the existing agent.json as a complete deviludo.test-manifest.v2 and asset manifest. Preserve it instead of auditing, regenerating, or reformatting it.",
+    checkpointEmitterInstruction,
+    ...(e2eRepairContext ? [
+      "This repair does not need manifest work unless the failure report explicitly identifies a manifest error. Do not inspect manifest generators or broad requirement coverage.",
+    ] : [
+      "After implementing and testing this revision, make only the minimal existing agent.json edits needed to map genuinely new check names.",
+    ]),
+  ] : [
     "IMPORTANT: The generated agent.json must include a complete testManifest AND an assetManifest.",
     "",
     "testManifest structure:",
-    "- schemaVersion: \"deviludo.test-manifest.v1\"",
+    "- schemaVersion: \"deviludo.test-manifest.v2\"",
+    "- requirements: copy the exact requirementId and description pairs listed below; do not omit, rename, or invent requirements",
     "- features: array of feature objects, each with:",
     "  - id: unique kebab-case identifier (e.g. \"collect-ember\")",
+    "  - requirementIds: one or more IDs from the exact frozen requirement catalog below",
     "  - category: one of core-loop, player-control, data-integrity, runtime-quality, ui, audio",
     "  - description: human-readable feature description",
-    "  - verificationMethod: \"unit\" for automated GDScript tests (required for all core game logic)",
+    "  - verificationMethod: unit, interactive, visual, or manual; manual must never be the only automated coverage for a requirement",
     "  - gdsTestPath: path to test script (typically \"res://tests/e2e.gd\")",
     "  - checkNames: array of assertion names that verify this feature",
+    "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, and timeoutMs no more than 300000.",
+    "- Its interactionScript must be version \"2\" with no more than 200 keyboard, mouse, wait, and checkpoint events.",
+    "- Use ONLY these exact interaction event shapes: {\"type\":\"key_press\",\"key\":\"KEY_SPACE\",\"delay_ms\":100}, {\"type\":\"key_release\",\"key\":\"KEY_SPACE\",\"delay_ms\":100}, {\"type\":\"mouse_move\",\"x\":640,\"y\":360,\"delay_ms\":100}, {\"type\":\"mouse_click\",\"button\":\"LEFT\",\"delay_ms\":100}, {\"type\":\"wait\",\"delay_ms\":1000}, and {\"type\":\"checkpoint\",\"id\":\"game-start\",\"role\":\"START\",\"delay_ms\":500,\"expectedOutput\":\"DEVILUDO_E2E_CHECKPOINT:game-start\"}.",
+    "- Keyboard keys must use canonical uppercase names such as KEY_SPACE and KEY_P. Mouse buttons must be uppercase. Never use event type keyboard, an action field, an ms field, or lowercase key names. wait requires delay_ms; the other event delay_ms fields are optional.",
+    "- Coordinates are relative to the fixed 1280x720 game client area.",
+    "- The core journey must contain checkpoint events with unique IDs and the roles START, KEY_STATE, and COMPLETION.",
+    "- The core journey must perform at least one real user action using key_press or mouse_click between its screenshots. A wait-only journey is invalid.",
+    "- Every core checkpoint must declare either referenceImage or expectedOutput. expectedOutput must equal DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> and may only be emitted after the screenshot's claimed semantic state is actually reached.",
+    checkpointEmitterInstruction,
+    "- A checkpoint may declare referenceImage as a safe project-relative PNG and threshold from 0 to 1; the default threshold is 0.01.",
+    "- Across the manifest: at most 500 requirements, 500 features, 32 interactive journeys, and 20 checkpoints.",
+    `- Frozen requirement catalog: ${JSON.stringify(requirementCatalog)}`,
     "",
     "assetManifest structure:",
     "- schemaVersion: \"deviludo.asset-manifest.v1\"",
@@ -154,23 +158,67 @@ async function runAgent(plan) {
     "Reference implementation: fixtures/godot-smoke/tests/e2e.gd demonstrates the required pattern.",
     "",
     "Every feature declared in the project document (gameplay mechanics, save/load, pause, win conditions, damage system, etc.) must have corresponding test checks.",
+  ];
+  const specificationInstructions = existingManifestValid
+    ? [`Current revision notes: ${JSON.stringify(specification.revisionNotes ?? [])}`]
+    : [`Specification: ${JSON.stringify(specification)}`];
+  const prompt = [
+    importedSource || restoredCheckpoint
+      ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
+      : "Create a complete Godot 4 project in /workspace/project.",
+    "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
+    "Enable rendering/textures/vram_compression/import_s3tc_bptc so release exports are portable.",
+    "The result must run headlessly and expose a deterministic smoke-test path.",
+    "Godot and Python may be absent from this Agent container. Do not search for or install them, and do not treat their absence as a failure. The next controlled builder stage performs real Godot validation; use Node-based static checks here when useful.",
+    "Prioritize a complete playable vertical slice, required files, and deterministic tests before optional polish.",
+    "Implement the current revision notes and missing behavior without re-auditing unrelated code that is already complete.",
+    "Start with the current revision notes. Inspect no more than the few source and test files directly needed for them, and make the first concrete source edit before inspecting broad regression coverage or manifest tooling.",
+    ...manifestInstructions,
+    "Real-window interaction timing contract: the guest driver waits event.delay_ms BEFORE it performs that event. This applies to key presses, key releases, mouse events, waits, and checkpoints.",
+    "A checkpoint also captures a real PNG after its delay and therefore consumes unpredictable wall-clock time while the exported game keeps running. Never model checkpoints as zero-time events.",
+    "Place checkpoints only where capture latency cannot invalidate later input (for example READY before the first input, after the last input needed for a KEY_STATE, and after completion), or explicitly make the game state safe while capturing.",
+    "When generating or repairing an interactionScript, reconstruct actual action times by adding each event delay before recording the action. Validate the emitted key/mouse schedule under that exact ordering; do not use a helper that records an action before its delay.",
+    "Do not spawn subagents, background agents, background tasks, or delegated code reviews. Work directly with the available file and shell tools.",
+    "Run at most one bounded static validation pass. The controlled Builder and E2E stages perform the exhaustive runtime validation, so finish once the requested source and manifests are complete.",
+    ...(restoredCheckpoint ? [
+      "A source checkpoint from an interrupted attempt is already restored. Continue only the interrupted implementation; do not start a general project audit, add unrelated improvements, invent new validators, or rewrite documentation outside the current requirement.",
+      "Treat completed checkpoint files as authoritative. Inspect only the files needed to finish the interrupted requirement, run one existing bounded static check, update the required manifests, and finish immediately.",
+    ] : []),
+    "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it. The latest live guidance is the highest-priority scope constraint: stop broader analysis immediately when it narrows the requested change.",
+    "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
     ...(e2eRepairContext ? [
       "",
       "This is an automatic repair pass after a trusted E2E product failure. Reproduce the reported game behavior from the existing source, fix the game content, scripts, scenes, or project configuration, and preserve unrelated working behavior.",
       "Do not dismiss the report as infrastructure failure and do not merely rewrite the report. Make concrete source changes that address its diagnostics.",
-      ...(e2eRepairContext.testDetails?.failures?.length > 0 ? [
-        `Failed feature checks: ${e2eRepairContext.testDetails.failures.join(", ")}`,
+      ...((e2eRepairContext.report ?? e2eRepairContext).testDetails?.failures?.length > 0 ? [
+        `Failed feature checks: ${(e2eRepairContext.report ?? e2eRepairContext).testDetails.failures.join(", ")}`,
         "Review the test script to understand what each failed check validates, then fix the game logic or configuration that caused the failure. Do not modify test assertions unless they are objectively incorrect.",
       ] : []),
-      `E2E failure report: ${JSON.stringify(e2eRepairContext)}`,
+      "The verified evidence files are available in /workspace/inputs/e2e-repair. Inspect report.json, logs, and only the failed checkpoint screenshots needed for the fix.",
+      `E2E failure summary: ${JSON.stringify(e2eRepairPromptSummary(e2eRepairContext))}`,
     ] : []),
-    `Specification: ${JSON.stringify(specification)}`,
+    ...specificationInstructions,
   ].join("\n");
   const completedCheckpoint = checkpointMetadata?.state === "AGENT_COMPLETE"
     && checkpointMetadata.originJobId === plan.job.jobId;
   if (completedCheckpoint) {
     emitProgress("PHASE", "已恢复本任务完成的 Agent 检查点，跳过重复模型调用");
   } else {
+    // Claude can occasionally end a successful CLI session after announcing
+    // its next step but before editing anything. A fresh pass over existing
+    // source must therefore produce a concrete change. A restored checkpoint
+    // is exempt only when it already differs from the frozen input revision;
+    // an unchanged "complete" checkpoint from an earlier failed job must not
+    // bypass the guard on a stage rerun.
+    const restoredOrImportedDigest = importedSource
+      ? await projectTreeDigest("/workspace/project")
+      : null;
+    const frozenSourceDigest = typeof plan.job.payload.sourceDigest === "string"
+      ? plan.job.payload.sourceDigest
+      : null;
+    const startingDigest = restoredOrImportedDigest === frozenSourceDigest
+      ? restoredOrImportedDigest
+      : null;
     const apiKey = (await readFile("/run/deviludo/provider.key", "utf8")).trim();
     const environment = { ...safeEnvironment(), ...configuration.environment };
     emitProgress("PHASE", "Agent 正在编写并验证游戏项目");
@@ -182,6 +230,15 @@ async function runAgent(plan) {
       apiKey,
       plan.job.jobId,
       plan.job.timeoutSeconds,
+      startingDigest === null ? null : async () => {
+        const currentDigest = await projectTreeDigest("/workspace/project");
+        if (currentDigest === startingDigest) {
+          throw new Error("Agent returned before making required source changes");
+        }
+        return currentDigest;
+      },
+      e2eRepairContext ? 2 * 60_000 : 5 * 60_000,
+      e2eRepairContext ? 60_000 : undefined,
     );
     flushAgentOutput();
   }
@@ -189,7 +246,7 @@ async function runAgent(plan) {
   // the agent.json contract. Upload the file the Agent wrote into the generated
   // source so Core can ingest its test and asset manifests from the trusted,
   // digest-checked output object.
-  const agentManifest = await readGeneratedAgentManifest();
+  const agentManifest = await readGeneratedAgentManifest(requirementCatalog);
   await writeFile("/workspace/outputs/agent.json", JSON.stringify(agentManifest), "utf8");
   emitProgress("PHASE", "Agent 已完成代码修改，正在发布源码 revision");
   await manifest([
@@ -210,7 +267,7 @@ async function readCheckpointMetadata() {
   }
 }
 
-async function readGeneratedAgentManifest() {
+async function readGeneratedAgentManifest(requirementCatalog) {
   let value;
   try {
     value = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
@@ -221,10 +278,7 @@ async function readGeneratedAgentManifest() {
     throw new Error("Agent did not produce a valid agent.json");
   }
   const testManifest = value.testManifest;
-  if (!testManifest || typeof testManifest !== "object" || Array.isArray(testManifest)
-    || testManifest.schemaVersion !== "deviludo.test-manifest.v1"
-    || !Array.isArray(testManifest.features)
-    || testManifest.features.length < 1 || testManifest.features.length > 500) {
+  if (!validTestManifestV2(testManifest, requirementCatalog)) {
     throw new Error("Agent did not produce a valid testManifest");
   }
   const assetManifest = value.assetManifest;
@@ -241,6 +295,15 @@ async function readGeneratedAgentManifest() {
   return value;
 }
 
+async function existingAgentManifestIsValid(requirementCatalog) {
+  try {
+    await readGeneratedAgentManifest(requirementCatalog);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validPlannedAsset(item) {
   return item && typeof item === "object" && !Array.isArray(item)
     && typeof item.assetKey === "string"
@@ -254,8 +317,201 @@ function validPlannedAsset(item) {
     && (item.dimensions == null || (typeof item.dimensions === "string" && /^[0-9]{1,5}x[0-9]{1,5}$/.test(item.dimensions)));
 }
 
-async function runGenerationAgent(configuration, environment, prompt, onOutput, apiKey, jobId, timeoutSeconds) {
-  if (configuration.runtime === "CLAUDE_CODE") environment.ANTHROPIC_AUTH_TOKEN = apiKey;
+function specificationRequirementCatalog(specification) {
+  const catalog = [];
+  for (const [kind, value] of [["feature", specification.coreLoop], ["acceptance", specification.acceptanceCriteria]]) {
+    if (!Array.isArray(value)) continue;
+    value.forEach((item, index) => {
+      if (typeof item !== "string" || !item.trim()) return;
+      catalog.push({ requirementId: stableRequirementId(kind, index, item), description: item.trim() });
+    });
+  }
+  return catalog;
+}
+
+function stableRequirementId(kind, index, text) {
+  let hash = 0x811c9dc5;
+  for (const character of `${kind}\0${index}\0${text.normalize("NFKC").trim()}`) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `req-${kind}-${String(index + 1).padStart(3, "0")}-${hash.toString(16).padStart(8, "0")}`;
+}
+
+function validTestManifestV2(value, expectedRequirements = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || value.schemaVersion !== "deviludo.test-manifest.v2"
+    || !Array.isArray(value.requirements) || value.requirements.length < 1 || value.requirements.length > 500
+    || !Array.isArray(value.features) || value.features.length < 1 || value.features.length > 500) return false;
+  const requirementIds = new Set();
+  for (const requirement of value.requirements) {
+    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)
+      || typeof requirement.requirementId !== "string" || !stableId(requirement.requirementId)
+      || requirementIds.has(requirement.requirementId)
+      || typeof requirement.description !== "string" || requirement.description.trim().length < 1 || requirement.description.length > 2000) return false;
+    requirementIds.add(requirement.requirementId);
+  }
+  if (expectedRequirements) {
+    if (value.requirements.length !== expectedRequirements.length) return false;
+    const actual = new Map(value.requirements.map(item => [item.requirementId, item.description]));
+    if (expectedRequirements.some(item => actual.get(item.requirementId) !== item.description)) return false;
+  }
+  const featureIds = new Set();
+  const checkNames = new Set();
+  const automatedCoverage = new Set();
+  let journeys = 0;
+  let checkpoints = 0;
+  let coreJourney = false;
+  for (const feature of value.features) {
+    if (!feature || typeof feature !== "object" || Array.isArray(feature)
+      || typeof feature.id !== "string" || !stableId(feature.id) || featureIds.has(feature.id)
+      || !["core-loop", "player-control", "data-integrity", "runtime-quality", "ui", "audio", "network"].includes(feature.category)
+      || typeof feature.description !== "string" || feature.description.trim().length < 1 || feature.description.length > 2000
+      || !["unit", "interactive", "visual", "manual"].includes(feature.verificationMethod)
+      || !Array.isArray(feature.requirementIds) || feature.requirementIds.length < 1
+      || feature.requirementIds.some(id => typeof id !== "string" || !requirementIds.has(id))) return false;
+    featureIds.add(feature.id);
+    if (feature.verificationMethod !== "manual") for (const id of feature.requirementIds) automatedCoverage.add(id);
+    if (feature.verificationMethod === "unit") {
+      if (typeof feature.gdsTestPath !== "string"
+        || !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(feature.gdsTestPath)
+        || /(^|\/)\.{1,2}(\/|$)|\/\//.test(feature.gdsTestPath.slice(6))
+        || !Array.isArray(feature.checkNames) || feature.checkNames.length < 1
+        || feature.checkNames.some(name => typeof name !== "string" || !stableId(name) || checkNames.has(name))) return false;
+      for (const name of feature.checkNames) checkNames.add(name);
+    } else if (feature.verificationMethod === "interactive") {
+      if (!validInteractionScriptV2(feature.interactionScript)
+        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000) return false;
+      journeys += 1;
+      const checkpointEvents = feature.interactionScript.events.filter(event => event.type === "checkpoint");
+      checkpoints += checkpointEvents.length;
+      if (feature.coreJourney === true && feature.category === "core-loop") {
+        const roles = new Set(checkpointEvents.map(event => event.role));
+        const assertionsComplete = checkpointEvents.every(event => event.referenceImage
+          || event.expectedOutput === checkpointOutputMarker(event.id));
+        const hasUserAction = feature.interactionScript.events.some(event => event.type === "key_press" || event.type === "mouse_click");
+        if (["START", "KEY_STATE", "COMPLETION"].every(role => roles.has(role))
+          && assertionsComplete && hasUserAction) coreJourney = true;
+      }
+    } else if (feature.verificationMethod === "visual") {
+      if (!validVisualSpec(feature.expectedVisual)) return false;
+      checkpoints += 1;
+    }
+  }
+  return journeys >= 1 && journeys <= 32 && checkpoints >= 3 && checkpoints <= 20 && coreJourney
+    && [...requirementIds].every(id => automatedCoverage.has(id));
+}
+
+function validInteractionScriptV2(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== "2"
+    || !Array.isArray(value.events) || value.events.length < 1 || value.events.length > 200) return false;
+  const checkpointIds = new Set();
+  return value.events.every(event => {
+    if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") return false;
+    const delayRequired = event.type === "wait";
+    if (event.delay_ms === undefined ? delayRequired : !Number.isInteger(event.delay_ms) || event.delay_ms < 0 || event.delay_ms > 300000) return false;
+    if (["key_press", "key_release"].includes(event.type)) return typeof event.key === "string"
+      && /^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$/.test(event.key);
+    if (event.type === "mouse_move") return Number.isInteger(event.x) && event.x >= 0 && event.x < 1280 && Number.isInteger(event.y) && event.y >= 0 && event.y < 720;
+    if (event.type === "mouse_click") return ["LEFT", "RIGHT", "MIDDLE"].includes(event.button);
+    if (event.type === "wait") return true;
+    if (event.type !== "checkpoint" || typeof event.id !== "string" || !stableId(event.id)
+      || checkpointIds.has(event.id) || !["START", "KEY_STATE", "COMPLETION"].includes(event.role)
+      || (event.referenceImage !== undefined && !safeProjectPngPath(event.referenceImage))
+      || (event.expectedOutput !== undefined && event.expectedOutput !== checkpointOutputMarker(event.id))
+      || (event.threshold !== undefined && (typeof event.threshold !== "number" || !Number.isFinite(event.threshold) || event.threshold < 0 || event.threshold > 1))) return false;
+    checkpointIds.add(event.id);
+    return true;
+  });
+}
+
+function checkpointOutputMarker(checkpointId) {
+  return `DEVILUDO_E2E_CHECKPOINT:${checkpointId}`;
+}
+
+function validVisualSpec(value) {
+  return value && typeof value === "object" && !Array.isArray(value) && value.version === "1"
+    && safeProjectPngPath(value.referenceImage)
+    && (value.threshold === undefined || (typeof value.threshold === "number" && Number.isFinite(value.threshold) && value.threshold >= 0 && value.threshold <= 1))
+    && (value.captureDelay === undefined || (Number.isInteger(value.captureDelay) && value.captureDelay >= 0 && value.captureDelay <= 300000));
+}
+
+function stableId(value) {
+  return /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function safeProjectPngPath(value) {
+  return typeof value === "string" && value.length >= 5 && value.length <= 240
+    && value.toLowerCase().endsWith(".png") && !value.startsWith("/") && !value.startsWith("res://")
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value) && /^[A-Za-z0-9][A-Za-z0-9._/-]*\.png$/i.test(value);
+}
+
+async function readLegacyE2eRepairReport(path) {
+  let report;
+  try { report = JSON.parse(await readFile(path, "utf8")); }
+  catch { throw new Error("Legacy E2E failure report input is unreadable"); }
+  if (report?.schemaVersion !== "deviludo.godot-guest-report.v1"
+    || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") throw new Error("Legacy E2E report is not a trusted product failure");
+  const root = "/workspace/inputs/e2e-repair";
+  await mkdir(root, { recursive: true });
+  await writeFile(`${root}/report.json`, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return { legacy: true, report };
+}
+
+async function extractE2eRepairEvidence(path) {
+  const root = "/workspace/inputs/e2e-repair";
+  await rm(root, { recursive: true, force: true });
+  const { extractAndValidateEvidenceBundle } = await import("/usr/local/lib/deviludo/e2e-evidence.mjs");
+  const { report } = await extractAndValidateEvidenceBundle(path, root, 512 * 1024 * 1024);
+  if (report?.schemaVersion !== "deviludo.e2e-evidence.v1" || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") {
+    throw new Error("E2E evidence is not a trusted product failure");
+  }
+  return { legacy: false, report };
+}
+
+function e2eRepairPromptSummary(context) {
+  const report = context?.report ?? context ?? {};
+  const details = report?.testDetails && typeof report.testDetails === "object"
+    ? report.testDetails
+    : {};
+  const failures = Array.isArray(details.failures)
+    ? details.failures.filter(value => typeof value === "string").slice(0, 50)
+    : [];
+  const failedCheckpoints = Array.isArray(report.checkpoints)
+    ? report.checkpoints
+      .filter(checkpoint => checkpoint && typeof checkpoint === "object"
+        && !["PASSED", "SUCCEEDED"].includes(String(checkpoint.outcome ?? checkpoint.status ?? "").toUpperCase()))
+      .map(checkpoint => String(checkpoint.id ?? checkpoint.checkpointId ?? "unknown"))
+      .slice(0, 20)
+    : [];
+  return {
+    schemaVersion: report.schemaVersion,
+    platform: report.platform,
+    action: report.action,
+    failureDomain: report.failureDomain,
+    summary: report.summary,
+    failures,
+    failedCheckpoints,
+    screenshotCount: report.screenshotCount,
+    visualDiff: report.visualDiff,
+  };
+}
+
+function godotErrorLines(...logs) {
+  const pattern = /(?:SCRIPT ERROR|Parse Error|Parser Error|Compile Error|Failed to load script|Cannot load script|runtime error|Invalid call\.|GDScript::reload)/i;
+  return logs.flatMap(log => String(log ?? "").split(/\r?\n/)).map(line => line.trim()).filter(line => pattern.test(line)).slice(0, 20);
+}
+
+async function runGenerationAgent(configuration, environment, prompt, onOutput, apiKey, jobId, timeoutSeconds, verifyCompletion = null, initialProgressDeadlineMs = 5 * 60_000, completionQuiescenceMs = undefined) {
+  if (configuration.runtime === "CLAUDE_CODE") {
+    environment.ANTHROPIC_AUTH_TOKEN = apiKey;
+    // Prompt instructions are not a security boundary: Claude's Bash tool can
+    // otherwise launch long-running work with run_in_background and keep the
+    // CLI alive after the requested edit is complete. Force the CLI-level
+    // switch after instance configuration has been merged so it cannot be
+    // overridden by stored provider settings.
+    environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
+  }
   else {
     environment.CODEX_API_KEY = apiKey;
     environment.CODEX_HOME = "/workspace/codex-home";
@@ -273,10 +529,11 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
 
   const deadline = Date.now() + Math.max(60_000, Math.min(80 * 60_000, (timeoutSeconds - 600) * 1_000));
   let lastError;
+  let resumeInstruction = "Resume from the current session and files. Finish only the remaining requested implementation and one bounded validation pass. Do not restart analysis or spawn background agents, background shell commands, or background tasks.";
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const resumedClaude = configuration.runtime === "CLAUDE_CODE" && attempt > 1;
     const continuation = attempt === 1 ? prompt : resumedClaude
-      ? "Resume from the current session and files. Finish only the remaining requested implementation and one bounded validation pass. Do not restart analysis or spawn background agents."
+      ? resumeInstruction
       : [
         "Continue from the files already present in /workspace/project after a transient Provider or CLI interruption.",
         "Inspect the existing work first, preserve completed functionality, and finish only the missing validation and required files. Do not restart the project from scratch.",
@@ -289,14 +546,23 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
-      return await command(
+      const result = await command(
         executable,
         arguments_,
         environment,
         configuration.runtime === "CODEX_CLI" ? continuation : undefined,
         onOutput,
-        { idleTimeoutMs: 8 * 60_000, overallTimeoutMs: remaining },
+        {
+          idleTimeoutMs: 8 * 60_000,
+          overallTimeoutMs: remaining,
+          initialProgressDeadlineMs: verifyCompletion ? initialProgressDeadlineMs : undefined,
+          verifyInitialProgress: verifyCompletion,
+          completionQuiescenceMs: verifyCompletion ? completionQuiescenceMs : undefined,
+          killProcessGroup: true,
+        },
       );
+      if (verifyCompletion) await verifyCompletion();
+      return result;
     } catch (error) {
       flushAgentOutput();
       lastError = error instanceof Error ? error : new Error("Agent CLI failed");
@@ -304,7 +570,10 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       if (attempt === 2 || !failure.recoverable) {
         throw new Error(`Agent CLI failed [${failure.code}]: ${failure.detail}`);
       }
-      const delaySeconds = 5;
+      if (failure.code === "INCOMPLETE_OUTPUT") {
+        resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
+      }
+      const delaySeconds = agentRetryDelaySeconds(failure);
       emitProgress("PHASE", `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（2/2）`);
       await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
     }
@@ -339,11 +608,54 @@ function classifyAgentFailure(message) {
   if (/deadline exceeded|task container exceeded|timed? out|timeout/i.test(detail)) return { code: "DEADLINE_EXCEEDED", detail, recoverable: true };
   if (/self error/i.test(detail)) return { code: "SELF_ERROR", detail, recoverable: true };
   if (/background tasks still running/i.test(detail)) return { code: "BACKGROUND_TASK_WAIT", detail, recoverable: true };
+  if (/returned before making required source changes/i.test(detail)) return { code: "INCOMPLETE_OUTPUT", detail, recoverable: true };
   if (/api error|rate.?limit|overload|temporar|unavailable|connection|econn|socket|fetch failed/i.test(detail)) {
     return { code: "PROVIDER_ERROR", detail, recoverable: true };
   }
   if (/cli exited without a diagnostic/i.test(detail)) return { code: "CLI_ERROR", detail, recoverable: true };
   return { code: "CLI_ERROR", detail, recoverable: false };
+}
+
+function agentRetryDelaySeconds(failure) {
+  if (failure.code !== "PROVIDER_ERROR") return 5;
+  // Provider memory pressure typically survives an immediate retry. Preserve
+  // the resumable session and give the gateway enough time to shed work instead
+  // of consuming the second model call against the same overload window.
+  if (/memory overloaded|memory pressure|capacity|overload/i.test(failure.detail)) return 60;
+  return 15;
+}
+
+async function projectTreeDigest(root) {
+  const normalizedRoot = resolve(root);
+  const files = [];
+  const visit = async directory => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = resolve(directory, entry.name);
+      if (absolute !== normalizedRoot && !absolute.startsWith(`${normalizedRoot}/`)) {
+        throw new Error("Agent source path escaped the project root");
+      }
+      const info = await lstat(absolute);
+      if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+        throw new Error("Agent source contains a link or special file");
+      }
+      if (info.isDirectory()) await visit(absolute);
+      else files.push({
+        path: relative(normalizedRoot, absolute).split(sep).join("/"),
+        bytes: await readFile(absolute),
+      });
+    }
+  };
+  await visit(normalizedRoot);
+  const hash = createHash("sha256");
+  for (const file of files) {
+    const path = Buffer.from(file.path, "utf8");
+    const size = Buffer.allocUnsafe(8);
+    size.writeBigUInt64BE(BigInt(file.bytes.length));
+    hash.update(path).update("\0").update(size).update(file.bytes);
+  }
+  return `sha256:${hash.digest("hex")}`;
 }
 
 async function runProjectDocumentMaintenance(plan) {
@@ -387,6 +699,7 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
   const environment = { ...safeEnvironment(), ...configuration.environment };
   if (configuration.runtime === "CLAUDE_CODE") {
     environment.ANTHROPIC_AUTH_TOKEN = apiKey;
+    environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
     return command("claude", [
       "-p", "--no-session-persistence", "--disable-slash-commands",
       "--output-format", "json", "--max-turns", "12",
@@ -428,25 +741,84 @@ async function runGodotBuild(plan) {
   emitProgress("PHASE", "正在展开并校验 Agent 生成的 Godot 项目");
   await command("tar", ["-xzf", input, "-C", "/workspace/project"], safeEnvironment());
   await materializeBuildAssets(plan);
+  const packagedE2e = await preparePackagedE2eContract();
   const platforms = await prepareGodotProject("/workspace/project", plan.job.payload.targetPlatforms);
   await mkdir("/workspace/.local/share/godot", { recursive: true });
   await symlink("/home/task/.local/share/godot/export_templates", "/workspace/.local/share/godot/export_templates");
   emitProgress("PHASE", "正在导入 Godot 资源并验证主场景");
-  await command("godot", ["--headless", "--path", "/workspace/project", "--import"], godotEnvironment());
-  await command("godot", ["--headless", "--path", "/workspace/project", "--quit-after", "120"], godotEnvironment());
+  await godotCommand(["--headless", "--path", "/workspace/project", "--import"]);
+  await godotCommand(["--headless", "--path", "/workspace/project", "--quit-after", "120"]);
   const outputs = [];
   for (const platform of platforms) {
     const target = godotExportTarget(platform);
     const exportDirectory = `/workspace/project/.deviludo-export/${platform}`;
     await mkdir(exportDirectory, { recursive: true });
     emitProgress("PHASE", `正在导出 ${target.name} 制品`);
-    await command("godot", ["--headless", "--path", "/workspace/project", "--export-release", target.name, `${exportDirectory}/${target.filename}`], godotEnvironment());
+    await godotCommand(["--headless", "--path", "/workspace/project", "--export-release", target.name, `${exportDirectory}/${target.filename}`]);
+    await copyPackagedE2eContract(packagedE2e, exportDirectory);
     const archive = `godot-build-${platform}.tar.gz`;
     await command("tar", ["-czf", `/workspace/outputs/${archive}`, "-C", exportDirectory, "."], safeEnvironment());
     outputs.push({ file: archive, kind: "BUILD", targetPlatform: platform, contentType: "application/gzip" });
   }
   emitProgress("PHASE", "Godot 制品导出完成，正在生成制品清单");
   await manifest(outputs);
+}
+
+async function godotCommand(arguments_) {
+  const result = await command("godot", arguments_, godotEnvironment());
+  const errors = godotErrorLines(result.stdout, result.stderr);
+  if (errors.length > 0) throw new Error(`Godot reported script errors despite exit code 0: ${errors.join(" | ")}`);
+  return result;
+}
+
+async function preparePackagedE2eContract() {
+  const { inspectScreenshot } = await import("/usr/local/lib/deviludo/e2e-evidence.mjs");
+  let agentManifest;
+  try { agentManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8")); }
+  catch { throw new Error("Build source is missing a valid agent.json test contract"); }
+  if (!validTestManifestV2(agentManifest?.testManifest)) throw new Error("Build source has an invalid deviludo.test-manifest.v2 contract");
+  const root = "/workspace/project/.deviludo-e2e-package";
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  await writeFile(`${root}/manifest.json`, `${JSON.stringify(agentManifest.testManifest, null, 2)}\n`, "utf8");
+  const referenceImages = [];
+  for (const feature of agentManifest.testManifest.features) {
+    if (feature.verificationMethod === "visual") referenceImages.push(feature.expectedVisual.referenceImage);
+    if (feature.verificationMethod === "interactive") {
+      for (const event of feature.interactionScript.events) if (event.type === "checkpoint" && event.referenceImage) referenceImages.push(event.referenceImage);
+    }
+  }
+  for (const relativePath of new Set(referenceImages)) {
+    if (!safeProjectPngPath(relativePath)) throw new Error(`E2E visual baseline path is unsafe: ${relativePath}`);
+    const source = resolve("/workspace/project", relativePath);
+    if (!source.startsWith("/workspace/project/")) throw new Error("E2E visual baseline escaped the project root");
+    const info = await lstat(source).catch(() => null);
+    if (!info?.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 64 * 1024 * 1024) {
+      throw new Error(`E2E visual baseline is missing or invalid: ${relativePath}`);
+    }
+    await inspectScreenshot(source).catch(error => {
+      throw new Error(`E2E visual baseline is not a valid 1280x720 game frame (${relativePath}): ${error instanceof Error ? error.message : String(error)}`);
+    });
+    const target = resolve(root, relativePath);
+    if (!target.startsWith(`${root}/`)) throw new Error("E2E baseline package path escaped its root");
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(source, target);
+  }
+  return root;
+}
+
+async function copyPackagedE2eContract(source, exportDirectory) {
+  const target = `${exportDirectory}/.deviludo-e2e`;
+  await mkdir(target, { recursive: true });
+  for (const entry of await readdir(source, { recursive: true, withFileTypes: true })) {
+    const path = resolve(entry.parentPath, entry.name);
+    const relativePath = path.slice(source.length + 1);
+    const destination = resolve(target, relativePath);
+    if (!destination.startsWith(`${target}/`) && destination !== target) throw new Error("E2E package escaped its controlled directory");
+    if (entry.isDirectory()) await mkdir(destination, { recursive: true });
+    else if (entry.isFile()) { await mkdir(dirname(destination), { recursive: true }); await copyFile(path, destination); }
+    else throw new Error("E2E package contains an unsupported file type");
+  }
 }
 
 async function materializeBuildAssets(plan) {
@@ -553,7 +925,13 @@ function godotEnvironment() {
 }
 
 async function command(executable, arguments_, env, stdin, onStdout, options = {}) {
-  const child = spawn(executable, arguments_, { cwd: "/workspace/project", env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(executable, arguments_, {
+    cwd: "/workspace/project",
+    env,
+    shell: false,
+    detached: options.killProcessGroup === true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   if (stdin) child.stdin.end(stdin); else child.stdin.end();
   const stdout = [];
   const stderr = [];
@@ -564,12 +942,30 @@ async function command(executable, arguments_, env, stdin, onStdout, options = {
   let inactivityError = null;
   let inactivityTimer = null;
   let overallTimer = null;
+  let initialProgressTimer = null;
+  let progressPollTimer = null;
+  let completionTimer = null;
+  let progressProbeRunning = false;
+  let latestProgressToken = null;
+  let acceptedAfterProgress = false;
   let forceKillTimer = null;
+  const signalChild = signal => {
+    if (options.killProcessGroup === true && child.pid) {
+      try { process.kill(-child.pid, signal); }
+      catch { child.kill(signal); }
+    } else child.kill(signal);
+  };
   const terminate = error => {
     if (inactivityError) return;
     inactivityError = error;
-    child.kill("SIGTERM");
-    forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    signalChild("SIGTERM");
+    forceKillTimer = setTimeout(() => signalChild("SIGKILL"), 5_000);
+  };
+  const acceptCompletedProgress = () => {
+    if (inactivityError || acceptedAfterProgress) return;
+    acceptedAfterProgress = true;
+    signalChild("SIGTERM");
+    forceKillTimer = setTimeout(() => signalChild("SIGKILL"), 5_000);
   };
   const resetInactivityTimer = () => {
     if (!options.idleTimeoutMs || inactivityError) return;
@@ -581,6 +977,40 @@ async function command(executable, arguments_, env, stdin, onStdout, options = {
   resetInactivityTimer();
   if (options.overallTimeoutMs) {
     overallTimer = setTimeout(() => terminate(new Error(`${executable} deadline exceeded after 80 minutes`)), options.overallTimeoutMs);
+  }
+  if (options.initialProgressDeadlineMs && options.verifyInitialProgress) {
+    const probeProgress = async () => {
+      if (progressProbeRunning || inactivityError || acceptedAfterProgress) return;
+      progressProbeRunning = true;
+      try {
+        const token = await options.verifyInitialProgress();
+        if (initialProgressTimer) {
+          clearTimeout(initialProgressTimer);
+          initialProgressTimer = null;
+        }
+        if (!options.completionQuiescenceMs) {
+          if (progressPollTimer) clearInterval(progressPollTimer);
+          progressPollTimer = null;
+          return;
+        }
+        if (token !== latestProgressToken) {
+          latestProgressToken = token;
+          if (completionTimer) clearTimeout(completionTimer);
+          completionTimer = setTimeout(acceptCompletedProgress, options.completionQuiescenceMs);
+        }
+      } catch {
+        // No source progress yet; the hard first-edit deadline below remains authoritative.
+      } finally {
+        progressProbeRunning = false;
+      }
+    };
+    progressPollTimer = setInterval(() => { void probeProgress(); }, 5_000);
+    void probeProgress();
+    initialProgressTimer = setTimeout(() => {
+      void Promise.resolve(options.verifyInitialProgress()).catch(error => {
+        terminate(error instanceof Error ? error : new Error("Agent did not make required source progress"));
+      });
+    }, options.initialProgressDeadlineMs);
   }
   child.stdout.on("data", chunk => {
     resetInactivityTimer();
@@ -607,10 +1037,16 @@ async function command(executable, arguments_, env, stdin, onStdout, options = {
   });
   if (inactivityTimer) clearTimeout(inactivityTimer);
   if (overallTimer) clearTimeout(overallTimer);
+  if (initialProgressTimer) clearTimeout(initialProgressTimer);
+  if (progressPollTimer) clearInterval(progressPollTimer);
+  if (completionTimer) clearTimeout(completionTimer);
   if (forceKillTimer) clearTimeout(forceKillTimer);
   progressBuffer += progressDecoder.end();
   if (onStdout && progressBuffer.trim()) onStdout(progressBuffer);
   if (inactivityError) throw inactivityError;
+  if (acceptedAfterProgress) {
+    return { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") };
+  }
   if (result.code !== 0) {
     const diagnostic = commandFailureDiagnostic(executable, Buffer.concat(stdout).toString("utf8"), Buffer.concat(stderr).toString("utf8"));
     throw new Error(`${executable} exited ${result.code ?? `by ${result.signal ?? "signal"}`}: ${diagnostic}`);

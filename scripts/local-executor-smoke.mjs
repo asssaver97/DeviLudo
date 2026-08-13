@@ -7,7 +7,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
-const skipNativeE2e = process.env.DEVILUDO_SKIP_NATIVE_E2E === "1";
+const skipRealWindowE2e = process.env.DEVILUDO_SKIP_NATIVE_E2E === "1";
 const workspaceId = randomUUID();
 const projectId = randomUUID();
 const workflowId = randomUUID();
@@ -18,6 +18,36 @@ try {
   await minio(["alias", "set", "deviludo-smoke", "http://127.0.0.1:9000", "deviludo-local", "deviludo-local-secret"]);
   const fixtureImage = await imageId("deviludo-agent-fixture:local");
   const agentJobId = randomUUID();
+  const specificationContent = Buffer.from(`${JSON.stringify({
+    vision: "验证本地隔离执行器能够从冻结需求生成并交付可测试的 Godot 游戏。",
+    coreLoop: [
+      "玩家使用键盘完成一轮可重复的时间循环。",
+      "游戏必须在关键状态显示清晰的时间循环提示。",
+    ],
+    playerExperience: ["操作反馈及时且核心状态易于辨认。"],
+    acceptanceCriteria: [
+      "导出游戏可在真实窗口中启动并完成核心交互旅程。",
+      "启动、关键状态和完成检查点均生成有效截图。",
+    ],
+    revisionNotes: ["本规格仅用于本地执行器端到端 smoke。"],
+  }, null, 2)}\n`);
+  const specificationDigest = `sha256:${createHash("sha256").update(specificationContent).digest("hex")}`;
+  const specificationKey = `${objectPrefix(agentJobId)}/specification.json`;
+  await localS3().send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: specificationKey,
+    Body: specificationContent,
+    ContentType: "application/json",
+    Metadata: { sha256: specificationDigest },
+  }));
+  createdKeys.push(specificationKey);
+  const specificationObject = {
+    kind: "SPECIFICATION",
+    bucket,
+    key: specificationKey,
+    sha256: specificationDigest,
+    sizeBytes: specificationContent.length,
+  };
   const agentPlan = {
     schemaVersion: "deviludo.sandbox-plan.v2",
     mode: "RESTRICTED_CONTAINER",
@@ -46,7 +76,7 @@ try {
       jobKind: "AGENT_GENERATION",
       runtimeImage: fixtureImage,
       requiredCapabilities: ["MICROVM", "NETWORK_POLICY"],
-      inputObjects: [],
+      inputObjects: [specificationObject],
       outputContract: { kinds: ["SPECIFICATION"], maxBytes: 134_217_728 },
       budget: { cpuMillis: 120_000, memoryBytes: 536_870_912, networkBytes: 0 },
       timeoutSeconds: 120,
@@ -130,12 +160,13 @@ try {
   createdKeys.push(build.key);
   await assertObjectBytes(build);
 
-  const macReport = skipNativeE2e ? null : await runNativeMacE2e(build);
-  if (macReport && (macReport.schemaVersion !== "deviludo.godot-guest-report.v1"
+  const macReport = skipRealWindowE2e ? null : await runTartMacE2e(build);
+  if (macReport && (macReport.schemaVersion !== "deviludo.godot-guest-report.v2"
     || macReport.outcome !== "PASSED" || macReport.failureDomain !== null
-    || macReport.guest?.isolation !== "DEVELOPMENT_NATIVE" || macReport.guest?.exitCode !== 0
+    || macReport.guest?.isolation !== "EPHEMERAL_VM" || macReport.guest?.exitCode !== 0
+    || macReport.evidence?.protocol !== "deviludo.e2e-evidence.v1" || macReport.evidence?.screenshotCount < 3
     || macReport.inputDigest !== build.sha256)) {
-    throw new Error(`Native macOS E2E report is invalid: ${JSON.stringify(macReport)}`);
+    throw new Error(`Tart macOS E2E report is invalid: ${JSON.stringify(macReport)}`);
   }
 
   console.log(JSON.stringify({
@@ -217,18 +248,37 @@ async function assertObjectBytes(object) {
   }
 }
 
-async function runNativeMacE2e(object) {
+async function runTartMacE2e(object) {
   const client = localS3();
   const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: object.bucket, Key: object.key }), { expiresIn: 300 });
-  return runJson(process.execPath, [new URL("./executors/local-macos-job.mjs", import.meta.url).pathname, "test"], {
-    schemaVersion: "deviludo.e2e-execution.v1",
-    action: "test",
-    jobId: randomUUID(),
-    workspaceId,
-    projectId,
-    payload: {},
-    inputs: [{ object, url, expiresAt: new Date(Date.now() + 300_000).toISOString() }],
-  });
+  const e2eJobId = randomUUID();
+  const isolation = new URL("./executors/local-tart-isolation.mjs", import.meta.url).pathname;
+  const executor = new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url).pathname;
+  const configuration = JSON.parse(await import("node:fs/promises").then(fs => fs.readFile(new URL("../.deviludo/local/tart-e2e.json", import.meta.url), "utf8")));
+  const jobRoot = new URL("../.deviludo/local/tart-host-jobs/", import.meta.url).pathname;
+  const isolationArguments = ["--stage", "before", "--job-id", e2eJobId, "--workspace-id", workspaceId, "--generation", "1", "--runtime-image", configuration.fingerprint];
+  await runJsonless(process.execPath, [isolation, "reimage", ...isolationArguments], { DEVILUDO_E2E_JOB_ROOT: jobRoot });
+  try {
+    return await runJson(process.execPath, [executor, "test"], {
+      schemaVersion: "deviludo.e2e-execution.v1",
+      action: "test",
+      jobId: e2eJobId,
+      workspaceId,
+      projectId,
+      operatingSystem: "macos",
+      payload: {},
+      inputs: [{ object, url, expiresAt: new Date(Date.now() + 300_000).toISOString() }],
+    }, 20 * 60_000, undefined, {
+      DEVILUDO_E2E_JOB_ROOT: jobRoot,
+      DEVILUDO_E2E_GUEST_RUNNER: new URL("./executors/local-tart-guest-runner.mjs", import.meta.url).pathname,
+    });
+  } finally {
+    await runJsonless(process.execPath, [isolation, "cleanup", "--stage", "after", "--job-id", e2eJobId, "--workspace-id", workspaceId, "--generation", "1", "--runtime-image", configuration.fingerprint], { DEVILUDO_E2E_JOB_ROOT: jobRoot }).catch(() => undefined);
+  }
+}
+
+async function runJsonless(executable, arguments_, extraEnvironment = {}) {
+  await execute(executable, arguments_, { cwd: root, timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, ...extraEnvironment } });
 }
 
 function localS3() {
@@ -255,9 +305,9 @@ async function sendGuidance(jobId, content) {
   if (result?.accepted !== true) throw new Error("Executor rejected player guidance");
 }
 
-function runJson(executable, arguments_, input, timeout = 5 * 60_000, onProgress) {
+function runJson(executable, arguments_, input, timeout = 5 * 60_000, onProgress, extraEnvironment = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, arguments_, { cwd: root, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(executable, arguments_, { cwd: root, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...extraEnvironment } });
     child.stdin.end(JSON.stringify(input));
     const stdout = [];
     const stderr = [];

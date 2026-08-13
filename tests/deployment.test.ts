@@ -25,9 +25,11 @@ test("local deployment exposes only Web while Core roles share one image", async
   const localMac = await readFile(new URL("../scripts/local-macos-e2e.mjs", import.meta.url), "utf8");
   assert.match(localMac, /const \{ main \} = await import\("\.\.\/services\/e2e-node\/src\/main\.ts"\);/);
   assert.match(localMac, /await main\(\);/);
-  const localMacJob = await readFile(new URL("../scripts/executors/local-macos-job.mjs", import.meta.url), "utf8");
-  assert.match(localMacJob, /schemaVersion: "deviludo\.godot-guest-report\.v1"/);
-  assert.match(localMacJob, /guest: \{/);
+  const tartGuest = await readFile(new URL("../scripts/executors/local-tart-guest-runner.mjs", import.meta.url), "utf8");
+  assert.match(tartGuest, /tart-e2e\.json/);
+  assert.match(tartGuest, /DEVILUDO_E2E_HOST_OUTPUT/);
+  assert.match(tartGuest, /HostKeyAlias=deviludo-tart-guest/);
+  assert.match(tartGuest, /\/usr\/local\/lib\/deviludo\/executors\/godot-window-e2e-guest\.mjs/);
   const localUp = await readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8");
   assert.match(localUp, /stopLocalE2e/);
   assert.match(localUp, /retainActiveJobRuntimeImages\(baseEnvironment\)/);
@@ -118,13 +120,19 @@ test("successful E2E queues a safe host-side Git commit without pushing", async 
 test("Agent generation preserves partial work and retries transient Provider failures in place", async () => {
   const runner = await readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8");
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
+  const checkpointRestore = await readFile(new URL("../services/sandbox-executor/src/checkpoint-restore.ts", import.meta.url), "utf8");
   assert.match(runner, /attempt <= 2/);
   assert.match(runner, /idleTimeoutMs: 8 \* 60_000/);
   assert.match(runner, /classifyAgentFailure/);
   assert.match(runner, /maximum\[ _-\]\?turns\|max\[ _-\]\?turns/);
   assert.match(runner, /"--resume" : "--session-id"/);
+  assert.match(runner, /Do not restart analysis or spawn background agents, background shell commands, or background tasks/);
   assert.match(runner, /"--tools", "Read,Write,Edit,Glob,Grep,Bash"/);
   assert.match(runner, /"--disallowedTools", "Agent,Task"/);
+  assert.match(runner, /environment\.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"/);
+  assert.match(runner, /Use ONLY these exact interaction event shapes/);
+  assert.match(runner, /canonical uppercase names such as KEY_SPACE and KEY_P/);
+  assert.match(runner, /Never use event type keyboard, an action field, an ms field, or lowercase key names/);
   assert.match(runner, /Math\.min\(80 \* 60_000/);
   assert.match(runner, /trimBufferedTail\(stdout, stdoutBytes, 2 \* 1024 \* 1024\)/);
   assert.match(runner, /checkpoint\.tar\.gz/);
@@ -135,7 +143,8 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(daemon, /本次已保存/);
   assert.match(daemon, /"AGENT_COMPLETE"/);
   assert.match(daemon, /saveAgentCheckpoint\(taskName, plan, "PARTIAL"/);
-  assert.match(daemon, /LOCAL_PROJECT_CHANGED/);
+  assert.match(checkpointRestore, /LOCAL_PROJECT_CHANGED/);
+  assert.match(checkpointRestore, /DISCARD_STALE/);
 });
 
 test("Core waits for the sandbox executor before claiming jobs", async () => {
@@ -235,6 +244,31 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /"--output-format", "stream-json", "--include-partial-messages"/);
   assert.match(taskRunner, /"--max-turns", "100"/);
   assert.match(taskRunner, /"--disallowedTools", "Agent,Task"/);
+  assert.match(taskRunner, /projectTreeDigest\("\/workspace\/project"\)/);
+  assert.match(taskRunner, /Agent returned before making required source changes/);
+  assert.match(taskRunner, /"INCOMPLETE_OUTPUT"/);
+  assert.match(taskRunner, /previous response stopped before changing any source files/);
+  assert.match(taskRunner, /Core has already validated the existing agent\.json/);
+  assert.match(taskRunner, /const manifestInstructions = existingManifestValid \?/);
+  assert.match(taskRunner, /This repair does not need manifest work unless the failure report explicitly identifies a manifest error/);
+  assert.match(taskRunner, /guest driver waits event\.delay_ms BEFORE it performs that event/);
+  assert.match(taskRunner, /Never model checkpoints as zero-time events/);
+  assert.match(taskRunner, /adding each event delay before recording the action/);
+  assert.match(taskRunner, /E2E failure summary:[\s\S]*e2eRepairPromptSummary\(e2eRepairContext\)/);
+  assert.doesNotMatch(taskRunner, /E2E failure report:[\s\S]*e2eRepairContext\.report/);
+  assert.match(taskRunner, /failures\.filter\(value => typeof value === "string"\)\.slice\(0, 50\)/);
+  assert.match(taskRunner, /const specificationInstructions = existingManifestValid[\s\S]*Current revision notes:/);
+  assert.match(taskRunner, /: \[`Specification: \$\{JSON\.stringify\(specification\)\}`\]/);
+  assert.match(taskRunner, /make the first concrete source edit before inspecting broad regression coverage/);
+  assert.match(taskRunner, /e2eRepairContext \? 2 \* 60_000 : 5 \* 60_000/);
+  assert.match(taskRunner, /e2eRepairContext \? 60_000 : undefined/);
+  assert.match(taskRunner, /initialProgressDeadlineMs: verifyCompletion \? initialProgressDeadlineMs/);
+  assert.match(taskRunner, /completionQuiescenceMs: verifyCompletion \? completionQuiescenceMs/);
+  assert.match(taskRunner, /setTimeout\(acceptCompletedProgress, options\.completionQuiescenceMs\)/);
+  assert.match(taskRunner, /if \(acceptedAfterProgress\)/);
+  assert.match(taskRunner, /detached: options\.killProcessGroup === true/);
+  assert.match(taskRunner, /process\.kill\(-child\.pid, signal\)/);
+  assert.match(taskRunner, /The latest live guidance is the highest-priority scope constraint/);
   assert.match(taskRunner, /The next controlled builder stage performs real Godot validation/);
   assert.match(taskRunner, /prepareGodotProject\("\/workspace\/project", plan\.job\.payload\.targetPlatforms\)/);
   assert.match(taskRunner, /read \/run\/deviludo\/guidance\.ndjson/);
@@ -280,18 +314,159 @@ test("production Agent execution requires a pinned Kata microVM runtime", async 
   assert.match(deployment, /verify_sha256 "\$expected" "\$archive"/);
   assert.match(manifest, /externalArtifacts: \{ kata \}/);
   assert.match(manifest, /artifactHostCommandsAllowed: false/);
-  assert.match(manifest, /guestReportProtocol: "deviludo\.godot-guest-report\.v1"/);
+  assert.match(manifest, /guestReportProtocol: "deviludo\.godot-guest-report\.v2"/);
 });
 
-test("CI uses the fixed no-provider Agent while local macOS keeps native E2E", async () => {
+test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", async () => {
   const workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const localUp = await readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8");
   const smoke = await readFile(new URL("../scripts/local-executor-smoke.mjs", import.meta.url), "utf8");
+  const tartProvision = await readFile(new URL("../scripts/local-tart-provision.sh", import.meta.url), "utf8");
   assert.match(workflow, /DEVILUDO_LOCAL_CI: "1"/);
   assert.match(workflow, /DEVILUDO_SKIP_NATIVE_E2E: "1"/);
-  assert.match(localUp, /if \(!ciMode\) await requireGodot\(\)/);
+  assert.match(localUp, /prepareLocalTartE2e\(\{ refresh: refreshE2eVm \}\)/);
+  assert.match(localUp, /error\?\.code !== "ENOENT"/);
+  assert.match(localUp, /hash\.update\("missing", "utf8"\)/);
+  assert.doesNotMatch(localUp, /requireGodot|local-macos-job/);
+  assert.match(smoke, /const specificationKey = `\$\{objectPrefix\(agentJobId\)\}\/specification\.json`/);
+  assert.match(smoke, /inputObjects: \[specificationObject\]/);
+  const tartPrepare = await readFile(new URL("../scripts/local-tart-prepare.mjs", import.meta.url), "utf8");
+  assert.match(tartPrepare, /assertHomebrewCommandLineTools\(\)/);
+  assert.match(tartPrepare, /Command Line Tools are too outdated/);
+  assert.match(tartPrepare, /developer\.apple\.com\/download\/all/);
+  assert.match(tartPrepare, /\["trust", "--formula", \.\.\.trustedFormulae\]/);
+  assert.match(tartPrepare, /trustedFormulae\.add\("cirruslabs\/cli\/softnet"\)/);
+  assert.match(tartPrepare, /`cirruslabs\/cli\/\$\{formula\}`/);
+  assert.match(tartPrepare, /\["clone", baseImage, baseCacheName\]/);
+  assert.match(tartPrepare, /if \(refresh \|\| !cacheExists\) await requireDiskSpace\(\)/);
+  assert.doesNotMatch(tartPrepare.match(/export async function prepareLocalTartE2e[\s\S]*?(?=async function ensureHomebrewTools)/)?.[0] ?? "", /requireDiskSpace\(\)/);
+  assert.match(tartPrepare, /canonicalPrefix/);
+  assert.match(tartPrepare, /\^sha256:\[0-9a-f\]\{64\}/);
+  assert.doesNotMatch(tartPrepare, /JSON\.stringify\(row, Object\.keys\(row\)\.sort\(\)\)/);
+  assert.match(tartPrepare, /legacyFingerprint/);
+  assert.match(tartPrepare, /rows\.some\(item => \[item\?\.Name, item\?\.name\]\.includes\(name\)\)/);
+  assert.match(tartPrepare, /split\(\/\\s\+\/\)\.includes\(name\)/);
+  assert.match(tartPrepare, /\["set", stagingName, "--memory", "6144", "--display", "1440x900"\]/);
+  assert.match(tartPrepare, /ensureAliasedKnownHosts\(\)/);
+  assert.match(tartPrepare, /HostKeyAlias=\$\{guestHostKeyAlias\}/);
+  assert.match(tartPrepare, /ssh-keyscan", \["-T", "5", "-H", ip\]/);
+  assert.match(tartPrepare, /attempt < 20 && !knownHosts/);
+  assert.match(tartPrepare, /PreferredAuthentications=password/);
+  assert.match(tartPrepare, /attempt < 20 && !authorized/);
+  assert.match(tartPrepare, /key_press/);
+  assert.match(tartPrepare, /key_release/);
+  assert.match(tartPrepare, /"-target", "arm64-apple-macosx15\.0"/);
+  assert.match(tartPrepare, /"-Onone"/);
+  assert.match(tartPrepare, /\[hostGuiDriverFile, "\/Users\/Shared\/deviludo-gui-driver"\]/);
+  assert.match(tartPrepare, /gui-event-batches\.mjs"\), "\/Users\/Shared\/gui-event-batches\.mjs"/);
+  assert.match(tartPrepare, /randomBytes\(12\)\.toString\("hex"\)/);
+  assert.doesNotMatch(tartPrepare, /\/Users\/Shared\/macos-gui-driver\.swift/);
+  assert.match(tartPrepare, /const rebootedVm = spawn\("tart"/);
+  assert.match(tartPrepare, /await waitForGuestSsh\(rebootedIp\)/);
+  assert.match(tartPrepare, /await waitForGuestDesktop\(rebootedIp\)/);
+  assert.match(tartPrepare, /launchctl print gui\/501/);
+  assert.match(tartPrepare, /attempt < 30/);
+  assert.match(tartPrepare, /await smokeGuestRuntime\(rebootedIp\)/);
+  assert.match(tartPrepare, /金镜像重启后真实窗口 smoke 失败/);
+  assert.match(tartProvision, /\/usr\/sbin\/sysadminctl[\s\\]*-resetPasswordFor admin/);
+  assert.match(tartProvision, /dscl \. -authonly admin/);
+  assert.match(tartProvision, /writeFileSync\("\/Users\/Shared\/deviludo-kcpassword"/);
+  assert.match(tartProvision, /install -o root -g wheel -m 0600 \/Users\/Shared\/deviludo-kcpassword \/etc\/kcpassword/);
+  assert.match(tartProvision, /com\.apple\.loginwindow autoLoginUser admin/);
+  assert.match(tartProvision, /kcpassword_size=.*stat -f/);
+  assert.match(tartProvision, /sudo sync/);
+  assert.match(tartProvision, /gui-event-batches\.mjs \"\$guest_root\/executors\/gui-event-batches\.mjs\"/);
+  assert.doesNotMatch(tartProvision, /sysadminctl[\s\\]*-autologin set/);
   assert.match(smoke, /deviludo-agent-fixture:local/);
-  assert.match(smoke, /skipNativeE2e \? null : await runNativeMacE2e/);
+  assert.match(smoke, /skipRealWindowE2e \? null : await runTartMacE2e/);
+  assert.doesNotMatch(smoke, /DEVELOPMENT_NATIVE/);
+  const fixtureMain = await readFile(new URL("../fixtures/godot-smoke/scripts/main.gd", import.meta.url), "utf8");
+  assert.match(fixtureMain, /func _unhandled_key_input\(event: InputEvent\)/);
+  assert.match(fixtureMain, /event\.keycode == KEY_DOWN/);
+  assert.match(fixtureMain, /event\.keycode == KEY_ENTER/);
+  assert.doesNotMatch(fixtureMain, /get_tree\(\)\.quit/);
+});
+
+test("Godot E2E is a real-window manifest run with portable visual evidence", async () => {
+  const [guest, evidence, builder, macDriver, linuxDriver, windowsDriver, linuxIsolation] = await Promise.all([
+    readFile(new URL("../scripts/executors/godot-window-e2e-guest.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/e2e-evidence.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/executors/macos-gui-driver.swift", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/executors/linux-x11-gui-driver.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/executors/windows-gui-driver.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-linux-isolation.sh", import.meta.url), "utf8"),
+  ]);
+  assert.match(guest, /deviludo\.test-manifest\.v2/);
+  assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
+  assert.match(guest, /"--log-file", logPath/);
+  assert.match(guest, /DEVILUDO_E2E_CHECKPOINT_FILE: checkpointOutputPath/);
+  assert.match(guest, /isolatedGameEnvironment\(`unit-\$\{unitIndex\}`\)/);
+  assert.match(guest, /isolatedGameEnvironment\(`journey-\$\{journey\.id\}`/);
+  assert.match(guest, /XDG_DATA_HOME: xdgData/);
+  assert.match(guest, /APPDATA: appData/);
+  assert.match(guest, /checkpointOutputSeen\(\[[\s\S]*await readOptionalLog\(gameLogPath\),[\s\S]*await readOptionalLog\(checkpointOutputPath\),/);
+  assert.match(guest, /waitForCheckpointOutput\([\s\S]*CHECKPOINT_VISUAL_SETTLE_MS/);
+  assert.match(guest, /MIN_STATE_TRANSITION_DIFFERENCE_RATIO\s*=\s*0\.001/);
+  assert.match(guest, /CHECKPOINT_VISUAL_STATE_UNCHANGED/);
+  assert.match(guest, /--windowed/);
+  assert.doesNotMatch(guest.match(/async function runJourney[\s\S]*?(?=async function runVisualCheck)/)?.[0] ?? "", /--headless/);
+  assert.match(guest, /CHECKPOINTS_MISSING/);
+  assert.match(guest, /CORE_INPUT_MISSING/);
+  assert.match(guest, /interactionEventBatches\(journey\.interactionScript\.events\)/);
+  assert.match(guest, /"sequence"[\s\S]*JSON\.stringify\(batch\.events\)/);
+  assert.match(guest, /journey\.timeoutMs/);
+  assert.match(guest, /UNIT_TIMEOUT/);
+  assert.match(guest, /timedOut = true/);
+  assert.match(guest, /inspectScreenshot/);
+  assert.match(guest, /godotErrorLines/);
+  assert.match(builder, /DEVILUDO_E2E_CHECKPOINT_FILE/);
+  assert.match(builder, /existingManifestValid \? \[[\s\S]*checkpointEmitterInstruction/);
+  assert.match(builder, /agentRetryDelaySeconds\(failure\)/);
+  assert.match(builder, /memory overloaded[\s\S]*return 60/);
+  assert.match(evidence, /index\.html/);
+  assert.match(evidence, /report\.json/);
+  assert.match(evidence, /logs\/stdout\.log/);
+  assert.match(evidence, /manifest\.json/);
+  assert.match(evidence, /data:image\/png;base64/);
+  assert.match(evidence, /ZIP cannot contain symbolic links/);
+  assert.match(builder, /\.deviludo-e2e/);
+  assert.match(builder, /Godot reported script errors despite exit code 0/);
+  assert.match(macDriver, /CGEvent\(keyboardEventSource/);
+  assert.match(macDriver, /"P": 35/);
+  assert.match(macDriver, /value\.hasPrefix\("KEY_"\)/);
+  assert.match(macDriver, /SCScreenshotManager\.captureImage/);
+  assert.match(macDriver, /let backgroundColor = CGColor\(gray: 0, alpha: 1\)/);
+  assert.match(macDriver, /withExtendedLifetime\(retainedBackgroundColor\)/);
+  assert.match(macDriver, /case "resize"/);
+  assert.match(macDriver, /case "sequence"/);
+  assert.match(macDriver, /ProcessInfo\.processInfo\.systemUptime/);
+  assert.match(macDriver, /sequenceStartedAt \+ dueOffset/);
+  const macWait = macDriver.match(/case "wait":[\s\S]*?(?=case "event")/)?.[0] ?? "";
+  assert.match(macWait, /NSRunningApplication\(processIdentifier: pid\)/);
+  assert.match(macWait, /gameWindow\(pid: pid\)/);
+  assert.match(macWait, /window\.isOnScreen/);
+  assert.doesNotMatch(macWait, /focus\(pid: pid\)/);
+  assert.match(macDriver, /CGWindowListCopyWindowInfo\(\[\.optionAll, \.excludeDesktopElements\]/);
+  assert.match(macDriver, /windowDiagnostics\(pid: pid\)/);
+  assert.match(macDriver, /if left\.isOnScreen != right\.isOnScreen/);
+  assert.match(macDriver, /NSScreen\.main\?\.backingScaleFactor/);
+  assert.match(macDriver, /window\.bounds\.width \* backingScale\(\) >= width/);
+  assert.match(macDriver, /CGFloat\(x\) \/ backingScale\(\)/);
+  assert.match(macDriver, /window\.bounds\.width \* scale/);
+  assert.doesNotMatch(macDriver, /CGWindowListCreateImage/);
+  assert.match(linuxDriver, /xdotool/);
+  assert.match(linuxDriver, /unsupported keyboard input/);
+  assert.match(linuxDriver, /command === "sequence"/);
+  assert.match(linuxDriver, /const startedAt = performance\.now\(\)/);
+  assert.match(linuxDriver, /startedAt \+ dueOffsetMs/);
+  assert.match(windowsDriver, /SendInput/);
+  assert.match(windowsDriver, /name\.StartsWith\("KEY_"/);
+  assert.match(windowsDriver, /\$Command -eq 'sequence'/);
+  assert.match(windowsDriver, /\[Diagnostics\.Stopwatch\]::StartNew\(\)/);
+  assert.match(windowsDriver, /\$dueMilliseconds-\$clock\.Elapsed\.TotalMilliseconds/);
+  assert.match(linuxIsolation, /--graphics spice,listen=none --video virtio/);
+  assert.doesNotMatch(linuxIsolation, /--graphics none/);
 });
 
 test("release is blocked on native Linux, Windows, and macOS Godot acceptance", async () => {
@@ -334,7 +509,10 @@ test("state backup and restore cover all durable stores with integrity and empty
 test("E2E signing failures and isolation cleanup remove transient workspaces", async () => {
   const executor = await readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8");
   const windows = await readFile(new URL("../deploy/assets/e2e-windows-isolation.ps1", import.meta.url), "utf8");
-  assert.match(executor, /if \(!signedOutputReady\) await rm\(workspace/);
+  assert.match(executor, /if \(!signedOutputReady && !evidenceOutputReady\) await rm\(workspace/);
+  assert.match(executor, /executable\.endsWith\("\.mjs"\)[\s\S]*process\.execPath[\s\S]*\[executable, \.\.\.arguments_\]/);
+  assert.doesNotMatch(executor, /spawn\(guestRunner,/);
+  assert.match(executor, /Guest runner outcome contract is invalid: \$\{JSON\.stringify\(diagnostic\)\}/);
   assert.match(windows, /Filter "deviludo-\$JobId-\*"[\s\S]*Remove-Item -Recurse -Force/);
 });
 
@@ -475,6 +653,37 @@ test("auto-generate never removes the user's own way to supply an asset", async 
   assert.match(panel, /可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词/);
 });
 
+test("expanded image assets stay in a bounded scrolling list with one immediate picker", async () => {
+  const [panel, styles] = await Promise.all([
+    readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/asset-manifest.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(styles, /\.asset-items-list\s*\{[\s\S]*max-height:[\s\S]*overflow-y: auto/);
+  assert.match(styles, /overscroll-behavior: contain/);
+  assert.equal([...panel.matchAll(/type="file"/g)].length, 1);
+  assert.match(panel, /uploadInputRef\.current\.click\(\)/);
+  assert.match(panel, /aria-label="图片素材列表"[\s\S]*role="region"[\s\S]*tabIndex=\{0\}/);
+});
+
+test("all standalone artifacts open through the verified host bridge", async () => {
+  const [studio, bridge, localUp] = await Promise.all([
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(studio, /const opensOnHost = session\.authMode === "STANDALONE"/);
+  assert.match(studio, /fetch\(`\$\{bridgeUrl\}\/artifact\/open`/);
+  assert.match(studio, /text\("打开", "OPEN"\)/);
+  assert.match(bridge, /"E2E_REPORT"/);
+  assert.match(bridge, /"PROJECT_DOCUMENT"/);
+  assert.match(bridge, /if \(!BUILD_ARTIFACT_KINDS\.has\(kind\)\)[\s\S]*\/usr\/bin\/open/);
+  assert.match(bridge, /sourceUrl\.origin !== artifactOrigin\.origin/);
+  assert.match(bridge, /received !== expectedSize[\s\S]*hash\.digest\("hex"\)/);
+  assert.match(bridge, /execute\("\/usr\/bin\/open", \[app\]/);
+  assert.match(bridge, /assertSafeArchiveEntries/);
+  assert.match(localUp, /artifactOrigin: `http:\/\/127\.0\.0\.1:\$\{artifactPort\}`/);
+});
+
 test("the asset panel only uses custom properties the themes actually define", async () => {
   const [assets, globals, product] = await Promise.all([
     readFile(new URL("../app/asset-manifest.css", import.meta.url), "utf8"),
@@ -538,7 +747,7 @@ test("the trusted Agent manifest reaches automatic image generation", async () =
   // then includes the asset manifest in complete_job's receipt.
   assert.match(objectStore, /async readAgentCompletion\(/);
   assert.match(objectStore, /readJsonOutput\(objects, "SPECIFICATION"/);
-  assert.match(sandbox, /objectStore\.readAgentCompletion\(receipt\.outputObjects\)/);
+  assert.match(sandbox, /objectStore\.readAgentCompletion\(receipt\.outputObjects, job\.inputObjects\)/);
   assert.match(sandbox, /projectSources\.readRevisionFile\(relativePath, "agent\.json"/);
   assert.match(sandbox, /\.\.\.\(agentCompletion \?\? \{\}\)/);
   // Planning immediately enables the asynchronous scheduler branch.
@@ -620,6 +829,8 @@ test("one rerun endpoint covers every delivery node once the workflow is at rest
   // withheld — but the node itself still renders, see the visibility test below.
   assert.match(studio, /canRerunStages && inProfile \?/);
   assert.match(studio, /"idempotency-key": `stage-rerun:\$\{String\(body\?\.stage\)\}:\$\{crypto\.randomUUID\(\)\}`/);
+  assert.match(studio, /"idempotency-key": `cancel:\$\{crypto\.randomUUID\(\)\}`/);
+  assert.match(api, /requestIdempotencyKey\(request, `cancel:\$\{project\.workflowId\}`\)/);
 });
 
 test("Web holds no database pool or object store credentials of its own", async () => {

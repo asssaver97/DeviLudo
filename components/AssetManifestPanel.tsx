@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AssetManifest, AssetItem, ImageGenerationConfig } from "@/lib/product/asset-manifest";
 
 type AssetManifestPanelProps = {
@@ -38,6 +38,8 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
   const [rebuildError, setRebuildError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [completion, setCompletion] = useState<AssetCompletion>(EMPTY_COMPLETION);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadAssetKeyRef = useRef<string | null>(null);
 
   const applyManifest = useCallback((data: AssetManifestPayload) => {
     setManifest(data.manifest);
@@ -147,6 +149,17 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     }
   };
 
+  const openUploadPicker = (assetKey: string) => {
+    // Keep a single native picker outside the repeated list. Besides reducing the
+    // expanded panel's DOM weight, calling click() synchronously preserves the
+    // browser's user activation and opens the chooser without waiting for state.
+    uploadAssetKeyRef.current = assetKey;
+    if (uploadInputRef.current) {
+      uploadInputRef.current.value = "";
+      uploadInputRef.current.click();
+    }
+  };
+
   // Uploaded assets only reach the game through a build, so "rebuild with
   // assets" is an ARTIFACT_BUILD rerun: it keeps the Agent's generated source
   // and re-runs packaging plus every stage after it.
@@ -244,7 +257,20 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
       {rebuildError && <p className="asset-manifest-error" role="alert">{rebuildError}</p>}
       {uploadError && <p className="asset-manifest-error" role="alert">{uploadError}</p>}
 
-      <div className="asset-items-list">
+      <input
+        ref={uploadInputRef}
+        aria-hidden="true"
+        className="asset-upload-picker"
+        tabIndex={-1}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        onChange={event => {
+          const file = event.target.files?.[0];
+          const assetKey = uploadAssetKeyRef.current;
+          if (file && assetKey) void handleUpload(assetKey, file);
+        }}
+      />
+      <div aria-label="图片素材列表" className="asset-items-list" role="region" tabIndex={0}>
         {items.map(item => (
           <div key={item.id} className={`asset-item asset-item-${item.status}`}>
             <div className="asset-item-header">
@@ -272,15 +298,12 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
                 hides it, because that write would race the generator. */}
             {item.status !== "generating" && (
               <div className="asset-upload">
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  onChange={e => {
-                    const file = e.target.files?.[0];
-                    if (file) void handleUpload(item.assetKey, file);
-                  }}
+                <button
+                  className="asset-upload-button"
                   disabled={uploading}
-                />
+                  onClick={() => openUploadPicker(item.assetKey)}
+                  type="button"
+                >{item.status === "generated" || item.status === "uploaded" ? "替换文件" : "上传文件"}</button>
                 {item.status === "planned" && autoGenerateEnabled ? (
                   <small className="asset-upload-hint">排队自动生成中，也可以直接上传自备素材</small>
                 ) : null}

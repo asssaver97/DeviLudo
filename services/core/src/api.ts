@@ -981,7 +981,7 @@ export async function runApi(
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "CANCEL_REQUESTED",
-      idempotencyKey: `cancel:${project.workflowId}`,
+      idempotencyKey: requestIdempotencyKey(request, `cancel:${project.workflowId}`),
       payload: { requestedBy: principal.user.username, requestedByAccountId: principal.user.id },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });

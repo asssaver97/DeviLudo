@@ -22,6 +22,8 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(dashboard, /role="tab"[^>]*>GITHUB<\/button>/);
   assert.doesNotMatch(dashboard, /项目 ZIP|Choose ZIP|type="file"/);
   assert.match(dashboard, /fetch\(`\$\{bridgeUrl\}\/directory\/select`/);
+  assert.match(dashboard, /preloadLocalProjectBridgeUrl\(\)/);
+  assert.doesNotMatch(dashboard, /directory\/select`[\s\S]{0,160}content-type/);
   assert.match(dashboard, /fetch\(`\$\{bridgeUrl\}\/github\/clone`/);
   assert.doesNotMatch(dashboard, /application\/zip|arrayBuffer\(\)/);
   assert.doesNotMatch(dashboard, /新分支|New branch|branchName:/);
@@ -47,5 +49,7 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(analysisMigration, /GRANT EXECUTE ON FUNCTION deviludo\.claim_project_import_analysis\(integer\) TO deviludo_api/);
   assert.match(projectImport, /PROJECT_ANALYSIS_TIMEOUT_MS = 10 \* 60 \* 1_000/);
   assert.match(proxy, /PROJECT_BIND_TIMEOUT_MS = 12 \* 60 \* 1_000/);
+  assert.match(proxy, /CONVERSATION_STREAM_TIMEOUT_MS = 12 \* 60 \* 1_000/);
+  assert.match(proxy, /routePath === "conversations\/messages\/stream"[\s\S]*CONVERSATION_STREAM_TIMEOUT_MS/);
   assert.match(configuration, /\["127\.0\.0\.1", "localhost"\]/);
 });

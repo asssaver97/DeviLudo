@@ -60,9 +60,11 @@ export class TrustedIsolationController implements IsolationController {
         PATH: e2eToolPath(),
         LANG: "C.UTF-8",
         NODE_ENV: process.env.NODE_ENV ?? "production",
+        ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
         ...(process.env.DEVILUDO_E2E_IDENTITY_KEY_FILE
           ? { DEVILUDO_E2E_IDENTITY_KEY_FILE: process.env.DEVILUDO_E2E_IDENTITY_KEY_FILE }
           : {}),
+        ...(process.env.DEVILUDO_E2E_JOB_ROOT ? { DEVILUDO_E2E_JOB_ROOT: process.env.DEVILUDO_E2E_JOB_ROOT } : {}),
         ...(process.env.DEVILUDO_GOLDEN_VM_FILE ? { DEVILUDO_GOLDEN_VM_FILE: process.env.DEVILUDO_GOLDEN_VM_FILE } : {}),
         ...(process.env.DEVILUDO_GOLDEN_VM_NAME ? { DEVILUDO_GOLDEN_VM_NAME: process.env.DEVILUDO_GOLDEN_VM_NAME } : {}),
         ...(process.env.DEVILUDO_COSIGN_IDENTITY_REGEXP ? { DEVILUDO_COSIGN_IDENTITY_REGEXP: process.env.DEVILUDO_COSIGN_IDENTITY_REGEXP } : {}),

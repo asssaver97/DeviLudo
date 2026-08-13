@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, sign } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import { assertJobPlacement } from "@/lib/runtime/job-routing";
 import {
   parseJobProtocolV4,
@@ -39,6 +39,8 @@ export async function executeE2eJob(
   const beforeReimageProof = await isolation.reimage(job, "before");
   const inputs = await client.authorizeObjects(job);
   let executionReceipt: Readonly<Record<string, unknown>> | null = null;
+  let preparedOutputContent: Buffer | null = null;
+  let preparedPublicReceipt: Readonly<Record<string, unknown>> | null = null;
   let executionFailure: unknown;
   try {
     if (job.jobKind === "ARTIFACT_SIGN") {
@@ -56,6 +58,11 @@ export async function executeE2eJob(
       );
     }
     validateExecutionReceipt(job, executionReceipt);
+    if (job.jobKind === "ARTIFACT_SIGN" || job.jobKind === "E2E_TEST") {
+      const prepared = await readExecutorArtifact(executionReceipt, job.jobKind);
+      preparedOutputContent = prepared.content;
+      preparedPublicReceipt = prepared.publicReceipt;
+    }
   } catch (error) {
     executionFailure = error;
   }
@@ -82,27 +89,9 @@ export async function executeE2eJob(
   const artifactKind = job.jobKind === "E2E_TEST" ? "E2E_REPORT"
     : job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT";
   let outputContent: Buffer;
-  let publicExecutionReceipt = executionReceipt;
-  if (job.jobKind === "ARTIFACT_SIGN") {
-    const outputPath = typeof executionReceipt.outputPath === "string" ? executionReceipt.outputPath : "";
-    if (!isAbsolute(outputPath)) throw new Error("Signing executor did not return an absolute signed artifact path");
-    const configuredJobRoot = process.env.DEVILUDO_E2E_JOB_ROOT ?? "";
-    if (!isAbsolute(configuredJobRoot)) throw new Error("A fixed E2E job root is required for signing");
-    const jobRoot = resolve(configuredJobRoot);
-    const resolvedOutput = resolve(outputPath);
-    const relativeOutput = relative(jobRoot, resolvedOutput);
-    if (relativeOutput.startsWith("..") || isAbsolute(relativeOutput)) {
-      throw new Error("Signing output escaped the fixed E2E job root");
-    }
-    outputContent = await readFile(resolvedOutput);
-    const outputSha256 = `sha256:${createHash("sha256").update(outputContent).digest("hex")}`;
-    if (executionReceipt.outputSha256 !== outputSha256
-      || executionReceipt.outputSizeBytes !== outputContent.length) {
-      throw new Error("Signing executor receipt does not match the signed artifact bytes");
-    }
-    const safeReceipt = Object.fromEntries(Object.entries(executionReceipt).filter(([key]) => key !== "outputPath"));
-    publicExecutionReceipt = Object.freeze(safeReceipt);
-    await rm(dirname(resolvedOutput), { recursive: true, force: true });
+  const publicExecutionReceipt = preparedPublicReceipt ?? executionReceipt;
+  if (preparedOutputContent) {
+    outputContent = preparedOutputContent;
   } else {
     outputContent = Buffer.from(JSON.stringify(executionReceipt));
   }
@@ -117,6 +106,9 @@ export async function executeE2eJob(
     ...upload.object,
     kind: artifactKind,
     targetPlatform: job.targetOperatingSystem ?? undefined,
+    ...(job.jobKind === "E2E_TEST" && executionReceipt.evidence && typeof executionReceipt.evidence === "object"
+      ? { metadata: Object.freeze({ e2eEvidence: executionReceipt.evidence }) }
+      : {}),
   })]);
   const unsigned = Object.freeze({
     schemaVersion: "deviludo.executor-receipt.v2" as const,
@@ -147,6 +139,27 @@ export async function executeE2eJob(
   });
 }
 
+async function readExecutorArtifact(
+  receipt: Readonly<Record<string, unknown>>,
+  kind: "ARTIFACT_SIGN" | "E2E_TEST",
+): Promise<Readonly<{ content: Buffer; publicReceipt: Readonly<Record<string, unknown>> }>> {
+  const outputPath = typeof receipt.outputPath === "string" ? receipt.outputPath : "";
+  if (!isAbsolute(outputPath)) throw new Error(`${kind === "E2E_TEST" ? "E2E" : "Signing"} executor did not return an absolute artifact path`);
+  const configuredJobRoot = process.env.DEVILUDO_E2E_JOB_ROOT ?? "";
+  if (!isAbsolute(configuredJobRoot)) throw new Error("A fixed E2E job root is required for external artifacts");
+  const jobRoot = resolve(configuredJobRoot);
+  const resolvedOutput = resolve(outputPath);
+  const relativeOutput = relative(jobRoot, resolvedOutput);
+  if (relativeOutput.startsWith("..") || isAbsolute(relativeOutput)) throw new Error("Executor output escaped the fixed E2E job root");
+  const content = await readFile(resolvedOutput);
+  const outputSha256 = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+  if (receipt.outputSha256 !== outputSha256 || receipt.outputSizeBytes !== content.length) {
+    throw new Error("Executor receipt does not match its artifact bytes");
+  }
+  const safeReceipt = Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "outputPath"));
+  return Object.freeze({ content, publicReceipt: Object.freeze(safeReceipt) });
+}
+
 export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<Record<string, unknown>>): void {
   const inputDigests = new Set(job.inputObjects.map(input => input.sha256));
   if (receipt.jobId !== job.jobId || typeof receipt.inputDigest !== "string" || !inputDigests.has(receipt.inputDigest as `sha256:${string}`)) {
@@ -162,7 +175,7 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
     return;
   }
   const expectedAction = job.jobKind === "E2E_TEST" ? "test" : "clean-install";
-  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v1"
+  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v2"
     || receipt.action !== expectedAction
     || !["PASSED", "FAILED"].includes(String(receipt.outcome))
     || (receipt.outcome === "FAILED" ? receipt.failureDomain !== "PRODUCT" : receipt.failureDomain !== null)
@@ -175,6 +188,20 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
     || (receipt.outcome === "PASSED" && guest.exitCode !== 0)
     || (receipt.outcome === "FAILED" && guest.exitCode === 0)) {
     throw new Error("Godot guest outcome does not match its exit code");
+  }
+  if (job.jobKind === "E2E_TEST") {
+    const evidence = receipt.evidence as Record<string, unknown> | undefined;
+    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)
+      || evidence.protocol !== "deviludo.e2e-evidence.v1" || evidence.result !== receipt.outcome
+      || !Number.isSafeInteger(evidence.checkCount) || Number(evidence.checkCount) < 0
+      || !Number.isSafeInteger(evidence.screenshotCount) || Number(evidence.screenshotCount) < 0
+      || (receipt.outcome === "PASSED" && Number(evidence.screenshotCount) < 3)
+      || typeof evidence.hasVisualDiff !== "boolean"
+      || typeof receipt.outputPath !== "string" || !isAbsolute(receipt.outputPath)
+      || typeof receipt.outputSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.outputSha256)
+      || !Number.isSafeInteger(receipt.outputSizeBytes) || Number(receipt.outputSizeBytes) < 1) {
+      throw new Error("Godot E2E evidence receipt is invalid");
+    }
   }
   // Optional testDetails field for structured test results
   if (receipt.testDetails !== undefined) {
@@ -258,6 +285,7 @@ async function runExternal(
       PATH: e2eToolPath(),
       LANG: "C.UTF-8",
       NODE_ENV: process.env.NODE_ENV ?? "production",
+      ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
       ...(process.env.DEVILUDO_E2E_GUEST_RUNNER ? { DEVILUDO_E2E_GUEST_RUNNER: process.env.DEVILUDO_E2E_GUEST_RUNNER } : {}),
       ...(process.env.DEVILUDO_E2E_JOB_ROOT ? { DEVILUDO_E2E_JOB_ROOT: process.env.DEVILUDO_E2E_JOB_ROOT } : {}),
       ...(process.env.DEVILUDO_E2E_SIGNING_BROKER_URL ? { DEVILUDO_E2E_SIGNING_BROKER_URL: process.env.DEVILUDO_E2E_SIGNING_BROKER_URL } : {}),

@@ -132,6 +132,16 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: min(54vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+  scrollbar-gutter: stable;
+}
+
+.asset-items-list:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
 }
 
 .asset-item {
@@ -250,8 +260,27 @@
   margin-top: 8px;
 }
 
-.asset-upload input[type="file"] {
+.asset-upload-picker {
+  display: none;
+}
+
+.asset-upload-button {
+  background: #162438;
+  border: 1px solid #415674;
+  border-radius: 4px;
+  color: var(--ink);
+  cursor: pointer;
   font-size: 13px;
+  padding: 7px 12px;
+}
+
+.asset-upload-button:hover:not(:disabled) {
+  border-color: var(--blue);
+}
+
+.asset-upload-button:disabled {
+  cursor: progress;
+  opacity: 0.55;
 }
 
 .asset-error {

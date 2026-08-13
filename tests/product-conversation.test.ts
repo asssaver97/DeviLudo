@@ -29,6 +29,8 @@ test("explicit development commands approve while discussions and negative comma
     "让 Agent 按照当前需求执行",
     "先做新手引导与前 10 回合反馈层次",
     "需求没问题，就按这个方案开始开发",
+    "增加 H 键隐藏提示并补回归测试。按照当前需求开发。",
+    "同步更新项目说明，删除过时状态，并立即按照当前需求开始开发。",
     "Go ahead and implement it",
     "Let's start building",
     "Have the agent implement the current requirements",
@@ -212,6 +214,42 @@ test("draft conversations merge a project document patch with the current docume
     categories: project.document.categories,
     features: ["十五分钟一局"],
   });
+});
+
+test("draft conversations normalize an overlong Agent feature before applying the patch", async () => {
+  const verboseFeature = `字体与真实输入验收：${"中文可读并通过 H 键切换提示。".repeat(30)}`;
+  const result = await generateProductConversationReply({
+    userContent: "修复中文字体并更新真实按键 E2E",
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: true,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example",
+      models: Object.freeze({
+        primary: "claude-primary",
+        opus: "claude-opus",
+        sonnet: "claude-sonnet",
+        haiku: "claude-haiku",
+        subagent: "claude-subagent",
+      }),
+      revision: 1,
+    }),
+    apiKey: "sk-test-secret",
+    fetchImpl: async () => new Response(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify({
+        reply: "需求已同步。",
+        options: [],
+        applyToDraft: true,
+        readyForDevelopment: true,
+        projectDocumentPatch: { features: [verboseFeature] },
+      }) }],
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  assert.equal(result.applyToDraft, true);
+  assert.ok((result.projectDocument?.features.length ?? 0) > 1);
+  assert.ok(result.projectDocument?.features.every(feature => feature.length <= 300));
+  assert.equal(result.projectDocument?.features.join(""), verboseFeature);
 });
 
 test("draft conversations reject an asserted mutation without a document patch", async () => {

@@ -1,10 +1,13 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22.22.0-bookworm-slim
 ARG CLAUDE_CODE_VERSION=2.1.201
-RUN --mount=type=cache,target=/root/.npm npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && useradd --create-home --uid 10001 task
 COPY services/sandbox-executor/task-runner.mjs /usr/local/bin/deviludo-task
 COPY services/sandbox-executor/task-io.mjs /usr/local/bin/deviludo-task-io
+COPY scripts/e2e-evidence.mjs /usr/local/lib/deviludo/e2e-evidence.mjs
 RUN chmod 0555 /usr/local/bin/deviludo-task /usr/local/bin/deviludo-task-io
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/deviludo-task"]

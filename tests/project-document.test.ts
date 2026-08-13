@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createInitialProjectDocument,
+  normalizeAgentProjectDocumentContent,
   parseProjectDocumentContent,
   projectDocumentMarkdown,
 } from "@/lib/product/project-document";
@@ -32,4 +33,18 @@ test("project documents fail closed when required collaboration fields are missi
     categories: ["冒险"],
     features: ["特性"],
   }), /玩法/);
+});
+
+test("verbose Agent document items are split to the strict storage contract", () => {
+  const verboseFeature = `字体与真实输入验收：${"中文可读并通过 H 键切换提示。".repeat(30)}`;
+  const content = normalizeAgentProjectDocumentContent({
+    introduction: "游戏介绍",
+    gameplay: "核心玩法",
+    categories: ["策略"],
+    features: [verboseFeature],
+  });
+  assert.ok(content.features.length > 1);
+  assert.ok(content.features.every(feature => feature.length <= 300));
+  assert.equal(content.features.join(""), verboseFeature);
+  assert.deepEqual(parseProjectDocumentContent(content), content);
 });

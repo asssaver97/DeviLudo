@@ -13,8 +13,8 @@ DeviLudo is an AI game delivery platform for Godot. It turns game requirements a
 - After linking, local Git and GitHub projects can create and switch to a new branch from the project page; private GitHub repositories reuse the host's Git credentials.
 - Persist source revisions for conversational iteration, failure repair, and stage reruns.
 - Generate images from an Agent-authored asset manifest, accept user uploads, or continue with placeholders.
-- Build Godot artifacts and run unit, interactive, visual, and manual acceptance checks from a feature manifest.
-- Perform isolated E2E validation on Linux, Windows, and macOS.
+- Build Godot artifacts and enforce a requirement-mapped manifest of unit checks, real keyboard/mouse interaction, and visual baselines; a successful launch is never treated as a test.
+- Run E2E in disposable graphical VMs on Linux, Windows, and macOS, producing an evidence ZIP with self-contained HTML, JSON, logs, real game screenshots, and visual diffs.
 - Sign release artifacts, require human approval, publish to Steam, and verify a clean installation.
 - Run in standalone mode or integrate with an external account authority in platform mode.
 - Back up and restore PostgreSQL, S3 artifacts, and project sources, with built-in observability and restricted task execution.
@@ -26,11 +26,11 @@ DeviLudo is an AI game delivery platform for Godot. It turns game requirements a
 | `VALIDATE` | Agent generation → image assets ready → Godot build → selected-platform E2E |
 | `RELEASE` | Agent generation → image assets ready → build → three-platform E2E → signing → human approval → Steam publish → clean install |
 
-The Agent submits an `assetManifest` and a `testManifest` with its source output. Images are materialized into the Godot project before the build, and test results map back to declared features instead of returning only an exit code.
+The Agent submits an `assetManifest` and `deviludo.test-manifest.v2` with its source output. Images are materialized into the Godot project before the build. E2E must complete a core-loop journey, inject real input, and capture start/key-state/completion frames; missing checks, Godot script errors, blank screenshots, and excessive visual differences fail the run. In local mode, opening an E2E report launches its self-contained HTML directly.
 
 ## Local quick start
 
-The complete local workflow currently supports macOS and uses Node.js 22, Docker/Colima, and Godot.
+The complete local workflow currently supports Apple Silicon macOS only and uses Node.js 22, Docker/Colima, Homebrew, and Tart. Godot runs inside a disposable Tart VM without taking focus on the host desktop.
 
 ```bash
 git clone <repository-url>
@@ -53,7 +53,13 @@ npm run local:down     # Stop services and keep data
 npm run local:reset    # Stop services and remove local data
 ```
 
-The first image build may take several minutes. Later `local:up` runs reuse images, migrations, bootstrap state, and the native macOS E2E process.
+The first `local:up` automatically installs missing Tart/SSH helpers, downloads a roughly 25 GB macOS base image, and builds a versioned E2E golden image, so keep at least 35 GiB free. Initialization fails explicitly and never falls back to host execution. Later starts reuse the golden image by configuration fingerprint and do not refresh it merely because remote `latest` changed. Refresh it explicitly with:
+
+```bash
+npm run local:up -- --refresh-e2e-vm
+```
+
+See [Tart Quick Start](https://tart.run/quick-start/) for the base-image size note. The first application-image build may also take several minutes; later starts reuse images, migrations, bootstrap state, and the Tart golden image.
 
 The Agent runs one task at a time by default for Docker environments around 8 GiB. On a larger machine, set `DEVILUDO_SANDBOX_CONCURRENCY=2` before startup to process two Core tasks concurrently; this increases memory use and Provider traffic, and only `1` or `2` is accepted.
 
@@ -65,9 +71,9 @@ Production uses five server pools:
 | --- | --- | --- |
 | `WEB` | Ubuntu 24.04 | Next.js site, BFF, and the only public entry point |
 | `CORE` | Ubuntu 24.04 x86_64 | API, scheduling, Agent, build, and publishing tasks |
-| `E2E_LINUX` | Ubuntu 24.04 x86_64 | KVM-isolated Linux validation |
-| `E2E_WINDOWS` | Windows 11 Pro x86_64 | Hyper-V-isolated Windows validation |
-| `E2E_MACOS` | macOS 15+ Apple Silicon | Tart-isolated macOS validation |
+| `E2E_LINUX` | Ubuntu 24.04 x86_64 | Linux real-window validation in a KVM graphical session |
+| `E2E_WINDOWS` | Windows 11 Pro x86_64 | Windows real-window validation in a Hyper-V interactive session |
+| `E2E_MACOS` | macOS 15+ Apple Silicon | macOS real-window validation on a Tart graphical desktop |
 
 You also need external PostgreSQL, S3, Vault/KMS, OpenTelemetry, and load balancing. Public traffic may enter only WEB; E2E nodes reach CORE only through outbound mTLS.
 
@@ -79,7 +85,7 @@ Pushing a `v*` tag starts the [release workflow](.github/workflows/release.yml),
    - [Linux E2E](deploy/e2e-linux/deploy.env.example)
    - [Windows E2E](deploy/e2e-windows/deploy.json.example)
    - [macOS E2E](deploy/e2e-macos/deploy.env.example)
-2. Put database, S3, Vault, TLS, signing, Steam, and golden-VM credentials in the permission-restricted files referenced by that configuration.
+2. Put database, S3, Vault, TLS, signing, Steam, and golden-VM credentials in the permission-restricted files referenced by that configuration. Each golden image must include Godot 4.5.1, Node 22, the guest runner, its platform GUI driver, and a passing window/input/screenshot smoke.
 3. Run the deployment script on every target server.
 
 Bash hosts:
@@ -100,6 +106,8 @@ Windows:
 ```
 
 Deployment consumes digest-pinned, Cosign-signed releases and does not compile on the server. Bash deployments also support `rollback`, limited to verified releases with a compatible database schema.
+
+On the first deployment of a new E2E protocol, the scheduler batch-revalidates only the latest terminal iteration that existed for each project at upgrade time: it reuses a valid build first, rebuilds from source next, and reruns the Agent only when source is unavailable. Set `DEVILUDO_E2E_REVALIDATION_BATCH_SIZE` to `1`–`20` (default `2`). A finally successful revalidation still auto-commits local Git projects and never pushes them.
 
 ## Development and verification
 

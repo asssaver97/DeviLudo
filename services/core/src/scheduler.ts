@@ -23,6 +23,7 @@ export async function runScheduler(
   }
   // Swept on the first tick, then on its own slower cadence.
   let nextAssetSweepAt = 0;
+  let nextE2eRevalidationAt = 0;
   while (!signal.aborted) {
     const startedAt = Date.now();
     try {
@@ -31,6 +32,10 @@ export async function runScheduler(
       const projectDocumentsScheduled = await repository.scheduleIdleProjectDocumentMaintenance(
         config.projectDocumentIdleSeconds,
       );
+      const e2eRevalidationsScheduled = Date.now() >= nextE2eRevalidationAt
+        ? await repository.scheduleE2eProtocolRevalidation("deviludo.e2e-evidence.v1", config.e2eRevalidationBatchSize)
+        : 0;
+      if (Date.now() >= nextE2eRevalidationAt) nextE2eRevalidationAt = Date.now() + 30_000;
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
       // Provider calls run less often than the sub-second recovery tick. The
@@ -46,6 +51,7 @@ export async function runScheduler(
         event: "scheduler_tick",
         recovered,
         projectDocumentsScheduled,
+        e2eRevalidationsScheduled,
         expiredAuthRecordsRemoved,
         ...(localGitCommit ? { localGitCommit } : {}),
         ...(assets ? {

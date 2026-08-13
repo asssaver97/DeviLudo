@@ -75,8 +75,10 @@ download_release() {
     "$target/release-manifest.json" >/dev/null
   jq -e --arg role "$DEVILUDO_ROLE" --arg version "$DEVILUDO_RELEASE_VERSION" \
     '.schemaVersion == "deviludo.release.v1" and .version == $version and (.roles | index($role)) != null
-      and .plugins.GODOT.version == "1"
-      and .plugins.GODOT.guestReportProtocol == "deviludo.godot-guest-report.v1"
+      and .plugins.GODOT.version == "2"
+      and .plugins.GODOT.testManifestProtocol == "deviludo.test-manifest.v2"
+      and .plugins.GODOT.guestReportProtocol == "deviludo.godot-guest-report.v2"
+      and .plugins.GODOT.evidenceProtocol == "deviludo.e2e-evidence.v1"
       and .plugins.GODOT.artifactHostCommandsAllowed == false
       and (.plugins.GODOT.builderImage | test("@sha256:[0-9a-f]{64}$"))' \
     "$target/release-manifest.json" >/dev/null

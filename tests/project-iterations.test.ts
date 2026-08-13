@@ -41,6 +41,7 @@ test("the iteration API is terminal-only, latest-only, and idempotent under dupl
   );
   assert.match(repository, /analysis\.status === "READY"/);
   assert.match(repository, /baseSourceRevision: latestSource/);
+  assert.match(repository, /ORDER BY source\.revision DESC/);
   assert.match(repository, /baseDocumentRevision: Number\(document/);
   assert.match(repository, /approvedDocumentRevision: null/);
   assert.match(repository, /signal\.kind === "SPEC_APPROVED"[\s\S]*approvedDocumentRevision/);
@@ -48,6 +49,17 @@ test("the iteration API is terminal-only, latest-only, and idempotent under dupl
   assert.match(contracts, /ProductWorkflowIterationDetail/);
   assert.match(openapi, /\/v1\/projects\/\{projectId\}\/iterations:/);
   assert.match(openapi, /\/v1\/projects\/\{projectId\}\/iterations\/\{workflowId\}:/);
+});
+
+test("iteration base revisions are repaired using numeric source order at creation time", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/022_correct_iteration_base_source_revision.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /max\(source\.revision\)/);
+  assert.match(migration, /source\.created_at <= child\.created_at/);
+  assert.match(migration, /\{iteration,baseSourceRevision\}/);
+  assert.match(migration, /event\.event_kind = 'ITERATION_STARTED'/);
 });
 
 test("the project page separates continuing requirements from rerunning a completed stage", async () => {
@@ -72,6 +84,14 @@ test("current artifact queries no longer mix evidence from older iterations", as
     readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
   ]);
   assert.match(api, /listProjectArtifacts\(workspace\.id, project\.id, project\.workflowId\)/);
-  assert.match(repository, /AND \(\$2::uuid IS NULL OR workflow_id = \$2::uuid\)/);
-  assert.match(repository, /WHERE project_id = \$1::uuid AND workflow_id = \$2::uuid[\s\S]*ORDER BY created_at DESC/);
+  assert.match(repository, /AND \(\$2::uuid IS NULL OR artifact\.workflow_id = \$2::uuid\)/);
+  assert.equal((repository.match(/DISTINCT ON \(artifact\.kind, artifact\.target_platform\)/g) ?? []).length, 2);
+  assert.match(repository, /WHERE artifact\.project_id = \$1::uuid AND artifact\.workflow_id = \$2::uuid[\s\S]*artifact\.created_at DESC/);
+});
+
+test("the artifact panel keeps only the newest item for each kind and platform", async () => {
+  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  assert.match(studio, /latestArtifactsByKindAndPlatform\([\s\S]*historicalIteration\.artifacts : artifacts/);
+  assert.match(studio, /const key = `\$\{artifact\.kind\}:\$\{artifact\.targetPlatform \?\? "common"\}`/);
+  assert.match(studio, /artifact\.createdAt > current\.createdAt/);
 });

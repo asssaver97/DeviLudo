@@ -30,6 +30,11 @@ const RESPONSE_HEADER_DENYLIST = new Set([
 ]);
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const PROJECT_BIND_TIMEOUT_MS = 12 * 60 * 1_000;
+// A design-Agent stream can legitimately take several minutes while it updates
+// the specification and project document. Cutting the proxy at the ordinary
+// 65-second request budget leaves the streamed answer visible temporarily but
+// aborts before the durable conversation/approval receipt reaches the browser.
+const CONVERSATION_STREAM_TIMEOUT_MS = 12 * 60 * 1_000;
 /**
  * Asset uploads carry an 8 MB image base64-encoded in JSON, so the envelope is
  * 4/3 the size of the file. Core enforces the real per-asset ceiling on the
@@ -99,9 +104,14 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   if (body && body.byteLength > bodyLimit) return Response.json({ code: "REQUEST_TOO_LARGE" }, { status: 413 });
 
   const controller = new AbortController();
+  const timeoutMilliseconds = routePath.startsWith("projects/bind/")
+    ? PROJECT_BIND_TIMEOUT_MS
+    : routePath === "conversations/messages/stream"
+      ? CONVERSATION_STREAM_TIMEOUT_MS
+      : 65_000;
   const timer = setTimeout(
     () => controller.abort(),
-    routePath.startsWith("projects/bind/") ? PROJECT_BIND_TIMEOUT_MS : 65_000,
+    timeoutMilliseconds,
   );
   try {
     const upstream = await fetch(target, {
