@@ -16,8 +16,8 @@ import { promisify } from "node:util";
 import { deflateSync, inflateSync } from "node:zlib";
 
 const execute = promisify(execFile);
-export const E2E_EVIDENCE_PROTOCOL = "deviludo.e2e-evidence.v1";
-export const GUEST_REPORT_PROTOCOL = "deviludo.godot-guest-report.v2";
+export const E2E_EVIDENCE_PROTOCOL = "deviludo.e2e-evidence.v2";
+export const GUEST_REPORT_PROTOCOL = "deviludo.godot-guest-report.v3";
 export const E2E_CLIENT_WIDTH = 1280;
 export const E2E_CLIENT_HEIGHT = 720;
 export const DEFAULT_VISUAL_THRESHOLD = 0.01;
@@ -98,6 +98,38 @@ export async function compareScreenshots(actualPath, referencePath, diffPath, th
   return Object.freeze({ passed: differenceRatio <= threshold, differentPixels, totalPixels, differenceRatio, threshold });
 }
 
+export async function compareScreenshotRegion(actualPath, referencePath, rect, diffPath = null) {
+  const [actual, reference] = await Promise.all([readFile(actualPath), readFile(referencePath)]).then(values => values.map(decodePng));
+  if (actual.width !== reference.width || actual.height !== reference.height) {
+    throw new Error("Visual comparison dimensions do not match");
+  }
+  const region = normalizePixelRect(rect, actual.width, actual.height);
+  const diff = diffPath ? Buffer.from(actual.rgba) : null;
+  let differentPixels = 0;
+  for (let y = region.y; y < region.y + region.height; y += 1) {
+    for (let x = region.x; x < region.x + region.width; x += 1) {
+      const offset = (y * actual.width + x) * 4;
+      let different = false;
+      for (let channel = 0; channel < 4; channel += 1) {
+        if (actual.rgba[offset + channel] !== reference.rgba[offset + channel]) different = true;
+      }
+      if (different) differentPixels += 1;
+      if (diff) {
+        diff[offset] = different ? 255 : Math.floor(actual.rgba[offset] * 0.25);
+        diff[offset + 1] = different ? 0 : Math.floor(actual.rgba[offset + 1] * 0.25);
+        diff[offset + 2] = different ? 255 : Math.floor(actual.rgba[offset + 2] * 0.25);
+        diff[offset + 3] = 255;
+      }
+    }
+  }
+  if (diff && diffPath) {
+    await mkdir(dirname(diffPath), { recursive: true });
+    await writeFile(diffPath, encodeRgbaPng(actual.width, actual.height, diff), { mode: 0o600 });
+  }
+  const totalPixels = region.width * region.height;
+  return Object.freeze({ differentPixels, totalPixels, differenceRatio: differentPixels / totalPixels, region });
+}
+
 export async function createEvidenceBundle({
   outputRoot,
   jobId,
@@ -152,7 +184,7 @@ export async function createEvidenceBundle({
   return Object.freeze({ outputPath, outputSha256: sha256(bytes), outputSizeBytes: bytes.length, manifest });
 }
 
-export async function extractAndValidateEvidenceBundle(zipPath, destination, maximumBytes = 1024 * 1024 * 1024) {
+export async function extractAndValidateEvidenceBundle(zipPath, destination, maximumBytes = 1024 * 1024 * 1024, options = {}) {
   if (!isAbsolute(zipPath) || !isAbsolute(destination)) throw new Error("Evidence paths must be absolute");
   const archive = await readFile(zipPath);
   if (archive.length < 22 || archive.length > maximumBytes) throw new Error("E2E evidence ZIP size is invalid");
@@ -166,9 +198,10 @@ export async function extractAndValidateEvidenceBundle(zipPath, destination, max
   const indexPath = join(destination, "index.html");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   const report = JSON.parse(await readFile(reportPath, "utf8"));
+  const acceptedProtocols = new Set([E2E_EVIDENCE_PROTOCOL, ...(options.allowLegacy === true ? ["deviludo.e2e-evidence.v1"] : [])]);
   if (manifest?.schemaVersion !== "deviludo.e2e-evidence-manifest.v1"
-    || manifest.evidenceProtocol !== E2E_EVIDENCE_PROTOCOL || !Array.isArray(manifest.files)) throw new Error("E2E evidence manifest is invalid");
-  if (report?.schemaVersion !== E2E_EVIDENCE_PROTOCOL || !["PASSED", "FAILED"].includes(report.outcome)) throw new Error("E2E evidence report is invalid");
+    || !acceptedProtocols.has(manifest.evidenceProtocol) || !Array.isArray(manifest.files)) throw new Error("E2E evidence manifest is invalid");
+  if (report?.schemaVersion !== manifest.evidenceProtocol || !["PASSED", "FAILED"].includes(report.outcome)) throw new Error("E2E evidence report is invalid");
   if (!files.includes("index.html")) throw new Error("E2E evidence HTML report is missing");
   const declared = new Set();
   for (const item of manifest.files) {
@@ -182,7 +215,7 @@ export async function extractAndValidateEvidenceBundle(zipPath, destination, max
   }
   const payloadFiles = files.filter(path => path !== "manifest.json");
   if (payloadFiles.some(path => !declared.has(path)) || declared.size !== payloadFiles.length) throw new Error("E2E evidence ZIP contains undeclared files");
-  return Object.freeze({ manifest, report, indexPath });
+  return Object.freeze({ manifest, report, indexPath, legacy: report.schemaVersion !== E2E_EVIDENCE_PROTOCOL });
 }
 
 function inspectZipDirectory(archive, maximumBytes) {
@@ -262,7 +295,18 @@ async function evidenceHtml(report, imagesInput, stdout, stderr) {
     images.push(`<figure><img alt="${escapeHtml(item.label)}" src="data:image/png;base64,${bytes.toString("base64")}"><figcaption>${escapeHtml(item.label)}</figcaption></figure>`);
   }
   const title = report.outcome === "PASSED" ? "E2E PASSED" : "E2E FAILED";
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{margin:0;background:#07111e;color:#e8f1ff;font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header{border:1px solid #32506f;padding:24px}h1{color:${report.outcome === "PASSED" ? "#57e3b2" : "#ff718d"}}section{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px;margin-top:24px}figure{margin:0;border:1px solid #32506f;padding:12px;background:#0b1928}img{width:100%;height:auto;display:block}figcaption{padding-top:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#050b13;padding:16px}</style></head><body><main><header><h1>${title}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")}</p></header><section>${images.join("")}</section><h2>结构化结果</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main></body></html>`;
+  const coverage = report.coverage ?? {};
+  const stats = [
+    ["Headless 检查", coverage.headlessCheckCount ?? 0],
+    ["真实玩家旅程", coverage.interactiveJourneyCount ?? 0],
+    ["系统级真实输入", coverage.realInputCount ?? 0],
+    ["玩家需求覆盖", `${coverage.coveredPlayerRequirementCount ?? 0}/${coverage.playerRequirementCount ?? 0}`],
+    ["截图", report.screenshotCount ?? imagesInput.filter(item => item.label.startsWith("checkpoint")).length],
+    ["稳定视觉基线", coverage.visualBaselineCount ?? 0],
+  ].map(([label, value]) => `<article><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></article>`).join("");
+  const requirementRows = (report.requirementCoverage ?? []).map(requirement => `<tr><td>${escapeHtml(requirement.requirementId)}</td><td>${escapeHtml(requirement.status)}</td><td>${escapeHtml((requirement.evidenceSteps ?? []).join(", ") || requirement.exemptionReason || "-")}</td></tr>`).join("");
+  const stepRows = (report.steps ?? []).map(step => `<tr><td>${escapeHtml(step.journeyId)}</td><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.type)}</td><td>${escapeHtml(step.target?.controls?.map(control => control.id).join(", ") ?? "键盘")}</td><td>${escapeHtml(`${step.before?.sequence ?? "-"} → ${step.after?.sequence ?? "-"}`)}</td></tr>`).join("");
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{margin:0;background:#07111e;color:#e8f1ff;font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid #32506f}header{padding:24px}h1{color:${report.outcome === "PASSED" ? "#57e3b2" : "#ff718d"}}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.stats article{padding:16px;background:#0b1928}.stats strong,.stats span{display:block}.stats span{font-size:28px;color:#57e3b2;margin-top:8px}figure{margin:0;padding:12px;background:#0b1928}img{width:100%;height:auto;display:block}figcaption{padding-top:10px}table{width:100%;border-collapse:collapse;background:#0b1928}th,td{padding:10px;border:1px solid #253f5c;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#050b13;padding:16px}</style></head><body><main><header><h1>${title}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")} · ${escapeHtml(report.schemaVersion ?? "")}</p></header><div class="stats">${stats}</div><h2>玩家需求覆盖</h2><table><thead><tr><th>需求</th><th>状态</th><th>真实操作证据</th></tr></thead><tbody>${requirementRows || "<tr><td colspan=\"3\">无已覆盖玩家需求</td></tr>"}</tbody></table><h2>真实键鼠步骤</h2><table><thead><tr><th>旅程</th><th>步骤</th><th>输入</th><th>语义目标</th><th>Probe 序号</th></tr></thead><tbody>${stepRows || "<tr><td colspan=\"5\">无真实输入步骤</td></tr>"}</tbody></table><section>${images.join("")}</section><h2>完整结构化结果</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main></body></html>`;
 }
 
 async function regularFiles(root, maximumBytes = Number.MAX_SAFE_INTEGER) {
@@ -290,6 +334,16 @@ function safeArchivePath(value) {
   if (typeof value !== "string" || !value || value.includes("\0") || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
   const normalized = value.replace(/^\.\//, "").replace(/\/$/, "");
   return normalized.length > 0 && normalized.split("/").every(part => part && part !== "." && part !== "..");
+}
+
+function normalizePixelRect(value, width, height) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || ![value.x, value.y, value.width, value.height].every(Number.isInteger)
+    || value.x < 0 || value.y < 0 || value.width < 1 || value.height < 1
+    || value.x + value.width > width || value.y + value.height > height) {
+    throw new Error("Visual comparison region is invalid");
+  }
+  return Object.freeze({ x: value.x, y: value.y, width: value.width, height: value.height });
 }
 
 function mediaType(path) {

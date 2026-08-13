@@ -26,8 +26,9 @@ export async function prepareGodotProject(projectDirectory, requestedPlatforms) 
   await writeFile(projectFile, project, { encoding: "utf8", mode: 0o600 });
 
   // Export presets are build policy, not trusted project input. Replacing them
-  // keeps signing disabled and prevents generated source from selecting custom
-  // export templates or build scripts.
+  // prevents generated source from selecting custom export templates or build
+  // scripts. macOS validation builds use Godot's controlled built-in ad-hoc
+  // signer so LaunchServices exercises the same native package boundary.
   await writeFile(
     join(projectDirectory, "export_presets.cfg"),
     controlledExportPresets(platforms),
@@ -115,7 +116,7 @@ function platformOptions(platform) {
       'application/bundle_identifier="io.deviludo.generated-game"',
       'application/short_version="1.0.0"',
       'application/version="1.0.0"',
-      "codesign/codesign=0",
+      "codesign/codesign=1",
       "notarization/notarization=0",
     ];
   }

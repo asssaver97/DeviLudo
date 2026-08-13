@@ -11,7 +11,7 @@ for _ in {1..120}; do ip=$(tart ip "$vm" 2>/dev/null || true); [[ -n $ip ]] && b
 ssh_options=(-i "/Library/Application Support/DeviludoE2E/guest_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="/Library/Application Support/DeviludoE2E/guest_known_hosts")
 scp "${ssh_options[@]}" "$artifact" "deviludo-guest@$ip:/Users/Shared/deviludo-artifact"
 receipt=$(ssh "${ssh_options[@]}" "deviludo-guest@$ip" /usr/local/bin/deviludo-guest-runner "$action" /Users/Shared/deviludo-artifact --job-id "$job_id" --json)
-if [[ $action == test ]]; then
+if [[ $action == test || $action == clean-install ]]; then
   : "${DEVILUDO_E2E_HOST_OUTPUT:?host evidence output is required}"
   guest_output=$(jq -er '.outputPath' <<<"$receipt")
   [[ $guest_output == /Users/Shared/* ]] || { echo 'guest evidence path escaped the shared directory' >&2; exit 1; }

@@ -33,7 +33,7 @@ export async function runScheduler(
         config.projectDocumentIdleSeconds,
       );
       const e2eRevalidationsScheduled = Date.now() >= nextE2eRevalidationAt
-        ? await repository.scheduleE2eProtocolRevalidation("deviludo.e2e-evidence.v1", config.e2eRevalidationBatchSize)
+        ? await repository.scheduleE2eProtocolRevalidation("deviludo.e2e-evidence.v2", config.e2eRevalidationBatchSize)
         : 0;
       if (Date.now() >= nextE2eRevalidationAt) nextE2eRevalidationAt = Date.now() + 30_000;
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();

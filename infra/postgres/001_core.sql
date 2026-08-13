@@ -72,7 +72,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '022_correct_iteration_base_source_revision');
+VALUES (true, '001', 'deviludo-core-source-v1', '023_real_player_e2e_v3');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -252,6 +252,8 @@ CREATE TABLE deviludo.project_source_revisions (
   content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
   file_count integer NOT NULL CHECK (file_count BETWEEN 1 AND 20000),
   total_bytes bigint NOT NULL CHECK (total_bytes BETWEEN 1 AND 1073741824),
+  test_manifest_protocol text CHECK (test_manifest_protocol ~ '^deviludo\.test-manifest\.v[0-9]+$'),
+  test_manifest_digest text CHECK (test_manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
   workflow_id uuid,
   job_id uuid,
   actor_account_id uuid NOT NULL,
@@ -2027,15 +2029,20 @@ BEGIN
       OR coalesce(p_receipt #>> '{sourceRevision,digest}', '') !~ '^sha256:[0-9a-f]{64}$'
       OR (p_receipt #>> '{sourceRevision,fileCount}')::integer NOT BETWEEN 1 AND 20000
       OR (p_receipt #>> '{sourceRevision,totalBytes}')::bigint NOT BETWEEN 1 AND 1073741824
+      OR coalesce(p_receipt #>> '{testManifest,schemaVersion}', '') <> 'deviludo.test-manifest.v3'
+      OR coalesce(p_receipt->>'testManifestDigest', '') !~ '^sha256:[0-9a-f]{64}$'
     THEN RAISE EXCEPTION 'validated persistent source revision is required'; END IF;
     INSERT INTO deviludo.project_source_revisions(
       workspace_id, project_id, revision, relative_path, content_digest,
-      file_count, total_bytes, workflow_id, job_id, actor_account_id, fencing_token
+      file_count, total_bytes, test_manifest_protocol, test_manifest_digest,
+      workflow_id, job_id, actor_account_id, fencing_token
     ) VALUES (
       job.workspace_id, job.project_id, (p_receipt #>> '{sourceRevision,revision}')::bigint,
       p_receipt #>> '{sourceRevision,relativePath}', p_receipt #>> '{sourceRevision,digest}',
       (p_receipt #>> '{sourceRevision,fileCount}')::integer,
       (p_receipt #>> '{sourceRevision,totalBytes}')::bigint,
+      p_receipt #>> '{testManifest,schemaVersion}',
+      p_receipt->>'testManifestDigest',
       job.workflow_id, job.id, workflow.development_actor_account_id, job.fencing_token
     ) ON CONFLICT (workspace_id, project_id, revision) DO NOTHING;
 
@@ -2236,7 +2243,7 @@ BEGIN
     SELECT * INTO agent_settings
       FROM deviludo.instance_agent_settings
      WHERE singleton = true;
-    IF repair_count < 3 AND agent_settings.singleton IS NOT NULL THEN
+    IF repair_count < 5 AND agent_settings.singleton IS NOT NULL THEN
       UPDATE deviludo.workflow_instances
          SET state = 'AGENT_RUNNING', version = version + 1, updated_at = clock_timestamp()
        WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
@@ -2626,7 +2633,15 @@ BEGIN
   signal_key := 'e2e-protocol-revalidate:' || p_protocol;
   FOR candidate IN
     SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
-           workflow.development_actor_account_id, project.created_by_actor_account_id
+           workflow.development_actor_account_id, project.created_by_actor_account_id,
+           (
+             SELECT source.test_manifest_protocol
+               FROM deviludo.project_source_revisions source
+              WHERE source.workspace_id = workflow.workspace_id
+                AND source.project_id = workflow.project_id
+              ORDER BY source.revision DESC
+              LIMIT 1
+           ) AS latest_test_manifest_protocol
       FROM deviludo.workflow_instances workflow
       JOIN deviludo.projects project
         ON project.workspace_id = workflow.workspace_id AND project.id = workflow.project_id
@@ -2655,7 +2670,9 @@ BEGIN
      LIMIT p_batch_size
   LOOP
     requested_by := coalesce(candidate.development_actor_account_id, candidate.created_by_actor_account_id);
-    IF EXISTS (
+    IF candidate.latest_test_manifest_protocol IS DISTINCT FROM 'deviludo.test-manifest.v3' THEN
+      rerun_stage := 'AGENT_GENERATION';
+    ELSIF EXISTS (
       SELECT 1 FROM deviludo.artifacts artifact
       JOIN deviludo.jobs producing_job
         ON producing_job.workspace_id = artifact.workspace_id AND producing_job.id = artifact.producing_job_id

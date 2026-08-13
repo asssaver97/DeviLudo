@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -293,9 +294,10 @@ async function readAgentCompletion(
   projectSources: ProjectSourceStore,
   job: JobProtocolV4,
   receipt: SandboxReceipt,
-): Promise<Readonly<{ assetManifest: unknown; testManifest: unknown }>> {
+): Promise<Readonly<{ assetManifest: unknown; testManifest: unknown; testManifestDigest: string }>> {
   try {
-    return await objectStore.readAgentCompletion(receipt.outputObjects, job.inputObjects);
+    const completion = await objectStore.readAgentCompletion(receipt.outputObjects, job.inputObjects);
+    return Object.freeze({ ...completion, testManifestDigest: jsonDigest(completion.testManifest) });
   } catch {
     const source = receipt.details.sourceRevision;
     if (!source || typeof source !== "object" || Array.isArray(source)) {
@@ -319,8 +321,16 @@ async function readAgentCompletion(
     }
     const testManifest = (parsed as Record<string, unknown>).testManifest;
     await objectStore.assertAgentTestManifest(testManifest, job.inputObjects);
-    return Object.freeze({ assetManifest: (parsed as Record<string, unknown>).assetManifest, testManifest });
+    return Object.freeze({
+      assetManifest: (parsed as Record<string, unknown>).assetManifest,
+      testManifest,
+      testManifestDigest: jsonDigest(testManifest),
+    });
   }
+}
+
+function jsonDigest(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
 export function sandboxPlan(job: JobProtocolV4, operationId: string | null = null): SandboxPlan {

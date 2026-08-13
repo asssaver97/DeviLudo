@@ -1,94 +1,165 @@
-# DeviLudo
+<div align="center">
+  <img src="public/deviludo-brand-mark.png" width="112" alt="DeviLudo logo">
+  <h1>DeviLudo</h1>
+  <p><strong>AI-native Godot delivery, from requirements to verified game builds</strong></p>
+  <p>
+    <a href="README.md">简体中文</a> · English
+  </p>
+  <p>
+    <a href="https://github.com/asssaver97/DeviLudo/actions/workflows/ci.yml"><img src="https://github.com/asssaver97/DeviLudo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <img src="https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white" alt="Node.js 22">
+    <img src="https://img.shields.io/badge/Godot-4.5.1-478CBF?logo=godotengine&logoColor=white" alt="Godot 4.5.1">
+    <img src="https://img.shields.io/badge/status-MVP-f6c344" alt="MVP status">
+  </p>
+</div>
 
-English | [简体中文](README.md)
+DeviLudo connects game requirements, source code, AI agents, image assets, Godot builds, real-window E2E, and Steam publishing in one traceable delivery pipeline. It can start a project from scratch or keep iterating directly inside an existing local or Git working tree.
 
-DeviLudo is an AI game delivery platform for Godot. It turns game requirements and conversations into versioned source code, image assets, and verified builds, then publishes them to Steam after human approval.
+> [!IMPORTANT]
+> DeviLudo is currently an MVP. The complete local workflow supports Apple Silicon macOS only. Production requires dedicated infrastructure and Linux, Windows, and macOS E2E nodes.
 
-> The project is currently an MVP. The complete local workflow targets macOS; production requires dedicated infrastructure and five server pools.
+## Table of contents
 
-## What it can do
+- [Highlights](#highlights)
+- [Delivery workflow](#delivery-workflow)
+- [Quick start](#quick-start)
+- [Importing and iterating](#importing-and-iterating)
+- [Real-interaction E2E](#real-interaction-e2e)
+- [Production architecture](#production-architecture)
+- [Development and verification](#development-and-verification)
+- [Security](#security)
 
-- Generate, modify, and repair Godot projects with Claude Code or Codex CLI agents.
-- Link an existing local Godot project directory directly, or clone a GitHub repository to a chosen location and link it; successful Agent changes are written back in place.
-- After linking, local Git and GitHub projects can create and switch to a new branch from the project page; private GitHub repositories reuse the host's Git credentials.
-- Persist source revisions for conversational iteration, failure repair, and stage reruns.
-- Generate images from an Agent-authored asset manifest, accept user uploads, or continue with placeholders.
-- Build Godot artifacts and enforce a requirement-mapped manifest of unit checks, real keyboard/mouse interaction, and visual baselines; a successful launch is never treated as a test.
-- Run E2E in disposable graphical VMs on Linux, Windows, and macOS, producing an evidence ZIP with self-contained HTML, JSON, logs, real game screenshots, and visual diffs.
-- Sign release artifacts, require human approval, publish to Steam, and verify a clean installation.
-- Run in standalone mode or integrate with an external account authority in platform mode.
-- Back up and restore PostgreSQL, S3 artifacts, and project sources, with built-in observability and restricted task execution.
+## Highlights
 
-## Delivery workflows
-
-| Profile | Pipeline |
+| Capability | What it provides |
 | --- | --- |
-| `VALIDATE` | Agent generation → image assets ready → Godot build → selected-platform E2E |
-| `RELEASE` | Agent generation → image assets ready → build → three-platform E2E → signing → human approval → Steam publish → clean install |
+| AI development | Generate, modify, and repair Godot projects with Claude Code or Codex CLI |
+| Existing projects | Link a local directory directly or clone GitHub with host Git credentials; local projects are never uploaded or copied |
+| Iterative delivery | Keep specifications, tasks, artifacts, and test evidence across source revisions and workflow iterations |
+| Git workflow | Create or switch branches from the project page; automatically commit after successful E2E without pushing |
+| Image assets | Generate from an Agent-authored manifest, accept user-supplied files, or use placeholders |
+| Godot builds | Produce delivery artifacts while rejecting script, import, startup, and export errors |
+| Real E2E | Exercise player actions with OS-level keyboard and mouse input inside disposable graphical VMs |
+| Visual evidence | Package self-contained HTML, JSON, logs, real screenshots, baselines, and diffs in a ZIP |
+| Steam delivery | Sign per platform, require human approval, upload to Steam, and verify a real clean installation |
+| Operations | PostgreSQL/S3/source backup, mTLS, RLS, observability, and restricted task execution |
 
-The Agent submits an `assetManifest` and `deviludo.test-manifest.v2` with its source output. Images are materialized into the Godot project before the build. E2E must complete a core-loop journey, inject real input, and capture start/key-state/completion frames; missing checks, Godot script errors, blank screenshots, and excessive visual differences fail the run. In local mode, opening an E2E report launches its self-contained HTML directly.
+## Delivery workflow
 
-## Local quick start
+```mermaid
+flowchart LR
+    A[Requirements] --> B[Agent generation]
+    B --> C[Image assets]
+    C --> D[Godot build]
+    D --> E[Real-window E2E]
+    E -->|Failure · up to 5 repairs| B
+    E -->|VALIDATE| V[Validated]
+    E -->|RELEASE| F[Platform signing]
+    F --> G[Human approval]
+    G --> H[Steam upload]
+    H --> I[Clean install]
+```
 
-The complete local workflow currently supports Apple Silicon macOS only and uses Node.js 22, Docker/Colima, Homebrew, and Tart. Godot runs inside a disposable Tart VM without taking focus on the host desktop.
+| Profile | Endpoint |
+| --- | --- |
+| `VALIDATE` | Agent → assets → build → target-platform E2E |
+| `RELEASE` | Agent → assets → build → three-platform E2E → signing → approval → Steam → clean install |
+
+Every development round is a separate workflow. After completion, failure, or cancellation, the next iteration inherits the specification and source binding while preserving all tasks, artifacts, and evidence from earlier rounds.
+
+## Quick start
+
+### Requirements
+
+| Item | Requirement |
+| --- | --- |
+| Host | Apple Silicon macOS |
+| Runtime | Node.js 22, Docker/Colima, Homebrew |
+| Virtualization | Tart; the first startup prepares a macOS E2E golden image |
+| Disk | At least 35 GiB free is recommended |
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/asssaver97/DeviLudo.git
 cd DeviLudo
 npm ci
 npm run local:bootstrap
 npm run local:up
 ```
 
-Open <http://127.0.0.1:3100>. Local installations use `standalone` by default and require no account. Configure a Claude Code or Codex CLI provider in Settings; an image-generation provider is optional.
+Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then configure a Claude Code or Codex CLI provider in Settings. An image-generation provider is optional. Local installations use `standalone` mode and require no account.
 
-Linking a local project never uploads or copies it. Once you choose the project root, DeviLudo immediately creates a project named after the directory; source reading and Agent analysis continue asynchronously while the project card is dimmed and shows progress. DeviLudo records only a restricted directory binding, reads the latest source from the original directory before each Agent run, and safely writes results back in place when the directory has not changed concurrently. For GitHub, DeviLudo runs the host's `git`, clones into the location you choose, and links that working tree under the repository name. Project contents never travel through a browser upload, so the former 64 MiB import ceiling does not apply. Credential helpers and SSH agents remain host-only; credentials are never mounted into containers or stored by DeviLudo.
-
-Common commands:
-
-```bash
-npm run local:status   # Show service status
-npm run local:logs     # Follow logs
-npm run local:down     # Stop services and keep data
-npm run local:reset    # Stop services and remove local data
-```
-
-The first `local:up` automatically installs missing Tart/SSH helpers, downloads a roughly 25 GB macOS base image, and builds a versioned E2E golden image, so keep at least 35 GiB free. Initialization fails explicitly and never falls back to host execution. Later starts reuse the golden image by configuration fingerprint and do not refresh it merely because remote `latest` changed. Refresh it explicitly with:
+The first `local:up` downloads a roughly 25 GB macOS base image and creates a versioned Tart golden image. Initialization fails explicitly instead of falling back to host execution. Later starts reuse the image and bootstrap state. Refresh it explicitly with:
 
 ```bash
 npm run local:up -- --refresh-e2e-vm
 ```
 
-See [Tart Quick Start](https://tart.run/quick-start/) for the base-image size note. The first application-image build may also take several minutes; later starts reuse images, migrations, bootstrap state, and the Tart golden image.
+See [Tart Quick Start](https://tart.run/quick-start/) for the base-image size note.
 
-The Agent runs one task at a time by default for Docker environments around 8 GiB. On a larger machine, set `DEVILUDO_SANDBOX_CONCURRENCY=2` before startup to process two Core tasks concurrently; this increases memory use and Provider traffic, and only `1` or `2` is accepted.
+### Common commands
 
-## Production deployment
+```bash
+npm run local:status   # Show service status
+npm run local:logs     # Follow service logs
+npm run local:down     # Stop services and keep data
+npm run local:reset    # Stop services and delete local data
+```
 
-Production uses five server pools:
+The Agent processes one task at a time by default. On a larger machine, set `DEVILUDO_SANDBOX_CONCURRENCY=2` to run two tasks concurrently. Only `1` and `2` are accepted.
+
+## Importing and iterating
+
+### Local projects
+
+Selecting a project root immediately creates a project named after that directory while analysis continues in the background. Nothing is uploaded through the browser or copied into a second working directory. Before every Agent run, DeviLudo reads the latest content from the original directory and writes changes back only when its baseline has not been modified externally.
+
+### GitHub projects
+
+DeviLudo invokes the host `git` command, so existing credential helpers and SSH agents continue to work and there is no browser-upload size limit. Git credentials are never mounted into containers or stored by DeviLudo.
+
+## Real-interaction E2E
+
+`deviludo.test-manifest.v3` maps approved specifications to executable verification:
+
+1. Start the final delivery package through the operating system from a clean user profile.
+2. Read control bounds, visibility, enabled state, and game progress through a read-only semantic UI probe.
+3. Perform real clicks, drags, scrolling, keyboard input, and text entry through CGEvent, X11, or SendInput.
+4. Require a new probe sequence, state change, and postcondition after every player action.
+5. Capture the `1280×720` client area at key checkpoints and perform blank-image checks, region-change checks, or stable-replay comparison.
+6. Package requirement coverage, input steps, before/after state, logs, PNGs, and diffs as `deviludo.e2e-evidence.v2`.
+
+Fixed-coordinate clicks, unrelated keys, self-reported success, missing player coverage, Godot script errors, blank screenshots, and excessive visual differences all fail the run. Each platform has a 30-minute budget. Product failures receive at most five automatic repair rounds; infrastructure failures retry only the affected node.
+
+## Production architecture
+
+```mermaid
+flowchart TB
+    U[Browser] --> W[WEB]
+    W --> C[CORE API / Scheduler / Sandbox]
+    C --> P[(PostgreSQL)]
+    C --> S[(S3)]
+    C --> V[Vault / KMS]
+    L[E2E Linux · KVM] -->|Outbound mTLS| C
+    N[E2E Windows · Hyper-V] -->|Outbound mTLS| C
+    M[E2E macOS · Tart] -->|Outbound mTLS| C
+```
 
 | Pool | Recommended OS | Responsibility |
 | --- | --- | --- |
-| `WEB` | Ubuntu 24.04 | Next.js site, BFF, and the only public entry point |
-| `CORE` | Ubuntu 24.04 x86_64 | API, scheduling, Agent, build, and publishing tasks |
-| `E2E_LINUX` | Ubuntu 24.04 x86_64 | Linux real-window validation in a KVM graphical session |
-| `E2E_WINDOWS` | Windows 11 Pro x86_64 | Windows real-window validation in a Hyper-V interactive session |
-| `E2E_MACOS` | macOS 15+ Apple Silicon | macOS real-window validation on a Tart graphical desktop |
+| `WEB` | Ubuntu 24.04 | Next.js, BFF, and the only public entry point |
+| `CORE` | Ubuntu 24.04 x86_64 | API, scheduling, Agent, builds, and publishing |
+| `E2E_LINUX` | Ubuntu 24.04 x86_64 | Linux validation in a KVM graphical session |
+| `E2E_WINDOWS` | Windows 11 Pro x86_64 | Windows validation in a Hyper-V interactive session |
+| `E2E_MACOS` | macOS 15+ Apple Silicon | macOS validation on a Tart graphical desktop |
 
-You also need external PostgreSQL, S3, Vault/KMS, OpenTelemetry, and load balancing. Public traffic may enter only WEB; E2E nodes reach CORE only through outbound mTLS.
+Production also requires PostgreSQL, S3, Vault/KMS, OpenTelemetry, and load balancing. Public traffic may enter only `WEB`; E2E nodes reach `CORE` only through outbound mTLS.
 
-Pushing a `v*` tag starts the [release workflow](.github/workflows/release.yml), which runs native acceptance on all three platforms and builds signed GHCR images and server bundles. Then, on each target server:
+### Deployment
 
-1. Copy and complete the matching configuration:
-   - [WEB](deploy/web/deploy.env.example)
-   - [CORE](deploy/core/deploy.env.example)
-   - [Linux E2E](deploy/e2e-linux/deploy.env.example)
-   - [Windows E2E](deploy/e2e-windows/deploy.json.example)
-   - [macOS E2E](deploy/e2e-macos/deploy.env.example)
-2. Put database, S3, Vault, TLS, signing, Steam, and golden-VM credentials in the permission-restricted files referenced by that configuration. Each golden image must include Godot 4.5.1, Node 22, the guest runner, its platform GUI driver, and a passing window/input/screenshot smoke.
-3. Run the deployment script on every target server.
-
-Bash hosts:
+1. Push a `v*` tag. The [release workflow](.github/workflows/release.yml) creates digest-pinned, Cosign-signed images and bundles.
+2. Complete the matching configuration: [WEB](deploy/web/deploy.env.example), [CORE](deploy/core/deploy.env.example), [Linux E2E](deploy/e2e-linux/deploy.env.example), [Windows E2E](deploy/e2e-windows/deploy.json.example), and [macOS E2E](deploy/e2e-macos/deploy.env.example).
+3. Provide database, object storage, Vault, TLS, signing, Steam, and signed golden-image credentials.
+4. Run `preflight`, `bootstrap`, `deploy`, and `status` on every server.
 
 ```bash
 sudo ./deploy/<role>/deploy.sh preflight
@@ -97,40 +168,38 @@ sudo ./deploy/<role>/deploy.sh deploy
 sudo ./deploy/<role>/deploy.sh status
 ```
 
-Windows:
-
 ```powershell
 .\deploy\e2e-windows\deploy.ps1 -Action preflight
 .\deploy\e2e-windows\deploy.ps1 -Action bootstrap
 .\deploy\e2e-windows\deploy.ps1 -Action deploy
 ```
 
-Deployment consumes digest-pinned, Cosign-signed releases and does not compile on the server. Bash deployments also support `rollback`, limited to verified releases with a compatible database schema.
-
-On the first deployment of a new E2E protocol, the scheduler batch-revalidates only the latest terminal iteration that existed for each project at upgrade time: it reuses a valid build first, rebuilds from source next, and reruns the Agent only when source is unavailable. Set `DEVILUDO_E2E_REVALIDATION_BATCH_SIZE` to `1`–`20` (default `2`). A finally successful revalidation still auto-commits local Git projects and never pushes them.
+Every platform golden image must contain Godot 4.5.1, Node 22, the v3 guest runner, its GUI driver, and a passing window/input/screenshot smoke. See the [architecture guide](docs/architecture.md) for more detail.
 
 ## Development and verification
 
 ```bash
-npm run check                 # Lint, types, unit tests, architecture checks, production build
-npm run local:executor:test   # Fixture Agent, image injection, Godot, MinIO, macOS E2E
-npm run local:database:test   # PostgreSQL RLS, concurrent claims, fencing, recovery, workflow gates
+npm run check                 # Lint, types, unit tests, architecture, production build
+npm run local:executor:test   # Fixture Agent, Godot build, and real macOS VM E2E
+npm run local:database:test   # RLS, concurrent claims, fencing, recovery, workflow gates
 npm run local:permissions:test
 ```
 
-The real-provider smoke test may incur charges and must be started explicitly with `npm run local:test`.
+The real-provider smoke test may incur charges and runs only when explicitly started with `npm run local:test`.
 
-## Security notes
+## Security
 
-- `standalone` has no login system. Anyone who can reach the Web service can administer the instance; never expose it to an untrusted network.
+- `standalone` has no login system. Never expose it to an untrusted network.
 - `platform` asserts sessions and membership through an external account API. Core does not store accounts, passwords, or OAuth data.
-- Production agents run in Kata microVMs. Build and publishing containers use non-root users, read-only filesystems, resource limits, and pinned image digests.
-- Provider, Steam, database, and signing credentials must not be committed or passed on command lines. Production reads them only from Vault or permission-restricted files.
+- Production Agents run in Kata microVMs. Build and publishing containers use non-root users, read-only filesystems, resource limits, and pinned image digests.
+- Provider, Steam, database, and signing credentials must never be committed or placed on command lines.
 
-## Learn more
+## Contributing
 
-- [Architecture](docs/architecture.md)
-- [CI workflow](.github/workflows/ci.yml)
-- [Release workflow](.github/workflows/release.yml)
+Issues and pull requests are welcome. Before submitting a change, run:
 
-Issues and pull requests are welcome. Run `npm run check` before submitting a change.
+```bash
+npm run check
+```
+
+Further reading: [Architecture](docs/architecture.md) · [CI](.github/workflows/ci.yml) · [Release workflow](.github/workflows/release.yml)

@@ -20,7 +20,7 @@ if (!input?.object || !/^sha256:[0-9a-f]{64}$/.test(input.object.sha256 ?? "")) 
 
 if (action !== "sign") {
   const base = {
-    schemaVersion: "deviludo.godot-guest-report.v2",
+    schemaVersion: "deviludo.godot-guest-report.v3",
     action,
     jobId: request.jobId,
     inputDigest: input.object.sha256,
@@ -35,7 +35,7 @@ if (action !== "sign") {
       stderr: "",
     },
   };
-  if (action === "test") {
+  if (action === "test" || action === "clean-install") {
     const jobRoot = process.env.DEVILUDO_E2E_JOB_ROOT ?? "";
     if (!isAbsolute(jobRoot)) throw new Error("DEVILUDO_E2E_JOB_ROOT must be absolute");
     const directory = resolve(jobRoot, request.jobId);
@@ -51,11 +51,15 @@ if (action !== "sign") {
       await writeFile(path, encodeRgbaPng(1280, 720, pixels));
       screenshots.push({ id, path });
     }
-    const report = { schemaVersion: "deviludo.e2e-evidence.v1", jobId: request.jobId, platform: request.operatingSystem ?? "macos", outcome: "PASSED", failureDomain: null, summary: base.summary,
+    const report = { schemaVersion: "deviludo.e2e-evidence.v2", jobId: request.jobId, platform: request.operatingSystem ?? "macos", action, outcome: "PASSED", failureDomain: null, summary: base.summary,
+      coverage: { headlessCheckCount: 1, interactiveJourneyCount: 1, realInputCount: 2, coveredPlayerRequirementCount: 1, playerRequirementCount: 1, visualBaselineCount: 1 },
       checkpoints: screenshots.map(item => ({ journeyId: "fixture-core-loop", checkpointId: item.id, status: "PASSED", screenshot: `screenshots/${item.id}.png` })) };
     const bundle = await createEvidenceBundle({ outputRoot: directory, jobId: request.jobId, platform: request.operatingSystem ?? "macos", report, screenshots });
     Object.assign(base, {
-      evidence: { protocol: "deviludo.e2e-evidence.v1", result: "PASSED", checkCount: 1, screenshotCount: 3, hasVisualDiff: false },
+      evidence: { protocol: "deviludo.e2e-evidence.v2", result: "PASSED", headlessCheckCount: 1,
+        interactiveJourneyCount: 1, realInputCount: 2, coveredPlayerRequirementCount: 1, playerRequirementCount: 1,
+        screenshotCount: 3, visualBaselineCount: 1, hasVisualDiff: false,
+        packageLaunchMode: request.operatingSystem === "macos" ? "MACOS_LAUNCH_SERVICES" : request.operatingSystem === "windows" ? "WINDOWS_FINAL_EXE" : "LINUX_RELEASE_EXECUTABLE" },
       outputPath: bundle.outputPath,
       outputSha256: bundle.outputSha256,
       outputSizeBytes: bundle.outputSizeBytes,

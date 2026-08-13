@@ -39,17 +39,15 @@ try {
     if (!guestRunner.startsWith("/")) throw new Error("A fixed guest runner is required");
     const evidenceOutput = join(workspace, `e2e-evidence-${request.operatingSystem}-${request.jobId}.zip`);
     const receipt = await runJson(guestRunner, [action, "--job-id", request.jobId, "--artifact", artifact], {
-      ...(action === "test" ? { DEVILUDO_E2E_HOST_OUTPUT: evidenceOutput } : {}),
+      DEVILUDO_E2E_HOST_OUTPUT: evidenceOutput,
     });
     const outcome = normalizeGuestOutcome(receipt);
-    if (action === "test") {
-      const evidence = await readFile(evidenceOutput);
-      const digest = `sha256:${createHash("sha256").update(evidence).digest("hex")}`;
-      if (receipt.outputPath !== evidenceOutput || receipt.outputSha256 !== digest || receipt.outputSizeBytes !== evidence.length) {
-        throw new Error("Guest evidence copy does not match its receipt");
-      }
-      evidenceOutputReady = true;
+    const evidence = await readFile(evidenceOutput);
+    const digest = `sha256:${createHash("sha256").update(evidence).digest("hex")}`;
+    if (receipt.outputPath !== evidenceOutput || receipt.outputSha256 !== digest || receipt.outputSizeBytes !== evidence.length) {
+      throw new Error("Guest evidence copy does not match its receipt");
     }
+    evidenceOutputReady = true;
     process.stdout.write(JSON.stringify({ ...receipt, jobId: request.jobId, action, inputDigest: input.object.sha256,
       outcome: outcome.outcome, failureDomain: outcome.failureDomain, summary: outcome.summary }));
   }
@@ -138,7 +136,7 @@ function runJson(executable, arguments_, extraEnvironment = {}) {
 
 function normalizeGuestOutcome(receipt) {
   const exitCode = receipt.guest?.exitCode ?? receipt.exitCode;
-  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v2") throw new Error("Guest runner protocol is obsolete");
+  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v3") throw new Error("Guest runner protocol is obsolete");
   if (receipt.outcome === "PASSED" && exitCode === 0
     && typeof receipt.summary === "string" && receipt.summary.trim()) {
     return { outcome: "PASSED", failureDomain: null, summary: receipt.summary.trim().slice(0, 2000) };

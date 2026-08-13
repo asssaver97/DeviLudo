@@ -42,6 +42,14 @@
 /.turbo/
 .eslintcache
 
+# local AI assistants and personal automation
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/.gemini/
+/.windsurf/
+
 # debug
 npm-debug.log*
 yarn-debug.log*

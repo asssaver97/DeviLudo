@@ -122,14 +122,30 @@ func performInputEvent(_ event: [String: Any], window: GameWindow) {
                 y: window.bounds.maxY - 720 / backingScale() + CGFloat(y) / backingScale()
               ), mouseButton: .left) else { fail("mouse move input is invalid") }
         input.post(tap: .cghidEventTap)
-    } else if type == "mouse_click" {
+    } else if type == "mouse_click" || type == "mouse_down" || type == "mouse_up" {
         let button = (event["button"] as? String) ?? ""
         let mouseButton: CGMouseButton = button == "RIGHT" ? .right : button == "MIDDLE" ? .center : .left
         let down: CGEventType = button == "RIGHT" ? .rightMouseDown : button == "MIDDLE" ? .otherMouseDown : .leftMouseDown
         let up: CGEventType = button == "RIGHT" ? .rightMouseUp : button == "MIDDLE" ? .otherMouseUp : .leftMouseUp
         let location = CGEvent(source: nil)?.location ?? CGPoint(x: window.bounds.midX, y: window.bounds.midY)
-        CGEvent(mouseEventSource: nil, mouseType: down, mouseCursorPosition: location, mouseButton: mouseButton)?.post(tap: .cghidEventTap)
-        CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: location, mouseButton: mouseButton)?.post(tap: .cghidEventTap)
+        if type != "mouse_up" { CGEvent(mouseEventSource: nil, mouseType: down, mouseCursorPosition: location, mouseButton: mouseButton)?.post(tap: .cghidEventTap) }
+        if type != "mouse_down" { CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: location, mouseButton: mouseButton)?.post(tap: .cghidEventTap) }
+    } else if type == "scroll" {
+        guard let delta = event["deltaY"] as? Int,
+              let input = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(delta), wheel2: 0, wheel3: 0) else { fail("scroll input is invalid") }
+        input.post(tap: .cghidEventTap)
+    } else if type == "text_input" {
+        guard let text = event["text"] as? String, !text.isEmpty, text.count <= 1000,
+              let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { fail("text input is invalid") }
+        let units = Array(text.utf16)
+        units.withUnsafeBufferPointer { buffer in
+            guard let address = buffer.baseAddress else { return }
+            down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: address)
+            up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: address)
+        }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     } else if type != "wait" {
         fail("unsupported input event")
     }

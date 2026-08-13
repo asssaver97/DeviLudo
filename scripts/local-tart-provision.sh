@@ -6,6 +6,8 @@ sudo install -d -m 0755 "$guest_root" "$guest_root/executors"
 sudo install -m 0555 /Users/Shared/godot-window-e2e-guest.mjs "$guest_root/executors/godot-window-e2e-guest.mjs"
 sudo install -m 0444 /Users/Shared/gui-event-batches.mjs "$guest_root/executors/gui-event-batches.mjs"
 sudo install -m 0444 /Users/Shared/e2e-evidence.mjs "$guest_root/e2e-evidence.mjs"
+sudo install -m 0444 /Users/Shared/e2e-ui-probe.mjs "$guest_root/e2e-ui-probe.mjs"
+sudo install -m 0555 /Users/Shared/steam-clean-install.mjs "$guest_root/executors/steam-clean-install.mjs"
 sudo install -m 0555 /Users/Shared/deviludo-gui-driver /usr/local/bin/deviludo-gui-driver
 if [[ ! -x /usr/local/bin/node ]]; then
   curl -fsSL "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz" -o /Users/Shared/node.tar.gz

@@ -333,7 +333,7 @@ async function openLocalArtifact(body) {
         }
       }
     } else if (kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")) {
-      await extractAndValidateEvidenceBundle(artifactFile, join(staging, "e2e-report"));
+      await extractAndValidateEvidenceBundle(artifactFile, join(staging, "e2e-report"), 1024 * 1024 * 1024, { allowLegacy: true });
     }
     await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
     await rm(destination, { recursive: true, force: true });

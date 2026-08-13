@@ -1,19 +1,21 @@
 import {
-  CHECKPOINT_ROLES,
   checkpointOutputMarker,
+  interactionActionEvents,
   interactionCheckpointCount,
   interactionHasUserAction,
   validateInteractionScript,
+  type CheckpointRole,
   type InteractionScript,
 } from "./interaction-script.js";
 import { validateVisualTestSpec, type VisualTestSpec } from "./visual-comparison.js";
 
-export const TEST_MANIFEST_SCHEMA_VERSION = "deviludo.test-manifest.v2" as const;
+export const TEST_MANIFEST_SCHEMA_VERSION = "deviludo.test-manifest.v3" as const;
 export const MAX_TEST_REQUIREMENTS = 500 as const;
 export const MAX_TEST_FEATURES = 500 as const;
 export const MAX_INTERACTIVE_JOURNEYS = 32 as const;
-export const MAX_SCREENSHOT_CHECKPOINTS = 20 as const;
+export const MAX_SCREENSHOT_CHECKPOINTS = 64 as const;
 export const MAX_JOURNEY_TIMEOUT_MS = 300_000 as const;
+export const MAX_PLATFORM_E2E_TIMEOUT_MS = 30 * 60_000;
 
 export const VERIFICATION_METHODS = ["unit", "interactive", "visual", "manual"] as const;
 export type VerificationMethod = typeof VERIFICATION_METHODS[number];
@@ -32,6 +34,10 @@ export type FeatureCategory = typeof FEATURE_CATEGORIES[number];
 export type TestManifestRequirement = Readonly<{
   requirementId: string;
   description: string;
+  source: "CORE_LOOP" | "ACCEPTANCE";
+  verificationClass: "PLAYER_INTERACTION" | "SYSTEM";
+  systemCategory?: "DATA" | "RUNTIME" | "NETWORK";
+  exemptionReason?: string;
 }>;
 
 export type TestManifestFeature = Readonly<{
@@ -45,6 +51,7 @@ export type TestManifestFeature = Readonly<{
   interactionScript?: InteractionScript;
   timeoutMs?: number;
   coreJourney?: boolean;
+  launchProfile?: Readonly<{ type: "FRESH" } | { type: "SCENARIO"; scenarioId: string }>;
   expectedVisual?: VisualTestSpec;
 }>;
 
@@ -70,13 +77,23 @@ export function validateTestManifest(value: unknown): value is TestManifest {
 
   const requirements = manifest.requirements as unknown[];
   const requirementIds = new Set<string>();
+  const playerRequirementIds = new Set<string>();
   for (const requirement of requirements) {
     if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return false;
     const item = requirement as Record<string, unknown>;
     if (typeof item.requirementId !== "string" || !isStableId(item.requirementId)
       || requirementIds.has(item.requirementId)
-      || typeof item.description !== "string" || item.description.trim().length < 1 || item.description.length > 2_000) return false;
+      || typeof item.description !== "string" || item.description.trim().length < 1 || item.description.length > 2_000
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(String(item.source))
+      || !["PLAYER_INTERACTION", "SYSTEM"].includes(String(item.verificationClass))) return false;
+    if (item.source === "CORE_LOOP" && item.verificationClass !== "PLAYER_INTERACTION") return false;
+    if (item.verificationClass === "SYSTEM") {
+      if (item.source !== "ACCEPTANCE"
+        || !["DATA", "RUNTIME", "NETWORK"].includes(String(item.systemCategory))
+        || typeof item.exemptionReason !== "string" || item.exemptionReason.trim().length < 10 || item.exemptionReason.length > 1_000) return false;
+    } else if (item.systemCategory !== undefined || item.exemptionReason !== undefined) return false;
     requirementIds.add(item.requirementId);
+    if (item.verificationClass === "PLAYER_INTERACTION") playerRequirementIds.add(item.requirementId);
   }
 
   const featureIds = new Set<string>();
@@ -85,6 +102,7 @@ export function validateTestManifest(value: unknown): value is TestManifest {
   let interactiveJourneys = 0;
   let checkpointCount = 0;
   let hasCoreJourney = false;
+  const interactiveCoverage = new Set<string>();
   for (const feature of manifest.features as unknown[]) {
     if (!feature || typeof feature !== "object" || Array.isArray(feature)) return false;
     const item = feature as Record<string, unknown>;
@@ -106,16 +124,32 @@ export function validateTestManifest(value: unknown): value is TestManifest {
       for (const name of item.checkNames as string[]) checkNames.add(name);
     } else if (item.verificationMethod === "interactive") {
       if (!validateInteractionScript(item.interactionScript)
-        || !Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS) return false;
+        || !Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS
+        || !validLaunchProfile(item.launchProfile)) return false;
       interactiveJourneys += 1;
       checkpointCount += interactionCheckpointCount(item.interactionScript);
+      const actions = interactionActionEvents(item.interactionScript);
+      const journeyCheckpoints = item.interactionScript.events.filter(event => event.type === "checkpoint");
+      if ((item.launchProfile as { type?: unknown } | undefined)?.type === "SCENARIO"
+        && !journeyCheckpoints.some(event => event.visualMode === "STABLE_REPLAY")) return false;
+      for (const action of actions) {
+        for (const requirementId of action.coversRequirementIds) {
+          if (!item.requirementIds.includes(requirementId) || !playerRequirementIds.has(requirementId)) return false;
+          interactiveCoverage.add(requirementId);
+        }
+      }
       if (item.coreJourney === true && item.category === "core-loop") {
-        const checkpoints = item.interactionScript.events.filter(event => event.type === "checkpoint");
+        const checkpoints = journeyCheckpoints;
         const roles = new Set(checkpoints.map(event => event.role));
-        const assertionsComplete = checkpoints.every(event => event.referenceImage
-          || event.expectedOutput === checkpointOutputMarker(event.id));
-        if (CHECKPOINT_ROLES.every(role => roles.has(role))
+        const assertionsComplete = checkpoints.every(event => event.assertions.length > 0
+          && (event.referenceImage || event.expectedOutput === undefined || event.expectedOutput === checkpointOutputMarker(event.id)));
+        const intents = new Set(actions.map(action => action.intent));
+        if ((item.launchProfile as { type?: unknown } | undefined)?.type === "FRESH"
+          && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role as CheckpointRole))
+          && checkpoints.some(event => event.visualMode === "STABLE_REPLAY")
           && assertionsComplete
+          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
+          && actions.length >= 2
           && interactionHasUserAction(item.interactionScript)) hasCoreJourney = true;
       }
     } else if (item.verificationMethod === "visual") {
@@ -127,7 +161,8 @@ export function validateTestManifest(value: unknown): value is TestManifest {
   return interactiveJourneys >= 1 && interactiveJourneys <= MAX_INTERACTIVE_JOURNEYS
     && checkpointCount >= 3 && checkpointCount <= MAX_SCREENSHOT_CHECKPOINTS
     && hasCoreJourney
-    && [...requirementIds].every(requirementId => automatedCoverage.has(requirementId));
+    && [...requirementIds].every(requirementId => automatedCoverage.has(requirementId))
+    && [...playerRequirementIds].every(requirementId => interactiveCoverage.has(requirementId));
 }
 
 export function validateTestExecutionResult(value: unknown): value is TestExecutionResult {
@@ -156,10 +191,23 @@ export function specificationRequirementCatalog(specification: Readonly<Record<s
     if (!Array.isArray(value)) continue;
     value.forEach((item, index) => {
       if (typeof item !== "string" || !item.trim()) return;
-      entries.push(Object.freeze({ requirementId: stableRequirementId(kind, index, item), description: item.trim() }));
+      entries.push(Object.freeze({
+        requirementId: stableRequirementId(kind, index, item),
+        description: item.trim(),
+        source: kind === "feature" ? "CORE_LOOP" : "ACCEPTANCE",
+        verificationClass: "PLAYER_INTERACTION",
+      }));
     });
   }
   return Object.freeze(entries);
+}
+
+function validLaunchProfile(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const profile = value as Record<string, unknown>;
+  if (profile.type === "FRESH") return Object.keys(profile).length === 1;
+  return profile.type === "SCENARIO" && typeof profile.scenarioId === "string"
+    && /^[a-z0-9][a-z0-9-]{0,119}$/.test(profile.scenarioId);
 }
 
 function isStableId(value: string): boolean {

@@ -239,6 +239,8 @@ async function installGuestRuntime(ip) {
     [resolve(root, "scripts/executors/godot-window-e2e-guest.mjs"), "/Users/Shared/godot-window-e2e-guest.mjs"],
     [resolve(root, "scripts/executors/gui-event-batches.mjs"), "/Users/Shared/gui-event-batches.mjs"],
     [resolve(root, "scripts/e2e-evidence.mjs"), "/Users/Shared/e2e-evidence.mjs"],
+    [resolve(root, "scripts/e2e-ui-probe.mjs"), "/Users/Shared/e2e-ui-probe.mjs"],
+    [resolve(root, "scripts/executors/steam-clean-install.mjs"), "/Users/Shared/steam-clean-install.mjs"],
     [hostGuiDriverFile, "/Users/Shared/deviludo-gui-driver"],
     [resolve(root, "scripts/local-tart-provision.sh"), "/Users/Shared/local-tart-provision.sh"],
   ]) await run("scp", [...ssh, source, `admin@${ip}:${destination}`], 120_000);
@@ -298,7 +300,7 @@ function sshArguments() { return ["-i", keyFile, "-o", "BatchMode=yes", "-o", "S
 async function configurationFingerprint(baseImageDigest) {
   const hash = createHash("sha256").update("deviludo-tart-e2e-v2\0node-22.22.0\0godot-4.5.1\0memory-6144\0display-1440x900\0swift-Onone\0").update(baseImageDigest);
   hash.update(await readFile(`${keyFile}.pub`));
-  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/e2e-evidence.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
+  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/steam-clean-install.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
   return `sha256:${hash.digest("hex")}`;
 }
 async function tartVmExists(name) {

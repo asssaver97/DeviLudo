@@ -3095,16 +3095,28 @@ function artifactFromRow(row: ArtifactRow): ArtifactRecord {
 function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const summary = value as Record<string, unknown>;
-  if (summary.protocol !== "deviludo.e2e-evidence.v1" || !["PASSED", "FAILED"].includes(String(summary.result))
-    || !Number.isSafeInteger(summary.checkCount) || Number(summary.checkCount) < 0
+  if (!["PASSED", "FAILED"].includes(String(summary.result))
     || !Number.isSafeInteger(summary.screenshotCount) || Number(summary.screenshotCount) < 0
     || typeof summary.hasVisualDiff !== "boolean") return null;
+  if (summary.protocol === "deviludo.e2e-evidence.v1") {
+    if (!Number.isSafeInteger(summary.checkCount) || Number(summary.checkCount) < 0) return null;
+    return Object.freeze({
+      protocol: "deviludo.e2e-evidence.v1", result: summary.result as "PASSED" | "FAILED",
+      checkCount: Number(summary.checkCount), screenshotCount: Number(summary.screenshotCount), hasVisualDiff: summary.hasVisualDiff,
+    });
+  }
+  const counts = ["headlessCheckCount", "interactiveJourneyCount", "realInputCount", "coveredPlayerRequirementCount", "playerRequirementCount", "visualBaselineCount"] as const;
+  if (summary.protocol !== "deviludo.e2e-evidence.v2"
+    || counts.some(key => !Number.isSafeInteger(summary[key]) || Number(summary[key]) < 0)
+    || Number(summary.coveredPlayerRequirementCount) > Number(summary.playerRequirementCount)
+    || ![null, "MACOS_LAUNCH_SERVICES", "WINDOWS_FINAL_EXE", "LINUX_RELEASE_EXECUTABLE"].includes(summary.packageLaunchMode as never)) return null;
   return Object.freeze({
-    protocol: "deviludo.e2e-evidence.v1",
-    result: summary.result as "PASSED" | "FAILED",
-    checkCount: Number(summary.checkCount),
-    screenshotCount: Number(summary.screenshotCount),
-    hasVisualDiff: summary.hasVisualDiff,
+    protocol: "deviludo.e2e-evidence.v2", result: summary.result as "PASSED" | "FAILED",
+    headlessCheckCount: Number(summary.headlessCheckCount), interactiveJourneyCount: Number(summary.interactiveJourneyCount),
+    realInputCount: Number(summary.realInputCount), coveredPlayerRequirementCount: Number(summary.coveredPlayerRequirementCount),
+    playerRequirementCount: Number(summary.playerRequirementCount), screenshotCount: Number(summary.screenshotCount),
+    visualBaselineCount: Number(summary.visualBaselineCount), hasVisualDiff: summary.hasVisualDiff,
+    packageLaunchMode: summary.packageLaunchMode as "MACOS_LAUNCH_SERVICES" | "WINDOWS_FINAL_EXE" | "LINUX_RELEASE_EXECUTABLE" | null,
   });
 }
 

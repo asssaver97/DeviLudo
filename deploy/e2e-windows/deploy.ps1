@@ -46,7 +46,7 @@ function Invoke-Bootstrap {
 function Verify-Manifest($c,$stage){
   & cosign verify-blob --certificate "$stage\release-manifest.json.pem" --signature "$stage\release-manifest.json.sig" --certificate-identity-regexp $c.cosignIdentityRegexp --certificate-oidc-issuer $c.cosignIssuer "$stage\release-manifest.json" | Out-Null
   $manifest=Get-Content "$stage\release-manifest.json" -Raw | ConvertFrom-Json
-  if($manifest.schemaVersion -ne 'deviludo.release.v1' -or $manifest.version -ne $c.releaseVersion -or $manifest.roles -notcontains 'E2E_WINDOWS' -or $manifest.plugins.GODOT.version -ne '2' -or $manifest.plugins.GODOT.testManifestProtocol -ne 'deviludo.test-manifest.v2' -or $manifest.plugins.GODOT.guestReportProtocol -ne 'deviludo.godot-guest-report.v2' -or $manifest.plugins.GODOT.evidenceProtocol -ne 'deviludo.e2e-evidence.v1' -or $manifest.plugins.GODOT.artifactHostCommandsAllowed -ne $false -or $manifest.plugins.GODOT.builderImage -notmatch '@sha256:[0-9a-f]{64}$'){throw 'Release manifest is invalid'}
+  if($manifest.schemaVersion -ne 'deviludo.release.v1' -or $manifest.version -ne $c.releaseVersion -or $manifest.roles -notcontains 'E2E_WINDOWS' -or $manifest.plugins.GODOT.version -ne '3' -or $manifest.plugins.GODOT.testManifestProtocol -ne 'deviludo.test-manifest.v3' -or $manifest.plugins.GODOT.guestReportProtocol -ne 'deviludo.godot-guest-report.v3' -or $manifest.plugins.GODOT.evidenceProtocol -ne 'deviludo.e2e-evidence.v2' -or $manifest.plugins.GODOT.artifactHostCommandsAllowed -ne $false -or $manifest.plugins.GODOT.builderImage -notmatch '@sha256:[0-9a-f]{64}$'){throw 'Release manifest is invalid'}
   return $manifest
 }
 function Verify-GoldenVm($c,$manifest){

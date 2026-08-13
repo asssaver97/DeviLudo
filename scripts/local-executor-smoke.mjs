@@ -161,10 +161,11 @@ try {
   await assertObjectBytes(build);
 
   const macReport = skipRealWindowE2e ? null : await runTartMacE2e(build);
-  if (macReport && (macReport.schemaVersion !== "deviludo.godot-guest-report.v2"
+  if (macReport && (macReport.schemaVersion !== "deviludo.godot-guest-report.v3"
     || macReport.outcome !== "PASSED" || macReport.failureDomain !== null
     || macReport.guest?.isolation !== "EPHEMERAL_VM" || macReport.guest?.exitCode !== 0
-    || macReport.evidence?.protocol !== "deviludo.e2e-evidence.v1" || macReport.evidence?.screenshotCount < 3
+    || macReport.evidence?.protocol !== "deviludo.e2e-evidence.v2" || macReport.evidence?.screenshotCount < 3
+    || macReport.evidence?.interactiveJourneyCount < 1 || macReport.evidence?.realInputCount < 2
     || macReport.inputDigest !== build.sha256)) {
     throw new Error(`Tart macOS E2E report is invalid: ${JSON.stringify(macReport)}`);
   }

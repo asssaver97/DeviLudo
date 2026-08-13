@@ -1,5 +1,5 @@
-export const E2E_EVIDENCE_PROTOCOL: "deviludo.e2e-evidence.v1";
-export const GUEST_REPORT_PROTOCOL: "deviludo.godot-guest-report.v2";
+export const E2E_EVIDENCE_PROTOCOL: "deviludo.e2e-evidence.v2";
+export const GUEST_REPORT_PROTOCOL: "deviludo.godot-guest-report.v3";
 export const E2E_CLIENT_WIDTH: number;
 export const E2E_CLIENT_HEIGHT: number;
 export const DEFAULT_VISUAL_THRESHOLD: number;
@@ -7,7 +7,8 @@ export const MAX_SOLID_PIXEL_RATIO: number;
 export function godotErrorLines(...logs: unknown[]): string[];
 export function inspectScreenshot(path: string, expectedWidth?: number, expectedHeight?: number): Promise<Readonly<Record<string, unknown>>>;
 export function compareScreenshots(actualPath: string, referencePath: string, diffPath?: string, threshold?: number): Promise<Readonly<{ passed: boolean; differentPixels: number; totalPixels: number; differenceRatio: number; threshold: number }>>;
+export function compareScreenshotRegion(actualPath: string, referencePath: string, rect: Readonly<{ x: number; y: number; width: number; height: number }>, diffPath?: string | null): Promise<Readonly<{ differentPixels: number; totalPixels: number; differenceRatio: number; region: Readonly<{ x: number; y: number; width: number; height: number }> }>>;
 export function encodeRgbaPng(width: number, height: number, rgba: Buffer): Buffer;
 export function createEvidenceBundle(input: Readonly<Record<string, unknown>>): Promise<Readonly<{ outputPath: string; outputSha256: string; outputSizeBytes: number; manifest: Readonly<Record<string, unknown>> }>>;
-export function extractAndValidateEvidenceBundle(zipPath: string, destination: string, maximumBytes?: number): Promise<Readonly<{ manifest: Readonly<Record<string, unknown>>; report: Readonly<Record<string, unknown>>; indexPath: string }>>;
+export function extractAndValidateEvidenceBundle(zipPath: string, destination: string, maximumBytes?: number, options?: Readonly<{ allowLegacy?: boolean }>): Promise<Readonly<{ manifest: Readonly<Record<string, unknown>>; report: Readonly<Record<string, unknown>>; indexPath: string; legacy: boolean }>>;
 export function readEvidenceRepairContext(zipPath: string, maximumBytes?: number): Promise<Readonly<{ report: Readonly<Record<string, unknown>>; screenshots: readonly Readonly<Record<string, unknown>>[] }>>;

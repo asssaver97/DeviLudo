@@ -15,7 +15,7 @@ done
 ssh_options=(-i /etc/deviludo/e2e/guest_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/deviludo/e2e/guest_known_hosts)
 scp "${ssh_options[@]}" "$artifact" "deviludo-guest@$ip:/var/lib/deviludo/input/artifact"
 receipt=$(ssh "${ssh_options[@]}" "deviludo-guest@$ip" /usr/local/bin/deviludo-guest-runner "$action" /var/lib/deviludo/input/artifact --job-id "$job_id" --json)
-if [[ $action == test ]]; then
+if [[ $action == test || $action == clean-install ]]; then
   : "${DEVILUDO_E2E_HOST_OUTPUT:?host evidence output is required}"
   guest_output=$(jq -er '.outputPath' <<<"$receipt")
   [[ $guest_output == /var/lib/deviludo/* ]] || { echo 'guest evidence path escaped the guest job directory' >&2; exit 1; }

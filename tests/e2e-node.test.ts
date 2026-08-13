@@ -86,7 +86,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     })]),
   });
   assert.doesNotThrow(() => validateExecutionReceipt(job, Object.freeze({
-    schemaVersion: "deviludo.godot-guest-report.v2",
+    schemaVersion: "deviludo.godot-guest-report.v3",
     action: "test",
     jobId: job.jobId,
     inputDigest: digest,
@@ -94,13 +94,15 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     failureDomain: "PRODUCT",
     summary: "The exported game crashed while entering the first level",
     guest: Object.freeze({ exitCode: 1 }),
-    evidence: Object.freeze({ protocol: "deviludo.e2e-evidence.v1", result: "FAILED", checkCount: 2, screenshotCount: 1, hasVisualDiff: false }),
+    evidence: Object.freeze({ protocol: "deviludo.e2e-evidence.v2", result: "FAILED", headlessCheckCount: 2,
+      interactiveJourneyCount: 0, realInputCount: 0, coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
+      screenshotCount: 1, visualBaselineCount: 0, hasVisualDiff: false, packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
     outputPath: "/tmp/deviludo-e2e/evidence.zip",
     outputSha256: `sha256:${"c".repeat(64)}`,
     outputSizeBytes: 1024,
   })));
   assert.throws(() => validateExecutionReceipt(job, Object.freeze({
-    schemaVersion: "deviludo.godot-guest-report.v2",
+    schemaVersion: "deviludo.godot-guest-report.v3",
     action: "test",
     jobId: job.jobId,
     inputDigest: digest,
@@ -108,7 +110,9 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     failureDomain: "NETWORK",
     summary: "network unavailable",
     guest: Object.freeze({ exitCode: 1 }),
-    evidence: Object.freeze({ protocol: "deviludo.e2e-evidence.v1", result: "FAILED", checkCount: 2, screenshotCount: 1, hasVisualDiff: false }),
+    evidence: Object.freeze({ protocol: "deviludo.e2e-evidence.v2", result: "FAILED", headlessCheckCount: 2,
+      interactiveJourneyCount: 0, realInputCount: 0, coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
+      screenshotCount: 1, visualBaselineCount: 0, hasVisualDiff: false, packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
     outputPath: "/tmp/deviludo-e2e/evidence.zip",
     outputSha256: `sha256:${"c".repeat(64)}`,
     outputSizeBytes: 1024,

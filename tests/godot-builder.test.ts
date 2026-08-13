@@ -26,7 +26,7 @@ test("Godot Builder supplies controlled export presets when Agent output omits t
     assert.deepEqual(platforms, ["macos", "windows"]);
     const presets = await readFile(join(directory, "export_presets.cfg"), "utf8");
     assert.match(presets, /name="macOS"[\s\S]*platform="macOS"/);
-    assert.match(presets, /codesign\/codesign=0/);
+    assert.match(presets, /codesign\/codesign=1/);
     assert.match(presets, /name="Windows Desktop"[\s\S]*platform="Windows Desktop"/);
     assert.match(presets, /codesign\/enable=false/);
     const normalizedProject = await readFile(join(directory, "project.godot"), "utf8");

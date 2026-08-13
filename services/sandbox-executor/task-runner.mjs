@@ -93,10 +93,12 @@ async function runAgent(plan) {
       : await readLegacyE2eRepairReport(`/workspace/inputs/${filename}`);
     emitProgress("PHASE", `Agent 正在修复 ${plan.job.payload.failedPlatform ?? "目标平台"} E2E 发现的游戏问题`);
   }
-  const checkpointEmitterInstruction = "Every expectedOutput checkpoint must use one real-game runtime emitter. It must print the exact DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> marker and, when the DEVILUDO_E2E_CHECKPOINT_FILE environment variable is non-empty, append that same marker plus a newline to that file and flush it immediately. Never emit markers from test-only setup or before the corresponding real semantic state exists.";
+  const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
+  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe.v1 contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Every snapshot must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
   const manifestInstructions = existingManifestValid ? [
-    "Core has already validated the existing agent.json as a complete deviludo.test-manifest.v2 and asset manifest. Preserve it instead of auditing, regenerating, or reformatting it.",
+    "Core has already validated the existing agent.json as a complete deviludo.test-manifest.v3 and asset manifest. Preserve its coverage and assertions unless the current change genuinely requires an update.",
     checkpointEmitterInstruction,
+    probeInstruction,
     ...(e2eRepairContext ? [
       "This repair does not need manifest work unless the failure report explicitly identifies a manifest error. Do not inspect manifest generators or broad requirement coverage.",
     ] : [
@@ -106,8 +108,8 @@ async function runAgent(plan) {
     "IMPORTANT: The generated agent.json must include a complete testManifest AND an assetManifest.",
     "",
     "testManifest structure:",
-    "- schemaVersion: \"deviludo.test-manifest.v2\"",
-    "- requirements: copy the exact requirementId and description pairs listed below; do not omit, rename, or invent requirements",
+    "- schemaVersion: \"deviludo.test-manifest.v3\"",
+    "- requirements: copy the exact requirementId, description, source and default verificationClass pairs below; every CORE_LOOP remains PLAYER_INTERACTION. An ACCEPTANCE item may be SYSTEM only for DATA, RUNTIME or NETWORK and must include systemCategory plus a concrete exemptionReason of at least 10 characters.",
     "- features: array of feature objects, each with:",
     "  - id: unique kebab-case identifier (e.g. \"collect-ember\")",
     "  - requirementIds: one or more IDs from the exact frozen requirement catalog below",
@@ -116,17 +118,20 @@ async function runAgent(plan) {
     "  - verificationMethod: unit, interactive, visual, or manual; manual must never be the only automated coverage for a requirement",
     "  - gdsTestPath: path to test script (typically \"res://tests/e2e.gd\")",
     "  - checkNames: array of assertion names that verify this feature",
-    "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, and timeoutMs no more than 300000.",
-    "- Its interactionScript must be version \"2\" with no more than 200 keyboard, mouse, wait, and checkpoint events.",
-    "- Use ONLY these exact interaction event shapes: {\"type\":\"key_press\",\"key\":\"KEY_SPACE\",\"delay_ms\":100}, {\"type\":\"key_release\",\"key\":\"KEY_SPACE\",\"delay_ms\":100}, {\"type\":\"mouse_move\",\"x\":640,\"y\":360,\"delay_ms\":100}, {\"type\":\"mouse_click\",\"button\":\"LEFT\",\"delay_ms\":100}, {\"type\":\"wait\",\"delay_ms\":1000}, and {\"type\":\"checkpoint\",\"id\":\"game-start\",\"role\":\"START\",\"delay_ms\":500,\"expectedOutput\":\"DEVILUDO_E2E_CHECKPOINT:game-start\"}.",
-    "- Keyboard keys must use canonical uppercase names such as KEY_SPACE and KEY_P. Mouse buttons must be uppercase. Never use event type keyboard, an action field, an ms field, or lowercase key names. wait requires delay_ms; the other event delay_ms fields are optional.",
-    "- Coordinates are relative to the fixed 1280x720 game client area.",
-    "- The core journey must contain checkpoint events with unique IDs and the roles START, KEY_STATE, and COMPLETION.",
-    "- The core journey must perform at least one real user action using key_press or mouse_click between its screenshots. A wait-only journey is invalid.",
-    "- Every core checkpoint must declare either referenceImage or expectedOutput. expectedOutput must equal DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> and may only be emitted after the screenshot's claimed semantic state is actually reached.",
+    "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, launchProfile {type:\"FRESH\"}, and timeoutMs no more than 300000. Scenario fixtures are allowed only on non-core journeys and may initialize state but never perform the tested action.",
+    "- Its interactionScript must be version \"3\" with no more than 200 events. Use semantic target IDs only; fixed x/y coordinates and unrelated key presses are forbidden.",
+    "- Action event types are key_tap, key_hold, click, double_click, drag, scroll and text_input. Every action requires a unique stepId, intent, coversRequirementIds and at least one postcondition. Click/drag/scroll/text targets use stable probe control IDs.",
+    "- Example: {\"type\":\"click\",\"stepId\":\"roll-dice\",\"intent\":\"PRIMARY_ACTION\",\"targetId\":\"roll-dice\",\"coversRequirementIds\":[\"req-feature-001-...\"],\"postconditions\":[{\"source\":\"PROGRESS\",\"key\":\"turn\",\"operator\":\"CHANGED\"}],\"delay_ms\":100}.",
+    "- Probe assertions use source STATE, PROGRESS, CONTROL or SCENE and operator EQUALS, NOT_EQUALS, GREATER_THAN, GREATER_THAN_OR_EQUALS, LESS_THAN, LESS_THAN_OR_EQUALS, CONTAINS, EXISTS or CHANGED.",
+    "- Every PLAYER_INTERACTION requirement must be covered by at least one real action inside a feature that maps that requirement, and every such action must verify an operation-after state change through postconditions.",
+    "- The fresh core journey must cross a real progress boundary and include at least two real actions with PRIMARY_ACTION and COMPLETE_LOOP intents.",
+    "- The core journey must contain asserted checkpoint events with unique IDs and the roles START, READY, PROGRESS, and COMPLETION; at least one must use visualMode STABLE_REPLAY. Other checkpoints may use DYNAMIC.",
+    "- Every DYNAMIC ACTION, PROGRESS or COMPLETION checkpoint must declare changeTargetId for a stable semantic control or viewport region whose pixels must change after the preceding real input.",
+    "- A checkpoint requires non-empty assertions. expectedOutput is optional auxiliary synchronization and, if present, must equal DEVILUDO_E2E_CHECKPOINT:<checkpoint-id>.",
     checkpointEmitterInstruction,
+    probeInstruction,
     "- A checkpoint may declare referenceImage as a safe project-relative PNG and threshold from 0 to 1; the default threshold is 0.01.",
-    "- Across the manifest: at most 500 requirements, 500 features, 32 interactive journeys, and 20 checkpoints.",
+    "- Across the manifest: at most 500 requirements, 500 features, 32 interactive journeys, and 64 checkpoints. Each journey is at most 300 seconds; the complete platform E2E has a hard 30 minute budget.",
     `- Frozen requirement catalog: ${JSON.stringify(requirementCatalog)}`,
     "",
     "assetManifest structure:",
@@ -157,7 +162,7 @@ async function runAgent(plan) {
     "",
     "Reference implementation: fixtures/godot-smoke/tests/e2e.gd demonstrates the required pattern.",
     "",
-    "Every feature declared in the project document (gameplay mechanics, save/load, pause, win conditions, damage system, etc.) must have corresponding test checks.",
+    "Every player-operable feature declared in the project document must have corresponding real system-level keyboard/mouse actions and postconditions. Headless unit checks remain appropriate only for data, runtime, network and deterministic algorithm details.",
   ];
   const specificationInstructions = existingManifestValid
     ? [`Current revision notes: ${JSON.stringify(specification.revisionNotes ?? [])}`]
@@ -278,7 +283,7 @@ async function readGeneratedAgentManifest(requirementCatalog) {
     throw new Error("Agent did not produce a valid agent.json");
   }
   const testManifest = value.testManifest;
-  if (!validTestManifestV2(testManifest, requirementCatalog)) {
+  if (!validTestManifestV3(testManifest, requirementCatalog)) {
     throw new Error("Agent did not produce a valid testManifest");
   }
   const assetManifest = value.assetManifest;
@@ -323,7 +328,12 @@ function specificationRequirementCatalog(specification) {
     if (!Array.isArray(value)) continue;
     value.forEach((item, index) => {
       if (typeof item !== "string" || !item.trim()) return;
-      catalog.push({ requirementId: stableRequirementId(kind, index, item), description: item.trim() });
+      catalog.push({
+        requirementId: stableRequirementId(kind, index, item),
+        description: item.trim(),
+        source: kind === "feature" ? "CORE_LOOP" : "ACCEPTANCE",
+        verificationClass: "PLAYER_INTERACTION",
+      });
     });
   }
   return catalog;
@@ -338,23 +348,38 @@ function stableRequirementId(kind, index, text) {
   return `req-${kind}-${String(index + 1).padStart(3, "0")}-${hash.toString(16).padStart(8, "0")}`;
 }
 
-function validTestManifestV2(value, expectedRequirements = null) {
+function validTestManifestV3(value, expectedRequirements = null) {
   if (!value || typeof value !== "object" || Array.isArray(value)
-    || value.schemaVersion !== "deviludo.test-manifest.v2"
+    || value.schemaVersion !== "deviludo.test-manifest.v3"
     || !Array.isArray(value.requirements) || value.requirements.length < 1 || value.requirements.length > 500
     || !Array.isArray(value.features) || value.features.length < 1 || value.features.length > 500) return false;
   const requirementIds = new Set();
+  const playerRequirementIds = new Set();
   for (const requirement of value.requirements) {
     if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)
       || typeof requirement.requirementId !== "string" || !stableId(requirement.requirementId)
       || requirementIds.has(requirement.requirementId)
-      || typeof requirement.description !== "string" || requirement.description.trim().length < 1 || requirement.description.length > 2000) return false;
+      || typeof requirement.description !== "string" || requirement.description.trim().length < 1 || requirement.description.length > 2000
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(requirement.source)
+      || !["PLAYER_INTERACTION", "SYSTEM"].includes(requirement.verificationClass)) return false;
+    if (requirement.source === "CORE_LOOP" && requirement.verificationClass !== "PLAYER_INTERACTION") return false;
+    if (requirement.verificationClass === "SYSTEM") {
+      if (requirement.source !== "ACCEPTANCE"
+        || !["DATA", "RUNTIME", "NETWORK"].includes(requirement.systemCategory)
+        || typeof requirement.exemptionReason !== "string" || requirement.exemptionReason.trim().length < 10
+        || requirement.exemptionReason.length > 1000) return false;
+    } else if (requirement.systemCategory !== undefined || requirement.exemptionReason !== undefined) return false;
     requirementIds.add(requirement.requirementId);
+    if (requirement.verificationClass === "PLAYER_INTERACTION") playerRequirementIds.add(requirement.requirementId);
   }
   if (expectedRequirements) {
     if (value.requirements.length !== expectedRequirements.length) return false;
-    const actual = new Map(value.requirements.map(item => [item.requirementId, item.description]));
-    if (expectedRequirements.some(item => actual.get(item.requirementId) !== item.description)) return false;
+    const actual = new Map(value.requirements.map(item => [item.requirementId, item]));
+    if (expectedRequirements.some(item => {
+      const received = actual.get(item.requirementId);
+      return !received || received.description !== item.description || received.source !== item.source
+        || (item.source === "CORE_LOOP" && received.verificationClass !== "PLAYER_INTERACTION");
+    })) return false;
   }
   const featureIds = new Set();
   const checkNames = new Set();
@@ -362,6 +387,7 @@ function validTestManifestV2(value, expectedRequirements = null) {
   let journeys = 0;
   let checkpoints = 0;
   let coreJourney = false;
+  const interactiveCoverage = new Set();
   for (const feature of value.features) {
     if (!feature || typeof feature !== "object" || Array.isArray(feature)
       || typeof feature.id !== "string" || !stableId(feature.id) || featureIds.has(feature.id)
@@ -380,49 +406,119 @@ function validTestManifestV2(value, expectedRequirements = null) {
         || feature.checkNames.some(name => typeof name !== "string" || !stableId(name) || checkNames.has(name))) return false;
       for (const name of feature.checkNames) checkNames.add(name);
     } else if (feature.verificationMethod === "interactive") {
-      if (!validInteractionScriptV2(feature.interactionScript)
-        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000) return false;
+      if (!validInteractionScriptV3(feature.interactionScript)
+        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000
+        || !validLaunchProfile(feature.launchProfile)) return false;
       journeys += 1;
       const checkpointEvents = feature.interactionScript.events.filter(event => event.type === "checkpoint");
+      if (feature.launchProfile.type === "SCENARIO"
+        && !checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")) return false;
       checkpoints += checkpointEvents.length;
+      const actionEvents = feature.interactionScript.events.filter(event => isInteractionActionType(event.type));
+      for (const action of actionEvents) {
+        for (const requirementId of action.coversRequirementIds) {
+          if (!feature.requirementIds.includes(requirementId) || !playerRequirementIds.has(requirementId)) return false;
+          interactiveCoverage.add(requirementId);
+        }
+      }
       if (feature.coreJourney === true && feature.category === "core-loop") {
         const roles = new Set(checkpointEvents.map(event => event.role));
-        const assertionsComplete = checkpointEvents.every(event => event.referenceImage
-          || event.expectedOutput === checkpointOutputMarker(event.id));
-        const hasUserAction = feature.interactionScript.events.some(event => event.type === "key_press" || event.type === "mouse_click");
-        if (["START", "KEY_STATE", "COMPLETION"].every(role => roles.has(role))
-          && assertionsComplete && hasUserAction) coreJourney = true;
+        const intents = new Set(actionEvents.map(event => event.intent));
+        const assertionsComplete = checkpointEvents.every(event => event.assertions.length > 0
+          && (event.referenceImage || event.expectedOutput === undefined || event.expectedOutput === checkpointOutputMarker(event.id)));
+        if (feature.launchProfile.type === "FRESH"
+          && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
+          && checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")
+          && assertionsComplete && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
+          && actionEvents.length >= 2) coreJourney = true;
       }
     } else if (feature.verificationMethod === "visual") {
       if (!validVisualSpec(feature.expectedVisual)) return false;
       checkpoints += 1;
     }
   }
-  return journeys >= 1 && journeys <= 32 && checkpoints >= 3 && checkpoints <= 20 && coreJourney
-    && [...requirementIds].every(id => automatedCoverage.has(id));
+  return journeys >= 1 && journeys <= 32 && checkpoints >= 3 && checkpoints <= 64 && coreJourney
+    && [...requirementIds].every(id => automatedCoverage.has(id))
+    && [...playerRequirementIds].every(id => interactiveCoverage.has(id));
 }
 
-function validInteractionScriptV2(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== "2"
+function validInteractionScriptV3(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== "3"
     || !Array.isArray(value.events) || value.events.length < 1 || value.events.length > 200) return false;
   const checkpointIds = new Set();
+  const stepIds = new Set();
   return value.events.every(event => {
     if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") return false;
     const delayRequired = event.type === "wait";
     if (event.delay_ms === undefined ? delayRequired : !Number.isInteger(event.delay_ms) || event.delay_ms < 0 || event.delay_ms > 300000) return false;
-    if (["key_press", "key_release"].includes(event.type)) return typeof event.key === "string"
-      && /^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$/.test(event.key);
-    if (event.type === "mouse_move") return Number.isInteger(event.x) && event.x >= 0 && event.x < 1280 && Number.isInteger(event.y) && event.y >= 0 && event.y < 720;
-    if (event.type === "mouse_click") return ["LEFT", "RIGHT", "MIDDLE"].includes(event.button);
+    if (isInteractionActionType(event.type)) {
+      if (!stableId(event.stepId) || stepIds.has(event.stepId)
+        || !["START_SESSION", "NAVIGATION", "PRIMARY_ACTION", "FEATURE_ACTION", "COMPLETE_LOOP"].includes(event.intent)
+        || !Array.isArray(event.coversRequirementIds) || event.coversRequirementIds.length > 500
+        || event.coversRequirementIds.some(id => typeof id !== "string" || !stableId(id))
+        || new Set(event.coversRequirementIds).size !== event.coversRequirementIds.length
+        || !Array.isArray(event.postconditions) || event.postconditions.length < 1 || event.postconditions.length > 32
+        || !event.postconditions.every(validProbeAssertion)) return false;
+      stepIds.add(event.stepId);
+      if (event.type === "key_tap") return validKeyboardKey(event.key);
+      if (event.type === "key_hold") return validKeyboardKey(event.key) && validDuration(event.duration_ms);
+      if (["click", "double_click"].includes(event.type)) return stableId(event.targetId)
+        && (event.button === undefined || ["LEFT", "RIGHT", "MIDDLE"].includes(event.button));
+      if (event.type === "drag") return stableId(event.fromTargetId) && stableId(event.toTargetId)
+        && validDuration(event.duration_ms) && (event.button === undefined || event.button === "LEFT");
+      if (event.type === "scroll") return stableId(event.targetId) && Number.isInteger(event.deltaY)
+        && event.deltaY !== 0 && Math.abs(event.deltaY) <= 10000;
+      return stableId(event.targetId) && typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1000;
+    }
     if (event.type === "wait") return true;
     if (event.type !== "checkpoint" || typeof event.id !== "string" || !stableId(event.id)
-      || checkpointIds.has(event.id) || !["START", "KEY_STATE", "COMPLETION"].includes(event.role)
+      || checkpointIds.has(event.id) || !["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(event.role)
+      || !Array.isArray(event.assertions) || event.assertions.length < 1 || event.assertions.length > 32
+      || !event.assertions.every(validProbeAssertion)
+      || !["DYNAMIC", "STABLE_REPLAY"].includes(event.visualMode)
+      || (event.changeTargetId !== undefined && !stableId(event.changeTargetId))
+      || (event.visualMode === "DYNAMIC" && ["ACTION", "PROGRESS", "COMPLETION"].includes(event.role)
+        && !stableId(event.changeTargetId))
       || (event.referenceImage !== undefined && !safeProjectPngPath(event.referenceImage))
       || (event.expectedOutput !== undefined && event.expectedOutput !== checkpointOutputMarker(event.id))
       || (event.threshold !== undefined && (typeof event.threshold !== "number" || !Number.isFinite(event.threshold) || event.threshold < 0 || event.threshold > 1))) return false;
     checkpointIds.add(event.id);
     return true;
   });
+}
+
+function isInteractionActionType(value) {
+  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input"].includes(value);
+}
+
+function validProbeAssertion(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || !["STATE", "PROGRESS", "CONTROL", "SCENE"].includes(value.source)
+    || !["EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS", "LESS_THAN", "LESS_THAN_OR_EQUALS", "CONTAINS", "EXISTS", "CHANGED"].includes(value.operator)) return false;
+  if (["STATE", "PROGRESS"].includes(value.source)) {
+    if (typeof value.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value.key)
+      || value.targetId !== undefined || value.property !== undefined) return false;
+  } else if (value.source === "CONTROL") {
+    if (!stableId(value.targetId) || !["visible", "enabled", "text", "value"].includes(value.property)
+      || value.key !== undefined) return false;
+  } else if (value.key !== undefined || value.targetId !== undefined || value.property !== undefined) return false;
+  const needsValue = !["EXISTS", "CHANGED"].includes(value.operator);
+  if (needsValue !== Object.hasOwn(value, "value")) return false;
+  return value.value === undefined || ["string", "number", "boolean"].includes(typeof value.value);
+}
+
+function validLaunchProfile(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value.type === "FRESH") return Object.keys(value).length === 1;
+  return value.type === "SCENARIO" && stableId(value.scenarioId);
+}
+
+function validKeyboardKey(value) {
+  return typeof value === "string" && /^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$/.test(value);
+}
+
+function validDuration(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 300000;
 }
 
 function checkpointOutputMarker(checkpointId) {
@@ -463,7 +559,7 @@ async function extractE2eRepairEvidence(path) {
   await rm(root, { recursive: true, force: true });
   const { extractAndValidateEvidenceBundle } = await import("/usr/local/lib/deviludo/e2e-evidence.mjs");
   const { report } = await extractAndValidateEvidenceBundle(path, root, 512 * 1024 * 1024);
-  if (report?.schemaVersion !== "deviludo.e2e-evidence.v1" || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") {
+  if (report?.schemaVersion !== "deviludo.e2e-evidence.v2" || report.outcome !== "FAILED" || report.failureDomain !== "PRODUCT") {
     throw new Error("E2E evidence is not a trusted product failure");
   }
   return { legacy: false, report };
@@ -776,7 +872,7 @@ async function preparePackagedE2eContract() {
   let agentManifest;
   try { agentManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8")); }
   catch { throw new Error("Build source is missing a valid agent.json test contract"); }
-  if (!validTestManifestV2(agentManifest?.testManifest)) throw new Error("Build source has an invalid deviludo.test-manifest.v2 contract");
+  if (!validTestManifestV3(agentManifest?.testManifest)) throw new Error("Build source has an invalid deviludo.test-manifest.v3 contract");
   const root = "/workspace/project/.deviludo-e2e-package";
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });

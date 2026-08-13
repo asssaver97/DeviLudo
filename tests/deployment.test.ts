@@ -130,9 +130,10 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /"--tools", "Read,Write,Edit,Glob,Grep,Bash"/);
   assert.match(runner, /"--disallowedTools", "Agent,Task"/);
   assert.match(runner, /environment\.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"/);
-  assert.match(runner, /Use ONLY these exact interaction event shapes/);
-  assert.match(runner, /canonical uppercase names such as KEY_SPACE and KEY_P/);
-  assert.match(runner, /Never use event type keyboard, an action field, an ms field, or lowercase key names/);
+  assert.match(runner, /interactionScript must be version \\"3\\"/);
+  assert.match(runner, /fixed x\/y coordinates and unrelated key presses are forbidden/);
+  assert.match(runner, /Every PLAYER_INTERACTION requirement must be covered/);
+  assert.match(runner, /deviludo\.e2e-ui-probe\.v1/);
   assert.match(runner, /Math\.min\(80 \* 60_000/);
   assert.match(runner, /trimBufferedTail\(stdout, stdoutBytes, 2 \* 1024 \* 1024\)/);
   assert.match(runner, /checkpoint\.tar\.gz/);
@@ -292,7 +293,7 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(e2eIsolation, /DEVILUDO_E2E_IDENTITY_KEY_FILE: process\.env\.DEVILUDO_E2E_IDENTITY_KEY_FILE/);
   const builder = await readFile(new URL("../services/sandbox-executor/godot-build.mjs", import.meta.url), "utf8");
   assert.match(builder, /writeFile\([\s\S]*export_presets\.cfg[\s\S]*controlledExportPresets/);
-  assert.match(builder, /codesign\/codesign=0/);
+  assert.match(builder, /codesign\/codesign=1/);
   assert.match(builder, /codesign\/enable=false/);
   const builderImage = await readFile(new URL("../Dockerfile.godot-builder", import.meta.url), "utf8");
   assert.match(builderImage, /COPY services\/sandbox-executor\/godot-build\.mjs \/usr\/local\/bin\/godot-build\.mjs/);
@@ -314,7 +315,7 @@ test("production Agent execution requires a pinned Kata microVM runtime", async 
   assert.match(deployment, /verify_sha256 "\$expected" "\$archive"/);
   assert.match(manifest, /externalArtifacts: \{ kata \}/);
   assert.match(manifest, /artifactHostCommandsAllowed: false/);
-  assert.match(manifest, /guestReportProtocol: "deviludo\.godot-guest-report\.v2"/);
+  assert.match(manifest, /guestReportProtocol: "deviludo\.godot-guest-report\.v3"/);
 });
 
 test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", async () => {
@@ -397,24 +398,34 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
     readFile(new URL("../scripts/executors/windows-gui-driver.ps1", import.meta.url), "utf8"),
     readFile(new URL("../deploy/assets/e2e-linux-isolation.sh", import.meta.url), "utf8"),
   ]);
-  assert.match(guest, /deviludo\.test-manifest\.v2/);
+  assert.match(guest, /deviludo\.test-manifest\.v3/);
+  assert.match(guest, /deviludo\.e2e-ui-probe\.v1|waitForProbeSnapshot/);
   assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
   assert.match(guest, /"--log-file", logPath/);
   assert.match(guest, /DEVILUDO_E2E_CHECKPOINT_FILE: checkpointOutputPath/);
   assert.match(guest, /isolatedGameEnvironment\(`unit-\$\{unitIndex\}`\)/);
-  assert.match(guest, /isolatedGameEnvironment\(`journey-\$\{journey\.id\}`/);
+  assert.match(guest, /isolatedGameEnvironment\(runId/);
   assert.match(guest, /XDG_DATA_HOME: xdgData/);
   assert.match(guest, /APPDATA: appData/);
-  assert.match(guest, /checkpointOutputSeen\(\[[\s\S]*await readOptionalLog\(gameLogPath\),[\s\S]*await readOptionalLog\(checkpointOutputPath\),/);
+  assert.match(guest, /checkpointOutputSeen\(\[await readOptionalLog\(gameLogPath\), await readOptionalLog\(checkpointOutputPath\)\]/);
   assert.match(guest, /waitForCheckpointOutput\([\s\S]*CHECKPOINT_VISUAL_SETTLE_MS/);
   assert.match(guest, /MIN_STATE_TRANSITION_DIFFERENCE_RATIO\s*=\s*0\.001/);
   assert.match(guest, /CHECKPOINT_VISUAL_STATE_UNCHANGED/);
   assert.match(guest, /--windowed/);
   assert.doesNotMatch(guest.match(/async function runJourney[\s\S]*?(?=async function runVisualCheck)/)?.[0] ?? "", /--headless/);
-  assert.match(guest, /CHECKPOINTS_MISSING/);
-  assert.match(guest, /CORE_INPUT_MISSING/);
-  assert.match(guest, /interactionEventBatches\(journey\.interactionScript\.events\)/);
-  assert.match(guest, /"sequence"[\s\S]*JSON\.stringify\(batch\.events\)/);
+  assert.match(guest, /JOURNEYS_MISSING/);
+  assert.match(guest, /PLAYER_REQUIREMENT_COVERAGE_MISSING/);
+  assert.match(guest, /nativeInputEvents\(event, before\)/);
+  assert.match(guest, /"sequence"[\s\S]*JSON\.stringify\(nativeEvents\)/);
+  assert.match(guest, /ACTION_STATE_UNCHANGED/);
+  assert.match(guest, /MACOS_LAUNCH_SERVICES/);
+  assert.match(guest, /launchArguments\.push\("--env"/);
+  assert.match(guest, /execute\("\/usr\/bin\/open", launchArguments/);
+  assert.doesNotMatch(guest, /"launchctl", \["setenv"/);
+  assert.match(guest, /WINDOWS_FINAL_EXE/);
+  assert.match(guest, /LINUX_RELEASE_EXECUTABLE/);
+  assert.match(guest, /PLATFORM_TIMEOUT_MS = 30 \* 60_000/);
+  assert.match(guest, /STEAM_CLIENT_INSTALL/);
   assert.match(guest, /journey\.timeoutMs/);
   assert.match(guest, /UNIT_TIMEOUT/);
   assert.match(guest, /timedOut = true/);
@@ -429,6 +440,7 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(evidence, /logs\/stdout\.log/);
   assert.match(evidence, /manifest\.json/);
   assert.match(evidence, /data:image\/png;base64/);
+  assert.match(evidence, /玩家需求覆盖/);
   assert.match(evidence, /ZIP cannot contain symbolic links/);
   assert.match(builder, /\.deviludo-e2e/);
   assert.match(builder, /Godot reported script errors despite exit code 0/);

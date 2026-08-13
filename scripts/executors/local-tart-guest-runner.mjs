@@ -26,12 +26,13 @@ const command = [
   "env", "DEVILUDO_GUI_DRIVER=/usr/local/bin/deviludo-gui-driver",
   "DEVILUDO_GUEST_EVIDENCE_ROOT=/Users/Shared",
   "DEVILUDO_GUEST_JOB_ROOT=/Users/Shared",
+  "DEVILUDO_STEAM_CLEAN_INSTALLER=/usr/local/lib/deviludo/executors/steam-clean-install.mjs",
   "/usr/local/bin/node", "/usr/local/lib/deviludo/executors/godot-window-e2e-guest.mjs",
   action, remoteArtifact, "--job-id", jobId, "--json",
 ];
-const { stdout } = await execute("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], { timeout: 15 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+const { stdout } = await execute("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], { timeout: 31 * 60_000, maxBuffer: 2 * 1024 * 1024 });
 const receipt = JSON.parse(stdout);
-if (action === "test") {
+if (action === "test" || action === "clean-install") {
   if (!isAbsolute(hostOutput) || typeof receipt.outputPath !== "string" || !receipt.outputPath.startsWith("/Users/Shared/")) throw new Error("Tart guest evidence path is invalid");
   await execute("scp", [...ssh, `${configuration.guestUser}@${ip}:${receipt.outputPath}`, hostOutput], { timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024 });
   receipt.outputPath = hostOutput;

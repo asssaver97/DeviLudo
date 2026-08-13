@@ -42,8 +42,8 @@ try {
       await mkdir(directory, { recursive: true });
       await writeFile(`${directory}/deviludo-fixture-game.txt`, `platform=${platform}\njob=${plan.job.jobId}\n`);
       const generatedManifest = JSON.parse(await readFile("/workspace/inputs/agent.json", "utf8"));
-      if (generatedManifest?.testManifest?.schemaVersion !== "deviludo.test-manifest.v2") {
-        throw new Error("Fixture build requires a v2 test manifest");
+      if (generatedManifest?.testManifest?.schemaVersion !== "deviludo.test-manifest.v3") {
+        throw new Error("Fixture build requires a v3 test manifest");
       }
       await mkdir(`${directory}/.deviludo-e2e`, { recursive: true });
       await writeFile(`${directory}/.deviludo-e2e/manifest.json`, JSON.stringify(generatedManifest.testManifest));
@@ -100,6 +100,14 @@ try {
     generatedManifest.testManifest.features = generatedManifest.testManifest.features.map(feature => ({
       ...feature,
       requirementIds: requirements.map(requirement => requirement.requirementId),
+      ...(feature.verificationMethod === "interactive" ? {
+        interactionScript: {
+          ...feature.interactionScript,
+          events: feature.interactionScript.events.map(event => isRealInput(event)
+            ? { ...event, coversRequirementIds: requirements.map(requirement => requirement.requirementId) }
+            : event),
+        },
+      } : {}),
     }));
     await writeFile("/workspace/project/agent.json", `${JSON.stringify(generatedManifest, null, 2)}\n`);
     await progress("AGENT_OUTPUT", "项目结构生成完成，正在发布源码 revision。");
@@ -132,10 +140,17 @@ function specificationRequirementCatalog(specification) {
     if (!Array.isArray(value)) continue;
     value.forEach((item, index) => {
       if (typeof item !== "string" || !item.trim()) return;
-      catalog.push({ requirementId: stableRequirementId(kind, index, item), description: item.trim() });
+      catalog.push({
+        requirementId: stableRequirementId(kind, index, item), description: item.trim(),
+        source: kind === "feature" ? "CORE_LOOP" : "ACCEPTANCE", verificationClass: "PLAYER_INTERACTION",
+      });
     });
   }
   return catalog;
+}
+
+function isRealInput(event) {
+  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input"].includes(event?.type);
 }
 
 function stableRequirementId(kind, index, text) {

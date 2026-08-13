@@ -9,6 +9,7 @@ import {
   E2E_CLIENT_HEIGHT,
   E2E_CLIENT_WIDTH,
   E2E_EVIDENCE_PROTOCOL,
+  compareScreenshotRegion,
   compareScreenshots,
   createEvidenceBundle,
   encodeRgbaPng,
@@ -70,6 +71,23 @@ describe("E2E evidence", () => {
       const comparison = await compareScreenshots(actual, reference, diff, 0.001);
       assert.equal(comparison.passed, false);
       assert.ok((await readFile(diff)).length > 0);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("measures change only inside the declared semantic UI region", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "deviludo-evidence-region-"));
+    try {
+      const reference = join(directory, "reference.png");
+      const actual = join(directory, "actual.png");
+      const diff = join(directory, "region-diff.png");
+      await writeFile(reference, testImage());
+      await writeFile(actual, testImage(true));
+      const changed = await compareScreenshotRegion(actual, reference, { x: 0, y: 0, width: 20, height: 720 }, diff);
+      const unchanged = await compareScreenshotRegion(actual, reference, { x: 30, y: 0, width: 20, height: 720 });
+      assert.equal(changed.differenceRatio, 1);
+      assert.equal(unchanged.differenceRatio, 0);
+      assert.ok((await readFile(diff)).length > 0);
+      await assert.rejects(compareScreenshotRegion(actual, reference, { x: 1270, y: 0, width: 20, height: 720 }), /region is invalid/);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

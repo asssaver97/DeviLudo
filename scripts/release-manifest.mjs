@@ -39,12 +39,12 @@ await writeFile(output, JSON.stringify({
   images,
   plugins: {
     GODOT: {
-      version: "2",
+      version: "3",
       builderImage: godotBuilderImage,
       buildProtocol: "deviludo.godot-build.v2",
-      testManifestProtocol: "deviludo.test-manifest.v2",
-      guestReportProtocol: "deviludo.godot-guest-report.v2",
-      evidenceProtocol: "deviludo.e2e-evidence.v1",
+      testManifestProtocol: "deviludo.test-manifest.v3",
+      guestReportProtocol: "deviludo.godot-guest-report.v3",
+      evidenceProtocol: "deviludo.e2e-evidence.v2",
       guestActions: ["test", "clean-install"],
       artifactHostCommandsAllowed: false,
     },

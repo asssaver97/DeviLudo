@@ -42,6 +42,18 @@ export type ArtifactRecord = Readonly<{
   targetPlatform: "linux" | "windows" | "macos" | null;
   object: ObjectReference;
   e2eEvidence?: Readonly<{
+    protocol: "deviludo.e2e-evidence.v2";
+    result: "PASSED" | "FAILED";
+    headlessCheckCount: number;
+    interactiveJourneyCount: number;
+    realInputCount: number;
+    coveredPlayerRequirementCount: number;
+    playerRequirementCount: number;
+    screenshotCount: number;
+    visualBaselineCount: number;
+    hasVisualDiff: boolean;
+    packageLaunchMode: "MACOS_LAUNCH_SERVICES" | "WINDOWS_FINAL_EXE" | "LINUX_RELEASE_EXECUTABLE" | null;
+  } | {
     protocol: "deviludo.e2e-evidence.v1";
     result: "PASSED" | "FAILED";
     checkCount: number;

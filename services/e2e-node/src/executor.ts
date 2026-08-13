@@ -58,7 +58,7 @@ export async function executeE2eJob(
       );
     }
     validateExecutionReceipt(job, executionReceipt);
-    if (job.jobKind === "ARTIFACT_SIGN" || job.jobKind === "E2E_TEST") {
+    if (job.jobKind === "ARTIFACT_SIGN" || job.jobKind === "E2E_TEST" || job.jobKind === "STEAM_CLEAN_INSTALL") {
       const prepared = await readExecutorArtifact(executionReceipt, job.jobKind);
       preparedOutputContent = prepared.content;
       preparedPublicReceipt = prepared.publicReceipt;
@@ -106,7 +106,7 @@ export async function executeE2eJob(
     ...upload.object,
     kind: artifactKind,
     targetPlatform: job.targetOperatingSystem ?? undefined,
-    ...(job.jobKind === "E2E_TEST" && executionReceipt.evidence && typeof executionReceipt.evidence === "object"
+    ...(["E2E_TEST", "STEAM_CLEAN_INSTALL"].includes(job.jobKind) && executionReceipt.evidence && typeof executionReceipt.evidence === "object"
       ? { metadata: Object.freeze({ e2eEvidence: executionReceipt.evidence }) }
       : {}),
   })]);
@@ -141,10 +141,10 @@ export async function executeE2eJob(
 
 async function readExecutorArtifact(
   receipt: Readonly<Record<string, unknown>>,
-  kind: "ARTIFACT_SIGN" | "E2E_TEST",
+  kind: "ARTIFACT_SIGN" | "E2E_TEST" | "STEAM_CLEAN_INSTALL",
 ): Promise<Readonly<{ content: Buffer; publicReceipt: Readonly<Record<string, unknown>> }>> {
   const outputPath = typeof receipt.outputPath === "string" ? receipt.outputPath : "";
-  if (!isAbsolute(outputPath)) throw new Error(`${kind === "E2E_TEST" ? "E2E" : "Signing"} executor did not return an absolute artifact path`);
+  if (!isAbsolute(outputPath)) throw new Error(`${kind === "ARTIFACT_SIGN" ? "Signing" : "E2E"} executor did not return an absolute artifact path`);
   const configuredJobRoot = process.env.DEVILUDO_E2E_JOB_ROOT ?? "";
   if (!isAbsolute(configuredJobRoot)) throw new Error("A fixed E2E job root is required for external artifacts");
   const jobRoot = resolve(configuredJobRoot);
@@ -175,7 +175,7 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
     return;
   }
   const expectedAction = job.jobKind === "E2E_TEST" ? "test" : "clean-install";
-  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v2"
+  if (receipt.schemaVersion !== "deviludo.godot-guest-report.v3"
     || receipt.action !== expectedAction
     || !["PASSED", "FAILED"].includes(String(receipt.outcome))
     || (receipt.outcome === "FAILED" ? receipt.failureDomain !== "PRODUCT" : receipt.failureDomain !== null)
@@ -189,14 +189,24 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
     || (receipt.outcome === "FAILED" && guest.exitCode === 0)) {
     throw new Error("Godot guest outcome does not match its exit code");
   }
-  if (job.jobKind === "E2E_TEST") {
+  if (job.jobKind === "E2E_TEST" || job.jobKind === "STEAM_CLEAN_INSTALL") {
     const evidence = receipt.evidence as Record<string, unknown> | undefined;
     if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)
-      || evidence.protocol !== "deviludo.e2e-evidence.v1" || evidence.result !== receipt.outcome
-      || !Number.isSafeInteger(evidence.checkCount) || Number(evidence.checkCount) < 0
+      || evidence.protocol !== "deviludo.e2e-evidence.v2" || evidence.result !== receipt.outcome
+      || !Number.isSafeInteger(evidence.headlessCheckCount) || Number(evidence.headlessCheckCount) < 0
+      || !Number.isSafeInteger(evidence.interactiveJourneyCount) || Number(evidence.interactiveJourneyCount) < 0
+      || !Number.isSafeInteger(evidence.realInputCount) || Number(evidence.realInputCount) < 0
+      || !Number.isSafeInteger(evidence.coveredPlayerRequirementCount) || Number(evidence.coveredPlayerRequirementCount) < 0
+      || !Number.isSafeInteger(evidence.playerRequirementCount) || Number(evidence.playerRequirementCount) < 0
+      || Number(evidence.coveredPlayerRequirementCount) > Number(evidence.playerRequirementCount)
       || !Number.isSafeInteger(evidence.screenshotCount) || Number(evidence.screenshotCount) < 0
       || (receipt.outcome === "PASSED" && Number(evidence.screenshotCount) < 3)
+      || !Number.isSafeInteger(evidence.visualBaselineCount) || Number(evidence.visualBaselineCount) < 0
+      || (receipt.outcome === "PASSED" && (Number(evidence.interactiveJourneyCount) < 1
+        || Number(evidence.realInputCount) < 2
+        || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount)))
       || typeof evidence.hasVisualDiff !== "boolean"
+      || ![null, "MACOS_LAUNCH_SERVICES", "WINDOWS_FINAL_EXE", "LINUX_RELEASE_EXECUTABLE"].includes(evidence.packageLaunchMode as never)
       || typeof receipt.outputPath !== "string" || !isAbsolute(receipt.outputPath)
       || typeof receipt.outputSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.outputSha256)
       || !Number.isSafeInteger(receipt.outputSizeBytes) || Number(receipt.outputSizeBytes) < 1) {

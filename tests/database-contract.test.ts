@@ -85,7 +85,9 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /p_kind = 'AGENT_GENERATION' AND NOT \(p_payload \? 'repairFromE2eJobId'\) AND v_input_count <> 1/);
   assert.match(sql, /E2E_CONTENT_FAILED/);
   assert.match(sql, /last_error = 'E2E_PRODUCT: ' \|\| failure_summary/);
-  assert.match(sql, /repair_count < 3/);
+  assert.match(sql, /repair_count < 5/);
+  assert.match(sql, /test_manifest_protocol text CHECK/);
+  assert.match(sql, /testManifest,schemaVersion\}', ''\) <> 'deviludo\.test-manifest\.v3'/);
   assert.match(sql, /previous_repair\.created_at > coalesce\(\([\s\S]*max\(manual_agent\.created_at\)[\s\S]*NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
   assert.match(sql, /'repairFromE2eJobId', job\.id/);
   assert.match(sql, /p_signal_kind = 'STAGE_RERUN_REQUESTED'/);
@@ -102,6 +104,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /fail_local_git_commit[\s\S]*attempts >= 3[\s\S]*GIT_COMMIT_FAILED/);
   assert.match(sql, /schedule_e2e_protocol_revalidation/);
   assert.match(sql, /state_data #>> '\{e2eProtocolRevalidation,protocol\}' = p_protocol/);
+  assert.match(sql, /latest_test_manifest_protocol IS DISTINCT FROM 'deviludo\.test-manifest\.v3'[\s\S]*rerun_stage := 'AGENT_GENERATION'/);
   assert.match(sql, /artifact\.kind = 'BUILD'[\s\S]*rerun_stage := 'E2E_TEST'/);
   assert.match(sql, /project_source_revisions[\s\S]*rerun_stage := 'ARTIFACT_BUILD'/);
   assert.match(sql, /LIMIT p_batch_size/);

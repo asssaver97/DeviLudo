@@ -36,10 +36,11 @@ public static class DeviludoWindow {
   [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
 
   const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
-  const uint KEYEVENTF_KEYUP = 0x0002;
+  const uint KEYEVENTF_KEYUP = 0x0002, KEYEVENTF_UNICODE = 0x0004;
   const uint MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
   const uint MOUSEEVENTF_RIGHTDOWN = 0x0008, MOUSEEVENTF_RIGHTUP = 0x0010;
   const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020, MOUSEEVENTF_MIDDLEUP = 0x0040;
+  const uint MOUSEEVENTF_WHEEL = 0x0800;
   const uint MOUSEEVENTF_ABSOLUTE = 0x8000, MOUSEEVENTF_VIRTUALDESK = 0x4000;
 
   public static void ResizeClient(IntPtr window, int width, int height) {
@@ -72,6 +73,11 @@ public static class DeviludoWindow {
   }
 
   public static void Click(string button) {
+    MouseButton(button, true);
+    MouseButton(button, false);
+  }
+
+  public static void MouseButton(string button, bool pressed) {
     uint down, up;
     switch (button) {
       case "RIGHT": down = MOUSEEVENTF_RIGHTDOWN; up = MOUSEEVENTF_RIGHTUP; break;
@@ -79,9 +85,27 @@ public static class DeviludoWindow {
       case "LEFT": down = MOUSEEVENTF_LEFTDOWN; up = MOUSEEVENTF_LEFTUP; break;
       default: throw new ArgumentException("unsupported mouse button");
     }
-    INPUT first = new INPUT { type = INPUT_MOUSE }; first.U.mi = new MOUSEINPUT { dwFlags = down };
-    INPUT second = new INPUT { type = INPUT_MOUSE }; second.U.mi = new MOUSEINPUT { dwFlags = up };
-    Send(new [] { first, second });
+    INPUT input = new INPUT { type = INPUT_MOUSE };
+    input.U.mi = new MOUSEINPUT { dwFlags = pressed ? down : up };
+    Send(new [] { input });
+  }
+
+  public static void Scroll(int deltaY) {
+    INPUT input = new INPUT { type = INPUT_MOUSE };
+    input.U.mi = new MOUSEINPUT { mouseData = unchecked((uint)deltaY), dwFlags = MOUSEEVENTF_WHEEL };
+    Send(new [] { input });
+  }
+
+  public static void Text(string text) {
+    var inputs = new List<INPUT>();
+    foreach (char character in text) {
+      INPUT down = new INPUT { type = INPUT_KEYBOARD };
+      down.U.ki = new KEYBDINPUT { wScan = character, dwFlags = KEYEVENTF_UNICODE };
+      INPUT up = new INPUT { type = INPUT_KEYBOARD };
+      up.U.ki = new KEYBDINPUT { wScan = character, dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP };
+      inputs.Add(down); inputs.Add(up);
+    }
+    if (inputs.Count > 0) Send(inputs.ToArray());
   }
 
   static void Send(INPUT[] inputs) {
@@ -112,6 +136,10 @@ function Send-DeviludoEvent($event){
   elseif($event.type -eq 'key_release'){[DeviludoWindow]::Key([string]$event.key,$false)}
   elseif($event.type -eq 'mouse_move'){[DeviludoWindow]::MovePointer($handle,[int]$event.x,[int]$event.y)}
   elseif($event.type -eq 'mouse_click'){[DeviludoWindow]::Click([string]$event.button)}
+  elseif($event.type -eq 'mouse_down'){[DeviludoWindow]::MouseButton([string]$event.button,$true)}
+  elseif($event.type -eq 'mouse_up'){[DeviludoWindow]::MouseButton([string]$event.button,$false)}
+  elseif($event.type -eq 'scroll'){[DeviludoWindow]::Scroll([int]$event.deltaY)}
+  elseif($event.type -eq 'text_input'){[DeviludoWindow]::Text([string]$event.text)}
   else{throw 'unsupported input event'}
 }
 if($Command -eq 'wait'){

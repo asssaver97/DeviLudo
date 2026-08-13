@@ -1430,9 +1430,15 @@ function e2eEvidenceLabel(
   if (!evidence) return text("旧版证据 · 打开 JSON", "LEGACY EVIDENCE · OPENS JSON");
   const outcome = evidence.result === "PASSED" ? text("通过", "PASSED") : text("失败", "FAILED");
   const visualDiff = evidence.hasVisualDiff ? text(" · 含视觉差异", " · VISUAL DIFF") : "";
+  if (evidence.protocol === "deviludo.e2e-evidence.v2") {
+    return text(
+      `${outcome} · ${evidence.interactiveJourneyCount} 条真实旅程 · ${evidence.realInputCount} 次真实输入 · ${evidence.screenshotCount} 张截图${visualDiff}`,
+      `${outcome} · ${evidence.interactiveJourneyCount} REAL JOURNEYS · ${evidence.realInputCount} REAL INPUTS · ${evidence.screenshotCount} SCREENSHOTS${visualDiff}`,
+    );
+  }
   return text(
-    `${outcome} · ${evidence.checkCount} 项检查 · ${evidence.screenshotCount} 张截图${visualDiff}`,
-    `${outcome} · ${evidence.checkCount} CHECKS · ${evidence.screenshotCount} SCREENSHOTS${visualDiff}`,
+    `${outcome} · 旧版证据 · ${evidence.checkCount} 项检查 · ${evidence.screenshotCount} 张截图${visualDiff}`,
+    `${outcome} · LEGACY · ${evidence.checkCount} CHECKS · ${evidence.screenshotCount} SCREENSHOTS${visualDiff}`,
   );
 }
 
