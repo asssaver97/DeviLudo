@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 action=${1:?}; shift
-stage= job_id= workspace_id= generation= runtime_image=
+stage='' job_id='' workspace_id='' generation='' runtime_image=''
 while (($#)); do case "$1" in --stage) stage=$2; shift 2;; --job-id) job_id=$2; shift 2;; --workspace-id) workspace_id=$2; shift 2;; --generation) generation=$2; shift 2;; --runtime-image) runtime_image=$2; shift 2;; *) exit 64;; esac; done
 [[ $job_id =~ ^[0-9a-f-]{36}$ && $workspace_id =~ ^[0-9a-f-]{36}$ && $generation =~ ^[0-9]+$ && $runtime_image =~ ^sha256:[0-9a-f]{64}$ ]] || exit 64
 vm="deviludo-${job_id}"

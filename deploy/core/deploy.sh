@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DEVILUDO_ROLE=CORE
+export DEVILUDO_ROLE=CORE
 source "$(cd "$(dirname "$0")/../common" && pwd)/lib.sh"
 role_preflight() { [[ $(uname -m) == x86_64 ]] || { log "CORE requires x86_64 for the Steam toolchain"; return 1; }; [[ -c /dev/kvm ]] || { log "CORE requires hardware virtualization at /dev/kvm"; return 1; }; require_command curl; require_command jq; require_command openssl; for variable in DEVILUDO_DATABASE_OWNER_URL_FILE DEVILUDO_DATABASE_API_URL_FILE DEVILUDO_DATABASE_SCHEDULER_URL_FILE DEVILUDO_DATABASE_SANDBOX_URL_FILE DEVILUDO_S3_CREDENTIALS_FILE DEVILUDO_VAULT_ADMIN_TOKEN_FILE DEVILUDO_VAULT_TOKEN_FILE DEVILUDO_VAULT_EXECUTOR_TOKEN_FILE DEVILUDO_VAULT_PKI_TOKEN_FILE DEVILUDO_TLS_CERT_FILE DEVILUDO_TLS_KEY_FILE DEVILUDO_TLS_SERVER_CA_FILE DEVILUDO_TLS_CLIENT_CA_FILE DEVILUDO_WEB_CORE_TOKEN_FILE; do require_file "${!variable:?}"; done; [[ ${DEVILUDO_ACCESS_MODE:-} != platform ]] || require_file "${DEVILUDO_PLATFORM_INTERNAL_TOKEN_FILE:?}"; }
 role_bootstrap() {

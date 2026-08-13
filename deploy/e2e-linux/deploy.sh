@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DEVILUDO_ROLE=E2E_LINUX
+export DEVILUDO_ROLE=E2E_LINUX
 source "$(cd "$(dirname "$0")/../common" && pwd)/lib.sh"
 role_preflight() { [[ $(uname -m) == x86_64 ]] || return 1; for variable in DEVILUDO_ENROLLMENT_TOKEN_FILE DEVILUDO_GOLDEN_VM_FILE DEVILUDO_E2E_CORE_CA_FILE DEVILUDO_GUEST_SSH_KEY_FILE DEVILUDO_GUEST_KNOWN_HOSTS_FILE; do require_file "${!variable:?}"; done; require_file "$DEVILUDO_GOLDEN_VM_FILE.pem"; require_file "$DEVILUDO_GOLDEN_VM_FILE.sig"; [[ ${DEVILUDO_CORE_URL:-} == https://* ]]; }
 role_bootstrap() { require_root; . /etc/os-release; [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]]; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst libguestfs-tools ovmf godot openssh-client jq curl ca-certificates xz-utils ufw; install_node_linux; install_cosign_linux; useradd --system --home /var/lib/deviludo-e2e --shell /usr/sbin/nologin deviludo-e2e 2>/dev/null || true; usermod -aG libvirt,kvm deviludo-e2e; install -d -o deviludo-e2e -g deviludo-e2e /etc/deviludo/e2e /var/lib/deviludo-e2e /var/lib/deviludo-e2e/jobs; configure_ufw; systemctl enable --now libvirtd; }

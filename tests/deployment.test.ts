@@ -211,9 +211,11 @@ test("production E2E service accounts can read only installed runtime inputs", a
 
   const windows = await readFile(new URL("../deploy/e2e-windows/deploy.ps1", import.meta.url), "utf8");
   assert.match(windows, /function Set-RestrictedAcl/);
+  assert.match(windows, /function Set-RestrictedAcl \{[\s\S]*SupportsShouldProcess=\$true[\s\S]*\$PSCmdlet\.ShouldProcess/);
   assert.match(windows, /\*S-1-5-18:\(OI\)\(CI\)F/);
   assert.match(windows, /Copy-Item -LiteralPath \$c\.goldenVmFile -Destination \$goldenVmFile -Force/);
-  assert.match(windows, /Configure-Service \$c \$nodeId \$goldenVmFile/);
+  assert.match(windows, /Set-ServiceConfiguration -Config \$c -NodeId \$nodeId -GoldenVmFile \$goldenVmFile/);
+  assert.match(windows, /Get-ServiceEnvironment -Config \$Config -NodeId \$NodeId -GoldenVmFile \$GoldenVmFile/);
   assert.match(windows, /\$ServiceAccount="NT SERVICE\\\$Service"/);
   assert.match(windows, /sc\.exe config \$Service "obj= \$ServiceAccount"/);
   assert.match(windows, /Grant-ServiceAcl \(Join-Path \$State 'credentials'\) '\(OI\)\(CI\)M'/);

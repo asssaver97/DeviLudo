@@ -5,7 +5,7 @@
   <p>
     <strong>English</strong>
     ·
-    <a href="./docs/zh-CN/#readme">简体中文</a>
+    <a href="./README.zh-CN.md">简体中文</a>
   </p>
   <p>
     <a href="https://github.com/asssaver97/DeviLudo/actions/workflows/ci.yml"><img src="https://github.com/asssaver97/DeviLudo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>

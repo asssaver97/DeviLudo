@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="../../public/deviludo-brand-mark.png" width="112" alt="DeviLudo 标志">
+  <img src="./public/deviludo-brand-mark.png" width="112" alt="DeviLudo 标志">
   <h1>DeviLudo</h1>
   <p><strong>AI 原生 Godot 开发、测试与托管交付平台</strong></p>
   <p>
-    <a href="../../#readme">English</a>
+    <a href="./README.md">English</a>
     ·
     <strong>简体中文</strong>
   </p>
@@ -150,7 +150,7 @@ flowchart TB
 
 生产环境还需要 PostgreSQL、兼容 S3 的对象存储、Vault/KMS、OpenTelemetry、TLS 和负载均衡。公网流量只能进入 `WEB`；E2E 节点仅通过出站 mTLS 访问 `CORE`。
 
-推送 `v*` tag 后会生成固定摘要且经 Cosign 签名的镜像和部署 bundle。填写对应的 [WEB](../../deploy/web/deploy.env.example)、[CORE](../../deploy/core/deploy.env.example)、[Linux E2E](../../deploy/e2e-linux/deploy.env.example)、[Windows E2E](../../deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](../../deploy/e2e-macos/deploy.env.example) 配置，然后在各服务器执行该角色的 `preflight`、`bootstrap`、`deploy` 和 `status`。信任边界与拓扑参见[架构说明](../architecture.md)。
+推送 `v*` tag 后会生成固定摘要且经 Cosign 签名的镜像和部署 bundle。填写对应的 [WEB](deploy/web/deploy.env.example)、[CORE](deploy/core/deploy.env.example)、[Linux E2E](deploy/e2e-linux/deploy.env.example)、[Windows E2E](deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](deploy/e2e-macos/deploy.env.example) 配置，然后在各服务器执行该角色的 `preflight`、`bootstrap`、`deploy` 和 `status`。信任边界与拓扑参见[架构说明](docs/architecture.md)。
 
 ## 开发与验证
 
@@ -174,4 +174,4 @@ npm run local:permissions:test
 
 欢迎提交 Issue 和 Pull Request。提交变更前请运行 `npm run check`。
 
-[架构说明](../architecture.md) · [CI](../../.github/workflows/ci.yml) · [发布流程](../../.github/workflows/release.yml)
+[架构说明](docs/architecture.md) · [CI](.github/workflows/ci.yml) · [发布流程](.github/workflows/release.yml)

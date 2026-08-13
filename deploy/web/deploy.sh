@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DEVILUDO_ROLE=WEB
+export DEVILUDO_ROLE=WEB
 # shellcheck source=../common/lib.sh
 source "$(cd "$(dirname "$0")/../common" && pwd)/lib.sh"
 role_preflight() { require_command curl; require_command jq; require_file "${DEVILUDO_WEB_CORE_TOKEN_FILE:?}"; }

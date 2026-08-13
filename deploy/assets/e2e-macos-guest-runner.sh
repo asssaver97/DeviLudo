@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 action=${1:?}; shift
-job_id= artifact= regression=
+job_id='' artifact='' regression=''
 while (($#)); do case "$1" in
   --job-id) job_id=$2; shift 2;;
   --artifact) artifact=$2; shift 2;;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DEVILUDO_ROLE=E2E_MACOS
+export DEVILUDO_ROLE=E2E_MACOS
 source "$(cd "$(dirname "$0")/../common" && pwd)/lib.sh"
 role_preflight() { [[ $(uname -m) == arm64 ]] || return 1; [[ $(sw_vers -productVersion | cut -d. -f1) -ge 15 ]] || return 1; for variable in DEVILUDO_ENROLLMENT_TOKEN_FILE DEVILUDO_GOLDEN_VM_FILE DEVILUDO_E2E_CORE_CA_FILE DEVILUDO_GUEST_SSH_KEY_FILE DEVILUDO_GUEST_KNOWN_HOSTS_FILE; do require_file "${!variable:?}"; done; require_file "$DEVILUDO_GOLDEN_VM_FILE.pem"; require_file "$DEVILUDO_GOLDEN_VM_FILE.sig"; [[ ${DEVILUDO_CORE_URL:-} == https://* ]]; }
 role_bootstrap() { require_root; command -v brew >/dev/null; local brew_owner; brew_owner=$(stat -f %Su "$(brew --prefix)"); sudo -u "$brew_owner" brew install node@22 cirruslabs/cli/tart godot cosign jq; create_service_user; install -d -o deviludo-e2e -g staff "/Library/Application Support/DeviludoE2E" "/Library/Application Support/DeviludoE2E/logs" /var/lib/deviludo-e2e; }
