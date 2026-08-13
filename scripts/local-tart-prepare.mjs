@@ -78,10 +78,11 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
     await delay(1000);
   }
   if (!rebootedIp) throw new Error(`Tart 金镜像重启后未能启动；请查看 ${logFile}`);
+  let gamepadAvailable = false;
   try {
     await waitForGuestSsh(rebootedIp);
     await waitForGuestDesktop(rebootedIp);
-    await smokeGuestRuntime(rebootedIp);
+    gamepadAvailable = await smokeGuestRuntime(rebootedIp);
   } catch (error) {
     throw new Error(`Tart 金镜像重启后真实窗口 smoke 失败，未启用宿主机降级：${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -89,7 +90,7 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   }
   if (await tartVmExists(goldenName)) await run("tart", ["delete", goldenName], 120_000);
   await run("tart", ["rename", stagingName, goldenName], 120_000);
-  const state = { schema: "deviludo.local-tart-e2e", goldenName, baseImage, baseCacheName, baseImageDigest, fingerprint, guestUser: "admin", keyFile, knownHostsFile, createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString() };
+  const state = { schema: "deviludo.local-tart-e2e", goldenName, baseImage, baseCacheName, baseImageDigest, fingerprint, gamepadAvailable, guestUser: "admin", keyFile, knownHostsFile, createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString() };
   await writeState(state);
   return Object.freeze({ ...state, reused: false });
 }
@@ -231,7 +232,7 @@ async function compileHostDrivers() {
   ], { timeout: 5 * 60_000, maxBuffer: 4 * 1024 * 1024 });
   await chmod(hostGuiDriverFile, 0o755);
   await execute("swiftc", [
-    "-Onone", "-target", "arm64-apple-macosx15.0", "-module-cache-path", moduleCache,
+    "-Onone", "-parse-as-library", "-target", "arm64-apple-macosx15.0", "-module-cache-path", moduleCache,
     "-o", hostGamepadDriverFile, resolve(root, "scripts/executors/macos-gamepad-driver.swift"),
   ], { timeout: 5 * 60_000, maxBuffer: 4 * 1024 * 1024 });
   await chmod(hostGamepadDriverFile, 0o755);
@@ -263,9 +264,12 @@ async function installGuestRuntime(ip) {
 
 async function smokeGuestRuntime(ip) {
   const ssh = sshArguments();
-  const command = "set -e; printf 'DeviLudo real-window E2E smoke\\n' > /Users/Shared/deviludo-smoke.txt; open -a TextEdit /Users/Shared/deviludo-smoke.txt; sleep 3; pid=$(pgrep -x TextEdit | head -n1); test -n \"$pid\"; /usr/local/bin/deviludo-gui-driver wait --pid \"$pid\" --width 1 --height 1; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_press\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_release\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver capture --pid \"$pid\" --output /Users/Shared/deviludo-smoke.png; /usr/local/bin/node -e \"import('/usr/local/lib/deviludo/e2e-evidence.mjs').then(m=>m.inspectScreenshot('/Users/Shared/deviludo-smoke.png')).then(()=>process.stdout.write('smoke-ok'))\"; mkdir -p /Users/Shared/godot-input-smoke; cp /Users/Shared/godot-input-smoke-project.godot /Users/Shared/godot-input-smoke/project.godot; cp /Users/Shared/godot-input-smoke-main.tscn /Users/Shared/godot-input-smoke/main.tscn; cp /Users/Shared/godot-input-smoke-main.gd /Users/Shared/godot-input-smoke/main.gd; DEVILUDO_GAMEPAD_DRIVER=/usr/local/bin/deviludo-gamepad-driver /usr/local/bin/node /Users/Shared/godot-system-gamepad-smoke.mjs /Users/Shared/godot-input-smoke";
+  const command = "set -e; printf 'DeviLudo real-window E2E smoke\\n' > /Users/Shared/deviludo-smoke.txt; open -a TextEdit /Users/Shared/deviludo-smoke.txt; sleep 3; pid=$(pgrep -x TextEdit | head -n1); test -n \"$pid\"; /usr/local/bin/deviludo-gui-driver wait --pid \"$pid\" --width 1 --height 1; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_press\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_release\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver capture --pid \"$pid\" --output /Users/Shared/deviludo-smoke.png; /usr/local/bin/node -e \"import('/usr/local/lib/deviludo/e2e-evidence.mjs').then(m=>m.inspectScreenshot('/Users/Shared/deviludo-smoke.png')).then(()=>process.stdout.write('smoke-ok'))\"; mkdir -p /Users/Shared/godot-input-smoke; cp /Users/Shared/godot-input-smoke-project.godot /Users/Shared/godot-input-smoke/project.godot; cp /Users/Shared/godot-input-smoke-main.tscn /Users/Shared/godot-input-smoke/main.tscn; cp /Users/Shared/godot-input-smoke-main.gd /Users/Shared/godot-input-smoke/main.gd; DEVILUDO_GAMEPAD_OPTIONAL=1 DEVILUDO_GAMEPAD_DRIVER=/usr/local/bin/deviludo-gamepad-driver /usr/local/bin/node /Users/Shared/godot-system-gamepad-smoke.mjs /Users/Shared/godot-input-smoke";
   const { stdout } = await execute("ssh", [...ssh, `admin@${ip}`, command], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
-  if (!stdout.includes("smoke-ok") || !stdout.includes("gamepad-smoke-ok")) throw new Error("Tart guest 截图/键鼠/系统手柄 smoke 未通过（检查 Screen Recording、Accessibility 与 Core HID 权限）");
+  if (!stdout.includes("smoke-ok") || (!stdout.includes("gamepad-smoke-ok") && !stdout.includes("gamepad-smoke-unavailable"))) throw new Error("Tart guest 截图/键鼠 smoke 未通过（检查 Screen Recording 与 Accessibility 权限）");
+  const available = stdout.includes("gamepad-smoke-ok");
+  if (!available) console.warn("Tart guest 未获得 Apple Core HID 虚拟设备 entitlement；键鼠 E2E 可用，声明 GAMEPAD 的项目将明确报基础设施不可用");
+  return available;
 }
 
 async function waitForGuestSsh(ip) {

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 
 const project = process.argv[2];
 const gamepadDriver = process.env.DEVILUDO_GAMEPAD_DRIVER ?? "";
+const optional = process.env.DEVILUDO_GAMEPAD_OPTIONAL === "1";
 const defaultGodot = process.platform === "darwin" ? "/Applications/Godot.app/Contents/MacOS/Godot"
   : process.platform === "win32" ? "C:\\Program Files\\Godot\\Godot.exe" : "/usr/bin/godot";
 const godot = process.env.DEVILUDO_GODOT ?? defaultGodot;
@@ -16,11 +17,15 @@ if (!isAbsolute(project ?? "") || !isAbsolute(gamepadDriver) || !isAbsolute(godo
 }
 await rm(marker, { force: true });
 
-const driver = spawn(gamepadDriver, ["serve", "--session", "golden-image-smoke"], { stdio: ["pipe", "pipe", "inherit"], shell: false });
+const driver = spawn(gamepadDriver, ["serve", "--session", "golden-image-smoke"], { stdio: ["pipe", "pipe", "pipe"], shell: false });
+let driverStderr = "";
+driver.stderr.on("data", chunk => { driverStderr += String(chunk); });
+driver.stdin.on("error", () => undefined);
 const lines = createInterface({ input: driver.stdout, crlfDelay: Infinity })[Symbol.asyncIterator]();
 let sequence = 0;
 async function request(command, payload = {}) {
   const id = `smoke-${++sequence}`;
+  if (!driver.stdin.writable || driver.stdin.destroyed) throw new Error("Gamepad driver closed during smoke");
   driver.stdin.write(`${JSON.stringify({ id, command, ...payload })}\n`);
   const response = await Promise.race([
     lines.next(),
@@ -32,8 +37,19 @@ async function request(command, payload = {}) {
 }
 
 let game = null;
+let ready = false;
 try {
-  await request("ready");
+  try {
+    await request("ready");
+    ready = true;
+  } catch (error) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (optional && (driver.exitCode === 64 || /unable to create Core HID virtual game controller/.test(driverStderr))) {
+      process.stdout.write("gamepad-smoke-unavailable\n");
+    } else throw error;
+  }
+  if (!ready) process.exitCode = 0;
+  else {
   game = spawn(godot, ["--path", project], {
     stdio: ["ignore", "inherit", "inherit"], shell: false,
     env: { ...process.env, DEVILUDO_GAMEPAD_SMOKE_MARKER: marker },
@@ -45,9 +61,10 @@ try {
   await access(marker);
   if (code !== 0) throw new Error(`Godot system gamepad smoke exited ${code}`);
   process.stdout.write("gamepad-smoke-ok\n");
+  }
 } finally {
   if (game?.exitCode === null) game.kill("SIGKILL");
-  await request("release_all").catch(() => undefined);
-  await request("destroy").catch(() => undefined);
+  if (ready) await request("release_all").catch(() => undefined);
+  if (ready) await request("destroy").catch(() => undefined);
   if (driver.exitCode === null) driver.kill("SIGTERM");
 }

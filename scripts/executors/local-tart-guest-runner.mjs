@@ -32,7 +32,7 @@ if (regression) {
 }
 const command = [
   "env", "DEVILUDO_GUI_DRIVER=/usr/local/bin/deviludo-gui-driver",
-  "DEVILUDO_GAMEPAD_DRIVER=/usr/local/bin/deviludo-gamepad-driver",
+  `DEVILUDO_GAMEPAD_DRIVER=${configuration.gamepadAvailable === true ? "/usr/local/bin/deviludo-gamepad-driver" : ""}`,
   "DEVILUDO_GUEST_EVIDENCE_ROOT=/Users/Shared",
   "DEVILUDO_GUEST_JOB_ROOT=/Users/Shared",
   "DEVILUDO_E2E_STREAM_PROTOCOL=1",

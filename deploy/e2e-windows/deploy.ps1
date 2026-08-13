@@ -21,6 +21,7 @@ function Grant-ServiceAcl($Path,$Rights){
 }
 function Get-ReleaseHeader {
   [CmdletBinding()]
+  [OutputType([System.Collections.Hashtable])]
   param([Parameter(Mandatory=$true)]$Config)
   if(!$Config.releaseAuthHeaderFile){return @{}}
   Test-RequiredFile -Path $Config.releaseAuthHeaderFile
@@ -82,6 +83,7 @@ function Initialize-Enrollment {
 }
 function Get-ServiceEnvironment {
   [CmdletBinding()]
+  [OutputType([System.Object[]])]
   param([Parameter(Mandatory=$true)]$Config,[Parameter(Mandatory=$true)][string]$NodeId,[Parameter(Mandatory=$true)][string]$GoldenVmFile)
   $credentials=Join-Path $State 'credentials'; $current=Join-Path $Root 'current'
   return @(

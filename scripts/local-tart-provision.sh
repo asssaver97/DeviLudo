@@ -11,7 +11,9 @@ sudo install -m 0444 /Users/Shared/e2e-ui-probe.mjs "$guest_root/e2e-ui-probe.mj
 sudo install -m 0555 /Users/Shared/deviludo-gui-driver /usr/local/bin/deviludo-gui-driver
 sudo install -m 0555 /Users/Shared/deviludo-gamepad-driver /usr/local/bin/deviludo-gamepad-driver
 if [[ ! -x /opt/homebrew/bin/ffmpeg ]]; then
-  /opt/homebrew/bin/brew install ffmpeg
+  # Provisioning is launched through sudo so privileged image changes remain
+  # non-interactive. Homebrew must still run as the unprivileged guest owner.
+  sudo -u admin -H /opt/homebrew/bin/brew install ffmpeg
 fi
 sudo ln -sfn /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg
 sudo ln -sfn /opt/homebrew/bin/ffprobe /usr/local/bin/ffprobe

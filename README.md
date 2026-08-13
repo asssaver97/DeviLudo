@@ -56,14 +56,18 @@ Each round has its own workflow instance. A completed, failed, or cancelled roun
 
 ## Quick start
 
-### Requirements
+### Local deployment requirements
 
 | Item | Requirement |
 | --- | --- |
-| Host | Apple Silicon macOS |
-| Runtime | Node.js 22, Docker or Colima, Homebrew |
-| Virtualization | Tart with a macOS Tahoe 26 golden image |
-| Storage | At least 35 GiB free is recommended |
+| Host | Apple Silicon Mac (M1 or newer) running macOS 15 or newer; Intel Macs and non-macOS hosts are not supported by the local all-in-one workflow |
+| Toolchain | Current Xcode Command Line Tools with `swiftc`, Homebrew, Git, Node.js `>=22.13`, and npm |
+| Containers | Docker Desktop, or Colima with Docker Compose v2; the bootstrap profile assigns 4 CPUs, 8 GiB RAM, and a 60 GiB sparse disk to Colima |
+| Virtualization | Apple Virtualization Framework enabled (`sysctl -n kern.hv_support` returns `1`); Tart runs a 6 GiB macOS Tahoe 26 VM |
+| Memory | 16 GiB host RAM minimum; 24 GiB or more recommended when Docker and the E2E VM run together |
+| Storage | 140 GiB free recommended before the first full start; Tart currently retains about 90–95 GiB, with additional variable Docker, build, source, and evidence data |
+| Network | Outbound HTTPS access to GitHub/GHCR, Homebrew, npm, container registries, and the configured AI providers |
+| Local ports | `3100` (web), `8080` (Core), `3199` (local project bridge), and `39000` (object storage) must be available on loopback |
 
 ```bash
 git clone https://github.com/asssaver97/DeviLudo.git
@@ -75,7 +79,9 @@ npm run local:up
 
 Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then configure Claude Code or Codex CLI under **Settings → Agent Settings**. An image-generation provider is optional. Local installations use `standalone` mode and require no account.
 
-The first `local:up` downloads a roughly 25 GB macOS base image and builds a fingerprinted Tart golden image. Initialization fails explicitly instead of falling back to host execution. Refresh the image only when required:
+`local:bootstrap` installs the container toolchain when it is missing. Keep Xcode Command Line Tools current before Homebrew installs Tart. The first `local:up` downloads roughly 25 GB over the network, then retains an OCI cache, a base clone, and a fingerprinted golden VM. The Tart footprint is currently about 90–95 GiB; Docker images and build caches are additional. The setup script's 35 GiB check is only a base-download preflight, not the complete local footprint.
+
+Initialization fails explicitly instead of falling back to host execution. Refresh the image only when required:
 
 ```bash
 npm run local:up -- --refresh-e2e-vm
@@ -119,6 +125,8 @@ Every deterministic journey and adaptive playthrough records `1280×720`, 5 FPS 
 
 System gamepad backends are Core HID on macOS, `uinput` on Linux, and KMDF/VHF on Windows. Every golden image must pass a real Godot window/input/screenshot smoke before accepting jobs. Fixed-coordinate regressions, self-reported success, missing player coverage, Godot errors, blank screenshots, stuck input, or fewer than two successful playthroughs fail the round.
 
+Apple restricts Core HID virtual devices to approved signing entitlements. Local setup detects that capability without weakening macOS security: keyboard/pointer E2E remains available, while a project that declares `GAMEPAD` fails explicitly as unavailable unless the E2E image has an Apple-approved virtual HID driver.
+
 ## Steam configuration
 
 - Store the workspace Steamworks build account and credential under **Settings → Steam build account**.
@@ -150,7 +158,7 @@ flowchart TB
 
 Production also requires PostgreSQL, S3-compatible object storage, Vault/KMS, OpenTelemetry, TLS, and load balancing. Public traffic enters only `WEB`; E2E nodes reach `CORE` through outbound mTLS.
 
-Push a `v*` tag to generate digest-pinned, Cosign-signed images and deployment bundles. Complete the matching [WEB](deploy/web/deploy.env.example), [CORE](deploy/core/deploy.env.example), [Linux E2E](deploy/e2e-linux/deploy.env.example), [Windows E2E](deploy/e2e-windows/deploy.json.example), and [macOS E2E](deploy/e2e-macos/deploy.env.example) configuration, then run the role's `preflight`, `bootstrap`, `deploy`, and `status` actions. See [Architecture](docs/architecture.md) for the trust boundaries and topology.
+Push a `v*` tag to generate digest-pinned, Cosign-signed images and deployment bundles. Complete the matching [WEB](deploy/web/deploy.env.example), [CORE](deploy/core/deploy.env.example), [Linux E2E](deploy/e2e-linux/deploy.env.example), [Windows E2E](deploy/e2e-windows/deploy.json.example), and [macOS E2E](deploy/e2e-macos/deploy.env.example) configuration, then run the role's `preflight`, `bootstrap`, `deploy`, and `status` actions.
 
 ## Development
 
@@ -174,4 +182,4 @@ The real-provider smoke may incur charges and runs only when explicitly started 
 
 Issues and pull requests are welcome. Run `npm run check` before submitting changes.
 
-[Architecture](docs/architecture.md) · [CI](.github/workflows/ci.yml) · [Release workflow](.github/workflows/release.yml)
+[CI](.github/workflows/ci.yml) · [Release workflow](.github/workflows/release.yml)

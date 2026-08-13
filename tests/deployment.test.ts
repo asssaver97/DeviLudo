@@ -212,6 +212,8 @@ test("production E2E service accounts can read only installed runtime inputs", a
   const windows = await readFile(new URL("../deploy/e2e-windows/deploy.ps1", import.meta.url), "utf8");
   assert.match(windows, /function Set-RestrictedAcl/);
   assert.match(windows, /function Set-RestrictedAcl \{[\s\S]*SupportsShouldProcess=\$true[\s\S]*\$PSCmdlet\.ShouldProcess/);
+  assert.match(windows, /function Get-ReleaseHeader \{[\s\S]*?OutputType\(\[System\.Collections\.Hashtable\]\)/);
+  assert.match(windows, /function Get-ServiceEnvironment \{[\s\S]*?OutputType\(\[System\.Object\[\]\]\)/);
   assert.match(windows, /\*S-1-5-18:\(OI\)\(CI\)F/);
   assert.match(windows, /Copy-Item -LiteralPath \$c\.goldenVmFile -Destination \$goldenVmFile -Force/);
   assert.match(windows, /Set-ServiceConfiguration -Config \$c -NodeId \$nodeId -GoldenVmFile \$goldenVmFile/);
@@ -223,6 +225,12 @@ test("production E2E service accounts can read only installed runtime inputs", a
   assert.match(windows, /Grant-ServiceAcl \(Join-Path \$State 'golden'\) '\(OI\)\(CI\)RX'/);
   assert.match(windows, /New-ScheduledTaskPrincipal -UserId \$ServiceAccount -LogonType ServiceAccount -RunLevel Limited/);
   assert.doesNotMatch(windows, /Register-ScheduledTask[^\n]+-User 'SYSTEM'/);
+});
+
+test("architecture verification uses only the Node.js filesystem API", async () => {
+  const verifier = await readFile(new URL("../scripts/verify-architecture.mjs", import.meta.url), "utf8");
+  assert.match(verifier, /readdir\(directory, \{ withFileTypes: true \}\)/);
+  assert.doesNotMatch(verifier, /node:child_process|execFile|["']rg["']/);
 });
 
 test("Core keeps Docker authority in executord and isolates Agent and Steam egress", async () => {
@@ -364,10 +372,22 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /key_press/);
   assert.match(tartPrepare, /key_release/);
   assert.match(tartPrepare, /"-target", "arm64-apple-macosx15\.0"/);
+  assert.match(tartPrepare, /"-Onone", "-parse-as-library", "-target", "arm64-apple-macosx15\.0"/);
   assert.match(tartPrepare, /godot-system-gamepad-smoke/);
   assert.match(tartPrepare, /gamepad-smoke-ok/);
   assert.match(tartPrepare, /"-Onone"/);
   assert.match(tartPrepare, /\[hostGuiDriverFile, "\/Users\/Shared\/deviludo-gui-driver"\]/);
+  const gamepadDriver = await readFile(new URL("../scripts/executors/macos-gamepad-driver.swift", import.meta.url), "utf8");
+  assert.match(gamepadDriver, /import CoreHID/);
+  assert.match(gamepadDriver, /HIDVirtualDevice\(properties:/);
+  assert.doesNotMatch(gamepadDriver, /IOHIDUserDeviceCreate|IOHIDUserDeviceHandleReport/);
+  assert.doesNotMatch(tartProvision, /amfi_get_out_of_my_way|codesign/);
+  assert.match(tartPrepare, /gamepad-smoke-unavailable/);
+  assert.match(tartPrepare, /gamepadAvailable/);
+  const tartGuest = await readFile(new URL("../scripts/executors/local-tart-guest-runner.mjs", import.meta.url), "utf8");
+  assert.match(tartGuest, /configuration\.gamepadAvailable === true/);
+  assert.match(tartProvision, /sudo -u admin -H \/opt\/homebrew\/bin\/brew install ffmpeg/);
+  assert.doesNotMatch(tartProvision, /^\s*\/opt\/homebrew\/bin\/brew install ffmpeg/m);
   assert.match(tartPrepare, /gui-event-batches\.mjs"\), "\/Users\/Shared\/gui-event-batches\.mjs"/);
   assert.match(tartPrepare, /randomBytes\(12\)\.toString\("hex"\)/);
   assert.doesNotMatch(tartPrepare, /\/Users\/Shared\/macos-gui-driver\.swift/);

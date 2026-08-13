@@ -56,14 +56,18 @@ flowchart LR
 
 ## 本地快速开始
 
-### 环境要求
+### 本地部署环境要求
 
 | 项目 | 要求 |
 | --- | --- |
-| 主机 | Apple Silicon macOS |
-| 运行时 | Node.js 22、Docker 或 Colima、Homebrew |
-| 虚拟化 | Tart 与 macOS Tahoe 26 金镜像 |
-| 磁盘 | 建议至少保留 35 GiB 可用空间 |
+| 主机 | Apple Silicon Mac（M1 或更新）和 macOS 15 或更新版本；本地一体化流程不支持 Intel Mac 或非 macOS 主机 |
+| 工具链 | 与当前系统兼容的最新版 Xcode Command Line Tools（包含 `swiftc`）、Homebrew、Git、Node.js `>=22.13` 和 npm |
+| 容器 | Docker Desktop，或 Colima + Docker Compose v2；bootstrap 默认给 Colima 分配 4 CPU、8 GiB 内存和 60 GiB 稀疏磁盘 |
+| 虚拟化 | Apple Virtualization Framework 已启用（`sysctl -n kern.hv_support` 返回 `1`）；Tart 会运行 6 GiB 内存的 macOS Tahoe 26 虚拟机 |
+| 内存 | 主机至少 16 GiB；Docker 与 E2E 虚拟机同时运行时建议 24 GiB 或更多 |
+| 磁盘 | 首次完整启动前建议有 140 GiB 可用空间；Tart 当前会保留约 90–95 GiB，Docker、构建、源码和证据数据还会占用额外空间 |
+| 网络 | 能通过 HTTPS 访问 GitHub/GHCR、Homebrew、npm、容器镜像仓库和已配置的 AI Provider |
+| 本地端口 | 回环地址上的 `3100`（Web）、`8080`（Core）、`3199`（本地项目桥接）和 `39000`（对象存储）未被占用 |
 
 ```bash
 git clone https://github.com/asssaver97/DeviLudo.git
@@ -75,7 +79,9 @@ npm run local:up
 
 打开 [http://127.0.0.1:3100](http://127.0.0.1:3100)，然后在“设置 → Agent 设置”中配置 Claude Code 或 Codex CLI。图片生成 Provider 为可选项。本地安装使用 `standalone` 模式，不需要账号。
 
-首次运行 `local:up` 会下载约 25 GB 的 macOS 基础镜像并构建带指纹的 Tart 金镜像。初始化失败会明确停止，不会降级到宿主机执行。仅在需要时刷新镜像：
+`local:bootstrap` 会安装缺失的容器工具链。在 Homebrew 安装 Tart 前，请确保 Xcode Command Line Tools 已更新到与当前系统兼容的版本。首次运行 `local:up` 会产生约 25 GB 网络下载，之后保留 OCI 缓存、基础克隆和带指纹的金镜像。Tart 当前实际占用约 90–95 GiB，Docker 镜像和构建缓存另计。脚本中的 35 GiB 检查只是下载基础镜像前的门槛，不是完整本地占用要求。
+
+初始化失败会明确停止，不会降级到宿主机执行。仅在需要时刷新镜像：
 
 ```bash
 npm run local:up -- --refresh-e2e-vm
@@ -119,6 +125,8 @@ DeviLudo 始终只维护一套当前 E2E 实现和一个当前测试契约 `devi
 
 系统级手柄后端固定为 macOS Core HID、Linux `uinput`、Windows KMDF/VHF。每个金镜像在领取任务前都必须通过真实 Godot 窗口、输入和截图 smoke。固定坐标回归、程序自报成功、玩家需求覆盖不完整、Godot 错误、空白截图、输入卡死或三次游玩不足两次成功都会判定失败。
 
+Apple 仅允许带获批签名 entitlement 的程序创建 Core HID 虚拟设备。本地初始化会在不削弱 macOS 安全机制的前提下检测该能力：键鼠 E2E 仍可用；如果项目声明 `GAMEPAD`，而 E2E 镜像没有 Apple 批准的虚拟 HID 驱动，则会明确报告基础设施不可用。
+
 ## Steam 配置
 
 - 在“设置 → Steam 构建账号”中保存工作区级 Steamworks 构建账号和凭证。
@@ -150,7 +158,7 @@ flowchart TB
 
 生产环境还需要 PostgreSQL、兼容 S3 的对象存储、Vault/KMS、OpenTelemetry、TLS 和负载均衡。公网流量只能进入 `WEB`；E2E 节点仅通过出站 mTLS 访问 `CORE`。
 
-推送 `v*` tag 后会生成固定摘要且经 Cosign 签名的镜像和部署 bundle。填写对应的 [WEB](deploy/web/deploy.env.example)、[CORE](deploy/core/deploy.env.example)、[Linux E2E](deploy/e2e-linux/deploy.env.example)、[Windows E2E](deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](deploy/e2e-macos/deploy.env.example) 配置，然后在各服务器执行该角色的 `preflight`、`bootstrap`、`deploy` 和 `status`。信任边界与拓扑参见[架构说明](docs/architecture.md)。
+推送 `v*` tag 后会生成固定摘要且经 Cosign 签名的镜像和部署 bundle。填写对应的 [WEB](deploy/web/deploy.env.example)、[CORE](deploy/core/deploy.env.example)、[Linux E2E](deploy/e2e-linux/deploy.env.example)、[Windows E2E](deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](deploy/e2e-macos/deploy.env.example) 配置，然后在各服务器执行该角色的 `preflight`、`bootstrap`、`deploy` 和 `status`。
 
 ## 开发与验证
 
@@ -174,4 +182,4 @@ npm run local:permissions:test
 
 欢迎提交 Issue 和 Pull Request。提交变更前请运行 `npm run check`。
 
-[架构说明](docs/architecture.md) · [CI](.github/workflows/ci.yml) · [发布流程](.github/workflows/release.yml)
+[CI](.github/workflows/ci.yml) · [发布流程](.github/workflows/release.yml)

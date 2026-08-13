@@ -1,18 +1,20 @@
-import { execFile } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
-const execute = promisify(execFile);
 const root = fileURLToPath(new URL("..", import.meta.url));
-const { stdout } = await execute("rg", ["--files"], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
 const textExtensions = new Set([
   ".ts", ".tsx", ".mjs", ".js", ".json", ".sql", ".yml", ".yaml", ".md", ".d.ts",
   ".sh", ".ps1", ".cmd", ".toml", ".hcl", ".plist",
 ]);
 const rootTextFiles = new Set([".env.example"]);
 const excluded = new Set(["scripts/verify-architecture.mjs"]);
+const ignoredDirectories = new Set([
+  ".git", ".next", ".deviludo", ".cache", ".turbo", ".vinext",
+  "node_modules", "coverage", "test-results", "playwright-report", "blob-report",
+  "dist", "out", "outputs", "work", "bin", "obj", "app_userdata",
+]);
+const sourceFiles = await listSourceFiles(root);
 const forbidden = [
   { label: "retired workflow sdk", pattern: new RegExp(["tempo", "ral"].join(""), "i") },
   { label: "retired cache service", pattern: new RegExp("\\b" + ["re", "dis"].join("") + "\\b", "i") },
@@ -33,17 +35,17 @@ const forbidden = [
   { label: "simulated success", pattern: /development-simulator|simulated\s*:\s*true/ },
 ];
 const violations = [];
-for (const file of stdout.trim().split("\n").filter(Boolean)) {
+for (const file of sourceFiles) {
   if (excluded.has(file)) continue;
   if (!textExtensions.has(extname(file)) && !rootTextFiles.has(file) && !file.startsWith("Dockerfile.") && file !== "package-lock.json") continue;
-  const content = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
+  const content = await readFile(join(root, file), "utf8");
   for (const rule of forbidden) {
     if (rule.pattern.test(content)) violations.push(`${file}: ${rule.label}`);
   }
 }
 
 const serviceDirectories = [...new Set(
-  stdout.trim().split("\n")
+  sourceFiles
     .filter(file => file.startsWith("services/"))
     .map(file => file.split("/")[1]),
 )].sort();
@@ -77,3 +79,18 @@ console.log(JSON.stringify({
   migrations,
   serverPools: 5,
 }));
+
+async function listSourceFiles(directory, prefix = "") {
+  const files = [];
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (entry.name.startsWith(".") || ignoredDirectories.has(entry.name)) continue;
+      files.push(...await listSourceFiles(join(directory, entry.name), relativePath));
+      continue;
+    }
+    if (entry.isFile() && (!entry.name.startsWith(".") || rootTextFiles.has(relativePath))) files.push(relativePath);
+  }
+  return files;
+}
