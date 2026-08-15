@@ -110,6 +110,7 @@ export function validateTestManifest(value: unknown): value is TestManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const manifest = value as Record<string, unknown>;
   if (manifest.schema !== TEST_MANIFEST_SCHEMA || Object.hasOwn(manifest, "schemaVersion") || Object.hasOwn(manifest, "version")
+    || Object.hasOwn(manifest, "suite") || Object.hasOwn(manifest, "gdsTestPath")
     || !Array.isArray(manifest.requirements) || manifest.requirements.length < 1 || manifest.requirements.length > MAX_TEST_REQUIREMENTS
     || !Array.isArray(manifest.features) || manifest.features.length < 1 || manifest.features.length > MAX_TEST_FEATURES) return false;
 

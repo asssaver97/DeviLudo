@@ -33,7 +33,7 @@ import {
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetManifestPanel } from "./AssetManifestPanel";
 import { ProjectSteamPanel } from "./ProjectSteamPanel";
-import { ArrowIcon, FileIcon, PlusIcon, RerunIcon } from "./console/Icons";
+import { ArrowIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 import { useProductSession } from "./ProductShell";
 
@@ -103,8 +103,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteLocalDirectory, setDeleteLocalDirectory] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [documentCollapsed, setDocumentCollapsed] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
   const [repository, setRepository] = useState<RepositoryConnection | null>(initialRepository ?? null);
@@ -116,6 +116,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [localGit, setLocalGit] = useState<LocalGitState | null>(null);
   const [localGitError, setLocalGitError] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState("");
+  const [editingLocalBranch, setEditingLocalBranch] = useState(false);
   const [branchBusy, setBranchBusy] = useState(false);
   const platformManaged = session.authMode === "PLATFORM";
 
@@ -325,6 +326,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       }
       setLocalGit(Object.freeze({ repository: true, branch: payload.branch }));
       setNewBranchName("");
+      setEditingLocalBranch(false);
     } catch (reason) {
       setLocalGitError(localGitMessage(reason, text));
     } finally {
@@ -612,7 +614,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   async function deleteProject() {
     if (!project || deleting || selectedWorkflowId !== null) return;
     setDeleting(true);
-    setError(null);
+    setDeleteError(null);
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
         method: "DELETE",
@@ -629,10 +631,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       removeCached(clientCacheKeys.repository(projectId));
       const projectList = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
       if (projectList) storeCached(clientCacheKeys.projects, projectList.filter(item => item.id !== projectId), 10_000);
-      router.push("/projects");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : text("项目删除失败", "Unable to delete project"));
       setConfirmingDelete(false);
+      router.replace("/projects");
+      router.refresh();
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : text("项目删除失败", "Unable to delete project"));
+    } finally {
       setDeleting(false);
     }
   }
@@ -716,6 +720,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const viewedArtifacts = latestArtifactsByKindAndPlatform(
     viewingHistoricalIteration ? historicalIteration.artifacts : artifacts,
   );
+  const artifactsByStage = groupArtifactsByPipelineStage(viewedArtifacts);
   const viewedIterationNumber = viewingHistoricalIteration
     ? historicalIteration.iterationNumber
     : project.iterationNumber;
@@ -746,51 +751,16 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <p>{viewingHistoricalIteration ? historicalIteration.concept : project.concept}</p>
         </div>
         <div className="product-studio-header-actions">
-          <button className="button project-delete-button" disabled={viewingHistoricalIteration} onClick={() => { setDeleteLocalDirectory(false); setConfirmingDelete(true); }} type="button">{text("删除项目", "DELETE PROJECT")}</button>
+          <button className="button project-delete-button" disabled={viewingHistoricalIteration} onClick={() => { setDeleteLocalDirectory(false); setDeleteError(null); setConfirmingDelete(true); }} type="button">{text("删除项目", "DELETE PROJECT")}</button>
         </div>
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
 
-      {project.source ? <section className="panel-card repository-sync-panel" aria-label={text("本地源码", "Local source")}>
-        <header className="section-heading"><div><span className="eyebrow">LOCAL SOURCE</span><h2>{text(`源码修订 r${project.source.revision}`, `SOURCE REVISION r${project.source.revision}`)}</h2></div><span className="revision-badge">{project.source.digest.slice(0, 18)}</span></header>
-        <p>{text("受控目录", "Managed path")}: <code>{project.source.relativePath}</code> · {project.source.fileCount} files · {project.source.totalBytes} bytes</p>
-        {project.localDirectory ? <div className="local-git-branch-panel">
-          <div className="local-git-branch-toolbar">
-            <div className="local-git-branch-status">
-              <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
-              {localGit?.repository ? <strong><span>{text("当前分支", "Current branch")}</span><code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
-            </div>
-            {localGit?.repository ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
-              <label><span>{text("新建分支", "New branch")}</span><input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
-              <button className="button button-secondary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button>
-            </form> : null}
-          </div>
-          {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
-          {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
-          {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支；请等待流程结束或先取消本次交付。", "Branches cannot be switched during delivery. Wait for it to finish or cancel the current delivery first.")}</small> : null}
-          {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图，切回当前轮后才能切换分支。", "Historical iterations are read-only. Return to the current iteration to switch branches.")}</small> : null}
-          {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
-        </div> : null}
-      </section> : null}
-
-      {platformManaged ? <section className="panel-card repository-sync-panel" aria-label={text("GitHub 仓库", "GitHub repository")}>
-        <header className="section-heading"><div><span className="eyebrow">GITHUB REPOSITORY</span><h2>{repository ? repository.fullName : text("尚未绑定仓库", "NO REPOSITORY CONNECTED")}</h2></div>{repository ? <span className={`revision-badge repository-state-${repository.syncState.toLowerCase()}`}>{repository.syncState}</span> : null}</header>
-        {repository ? <>
-          <p><a href={repository.htmlUrl} rel="noreferrer" target="_blank">{repository.fullName}</a> · <code>{repository.syncBranch}</code>{repository.lastSourceRevision ? ` · r${repository.lastSourceRevision}` : ""}</p>
-          {repository.lastError ? <p className="repository-onboarding-error">{repository.lastError}</p> : null}
-          <div className="platform-repository-actions">
-            <button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("重新绑定", "RECONNECT")}</button>
-            {repository.syncState === "FAILED" || repository.syncState === "REMOTE_DIVERGED" ? <button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void retryRepositorySync()} type="button">{text("重试同步", "RETRY SYNC")}</button> : null}
-          </div>
-        </> : <><p>{text("项目源码仍以 Core 本地 revision 为准；绑定后，成功工作流由 Platform 独立同步。", "Core source revisions remain authoritative; after binding, Platform independently syncs successful workflows.")}</p><div className="platform-repository-actions"><button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void createPrivateRepository()} type="button">{text("创建私有仓库", "CREATE PRIVATE REPOSITORY")}</button><button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("绑定已有仓库", "CONNECT EXISTING")}</button><Link aria-disabled={viewingHistoricalIteration} className="button button-secondary" href="/account">{text("GitHub 授权", "GITHUB ACCESS")}</Link></div></>}
-        {repositoryPickerOpen ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} disabled={viewingHistoricalIteration} onChange={event => setSelectedRepositoryId(event.target.value)} value={selectedRepositoryId}>{repositoryOptions.map(option => <option key={option.id} value={option.id}>{option.fullName}{option.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={!selectedRepositoryId || repositoryBusy || viewingHistoricalIteration} onClick={() => void bindRepository()} type="button">{text("确认绑定", "CONNECT")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => setRepositoryPickerOpen(false)} type="button">{text("取消", "CANCEL")}</button></div> : null}
-      </section> : null}
-
       <section aria-label={text("交付流程", "Delivery pipeline")} className="product-delivery-pipeline">
         <header className="product-delivery-pipeline-header">
-          <div>
-            <span className="eyebrow">DELIVERY PIPELINE</span>
-            <h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2>
+          <div className="product-delivery-pipeline-title">
+            <span className="product-delivery-section-number">01</span>
+            <div><span className="eyebrow">DELIVERY PIPELINE</span><h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2></div>
           </div>
           <div className="product-delivery-pipeline-actions">
             <label className="product-iteration-selector">
@@ -812,11 +782,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 ))}
               </select>
             </label>
-            <span className="revision-badge">
-              {viewingHistoricalIteration
-                ? text("历史只读", "READ ONLY")
-                : viewedDeliveryActive ? text("自动刷新", "AUTO REFRESH") : workflowLabel(viewedWorkflowState, text)}
-            </span>
+            {viewingHistoricalIteration || !viewedDeliveryActive ? (
+              <span className="revision-badge">
+                {viewingHistoricalIteration ? text("历史只读", "READ ONLY") : workflowLabel(viewedWorkflowState, text)}
+              </span>
+            ) : null}
             {!viewingHistoricalIteration && deliveryActive ? (
               <button className="button button-secondary" disabled={busy} onClick={() => void mutate("cancel")} type="button">
                 {text("取消本次交付", "CANCEL DELIVERY")}
@@ -837,6 +807,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <ol className="product-delivery-track">
             {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
               const jobs = latestPipelineJobs(viewedJobs.filter(job => job.kind === kind));
+              const stageArtifacts = artifactsByStage.get(kind) ?? Object.freeze([]);
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
               const view = inProfile ? pipelineStageView(state, text) : OUT_OF_PROFILE_STAGE_VIEW(text);
@@ -849,6 +820,26 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <small>{inProfile
                     ? pipelineJobDetails(jobs, text)
                     : text("当前为验证流程，不含此阶段", "Not part of the current VALIDATE run")}</small>
+                  {stageArtifacts.length ? (
+                    <div className="product-delivery-stage-artifacts">
+                      {stageArtifacts.map(artifact => (
+                        <button
+                          aria-label={text(`打开${artifactLabel(artifact, text)}`, `Open ${artifactLabel(artifact, text)}`)}
+                          disabled={openingArtifactId !== null}
+                          key={artifact.id}
+                          onClick={() => void accessArtifact(artifact)}
+                          title={`${artifactLabel(artifact, text)} · ${artifact.targetPlatform ?? text("通用", "COMMON")} · ${formatArtifactSize(artifact.object.sizeBytes)}`}
+                          type="button"
+                        >
+                          <span>{artifact.targetPlatform ?? text("通用", "ALL")}</span>
+                          <b>{artifactLabel(artifact, text)}</b>
+                          <strong>{openingArtifactId === artifact.id
+                            ? text("打开中…", "OPENING…")
+                            : session.authMode === "STANDALONE" ? text("打开", "OPEN") : text("下载", "DOWNLOAD")}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   {canRerunStages && inProfile && (kind !== "STEAM_PUBLISH" || project.workflowState === "FAILED") ? (
                     <button
                       aria-label={text(
@@ -942,82 +933,95 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             ) : null}
           </section>
         ) : null}
+        {viewingHistoricalIteration ? (
+          <section aria-label={text("历史轮次摘要", "Historical iteration summary")} className="product-iteration-history-summary">
+            <header className="section-heading">
+              <div><span className="eyebrow">ITERATION HISTORY</span><h3>{text(`第 ${historicalIteration.iterationNumber} 轮记录`, `ITERATION ${historicalIteration.iterationNumber} RECORD`)}</h3></div>
+              <span className="revision-badge">{workflowLabel(historicalIteration.state, text)}</span>
+            </header>
+            <dl>
+              <div><dt>{text("基础源码", "Base source")}</dt><dd>{historicalIteration.baseSourceRevision ? `r${historicalIteration.baseSourceRevision}` : "—"}</dd></div>
+              <div><dt>{text("产出源码", "Output source")}</dt><dd>{historicalIteration.outputSourceRevision ? `r${historicalIteration.outputSourceRevision}` : "—"}</dd></div>
+              <div><dt>{text("基础文档", "Base document")}</dt><dd>R{historicalIteration.baseDocumentRevision}</dd></div>
+              <div><dt>{text("批准文档", "Approved document")}</dt><dd>{historicalIteration.approvedDocumentRevision ? `R${historicalIteration.approvedDocumentRevision}` : "—"}</dd></div>
+            </dl>
+            {historicalIteration.events.length ? (
+              <details>
+                <summary>{text(`查看 ${historicalIteration.events.length} 条工作流事件`, `View ${historicalIteration.events.length} workflow events`)}</summary>
+                <ol>{historicalIteration.events.map(event => <li key={event.id}><code>{event.kind}</code><time>{formatConversationTime(event.createdAt, localeTag(locale), text)}</time></li>)}</ol>
+              </details>
+            ) : null}
+          </section>
+        ) : null}
+        {assetPanelExpanded && !viewingHistoricalIteration ? (
+          <div className="product-delivery-inline-assets"><AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} /></div>
+        ) : null}
+        <details className="product-delivery-configuration">
+          <summary>
+            <span className="product-delivery-config-copy">
+              <span aria-hidden="true" className="product-delivery-config-marker">CFG</span>
+              <span><b>{text("项目交付配置", "PROJECT DELIVERY SETTINGS")}</b><small>{text("Git 分支、代码仓库与 SteamPipe", "Git branch, repository, and SteamPipe")}</small></span>
+            </span>
+            <span className="product-delivery-config-summary-meta">
+              <span className="product-delivery-config-branch">{localGit?.repository ? localGit.branch ?? "DETACHED HEAD" : repository?.syncBranch ?? text("未绑定 Git", "NO GIT")}</span>
+              <span className="product-delivery-config-toggle">
+                <span className="product-delivery-config-toggle-closed">{text("点击展开", "OPEN SETTINGS")}</span>
+                <span className="product-delivery-config-toggle-open">{text("点击收起", "CLOSE SETTINGS")}</span>
+                <ArrowIcon aria-hidden="true" />
+              </span>
+            </span>
+          </summary>
+          <div className="product-delivery-configuration-grid">
+            <section aria-label={text("Git 配置", "Git settings")} className="project-delivery-git-settings">
+              <header><span className="eyebrow">GIT</span><h3>{text("代码仓库与分支", "REPOSITORY & BRANCH")}</h3></header>
+              {project.localDirectory ? <div className="local-git-branch-panel">
+                <div className="local-git-branch-toolbar">
+                  <div className="local-git-branch-status">
+                    <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
+                    {localGit?.repository ? <strong><span>{text("当前分支", "Current branch")}</span><code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
+                  </div>
+                  {localGit?.repository && !editingLocalBranch ? <button className="button button-secondary" disabled={deliveryActive || viewingHistoricalIteration} onClick={() => { setNewBranchName(""); setEditingLocalBranch(true); }} type="button">{text("修改分支", "CHANGE BRANCH")}</button> : null}
+                </div>
+                {localGit?.repository && editingLocalBranch ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
+                  <label><span>{text("新分支名称", "New branch name")}</span><input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" autoFocus disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
+                  <div><button className="button button-secondary" disabled={branchBusy} onClick={() => { setNewBranchName(""); setEditingLocalBranch(false); }} type="button">{text("取消", "CANCEL")}</button><button className="button button-primary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button></div>
+                </form> : null}
+                {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
+                {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
+                {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支。", "Branches cannot be switched during delivery.")}</small> : null}
+                {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图。", "Historical iterations are read-only.")}</small> : null}
+                {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
+              </div> : null}
+              {platformManaged ? <div className="platform-repository-settings">
+                {repository ? <>
+                  <div className="platform-repository-summary"><a href={repository.htmlUrl} rel="noreferrer" target="_blank">{repository.fullName}</a><span className={`revision-badge repository-state-${repository.syncState.toLowerCase()}`}>{repository.syncState}</span></div>
+                  {repository.lastError ? <p className="repository-onboarding-error">{repository.lastError}</p> : null}
+                  <div className="platform-repository-actions"><button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("重新绑定", "RECONNECT")}</button>{repository.syncState === "FAILED" || repository.syncState === "REMOTE_DIVERGED" ? <button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void retryRepositorySync()} type="button">{text("重试同步", "RETRY SYNC")}</button> : null}</div>
+                </> : <div className="platform-repository-actions"><button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void createPrivateRepository()} type="button">{text("创建私有仓库", "CREATE PRIVATE REPOSITORY")}</button><button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("绑定已有仓库", "CONNECT EXISTING")}</button><Link aria-disabled={viewingHistoricalIteration} className="button button-secondary" href="/account">{text("GitHub 授权", "GITHUB ACCESS")}</Link></div>}
+                {repositoryPickerOpen ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} disabled={viewingHistoricalIteration} onChange={event => setSelectedRepositoryId(event.target.value)} value={selectedRepositoryId}>{repositoryOptions.map(option => <option key={option.id} value={option.id}>{option.fullName}{option.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={!selectedRepositoryId || repositoryBusy || viewingHistoricalIteration} onClick={() => void bindRepository()} type="button">{text("确认绑定", "CONNECT")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => setRepositoryPickerOpen(false)} type="button">{text("取消", "CANCEL")}</button></div> : null}
+              </div> : null}
+              {!project.localDirectory && !platformManaged ? <p className="project-delivery-config-empty">{text("当前项目没有可配置的 Git 工作目录。", "This project has no configurable Git worktree.")}</p> : null}
+            </section>
+            <ProjectSteamPanel
+              compact
+              iterationNumber={viewedIterationNumber}
+              onChanged={async () => { await Promise.all([loadProject(true), loadIterations(), loadArtifacts(true)]); }}
+              projectId={projectId}
+              readOnly={viewingHistoricalIteration}
+              workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
+              workflowState={viewedWorkflowState}
+              workspaceRole={session.workspaceRole}
+            />
+          </div>
+        </details>
       </section>
 
-      <ProjectSteamPanel
-        iterationNumber={viewedIterationNumber}
-        onChanged={async () => { await Promise.all([loadProject(true), loadIterations(), loadArtifacts(true)]); }}
-        projectId={projectId}
-        readOnly={viewingHistoricalIteration}
-        workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
-        workflowState={viewedWorkflowState}
-        workspaceRole={session.workspaceRole}
-      />
-
-      {viewingHistoricalIteration ? (
-        <section aria-label={text("历史轮次摘要", "Historical iteration summary")} className="panel-card product-iteration-history-summary">
-          <header className="section-heading">
-            <div><span className="eyebrow">ITERATION HISTORY</span><h2>{text(`第 ${historicalIteration.iterationNumber} 轮记录`, `ITERATION ${historicalIteration.iterationNumber} RECORD`)}</h2></div>
-            <span className="revision-badge">{workflowLabel(historicalIteration.state, text)}</span>
-          </header>
-          <dl>
-            <div><dt>{text("基础源码", "Base source")}</dt><dd>{historicalIteration.baseSourceRevision ? `r${historicalIteration.baseSourceRevision}` : "—"}</dd></div>
-            <div><dt>{text("产出源码", "Output source")}</dt><dd>{historicalIteration.outputSourceRevision ? `r${historicalIteration.outputSourceRevision}` : "—"}</dd></div>
-            <div><dt>{text("基础文档", "Base document")}</dt><dd>R{historicalIteration.baseDocumentRevision}</dd></div>
-            <div><dt>{text("批准文档", "Approved document")}</dt><dd>{historicalIteration.approvedDocumentRevision ? `R${historicalIteration.approvedDocumentRevision}` : "—"}</dd></div>
-          </dl>
-          {historicalIteration.events.length ? (
-            <details>
-              <summary>{text(`查看 ${historicalIteration.events.length} 条工作流事件`, `View ${historicalIteration.events.length} workflow events`)}</summary>
-              <ol>{historicalIteration.events.map(event => <li key={event.id}><code>{event.kind}</code><time>{formatConversationTime(event.createdAt, localeTag(locale), text)}</time></li>)}</ol>
-            </details>
-          ) : null}
-        </section>
-      ) : null}
-
-      {assetPanelExpanded && !viewingHistoricalIteration ? (
-        <AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} />
-      ) : null}
-
-      {viewedArtifacts.length ? (
-        <section aria-label={text("项目制品", "Project artifacts")} className="product-artifacts-panel">
-          <header>
-            <div><span className="eyebrow">ARTIFACTS</span><h2>{session.authMode === "STANDALONE" ? text("游戏制品", "GAME BUILDS") : text("游戏制品下载", "GAME BUILDS")}</h2></div>
-            <span>{text(`${viewedArtifacts.length} 个制品`, `${viewedArtifacts.length} artifacts`)}</span>
-          </header>
-          <div className="product-artifact-list">
-            {viewedArtifacts.map(artifact => (
-              <article key={artifact.id}>
-                <div>
-                  <b>{artifactLabel(artifact, text)}</b>
-                  <span>{artifact.targetPlatform ?? text("通用", "COMMON")} · {formatArtifactSize(artifact.object.sizeBytes)}</span>
-                  {artifact.kind === "E2E_REPORT" ? (
-                    <span>{e2eEvidenceLabel(artifact, text)}</span>
-                  ) : null}
-                </div>
-                <button
-                  className="button button-secondary"
-                  disabled={openingArtifactId !== null}
-                  onClick={() => void accessArtifact(artifact)}
-                  type="button"
-                >{openingArtifactId === artifact.id
-                    ? session.authMode === "STANDALONE"
-                      ? text("正在打开…", "OPENING…")
-                      : text("准备下载…", "PREPARING…")
-                    : session.authMode === "STANDALONE"
-                      ? text("打开", "OPEN")
-                      : text("下载", "DOWNLOAD")}</button>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <div className={`project-workspace-layout ${documentCollapsed ? "document-is-collapsed" : ""}`}>
-        <main className="project-workspace-main">
-          <section className="conversation-panel project-conversation-panel">
+      <div className="project-collaboration-layout">
+      <section className="project-primary-section project-conversations-section" aria-label={text("项目会话", "Project conversations")}>
+        <div className="project-primary-section-heading"><span>02</span><div><b>{text("项目会话", "PROJECT CONVERSATIONS")}</b><small>{text("设计、开发与测试 Agent 的协作记录", "Design, Development, and Test Agent collaboration")}</small></div></div>
+        <section className="conversation-panel project-conversation-panel">
             <div className="conversation-header product-panel-heading">
-              <div><span className="step-number">01</span><span><h2>{text("项目会话", "PROJECT CONVERSATIONS")}</h2><small>{conversations.length ? text(`${conversations.length} 个历史会话`, `${conversations.length} saved conversation${conversations.length === 1 ? "" : "s"}`) : text("还没有历史会话", "No conversation history")}</small></span></div>
+              <div><span><h2>{text("会话记录", "CONVERSATION HISTORY")}</h2><small>{conversations.length ? text(`${conversations.length} 个历史会话`, `${conversations.length} saved conversation${conversations.length === 1 ? "" : "s"}`) : text("还没有历史会话", "No conversation history")}</small></span></div>
               <button className="button button-secondary project-new-conversation" disabled={viewingHistoricalIteration} onClick={startConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button>
             </div>
             {viewingHistoricalIteration ? <p className="product-iteration-readonly-notice">{text("正在查看历史轮次。会话和项目说明仅供参考；切回当前轮后才能修改。", "You are viewing a historical iteration. Conversations and the project document are reference-only until you return to the current iteration.")}</p> : null}
@@ -1070,23 +1074,16 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 value={conversationInput}
               />
             </div>
-          </section>
-        </main>
+        </section>
+      </section>
 
+      <section className="project-primary-section project-document-section" aria-label={text("项目说明", "Project document")}>
+        <div className="project-primary-section-heading"><span>03</span><div><b>{text("项目说明", "PROJECT DOCUMENT")}</b><small>{text("由需求会话持续维护的当前设计规格", "The current design specification maintained by project conversations")}</small></div></div>
         <aside className="product-document-sidebar">
           <header className="product-document-sidebar-header">
-            <button
-              aria-label={documentCollapsed ? text("展开项目说明", "Expand project document") : text("收起项目说明", "Collapse project document")}
-              className="product-document-toggle"
-              onClick={() => setDocumentCollapsed(value => !value)}
-              type="button"
-            ><FileIcon /><span>{documentCollapsed ? "<" : ">"}</span></button>
-            {documentCollapsed ? <b className="product-document-collapsed-title">{text("项目说明", "PROJECT DOC")}</b> : (
-              <div><span className="step-number">DOC</span><span><b>{text("项目说明", "PROJECT DOCUMENT")}</b><small>{text("Agent 随需求对话实时维护", "Updated by Agent from the conversation")}</small></span></div>
-            )}
+            <div><span className="step-number">DOC</span><span><b>{text("当前项目说明", "CURRENT PROJECT DOCUMENT")}</b><small>{text("Agent 随需求对话实时维护", "Updated by Agent from the conversation")}</small></span></div>
           </header>
-          {!documentCollapsed ? (
-            <>
+          <>
               <div className="product-document-sidebar-actions">
                 <span className="revision-badge">R{project.document.revision} · {documentMaintainer(project.document.maintainedBy, text)}</span>
                 {editingDocument ? (
@@ -1114,23 +1111,23 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 </div>
               )}
             </>
-          ) : null}
         </aside>
+      </section>
       </div>
 
       {confirmingDelete ? (
-        <div className="workspace-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !deleting) { setDeleteLocalDirectory(false); setConfirmingDelete(false); } }}>
+        <div className="workspace-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !deleting) { setDeleteLocalDirectory(false); setDeleteError(null); setConfirmingDelete(false); } }}>
           <section aria-labelledby="project-delete-title" aria-modal="true" className="workspace-dialog project-delete-dialog" role="dialog">
             <span className="eyebrow">DELETE PROJECT</span>
             <h2 id="project-delete-title">{text(`删除《${project.name}》？`, `DELETE “${project.name}”?`)}</h2>
             <p>{deliveryActive ? text("正在执行的任务会先被停止；随后删除历史会话、说明文档、工作流、对象制品和 Core 源码快照。", "Active tasks will be stopped first; conversations, documents, workflows, object artifacts, and Core source snapshots will then be deleted.") : text("历史会话、说明文档、工作流、对象制品和 Core 源码快照都会永久删除。", "Conversations, documents, workflows, object artifacts, and Core source snapshots will be deleted permanently.")}</p>
-            {project.localDirectory ? (
-              <label className="project-delete-local-option">
-                <input checked={deleteLocalDirectory} disabled={deleting} onChange={event => setDeleteLocalDirectory(event.target.checked)} type="checkbox" />
-                <span><b>{text("同时删除本地项目目录", "ALSO DELETE LOCAL PROJECT DIRECTORY")}</b><small>{text("将永久删除已绑定的项目文件夹及其中所有文件，无法恢复。", "Permanently deletes the bound project folder and every file inside it. This cannot be undone.")}</small></span>
-              </label>
-            ) : null}
-            <div><button className="button button-secondary" disabled={deleting} onClick={() => { setDeleteLocalDirectory(false); setConfirmingDelete(false); }} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : deleteLocalDirectory ? text("删除项目和目录", "DELETE PROJECT & DIRECTORY") : text("确认删除", "CONFIRM DELETE")}</button></div>
+            <label className="project-delete-local-option">
+              <input checked={deleteLocalDirectory} disabled={deleting} onChange={event => setDeleteLocalDirectory(event.target.checked)} type="checkbox" />
+              <span aria-hidden="true" className="project-delete-checkbox-indicator" />
+              <span className="project-delete-local-copy"><b>{text("同时删除本地项目目录", "ALSO DELETE LOCAL PROJECT DIRECTORY")}</b><small>{project.localDirectory ? text("将永久删除已绑定的项目文件夹及其中所有文件，无法恢复。", "Permanently deletes the bound project folder and every file inside it. This cannot be undone.") : text("该项目使用 DeviLudo 本机托管源码；勾选后会一并清理，不会删除工作区之外的目录。", "This project uses DeviLudo-managed local source; selecting this cleans it without deleting any directory outside the workspace.")}</small></span>
+            </label>
+            {deleteError ? <p aria-live="assertive" className="project-delete-error" role="alert">{deleteError}</p> : null}
+            <div><button className="button button-secondary" disabled={deleting} onClick={() => { setDeleteLocalDirectory(false); setDeleteError(null); setConfirmingDelete(false); }} type="button">{text("返回", "BACK")}</button><button className="button project-delete-confirm" disabled={deleting} onClick={() => void deleteProject()} type="button">{deleting ? text("正在删除…", "DELETING…") : deleteLocalDirectory ? text("删除项目和目录", "DELETE PROJECT & DIRECTORY") : text("确认删除", "CONFIRM DELETE")}</button></div>
           </section>
         </div>
       ) : null}
@@ -1419,25 +1416,31 @@ function latestArtifactsByKindAndPlatform(values: readonly ArtifactRecord[]): re
     right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)));
 }
 
+function groupArtifactsByPipelineStage(
+  values: readonly ArtifactRecord[],
+): ReadonlyMap<(typeof PIPELINE)[number][0], readonly ArtifactRecord[]> {
+  const grouped = new Map<(typeof PIPELINE)[number][0], ArtifactRecord[]>();
+  for (const artifact of values) {
+    const stage = artifactPipelineStage(artifact.kind);
+    const stageArtifacts = grouped.get(stage) ?? [];
+    stageArtifacts.push(artifact);
+    grouped.set(stage, stageArtifacts);
+  }
+  return grouped;
+}
+
+function artifactPipelineStage(kind: ArtifactRecord["kind"]): (typeof PIPELINE)[number][0] {
+  if (kind === "BUILD" || kind === "SIGNED_BUILD") return "ARTIFACT_BUILD";
+  if (kind === "E2E_REPORT" || kind === "CLEAN_INSTALL_REPORT") return "E2E_TEST";
+  if (kind === "PUBLISH_RECEIPT") return "STEAM_PUBLISH";
+  return "AGENT_GENERATION";
+}
+
 function formatArtifactSize(sizeBytes: number): string {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
   if (sizeBytes < 1024 ** 2) return `${(sizeBytes / 1024).toFixed(1)} KiB`;
   if (sizeBytes < 1024 ** 3) return `${(sizeBytes / 1024 ** 2).toFixed(1)} MiB`;
   return `${(sizeBytes / 1024 ** 3).toFixed(1)} GiB`;
-}
-
-function e2eEvidenceLabel(
-  artifact: ArtifactRecord,
-  text: (chinese: string, english: string) => string,
-): string {
-  const evidence = artifact.e2eEvidence;
-  if (!evidence) return text("证据摘要不可用", "EVIDENCE SUMMARY UNAVAILABLE");
-  const outcome = evidence.result === "PASSED" ? text("通过", "PASSED") : text("失败", "FAILED");
-  const visualDiff = evidence.hasVisualDiff ? text(" · 含视觉差异", " · VISUAL DIFF") : "";
-  return text(
-    `${outcome} · 确定性检查 ${evidence.headlessCheckCount + evidence.interactiveJourneyCount} 项 · 自适应游玩 ${evidence.adaptiveSuccessCount}/3 · ${evidence.keyboardMouseInputCount} 次键鼠 · ${evidence.gamepadInputCount} 次手柄 · ${evidence.videoCount} 段视频${visualDiff}`,
-    `${outcome} · ${evidence.headlessCheckCount + evidence.interactiveJourneyCount} DETERMINISTIC CHECKS · ADAPTIVE ${evidence.adaptiveSuccessCount}/3 · ${evidence.keyboardMouseInputCount} KEYBOARD/POINTER · ${evidence.gamepadInputCount} GAMEPAD · ${evidence.videoCount} VIDEOS${visualDiff}`,
-  );
 }
 
 function documentMaintainer(value: ProductProjectDetail["document"]["maintainedBy"], text: (chinese: string, english: string) => string): string {

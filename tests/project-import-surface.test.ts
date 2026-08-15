@@ -56,17 +56,28 @@ test("project linking is reachable from Home and separates local and GitHub sour
 });
 
 test("project deletion only removes a local directory through its server-owned binding", async () => {
-  const [studio, core, bridge, bridgeProxy] = await Promise.all([
+  const [studio, core, repository, bridge, bridgeProxy] = await Promise.all([
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-project-bridge-proxy.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(studio, /type="checkbox"[\s\S]*deleteLocalDirectory/);
+  assert.match(studio, /disabled=\{deleting\}[\s\S]*project-delete-checkbox-indicator/);
+  assert.doesNotMatch(studio, /disabled=\{deleting \|\| !project\.localDirectory\}/);
   assert.match(studio, /JSON\.stringify\(\{ deleteLocalDirectory \}\)/);
+  assert.match(studio, /setDeleteError\([\s\S]*role="alert"/);
+  assert.doesNotMatch(studio, /catch \(reason\) \{[\s\S]{0,240}setConfirmingDelete\(false\)/);
   assert.match(core, /project\.localDirectory\?\.bindingId/);
   assert.match(core, /\/internal\/directory\/delete/);
   assert.doesNotMatch(core, /deleteBoundProjectDirectory\(config,\s*body\./);
+  assert.doesNotMatch(core, /LOCAL_DIRECTORY_NOT_BOUND/);
+  const steamReleaseDelete = repository.indexOf("DELETE FROM deviludo.${table}");
+  const workflowDelete = repository.indexOf("DELETE FROM deviludo.workflow_instances", steamReleaseDelete);
+  assert.ok(steamReleaseDelete > 0 && workflowDelete > steamReleaseDelete);
+  assert.match(repository, /\["steam_releases", "asset_manifests"\]/);
+  assert.ok(repository.indexOf("await beforeDelete?.()") > repository.indexOf("DELETE FROM deviludo.projects"));
   assert.match(bridge, /const binding = await requireBinding\(value\)/);
   assert.match(bridge, /await rename\(binding\.path, quarantine\)/);
   assert.match(bridge, /await rm\(quarantine, \{ force: false, maxRetries: 3, recursive: true/);
@@ -79,8 +90,8 @@ test("project Git controls share one compact row and destructive actions stay in
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/product.css", import.meta.url), "utf8"),
   ]);
-  assert.match(studio, /className="local-git-branch-toolbar"[\s\S]*className="local-git-branch-status"[\s\S]*className="local-git-branch-form"/);
-  assert.match(styles, /\.local-git-branch-toolbar \{[\s\S]*grid-template-columns: minmax\(220px, \.42fr\) minmax\(420px, 1fr\)/);
+  assert.match(studio, /className="local-git-branch-toolbar"[\s\S]*className="local-git-branch-status"[\s\S]*!editingLocalBranch[\s\S]*className="local-git-branch-form"/);
+  assert.match(styles, /\.local-git-branch-toolbar \{[\s\S]*justify-content: space-between/);
   assert.match(studio, /className="product-studio-header-actions"[\s\S]*className="button project-delete-button"/);
   assert.match(styles, /\.product-studio-header-actions \{[\s\S]*position: absolute;[\s\S]*right: 0;[\s\S]*top: 0;/);
 });

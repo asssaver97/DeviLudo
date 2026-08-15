@@ -818,10 +818,8 @@ export async function runApi(
     const deleteLocalDirectory = body.deleteLocalDirectory === true;
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    if (deleteLocalDirectory && !project.localDirectory) {
-      throw httpError(409, "LOCAL_DIRECTORY_NOT_BOUND", "该项目没有绑定可删除的本地项目目录");
-    }
-    if (deleteLocalDirectory && (!config.localDirectoryBindings || !config.localProjectBridgeUrl || !config.localProjectBridgeToken)) {
+    if (deleteLocalDirectory && project.localDirectory
+      && (!config.localDirectoryBindings || !config.localProjectBridgeUrl || !config.localProjectBridgeToken)) {
       throw httpError(409, "LOCAL_DIRECTORY_DELETE_UNAVAILABLE", "当前环境不支持删除本地项目目录");
     }
     const localDirectoryBindingId = project.localDirectory?.bindingId ?? null;

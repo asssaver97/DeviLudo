@@ -1818,14 +1818,23 @@ export class CoreRepository {
         );
       }
 
-      await beforeDelete?.();
-
       const params = [workspaceId, projectId];
       await client.query(
         `DELETE FROM deviludo.project_creation_receipts
           WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
         params,
       );
+      // These project-owned records reference workflow_instances without
+      // ON DELETE CASCADE. They must be removed before the workflow history;
+      // otherwise projects that reached asset planning or Steam delivery can
+      // never be deleted.
+      for (const table of ["steam_releases", "asset_manifests"] as const) {
+        await client.query(
+          `DELETE FROM deviludo.${table}
+            WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+          params,
+        );
+      }
       await client.query(
         `DELETE FROM deviludo.artifact_inputs input
           WHERE input.workspace_id = $1::uuid
@@ -1908,7 +1917,12 @@ export class CoreRepository {
           WHERE workspace_id = $1::uuid AND id = $2::uuid`,
         params,
       );
-      return deleted.rowCount === 1;
+      if (deleted.rowCount !== 1) return false;
+      // Run irreversible object/source/directory cleanup only after every
+      // database foreign-key check has succeeded. A callback failure still
+      // rolls this transaction back and keeps the project record visible.
+      await beforeDelete?.();
+      return true;
     });
   }
 

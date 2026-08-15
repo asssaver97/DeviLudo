@@ -76,10 +76,36 @@ describe("test-manifest", () => {
     const manifest = completeManifest();
     assert.equal(validateTestManifest({ ...manifest, schema: "deviludo.test-manifest.v3" }), false);
     assert.equal(validateTestManifest({ ...manifest, schemaVersion: "deviludo.test-manifest" }), false);
+    assert.equal(validateTestManifest({ ...manifest, suite: "retired-suite" }), false);
+    assert.equal(validateTestManifest({ ...manifest, gdsTestPath: "res://tests/e2e.gd" }), false);
     assert.equal(validateTestManifest({ ...manifest, features: [{
       ...manifest.features[0], launchProfile: undefined,
       interactionScript: { events: [{ type: "key_press", key: "KEY_H" }, { type: "key_release", key: "KEY_H" }] },
     }, ...manifest.features.slice(1)] }), false);
+  });
+
+  test("does not accept checkpoint marker aliases", () => {
+    const manifest = completeManifest();
+    const core = manifest.features[0];
+    const events = core.interactionScript!.events.map((event, index) => index === 0
+      ? { ...event, expectedOutput: "DEVILUDO_E2E_CHECKPOINT:old-start" }
+      : event);
+    assert.equal(validateTestManifest({
+      ...manifest,
+      features: [{ ...core, interactionScript: { events } }, ...manifest.features.slice(1)],
+    }), false);
+  });
+
+  test("does not accept values on CHANGED or EXISTS assertions", () => {
+    const manifest = completeManifest();
+    const core = manifest.features[0];
+    const events = core.interactionScript!.events.map(event => event.type === "click"
+      ? { ...event, postconditions: [{ ...changedTurn, value: 1 }] }
+      : event);
+    assert.equal(validateTestManifest({
+      ...manifest,
+      features: [{ ...core, interactionScript: { events } }, ...manifest.features.slice(1)],
+    }), false);
   });
 
   test("forces coreLoop and default acceptance requirements through real player actions", () => {

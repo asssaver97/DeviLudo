@@ -437,8 +437,10 @@ async function expectRlsRejection(operation) {
 async function cleanup(owner, workspaceIds) {
   for (const table of [
     "executor_receipts", "artifact_inputs", "artifacts", "operation_receipts", "external_signals",
+    "steam_releases",
     "asset_items", "asset_manifests",
-    "workflow_events", "jobs", "workspace_claim_fairness", "conversation_messages",
+    "workflow_events", "job_guidance_messages", "job_progress_events", "jobs",
+    "workspace_claim_fairness", "conversation_messages",
     "project_conversations", "agent_installations", "project_source_ready_outbox",
     "project_source_revisions", "project_document_revisions", "project_documents",
     "workflow_instances", "project_creation_receipts", "projects",

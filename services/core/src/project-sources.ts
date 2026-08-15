@@ -17,7 +17,7 @@ export type SourceCheckpoint = Readonly<{
   fileCount: number;
   totalBytes: number;
   state: "PARTIAL" | "AGENT_COMPLETE";
-  originJobId: string | null;
+  originJobId: string;
   specificationDigest: string | null;
   sourceDigest: string | null;
   localDirectoryBaseDigest: string | null;
@@ -101,27 +101,6 @@ export class ProjectSourceStore {
     });
   }
 
-  /**
-   * Read one bounded regular file from an immutable published revision. This is
-   * used by Core to recover the canonical generated agent.json even while an
-   * Agent job created before the runner upgrade still uploads legacy CLI stdout
-   * as its object artifact.
-   */
-  async readRevisionFile(relativePath: string, filePath: string, maximumBytes: number): Promise<Buffer> {
-    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) throw new Error("Source file limit is invalid");
-    const directory = resolve(this.root, relativePath);
-    assertWithin(this.root, directory);
-    const normalized = normalizeProjectPath(filePath);
-    const target = resolve(directory, normalized);
-    assertWithin(directory, target);
-    const info = await lstat(target);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Source revision entry is not a regular file");
-    if (info.size < 1 || info.size > maximumBytes) throw new Error("Source revision file size is invalid");
-    const bytes = await readFile(target);
-    if (bytes.length !== info.size) throw new Error("Source revision file changed while reading");
-    return bytes;
-  }
-
   async publishDirectory(input: Readonly<{
     workspaceId: string;
     projectId: string;
@@ -136,11 +115,11 @@ export class ProjectSourceStore {
     projectId: string;
     workflowId: string;
     files: readonly SourceFile[];
-    state?: "PARTIAL" | "AGENT_COMPLETE";
-    originJobId?: string | null;
-    specificationDigest?: string | null;
-    sourceDigest?: string | null;
-    localDirectoryBaseDigest?: string | null;
+    state: "PARTIAL" | "AGENT_COMPLETE";
+    originJobId: string;
+    specificationDigest: string | null;
+    sourceDigest: string | null;
+    localDirectoryBaseDigest: string | null;
   }>): Promise<SourceCheckpoint> {
     assertIdentity(input.workspaceId, "workspace");
     assertIdentity(input.projectId, "project");
@@ -194,19 +173,15 @@ export class ProjectSourceStore {
     const checkpoint = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", workflowId);
     const metadata = join(this.projectPath(workspaceId, projectId), ".staging", "checkpoints", `${workflowId}.json`);
     assertWithin(this.root, checkpoint);
+    let files: readonly SourceFile[];
     try {
-      const files = await readSourceFiles(checkpoint);
-      let stored: ReturnType<typeof checkpointMetadata> | null = null;
-      try {
-        stored = parseCheckpointMetadata(JSON.parse(await readFile(metadata, "utf8")));
-      } catch (error) {
-        if (!isMissing(error) && !(error instanceof SyntaxError)) throw error;
-      }
-      return Object.freeze({ bytes: createTarGzip(files), ...checkpointDetails(files, stored ?? checkpointMetadata({})) });
+      files = await readSourceFiles(checkpoint);
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
     }
+    const stored = parseCheckpointMetadata(JSON.parse(await readFile(metadata, "utf8")));
+    return Object.freeze({ bytes: createTarGzip(files), ...checkpointDetails(files, stored) });
   }
 
   async deleteCheckpoint(workspaceId: string, projectId: string, workflowId: string): Promise<void> {
@@ -337,18 +312,15 @@ function checkpointDetails(
 }
 
 function checkpointMetadata(input: Readonly<{
-  state?: "PARTIAL" | "AGENT_COMPLETE";
-  originJobId?: string | null;
-  specificationDigest?: string | null;
-  sourceDigest?: string | null;
-  localDirectoryBaseDigest?: string | null;
+  state: "PARTIAL" | "AGENT_COMPLETE";
+  originJobId: string;
+  specificationDigest: string | null;
+  sourceDigest: string | null;
+  localDirectoryBaseDigest: string | null;
 }>): Readonly<Omit<SourceCheckpoint, "digest" | "fileCount" | "totalBytes">> {
-  const state = input.state ?? "PARTIAL";
-  const originJobId = input.originJobId ?? null;
-  const specificationDigest = input.specificationDigest ?? null;
-  const baseSourceDigest = input.sourceDigest ?? null;
-  const localDirectoryBaseDigest = input.localDirectoryBaseDigest ?? null;
-  if (![originJobId].every(value => value === null || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value))) {
+  const { state, originJobId, specificationDigest, localDirectoryBaseDigest } = input;
+  const baseSourceDigest = input.sourceDigest;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(originJobId)) {
     throw new Error("Source checkpoint job identity is invalid");
   }
   if (![specificationDigest, baseSourceDigest, localDirectoryBaseDigest]
@@ -367,12 +339,17 @@ function parseCheckpointMetadata(value: unknown): ReturnType<typeof checkpointMe
   if (!['PARTIAL', 'AGENT_COMPLETE'].includes(String(metadata.state))) {
     throw new Error("Source checkpoint state is invalid");
   }
+  if (typeof metadata.originJobId !== "string"
+    || ![metadata.specificationDigest, metadata.sourceDigest, metadata.localDirectoryBaseDigest]
+      .every(value => value === null || typeof value === "string")) {
+    throw new Error("Source checkpoint metadata is invalid");
+  }
   return checkpointMetadata({
     state: metadata.state as "PARTIAL" | "AGENT_COMPLETE",
-    originJobId: typeof metadata.originJobId === "string" ? metadata.originJobId : null,
-    specificationDigest: typeof metadata.specificationDigest === "string" ? metadata.specificationDigest : null,
-    sourceDigest: typeof metadata.sourceDigest === "string" ? metadata.sourceDigest : null,
-    localDirectoryBaseDigest: typeof metadata.localDirectoryBaseDigest === "string" ? metadata.localDirectoryBaseDigest : null,
+    originJobId: metadata.originJobId,
+    specificationDigest: metadata.specificationDigest as string | null,
+    sourceDigest: metadata.sourceDigest as string | null,
+    localDirectoryBaseDigest: metadata.localDirectoryBaseDigest as string | null,
   });
 }
 

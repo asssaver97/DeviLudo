@@ -94,4 +94,7 @@ test("the artifact panel keeps only the newest item for each kind and platform",
   assert.match(studio, /latestArtifactsByKindAndPlatform\([\s\S]*historicalIteration\.artifacts : artifacts/);
   assert.match(studio, /const key = `\$\{artifact\.kind\}:\$\{artifact\.targetPlatform \?\? "common"\}`/);
   assert.match(studio, /artifact\.createdAt > current\.createdAt/);
+  assert.match(studio, /groupArtifactsByPipelineStage\(viewedArtifacts\)/);
+  assert.match(studio, /artifactPipelineStage\(artifact\.kind\)/);
+  assert.doesNotMatch(studio, /className="product-artifacts-panel"/);
 });

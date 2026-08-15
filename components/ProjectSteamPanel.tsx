@@ -11,6 +11,7 @@ export function ProjectSteamPanel(props: Readonly<{
   iterationNumber: number;
   workspaceRole: string;
   readOnly: boolean;
+  compact?: boolean;
   onChanged: () => Promise<void>;
 }>) {
   const { text } = useLanguage();
@@ -115,7 +116,7 @@ export function ProjectSteamPanel(props: Readonly<{
   const currentRelease = releases.find(release => release.workflowId === props.workflowId) ?? null;
   const admin = props.workspaceRole === "OWNER" || props.workspaceRole === "ADMIN";
   return (
-    <section className="panel-card product-steam-panel" aria-label={text("Steam 托管发布", "Managed Steam releases")}>
+    <section className={`panel-card product-steam-panel${props.compact ? " is-compact" : ""}`} aria-label={text("Steam 托管发布", "Managed Steam releases")}>
       <header className="section-heading">
         <div><span className="eyebrow">STEAM RELEASES</span><h2>{text("Steam 托管发布", "MANAGED STEAM RELEASES")}</h2></div>
         <span className="revision-badge">{settings ? `APP ${settings.appId}` : text("未配置", "NOT CONFIGURED")}</span>

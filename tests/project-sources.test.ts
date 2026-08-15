@@ -38,34 +38,6 @@ test("persistent source revisions are immutable, deterministic, and project-scop
   }
 });
 
-test("a bounded manifest can be read from its immutable source revision", async () => {
-  const root = await mkdtemp(join(tmpdir(), "deviludo-source-manifest-"));
-  try {
-    const store = new ProjectSourceStore(root);
-    const agent = Buffer.from(JSON.stringify({ assetManifest: { items: [{ assetKey: "ui/icon" }] } }));
-    const revision = await store.publishFiles({
-      workspaceId,
-      projectId,
-      revision: 1,
-      files: [
-        { path: "project.godot", bytes: Buffer.from("[application]\n") },
-        { path: "agent.json", bytes: agent },
-      ],
-    });
-    assert.deepEqual(await store.readRevisionFile(revision.relativePath, "agent.json", 1024), agent);
-    await assert.rejects(
-      store.readRevisionFile(revision.relativePath, "agent.json", agent.length - 1),
-      /file size is invalid/,
-    );
-    await assert.rejects(
-      store.readRevisionFile(revision.relativePath, "../project.godot", 1024),
-      /路径|path/i,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("persistent source publication rejects credentials, traversal, and symlinked path components", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-sources-boundary-"));
   try {
@@ -122,6 +94,7 @@ test("validated Agent checkpoints survive source publication and carry completio
       originJobId: "30000000-0000-4000-8000-000000000006",
       sourceDigest,
       specificationDigest,
+      localDirectoryBaseDigest: null,
     });
     assert.equal(saved.fileCount, 2);
     const restored = await store.archiveCheckpoint(workspaceId, projectId, workflowId);
@@ -131,26 +104,26 @@ test("validated Agent checkpoints survive source publication and carry completio
     assert.equal(restored?.sourceDigest, sourceDigest);
     assert.equal(restored?.specificationDigest, specificationDigest);
     await assert.rejects(
-      store.saveCheckpoint({ workspaceId, projectId, workflowId, files: [{ path: ".env", bytes: Buffer.from("TOKEN=x") }] }),
+      store.saveCheckpoint({
+        workspaceId,
+        projectId,
+        workflowId,
+        files: [{ path: ".env", bytes: Buffer.from("TOKEN=x") }],
+        state: "PARTIAL",
+        originJobId: "30000000-0000-4000-8000-000000000006",
+        specificationDigest,
+        sourceDigest,
+        localDirectoryBaseDigest: null,
+      }),
       /forbidden credential/,
     );
     await store.publishFiles({ workspaceId, projectId, revision: 1, files });
     assert.equal((await store.archiveCheckpoint(workspaceId, projectId, workflowId))?.digest, saved.digest);
+    const checkpointMetadata = join(root, "workspaces", workspaceId, "projects", projectId, ".staging", "checkpoints", `${workflowId}.json`);
+    await rm(checkpointMetadata);
+    await assert.rejects(store.archiveCheckpoint(workspaceId, projectId, workflowId), /ENOENT|metadata/i);
     await store.deleteCheckpoint(workspaceId, projectId, workflowId);
     assert.equal(await store.archiveCheckpoint(workspaceId, projectId, workflowId), null);
-    await store.saveCheckpoint({ workspaceId, projectId, workflowId, files });
-    await assert.rejects(
-      store.publishFiles({
-        workspaceId,
-        projectId,
-        revision: 1,
-        files: [{ path: "project.godot", bytes: Buffer.from("changed") }],
-      }),
-      /already published with different content/,
-    );
-    const legacyCompatible = await store.archiveCheckpoint(workspaceId, projectId, workflowId);
-    assert.equal(legacyCompatible?.digest, saved.digest);
-    assert.equal(legacyCompatible?.state, "PARTIAL");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

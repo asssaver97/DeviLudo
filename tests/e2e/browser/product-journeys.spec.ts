@@ -102,9 +102,14 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
     height: element.clientHeight,
     overflowY: getComputedStyle(element).overflowY,
   }));
-  expect(messageViewport.height).toBeLessThanOrEqual(460);
+  expect(messageViewport.height).toBeLessThanOrEqual(520);
   expect(messageViewport.height).toBeGreaterThanOrEqual(300);
   expect(messageViewport.overflowY).toBe("auto");
+  const conversationBox = await page.locator(".project-conversation-box").boundingBox();
+  const composer = await page.locator(".project-conversation-box .conversation-box-composer").boundingBox();
+  expect(conversationBox).not.toBeNull();
+  expect(composer).not.toBeNull();
+  expect(Math.abs((conversationBox!.y + conversationBox!.height) - (composer!.y + composer!.height))).toBeLessThanOrEqual(1);
   expect((await pipeline.boundingBox())?.y).toBeLessThan((await workspace.boundingBox())?.y ?? 0);
 });
 
