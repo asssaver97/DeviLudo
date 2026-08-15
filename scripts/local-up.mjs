@@ -1,6 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { networkInterfaces } from "node:os";
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { lstat, readFile, readlink, readdir, writeFile } from "node:fs/promises";
 import { request } from "node:http";
@@ -38,8 +40,16 @@ const localImageBuilds = Object.freeze([
 const ciMode = process.env.DEVILUDO_LOCAL_CI === "1";
 const resetIncompatibleBaseline = process.argv.includes("--reset-incompatible-baseline");
 const refreshE2eVm = process.argv.includes("--refresh-e2e-vm");
+const remoteE2eHost = optionValue("--remote-e2e") ?? process.env.DEVILUDO_LOCAL_REMOTE_E2E_HOST?.trim() ?? "";
+if (remoteE2eHost && (!isPrivateNetworkIpv4(remoteE2eHost) || isIP(remoteE2eHost) !== 4)) {
+  throw new Error("--remote-e2e must be a private IPv4 address reachable by the trusted LAN/VPN; use production HTTPS/mTLS for public networks");
+}
+if (remoteE2eHost && !isLocalInterfaceIpv4(remoteE2eHost)) {
+  throw new Error(`--remote-e2e address ${remoteE2eHost} is not assigned to a local network interface`);
+}
 const releaseStartupLock = acquireStartupLock();
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
+const corePort = process.env.DEVILUDO_CORE_HOST_PORT?.trim() || "8080";
 const gitImportPort = process.env.DEVILUDO_LOCAL_GIT_IMPORT_PORT?.trim() || "3199";
 const artifactPort = process.env.DEVILUDO_MINIO_HOST_PORT?.trim() || "39000";
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
@@ -48,13 +58,33 @@ if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
 if (webPort === "3000") {
   throw new Error("Port 3000 is reserved; choose another DEVILUDO_WEB_HOST_PORT");
 }
+if (!/^\d+$/.test(corePort) || Number(corePort) < 1 || Number(corePort) > 65535) {
+  throw new Error("DEVILUDO_CORE_HOST_PORT must be a valid TCP port");
+}
 if (!/^\d+$/.test(gitImportPort) || Number(gitImportPort) < 1 || Number(gitImportPort) > 65535
-  || gitImportPort === webPort) {
+  || [webPort, corePort].includes(gitImportPort)) {
   throw new Error("DEVILUDO_LOCAL_GIT_IMPORT_PORT must be a valid unused TCP port");
 }
 if (!/^\d+$/.test(artifactPort) || Number(artifactPort) < 1 || Number(artifactPort) > 65535) {
   throw new Error("DEVILUDO_MINIO_HOST_PORT must be a valid TCP port");
 }
+if ([webPort, corePort, gitImportPort].includes(artifactPort)) {
+  throw new Error("Local Web, Core, project bridge, and artifact ports must be distinct");
+}
+const previousRemoteE2eConfiguration = await readLocalRemoteE2eConfiguration();
+const e2eNodeToken = previousRemoteE2eConfiguration?.token ?? randomBytes(32).toString("base64url");
+const remoteE2eConfiguration = {
+  enabled: Boolean(remoteE2eHost),
+  host: remoteE2eHost || null,
+  coreUrl: remoteE2eHost ? `http://${remoteE2eHost}:${corePort}` : `http://127.0.0.1:${corePort}`,
+  artifactUrl: remoteE2eHost ? `http://${remoteE2eHost}:${artifactPort}` : `http://127.0.0.1:${artifactPort}`,
+  token: e2eNodeToken,
+};
+await writeFile(
+  new URL("../.deviludo/local/remote-e2e.json", import.meta.url),
+  `${JSON.stringify(remoteE2eConfiguration, null, 2)}\n`,
+  { mode: 0o600 },
+);
 const previousGitImportConfiguration = await readLocalProjectBridgeConfiguration();
 const gitImportConfiguration = {
   port: Number(gitImportPort),
@@ -91,6 +121,11 @@ const providerUpstreamProxy = await detectLocalProviderUpstreamProxy();
 const baseEnvironment = {
   ...process.env,
   DEVILUDO_WEB_HOST_PORT: webPort,
+  DEVILUDO_CORE_HOST_PORT: corePort,
+  DEVILUDO_CORE_BIND_ADDRESS: remoteE2eHost ? "0.0.0.0" : "127.0.0.1",
+  DEVILUDO_ARTIFACT_BIND_ADDRESS: remoteE2eHost ? "0.0.0.0" : "127.0.0.1",
+  DEVILUDO_S3_PUBLIC_ENDPOINT: remoteE2eConfiguration.artifactUrl,
+  DEVILUDO_E2E_NODE_TOKEN: e2eNodeToken,
   DEVILUDO_LOCAL_GIT_IMPORT_PORT: gitImportPort,
   DEVILUDO_LOCAL_GIT_IMPORT_PUBLIC_URL: `http://127.0.0.1:${gitImportPort}`,
   DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: `http://local-project-bridge-proxy:${gitImportPort}`,
@@ -208,7 +243,7 @@ if (!ciMode) {
     nodeId: initialized.macNodeId,
     poolKind: "E2E_MACOS",
     coreUrl: process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080",
-    token: process.env.DEVILUDO_E2E_NODE_TOKEN ?? "local-e2e-node-token",
+    token: e2eNodeToken,
     identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
     jobRoot: new URL("../.deviludo/local/tart-host-jobs", import.meta.url).pathname,
     tartFingerprint: tartE2e?.fingerprint,
@@ -248,6 +283,11 @@ console.log(JSON.stringify({
   webUrl: `http://127.0.0.1:${webPort}`,
   gitImportPid,
   macE2ePid: e2ePid,
+  remoteE2e: remoteE2eHost ? {
+    coreUrl: remoteE2eConfiguration.coreUrl,
+    artifactUrl: remoteE2eConfiguration.artifactUrl,
+    enrollment: "Open Runtime and create a one-time E2E enrollment token",
+  } : null,
   startupMs: Date.now() - startupStartedAt,
   images: imagesBuilt ? "built" : "reused",
   migrations: migrationRan ? "applied" : "verified",
@@ -543,7 +583,7 @@ async function readLocalPolicySources() {
     "api.hcl",
     "executor.hcl",
   ].map(name => readOptionalFile(new URL(`../infra/vault/${name}`, import.meta.url))));
-  return sources.some(content => content === null) ? null : sources.join(" ");
+  return sources.some(content => content === null) ? null : sources.join("\0");
 }
 
 async function readOptionalFile(target) {
@@ -639,6 +679,11 @@ async function persistLocalComposeEnvironment(environment) {
   const end = "# END DEVILUDO LOCAL RUNTIME";
   const keys = [
     "DEVILUDO_WEB_HOST_PORT",
+    "DEVILUDO_CORE_HOST_PORT",
+    "DEVILUDO_CORE_BIND_ADDRESS",
+    "DEVILUDO_ARTIFACT_BIND_ADDRESS",
+    "DEVILUDO_S3_PUBLIC_ENDPOINT",
+    "DEVILUDO_E2E_NODE_TOKEN",
     "DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE",
     "DEVILUDO_CLAUDE_CODE_VERSION",
     "DEVILUDO_CODEX_CLI_VERSION",
@@ -684,6 +729,44 @@ async function readLocalProjectBridgeConfiguration() {
     }
   } catch { /* first start or an obsolete local bridge configuration */ }
   return null;
+}
+
+async function readLocalRemoteE2eConfiguration() {
+  try {
+    const value = JSON.parse(await readFile(new URL("../.deviludo/local/remote-e2e.json", import.meta.url), "utf8"));
+    if (value && typeof value === "object" && !Array.isArray(value)
+      && typeof value.token === "string" && /^[A-Za-z0-9_-]{40,200}$/.test(value.token)) {
+      return Object.freeze({ token: value.token });
+    }
+  } catch { /* first start */ }
+  return null;
+}
+
+function optionValue(name) {
+  const exact = process.argv.indexOf(name);
+  if (exact >= 0) {
+    const value = process.argv[exact + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+    return value.trim();
+  }
+  const prefix = `${name}=`;
+  const inline = process.argv.find(argument => argument.startsWith(prefix));
+  return inline ? inline.slice(prefix.length).trim() : null;
+}
+
+function isPrivateNetworkIpv4(value) {
+  if (isIP(value) !== 4) return false;
+  const [first, second] = value.split(".").map(Number);
+  return first === 10
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || (first === 100 && second >= 64 && second <= 127);
+}
+
+function isLocalInterfaceIpv4(value) {
+  return Object.values(networkInterfaces()).some(addresses =>
+    addresses?.some(address => address.family === "IPv4" && address.address === value),
+  );
 }
 
 async function detectLocalProviderUpstreamProxy() {

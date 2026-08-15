@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   closeLineInput,
@@ -32,7 +32,7 @@ try {
   const regressionArtifact = regressionInput ? join(workspace, "current-e2e-regression.json") : "";
   if (regressionInput) await downloadInput(regressionInput, regressionArtifact);
   const guestRunner = process.env.DEVILUDO_E2E_GUEST_RUNNER ?? "";
-  if (!guestRunner.startsWith("/")) throw new Error("A fixed guest runner is required");
+  if (!isAbsolute(guestRunner)) throw new Error("A fixed guest runner is required");
   const evidenceOutput = join(workspace, `e2e-evidence-${request.operatingSystem}-${request.jobId}.zip`);
   const regressionOutput = join(workspace, `e2e-regression-${request.operatingSystem}-${request.jobId}.json`);
   const receipt = await runFramed(guestRunner, [action, "--job-id", request.jobId, "--artifact", artifact,

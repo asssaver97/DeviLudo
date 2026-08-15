@@ -29,13 +29,13 @@ export class CoreE2eClient {
   }
 
   async heartbeat(job: JobProtocolV4): Promise<boolean> {
-    const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/heartbeat`, identity(job));
+    const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/heartbeat`, identity(job, this.config.nodeId));
     return response.accepted;
   }
 
   async complete(job: JobProtocolV4, completion: JobCompletion): Promise<boolean> {
     const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/complete`, {
-      ...identity(job),
+      ...identity(job, this.config.nodeId),
       ...completion,
     });
     return response.accepted;
@@ -43,7 +43,7 @@ export class CoreE2eClient {
 
   async fail(job: JobProtocolV4, failure: E2eInfrastructureFailure): Promise<boolean> {
     const response = await this.call<{ accepted: boolean }>(`/v1/e2e/jobs/${job.jobId}/fail`, {
-      ...identity(job),
+      ...identity(job, this.config.nodeId),
       ...failure,
     });
     return response.accepted;
@@ -51,7 +51,7 @@ export class CoreE2eClient {
 
   async authorizeObjects(job: JobProtocolV4): Promise<readonly Readonly<{ object: JobProtocolV4["inputObjects"][number]; url: string; expiresAt: string }>[]> {
     const response = await this.call<{ inputs: readonly Readonly<{ object: JobProtocolV4["inputObjects"][number]; url: string; expiresAt: string }>[] }>(
-      `/v1/e2e/jobs/${job.jobId}/objects`, { ...identity(job) },
+      `/v1/e2e/jobs/${job.jobId}/objects`, { ...identity(job, this.config.nodeId) },
     );
     return response.inputs;
   }
@@ -62,7 +62,7 @@ export class CoreE2eClient {
       expiresAt: string;
       object: JobProtocolV4["inputObjects"][number];
       requiredHeaders: Readonly<Record<string, string>>;
-    }>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job), ...input });
+    }>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job, this.config.nodeId), ...input });
   }
 
   async decidePlayerPolicy(job: JobProtocolV4, request: Readonly<Record<string, unknown>>) {
@@ -70,7 +70,7 @@ export class CoreE2eClient {
       decision: Readonly<Record<string, unknown>>;
       policy: Readonly<{ configurationDigest: string; settingsRevision: number; model: string }>;
       cached: boolean;
-    }>>(`/v1/e2e/jobs/${job.jobId}/player-policy`, { ...identity(job), request });
+    }>>(`/v1/e2e/jobs/${job.jobId}/player-policy`, { ...identity(job, this.config.nodeId), request });
   }
 
   private async call<T>(path: string, body: Readonly<Record<string, unknown>>): Promise<T> {
@@ -87,6 +87,7 @@ export class CoreE2eClient {
         "content-type": "application/json",
         "content-length": String(data.length),
         ...(this.config.developmentToken ? { "x-deviludo-node-auth": this.config.developmentToken } : {}),
+        ...(this.config.developmentToken ? { "x-deviludo-node-id": this.config.nodeId } : {}),
       },
       cert: this.tls.cert,
       key: this.tls.key,
@@ -124,8 +125,8 @@ export class CoreE2eClient {
   }
 }
 
-function identity(job: JobProtocolV4) {
-  return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token });
+function identity(job: JobProtocolV4, nodeId: string) {
+  return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token, nodeId });
 }
 
 async function optionalFile(path: string | null): Promise<Buffer | undefined> {

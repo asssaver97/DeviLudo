@@ -98,6 +98,27 @@ npm run local:reset    # Stop services and delete local data
 
 Agent execution defaults to one concurrent job. Machines with sufficient memory and Provider capacity may set `DEVILUDO_SANDBOX_CONCURRENCY=2`; only `1` and `2` are accepted.
 
+### Remote E2E nodes
+
+E2E workers make outbound connections to Core; Core never needs to open a connection to the worker. A trusted LAN/VPN Windows machine can join a local workspace as follows:
+
+1. Start local services with explicit private-network exposure: `npm run local:up -- --remote-e2e 192.168.1.20`. The address must be an RFC 1918 or CGNAT/VPN IPv4 address assigned to the Mac. Web and project-directory bridges remain loopback-only; only Core `8080` and artifact storage `39000` are exposed.
+2. Open **Runtime**, choose `E2E_WINDOWS`, and create a 30-minute one-time enrollment token. Save it to a file on Windows; never put it on a command line.
+3. On Windows 11 Pro, enable Hyper-V, clone the same DeviLudo revision, run `npm ci`, and prepare a ZIP containing exactly one exported Hyper-V VM (`.vmcx`) plus its disks. The guest must contain the DeviLudo guest runner, GUI/input drivers, Godot, and an interactive desktop account.
+4. Export that guest account credential on the Windows host, then enroll and run the node:
+
+```powershell
+Get-Credential | Export-Clixml C:\DeviludoInput\guest-credential.xml
+powershell -ExecutionPolicy Bypass -File scripts\local-remote-windows-e2e.ps1 -Action enroll `
+  -CoreUrl http://192.168.1.20:8080 `
+  -EnrollmentTokenFile C:\DeviludoInput\enrollment.token `
+  -GoldenVmArchive D:\DeviludoImages\windows-golden.zip `
+  -GuestCredentialFile C:\DeviludoInput\guest-credential.xml
+powershell -ExecutionPolicy Bypass -File scripts\local-remote-windows-e2e.ps1 -Action run
+```
+
+Local remote mode is for a trusted private network only. One-time pairing issues a separate durable credential bound to that node, and public IP exposure is rejected. For the public internet, deploy Core and the Windows bundle from a signed release: Core must be reachable through TLS on `8443`, artifact URLs must be reachable by the node, the node's public source IP must be in `DEVILUDO_CORE_ALLOWED_CIDRS`, and enrollment/renewal/job traffic uses one-time enrollment plus mTLS. The Windows host requires no inbound port.
+
 ## Existing projects and iteration
 
 ### Local directories
@@ -156,9 +177,9 @@ flowchart TB
 | `E2E_WINDOWS` | Windows 11 Pro x86_64 | Windows validation in a Hyper-V interactive session |
 | `E2E_MACOS` | macOS Tahoe 26 Apple Silicon | macOS validation on a Tart graphical desktop |
 
-Production also requires PostgreSQL, S3-compatible object storage, Vault/KMS, OpenTelemetry, TLS, and load balancing. Public traffic enters only `WEB`; E2E nodes reach `CORE` through outbound mTLS.
+Production also requires PostgreSQL, S3-compatible object storage, Vault/KMS, OpenTelemetry, TLS, and load balancing. Browser traffic enters only `WEB`; E2E nodes reach the dedicated Core E2E interface through outbound mTLS. It may be routed over a LAN, site-to-site VPN, or the public internet with a strict source CIDR allowlist.
 
-Push a `v*` tag to generate digest-pinned, Cosign-signed images and deployment bundles. Complete the matching [WEB](deploy/web/deploy.env.example), [CORE](deploy/core/deploy.env.example), [Linux E2E](deploy/e2e-linux/deploy.env.example), [Windows E2E](deploy/e2e-windows/deploy.json.example), and [macOS E2E](deploy/e2e-macos/deploy.env.example) configuration, then run the role's `preflight`, `bootstrap`, `deploy`, and `status` actions.
+Push a `v*` tag to generate digest-pinned, Cosign-signed images and deployment bundles. Complete the matching [WEB](deploy/web/deploy.env.example), [CORE](deploy/core/deploy.env.example), [Linux E2E](deploy/e2e-linux/deploy.env.example), [Windows E2E](deploy/e2e-windows/deploy.json.example), and [macOS E2E](deploy/e2e-macos/deploy.env.example) configuration, create the target pool's one-time token under **Runtime**, then run the role's `preflight`, `bootstrap`, `deploy`, and `status` actions. The Windows golden image input is a signed ZIP of one exported Hyper-V VM; its bootstrap guest credential JSON contains `username` and `password`, is immediately resealed by the restricted Windows service identity, and is deleted after installation.
 
 ## Development
 

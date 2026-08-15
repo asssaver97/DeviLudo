@@ -102,7 +102,7 @@ jobs:
           cp deploy/e2e-windows/deploy.json.example release/e2e-windows-deploy.json.example
           tar -czf E2E_LINUX.tar.gz -C release deviludo-e2e-host deviludo-e2e.service deviludo-e2e-renew.service deviludo-e2e-renew.timer e2e-linux-isolation.sh e2e-linux-guest-runner.sh e2e-job-executor.mjs e2e-process-lifecycle.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-linux-deploy.sh e2e-linux-deploy.env.example deploy-common.sh
           tar -czf E2E_MACOS.tar.gz -C release deviludo-e2e-host deviludo-e2e-renew com.deviludo.e2e.plist com.deviludo.e2e-renew.plist e2e-macos-isolation.sh e2e-macos-guest-runner.sh e2e-job-executor.mjs e2e-process-lifecycle.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-macos-deploy.sh e2e-macos-deploy.env.example deploy-common.sh
-          (cd release && zip -q -r ../E2E_WINDOWS.zip e2e-windows-isolation.ps1 e2e-windows-isolation.cmd e2e-windows-guest-runner.ps1 e2e-windows-guest-runner.cmd e2e-windows-job-executor.cmd e2e-windows-renew.ps1 e2e-job-executor.mjs e2e-process-lifecycle.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-windows-deploy.ps1 e2e-windows-deploy.json.example)
+          (cd release && zip -q -r ../E2E_WINDOWS.zip e2e-windows-isolation.ps1 e2e-windows-isolation.cmd e2e-windows-guest-runner.ps1 e2e-windows-guest-runner.cmd e2e-windows-initialize-credential.ps1 e2e-windows-job-executor.cmd e2e-windows-renew.ps1 e2e-job-executor.mjs e2e-process-lifecycle.mjs e2e-node.mjs e2e-enroll.mjs e2e-renew.mjs e2e-windows-deploy.ps1 e2e-windows-deploy.json.example)
       - name: Manifest and signatures
         env:
           DEVILUDO_RELEASE_VERSION: ${{ github.ref_name }}

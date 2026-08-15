@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("local deployment exposes only Web while Core roles share one image", async () => {
+test("local deployment keeps Core private by default and exposes it only for explicit remote E2E", async () => {
   const compose = await readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
   assert.match(compose, /x-core: &core[\s\S]*image: deviludo-core:local/);
   for (const service of ["core-api", "core-scheduler", "core-sandbox"]) {
     assert.match(compose, new RegExp(`\\n  ${service}:\\n    <<: \\*core`));
   }
   assert.match(compose, /web:[\s\S]*127\.0\.0\.1:\$\{DEVILUDO_WEB_HOST_PORT:-3100\}:3000/);
-  assert.match(compose, /core-api:[\s\S]*127\.0\.0\.1:\$\{DEVILUDO_CORE_HOST_PORT:-8080\}:8080/);
+  assert.match(compose, /core-api:[\s\S]*\$\{DEVILUDO_CORE_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{DEVILUDO_CORE_HOST_PORT:-8080\}:8080/);
+  assert.match(compose, /minio:[\s\S]*\$\{DEVILUDO_ARTIFACT_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{DEVILUDO_MINIO_HOST_PORT:-39000\}:9000/);
   assert.match(compose, /DEVILUDO_CLAUDE_CODE_VERSION/);
   assert.match(compose, /DEVILUDO_CODEX_CLI_VERSION/);
   assert.match(compose, /DEVILUDO_SANDBOX_CONCURRENCY: \$\{DEVILUDO_SANDBOX_CONCURRENCY:-1\}/);
@@ -42,6 +43,13 @@ test("local deployment exposes only Web while Core roles share one image", async
   assert.match(localUp, /detectLocalProviderUpstreamProxy\(\)/);
   assert.match(localUp, /198\.18\.0\.0\/15 Fake-IP/);
   assert.match(localUp, /supportsHttpConnectProxy/);
+  assert.match(localUp, /optionValue\("--remote-e2e"\)/);
+  assert.match(localUp, /isPrivateNetworkIpv4/);
+  assert.match(localUp, /networkInterfaces\(\)/);
+  assert.match(localUp, /not assigned to a local network interface/);
+  assert.match(localUp, /DEVILUDO_CORE_BIND_ADDRESS: remoteE2eHost \? "0\.0\.0\.0" : "127\.0\.0\.1"/);
+  assert.match(localUp, /DEVILUDO_ARTIFACT_BIND_ADDRESS: remoteE2eHost \? "0\.0\.0\.0" : "127\.0\.0\.1"/);
+  assert.match(localUp, /randomBytes\(32\)\.toString\("base64url"\)/);
   assert.match(compose, /DEVILUDO_PROVIDER_UPSTREAM_PROXY/);
   const providerProxy = await readFile(new URL("../services/sandbox-executor/proxy-entrypoint.sh", import.meta.url), "utf8");
   assert.match(providerProxy, /cache_peer %s parent %s 0 no-query default/);
@@ -223,16 +231,52 @@ test("production E2E service accounts can read only installed runtime inputs", a
   assert.match(windows, /function Get-ReleaseHeader \{[\s\S]*?OutputType\(\[System\.Collections\.Hashtable\]\)/);
   assert.match(windows, /function Get-ServiceEnvironment \{[\s\S]*?OutputType\(\[System\.Object\[\]\]\)/);
   assert.match(windows, /\*S-1-5-18:\(OI\)\(CI\)F/);
-  assert.match(windows, /Copy-Item -LiteralPath \$c\.goldenVmFile -Destination \$goldenVmFile -Force/);
-  assert.match(windows, /Set-ServiceConfiguration -Config \$c -NodeId \$nodeId -GoldenVmFile \$goldenVmFile/);
-  assert.match(windows, /Get-ServiceEnvironment -Config \$Config -NodeId \$NodeId -GoldenVmFile \$GoldenVmFile/);
+  assert.match(windows, /Copy-Item -LiteralPath \$c\.goldenVmFile -Destination \$goldenVmArchive -Force/);
+  assert.match(windows, /Expand-Archive -LiteralPath \$goldenVmArchive/);
+  assert.match(windows, /Get-ChildItem -LiteralPath \$goldenImage -Recurse -File -Filter '\*\.vmcx'/);
+  assert.match(windows, /Set-ServiceConfiguration -Config \$c -NodeId \$nodeId -GoldenVmArchive \$goldenVmArchive -GoldenVmConfiguration \$goldenVmConfiguration/);
+  assert.match(windows, /Get-ServiceEnvironment -Config \$Config -NodeId \$NodeId -GoldenVmArchive \$GoldenVmArchive -GoldenVmConfiguration \$GoldenVmConfiguration/);
   assert.match(windows, /\$ServiceAccount="NT SERVICE\\\$Service"/);
+  assert.match(windows, /Get-LocalGroup -SID 'S-1-5-32-578'/);
   assert.match(windows, /sc\.exe config \$Service "obj= \$ServiceAccount"/);
   assert.match(windows, /Grant-ServiceAcl \(Join-Path \$State 'credentials'\) '\(OI\)\(CI\)M'/);
   assert.match(windows, /Grant-ServiceAcl \(Join-Path \$State 'jobs'\) '\(OI\)\(CI\)M'/);
   assert.match(windows, /Grant-ServiceAcl \(Join-Path \$State 'golden'\) '\(OI\)\(CI\)RX'/);
   assert.match(windows, /New-ScheduledTaskPrincipal -UserId \$ServiceAccount -LogonType ServiceAccount -RunLevel Limited/);
+  assert.match(windows, /Initialize-GuestCredential/);
+  assert.match(windows, /guest-credential\.bootstrap\.json/);
+  assert.match(windows, /Remove-Item -LiteralPath \$bootstrap -Force/);
   assert.doesNotMatch(windows, /Register-ScheduledTask[^\n]+-User 'SYSTEM'/);
+});
+
+test("remote E2E enrollment is node-bound and public networks keep production mTLS", async () => {
+  const [client, api, repository, enroll, localWindows, windowsIsolation, release] = await Promise.all([
+    readFile(new URL("../services/e2e-node/src/core-client.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/remote-e2e-enroll.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-remote-windows-e2e.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-windows-isolation.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8"),
+  ]);
+  assert.match(client, /"x-deviludo-node-id": this\.config\.nodeId/);
+  assert.match(api, /\/v1\/e2e\/enroll-development/);
+  assert.match(api, /process\.env\.NODE_ENV === "production"/);
+  assert.match(api, /nodeAuthTokenHash/);
+  assert.match(api, /authenticateDevelopmentE2eNode/);
+  assert.match(api, /heartbeatServerNode/);
+  assert.match(repository, /node\.development_auth_token_hash = \$2/);
+  assert.doesNotMatch(repository, /authenticateDevelopmentE2eNode[\s\S]{0,500}e2e_enrollment_tokens/);
+  assert.match(enroll, /Plain HTTP enrollment is restricted to a private LAN\/VPN IPv4 address/);
+  assert.match(enroll, /enrollment-token-file/);
+  assert.match(enroll, /node-auth-token/);
+  assert.match(enroll, /nodeAuthTokenHash/);
+  assert.match(enroll, /every\(isAbsolute\)/);
+  assert.match(localWindows, /ValidateSet\('enroll','run','status'\)/);
+  assert.match(localWindows, /DEVILUDO_E2E_ALLOW_UNSIGNED_LOCAL_RUNTIME='1'/);
+  assert.match(windowsIsolation, /DEVILUDO_GOLDEN_VM_ARCHIVE/);
+  assert.match(windowsIsolation, /Import-VM[\s\S]*-VhdDestinationPath[\s\S]*-SnapshotFilePath/);
+  assert.match(release, /e2e-windows-initialize-credential\.ps1/);
 });
 
 test("architecture verification uses only the Node.js filesystem API", async () => {
@@ -581,6 +625,13 @@ test("the shared product shell is mounted once in the root layout so route chang
   assert.match(layout, /<LanguageProvider[\s\S]*<ProductShell>\{children\}<\/ProductShell>[\s\S]*<\/LanguageProvider>/);
   assert.match(page, /<AgentSettings \/>/);
   assert.doesNotMatch(page, /ProductShell/);
+});
+
+test("remote E2E node connectivity refreshes from server heartbeats", async () => {
+  const dashboard = await readFile(new URL("../components/ServerPoolDashboard.tsx", import.meta.url), "utf8");
+  assert.match(dashboard, /window\.setInterval\(\(\) => refresh\(0\), 15_000\)/);
+  assert.match(dashboard, /isRecentlyConnected\(node\.lastHeartbeatAt\)/);
+  assert.match(dashboard, /Date\.now\(\) - Date\.parse\(value\) < 90_000/);
 });
 
 test("product pages share session data and never poll an idle project", async () => {

@@ -8,7 +8,9 @@ $ErrorActionPreference='Stop'
 if($JobId -notmatch '^[0-9a-f-]{36}$' -or !(Test-Path -LiteralPath $Artifact)){throw 'Invalid guest execution request'}
 if($Regression -and !(Test-Path -LiteralPath $Regression)){throw 'Current regression input does not exist'}
 $vm="deviludo-$JobId"
-$credential=Import-Clixml 'C:\ProgramData\Deviludo\guest-credential.xml'
+$credentialFile=$(if($env:DEVILUDO_E2E_GUEST_CREDENTIAL_FILE){$env:DEVILUDO_E2E_GUEST_CREDENTIAL_FILE}else{'C:\ProgramData\Deviludo\guest-credential.xml'})
+if(!(Test-Path -LiteralPath $credentialFile -PathType Leaf)){throw 'PowerShell Direct guest credential is missing'}
+$credential=Import-Clixml $credentialFile
 $destination='C:\Deviludo\input\artifact'
 $regressionDestination='C:\Deviludo\input\regression.json'
 $projectId=$(if($env:DEVILUDO_E2E_PROJECT_ID){$env:DEVILUDO_E2E_PROJECT_ID}else{$JobId})

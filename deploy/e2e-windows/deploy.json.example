@@ -7,8 +7,8 @@
   "coreUrl": "https://core.internal.example:8443",
   "enrollmentTokenFile": "C:\\ProgramData\\DeviludoInput\\enrollment.token",
   "coreCaFile": "C:\\ProgramData\\DeviludoInput\\core-ca.crt",
-  "goldenVmFile": "D:\\DeviludoImages\\windows-golden.vmcz",
-  "guestCredentialFile": "C:\\ProgramData\\DeviludoInput\\guest-credential.xml",
+  "goldenVmFile": "D:\\DeviludoImages\\windows-golden.zip",
+  "guestCredentialFile": "C:\\ProgramData\\DeviludoInput\\guest-credential.json",
   "packageVersions": {
     "node": "REPLACE_WITH_WINGET_VERSION",
     "windowsSdk": "REPLACE_WITH_WINGET_VERSION",

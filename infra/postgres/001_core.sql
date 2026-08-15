@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '029_adaptive_e2e');
+VALUES (true, '001', 'deviludo-core-source-v1', '030_remote_e2e_node_credentials');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -127,6 +127,9 @@ CREATE TABLE deviludo.server_nodes (
   isolation_generation bigint NOT NULL DEFAULT 1 CHECK (isolation_generation > 0),
   current_workspace_id uuid,
   agent_installed boolean NOT NULL DEFAULT false CHECK (agent_installed = false),
+  development_auth_token_hash text CHECK (
+    development_auth_token_hash IS NULL OR development_auth_token_hash ~ '^sha256:[0-9a-f]{64}$'
+  ),
   last_heartbeat_at timestamptz,
   last_reimage_proof_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),

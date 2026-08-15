@@ -98,6 +98,27 @@ npm run local:reset    # 停止服务并删除本地数据
 
 Agent 默认只并发执行一个任务。内存与 Provider 容量充足时可以设置 `DEVILUDO_SANDBOX_CONCURRENCY=2`；仅允许 `1` 或 `2`。
 
+### 远程 E2E 节点
+
+E2E 节点主动向 Core 发起出站连接，Core 不需要反向访问节点。可信局域网/VPN 内的 Windows 机器可按以下步骤加入本地工作区：
+
+1. 显式开放私网接口：`npm run local:up -- --remote-e2e 192.168.1.20`。该地址必须是 Mac 自身的 RFC 1918 或 CGNAT/VPN 私网 IPv4。Web 和本地项目目录桥接仍只监听回环地址，仅开放 Core `8080` 与制品存储 `39000`。
+2. 打开“运行状态”，在 `E2E_WINDOWS` 中创建 30 分钟有效的一次性配对码。将它保存到 Windows 文件中，不要放到命令行参数。
+3. Windows 11 Pro 启用 Hyper-V，检出与 Core 相同的 DeviLudo revision 并运行 `npm ci`；准备只包含一个导出 Hyper-V VM（`.vmcx`）及其磁盘的 ZIP。Guest 中必须安装 DeviLudo guest runner、GUI/输入驱动、Godot，并配置可登录的图形桌面账号。
+4. 在 Windows 宿主机导出该 Guest 账号凭证，然后配对并运行节点：
+
+```powershell
+Get-Credential | Export-Clixml C:\DeviludoInput\guest-credential.xml
+powershell -ExecutionPolicy Bypass -File scripts\local-remote-windows-e2e.ps1 -Action enroll `
+  -CoreUrl http://192.168.1.20:8080 `
+  -EnrollmentTokenFile C:\DeviludoInput\enrollment.token `
+  -GoldenVmArchive D:\DeviludoImages\windows-golden.zip `
+  -GuestCredentialFile C:\DeviludoInput\guest-credential.xml
+powershell -ExecutionPolicy Bypass -File scripts\local-remote-windows-e2e.ps1 -Action run
+```
+
+本地远程模式只允许可信私网；一次性配对完成后会签发独立、持久且绑定到该节点的凭证，并拒绝公网 IP。公网接入必须使用签名 Release 中的 Core 和 Windows 部署包：Core 通过 TLS `8443` 提供接口，节点能访问制品 URL，节点公网出口 IP 加入 `DEVILUDO_CORE_ALLOWED_CIDRS`；配对、续签和任务通信使用一次性配对码与 mTLS。Windows 节点无需开放任何入站端口。
+
 ## 已有项目与持续迭代
 
 ### 本地目录
@@ -156,9 +177,9 @@ flowchart TB
 | `E2E_WINDOWS` | Windows 11 Pro x86_64 | Hyper-V 交互会话中的 Windows 验证 |
 | `E2E_MACOS` | macOS Tahoe 26 Apple Silicon | Tart 图形桌面中的 macOS 验证 |
 
-生产环境还需要 PostgreSQL、兼容 S3 的对象存储、Vault/KMS、OpenTelemetry、TLS 和负载均衡。公网流量只能进入 `WEB`；E2E 节点仅通过出站 mTLS 访问 `CORE`。
+生产环境还需要 PostgreSQL、兼容 S3 的对象存储、Vault/KMS、OpenTelemetry、TLS 和负载均衡。浏览器流量只能进入 `WEB`；E2E 节点通过专用 Core E2E 接口建立出站 mTLS，可运行在局域网、站点 VPN 或带严格来源 CIDR 白名单的公网。
 
-推送 `v*` tag 后会生成固定摘要且经 Cosign 签名的镜像和部署 bundle。填写对应的 [WEB](deploy/web/deploy.env.example)、[CORE](deploy/core/deploy.env.example)、[Linux E2E](deploy/e2e-linux/deploy.env.example)、[Windows E2E](deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](deploy/e2e-macos/deploy.env.example) 配置，然后在各服务器执行该角色的 `preflight`、`bootstrap`、`deploy` 和 `status`。
+推送 `v*` tag 后会生成固定摘要且经 Cosign 签名的镜像和部署 bundle。填写对应的 [WEB](deploy/web/deploy.env.example)、[CORE](deploy/core/deploy.env.example)、[Linux E2E](deploy/e2e-linux/deploy.env.example)、[Windows E2E](deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](deploy/e2e-macos/deploy.env.example) 配置，在“运行状态”中创建目标池的一次性配对码，然后在各服务器执行该角色的 `preflight`、`bootstrap`、`deploy` 和 `status`。Windows 金镜像输入是一个经签名的 Hyper-V 导出 ZIP；初始化 Guest 凭证 JSON 包含 `username` 和 `password`，安装时会立即由受限 Windows 服务身份重新加密并删除明文引导文件。
 
 ## 开发与验证
 

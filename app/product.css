@@ -2994,6 +2994,37 @@ textarea {
 }
 
 /* Fixed server-pool diagnostics */
+.pool-enroll-button {
+  justify-self: start;
+  margin-top: 12px;
+}
+
+.pool-enrollment {
+  background: #07131c;
+  border: 1px solid var(--blue);
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.pool-enrollment strong {
+  color: var(--blue);
+  font: 800 8px var(--font-geist-mono), monospace;
+  letter-spacing: .08em;
+}
+
+.pool-enrollment code {
+  color: var(--ink);
+  font: 8px/1.5 var(--font-geist-mono), monospace;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.pool-enrollment small {
+  color: var(--muted);
+  font: 8px/1.6 var(--font-geist-mono), monospace;
+}
 
 .adminPage {
   margin: 0 auto;

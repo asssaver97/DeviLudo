@@ -1220,8 +1220,39 @@ export async function runApi(
     return reply.code(201).send({ nodeId, ...certificate });
   });
 
+  app.post("/v1/e2e/enroll-development", async (request, reply) => {
+    if (process.env.NODE_ENV === "production" || !config.e2eDevelopmentToken) {
+      return reply.code(404).send({ code: "NOT_FOUND" });
+    }
+    const body = objectBody(request.body);
+    const token = typeof body.token === "string" ? body.token : "";
+    if (!isServerPoolKind(body.poolKind) || !body.poolKind.startsWith("E2E_")
+      || !["linux", "windows", "macos"].includes(String(body.operatingSystem))
+      || typeof body.receiptPublicKey !== "string" || !/^[A-Za-z0-9_-]{32,200}$/.test(token)
+      || typeof body.nodeAuthTokenHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(body.nodeAuthTokenHash)
+      || typeof body.runtimeImage !== "string" || !/^sha256:[0-9a-f]{64}$/.test(body.runtimeImage)) {
+      return reply.code(400).send({ code: "INVALID_DEVELOPMENT_E2E_ENROLLMENT" });
+    }
+    try {
+      if (createPublicKey(body.receiptPublicKey).asymmetricKeyType !== "ed25519") throw new Error("not Ed25519");
+    } catch {
+      return reply.code(400).send({ code: "INVALID_E2E_RECEIPT_KEY" });
+    }
+    const operatingSystem = body.operatingSystem as ServerOperatingSystem;
+    assertPoolOperatingSystem(body.poolKind, operatingSystem);
+    const nodeId = await repository.reserveDevelopmentE2eEnrollment({
+      tokenHash: digest(token),
+      poolKind: body.poolKind as Extract<ServerPoolKind, `E2E_${string}`>,
+      operatingSystem,
+      receiptPublicKey: body.receiptPublicKey,
+      nodeAuthTokenHash: body.nodeAuthTokenHash,
+      runtimeImage: body.runtimeImage,
+    });
+    return reply.code(201).send({ nodeId, poolKind: body.poolKind, operatingSystem });
+  });
+
   app.post<{ Params: { nodeId: string } }>("/v1/e2e/nodes/:nodeId/renew", async (request, reply) => {
-    authorizeE2e(request, config);
+    await authorizeE2e(request, config, repository);
     const socket = request.raw.socket as Socket & { getPeerCertificate?: () => { subjectaltname?: string } };
     if (!(socket.getPeerCertificate?.().subjectaltname ?? "").includes(`URI:spiffe://deviludo/e2e-node/${request.params.nodeId}`)) {
       throw unauthorized("E2E node certificate identity mismatch");
@@ -1250,7 +1281,7 @@ export async function runApi(
   );
 
   app.post("/v1/e2e/jobs/claim", async (request, reply) => {
-    const authenticatedNodeId = authorizeE2e(request, config);
+    const authenticatedNodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     if (typeof body.nodeId !== "string"
       || !isServerPoolKind(body.poolKind)
@@ -1262,6 +1293,7 @@ export async function runApi(
     if (!node || node.state !== "ACTIVE" || node.poolKind !== body.poolKind) {
       return reply.code(409).send({ code: "NODE_NOT_ELIGIBLE" });
     }
+    await repository.heartbeatServerNode(node.id, node.poolKind);
     const job = await repository.claimJob({
       workerId: `e2e:${body.nodeId}`,
       poolKind: body.poolKind,
@@ -1271,14 +1303,16 @@ export async function runApi(
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/heartbeat", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
+    const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    const reportingNodeId = nodeId ?? (typeof body.nodeId === "string" && UUID.test(body.nodeId) ? body.nodeId : null);
+    if (reportingNodeId) await repository.heartbeatServerNode(reportingNodeId, job.poolKind);
     return reply.send({ accepted: await repository.heartbeat(job) });
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/complete", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
+    const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     const completion = parseCompletion(body);
@@ -1288,7 +1322,7 @@ export async function runApi(
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/fail", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
+    const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     if (body.classification !== "INFRASTRUCTURE"
@@ -1301,14 +1335,14 @@ export async function runApi(
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/objects", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
+    const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     return reply.send({ inputs: await objectStore.authorizeInputs(job) });
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/outputs", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
+    const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     return reply.send(await objectStore.authorizeOutput(job, {
@@ -1320,7 +1354,7 @@ export async function runApi(
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", async (request, reply) => {
-    const nodeId = authorizeE2e(request, config);
+    const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
     if (job.jobKind !== "E2E_TEST") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
@@ -1670,7 +1704,11 @@ function authorizePlatformService(request: FastifyRequest, config: CoreConfig): 
   }
 }
 
-function authorizeE2e(request: FastifyRequest, config: CoreConfig): string | null {
+async function authorizeE2e(
+  request: FastifyRequest,
+  config: CoreConfig,
+  repository: CoreRepository,
+): Promise<string | null> {
   if (process.env.NODE_ENV === "production") {
     const socket = request.raw.socket as Socket & {
       authorized?: boolean;
@@ -1684,10 +1722,13 @@ function authorizeE2e(request: FastifyRequest, config: CoreConfig): string | nul
     return match[1];
   }
   const actual = String(request.headers["x-deviludo-node-auth"] ?? "");
-  if (!config.e2eDevelopmentToken || !secureEqual(actual, config.e2eDevelopmentToken)) {
+  if (config.e2eDevelopmentToken && secureEqual(actual, config.e2eDevelopmentToken)) return null;
+  const nodeId = String(request.headers["x-deviludo-node-id"] ?? "");
+  if (!UUID.test(nodeId) || !actual
+    || !await repository.authenticateDevelopmentE2eNode(nodeId, digest(actual))) {
     throw unauthorized("E2E node authentication failed");
   }
-  return null;
+  return nodeId;
 }
 
 function jobIdentity(jobId: string, body: Record<string, unknown>): ClaimedJobIdentity {

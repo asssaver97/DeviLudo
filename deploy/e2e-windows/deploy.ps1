@@ -84,21 +84,42 @@ function Initialize-Enrollment {
 function Get-ServiceEnvironment {
   [CmdletBinding()]
   [OutputType([System.Object[]])]
-  param([Parameter(Mandatory=$true)]$Config,[Parameter(Mandatory=$true)][string]$NodeId,[Parameter(Mandatory=$true)][string]$GoldenVmFile)
+  param([Parameter(Mandatory=$true)]$Config,[Parameter(Mandatory=$true)][string]$NodeId,[Parameter(Mandatory=$true)][string]$GoldenVmArchive,[Parameter(Mandatory=$true)][string]$GoldenVmConfiguration)
   $credentials=Join-Path $State 'credentials'; $current=Join-Path $Root 'current'
   return @(
     'NODE_ENV=production',"DEVILUDO_E2E_NODE_ID=$NodeId",'DEVILUDO_E2E_POOL_KIND=E2E_WINDOWS',"DEVILUDO_CORE_API_URL=$($Config.coreUrl)","DEVILUDO_E2E_TOOL_PATH=$($Config.toolPath)",
     "DEVILUDO_E2E_CLIENT_CERT_FILE=$credentials\node.crt","DEVILUDO_E2E_CLIENT_KEY_FILE=$credentials\node-tls.key","DEVILUDO_E2E_CORE_CA_FILE=$credentials\core-ca.crt","DEVILUDO_E2E_IDENTITY_KEY_FILE=$credentials\receipt-ed25519.pem","DEVILUDO_E2E_CREDENTIAL_DIRECTORY=$credentials",
     "DEVILUDO_E2E_ISOLATION_EXECUTOR=$current\e2e-windows-isolation.cmd","DEVILUDO_E2E_TEST_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_GUEST_RUNNER=$current\e2e-windows-guest-runner.cmd",
-    "DEVILUDO_E2E_JOB_ROOT=$State\jobs","DEVILUDO_GOLDEN_VM_FILE=$GoldenVmFile","DEVILUDO_COSIGN_IDENTITY_REGEXP=$($Config.cosignIdentityRegexp)","DEVILUDO_COSIGN_ISSUER=$($Config.cosignIssuer)"
+    "DEVILUDO_E2E_JOB_ROOT=$State\jobs","DEVILUDO_E2E_GUEST_CREDENTIAL_FILE=$credentials\guest-credential.xml","DEVILUDO_GOLDEN_VM_ARCHIVE=$GoldenVmArchive","DEVILUDO_GOLDEN_VM_FILE=$GoldenVmConfiguration","DEVILUDO_COSIGN_IDENTITY_REGEXP=$($Config.cosignIdentityRegexp)","DEVILUDO_COSIGN_ISSUER=$($Config.cosignIssuer)"
   )
+}
+function Initialize-GuestCredential {
+  param([Parameter(Mandatory=$true)][string]$Nssm,[Parameter(Mandatory=$true)][string]$Current)
+  $credentials=Join-Path $State 'credentials'; $bootstrap=Join-Path $credentials 'guest-credential.bootstrap.json'; $output=Join-Path $credentials 'guest-credential.xml'
+  Test-RequiredFile -Path $bootstrap
+  try {
+    Remove-Item -LiteralPath $output -Force -ErrorAction SilentlyContinue
+    $initializer=Join-Path $Current 'e2e-windows-initialize-credential.ps1'; Test-RequiredFile -Path $initializer
+    & $Nssm set $Service Application 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' | Out-Null
+    & $Nssm set $Service AppParameters ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$initializer+'" -InputFile "'+$bootstrap+'" -OutputFile "'+$output+'"') | Out-Null
+    & $Nssm set $Service AppDirectory $Current | Out-Null
+    & $Nssm set $Service AppExit Default Exit | Out-Null
+    Start-Service $Service
+    $deadline=(Get-Date).AddSeconds(30)
+    do { Start-Sleep -Milliseconds 250; $status=(Get-Service $Service).Status } while($status -ne 'Stopped' -and (Get-Date) -lt $deadline)
+    if($status -ne 'Stopped' -or !(Test-Path -LiteralPath $output)){throw 'The restricted E2E service account could not seal the guest credential'}
+  } finally {
+    Remove-Item -LiteralPath $bootstrap -Force -ErrorAction SilentlyContinue
+  }
 }
 function Set-ServiceConfiguration {
   [CmdletBinding(SupportsShouldProcess=$true)]
-  param([Parameter(Mandatory=$true)]$Config,[Parameter(Mandatory=$true)][string]$NodeId,[Parameter(Mandatory=$true)][string]$GoldenVmFile)
+  param([Parameter(Mandatory=$true)]$Config,[Parameter(Mandatory=$true)][string]$NodeId,[Parameter(Mandatory=$true)][string]$GoldenVmArchive,[Parameter(Mandatory=$true)][string]$GoldenVmConfiguration)
   if(!$PSCmdlet.ShouldProcess($Service,'Configure E2E service')){return}
   $nssm=(Get-Command nssm.exe -ErrorAction Stop).Source; $node='C:\Program Files\nodejs\node.exe'; $entry=Join-Path $Root 'current\e2e-node.mjs'
   if(!(Get-Service $Service -ErrorAction SilentlyContinue)){& $nssm install $Service $node $entry | Out-Null}
+  $hyperVGroup=Get-LocalGroup -SID 'S-1-5-32-578' -ErrorAction Stop
+  Add-LocalGroupMember -Group $hyperVGroup -Member $ServiceAccount -ErrorAction SilentlyContinue
   & sc.exe config $Service "obj= $ServiceAccount" 'password= ' | Out-Null
   if($LASTEXITCODE -ne 0){throw 'Failed to assign the restricted virtual service account'}
   & sc.exe sidtype $Service unrestricted | Out-Null
@@ -107,9 +128,11 @@ function Set-ServiceConfiguration {
   Grant-ServiceAcl (Join-Path $State 'credentials') '(OI)(CI)M'
   Grant-ServiceAcl (Join-Path $State 'jobs') '(OI)(CI)M'
   Grant-ServiceAcl (Join-Path $State 'golden') '(OI)(CI)RX'
+  Initialize-GuestCredential -Nssm $nssm -Current $current
   & $nssm set $Service Application $node | Out-Null; & $nssm set $Service AppParameters ('"'+$entry+'"') | Out-Null
   & $nssm set $Service AppDirectory (Join-Path $Root 'current') | Out-Null
-  & $nssm set $Service AppEnvironmentExtra (Get-ServiceEnvironment -Config $Config -NodeId $NodeId -GoldenVmFile $GoldenVmFile) | Out-Null
+  & $nssm set $Service AppEnvironmentExtra (Get-ServiceEnvironment -Config $Config -NodeId $NodeId -GoldenVmArchive $GoldenVmArchive -GoldenVmConfiguration $GoldenVmConfiguration) | Out-Null
+  & $nssm set $Service AppExit Default Restart | Out-Null
   & $nssm set $Service Start SERVICE_AUTO_START | Out-Null
   @{coreUrl=$Config.coreUrl;credentialDirectory=(Join-Path $State 'credentials')} | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $State 'node.json')
   $renewAction=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Program Files\Deviludo\current\e2e-windows-renew.ps1"'
@@ -130,16 +153,24 @@ function Invoke-Deploy {
     $actual=(Get-FileHash -Algorithm SHA256 (Join-Path $stage $bundle)).Hash.ToLowerInvariant()
     if($actual -ne $manifest.bundles.E2E_WINDOWS.sha256){throw 'Windows release bundle checksum mismatch'}
     Test-GoldenVm -Config $c -Manifest $manifest
+    if([IO.Path]::GetExtension($c.goldenVmFile) -ne '.zip'){throw 'Windows golden VM must be a signed ZIP of one exported Hyper-V VM'}
     $goldenDirectory=Join-Path $State 'golden'; New-Item -ItemType Directory -Force $goldenDirectory | Out-Null; Set-RestrictedAcl -Path $goldenDirectory
-    $goldenVmFile=Join-Path $goldenDirectory (Split-Path -Leaf $c.goldenVmFile)
-    Copy-Item -LiteralPath $c.goldenVmFile -Destination $goldenVmFile -Force
-    Copy-Item -LiteralPath "$($c.goldenVmFile).pem" -Destination "$goldenVmFile.pem" -Force
-    Copy-Item -LiteralPath "$($c.goldenVmFile).sig" -Destination "$goldenVmFile.sig" -Force
+    $goldenVmArchive=Join-Path $goldenDirectory (Split-Path -Leaf $c.goldenVmFile)
+    Copy-Item -LiteralPath $c.goldenVmFile -Destination $goldenVmArchive -Force
+    Copy-Item -LiteralPath "$($c.goldenVmFile).pem" -Destination "$goldenVmArchive.pem" -Force
+    Copy-Item -LiteralPath "$($c.goldenVmFile).sig" -Destination "$goldenVmArchive.sig" -Force
+    $goldenImage=Join-Path $goldenDirectory 'image'; if(Test-Path $goldenImage){Remove-Item $goldenImage -Recurse -Force}; Expand-Archive -LiteralPath $goldenVmArchive -DestinationPath $goldenImage -Force
+    $goldenConfigurations=@(Get-ChildItem -LiteralPath $goldenImage -Recurse -File -Filter '*.vmcx')
+    if($goldenConfigurations.Count -ne 1){throw "Windows golden VM archive must contain exactly one .vmcx file; found $($goldenConfigurations.Count)"}
+    $goldenVmConfiguration=$goldenConfigurations[0].FullName
+    $guestCredential=Get-Content -LiteralPath $c.guestCredentialFile -Raw | ConvertFrom-Json
+    if([string]::IsNullOrWhiteSpace($guestCredential.username) -or [string]::IsNullOrWhiteSpace($guestCredential.password)){throw 'guestCredentialFile must contain username and password'}
+    Copy-Item -LiteralPath $c.guestCredentialFile -Destination (Join-Path $State 'credentials\guest-credential.bootstrap.json') -Force
     $release=Join-Path $Root "releases\$($c.releaseVersion)"
     if(!(Test-Path $release)){New-Item -ItemType Directory -Force $release | Out-Null; Expand-Archive (Join-Path $stage $bundle) -DestinationPath $release; Copy-Item "$stage\release-manifest.json*" $release}
     $nodeId=Initialize-Enrollment -Config $c -Release $release
     $oldTarget=$null; $current=Join-Path $Root 'current'; if(Test-Path $current){$oldTarget=(Get-Item $current).Target; Stop-Service $Service -ErrorAction SilentlyContinue; Remove-Item $current -Force}
-    try { New-Item -ItemType Junction -Path $current -Target $release | Out-Null; Set-ServiceConfiguration -Config $c -NodeId $nodeId -GoldenVmFile $goldenVmFile; Start-Service $Service; Start-Sleep -Seconds 3; if((Get-Service $Service).Status -ne 'Running'){throw 'E2E service did not stay running'} }
+    try { New-Item -ItemType Junction -Path $current -Target $release | Out-Null; Set-ServiceConfiguration -Config $c -NodeId $nodeId -GoldenVmArchive $goldenVmArchive -GoldenVmConfiguration $goldenVmConfiguration; Start-Service $Service; Start-Sleep -Seconds 3; if((Get-Service $Service).Status -ne 'Running'){throw 'E2E service did not stay running'} }
     catch { Remove-Item $current -Force -ErrorAction SilentlyContinue; if($oldTarget){New-Item -ItemType Junction -Path $current -Target $oldTarget | Out-Null; Start-Service $Service -ErrorAction SilentlyContinue}; throw }
   } finally { if($mutex){$mutex.ReleaseMutex();$mutex.Dispose()} }
 }

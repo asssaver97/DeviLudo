@@ -2435,14 +2435,31 @@ export class CoreRepository {
     const client = await this.database.pool.connect();
     try {
       await client.query("BEGIN");
-      const token = await client.query<{ id: string }>(
-        `SELECT id::text FROM deviludo.e2e_enrollment_tokens
+      const token = await client.query<{ id: string; node_id: string | null; used_at: string | null; expires_at: string }>(
+        `SELECT id::text, node_id::text, used_at::text, expires_at::text
+           FROM deviludo.e2e_enrollment_tokens
           WHERE token_hash = $1 AND pool_kind = $2::deviludo.server_pool_kind
-            AND used_at IS NULL AND expires_at > clock_timestamp()
           FOR UPDATE`,
         [input.tokenHash, input.poolKind],
       );
-      if (!token.rows[0]) throw Object.assign(new Error("Enrollment token is invalid or expired"), { statusCode: 401 });
+      if (!token.rows[0] || (!token.rows[0].used_at && Date.parse(token.rows[0].expires_at) <= Date.now())) {
+        throw Object.assign(new Error("Enrollment token is invalid or expired"), { statusCode: 401 });
+      }
+      if (token.rows[0].used_at && token.rows[0].node_id) {
+        const existing = await client.query<{ public_key_pem: string; operating_system: string }>(
+          `SELECT identity.public_key_pem, node.operating_system::text
+             FROM deviludo.executor_identities identity
+             JOIN deviludo.server_nodes node ON node.id = identity.node_id
+            WHERE identity.node_id = $1::uuid AND identity.enabled = true`,
+          [token.rows[0].node_id],
+        );
+        if (existing.rows[0]?.public_key_pem !== input.receiptPublicKey
+          || existing.rows[0]?.operating_system !== input.operatingSystem) {
+          throw Object.assign(new Error("Enrollment token is already bound to another node"), { statusCode: 401 });
+        }
+        await client.query("COMMIT");
+        return token.rows[0].node_id;
+      }
       const node = await client.query<{ id: string }>(
         `INSERT INTO deviludo.server_nodes(pool_kind, operating_system, state, capabilities)
          VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, 'PROVISIONING',
@@ -2468,6 +2485,105 @@ export class CoreRepository {
     } finally {
       client.release();
     }
+  }
+
+  async reserveDevelopmentE2eEnrollment(input: Readonly<{
+    tokenHash: string;
+    poolKind: Extract<ServerPoolKind, `E2E_${string}`>;
+    operatingSystem: ServerOperatingSystem;
+    receiptPublicKey: string;
+    nodeAuthTokenHash: string;
+    runtimeImage: string;
+  }>): Promise<string> {
+    const client = await this.database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const token = await client.query<{ id: string; node_id: string | null; used_at: string | null; expires_at: string }>(
+        `SELECT id::text, node_id::text, used_at::text, expires_at::text
+           FROM deviludo.e2e_enrollment_tokens
+          WHERE token_hash = $1 AND pool_kind = $2::deviludo.server_pool_kind
+          FOR UPDATE`,
+        [input.tokenHash, input.poolKind],
+      );
+      if (!token.rows[0] || (!token.rows[0].used_at && Date.parse(token.rows[0].expires_at) <= Date.now())) {
+        throw Object.assign(new Error("Enrollment token is invalid or expired"), { statusCode: 401 });
+      }
+      if (token.rows[0].used_at && token.rows[0].node_id) {
+        const existing = await client.query<{
+          public_key_pem: string;
+          operating_system: string;
+          development_auth_token_hash: string | null;
+        }>(
+          `SELECT identity.public_key_pem, node.operating_system::text, node.development_auth_token_hash
+             FROM deviludo.executor_identities identity
+             JOIN deviludo.server_nodes node ON node.id = identity.node_id
+            WHERE identity.node_id = $1::uuid AND identity.enabled = true`,
+          [token.rows[0].node_id],
+        );
+        if (existing.rows[0]?.public_key_pem !== input.receiptPublicKey
+          || existing.rows[0]?.operating_system !== input.operatingSystem
+          || existing.rows[0]?.development_auth_token_hash !== input.nodeAuthTokenHash) {
+          throw Object.assign(new Error("Enrollment token is already bound to another node"), { statusCode: 401 });
+        }
+        await client.query("COMMIT");
+        return token.rows[0].node_id;
+      }
+      const node = await client.query<{ id: string }>(
+        `INSERT INTO deviludo.server_nodes(
+           pool_kind, operating_system, state, capabilities, development_auth_token_hash
+         )
+         VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, 'ACTIVE', ARRAY['E2E_TEST'], $3)
+         RETURNING id::text`,
+        [input.poolKind, input.operatingSystem, input.nodeAuthTokenHash],
+      );
+      await client.query(
+        `UPDATE deviludo.e2e_enrollment_tokens
+            SET used_at = clock_timestamp(), node_id = $2::uuid WHERE id = $1::uuid`,
+        [token.rows[0].id, node.rows[0].id],
+      );
+      await client.query(
+        `INSERT INTO deviludo.executor_identities(executor_id, identity_kind, node_id, public_key_pem)
+         VALUES ($1, 'E2E', $1::uuid, $2)`,
+        [node.rows[0].id, input.receiptPublicKey],
+      );
+      await client.query(
+        `INSERT INTO deviludo.runtime_images(runtime_key, image_reference, release_version, verified_at)
+         VALUES ($1, $2, 'local-remote', clock_timestamp())
+         ON CONFLICT (runtime_key) DO UPDATE SET image_reference = EXCLUDED.image_reference,
+           release_version = EXCLUDED.release_version, verified_at = EXCLUDED.verified_at,
+           updated_at = clock_timestamp()`,
+        [input.poolKind, input.runtimeImage],
+      );
+      await client.query("COMMIT");
+      return node.rows[0].id;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async authenticateDevelopmentE2eNode(nodeId: string, tokenHash: string): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `SELECT 1
+         FROM deviludo.server_nodes node
+        WHERE node.id = $1::uuid AND node.development_auth_token_hash = $2
+          AND node.state IN ('ACTIVE', 'DRAINING')
+        LIMIT 1`,
+      [nodeId, tokenHash],
+    );
+    return result.rowCount === 1;
+  }
+
+  async heartbeatServerNode(nodeId: string, poolKind: ServerPoolKind): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `UPDATE deviludo.server_nodes
+          SET last_heartbeat_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE id = $1::uuid AND pool_kind = $2::deviludo.server_pool_kind AND state = 'ACTIVE'`,
+      [nodeId, poolKind],
+    );
+    return result.rowCount === 1;
   }
 
   async saveE2eCertificate(input: Readonly<{
