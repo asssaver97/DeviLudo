@@ -377,6 +377,7 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /HostKeyAlias=\$\{guestHostKeyAlias\}/);
   assert.match(tartPrepare, /ssh-keyscan", \["-T", "5", "-H", ip\]/);
   assert.match(tartPrepare, /attempt < 20 && !knownHosts/);
+  assert.match(tartPrepare, /!line\.startsWith\("#"\)[\s\S]*line\.split\(\/\\s\+\/\)\.length >= 3/);
   assert.match(tartPrepare, /PreferredAuthentications=password/);
   assert.match(tartPrepare, /attempt < 20 && !authorized/);
   assert.match(tartPrepare, /key_press/);
@@ -397,6 +398,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   const tartGuest = await readFile(new URL("../scripts/executors/local-tart-guest-runner.mjs", import.meta.url), "utf8");
   assert.match(tartGuest, /configuration\.gamepadAvailable === true/);
   assert.match(tartProvision, /sudo -u admin -H \/opt\/homebrew\/bin\/brew install ffmpeg/);
+  assert.match(tartProvision, /HOMEBREW_NO_AUTO_UPDATE=1/);
+  assert.match(tartPrepare, /"admin\\n", 45 \* 60_000/);
   assert.doesNotMatch(tartProvision, /^\s*\/opt\/homebrew\/bin\/brew install ffmpeg/m);
   assert.match(tartPrepare, /gui-event-batches\.mjs"\), "\/Users\/Shared\/gui-event-batches\.mjs"/);
   assert.match(tartPrepare, /randomBytes\(12\)\.toString\("hex"\)/);

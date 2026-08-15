@@ -5,9 +5,15 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import {
+  closeLineInput,
+  terminateChildProcess,
+  waitForChildWithHardTimeout,
+} from "./e2e-process-lifecycle.mjs";
 const action = process.argv[2];
 if (action !== "test") throw new Error("Unsupported E2E executor action");
-const parentLines = createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
+const parentInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const parentLines = parentInput[Symbol.asyncIterator]();
 const initial = await parentLines.next();
 const envelope = initial.done ? null : JSON.parse(initial.value);
 const request = envelope?.type === "execute" ? envelope.request : null;
@@ -37,7 +43,7 @@ try {
     DEVILUDO_E2E_PROJECT_ID: request.projectId,
     DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS: String(request.timeoutSeconds),
     DEVILUDO_E2E_CONTRACT_DIGEST: String(request.payload?.e2eContractDigest ?? ""),
-  });
+  }, request.timeoutSeconds);
   const outcome = normalizeGuestOutcome(receipt);
   const evidence = await readFile(evidenceOutput);
   const digest = `sha256:${createHash("sha256").update(evidence).digest("hex")}`;
@@ -54,6 +60,7 @@ try {
   process.stdout.write(`${JSON.stringify({ type: "result", value: { ...receipt, jobId: request.jobId, action, inputDigest: input.object.sha256,
     outcome: outcome.outcome, failureDomain: outcome.failureDomain, summary: outcome.summary } })}\n`);
 } finally {
+  closeLineInput(parentInput, process.stdin);
   if (!evidenceOutputReady) await rm(workspace, { recursive: true, force: true });
 }
 
@@ -75,40 +82,62 @@ async function downloadInput(input, destination) {
   await writeFile(destination, content, { mode: 0o600 });
 }
 
-async function runFramed(executable, arguments_, parentIterator, extraEnvironment = {}) {
-  return await new Promise((resolve, reject) => {
-    // JavaScript runners are source files, not platform executables. Invoke them
-    // through the same trusted Node binary so a checkout that does not preserve
-    // executable mode (or a freshly generated local runner) cannot fail with
-    // EACCES before the guest VM is reached.
-    const invocation = executable.endsWith(".mjs")
-      ? { executable: process.execPath, arguments: [executable, ...arguments_] }
-      : { executable, arguments: arguments_ };
-    const child = spawn(invocation.executable, invocation.arguments, { stdio: ["pipe", "pipe", "pipe"], shell: false, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...extraEnvironment } });
-    const stderr = []; child.stderr.on("data", value => stderr.push(Buffer.from(value)));
-    let result = null;
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    void (async () => {
-      for await (const line of lines) {
-        const message = JSON.parse(line);
-        if (message?.type === "policy_request" && typeof message.id === "string") {
-          process.stdout.write(`${JSON.stringify(message)}\n`);
-          const next = await parentIterator.next();
-          if (next.done) throw new Error("Player policy relay closed before responding");
-          const response = JSON.parse(next.value);
-          if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");
-          child.stdin.write(`${JSON.stringify(response)}\n`);
-        } else if (message?.type === "result" && message.value && typeof message.value === "object") {
-          result = message.value;
-        }
-      }
-    })().catch(reject);
-    child.once("error", reject); child.once("close", code => {
-      if (!result || typeof result !== "object" || Array.isArray(result)) return reject(new Error(`Guest runner returned invalid framed JSON: ${Buffer.concat(stderr).toString("utf8").slice(0, 2000)}`));
-      if (!Number.isInteger(result.exitCode)) result.exitCode = Number.isInteger(code) ? code : 1;
-      resolve(result);
-    });
+async function runFramed(executable, arguments_, parentIterator, extraEnvironment, timeoutSeconds) {
+  // JavaScript runners are source files, not platform executables. Invoke them
+  // through the same trusted Node binary so a checkout that does not preserve
+  // executable mode (or a freshly generated local runner) cannot fail with
+  // EACCES before the guest VM is reached.
+  const invocation = executable.endsWith(".mjs")
+    ? { executable: process.execPath, arguments: [executable, ...arguments_] }
+    : { executable, arguments: arguments_ };
+  const killProcessGroup = process.platform !== "win32";
+  const child = spawn(invocation.executable, invocation.arguments, {
+    stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,
+    env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...extraEnvironment },
   });
+  const stderr = [];
+  child.stderr.on("data", value => { if (Buffer.concat(stderr).length < 65_536) stderr.push(Buffer.from(value)); });
+  let result = null;
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const relay = (async () => {
+    for await (const line of lines) {
+      const message = JSON.parse(line);
+      if (message?.type === "policy_request" && typeof message.id === "string") {
+        process.stdout.write(`${JSON.stringify(message)}\n`);
+        const next = await parentIterator.next();
+        if (next.done) throw new Error("Player policy relay closed before responding");
+        const response = JSON.parse(next.value);
+        if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");
+        child.stdin.write(`${JSON.stringify(response)}\n`);
+      } else if (message?.type === "result" && message.value && typeof message.value === "object") {
+        result = message.value;
+      }
+    }
+  })();
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1800 || timeoutSeconds > 5400) {
+    terminateChildProcess(child, "SIGKILL", killProcessGroup);
+    throw new Error("Guest runner hard timeout is invalid");
+  }
+  try {
+    const [childExit] = await Promise.all([
+      waitForChildWithHardTimeout(child, {
+        timeoutMs: timeoutSeconds * 1_000 + 180_000,
+        terminateGraceMs: 2_000,
+        killProcessGroup,
+      }),
+      relay,
+    ]);
+    if (childExit.timedOut) throw new Error("Guest runner exceeded the frozen E2E hard deadline and was terminated");
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      throw new Error(`Guest runner returned invalid framed JSON: ${Buffer.concat(stderr).toString("utf8").slice(0, 2000)}`);
+    }
+    if (!Number.isInteger(result.exitCode)) result.exitCode = Number.isInteger(childExit.code) ? childExit.code : 1;
+    return result;
+  } finally {
+    lines.close();
+    child.stdin.end();
+    terminateChildProcess(child, "SIGKILL", killProcessGroup);
+  }
 }
 
 function normalizeGuestOutcome(receipt) {

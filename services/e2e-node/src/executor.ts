@@ -2,6 +2,10 @@ import { spawn } from "node:child_process";
 import { createHash, sign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import {
+  terminateChildProcess,
+  waitForChildWithHardTimeout,
+} from "../../../deploy/assets/e2e-process-lifecycle.mjs";
 import { assertJobPlacement } from "@/lib/runtime/job-routing";
 import {
   parseJobProtocolV4,
@@ -272,10 +276,12 @@ async function runExternal(
   }
   if (!isAbsolute(executable)) throw new Error(`${action} executor path must be absolute`);
   const invocation = e2eExecutableInvocation(executable, [action]);
+  const killProcessGroup = process.platform !== "win32";
   const child = spawn(invocation.executable, invocation.arguments, {
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
     signal,
+    detached: killProcessGroup,
     env: {
       PATH: e2eToolPath(),
       LANG: "C.UTF-8",
@@ -315,13 +321,27 @@ async function runExternal(
   child.stderr.on("data", (chunk: Buffer) => {
     if (Buffer.concat(stderr).length < 65_536) stderr.push(chunk);
   });
-  const code = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  if (code !== 0 || bytes > 4_194_304 || !result) {
+  const timeoutSeconds = Number(request.timeoutSeconds);
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1800 || timeoutSeconds > 5400) {
+    terminateChildProcess(child, "SIGKILL", killProcessGroup);
+    throw new Error(`${action} executor hard timeout is invalid`);
+  }
+  let childExit: Awaited<ReturnType<typeof waitForChildWithHardTimeout>>;
+  try {
+    childExit = await waitForChildWithHardTimeout(child, {
+      timeoutMs: timeoutSeconds * 1_000 + 300_000,
+      terminateGraceMs: 2_000,
+      killProcessGroup,
+    });
+  } finally {
+    child.stdin.end();
+    terminateChildProcess(child, "SIGKILL", killProcessGroup);
+  }
+  if (childExit.timedOut) {
+    throw new Error(`${action} executor exceeded its frozen hard deadline and was terminated`);
+  }
+  if (childExit.code !== 0 || bytes > 4_194_304 || !result) {
     throw new Error(`${action} executor failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2_000)}`);
   }
-  child.stdin.end();
   return result;
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_ENV_HINTS=1
 guest_root=/usr/local/lib/deviludo
 sudo install -d -m 0755 "$guest_root" "$guest_root/executors"
 sudo install -m 0555 /Users/Shared/godot-window-e2e-guest.mjs "$guest_root/executors/godot-window-e2e-guest.mjs"
@@ -8,6 +10,7 @@ sudo install -m 0444 /Users/Shared/game-test-environment.mjs "$guest_root/execut
 sudo install -m 0444 /Users/Shared/gui-event-batches.mjs "$guest_root/executors/gui-event-batches.mjs"
 sudo install -m 0444 /Users/Shared/e2e-evidence.mjs "$guest_root/e2e-evidence.mjs"
 sudo install -m 0444 /Users/Shared/e2e-ui-probe.mjs "$guest_root/e2e-ui-probe.mjs"
+sudo install -m 0444 /Users/Shared/e2e-interaction-contract.mjs "$guest_root/e2e-interaction-contract.mjs"
 sudo install -m 0555 /Users/Shared/deviludo-gui-driver /usr/local/bin/deviludo-gui-driver
 sudo install -m 0555 /Users/Shared/deviludo-gamepad-driver /usr/local/bin/deviludo-gamepad-driver
 if [[ ! -x /opt/homebrew/bin/ffmpeg ]]; then

@@ -198,9 +198,13 @@ async function authorizeSshKey(ip) {
   if (!authorized) throw authorizationError ?? new Error("无法授权 Tart guest SSH key");
   let knownHosts = "";
   for (let attempt = 0; attempt < 20 && !knownHosts; attempt += 1) {
-    knownHosts = await execute("ssh-keyscan", ["-T", "5", "-H", ip], { timeout: 10_000, maxBuffer: 1024 * 1024 })
+    const scan = await execute("ssh-keyscan", ["-T", "5", "-H", ip], { timeout: 10_000, maxBuffer: 1024 * 1024 })
       .then(result => result.stdout.trim())
       .catch(error => String(error?.stdout ?? "").trim());
+    knownHosts = scan.split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith("#") && line.split(/\s+/).length >= 3)
+      .join("\n");
     if (!knownHosts) await delay(1000);
   }
   if (!knownHosts) throw new Error("无法固定 Tart guest SSH host key");
@@ -246,6 +250,7 @@ async function installGuestRuntime(ip) {
     [resolve(root, "scripts/executors/gui-event-batches.mjs"), "/Users/Shared/gui-event-batches.mjs"],
     [resolve(root, "scripts/e2e-evidence.mjs"), "/Users/Shared/e2e-evidence.mjs"],
     [resolve(root, "scripts/e2e-ui-probe.mjs"), "/Users/Shared/e2e-ui-probe.mjs"],
+    [resolve(root, "scripts/e2e-interaction-contract.mjs"), "/Users/Shared/e2e-interaction-contract.mjs"],
     [resolve(root, "scripts/executors/godot-system-gamepad-smoke.mjs"), "/Users/Shared/godot-system-gamepad-smoke.mjs"],
     [resolve(root, "fixtures/godot-input-smoke/project.godot"), "/Users/Shared/godot-input-smoke-project.godot"],
     [resolve(root, "fixtures/godot-input-smoke/main.tscn"), "/Users/Shared/godot-input-smoke-main.tscn"],
@@ -259,7 +264,7 @@ async function installGuestRuntime(ip) {
   // base64url characters still provide 144 bits of random entropy while
   // remaining compatible with the persisted desktop login path.
   const password = randomBytes(12).toString("hex");
-  await spawnWithInput("ssh", [...ssh, `admin@${ip}`, `env DEVILUDO_REPLACEMENT_PASSWORD=${password} sudo -S -E bash /Users/Shared/local-tart-provision.sh`], "admin\n", 20 * 60_000);
+  await spawnWithInput("ssh", [...ssh, `admin@${ip}`, `env DEVILUDO_REPLACEMENT_PASSWORD=${password} sudo -S -E bash /Users/Shared/local-tart-provision.sh`], "admin\n", 45 * 60_000);
 }
 
 async function smokeGuestRuntime(ip) {
@@ -313,7 +318,7 @@ function sshArguments() { return ["-i", keyFile, "-o", "BatchMode=yes", "-o", "S
 async function configurationFingerprint(baseImageDigest) {
   const hash = createHash("sha256").update("deviludo-tart-adaptive-e2e\0tahoe-26\0node-22.22.0\0godot-4.5.1\0ffmpeg\0memory-6144\0display-1440x900\0swift-Onone\0").update(baseImageDigest);
   hash.update(await readFile(`${keyFile}.pub`));
-  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/game-test-environment.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/godot-system-gamepad-smoke.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/executors/macos-gamepad-driver.swift", "fixtures/godot-input-smoke/project.godot", "fixtures/godot-input-smoke/main.tscn", "fixtures/godot-input-smoke/main.gd", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
+  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/game-test-environment.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/godot-system-gamepad-smoke.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/e2e-interaction-contract.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/executors/macos-gamepad-driver.swift", "fixtures/godot-input-smoke/project.godot", "fixtures/godot-input-smoke/main.tscn", "fixtures/godot-input-smoke/main.gd", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
   return `sha256:${hash.digest("hex")}`;
 }
 async function tartVmExists(name) {

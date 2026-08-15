@@ -4,9 +4,15 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
+import {
+  closeLineInput,
+  readCliArgument,
+  terminateChildProcess,
+  waitForChildWithHardTimeout,
+} from "../../deploy/assets/e2e-process-lifecycle.mjs";
 const execute = promisify(execFile);
 const action = process.argv[2];
-const argument = name => process.argv[process.argv.indexOf(name) + 1] ?? "";
+const argument = name => readCliArgument(process.argv, name);
 const jobId = argument("--job-id");
 const artifact = argument("--artifact");
 const regression = argument("--regression");
@@ -43,35 +49,54 @@ const command = [
   action, remoteArtifact, "--job-id", jobId, "--json",
   ...(remoteRegression ? ["--regression", remoteRegression] : []),
 ];
-const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], { stdio: ["pipe", "pipe", "pipe"], shell: false });
-const remoteClosed = new Promise((resolvePromise, rejectPromise) => {
-  remote.once("error", rejectPromise);
-  remote.once("close", resolvePromise);
+const killProcessGroup = process.platform !== "win32";
+const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], {
+  stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,
 });
-const parentLines = createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
+const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
+if (!Number.isSafeInteger(frozenTimeoutSeconds) || frozenTimeoutSeconds < 1800 || frozenTimeoutSeconds > 5400) {
+  terminateChildProcess(remote, "SIGKILL", killProcessGroup);
+  throw new Error("Local Tart guest hard timeout is invalid");
+}
+const remoteClosed = waitForChildWithHardTimeout(remote, {
+  timeoutMs: frozenTimeoutSeconds * 1_000 + 60_000,
+  terminateGraceMs: 2_000,
+  killProcessGroup,
+});
+void remoteClosed.catch(() => undefined);
+const parentInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const parentLines = parentInput[Symbol.asyncIterator]();
 const remoteLines = createInterface({ input: remote.stdout, crlfDelay: Infinity });
 let receipt = null;
-for await (const line of remoteLines) {
-  const message = JSON.parse(line);
-  if (message?.type === "policy_request" && typeof message.id === "string") {
-    process.stdout.write(`${JSON.stringify(message)}\n`);
-    const next = await parentLines.next();
-    if (next.done) throw new Error("Player policy relay closed before responding");
-    const response = JSON.parse(next.value);
-    if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");
-    remote.stdin.write(`${JSON.stringify(response)}\n`);
-  } else if (message?.type === "result" && message.value && typeof message.value === "object") receipt = message.value;
-}
-const remoteCode = await remoteClosed;
-if (remoteCode !== 0 || !receipt) throw new Error("Tart guest runner failed or omitted its result");
-if (action === "test") {
-  if (!isAbsolute(hostOutput) || typeof receipt.outputPath !== "string" || !receipt.outputPath.startsWith("/Users/Shared/")) throw new Error("Tart guest evidence path is invalid");
-  await execute("scp", [...ssh, `${configuration.guestUser}@${ip}:${receipt.outputPath}`, hostOutput], { timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024 });
-  receipt.outputPath = hostOutput;
-  if (typeof receipt.regressionOutputPath === "string") {
-    if (!isAbsolute(hostRegressionOutput) || !receipt.regressionOutputPath.startsWith("/Users/Shared/")) throw new Error("Tart guest regression path is invalid");
-    await execute("scp", [...ssh, `${configuration.guestUser}@${ip}:${receipt.regressionOutputPath}`, hostRegressionOutput], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
-    receipt.regressionOutputPath = hostRegressionOutput;
+try {
+  for await (const line of remoteLines) {
+    const message = JSON.parse(line);
+    if (message?.type === "policy_request" && typeof message.id === "string") {
+      process.stdout.write(`${JSON.stringify(message)}\n`);
+      const next = await parentLines.next();
+      if (next.done) throw new Error("Player policy relay closed before responding");
+      const response = JSON.parse(next.value);
+      if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");
+      remote.stdin.write(`${JSON.stringify(response)}\n`);
+    } else if (message?.type === "result" && message.value && typeof message.value === "object") receipt = message.value;
   }
+  const remoteExit = await remoteClosed;
+  if (remoteExit.timedOut) throw new Error("Tart guest exceeded its frozen E2E hard deadline and was terminated");
+  if (remoteExit.code !== 0 || !receipt) throw new Error("Tart guest runner failed or omitted its result");
+  if (action === "test") {
+    if (!isAbsolute(hostOutput) || typeof receipt.outputPath !== "string" || !receipt.outputPath.startsWith("/Users/Shared/")) throw new Error("Tart guest evidence path is invalid");
+    await execute("scp", [...ssh, `${configuration.guestUser}@${ip}:${receipt.outputPath}`, hostOutput], { timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+    receipt.outputPath = hostOutput;
+    if (typeof receipt.regressionOutputPath === "string") {
+      if (!isAbsolute(hostRegressionOutput) || !receipt.regressionOutputPath.startsWith("/Users/Shared/")) throw new Error("Tart guest regression path is invalid");
+      await execute("scp", [...ssh, `${configuration.guestUser}@${ip}:${receipt.regressionOutputPath}`, hostRegressionOutput], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
+      receipt.regressionOutputPath = hostRegressionOutput;
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ type: "result", value: receipt })}\n`);
+} finally {
+  remoteLines.close();
+  closeLineInput(parentInput, process.stdin);
+  remote.stdin.end();
+  terminateChildProcess(remote, "SIGKILL", killProcessGroup);
 }
-process.stdout.write(`${JSON.stringify({ type: "result", value: receipt })}\n`);

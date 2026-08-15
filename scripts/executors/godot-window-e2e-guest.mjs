@@ -23,6 +23,14 @@ import {
   resolveProbeControl,
   waitForProbeSnapshot,
 } from "../e2e-ui-probe.mjs";
+import {
+  isInteractionAction as isActionEvent,
+  isSafeProjectPngPath as safePngPath,
+  isStableId as stableId,
+  validLaunchProfile,
+  validateGuestInteractionScript as validInteractionScript,
+  validateProbeAssertion as validProbeAssertion,
+} from "../e2e-interaction-contract.mjs";
 import { checkpointOutputSeen } from "./gui-event-batches.mjs";
 import { GameTestEnvironment, gamepadEventCount } from "./game-test-environment.mjs";
 
@@ -43,7 +51,8 @@ const MAX_SCREENSHOTS = 64;
 const ADAPTIVE_ROLLOUT_COUNT = 3;
 const ADAPTIVE_REQUIRED_SUCCESSES = 2;
 const streamProtocol = process.env.DEVILUDO_E2E_STREAM_PROTOCOL === "1";
-const policyLines = streamProtocol ? createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]() : null;
+const policyInput = streamProtocol ? createInterface({ input: process.stdin, crlfDelay: Infinity }) : null;
+const policyLines = policyInput?.[Symbol.asyncIterator]() ?? null;
 const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
 const frozenContractDigest = process.env.DEVILUDO_E2E_CONTRACT_DIGEST ?? "";
 
@@ -135,6 +144,9 @@ try {
   gameExitCode = gameExitCode || 1;
   await finish("FAILED", "PRODUCT", error.message, activeManifest);
 } finally {
+  policyInput?.close();
+  process.stdin.pause();
+  process.stdin.unref?.();
   await rm(workspace, { recursive: true, force: true });
 }
 
@@ -1010,64 +1022,6 @@ function assertManifest(value) {
   if (value.inputProfiles.some(profile => !exercisedInputProfiles.has(profile))) throw productFailure("INPUT_PROFILE_COVERAGE_MISSING", "声明的输入方式没有确定性真实操作覆盖");
 }
 
-function validInteractionScript(value, journeyRequirements, playerRequirements) {
-  if (!value || Object.hasOwn(value, "version") || Object.hasOwn(value, "schemaVersion")
-    || !Array.isArray(value.events) || !value.events.length || value.events.length > 200) return false;
-  const steps = new Set(), checkpoints_ = new Set();
-  return value.events.every(event => {
-    if (!event || typeof event !== "object" || !validDelay(event.delay_ms, event.type === "wait")) return false;
-    if (event.type === "wait") return true;
-      if (event.type === "checkpoint") {
-      if (!stableId(event.id) || checkpoints_.has(event.id) || !["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(event.role)
-        || !Array.isArray(event.assertions) || !event.assertions.length || !event.assertions.every(validProbeAssertion)
-        || !["DYNAMIC", "STABLE_REPLAY"].includes(event.visualMode)
-        || (event.changeTargetId !== undefined && !stableId(event.changeTargetId))
-        || (event.visualMode === "DYNAMIC" && ["ACTION", "PROGRESS", "COMPLETION"].includes(event.role)
-          && !stableId(event.changeTargetId))
-        || (event.referenceImage !== undefined && !safePngPath(event.referenceImage))
-        || (event.expectedOutput !== undefined && event.expectedOutput !== checkpointOutputMarker(event.id))) return false;
-      checkpoints_.add(event.id); return true;
-    }
-    if (!isActionEvent(event) || !stableId(event.stepId) || steps.has(event.stepId)
-      || !["START_SESSION", "NAVIGATION", "PRIMARY_ACTION", "FEATURE_ACTION", "COMPLETE_LOOP"].includes(event.intent)
-      || !Array.isArray(event.coversRequirementIds)
-      || event.coversRequirementIds.some(id => !journeyRequirements.includes(id) || !playerRequirements.has(id))
-      || !Array.isArray(event.postconditions) || !event.postconditions.length || !event.postconditions.every(validProbeAssertion)) return false;
-    steps.add(event.stepId);
-    if (["click", "double_click", "scroll", "text_input"].includes(event.type) && !stableId(event.targetId)) return false;
-    if (event.type === "drag" && (!stableId(event.fromTargetId) || !stableId(event.toTargetId) || !validDuration(event.duration_ms))) return false;
-    if (["key_tap", "key_hold"].includes(event.type) && !supportedKey(event.key)) return false;
-    if (event.type === "key_hold" && !validDuration(event.duration_ms)) return false;
-    if (event.type === "scroll" && (!Number.isInteger(event.deltaY) || !event.deltaY || Math.abs(event.deltaY) > 10_000)) return false;
-    if (event.type === "text_input") return typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1_000;
-    if (["gamepad_button_tap", "gamepad_button_hold"].includes(event.type)) return ["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK", "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"].includes(event.button)
-      && (event.type !== "gamepad_button_hold" || validDuration(event.duration_ms));
-    if (event.type === "gamepad_axis") return ["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"].includes(event.axis)
-      && typeof event.value === "number" && event.value >= -1 && event.value <= 1
-      && (event.duration_ms === undefined || validDuration(event.duration_ms));
-    if (event.type === "gamepad_trigger") return ["LEFT", "RIGHT"].includes(event.trigger)
-      && typeof event.value === "number" && event.value >= 0 && event.value <= 1
-      && (event.duration_ms === undefined || validDuration(event.duration_ms));
-    return event.type === "gamepad_release_all";
-  });
-}
-
-function validProbeAssertion(value) {
-  if (!value || typeof value !== "object" || !["STATE", "PROGRESS", "CONTROL", "SCENE"].includes(value.source)
-    || !["EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS", "LESS_THAN", "LESS_THAN_OR_EQUALS", "CONTAINS", "EXISTS", "CHANGED"].includes(value.operator)) return false;
-  if (["STATE", "PROGRESS"].includes(value.source) && (typeof value.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value.key))) return false;
-  if (value.source === "CONTROL" && (!stableId(value.targetId) || !["visible", "enabled", "text", "value"].includes(value.property))) return false;
-  const requiresValue = !["EXISTS", "CHANGED"].includes(value.operator);
-  return requiresValue === Object.hasOwn(value, "value");
-}
-
-function validLaunchProfile(value) { return value?.type === "FRESH" || (value?.type === "SCENARIO" && stableId(value.scenarioId)); }
-function isActionEvent(event) { return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all"].includes(event?.type); }
-function supportedKey(value) { return typeof value === "string" && /^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$/.test(value); }
-function validDuration(value) { return Number.isInteger(value) && value >= 1 && value <= 300_000; }
-function validDelay(value, required) { return value === undefined ? !required : Number.isInteger(value) && value >= 0 && value <= 300_000; }
-function checkpointOutputMarker(id) { return `DEVILUDO_E2E_CHECKPOINT:${id}`; }
-
 async function finish(outcome, failureDomain, summary, manifest) {
   const scopedRequirements = manifest?.requirements ?? [];
   const playerRequirementCount = scopedRequirements.filter(item => item.verificationClass === "PLAYER_INTERACTION").length;
@@ -1205,9 +1159,7 @@ async function processAlive(pid) { try { process.kill(pid, 0); return true; } ca
 async function readOptionalLog(path) { return readFile(path).catch(() => Buffer.alloc(0)); }
 function gameWindowArguments(logPath) { return ["--log-file", logPath, "--windowed", "--resolution", `${E2E_CLIENT_WIDTH}x${E2E_CLIENT_HEIGHT}`, "--position", "40,40"]; }
 function checkpointEvidenceId(journeyId, checkpointId) { return `journey-${journeyId.length}-${journeyId}-${checkpointId}`; }
-function stableId(value) { return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,119}$/.test(value); }
 function safeGodotPath(value) { return typeof value === "string" && /^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(value) && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value.slice(6)); }
-function safePngPath(value) { return typeof value === "string" && value.length >= 5 && value.length <= 240 && value.toLowerCase().endsWith(".png") && !value.startsWith("/") && !value.startsWith("res://") && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value) && /^[A-Za-z0-9][A-Za-z0-9._/-]*\.png$/i.test(value); }
 function productFailure(code, message) { return Object.assign(new Error(String(message).slice(0, 2_000)), { code, productFailure: true }); }
 function isProductFailure(error) { return Boolean(error && typeof error === "object" && error.productFailure === true); }
 function safeEnvironment(overrides = {}) { return { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", DISPLAY: process.env.DISPLAY ?? "", HOME: process.env.HOME ?? tmpdir(), ...overrides }; }

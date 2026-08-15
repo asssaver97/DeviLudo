@@ -2,9 +2,10 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { readCliArgument } from "../../deploy/assets/e2e-process-lifecycle.mjs";
 
 const action = process.argv[2];
-const argument = name => process.argv[process.argv.indexOf(name) + 1] ?? "";
+const argument = name => readCliArgument(process.argv, name);
 const stage = argument("--stage");
 const jobId = argument("--job-id");
 const generation = argument("--generation");

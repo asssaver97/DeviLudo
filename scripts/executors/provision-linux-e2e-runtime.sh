@@ -13,6 +13,7 @@ install -m 0555 "$source_root/scripts/executors/godot-window-e2e-guest.mjs" /usr
 install -m 0444 "$source_root/scripts/executors/game-test-environment.mjs" /usr/local/lib/deviludo/executors/game-test-environment.mjs
 install -m 0444 "$source_root/scripts/e2e-evidence.mjs" /usr/local/lib/deviludo/e2e-evidence.mjs
 install -m 0444 "$source_root/scripts/e2e-ui-probe.mjs" /usr/local/lib/deviludo/e2e-ui-probe.mjs
+install -m 0444 "$source_root/scripts/e2e-interaction-contract.mjs" /usr/local/lib/deviludo/e2e-interaction-contract.mjs
 groupadd --system deviludo-input 2>/dev/null || true
 usermod -aG deviludo-input "$guest_user"
 printf 'uinput\n' > /etc/modules-load.d/deviludo-uinput.conf
