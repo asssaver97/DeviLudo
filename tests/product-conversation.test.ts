@@ -11,6 +11,8 @@ const project = Object.freeze({
   name: "星港维修队",
   concept: "双人合作修理太空站",
   workflowState: "DRAFT",
+  analysisStatus: "READY" as const,
+  discovery: null,
   specification: Object.freeze({ coreLoop: Object.freeze(["发现故障", "协作维修"]) }),
   document: Object.freeze({
     introduction: "玩家共同维护一座太空站。",

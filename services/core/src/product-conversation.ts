@@ -3,6 +3,7 @@ import type {
   AgentRoleModelConfiguration,
   AgentRuntimeKind,
   ProductConversationMessage,
+  ProjectDiscoveryReport,
   ProjectAgentRole,
   ProjectDocumentContent,
 } from "@/lib/product/contracts";
@@ -18,6 +19,8 @@ export type ConversationAgentProjectContext = Readonly<{
   workflowState: string;
   specification: Readonly<Record<string, unknown>>;
   document: ProjectDocumentContent;
+  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "NEEDS_INPUT" | "FAILED";
+  discovery: ProjectDiscoveryReport | null;
 }>;
 
 export type ConversationAgentSettings = Readonly<{
@@ -212,6 +215,8 @@ function systemPrompt(
       workflowState: project.workflowState,
       specification: project.specification,
       document: project.document,
+      analysisStatus: project.analysisStatus,
+      discovery: project.discovery,
     },
     permissions: {
       mayApplyUserMessageToDraft: allowDraftMutation,
@@ -231,6 +236,8 @@ function systemPrompt(
     ...roleInstructions,
     "使用玩家正在使用的语言回答，优先给出具体、可执行的设计建议；必要时提出一到三个关键追问。",
     "充分利用会话历史、项目说明、规格和工作流状态，避免重复询问已经明确的信息。",
+    "如果 discovery 存在，它是现有项目导入时的结构化源码分析。必须逐项处理其中 questions；只有玩家的回答已经消除全部阻塞歧义时才能把 readyForDevelopment 设为 true。不得忽略 startupIssues、remainingWork 或 recommendedPlan。",
+    "当 analysisStatus 为 NEEDS_INPUT 时，先明确复述哪些分析问题已被本轮回答、哪些仍未解决。只要仍有任何问题未解决，三个 Agent 都必须将 readyForDevelopment 设为 false。",
     "不要声称执行了构建、测试、发布或其他尚未发生的操作。",
     "玩家在本轮明确以命令方式要求开始、继续或按照当前需求开发时，该消息同时构成开发批准：完成必要的需求同步后，告诉玩家系统会自动开启开发流程，不要再要求玩家点击按钮。",
     "如果玩家只是批准开始开发、没有改变任何需求，projectDocumentPatch 必须为 null 且 applyToDraft 必须为 false；开发批准本身不需要伪造一次项目说明变更。",

@@ -827,7 +827,8 @@ test("every delivery node stays visible, including stages this run will not reac
   // disappear from a VALIDATE project, so the pipeline no longer showed what was
   // still ahead. The track iterates the whole chain; the profile only decides how a
   // node is labelled and whether its rerun is offered.
-  assert.match(studio, /<ol className="product-delivery-track">\s*\{PIPELINE\.map\(/);
+  assert.match(studio, /<ol className="product-delivery-track">[\s\S]*discoveryStage\.title[\s\S]*\{PIPELINE\.map\(/);
+  assert.match(studio, /text\("已有项目分析", "PROJECT ANALYSIS"\)/);
   assert.doesNotMatch(studio, /visibleStages/);
   assert.match(studio, /const inProfile = profileStages\.has\(kind\);/);
   assert.match(studio, /view = inProfile \? pipelineStageView\(state, text\) : OUT_OF_PROFILE_STAGE_VIEW\(text\)/);

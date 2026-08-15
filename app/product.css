@@ -2111,7 +2111,7 @@ textarea {
      the room for it is reserved here. Keeping the reserve on the track means it
      travels with the branch instead of being a canvas min-height to remember. */
   margin: 0 0 88px;
-  min-width: 920px;
+  min-width: 1080px;
   overflow: visible;
   padding: 0;
   position: relative;

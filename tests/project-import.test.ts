@@ -109,6 +109,25 @@ test("a bound directory larger than the former 64 MiB browser limit remains vali
   assert.equal(snapshot.fileCount, 2);
 });
 
+test("project analysis context keeps late startup logic from large entry scripts", () => {
+  const snapshot = inspectProjectFiles({
+    files: [
+      { path: "project.godot", bytes: Buffer.from('[application]\nrun/main_scene="res://scenes/main.tscn"') },
+      { path: "scenes/main.tscn", bytes: Buffer.from('[ext_resource path="res://scripts/main.gd" type="Script" id="1"]') },
+      {
+        path: "scripts/main.gd",
+        bytes: Buffer.from(`${"# ordinary implementation\n".repeat(2_000)}func _ready():\n  state.setup(19870531, 3)\n  rules.start_turn()\n`),
+      },
+    ],
+    sourceKind: "LOCAL_DIRECTORY",
+    localDirectoryBindingId: "10000000-0000-4000-8000-000000000001",
+    displayName: "Midgame Startup",
+  });
+  assert.match(snapshot.context, /run\/main_scene="res:\/\/scenes\/main\.tscn"/);
+  assert.match(snapshot.context, /state\.setup\(19870531, 3\)/);
+  assert.match(snapshot.context, /rules\.start_turn\(\)/);
+});
+
 test("project import rejects credentials even when the archive is otherwise valid", () => {
   const archive = createStoredZip([
     { path: "game/project.godot", bytes: encoder.encode("[application]") },
@@ -138,13 +157,23 @@ test("import analysis creates the collaborative document and development specifi
         coreLoop: ["探索", "推理", "重置"],
         playerExperience: "在重复中逐步掌握因果关系。",
         acceptanceCriteria: ["可以完成一次时间循环"],
-        summary: "源码已解析。我整理了现有玩法和后续开发计划，可以继续讨论下一步修改。",
+        gameContent: "玩家探索时间回廊，通过循环改变事件结果。",
+        currentDevelopmentState: "核心循环原型已存在，完整关卡尚未完成。",
+        completedWork: ["基础探索", "时间重置"],
+        remainingWork: ["完整关卡流程"],
+        startupFlow: "项目主场景直接进入回廊关卡。",
+        startupIssues: ["缺少主菜单，启动后直接进入进行中的关卡状态。"],
+        risks: ["状态持久化仍需验证"],
+        recommendedPlan: ["补齐主菜单与新游戏入口", "完成首个关卡", "增加真实操作验收"],
+        questions: ["启动后应显示主菜单，还是自动继续最近存档？"],
       }) }] });
     }) as typeof fetch,
   });
   assert.equal(analysis.name, "时序回廊");
   assert.deepEqual(analysis.document.categories, ["解谜", "冒险"]);
   assert.deepEqual(analysis.specification.coreLoop, ["探索", "推理", "重置"]);
+  assert.match(analysis.assistantContent, /启动后直接进入进行中的关卡状态/);
+  assert.deepEqual(analysis.discovery.questions, ["启动后应显示主菜单，还是自动继续最近存档？"]);
   assert.equal(analysis.settingsRevision, 7);
 });
 
@@ -167,7 +196,15 @@ test("import analysis retries a transient Provider connection failure", async ()
         coreLoop: ["探索", "重置"],
         playerExperience: "在重复中掌握因果关系。",
         acceptanceCriteria: ["能够完成一次时间循环"],
-        summary: "短暂断线后完成了项目分析。",
+        gameContent: "时间循环解谜。",
+        currentDevelopmentState: "可玩的核心原型。",
+        completedWork: ["循环重置"],
+        remainingWork: ["更多谜题"],
+        startupFlow: "标题页进入关卡。",
+        startupIssues: [],
+        risks: [],
+        recommendedPlan: ["增加谜题并回归核心循环"],
+        questions: [],
       }) }] });
     }) as typeof fetch,
   });
@@ -190,7 +227,15 @@ test("import analysis recovers JSON wrapped in prose with literal newlines and t
     '  "coreLoop": ["采购", "销售", "扩张",],',
     '  "playerExperience": "持续优化经营策略。",',
     '  "acceptanceCriteria": ["能够完成一次经营周期",],',
-    '  "summary": "项目结构已分析完成。",',
+    '  "gameContent": "经营并扩张商业版图。",',
+    '  "currentDevelopmentState": "经营核心原型已经存在。",',
+    '  "completedWork": ["采购与销售",],',
+    '  "remainingWork": ["完整新手流程",],',
+    '  "startupFlow": "标题页进入新游戏。",',
+    '  "startupIssues": [],',
+    '  "risks": ["经济平衡尚未验证",],',
+    '  "recommendedPlan": ["补齐新手流程", "验证经济平衡",],',
+    '  "questions": [],',
     "}",
     "```",
     "可以继续开始开发。",

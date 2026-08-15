@@ -3,13 +3,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("project linking is reachable from Home and separates local and GitHub sources", async () => {
-  const [home, dashboard, studio, bridge, proxy, core, projectImport, configuration, analysisMigration] = await Promise.all([
+  const [home, dashboard, studio, bridge, proxy, core, repository, projectImport, configuration, analysisMigration] = await Promise.all([
     readFile(new URL("../components/HomeChat.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/api/[...segments]/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/project-import.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/local-git-import/config/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../infra/postgres/migrations/010_async_project_import_analysis.sql", import.meta.url), "utf8"),
@@ -44,6 +45,14 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(dashboard, /router\.push\("\/projects"\)/);
   assert.match(dashboard, /className="project-analysis-spinner"/);
   assert.match(dashboard, /project\.analysisStatus === "PENDING"/);
+  assert.match(dashboard, /project\.analysisStatus === "NEEDS_INPUT"/);
+  assert.match(studio, /text\("已有项目分析", "PROJECT ANALYSIS"\)/);
+  assert.match(studio, /analysisStatus === "NEEDS_INPUT"/);
+  assert.match(projectImport, /completedWork.*remainingWork.*startupFlow.*startupIssues.*recommendedPlan.*questions/s);
+  assert.match(projectImport, /直接进入进行中的对局、残局、测试\/调试状态/);
+  assert.match(repository, /status: input\.discovery\.questions\.length \? "NEEDS_INPUT" : "READY"/);
+  assert.match(repository, /state_data #>> '\{importAnalysis,status\}' = 'NEEDS_INPUT'/);
+  assert.match(core, /project\.analysisStatus === "NEEDS_INPUT"[\s\S]*agentReplies\.every\(reply => reply\.readyForDevelopment\)/);
   assert.match(analysisMigration, /SECURITY DEFINER[\s\S]*SET row_security = off/);
   assert.match(analysisMigration, /FOR UPDATE OF workflow SKIP LOCKED/);
   assert.match(analysisMigration, /GRANT EXECUTE ON FUNCTION deviludo\.claim_project_import_analysis\(integer\) TO deviludo_api/);

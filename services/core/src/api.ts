@@ -964,7 +964,13 @@ export async function runApi(
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     if (project.analysisStatus !== "READY") {
-      throw httpError(409, "PROJECT_ANALYSIS_INCOMPLETE", "项目源码分析完成后才能开始开发");
+      throw httpError(
+        409,
+        "PROJECT_ANALYSIS_INCOMPLETE",
+        project.analysisStatus === "NEEDS_INPUT"
+          ? "请先在项目会话中回答现有项目分析提出的问题，再开始开发"
+          : "项目源码分析完成后才能开始开发",
+      );
     }
     const accepted = await approveProjectDevelopment({
       repository,
@@ -1502,6 +1508,8 @@ async function processConversationMessage(input: Readonly<{
         workflowState: "DRAFT",
         specification,
         document: createInitialProjectDocument(name, command.content, specification),
+        analysisStatus: "READY",
+        discovery: null,
       }),
       allowDraftMutation: true,
     }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
@@ -1587,6 +1595,8 @@ async function processConversationMessage(input: Readonly<{
     })),
     assistantApplyToDraft: agentReplies.some(reply => reply.agentRole === "DESIGN" && reply.applyToDraft),
     assistantProjectDocument: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument ?? null,
+    resolveImportAnalysis: project.analysisStatus === "NEEDS_INPUT"
+      && agentReplies.every(reply => reply.readyForDevelopment),
   });
   let updatedProject = await repository.readProject(workspace.id, projectId);
   if (!updatedProject) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
@@ -2010,7 +2020,10 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
           model: analysis.model,
           settingsRevision: analysis.settingsRevision,
           analyzedProjectName: analysis.name,
+          readyForDevelopment: analysis.discovery.questions.length === 0,
+          analysisQuestions: analysis.discovery.questions,
         },
+        discovery: analysis.discovery,
         source: {
           kind: source.sourceKind as "GIT" | "LOCAL_DIRECTORY",
           repositoryUrl: source.repositoryUrl,
@@ -2153,7 +2166,10 @@ async function processProjectImport(input: Readonly<{
         agentRuntime: analysis.runtime,
         model: analysis.model,
         settingsRevision: analysis.settingsRevision,
+        readyForDevelopment: analysis.discovery.questions.length === 0,
+        analysisQuestions: analysis.discovery.questions,
       },
+      discovery: analysis.discovery,
       source: {
         kind: source.sourceKind,
         repositoryUrl: source.repositoryUrl,
@@ -2217,6 +2233,8 @@ function conversationProjectContext(project: ProductProjectDetail): Conversation
     workflowState: project.workflowState,
     specification: project.specification,
     document: project.document.content,
+    analysisStatus: project.analysisStatus,
+    discovery: project.discovery,
   });
 }
 

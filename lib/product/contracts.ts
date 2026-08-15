@@ -120,8 +120,27 @@ export type ProductProjectSummary = Readonly<{
   concept: string;
   specification: Readonly<Record<string, unknown>>;
   source: ProjectSourceRevision | null;
-  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "FAILED";
+  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "NEEDS_INPUT" | "FAILED";
   analysisError: string | null;
+  discovery: ProjectDiscoveryReport | null;
+}>;
+
+/**
+ * Source-backed projects must be understood before implementation starts. The
+ * report is deliberately product-facing: it records what the game is, where
+ * development actually stands, and which assumptions still require a player
+ * decision instead of hiding those findings in an Agent transcript.
+ */
+export type ProjectDiscoveryReport = Readonly<{
+  gameContent: string;
+  currentDevelopmentState: string;
+  completedWork: readonly string[];
+  remainingWork: readonly string[];
+  startupFlow: string;
+  startupIssues: readonly string[];
+  risks: readonly string[];
+  recommendedPlan: readonly string[];
+  questions: readonly string[];
 }>;
 
 export type ProjectSourceRevision = Readonly<{

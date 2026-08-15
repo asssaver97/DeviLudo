@@ -262,18 +262,19 @@ export function ProductDashboard({
         <section className="project-catalog-grid" aria-label={text("可访问项目", "Accessible projects")}>
           {projects.map(project => {
             const analyzing = project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING";
+            const needsInput = project.analysisStatus === "NEEDS_INPUT";
             const analysisFailed = project.analysisStatus === "FAILED";
             const contents = <>
               <div className="project-catalog-card-top"><span className="project-catalog-glyph">{project.name.slice(0, 1)}</span></div>
               <h2>{project.name}</h2>
               <dl>
-                <div><dt>{text("当前阶段", "Stage")}</dt><dd>{text(`第 ${project.iterationNumber} 轮`, `Iteration ${project.iterationNumber}`)} · {analyzing ? text("正在分析项目", "ANALYZING PROJECT") : analysisFailed ? text("分析失败", "ANALYSIS FAILED") : workflowLabel(project.workflowState, text)}</dd></div>
+                <div><dt>{text("当前阶段", "Stage")}</dt><dd>{text(`第 ${project.iterationNumber} 轮`, `Iteration ${project.iterationNumber}`)} · {analyzing ? text("正在分析项目", "ANALYZING PROJECT") : needsInput ? text("等待确认分析问题", "AWAITING CLARIFICATION") : analysisFailed ? text("分析失败", "ANALYSIS FAILED") : workflowLabel(project.workflowState, text)}</dd></div>
                 <div><dt>{text("创建时间", "Created")}</dt><dd>{formatDate(project.createdAt, localeTag(locale))}</dd></div>
                 <div><dt>{text("源码修订", "Source revision")}</dt><dd>{project.source ? `r${project.source.revision}` : "—"}</dd></div>
                 <div><dt>{text("源码大小", "Source size")}</dt><dd>{project.source ? `${project.source.fileCount} files` : "—"}</dd></div>
               </dl>
               <div className="project-catalog-card-footer">
-                <span>{analyzing ? <><i aria-hidden="true" className="project-analysis-spinner" /> {text("后台分析中", "ANALYZING")}</> : analysisFailed ? text("分析未完成", "ANALYSIS INCOMPLETE") : <>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></>}</span>
+                <span>{analyzing ? <><i aria-hidden="true" className="project-analysis-spinner" /> {text("后台分析中", "ANALYZING")}</> : analysisFailed ? text("分析未完成", "ANALYSIS INCOMPLETE") : needsInput ? <>{text("回答分析问题", "ANSWER QUESTIONS")} <ArrowIcon /></> : <>{text("进入项目", "OPEN PROJECT")} <ArrowIcon /></>}</span>
                 {analysisFailed ? <button className="button button-secondary project-analysis-retry" disabled={retryingProjectId !== null} onClick={() => void retryProjectAnalysis(project.id)} type="button">{retryingProjectId === project.id ? text("正在重试…", "RETRYING…") : text("重试分析", "RETRY ANALYSIS")}</button> : null}
               </div>
               {analysisFailed && project.analysisError ? <small className="project-analysis-error">{project.analysisError}</small> : null}

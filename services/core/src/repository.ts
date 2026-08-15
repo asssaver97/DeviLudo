@@ -17,6 +17,7 @@ import {
   type ProductJob,
   type ProductWorkflowIterationDetail,
   type ProductWorkflowIterationSummary,
+  type ProjectDiscoveryReport,
   type ProjectSourceRevision,
   type ProjectSteamSettings,
   type SteamRelease,
@@ -808,6 +809,7 @@ export class CoreRepository {
     userContent: string;
     assistantContent: string;
     assistantMetadata: Readonly<Record<string, unknown>>;
+    discovery: ProjectDiscoveryReport;
     source: Readonly<{
       kind: "GIT" | "LOCAL_ARCHIVE" | "LOCAL_DIRECTORY";
       repositoryUrl: string | null;
@@ -863,6 +865,13 @@ export class CoreRepository {
             fileCount: input.source.fileCount,
             totalBytes: input.source.totalBytes,
             sha256: input.source.sha256,
+          },
+          importAnalysis: {
+            status: input.discovery.questions.length ? "NEEDS_INPUT" : "READY",
+            attempts: 1,
+            error: null,
+            report: input.discovery,
+            completedAt: new Date().toISOString(),
           },
           iteration: initialIterationState(),
         })],
@@ -1044,6 +1053,7 @@ export class CoreRepository {
     document: ProjectDocumentContent;
     assistantContent: string;
     assistantMetadata: Readonly<Record<string, unknown>>;
+    discovery: ProjectDiscoveryReport;
     source: Readonly<{
       kind: "GIT" | "LOCAL_DIRECTORY";
       repositoryUrl: string | null;
@@ -1123,8 +1133,9 @@ export class CoreRepository {
           },
           importAnalysis: {
             ...currentAnalysis,
-            status: "READY",
+            status: input.discovery.questions.length ? "NEEDS_INPUT" : "READY",
             error: null,
+            report: input.discovery,
             completedAt: new Date().toISOString(),
             leaseToken: null,
             leaseExpiresAt: null,
@@ -2161,6 +2172,7 @@ export class CoreRepository {
     }>[];
     assistantApplyToDraft: boolean;
     assistantProjectDocument: ProjectDocumentContent | null;
+    resolveImportAnalysis: boolean;
   }>): Promise<ProductConversation> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const existing = await client.query<ProductConversationRow>(
@@ -2289,6 +2301,29 @@ export class CoreRepository {
           );
           projectDocumentUpdated = true;
         }
+      }
+
+      if (input.resolveImportAnalysis && project.workflowState === "DRAFT") {
+        await client.query(
+          `UPDATE deviludo.workflow_instances
+              SET state_data = jsonb_set(
+                    state_data,
+                    '{importAnalysis}',
+                    coalesce(state_data->'importAnalysis', '{}'::jsonb)
+                      || jsonb_build_object(
+                        'status', 'READY',
+                        'error', NULL,
+                        'questionsResolvedAt', clock_timestamp()
+                      ),
+                    true
+                  ),
+                  version = version + 1,
+                  updated_at = clock_timestamp()
+            WHERE id = $1::uuid
+              AND state = 'DRAFT'
+              AND state_data #>> '{importAnalysis,status}' = 'NEEDS_INPUT'`,
+          [project.workflowId],
+        );
       }
 
       for (const message of input.assistantMessages) {
@@ -3193,8 +3228,9 @@ export type ProductProjectSummary = Readonly<{
   concept: string;
   specification: Readonly<Record<string, unknown>>;
   source: ProjectSourceRevision | null;
-  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "FAILED";
+  analysisStatus: "READY" | "PENDING" | "ANALYZING" | "NEEDS_INPUT" | "FAILED";
   analysisError: string | null;
+  discovery: ProjectDiscoveryReport | null;
 }>;
 
 export type ProductProjectDetail = ProductProjectSummary & Readonly<{
@@ -3497,7 +3533,7 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
     && !Array.isArray(stateData.importAnalysis)
     ? stateData.importAnalysis as Record<string, unknown>
     : null;
-  const analysisStatus = analysis && ["PENDING", "ANALYZING", "FAILED", "READY"].includes(String(analysis.status))
+  const analysisStatus = analysis && ["PENDING", "ANALYZING", "NEEDS_INPUT", "FAILED", "READY"].includes(String(analysis.status))
     ? analysis.status as ProductProjectSummary["analysisStatus"]
     : "READY";
   return Object.freeze({
@@ -3528,6 +3564,40 @@ function projectSummaryFromRow(row: ProductProjectRow): ProductProjectSummary {
     analysisError: analysisStatus === "FAILED" && typeof analysis?.error === "string"
       ? analysis.error
       : null,
+    discovery: projectDiscoveryFromValue(analysis?.report),
+  });
+}
+
+function projectDiscoveryFromValue(value: unknown): ProjectDiscoveryReport | null {
+  const report = objectValue(value);
+  const text = (candidate: unknown): string | null => typeof candidate === "string" && candidate.trim()
+    ? candidate.trim()
+    : null;
+  const list = (candidate: unknown): readonly string[] | null => Array.isArray(candidate)
+    && candidate.every(item => typeof item === "string")
+    ? Object.freeze(candidate.map(item => item.trim()).filter(Boolean))
+    : null;
+  const gameContent = text(report.gameContent);
+  const currentDevelopmentState = text(report.currentDevelopmentState);
+  const completedWork = list(report.completedWork);
+  const remainingWork = list(report.remainingWork);
+  const startupFlow = text(report.startupFlow);
+  const startupIssues = list(report.startupIssues);
+  const risks = list(report.risks);
+  const recommendedPlan = list(report.recommendedPlan);
+  const questions = list(report.questions);
+  if (!gameContent || !currentDevelopmentState || !completedWork || !remainingWork || !startupFlow
+    || !startupIssues || !risks || !recommendedPlan?.length || !questions) return null;
+  return Object.freeze({
+    gameContent,
+    currentDevelopmentState,
+    completedWork,
+    remainingWork,
+    startupFlow,
+    startupIssues,
+    risks,
+    recommendedPlan,
+    questions,
   });
 }
 

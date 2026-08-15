@@ -721,6 +721,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     viewingHistoricalIteration ? historicalIteration.artifacts : artifacts,
   );
   const artifactsByStage = groupArtifactsByPipelineStage(viewedArtifacts);
+  const discoveryStage = discoveryStageView({
+    imported: project.localDirectory !== null,
+    analysisStatus: project.analysisStatus,
+    requirementsReady,
+    historical: viewingHistoricalIteration,
+    workflowState: viewedWorkflowState,
+    questionCount: project.discovery?.questions.length ?? 0,
+  }, text);
   const viewedIterationNumber = viewingHistoricalIteration
     ? historicalIteration.iterationNumber
     : project.iterationNumber;
@@ -805,6 +813,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         </header>
         <div className="product-delivery-canvas">
           <ol className="product-delivery-track">
+            <li className={`product-delivery-stage status-${discoveryStage.view.kind}`} data-stage-status={discoveryStage.view.kind}>
+              <div className="product-delivery-stage-marker" aria-hidden="true">{discoveryStage.view.symbol}</div>
+              <span className="product-delivery-stage-number">01</span>
+              <b>{discoveryStage.title}</b>
+              <strong>{discoveryStage.view.label}</strong>
+              <small>{discoveryStage.detail}</small>
+            </li>
             {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
               const jobs = latestPipelineJobs(viewedJobs.filter(job => job.kind === kind));
               const stageArtifacts = artifactsByStage.get(kind) ?? Object.freeze([]);
@@ -814,7 +829,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
-                  <span className="product-delivery-stage-number">{String(index + 1).padStart(2, "0")}</span>
+                  <span className="product-delivery-stage-number">{String(index + 2).padStart(2, "0")}</span>
                   <b>{text(chineseLabel, englishLabel)}</b>
                   <strong>{view.label}</strong>
                   <small>{inProfile
@@ -1206,6 +1221,70 @@ type PipelineStageView = Readonly<{
   label: string;
   symbol: string;
 }>;
+
+function discoveryStageView(
+  input: Readonly<{
+    imported: boolean;
+    analysisStatus: ProductProjectDetail["analysisStatus"];
+    requirementsReady: boolean;
+    historical: boolean;
+    workflowState: string;
+    questionCount: number;
+  }>,
+  text: (chinese: string, english: string) => string,
+): Readonly<{ title: string; detail: string; view: PipelineStageView }> {
+  const title = input.imported
+    ? text("已有项目分析", "PROJECT ANALYSIS")
+    : text("需求沟通", "REQUIREMENTS");
+  if (input.historical || input.workflowState !== "DRAFT") {
+    return {
+      title,
+      detail: input.imported
+        ? text("现状、缺口与开发计划已确认", "Current state, gaps, and plan confirmed")
+        : text("本轮批准需求已冻结", "Approved requirements frozen for this iteration"),
+      view: pipelineStageView("SUCCEEDED", text),
+    };
+  }
+  if (input.imported) {
+    if (input.analysisStatus === "FAILED") {
+      return { title, detail: text("源码分析失败，请先重试", "Source analysis failed; retry it first"), view: pipelineStageView("FAILED", text) };
+    }
+    if (input.analysisStatus === "NEEDS_INPUT") {
+      return {
+        title,
+        detail: text(
+          `请在项目会话中回答 ${input.questionCount || "待确认"} 个分析问题`,
+          `Answer ${input.questionCount || "the"} analysis question${input.questionCount === 1 ? "" : "s"} in project chat`,
+        ),
+        view: { kind: "active", label: text("等待用户确认", "AWAITING INPUT"), symbol: "?" },
+      };
+    }
+    if (input.analysisStatus === "PENDING" || input.analysisStatus === "ANALYZING") {
+      return {
+        title,
+        detail: text("正在检查游戏内容、完成度、启动流程与开发缺口", "Inspecting game content, completion, startup flow, and gaps"),
+        view: pipelineStageView("RUNNING", text),
+      };
+    }
+    return {
+      title,
+      detail: text("现状、缺口与建议开发计划已生成", "Current state, gaps, and development plan generated"),
+      view: pipelineStageView("SUCCEEDED", text),
+    };
+  }
+  if (input.requirementsReady) {
+    return {
+      title,
+      detail: text("需求已明确，可以批准开发", "Requirements are clear and ready for approval"),
+      view: pipelineStageView("SUCCEEDED", text),
+    };
+  }
+  return {
+    title,
+    detail: text("在项目会话中明确目标、玩法与验收标准", "Clarify goals, gameplay, and acceptance criteria in project chat"),
+    view: { kind: "active", label: text("沟通需求中", "DISCUSSING"), symbol: "…" },
+  };
+}
 
 function pipelineStageView(state: string, text: (chinese: string, english: string) => string): PipelineStageView {
   if (state === "SUCCEEDED") return { kind: "completed", label: text("已完成", "COMPLETED"), symbol: "✓" };

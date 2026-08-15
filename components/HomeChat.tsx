@@ -178,11 +178,13 @@ export function HomeChat() {
           <option value="">{text("创建新项目", "Create new project")}</option>
           <option value={IMPORT_PROJECT_VALUE}>{text("关联已有项目…", "Link existing project…")}</option>
           {projects.map(project => (
-            <option disabled={project.analysisStatus !== "READY"} key={project.id} value={project.id}>
+            <option disabled={project.analysisStatus !== "READY" && project.analysisStatus !== "NEEDS_INPUT"} key={project.id} value={project.id}>
               {project.name} · {project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING"
                 ? text("正在分析", "Analyzing")
                 : project.analysisStatus === "FAILED"
                   ? text("分析失败", "Analysis failed")
+                  : project.analysisStatus === "NEEDS_INPUT"
+                    ? text("待确认分析问题", "Needs clarification")
                   : workflowLabel(project.workflowState, text)}
             </option>
           ))}
