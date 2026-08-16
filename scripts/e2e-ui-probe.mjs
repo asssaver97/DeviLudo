@@ -13,6 +13,10 @@ export async function readProbeSnapshot(path, expected) {
 }
 
 export function validateProbeSnapshot(value, expected = {}) {
+  return probeSnapshotValidationError(value, expected) === null;
+}
+
+export function probeSnapshotValidationError(value, expected = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || value.schema !== E2E_UI_PROBE_SCHEMA
     || Object.hasOwn(value, "schemaVersion") || Object.hasOwn(value, "version")
@@ -21,32 +25,77 @@ export function validateProbeSnapshot(value, expected = {}) {
     || !Number.isSafeInteger(value.sequence) || value.sequence < 1
     || typeof value.sceneId !== "string" || !stableId(value.sceneId)
     || !plainRecord(value.state) || !plainRecord(value.progress)
-    || !Array.isArray(value.controls) || value.controls.length > 2_000) return false;
-  if (expected.sessionNonce && value.sessionNonce !== expected.sessionNonce) return false;
-  if (expected.pid && value.pid !== expected.pid) return false;
-  if (expected.afterSequence !== undefined && value.sequence <= expected.afterSequence) return false;
-  if (!flatProbeValues(value.state) || !flatProbeValues(value.progress)) return false;
+    || !Array.isArray(value.controls) || value.controls.length > 2_000) return "snapshot envelope violates the current probe contract";
+  if (expected.sessionNonce && value.sessionNonce !== expected.sessionNonce) return "session nonce does not match the launched game";
+  if (expected.pid && value.pid !== expected.pid) return "process ID does not match the launched game";
+  if (expected.afterSequence !== undefined && value.sequence <= expected.afterSequence) return `sequence ${value.sequence} did not advance beyond ${expected.afterSequence}`;
+  if (!flatProbeValues(value.state) || !flatProbeValues(value.progress)) return "state or progress contains a non-primitive or invalid field";
   const ids = new Set();
-  for (const control of value.controls) {
+  for (const [index, control] of value.controls.entries()) {
+    const label = typeof control?.id === "string" ? control.id : `#${index}`;
     if (!control || typeof control !== "object" || Array.isArray(control)
-      || !stableId(control.id) || ids.has(control.id)
-      || typeof control.visible !== "boolean" || typeof control.enabled !== "boolean"
-      || !validRect(control.rect)
-      || (control.text !== undefined && (typeof control.text !== "string" || control.text.length > 2_000))
-      || (control.value !== undefined && !primitive(control.value))) return false;
+      || !stableId(control.id)) return `control ${label} has an invalid semantic ID or structure`;
+    if (ids.has(control.id)) return `control ${label} is duplicated`;
+    if (typeof control.visible !== "boolean" || typeof control.enabled !== "boolean") return `control ${label} visibility or enabled state is invalid`;
+    if (!validRect(control.rect)) return `control ${label} rectangle must be positive and remain inside 1280x720`;
+    if (control.text !== undefined && (typeof control.text !== "string" || control.text.length > 2_000)) return `control ${label} text exceeds the probe contract`;
+    if (control.value !== undefined && !primitive(control.value)) return `control ${label} value must be primitive`;
     ids.add(control.id);
   }
-  return true;
+  return null;
 }
 
 export async function waitForProbeSnapshot(path, expected, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
+  let lastError = "snapshot file is missing or is not valid JSON";
   while (Date.now() < deadline) {
-    const snapshot = await readProbeSnapshot(path, expected);
-    if (snapshot) return snapshot;
+    try {
+      const value = JSON.parse(await readFile(path, "utf8"));
+      const validationError = probeSnapshotValidationError(value, expected);
+      if (validationError === null) return Object.freeze(value);
+      lastError = validationError;
+    } catch { lastError = "snapshot file is missing or is not valid JSON"; }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  throw new Error("E2E UI probe did not publish a fresh valid snapshot");
+  throw new Error(`E2E UI probe did not publish a fresh valid snapshot: ${lastError}`);
+}
+
+/**
+ * Waits for the game result of an OS-level action, rather than accepting the
+ * first periodic Probe heartbeat after the input was posted. Games commonly
+ * publish one or more unchanged frames while an animation, deferred signal or
+ * physics tick is still completing. Returning the latest valid observation on
+ * timeout lets the caller preserve accurate failure evidence.
+ */
+export async function waitForProbePostconditions(path, expected, before, assertions, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let afterSequence = expected.afterSequence ?? before.sequence;
+  let latest = null;
+  let latestAssertions = null;
+  let latestStateChanged = false;
+  let lastError = "snapshot file is missing or is not valid JSON";
+  while (Date.now() < deadline) {
+    try {
+      const value = JSON.parse(await readFile(path, "utf8"));
+      const validationError = probeSnapshotValidationError(value, { ...expected, afterSequence });
+      if (validationError === null) {
+        latest = Object.freeze(value);
+        latestAssertions = evaluateProbeAssertions(assertions, before, latest);
+        latestStateChanged = probeStateDigest(before) !== probeStateDigest(latest);
+        if (latestStateChanged && latestAssertions.every(assertion => assertion.passed)) {
+          return Object.freeze({ snapshot: latest, assertions: latestAssertions, stateChanged: true, passed: true });
+        }
+        afterSequence = latest.sequence;
+      } else {
+        lastError = validationError;
+      }
+    } catch { lastError = "snapshot file is missing or is not valid JSON"; }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (latest) {
+    return Object.freeze({ snapshot: latest, assertions: latestAssertions, stateChanged: latestStateChanged, passed: false });
+  }
+  throw new Error(`E2E UI probe did not publish a fresh valid snapshot: ${lastError}`);
 }
 
 export function resolveProbeControl(snapshot, targetId, options = {}) {

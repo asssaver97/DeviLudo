@@ -31,38 +31,39 @@ if [[ ! -x /Applications/Godot.app/Contents/MacOS/Godot ]]; then
   sudo ditto /Users/Shared/godot/Godot.app /Applications/Godot.app
 fi
 sudo ln -sfn /Applications/Godot.app/Contents/MacOS/Godot /usr/local/bin/godot
-# The Cirrus base image logs admin into the desktop automatically. Changing the
-# password without updating loginwindow leaves subsequent golden-image clones
-# at the login screen: WindowServer exists, but GUI apps launched over SSH can
-# never create an on-screen window. Keep the replacement credential and update
-# macOS' native auto-login record atomically for this disposable E2E guest.
-# Use explicit administrator credentials: running sysadminctl as root without
-# them updates autoLoginUser but leaves the old /etc/kcpassword behind.
-sudo /usr/sbin/sysadminctl \
-  -resetPasswordFor admin \
-  -newPassword "$DEVILUDO_REPLACEMENT_PASSWORD" \
-  -adminUser admin \
-  -adminPassword admin
-sudo dscl . -authonly admin "$DEVILUDO_REPLACEMENT_PASSWORD"
-# On Tahoe, sysadminctl -autologin reports success while emitting
-# SACSetAutoLoginPassword error:22 and leaves the old record untouched when it
-# runs through an SSH provisioning session. Generate the loginwindow record
-# explicitly, then prove it was installed before the VM is snapshotted.
-/usr/local/bin/node -e '
-  const { randomFillSync } = require("node:crypto");
-  const { writeFileSync } = require("node:fs");
-  const secret = Buffer.from(process.env.DEVILUDO_REPLACEMENT_PASSWORD, "utf8");
-  const key = Buffer.from([0x7d, 0x89, 0x52, 0x23, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f]);
-  const plain = Buffer.alloc(Math.ceil((secret.length + 1) / 12) * 12);
-  secret.copy(plain);
-  plain[secret.length] = 0;
-  if (secret.length + 1 < plain.length) randomFillSync(plain, secret.length + 1);
-  for (let index = 0; index < plain.length; index += 1) plain[index] ^= key[index % key.length];
-  writeFileSync("/Users/Shared/deviludo-kcpassword", plain, { mode: 0o600 });
-'
-sudo install -o root -g wheel -m 0600 /Users/Shared/deviludo-kcpassword /etc/kcpassword
-sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser admin
-kcpassword_size="$(stat -f '%z' /etc/kcpassword)"
-[[ "$kcpassword_size" -gt 12 ]]
+if [[ "${DEVILUDO_ROTATE_GUEST_CREDENTIALS:-1}" == "1" ]]; then
+  # The Cirrus base image logs admin into the desktop automatically. Changing the
+  # password without updating loginwindow leaves subsequent golden-image clones
+  # at the login screen: WindowServer exists, but GUI apps launched over SSH can
+  # never create an on-screen window. Incremental updates retain the already
+  # randomized and verified credential because the original password is not
+  # persisted outside the disposable guest.
+  sudo /usr/sbin/sysadminctl \
+    -resetPasswordFor admin \
+    -newPassword "$DEVILUDO_REPLACEMENT_PASSWORD" \
+    -adminUser admin \
+    -adminPassword admin
+  sudo dscl . -authonly admin "$DEVILUDO_REPLACEMENT_PASSWORD"
+  # On Tahoe, sysadminctl -autologin reports success while emitting
+  # SACSetAutoLoginPassword error:22 and leaves the old record untouched when it
+  # runs through an SSH provisioning session. Generate the loginwindow record
+  # explicitly, then prove it was installed before the VM is snapshotted.
+  /usr/local/bin/node -e '
+    const { randomFillSync } = require("node:crypto");
+    const { writeFileSync } = require("node:fs");
+    const secret = Buffer.from(process.env.DEVILUDO_REPLACEMENT_PASSWORD, "utf8");
+    const key = Buffer.from([0x7d, 0x89, 0x52, 0x23, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f]);
+    const plain = Buffer.alloc(Math.ceil((secret.length + 1) / 12) * 12);
+    secret.copy(plain);
+    plain[secret.length] = 0;
+    if (secret.length + 1 < plain.length) randomFillSync(plain, secret.length + 1);
+    for (let index = 0; index < plain.length; index += 1) plain[index] ^= key[index % key.length];
+    writeFileSync("/Users/Shared/deviludo-kcpassword", plain, { mode: 0o600 });
+  '
+  sudo install -o root -g wheel -m 0600 /Users/Shared/deviludo-kcpassword /etc/kcpassword
+  sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser admin
+  kcpassword_size="$(stat -f '%z' /etc/kcpassword)"
+  [[ "$kcpassword_size" -gt 12 ]]
+fi
 sudo sync
 sleep 3

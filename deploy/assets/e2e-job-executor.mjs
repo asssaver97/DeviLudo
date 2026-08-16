@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
+  closeChildPipesAfterExit,
   closeLineInput,
+  forwardTerminationSignals,
+  readProtocolLineWithTimeout,
   terminateChildProcess,
   waitForChildWithHardTimeout,
 } from "./e2e-process-lifecycle.mjs";
@@ -83,6 +86,9 @@ async function downloadInput(input, destination) {
 }
 
 async function runFramed(executable, arguments_, parentIterator, extraEnvironment, timeoutSeconds) {
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1800 || timeoutSeconds > 5400) {
+    throw new Error("Guest runner hard timeout is invalid");
+  }
   // JavaScript runners are source files, not platform executables. Invoke them
   // through the same trusted Node binary so a checkout that does not preserve
   // executable mode (or a freshly generated local runner) cannot fail with
@@ -95,6 +101,13 @@ async function runFramed(executable, arguments_, parentIterator, extraEnvironmen
     stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,
     env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...extraEnvironment },
   });
+  const stopForwardingTermination = forwardTerminationSignals(child, killProcessGroup);
+  const stopClosingChildPipes = closeChildPipesAfterExit(child);
+  const childClosed = waitForChildWithHardTimeout(child, {
+    timeoutMs: timeoutSeconds * 1_000 + 180_000,
+    terminateGraceMs: 2_000,
+    killProcessGroup,
+  });
   const stderr = [];
   child.stderr.on("data", value => { if (Buffer.concat(stderr).length < 65_536) stderr.push(Buffer.from(value)); });
   let result = null;
@@ -104,7 +117,7 @@ async function runFramed(executable, arguments_, parentIterator, extraEnvironmen
       const message = JSON.parse(line);
       if (message?.type === "policy_request" && typeof message.id === "string") {
         process.stdout.write(`${JSON.stringify(message)}\n`);
-        const next = await parentIterator.next();
+        const next = await readProtocolLineWithTimeout(parentIterator, childClosed, 65_000);
         if (next.done) throw new Error("Player policy relay closed before responding");
         const response = JSON.parse(next.value);
         if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");
@@ -114,17 +127,9 @@ async function runFramed(executable, arguments_, parentIterator, extraEnvironmen
       }
     }
   })();
-  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1800 || timeoutSeconds > 5400) {
-    terminateChildProcess(child, "SIGKILL", killProcessGroup);
-    throw new Error("Guest runner hard timeout is invalid");
-  }
   try {
     const [childExit] = await Promise.all([
-      waitForChildWithHardTimeout(child, {
-        timeoutMs: timeoutSeconds * 1_000 + 180_000,
-        terminateGraceMs: 2_000,
-        killProcessGroup,
-      }),
+      childClosed,
       relay,
     ]);
     if (childExit.timedOut) throw new Error("Guest runner exceeded the frozen E2E hard deadline and was terminated");
@@ -134,6 +139,8 @@ async function runFramed(executable, arguments_, parentIterator, extraEnvironmen
     if (!Number.isInteger(result.exitCode)) result.exitCode = Number.isInteger(childExit.code) ? childExit.code : 1;
     return result;
   } finally {
+    stopClosingChildPipes();
+    stopForwardingTermination();
     lines.close();
     child.stdin.end();
     terminateChildProcess(child, "SIGKILL", killProcessGroup);

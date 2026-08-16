@@ -11,6 +11,7 @@ import {
   E2E_EVIDENCE_SCHEMA,
   compareScreenshotRegion,
   compareScreenshots,
+  captureAndInspectScreenshot,
   createEvidenceBundle,
   encodeRgbaPng,
   extractAndValidateEvidenceBundle,
@@ -57,6 +58,27 @@ describe("E2E evidence", () => {
       await inspectScreenshot(roundedCorners);
       await assert.rejects(inspectScreenshot(blank), /blank or nearly solid/);
       await assert.rejects(inspectScreenshot(translucent), /too many transparent or translucent/);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("waits for the native game frame to replace a transient solid launch frame", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "deviludo-evidence-ready-"));
+    try {
+      const screenshot = join(directory, "capture.png");
+      const blankPixels = Buffer.alloc(E2E_CLIENT_WIDTH * E2E_CLIENT_HEIGHT * 4, 127);
+      for (let offset = 3; offset < blankPixels.length; offset += 4) blankPixels[offset] = 255;
+      let captures = 0;
+      const details = await captureAndInspectScreenshot(screenshot, async path => {
+        captures += 1;
+        await writeFile(path, captures === 1
+          ? encodeRgbaPng(E2E_CLIENT_WIDTH, E2E_CLIENT_HEIGHT, blankPixels)
+          : testImage());
+      }, { attempts: 2, delayMs: 0 });
+      assert.equal(captures, 2);
+      assert.equal(details.width, E2E_CLIENT_WIDTH);
+      await assert.rejects(captureAndInspectScreenshot(screenshot, async path => {
+        await writeFile(path, encodeRgbaPng(E2E_CLIENT_WIDTH, E2E_CLIENT_HEIGHT, blankPixels));
+      }, { attempts: 2, delayMs: 0 }), /blank or nearly solid/);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

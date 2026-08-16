@@ -81,7 +81,11 @@ services:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: api
       DEVILUDO_WEB_CORE_TOKEN: local-web-to-core-token-0000000000000001
-      DEVILUDO_E2E_NODE_TOKEN: ${DEVILUDO_E2E_NODE_TOKEN:?local E2E node token is required}
+      # local-up always injects a random token. The empty fallback lets status,
+      # down and migration commands parse an installation created before this
+      # variable existed; Core still rejects an empty token if someone tries to
+      # start the stack without local-up.
+      DEVILUDO_E2E_NODE_TOKEN: ${DEVILUDO_E2E_NODE_TOKEN:-}
       DEVILUDO_CORE_API_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
       DEVILUDO_S3_ENDPOINT: http://minio:9000
       DEVILUDO_S3_PUBLIC_ENDPOINT: ${DEVILUDO_S3_PUBLIC_ENDPOINT:-http://127.0.0.1:39000}

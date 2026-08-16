@@ -2411,6 +2411,13 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.product-delivery-stage-finished-at {
+  color: #536176;
+  display: block;
+  font: 6px/1.4 var(--font-geist-mono), monospace;
+  margin-top: 4px;
+}
+
 .product-delivery-stage-artifacts {
   display: grid;
   gap: 5px;

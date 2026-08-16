@@ -530,6 +530,17 @@ export class CoreRepository {
     return (result.rowCount ?? 0) === 1;
   }
 
+  async markTestPolicyUnavailable(settingsRevision: number): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `UPDATE deviludo.instance_agent_settings
+          SET test_policy_ready = false, test_policy_checked_revision = NULL,
+              updated_at = clock_timestamp()
+        WHERE singleton = true AND revision = $1::bigint`,
+      [settingsRevision],
+    );
+    return (result.rowCount ?? 0) === 1;
+  }
+
   async lockE2ePlayerPolicy(input: Readonly<{
     workspaceId: string;
     jobId: string;

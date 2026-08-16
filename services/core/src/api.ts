@@ -53,7 +53,7 @@ import {
   type ConversationAgentProjectContext,
   type ProductConversationGroupReply,
 } from "./product-conversation";
-import { generateE2ePlayerDecision, parsePlayerPolicyRequest } from "./e2e-player-policy";
+import { generateE2ePlayerDecision, parsePlayerPolicyRequest, playerPolicyIdempotencyInput } from "./e2e-player-policy";
 import type {
   CoreRepository,
   PendingProjectImportAnalysis,
@@ -104,10 +104,11 @@ export async function runApi(
     (_request, body, done) => done(null, body),
   );
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     const failure = error instanceof Error ? error : new Error(String(error));
     const status = "statusCode" in failure && typeof failure.statusCode === "number" ? failure.statusCode : 400;
     const code = "code" in failure && typeof failure.code === "string" ? failure.code : null;
+    if (status >= 500) request.log.error({ err: failure, failureCode: code ?? "INTERNAL_ERROR" }, "Core request failed");
     void reply.code(status >= 400 && status < 500 ? status : 500).send({
       code: status >= 500 ? "INTERNAL_ERROR" : code ?? "INVALID_REQUEST",
       message: status >= 500 ? "Core request failed" : failure.message,
@@ -1371,11 +1372,7 @@ export async function runApi(
       runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
       credentialSecretRef: settings.credentialSecretRef, configurationDigest,
     });
-    const requestDigest = jsonDigest({
-      rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex,
-      screenshotSha256: policyRequest.screenshotSha256, goal: policyRequest.goal,
-      allowedActions: policyRequest.allowedActions, history: policyRequest.history, recovery: policyRequest.recovery,
-    });
+    const requestDigest = jsonDigest(playerPolicyIdempotencyInput(policyRequest));
     return repository.withE2ePlayerDecisionLock({
       workspaceId: job.workspaceId, jobId: job.jobId,
       rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex,
@@ -1390,9 +1387,17 @@ export async function runApi(
       const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
       if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
       const startedAt = Date.now();
-      const generated = await generateE2ePlayerDecision({
-        request: policyRequest, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
-      });
+      let generated;
+      try {
+        generated = await generateE2ePlayerDecision({
+          request: policyRequest, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
+        });
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE") {
+          await repository.markTestPolicyUnavailable(policy.settingsRevision);
+        }
+        throw error;
+      }
       const stored = await repository.saveE2ePlayerDecision({
         workspaceId: job.workspaceId, jobId: job.jobId,
         rolloutIndex: policyRequest.rolloutIndex, decisionIndex: policyRequest.decisionIndex,

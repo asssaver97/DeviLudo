@@ -5,8 +5,13 @@ import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import {
+  closeChildPipesAfterExit,
   closeLineInput,
+  forwardTerminationSignals,
   readCliArgument,
+  readProtocolLineWithTimeout,
+  settleChildAfterProtocolResult,
+  startChildProtocolWatchdog,
   terminateChildProcess,
   waitForChildWithHardTimeout,
 } from "../../deploy/assets/e2e-process-lifecycle.mjs";
@@ -37,7 +42,8 @@ if (regression) {
   await execute("scp", [...ssh, regression, `${configuration.guestUser}@${ip}:${remoteRegression}`], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
 }
 const command = [
-  "env", "DEVILUDO_GUI_DRIVER=/usr/local/bin/deviludo-gui-driver",
+  "env", "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+  "DEVILUDO_GUI_DRIVER=/usr/local/bin/deviludo-gui-driver",
   `DEVILUDO_GAMEPAD_DRIVER=${configuration.gamepadAvailable === true ? "/usr/local/bin/deviludo-gamepad-driver" : ""}`,
   "DEVILUDO_GUEST_EVIDENCE_ROOT=/Users/Shared",
   "DEVILUDO_GUEST_JOB_ROOT=/Users/Shared",
@@ -52,6 +58,24 @@ const command = [
 const killProcessGroup = process.platform !== "win32";
 const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], {
   stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,
+});
+const stopForwardingTermination = forwardTerminationSignals(remote, killProcessGroup);
+const stopClosingRemotePipes = closeChildPipesAfterExit(remote);
+const protocolWatchdog = startChildProtocolWatchdog(remote, {
+  idleMs: 45_000,
+  checkMs: 1_000,
+  terminateGraceMs: 2_000,
+  killProcessGroup,
+});
+const remoteStderrChunks = [];
+const remoteStderrLimit = 64 * 1024;
+let remoteStderrBytes = 0;
+remote.stderr.on("data", chunk => {
+  if (remoteStderrBytes >= remoteStderrLimit) return;
+  const remaining = remoteStderrLimit - remoteStderrBytes;
+  const captured = Buffer.from(chunk).subarray(0, remaining);
+  remoteStderrChunks.push(captured);
+  remoteStderrBytes += captured.length;
 });
 const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
 if (!Number.isSafeInteger(frozenTimeoutSeconds) || frozenTimeoutSeconds < 1800 || frozenTimeoutSeconds > 5400) {
@@ -70,19 +94,36 @@ const remoteLines = createInterface({ input: remote.stdout, crlfDelay: Infinity 
 let receipt = null;
 try {
   for await (const line of remoteLines) {
+    protocolWatchdog.touch();
     const message = JSON.parse(line);
     if (message?.type === "policy_request" && typeof message.id === "string") {
       process.stdout.write(`${JSON.stringify(message)}\n`);
-      const next = await parentLines.next();
+      const next = await readProtocolLineWithTimeout(parentLines, remoteClosed, 65_000);
       if (next.done) throw new Error("Player policy relay closed before responding");
       const response = JSON.parse(next.value);
       if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");
       remote.stdin.write(`${JSON.stringify(response)}\n`);
-    } else if (message?.type === "result" && message.value && typeof message.value === "object") receipt = message.value;
+    } else if (message?.type === "result" && message.value && typeof message.value === "object") {
+      receipt = message.value;
+      break;
+    }
   }
-  const remoteExit = await remoteClosed;
+  const remoteSettlement = receipt
+    ? await settleChildAfterProtocolResult(remote, remoteClosed, { graceMs: 500, killProcessGroup })
+    : { result: await remoteClosed, transportTerminated: false };
+  const remoteExit = remoteSettlement.result;
   if (remoteExit.timedOut) throw new Error("Tart guest exceeded its frozen E2E hard deadline and was terminated");
-  if (remoteExit.code !== 0 || !receipt) throw new Error("Tart guest runner failed or omitted its result");
+  if ((!remoteSettlement.transportTerminated && remoteExit.code !== 0) || !receipt) {
+    const remoteError = Buffer.concat(remoteStderrChunks)
+      .toString("utf8")
+      .replace(/[\r\n\t ]+/g, " ")
+      .trim()
+      .slice(0, 4_000);
+    const reason = protocolWatchdog.expired()
+      ? "Tart guest protocol stream became idle and was terminated"
+      : "Tart guest runner failed or omitted its result";
+    throw new Error(`${reason}${remoteError ? `: ${remoteError}` : ""}`);
+  }
   if (action === "test") {
     if (!isAbsolute(hostOutput) || typeof receipt.outputPath !== "string" || !receipt.outputPath.startsWith("/Users/Shared/")) throw new Error("Tart guest evidence path is invalid");
     await execute("scp", [...ssh, `${configuration.guestUser}@${ip}:${receipt.outputPath}`, hostOutput], { timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024 });
@@ -95,6 +136,9 @@ try {
   }
   process.stdout.write(`${JSON.stringify({ type: "result", value: receipt })}\n`);
 } finally {
+  protocolWatchdog.stop();
+  stopClosingRemotePipes();
+  stopForwardingTermination();
   remoteLines.close();
   closeLineInput(parentInput, process.stdin);
   remote.stdin.end();

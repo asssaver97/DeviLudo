@@ -36,9 +36,22 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
     return Object.freeze({ ...migrated, reused: true });
   }
   await compileHostDrivers();
-  console.log(JSON.stringify({ event: "local_up_stage", stage: "e2e_vm_initializing", message: "正在从固定的本地基础镜像构建真实窗口 E2E 金镜像" }));
+  const updateFromGolden = !refresh
+    && previous?.schema === "deviludo.local-tart-e2e"
+    && previous?.baseImage === baseImage
+    && previous?.baseImageDigest === baseImageDigest
+    && previous?.goldenName === goldenName
+    && await tartVmExists(goldenName);
+  const updateSource = updateFromGolden ? goldenName : baseCacheName;
+  console.log(JSON.stringify({
+    event: "local_up_stage",
+    stage: "e2e_vm_initializing",
+    message: updateFromGolden
+      ? "正在增量更新真实窗口 E2E 金镜像"
+      : "正在从固定的本地基础镜像构建真实窗口 E2E 金镜像",
+  }));
   if (await tartVmExists(stagingName)) await run("tart", ["delete", stagingName], 120_000);
-  await visible("tart", ["clone", baseCacheName, stagingName]);
+  await visible("tart", ["clone", updateSource, stagingName]);
   await run("tart", ["set", stagingName, "--memory", "6144", "--display", "1440x900"], 30_000);
   const logFile = resolve(localRoot, "tart-provision.log");
   const descriptor = await import("node:fs").then(fs => fs.openSync(logFile, "a", 0o600));
@@ -53,8 +66,13 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   }
   if (!ip) throw new Error(`Tart 金镜像未能启动；请查看 ${logFile}`);
   try {
-    await authorizeSshKey(ip);
-    await installGuestRuntime(ip);
+    if (updateFromGolden) {
+      await ensureAliasedKnownHosts();
+      await waitForGuestSsh(ip);
+    } else {
+      await authorizeSshKey(ip);
+    }
+    await installGuestRuntime(ip, { rotateCredentials: !updateFromGolden });
   } catch (error) {
     throw new Error(`Tart 真实窗口环境初始化失败，未启用宿主机降级：${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -242,7 +260,7 @@ async function compileHostDrivers() {
   await chmod(hostGamepadDriverFile, 0o755);
 }
 
-async function installGuestRuntime(ip) {
+async function installGuestRuntime(ip, { rotateCredentials = true } = {}) {
   const ssh = sshArguments();
   for (const [source, destination] of [
     [resolve(root, "scripts/executors/godot-window-e2e-guest.mjs"), "/Users/Shared/godot-window-e2e-guest.mjs"],
@@ -264,7 +282,10 @@ async function installGuestRuntime(ip) {
   // base64url characters still provide 144 bits of random entropy while
   // remaining compatible with the persisted desktop login path.
   const password = randomBytes(12).toString("hex");
-  await spawnWithInput("ssh", [...ssh, `admin@${ip}`, `env DEVILUDO_REPLACEMENT_PASSWORD=${password} sudo -S -E bash /Users/Shared/local-tart-provision.sh`], "admin\n", 45 * 60_000);
+  const environment = rotateCredentials
+    ? `DEVILUDO_ROTATE_GUEST_CREDENTIALS=1 DEVILUDO_REPLACEMENT_PASSWORD=${password}`
+    : "DEVILUDO_ROTATE_GUEST_CREDENTIALS=0";
+  await spawnWithInput("ssh", [...ssh, `admin@${ip}`, `env ${environment} sudo -S -E bash /Users/Shared/local-tart-provision.sh`], "admin\n", 45 * 60_000);
 }
 
 async function smokeGuestRuntime(ip) {

@@ -10,6 +10,7 @@ export const MAX_E2E_EVIDENCE_BYTES: number;
 export const MAX_E2E_VIDEO_BYTES: number;
 export function godotErrorLines(...logs: unknown[]): string[];
 export function inspectScreenshot(path: string, expectedWidth?: number, expectedHeight?: number): Promise<Readonly<Record<string, unknown>>>;
+export function captureAndInspectScreenshot(path: string, capture: (path: string) => Promise<unknown>, options?: Readonly<{ attempts?: number; delayMs?: number }>): Promise<Readonly<Record<string, unknown>>>;
 export function compareScreenshots(actualPath: string, referencePath: string, diffPath?: string, threshold?: number): Promise<Readonly<{ passed: boolean; differentPixels: number; totalPixels: number; differenceRatio: number; threshold: number }>>;
 export function compareScreenshotRegion(actualPath: string, referencePath: string, rect: Readonly<{ x: number; y: number; width: number; height: number }>, diffPath?: string | null): Promise<Readonly<{ differentPixels: number; totalPixels: number; differenceRatio: number; region: Readonly<{ x: number; y: number; width: number; height: number }> }>>;
 export function encodeRgbaPng(width: number, height: number, rgba: Buffer): Buffer;

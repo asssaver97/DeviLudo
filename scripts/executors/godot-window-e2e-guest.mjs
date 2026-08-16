@@ -11,6 +11,7 @@ import {
   E2E_CLIENT_WIDTH,
   E2E_EVIDENCE_SCHEMA,
   GUEST_REPORT_SCHEMA,
+  captureAndInspectScreenshot,
   compareScreenshots,
   compareScreenshotRegion,
   createEvidenceBundle,
@@ -21,6 +22,7 @@ import {
   evaluateProbeAssertions,
   probeStateDigest,
   resolveProbeControl,
+  waitForProbePostconditions,
   waitForProbeSnapshot,
 } from "../e2e-ui-probe.mjs";
 import {
@@ -53,6 +55,10 @@ const ADAPTIVE_REQUIRED_SUCCESSES = 2;
 const streamProtocol = process.env.DEVILUDO_E2E_STREAM_PROTOCOL === "1";
 const policyInput = streamProtocol ? createInterface({ input: process.stdin, crlfDelay: Infinity }) : null;
 const policyLines = policyInput?.[Symbol.asyncIterator]() ?? null;
+const streamHeartbeat = streamProtocol ? setInterval(() => {
+  process.stdout.write(`${JSON.stringify({ type: "heartbeat", at: new Date().toISOString() })}\n`);
+}, 5_000) : null;
+streamHeartbeat?.unref?.();
 const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
 const frozenContractDigest = process.env.DEVILUDO_E2E_CONTRACT_DIGEST ?? "";
 
@@ -140,10 +146,12 @@ try {
   await finish("PASSED", null, "玩家需求、原生包启动、确定性真实输入和自适应游玩均已通过", manifest);
 } catch (error) {
   if (!isProductFailure(error)) throw error;
-  failures.push(`${error.code}: ${error.message}`);
+  const summary = productFailureMessage(error.code, error.message);
+  failures.push(`${error.code}: ${summary}`);
   gameExitCode = gameExitCode || 1;
-  await finish("FAILED", "PRODUCT", error.message, activeManifest);
+  await finish("FAILED", "PRODUCT", summary, activeManifest);
 } finally {
+  if (streamHeartbeat) clearInterval(streamHeartbeat);
   policyInput?.close();
   process.stdin.pause();
   process.stdin.unref?.();
@@ -297,14 +305,16 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         gamepadInputCount += gamepadCount;
         keyboardMouseInputCount += nativeEvents.length - gamepadCount;
         priorInputs.push({ stepId: event.stepId, type: event.type, intent: event.intent, ...targetRecord });
-        const after = await waitForProbeSnapshot(probePath, {
+        const postconditionResult = await waitForProbePostconditions(probePath, {
           sessionNonce, pid: launched.pid, afterSequence: before.sequence,
-        }, PROBE_TIMEOUT_MS).catch(error => { throw productFailure("PROBE_NOT_UPDATED", `${journey.id}/${event.stepId}: ${error.message}`); });
-        const assertions = evaluateProbeAssertions(event.postconditions, before, after);
+        }, before, event.postconditions, PROBE_TIMEOUT_MS)
+          .catch(error => { throw productFailure("PROBE_NOT_UPDATED", `${journey.id}/${event.stepId}: ${error.message}`); });
+        const after = postconditionResult.snapshot;
+        const assertions = postconditionResult.assertions;
         const beforeDigest = probeStateDigest(before);
         const afterDigest = probeStateDigest(after);
         const assertionsPassed = assertions.every(assertion => assertion.passed);
-        const stateChanged = beforeDigest !== afterDigest;
+        const stateChanged = postconditionResult.stateChanged;
         if (recordEvidence) {
           steps.push({
             journeyId: journey.id, stepId: event.stepId, type: event.type, intent: event.intent,
@@ -317,7 +327,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         if (!assertionsPassed || !stateChanged) {
           if (recordEvidence) {
             await captureFailedActionEvidence({
-              launched, journey, event, probe: after, assertions, priorInputs,
+              testEnvironment, journey, event, probe: after, assertions, priorInputs,
               failureCode: assertionsPassed ? "ACTION_STATE_UNCHANGED" : "POSTCONDITION_FAILED",
             });
           }
@@ -423,13 +433,17 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
   return { captures };
 }
 
-async function captureFailedActionEvidence({ launched, journey, event, probe, assertions, priorInputs, failureCode }) {
+async function captureFailedActionEvidence({ testEnvironment, journey, event, probe, assertions, priorInputs, failureCode }) {
   if (screenshots.length >= MAX_SCREENSHOTS) throw productFailure("SCREENSHOT_LIMIT_EXCEEDED", "E2E 截图超过 64 张");
   const checkpointId = `failed-${event.stepId}`;
   const evidenceId = checkpointEvidenceId(journey.id, checkpointId);
   const screenshotPath = join(workspace, "evidence-screenshots", `${evidenceId}.png`);
   await mkdir(dirname(screenshotPath), { recursive: true });
-  const capture = await driver("capture", ["--pid", String(launched.pid), "--output", screenshotPath]);
+  // Failure evidence shares the same serialized desktop queue as video frames,
+  // regular checkpoints and native input. Calling the GUI driver directly here
+  // allowed ScreenCaptureKit requests to overlap and intermittently rejected
+  // the diagnostic screenshot, masking the original product assertion.
+  const capture = await testEnvironment.capture(screenshotPath);
   let screenshot;
   try { screenshot = await inspectScreenshot(screenshotPath); }
   catch (error) { throw productFailure("SCREENSHOT_INVALID", `${journey.id}/${event.stepId} 失败现场截图无效：${error.message}`); }
@@ -509,13 +523,15 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
 
       const screenshotPath = join(workspace, "adaptive-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
       await mkdir(dirname(screenshotPath), { recursive: true });
-      await testEnvironment.capture(screenshotPath);
-      const screenshot = await inspectScreenshot(screenshotPath);
+      const screenshot = await captureAndInspectScreenshot(
+        screenshotPath,
+        path => testEnvironment.capture(path),
+      );
       const policyScreenshotPath = join(workspace, "adaptive-policy-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
       await mkdir(dirname(policyScreenshotPath), { recursive: true });
       await execute("ffmpeg", [
         "-nostdin", "-loglevel", "error", "-i", screenshotPath,
-        "-vf", "scale=640:360:flags=lanczos", "-frames:v", "1", "-y", policyScreenshotPath,
+        "-vf", "scale=960:540:flags=lanczos", "-frames:v", "1", "-y", policyScreenshotPath,
       ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
       const screenshotBytes = await readFile(policyScreenshotPath);
       const policyScreenshotSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
@@ -596,8 +612,7 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
     }
     const finalScreenshot = join(workspace, "evidence-screenshots", `${runId}-final.png`);
     await mkdir(dirname(finalScreenshot), { recursive: true });
-    await testEnvironment.capture(finalScreenshot);
-    await inspectScreenshot(finalScreenshot);
+    await captureAndInspectScreenshot(finalScreenshot, path => testEnvironment.capture(path));
     if (screenshots.length < MAX_SCREENSHOTS) screenshots.push({ id: `${runId}-final`, path: finalScreenshot });
   } finally {
     const video = await testEnvironment.close();
@@ -744,7 +759,7 @@ async function requestPlayerPolicy(request) {
   process.stdout.write(`${JSON.stringify({ type: "policy_request", id, request })}\n`);
   const responseLine = await Promise.race([
     policyLines.next(),
-    delay(35_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
+    delay(65_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
   ]);
   if (responseLine.done) throw new Error("INFRASTRUCTURE: Test Agent player policy relay closed");
   const message = JSON.parse(responseLine.value);
@@ -1123,11 +1138,12 @@ async function driver(command, arguments_, timeout = 30_000) {
     }
     return value;
   } catch (error) {
-    const detail = String(error?.stderr ?? error?.message ?? error);
-    if (/permission|not authorized|display unavailable|capture backend|accessibility|unsupported (?:keyboard|mouse|input)|GUI driver/i.test(detail)) {
-      throw new Error(`INFRASTRUCTURE: ${detail.slice(0, 500)}`);
-    }
-    throw new Error(detail.slice(0, 2_000), { cause: error });
+    const stderr = Buffer.isBuffer(error?.stderr)
+      ? error.stderr.toString("utf8").trim()
+      : typeof error?.stderr === "string" ? error.stderr.trim() : "";
+    const message = error instanceof Error ? error.message.trim() : "";
+    const detail = stderr || message || String(error ?? "").trim() || `GUI driver ${command} failed without diagnostics`;
+    throw new Error(`INFRASTRUCTURE: GUI driver ${command} failed: ${detail.slice(0, 1_900)}`, { cause: error });
   }
 }
 
@@ -1160,7 +1176,11 @@ async function readOptionalLog(path) { return readFile(path).catch(() => Buffer.
 function gameWindowArguments(logPath) { return ["--log-file", logPath, "--windowed", "--resolution", `${E2E_CLIENT_WIDTH}x${E2E_CLIENT_HEIGHT}`, "--position", "40,40"]; }
 function checkpointEvidenceId(journeyId, checkpointId) { return `journey-${journeyId.length}-${journeyId}-${checkpointId}`; }
 function safeGodotPath(value) { return typeof value === "string" && /^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(value) && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value.slice(6)); }
-function productFailure(code, message) { return Object.assign(new Error(String(message).slice(0, 2_000)), { code, productFailure: true }); }
+function productFailureMessage(code, message) {
+  const detail = String(message ?? "").trim();
+  return (detail || `${code} 未提供详细错误`).slice(0, 2_000);
+}
+function productFailure(code, message) { return Object.assign(new Error(productFailureMessage(code, message)), { code, productFailure: true }); }
 function isProductFailure(error) { return Boolean(error && typeof error === "object" && error.productFailure === true); }
 function safeEnvironment(overrides = {}) { return { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", DISPLAY: process.env.DISPLAY ?? "", HOME: process.env.HOME ?? tmpdir(), ...overrides }; }
 async function isolatedGameEnvironment(scope, overrides = {}) {

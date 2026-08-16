@@ -31,6 +31,7 @@ export class GameTestEnvironment {
     this.recordingPromise = null;
     this.recordingFailure = null;
     this.frameCount = 0;
+    this.desktopOperation = Promise.resolve();
     this.videoPath = join(workspace, "evidence-videos", `${runId}.mp4`);
     this.framesRoot = join(workspace, "video-frames", runId);
   }
@@ -47,7 +48,7 @@ export class GameTestEnvironment {
   async prepare() {
     if (!Number.isSafeInteger(this.pid) || this.pid <= 1) throw new Error("GameTestEnvironment has no native game PID");
     if (this.useGamepad && !this.gamepad) throw new Error("INFRASTRUCTURE: virtual gamepad must exist before game launch");
-    await this.driver("wait", ["--pid", String(this.pid), "--width", "1280", "--height", "720"]);
+    await this.#desktop("wait", ["--pid", String(this.pid), "--width", "1280", "--height", "720"]);
     await mkdir(this.framesRoot, { recursive: true });
     this.recording = true;
     this.recordingPromise = this.#captureLoop();
@@ -67,13 +68,32 @@ export class GameTestEnvironment {
         if (!this.useGamepad) throw new Error("INFRASTRUCTURE: gamepad input was requested without a virtual device");
         await this.#gamepadRequest("sequence", { events: group.events }, timeoutMs);
       } else {
-        await this.driver("sequence", ["--pid", String(this.pid), "--events", JSON.stringify(group.events)], timeoutMs);
+        await this.#desktop("sequence", ["--pid", String(this.pid), "--events", JSON.stringify(group.events)], timeoutMs);
       }
     }
   }
 
   capture(outputPath) {
-    return this.driver("capture", ["--pid", String(this.pid), "--output", outputPath]);
+    return this.#desktopCapture(outputPath);
+  }
+
+  async #desktopCapture(outputPath) {
+    let lastError;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await this.#desktop("capture", ["--pid", String(this.pid), "--output", outputPath]);
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    throw lastError;
+  }
+
+  #desktop(command, arguments_, timeoutMs) {
+    const operation = this.desktopOperation.then(() => this.driver(command, arguments_, timeoutMs));
+    this.desktopOperation = operation.catch(() => undefined);
+    return operation;
   }
 
   async close() {

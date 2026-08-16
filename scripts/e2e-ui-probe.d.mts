@@ -37,8 +37,15 @@ export type E2EProbeAssertionResult = Readonly<{
 }>;
 
 export function validateProbeSnapshot(value: unknown, expected?: E2EProbeExpectation): value is E2EProbeSnapshot;
+export function probeSnapshotValidationError(value: unknown, expected?: E2EProbeExpectation): string | null;
 export function readProbeSnapshot(path: string, expected?: E2EProbeExpectation): Promise<E2EProbeSnapshot | null>;
 export function waitForProbeSnapshot(path: string, expected: E2EProbeExpectation, timeoutMs?: number): Promise<E2EProbeSnapshot>;
+export function waitForProbePostconditions(path: string, expected: E2EProbeExpectation, before: E2EProbeSnapshot, assertions: readonly ProbeAssertion[], timeoutMs?: number): Promise<Readonly<{
+  snapshot: E2EProbeSnapshot;
+  assertions: readonly E2EProbeAssertionResult[];
+  stateChanged: boolean;
+  passed: boolean;
+}>>;
 export function resolveProbeControl(snapshot: E2EProbeSnapshot, targetId: string, options?: Readonly<{ requireEnabled?: boolean }>): Readonly<{ control: E2EProbeControl; center: Readonly<{ x: number; y: number }> }>;
 export function evaluateProbeAssertions(assertions: readonly ProbeAssertion[], before: E2EProbeSnapshot, after: E2EProbeSnapshot): readonly E2EProbeAssertionResult[];
 export function probeStateDigest(snapshot: E2EProbeSnapshot): string;

@@ -826,6 +826,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
               const view = inProfile ? pipelineStageView(state, text) : OUT_OF_PROFILE_STAGE_VIEW(text);
+              const finishedAt = inProfile ? pipelineStageFinishedAt(jobs) : null;
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
@@ -835,6 +836,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <small>{inProfile
                     ? pipelineJobDetails(jobs, text)
                     : text("当前为验证流程，不含此阶段", "Not part of the current VALIDATE run")}</small>
+                  {finishedAt ? (
+                    <time className="product-delivery-stage-finished-at" dateTime={finishedAt}>
+                      {text("运行结束", "Finished")} · {formatConversationTime(finishedAt, localeTag(locale), text)}
+                    </time>
+                  ) : null}
                   {stageArtifacts.length ? (
                     <div className="product-delivery-stage-artifacts">
                       {stageArtifacts.map(artifact => (
@@ -1315,6 +1321,13 @@ function latestPipelineJobs(jobs: ProductProjectDetail["jobs"]): ProductProjectD
     if (!current || Date.parse(current.createdAt) <= Date.parse(job.createdAt)) latest.set(key, job);
   }
   return Object.freeze([...latest.values()]);
+}
+
+export function pipelineStageFinishedAt(jobs: ProductProjectDetail["jobs"]): string | null {
+  if (!jobs.length || jobs.some(job => !["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.state))) return null;
+  const timestamps = jobs.map(job => Date.parse(job.updatedAt));
+  if (timestamps.some(value => !Number.isFinite(value))) return null;
+  return new Date(Math.max(...timestamps)).toISOString();
 }
 
 type JobFailurePresentation = Readonly<{ title: string; reason: string; action: string }>;

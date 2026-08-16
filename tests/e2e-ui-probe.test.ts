@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   evaluateProbeAssertions,
+  probeSnapshotValidationError,
   probeStateDigest,
   resolveProbeControl,
   validateProbeSnapshot,
+  waitForProbePostconditions,
   waitForProbeSnapshot,
 } from "../scripts/e2e-ui-probe.mjs";
 
@@ -35,6 +37,24 @@ describe("deviludo.e2e-ui-probe", () => {
     const duplicate = snapshot({ controls: [snapshot().controls[0], snapshot().controls[0]] });
     assert.equal(validateProbeSnapshot(duplicate), false);
     assert.equal(validateProbeSnapshot(snapshot({ controls: [{ ...snapshot().controls[0], rect: { x: 1270, y: 0, width: 20, height: 10 } }] })), false);
+    assert.equal(
+      probeSnapshotValidationError(snapshot({ controls: [{ ...snapshot().controls[0], id: "player-label", rect: { x: 9, y: 5, width: 231, height: 0 } }] })),
+      "control player-label rectangle must be positive and remain inside 1280x720",
+    );
+  });
+
+  test("reports the last structural reason when a published snapshot never becomes valid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "deviludo-probe-error-test-"));
+    const path = join(root, "probe.json");
+    try {
+      await writeFile(path, JSON.stringify(snapshot({ controls: [{ ...snapshot().controls[0], id: "player-label", rect: { x: 9, y: 5, width: 231, height: 0 } }] })));
+      await assert.rejects(
+        waitForProbeSnapshot(path, { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234 }, 80),
+        /control player-label rectangle must be positive and remain inside 1280x720/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("evaluates pre/post state, progress, control and scene assertions", () => {
@@ -66,6 +86,29 @@ describe("deviludo.e2e-ui-probe", () => {
         void writeFile(temporary, JSON.stringify(snapshot({ sequence: 8 }))).then(() => rename(temporary, path));
       }, 50);
       assert.equal((await waiting).sequence, 8);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("waits past unchanged heartbeats until post-action state satisfies the Oracle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "deviludo-probe-postcondition-test-"));
+    const path = join(root, "probe.json");
+    const before = snapshot({ sequence: 7, progress: { turn: 2, move_budget: 0 } });
+    try {
+      await writeFile(path, JSON.stringify(snapshot({ sequence: 8, progress: { turn: 2, move_budget: 0 } })));
+      const waiting = waitForProbePostconditions(path, {
+        sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234, afterSequence: 7,
+      }, before as never, [{ source: "PROGRESS", key: "move_budget", operator: "GREATER_THAN", value: 0 }], 2_000);
+      setTimeout(() => {
+        const temporary = `${path}.tmp`;
+        void writeFile(temporary, JSON.stringify(snapshot({ sequence: 9, progress: { turn: 2, move_budget: 6 } }))).then(() => rename(temporary, path));
+      }, 100);
+      const result = await waiting;
+      assert.equal(result.snapshot.sequence, 9);
+      assert.equal(result.stateChanged, true);
+      assert.equal(result.passed, true);
+      assert.equal(result.assertions[0]?.actual, 6);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

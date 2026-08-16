@@ -11,6 +11,7 @@ const runtimeDirectory = resolve(root, ".deviludo/local");
 const pidFile = resolve(runtimeDirectory, "e2e-macos.pid");
 const logFile = resolve(runtimeDirectory, "e2e-macos.log");
 const entrypoint = "scripts/local-macos-e2e.mjs";
+const guestRunnerPath = resolve(root, "scripts/executors/local-tart-guest-runner.mjs");
 
 export async function startLocalE2e() {
   const current = await runningPid();
@@ -37,7 +38,7 @@ export async function stopLocalE2e() {
   const pid = await runningPid();
   if (!pid) {
     removePidFile();
-    return false;
+    return await stopManagedGuestRunners() > 0;
   }
   const identity = await processIdentity(pid);
   if (identity !== "match") {
@@ -48,10 +49,52 @@ export async function stopLocalE2e() {
     await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
     if (await processIdentity(pid) === "missing") {
       removePidFile();
+      await stopManagedGuestRunners();
       return true;
     }
   }
   throw new Error(`macOS E2E node ${pid} did not stop after SIGTERM`);
+}
+
+async function stopManagedGuestRunners() {
+  const { stdout } = await execute("ps", ["-ax", "-o", "pid=,ppid=,command="]);
+  const pids = parseManagedGuestRunnerPids(stdout);
+  for (const pid of pids) signalProcess(pid, "SIGTERM");
+  for (let attempt = 0; attempt < 30 && (await matchingGuestRunners(pids)).length; attempt += 1) {
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  }
+  const survivors = await matchingGuestRunners(pids);
+  for (const pid of survivors) signalProcess(pid, "SIGKILL");
+  if (survivors.length) await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  const remaining = await matchingGuestRunners(survivors);
+  if (remaining.length) throw new Error(`Local E2E guest runners did not stop: ${remaining.join(", ")}`);
+  return pids.length;
+}
+
+export function parseManagedGuestRunnerPids(output) {
+  const marker = ` ${guestRunnerPath} test `;
+  return output.split("\n").flatMap(line => {
+    const match = line.match(/^\s*(\d+)\s+\d+\s+(.+)$/);
+    return match && match[2].includes(marker) ? [Number(match[1])] : [];
+  }).filter(pid => Number.isSafeInteger(pid) && pid > 1);
+}
+
+async function matchingGuestRunners(pids) {
+  const matches = [];
+  for (const pid of pids) {
+    try {
+      const { stdout } = await execute("ps", ["-p", String(pid), "-o", "command="]);
+      if (stdout.includes(` ${guestRunnerPath} test `)) matches.push(pid);
+    } catch { /* The process has already exited. */ }
+  }
+  return matches;
+}
+
+function signalProcess(pid, signal) {
+  try { process.kill(pid, signal); }
+  catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error;
+  }
 }
 
 export async function runningPid() {

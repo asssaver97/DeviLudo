@@ -1,18 +1,25 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 import {
   generateE2ePlayerDecision,
   parsePlayerPolicyDecision,
   parsePlayerPolicyRequest,
+  playerPolicyIdempotencyInput,
 } from "@/services/core/src/e2e-player-policy";
+
+test("E2E node preserves the complete player-policy provider budget", async () => {
+  const source = await readFile(new URL("../services/e2e-node/src/core-client.ts", import.meta.url), "utf8");
+  assert.match(source, /path\.endsWith\("\/player-policy"\) \? 60_000 : 10_000/);
+});
 
 const screenshotBytes = Buffer.alloc(33);
 screenshotBytes.set([137, 80, 78, 71, 13, 10, 26, 10], 0);
 screenshotBytes.writeUInt32BE(13, 8);
 screenshotBytes.write("IHDR", 12, "ascii");
-screenshotBytes.writeUInt32BE(640, 16);
-screenshotBytes.writeUInt32BE(360, 20);
+screenshotBytes.writeUInt32BE(960, 16);
+screenshotBytes.writeUInt32BE(540, 20);
 const screenshotBase64 = screenshotBytes.toString("base64");
 const screenshotSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
 
@@ -44,6 +51,20 @@ function decision(actions: readonly Record<string, unknown>[] = [{ type: "click"
 }
 
 describe("E2E Test Agent policy", () => {
+  test("reuses a decision across a clean node retry with different pixels", () => {
+    const first = parsePlayerPolicyRequest(request());
+    const changedScreenshot = Buffer.from(screenshotBytes);
+    changedScreenshot[32] = 1;
+    const retried = parsePlayerPolicyRequest({
+      ...request(),
+      screenshotBase64: changedScreenshot.toString("base64"),
+      screenshotSha256: `sha256:${createHash("sha256").update(changedScreenshot).digest("hex")}`,
+      history: [],
+      recovery: true,
+    });
+    assert.deepEqual(playerPolicyIdempotencyInput(retried), playerPolicyIdempotencyInput(first));
+  });
+
   test("accepts a screenshot-only bounded request and rejects stale or oversized inputs", () => {
     const parsed = parsePlayerPolicyRequest(request());
     assert.equal(parsed.screenshotSha256, screenshotSha256);
@@ -101,6 +122,8 @@ describe("E2E Test Agent policy", () => {
     const providerInput = JSON.stringify(bodies);
     assert.doesNotMatch(providerInput, /uiProbe|godotLogs|stderr|stdout/i);
     assert.match(providerInput, /data:image\/png;base64/);
+    assert.match(providerInput, /attached 960x540 image is the current live game frame/);
+    assert.match(providerInput, /scale image coordinates by 1\.3333333333333333/);
   });
 
   test("classifies provider failures as infrastructure errors", async () => {
@@ -115,5 +138,100 @@ describe("E2E Test Agent policy", () => {
       const value = error as Error & { code?: string; statusCode?: number };
       return value.code === "PLAYER_POLICY_PROVIDER" && value.statusCode === 503;
     });
+  });
+
+  test("rejects a model that explicitly reports the attached pixels are unavailable", async () => {
+    let calls = 0;
+    await assert.rejects(generateE2ePlayerDecision({
+      request: parsePlayerPolicyRequest(request()),
+      runtime: "CLAUDE_CODE",
+      baseUrl: "https://provider.example",
+      apiKey: "secret",
+      model: "text-only-model",
+      fetchImpl: async () => {
+        calls += 1;
+        const unavailable = JSON.parse(decision()) as Record<string, unknown>;
+        return new Response(JSON.stringify({ content: [{
+          type: "tool_use",
+          name: "submit_player_decision",
+          input: {
+            ...unavailable,
+            observation: "No game-frame pixels are included in the accessible context.",
+          },
+        }] }), { status: 200 });
+      },
+    }), (error: unknown) => {
+      const value = error as Error & { code?: string; statusCode?: number };
+      return value.code === "PLAYER_POLICY_VISION_UNAVAILABLE" && value.statusCode === 503
+        && !value.message.includes("pixels are included");
+    });
+    assert.equal(calls, 2);
+  });
+
+  test("retries an HTML provider response without exposing its body", async () => {
+    let calls = 0;
+    let requestedUrl = "";
+    let authorization = "";
+    let providerBody: Record<string, unknown> = {};
+    const result = await generateE2ePlayerDecision({
+      request: parsePlayerPolicyRequest(request()),
+      runtime: "CLAUDE_CODE",
+      baseUrl: "https://provider.example",
+      apiKey: "secret",
+      model: "test-model",
+      fetchImpl: async (url, init) => {
+        calls += 1;
+        requestedUrl = String(url);
+        authorization = new Headers(init?.headers).get("authorization") ?? "";
+        providerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (calls === 1) return new Response("<!doctype html><title>edge error</title>", { status: 200, headers: { "content-type": "text/html" } });
+        return new Response(JSON.stringify({
+          content: [{ type: "tool_use", name: "submit_player_decision", input: JSON.parse(decision()) }],
+        }), { status: 200 });
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(requestedUrl, "https://provider.example/v1/messages");
+    assert.equal(authorization, "Bearer secret");
+    assert.deepEqual(providerBody.tool_choice, { type: "tool", name: "submit_player_decision" });
+    assert.equal((providerBody.tools as readonly Record<string, unknown>[])[0]?.name, "submit_player_decision");
+    const toolSchema = JSON.stringify(providerBody.tools);
+    assert.match(toolSchema, /"enum":\["A","B","C"/);
+    assert.match(toolSchema, /"DPAD_RIGHT"/);
+    assert.match(toolSchema, /"LEFT_X","LEFT_Y","RIGHT_X","RIGHT_Y"/);
+    assert.equal(result.decision.actions[0]?.type, "click");
+  });
+
+  test("classifies persistent non-JSON provider responses as infrastructure errors", async () => {
+    await assert.rejects(generateE2ePlayerDecision({
+      request: parsePlayerPolicyRequest(request()),
+      runtime: "CLAUDE_CODE",
+      baseUrl: "https://provider.example",
+      apiKey: "secret",
+      model: "test-model",
+      fetchImpl: async () => new Response("<!doctype html><title>edge error</title>", { status: 200 }),
+    }), (error: unknown) => {
+      const value = error as Error & { code?: string; statusCode?: number };
+      return value.code === "PLAYER_POLICY_PROVIDER" && value.statusCode === 503
+        && !value.message.includes("doctype");
+    });
+  });
+
+  test("retries a transient provider transport failure and never leaks it as Core 500", async () => {
+    let calls = 0;
+    const result = await generateE2ePlayerDecision({
+      request: parsePlayerPolicyRequest(request()),
+      runtime: "CLAUDE_CODE",
+      baseUrl: "https://provider.example",
+      apiKey: "secret",
+      model: "test-model",
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return new Response(JSON.stringify({ content: [{ type: "text", text: decision() }] }), { status: 200 });
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(result.decision.actions[0]?.type, "click");
   });
 });

@@ -94,7 +94,10 @@ export class CoreE2eClient {
       ca: this.tls.ca,
       minVersion: "TLSv1.3",
       rejectUnauthorized: url.protocol === "https:",
-      timeout: path.endsWith("/player-policy") ? 35_000 : 10_000,
+      // A policy decision can use two bounded 25-second provider attempts.
+      // Keep this transport alive for that complete budget; the guest owns
+      // the stricter end-to-end decision deadline.
+      timeout: path.endsWith("/player-policy") ? 60_000 : 10_000,
     };
     return await new Promise<T>((resolve, reject) => {
       const requester = url.protocol === "https:" ? httpsRequest : httpRequest;

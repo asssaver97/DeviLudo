@@ -5,9 +5,15 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { validateGuestInteractionScript } from "../scripts/e2e-interaction-contract.mjs";
 import {
+  closeChildPipesAfterExit,
+  forwardTerminationSignals,
   readCliArgument,
+  readProtocolLineWithTimeout,
+  settleChildAfterProtocolResult,
+  startChildProtocolWatchdog,
   waitForChildWithHardTimeout,
 } from "../deploy/assets/e2e-process-lifecycle.mjs";
+import { GameTestEnvironment } from "../scripts/executors/game-test-environment.mjs";
 
 test("the guest accepts a semantic mouse journey with post-action Oracle evidence", () => {
   const changed = Object.freeze({ source: "STATE", key: "session.started", operator: "CHANGED" });
@@ -66,6 +72,160 @@ test("the hard deadline terminates a stuck process group", async () => {
   assert.throws(() => process.kill(pid, 0));
 });
 
+test("an exited child cannot hang forever when a grandchild inherits its pipes", async () => {
+  const killProcessGroup = process.platform !== "win32";
+  const child = spawn(process.execPath, ["-e", [
+    "const { spawn } = require('node:child_process');",
+    "const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+    "grandchild.unref();",
+  ].join("\n")], { stdio: ["ignore", "pipe", "pipe"], detached: killProcessGroup });
+  const pid = child.pid;
+  assert.ok(pid);
+  const stopClosing = closeChildPipesAfterExit(child, 50);
+  const startedAt = Date.now();
+  const result = await waitForChildWithHardTimeout(child, {
+    timeoutMs: 1_000,
+    terminateGraceMs: 50,
+    killProcessGroup,
+  });
+  stopClosing();
+  assert.equal(result.timedOut, false);
+  assert.ok(Date.now() - startedAt < 500);
+  if (killProcessGroup) {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* The group already exited. */ }
+  }
+});
+
+test("a protocol result terminates a transport that remains alive after the remote job finished", async () => {
+  const killProcessGroup = process.platform !== "win32";
+  const child = spawn(process.execPath, ["-e", [
+    "process.stdout.write(JSON.stringify({ type: 'result', value: { outcome: 'FAILED' } }) + '\\n');",
+    "setInterval(() => {}, 1000);",
+  ].join("\n")], { stdio: ["pipe", "pipe", "pipe"], detached: killProcessGroup });
+  const pid = child.pid;
+  assert.ok(pid);
+  const stopClosing = closeChildPipesAfterExit(child, 50);
+  const childClosed = waitForChildWithHardTimeout(child, {
+    timeoutMs: 1_000,
+    terminateGraceMs: 50,
+    killProcessGroup,
+  });
+  await once(child.stdout, "data");
+  const startedAt = Date.now();
+  const settlement = await settleChildAfterProtocolResult(child, childClosed, {
+    graceMs: 50,
+    killProcessGroup,
+  });
+  stopClosing();
+  assert.equal(settlement.transportTerminated, true);
+  assert.equal(settlement.result.timedOut, false);
+  assert.ok(Date.now() - startedAt < 500);
+  assert.throws(() => process.kill(pid, 0));
+});
+
+test("a silent guest transport is killed before the frozen platform deadline", async () => {
+  const killProcessGroup = process.platform !== "win32";
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: killProcessGroup,
+  });
+  const pid = child.pid;
+  assert.ok(pid);
+  const stopClosing = closeChildPipesAfterExit(child, 25);
+  const watchdog = startChildProtocolWatchdog(child, {
+    idleMs: 50,
+    checkMs: 10,
+    terminateGraceMs: 25,
+    killProcessGroup,
+  });
+  const result = await waitForChildWithHardTimeout(child, {
+    timeoutMs: 1_000,
+    terminateGraceMs: 25,
+    killProcessGroup,
+  });
+  watchdog.stop();
+  stopClosing();
+  assert.equal(watchdog.expired(), true);
+  assert.equal(result.timedOut, false);
+  assert.throws(() => process.kill(pid, 0));
+});
+
+test("a policy relay stops waiting when its guest transport closes", async () => {
+  const killProcessGroup = process.platform !== "win32";
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+    detached: killProcessGroup,
+  });
+  const childClosed = waitForChildWithHardTimeout(child, {
+    timeoutMs: 1_000,
+    terminateGraceMs: 25,
+    killProcessGroup,
+  });
+  const neverResponds = { next: () => new Promise<IteratorResult<string>>(() => undefined) };
+  await assert.rejects(
+    readProtocolLineWithTimeout(neverResponds, childClosed, 1_000),
+    /Protocol transport closed before responding/,
+  );
+});
+
+test("termination forwarding stops a detached child group and can be removed", async () => {
+  const killProcessGroup = process.platform !== "win32";
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    detached: killProcessGroup,
+  });
+  const pid = child.pid;
+  assert.ok(pid);
+  const stopForwarding = forwardTerminationSignals(child, killProcessGroup);
+  process.emit("SIGTERM");
+  await Promise.race([
+    once(child, "close"),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("forwarded termination did not stop child")), 1_000)),
+  ]);
+  stopForwarding();
+  assert.throws(() => process.kill(pid, 0));
+});
+
+test("video frames, evidence screenshots and desktop input never overlap the GUI driver", async () => {
+  let active = 0;
+  let maximum = 0;
+  const driver = async () => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    active -= 1;
+    return { ok: true };
+  };
+  const environment = new GameTestEnvironment({
+    pid: 42,
+    runId: "serialized-desktop",
+    workspace: "/tmp/deviludo-serialized-desktop",
+    driver,
+  });
+  await Promise.all([
+    environment.capture("/tmp/deviludo-evidence.png"),
+    environment.capture("/tmp/deviludo-video-frame.png"),
+    environment.sequence([{ type: "click" }], 1_000),
+  ]);
+  assert.equal(maximum, 1);
+});
+
+test("a transient native screenshot failure is retried before failing the E2E node", async () => {
+  let captures = 0;
+  const environment = new GameTestEnvironment({
+    pid: 42,
+    runId: "capture-retry",
+    workspace: "/tmp/deviludo-capture-retry",
+    driver: async command => {
+      captures += 1;
+      if (command === "capture" && captures < 3) throw new Error("capture backend is temporarily unavailable");
+      return { ok: true };
+    },
+  });
+  await environment.capture("/tmp/deviludo-capture-retry.png");
+  assert.equal(captures, 3);
+});
+
 test("the production Guest, relay, executor and node all wire the lifecycle guards", async () => {
   const [guest, tartRelay, executor, node, release] = await Promise.all([
     readFile(new URL("../scripts/executors/godot-window-e2e-guest.mjs", import.meta.url), "utf8"),
@@ -76,9 +236,28 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   ]);
   assert.match(guest, /validateGuestInteractionScript as validInteractionScript/);
   assert.match(guest, /policyInput\?\.close\(\)/);
+  assert.match(guest, /type: "heartbeat"/);
+  assert.match(guest, /const summary = productFailureMessage\(error\.code, error\.message\)/);
+  assert.match(guest, /detail \|\| `\$\{code\} 未提供详细错误`/);
+  assert.match(guest, /finish\("FAILED", "PRODUCT", summary, activeManifest\)/);
+  assert.match(guest, /Buffer\.isBuffer\(error\?\.stderr\)[\s\S]*error\.stderr\.toString\("utf8"\)\.trim\(\)/);
+  assert.match(guest, /const detail = stderr \|\| message \|\| String\(error \?\? ""\)\.trim\(\) \|\| `GUI driver \$\{command\} failed without diagnostics`/);
+  assert.match(guest, /throw new Error\(`INFRASTRUCTURE: GUI driver \$\{command\} failed:/);
+  assert.match(guest, /captureFailedActionEvidence\(\{[\s\S]*testEnvironment, journey,[\s\S]*await testEnvironment\.capture\(screenshotPath\)/);
   assert.match(tartRelay, /readCliArgument\(process\.argv, name\)/);
+  assert.match(tartRelay, /PATH=\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin/);
   assert.match(tartRelay, /waitForChildWithHardTimeout\(remote/);
+  assert.match(tartRelay, /remote\.stderr\.on\("data"/);
+  assert.match(tartRelay, /remoteStderrLimit = 64 \* 1024/);
+  assert.match(tartRelay, /const reason = protocolWatchdog\.expired\(\)[\s\S]*Tart guest runner failed or omitted its result/);
+  assert.match(tartRelay, /forwardTerminationSignals\(remote, killProcessGroup\)/);
+  assert.match(tartRelay, /settleChildAfterProtocolResult\(remote, remoteClosed/);
+  assert.match(tartRelay, /startChildProtocolWatchdog\(remote/);
+  assert.match(tartRelay, /readProtocolLineWithTimeout\(parentLines, remoteClosed, 65_000\)/);
   assert.match(executor, /waitForChildWithHardTimeout\(child/);
+  assert.match(executor, /readProtocolLineWithTimeout\(parentIterator, childClosed, 65_000\)/);
+  assert.match(executor, /closeChildPipesAfterExit\(child\)/);
+  assert.match(executor, /forwardTerminationSignals\(child, killProcessGroup\)/);
   assert.match(node, /waitForChildWithHardTimeout\(child/);
   assert.match(release, /E2E_MACOS\.tar\.gz[^\n]+e2e-process-lifecycle\.mjs/);
 });

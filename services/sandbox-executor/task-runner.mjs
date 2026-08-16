@@ -172,10 +172,25 @@ async function runAgent(plan) {
   const specificationInstructions = existingManifestValid
     ? [`Current revision notes: ${JSON.stringify(specification.revisionNotes ?? [])}`]
     : [`Specification: ${JSON.stringify(specification)}`];
+  const e2eRepairInstructions = e2eRepairContext ? [
+    "",
+    "BLOCKING E2E REPAIR: fix the verified product failure before any broad audit, manifest review, refactor, or explanation.",
+    "Open only the exact source/test file named by the evidence first, locate the reported symbol or behavior, and make the smallest concrete source edit immediately. Inspect wider code only when that edit genuinely requires it.",
+    "This is an automatic repair pass after a trusted E2E product failure. Reproduce the reported game behavior from the existing source, fix the game content, scripts, scenes, or project configuration, and preserve unrelated working behavior.",
+    "Do not dismiss the report as infrastructure failure and do not merely rewrite the report. Make concrete source changes that address its diagnostics.",
+    ...((e2eRepairContext.report ?? e2eRepairContext).testDetails?.failures?.length > 0 ? [
+      `Failed feature checks: ${(e2eRepairContext.report ?? e2eRepairContext).testDetails.failures.join(", ")}`,
+      "Review the named failing test only as needed to understand the intended behavior. Fix game logic or configuration first; do not modify test assertions unless they are objectively incorrect.",
+    ] : []),
+    "The verified evidence files are available in /workspace/inputs/e2e-repair. Start from report.json and the named error; inspect logs or failed screenshots only when needed for the concrete fix.",
+    `E2E failure summary: ${JSON.stringify(e2eRepairPromptSummary(e2eRepairContext))}`,
+    "",
+  ] : [];
   const prompt = [
     importedSource || restoredCheckpoint
       ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
       : "Create a complete Godot 4 project in /workspace/project.",
+    ...e2eRepairInstructions,
     "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
     "Enable rendering/textures/vram_compression/import_s3tc_bptc so release exports are portable.",
     "The result must run headlessly and expose a deterministic smoke-test path.",
@@ -196,17 +211,6 @@ async function runAgent(plan) {
     ] : []),
     "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it. The latest live guidance is the highest-priority scope constraint: stop broader analysis immediately when it narrows the requested change.",
     "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
-    ...(e2eRepairContext ? [
-      "",
-      "This is an automatic repair pass after a trusted E2E product failure. Reproduce the reported game behavior from the existing source, fix the game content, scripts, scenes, or project configuration, and preserve unrelated working behavior.",
-      "Do not dismiss the report as infrastructure failure and do not merely rewrite the report. Make concrete source changes that address its diagnostics.",
-      ...((e2eRepairContext.report ?? e2eRepairContext).testDetails?.failures?.length > 0 ? [
-        `Failed feature checks: ${(e2eRepairContext.report ?? e2eRepairContext).testDetails.failures.join(", ")}`,
-        "Review the test script to understand what each failed check validates, then fix the game logic or configuration that caused the failure. Do not modify test assertions unless they are objectively incorrect.",
-      ] : []),
-      "The verified evidence files are available in /workspace/inputs/e2e-repair. Inspect report.json, logs, and only the failed checkpoint screenshots needed for the fix.",
-      `E2E failure summary: ${JSON.stringify(e2eRepairPromptSummary(e2eRepairContext))}`,
-    ] : []),
     ...specificationInstructions,
   ].join("\n");
   const completedCheckpoint = checkpointMetadata?.state === "AGENT_COMPLETE"
@@ -247,7 +251,7 @@ async function runAgent(plan) {
         }
         return currentDigest;
       },
-      e2eRepairContext ? 2 * 60_000 : 5 * 60_000,
+      5 * 60_000,
       e2eRepairContext ? 60_000 : undefined,
       async () => readGeneratedAgentManifest(requirementCatalog),
     );

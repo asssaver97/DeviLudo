@@ -73,6 +73,26 @@ export async function inspectScreenshot(path, expectedWidth = E2E_CLIENT_WIDTH, 
   });
 }
 
+export async function captureAndInspectScreenshot(path, capture, options = {}) {
+  const attempts = options.attempts ?? 12;
+  const delayMs = options.delayMs ?? 250;
+  if (typeof capture !== "function" || !Number.isInteger(attempts) || attempts < 1 || attempts > 40
+    || !Number.isInteger(delayMs) || delayMs < 0 || delayMs > 2_000) {
+    throw new Error("Screenshot readiness options are invalid");
+  }
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await capture(path);
+    try { return await inspectScreenshot(path); }
+    catch (error) {
+      lastError = error;
+      if (!(error instanceof Error) || !/blank or nearly solid/i.test(error.message) || attempt === attempts - 1) throw error;
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError ?? new Error("Screenshot did not become ready");
+}
+
 export async function compareScreenshots(actualPath, referencePath, diffPath, threshold = DEFAULT_VISUAL_THRESHOLD) {
   if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
     throw new Error("Visual difference threshold is invalid");
