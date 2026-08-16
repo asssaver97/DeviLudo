@@ -74,6 +74,8 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
   assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD', 'E2E_TEST'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
+  assert.match(sql, /CREATE TRIGGER jobs_snapshot_agent_baseline_source/);
+  assert.match(sql, /'baselineSourceRelativePath', baseline\.relative_path/);
   assert.match(sql, /CREATE TRIGGER jobs_snapshot_artifact_build_assets[\s\S]*BEFORE INSERT ON deviludo\.jobs/);
   assert.match(sql, /'assetInputs', inputs/);
   assert.match(sql, /asset_key ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9\._\/\-\]\{0,199\}\$'/);

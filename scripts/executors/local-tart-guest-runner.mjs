@@ -56,13 +56,19 @@ const command = [
   ...(remoteRegression ? ["--regression", remoteRegression] : []),
 ];
 const killProcessGroup = process.platform !== "win32";
+// A Test Agent decision is allowed up to 65 seconds end-to-end. The SSH
+// transport watchdog must therefore stay strictly outside that window: while
+// this relay is awaiting its parent response it cannot consume guest heartbeat
+// frames, so a shorter idle deadline would kill a healthy guest mid-decision.
+const policyResponseTimeoutMs = 65_000;
+const protocolIdleTimeoutMs = policyResponseTimeoutMs + 10_000;
 const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], {
   stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,
 });
 const stopForwardingTermination = forwardTerminationSignals(remote, killProcessGroup);
 const stopClosingRemotePipes = closeChildPipesAfterExit(remote);
 const protocolWatchdog = startChildProtocolWatchdog(remote, {
-  idleMs: 45_000,
+  idleMs: protocolIdleTimeoutMs,
   checkMs: 1_000,
   terminateGraceMs: 2_000,
   killProcessGroup,
@@ -98,7 +104,7 @@ try {
     const message = JSON.parse(line);
     if (message?.type === "policy_request" && typeof message.id === "string") {
       process.stdout.write(`${JSON.stringify(message)}\n`);
-      const next = await readProtocolLineWithTimeout(parentLines, remoteClosed, 65_000);
+      const next = await readProtocolLineWithTimeout(parentLines, remoteClosed, policyResponseTimeoutMs);
       if (next.done) throw new Error("Player policy relay closed before responding");
       const response = JSON.parse(next.value);
       if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");

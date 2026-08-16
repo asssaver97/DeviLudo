@@ -39,6 +39,10 @@ export async function executeE2eJob(
     throw new Error("E2E nodes cannot execute Core jobs or install Agent software");
   }
 
+  // Prove that the frozen Test Agent route can actually inspect pixels before
+  // cloning or booting an expensive platform VM. A text-only Provider is an
+  // infrastructure capability failure and must never reach product repair.
+  await client.verifyPlayerPolicy(job);
   await isolation.assertAgentAbsent();
   const beforeReimageProof = await isolation.reimage(job, "before");
   let executionReceipt: Readonly<Record<string, unknown>> | null = null;
@@ -294,28 +298,25 @@ async function runExternal(
   child.stdin.write(`${JSON.stringify({ type: "execute", request })}\n`);
   let result: Readonly<Record<string, unknown>> | null = null;
   let stdoutBuffer = "";
+  let protocolError: Error | null = null;
   const stderr: Buffer[] = [];
-  let bytes = 0;
   child.stdout.on("data", (chunk: Buffer) => {
-    bytes += chunk.length;
-    if (bytes > 4_194_304) return;
-    stdoutBuffer += chunk.toString("utf8");
-    let newline = stdoutBuffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = stdoutBuffer.slice(0, newline); stdoutBuffer = stdoutBuffer.slice(newline + 1);
-      if (line.trim()) {
-        try {
-          const message = JSON.parse(line) as Record<string, unknown>;
-          if (message.type === "result" && message.value && typeof message.value === "object" && !Array.isArray(message.value)) {
-            result = Object.freeze(message.value as Record<string, unknown>);
-          } else if (message.type === "policy_request" && typeof message.id === "string" && message.request && typeof message.request === "object" && !Array.isArray(message.request)) {
-            void client.decidePlayerPolicy(job, message.request as Record<string, unknown>)
-              .then(response => child.stdin.write(`${JSON.stringify({ type: "policy_response", id: message.id, response })}\n`))
-              .catch(error => child.stdin.write(`${JSON.stringify({ type: "policy_response", id: message.id, error: error instanceof Error ? error.message.slice(0, 1_000) : "Player policy failed" })}\n`));
-          }
-        } catch { /* Invalid frames make the executor fail after exit. */ }
+    if (protocolError) return;
+    try {
+      const parsed = parseE2eExecutorProtocolChunk(stdoutBuffer, chunk);
+      stdoutBuffer = parsed.remainder;
+      for (const message of parsed.messages) {
+        if (message.type === "result" && message.value && typeof message.value === "object" && !Array.isArray(message.value)) {
+          result = Object.freeze(message.value as Record<string, unknown>);
+        } else if (message.type === "policy_request" && typeof message.id === "string" && message.request && typeof message.request === "object" && !Array.isArray(message.request)) {
+          void client.decidePlayerPolicy(job, message.request as Record<string, unknown>)
+            .then(response => child.stdin.write(`${JSON.stringify({ type: "policy_response", id: message.id, response })}\n`))
+            .catch(error => child.stdin.write(`${JSON.stringify({ type: "policy_response", id: message.id, error: error instanceof Error ? error.message.slice(0, 1_000) : "Player policy failed" })}\n`));
+        }
       }
-      newline = stdoutBuffer.indexOf("\n");
+    } catch (error) {
+      protocolError = error instanceof Error ? error : new Error("E2E executor protocol is invalid");
+      terminateChildProcess(child, "SIGTERM", killProcessGroup);
     }
   });
   child.stderr.on("data", (chunk: Buffer) => {
@@ -340,8 +341,41 @@ async function runExternal(
   if (childExit.timedOut) {
     throw new Error(`${action} executor exceeded its frozen hard deadline and was terminated`);
   }
-  if (childExit.code !== 0 || bytes > 4_194_304 || !result) {
-    throw new Error(`${action} executor failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2_000)}`);
+  if (childExit.code !== 0 || protocolError || stdoutBuffer.trim() || !result) {
+    const protocolFailure = protocolError as Error | null;
+    const detail = [protocolFailure?.message, Buffer.concat(stderr).toString("utf8")]
+      .filter(Boolean).join(": ").slice(0, 2_000);
+    throw new Error(`${action} executor failed: ${detail}`);
   }
   return result;
+}
+
+const MAX_E2E_EXECUTOR_PROTOCOL_FRAME_BYTES = 2 * 1024 * 1024;
+
+export function parseE2eExecutorProtocolChunk(
+  previous: string,
+  chunk: Buffer | string,
+): Readonly<{ remainder: string; messages: readonly Readonly<Record<string, unknown>>[] }> {
+  let buffer = previous + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+  const messages: Readonly<Record<string, unknown>>[] = [];
+  let newline = buffer.indexOf("\n");
+  while (newline >= 0) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (Buffer.byteLength(line) > MAX_E2E_EXECUTOR_PROTOCOL_FRAME_BYTES) {
+      throw new Error("E2E executor protocol frame exceeds its limit");
+    }
+    if (line.trim()) {
+      const message = JSON.parse(line) as unknown;
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        throw new Error("E2E executor protocol frame must be an object");
+      }
+      messages.push(Object.freeze(message as Record<string, unknown>));
+    }
+    newline = buffer.indexOf("\n");
+  }
+  if (Buffer.byteLength(buffer) > MAX_E2E_EXECUTOR_PROTOCOL_FRAME_BYTES) {
+    throw new Error("E2E executor protocol frame exceeds its limit");
+  }
+  return Object.freeze({ remainder: buffer, messages: Object.freeze(messages) });
 }

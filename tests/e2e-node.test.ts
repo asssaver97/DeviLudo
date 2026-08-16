@@ -129,6 +129,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
 
 test("ordinary E2E tests never receive signing authority", async () => {
   const client = {
+    async verifyPlayerPolicy() {},
     async authorizeObjects() { return []; },
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
@@ -176,6 +177,7 @@ test("logical operating-system overrides are restricted to test mode and still p
 
 test("execution failures still attempt cleanup and the final trusted reimage", async () => {
   const client = {
+    async verifyPlayerPolicy() {},
     async authorizeObjects() { throw new Error("artifact authorization unavailable"); },
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
@@ -205,11 +207,26 @@ test("cleanup failures fail the job even when execution itself succeeds", async 
   await assert.rejects(() => executeE2eJob(
     baseJob,
     config,
-    { authorizeObjects: async () => [] } as unknown as CoreE2eClient,
+    { verifyPlayerPolicy: async () => {}, authorizeObjects: async () => [] } as unknown as CoreE2eClient,
     isolation,
     new AbortController().signal,
   ), AggregateError);
   assert.deepEqual(calls, ["agent-absent", "reimage-before", "cleanup", "reimage-after"]);
+});
+
+test("a text-only Test Agent route is rejected before allocating a VM", async () => {
+  const calls: string[] = [];
+  const client = {
+    async verifyPlayerPolicy() { throw new Error("PLAYER_POLICY_VISION_UNAVAILABLE"); },
+  } as unknown as CoreE2eClient;
+  await assert.rejects(() => executeE2eJob(
+    baseJob,
+    config,
+    client,
+    fakeIsolation(calls),
+    new AbortController().signal,
+  ), /PLAYER_POLICY_VISION_UNAVAILABLE/);
+  assert.deepEqual(calls, []);
 });
 
 function fakeIsolation(calls: string[]): IsolationController {

@@ -12,7 +12,7 @@ function valid() {
   return {
     events: [
       { type: "checkpoint", id: "game-start", role: "START", assertions: [{ source: "SCENE", operator: "EQUALS", value: "main" }], visualMode: "STABLE_REPLAY" },
-      { type: "click", stepId: "roll-dice", intent: "PRIMARY_ACTION", targetId: "roll-dice", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn], delay_ms: 100 },
+      { type: "click", stepId: "activate-primary-control", intent: "PRIMARY_ACTION", targetId: "primary-control", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn], delay_ms: 100 },
       { type: "key_hold", stepId: "end-turn", intent: "COMPLETE_LOOP", key: "KEY_ENTER", duration_ms: 50, coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
       { type: "text_input", stepId: "name-save", intent: "FEATURE_ACTION", targetId: "save-name", text: "新档", coversRequirementIds: [], postconditions: [{ source: "CONTROL", targetId: "save-name", property: "text", operator: "EQUALS", value: "新档" }] },
       { type: "wait", delay_ms: 10 },
@@ -27,7 +27,7 @@ describe("current InteractionScript validation", () => {
     assert.equal(interactionHasUserAction(valid() as never), true);
   });
 
-  it("rejects v2 coordinate and raw key event scripts, including the old Big Rich H-only route", () => {
+  it("rejects versioned coordinate and raw-key event scripts", () => {
     assert.equal(validateInteractionScript({ version: "2", events: [
       { type: "key_press", key: "KEY_H" }, { type: "key_release", key: "KEY_H" },
     ] }), false);

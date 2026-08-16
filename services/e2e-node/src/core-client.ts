@@ -65,6 +65,10 @@ export class CoreE2eClient {
     }>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job, this.config.nodeId), ...input });
   }
 
+  async verifyPlayerPolicy(job: JobProtocolV4): Promise<void> {
+    await this.call(`/v1/e2e/jobs/${job.jobId}/player-policy/verify`, identity(job, this.config.nodeId));
+  }
+
   async decidePlayerPolicy(job: JobProtocolV4, request: Readonly<Record<string, unknown>>) {
     return this.call<Readonly<{
       decision: Readonly<Record<string, unknown>>;
@@ -97,7 +101,7 @@ export class CoreE2eClient {
       // A policy decision can use two bounded 25-second provider attempts.
       // Keep this transport alive for that complete budget; the guest owns
       // the stricter end-to-end decision deadline.
-      timeout: path.endsWith("/player-policy") ? 60_000 : 10_000,
+      timeout: path.includes("/player-policy") ? 60_000 : 10_000,
     };
     return await new Promise<T>((resolve, reject) => {
       const requester = url.protocol === "https:" ? httpsRequest : httpRequest;

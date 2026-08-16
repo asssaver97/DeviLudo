@@ -53,7 +53,12 @@ import {
   type ConversationAgentProjectContext,
   type ProductConversationGroupReply,
 } from "./product-conversation";
-import { generateE2ePlayerDecision, parsePlayerPolicyRequest, playerPolicyIdempotencyInput } from "./e2e-player-policy";
+import {
+  generateE2ePlayerDecision,
+  parsePlayerPolicyRequest,
+  playerPolicyIdempotencyInput,
+  verifyE2ePlayerVision,
+} from "./e2e-player-policy";
 import type {
   CoreRepository,
   PendingProjectImportAnalysis,
@@ -1352,6 +1357,49 @@ export async function runApi(
       sizeBytes: Number(body.sizeBytes),
       targetPlatform: job.targetOperatingSystem,
     }));
+  });
+
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy/verify", async (request, reply) => {
+    const nodeId = await authorizeE2e(request, config, repository);
+    const body = objectBody(request.body);
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    if (job.jobKind !== "E2E_TEST") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
+    const settings = await repository.readAgentSettings();
+    if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
+    const model = settings.roleModels.test;
+    const configurationDigest = jsonDigest({
+      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
+      settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
+    });
+    const policy = await repository.lockE2ePlayerPolicy({
+      workspaceId: job.workspaceId, jobId: job.jobId, settingsRevision: settings.revision,
+      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
+      credentialSecretRef: settings.credentialSecretRef, configurationDigest,
+    });
+    const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
+    if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
+    try {
+      await verifyE2ePlayerVision({
+        runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
+      });
+    } catch (error) {
+      await repository.markTestPolicyUnavailable(policy.settingsRevision);
+      const code = error instanceof Error && "code" in error && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE"
+        ? "PLAYER_POLICY_VISION_UNAVAILABLE"
+        : "PLAYER_POLICY_PROVIDER";
+      return reply.code(503).send({
+        code,
+        message: code === "PLAYER_POLICY_VISION_UNAVAILABLE"
+          ? "Test Agent Provider 未向模型提供图像输入，无法执行真实画面自适应测试"
+          : "Test Agent Provider 视觉能力检查失败",
+      });
+    }
+    await repository.markTestPolicyReady(policy.settingsRevision);
+    return reply.send({ ready: true, policy: {
+      configurationDigest: policy.configurationDigest,
+      settingsRevision: policy.settingsRevision,
+      model: policy.model,
+    } });
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", async (request, reply) => {

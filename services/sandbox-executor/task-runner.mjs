@@ -69,6 +69,11 @@ async function runAgent(plan) {
     await command("tar", ["-xzf", "/workspace/inputs/source.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "现有项目源码已展开，Agent 正在分析工程结构");
   }
+  const baselineSourceAvailable = await exists("/workspace/inputs/baseline-source.tar.gz");
+  if (baselineSourceAvailable) {
+    await mkdir("/workspace/baseline", { recursive: true });
+    await command("tar", ["-xzf", "/workspace/inputs/baseline-source.tar.gz", "-C", "/workspace/baseline"], safeEnvironment());
+  }
   const restoredCheckpoint = await exists("/workspace/inputs/checkpoint.tar.gz");
   const checkpointMetadata = restoredCheckpoint
     ? await readCheckpointMetadata()
@@ -81,7 +86,13 @@ async function runAgent(plan) {
   if (requirementCatalog.length < 1) {
     throw new Error("Approved specification does not contain testable coreLoop or acceptanceCriteria requirements");
   }
-  const existingManifestValid = await existingAgentManifestIsValid(requirementCatalog);
+  let existingAgentManifest = null;
+  try {
+    existingAgentManifest = await readGeneratedAgentManifest(requirementCatalog);
+  } catch {
+    // A missing or retired contract is regenerated from the frozen catalog.
+  }
+  const existingManifestValid = existingAgentManifest !== null;
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
   let e2eRepairContext = null;
   if (e2eReportObject) {
@@ -93,13 +104,19 @@ async function runAgent(plan) {
     emitProgress("PHASE", `Agent 正在修复 ${plan.job.payload.failedPlatform ?? "目标平台"} E2E 发现的游戏问题`);
   }
   const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
-  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
+  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Include asynchronous UI lifecycle changes: a window, popup, dialog, overlay, animation, or deferred layout must publish again from its real visibility/layout signal or a completed draw frame, not only from the synchronous input handler that requested the change. Show and hide must both advance the sequence, and the snapshot must read the actual rendered state. Map every control and embedded Window/Popup rectangle against the root game client viewport before converting to 1280x720; never use a child window's own content size as the root scale, clamp an invalid rectangle, or publish an out-of-client snapshot. A node detached from the scene tree or without a live root viewport must never be published as visible or enabled: wait until it is attached and laid out, or publish the truthful non-actionable state using the last valid in-client rectangle. Never invent a fallback viewport size to make a detached node appear actionable. If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content; never shrink, clip, or substitute only the Probe rectangle. Every control reported visible and enabled for an action must be connected to its production input handler. After real OS input, successful, rejected, and asynchronously completed actions must all converge on a final UI refresh and publish a newer Probe with the truthful outcome, so an action can never silently leave the previous sequence in place. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
+  const coherentJourneyInstructions = [
+    "Every interactive journey must represent one coherent, uninterrupted player objective. After an action leaves a menu, mode, scene, or session, never target controls from that previous context unless the journey contains a real visible action that returns there.",
+    "Keep the FRESH coreJourney to the shortest real core loop that crosses one genuine progress boundary. Put acceptance criteria for mutually exclusive modes, alternate entry paths, destructive/settings flows, or long end states in separate journeys instead of concatenating every requirement into one script.",
+  ];
   const manifestInstructions = existingManifestValid ? [
     "Core has already validated the existing agent.json as a complete deviludo.test-manifest and asset manifest. Preserve its coverage and assertions unless the current change genuinely requires an update.",
     checkpointEmitterInstruction,
     probeInstruction,
+    ...coherentJourneyInstructions,
     ...(e2eRepairContext ? [
-      "This repair does not need manifest work unless the failure report explicitly identifies a manifest error. Do not inspect manifest generators or broad requirement coverage.",
+      "This repair does not need broad manifest work, but the failing journey and step must remain coherent with every preceding visible state transition.",
+      "For a missing, hidden, disabled, or duplicated action target, inspect the failing step, preceding actions, Probe snapshot, and screenshot before editing. If the script targets a control from an exited or mutually exclusive context, split or reorder the journey; never keep an unrelated old-context control globally visible merely to satisfy the script.",
     ] : [
       "After implementing and testing this revision, make only the minimal existing agent.json edits needed to map genuinely new check names.",
     ]),
@@ -110,7 +127,7 @@ async function runAgent(plan) {
     "- schema: \"deviludo.test-manifest\". Do not emit schemaVersion or any version field.",
     "- Do not emit retired top-level suite or gdsTestPath fields; test paths belong only to unit feature objects.",
     "- inputProfiles: one or both of KEYBOARD_MOUSE and GAMEPAD; primaryInputProfile must be one declared profile. Every declared profile must appear in deterministic real-input coverage.",
-    "- adaptivePlayer: goal, requirementIds including every CORE_LOOP requirement, allowedActions (KEYBOARD, POINTER and/or GAMEPAD), non-empty successAssertions and failureAssertions, rolloutTimeoutMs 60000-300000, maxDecisions 8-40, seedStrategy STABLE_PROJECT_PLATFORM. successAssertions must include a PROGRESS CHANGED/NOT_EQUALS/GREATER_THAN/GREATER_THAN_OR_EQUALS assertion proving a real progress boundary relative to the clean rollout start.",
+    "- adaptivePlayer: goal, requirementIds including every CORE_LOOP requirement, allowedActions (KEYBOARD, POINTER and/or GAMEPAD), non-empty successAssertions and failureAssertions, rolloutTimeoutMs 240000-300000, maxDecisions 8-40, seedStrategy STABLE_PROJECT_PLATFORM. successAssertions must include a PROGRESS CHANGED/NOT_EQUALS/GREATER_THAN/GREATER_THAN_OR_EQUALS assertion proving a real progress boundary relative to the clean rollout start.",
     "- requirements: copy the exact requirementId, description, source and default verificationClass pairs below; every CORE_LOOP remains PLAYER_INTERACTION. An ACCEPTANCE item may be SYSTEM only for DATA, RUNTIME or NETWORK and must include systemCategory plus a concrete exemptionReason of at least 10 characters.",
     "- features: array of feature objects, each with:",
     "  - id: unique kebab-case identifier (e.g. \"collect-ember\")",
@@ -120,10 +137,12 @@ async function runAgent(plan) {
     "  - verificationMethod: unit, interactive, visual, or manual; manual must never be the only automated coverage for a requirement",
     "  - gdsTestPath: path to test script (typically \"res://tests/e2e.gd\")",
     "  - checkNames: array of assertion names that verify this feature; every unit feature also requires timeoutMs no more than 300000",
-    "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, launchProfile {type:\"FRESH\"}, and timeoutMs no more than 300000. Scenario fixtures are allowed only on non-core journeys and may initialize state but never perform the tested action.",
+    "  - A unit timeoutMs budgets the complete Godot process for its gdsTestPath, not one logical feature. When multiple features share a script that runs a combined suite, their effective maximum timeout must cover the whole suite while remaining within 300000ms; never shorten the hard timeout by dividing the suite budget across feature entries.",
+    "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, launchProfile {type:\"FRESH\"}, and timeoutMs no more than 300000. Non-core scenario journeys must use the exact launchProfile shape {type:\"SCENARIO\",scenarioId:\"stable-kebab-case-id\"}; no alias fields are accepted. Scenario fixtures may initialize state but never perform the tested action, and every scenario journey needs at least one STABLE_REPLAY checkpoint. A scenario must enter the truthful player-visible context declared by its first READY checkpoint with no unrelated menu, modal, or overlay blocking the target; the final tested transition still requires real OS input.",
+    ...coherentJourneyInstructions.map(instruction => `- ${instruction}`),
     "- Its interactionScript contains only events and no version field, with no more than 200 events. Use semantic target IDs only; fixed x/y coordinates and unrelated key presses are forbidden.",
     "- Action event types are key_tap, key_hold, click, double_click, drag, scroll, text_input, gamepad_button_tap, gamepad_button_hold, gamepad_axis, gamepad_trigger and gamepad_release_all. Every action requires a unique stepId, intent, coversRequirementIds and at least one postcondition. Click/drag/scroll/text targets use stable probe control IDs.",
-    "- Example: {\"type\":\"click\",\"stepId\":\"roll-dice\",\"intent\":\"PRIMARY_ACTION\",\"targetId\":\"roll-dice\",\"coversRequirementIds\":[\"req-feature-001-...\"],\"postconditions\":[{\"source\":\"PROGRESS\",\"key\":\"turn\",\"operator\":\"CHANGED\"}],\"delay_ms\":100}.",
+    "- Generic example: {\"type\":\"click\",\"stepId\":\"activate-primary-control\",\"intent\":\"PRIMARY_ACTION\",\"targetId\":\"primary-control\",\"coversRequirementIds\":[\"req-feature-001-...\"],\"postconditions\":[{\"source\":\"PROGRESS\",\"key\":\"primary-progress\",\"operator\":\"CHANGED\"}],\"delay_ms\":100}. Replace every identifier with semantics discovered from the current project; never copy the example identifiers into a project contract.",
     "- Probe assertions use source STATE, PROGRESS, CONTROL or SCENE and operator EQUALS, NOT_EQUALS, GREATER_THAN, GREATER_THAN_OR_EQUALS, LESS_THAN, LESS_THAN_OR_EQUALS, CONTAINS, EXISTS or CHANGED.",
     "- STATE and PROGRESS assertions require key and forbid targetId/property. CONTROL assertions require targetId plus property (visible, enabled, text, or value) and forbid key. SCENE assertions forbid key, targetId, and property.",
     "- EXISTS and CHANGED assertions must not contain value. Every other Probe operator must contain a string, number, or boolean value.",
@@ -191,7 +210,10 @@ async function runAgent(plan) {
       ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
       : "Create a complete Godot 4 project in /workspace/project.",
     ...e2eRepairInstructions,
-    "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
+    "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson, the optional read-only /workspace/baseline, and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
+    ...(baselineSourceAvailable ? [
+      "A read-only snapshot of the workflow-start source is available at /workspace/baseline. The current /workspace/project remains authoritative for approved work. Use the baseline only to compare behavior and restore accidentally deleted or structurally damaged existing declarations; never copy it wholesale, revert unrelated approved changes, or edit files under /workspace/baseline.",
+    ] : []),
     "Enable rendering/textures/vram_compression/import_s3tc_bptc so release exports are portable.",
     "The result must run headlessly and expose a deterministic smoke-test path.",
     "Godot and Python may be absent from this Agent container. Do not search for or install them, and do not treat their absence as a failure. The next controlled builder stage performs real Godot validation; use Node-based static checks here when useful.",
@@ -252,8 +274,10 @@ async function runAgent(plan) {
         return currentDigest;
       },
       5 * 60_000,
-      e2eRepairContext ? 60_000 : undefined,
-      async () => readGeneratedAgentManifest(requirementCatalog),
+      e2eRepairContext ? 3 * 60_000 : undefined,
+      async () => {
+        await readGeneratedAgentManifest(requirementCatalog);
+      },
     );
     flushAgentOutput();
   }
@@ -314,15 +338,6 @@ async function readGeneratedAgentManifest(requirementCatalog) {
     throw new Error("Agent assetManifest keys must be unique");
   }
   return value;
-}
-
-async function existingAgentManifestIsValid(requirementCatalog) {
-  try {
-    await readGeneratedAgentManifest(requirementCatalog);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function validPlannedAsset(item) {
@@ -407,7 +422,7 @@ function validTestManifest(value, expectedRequirements = null) {
     || !adaptive.successAssertions.some(assertion => assertion && assertion.source === "PROGRESS"
       && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
     || !Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1 || !adaptive.failureAssertions.every(validProbeAssertion)
-    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 60000 || adaptive.rolloutTimeoutMs > 300000
+    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 240000 || adaptive.rolloutTimeoutMs > 300000
     || !Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40
     || adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM"
     || adaptive.allowedActions.includes("GAMEPAD") !== value.inputProfiles.includes("GAMEPAD")
@@ -586,7 +601,7 @@ function testManifestValidationIssues(value, expectedRequirements = null) {
       || !adaptive.failureAssertions.every(validProbeAssertion)) add("adaptivePlayer.failureAssertions must contain valid current Probe assertions");
     if (!adaptiveSuccessAssertions.some(assertion => assertion?.source === "PROGRESS"
       && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))) add("adaptivePlayer.successAssertions must prove a real PROGRESS boundary");
-    if (!Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 60000 || adaptive.rolloutTimeoutMs > 300000) add("adaptivePlayer.rolloutTimeoutMs must be 60000-300000");
+    if (!Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 240000 || adaptive.rolloutTimeoutMs > 300000) add("adaptivePlayer.rolloutTimeoutMs must be 240000-300000");
     if (!Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40) add("adaptivePlayer.maxDecisions must be 8-40");
     if (adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM") add("adaptivePlayer.seedStrategy must be STABLE_PROJECT_PLATFORM");
   }
@@ -959,7 +974,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
   const deadline = Date.now() + Math.max(60_000, Math.min(80 * 60_000, (timeoutSeconds - 600) * 1_000));
   let lastError;
   let resumeInstruction = "Resume from the current session and files. Finish only the remaining requested implementation and one bounded validation pass. Do not restart analysis or spawn background agents, background shell commands, or background tasks.";
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     const resumedClaude = configuration.runtime === "CLAUDE_CODE" && attempt > 1;
     const continuation = attempt === 1 ? prompt : resumedClaude
       ? resumeInstruction
@@ -976,32 +991,82 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
-      const result = await command(
-        executable,
-        arguments_,
-        environment,
-        configuration.runtime === "CODEX_CLI" ? continuation : undefined,
-        onOutput,
-        {
-          idleTimeoutMs: 8 * 60_000,
-          overallTimeoutMs: remaining,
-          initialProgressDeadlineMs: verifyCompletion ? initialProgressDeadlineMs : undefined,
-          verifyInitialProgress: verifyCompletion,
-          completionQuiescenceMs: verifyCompletion ? completionQuiescenceMs : undefined,
-          killProcessGroup: true,
-        },
-      );
-      if (verifyCompletion) await verifyCompletion();
-      if (validateOutput) await validateOutput();
-      return result;
+      const {
+        agentGuidanceArrivedDuringRun,
+        discardAgentProjectTurnSnapshot,
+        readAgentGuidanceSnapshot,
+        restoreAgentProjectTurn,
+        snapshotAgentProjectTurn,
+        waitForAgentGuidanceQuiescence,
+      } = await import("/usr/local/lib/deviludo/agent-guidance-contract.mjs");
+      const guidanceBefore = await readAgentGuidanceSnapshot();
+      const turnSnapshot = `/workspace/.agent-turn-snapshot-${attempt}`;
+      await snapshotAgentProjectTurn("/workspace/project", turnSnapshot);
+      try {
+        let result;
+        let commandError;
+        try {
+          result = await command(
+            executable,
+            arguments_,
+            environment,
+            configuration.runtime === "CODEX_CLI" ? continuation : undefined,
+            onOutput,
+            {
+              idleTimeoutMs: 8 * 60_000,
+              overallTimeoutMs: remaining,
+              initialProgressDeadlineMs: verifyCompletion ? initialProgressDeadlineMs : undefined,
+              verifyInitialProgress: verifyCompletion,
+              completionQuiescenceMs: verifyCompletion ? completionQuiescenceMs : undefined,
+              killProcessGroup: true,
+            },
+          );
+        } catch (error) {
+          commandError = error;
+        }
+        const guidanceAfter = await readAgentGuidanceSnapshot();
+        const newGuidance = agentGuidanceArrivedDuringRun(guidanceBefore, guidanceAfter);
+        if (newGuidance.length > 0) {
+          await restoreAgentProjectTurn("/workspace/project", turnSnapshot);
+          throw Object.assign(new Error(`Live player guidance arrived during the model run:\n${newGuidance.map((content, index) => `${index + 1}. ${content}`).join("\n")}`), {
+            code: "GUIDANCE_PENDING",
+            guidance: newGuidance,
+          });
+        }
+        if (commandError) throw commandError;
+        if (verifyCompletion) await verifyCompletion();
+        if (validateOutput) await validateOutput();
+        const settledGuidance = await waitForAgentGuidanceQuiescence(guidanceAfter);
+        const completionGuidance = agentGuidanceArrivedDuringRun(guidanceBefore, settledGuidance);
+        if (completionGuidance.length > 0) {
+          await restoreAgentProjectTurn("/workspace/project", turnSnapshot);
+          throw Object.assign(new Error(`Live player guidance arrived before completion was committed:\n${completionGuidance.map((content, index) => `${index + 1}. ${content}`).join("\n")}`), {
+            code: "GUIDANCE_PENDING",
+            guidance: completionGuidance,
+          });
+        }
+        return result;
+      } finally {
+        await discardAgentProjectTurnSnapshot(turnSnapshot);
+      }
     } catch (error) {
       flushAgentOutput();
       lastError = error instanceof Error ? error : new Error("Agent CLI failed");
       const failure = classifyAgentFailure(lastError);
-      if (attempt === 2 || !failure.recoverable) {
+      const maxAttemptsForFailure = failure.code === "GUIDANCE_PENDING" ? 3 : 2;
+      if (attempt >= maxAttemptsForFailure || !failure.recoverable) {
         throw new Error(`Agent generation failed [${failure.code}]: ${failure.detail}`);
       }
-      if (failure.code === "TEST_MANIFEST_INVALID") {
+      if (failure.code === "GUIDANCE_PENDING") {
+        const guidance = Array.isArray(lastError.guidance) ? lastError.guidance : [];
+        resumeInstruction = [
+          "Live player guidance arrived while your previous tool call was still running. That previous result cannot be accepted as complete.",
+          "The following entries are the highest-priority current scope, in arrival order:",
+          ...guidance.map((content, index) => `${index + 1}. ${content}`),
+          "The project worktree was restored automatically to the exact snapshot taken before that model call. Do not guess at or manually revert earlier files.",
+          "Resume the same session, inspect the restored files, implement only the current guidance, and run one bounded validation pass.",
+        ].join("\n");
+      } else if (failure.code === "TEST_MANIFEST_INVALID") {
         resumeInstruction = [
           "Your previous run produced source code but agent.json does not satisfy the one current deviludo.test-manifest contract.",
           "Rewrite only /workspace/project/agent.json and any directly required Probe/test wiring. Do not preserve old fields, old event names, old checkpoint roles, or old contract shapes. Do not weaken coverage.",
@@ -1015,9 +1080,11 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       } else if (failure.code === "INCOMPLETE_OUTPUT") {
         resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
       }
-      const delaySeconds = failure.code === "TEST_MANIFEST_INVALID" ? 0 : agentRetryDelaySeconds(failure);
-      emitProgress("PHASE", failure.code === "TEST_MANIFEST_INVALID"
-        ? `Agent 输出未通过当前测试契约：${failure.detail}；正在同一会话定向修正（2/2）`
+      const delaySeconds = ["TEST_MANIFEST_INVALID", "GUIDANCE_PENDING"].includes(failure.code) ? 0 : agentRetryDelaySeconds(failure);
+      emitProgress("PHASE", failure.code === "GUIDANCE_PENDING"
+        ? "执行期间收到新的实时指导；旧范围结果已拒绝，正在同一会话按最新范围继续"
+        : failure.code === "TEST_MANIFEST_INVALID"
+        ? `Agent 输出未通过完成门禁：${failure.detail}；正在同一会话定向修正（2/2）`
         : `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（2/2）`);
       if (delaySeconds > 0) await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
     }
@@ -1045,6 +1112,7 @@ function claudeGenerationArguments(configuration, prompt, sessionId, resume) {
 function classifyAgentFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = sanitizeError(message.replace(/^claude exited [^:]+:\s*/i, "").replace(/^codex exited [^:]+:\s*/i, ""));
+  if (error?.code === "GUIDANCE_PENDING") return { code: "GUIDANCE_PENDING", detail, recoverable: true };
   if (error?.code === "TEST_MANIFEST_INVALID") return { code: "TEST_MANIFEST_INVALID", detail, recoverable: true };
   if (/\b(?:401|403)\b|invalid api key|authentication|unauthorized|forbidden/i.test(detail)) {
     return { code: "AUTH_ERROR", detail, recoverable: false };

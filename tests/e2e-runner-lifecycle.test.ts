@@ -14,6 +14,7 @@ import {
   waitForChildWithHardTimeout,
 } from "../deploy/assets/e2e-process-lifecycle.mjs";
 import { GameTestEnvironment } from "../scripts/executors/game-test-environment.mjs";
+import { parseE2eExecutorProtocolChunk } from "../services/e2e-node/src/executor";
 
 test("the guest accepts a semantic mouse journey with post-action Oracle evidence", () => {
   const changed = Object.freeze({ source: "STATE", key: "session.started", operator: "CHANGED" });
@@ -168,6 +169,29 @@ test("a policy relay stops waiting when its guest transport closes", async () =>
   );
 });
 
+test("player-policy screenshots are bounded per frame instead of across the whole E2E stream", () => {
+  let remainder = "";
+  let totalBytes = 0;
+  for (let index = 0; index < 8; index += 1) {
+    const frame = `${JSON.stringify({
+      type: "policy_request",
+      id: `decision-${index}`,
+      request: { screenshotBase64: "a".repeat(700_000) },
+    })}\n`;
+    totalBytes += Buffer.byteLength(frame);
+    const parsed = parseE2eExecutorProtocolChunk(remainder, frame);
+    remainder = parsed.remainder;
+    assert.equal(parsed.messages.length, 1);
+    assert.equal(parsed.messages[0]?.id, `decision-${index}`);
+  }
+  assert.ok(totalBytes > 4 * 1024 * 1024);
+  assert.equal(remainder, "");
+  assert.throws(
+    () => parseE2eExecutorProtocolChunk("", "a".repeat(2 * 1024 * 1024 + 1)),
+    /frame exceeds/,
+  );
+});
+
 test("termination forwarding stops a detached child group and can be removed", async () => {
   const killProcessGroup = process.platform !== "win32";
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
@@ -244,6 +268,13 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /const detail = stderr \|\| message \|\| String\(error \?\? ""\)\.trim\(\) \|\| `GUI driver \$\{command\} failed without diagnostics`/);
   assert.match(guest, /throw new Error\(`INFRASTRUCTURE: GUI driver \$\{command\} failed:/);
   assert.match(guest, /captureFailedActionEvidence\(\{[\s\S]*testEnvironment, journey,[\s\S]*await testEnvironment\.capture\(screenshotPath\)/);
+  assert.match(guest, /failureCode: "ACTION_TARGET_UNAVAILABLE"[\s\S]*`\$\{journey\.id\}\/\$\{event\.stepId\}: \$\{detail\}`/);
+  assert.match(guest, /failureCode: "PROBE_NOT_UPDATED"[\s\S]*await captureFailedActionEvidence\(\{/);
+  assert.match(guest, /failureDetail: detail/);
+  assert.match(guest, /drawgrid=width=80:height=80:thickness=1:color=cyan@0\.45/);
+  assert.match(guest, /const screenshotBytes = await readFile\(playerObservationPath\)/);
+  assert.doesNotMatch(guest, /scale=960:540|adaptive-policy-observations|policyScreenshot/);
+  assert.match(guest, /if \(action\.type === "wait"\) return \[\{ type: "wait", delay_ms: action\.duration_ms \}\]/);
   assert.match(tartRelay, /readCliArgument\(process\.argv, name\)/);
   assert.match(tartRelay, /PATH=\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin/);
   assert.match(tartRelay, /waitForChildWithHardTimeout\(remote/);
@@ -253,7 +284,10 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(tartRelay, /forwardTerminationSignals\(remote, killProcessGroup\)/);
   assert.match(tartRelay, /settleChildAfterProtocolResult\(remote, remoteClosed/);
   assert.match(tartRelay, /startChildProtocolWatchdog\(remote/);
-  assert.match(tartRelay, /readProtocolLineWithTimeout\(parentLines, remoteClosed, 65_000\)/);
+  assert.match(tartRelay, /const policyResponseTimeoutMs = 65_000/);
+  assert.match(tartRelay, /const protocolIdleTimeoutMs = policyResponseTimeoutMs \+ 10_000/);
+  assert.match(tartRelay, /idleMs: protocolIdleTimeoutMs/);
+  assert.match(tartRelay, /readProtocolLineWithTimeout\(parentLines, remoteClosed, policyResponseTimeoutMs\)/);
   assert.match(executor, /waitForChildWithHardTimeout\(child/);
   assert.match(executor, /readProtocolLineWithTimeout\(parentIterator, childClosed, 65_000\)/);
   assert.match(executor, /closeChildPipesAfterExit\(child\)/);

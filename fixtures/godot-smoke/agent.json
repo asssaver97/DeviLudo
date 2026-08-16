@@ -10,7 +10,7 @@
       "allowedActions": ["KEYBOARD", "POINTER"],
       "successAssertions": [{ "source": "PROGRESS", "key": "loop", "operator": "GREATER_THAN", "value": 0 }],
       "failureAssertions": [{ "source": "STATE", "key": "failed", "operator": "EQUALS", "value": true }],
-      "rolloutTimeoutMs": 60000,
+      "rolloutTimeoutMs": 240000,
       "maxDecisions": 8,
       "seedStrategy": "STABLE_PROJECT_PLATFORM"
     },

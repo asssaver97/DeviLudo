@@ -37,7 +37,7 @@ export function probeSnapshotValidationError(value, expected = {}) {
       || !stableId(control.id)) return `control ${label} has an invalid semantic ID or structure`;
     if (ids.has(control.id)) return `control ${label} is duplicated`;
     if (typeof control.visible !== "boolean" || typeof control.enabled !== "boolean") return `control ${label} visibility or enabled state is invalid`;
-    if (!validRect(control.rect)) return `control ${label} rectangle must be positive and remain inside 1280x720`;
+    if (!validRect(control.rect)) return `control ${label} rectangle ${rectDiagnostic(control.rect)} must be positive and remain inside 1280x720`;
     if (control.text !== undefined && (typeof control.text !== "string" || control.text.length > 2_000)) return `control ${label} text exceeds the probe contract`;
     if (control.value !== undefined && !primitive(control.value)) return `control ${label} value must be primitive`;
     ids.add(control.id);
@@ -73,6 +73,8 @@ export async function waitForProbePostconditions(path, expected, before, asserti
   let latest = null;
   let latestAssertions = null;
   let latestStateChanged = false;
+  let newestInvalidSequence = -1;
+  let newestInvalidError = null;
   let lastError = "snapshot file is missing or is not valid JSON";
   while (Date.now() < deadline) {
     try {
@@ -88,9 +90,19 @@ export async function waitForProbePostconditions(path, expected, before, asserti
         afterSequence = latest.sequence;
       } else {
         lastError = validationError;
+        const candidateSequence = Number.isSafeInteger(value?.sequence) ? value.sequence : -1;
+        const belongsToLaunchedGame = (!expected.sessionNonce || value?.sessionNonce === expected.sessionNonce)
+          && (!expected.pid || value?.pid === expected.pid);
+        if (belongsToLaunchedGame && candidateSequence > afterSequence && candidateSequence > newestInvalidSequence) {
+          newestInvalidSequence = candidateSequence;
+          newestInvalidError = validationError;
+        }
       }
     } catch { lastError = "snapshot file is missing or is not valid JSON"; }
     await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (newestInvalidError && newestInvalidSequence > (latest?.sequence ?? (expected.afterSequence ?? before.sequence))) {
+    throw new Error(`E2E UI probe published invalid newer snapshot sequence ${newestInvalidSequence}: ${newestInvalidError}`);
   }
   if (latest) {
     return Object.freeze({ snapshot: latest, assertions: latestAssertions, stateChanged: latestStateChanged, passed: false });
@@ -173,6 +185,14 @@ function validRect(value) {
     && [value.x, value.y, value.width, value.height].every(Number.isFinite)
     && value.x >= 0 && value.y >= 0 && value.width > 0 && value.height > 0
     && value.x + value.width <= E2E_CLIENT_WIDTH && value.y + value.height <= E2E_CLIENT_HEIGHT;
+}
+
+function rectDiagnostic(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return JSON.stringify(value ?? null);
+  return JSON.stringify(Object.fromEntries(["x", "y", "width", "height"].map(key => [
+    key,
+    Number.isFinite(value[key]) ? value[key] : null,
+  ])));
 }
 
 function flatProbeValues(value) {

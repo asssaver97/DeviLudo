@@ -30,7 +30,7 @@ function completeManifest(): TestManifest {
       allowedActions: ["KEYBOARD", "POINTER"],
       successAssertions: [changedTurn],
       failureAssertions: [{ source: "STATE", key: "game_over", operator: "EQUALS", value: true }],
-      rolloutTimeoutMs: 120_000,
+      rolloutTimeoutMs: 240_000,
       maxDecisions: 20,
       seedStrategy: "STABLE_PROJECT_PLATFORM",
     },
@@ -46,7 +46,7 @@ function completeManifest(): TestManifest {
         launchProfile: { type: "FRESH" }, timeoutMs: 300_000,
         interactionScript: { events: [
           checkpoint("game-start", "START", true), checkpoint("game-ready", "READY"),
-          { type: "click", stepId: "roll", intent: "PRIMARY_ACTION", targetId: "roll-dice", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
+          { type: "click", stepId: "activate-primary-control", intent: "PRIMARY_ACTION", targetId: "primary-control", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
           checkpoint("turn-progress", "PROGRESS"),
           { type: "click", stepId: "finish", intent: "COMPLETE_LOOP", targetId: "end-turn", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
           checkpoint("game-complete", "COMPLETION", true),
@@ -72,7 +72,7 @@ describe("test-manifest", () => {
     assert.equal(validateTestManifest(completeManifest()), true);
   });
 
-  test("rejects versioned contracts and the former two-H blind-start contract", () => {
+  test("rejects versioned contracts and blind raw-key launch contracts", () => {
     const manifest = completeManifest();
     assert.equal(validateTestManifest({ ...manifest, schema: "deviludo.test-manifest.v3" }), false);
     assert.equal(validateTestManifest({ ...manifest, schemaVersion: "deviludo.test-manifest" }), false);
@@ -185,7 +185,7 @@ describe("test-manifest", () => {
     const manifest = completeManifest();
     const withoutRegression = planE2eExecution(manifest);
     const withRegression = planE2eExecution(manifest, 300_000);
-    assert.equal(withoutRegression.plannedTimeoutMs, 30 * 60_000);
+    assert.equal(withoutRegression.plannedTimeoutMs, 40 * 60_000);
     assert.ok(withRegression.plannedTimeoutMs >= withoutRegression.plannedTimeoutMs);
     assert.equal(withRegression.adaptiveMs, 3 * manifest.adaptivePlayer.rolloutTimeoutMs);
     assert.equal(withRegression.solidificationMs, 2 * manifest.adaptivePlayer.rolloutTimeoutMs);

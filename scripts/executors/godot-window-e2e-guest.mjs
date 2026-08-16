@@ -114,7 +114,7 @@ try {
   }
   platformDeadline = startedAt + frozenTimeoutSeconds * 1_000;
 
-  await runUnitTests(gamePackage.executable, manifest);
+  await runUnitTests(gamePackage, manifest);
   const journeys = manifest.features.filter(feature => feature.verificationMethod === "interactive");
   for (const journey of journeys) {
     assertPlatformBudget();
@@ -203,7 +203,11 @@ async function readCurrentRegression(manifest) {
   return trace;
 }
 
-async function runUnitTests(executable, manifest) {
+async function runUnitTests(gamePackage, manifest) {
+  const runtime = godotUnitRuntime();
+  await access(runtime).catch(() => {
+    throw new Error(`INFRASTRUCTURE: fixed Godot unit-test runtime is unavailable at ${runtime}`);
+  });
   const scripts = new Map();
   for (const feature of manifest.features.filter(item => item.verificationMethod === "unit")) {
     const entry = scripts.get(feature.gdsTestPath) ?? { checks: new Set(), timeoutMs: 0 };
@@ -217,8 +221,8 @@ async function runUnitTests(executable, manifest) {
     assertPlatformBudget();
     unitIndex += 1;
     const result = await runCaptured(
-      executable,
-      ["--headless", "--script", script],
+      runtime,
+      ["--headless", "--main-pack", gamePackage.projectPack, "--script", script],
       Math.min(entry.timeoutMs, remainingPlatformBudget()),
       await isolatedGameEnvironment(`unit-${unitIndex}`),
     );
@@ -227,7 +231,12 @@ async function runUnitTests(executable, manifest) {
     const errors = godotErrorLines(result.stdout, result.stderr);
     if (errors.length) throw productFailure("GODOT_SCRIPT_ERROR", errors[0]);
     const marker = [...result.stdout.matchAll(/DEVILUDO_E2E_RESULT:(.+)$/gm)].at(-1)?.[1];
-    if (!marker) throw productFailure("UNIT_RESULT_MISSING", `单元测试 ${script} 未输出 DEVILUDO_E2E_RESULT`);
+    if (!marker) {
+      const termination = result.signal
+        ? `被信号 ${result.signal} 终止`
+        : `退出码 ${result.code}`;
+      throw productFailure("UNIT_RESULT_MISSING", `单元测试 ${script} 未输出 DEVILUDO_E2E_RESULT（${termination}）`);
+    }
     let details;
     try { details = JSON.parse(marker); } catch { throw productFailure("UNIT_RESULT_INVALID", `单元测试 ${script} 返回无效 JSON`); }
     if (!Array.isArray(details.checks) || !Array.isArray(details.failures)) throw productFailure("UNIT_RESULT_INVALID", `单元测试 ${script} 返回结构无效`);
@@ -298,17 +307,50 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       if (event.type === "wait") continue;
       if (event.type !== "checkpoint") {
         const before = currentProbe;
-        const targetRecord = actionTargetRecord(event, before);
-        const nativeEvents = nativeInputEvents(event, before);
+        let targetRecord;
+        let nativeEvents;
+        try {
+          targetRecord = actionTargetRecord(event, before);
+          nativeEvents = nativeInputEvents(event, before);
+        } catch (error) {
+          if (recordEvidence) {
+            await captureFailedActionEvidence({
+              testEnvironment, journey, event, probe: before, assertions: [], priorInputs,
+              failureCode: "ACTION_TARGET_UNAVAILABLE",
+            });
+          }
+          const detail = error instanceof Error ? error.message : String(error);
+          throw productFailure("ACTION_TARGET_UNAVAILABLE", `${journey.id}/${event.stepId}: ${detail}`);
+        }
         await testEnvironment.sequence(nativeEvents, Math.min(journey.timeoutMs, remainingPlatformBudget()));
         const gamepadCount = gamepadEventCount(nativeEvents);
         gamepadInputCount += gamepadCount;
         keyboardMouseInputCount += nativeEvents.length - gamepadCount;
         priorInputs.push({ stepId: event.stepId, type: event.type, intent: event.intent, ...targetRecord });
-        const postconditionResult = await waitForProbePostconditions(probePath, {
-          sessionNonce, pid: launched.pid, afterSequence: before.sequence,
-        }, before, event.postconditions, PROBE_TIMEOUT_MS)
-          .catch(error => { throw productFailure("PROBE_NOT_UPDATED", `${journey.id}/${event.stepId}: ${error.message}`); });
+        let postconditionResult;
+        try {
+          postconditionResult = await waitForProbePostconditions(probePath, {
+            sessionNonce, pid: launched.pid, afterSequence: before.sequence,
+          }, before, event.postconditions, PROBE_TIMEOUT_MS);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const assertions = evaluateProbeAssertions(event.postconditions, before, before);
+          if (recordEvidence) {
+            const digest = probeStateDigest(before);
+            steps.push({
+              journeyId: journey.id, stepId: event.stepId, type: event.type, intent: event.intent,
+              coversRequirementIds: event.coversRequirementIds, target: targetRecord,
+              before: { sequence: before.sequence, sceneId: before.sceneId, digest },
+              after: { sequence: before.sequence, sceneId: before.sceneId, digest },
+              assertions, status: "FAILED", failureCode: "PROBE_NOT_UPDATED", failureDetail: detail,
+            });
+            await captureFailedActionEvidence({
+              testEnvironment, journey, event, probe: before, assertions, priorInputs,
+              failureCode: "PROBE_NOT_UPDATED",
+            });
+          }
+          throw productFailure("PROBE_NOT_UPDATED", `${journey.id}/${event.stepId}: ${detail}`);
+        }
         const after = postconditionResult.snapshot;
         const assertions = postconditionResult.assertions;
         const beforeDigest = probeStateDigest(before);
@@ -527,16 +569,17 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         screenshotPath,
         path => testEnvironment.capture(path),
       );
-      const policyScreenshotPath = join(workspace, "adaptive-policy-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
-      await mkdir(dirname(policyScreenshotPath), { recursive: true });
+      const playerObservationPath = join(workspace, "adaptive-player-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
+      await mkdir(dirname(playerObservationPath), { recursive: true });
       await execute("ffmpeg", [
         "-nostdin", "-loglevel", "error", "-i", screenshotPath,
-        "-vf", "scale=960:540:flags=lanczos", "-frames:v", "1", "-y", policyScreenshotPath,
+        "-vf", "drawgrid=width=80:height=80:thickness=1:color=cyan@0.45",
+        "-frames:v", "1", "-y", playerObservationPath,
       ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
-      const screenshotBytes = await readFile(policyScreenshotPath);
-      const policyScreenshotSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
+      const screenshotBytes = await readFile(playerObservationPath);
+      const playerObservationSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
       const policyRequest = {
-        rolloutIndex, decisionIndex, screenshotBase64: screenshotBytes.toString("base64"), screenshotSha256: policyScreenshotSha256,
+        rolloutIndex, decisionIndex, screenshotBase64: screenshotBytes.toString("base64"), screenshotSha256: playerObservationSha256,
         goal: contract.goal, allowedActions: contract.allowedActions, history: history.slice(-6), recovery,
       };
       const policyResponse = await requestPlayerPolicy(policyRequest);
@@ -581,7 +624,6 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       const record = {
         schema: "deviludo.e2e-trajectory-event", rolloutIndex, decisionIndex, seed,
         observedAt: new Date().toISOString(), screenshotSha256: screenshot.sha256,
-        policyScreenshotSha256,
         status: decision.status, observation: decision.observation, rationale: decision.rationale,
         actions: decision.actions, semanticActions: semanticizePolicyActions(decision.actions, currentProbe),
         before: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: beforeDigest },
@@ -732,6 +774,7 @@ function materializeRegressionAction(action, probe) {
 
 function policyNativeEvents(actions) {
   return actions.flatMap(action => {
+    if (action.type === "wait") return [{ type: "wait", delay_ms: action.duration_ms }];
     if (action.type === "key_tap") return [{ type: "key_press", key: action.key, delay_ms: 0 }, { type: "key_release", key: action.key, delay_ms: 80 }];
     if (action.type === "key_hold") return [{ type: "key_press", key: action.key, delay_ms: 0 }, { type: "wait", delay_ms: action.duration_ms }, { type: "key_release", key: action.key, delay_ms: 0 }];
     if (action.type === "text_input") return [{ type: "text_input", text: action.text, delay_ms: 0 }];
@@ -916,6 +959,10 @@ async function waitForExecutablePid(executable, timeoutMs) {
 async function findGamePackage(root, operatingSystem) {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const files = entries.filter(entry => entry.isFile()).map(entry => join(entry.parentPath, entry.name));
+  const projectPacks = files.filter(path => path.toLowerCase().endsWith(".pck"));
+  if (projectPacks.length !== 1) {
+    throw productFailure("PROJECT_PACK_INVALID", `构建制品必须包含且只包含一个 Godot PCK，实际为 ${projectPacks.length} 个`);
+  }
   const executable = operatingSystem === "macos" ? files.find(path => path.includes(".app/Contents/MacOS/"))
     : operatingSystem === "windows" ? files.find(path => path.toLowerCase().endsWith(".exe"))
       : files.find(path => path.endsWith(".x86_64"));
@@ -923,9 +970,17 @@ async function findGamePackage(root, operatingSystem) {
   if (operatingSystem !== "windows") await chmod(executable, 0o700);
   if (operatingSystem === "macos") {
     const marker = executable.indexOf(".app/Contents/MacOS/");
-    return { executable, packagePath: executable.slice(0, marker + 4) };
+    return { executable, packagePath: executable.slice(0, marker + 4), projectPack: projectPacks[0] };
   }
-  return { executable, packagePath: executable };
+  return { executable, packagePath: executable, projectPack: projectPacks[0] };
+}
+
+function godotUnitRuntime() {
+  const configured = process.env.DEVILUDO_GODOT_RUNTIME ?? (platform === "macos"
+    ? "/Applications/Godot.app/Contents/MacOS/Godot"
+    : platform === "windows" ? "C:\\Program Files\\Godot\\Godot.exe" : "/usr/bin/godot");
+  if (!isAbsolute(configured)) throw new Error("INFRASTRUCTURE: fixed Godot unit-test runtime path must be absolute");
+  return configured;
 }
 
 function assertManifest(value) {
@@ -976,7 +1031,7 @@ function assertManifest(value) {
     || !adaptive.successAssertions.some(assertion => assertion && assertion.source === "PROGRESS"
       && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
     || !Array.isArray(adaptive.failureAssertions) || !adaptive.failureAssertions.length || !adaptive.failureAssertions.every(validProbeAssertion)
-    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 60000 || adaptive.rolloutTimeoutMs > 300000
+    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 240000 || adaptive.rolloutTimeoutMs > 300000
     || !Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40
     || adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM") throw productFailure("ADAPTIVE_CONTRACT_INVALID", "自适应玩家测试合同无效");
   const featureIds = new Set();
@@ -1165,7 +1220,16 @@ async function runCaptured(executable, arguments_, timeout, environment = safeEn
     child.stdout.on("data", chunk => stdout.push(Buffer.from(chunk)));
     child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
     child.once("error", rejectPromise);
-    child.once("close", code => { clearTimeout(timer); resolvePromise({ code: Number.isInteger(code) ? code : 124, timedOut, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") }); });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      resolvePromise({
+        code: Number.isInteger(code) ? code : 124,
+        signal: typeof signal === "string" ? signal : null,
+        timedOut,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
   });
 }
 

@@ -82,6 +82,25 @@ func focus(pid: pid_t) -> Bool {
     return CFGetTypeID(window) == AXUIElementGetTypeID()
 }
 
+func waitForFocusedGameWindow(pid: pid_t, timeout: TimeInterval = 2.0) -> GameWindow? {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        let application = NSRunningApplication(processIdentifier: pid)
+        if application?.isTerminated != true,
+           focus(pid: pid),
+           application?.isActive == true,
+           let window = gameWindow(pid: pid), window.isOnScreen {
+            // Activation is asynchronous. Give WindowServer one scheduling turn
+            // after both AppKit and Accessibility agree on the focused PID so a
+            // physical CGEvent cannot be delivered to the previously active app.
+            Thread.sleep(forTimeInterval: 0.05)
+            return gameWindow(pid: pid) ?? window
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    return nil
+}
+
 func resizeFocusedWindow(pid: pid_t, width: CGFloat, height: CGFloat) -> Bool {
     guard focus(pid: pid) else { return false }
     let app = AXUIElementCreateApplication(pid)
@@ -197,17 +216,19 @@ case "wait":
     fail("game window did not appear at the required client size: \(windowDiagnostics(pid: pid))")
 case "event":
     guard let data = argument("--event").data(using: .utf8),
-          let event = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let window = gameWindow(pid: pid) else { fail("input event or game window is invalid") }
-    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
+          let event = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { fail("input event is invalid") }
+    guard let window = waitForFocusedGameWindow(pid: pid) else {
+        fail("input event could not focus the locked game window: \(windowDiagnostics(pid: pid))")
+    }
     performInputEvent(event, window: window)
     json(["ok": true, "pid": pid, "width": Int(window.bounds.width), "height": Int(window.bounds.height)])
 case "sequence":
     guard let data = argument("--events").data(using: .utf8),
           let events = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-          !events.isEmpty, events.count <= 200,
-          let window = gameWindow(pid: pid) else { fail("input sequence or game window is invalid") }
-    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
+          !events.isEmpty, events.count <= 200 else { fail("input sequence is invalid") }
+    guard let window = waitForFocusedGameWindow(pid: pid) else {
+        fail("input sequence could not focus the locked game window: \(windowDiagnostics(pid: pid))")
+    }
     // Schedule every event against one monotonic origin. Sleeping each relative
     // delay independently accumulates CGEvent posting and scheduler overhead;
     // long rhythm-based journeys can drift by multiple simulation frames even

@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '030_remote_e2e_node_credentials');
+VALUES (true, '001', 'deviludo-core-source-v1', '031_agent_workflow_source_baseline');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -934,6 +934,49 @@ $$;
 CREATE TRIGGER jobs_snapshot_artifact_build_assets
 BEFORE INSERT ON deviludo.jobs
 FOR EACH ROW EXECUTE FUNCTION deviludo.snapshot_artifact_build_assets();
+
+-- Every existing-project Agent task receives the immutable source from the
+-- start of its workflow iteration. The current source remains authoritative;
+-- this snapshot exists only so a repair can recover accidentally deleted
+-- declarations without guessing or depending on a host-specific Git checkout.
+CREATE OR REPLACE FUNCTION deviludo.snapshot_agent_baseline_source()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  baseline deviludo.project_source_revisions%ROWTYPE;
+BEGIN
+  IF NEW.kind <> 'AGENT_GENERATION' THEN RETURN NEW; END IF;
+  SELECT source.* INTO baseline
+    FROM deviludo.project_source_revisions source
+   WHERE source.workspace_id = NEW.workspace_id
+     AND source.project_id = NEW.project_id
+     AND source.revision = coalesce(
+       (SELECT nullif(workflow.state_data #>> '{iteration,baseSourceRevision}', '')::bigint
+          FROM deviludo.workflow_instances workflow
+         WHERE workflow.workspace_id = NEW.workspace_id AND workflow.id = NEW.workflow_id),
+       (SELECT min(initial.revision)
+          FROM deviludo.project_source_revisions initial
+         WHERE initial.workspace_id = NEW.workspace_id AND initial.project_id = NEW.project_id)
+     )
+   LIMIT 1;
+  IF baseline.revision IS NOT NULL THEN
+    NEW.payload := NEW.payload || jsonb_build_object(
+      'baselineSourceRevision', baseline.revision,
+      'baselineSourceRelativePath', baseline.relative_path,
+      'baselineSourceDigest', baseline.content_digest
+    );
+  END IF;
+  RETURN NEW;
+END
+$$;
+REVOKE ALL ON FUNCTION deviludo.snapshot_agent_baseline_source() FROM PUBLIC;
+
+CREATE TRIGGER jobs_snapshot_agent_baseline_source
+BEFORE INSERT ON deviludo.jobs
+FOR EACH ROW EXECUTE FUNCTION deviludo.snapshot_agent_baseline_source();
 
 CREATE OR REPLACE FUNCTION deviludo.current_workspace_id()
 RETURNS uuid

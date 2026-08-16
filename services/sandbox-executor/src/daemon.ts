@@ -10,7 +10,7 @@ import { executorReceiptSigningPayload, parseJobProtocolV4 } from "@/services/co
 import { ProjectSourceStore, type PublishedSourceRevision } from "@/services/core/src/project-sources";
 import { createTarGzip } from "@/services/core/src/project-import";
 import { decideAgentCheckpointRestore } from "./checkpoint-restore";
-import { validateAgentSourceReference } from "./source-revision";
+import { validateAgentBaselineSourceReference, validateAgentSourceReference } from "./source-revision";
 
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
 const executorId = process.env.DEVILUDO_EXECUTOR_ID ?? "";
@@ -344,6 +344,10 @@ async function execute(
     const sourceRelativePath = typeof plan.job.payload.sourceRelativePath === "string"
       ? plan.job.payload.sourceRelativePath
       : null;
+    const baselineSourceRelativePath = plan.job.jobKind === "AGENT_GENERATION"
+      && typeof plan.job.payload.baselineSourceRelativePath === "string"
+      ? plan.job.payload.baselineSourceRelativePath
+      : null;
     const specificationDigest = plan.job.inputObjects.find(input => input.kind === "SPECIFICATION")?.sha256 ?? null;
     let inputSourceDigest = typeof plan.job.payload.sourceDigest === "string"
       ? plan.job.payload.sourceDigest
@@ -362,6 +366,11 @@ async function execute(
         if (source.digest !== plan.job.payload.sourceDigest) throw new Error("Source revision digest changed");
         await writeFile(join(inputDirectory, "source.tar.gz"), source.bytes, { mode: 0o600 });
       }
+    }
+    if (baselineSourceRelativePath) {
+      const baseline = await projectSources.archive(baselineSourceRelativePath);
+      if (baseline.digest !== plan.job.payload.baselineSourceDigest) throw new Error("Baseline source revision digest changed");
+      await writeFile(join(inputDirectory, "baseline-source.tar.gz"), baseline.bytes, { mode: 0o600 });
     }
     let checkpoint = plan.job.jobKind === "AGENT_GENERATION"
       ? await projectSources.archiveCheckpoint(plan.job.workspaceId, plan.job.projectId, plan.job.workflowId)
@@ -394,6 +403,10 @@ async function execute(
       await inject(taskName, `input:${filename}`, await readFile(join(inputDirectory, filename)));
     }
     if (sourceRelativePath) await inject(taskName, "input:source.tar.gz", await readFile(join(inputDirectory, "source.tar.gz")));
+    if (baselineSourceRelativePath) {
+      await inject(taskName, "input:baseline-source.tar.gz", await readFile(join(inputDirectory, "baseline-source.tar.gz")));
+      onProgress("PHASE", "已提供工作流起点的只读源码基线，用于防止修复误删既有实现");
+    }
     if (checkpoint) {
       await inject(taskName, "input:checkpoint.tar.gz", await readFile(join(inputDirectory, "checkpoint.tar.gz")));
       await inject(taskName, "input:checkpoint.json", Buffer.from(JSON.stringify({
@@ -742,6 +755,7 @@ function validatePlan(value: unknown): SandboxPlan {
       && basename(input.key) === "specification.json");
     if (specifications.length !== 1) throw new Error("Agent requires exactly one approved specification input");
     validateAgentSourceReference(job.payload, job.workspaceId, job.projectId);
+    validateAgentBaselineSourceReference(job.payload, job.workspaceId, job.projectId);
   }
   const bindingId = job.payload.localDirectoryBindingId;
   if (bindingId !== undefined && bindingId !== null) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateAgentSourceReference } from "@/services/sandbox-executor/src/source-revision";
+import { validateAgentBaselineSourceReference, validateAgentSourceReference } from "@/services/sandbox-executor/src/source-revision";
 
 const workspaceId = "30000000-0000-4000-8000-000000000003";
 const projectId = "30000000-0000-4000-8000-000000000004";
@@ -34,4 +34,18 @@ test("subsequent Agent generation requires one complete deterministic source ref
     sourceRelativePath: `${relativePath}-tampered`,
     sourceDigest: digest,
   }, workspaceId, projectId), /source revision is invalid/i);
+});
+
+test("workflow baseline source references use the same project-bound integrity contract", () => {
+  const relativePath = `workspaces/${workspaceId}/projects/${projectId}/revisions/r000000000001-${"a".repeat(16)}`;
+  assert.deepEqual(validateAgentBaselineSourceReference({
+    baselineSourceRevision: 1,
+    baselineSourceRelativePath: relativePath,
+    baselineSourceDigest: digest,
+  }, workspaceId, projectId), { revision: 1, relativePath, digest });
+  assert.throws(() => validateAgentBaselineSourceReference({
+    baselineSourceRevision: 1,
+    baselineSourceRelativePath: relativePath.replace(projectId, "30000000-0000-4000-8000-000000000099"),
+    baselineSourceDigest: digest,
+  }, workspaceId, projectId), /baseline source revision is invalid/i);
 });

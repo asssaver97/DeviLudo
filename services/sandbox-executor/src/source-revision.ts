@@ -9,9 +9,26 @@ export function validateAgentSourceReference(
   workspaceId: string,
   projectId: string,
 ): AgentSourceReference | null {
-  const revision = payload.sourceRevision;
-  const relativePath = payload.sourceRelativePath;
-  const digest = payload.sourceDigest;
+  return validateSourceReference(payload, workspaceId, projectId, "source");
+}
+
+export function validateAgentBaselineSourceReference(
+  payload: Readonly<Record<string, unknown>>,
+  workspaceId: string,
+  projectId: string,
+): AgentSourceReference | null {
+  return validateSourceReference(payload, workspaceId, projectId, "baselineSource");
+}
+
+function validateSourceReference(
+  payload: Readonly<Record<string, unknown>>,
+  workspaceId: string,
+  projectId: string,
+  prefix: "source" | "baselineSource",
+): AgentSourceReference | null {
+  const revision = payload[`${prefix}Revision`];
+  const relativePath = payload[`${prefix}RelativePath`];
+  const digest = payload[`${prefix}Digest`];
   const values = [revision, relativePath, digest];
 
   if (values.every(value => value === undefined || value === null)) return null;
@@ -19,11 +36,11 @@ export function validateAgentSourceReference(
     || typeof relativePath !== "string"
     || typeof digest !== "string"
     || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
-    throw new Error("Agent source revision is invalid");
+    throw new Error(`Agent ${prefix === "source" ? "source" : "baseline source"} revision is invalid`);
   }
 
   const expectedPath = `workspaces/${workspaceId}/projects/${projectId}/revisions/r${String(revision).padStart(12, "0")}-${digest.slice(7, 23)}`;
-  if (relativePath !== expectedPath) throw new Error("Agent source revision is invalid");
+  if (relativePath !== expectedPath) throw new Error(`Agent ${prefix === "source" ? "source" : "baseline source"} revision is invalid`);
 
   return Object.freeze({ revision: Number(revision), relativePath, digest });
 }

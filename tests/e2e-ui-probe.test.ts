@@ -18,7 +18,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     schema: "deviludo.e2e-ui-probe", sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234,
     sequence: 7, sceneId: "main", state: { paused: false, phase: "playing" }, progress: { turn: 2 },
     controls: [
-      { id: "roll-dice", visible: true, enabled: true, text: "掷骰", value: 0, rect: { x: 100, y: 200, width: 120, height: 50 } },
+      { id: "primary-control", visible: true, enabled: true, text: "Activate", value: 0, rect: { x: 100, y: 200, width: 120, height: 50 } },
     ],
     ...overrides,
   };
@@ -27,7 +27,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
 describe("deviludo.e2e-ui-probe", () => {
   test("accepts a nonce/PID-scoped semantic UI and state snapshot", () => {
     assert.equal(validateProbeSnapshot(snapshot(), { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234 }), true);
-    assert.deepEqual(resolveProbeControl(snapshot() as never, "roll-dice").control.rect, { x: 100, y: 200, width: 120, height: 50 });
+    assert.deepEqual(resolveProbeControl(snapshot() as never, "primary-control").control.rect, { x: 100, y: 200, width: 120, height: 50 });
   });
 
   test("rejects stale processes, non-monotonic sequences and duplicate or out-of-client controls", () => {
@@ -39,7 +39,7 @@ describe("deviludo.e2e-ui-probe", () => {
     assert.equal(validateProbeSnapshot(snapshot({ controls: [{ ...snapshot().controls[0], rect: { x: 1270, y: 0, width: 20, height: 10 } }] })), false);
     assert.equal(
       probeSnapshotValidationError(snapshot({ controls: [{ ...snapshot().controls[0], id: "player-label", rect: { x: 9, y: 5, width: 231, height: 0 } }] })),
-      "control player-label rectangle must be positive and remain inside 1280x720",
+      "control player-label rectangle {\"x\":9,\"y\":5,\"width\":231,\"height\":0} must be positive and remain inside 1280x720",
     );
   });
 
@@ -50,7 +50,7 @@ describe("deviludo.e2e-ui-probe", () => {
       await writeFile(path, JSON.stringify(snapshot({ controls: [{ ...snapshot().controls[0], id: "player-label", rect: { x: 9, y: 5, width: 231, height: 0 } }] })));
       await assert.rejects(
         waitForProbeSnapshot(path, { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234 }, 80),
-        /control player-label rectangle must be positive and remain inside 1280x720/,
+        /control player-label rectangle \{\"x\":9,\"y\":5,\"width\":231,\"height\":0\} must be positive and remain inside 1280x720/,
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -63,7 +63,7 @@ describe("deviludo.e2e-ui-probe", () => {
     assert.deepEqual(evaluateProbeAssertions([
       { source: "PROGRESS", key: "turn", operator: "CHANGED" },
       { source: "STATE", key: "paused", operator: "EQUALS", value: true },
-      { source: "CONTROL", targetId: "roll-dice", property: "enabled", operator: "EQUALS", value: true },
+      { source: "CONTROL", targetId: "primary-control", property: "enabled", operator: "EQUALS", value: true },
       { source: "SCENE", operator: "EQUALS", value: "main" },
     ], before as never, after as never).map(result => result.passed), [true, true, true, true]);
     assert.notEqual(probeStateDigest(before as never), probeStateDigest(after as never));
@@ -71,8 +71,8 @@ describe("deviludo.e2e-ui-probe", () => {
 
   test("requires enabled input targets but permits disabled post-action visual regions", () => {
     const disabled = snapshot({ controls: [{ ...snapshot().controls[0], enabled: false }] });
-    assert.throws(() => resolveProbeControl(disabled as never, "roll-dice"), /visible and enabled/);
-    assert.equal(resolveProbeControl(disabled as never, "roll-dice", { requireEnabled: false }).control.enabled, false);
+    assert.throws(() => resolveProbeControl(disabled as never, "primary-control"), /visible and enabled/);
+    assert.equal(resolveProbeControl(disabled as never, "primary-control", { requireEnabled: false }).control.enabled, false);
   });
 
   test("waits for an atomically replaced newer snapshot", async () => {
@@ -109,6 +109,32 @@ describe("deviludo.e2e-ui-probe", () => {
       assert.equal(result.stateChanged, true);
       assert.equal(result.passed, true);
       assert.equal(result.assertions[0]?.actual, 6);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("reports a newer contract-invalid snapshot instead of masking it with an older valid observation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "deviludo-probe-postcondition-invalid-test-"));
+    const path = join(root, "probe.json");
+    const before = snapshot({ sequence: 7, progress: { turn: 2 } });
+    try {
+      await writeFile(path, JSON.stringify(snapshot({ sequence: 8, progress: { turn: 2 } })));
+      const waiting = waitForProbePostconditions(path, {
+        sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234, afterSequence: 7,
+      }, before as never, [{ source: "CONTROL", targetId: "dialog", property: "visible", operator: "EQUALS", value: true }], 250);
+      setTimeout(() => {
+        const temporary = `${path}.tmp`;
+        const invalid = snapshot({
+          sequence: 9,
+          controls: [{ id: "dialog", visible: true, enabled: true, text: "", value: "", rect: { x: 1100, y: 100, width: 300, height: 200 } }],
+        });
+        void writeFile(temporary, JSON.stringify(invalid)).then(() => rename(temporary, path));
+      }, 50);
+      await assert.rejects(
+        waiting,
+        /invalid newer snapshot sequence 9: control dialog rectangle \{\"x\":1100,\"y\":100,\"width\":300,\"height\":200\} must be positive and remain inside 1280x720/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
