@@ -1,11 +1,9 @@
-// Image generation provider calls.
+// Image generation through the selected Agent Provider connection.
 //
 // Asset generation deliberately runs outside the delivery chain and outside the
 // sandbox executor: it is a plain HTTP call to a configured provider, the same
 // shape as the design Agent's conversation calls in `product-conversation.ts`.
 // Giving it a job kind would put it back on the serial chain it was taken off.
-
-import type { ImageGenerationProvider } from "@/lib/product/asset-manifest";
 
 export type FetchLike = typeof globalThis.fetch;
 
@@ -20,9 +18,8 @@ export type AssetGenerationRequest = Readonly<{
 }>;
 
 export type ImageGenerationTarget = Readonly<{
-  provider: ImageGenerationProvider;
-  apiEndpoint: string | null;
-  model: string | null;
+  baseUrl: string;
+  model: string;
   apiKey: string;
 }>;
 
@@ -35,20 +32,6 @@ export type GeneratedImage = Readonly<{
 export const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
 
 const PROVIDER_TIMEOUT_MS = 120_000;
-
-const DEFAULT_ENDPOINTS: Readonly<Record<ImageGenerationProvider, string>> = Object.freeze({
-  "dalle-3": "https://api.openai.com/v1",
-  "stable-diffusion-xl": "https://api.stability.ai",
-  midjourney: "https://api.midjourney.com",
-  replicate: "https://api.replicate.com",
-});
-
-const DEFAULT_MODELS: Readonly<Record<ImageGenerationProvider, string>> = Object.freeze({
-  "dalle-3": "dall-e-3",
-  "stable-diffusion-xl": "stable-diffusion-xl-1024-v1-0",
-  midjourney: "midjourney",
-  replicate: "stability-ai/sdxl",
-});
 
 /**
  * Only these image types are accepted, matching what the upload route allows and
@@ -86,11 +69,10 @@ export function composeImagePrompt(request: AssetGenerationRequest): string {
 }
 
 /**
- * `1024x1024` and friends are the only sizes DALL-E 3 accepts, so a 32x32 sprite
- * is requested at the nearest supported aspect and downscaled by the game's
- * importer rather than rejected here.
+ * The selected connection uses the OpenAI-compatible image endpoint. Request a
+ * standard generation aspect and let the game's importer handle final sizing.
  */
-function dalleSize(dimensions: string | null): "1024x1024" | "1792x1024" | "1024x1792" {
+function imageSize(dimensions: string | null): "1024x1024" | "1792x1024" | "1024x1792" {
   const match = dimensions?.match(/^(\d{1,5})x(\d{1,5})$/);
   if (!match) return "1024x1024";
   const width = Number(match[1]);
@@ -102,12 +84,11 @@ function dalleSize(dimensions: string | null): "1024x1024" | "1792x1024" | "1024
   return "1024x1024";
 }
 
-function endpointBase(target: ImageGenerationTarget): string {
-  return (target.apiEndpoint ?? DEFAULT_ENDPOINTS[target.provider]).replace(/\/+$/, "");
-}
-
-function providerModel(target: ImageGenerationTarget): string {
-  return target.model ?? DEFAULT_MODELS[target.provider];
+function imageEndpoint(target: ImageGenerationTarget): string {
+  const url = new URL(target.baseUrl);
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/images/generations`.replace(/\/{2,}/g, "/");
+  return url.href;
 }
 
 function providerSignal(): AbortSignal {
@@ -128,31 +109,26 @@ export async function generateAssetImage(
   fetchImpl: FetchLike = globalThis.fetch,
 ): Promise<GeneratedImage> {
   const prompt = composeImagePrompt(request);
-  if (target.provider === "dalle-3") return generateWithDalle(target, request, prompt, fetchImpl);
-  if (target.provider === "stable-diffusion-xl") return generateWithStability(target, prompt, fetchImpl);
-  if (target.provider === "replicate") return generateWithReplicate(target, prompt, fetchImpl);
-  // Midjourney has no first-party synchronous HTTP API. Rather than pretend to
-  // support it and fail per asset, it is rejected once, clearly.
-  throw new Error("当前提供商不支持自动生成，请改用 DALL-E 3、Stable Diffusion XL 或 Replicate");
+  return generateWithSelectedConnection(target, request, prompt, fetchImpl);
 }
 
-async function generateWithDalle(
+async function generateWithSelectedConnection(
   target: ImageGenerationTarget,
   request: AssetGenerationRequest,
   prompt: string,
   fetchImpl: FetchLike,
 ): Promise<GeneratedImage> {
-  const response = await fetchImpl(`${endpointBase(target)}/images/generations`, {
+  const response = await fetchImpl(imageEndpoint(target), {
     method: "POST",
     headers: {
       authorization: `Bearer ${target.apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: providerModel(target),
+      model: target.model,
       prompt,
       n: 1,
-      size: dalleSize(request.dimensions),
+      size: imageSize(request.dimensions),
       response_format: "b64_json",
     }),
     signal: providerSignal(),
@@ -163,83 +139,6 @@ async function generateWithDalle(
   if (typeof encoded !== "string" || !encoded) throw new Error("图片生成未返回图像数据");
   return decodeBase64Image(encoded);
 }
-
-async function generateWithStability(
-  target: ImageGenerationTarget,
-  prompt: string,
-  fetchImpl: FetchLike,
-): Promise<GeneratedImage> {
-  const response = await fetchImpl(
-    `${endpointBase(target)}/v1/generation/${encodeURIComponent(providerModel(target))}/text-to-image`,
-    {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${target.apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        text_prompts: [{ text: prompt, weight: 1 }],
-        samples: 1,
-        steps: 30,
-      }),
-      signal: providerSignal(),
-    },
-  );
-  if (!response.ok) throw new Error(`图片生成失败（Provider ${response.status}）`);
-  const body = await response.json() as { artifacts?: readonly { base64?: unknown }[] };
-  const encoded = body.artifacts?.[0]?.base64;
-  if (typeof encoded !== "string" || !encoded) throw new Error("图片生成未返回图像数据");
-  return decodeBase64Image(encoded);
-}
-
-/**
- * Replicate is asynchronous: the create call returns a prediction that has to be
- * polled. `Prefer: wait` collapses that into one request for short predictions,
- * and the poll loop covers the rest without a second code path.
- */
-async function generateWithReplicate(
-  target: ImageGenerationTarget,
-  prompt: string,
-  fetchImpl: FetchLike,
-): Promise<GeneratedImage> {
-  const base = endpointBase(target);
-  const created = await fetchImpl(`${base}/v1/models/${providerModel(target)}/predictions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${target.apiKey}`,
-      "content-type": "application/json",
-      prefer: "wait",
-    },
-    body: JSON.stringify({ input: { prompt } }),
-    signal: providerSignal(),
-  });
-  if (!created.ok) throw new Error(`图片生成失败（Provider ${created.status}）`);
-  let prediction = await created.json() as ReplicatePrediction;
-  const deadline = Date.now() + PROVIDER_TIMEOUT_MS;
-  while (prediction.status === "starting" || prediction.status === "processing") {
-    if (Date.now() >= deadline) throw new Error("图片生成超时");
-    await new Promise(resolve => setTimeout(resolve, 2_000));
-    const url = prediction.urls?.get;
-    if (typeof url !== "string") throw new Error("图片生成未返回可轮询的任务地址");
-    const polled = await fetchImpl(url, {
-      headers: { authorization: `Bearer ${target.apiKey}` },
-      signal: providerSignal(),
-    });
-    if (!polled.ok) throw new Error(`图片生成失败（Provider ${polled.status}）`);
-    prediction = await polled.json() as ReplicatePrediction;
-  }
-  if (prediction.status !== "succeeded") throw new Error("图片生成失败");
-  const output = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
-  if (typeof output !== "string" || !output) throw new Error("图片生成未返回图像数据");
-  return downloadGeneratedImage(output, fetchImpl);
-}
-
-type ReplicatePrediction = Readonly<{
-  status?: string;
-  output?: unknown;
-  urls?: Readonly<{ get?: unknown }>;
-}>;
 
 /**
  * Decode a base64 image from a provider response.
@@ -254,32 +153,6 @@ function decodeBase64Image(encoded: string): GeneratedImage {
   if (content.length > MAX_GENERATED_IMAGE_BYTES) throw new Error("生成的图片超出大小上限");
   const contentType = sniffContentType(content);
   if (!contentType) throw new Error("生成的图片格式不受支持");
-  return Object.freeze({ content, contentType });
-}
-
-/**
- * Fetch an image the provider stored elsewhere. The URL comes from the provider
- * response, so it is only followed over HTTPS and the declared type has to be one
- * we accept.
- */
-async function downloadGeneratedImage(url: string, fetchImpl: FetchLike): Promise<GeneratedImage> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error("图片生成返回的地址无效");
-  }
-  if (parsed.protocol !== "https:") throw new Error("图片生成返回的地址不是 HTTPS");
-  const response = await fetchImpl(parsed.href, { signal: providerSignal() });
-  if (!response.ok) throw new Error(`图片下载失败（Provider ${response.status}）`);
-  const declared = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
-  const content = Buffer.from(await response.arrayBuffer());
-  if (content.length < 1) throw new Error("图片生成返回的图像为空");
-  if (content.length > MAX_GENERATED_IMAGE_BYTES) throw new Error("生成的图片超出大小上限");
-  // Trust the bytes over the header: a provider CDN mislabelling a PNG as
-  // application/octet-stream is common, a forged magic number is not.
-  const contentType = sniffContentType(content) ?? declared;
-  if (!generatedImageExtension(contentType)) throw new Error("生成的图片格式不受支持");
   return Object.freeze({ content, contentType });
 }
 

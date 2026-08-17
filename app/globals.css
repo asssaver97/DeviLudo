@@ -331,23 +331,9 @@ button {
 }
 
 /* Workspace and project Agent configuration */
-.agent-settings-heading { align-items: flex-start; display: flex; justify-content: space-between; }
 .scope-badge { align-items: center; background: #e8eee7; border: 1px solid #cbd7ca; border-radius: 999px; color: #39543e; display: inline-flex; font-size: 11px; font-weight: 700; gap: 7px; padding: 8px 12px; }
 .scope-badge svg { height: 14px; width: 14px; }
-.agent-settings-summary { display: grid; gap: 14px; grid-template-columns: repeat(3, 1fr); margin-bottom: 18px; }
-.agent-settings-summary article { align-items: flex-start; background: #fff; border: 1px solid var(--line); border-radius: 14px; display: flex; gap: 13px; min-height: 118px; padding: 18px; }
-.agent-settings-summary article > span { align-items: center; background: #eef0e9; border-radius: 10px; color: #53624c; display: flex; height: 36px; justify-content: center; width: 36px; }
-.agent-settings-summary svg { height: 17px; width: 17px; }
-.agent-settings-summary small, .effective-agent small { color: var(--muted); display: block; font-size: 9px; letter-spacing: .08em; margin-bottom: 6px; text-transform: uppercase; }
-.agent-settings-summary strong { display: block; font-size: 16px; }
-.agent-settings-summary p { color: var(--muted); font-size: 10px; line-height: 1.5; margin: 7px 0 0; }
-.steam-settings-summary article > span:first-child { background: #eef7f1; color: #276241; }
-.steam-settings-layout { align-items: start; }
-.steam-security-list { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; }
-.steam-security-list li { align-items: flex-start; border: 1px solid var(--line); border-radius: 12px; display: flex; gap: 11px; padding: 13px; }
-.steam-security-list li > svg { color: #3d7652; flex: 0 0 auto; height: 17px; margin-top: 2px; width: 17px; }
-.steam-security-list b, .steam-security-list small { display: block; }
-.steam-security-list small { color: var(--muted); line-height: 1.5; margin-top: 4px; }
+.effective-agent small { color: var(--muted); display: block; font-size: 9px; letter-spacing: .08em; margin-bottom: 6px; text-transform: uppercase; }
 .product-steam-panel { display: grid; gap: 18px; }
 .product-steam-settings { border: 1px solid var(--line); padding: 14px; }
 .product-steam-settings summary { cursor: pointer; font-weight: 800; }
@@ -364,16 +350,12 @@ button {
 .product-steam-promotion { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
 .steam-release-live_test, .steam-release-live_default { color: var(--green); }
 .steam-release-failed { color: var(--danger); }
-.agent-settings-summary a, .project-agent-note a { color: #45664b; font-weight: 700; text-decoration: none; }
-.agent-settings-grid { display: grid; gap: 18px; grid-template-columns: minmax(280px, .72fr) minmax(480px, 1.28fr); }
+.project-agent-note a { color: #45664b; font-weight: 700; text-decoration: none; }
 .settings-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
-.settings-card-wide { min-width: 0; }
-.settings-card-full { grid-column: 1 / -1; }
 .settings-card-title { align-items: center; border-bottom: 1px solid #ecece6; display: flex; justify-content: space-between; margin-bottom: 17px; padding-bottom: 14px; }
 .settings-card-title > div { align-items: center; display: flex; gap: 9px; }
 .settings-card-title h2 { font-size: 14px; margin: 0; }
 .settings-card-title > span { color: var(--muted); font-size: 9px; }
-.step-number { align-items: center; background: #222a24; border-radius: 7px; color: white; display: inline-flex; font-family: var(--font-geist-mono); font-size: 9px; height: 23px; justify-content: center; width: 23px; }
 .settings-form { display: grid; gap: 12px; }
 .settings-form label { color: #60645d; display: grid; font-size: 10px; font-weight: 600; gap: 6px; }
 .settings-form input, .settings-form select, .profile-selection-row select { background: #fafaf7; border: 1px solid #dcded6; border-radius: 8px; color: #252923; font: inherit; font-size: 11px; min-height: 38px; padding: 0 11px; width: 100%; }
@@ -442,9 +424,8 @@ button {
 .project-profile-save { margin-top: 14px; width: 100%; }
 
 @media (max-width: 1100px) {
-  .agent-settings-summary { grid-template-columns: 1fr; }
-  .agent-settings-grid, .project-agent-layout { grid-template-columns: 1fr; }
-  .settings-card-full, .project-agent-note { grid-column: auto; }
+  .project-agent-layout { grid-template-columns: 1fr; }
+  .project-agent-note { grid-column: auto; }
   .provider-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
@@ -526,42 +507,6 @@ button {
 
 .icon-button:hover {
   background: #e7e8e1;
-}
-
-.profile-button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  display: flex;
-  gap: 9px;
-  margin-left: 2px;
-  padding: 3px 0 3px 4px;
-}
-
-.profile-button > span {
-  align-items: center;
-  background: var(--ink);
-  color: var(--acid);
-  display: flex;
-  font-size: 9px;
-  font-weight: 800;
-  height: 31px;
-  justify-content: center;
-  width: 31px;
-}
-
-.profile-button b {
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.profile-button small {
-  color: var(--muted);
-}
-
-.profile-session {
-  cursor: default;
 }
 
 .shell-content {
@@ -1354,9 +1299,7 @@ button {
   .shell-main { margin-left: 68px; width: calc(100% - 68px); }
   .shell-topbar { padding: 0 18px; }
   .topbar-context,
-  .system-pill,
-  .profile-button b,
-  .profile-button small { display: none; }
+  .system-pill { display: none; }
   .shell-content { padding: 28px 18px 50px; }
   .page-heading { align-items: flex-start; flex-direction: column; gap: 20px; }
   .page-heading h1 { font-size: 31px; }
@@ -1906,51 +1849,6 @@ button {
   .local-real-validation-result { justify-items: start; }
   .local-event-log li b { display: block; min-width: 0; margin-bottom: 2px; }
 }
-.login-page {
-  align-items: center;
-  background: radial-gradient(circle at 20% 10%, rgba(116, 91, 255, .16), transparent 34%), #080b12;
-  display: flex;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 32px;
-}
-
-.login-card {
-  background: rgba(18, 22, 34, .94);
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-radius: 20px;
-  box-shadow: 0 28px 90px rgba(0, 0, 0, .42);
-  color: #e9eaf3;
-  max-width: 560px;
-  padding: 44px;
-}
-
-.login-brand { color: #9b8cff; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
-.login-card h1 { font-size: clamp(30px, 5vw, 46px); letter-spacing: -.045em; line-height: 1.05; margin: 18px 0; }
-.login-card > p { color: #a9aec0; line-height: 1.7; }
-.login-error { background: rgba(255, 91, 111, .11); border: 1px solid rgba(255, 91, 111, .25); border-radius: 12px; color: #ffadb8; margin: 22px 0; padding: 14px 16px; }
-.login-security { background: rgba(255, 255, 255, .04); border-radius: 12px; display: grid; gap: 5px; margin: 26px 0; padding: 16px; }
-.login-security span { color: #9da3b7; font-size: 14px; }
-.profile-login { border: 1px solid var(--border, #303546); border-radius: 10px; color: inherit; padding: 9px 14px; text-decoration: none; }
-.profile-loading { color: var(--muted, #8c93a8); font-size: 13px; }
-
-.invite-admin { display: grid; gap: 24px; }
-.invite-heading { align-items: flex-start; display: flex; justify-content: space-between; gap: 24px; }
-.invite-heading h1 { font-size: 34px; letter-spacing: -.04em; margin: 5px 0 8px; }
-.invite-heading > div > p:last-child { color: var(--muted); margin: 0; }
-.invite-boundary { background: #e8f2d2; border: 1px solid #c7dc99; border-radius: 999px; color: #46620b; font-size: 12px; font-weight: 750; padding: 8px 12px; }
-.invite-grid { display: grid; gap: 20px; grid-template-columns: minmax(320px, .8fr) minmax(360px, 1.2fr); }
-.invite-form, .invite-result { background: var(--paper); border: 1px solid var(--line); border-radius: 16px; padding: 24px; }
-.invite-form { display: grid; gap: 18px; }
-.invite-form label { color: var(--muted); display: grid; font-size: 12px; font-weight: 700; gap: 8px; }
-.invite-form input, .invite-form select { background: white; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); min-width: 0; padding: 12px; }
-.invite-form small { color: var(--muted); line-height: 1.5; }
-.invite-result { min-height: 310px; }
-.invite-result h2 { font-size: 26px; margin: 14px 0; }
-.invite-result > p { color: var(--muted); line-height: 1.6; }
-.invite-result code { background: #171a16; border-radius: 10px; color: #dcff63; display: block; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; padding: 16px; }
-.invite-message { background: #f1f3ea; border-radius: 10px; color: #53584d; font-size: 12px; margin-top: 18px; padding: 12px; }
-@media (max-width: 860px) { .invite-heading { flex-direction: column; } .invite-grid { grid-template-columns: 1fr; } }
 
 /* Arcade command-center skin, adapted from the supplied Stack Attack template. */
 body:has(.app-shell) {
@@ -2173,15 +2071,6 @@ body:has(.app-shell) {
   background: #151e2b;
 }
 
-.profile-button > span {
-  background: #172231;
-  border: 1px solid var(--acid);
-  color: var(--acid);
-}
-
-.profile-button b {
-  color: var(--ink);
-}
 
 .shell-content {
   padding-top: 36px;
@@ -2196,8 +2085,7 @@ body:has(.app-shell) {
 }
 
 .page-heading h1,
-.project-page-header h1,
-.invite-heading h1 {
+.project-page-header h1 {
   color: #fff;
   font-family: var(--font-geist-mono), monospace;
   font-weight: 800;
@@ -2273,8 +2161,6 @@ body:has(.app-shell) {
 .profile-selection-row select,
 .repository-onboarding-form input,
 .repository-onboarding-form select,
-.invite-form input,
-.invite-form select,
 .credential-rotation-form input,
 .delivery-cancel-controls textarea {
   background: #0c121c;
@@ -2300,9 +2186,6 @@ body:has(.app-shell) {
 .evidence-artifacts,
 .local-delivery,
 .settings-card,
-.agent-settings-summary article,
-.invite-form,
-.invite-result,
 .repository-onboarding {
   background: rgba(17, 24, 36, .96);
   border: 2px solid #2d394c;
@@ -2474,7 +2357,6 @@ body:has(.app-shell) {
 .counter,
 .detail-icon,
 .project-catalog-glyph,
-.step-number,
 .effective-agent > span {
   background: var(--acid);
   border: 1px solid #ffe8a6;
@@ -2524,7 +2406,6 @@ body:has(.app-shell) {
 }
 
 .project-profile-options label,
-.steam-security-list li,
 .effective-lock-grid > div,
 .credential-rotation-form,
 .masked-list code,
@@ -2534,8 +2415,7 @@ body:has(.app-shell) {
 .local-delivery-lock,
 .local-delivery-metric,
 .local-platform,
-.local-real-validation,
-.invite-message {
+.local-real-validation {
   background: #0d1520;
   border-color: var(--line);
   border-radius: 0;
@@ -2555,7 +2435,6 @@ body:has(.app-shell) {
 .local-delivery-lock b,
 .local-delivery-metric b,
 .local-delivery-lock code,
-.invite-message,
 .fencing-note b {
   color: var(--ink);
 }
@@ -2602,7 +2481,6 @@ body:has(.app-shell) {
 .quiet-button,
 .text-link,
 .project-catalog-card-footer a,
-.agent-settings-summary a,
 .project-agent-note a {
   color: var(--blue);
 }

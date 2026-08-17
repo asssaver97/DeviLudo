@@ -10,8 +10,8 @@ import {
   type AgentRuntimeKind,
   type InstanceAgentSettings,
 } from "@/lib/product/contracts";
-import { FileIcon, LinkIcon, SettingsIcon, ShieldIcon, SparkIcon } from "./console/Icons";
-import { localeTag, useLanguage } from "./i18n/LanguageProvider";
+import { FileIcon, SettingsIcon, ShieldIcon } from "./console/Icons";
+import { useLanguage } from "./i18n/LanguageProvider";
 
 type ConfigurationMode = "SIMPLE" | "SETTINGS_JSON";
 type ModelMode = "SINGLE" | "EXPANDED";
@@ -30,6 +30,8 @@ const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
     development: "claude-opus-4-1",
     test: "claude-haiku-4-5",
   }),
+  imageModel: null,
+  imageGenerationReady: false,
   apiKeyConfigured: false,
   testPolicyReady: false,
   apiKeyMasked: null,
@@ -38,9 +40,9 @@ const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   updatedAt: null,
 });
 
-const RUNTIME_COPY: Readonly<Record<AgentRuntimeKind, Readonly<{ name: string; description: string }>>> = Object.freeze({
-  CLAUDE_CODE: Object.freeze({ name: "Claude Code", description: "使用 Anthropic Messages 兼容网关执行 Agent。" }),
-  CODEX_CLI: Object.freeze({ name: "Codex CLI", description: "使用宿主机的 OpenAI 官方 ChatGPT 登录。" }),
+const RUNTIME_COPY: Readonly<Record<AgentRuntimeKind, Readonly<{ name: string }>>> = Object.freeze({
+  CLAUDE_CODE: Object.freeze({ name: "Claude Code" }),
+  CODEX_CLI: Object.freeze({ name: "Codex CLI" }),
 });
 
 const EMPTY_MODELS: AgentModelConfiguration = Object.freeze({
@@ -52,7 +54,7 @@ const EMPTY_MODELS: AgentModelConfiguration = Object.freeze({
 });
 
 export function AgentSettings() {
-  const { locale, text } = useLanguage();
+  const { errorText, text } = useLanguage();
   const initialPayload = cachedValue<AgentSettingsPayload>(clientCacheKeys.agentSettings);
   const initialSettings = initialPayload?.settings ?? DEFAULT_SETTINGS;
   const initialModels = initialSettings.models ?? EMPTY_MODELS;
@@ -64,6 +66,7 @@ export function AgentSettings() {
   const [singleModel, setSingleModel] = useState(initialModels.primary);
   const [expandedModels, setExpandedModels] = useState<AgentModelConfiguration>(initialModels);
   const [roleModels, setRoleModels] = useState<AgentRoleModelConfiguration>(initialRoleModels);
+  const [imageModel, setImageModel] = useState(initialSettings.imageModel ?? "");
   const [apiKey, setApiKey] = useState("");
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
   const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.models));
@@ -82,7 +85,7 @@ export function AgentSettings() {
           runtimes?: readonly AgentRuntimeAvailability[];
           message?: string;
         };
-        if (!response.ok || !body.settings) throw new Error(body.message ?? text("无法读取 Agent 设置", "Unable to load Agent settings"));
+        if (!response.ok || !body.settings) throw new Error(errorText(body.message, "无法读取 Agent 设置", "Unable to load Agent settings"));
         return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [] });
       })
       .then(body => {
@@ -96,6 +99,7 @@ export function AgentSettings() {
         setSingleModel(loadedModels.primary);
         setModelMode(hasDistinctModels(loadedModels) ? "EXPANDED" : "SINGLE");
         setRoleModels(value.roleModels ?? roleModelsFromRoutes(value.agentRuntime, loadedModels));
+        setImageModel(value.imageModel ?? "");
         setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.models));
         setRuntimes(body.runtimes);
       })
@@ -104,7 +108,7 @@ export function AgentSettings() {
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [text]);
+  }, [errorText, text]);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -116,17 +120,20 @@ export function AgentSettings() {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(configurationMode === "SETTINGS_JSON"
-          ? { agentRuntime, settingsJson, roleModels }
+          ? { agentRuntime, settingsJson, roleModels, imageModel: imageModel.trim() || null }
           : {
               agentRuntime,
-              baseUrl,
               roleModels,
-              models: effectiveModels(modelMode, singleModel, expandedModels),
-              ...(apiKey ? { apiKey } : {}),
+              imageModel: agentRuntime === "CLAUDE_CODE" ? imageModel.trim() || null : null,
+              ...(agentRuntime === "CLAUDE_CODE" ? {
+                baseUrl,
+                models: effectiveModels(modelMode, singleModel, expandedModels),
+                ...(apiKey ? { apiKey } : {}),
+              } : {}),
             }),
       });
       const body = await response.json() as { settings?: InstanceAgentSettings; message?: string };
-      if (!response.ok || !body.settings) throw new Error(body.message ?? text("保存失败", "Save failed"));
+      if (!response.ok || !body.settings) throw new Error(errorText(body.message, "保存失败", "Save failed"));
       storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes }), 60_000);
       setSettings(body.settings);
       setAgentRuntime(body.settings.agentRuntime);
@@ -136,6 +143,7 @@ export function AgentSettings() {
       setSingleModel(savedModels.primary);
       setModelMode(hasDistinctModels(savedModels) ? "EXPANDED" : "SINGLE");
       setRoleModels(body.settings.roleModels);
+      setImageModel(body.settings.imageModel ?? "");
       setApiKey("");
       setSettingsJson(formatClaudeSettingsJson(
         body.settings.baseUrl,
@@ -151,8 +159,14 @@ export function AgentSettings() {
   }
 
   function selectRuntime(kind: AgentRuntimeKind) {
-    if (kind !== "CLAUDE_CODE") return;
     setAgentRuntime(kind);
+    if (kind === "CODEX_CLI") {
+      setConfigurationMode("SIMPLE");
+      setRoleModels(roleModelsFromRoutes(kind, EMPTY_MODELS));
+      setImageModel("");
+      setApiKey("");
+      return;
+    }
     const next = settings.agentRuntime === "CLAUDE_CODE" ? settings : DEFAULT_SETTINGS;
     setBaseUrl(next.baseUrl);
     const nextModels = next.models ?? EMPTY_MODELS;
@@ -160,6 +174,7 @@ export function AgentSettings() {
     setSingleModel(nextModels.primary);
     setModelMode(hasDistinctModels(nextModels) ? "EXPANDED" : "SINGLE");
     setRoleModels(next.roleModels);
+    setImageModel(next.imageModel ?? "");
     setApiKey("");
     setSettingsJson(formatClaudeSettingsJson(next.baseUrl, next.apiKeyMasked ?? "", next.models));
   }
@@ -176,7 +191,7 @@ export function AgentSettings() {
       return;
     }
     try {
-      const connection = connectionFromClaudeSettingsJson(settingsJson);
+      const connection = connectionFromClaudeSettingsJson(settingsJson, text);
       setBaseUrl(connection.baseUrl);
       setApiKey(connection.apiKey);
       setExpandedModels(connection.models);
@@ -206,29 +221,21 @@ export function AgentSettings() {
     setRoleModels(current => Object.freeze({ ...current, [key]: value }));
   }
 
-  const runtime = RUNTIME_COPY[agentRuntime];
-  const runtimeAvailability = runtimes.find(candidate => candidate.kind === agentRuntime);
   return (
     <>
       <section className="page-heading agent-config-heading">
         <div>
           <span className="eyebrow">{text("CONFIGURATION · 全局配置", "CONFIGURATION · INSTANCE GLOBAL")}</span>
           <h1>{text("Agent 设置", "AGENT SETTINGS")}</h1>
-          <p>{text("Claude Code 使用独立 Provider 配置；Codex CLI 只读取宿主机的 OpenAI 官方登录状态。", "Claude Code keeps its own Provider settings; Codex CLI only reports the host's official OpenAI login status.")}</p>
+          <p>{text("选择一个 Agent 连接，设计、开发、测试和图片生成都沿用该连接。", "Choose one Agent connection for design, development, testing, and image generation.")}</p>
         </div>
         <span className="scope-badge"><ShieldIcon /> INSTANCE GLOBAL</span>
       </section>
 
-      <section className="agent-settings-summary" aria-label={text("当前 Agent 配置", "Current Agent configuration")}>
-        <article><span><SparkIcon /></span><div><small>Agent Runtime</small><strong>{runtime.name}</strong><p>{runtimeAvailability?.installed ? text(`已检测 · v${runtimeAvailability.version}`, `Detected · v${runtimeAvailability.version}`) : loading ? text("正在检测本地运行时", "Detecting local runtime") : text("未检测到安装", "Not installed")}</p></div></article>
-        <article><span><LinkIcon /></span><div><small>Claude Provider</small><strong>{hostLabel(baseUrl)}</strong><p>{modelSummary(modelMode, singleModel, expandedModels) || baseUrl}</p></div></article>
-        <article><span><ShieldIcon /></span><div><small>Credential</small><strong>{settings.apiKeyConfigured ? text("已安全配置", "SECURELY CONFIGURED") : text("等待配置", "NOT CONFIGURED")}</strong><p>{settings.apiKeyMasked ?? text("API Key 尚未配置", "API Key not configured")}</p></div></article>
-      </section>
-
-      <div className="agent-config-layout">
-        <section className="settings-card agent-config-form-card">
+      <div className="settings-page-stack">
+        <section className="settings-card settings-section agent-config-form-card">
           <div className="settings-card-title agent-config-card-title">
-            <div><span className="step-number">01</span><h2>{text("连接配置", "CONNECTION")}</h2></div>
+            <div><h2>{text("Agent 连接", "AGENT CONNECTION")}</h2></div>
             <div className="agent-config-title-actions">
               <span>{loading ? "SYNCING" : "READY"}</span>
               {agentRuntime === "CLAUDE_CODE" ? (
@@ -244,20 +251,24 @@ export function AgentSettings() {
               <legend>{text("Agent 运行时", "Agent runtime")}</legend>
               <div className="agent-runtime-options">
                 {AGENT_RUNTIME_KINDS.map(kind => (
-                  <label aria-disabled={kind === "CODEX_CLI"} className={`agent-runtime-choice ${agentRuntime === kind ? "is-selected" : ""}`} key={kind}>
-                    <input checked={agentRuntime === kind} disabled={kind === "CODEX_CLI"} name="agentRuntime" onChange={() => selectRuntime(kind)} type="radio" value={kind} />
+                  <label className={`agent-runtime-choice ${agentRuntime === kind ? "is-selected" : ""}`} key={kind}>
+                    <input checked={agentRuntime === kind} name="agentRuntime" onChange={() => selectRuntime(kind)} type="radio" value={kind} />
                     <span><span className="agent-runtime-name"><b>{RUNTIME_COPY[kind].name}</b><em className={runtimeClass(runtimes, kind, loading)}>{runtimeLabel(runtimes, kind, loading, text)}</em></span><small>{runtimeDescription(kind, text)}</small></span>
                     <i aria-hidden="true" />
                   </label>
                 ))}
               </div>
-              <p className="agent-role-model-description">{text(
-                "本地默认运行时是 Claude Code。Codex CLI 不保存 Base URL、API Key 或模型配置；登录请在宿主机运行 codex login。",
-                "The local default runtime is Claude Code. Codex CLI stores no Base URL, API key, or model settings here; sign in on the host with codex login.",
-              )}</p>
             </fieldset>
 
-            {configurationMode === "SIMPLE" ? (
+            {agentRuntime === "CODEX_CLI" ? (
+              <div className="agent-connection-status" role="status">
+                <ShieldIcon />
+                <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
+                  "使用宿主机 Codex CLI 的 ChatGPT 登录。这里不重复填写 Provider、Base URL 或凭据。",
+                  "Uses the host Codex CLI ChatGPT session. No Provider, Base URL, or credential is duplicated here.",
+                )}</p></div>
+              </div>
+            ) : configurationMode === "SIMPLE" ? (
               <>
                 <label>Provider Base URL
                   <input autoComplete="url" disabled={loading || saving} maxLength={2048} name="baseUrl" onChange={event => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required type="url" value={baseUrl} />
@@ -280,7 +291,7 @@ export function AgentSettings() {
                     name="providerCredential"
                     onChange={event => setApiKey(event.target.value)}
                     placeholder={settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")}
-                    required={!settings.apiKeyConfigured}
+                    required={settings.agentRuntime !== "CLAUDE_CODE" || !settings.apiKeyConfigured}
                     spellCheck={false}
                     type="text"
                     value={apiKey}
@@ -289,9 +300,6 @@ export function AgentSettings() {
 
                 <fieldset className="agent-model-fieldset">
                     <legend>Model</legend>
-                    <div className="agent-model-heading">
-                      <span>Model</span>
-                    </div>
                     {modelMode === "SINGLE" ? (
                       <label className="agent-model-single"><span>{text("统一模型", "Unified model")}</span>
                         <div className="agent-model-input-row">
@@ -315,6 +323,7 @@ export function AgentSettings() {
                       </div>
                     )}
                 </fieldset>
+
               </>
             ) : (
               <label className="settings-json-editor">Claude Code settings.json
@@ -322,11 +331,18 @@ export function AgentSettings() {
               </label>
             )}
 
+            {agentRuntime === "CLAUDE_CODE" ? (
+              <label>{text("图片生成模型（可选）", "Image model (optional)")}
+                <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="imageModel" onChange={event => setImageModel(event.target.value)} placeholder="gpt-image-1" type="text" value={imageModel} />
+                <small className="field-help">{text("沿用当前连接的 Provider、Base URL 和凭据；留空则关闭自动图片生成。", "Uses the selected connection's Provider, Base URL, and credential. Leave blank to disable automatic image generation.")}</small>
+              </label>
+            ) : null}
+
             <fieldset className="agent-model-fieldset agent-role-model-fieldset">
               <legend>{text("群聊 Agent", "GROUP CHAT AGENTS")}</legend>
               <p className="agent-role-model-description">{text(
-                "三个角色会依次参与每轮项目群聊，并使用各自的模型。开发角色的模型同时用于后续代码生成任务。",
-                "All three roles participate in every project turn with their own model. The Development model also drives subsequent code-generation jobs.",
+                "按角色选择模型；开发模型同时用于代码生成。",
+                "Choose a model per role; the Development model also generates code.",
               )}</p>
               <div className="agent-model-expanded">
                 <ModelInput disabled={loading || saving} label={text("设计 Agent", "Design Agent")} onChange={value => updateRoleModel("design", value)} value={roleModels.design} />
@@ -344,16 +360,6 @@ export function AgentSettings() {
           </form>
         </section>
 
-        <aside className="settings-card agent-config-security">
-          <div className="settings-card-title"><div><span className="step-number">02</span><h2>{text("安全边界", "SECURITY BOUNDARY")}</h2></div><span>FAIL CLOSED</span></div>
-          <div className="agent-config-lock"><SettingsIcon /><span><b>{text("实例全局生效", "INSTANCE GLOBAL")}</b><small>{text("所有工作区共享同一套 Agent 连接配置。", "All workspaces share this Agent connection configuration.")}</small></span></div>
-          <ul>
-            <li><b>{text("API Key 隔离", "API KEY ISOLATION")}</b><span>{text("明文只进入 Core 的 Secret 边界；数据库和页面仅保留掩码、指纹与版本引用。", "Plaintext enters only the Core secret boundary; the database and UI retain only a mask and version reference.")}</span></li>
-            <li><b>{text("任务配置冻结", "IMMUTABLE JOB SETTINGS")}</b><span>{text("已运行任务不会被改写，新任务锁定当时的运行时、Base URL 和凭据版本。", "Running jobs are never rewritten; new jobs lock the current runtime, Base URL, and credential version.")}</span></li>
-            <li><b>{text("Agent 只在 CORE 执行", "AGENT RUNS IN CORE ONLY")}</b><span>{text("E2E Linux、Windows、macOS 节点永远不会获得 Agent 或 Provider 凭据。", "E2E Linux, Windows, and macOS nodes never receive Agent or provider credentials.")}</span></li>
-          </ul>
-          {settings.updatedAt ? <p className="agent-config-updated">{text("最后更新", "Last updated")} {formatTime(settings.updatedAt, localeTag(locale))}</p> : null}
-        </aside>
       </div>
     </>
   );
@@ -462,7 +468,10 @@ function formatClaudeSettingsJson(
   }, null, 2);
 }
 
-function connectionFromClaudeSettingsJson(value: string): Readonly<{
+function connectionFromClaudeSettingsJson(
+  value: string,
+  text: (chinese: string, english: string) => string,
+): Readonly<{
   baseUrl: string;
   apiKey: string;
   models: AgentModelConfiguration;
@@ -471,21 +480,21 @@ function connectionFromClaudeSettingsJson(value: string): Readonly<{
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("settings.json 不是有效 JSON，修复后才能切回简易表单。");
+    throw new Error(text("settings.json 不是有效 JSON，修复后才能切回简易表单。", "settings.json is not valid JSON. Fix it before returning to the simple form."));
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("settings.json 必须包含 JSON 对象。");
+    throw new Error(text("settings.json 必须包含 JSON 对象。", "settings.json must contain a JSON object."));
   }
   const env = (parsed as Record<string, unknown>).env;
   if (!env || typeof env !== "object" || Array.isArray(env)) {
-    throw new Error("settings.json 缺少 env 对象。");
+    throw new Error(text("settings.json 缺少 env 对象。", "settings.json must contain an env object."));
   }
   const values = env as Record<string, unknown>;
   if (typeof values.ANTHROPIC_BASE_URL !== "string") {
-    throw new Error("settings.json 缺少 ANTHROPIC_BASE_URL。");
+    throw new Error(text("settings.json 缺少 ANTHROPIC_BASE_URL。", "settings.json is missing ANTHROPIC_BASE_URL."));
   }
   const credential = values.ANTHROPIC_API_KEY || values.ANTHROPIC_AUTH_TOKEN || "";
-  if (typeof credential !== "string") throw new Error("settings.json 中的凭据必须是字符串。");
+  if (typeof credential !== "string") throw new Error(text("settings.json 中的凭据必须是字符串。", "The credential in settings.json must be a string."));
   const models = {
     primary: values.ANTHROPIC_MODEL,
     opus: values.ANTHROPIC_DEFAULT_OPUS_MODEL,
@@ -494,11 +503,11 @@ function connectionFromClaudeSettingsJson(value: string): Readonly<{
     subagent: values.CLAUDE_CODE_SUBAGENT_MODEL,
   };
   if (Object.values(models).some(model => typeof model !== "string")) {
-    throw new Error("settings.json 中的模型变量必须是字符串。");
+    throw new Error(text("settings.json 中的模型变量必须是字符串。", "Model variables in settings.json must be strings."));
   }
   const configuredModelCount = Object.values(models).filter(Boolean).length;
   if (configuredModelCount !== 0 && configuredModelCount !== 5) {
-    throw new Error("settings.json 必须同时填写全部 5 个模型变量。");
+    throw new Error(text("settings.json 必须同时填写全部 5 个模型变量。", "Fill in all five model variables in settings.json together."));
   }
   return Object.freeze({
     baseUrl: values.ANTHROPIC_BASE_URL,
@@ -537,25 +546,4 @@ function effectiveModels(
 
 function hasDistinctModels(models: AgentModelConfiguration): boolean {
   return new Set(Object.values(models)).size > 1;
-}
-
-function modelSummary(
-  mode: ModelMode,
-  single: string,
-  expanded: AgentModelConfiguration,
-): string {
-  if (mode === "SINGLE") return single ? `MODEL · ${single}` : "";
-  return Object.values(expanded).every(Boolean) ? "MODELS · 5 ROUTES" : "";
-}
-
-function hostLabel(value: string): string {
-  try {
-    return new URL(value).host;
-  } catch {
-    return "等待有效地址";
-  }
-}
-
-function formatTime(value: string, locale: string): string {
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }

@@ -35,7 +35,6 @@ import { AssetManifestPanel } from "./AssetManifestPanel";
 import { ProjectSteamPanel } from "./ProjectSteamPanel";
 import { ArrowIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
-import { useProductSession } from "./ProductShell";
 
 // The serial delivery chain, in order. Asset generation is shown as a branch off
 // Agent generation, but it is a real readiness gate: artifact builds cannot start
@@ -48,42 +47,19 @@ const PIPELINE = [
 ] as const;
 const RERUNNABLE_WORKFLOW_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 
-type RepositoryConnection = Readonly<{
-  repositoryId: string;
-  fullName: string;
-  htmlUrl: string;
-  private: boolean;
-  defaultBranch: string;
-  syncBranch: string;
-  syncState: "PENDING" | "SYNCING" | "SYNCED" | "FAILED" | "REMOTE_DIVERGED";
-  lastPushedCommitSha: string | null;
-  lastSourceRevision: number | null;
-  lastSyncedAt: string | null;
-  lastError: string | null;
-}>;
-
-type GitHubRepositoryOption = Readonly<{
-  id: string;
-  fullName: string;
-  private: boolean;
-  defaultBranch: string;
-}>;
-
 type LocalGitState = Readonly<{
   repository: boolean;
   branch: string | null;
 }>;
 
 export function ProjectStudio({ projectId }: { projectId: string }) {
-  const { locale, text } = useLanguage();
+  const { errorText, locale, text } = useLanguage();
   const router = useRouter();
-  const session = useProductSession();
   const initialProject = cachedValue<ProductProjectDetail>(clientCacheKeys.project(projectId));
   const initialConversations = cachedValue<readonly ProductConversationSummary[]>(clientCacheKeys.conversations(projectId));
   const initialConversationId = initialConversations?.[0]?.id ?? null;
   const initialConversation = initialConversationId ? cachedValue<ProductConversation>(clientCacheKeys.conversation(initialConversationId)) : undefined;
   const initialArtifacts = cachedValue<readonly ArtifactRecord[]>(clientCacheKeys.artifacts(projectId));
-  const initialRepository = cachedValue<RepositoryConnection | null>(clientCacheKeys.repository(projectId));
   const [project, setProject] = useState<ProductProjectDetail | null>(initialProject ?? null);
   const [conversations, setConversations] = useState<readonly ProductConversationSummary[]>(initialConversations ?? []);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(initialConversationId);
@@ -107,24 +83,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
-  const [repository, setRepository] = useState<RepositoryConnection | null>(initialRepository ?? null);
-  const [repositoryOptions, setRepositoryOptions] = useState<readonly GitHubRepositoryOption[]>([]);
-  const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
-  const [repositoryBusy, setRepositoryBusy] = useState(false);
-  const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
   const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
   const [localGit, setLocalGit] = useState<LocalGitState | null>(null);
   const [localGitError, setLocalGitError] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState("");
   const [editingLocalBranch, setEditingLocalBranch] = useState(false);
   const [branchBusy, setBranchBusy] = useState(false);
-  const platformManaged = session.authMode === "PLATFORM";
 
   const loadProject = useCallback(async (force = false) => {
     const value = await loadCached(clientCacheKeys.project(projectId), 5_000, async () => {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" });
       const payload = await response.json() as { project?: ProductProjectDetail; message?: string };
-      if (!response.ok || !payload.project) throw new Error(payload.message ?? text(`项目读取失败 (${response.status})`, `Unable to load project (${response.status})`));
+      if (!response.ok || !payload.project) throw new Error(errorText(payload.message, `项目读取失败 (${response.status})`, `Unable to load project (${response.status})`));
       return payload.project;
     }, { force });
     setProject(current => {
@@ -132,13 +102,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       storeCached(clientCacheKeys.project(projectId), next, 5_000);
       return next;
     });
-  }, [projectId, text]);
+  }, [errorText, projectId]);
 
   const loadConversations = useCallback(async () => {
     const values = await loadCached(clientCacheKeys.conversations(projectId), 30_000, async () => {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversations`, { cache: "no-store" });
       const payload = await response.json() as { conversations?: readonly ProductConversationSummary[]; message?: string };
-      if (!response.ok || !payload.conversations) throw new Error(payload.message ?? text(`历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
+      if (!response.ok || !payload.conversations) throw new Error(errorText(payload.message, `历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
       return payload.conversations;
     });
     setConversations(values);
@@ -151,21 +121,21 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     const value = await loadCached(clientCacheKeys.conversation(initialId), 30_000, async () => {
       const conversationResponse = await fetch(`/api/conversations/${encodeURIComponent(initialId)}`, { cache: "no-store" });
       const conversationPayload = await conversationResponse.json() as { conversation?: ProductConversation; message?: string };
-      if (!conversationResponse.ok || !conversationPayload.conversation) throw new Error(conversationPayload.message ?? text(`会话读取失败 (${conversationResponse.status})`, `Unable to load conversation (${conversationResponse.status})`));
+      if (!conversationResponse.ok || !conversationPayload.conversation) throw new Error(errorText(conversationPayload.message, `会话读取失败 (${conversationResponse.status})`, `Unable to load conversation (${conversationResponse.status})`));
       return conversationPayload.conversation;
     });
     setConversation(value);
-  }, [projectId, text]);
+  }, [errorText, projectId]);
 
   const loadArtifacts = useCallback(async (force = false) => {
     const values = await loadCached(clientCacheKeys.artifacts(projectId), 10_000, async () => {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts`, { cache: "no-store" });
       const payload = await response.json() as { artifacts?: readonly ArtifactRecord[]; message?: string };
-      if (!response.ok || !payload.artifacts) throw new Error(payload.message ?? text(`制品读取失败 (${response.status})`, `Unable to load artifacts (${response.status})`));
+      if (!response.ok || !payload.artifacts) throw new Error(errorText(payload.message, `制品读取失败 (${response.status})`, `Unable to load artifacts (${response.status})`));
       return payload.artifacts;
     }, { force });
     setArtifacts(values);
-  }, [projectId, text]);
+  }, [errorText, projectId]);
 
   const loadIterations = useCallback(async () => {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/iterations`, { cache: "no-store" });
@@ -174,37 +144,26 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       message?: string;
     };
     if (!response.ok || !payload.iterations) {
-      throw new Error(payload.message ?? text(`迭代历史读取失败 (${response.status})`, `Unable to load iteration history (${response.status})`));
+      throw new Error(errorText(payload.message, `迭代历史读取失败 (${response.status})`, `Unable to load iteration history (${response.status})`));
     }
     setIterations(payload.iterations);
-  }, [projectId, text]);
-
-  const loadRepository = useCallback(async (force = false) => {
-    if (!platformManaged) return;
-    const value = await loadCached<RepositoryConnection | null>(clientCacheKeys.repository(projectId), 10_000, async () => {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, { cache: "no-store" });
-      const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection | null; error?: { code?: string } };
-      if (!response.ok) throw new Error(payload.error?.code ?? text("仓库状态读取失败", "Unable to load repository status"));
-      return payload.data ?? null;
-    }, { force });
-    setRepository(value);
-  }, [platformManaged, projectId, text]);
+  }, [errorText, projectId]);
 
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
-      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadIterations(), loadRepository()]).catch(reason => {
+      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadIterations()]).catch(reason => {
         if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
       });
     }, 0);
     return () => { active = false; clearTimeout(initial); };
-  }, [loadArtifacts, loadConversations, loadIterations, loadProject, loadRepository, text]);
+  }, [loadArtifacts, loadConversations, loadIterations, loadProject, text]);
 
   const localDirectoryBindingId = project?.localDirectory?.bindingId ?? null;
   useEffect(() => {
     if (!localDirectoryBindingId) return;
     let active = true;
-    void readLocalGitStatus(localDirectoryBindingId, text).then(value => {
+    void readLocalGitStatus(localDirectoryBindingId, text, errorText).then(value => {
       if (active) {
         setLocalGit(value);
         setLocalGitError(null);
@@ -213,7 +172,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       if (active) setLocalGitError(localGitMessage(reason, text));
     });
     return () => { active = false; };
-  }, [localDirectoryBindingId, text]);
+  }, [errorText, localDirectoryBindingId, text]);
 
   const workflowState = project?.workflowState;
   const projectAnalysisInProgress = project?.analysisStatus === "PENDING" || project?.analysisStatus === "ANALYZING";
@@ -230,80 +189,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     timer = setTimeout(poll, 3_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
   }, [loadArtifacts, loadIterations, loadProject, projectAnalysisInProgress, workflowState]);
-
-  const repositorySyncState = repository?.syncState;
-  useEffect(() => {
-    if (!platformManaged || !repositorySyncState || !repositoryNeedsPolling(repositorySyncState)) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const poll = async () => {
-      if (document.visibilityState === "visible") await loadRepository(true).catch(() => undefined);
-      if (!stopped) timer = setTimeout(poll, 5_000);
-    };
-    timer = setTimeout(poll, 5_000);
-    return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [loadRepository, platformManaged, repositorySyncState]);
-
-  async function createPrivateRepository() {
-    if (!project || repositoryBusy || selectedWorkflowId !== null) return;
-    setRepositoryBusy(true); setError(null);
-    try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/create`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectName: project.name }),
-      });
-      const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection; error?: { code?: string } };
-      if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
-      setRepository(payload.data);
-      storeCached(clientCacheKeys.repository(projectId), payload.data, 10_000);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库创建失败", "Unable to create repository")); }
-    finally { setRepositoryBusy(false); }
-  }
-
-  async function openRepositoryPicker() {
-    if (repositoryBusy || selectedWorkflowId !== null) return;
-    setRepositoryBusy(true); setError(null);
-    try {
-      const options = await loadCached(clientCacheKeys.githubRepositories, 120_000, async () => {
-        const response = await fetch("/api/github/repositories?perPage=100", { cache: "no-store" });
-        const payload = await response.json().catch(() => ({})) as { data?: GitHubRepositoryOption[]; error?: { code?: string } };
-        if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
-        return payload.data;
-      });
-      setRepositoryOptions(options);
-      setSelectedRepositoryId(options[0]?.id ?? "");
-      setRepositoryPickerOpen(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库列表读取失败", "Unable to list repositories")); }
-    finally { setRepositoryBusy(false); }
-  }
-
-  async function bindRepository() {
-    if (!project || !selectedRepositoryId || repositoryBusy || selectedWorkflowId !== null) return;
-    setRepositoryBusy(true); setError(null);
-    try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository`, {
-        method: "PUT", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ repositoryId: selectedRepositoryId, projectSlug: project.name }),
-      });
-      const payload = await response.json().catch(() => ({})) as { data?: RepositoryConnection; error?: { code?: string } };
-      if (!response.ok || !payload.data) throw new Error(repositoryMessage(payload.error?.code, text));
-      setRepository(payload.data); setRepositoryPickerOpen(false);
-      storeCached(clientCacheKeys.repository(projectId), payload.data, 10_000);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : text("仓库绑定失败", "Unable to bind repository")); }
-    finally { setRepositoryBusy(false); }
-  }
-
-  async function retryRepositorySync() {
-    if (repositoryBusy || selectedWorkflowId !== null) return;
-    setRepositoryBusy(true); setError(null);
-    try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repository/sync/retry`, { method: "POST" });
-      const payload = await response.json().catch(() => ({})) as { error?: { code?: string } };
-      if (!response.ok) throw new Error(repositoryMessage(payload.error?.code, text));
-      expireCached(clientCacheKeys.repository(projectId));
-      await loadRepository(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : text("同步重试失败", "Unable to retry synchronization")); }
-    finally { setRepositoryBusy(false); }
-  }
 
   async function createLocalBranch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -322,7 +207,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       });
       const payload = await response.json().catch(() => ({})) as Partial<LocalGitState> & { code?: string; message?: string };
       if (!response.ok || payload.repository !== true || typeof payload.branch !== "string") {
-        throw new LocalGitError(payload.code ?? "LOCAL_GIT_OPERATION_FAILED", payload.message);
+        throw new LocalGitError(payload.code ?? "LOCAL_GIT_OPERATION_FAILED", errorText(payload.message, "本地 Git 操作失败", "Local Git operation failed"));
       }
       setLocalGit(Object.freeze({ repository: true, branch: payload.branch }));
       setNewBranchName("");
@@ -388,7 +273,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       const value = await loadCached(clientCacheKeys.conversation(conversationId), 30_000, async () => {
         const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { cache: "no-store" });
         const payload = await response.json() as { conversation?: ProductConversation; message?: string };
-        if (!response.ok || !payload.conversation) throw new Error(payload.message ?? text(`会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
+        if (!response.ok || !payload.conversation) throw new Error(errorText(payload.message, `会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
         return payload.conversation;
       });
       setConversation(value);
@@ -406,7 +291,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
   async function selectIteration(workflowId: string) {
     if (!project || busy) return;
-    setRepositoryPickerOpen(false);
     setEditingDocument(false);
     if (workflowId === project.workflowId) {
       setSelectedWorkflowId(null);
@@ -426,7 +310,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         message?: string;
       };
       if (!response.ok || !payload.iteration) {
-        throw new Error(payload.message ?? text(`迭代详情读取失败 (${response.status})`, `Unable to load iteration details (${response.status})`));
+        throw new Error(errorText(payload.message, `迭代详情读取失败 (${response.status})`, `Unable to load iteration details (${response.status})`));
       }
       setSelectedWorkflowId(workflowId);
       setHistoricalIteration(payload.iteration);
@@ -453,7 +337,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         message?: string;
       };
       if (!response.ok || !payload.project) {
-        throw new Error(payload.message ?? text(`新一轮创建失败 (${response.status})`, `Unable to create the next iteration (${response.status})`));
+        throw new Error(errorText(payload.message, `新一轮创建失败 (${response.status})`, `Unable to create the next iteration (${response.status})`));
       }
       setProject(payload.project);
       storeCached(clientCacheKeys.project(projectId), payload.project, 5_000);
@@ -524,7 +408,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       });
     } catch (reason) {
       const failureMessage = reason instanceof ConversationStreamError
-        ? reason.message
+        ? errorText(reason.message, "消息发送失败，请稍后重试", "Message failed. Please try again.")
         : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
       const failedConversation = failedOptimisticConversation(pendingConversation, failureMessage);
       setConversation(failedConversation);
@@ -562,7 +446,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         router.push("/settings?required=agent-retry");
         return;
       }
-      if (!response.ok) throw new Error(payload.message ?? text(`操作失败 (${response.status})`, `Operation failed (${response.status})`));
+      if (!response.ok) throw new Error(errorText(payload.message, `操作失败 (${response.status})`, `Operation failed (${response.status})`));
       await loadProject(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("操作失败", "Operation failed"));
@@ -601,7 +485,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         }),
       });
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      if (!response.ok) throw new Error(payload.message ?? text(`说明文档保存失败 (${response.status})`, `Unable to save project document (${response.status})`));
+      if (!response.ok) throw new Error(errorText(payload.message, `说明文档保存失败 (${response.status})`, `Unable to save project document (${response.status})`));
       setEditingDocument(false);
       await loadProject(true);
     } catch (reason) {
@@ -623,12 +507,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({})) as { message?: string };
-        throw new Error(payload.message ?? text(`项目删除失败 (${response.status})`, `Unable to delete project (${response.status})`));
+        throw new Error(errorText(payload.message, `项目删除失败 (${response.status})`, `Unable to delete project (${response.status})`));
       }
       removeCached(clientCacheKeys.project(projectId));
       removeCached(clientCacheKeys.conversations(projectId));
       removeCached(clientCacheKeys.artifacts(projectId));
-      removeCached(clientCacheKeys.repository(projectId));
       const projectList = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
       if (projectList) storeCached(clientCacheKeys.projects, projectList.filter(item => item.id !== projectId), 10_000);
       setConfirmingDelete(false);
@@ -643,10 +526,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
   async function accessArtifact(artifact: ArtifactRecord) {
     if (openingArtifactId) return;
-    // Standalone artifacts already live in the local MinIO container. Hand all
+    // Self-hosted artifacts already live in the local object store. Hand all
     // of them to the host bridge so reports and snapshots open in their default
     // macOS application instead of taking an unnecessary browser download path.
-    const opensOnHost = session.authMode === "STANDALONE";
+    const opensOnHost = true;
     setOpeningArtifactId(artifact.id);
     setError(null);
     try {
@@ -659,7 +542,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       ]);
       const payload = await response.json() as { url?: string; filename?: string; message?: string };
       if (!response.ok || !payload.url || !payload.filename) {
-        throw new Error(payload.message ?? text(`制品下载授权失败 (${response.status})`, `Unable to authorize download (${response.status})`));
+        throw new Error(errorText(payload.message, `制品下载授权失败 (${response.status})`, `Unable to authorize download (${response.status})`));
       }
       if (opensOnHost && bridgeUrl) {
         const openResponse = await fetch(`${bridgeUrl}/artifact/open`, {
@@ -677,7 +560,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         });
         const openResult = await openResponse.json().catch(() => ({})) as { opened?: boolean; message?: string };
         if (!openResponse.ok || openResult.opened !== true) {
-          throw new Error(openResult.message ?? text("本地制品打开失败", "Unable to open the local artifact"));
+          throw new Error(errorText(openResult.message, "本地制品打开失败", "Unable to open the local artifact"));
         }
         return;
       }
@@ -771,7 +654,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       <section aria-label={text("交付流程", "Delivery pipeline")} className="product-delivery-pipeline">
         <header className="product-delivery-pipeline-header">
           <div className="product-delivery-pipeline-title">
-            <span className="product-delivery-section-number">01</span>
             <div><span className="eyebrow">DELIVERY PIPELINE</span><h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2></div>
           </div>
           <div className="product-delivery-pipeline-actions">
@@ -819,7 +701,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           <ol className="product-delivery-track">
             <li className={`product-delivery-stage status-${discoveryStage.view.kind}`} data-stage-status={discoveryStage.view.kind}>
               <div className="product-delivery-stage-marker" aria-hidden="true">{discoveryStage.view.symbol}</div>
-              <span className="product-delivery-stage-number">01</span>
               <b>{discoveryStage.title}</b>
               <strong>{discoveryStage.view.label}</strong>
               <small>{discoveryStage.detail}</small>
@@ -829,7 +710,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 </time>
               ) : null}
             </li>
-            {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
+            {PIPELINE.map(([kind, chineseLabel, englishLabel]) => {
               const jobs = latestPipelineJobs(viewedJobs.filter(job => job.kind === kind));
               const stageArtifacts = artifactsByStage.get(kind) ?? Object.freeze([]);
               const inProfile = profileStages.has(kind);
@@ -839,7 +720,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
-                  <span className="product-delivery-stage-number">{String(index + 2).padStart(2, "0")}</span>
                   <b>{text(chineseLabel, englishLabel)}</b>
                   <strong>{view.label}</strong>
                   <small>{inProfile
@@ -865,7 +745,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                           <b>{artifactLabel(artifact, text)}</b>
                           <strong>{openingArtifactId === artifact.id
                             ? text("打开中…", "OPENING…")
-                            : session.authMode === "STANDALONE" ? text("打开", "OPEN") : text("下载", "DOWNLOAD")}</strong>
+                            : text("打开", "OPEN")}</strong>
                         </button>
                       ))}
                     </div>
@@ -993,7 +873,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               <span><b>{text("项目交付配置", "PROJECT DELIVERY SETTINGS")}</b><small>{text("Git 分支、代码仓库与 SteamPipe", "Git branch, repository, and SteamPipe")}</small></span>
             </span>
             <span className="product-delivery-config-summary-meta">
-              <span className="product-delivery-config-branch">{localGit?.repository ? localGit.branch ?? "DETACHED HEAD" : repository?.syncBranch ?? text("未绑定 Git", "NO GIT")}</span>
+              <span className="product-delivery-config-branch">{localGit?.repository ? localGit.branch ?? "DETACHED HEAD" : text("未绑定 Git", "NO GIT")}</span>
               <span className="product-delivery-config-toggle">
                 <span className="product-delivery-config-toggle-closed">{text("点击展开", "OPEN SETTINGS")}</span>
                 <span className="product-delivery-config-toggle-open">{text("点击收起", "CLOSE SETTINGS")}</span>
@@ -1022,15 +902,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图。", "Historical iterations are read-only.")}</small> : null}
                 {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
               </div> : null}
-              {platformManaged ? <div className="platform-repository-settings">
-                {repository ? <>
-                  <div className="platform-repository-summary"><a href={repository.htmlUrl} rel="noreferrer" target="_blank">{repository.fullName}</a><span className={`revision-badge repository-state-${repository.syncState.toLowerCase()}`}>{repository.syncState}</span></div>
-                  {repository.lastError ? <p className="repository-onboarding-error">{repository.lastError}</p> : null}
-                  <div className="platform-repository-actions"><button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("重新绑定", "RECONNECT")}</button>{repository.syncState === "FAILED" || repository.syncState === "REMOTE_DIVERGED" ? <button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void retryRepositorySync()} type="button">{text("重试同步", "RETRY SYNC")}</button> : null}</div>
-                </> : <div className="platform-repository-actions"><button className="button button-primary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void createPrivateRepository()} type="button">{text("创建私有仓库", "CREATE PRIVATE REPOSITORY")}</button><button className="button button-secondary" disabled={repositoryBusy || viewingHistoricalIteration} onClick={() => void openRepositoryPicker()} type="button">{text("绑定已有仓库", "CONNECT EXISTING")}</button><Link aria-disabled={viewingHistoricalIteration} className="button button-secondary" href="/account">{text("GitHub 授权", "GITHUB ACCESS")}</Link></div>}
-                {repositoryPickerOpen ? <div className="platform-repository-picker"><select aria-label={text("选择 GitHub 仓库", "Select GitHub repository")} disabled={viewingHistoricalIteration} onChange={event => setSelectedRepositoryId(event.target.value)} value={selectedRepositoryId}>{repositoryOptions.map(option => <option key={option.id} value={option.id}>{option.fullName}{option.private ? " · private" : ""}</option>)}</select><button className="button button-primary" disabled={!selectedRepositoryId || repositoryBusy || viewingHistoricalIteration} onClick={() => void bindRepository()} type="button">{text("确认绑定", "CONNECT")}</button><button className="button button-secondary" disabled={repositoryBusy} onClick={() => setRepositoryPickerOpen(false)} type="button">{text("取消", "CANCEL")}</button></div> : null}
-              </div> : null}
-              {!project.localDirectory && !platformManaged ? <p className="project-delivery-config-empty">{text("当前项目没有可配置的 Git 工作目录。", "This project has no configurable Git worktree.")}</p> : null}
+              {!project.localDirectory ? <p className="project-delivery-config-empty">{text("当前项目没有可配置的 Git 工作目录。", "This project has no configurable Git worktree.")}</p> : null}
             </section>
             <ProjectSteamPanel
               compact
@@ -1040,7 +912,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               readOnly={viewingHistoricalIteration}
               workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
               workflowState={viewedWorkflowState}
-              workspaceRole={session.workspaceRole}
             />
           </div>
         </details>
@@ -1048,7 +919,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
       <div className="project-collaboration-layout">
       <section className="project-primary-section project-conversations-section" aria-label={text("项目会话", "Project conversations")}>
-        <div className="project-primary-section-heading"><span>02</span><div><b>{text("项目会话", "PROJECT CONVERSATIONS")}</b><small>{text("设计、开发与测试 Agent 的协作记录", "Design, Development, and Test Agent collaboration")}</small></div></div>
+        <div className="project-primary-section-heading"><div><b>{text("项目会话", "PROJECT CONVERSATIONS")}</b><small>{text("设计、开发与测试 Agent 的协作记录", "Design, Development, and Test Agent collaboration")}</small></div></div>
         <section className="conversation-panel project-conversation-panel">
             <div className="conversation-header product-panel-heading">
               <div><span><h2>{text("会话记录", "CONVERSATION HISTORY")}</h2><small>{conversations.length ? text(`${conversations.length} 个历史会话`, `${conversations.length} saved conversation${conversations.length === 1 ? "" : "s"}`) : text("还没有历史会话", "No conversation history")}</small></span></div>
@@ -1108,10 +979,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       </section>
 
       <section className="project-primary-section project-document-section" aria-label={text("项目说明", "Project document")}>
-        <div className="project-primary-section-heading"><span>03</span><div><b>{text("项目说明", "PROJECT DOCUMENT")}</b><small>{text("由需求会话持续维护的当前设计规格", "The current design specification maintained by project conversations")}</small></div></div>
+        <div className="project-primary-section-heading"><div><b>{text("项目说明", "PROJECT DOCUMENT")}</b><small>{text("由需求会话持续维护的当前设计规格", "The current design specification maintained by project conversations")}</small></div></div>
         <aside className="product-document-sidebar">
           <header className="product-document-sidebar-header">
-            <div><span className="step-number">DOC</span><span><b>{text("当前项目说明", "CURRENT PROJECT DOCUMENT")}</b><small>{text("Agent 随需求对话实时维护", "Updated by Agent from the conversation")}</small></span></div>
+            <div><span><b>{text("当前项目说明", "CURRENT PROJECT DOCUMENT")}</b><small>{text("Agent 随需求对话实时维护", "Updated by Agent from the conversation")}</small></span></div>
           </header>
           <>
               <div className="product-document-sidebar-actions">
@@ -1168,6 +1039,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 async function readLocalGitStatus(
   bindingId: string,
   text: (chinese: string, english: string) => string,
+  errorText: (message: unknown, chineseFallback: string, englishFallback: string) => string,
 ): Promise<LocalGitState> {
   const bridgeUrl = await localProjectBridgeUrl(text);
   const response = await fetch(`${bridgeUrl}/directory/git/status`, {
@@ -1178,7 +1050,7 @@ async function readLocalGitStatus(
   const payload = await response.json().catch(() => ({})) as Partial<LocalGitState> & { code?: string; message?: string };
   if (!response.ok || typeof payload.repository !== "boolean"
     || (payload.branch !== null && typeof payload.branch !== "string")) {
-    throw new LocalGitError(payload.code ?? "LOCAL_GIT_STATUS_FAILED", payload.message);
+    throw new LocalGitError(payload.code ?? "LOCAL_GIT_STATUS_FAILED", errorText(payload.message, "本地 Git 状态读取失败", "Unable to read local Git status"));
   }
   return Object.freeze({ repository: payload.repository, branch: payload.branch ?? null });
 }
@@ -1465,7 +1337,7 @@ export function technicalFailureDetail(raw: string): string {
     .replace(/(?:Sandbox executor failed:\s*)?DEVILUDO_PROGRESS:[^\n]*(?:\n|$)/g, "")
     .trim();
   if (!withoutProgress && raw.includes("DEVILUDO_PROGRESS:")) {
-    return "EXECUTOR_DIAGNOSTIC_TRUNCATED: 旧执行器未保留真实失败原因";
+    return "EXECUTOR_DIAGNOSTIC_TRUNCATED: The previous executor did not preserve the actual failure reason";
   }
   const detail = withoutProgress || raw;
   const jsonStart = detail.indexOf("{");
@@ -1503,7 +1375,7 @@ function artifactLabel(
     PROJECT_DOCUMENT: ["项目说明", "PROJECT DOCUMENT"],
     BUILD: ["游戏构建", "GAME BUILD"],
     E2E_REPORT: ["E2E 报告", "E2E REPORT"],
-    E2E_REGRESSION: ["托管回归轨迹", "MANAGED REGRESSION TRACE"],
+    E2E_REGRESSION: ["当前回归轨迹", "CURRENT REGRESSION TRACE"],
     SIGNED_BUILD: ["签名构建", "SIGNED BUILD"],
     PUBLISH_RECEIPT: ["发布回执", "PUBLISH RECEIPT"],
     CLEAN_INSTALL_REPORT: ["回装报告", "CLEAN-INSTALL REPORT"],
@@ -1515,7 +1387,7 @@ function artifactLabel(
 function latestArtifactsByKindAndPlatform(values: readonly ArtifactRecord[]): readonly ArtifactRecord[] {
   const latest = new Map<string, ArtifactRecord>();
   for (const artifact of values) {
-    // Regression traces are managed inputs for the next E2E job, not user-facing downloads.
+    // Regression traces are internal inputs for the next E2E job, not user-facing downloads.
     if (artifact.kind === "E2E_REGRESSION") continue;
     const key = `${artifact.kind}:${artifact.targetPlatform ?? "common"}`;
     const current = latest.get(key);
@@ -1598,14 +1470,6 @@ function formatConversationTime(value: string, locale: string, text: (chinese: s
   }).format(date);
 }
 
-function repositoryMessage(code: string | undefined, text: (chinese: string, english: string) => string): string {
-  if (code === "GITHUB_REAUTHORIZE_REQUIRED") return text("请先在账号设置中连接或重新授权 GitHub", "Connect or reauthorize GitHub in Account settings first");
-  if (code === "GITHUB_PERMISSION_OR_RATE_LIMIT" || code === "GITHUB_PUSH_REQUIRED") return text("当前 GitHub 账号没有推送权限，或组织 SSO 尚未授权", "The current GitHub account cannot push, or organization SSO is not authorized");
-  if (code === "ORGANIZATION_ADMIN_REQUIRED") return text("只有组织 Owner 或 Admin 可以重新绑定仓库", "Only an organization Owner or Admin can reconnect a repository");
-  if (code === "SYNC_NOT_RETRYABLE") return text("当前没有可重试的仓库同步", "There is no repository synchronization to retry");
-  return code ?? text("仓库操作失败", "Repository operation failed");
-}
-
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
     DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
@@ -1622,8 +1486,4 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
 
 function workflowNeedsPolling(state: string): boolean {
   return ["AGENT_RUNNING", "ASSET_GENERATING", "ARTIFACT_BUILDING", "E2E_TESTING", "STEAM_PUBLISHING"].includes(state);
-}
-
-function repositoryNeedsPolling(state: RepositoryConnection["syncState"]): boolean {
-  return state === "PENDING" || state === "SYNCING";
 }

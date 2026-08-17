@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
-import type { ProductConversation, ProductProjectDetail, ProjectAgentRole, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
+import type { ProductConversation, ProductProjectDetail, ProjectAgentRole, WorkspaceSummary } from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -13,17 +13,12 @@ import {
 import {
   createAgentSecretStore,
   isMaskedApiKey,
-  normalizeBaseUrl,
   parseAgentSettingsInput,
   type AgentSecretStore,
 } from "./agent-settings";
-import {
-  isImageGenerationProvider,
-  type ImageGenerationProvider,
-} from "@/lib/product/asset-manifest";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
 import type { CoreConfig } from "./config";
-import { AccessResolver, type AccessPrincipal } from "./access";
+import { localAccessContext, type LocalAccessContext } from "./access";
 import {
   assertE2eCompletion,
   deliveryStages,
@@ -40,7 +35,6 @@ import {
   analyzeImportedProject,
   decodeProjectSourceStream,
   inspectProjectFiles,
-  inspectProjectZip,
   normalizeGitBranchName,
   normalizeGitHubRepositoryUrl,
   type ImportedSourceSnapshot,
@@ -63,7 +57,6 @@ import type {
   CoreRepository,
   PendingProjectImportAnalysis,
   StoredInstanceAgentSettings,
-  StoredImageGenerationSettings,
 } from "./repository";
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
@@ -74,6 +67,7 @@ import {
   validateSteamBuildToken,
   type SteamSecretStore,
 } from "./steam-settings";
+import { UsageTelemetry } from "./usage-telemetry";
 
 export async function runApi(
   repository: CoreRepository,
@@ -86,7 +80,7 @@ export async function runApi(
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   const pki = new E2ePkiIssuer();
-  const access = new AccessResolver(config);
+  const telemetry = new UsageTelemetry(config);
   const app = Fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
@@ -123,15 +117,13 @@ export async function runApi(
   app.addHook("preHandler", async request => {
     const path = request.url.split("?", 1)[0];
     if (!path.startsWith("/v1/") || path.startsWith("/v1/e2e/")) return;
-    if (path.startsWith("/v1/internal/platform/")) return;
     authorizeWeb(request, config);
     if (path.startsWith("/v1/dev/")) return;
     const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-    const principal = await access.resolve(request, mutating);
-    authenticatedRequests.set(request, principal);
     if (mutating && request.headers["x-deviludo-origin-verified"] !== "1") {
       throw httpError(403, "ORIGIN_REJECTED", "请求来源校验失败");
     }
+    telemetry.recordActivity();
   });
 
   app.get("/health/live", async () => ({
@@ -150,182 +142,51 @@ export async function runApi(
       .filter(pool => required.has(pool.kind))
       .every(pool => pool.readiness === "READY" || pool.readiness === "ON_DEMAND_READY");
     return reply.code(ready ? 200 : 503).send({
-      schemaVersion: "deviludo.platform-readiness.v1",
+      schemaVersion: "deviludo.instance-readiness",
       status: ready ? "ready" : "not_ready",
       pools: Object.fromEntries(pools.map(pool => [pool.kind, pool.readiness])),
       requiredPools: config.requiredReadyPools,
     });
   });
 
-  app.get<{ Querystring: { limit?: string } }>("/v1/internal/platform/source-events", async (request, reply) => {
-    authorizePlatformService(request, config);
-    const limit = Number(request.query.limit ?? "100");
-    return reply.header("cache-control", "no-store").send({
-      events: await repository.listSourceReadyEvents(limit),
-    });
-  });
-
-  app.post("/v1/internal/platform/source-events/ack", async (request, reply) => {
-    authorizePlatformService(request, config);
-    const body = objectBody(request.body);
-    if (!Array.isArray(body.eventIds) || body.eventIds.some(value => typeof value !== "string")) {
-      throw httpError(400, "INVALID_SOURCE_EVENT_ACK", "源码事件确认格式无效");
-    }
-    return reply.send({ acknowledged: await repository.acknowledgeSourceReadyEvents(body.eventIds as string[]) });
-  });
-
-  app.post(
-    "/v1/internal/platform/projects/import",
-    { bodyLimit: 64 * 1024 * 1024 },
-    async (request, reply) => {
-      authorizePlatformService(request, config);
-      const workspaceId = header(request, "x-deviludo-workspace-id");
-      const actorAccountId = header(request, "x-deviludo-actor-account-id");
-      const encodedName = header(request, "x-deviludo-project-name");
-      const workspaceName = decodeHeader(header(request, "x-deviludo-workspace-name") || "Organization");
-      if (!UUID.test(workspaceId) || !UUID.test(actorAccountId) || !Buffer.isBuffer(request.body)) {
-        throw httpError(400, "INVALID_PLATFORM_IMPORT", "Platform 项目导入请求无效");
-      }
-      const displayName = decodeHeader(encodedName || "GitHub project");
-      const principal: AccessPrincipal = Object.freeze({
-        id: "platform-import",
-        user: Object.freeze({ id: actorAccountId, username: "Platform actor", instanceAdmin: false, createdAt: "" }),
-        workspace: Object.freeze({ id: workspaceId, name: workspaceName, createdAt: "" }),
-        role: "MEMBER",
-        csrfHash: null,
-        expiresAt: null,
-        platformAdminRoles: Object.freeze([]),
-      });
-      const result = await processProjectImport({
-        request,
-        principal,
-        repository,
-        agentSecrets,
-        projectSources,
-        source: async () => inspectProjectZip({
-          bytes: request.body as Buffer,
-          sourceKind: "GIT",
-          displayName,
-        }),
-      });
-      return reply.code(result.statusCode).send(result.payload);
-    },
-  );
-
-  app.get<{ Params: { workspaceId: string; projectId: string } }>(
-    "/v1/internal/platform/workspaces/:workspaceId/projects/:projectId",
-    async (request, reply) => {
-      authorizePlatformService(request, config);
-      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
-        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      }
-      const project = await repository.readProject(request.params.workspaceId, request.params.projectId);
-      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      return reply.header("cache-control", "no-store").send({ project: {
-        id: project.id,
-        workspaceId: request.params.workspaceId,
-        name: project.name,
-        workflowState: project.workflowState,
-        source: project.source,
-      } });
-    },
-  );
-
-  app.delete<{ Params: { workspaceId: string; projectId: string } }>(
-    "/v1/internal/platform/workspaces/:workspaceId/projects/:projectId",
-    async (request, reply) => {
-      authorizePlatformService(request, config);
-      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
-        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      }
-      const deleted = await repository.deleteProject(
-        request.params.workspaceId,
-        request.params.projectId,
-        () => Promise.all([
-          objectStore.deleteProjectObjects(request.params.workspaceId, request.params.projectId),
-          projectSources.deleteProject(request.params.workspaceId, request.params.projectId),
-        ]).then(() => undefined),
-      );
-      return deleted ? reply.code(204).send() : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-    },
-  );
-
-  app.get<{ Params: { workspaceId: string; projectId: string; revision: string } }>(
-    "/v1/internal/platform/workspaces/:workspaceId/projects/:projectId/source/:revision/archive",
-    async (request, reply) => {
-      authorizePlatformService(request, config);
-      const revision = Number(request.params.revision);
-      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)
-        || !Number.isSafeInteger(revision) || revision < 1) {
-        return reply.code(404).send({ code: "SOURCE_REVISION_NOT_FOUND" });
-      }
-      const source = await repository.readSourceRevision({
-        workspaceId: request.params.workspaceId,
-        projectId: request.params.projectId,
-        revision,
-      });
-      if (!source) return reply.code(404).send({ code: "SOURCE_REVISION_NOT_FOUND" });
-      const archive = await projectSources.archive(source.relativePath);
-      if (archive.digest !== source.digest || archive.fileCount !== source.fileCount || archive.totalBytes !== source.totalBytes) {
-        throw httpError(409, "SOURCE_REVISION_CORRUPTED", "源码 revision 与数据库摘要不一致");
-      }
-      return reply
-        .header("content-type", "application/gzip")
-        .header("content-disposition", `attachment; filename=source-r${revision}.tar.gz`)
-        .header("x-deviludo-source-digest", source.digest)
-        .header("x-deviludo-source-files", String(source.fileCount))
-        .header("x-deviludo-source-bytes", String(source.totalBytes))
-        .send(archive.bytes);
-    },
-  );
-
-  app.get("/v1/admin/server-pools", async (request, reply) => {
-    requireInstanceAdmin(request);
+  app.get("/v1/runtime/server-pools", async (request, reply) => {
+    requireLocalOperator();
     const [pools, nodes] = await Promise.all([repository.readServerPools(), repository.readServerNodes()]);
     return reply.send({ pools, nodes });
   });
 
-  app.get("/v1/admin/server-nodes", async (request, reply) => {
-    requireInstanceAdmin(request);
+  app.get("/v1/runtime/server-nodes", async (request, reply) => {
+    requireLocalOperator();
     return reply.send({ nodes: await repository.readServerNodes() });
   });
 
-  app.get("/v1/session", async (request, reply) => {
-    const principal = productAccess(request, config);
-    return reply.header("cache-control", "no-store").send({ session: {
-      user: publicUser(principal.user),
-      authenticated: true,
-      authMode: config.accessMode === "standalone" ? "STANDALONE" : "PLATFORM",
-      canLogout: config.accessMode === "platform",
-      workspaceRole: principal.role,
-      selectedWorkspace: principal.workspace,
+  app.get("/v1/instance", async (request, reply) => {
+    const access = productAccess(request, config);
+    return reply.header("cache-control", "no-store").send({ instance: {
+      mode: "SELF_HOSTED",
+      workspace: access.workspace,
     } });
   });
 
-  app.put("/v1/session/workspace", async (request, reply) => {
-    const principal = productAccess(request, config);
-    const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
-      ? request.body as Record<string, unknown>
-      : {};
-    if (body.workspaceId !== principal.workspace.id) {
-      throw httpError(409, "WORKSPACE_ASSERTION_CHANGED", "当前工作区由访问模式决定，请刷新后重试");
-    }
-    return reply.header("cache-control", "no-store").send({ workspace: principal.workspace });
+  app.get("/v1/settings/telemetry", async (request, reply) => {
+    productAccess(request, config);
+    return reply.header("cache-control", "no-store").send({ settings: await telemetry.settings() });
   });
 
-  app.get("/v1/workspaces", async (request, reply) => {
-    const principal = productAccess(request, config);
-    return reply.header("cache-control", "no-store").send({ workspaces: [principal.workspace] });
+  app.put("/v1/settings/telemetry", async (request, reply) => {
+    productAccess(request, config);
+    const body = objectBody(request.body);
+    if (typeof body.enabled !== "boolean") throw httpError(400, "INVALID_TELEMETRY_SETTINGS", "遥测开关无效");
+    return reply.header("cache-control", "no-store").send({ settings: await telemetry.setEnabled(body.enabled) });
   });
 
   app.get("/v1/settings/agent", async (request, reply) => {
-    const principal = productAccess(request, config);
-    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
+    productAccess(request, config);
     const [settings, runtimes] = await Promise.all([
       repository.readAgentSettings(),
       detectAgentRuntimes(),
     ]);
-    const apiKeyMask = settings
+    const apiKeyMask = settings?.agentRuntime === "CLAUDE_CODE"
       ? settings.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(settings.credentialSecretRef)
       : null;
@@ -337,10 +198,9 @@ export async function runApi(
 
   app.put("/v1/settings/agent", async (request, reply) => {
     const principal = productAccess(request, config);
-    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
     const input = parseAgentSettingsInput(request.body);
     const current = await repository.readAgentSettings();
-    const currentMask = current
+    const currentMask = current?.agentRuntime === "CLAUDE_CODE"
       ? current.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
       : null;
@@ -348,72 +208,35 @@ export async function runApi(
       throw new Error("API Key 掩码与已保存凭据不匹配");
     }
     const replacementApiKey = input.apiKey && input.apiKey !== currentMask ? input.apiKey : null;
-    if (!replacementApiKey && !current) throw new Error("首次配置必须提供 API Key");
-    const credential = replacementApiKey
-      ? await agentSecrets.writeApiKey(replacementApiKey)
-      : {
-          secretRef: current?.credentialSecretRef ?? "",
-          mask: currentMask ?? "",
-          fingerprint: current?.apiKeyFingerprint ?? "",
-          version: current?.credentialVersion ?? "",
-        };
+    if (input.agentRuntime === "CLAUDE_CODE" && !replacementApiKey && current?.agentRuntime !== "CLAUDE_CODE") {
+      throw new Error("切换到 Claude Code 时必须提供 Provider API Key");
+    }
+    const credential = input.agentRuntime === "CODEX_CLI"
+      ? await agentSecrets.writeApiKey(readCodexOfficialLogin())
+      : replacementApiKey
+        ? await agentSecrets.writeApiKey(replacementApiKey)
+        : {
+            secretRef: current?.credentialSecretRef ?? "",
+            mask: currentMask ?? "",
+            fingerprint: current?.apiKeyFingerprint ?? "",
+            version: current?.credentialVersion ?? "",
+          };
     if (!credential.mask) throw new Error("已保存 API Key 的掩码不可用，请重新填写 API Key");
     const saved = await repository.saveAgentSettings({
       agentRuntime: input.agentRuntime,
       baseUrl: input.baseUrl,
       models: input.models,
       roleModels: input.roleModels,
+      imageModel: input.imageModel,
       credentialSecretRef: credential.secretRef,
       apiKeyMask: credential.mask,
       apiKeyFingerprint: credential.fingerprint,
       credentialVersion: credential.version,
-      updatedBy: principal.user.username,
+      updatedBy: principal.actorLabel,
     });
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(saved),
     });
-  });
-
-  app.get("/v1/settings/image-generation", async (request, reply) => {
-    const principal = productAccess(request, config);
-    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
-    const settings = await repository.readImageGenerationSettings();
-    return reply.header("cache-control", "no-store")
-      .send({ settings: publicImageGenerationSettings(settings) });
-  });
-
-  app.put("/v1/settings/image-generation", async (request, reply) => {
-    const principal = productAccess(request, config);
-    if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
-    const input = parseImageGenerationInput(request.body);
-    const current = await repository.readImageGenerationSettings();
-    // Re-submitting the mask means "keep the stored key"; anything else is a
-    // replacement. This mirrors how the Agent runtime credential is handled.
-    if (input.apiKey && isMaskedApiKey(input.apiKey) && input.apiKey !== current?.apiKeyMask) {
-      throw new Error("API Key 掩码与已保存凭据不匹配");
-    }
-    const replacementApiKey = input.apiKey && input.apiKey !== current?.apiKeyMask ? input.apiKey : null;
-    if (!replacementApiKey && !current) throw new Error("首次配置必须提供 API Key");
-    const credential = replacementApiKey
-      ? await agentSecrets.writeApiKey(replacementApiKey, "image-generation")
-      : {
-          secretRef: current?.credentialSecretRef ?? "",
-          mask: current?.apiKeyMask ?? "",
-          fingerprint: current?.apiKeyFingerprint ?? "",
-          version: current?.credentialVersion ?? "",
-        };
-    const saved = await repository.saveImageGenerationSettings({
-      provider: input.provider,
-      apiEndpoint: input.apiEndpoint,
-      model: input.model,
-      credentialSecretRef: credential.secretRef,
-      apiKeyMask: credential.mask,
-      apiKeyFingerprint: credential.fingerprint,
-      credentialVersion: credential.version,
-      updatedBy: principal.user.username,
-    });
-    return reply.header("cache-control", "no-store")
-      .send({ settings: publicImageGenerationSettings(saved) });
   });
 
   app.get("/v1/settings/steam", async (request, reply) => {
@@ -427,14 +250,13 @@ export async function runApi(
         revision: settings.revision,
         updatedAt: settings.updatedAt,
       } : null,
-      editable: principal.role === "OWNER" || principal.role === "ADMIN",
+      editable: true,
     });
   });
 
   app.put("/v1/settings/steam", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
-    requireWorkspaceAdmin(principal);
     const body = objectBody(request.body);
     const builderUsername = typeof body.builderUsername === "string" ? body.builderUsername.trim() : "";
     const buildToken = typeof body.buildToken === "string" ? body.buildToken : "";
@@ -459,7 +281,7 @@ export async function runApi(
       credentialMask: credential.mask,
       credentialFingerprint: credential.fingerprint,
       credentialVersion: credential.version,
-      updatedByAccountId: principal.user.id,
+      updatedByActorId: principal.actorId,
     });
     return reply.header("cache-control", "no-store").send({ settings: {
       builderUsername: saved.builderUsername,
@@ -499,9 +321,9 @@ export async function runApi(
     }
     const name = suppliedName || await agentProjectName(concept, repository, agentSecrets);
     const workspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
-    const projectId = deterministicProjectId(principal.user.id, idempotencyKey);
+    const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
     const project = await repository.createProject({
-      actorUserId: principal.user.id,
+      actorId: principal.actorId,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       projectId,
@@ -605,7 +427,7 @@ export async function runApi(
         workspaceId: workspace.id,
         projectId: request.params.projectId,
         baseWorkflowId: body.baseWorkflowId,
-        actorUserId: principal.user.id,
+        actorId: principal.actorId,
       });
       return reply.code(result.created ? 201 : 200).send(result);
     },
@@ -814,9 +636,6 @@ export async function runApi(
   app.delete<{ Params: { projectId: string }; Body?: { deleteLocalDirectory?: unknown } }>("/v1/projects/:projectId", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
-    if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
-      throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区管理员可以删除项目");
-    }
     const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
       ? request.body
       : {};
@@ -866,7 +685,7 @@ export async function runApi(
       });
     }
     const project = await repository.updateProjectDocument({
-      actorUserId: principal.user.id,
+      actorId: principal.actorId,
       workspaceId: workspace.id,
       projectId: request.params.projectId,
       expectedRevision: Number(body.expectedRevision),
@@ -985,7 +804,7 @@ export async function runApi(
       objectStore,
       workspaceId: workspace.id,
       project,
-      requestedByAccountId: principal.user.id,
+      requestedByActorId: principal.actorId,
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -997,14 +816,13 @@ export async function runApi(
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     return reply.header("cache-control", "no-store").send({
       settings: await repository.readProjectSteamSettings(workspace.id, project.id),
-      editable: principal.role === "OWNER" || principal.role === "ADMIN",
+      editable: true,
     });
   });
 
   app.put<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-settings", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
-    requireWorkspaceAdmin(principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     const input = parseProjectSteamSettings(request.body);
@@ -1012,7 +830,7 @@ export async function runApi(
       workspaceId: workspace.id,
       projectId: project.id,
       ...input,
-      updatedByAccountId: principal.user.id,
+      updatedByActorId: principal.actorId,
     });
     return reply.send({ settings });
   });
@@ -1030,7 +848,6 @@ export async function runApi(
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-releases", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
-    requireWorkspaceAdmin(principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     const body = objectBody(request.body);
@@ -1052,7 +869,7 @@ export async function runApi(
       workflowId,
       version,
       channel,
-      requestedByAccountId: principal.user.id,
+      requestedByActorId: principal.actorId,
     });
     return reply.code(result.accepted ? 202 : 200).send(result);
   });
@@ -1071,7 +888,7 @@ export async function runApi(
         workspaceId: workspace.id,
         workflowId: project.workflowId,
         idempotencyKey: requestIdempotencyKey(request, `release-skipped:${project.workflowId}`),
-        requestedByAccountId: principal.user.id,
+        requestedByActorId: principal.actorId,
       });
       return reply.code(accepted ? 202 : 200).send({ accepted });
     },
@@ -1082,7 +899,6 @@ export async function runApi(
     async (request, reply) => {
       const principal = productAccess(request, config);
       const workspace = await requireSelectedWorkspace(request, repository, principal);
-      requireWorkspaceAdmin(principal);
       const project = await repository.readProject(workspace.id, request.params.projectId);
       if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
       const release = await repository.confirmSteamReleaseLive({
@@ -1140,8 +956,8 @@ export async function runApi(
       idempotencyKey,
       payload: {
         stage,
-        requestedBy: principal.user.username,
-        requestedByAccountId: principal.user.id,
+        requestedBy: principal.actorLabel,
+        requestedByActorId: principal.actorId,
       },
     } as const;
     const accepted = stage === "STEAM_PUBLISH"
@@ -1149,7 +965,7 @@ export async function runApi(
           workspaceId: workspace.id,
           workflowId: project.workflowId,
           idempotencyKey,
-          requestedByAccountId: principal.user.id,
+          requestedByActorId: principal.actorId,
         })
       : await repository.appendSignal(workspace.id, project.workflowId, signalInput);
     return reply.code(accepted ? 202 : 200).send({ accepted, stage });
@@ -1163,13 +979,13 @@ export async function runApi(
     const accepted = await repository.appendSignal(workspace.id, project.workflowId, {
       kind: "CANCEL_REQUESTED",
       idempotencyKey: requestIdempotencyKey(request, `cancel:${project.workflowId}`),
-      payload: { requestedBy: principal.user.username, requestedByAccountId: principal.user.id },
+      payload: { requestedBy: principal.actorLabel, requestedByActorId: principal.actorId },
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
-  app.post("/v1/admin/server-nodes", async (request, reply) => {
-    requireInstanceAdmin(request);
+  app.post("/v1/runtime/server-nodes", async (request, reply) => {
+    requireLocalOperator();
     const body = objectBody(request.body);
     if (!isServerPoolKind(body.poolKind)
       || !["linux", "windows", "macos"].includes(String(body.operatingSystem))
@@ -1187,8 +1003,8 @@ export async function runApi(
     return reply.code(201).send({ node });
   });
 
-  app.post("/v1/admin/e2e-enrollment-tokens", async (request, reply) => {
-    const principal = requireInstanceAdmin(request);
+  app.post("/v1/runtime/e2e-enrollment-tokens", async (request, reply) => {
+    const principal = requireLocalOperator();
     const body = objectBody(request.body);
     if (!isServerPoolKind(body.poolKind) || !body.poolKind.startsWith("E2E_")) {
       return reply.code(400).send({ code: "INVALID_E2E_POOL" });
@@ -1197,7 +1013,7 @@ export async function runApi(
     const created = await repository.createE2eEnrollmentToken({
       tokenHash: digest(token),
       poolKind: body.poolKind as Extract<ServerPoolKind, `E2E_${string}`>,
-      createdBy: principal.user.id,
+      createdBy: principal.actorId,
     });
     return reply.code(201).send({ enrollment: { ...created, token } });
   });
@@ -1273,9 +1089,9 @@ export async function runApi(
   });
 
   app.post<{ Params: { nodeId: string; action: string } }>(
-    "/v1/admin/server-nodes/:nodeId/:action",
+    "/v1/runtime/server-nodes/:nodeId/:action",
     async (request, reply) => {
-      requireInstanceAdmin(request);
+      requireLocalOperator();
       const states: Readonly<Record<string, ServerNodeState>> = Object.freeze({
         activate: "ACTIVE",
         drain: "DRAINING",
@@ -1500,7 +1316,7 @@ export async function runApi(
     const accepted = await repository.appendSignal(body.workspaceId, request.params.workflowId, {
       kind: body.kind,
       idempotencyKey: body.idempotencyKey,
-      payload: { ...(body.payload as Record<string, unknown>), requestedByAccountId: principal.user.id },
+      payload: { ...(body.payload as Record<string, unknown>), requestedByActorId: principal.actorId },
     } as WorkflowSignalInput);
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -1557,7 +1373,7 @@ function conversationMessageCommand(value: unknown): ConversationMessageCommand 
 
 async function processConversationMessage(input: Readonly<{
   request: FastifyRequest;
-  principal: AccessPrincipal;
+  principal: LocalAccessContext;
   repository: CoreRepository;
   objectStore: CoreObjectStore;
   agentSecrets: AgentSecretStore;
@@ -1623,9 +1439,9 @@ async function processConversationMessage(input: Readonly<{
     }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
-    const projectId = deterministicProjectId(principal.user.id, idempotencyKey);
+    const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
     const createdBundle = await repository.createProjectConversation({
-      actorUserId: principal.user.id,
+      actorId: principal.actorId,
       workspaceId: targetWorkspace.id,
       workspaceName: targetWorkspace.name,
       projectId,
@@ -1654,7 +1470,7 @@ async function processConversationMessage(input: Readonly<{
         objectStore,
         workspaceId: targetWorkspace.id,
         project: createdProject,
-        requestedByAccountId: principal.user.id,
+        requestedByActorId: principal.actorId,
       });
       createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? createdProject;
     }
@@ -1715,7 +1531,7 @@ async function processConversationMessage(input: Readonly<{
       objectStore,
       workspaceId: workspace.id,
       project: updatedProject,
-      requestedByAccountId: principal.user.id,
+      requestedByActorId: principal.actorId,
     });
     updatedProject = await repository.readProject(workspace.id, projectId) ?? updatedProject;
   }
@@ -1731,7 +1547,7 @@ async function approveProjectDevelopment(input: Readonly<{
   objectStore: CoreObjectStore;
   workspaceId: string;
   project: ProductProjectDetail;
-  requestedByAccountId: string;
+  requestedByActorId: string;
 }>): Promise<boolean> {
   const specificationObject = await input.objectStore.putSpecification({
     workspaceId: input.workspaceId,
@@ -1748,7 +1564,7 @@ async function approveProjectDevelopment(input: Readonly<{
   return input.repository.appendSignal(input.workspaceId, input.project.workflowId, {
     kind: "SPEC_APPROVED",
     idempotencyKey: `spec-approved:${input.project.workflowId}`,
-    payload: { specificationObject, requestedByAccountId: input.requestedByAccountId },
+    payload: { specificationObject, requestedByActorId: input.requestedByActorId },
   });
 }
 
@@ -1766,16 +1582,6 @@ function authorizeWeb(request: FastifyRequest, config: CoreConfig): void {
   if (process.env.NODE_ENV !== "production" && !config.webToken) return;
   const actual = String(request.headers["x-deviludo-web-auth"] ?? "");
   if (!secureEqual(actual, config.webToken)) throw unauthorized("Web service authentication failed");
-}
-
-function authorizePlatformService(request: FastifyRequest, config: CoreConfig): void {
-  if (config.accessMode !== "platform" || !config.platformInternalToken) {
-    throw httpError(404, "NOT_FOUND", "接口不存在");
-  }
-  const authorization = String(request.headers.authorization ?? "");
-  if (!authorization.startsWith("Bearer ") || !secureEqual(authorization.slice(7), config.platformInternalToken)) {
-    throw unauthorized("Platform service authentication failed");
-  }
 }
 
 async function authorizeE2e(
@@ -1829,15 +1635,6 @@ function jsonDigest(value: unknown): string {
   return `sha256:${createHash("sha256").update(stable(value)).digest("hex")}`;
 }
 
-function header(request: FastifyRequest, name: string): string {
-  const value = request.headers[name];
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function decodeHeader(value: string): string {
-  try { return decodeURIComponent(value).slice(0, 200); } catch { throw httpError(400, "INVALID_PLATFORM_IMPORT", "Platform 项目导入元数据无效"); }
-}
-
 function secureEqual(actual: string, expected: string): boolean {
   const left = Buffer.from(actual);
   const right = Buffer.from(expected);
@@ -1863,36 +1660,29 @@ const MAX_ASSET_BYTES = 8 * 1024 * 1024;
  * that before `MAX_ASSET_BYTES` can be enforced on the decoded buffer.
  */
 const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_ASSET_BYTES * 4 / 3) + 4 * 1024;
-const authenticatedRequests = new WeakMap<FastifyRequest, AccessPrincipal>();
-
-function productAccess(request: FastifyRequest, config: CoreConfig): AccessPrincipal {
+function productAccess(request: FastifyRequest, config: CoreConfig): LocalAccessContext {
   authorizeWeb(request, config);
-  const session = authenticatedRequests.get(request);
-  if (!session) throw unauthorized("请先登录");
-  return session;
+  return localAccessContext();
 }
 
 async function selectedWorkspaceFromRequest(
   _request: FastifyRequest,
   _repository: CoreRepository,
-  session: AccessPrincipal,
+  context: LocalAccessContext,
 ) {
-  return session.workspace;
+  return context.workspace;
 }
 
 async function requireSelectedWorkspace(
   request: FastifyRequest,
   repository: CoreRepository,
-  session: AccessPrincipal,
+  context: LocalAccessContext,
 ) {
-  return selectedWorkspaceFromRequest(request, repository, session);
+  return selectedWorkspaceFromRequest(request, repository, context);
 }
 
-function requireInstanceAdmin(request: FastifyRequest): AccessPrincipal {
-  const principal = authenticatedRequests.get(request);
-  if (!principal) throw unauthorized("请先登录");
-  if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
-  return principal;
+function requireLocalOperator(): LocalAccessContext {
+  return localAccessContext();
 }
 
 function requestIdempotencyKey(request: FastifyRequest, prefix: string): string {
@@ -2013,7 +1803,7 @@ function projectSourceDigest(files: readonly SourceFile[]): string {
 
 async function queueBoundProjectImport(input: Readonly<{
   request: FastifyRequest;
-  principal: AccessPrincipal;
+  principal: LocalAccessContext;
   repository: CoreRepository;
   name: string;
   source: Readonly<{
@@ -2055,10 +1845,10 @@ async function queueBoundProjectImport(input: Readonly<{
 
   const targetWorkspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
   const project = await input.repository.createPendingImportedProject({
-    actorUserId: input.principal.user.id,
+    actorId: input.principal.actorId,
     workspaceId: targetWorkspace.id,
     workspaceName: targetWorkspace.name,
-    projectId: deterministicProjectId(input.principal.user.id, idempotencyKey),
+    projectId: deterministicProjectId(input.principal.actorId, idempotencyKey),
     workflowId: randomUUID(),
     idempotencyKey,
     name,
@@ -2124,7 +1914,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
         workflowId: claimed.workflowId,
-        actorUserId: claimed.actorUserId,
+        actorId: claimed.actorId,
         leaseToken: claimed.leaseToken,
         concept: analysis.concept,
         specification: analysis.specification,
@@ -2186,131 +1976,6 @@ async function abortableDelay(milliseconds: number, signal: AbortSignal): Promis
   });
 }
 
-async function processProjectImport(input: Readonly<{
-  request: FastifyRequest;
-  principal: AccessPrincipal;
-  repository: CoreRepository;
-  agentSecrets: AgentSecretStore;
-  projectSources: ProjectSourceStore;
-  source: () => Promise<ImportedSourceSnapshot>;
-}>): Promise<Readonly<{
-  statusCode: 200 | 201;
-  workspace: WorkspaceSummary;
-  payload: Readonly<{
-    workspace: WorkspaceSummary;
-    project: ProductProjectDetail;
-    conversation: ProductConversation | null;
-  }>;
-}>> {
-  const idempotencyKey = requestIdempotencyKey(input.request, "project-import");
-  const currentWorkspace = await selectedWorkspaceFromRequest(input.request, input.repository, input.principal);
-  const prior = await input.repository.readProjectCreationReceipt(input.principal.workspace.id, idempotencyKey);
-  if (prior) {
-    if (prior.operationKind !== "PROJECT" || (currentWorkspace && currentWorkspace.id !== prior.workspaceId)) {
-      throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他操作");
-    }
-    const [workspace, project, conversations] = await Promise.all([
-      input.repository.readWorkspace(prior.workspaceId),
-      input.repository.readProject(prior.workspaceId, prior.projectId),
-      input.repository.listProjectConversations(prior.workspaceId, prior.projectId),
-    ]);
-    if (!workspace || !project) throw new Error("Project import receipt is incomplete");
-    const conversation = conversations[0]
-      ? await input.repository.readConversation(prior.workspaceId, conversations[0].id)
-      : null;
-    return Object.freeze({
-      statusCode: 200,
-      workspace,
-      payload: Object.freeze({ workspace, project, conversation }),
-    });
-  }
-
-  let source: ImportedSourceSnapshot;
-  try {
-    source = await input.source();
-  } catch (error) {
-    if (isTimeoutFailure(error)) {
-      throw httpError(408, "PROJECT_SOURCE_TIMEOUT", "读取本地项目目录超时，请确认磁盘可用后重试");
-    }
-    const message = error instanceof Error ? error.message : "项目源码读取失败";
-    throw httpError(422, "PROJECT_IMPORT_SOURCE_FAILED", message);
-  }
-  const settings = await input.repository.readAgentSettings();
-  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-  const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
-  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
-  let analysis;
-  try {
-    analysis = await analyzeImportedProject({ source, settings, apiKey });
-  } catch (error) {
-    if (isTimeoutFailure(error)) {
-      throw httpError(408, "AGENT_IMPORT_TIMEOUT", "项目目录已读取完成，但 Agent 分析超时，请重试关联");
-    }
-    const message = error instanceof Error ? error.message : "项目分析 Agent 调用失败";
-    throw httpError(424, "AGENT_IMPORT_FAILED", message);
-  }
-
-  const targetWorkspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name: analysis.name, createdAt: "" });
-  const projectId = deterministicProjectId(input.principal.user.id, idempotencyKey);
-  const workflowId = randomUUID();
-  const stored = await input.projectSources.publishFiles({
-    workspaceId: targetWorkspace.id,
-    projectId,
-    revision: 1,
-    files: source.files,
-  });
-  let bundle;
-  try {
-    bundle = await input.repository.createImportedProject({
-      actorUserId: input.principal.user.id,
-      workspaceId: targetWorkspace.id,
-      workspaceName: targetWorkspace.name,
-      projectId,
-      workflowId,
-      conversationId: randomUUID(),
-      idempotencyKey,
-      name: analysis.name,
-      concept: analysis.concept,
-      specification: analysis.specification,
-      document: analysis.document,
-      userContent: source.repositoryUrl
-        ? `关联并分析 Git 项目：${source.repositoryUrl}`
-        : `关联并分析本地项目：${source.displayName}`,
-      assistantContent: analysis.assistantContent,
-      assistantMetadata: {
-        agentRuntime: analysis.runtime,
-        model: analysis.model,
-        settingsRevision: analysis.settingsRevision,
-        readyForDevelopment: analysis.discovery.questions.length === 0,
-        analysisQuestions: analysis.discovery.questions,
-      },
-      discovery: analysis.discovery,
-      source: {
-        kind: source.sourceKind,
-        repositoryUrl: source.repositoryUrl,
-        localDirectoryBindingId: source.localDirectoryBindingId,
-        gitBranch: source.gitBranch,
-        displayName: source.displayName,
-        fileCount: source.fileCount,
-        totalBytes: source.totalBytes,
-        revision: stored.revision,
-        relativePath: stored.relativePath,
-        sha256: stored.digest,
-      },
-      ...defaultWorkflowConfiguration(),
-    });
-  } catch (error) {
-    await input.projectSources.deleteProject(targetWorkspace.id, projectId).catch(() => undefined);
-    throw error;
-  }
-  const workspace = currentWorkspace ?? await input.repository.readWorkspace(targetWorkspace.id);
-  if (!workspace) throw new Error("Imported workspace could not be read");
-  return Object.freeze({
-    statusCode: 201,
-    workspace,
-    payload: Object.freeze({ workspace, ...bundle }),
-  });
-}
 
 async function conversationAgentReplies(
   input: Readonly<{
@@ -2390,49 +2055,38 @@ function publicAgentSettings(
       development: "claude-opus-4-1",
       test: "claude-haiku-4-5",
     }),
+    imageModel: settings?.imageModel ?? null,
+    imageGenerationReady: settings?.agentRuntime === "CLAUDE_CODE"
+      && settings.imageModel !== null
+      && settings.apiKeyMask !== null,
     apiKeyConfigured: settings !== null,
-    apiKeyMasked: apiKeyMask,
-    apiKeyFingerprint: settings?.apiKeyFingerprint ?? null,
+    apiKeyMasked: settings?.agentRuntime === "CLAUDE_CODE" ? apiKeyMask : null,
+    apiKeyFingerprint: settings?.agentRuntime === "CLAUDE_CODE" ? settings.apiKeyFingerprint : null,
     revision: settings?.revision ?? 0,
     testPolicyReady: settings?.testPolicyReady ?? false,
     updatedAt: settings?.updatedAt ?? null,
   });
 }
 
-function publicImageGenerationSettings(settings: StoredImageGenerationSettings | null) {
-  // Null means "not configured": the asset panel uses this to tell users assets
-  // must be uploaded by hand rather than generated.
-  if (!settings) return null;
-  return Object.freeze({
-    provider: settings.provider,
-    apiKeyMask: settings.apiKeyMask,
-    apiEndpoint: settings.apiEndpoint,
-    model: settings.model,
-    revision: settings.revision,
-    updatedBy: settings.updatedBy,
-    updatedAt: settings.updatedAt,
-  });
-}
-
-function parseImageGenerationInput(value: unknown): Readonly<{
-  provider: ImageGenerationProvider;
-  apiKey: string | null;
-  apiEndpoint: string | null;
-  model: string | null;
-}> {
-  const body = objectBody(value);
-  const unsupported = Object.keys(body)
-    .filter(key => !["provider", "apiKey", "apiEndpoint", "model"].includes(key));
-  if (unsupported.length > 0) throw new Error("图片生成配置包含不支持的字段");
-  if (!isImageGenerationProvider(body.provider)) throw new Error("图片生成提供商无效");
-  const apiKey = typeof body.apiKey === "string" && body.apiKey !== "" ? body.apiKey : null;
-  if (apiKey && (apiKey.length < 8 || apiKey.length > 512)) throw new Error("API Key 格式无效");
-  const endpoint = typeof body.apiEndpoint === "string" && body.apiEndpoint !== ""
-    ? normalizeBaseUrl(body.apiEndpoint, process.env.NODE_ENV ?? "development")
-    : null;
-  const model = typeof body.model === "string" && body.model !== "" ? body.model : null;
-  if (model && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model)) throw new Error("模型名称无效");
-  return Object.freeze({ provider: body.provider, apiKey, apiEndpoint: endpoint, model });
+function readCodexOfficialLogin(): string {
+  if (process.env.DEVILUDO_CODEX_LOGIN_METHOD !== "CHATGPT") {
+    throw new Error("Codex CLI 尚未使用 OpenAI 官方账号登录，请先在宿主机运行 codex login");
+  }
+  const path = process.env.DEVILUDO_CODEX_AUTH_FILE ?? "/run/deviludo-codex/auth.json";
+  let value: string;
+  try {
+    value = readFileSync(path, "utf8").trim();
+  } catch {
+    throw new Error("无法读取 Codex CLI 官方登录状态，请重新运行 npm run local:up");
+  }
+  if (value.length < 16 || value.length > 64 * 1024) throw new Error("Codex CLI 官方登录数据无效");
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+  } catch {
+    throw new Error("Codex CLI 官方登录数据无效");
+  }
+  return value;
 }
 
 function parseProjectSteamSettings(value: unknown): Readonly<{
@@ -2472,12 +2126,6 @@ function steamNumericId(value: unknown, label: string): string {
   return normalized;
 }
 
-function requireWorkspaceAdmin(principal: AccessPrincipal): void {
-  if (principal.role !== "OWNER" && principal.role !== "ADMIN") {
-    throw httpError(403, "WORKSPACE_ADMIN_REQUIRED", "只有工作区 Owner 或 Admin 可以修改 Steam 配置和发起发布");
-  }
-}
-
 function specificationFromConcept(name: string, concept: string): Readonly<Record<string, unknown>> {
   return Object.freeze({
     title: name,
@@ -2497,17 +2145,8 @@ function specificationFromConcept(name: string, concept: string): Readonly<Recor
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
-function publicUser(user: UserRecord) {
-  return Object.freeze({
-    id: user.id,
-    username: user.username,
-    instanceAdmin: user.instanceAdmin,
-    createdAt: user.createdAt,
-  });
-}
-
-function deterministicProjectId(userId: string, idempotencyKey: string): string {
-  const bytes = createHash("sha256").update("deviludo-project\0").update(userId).update("\0").update(idempotencyKey).digest().subarray(0, 16);
+function deterministicProjectId(actorId: string, idempotencyKey: string): string {
+  const bytes = createHash("sha256").update("deviludo-project\0").update(actorId).update("\0").update(idempotencyKey).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = bytes.toString("hex");

@@ -9,9 +9,9 @@ x-core: &core
     NODE_ENV: production
     DEVILUDO_DEFAULT_WORKFLOW_PROFILE: RELEASE
     DEVILUDO_DATABASE_SET_ROLE: "1"
-    DEVILUDO_ACCESS_MODE: ${DEVILUDO_ACCESS_MODE:?standalone or platform is required}
-    DEVILUDO_PLATFORM_ACCOUNT_API_URL: ${DEVILUDO_PLATFORM_ACCOUNT_API_URL:-}
-    DEVILUDO_PLATFORM_INTERNAL_TOKEN_FILE: /run/secrets/platform-internal.token
+    DEVILUDO_TELEMETRY_ENABLED: ${DEVILUDO_TELEMETRY_ENABLED:-1}
+    DEVILUDO_TELEMETRY_ENDPOINT: ${DEVILUDO_TELEMETRY_ENDPOINT:-}
+    DEVILUDO_RELEASE_VERSION: ${DEVILUDO_RELEASE_VERSION:?}
     DEVILUDO_PROJECTS_ROOT: /var/lib/deviludo-projects
     OTEL_EXPORTER_OTLP_ENDPOINT: ${DEVILUDO_OTEL_ENDPOINT:?}
 services:
@@ -102,7 +102,6 @@ services:
       - /etc/deviludo/core/secrets/s3.credentials:/run/secrets/s3.credentials:ro
       - /etc/deviludo/core/secrets/vault-api.token:/run/secrets/vault-api.token:ro
       - /etc/deviludo/core/secrets/vault-pki.token:/run/secrets/vault-pki.token:ro
-      - /etc/deviludo/core/secrets/platform-internal.token:/run/secrets/platform-internal.token:ro
       - projects-data:/var/lib/deviludo-projects
       - /etc/deviludo/core/secrets/core.crt:/run/secrets/core.crt:ro
       - /etc/deviludo/core/secrets/core.key:/run/secrets/core.key:ro
@@ -116,7 +115,6 @@ services:
       DEVILUDO_CORE_SCHEDULER_DATABASE_URL_FILE: /run/secrets/database-scheduler.url
     volumes:
       - /etc/deviludo/core/secrets/database-scheduler.url:/run/secrets/database-scheduler.url:ro
-      - /etc/deviludo/core/secrets/platform-internal.token:/run/secrets/platform-internal.token:ro
       - projects-data:/var/lib/deviludo-projects
   sandbox:
     <<: *core
@@ -135,7 +133,6 @@ services:
       - /etc/deviludo/core/secrets/database-sandbox.url:/run/secrets/database-sandbox.url:ro
       - /etc/deviludo/core/secrets/s3.credentials:/run/secrets/s3.credentials:ro
       - executor-socket:/run/deviludo-executor
-      - /etc/deviludo/core/secrets/platform-internal.token:/run/secrets/platform-internal.token:ro
       - projects-data:/var/lib/deviludo-projects
   provider-proxy:
     image: ${DEVILUDO_PROVIDER_PROXY_IMAGE:?immutable Provider proxy image is required}

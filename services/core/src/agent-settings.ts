@@ -14,6 +14,7 @@ export type AgentSettingsInput = Readonly<{
   apiKey: string | null;
   models: AgentModelConfiguration | null;
   roleModels: AgentRoleModelConfiguration;
+  imageModel: string | null;
 }>;
 
 export type AgentSecretVersion = Readonly<{
@@ -23,11 +24,8 @@ export type AgentSecretVersion = Readonly<{
   version: string;
 }>;
 
-/**
- * Secret namespaces this store manages. Each scope is a separate Vault path, so
- * the image generation key can never be read through an Agent-runtime ref.
- */
-export const SECRET_SCOPES = ["agent-runtime", "image-generation"] as const;
+/** The selected Agent connection owns the only Provider credential. */
+export const SECRET_SCOPES = ["agent-runtime"] as const;
 export type SecretScope = typeof SECRET_SCOPES[number];
 
 export interface AgentSecretStore {
@@ -62,13 +60,29 @@ export function parseAgentSettingsInput(
     throw new Error("Agent settings must be an object");
   }
   const input = value as Record<string, unknown>;
-  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "models", "roleModels", "settingsJson"].includes(key));
+  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "models", "roleModels", "settingsJson", "imageModel"].includes(key));
   if (unknown.length > 0) throw new Error("Agent settings contain unsupported fields");
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.agentRuntime)) {
     throw new Error("Agent runtime must be Claude Code or Codex CLI");
   }
-  if (input.agentRuntime !== "CLAUDE_CODE") {
-    throw new Error("Codex CLI uses the host's official ChatGPT login and cannot be configured as a custom Provider");
+  if (input.agentRuntime === "CODEX_CLI") {
+    if (input.baseUrl !== undefined || input.apiKey !== undefined || input.models !== undefined || input.settingsJson !== undefined) {
+      throw new Error("Codex CLI uses the host's official ChatGPT login; custom Provider fields are not accepted");
+    }
+    if (input.imageModel !== undefined && input.imageModel !== null && input.imageModel !== "") {
+      throw new Error("Image generation requires a selected Provider connection");
+    }
+    const roleModels = input.roleModels === undefined
+      ? Object.freeze({ design: "gpt-5.3-codex", development: "gpt-5.3-codex", test: "gpt-5.3-codex" })
+      : normalizeAgentRoleModels(input.roleModels);
+    return Object.freeze({
+      agentRuntime: "CODEX_CLI",
+      baseUrl: "https://chatgpt.com",
+      apiKey: null,
+      models: null,
+      roleModels,
+      imageModel: null,
+    });
   }
   const fromJson = input.settingsJson !== undefined;
   if (fromJson && (input.baseUrl !== undefined || input.apiKey !== undefined || input.models !== undefined)) {
@@ -100,12 +114,16 @@ export function parseAgentSettingsInput(
   const roleModels = input.roleModels === undefined
     ? defaultAgentRoleModels(models)
     : normalizeAgentRoleModels(input.roleModels);
+  const imageModel = input.imageModel === undefined || input.imageModel === null || input.imageModel === ""
+    ? null
+    : normalizeAgentModel(input.imageModel);
   return Object.freeze({
     agentRuntime: input.agentRuntime as AgentRuntimeKind,
     baseUrl,
     apiKey,
     models,
     roleModels,
+    imageModel,
   });
 }
 

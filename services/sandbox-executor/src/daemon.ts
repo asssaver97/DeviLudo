@@ -811,9 +811,8 @@ function validateAgentConfiguration(configuration: NonNullable<SandboxPlan["agen
       throw new Error("Claude Code environment is invalid");
     }
   } else if (configuration.runtime === "CODEX_CLI") {
-    if (configuration.credentialEnvironmentVariable !== "CODEX_API_KEY"
-      || environment.DEVILUDO_CODEX_BASE_URL !== configuration.baseUrl
-      || Object.keys(environment).some(key => key !== "DEVILUDO_CODEX_BASE_URL")) {
+    if (configuration.credentialEnvironmentVariable !== "CODEX_AUTH_JSON"
+      || Object.keys(environment).some(key => key !== "DEVILUDO_CODEX_MODEL")) {
       throw new Error("Codex environment is invalid");
     }
   } else {

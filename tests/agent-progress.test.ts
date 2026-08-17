@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentProgressDisplayRows } from "../lib/product/agent-progress";
+import { agentProgressDisplayRows, localizedAgentProgressContent } from "../lib/product/agent-progress";
 import type { AgentProgressEvent } from "../lib/product/contracts";
 
 function progress(
@@ -40,4 +40,15 @@ test("Agent whitespace survives transport fragment merging", () => {
   ]);
 
   assert.equal(rows[0]?.content, "First sentence. Second sentence.\n\nNew paragraph.");
+});
+
+test("English UI localizes executor phases but preserves Agent-authored output", () => {
+  const [phase, output] = agentProgressDisplayRows([
+    progress(1, "PHASE", "已读取绑定目录中的 554 个最新源码文件"),
+    progress(2, "AGENT_OUTPUT", "我会先检查现有项目。"),
+  ]);
+
+  assert.equal(localizedAgentProgressContent(phase!, "en"), "Read 554 latest source files from the bound directory");
+  assert.equal(localizedAgentProgressContent(output!, "en"), "我会先检查现有项目。");
+  assert.equal(localizedAgentProgressContent(phase!, "zh"), "已读取绑定目录中的 554 个最新源码文件");
 });

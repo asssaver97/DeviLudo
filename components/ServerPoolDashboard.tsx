@@ -9,7 +9,7 @@ type PoolResponse = Readonly<{ pools: readonly ServerPoolRecord[]; nodes: readon
 type Enrollment = Readonly<{ poolKind: string; token: string; expiresAt: string }>;
 
 export function ServerPoolDashboard() {
-  const { text } = useLanguage();
+  const { errorText, text } = useLanguage();
   const initialState = cachedValue<PoolResponse>(clientCacheKeys.serverPools);
   const [state, setState] = useState<PoolResponse | null>(initialState ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +19,7 @@ export function ServerPoolDashboard() {
   useEffect(() => {
     let active = true;
     const load = async (maximumAge: number) => loadCached<PoolResponse>(clientCacheKeys.serverPools, maximumAge, async () => {
-        const response = await fetch("/api/admin/server-pools", { cache: "no-store" });
+        const response = await fetch("/api/runtime/server-pools", { cache: "no-store" });
         if (!response.ok) throw new Error(text(`服务器池接口返回 ${response.status}`, `Server pool API returned ${response.status}`));
         return await response.json() as PoolResponse;
       });
@@ -45,14 +45,14 @@ export function ServerPoolDashboard() {
     setEnrollmentBusy(poolKind);
     setError(null);
     try {
-      const response = await fetch("/api/admin/e2e-enrollment-tokens", {
+      const response = await fetch("/api/runtime/e2e-enrollment-tokens", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ poolKind }),
       });
       const body = await response.json() as { enrollment?: { token?: string; expiresAt?: string }; message?: string };
       if (!response.ok || !body.enrollment?.token || !body.enrollment.expiresAt) {
-        throw new Error(body.message ?? text("无法创建节点配对码", "Unable to create node enrollment token"));
+        throw new Error(errorText(body.message, "无法创建节点配对码", "Unable to create node enrollment token"));
       }
       setEnrollment(Object.freeze({ poolKind, token: body.enrollment.token, expiresAt: body.enrollment.expiresAt }));
     } catch (reason) {

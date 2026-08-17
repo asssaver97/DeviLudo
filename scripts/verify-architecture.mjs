@@ -44,6 +44,26 @@ for (const file of sourceFiles) {
   }
 }
 
+const retiredHostedControlPlane = [
+  { label: "hosted access mode", pattern: new RegExp(["DEVILUDO_", "ACCESS_MODE"].join("")) },
+  { label: "hosted platform configuration", pattern: new RegExp(["DEVILUDO_", "PLATFORM_"].join("")) },
+  { label: "hosted platform internal API", pattern: new RegExp(["/v1/internal/", "platform"].join(""), "i") },
+  { label: "hosted product session", pattern: new RegExp(["Product", "Session|platform", "Session"].join("")) },
+  { label: "account-bound audit field", pattern: new RegExp(["actor_", "account_id"].join(""), "i") },
+  { label: "hosted repository UI", pattern: new RegExp(["platform", "-repository"].join(""), "i") },
+  { label: "hosted identity tables", pattern: new RegExp(["workspace_", "(?:memberships|invitations)|github_", "oauth_flows|project_repository_", "(?:connections|github_permissions)"].join(""), "i") },
+  { label: "hosted user table", pattern: new RegExp(["CREATE TABLE deviludo.", "users"].join(""), "i") },
+  { label: "retired source synchronization outbox", pattern: new RegExp(["project_source_ready_", "outbox"].join(""), "i") },
+  { label: "account-era administrator route", pattern: new RegExp(["/v1/", "admin/"].join(""), "i") },
+];
+for (const file of sourceFiles.filter(file => /^(app|components|deploy|infra|lib|openapi|services)\//.test(file))) {
+  if (!textExtensions.has(extname(file))) continue;
+  const content = await readFile(join(root, file), "utf8");
+  for (const rule of retiredHostedControlPlane) {
+    if (rule.pattern.test(content)) violations.push(`${file}: ${rule.label}`);
+  }
+}
+
 const serviceDirectories = [...new Set(
   sourceFiles
     .filter(file => file.startsWith("services/"))

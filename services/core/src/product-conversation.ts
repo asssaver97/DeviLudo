@@ -10,6 +10,7 @@ import type {
 import {
   normalizeAgentProjectDocumentContent,
 } from "@/lib/product/project-document";
+import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 type FetchLike = typeof fetch;
 
@@ -79,6 +80,7 @@ type ConversationReplyInput = Readonly<{
   settings: ConversationAgentSettings;
   apiKey: string;
   fetchImpl?: FetchLike;
+  codexRunner?: CodexPromptRunner;
   signal?: AbortSignal;
   providerIdleTimeoutMs?: number;
   agentRole?: ProjectAgentRole;
@@ -99,7 +101,7 @@ export async function generateProductConversationReply(input: ConversationReplyI
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
     ? await requestClaudeReply(fetchImpl, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs)
-    : await requestCodexReply(fetchImpl, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs);
+    : await requestCodexReply(input.codexRunner ?? runCodexPrompt, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs);
   const parsed = parseAgentReply(raw);
   return reply(input, model, parsed, input.allowDraftMutation);
 }
@@ -136,8 +138,7 @@ export async function streamProductConversationReply(
       input.providerIdleTimeoutMs,
     )
     : await requestCodexReplyStream(
-      fetchImpl,
-      input.settings.baseUrl,
+      input.codexRunner ?? runCodexPrompt,
       input.apiKey,
       model,
       system,
@@ -267,7 +268,7 @@ async function requestClaudeReply(
 ): Promise<string> {
   const deadline = providerDeadline(undefined, idleTimeoutMs);
   try {
-    const response = await fetchImpl(providerEndpoint(baseUrl, "messages"), {
+    const response = await fetchImpl(messagesEndpoint(baseUrl), {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,
@@ -296,44 +297,20 @@ async function requestClaudeReply(
 }
 
 async function requestCodexReply(
-  fetchImpl: FetchLike,
-  baseUrl: string,
-  apiKey: string,
+  codexRunner: CodexPromptRunner,
+  authJson: string,
   model: string,
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
   userContent: string,
   idleTimeoutMs?: number,
 ): Promise<string> {
-  const deadline = providerDeadline(undefined, idleTimeoutMs);
-  try {
-    const response = await fetchImpl(providerEndpoint(baseUrl, "responses"), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        instructions: system,
-        input: [...history, { role: "user", content: userContent }],
-        max_output_tokens: 4_000,
-      }),
-      signal: deadline.signal,
-    });
-    deadline.touch();
-    if (!response.ok) throw new Error(`Agent 调用失败（Provider ${response.status}）`);
-    const body = await response.json() as {
-      output_text?: unknown;
-      output?: readonly { content?: readonly { text?: unknown }[] }[];
-    };
-    const nested = body.output?.flatMap(item => item.content ?? []).find(item => typeof item.text === "string")?.text;
-    const text = typeof body.output_text === "string" ? body.output_text : nested;
-    if (typeof text !== "string") throw new Error("Agent 未返回有效回复");
-    return text;
-  } finally {
-    deadline.dispose();
-  }
+  return codexRunner({
+    authJson,
+    model,
+    prompt: codexConversationPrompt(system, history, userContent),
+    timeoutMs: idleTimeoutMs,
+  });
 }
 
 async function requestClaudeReplyStream(
@@ -350,7 +327,7 @@ async function requestClaudeReplyStream(
 ): Promise<string> {
   const deadline = providerDeadline(signal, idleTimeoutMs);
   try {
-    const response = await fetchImpl(providerEndpoint(baseUrl, "messages"), {
+    const response = await fetchImpl(messagesEndpoint(baseUrl), {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,
@@ -390,9 +367,8 @@ async function requestClaudeReplyStream(
 }
 
 async function requestCodexReplyStream(
-  fetchImpl: FetchLike,
-  baseUrl: string,
-  apiKey: string,
+  codexRunner: CodexPromptRunner,
+  authJson: string,
   model: string,
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
@@ -401,51 +377,20 @@ async function requestCodexReplyStream(
   onRawText: (raw: string) => void,
   idleTimeoutMs?: number,
 ): Promise<string> {
-  const deadline = providerDeadline(signal, idleTimeoutMs);
-  try {
-    const response = await fetchImpl(providerEndpoint(baseUrl, "responses"), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        instructions: system,
-        input: [...history, { role: "user", content: userContent }],
-        max_output_tokens: 4_000,
-        stream: true,
-      }),
-      signal: deadline.signal,
-    });
-    deadline.touch();
-    if (!response.ok) throw new Error(`Agent 调用失败（Provider ${response.status}）`);
-    if (!isEventStream(response)) {
-      const body = await response.json() as {
-        output_text?: unknown;
-        output?: readonly { content?: readonly { text?: unknown }[] }[];
-      };
-      const nested = body.output?.flatMap(item => item.content ?? []).find(item => typeof item.text === "string")?.text;
-      const text = typeof body.output_text === "string" ? body.output_text : nested;
-      if (typeof text !== "string") throw new Error("Agent 未返回有效回复");
-      onRawText(text);
-      return text;
-    }
-    return await readProviderEventStream(response, event => {
-      if ((event.type === "response.output_text.delta" || event.type === "output_text.delta")
-        && typeof event.delta === "string") return event.delta;
-      if (isRecord(event.choices)) return null;
-      if (Array.isArray(event.choices)) {
-        const first = event.choices[0];
-        if (isRecord(first) && isRecord(first.delta) && typeof first.delta.content === "string") {
-          return first.delta.content;
-        }
-      }
-      return null;
-    }, onRawText, deadline.touch);
-  } finally {
-    deadline.dispose();
-  }
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const result = await requestCodexReply(codexRunner, authJson, model, system, history, userContent, idleTimeoutMs);
+  onRawText(result);
+  return result;
+}
+
+function codexConversationPrompt(
+  system: string,
+  history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
+  userContent: string,
+): string {
+  return [system, "", "Conversation history:",
+    ...history.map(message => `${message.role.toUpperCase()}: ${message.content}`),
+    `USER: ${userContent}`].join("\n");
 }
 
 async function readProviderEventStream(
@@ -703,10 +648,10 @@ function agentRoleLabel(role: ProjectAgentRole): string {
   return role === "DESIGN" ? "设计 Agent" : role === "DEVELOPMENT" ? "开发 Agent" : "测试 Agent";
 }
 
-function providerEndpoint(baseUrl: string, resource: "messages" | "responses"): string {
+function messagesEndpoint(baseUrl: string): string {
   const url = new URL(baseUrl);
   const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/${resource}`.replace(/\/{2,}/g, "/");
+  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/messages`.replace(/\/{2,}/g, "/");
   return url.href;
 }
 

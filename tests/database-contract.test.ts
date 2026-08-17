@@ -16,9 +16,9 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "instance_agent_settings", "project_creation_receipts", "workflow_instances",
     "workflow_events", "jobs", "external_signals", "job_progress_events",
     "job_guidance_messages", "operation_receipts",
-    "project_source_revisions", "project_source_ready_outbox",
+    "project_source_revisions",
     "artifacts", "artifact_inputs", "object_cleanup_queue", "executor_receipts",
-    "instance_image_generation_settings", "asset_manifests", "asset_items",
+    "asset_manifests", "asset_items",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
   }
@@ -29,7 +29,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /current_setting\('app\.workspace_id', true\)/);
   assert.match(sql, /ALTER TABLE deviludo\.workspaces FORCE ROW LEVEL SECURITY/);
   for (const table of [
-    "projects", "project_source_revisions", "project_source_ready_outbox", "project_documents", "project_document_revisions",
+    "projects", "project_source_revisions", "project_documents", "project_document_revisions",
     "project_conversations", "conversation_messages", "agent_installations",
     "workflow_instances", "workflow_events",
     "jobs", "external_signals", "job_progress_events", "job_guidance_messages",
@@ -53,9 +53,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /CREATE TABLE deviludo\.project_conversations \([\s\S]*project_id uuid NOT NULL/);
   assert.match(sql, /CREATE TABLE deviludo\.project_source_revisions[\s\S]*relative_path text NOT NULL[\s\S]*content_digest text NOT NULL/);
   assert.doesNotMatch(sql, /UNIQUE \(workspace_id, project_id, content_digest\)/);
-  assert.match(sql, /CREATE TABLE deviludo\.project_source_ready_outbox[\s\S]*development_actor_account_id uuid NOT NULL[\s\S]*acknowledged_at timestamptz/);
-  assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.pull_source_ready_events/);
-  assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.acknowledge_source_ready_events/);
+  assert.doesNotMatch(sql, /source_ready_outbox|pull_source_ready_events|acknowledge_source_ready_events/);
   assert.doesNotMatch(sql, /users|sessions|membership|invitation|github|repository_connection|password_hash|argon2/i);
   assert.doesNotMatch(sql, /'GITHUB_SYNC'|'REPOSITORY_SYNC_RECEIPT'|'SOURCE'/);
   assert.match(sql, /CREATE TABLE deviludo\.executor_receipts[\s\S]*receipt->>'simulated' = 'false'/);
@@ -155,20 +153,20 @@ test("manual Agent reruns retain product-failure evidence and reset the bounded 
   assert.match(buildMigration, /'repairFailureSummary', repair_build_summary/);
 });
 
-test("Core stores only opaque external actor identifiers and has no account authority", async () => {
+test("Core stores only opaque local actor identifiers and has no identity authority", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
   const bootstrap = await readFile(new URL("../scripts/bootstrap-instance.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(sql, /VALUES\s*\(\s*'admin'/i);
   assert.doesNotMatch(bootstrap, /password_hash|admin\/admin|argon2/i);
-  assert.match(sql, /created_by_actor_account_id uuid NOT NULL/);
-  assert.match(sql, /development_actor_account_id uuid/);
-  assert.doesNotMatch(repository, /github|oauth|session|membership|invitation/i);
+  assert.match(sql, /created_by_actor_id uuid NOT NULL/);
+  assert.match(sql, /development_actor_id uuid/);
+  assert.doesNotMatch(repository, /github|oauth|membership|invitation/i);
 });
 
 test("migration upgrades compatible databases in order and still rejects incompatible baselines", async () => {
   const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
-  assert.match(migration, /deviludo-core-source-v1/);
+  assert.match(migration, /deviludo-self-hosted-v1/);
   assert.match(migration, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
   assert.match(migration, /infra\/postgres\/migrations/);
   assert.match(migration, /pg_advisory_lock/);
@@ -176,8 +174,8 @@ test("migration upgrades compatible databases in order and still rejects incompa
   assert.match(migration, /MIGRATION_CHECKSUM_MISMATCH/);
   assert.match(migration, /DATABASE_SCHEMA_AHEAD/);
   assert.match(migration, /await client\.query\(migration\.source\)/);
-  const reset = await readFile(new URL("../scripts/reset-source-baseline.mjs", import.meta.url), "utf8");
-  assert.match(reset, /--confirm=RESET_DEVILUDO_SOURCE_V1/);
+  const reset = await readFile(new URL("../scripts/reset-self-hosted-baseline.mjs", import.meta.url), "utf8");
+  assert.match(reset, /--confirm=RESET_DEVILUDO_SELF_HOSTED/);
   assert.match(reset, /remoteResourcesDeleted: false/);
   assert.match(reset, /DEVILUDO_PROJECTS_ROOT/);
 });
@@ -356,10 +354,10 @@ test("Agent generation lands its planned asset manifest, validated and whole", a
   assert.match(complete, /RAISE EXCEPTION 'asset manifest items are invalid'/);
   assert.match(complete, /RAISE EXCEPTION 'asset manifest keys must be unique'/);
   assert.match(complete, /NOT IN\s*\n?\s*\('sprite', 'animation', 'background', 'ui', 'icon', 'tileset'\)/);
-  // Re-planning keeps one manifest per project, gates the build only when a real
-  // image provider exists, and preserves any already-uploaded asset.
+  // Re-planning keeps one manifest per project, gates the build only when the
+  // selected Agent connection has one image model, and preserves uploaded art.
   assert.match(complete, /ON CONFLICT \(workspace_id, project_id\) DO UPDATE/);
-  assert.match(complete, /EXISTS \(SELECT 1 FROM deviludo\.instance_image_generation_settings WHERE singleton = true\)/);
+  assert.match(complete, /EXISTS \(SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'[\s\S]*image_model IS NOT NULL\)/);
   assert.match(complete, /RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate/);
   assert.match(complete, /ON CONFLICT \(workspace_id, manifest_id, asset_key\) DO UPDATE/);
   assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status NOT IN \('generated', 'uploaded'\)[\s\S]*asset_key NOT IN/);
@@ -421,7 +419,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(claim, /generation_attempt = item\.generation_attempt \+ 1/);
   // Without configured settings there is no credential to call with, so claiming
   // would only burn attempts.
-  assert.match(claim, /IF NOT EXISTS \(\s*SELECT 1 FROM deviludo\.instance_image_generation_settings WHERE singleton = true\s*\) THEN RETURN; END IF;/);
+  assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'[\s\S]*image_model IS NOT NULL[\s\S]*\) THEN RETURN; END IF;/);
 
   // A user upload that lands mid-generation wins: settlement only applies to items
   // still leased, so a generated image cannot replace the art they chose.
@@ -441,8 +439,8 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   // Generation is driven by the scheduler role, not an executor lease.
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.claim_asset_generation\(integer, integer\) TO deviludo_scheduler/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.fail_asset_generation\(uuid, uuid, text\) TO deviludo_scheduler/);
-  assert.match(sql, /GRANT SELECT ON deviludo\.instance_image_generation_settings TO deviludo_scheduler/);
-  assert.match(sql, /GRANT SELECT ON deviludo\.instance_image_generation_settings TO deviludo_sandbox/);
+  assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON deviludo\.instance_agent_settings TO deviludo_api/);
+  assert.match(sql, /deviludo\.workflow_instances, deviludo\.instance_agent_settings,/);
   // These sweep every workspace, so they are definer functions owned by the role
   // that bypasses row-level security.
   for (const definer of [claim, complete, fail]) {
@@ -457,15 +455,23 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
 });
 
-test("the image generation key is held by reference and never stored in the row", async () => {
+test("image generation reuses the selected Agent credential and stores only one optional model", async () => {
   const sql = await readFile(sqlUrl, "utf8");
-  const table = sql.match(/CREATE TABLE deviludo\.instance_image_generation_settings \(([\s\S]*?)\n\);/)?.[1] ?? "";
+  const table = sql.match(/CREATE TABLE deviludo\.instance_agent_settings \(([\s\S]*?)\n\);/)?.[1] ?? "";
   assert.match(table, /credential_secret_ref text NOT NULL/);
-  // Its own Vault scope: an Agent-runtime ref must not resolve this key.
-  assert.match(table, /LIKE 'vault:\/\/instance\/image-generation\/api-key\/versions\/%'/);
+  assert.match(table, /LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(table, /api_key_mask text NOT NULL CHECK \(api_key_mask ~ '\^\.\{3\}\\\*\{8\}\.\{4\}\$'\)/);
+  assert.match(table, /image_model text CHECK/);
+  assert.equal((table.match(/image_model text/g) ?? []).length, 1);
   assert.doesNotMatch(table, /\bapi_key text\b|\bapi_key_value\b|\bsecret text\b/);
-  assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON deviludo\.instance_image_generation_settings TO deviludo_api/);
-  // Instance-wide singleton, like the Agent runtime settings.
+  assert.doesNotMatch(sql, /CREATE TABLE deviludo\.instance_image_generation_settings/);
   assert.match(table, /singleton boolean PRIMARY KEY DEFAULT true CHECK \(singleton\)/);
+});
+
+test("the unified Agent connection migration removes the independent image settings store", async () => {
+  const migration = await readFile(new URL("../infra/postgres/migrations/040_unify_image_generation_with_agent_connection.sql", import.meta.url), "utf8");
+  assert.match(migration, /ADD COLUMN image_model text/);
+  assert.match(migration, /DROP CONSTRAINT IF EXISTS instance_agent_settings_runtime_models/);
+  assert.match(migration, /DROP CONSTRAINT IF EXISTS instance_agent_settings_claude_provider_only/);
+  assert.match(migration, /DROP TABLE deviludo\.instance_image_generation_settings/);
 });

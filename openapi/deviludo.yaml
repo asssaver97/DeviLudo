@@ -1,18 +1,9 @@
 openapi: 3.1.0
 info:
   title: DeviLudo Core API
-  version: 7.1.1
+  version: 8.0.0
 components:
   securitySchemes:
-    platformSession:
-      type: apiKey
-      in: cookie
-      name: platform_session
-      description: Forwarded to Platform for assertion only when DEVILUDO_ACCESS_MODE=platform; standalone has no browser authentication.
-    platformInternal:
-      type: http
-      scheme: bearer
-      description: Service credential shared only by Platform and Core.
     e2eMtls:
       type: mutualTLS
   parameters:
@@ -31,55 +22,53 @@ paths:
     get:
       operationId: coreReadiness
       responses:
-        "200": { description: Required fixed pools, persistent source root, and access-mode dependencies are ready }
+        "200": { description: Required fixed pools and the persistent source root are ready }
         "503": { description: A required fixed pool is unavailable }
-  /v1/session:
+  /v1/instance:
     get:
-      operationId: readSession
-      security: [{ platformSession: [] }, {}]
+      operationId: readLocalInstance
       responses:
-        "200": { description: STANDALONE anonymous principal or a fresh Platform account/workspace/role assertion }
-        "401": { description: Platform assertion is missing, invalid, or unavailable }
+        "200": { description: Self-hosted instance and its internal local workspace }
+  /v1/settings/telemetry:
+    get:
+      operationId: readTelemetrySettings
+      responses:
+        "200": { description: Privacy-minimal active-installation telemetry settings }
+    put:
+      operationId: saveTelemetrySettings
+      responses:
+        "200": { description: Anonymous telemetry enabled state persisted locally }
   /v1/settings/agent:
     get:
       operationId: readGlobalAgentSettings
-      security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Masked instance Agent settings, independent design/development/test model routes, and runtime versions }
+        "200": { description: Selected Agent connection, role models, optional single image model, and runtime availability }
     put:
       operationId: saveGlobalAgentSettings
-      security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Instance Agent settings and three role model routes stored with a Vault secret reference }
-        "403": { description: Instance administrator permission required }
+        "200": { description: Selected Agent connection and models stored with one protected credential reference; Codex uses official host login }
   /v1/settings/steam:
     get:
       operationId: readWorkspaceSteamSettings
-      security: [{ platformSession: [] }, {}]
       responses:
-        "200": { description: Masked workspace SteamPipe build account }
+        "200": { description: Masked workspace SteamPipe build credential }
     put:
       operationId: saveWorkspaceSteamSettings
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Workspace Steam credential stored as a versioned secret reference }
-        "403": { description: Workspace owner or admin permission required }
   /v1/projects:
     get:
       operationId: listProjects
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Projects in the asserted workspace, including the latest persistent source revision }
     post:
       operationId: createProject
-      security: [{ platformSession: [] }, {}]
       responses:
         "201": { description: Local project created without any repository binding }
         "424": { description: Global Agent configuration or name generation failed }
   /v1/projects/bind/local-directory:
     post:
       operationId: bindLocalProjectDirectory
-      security: [{ platformSession: [] }, {}]
       requestBody:
         required: true
         content:
@@ -97,7 +86,6 @@ paths:
   /v1/projects/bind/github:
     post:
       operationId: bindClonedGitHubProject
-      security: [{ platformSession: [] }, {}]
       requestBody:
         required: true
         content:
@@ -121,7 +109,6 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: retryProjectImportAnalysis
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: Failed initial analysis returned to the durable background queue }
         "409": { description: Initial analysis has not failed }
@@ -133,13 +120,11 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: listProjectIterations
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: All immutable delivery iterations, newest first }
         "404": { description: Project is not visible in the selected workspace }
     post:
       operationId: createProjectIteration
-      security: [{ platformSession: [] }, {}]
       requestBody:
         required: true
         content:
@@ -165,7 +150,6 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: readProjectIteration
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Read-only iteration state, jobs, events, artifacts, and E2E evidence }
         "404": { description: Workflow is not an iteration of the selected project }
@@ -177,7 +161,6 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: approveProjectSpecification
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: Immutable specification object registered and workflow started }
   /v1/projects/{projectId}/steam-settings:
@@ -188,12 +171,10 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: readProjectSteamSettings
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Project App ID, depot mapping, and test branch }
     put:
       operationId: saveProjectSteamSettings
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Project SteamPipe settings saved }
         "403": { description: Workspace owner or admin permission required }
@@ -205,12 +186,10 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: listProjectSteamReleases
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Persistent release history across project iterations }
     post:
       operationId: createProjectSteamRelease
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: Versioned release created and SteamPipe upload queued }
         "200": { description: The iteration's existing release was returned idempotently }
@@ -227,7 +206,6 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: completeIterationWithoutPublishing
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: E2E-passed iteration completed without a Steam release }
         "409": { description: Iteration is not awaiting a release decision }
@@ -243,7 +221,6 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: confirmDefaultSteamReleaseLive
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Manual default-branch promotion recorded }
         "409": { description: Release is not awaiting default-branch promotion }
@@ -258,7 +235,6 @@ paths:
         schema: { type: string, minLength: 8, maxLength: 300 }
     post:
       operationId: retryFailedAgentGeneration
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: A new Agent job was created with the currently verified runtime image }
         "200": { description: The same retry request was already accepted }
@@ -276,7 +252,6 @@ paths:
         schema: { type: string, minLength: 8, maxLength: 300 }
     post:
       operationId: retryFailedArtifactBuild
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: A new build job was created from the latest verified Agent source }
         "200": { description: The same retry request was already accepted }
@@ -293,7 +268,6 @@ paths:
         schema: { type: string, minLength: 8, maxLength: 300 }
     post:
       operationId: retryFailedE2e
-      security: [{ platformSession: [] }, {}]
       responses:
         "202": { description: New E2E jobs were created for target platforms without a successful test }
         "200": { description: The same retry request was already accepted }
@@ -306,13 +280,11 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: readProject
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Project, current collaborative document, revision history, and workflow state }
         "404": { description: Project is not visible in the selected workspace }
     delete:
       operationId: deleteProject
-      security: [{ platformSession: [] }, {}]
       requestBody:
         required: false
         content:
@@ -339,7 +311,6 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: listProjectArtifacts
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Current iteration build, E2E report, signature, and publication artifacts; source remains in persistent revisions }
         "404": { description: Project is not visible in the selected workspace }
@@ -355,7 +326,6 @@ paths:
         schema: { type: string, format: uuid }
     post:
       operationId: authorizeProjectArtifactDownload
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: A workspace-scoped download URL valid for 120 seconds }
         "404": { description: Artifact is not visible in the selected workspace and project }
@@ -367,7 +337,6 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: listProjectConversations
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Most recently active project conversations with previews, total and user-message counts, and a system-generated import-analysis marker }
         "404": { description: Project is not visible in the selected workspace }
@@ -382,7 +351,6 @@ paths:
         schema: { type: integer, minimum: 0, default: 0 }
     get:
       operationId: streamAgentGenerationProgress
-      security: [{ platformSession: [] }, {}]
       responses:
         "200":
           description: Newline-delimited Agent phases, visible output, accepted player guidance, and completion state
@@ -398,7 +366,6 @@ paths:
         schema: { type: string, format: uuid }
     put:
       operationId: updateProjectDocument
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Collaborative project document updated with a new immutable revision }
         "409": { description: Expected revision is stale }
@@ -410,14 +377,12 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: readConversation
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Group-chat messages in chronological order; assistant metadata identifies DESIGN, DEVELOPMENT, or TEST }
         "404": { description: Conversation is not visible in the selected workspace }
   /v1/conversations/messages:
     post:
       operationId: sendConversationMessage
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Existing conversation updated }
         "201": { description: Project conversation created }
@@ -425,92 +390,31 @@ paths:
   /v1/conversations/messages/stream:
     post:
       operationId: streamConversationMessage
-      security: [{ platformSession: [] }, {}]
       responses:
         "200":
           description: Newline-delimited agent_delta events for design, development, and test replies followed by the atomically persisted group-chat result; during Agent generation the user message is stored as live task guidance
           content:
             application/x-ndjson:
               schema: { type: string }
-  /v1/admin/server-pools:
+  /v1/runtime/server-pools:
     get:
       operationId: listServerPools
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: The five fixed server pools }
-        "403": { description: Instance administrator permission required }
-  /v1/admin/server-nodes:
+  /v1/runtime/server-nodes:
     get:
       operationId: listServerNodes
-      security: [{ platformSession: [] }, {}]
       responses:
         "200": { description: Registered server nodes }
     post:
       operationId: createServerNode
-      security: [{ platformSession: [] }, {}]
       responses:
         "201": { description: Node registered in a fixed pool }
-  /v1/admin/e2e-enrollment-tokens:
+  /v1/runtime/e2e-enrollment-tokens:
     post:
       operationId: createE2eEnrollmentToken
-      security: [{ platformSession: [] }, {}]
       responses:
         "201": { description: Single-use 30-minute E2E enrollment token created }
-  /v1/internal/platform/source-events:
-    get:
-      operationId: pullPlatformSourceReadyEvents
-      security: [{ platformInternal: [] }]
-      parameters:
-        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
-      responses:
-        "200": { description: Unacknowledged project.source.ready events ordered for replay }
-        "401": { description: Platform service credential is invalid }
-  /v1/internal/platform/source-events/ack:
-    post:
-      operationId: acknowledgePlatformSourceReadyEvents
-      security: [{ platformInternal: [] }]
-      responses:
-        "200": { description: Events atomically acknowledged after Platform persisted scheduling state }
-  /v1/internal/platform/projects/import:
-    post:
-      operationId: importPlatformRepositoryArchive
-      security: [{ platformInternal: [] }]
-      requestBody:
-        required: true
-        content:
-          application/zip:
-            schema: { type: string, format: binary, maxLength: 67108864 }
-      responses:
-        "201": { description: Platform-authenticated archive imported into a new persistent Core project directory }
-        "422": { description: Archive violates the source boundary }
-  /v1/internal/platform/workspaces/{workspaceId}/projects/{projectId}:
-    parameters:
-      - { in: path, name: workspaceId, required: true, schema: { type: string, format: uuid } }
-      - { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
-    get:
-      operationId: readPlatformProjectBoundary
-      security: [{ platformInternal: [] }]
-      responses:
-        "200": { description: Project identity and latest source revision for Platform repository operations }
-        "404": { description: Project does not exist in the requested workspace }
-    delete:
-      operationId: deletePlatformProject
-      security: [{ platformInternal: [] }]
-      responses:
-        "204": { description: Active tasks stopped and all Core project data, object artifacts, and source directories deleted }
-        "404": { description: Project does not exist in the requested workspace }
-  /v1/internal/platform/workspaces/{workspaceId}/projects/{projectId}/source/{revision}/archive:
-    parameters:
-      - { in: path, name: workspaceId, required: true, schema: { type: string, format: uuid } }
-      - { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
-      - { in: path, name: revision, required: true, schema: { type: integer, minimum: 1 } }
-    get:
-      operationId: downloadDeterministicSourceRevisionArchive
-      security: [{ platformInternal: [] }]
-      responses:
-        "200": { description: Deterministic tar.gz plus digest, file-count, and byte-count headers }
-        "404": { description: Source revision does not exist }
-        "409": { description: Persistent source content does not match its database receipt }
   /v1/e2e/enroll:
     post:
       operationId: enrollE2eNode

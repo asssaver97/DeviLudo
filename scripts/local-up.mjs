@@ -2,11 +2,11 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { networkInterfaces } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { lstat, readFile, readlink, readdir, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readlink, readdir, writeFile } from "node:fs/promises";
 import { request } from "node:http";
-import { relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -102,6 +102,7 @@ const [claudeVersion, codexVersion, codexLoginMethod] = await Promise.all([
   detectLocalRuntime("codex"),
   detectLocalCodexAuthentication(),
 ]);
+await prepareLocalCodexOfficialLogin(codexLoginMethod);
 await requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 await requireCommand("docker", ["compose", "version"]);
 await requireCommand("git", ["--version"]);
@@ -670,6 +671,26 @@ async function detectLocalCodexAuthentication() {
   }
 }
 
+async function prepareLocalCodexOfficialLogin(loginMethod) {
+  const target = fileURLToPath(new URL("../.deviludo/local/codex-auth.json", import.meta.url));
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+  if (loginMethod !== "CHATGPT") {
+    await writeFile(target, "{}\n", { mode: 0o600 });
+    await chmod(target, 0o600);
+    return;
+  }
+  const configuredRoot = process.env.CODEX_HOME?.trim();
+  const source = configuredRoot && isAbsolute(configuredRoot)
+    ? join(configuredRoot, "auth.json")
+    : join(homedir(), ".codex", "auth.json");
+  const parsed = JSON.parse(await readFile(source, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Codex CLI auth.json is invalid; run codex login again");
+  }
+  await writeFile(target, `${JSON.stringify(parsed)}\n`, { mode: 0o600 });
+  await chmod(target, 0o600);
+}
+
 async function requireCommand(command, arguments_) {
   try {
     await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
@@ -915,7 +936,7 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
   // This is still a full immutable-ledger verification on every start. It avoids
   // creating a migration container only when the database reports exactly the
   // versions and checksums present in this checkout.
-  if (state?.baseline === "001 deviludo-core-source-v1" && state.migrations === expectedLedger) {
+  if (state?.baseline === "001 deviludo-self-hosted-v1" && state.migrations === expectedLedger) {
     return false;
   }
   try {
@@ -925,9 +946,10 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
     if (!isIncompatibleBaselineError(error)) throw error;
     if (!resetIncompatibleBaseline) {
       throw Object.assign(new Error([
-        "检测到不兼容的旧版 DeviLudo 本地数据基线。持久源码 v1 不支持原地迁移。",
+        "检测到包含旧托管平台或账号模型的不兼容 DeviLudo 数据基线。自建版不支持原地迁移。",
         "如确认删除本地 PostgreSQL、MinIO 制品、项目源码目录和 Vault 数据，请运行：",
-        "  npm run local:reset:source-v1",
+        "  npm run local:reset:self-hosted",
+        "已绑定的外部本地项目目录不会被此操作删除。",
         "任何远端服务的数据都不会被删除。",
       ].join("\n")), { code: "INCOMPATIBLE_BASELINE_RESET_REQUIRED" });
     }
@@ -943,7 +965,7 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
     // Every volume the fingerprints describe has just been destroyed, so nothing
     // recorded from this start may be reused by the next one.
     baselineReset = true;
-    console.warn("持久源码 v1 本地数据基线已重建，继续启动服务。");
+    console.warn("自建版本地数据基线已重建，继续启动服务。");
     return true;
   }
 }

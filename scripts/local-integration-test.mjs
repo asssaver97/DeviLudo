@@ -4,10 +4,9 @@ const webUrl = new URL(process.env.DEVILUDO_WEB_URL ?? "http://127.0.0.1:3100");
 const coreUrl = new URL(process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080");
 await json(new URL("/api/health/live", webUrl));
 await json(new URL("/health/live", coreUrl));
-const current = await request("/api/session");
-if (!current.session?.authenticated || current.session.authMode !== "STANDALONE"
-  || !current.session.user?.instanceAdmin || current.session.canLogout !== false) {
-  throw new Error("Local integration requires standalone anonymous administrator access");
+const current = await request("/api/instance");
+if (current.instance?.mode !== "SELF_HOSTED" || !current.instance.workspace?.id) {
+  throw new Error("Local integration requires a self-hosted instance");
 }
 
 const agent = await request("/api/settings/agent");
@@ -25,7 +24,7 @@ if (!agent.settings?.apiKeyConfigured) {
   } });
 }
 
-const pools = await request("/api/admin/server-pools");
+const pools = await request("/api/runtime/server-pools");
 if (pools.pools?.length !== 5 || !pools.pools.some(pool => pool.kind === "E2E_MACOS" && pool.readiness === "READY")) {
   throw new Error("Five fixed pools or the native macOS node are not ready");
 }

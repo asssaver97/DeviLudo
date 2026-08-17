@@ -14,7 +14,7 @@ import {
   type ProductConversationMessage,
   type ProjectAgentRole,
 } from "@/lib/product/contracts";
-import { agentProgressDisplayRows } from "@/lib/product/agent-progress";
+import { agentProgressDisplayRows, localizedAgentProgressContent } from "@/lib/product/agent-progress";
 import { PlusIcon, SendIcon } from "../console/Icons";
 import { TypingDots } from "../console/TypingDots";
 import { useLanguage } from "../i18n/LanguageProvider";
@@ -70,7 +70,7 @@ export function ConversationBox({
   emptyDescription,
   className = "",
 }: ConversationBoxProps) {
-  const { text } = useLanguage();
+  const { errorText, locale, text } = useLanguage();
   const messageViewport = useRef<HTMLDivElement | null>(null);
   const progressViewport = useRef<HTMLDivElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
@@ -166,7 +166,9 @@ export function ConversationBox({
                   {failed ? (
                     <span
                       className="conversation-box-failed"
-                      title={typeof message.metadata.failureMessage === "string" ? message.metadata.failureMessage : undefined}
+                      title={typeof message.metadata.failureMessage === "string"
+                        ? errorText(message.metadata.failureMessage, "消息未保存", "Message was not saved")
+                        : undefined}
                     >
                       {text("未保存 · 可重试", "NOT SAVED · RETRY")}
                     </span>
@@ -174,7 +176,7 @@ export function ConversationBox({
                 </header>
                 <p>{message.content}</p>
                 {failed && typeof message.metadata.failureMessage === "string" ? (
-                  <small className="conversation-box-failure-detail">{message.metadata.failureMessage}</small>
+                  <small className="conversation-box-failure-detail">{errorText(message.metadata.failureMessage, "消息未保存，请重试", "Message was not saved. Please retry.")}</small>
                 ) : null}
                 {options.length && onOptionSelect ? (
                   <div aria-label={text("可选回复", "Suggested replies")} className="conversation-box-options" role="group">
@@ -210,7 +212,7 @@ export function ConversationBox({
                   ref={progressViewport}
                 >
                   {progressRows.map(row => (
-                    <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{row.content}</p>
+                    <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
                   ))}
                   {agentProgress.running ? <TypingDots /> : null}
                 </div>

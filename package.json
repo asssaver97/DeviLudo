@@ -2,6 +2,7 @@
   "name": "deviludo",
   "version": "1.0.0",
   "private": true,
+  "license": "Elastic-2.0",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -15,7 +16,7 @@
     "core:sandbox": "DEVILUDO_CORE_ROLE=sandbox npm run core",
     "e2e-node": "node --import tsx services/e2e-node/src/main.ts",
     "local:up": "node scripts/local-up.mjs",
-    "local:reset:source-v1": "node scripts/local-up.mjs --reset-incompatible-baseline",
+    "local:reset:self-hosted": "node scripts/local-up.mjs --reset-incompatible-baseline",
     "local:bootstrap": "node scripts/local-bootstrap.mjs",
     "local:prepare": "node scripts/local-prepare.mjs",
     "local:e2e": "node --import tsx scripts/local-macos-e2e.mjs",
@@ -36,7 +37,7 @@
     "db:migrate": "node scripts/migrate-postgres.mjs",
     "state:backup": "node scripts/backup-state.mjs",
     "state:restore": "node scripts/restore-state.mjs",
-    "db:reset:source-v1": "node scripts/reset-source-baseline.mjs",
+    "db:reset:self-hosted": "node scripts/reset-self-hosted-baseline.mjs",
     "verify:architecture": "node scripts/verify-architecture.mjs",
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "test": "npm run typecheck && npm run test:unit && npm run verify:architecture",

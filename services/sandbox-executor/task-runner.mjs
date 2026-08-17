@@ -984,20 +984,10 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
   }
   else {
-    environment.CODEX_API_KEY = apiKey;
     environment.CODEX_HOME = "/workspace/codex-home";
     await mkdir(environment.CODEX_HOME, { recursive: true });
-    const baseUrl = configuration.baseUrl.replace(/"/g, "");
-    const model = configuration.model.replace(/"/g, "");
-    await writeFile(`${environment.CODEX_HOME}/config.toml`, [
-      `model = "${model}"`,
-      'model_provider = "deviludo"',
-      '[model_providers.deviludo]',
-      'name = "Deviludo Provider"',
-      `base_url = "${baseUrl}"`,
-      'env_key = "CODEX_API_KEY"',
-      'wire_api = "responses"',
-    ].join("\n"), { mode: 0o600 });
+    validateCodexAuth(apiKey);
+    await writeFile(`${environment.CODEX_HOME}/auth.json`, apiKey, { mode: 0o600 });
   }
 
   const deadline = Date.now() + Math.max(60_000, Math.min(80 * 60_000, (timeoutSeconds - 600) * 1_000));
@@ -1022,7 +1012,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     const executable = configuration.runtime === "CLAUDE_CODE" ? "claude" : "codex";
     const arguments_ = configuration.runtime === "CLAUDE_CODE"
       ? claudeGenerationArguments(configuration, continuation, jobId, resumedClaude)
-      : ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-C", "/workspace/project", "-"];
+      : ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-m", configuration.model, "-C", "/workspace/project", "-"];
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
@@ -1260,21 +1250,19 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
       "--dangerously-skip-permissions", prompt,
     ], environment);
   }
-  environment.CODEX_API_KEY = apiKey;
   environment.CODEX_HOME = "/workspace/codex-home";
   await mkdir(environment.CODEX_HOME, { recursive: true });
-  const baseUrl = configuration.baseUrl.replace(/"/g, "");
-  const model = configuration.model.replace(/"/g, "");
-  await writeFile(`${environment.CODEX_HOME}/config.toml`, [
-    `model = "${model}"`,
-    'model_provider = "deviludo"',
-    '[model_providers.deviludo]',
-    'name = "Deviludo Provider"',
-    `base_url = "${baseUrl}"`,
-    'env_key = "CODEX_API_KEY"',
-    'wire_api = "responses"',
-  ].join("\n"), { mode: 0o600 });
-  return command("codex", ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-C", "/workspace/project", "-"], environment, prompt);
+  validateCodexAuth(apiKey);
+  await writeFile(`${environment.CODEX_HOME}/auth.json`, apiKey, { mode: 0o600 });
+  return command("codex", ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-m", configuration.model, "-C", "/workspace/project", "-"], environment, prompt);
+}
+
+function validateCodexAuth(value) {
+  let parsed;
+  try { parsed = JSON.parse(value); } catch { throw new Error("Codex official login data is invalid"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Codex official login data is invalid");
+  }
 }
 
 function validateProjectDocument(content) {

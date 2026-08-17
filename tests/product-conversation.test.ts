@@ -174,8 +174,8 @@ test("Claude design Agent receives project context and conversation history", as
   });
 });
 
-test("Codex design Agent uses Responses API and cannot mutate a locked workflow", async () => {
-  let requestedBody: Record<string, unknown> = {};
+test("Codex design Agent uses the official CLI session and cannot mutate a locked workflow", async () => {
+  let requestedPrompt = "";
   const result = await generateProductConversationReply({
     userContent: "把所有关卡缩短一半",
     history: Object.freeze([]),
@@ -187,16 +187,14 @@ test("Codex design Agent uses Responses API and cannot mutate a locked workflow"
       models: null,
       revision: 3,
     }),
-    apiKey: "codex-test-secret",
-    fetchImpl: async (_url, init) => {
-      requestedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return new Response(JSON.stringify({
-        output_text: JSON.stringify({ reply: "当前交付已锁定，我会把它作为下一轮建议。", applyToDraft: true }),
-      }), { status: 200, headers: { "content-type": "application/json" } });
+    apiKey: JSON.stringify({ tokens: { access_token: "test" } }),
+    codexRunner: async input => {
+      requestedPrompt = input.prompt;
+      return JSON.stringify({ reply: "当前交付已锁定，我会把它作为下一轮建议。", applyToDraft: true });
     },
   });
 
-  assert.match(String(requestedBody.instructions), /applyToDraft 必须为 false/);
+  assert.match(requestedPrompt, /applyToDraft 必须为 false/);
   assert.equal(result.applyToDraft, false);
   assert.equal(result.content, "当前交付已锁定，我会把它作为下一轮建议。");
   assert.deepEqual(result.options, []);

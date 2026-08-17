@@ -23,16 +23,16 @@ DECLARE
       OR coalesce(p_receipt->>'testManifestDigest', '') !~ '^sha256:[0-9a-f]{64}$'
     THEN RAISE EXCEPTION 'validated persistent source revision is required'; END IF;$new$;
   old_insert text := $old$
-      file_count, total_bytes, workflow_id, job_id, actor_account_id, fencing_token
+      file_count, total_bytes, workflow_id, job_id, actor_id, fencing_token
     ) VALUES (
       job.workspace_id, job.project_id, (p_receipt #>> '{sourceRevision,revision}')::bigint,
       p_receipt #>> '{sourceRevision,relativePath}', p_receipt #>> '{sourceRevision,digest}',
       (p_receipt #>> '{sourceRevision,fileCount}')::integer,
       (p_receipt #>> '{sourceRevision,totalBytes}')::bigint,
-      job.workflow_id, job.id, workflow.development_actor_account_id, job.fencing_token$old$;
+      job.workflow_id, job.id, workflow.development_actor_id, job.fencing_token$old$;
   new_insert text := $new$
       file_count, total_bytes, test_manifest_protocol, test_manifest_digest,
-      workflow_id, job_id, actor_account_id, fencing_token
+      workflow_id, job_id, actor_id, fencing_token
     ) VALUES (
       job.workspace_id, job.project_id, (p_receipt #>> '{sourceRevision,revision}')::bigint,
       p_receipt #>> '{sourceRevision,relativePath}', p_receipt #>> '{sourceRevision,digest}',
@@ -40,7 +40,7 @@ DECLARE
       (p_receipt #>> '{sourceRevision,totalBytes}')::bigint,
       p_receipt #>> '{testManifest,schemaVersion}',
       p_receipt->>'testManifestDigest',
-      job.workflow_id, job.id, workflow.development_actor_account_id, job.fencing_token$new$;
+      job.workflow_id, job.id, workflow.development_actor_id, job.fencing_token$new$;
 BEGIN
   SELECT pg_get_functiondef(target) INTO definition;
   IF position('deviludo.test-manifest.v3' IN definition) = 0 THEN
@@ -93,7 +93,7 @@ BEGIN
   signal_key := 'e2e-protocol-revalidate:' || p_protocol;
   FOR candidate IN
     SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
-           workflow.development_actor_account_id, project.created_by_actor_account_id,
+           workflow.development_actor_id, project.created_by_actor_id,
            (
              SELECT source.test_manifest_protocol
                FROM deviludo.project_source_revisions source
@@ -129,7 +129,7 @@ BEGIN
      ORDER BY workflow.updated_at, workflow.id
      LIMIT p_batch_size
   LOOP
-    requested_by := coalesce(candidate.development_actor_account_id, candidate.created_by_actor_account_id);
+    requested_by := coalesce(candidate.development_actor_id, candidate.created_by_actor_id);
     IF candidate.latest_test_manifest_protocol IS DISTINCT FROM 'deviludo.test-manifest.v3' THEN
       rerun_stage := 'AGENT_GENERATION';
     ELSIF EXISTS (
@@ -156,7 +156,7 @@ BEGIN
       signal_key,
       jsonb_build_object(
         'stage', rerun_stage::text,
-        'requestedByAccountId', requested_by,
+        'requestedByActorId', requested_by,
         'reason', 'E2E_PROTOCOL_UPGRADE',
         'testManifestProtocol', 'deviludo.test-manifest.v3',
         'evidenceProtocol', p_protocol

@@ -4,32 +4,32 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import type { ProductSession } from "@/lib/product/contracts";
+import type { LocalInstance } from "@/lib/product/contracts";
 import { cachedValue, clientCacheKeys, loadCached } from "@/lib/product/client-cache";
 import { LanguageSwitcher, useLanguage } from "./i18n/LanguageProvider";
 import { BellIcon, GamepadIcon, HomeIcon, ServerIcon, SettingsIcon } from "./console/Icons";
 
 type HealthState = "checking" | "ok" | "degraded";
-const ProductSessionContext = createContext<ProductSession | undefined>(undefined);
+const LocalInstanceContext = createContext<LocalInstance | undefined>(undefined);
 
 export function ProductShell({ children }: { children: ReactNode }) {
   const { text } = useLanguage();
   const pathname = usePathname();
-  const cachedSession = cachedValue<ProductSession>(clientCacheKeys.session);
-  const [session, setSession] = useState<ProductSession | null>(cachedSession ?? null);
-  const [sessionLoaded, setSessionLoaded] = useState(Boolean(cachedSession));
+  const cachedInstance = cachedValue<LocalInstance>(clientCacheKeys.instance);
+  const [instance, setInstance] = useState<LocalInstance | null>(cachedInstance ?? null);
+  const [instanceLoaded, setInstanceLoaded] = useState(Boolean(cachedInstance));
   const [health, setHealth] = useState<HealthState>(cachedValue<HealthState>(clientCacheKeys.health) ?? "checking");
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadCached(clientCacheKeys.session, 30_000, async () => {
-      const response = await fetch("/api/session", { cache: "no-store", signal: controller.signal });
-      if (!response.ok) throw new Error("SESSION_UNAVAILABLE");
-      return (await response.json() as { session: ProductSession }).session;
+    void loadCached(clientCacheKeys.instance, 30_000, async () => {
+      const response = await fetch("/api/instance", { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error("INSTANCE_UNAVAILABLE");
+      return (await response.json() as { instance: LocalInstance }).instance;
     })
-      .then(value => { if (!controller.signal.aborted) setSession(value); })
+      .then(value => { if (!controller.signal.aborted) setInstance(value); })
       .catch(() => undefined)
-      .finally(() => { if (!controller.signal.aborted) setSessionLoaded(true); });
+      .finally(() => { if (!controller.signal.aborted) setInstanceLoaded(true); });
     void loadCached<HealthState>(clientCacheKeys.health, 30_000, async () => {
       const response = await fetch("/api/health/live", { signal: controller.signal });
       return response.ok ? "ok" : "degraded";
@@ -39,14 +39,14 @@ export function ProductShell({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, []);
 
-  if (!sessionLoaded) {
+  if (!instanceLoaded) {
     return <div className="auth-screen"><LanguageSwitcher /><span className="eyebrow">DEVILUDO CORE</span><h1>{text("正在连接…", "CONNECTING…")}</h1></div>;
   }
-  if (!session) {
-    return <div className="auth-screen"><LanguageSwitcher /><span className="eyebrow">DEVILUDO CORE</span><h1>{text("访问不可用", "ACCESS UNAVAILABLE")}</h1><p>{text("Platform 会话无效或账号服务暂时不可用。", "The Platform session is invalid or the account service is unavailable.")}</p></div>;
+  if (!instance) {
+    return <div className="auth-screen"><LanguageSwitcher /><span className="eyebrow">DEVILUDO CORE</span><h1>{text("本地实例不可用", "LOCAL INSTANCE UNAVAILABLE")}</h1><p>{text("请确认 DeviLudo Core 已启动。", "Make sure DeviLudo Core is running.")}</p></div>;
   }
 
-  const workspace = session.selectedWorkspace;
+  const workspace = instance.workspace;
   const healthLabel = health === "ok" ? "SYSTEM ONLINE" : health === "degraded" ? "SYSTEM LIMITED" : "SYSTEM SYNCING";
   return (
     <div className="app-shell">
@@ -58,7 +58,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
         <div className="workspace-switcher" aria-label={text("当前工作区", "Current workspace")}>
           <span aria-hidden="true" className="workspace-avatar">{workspaceMonogram(workspace.name)}</span>
-          <span><b>{workspace.name}</b><small>{session.authMode === "STANDALONE" ? text("本地独立模式", "Local standalone mode") : text("由 Platform 管理", "Managed by Platform")}</small></span>
+          <span><b>{workspace.name}</b><small>{text("免费自建实例", "Free self-hosted instance")}</small></span>
         </div>
 
         <nav aria-label={text("主要导航", "Main navigation")} className="shell-nav">
@@ -72,8 +72,8 @@ export function ProductShell({ children }: { children: ReactNode }) {
           <Link className={`shell-nav-item ${pathname.startsWith("/settings") ? "is-active" : ""}`} href="/settings">
             <SettingsIcon /><span>{text("设置", "Settings")}</span>{pathname.startsWith("/settings") ? <i aria-hidden="true" /> : null}
           </Link>
-          <Link className={`shell-nav-item ${pathname.startsWith("/admin/server-pools") ? "is-active" : ""}`} href="/admin/server-pools">
-            <ServerIcon /><span>{text("运行状态", "Runtime")}</span>{pathname.startsWith("/admin/server-pools") ? <i aria-hidden="true" /> : null}
+          <Link className={`shell-nav-item ${pathname === "/runtime" ? "is-active" : ""}`} href="/runtime">
+            <ServerIcon /><span>{text("运行状态", "Runtime")}</span>{pathname === "/runtime" ? <i aria-hidden="true" /> : null}
           </Link>
         </nav>
       </aside>
@@ -87,16 +87,16 @@ export function ProductShell({ children }: { children: ReactNode }) {
             <button aria-label={text("通知", "Notifications")} className="icon-button" type="button"><BellIcon /></button>
           </div>
         </header>
-        <main className="shell-content"><ProductSessionContext.Provider value={session}>{children}</ProductSessionContext.Provider></main>
+        <main className="shell-content"><LocalInstanceContext.Provider value={instance}>{children}</LocalInstanceContext.Provider></main>
       </div>
     </div>
   );
 }
 
-export function useProductSession(): ProductSession {
-  const session = useContext(ProductSessionContext);
-  if (!session) throw new Error("ProductSessionContext is missing");
-  return session;
+export function useLocalInstance(): LocalInstance {
+  const instance = useContext(LocalInstanceContext);
+  if (!instance) throw new Error("LocalInstanceContext is missing");
+  return instance;
 }
 
 function workspaceMonogram(name: string): string {

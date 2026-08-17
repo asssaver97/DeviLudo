@@ -1,4 +1,5 @@
 import type { StoredInstanceAgentSettings } from "./repository";
+import { runCodexPrompt } from "./codex-cli";
 
 type FetchLike = typeof fetch;
 
@@ -20,7 +21,7 @@ export async function generateProjectName(input: Readonly<{
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
     ? await requestClaudeName(fetchImpl, input.settings, input.apiKey, prompt)
-    : await requestCodexName(fetchImpl, input.settings, input.apiKey, prompt);
+    : await requestCodexName(input.settings, input.apiKey, prompt);
   return normalizeGeneratedProjectName(raw);
 }
 
@@ -32,7 +33,7 @@ async function requestClaudeName(
 ): Promise<string> {
   const model = settings.models?.primary;
   if (!model) throw new Error("Claude Code 主模型尚未配置");
-  const response = await fetchImpl(providerEndpoint(settings.baseUrl, "messages"), {
+  const response = await fetchImpl(messagesEndpoint(settings.baseUrl), {
     method: "POST",
     headers: {
       authorization: `Bearer ${apiKey}`,
@@ -56,40 +57,18 @@ async function requestClaudeName(
 }
 
 async function requestCodexName(
-  fetchImpl: FetchLike,
   settings: StoredInstanceAgentSettings,
-  apiKey: string,
+  authJson: string,
   prompt: string,
 ): Promise<string> {
   if (settings.agentRuntime !== "CODEX_CLI" || !settings.model) throw new Error("Codex CLI 模型尚未配置");
-  const response = await fetchImpl(providerEndpoint(settings.baseUrl, "responses"), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      input: prompt,
-      max_output_tokens: 80,
-    }),
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!response.ok) throw new Error(`Agent 名称生成失败（Provider ${response.status}）`);
-  const body = await response.json() as {
-    output_text?: unknown;
-    output?: readonly { content?: readonly { text?: unknown }[] }[];
-  };
-  const nested = body.output?.flatMap(item => item.content ?? []).find(item => typeof item.text === "string")?.text;
-  const text = typeof body.output_text === "string" ? body.output_text : nested;
-  if (typeof text !== "string") throw new Error("Agent 未返回有效项目名称");
-  return text;
+  return runCodexPrompt({ authJson, model: settings.model, prompt, timeoutMs: 30_000 });
 }
 
-function providerEndpoint(baseUrl: string, resource: "messages" | "responses"): string {
+function messagesEndpoint(baseUrl: string): string {
   const url = new URL(baseUrl);
   const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/${resource}`.replace(/\/{2,}/g, "/");
+  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/messages`.replace(/\/{2,}/g, "/");
   return url.href;
 }
 

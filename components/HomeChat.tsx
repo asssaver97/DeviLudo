@@ -29,7 +29,7 @@ const STARTERS_EN = Object.freeze([
 const IMPORT_PROJECT_VALUE = "__import_existing_project__";
 
 export function HomeChat() {
-  const { locale, text } = useLanguage();
+  const { errorText, locale, text } = useLanguage();
   const router = useRouter();
   const initialProjects = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
   const [projects, setProjects] = useState<readonly ProductProjectSummary[]>(initialProjects ?? []);
@@ -117,7 +117,7 @@ export function HomeChat() {
       }
     } catch (cause) {
       const failureMessage = cause instanceof ConversationStreamError
-        ? cause.message
+        ? errorText(cause.message, "消息发送失败，请稍后重试", "Message failed. Please try again.")
         : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
       setConversation(failedOptimisticConversation(pendingConversation, failureMessage));
       setContent(message);
@@ -150,7 +150,7 @@ export function HomeChat() {
         body: "{}",
       });
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      if (!response.ok) throw new Error(payload.message ?? text(`操作失败 (${response.status})`, `Operation failed (${response.status})`));
+      if (!response.ok) throw new Error(errorText(payload.message, `操作失败 (${response.status})`, `Operation failed (${response.status})`));
       router.push(`/projects/${activeProject.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("暂时无法开始开发", "Unable to start development"));

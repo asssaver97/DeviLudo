@@ -4,23 +4,17 @@ export type WorkspaceSummary = Readonly<{
   createdAt: string;
 }>;
 
-export const WORKSPACE_ROLES = ["OWNER", "ADMIN", "MEMBER"] as const;
-export type WorkspaceRole = typeof WORKSPACE_ROLES[number];
-
-export type UserRecord = Readonly<{
-  id: string;
-  username: string;
-  instanceAdmin: boolean;
-  createdAt: string;
+export type LocalInstance = Readonly<{
+  mode: "SELF_HOSTED";
+  workspace: WorkspaceSummary;
 }>;
 
-export type ProductSession = Readonly<{
-  user: UserRecord;
-  authenticated: true;
-  authMode: "STANDALONE" | "PLATFORM";
-  canLogout: boolean;
-  workspaceRole: WorkspaceRole;
-  selectedWorkspace: WorkspaceSummary;
+export type TelemetrySettings = Readonly<{
+  enabled: boolean;
+  endpointConfigured: boolean;
+  installationIdMask: string;
+  lastReportedAt: string | null;
+  collectedFields: readonly ["installationId", "activeDay", "releaseVersion", "operatingSystem", "architecture"];
 }>;
 
 export const WORKFLOW_PROFILES = ["VALIDATE", "RELEASE"] as const;
@@ -101,6 +95,8 @@ export type InstanceAgentSettings = Readonly<{
   model: string | null;
   models: AgentModelConfiguration | null;
   roleModels: AgentRoleModelConfiguration;
+  imageModel: string | null;
+  imageGenerationReady: boolean;
   apiKeyConfigured: boolean;
   apiKeyMasked: string | null;
   apiKeyFingerprint: string | null;

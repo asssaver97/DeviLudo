@@ -85,8 +85,8 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
     model: "gpt-5.3-codex",
     models: null,
     credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
-    credentialEnvironmentVariable: "CODEX_API_KEY",
-    environment: { DEVILUDO_CODEX_BASE_URL: "https://api.example.com/v1", DEVILUDO_CODEX_MODEL: "gpt-5.3-codex" },
+    credentialEnvironmentVariable: "CODEX_AUTH_JSON",
+    environment: { DEVILUDO_CODEX_MODEL: "gpt-5.3-codex" },
     revision: 3,
   });
   assert.throws(() => sandboxPlan(Object.freeze({

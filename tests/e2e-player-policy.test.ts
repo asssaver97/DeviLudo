@@ -10,6 +10,7 @@ import {
   playerPolicyIdempotencyInput,
   verifyE2ePlayerVision,
 } from "@/services/core/src/e2e-player-policy";
+import type { CodexPromptInput } from "@/services/core/src/codex-cli";
 
 test("E2E node preserves the complete player-policy provider budget", async () => {
   const source = await readFile(new URL("../services/e2e-node/src/core-client.ts", import.meta.url), "utf8");
@@ -150,11 +151,9 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "text-only-model",
-      fetchImpl: async () => {
+      codexRunner: async () => {
         calls += 1;
-        return new Response(JSON.stringify({
-          output_text: JSON.stringify({ left: "UNAVAILABLE", right: "UNAVAILABLE" }),
-        }), { status: 200 });
+        return JSON.stringify({ left: "UNAVAILABLE", right: "UNAVAILABLE" });
       },
     }), (error: unknown) => (error as { code?: string }).code === "PLAYER_POLICY_VISION_UNAVAILABLE");
     assert.equal(calls, 1);
@@ -237,10 +236,10 @@ describe("E2E Test Agent policy", () => {
   });
 
   test("repairs malformed provider JSON once without exposing Probe or logs", async () => {
-    const bodies: Record<string, unknown>[] = [];
+    const calls: CodexPromptInput[] = [];
     const responses = [
-      { output_text: "not-json", usage: { input_tokens: 11, output_tokens: 2 } },
-      { output_text: decision(), usage: { input_tokens: 13, output_tokens: 7 } },
+      "not-json",
+      decision(),
     ];
     const result = await generateE2ePlayerDecision({
       request: parsePlayerPolicyRequest(request()),
@@ -248,22 +247,18 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      fetchImpl: async (_url, init) => {
-        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-        return new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "content-type": "application/json" } });
+      codexRunner: async input => {
+        calls.push(input);
+        return responses.shift() ?? "";
       },
     });
-    assert.equal(bodies.length, 2);
+    assert.equal(calls.length, 2);
     assert.equal(result.decision.actions[0]?.type, "click");
-    assert.equal(result.inputTokens, 24);
-    assert.equal(result.outputTokens, 9);
-    const providerInput = JSON.stringify(bodies);
+    assert.equal(result.inputTokens, 0);
+    assert.equal(result.outputTokens, 0);
+    const providerInput = JSON.stringify(calls);
     assert.doesNotMatch(providerInput, /uiProbe|godotLogs|stderr|stdout/i);
-    assert.match(providerInput, /data:image\/png;base64/);
-    const responseInput = bodies[0]?.input as readonly Record<string, unknown>[];
-    const responseContent = responseInput[0]?.content as readonly Record<string, unknown>[];
-    const imageUrl = String(responseContent.find(item => item.type === "input_image")?.image_url ?? "");
-    const providerPng = Buffer.from(imageUrl.replace(/^data:image\/png;base64,/, ""), "base64");
+    const providerPng = Buffer.from(calls[0]?.imageBase64 ?? "", "base64");
     assert.equal(providerPng.readUInt32BE(16), 640);
     assert.equal(providerPng.readUInt32BE(20), 360);
     assert.match(providerInput, /attached 640x360 image is an exact half-scale observation/);
@@ -282,31 +277,31 @@ describe("E2E Test Agent policy", () => {
   });
 
   test("tells the provider why a structured decision needs repair", async () => {
-    const bodies: Record<string, unknown>[] = [];
+    const prompts: CodexPromptInput[] = [];
     const invalidDecision = JSON.stringify({
       status: "CONTINUE", observation: "The launch menu is visible.",
       rationale: "I should continue.", actions: [],
     });
-    let calls = 0;
+    let attempts = 0;
     const result = await generateE2ePlayerDecision({
       request: parsePlayerPolicyRequest(request()),
       runtime: "CODEX_CLI",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      fetchImpl: async (_url, init) => {
-        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-        calls += 1;
-        return new Response(JSON.stringify({ output_text: calls === 1 ? invalidDecision : decision() }), { status: 200 });
+      codexRunner: async input => {
+        prompts.push(input);
+        attempts += 1;
+        return attempts === 1 ? invalidDecision : decision();
       },
     });
     assert.equal(result.decision.actions[0]?.type, "click");
-    assert.match(JSON.stringify(bodies[1]), /Validation error: Test Agent decision shape is invalid/);
+    assert.match(prompts[1]?.prompt ?? "", /Validation error: Test Agent decision shape is invalid/);
   });
 
   test("repairs repeated no-progress clicks into exploration of a different visible control", async () => {
-    const bodies: Record<string, unknown>[] = [];
-    let calls = 0;
+    const prompts: CodexPromptInput[] = [];
+    let attempts = 0;
     const result = await generateE2ePlayerDecision({
       request: parsePlayerPolicyRequest({
         ...request(),
@@ -321,17 +316,17 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      fetchImpl: async (_url, init) => {
-        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-        calls += 1;
-        const actions = calls === 1
+      codexRunner: async input => {
+        prompts.push(input);
+        attempts += 1;
+        const actions = attempts === 1
           ? [{ type: "double_click", x: 650, y: 400 }]
           : [{ type: "click", x: 300, y: 220 }];
-        return new Response(JSON.stringify({ output_text: decision(actions) }), { status: 200 });
+        return decision(actions);
       },
     });
     assert.deepEqual(result.decision.actions[0], { type: "click", x: 300, y: 220 });
-    assert.match(JSON.stringify(bodies[1]), /repeated an action that made no verified progress/);
+    assert.match(prompts[1]?.prompt ?? "", /repeated an action that made no verified progress/);
   });
 
   test("repairs consecutive no-progress waits instead of accepting an infinite loading loop", async () => {
@@ -350,12 +345,12 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      fetchImpl: async () => {
+      codexRunner: async () => {
         calls += 1;
         const actions = calls === 1
           ? [{ type: "wait", duration_ms: 100 }]
           : [{ type: "click", x: 300, y: 220 }];
-        return new Response(JSON.stringify({ output_text: decision(actions) }), { status: 200 });
+        return decision(actions);
       },
     });
     assert.equal(calls, 2);
@@ -363,7 +358,7 @@ describe("E2E Test Agent policy", () => {
   });
 
   test("repairs a premature unrecoverable decision into a safe observation wait", async () => {
-    const bodies: Record<string, unknown>[] = [];
+    const prompts: CodexPromptInput[] = [];
     let calls = 0;
     const result = await generateE2ePlayerDecision({
       request: parsePlayerPolicyRequest({ ...request(), history: [], decisionIndex: 0, recovery: false }),
@@ -371,8 +366,8 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      fetchImpl: async (_url, init) => {
-        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      codexRunner: async input => {
+        prompts.push(input);
         calls += 1;
         const output = calls === 1
           ? JSON.stringify({
@@ -387,11 +382,11 @@ describe("E2E Test Agent policy", () => {
             rationale: "Wait briefly for the topmost layer to finish rendering.",
             actions: [{ type: "wait", duration_ms: 1_000 }],
           });
-        return new Response(JSON.stringify({ output_text: output }), { status: 200 });
+        return output;
       },
     });
     assert.deepEqual(result.decision.actions[0], { type: "wait", duration_ms: 1_000 });
-    assert.match(JSON.stringify(bodies[1]), /cannot declare UNRECOVERABLE before recovery mode/);
+    assert.match(prompts[1]?.prompt ?? "", /cannot declare UNRECOVERABLE before recovery mode/);
   });
 
   test("classifies provider failures as infrastructure errors", async () => {
@@ -401,7 +396,7 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      fetchImpl: async () => new Response("rate limited", { status: 429 }),
+      codexRunner: async () => { throw new Error("rate limited"); },
     }), (error: unknown) => {
       const value = error as Error & { code?: string; statusCode?: number };
       return value.code === "PLAYER_POLICY_PROVIDER" && value.statusCode === 503;

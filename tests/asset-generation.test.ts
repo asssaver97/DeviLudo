@@ -42,10 +42,10 @@ function lease(overrides: Partial<AssetGenerationLease> = {}): AssetGenerationLe
 }
 
 const settings = Object.freeze({
-  provider: "dalle-3" as const,
-  apiEndpoint: null,
-  model: null,
-  credentialSecretRef: "vault://instance/image-generation/api-key/versions/1",
+  agentRuntime: "CLAUDE_CODE" as const,
+  baseUrl: "https://api.example.com/v1",
+  imageModel: "gpt-image-1",
+  credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/1",
   apiKeyMask: "sk-********abcd",
   apiKeyFingerprint: "sha256:0123456789ab",
   credentialVersion: "20000000-0000-4000-8000-000000000009",
@@ -67,7 +67,7 @@ function harness(options: Readonly<{
   const claims: { leaseSeconds: number; batchSize: number }[] = [];
   const dependencies = {
     repository: {
-      readImageGenerationSettings: async () =>
+      readAgentSettings: async () =>
         options.imageSettings === undefined ? settings : options.imageSettings,
       assets: {
         claimGeneration: async (leaseSeconds: number, batchSize: number) => {
@@ -139,7 +139,7 @@ describe("Asset generation batch", () => {
     assert.equal(claims[0].leaseSeconds >= 120, true);
   });
 
-  it("does nothing when the instance has no image generation settings or credential", async () => {
+  it("does nothing when the selected Agent connection has no image model or credential", async () => {
     const withoutSettings = harness({ leases: [lease()], imageSettings: null });
     assert.deepEqual(
       await runAssetGenerationBatch(withoutSettings.dependencies),
@@ -248,7 +248,7 @@ describe("Image generation provider calls", () => {
       requested.push(JSON.parse(String(init.body)).size);
       return new Response(JSON.stringify({ data: [{ b64_json: PNG.toString("base64") }] }), { status: 200 });
     }) as never;
-    const target = { provider: "dalle-3" as const, apiEndpoint: null, model: null, apiKey: "k" };
+    const target = { baseUrl: "https://api.example.com/v1", model: "gpt-image-1", apiKey: "k" };
     const request = {
       assetKey: "a", assetType: "sprite", description: "d", generationPrompt: "p", frameCount: null,
     };
@@ -260,32 +260,40 @@ describe("Image generation provider calls", () => {
     assert.deepEqual(requested, ["1024x1024", "1792x1024", "1024x1792"]);
   });
 
-  it("rejects a provider with no synchronous generation API instead of failing per asset", async () => {
+  it("requires the selected connection to return image bytes inline", async () => {
     await assert.rejects(
       () => generateAssetImage(
-        { provider: "midjourney", apiEndpoint: null, model: null, apiKey: "k" },
+        { baseUrl: "https://api.example.com/v1", model: "gpt-image-1", apiKey: "k" },
         {
           assetKey: "a", assetType: "sprite", description: "d",
           generationPrompt: "p", dimensions: null, frameCount: null,
         },
         (async () => new Response("{}", { status: 200 })) as never,
       ),
-      /不支持自动生成/,
+      /未返回图像数据/,
     );
   });
 
-  it("only follows an HTTPS result URL", async () => {
-    const target = { provider: "replicate" as const, apiEndpoint: null, model: null, apiKey: "k" };
-    await assert.rejects(
-      () => generateAssetImage(target, {
+  it("uses the selected connection endpoint, credential, and sole image model", async () => {
+    let observedUrl = "";
+    let observedAuthorization = "";
+    let observedModel = "";
+    await generateAssetImage(
+      { baseUrl: "https://gateway.example.com/provider", model: "studio-image", apiKey: "secret" },
+      {
         assetKey: "a", assetType: "sprite", description: "d",
         generationPrompt: "p", dimensions: null, frameCount: null,
-      }, (async () => new Response(
-        JSON.stringify({ status: "succeeded", output: ["http://cdn.example.com/x.png"] }),
-        { status: 200 },
-      )) as never),
-      /不是 HTTPS/,
+      },
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        observedUrl = String(input);
+        observedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
+        observedModel = (JSON.parse(String(init?.body)) as { model: string }).model;
+        return new Response(JSON.stringify({ data: [{ b64_json: PNG.toString("base64") }] }), { status: 200 });
+      }) as never,
     );
+    assert.equal(observedUrl, "https://gateway.example.com/provider/v1/images/generations");
+    assert.equal(observedAuthorization, "Bearer secret");
+    assert.equal(observedModel, "studio-image");
   });
 
   it("identifies images by magic number, not by the declared content type", () => {

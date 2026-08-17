@@ -16,7 +16,7 @@ test("cacheable local initialisation is gated while the migration ledger is alwa
   // decides whether creating a migration container is necessary.
   assert.match(startup, /readExpectedMigrationLedger\(\)/);
   assert.match(startup, /migrateWithOptionalBaselineReset\(environment, instanceState, expectedMigrationLedger\)/);
-  assert.match(startup, /state\?\.baseline === "001 deviludo-core-source-v1" && state\.migrations === expectedLedger/);
+  assert.match(startup, /state\?\.baseline === "001 deviludo-self-hosted-v1" && state\.migrations === expectedLedger/);
   assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, migrationRan\)/);
   assert.match(startup, /await runMigration\(environment\)/);
   assert.match(startup, /if \(!migrationRan && !baselineReset\)/);

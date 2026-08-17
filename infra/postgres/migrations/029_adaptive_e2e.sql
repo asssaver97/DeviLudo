@@ -242,7 +242,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM deviludo.instance_agent_settings WHERE singleton = true) THEN RETURN; END IF;
   FOR candidate IN
     SELECT workflow.workspace_id, workflow.id AS workflow_id,
-           coalesce(workflow.development_actor_account_id, project.created_by_actor_account_id) AS requested_by
+           coalesce(workflow.development_actor_id, project.created_by_actor_id) AS requested_by
       FROM deviludo.workflow_instances workflow
       JOIN deviludo.projects project
         ON project.workspace_id = workflow.workspace_id AND project.id = workflow.project_id
@@ -269,7 +269,7 @@ BEGIN
        AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED');
     PERFORM deviludo.accept_workflow_signal(
       candidate.workflow_id, 'STAGE_RERUN_REQUESTED', 'adaptive-e2e-current',
-      jsonb_build_object('stage', 'AGENT_GENERATION', 'requestedByAccountId', candidate.requested_by,
+      jsonb_build_object('stage', 'AGENT_GENERATION', 'requestedByActorId', candidate.requested_by,
         'reason', 'E2E_CONTRACT_REPLACED')
     );
   END LOOP;

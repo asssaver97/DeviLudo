@@ -11,7 +11,7 @@ test("legacy executor progress noise is not presented as the failure cause", () 
 
   assert.equal(
     technicalFailureDetail(legacy),
-    "EXECUTOR_DIAGNOSTIC_TRUNCATED: 旧执行器未保留真实失败原因",
+    "EXECUTOR_DIAGNOSTIC_TRUNCATED: The previous executor did not preserve the actual failure reason",
   );
 });
 

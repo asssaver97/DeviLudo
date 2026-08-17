@@ -31,6 +31,7 @@ const settings: StoredInstanceAgentSettings = Object.freeze({
     subagent: "claude-subagent",
   }),
   roleModels: Object.freeze({ design: "claude-sonnet", development: "claude-primary", test: "claude-haiku" }),
+  imageModel: null,
   credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
   apiKeyMask: "sk-********alue",
   apiKeyFingerprint: "sha256:0123456789ab",

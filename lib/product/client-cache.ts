@@ -51,15 +51,13 @@ export function clearClientCache(): void {
 }
 
 export const clientCacheKeys = Object.freeze({
-  session: "session",
+  instance: "instance",
   health: "health",
   projects: "projects",
   project: (projectId: string) => `project:${projectId}`,
   conversations: (projectId: string) => `project:${projectId}:conversations`,
   conversation: (conversationId: string) => `conversation:${conversationId}`,
   artifacts: (projectId: string) => `project:${projectId}:artifacts`,
-  repository: (projectId: string) => `project:${projectId}:repository`,
-  githubRepositories: "github:repositories",
   agentSettings: "settings:agent",
   serverPools: "admin:server-pools",
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { test, expect } from "../fixtures/stack";
 
-test("health, authentication, readiness and the fixed node lifecycle", async ({ stack }) => {
+test("health, self-hosted access, readiness and the fixed node lifecycle", async ({ stack }) => {
   const webLive = await stack.web("/api/health/live");
   expect(webLive.ok()).toBeTruthy();
   expect(await webLive.json()).toMatchObject({ service: "web", status: "ok" });
@@ -14,20 +14,20 @@ test("health, authentication, readiness and the fixed node lifecycle", async ({ 
   expect(notReady.status()).toBe(503);
   expect(await notReady.json()).toMatchObject({ status: "not_ready" });
 
-  const unauthorized = await stack.apiRequest.get(new URL("/v1/admin/server-pools", stack.coreUrl).href);
+  const unauthorized = await stack.apiRequest.get(new URL("/v1/runtime/server-pools", stack.coreUrl).href);
   expect(unauthorized.status()).toBe(401);
 
-  const poolsThroughBff = await stack.web("/api/admin/server-pools");
+  const poolsThroughBff = await stack.web("/api/runtime/server-pools");
   expect(poolsThroughBff.ok()).toBeTruthy();
   expect((await poolsThroughBff.json() as { pools: unknown[] }).pools).toHaveLength(5);
 
-  const invalidNode = await stack.coreWeb("/v1/admin/server-nodes", {
+  const invalidNode = await stack.coreWeb("/v1/runtime/server-nodes", {
     method: "POST",
     data: { poolKind: "UNKNOWN", operatingSystem: "linux", capabilities: [] },
   });
   expect(invalidNode.status()).toBe(400);
 
-  const mismatchedNode = await stack.coreWeb("/v1/admin/server-nodes", {
+  const mismatchedNode = await stack.coreWeb("/v1/runtime/server-nodes", {
     method: "POST",
     data: { poolKind: "E2E_WINDOWS", operatingSystem: "linux", capabilities: ["E2E_TEST"] },
   });
@@ -43,7 +43,7 @@ test("health, authentication, readiness and the fixed node lifecycle", async ({ 
   const mac = nodes.find(node => node.poolKind === "E2E_MACOS");
   expect(mac).toBeTruthy();
   for (const [action, state] of [["drain", "DRAINING"], ["disable", "DISABLED"], ["activate", "ACTIVE"]] as const) {
-    const response = await stack.coreWeb(`/v1/admin/server-nodes/${mac?.id}/${action}`, {
+    const response = await stack.coreWeb(`/v1/runtime/server-nodes/${mac?.id}/${action}`, {
       method: "POST",
       data: {},
     });
@@ -51,30 +51,30 @@ test("health, authentication, readiness and the fixed node lifecycle", async ({ 
     expect((await response.json() as { node: { state: string } }).node.state).toBe(state);
   }
 
-  const unknownAction = await stack.coreWeb(`/v1/admin/server-nodes/${mac?.id}/restart`, {
+  const unknownAction = await stack.coreWeb(`/v1/runtime/server-nodes/${mac?.id}/restart`, {
     method: "POST",
     data: {},
   });
   expect(unknownAction.status()).toBe(404);
 
-  const missingNode = await stack.coreWeb(`/v1/admin/server-nodes/${randomUUID()}/activate`, {
+  const missingNode = await stack.coreWeb(`/v1/runtime/server-nodes/${randomUUID()}/activate`, {
     method: "POST",
     data: {},
   });
   expect(missingNode.status()).toBe(404);
 
-  const nodeList = await stack.web("/api/admin/server-nodes");
+  const nodeList = await stack.web("/api/runtime/server-nodes");
   expect(nodeList.ok()).toBeTruthy();
   expect((await nodeList.json() as { nodes: unknown[] }).nodes).toHaveLength(5);
 });
 
 test("the BFF forwards product requests, enforces its body limit and reports Core outages", async ({ stack }) => {
-  const session = await stack.web("/api/session?source=e2e");
-  expect(session.ok()).toBeTruthy();
-  expect(await session.json()).toMatchObject({
-    session: { authenticated:true,authMode:"STANDALONE",selectedWorkspace: { name:"Local workspace" } },
+  const instance = await stack.web("/api/instance?source=e2e");
+  expect(instance.ok()).toBeTruthy();
+  expect(await instance.json()).toMatchObject({
+    instance: { mode:"SELF_HOSTED",workspace: { name:"Local workspace" } },
   });
-  expect(session.headers()["cache-control"]).toContain("no-store");
+  expect(instance.headers()["cache-control"]).toContain("no-store");
 
   const upstreamValidation = await stack.web("/api/projects", {
     method: "POST",

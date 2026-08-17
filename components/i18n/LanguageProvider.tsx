@@ -8,6 +8,7 @@ type LanguageContextValue = Readonly<{
   locale: Locale;
   setLocale: (locale: Locale) => void;
   text: (chinese: string, english: string) => string;
+  errorText: (message: unknown, chineseFallback: string, englishFallback: string) => string;
 }>;
 
 const LanguageContext = createContext<LanguageContextValue | null>(null);
@@ -28,6 +29,15 @@ export function LanguageProvider({ children, initialLocale }: Readonly<{ childre
     },
     text(chinese, english) {
       return locale === "en" ? english : chinese;
+    },
+    errorText(message, chineseFallback, englishFallback) {
+      const fallback = locale === "en" ? englishFallback : chineseFallback;
+      if (typeof message !== "string" || !message.trim()) return fallback;
+      // Core error details are not presentation copy and can originate from an
+      // older job or a provider. Never leak a Chinese server fallback into the
+      // English UI; keep useful provider messages that are already English.
+      if (locale === "en" && /\p{Script=Han}/u.test(message)) return englishFallback;
+      return message;
     },
   }), [locale]);
 

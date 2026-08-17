@@ -6,7 +6,7 @@ RETURNS TABLE (
   "workspaceId" uuid,
   "projectId" uuid,
   "workflowId" uuid,
-  "actorUserId" uuid,
+  "actorId" uuid,
   "leaseToken" uuid,
   "sourceKind" text,
   "repositoryUrl" text,
@@ -29,7 +29,7 @@ BEGIN
     RAISE EXCEPTION 'invalid project import analysis lease';
   END IF;
   SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
-         workflow.state_data, project.created_by_actor_account_id
+         workflow.state_data, project.created_by_actor_id
     INTO candidate
     FROM deviludo.workflow_instances workflow
     JOIN deviludo.projects project
@@ -68,7 +68,7 @@ BEGIN
     candidate.workspace_id,
     candidate.project_id,
     candidate.workflow_id,
-    candidate.created_by_actor_account_id,
+    candidate.created_by_actor_id,
     next_token,
     candidate.state_data #>> '{source,kind}',
     candidate.state_data #>> '{source,repositoryUrl}',

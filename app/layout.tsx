@@ -4,19 +4,27 @@ import "@fontsource/dotgothic16/400.css";
 import "@fontsource/press-start-2p/400.css";
 import { LanguageProvider, type Locale } from "@/components/i18n/LanguageProvider";
 import { ProductShell } from "@/components/ProductShell";
+import { localizedMetadata } from "@/lib/web/localized-metadata";
 import "./globals.css";
 import "./product.css";
 import "./asset-manifest.css";
 
-export const metadata: Metadata = {
-  title: "DeviLudo · 游戏 AI 开发平台",
-  description: "把游戏构想变成经过跨平台验证、可交付到 Steam 的成品。",
-  icons: {
-    icon: [{ url: "/favicon-deviludo.png", sizes: "64x64", type: "image/png" }],
-    shortcut: "/favicon-deviludo.png",
-    apple: [{ url: "/deviludo-brand-mark.png", sizes: "256x256", type: "image/png" }],
-  },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const localized = await localizedMetadata(
+    "DeviLudo · 游戏 AI 开发平台",
+    "DeviLudo · AI Game Development Platform",
+    "把游戏构想变成经过跨平台验证、可交付到 Steam 的成品。",
+    "Turn game ideas into cross-platform validated builds ready for Steam delivery.",
+  );
+  return {
+    ...localized,
+    icons: {
+      icon: [{ url: "/favicon-deviludo.png", sizes: "64x64", type: "image/png" }],
+      shortcut: "/favicon-deviludo.png",
+      apple: [{ url: "/deviludo-brand-mark.png", sizes: "256x256", type: "image/png" }],
+    },
+  };
+}
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const storedLocale = (await cookies()).get("deviludo_locale")?.value;

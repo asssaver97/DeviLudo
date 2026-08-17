@@ -2,10 +2,6 @@ import type { PoolClient } from "pg";
 import { randomUUID, verify } from "node:crypto";
 import { AssetManifestStore } from "./asset-manifest";
 import {
-  IMAGE_GENERATION_PROVIDERS,
-  type ImageGenerationProvider,
-} from "@/lib/product/asset-manifest";
-import {
   AGENT_RUNTIME_KINDS,
   type AgentProgressEvent,
   type AgentProgressEventKind,
@@ -55,38 +51,6 @@ export class CoreRepository {
 
   async ping(): Promise<void> {
     await this.database.pool.query("SELECT 1");
-  }
-
-  async listSourceReadyEvents(limit = 100): Promise<readonly SourceReadyEvent[]> {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Source event page size is invalid");
-    const result = await this.database.pool.query<SourceReadyEventRow>(
-      `SELECT event_id::text, workspace_id::text, project_id::text, workflow_id::text,
-              source_revision::text, content_digest, development_actor_account_id::text,
-              created_at::text
-         FROM deviludo.pull_source_ready_events($1::integer)`,
-      [limit],
-    );
-    return Object.freeze(result.rows.map(row => Object.freeze({
-      eventId: row.event_id,
-      workspaceId: row.workspace_id,
-      projectId: row.project_id,
-      workflowId: row.workflow_id,
-      sourceRevision: Number(row.source_revision),
-      digest: row.content_digest,
-      developmentActorAccountId: row.development_actor_account_id,
-      createdAt: row.created_at,
-    })));
-  }
-
-  async acknowledgeSourceReadyEvents(eventIds: readonly string[]): Promise<number> {
-    if (eventIds.length < 1 || eventIds.length > 500 || eventIds.some(id => !UUID.test(id))) {
-      throw new Error("Source event acknowledgement is invalid");
-    }
-    const result = await this.database.pool.query<{ acknowledged: string }>(
-      "SELECT deviludo.acknowledge_source_ready_events($1::uuid[])::text AS acknowledged",
-      [eventIds],
-    );
-    return Number(result.rows[0]?.acknowledged ?? 0);
   }
 
   async readSourceRevision(input: Readonly<{
@@ -180,13 +144,13 @@ export class CoreRepository {
     credentialMask: string;
     credentialFingerprint: string;
     credentialVersion: string;
-    updatedByAccountId: string;
+    updatedByActorId: string;
   }>): Promise<StoredWorkspaceSteamSettings> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const result = await client.query<WorkspaceSteamSettingsRow>(
         `INSERT INTO deviludo.workspace_steam_settings(
            workspace_id, builder_username, credential_secret_ref, credential_mask,
-           credential_fingerprint, credential_version, revision, updated_by_actor_account_id
+           credential_fingerprint, credential_version, revision, updated_by_actor_id
          ) VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, 1, $7::uuid)
          ON CONFLICT (workspace_id) DO UPDATE SET
            builder_username = EXCLUDED.builder_username,
@@ -195,12 +159,12 @@ export class CoreRepository {
            credential_fingerprint = EXCLUDED.credential_fingerprint,
            credential_version = EXCLUDED.credential_version,
            revision = deviludo.workspace_steam_settings.revision + 1,
-           updated_by_actor_account_id = EXCLUDED.updated_by_actor_account_id,
+           updated_by_actor_id = EXCLUDED.updated_by_actor_id,
            updated_at = clock_timestamp()
          RETURNING builder_username, credential_secret_ref, credential_mask,
                    credential_fingerprint, credential_version::text, revision::text, updated_at::text`,
         [input.workspaceId, input.builderUsername, input.credentialSecretRef, input.credentialMask,
-          input.credentialFingerprint, input.credentialVersion, input.updatedByAccountId],
+          input.credentialFingerprint, input.credentialVersion, input.updatedByActorId],
       );
       return workspaceSteamSettingsFromRow(result.rows[0]);
     });
@@ -225,26 +189,26 @@ export class CoreRepository {
     appId: string;
     depots: Readonly<Partial<Record<ServerOperatingSystem, string>>>;
     testBranch: string;
-    updatedByAccountId: string;
+    updatedByActorId: string;
   }>): Promise<ProjectSteamSettings> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const result = await client.query<ProjectSteamSettingsRow>(
         `INSERT INTO deviludo.project_steam_settings(
            workspace_id, project_id, app_id, depot_linux, depot_windows, depot_macos,
-           test_branch, revision, updated_by_actor_account_id
+           test_branch, revision, updated_by_actor_id
          ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::bigint, $5::bigint, $6::bigint, $7, 1, $8::uuid)
          ON CONFLICT (workspace_id, project_id) DO UPDATE SET
            app_id = EXCLUDED.app_id, depot_linux = EXCLUDED.depot_linux,
            depot_windows = EXCLUDED.depot_windows, depot_macos = EXCLUDED.depot_macos,
            test_branch = EXCLUDED.test_branch,
            revision = deviludo.project_steam_settings.revision + 1,
-           updated_by_actor_account_id = EXCLUDED.updated_by_actor_account_id,
+           updated_by_actor_id = EXCLUDED.updated_by_actor_id,
            updated_at = clock_timestamp()
          RETURNING project_id::text, app_id::text, depot_linux::text, depot_windows::text,
                    depot_macos::text, test_branch, revision::text, updated_at::text`,
         [input.workspaceId, input.projectId, input.appId, input.depots.linux ?? null,
           input.depots.windows ?? null, input.depots.macos ?? null, input.testBranch,
-          input.updatedByAccountId],
+          input.updatedByActorId],
       );
       return projectSteamSettingsFromRow(result.rows[0]);
     });
@@ -275,7 +239,7 @@ export class CoreRepository {
     workflowId: string;
     version: string;
     channel: "TEST" | "DEFAULT";
-    requestedByAccountId: string;
+    requestedByActorId: string;
   }>): Promise<Readonly<{ release: SteamRelease; accepted: boolean }>> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       await client.query(
@@ -364,7 +328,7 @@ export class CoreRepository {
            workspace_id, id, project_id, workflow_id, version, release_number, channel,
            target_branch, app_id, depot_linux, depot_windows, depot_macos,
            project_settings_revision, builder_username, credential_secret_ref,
-           credential_revision, build_digests, requested_by_actor_account_id
+           credential_revision, build_digests, requested_by_actor_id
          ) VALUES (
            $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::bigint, $7::deviludo.steam_release_channel,
            $8, $9::bigint, $10::bigint, $11::bigint, $12::bigint, $13::bigint,
@@ -374,12 +338,12 @@ export class CoreRepository {
           nextNumber.rows[0].value, input.channel, targetBranch, settings.app_id,
           settings.depot_linux, settings.depot_windows, settings.depot_macos,
           settings.project_revision, settings.builder_username, settings.credential_secret_ref,
-          settings.credential_revision, JSON.stringify(buildDigests), input.requestedByAccountId],
+          settings.credential_revision, JSON.stringify(buildDigests), input.requestedByActorId],
       );
       const accepted = await client.query<{ accepted: boolean }>(
         `SELECT deviludo.start_steam_release($1::uuid, $2::uuid, $3, $4::jsonb) AS accepted`,
         [input.workflowId, releaseId, `release-approved:${releaseId}`,
-          JSON.stringify({ requestedByAccountId: input.requestedByAccountId })],
+          JSON.stringify({ requestedByActorId: input.requestedByActorId })],
       );
       const release = await client.query<SteamReleaseRow>(steamReleaseSelectSql("release.id = $3::uuid"),
         [input.workspaceId, input.projectId, releaseId]);
@@ -391,13 +355,13 @@ export class CoreRepository {
     workspaceId: string;
     workflowId: string;
     idempotencyKey: string;
-    requestedByAccountId: string;
+    requestedByActorId: string;
   }>): Promise<boolean> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const result = await client.query<{ accepted: boolean }>(
         `SELECT deviludo.complete_workflow_iteration($1::uuid, $2, $3::jsonb) AS accepted`,
         [input.workflowId, input.idempotencyKey,
-          JSON.stringify({ requestedByAccountId: input.requestedByAccountId })],
+          JSON.stringify({ requestedByActorId: input.requestedByActorId })],
       );
       return result.rows[0]?.accepted === true;
     });
@@ -407,13 +371,13 @@ export class CoreRepository {
     workspaceId: string;
     workflowId: string;
     idempotencyKey: string;
-    requestedByAccountId: string;
+    requestedByActorId: string;
   }>): Promise<boolean> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const result = await client.query<{ accepted: boolean }>(
         `SELECT deviludo.retry_steam_release($1::uuid, $2, $3::jsonb) AS accepted`,
         [input.workflowId, input.idempotencyKey,
-          JSON.stringify({ requestedByAccountId: input.requestedByAccountId })],
+          JSON.stringify({ requestedByActorId: input.requestedByActorId })],
       );
       return result.rows[0]?.accepted === true;
     });
@@ -447,7 +411,7 @@ export class CoreRepository {
   async readAgentSettings(): Promise<StoredInstanceAgentSettings | null> {
     const result = await this.database.pool.query<AgentSettingsRow>(
         `SELECT agent_runtime::text, base_url, primary_model, opus_model,
-                sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
+                sonnet_model, haiku_model, subagent_model, role_models, image_model, credential_secret_ref,
                 test_policy_ready, test_policy_checked_revision::text,
                 api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                 updated_by, updated_at::text
@@ -462,6 +426,7 @@ export class CoreRepository {
     baseUrl: string;
     models: AgentModelConfiguration | null;
     roleModels: AgentRoleModelConfiguration;
+    imageModel: string | null;
     credentialSecretRef: string;
     apiKeyMask: string;
     apiKeyFingerprint: string;
@@ -471,11 +436,11 @@ export class CoreRepository {
       const result = await this.database.pool.query<AgentSettingsRow>(
         `INSERT INTO deviludo.instance_agent_settings(
            singleton, agent_runtime, base_url, primary_model, opus_model,
-           sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
+           sonnet_model, haiku_model, subagent_model, role_models, image_model, credential_secret_ref,
            api_key_mask, api_key_fingerprint, credential_version, updated_by
          ) VALUES (
            true, $1::deviludo.agent_runtime, $2, $3, $4, $5, $6, $7,
-           $8::jsonb, $9, $10, $11, $12::uuid, $13
+           $8::jsonb, $9, $10, $11, $12, $13::uuid, $14
          )
          ON CONFLICT (singleton) DO UPDATE SET
            agent_runtime = EXCLUDED.agent_runtime,
@@ -486,6 +451,7 @@ export class CoreRepository {
            haiku_model = EXCLUDED.haiku_model,
            subagent_model = EXCLUDED.subagent_model,
            role_models = EXCLUDED.role_models,
+           image_model = EXCLUDED.image_model,
            credential_secret_ref = EXCLUDED.credential_secret_ref,
            api_key_mask = EXCLUDED.api_key_mask,
            api_key_fingerprint = EXCLUDED.api_key_fingerprint,
@@ -496,7 +462,7 @@ export class CoreRepository {
            updated_by = EXCLUDED.updated_by,
            updated_at = clock_timestamp()
          RETURNING agent_runtime::text, base_url, primary_model, opus_model,
-                   sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
+                   sonnet_model, haiku_model, subagent_model, role_models, image_model, credential_secret_ref,
                    test_policy_ready, test_policy_checked_revision::text,
                    api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                    updated_by, updated_at::text
@@ -504,12 +470,13 @@ export class CoreRepository {
         [
           input.agentRuntime,
           input.baseUrl,
-          input.models?.primary ?? null,
+          input.agentRuntime === "CODEX_CLI" ? input.roleModels.development : input.models?.primary ?? null,
           input.models?.opus ?? null,
           input.models?.sonnet ?? null,
           input.models?.haiku ?? null,
           input.models?.subagent ?? null,
           JSON.stringify(input.roleModels),
+          input.imageModel,
           input.credentialSecretRef,
           input.apiKeyMask,
           input.apiKeyFingerprint,
@@ -655,60 +622,6 @@ export class CoreRepository {
     return await this.readE2ePlayerDecision(input) ?? input.decision;
   }
 
-  async readImageGenerationSettings(): Promise<StoredImageGenerationSettings | null> {
-    const result = await this.database.pool.query<ImageGenerationSettingsRow>(
-      `SELECT provider, api_endpoint, model, credential_secret_ref,
-              api_key_mask, api_key_fingerprint, credential_version::text,
-              revision::text, updated_by, updated_at::text
-         FROM deviludo.instance_image_generation_settings
-        WHERE singleton = true`,
-    );
-    return result.rows[0] ? imageGenerationSettingsFromRow(result.rows[0]) : null;
-  }
-
-  async saveImageGenerationSettings(input: Readonly<{
-    provider: ImageGenerationProvider;
-    apiEndpoint: string | null;
-    model: string | null;
-    credentialSecretRef: string;
-    apiKeyMask: string;
-    apiKeyFingerprint: string;
-    credentialVersion: string;
-    updatedBy: string;
-  }>): Promise<StoredImageGenerationSettings> {
-    const result = await this.database.pool.query<ImageGenerationSettingsRow>(
-      `INSERT INTO deviludo.instance_image_generation_settings(
-         singleton, provider, api_endpoint, model, credential_secret_ref,
-         api_key_mask, api_key_fingerprint, credential_version, updated_by
-       ) VALUES (true, $1, $2, $3, $4, $5, $6, $7::uuid, $8)
-       ON CONFLICT (singleton) DO UPDATE SET
-         provider = EXCLUDED.provider,
-         api_endpoint = EXCLUDED.api_endpoint,
-         model = EXCLUDED.model,
-         credential_secret_ref = EXCLUDED.credential_secret_ref,
-         api_key_mask = EXCLUDED.api_key_mask,
-         api_key_fingerprint = EXCLUDED.api_key_fingerprint,
-         credential_version = EXCLUDED.credential_version,
-         revision = deviludo.instance_image_generation_settings.revision + 1,
-         updated_by = EXCLUDED.updated_by,
-         updated_at = clock_timestamp()
-       RETURNING provider, api_endpoint, model, credential_secret_ref,
-                 api_key_mask, api_key_fingerprint, credential_version::text,
-                 revision::text, updated_by, updated_at::text`,
-      [
-        input.provider,
-        input.apiEndpoint,
-        input.model,
-        input.credentialSecretRef,
-        input.apiKeyMask,
-        input.apiKeyFingerprint,
-        input.credentialVersion,
-        input.updatedBy,
-      ],
-    );
-    return imageGenerationSettingsFromRow(result.rows[0]);
-  }
-
   async listProjects(workspaceId: string): Promise<readonly ProductProjectSummary[]> {
     return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<ProductProjectRow>(
@@ -747,7 +660,7 @@ export class CoreRepository {
   }
 
   async createProject(input: Readonly<{
-    actorUserId: string;
+    actorId: string;
     workspaceId: string;
     workspaceName: string;
     projectId: string;
@@ -766,9 +679,9 @@ export class CoreRepository {
         [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_id, name)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
-        [input.workspaceId, input.projectId, input.actorUserId, input.name],
+        [input.workspaceId, input.projectId, input.actorId, input.name],
       );
       await insertInitialProjectDocument(client, input);
       await client.query(
@@ -806,144 +719,6 @@ export class CoreRepository {
     return created;
   }
 
-  async createImportedProject(input: Readonly<{
-    actorUserId: string;
-    workspaceId: string;
-    workspaceName: string;
-    projectId: string;
-    workflowId: string;
-    conversationId: string;
-    idempotencyKey: string;
-    name: string;
-    concept: string;
-    specification: Readonly<Record<string, unknown>>;
-    document: ProjectDocumentContent;
-    userContent: string;
-    assistantContent: string;
-    assistantMetadata: Readonly<Record<string, unknown>>;
-    discovery: ProjectDiscoveryReport;
-    source: Readonly<{
-      kind: "GIT" | "LOCAL_ARCHIVE" | "LOCAL_DIRECTORY";
-      repositoryUrl: string | null;
-      localDirectoryBindingId: string | null;
-      gitBranch: string | null;
-      displayName: string;
-      fileCount: number;
-      totalBytes: number;
-      revision: number;
-      relativePath: string;
-      sha256: string;
-    }>;
-    profile: "VALIDATE" | "RELEASE";
-    targetPlatforms: readonly ServerOperatingSystem[];
-  }>): Promise<Readonly<{ project: ProductProjectDetail; conversation: ProductConversation }>> {
-    await this.database.withWorkspace(input.workspaceId, async client => {
-      await client.query(
-        `INSERT INTO deviludo.workspaces(id, name) VALUES ($1::uuid, $2)
-         ON CONFLICT (id) DO NOTHING`,
-        [input.workspaceId, input.workspaceName],
-      );
-      await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
-        [input.workspaceId, input.projectId, input.actorUserId, input.name],
-      );
-      const markdown = projectDocumentMarkdown(input.name, input.document);
-      await client.query(
-        `INSERT INTO deviludo.project_documents(
-           workspace_id, project_id, content, markdown, maintained_by, last_agent_maintained_at
-         ) VALUES ($1::uuid, $2::uuid, $3::jsonb, $4, 'AGENT', clock_timestamp())`,
-        [input.workspaceId, input.projectId, JSON.stringify(input.document), markdown],
-      );
-      await client.query(
-        `INSERT INTO deviludo.project_document_revisions(
-           workspace_id, project_id, revision, content, markdown, source
-         ) VALUES ($1::uuid, $2::uuid, 1, $3::jsonb, $4, 'PROJECT_IMPORTED')`,
-        [input.workspaceId, input.projectId, JSON.stringify(input.document), markdown],
-      );
-      await client.query(
-        `INSERT INTO deviludo.workflow_instances(
-           workspace_id, id, project_id, profile, target_platforms, state_data
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.workflow_profile, $5::deviludo.server_os[], $6::jsonb)`,
-        [input.workspaceId, input.workflowId, input.projectId, input.profile, input.targetPlatforms, JSON.stringify({
-          concept: input.concept,
-          specification: input.specification,
-          source: {
-            kind: input.source.kind,
-            repositoryUrl: input.source.repositoryUrl,
-            localDirectoryBindingId: input.source.localDirectoryBindingId,
-            gitBranch: input.source.gitBranch,
-            displayName: input.source.displayName,
-            fileCount: input.source.fileCount,
-            totalBytes: input.source.totalBytes,
-            sha256: input.source.sha256,
-          },
-          importAnalysis: {
-            status: input.discovery.questions.length ? "NEEDS_INPUT" : "READY",
-            attempts: 1,
-            error: null,
-            report: input.discovery,
-            completedAt: new Date().toISOString(),
-          },
-          iteration: initialIterationState(),
-        })],
-      );
-      await client.query(
-        `INSERT INTO deviludo.workflow_events(
-           workspace_id, workflow_id, event_kind, event_data, idempotency_key
-         ) VALUES ($1::uuid, $2::uuid, 'PROJECT_IMPORTED', $3::jsonb, 'project-imported')`,
-        [input.workspaceId, input.workflowId, JSON.stringify({
-          sourceKind: input.source.kind,
-          repositoryUrl: input.source.repositoryUrl,
-          localDirectoryBindingId: input.source.localDirectoryBindingId,
-          gitBranch: input.source.gitBranch,
-          fileCount: input.source.fileCount,
-          totalBytes: input.source.totalBytes,
-          sha256: input.source.sha256,
-        })],
-      );
-      await client.query(
-        `INSERT INTO deviludo.project_source_revisions(
-           workspace_id, project_id, revision, relative_path, content_digest,
-           file_count, total_bytes, workflow_id, actor_account_id
-         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4, $5, $6, $7, $8::uuid, $9::uuid)`,
-        [input.workspaceId, input.projectId, input.source.revision, input.source.relativePath,
-          input.source.sha256, input.source.fileCount, input.source.totalBytes,
-          input.workflowId, input.actorUserId],
-      );
-      await client.query(
-        `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, 'PROJECT_FEEDBACK', $4)`,
-        [input.workspaceId, input.conversationId, input.projectId, `${input.name} · 导入分析`],
-      );
-      await client.query(
-        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content)
-         VALUES ($1::uuid, $2::uuid, 'USER', $3)`,
-        [input.workspaceId, input.conversationId, input.userContent],
-      );
-      await client.query(
-        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
-         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
-        [input.workspaceId, input.conversationId, input.assistantContent, JSON.stringify({
-          ...input.assistantMetadata,
-          source: "PROJECT_IMPORT_AGENT",
-          appliedToDraft: true,
-        })],
-      );
-      await client.query(
-        `INSERT INTO deviludo.project_creation_receipts(
-           idempotency_key, operation_kind, workspace_id, project_id
-         ) VALUES ($1, 'PROJECT', $2::uuid, $3::uuid)`,
-        [input.idempotencyKey, input.workspaceId, input.projectId],
-      );
-    });
-    const [project, conversation] = await Promise.all([
-      this.readProject(input.workspaceId, input.projectId),
-      this.readConversation(input.workspaceId, input.conversationId),
-    ]);
-    if (!project || !conversation) throw new Error("Imported project could not be read");
-    return Object.freeze({ project, conversation });
-  }
 
   /**
    * Persist the directory link before any source read or Provider call. This is
@@ -951,7 +726,7 @@ export class CoreRepository {
    * soon as a durable project card exists.
    */
   async createPendingImportedProject(input: Readonly<{
-    actorUserId: string;
+    actorId: string;
     workspaceId: string;
     workspaceName: string;
     projectId: string;
@@ -977,9 +752,9 @@ export class CoreRepository {
         [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_id, name)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
-        [input.workspaceId, input.projectId, input.actorUserId, input.name],
+        [input.workspaceId, input.projectId, input.actorId, input.name],
       );
       await insertInitialProjectDocument(client, {
         workspaceId: input.workspaceId,
@@ -1044,7 +819,7 @@ export class CoreRepository {
       workspaceId: row.workspaceId,
       projectId: row.projectId,
       workflowId: row.workflowId,
-      actorUserId: row.actorUserId,
+      actorId: row.actorId,
       leaseToken: row.leaseToken,
       sourceKind: row.sourceKind,
       repositoryUrl: row.repositoryUrl,
@@ -1058,7 +833,7 @@ export class CoreRepository {
     workspaceId: string;
     projectId: string;
     workflowId: string;
-    actorUserId: string;
+    actorId: string;
     leaseToken: string;
     concept: string;
     specification: Readonly<Record<string, unknown>>;
@@ -1116,11 +891,11 @@ export class CoreRepository {
       await client.query(
         `INSERT INTO deviludo.project_source_revisions(
            workspace_id, project_id, revision, relative_path, content_digest,
-           file_count, total_bytes, workflow_id, actor_account_id
+           file_count, total_bytes, workflow_id, actor_id
          ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4, $5, $6, $7, $8::uuid, $9::uuid)`,
         [input.workspaceId, input.projectId, input.source.revision, input.source.relativePath,
           input.source.sha256, input.source.fileCount, input.source.totalBytes,
-          input.workflowId, input.actorUserId],
+          input.workflowId, input.actorId],
       );
 
       const currentState = row.state_data ?? {};
@@ -1284,7 +1059,7 @@ export class CoreRepository {
   }
 
   async createProjectConversation(input: Readonly<{
-    actorUserId: string;
+    actorId: string;
     workspaceId: string;
     workspaceName: string;
     projectId: string;
@@ -1310,9 +1085,9 @@ export class CoreRepository {
         [input.workspaceId, input.workspaceName],
       );
       await client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_id, name)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
-        [input.workspaceId, input.projectId, input.actorUserId, input.name],
+        [input.workspaceId, input.projectId, input.actorId, input.name],
       );
       await insertInitialProjectDocument(client, input);
       await client.query(
@@ -1467,7 +1242,7 @@ export class CoreRepository {
         ),
         client.query<ProjectDocumentRevisionRow>(
           `SELECT revision.revision::text, revision.source,
-                  revision.author_actor_account_id::text AS author_username, revision.created_at::text
+                  revision.author_actor_id::text AS author_username, revision.created_at::text
              FROM deviludo.project_document_revisions revision
             WHERE revision.project_id = $1::uuid
             ORDER BY revision.revision DESC
@@ -1506,9 +1281,9 @@ export class CoreRepository {
     workspaceId: string;
     projectId: string;
     baseWorkflowId: string;
-    actorUserId: string;
+    actorId: string;
   }>): Promise<Readonly<{ project: ProductProjectDetail; created: boolean }>> {
-    if (!UUID.test(input.projectId) || !UUID.test(input.baseWorkflowId) || !UUID.test(input.actorUserId)) {
+    if (!UUID.test(input.projectId) || !UUID.test(input.baseWorkflowId) || !UUID.test(input.actorId)) {
       throw iterationError("INVALID_PROJECT_ITERATION", "项目迭代请求无效", 400);
     }
     const result = await this.database.withWorkspace(input.workspaceId, async client => {
@@ -1611,7 +1386,7 @@ export class CoreRepository {
           parentWorkflowId: input.baseWorkflowId,
           baseSourceRevision: stateData.iteration.baseSourceRevision,
           baseDocumentRevision: stateData.iteration.baseDocumentRevision,
-          requestedByAccountId: input.actorUserId,
+          requestedByActorId: input.actorId,
         })],
       );
       await touchProjectActivity(client, input.workspaceId, input.projectId);
@@ -1757,7 +1532,7 @@ export class CoreRepository {
   }
 
   async updateProjectDocument(input: Readonly<{
-    actorUserId: string;
+    actorId: string;
     workspaceId: string;
     projectId: string;
     expectedRevision: number;
@@ -1786,16 +1561,16 @@ export class CoreRepository {
       await client.query(
         `UPDATE deviludo.project_documents
             SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
-                maintained_by = 'USER', updated_by_actor_account_id = $5::uuid,
+                maintained_by = 'USER', updated_by_actor_id = $5::uuid,
                 updated_at = clock_timestamp()
           WHERE project_id = $1::uuid`,
-        [input.projectId, revision, JSON.stringify(content), markdown, input.actorUserId],
+        [input.projectId, revision, JSON.stringify(content), markdown, input.actorId],
       );
       await client.query(
         `INSERT INTO deviludo.project_document_revisions(
-           workspace_id, project_id, revision, content, markdown, source, author_actor_account_id
+           workspace_id, project_id, revision, content, markdown, source, author_actor_id
          ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5, 'USER_EDIT', $6::uuid)`,
-        [input.workspaceId, input.projectId, revision, JSON.stringify(content), markdown, input.actorUserId],
+        [input.workspaceId, input.projectId, revision, JSON.stringify(content), markdown, input.actorId],
       );
     });
     return this.readProject(input.workspaceId, input.projectId);
@@ -2300,7 +2075,7 @@ export class CoreRepository {
           await client.query(
             `UPDATE deviludo.project_documents
                 SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
-                    maintained_by = 'AGENT', updated_by_actor_account_id = NULL,
+                    maintained_by = 'AGENT', updated_by_actor_id = NULL,
                     last_agent_maintained_at = clock_timestamp(), updated_at = clock_timestamp()
               WHERE project_id = $1::uuid`,
             [input.projectId, revision, JSON.stringify(content), markdown],
@@ -2430,7 +2205,7 @@ export class CoreRepository {
     createdBy: string;
   }>): Promise<{ id: string; expiresAt: string }> {
     const result = await this.database.pool.query<{ id: string; expires_at: string }>(
-      `INSERT INTO deviludo.e2e_enrollment_tokens(token_hash, pool_kind, expires_at, created_by_actor_account_id)
+      `INSERT INTO deviludo.e2e_enrollment_tokens(token_hash, pool_kind, expires_at, created_by_actor_id)
        VALUES ($1, $2::deviludo.server_pool_kind, clock_timestamp() + interval '30 minutes', $3::uuid)
        RETURNING id::text, expires_at::text`,
       [input.tokenHash, input.poolKind, input.createdBy],
@@ -3139,26 +2914,6 @@ type PendingObjectCleanupRow = {
 };
 
 export type PendingObjectCleanup = Readonly<PendingObjectCleanupRow>;
-type SourceReadyEventRow = {
-  event_id: string;
-  workspace_id: string;
-  project_id: string;
-  workflow_id: string;
-  source_revision: string;
-  content_digest: string;
-  development_actor_account_id: string;
-  created_at: string;
-};
-export type SourceReadyEvent = Readonly<{
-  eventId: string;
-  workspaceId: string;
-  projectId: string;
-  workflowId: string;
-  sourceRevision: number;
-  digest: string;
-  developmentActorAccountId: string;
-  createdAt: string;
-}>;
 type AgentSettingsRow = {
   agent_runtime: string;
   base_url: string;
@@ -3168,6 +2923,7 @@ type AgentSettingsRow = {
   haiku_model: string | null;
   subagent_model: string | null;
   role_models: unknown;
+  image_model: string | null;
   credential_secret_ref: string;
   test_policy_ready: boolean;
   test_policy_checked_revision: string | null;
@@ -3185,6 +2941,7 @@ export type StoredInstanceAgentSettings = Readonly<{
   model: string | null;
   models: AgentModelConfiguration | null;
   roleModels: AgentRoleModelConfiguration;
+  imageModel: string | null;
   credentialSecretRef: string;
   testPolicyReady: boolean;
   testPolicyCheckedRevision: number | null;
@@ -3221,58 +2978,10 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
     model: runtime === "CODEX_CLI" ? row.primary_model ?? roleModels.development : null,
     models,
     roleModels,
+    imageModel: row.image_model,
     credentialSecretRef: row.credential_secret_ref,
     testPolicyReady: row.test_policy_ready,
     testPolicyCheckedRevision,
-    apiKeyMask: row.api_key_mask,
-    apiKeyFingerprint: row.api_key_fingerprint,
-    credentialVersion: row.credential_version,
-    revision,
-    updatedBy: row.updated_by,
-    updatedAt: row.updated_at,
-  });
-}
-
-type ImageGenerationSettingsRow = {
-  provider: string;
-  api_endpoint: string | null;
-  model: string | null;
-  credential_secret_ref: string;
-  api_key_mask: string;
-  api_key_fingerprint: string;
-  credential_version: string;
-  revision: string;
-  updated_by: string;
-  updated_at: string;
-};
-
-export type StoredImageGenerationSettings = Readonly<{
-  provider: ImageGenerationProvider;
-  apiEndpoint: string | null;
-  model: string | null;
-  credentialSecretRef: string;
-  apiKeyMask: string;
-  apiKeyFingerprint: string;
-  credentialVersion: string;
-  revision: number;
-  updatedBy: string;
-  updatedAt: string;
-}>;
-
-function imageGenerationSettingsFromRow(row: ImageGenerationSettingsRow): StoredImageGenerationSettings {
-  const revision = Number(row.revision);
-  if (!(IMAGE_GENERATION_PROVIDERS as readonly string[]).includes(row.provider)
-    || !Number.isSafeInteger(revision) || revision < 1
-    || !row.credential_secret_ref.startsWith("vault://instance/image-generation/api-key/versions/")
-    || !/^.{3}\*{8}.{4}$/.test(row.api_key_mask)
-    || !/^sha256:[0-9a-f]{12}$/.test(row.api_key_fingerprint)) {
-    throw new Error("Stored image generation settings are invalid");
-  }
-  return Object.freeze({
-    provider: row.provider as ImageGenerationProvider,
-    apiEndpoint: row.api_endpoint,
-    model: row.model,
-    credentialSecretRef: row.credential_secret_ref,
     apiKeyMask: row.api_key_mask,
     apiKeyFingerprint: row.api_key_fingerprint,
     credentialVersion: row.credential_version,
@@ -3531,7 +3240,7 @@ export type PendingProjectImportAnalysis = Readonly<{
   workspaceId: string;
   projectId: string;
   workflowId: string;
-  actorUserId: string;
+  actorId: string;
   leaseToken: string;
   sourceKind: "GIT" | "LOCAL_DIRECTORY";
   repositoryUrl: string | null;
@@ -3544,7 +3253,7 @@ type PendingProjectImportAnalysisRow = {
   workspaceId: string;
   projectId: string;
   workflowId: string;
-  actorUserId: string;
+  actorId: string;
   leaseToken: string;
   sourceKind: "GIT" | "LOCAL_DIRECTORY";
   repositoryUrl: string | null;

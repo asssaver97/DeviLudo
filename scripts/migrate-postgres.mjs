@@ -63,9 +63,9 @@ try {
     const metadata = await client.query(
       "SELECT baseline, compatibility, current_version, source_digest FROM deviludo.schema_metadata WHERE singleton = true",
     );
-    if (metadata.rows[0]?.baseline !== "001" || metadata.rows[0]?.compatibility !== "deviludo-core-source-v1") {
+    if (metadata.rows[0]?.baseline !== "001" || metadata.rows[0]?.compatibility !== "deviludo-self-hosted-v1") {
       throw Object.assign(new Error(
-        "INCOMPATIBLE_BASELINE_RESET_REQUIRED: this database is not compatible with persistent source v1",
+        "INCOMPATIBLE_BASELINE_RESET_REQUIRED: this database predates the self-hosted-only schema",
       ), { code: "INCOMPATIBLE_BASELINE_RESET_REQUIRED" });
     }
 

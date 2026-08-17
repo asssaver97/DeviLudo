@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { crc32, deflateSync } from "node:zlib";
 import sharp from "sharp";
 import type { AgentRuntimeKind } from "@/lib/product/contracts";
+import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 export const PLAYER_POLICY_STATUSES = ["CONTINUE", "GOAL_REACHED", "UNRECOVERABLE"] as const;
 export type PlayerPolicyStatus = typeof PLAYER_POLICY_STATUSES[number];
@@ -139,9 +140,11 @@ export async function generateE2ePlayerDecision(input: Readonly<{
   apiKey: string;
   model: string;
   fetchImpl?: typeof fetch;
+  codexRunner?: CodexPromptRunner;
 }>): Promise<PlayerPolicyResult> {
   const prompt = policyPrompt(input.request);
   const fetchImpl = input.fetchImpl ?? fetch;
+  const codexRunner = input.codexRunner ?? runCodexPrompt;
   const providerFrameBase64 = await downsamplePlayerFrame(input.request.screenshotBase64);
   let lastRaw = "";
   let inputTokens = 0;
@@ -160,7 +163,7 @@ export async function generateE2ePlayerDecision(input: Readonly<{
     let response: Response;
     try {
       response = input.runtime === "CLAUDE_CODE"
-        ? await fetchImpl(providerEndpoint(input.baseUrl, "messages"), {
+        ? await fetchImpl(messagesEndpoint(input.baseUrl), {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -180,19 +183,13 @@ export async function generateE2ePlayerDecision(input: Readonly<{
           }),
           signal: AbortSignal.timeout(75_000),
         })
-        : await fetchImpl(providerEndpoint(input.baseUrl, "responses"), {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${input.apiKey}` },
-          body: JSON.stringify({
-            model: input.model,
-            instructions: PLAYER_POLICY_SYSTEM,
-            input: [{ role: "user", content: [
-              { type: "input_image", image_url: `data:image/png;base64,${providerFrameBase64}` },
-              { type: "input_text", text: prompt + correction },
-            ] }], max_output_tokens: 1_200,
-          }),
-          signal: AbortSignal.timeout(75_000),
-        });
+        : new Response(JSON.stringify({ output_text: await codexRunner({
+          authJson: input.apiKey,
+          model: input.model,
+          prompt: `${PLAYER_POLICY_SYSTEM}\n\n${prompt}${correction}`,
+          imageBase64: providerFrameBase64,
+          timeoutMs: 75_000,
+        }) }), { status: 200, headers: { "content-type": "application/json" } });
     } catch {
       lastRaw = "provider request failed";
       if (!transportRetryUsed) {
@@ -278,13 +275,15 @@ export async function verifyE2ePlayerVision(input: Readonly<{
   apiKey: string;
   model: string;
   fetchImpl?: typeof fetch;
+  codexRunner?: CodexPromptRunner;
 }>): Promise<void> {
   const fetchImpl = input.fetchImpl ?? fetch;
+  const codexRunner = input.codexRunner ?? runCodexPrompt;
   for (const testCase of VISION_SMOKE_CASES) {
     let response: Response;
     try {
       response = input.runtime === "CLAUDE_CODE"
-        ? await fetchImpl(providerEndpoint(input.baseUrl, "messages"), {
+        ? await fetchImpl(messagesEndpoint(input.baseUrl), {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -303,20 +302,13 @@ export async function verifyE2ePlayerVision(input: Readonly<{
           }),
           signal: AbortSignal.timeout(40_000),
         })
-        : await fetchImpl(providerEndpoint(input.baseUrl, "responses"), {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${input.apiKey}` },
-          body: JSON.stringify({
-            model: input.model,
-            instructions: "Inspect the attached calibration image; do not infer colors from text.",
-            input: [{ role: "user", content: [
-              { type: "input_image", image_url: `data:image/png;base64,${testCase.png}` },
-              { type: "input_text", text: VISION_SMOKE_PROMPT },
-            ] }],
-            max_output_tokens: 120,
-          }),
-          signal: AbortSignal.timeout(40_000),
-        });
+        : new Response(JSON.stringify({ output_text: await codexRunner({
+          authJson: input.apiKey,
+          model: input.model,
+          prompt: `Inspect the attached calibration image; do not infer colors from text.\n\n${VISION_SMOKE_PROMPT}`,
+          imageBase64: testCase.png,
+          timeoutMs: 40_000,
+        }) }), { status: 200, headers: { "content-type": "application/json" } });
     } catch {
       throw providerFailure("Test Agent visual capability request failed");
     }
@@ -541,10 +533,10 @@ function frameCoordinate(maximum: number, description: string): Readonly<Record<
   return Object.freeze({ type: "integer", minimum: 0, maximum: maximum - 1, description });
 }
 
-function providerEndpoint(baseUrl: string, endpoint: string): string {
+function messagesEndpoint(baseUrl: string): string {
   const url = new URL(baseUrl);
   const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/${endpoint}`.replace(/\/{2,}/g, "/");
+  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/messages`.replace(/\/{2,}/g, "/");
   return url.href;
 }
 

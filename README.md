@@ -1,7 +1,7 @@
 <div align="center">
   <img src="public/deviludo-brand-mark.png" width="112" alt="DeviLudo logo">
   <h1>DeviLudo</h1>
-  <p><strong>AI-native Godot development, testing, and managed delivery</strong></p>
+  <p><strong>Self-hosted AI game development automation for Godot</strong></p>
   <p>
     <strong>English</strong>
     ·
@@ -12,10 +12,11 @@
     <img src="https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white" alt="Node.js 22">
     <img src="https://img.shields.io/badge/Godot-4.5.1-478CBF?logo=godotengine&logoColor=white" alt="Godot 4.5.1">
     <img src="https://img.shields.io/badge/status-MVP-f6c344" alt="MVP status">
+    <img src="https://img.shields.io/badge/license-Elastic--2.0-5fba7d" alt="Elastic License 2.0">
   </p>
 </div>
 
-DeviLudo connects requirements, source code, specialized AI agents, image assets, Godot builds, real player-operation E2E, and Steam delivery in one traceable workspace. Start from an idea, link an existing local or GitHub project, and continue shipping new iterations without losing earlier specifications, artifacts, or test evidence.
+DeviLudo is a self-hosted automation chain that connects requirements, source code, specialized AI agents, image assets, Godot builds, real player-operation E2E, and Steam delivery. It has no hosted account, organization, membership, OAuth, or SaaS control plane.
 
 > [!IMPORTANT]
 > DeviLudo is an MVP. The complete local workflow currently supports Apple Silicon macOS. Production requires dedicated Core infrastructure and Linux, Windows, and macOS E2E nodes.
@@ -31,7 +32,7 @@ DeviLudo connects requirements, source code, specialized AI agents, image assets
 | Image assets | Generate from an Agent-authored asset plan, upload user assets, or deliberately use placeholders |
 | Godot builds | Produce game artifacts while rejecting script, import, startup, and export errors |
 | Adaptive real E2E | Run deterministic journeys and three Test Agent playthroughs through OS-level keyboard, pointer, and virtual gamepad input |
-| Evidence and regression | Preserve HTML, JSON, logs, screenshots, video, action traces, visual diffs, and one current managed regression trace per platform |
+| Evidence and regression | Preserve HTML, JSON, logs, screenshots, video, action traces, visual diffs, and one current regression trace per target OS |
 | Steam delivery | Keep credentials at workspace scope, App/Depot settings at project scope, and release history across iterations |
 
 Project chat runs in Design → Development → Test order. Design owns the gameplay specification and project document, Development reviews implementation and produces code, and Test owns acceptance coverage and regression risk. Only explicit development instructions approve and start the delivery workflow.
@@ -47,7 +48,7 @@ flowchart LR
     E -->|Product failure · up to 5 repairs| B
     E --> F{Release decision}
     F -->|Finish iteration| G[Next iteration]
-    F -->|Admin approval| H[SteamPipe upload]
+    F -->|Explicit approval| H[SteamPipe upload]
     H -->|Test branch| I[Automatic SetLive]
     H -->|default| J[Manual Steamworks promotion]
 ```
@@ -77,7 +78,7 @@ npm run local:bootstrap
 npm run local:up
 ```
 
-Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then configure Claude Code or Codex CLI under **Settings → Agent Settings**. An image-generation provider is optional. Local installations use `standalone` mode and require no account.
+Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then select Claude Code or the host's officially signed-in Codex CLI under **Settings → Agent Settings**. Optional image generation reuses the selected Claude connection and accepts one image model; it has no separate Provider or credential. DeviLudo is always self-hosted and has no product login.
 
 `local:bootstrap` installs the container toolchain when it is missing. Keep Xcode Command Line Tools current before Homebrew installs Tart. The first `local:up` downloads roughly 25 GB over the network, then retains an OCI cache, a base clone, and a fingerprinted golden VM. The Tart footprint is currently about 90–95 GiB; Docker images and build caches are additional. The setup script's 35 GiB check is only a base-download preflight, not the complete local footprint.
 
@@ -97,6 +98,10 @@ npm run local:reset    # Stop services and delete local data
 ```
 
 Agent execution defaults to one concurrent job. Machines with sufficient memory and Provider capacity may set `DEVILUDO_SANDBOX_CONCURRENCY=2`; only `1` and `2` are accepted.
+
+### Breaking upgrade from the former hosted-control-plane schema
+
+This release intentionally removes accounts, memberships, OAuth connections, repository synchronization, and their database objects. It does not carry a compatibility layer for that retired model. If `local:up` reports an incompatible baseline, back up anything you need and run `npm run local:reset:self-hosted`. This deletes DeviLudo's PostgreSQL, object-store artifacts, managed project-source root, and Vault data. It does not delete external local directories that were only linked to DeviLudo, and it never deletes remote repositories.
 
 ### Remote E2E nodes
 
@@ -140,9 +145,9 @@ DeviLudo maintains one current E2E implementation and one current test contract,
 3. Run three independent Test Agent playthroughs per target platform with stable seeds; the read-only Probe Oracle must prove that at least two complete the core loop.
 4. Give the Test Agent only a downsampled game frame, approved player goal, allowed actions, and the six latest visible outcomes—never Probe data, logs, credentials, or internal state.
 5. Detect visual/state stalls and repeated action loops, allow one recovery attempt, and fail if progress does not resume.
-6. Convert the shortest successful trace to semantic controls and replay it twice from clean directories before replacing the platform's current managed regression trace.
+6. Convert the shortest successful trace to semantic controls and replay it twice from clean directories before replacing the target OS's current regression trace.
 
-Every deterministic journey and adaptive playthrough records `1280×720`, 5 FPS H.264 video. The evidence ZIP contains a self-contained HTML report, structured results, logs, screenshots, videos, JSONL action traces, Oracle decisions, visual diffs, file digests, and the managed regression summary.
+Every deterministic journey and adaptive playthrough records `1280×720`, 5 FPS H.264 video. The evidence ZIP contains a self-contained HTML report, structured results, logs, screenshots, videos, JSONL action traces, Oracle decisions, visual diffs, file digests, and the current regression summary.
 
 System gamepad backends are Core HID on macOS, `uinput` on Linux, and KMDF/VHF on Windows. Every golden image must pass a real Godot window/input/screenshot smoke before accepting jobs. Fixed-coordinate regressions, self-reported success, missing player coverage, Godot errors, blank screenshots, stuck input, or fewer than two successful playthroughs fail the round.
 
@@ -150,12 +155,12 @@ Apple restricts Core HID virtual devices to approved signing entitlements. Local
 
 ## Steam configuration
 
-- Store the workspace Steamworks build account and credential under **Settings → Steam build account**.
-- Store App ID, per-platform Depot IDs, and the test branch in the project's **Managed Steam delivery** panel.
+- Store the Steamworks build credential under **Settings → Steam build credential**.
+- Store App ID, per-OS Depot IDs, and the test branch in the project's **Steam delivery** panel.
 - Credential bodies exist only in the local Secret Store or production Vault; App and Depot IDs are project data, not deployment environment variables.
 - SteamPipe may automatically set a test branch live. Promotion to `default` remains an explicit Steamworks administrator action.
 
-## Production architecture
+## Self-hosted multi-node architecture
 
 ```mermaid
 flowchart TB
@@ -177,7 +182,15 @@ flowchart TB
 | `E2E_WINDOWS` | Windows 11 Pro x86_64 | Windows validation in a Hyper-V interactive session |
 | `E2E_MACOS` | macOS Tahoe 26 Apple Silicon | macOS validation on a Tart graphical desktop |
 
-Production also requires PostgreSQL, S3-compatible object storage, Vault/KMS, OpenTelemetry, TLS, and load balancing. Browser traffic enters only `WEB`; E2E nodes reach the dedicated Core E2E interface through outbound mTLS. It may be routed over a LAN, site-to-site VPN, or the public internet with a strict source CIDR allowlist.
+A multi-node self-hosted installation also requires PostgreSQL, S3-compatible object storage, Vault/KMS, OpenTelemetry, TLS, and load balancing. Browser traffic enters only `WEB`; E2E nodes reach the dedicated Core E2E interface through outbound mTLS. It may be routed over a LAN, site-to-site VPN, or the public internet with a strict source CIDR allowlist.
+
+## Anonymous usage telemetry
+
+DeviLudo can emit at most one best-effort active-installation heartbeat every 20 hours. The payload contains only a random installation ID, active day, release version, operating system, and CPU architecture. It never contains project names, source code, local paths, prompts, model settings, artifacts, credentials, names, or email addresses. As with any HTTPS request, the configured collector can observe normal transport metadata such as the source IP under its own privacy policy.
+
+- No report leaves the machine unless `DEVILUDO_TELEMETRY_ENDPOINT` is configured by the distributor or operator.
+- Disable it at any time in **Settings → Anonymous usage statistics** or with `DEVILUDO_TELEMETRY_ENABLED=0`.
+- Daily active installations are distinct installation IDs for one `activeDay`; monthly active installations are distinct IDs seen in the latest 30 days. These are installation counts, not identified people.
 
 Push a `v*` tag to generate digest-pinned, Cosign-signed images and deployment bundles. Complete the matching [WEB](deploy/web/deploy.env.example), [CORE](deploy/core/deploy.env.example), [Linux E2E](deploy/e2e-linux/deploy.env.example), [Windows E2E](deploy/e2e-windows/deploy.json.example), and [macOS E2E](deploy/e2e-macos/deploy.env.example) configuration, create the target pool's one-time token under **Runtime**, then run the role's `preflight`, `bootstrap`, `deploy`, and `status` actions. The Windows golden image input is a signed ZIP of one exported Hyper-V VM; its bootstrap guest credential JSON contains `username` and `password`, is immediately resealed by the restricted Windows service identity, and is deleted after installation.
 
@@ -194,8 +207,7 @@ The real-provider smoke may incur charges and runs only when explicitly started 
 
 ## Security
 
-- `standalone` has no login system. Never expose it to an untrusted network.
-- `platform` delegates sessions and membership to an external account service; Core stores no passwords or OAuth identities.
+- DeviLudo has no login or tenant boundary. Keep the Web UI on a trusted network or place your own access proxy in front of it.
 - Production Agents run in Kata microVMs. Build and publishing containers use non-root users, read-only filesystems, resource limits, and pinned image digests.
 - Provider, Steam, database, and signing credentials must never be committed or placed on command lines.
 
@@ -204,3 +216,9 @@ The real-provider smoke may incur charges and runs only when explicitly started 
 Issues and pull requests are welcome. Run `npm run check` before submitting changes.
 
 [CI](.github/workflows/ci.yml) · [Release workflow](.github/workflows/release.yml)
+
+## License
+
+DeviLudo is **source-available under the [Elastic License 2.0](LICENSE)**. Individuals and studios may self-host it for free, modify it, and use it to develop and sell commercial games. You may redistribute modified copies with the required notices. You may not provide DeviLudo to third parties as a hosted or managed service that exposes a substantial set of its functionality.
+
+Because that hosted-service restriction is not compatible with the Open Source Definition, this repository does not describe Elastic-2.0 as an OSI-approved open-source license. Your game and project files are not relicensed by DeviLudo; third-party engines, models, assets, and providers keep their own terms.

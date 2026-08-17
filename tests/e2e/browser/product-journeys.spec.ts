@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { test, expect } from "../fixtures/stack";
 
 test("product navigation preserves the shell and reuses project data without reconnecting",async({page})=>{
-  let sessionRequests=0;
+  let instanceRequests=0;
   let projectListRequests=0;
   page.on("request",request=>{
     const url=new URL(request.url());
-    if(url.pathname==="/api/session")sessionRequests++;
+    if(url.pathname==="/api/instance")instanceRequests++;
     if(url.pathname==="/api/projects"&&request.method()==="GET")projectListRequests++;
   });
   await page.goto("/");
@@ -19,7 +19,7 @@ test("product navigation preserves the shell and reuses project data without rec
   await expect(page.getByText("正在连接…",{exact:true})).toHaveCount(0);
   await page.getByRole("link",{name:"首页",exact:true}).click();
   await expect(page.getByRole("heading",{name:"今天想做什么游戏？"})).toBeVisible();
-  expect(sessionRequests).toBe(1);
+  expect(instanceRequests).toBe(1);
   expect(projectListRequests).toBe(1);
 });
 
@@ -332,11 +332,10 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
 
   const projectId = page.url().split("/").pop() ?? "";
-  const browserSession = await (await page.request.get("/api/session")).json() as {
-    session: { selectedWorkspace: { id: string } | null };
+  const browserInstance = await (await page.request.get("/api/instance")).json() as {
+    instance: { workspace: { id: string } };
   };
-  expect(browserSession.session.selectedWorkspace).not.toBeNull();
-  await stack.selectWorkspace(browserSession.session.selectedWorkspace!.id);
+  await stack.selectWorkspace(browserInstance.instance.workspace.id);
   const project = await stack.readProject(projectId);
   expect(project.workflowState).toBe("SUCCEEDED");
   expect(project.jobs).toHaveLength(12);

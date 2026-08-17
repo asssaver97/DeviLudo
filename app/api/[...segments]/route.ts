@@ -89,7 +89,10 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
     const origin = request.headers.get("origin");
     if (!requestOriginMatchesHost(origin, externalHost)) {
-      return Response.json({ code: "ORIGIN_REJECTED", message: "请求来源校验失败" }, { status: 403 });
+      return Response.json({
+        code: "ORIGIN_REJECTED",
+        message: requestText(request, "请求来源校验失败", "Request origin validation failed"),
+      }, { status: 403 });
     }
     headers.set("x-deviludo-origin-verified", "1");
     const csrf = cookieValue(request.headers.get("cookie"), "deviludo_csrf");
@@ -139,7 +142,9 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
     });
   } catch (error) {
     const code = error instanceof Error && error.name === "AbortError" ? "CORE_TIMEOUT" : "CORE_UNAVAILABLE";
-    const message = code === "CORE_TIMEOUT" ? "Core 请求超时" : "Core 暂时不可用";
+    const message = code === "CORE_TIMEOUT"
+      ? requestText(request, "Core 请求超时", "The Core request timed out")
+      : requestText(request, "Core 暂时不可用", "Core is temporarily unavailable");
     return Response.json({ code, message }, { status: 503, headers: { "cache-control": "no-store" } });
   } finally {
     clearTimeout(timer);
@@ -153,6 +158,10 @@ function cookieValue(header: string | null, name: string): string | null {
     if (key === name) return value.join("=");
   }
   return null;
+}
+
+function requestText(request: Request, chinese: string, english: string): string {
+  return cookieValue(request.headers.get("cookie"), "deviludo_locale") === "en" ? english : chinese;
 }
 
 export const GET = proxy;

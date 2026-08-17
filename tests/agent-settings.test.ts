@@ -14,10 +14,23 @@ import {
 import { CoreRepository } from "@/services/core/src/repository";
 
 test("Agent settings accept fixed runtimes and normalize safe provider URLs", () => {
+  assert.deepEqual(parseAgentSettingsInput({
+    agentRuntime: "CODEX_CLI",
+  }, "production"), {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://chatgpt.com",
+    apiKey: null,
+    models: null,
+    roleModels: {
+      design: "gpt-5.3-codex",
+      development: "gpt-5.3-codex",
+      test: "gpt-5.3-codex",
+    },
+    imageModel: null,
+  });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1/",
-    apiKey: "sk-valid-secret",
   }, "production"), /official ChatGPT login/i);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
@@ -100,6 +113,7 @@ test("Claude settings.json accepts only the supported connection fields", () => 
       development: "claude-fable-5-max",
       test: "claude-haiku-route",
     },
+    imageModel: null,
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
@@ -141,35 +155,6 @@ test("the local Secret store writes a versioned instance key and returns only sa
       `${saved.version}.key`,
     ), "utf8");
     assert.equal(stored, "sk-local-secret-value");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("each secret scope is its own namespace, so a ref cannot cross scopes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "deviludo-secret-scopes-"));
-  try {
-    const store = new LocalAgentSecretStore(root);
-    const agent = await store.writeApiKey("sk-agent-secret-value", "agent-runtime");
-    const image = await store.writeApiKey("sk-image-secret-value", "image-generation");
-    assert.match(agent.secretRef, /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//);
-    assert.match(image.secretRef, /^vault:\/\/instance\/image-generation\/api-key\/versions\//);
-
-    // Each scope resolves only its own refs. Reading the image-generation key
-    // through the Agent-runtime scope must fail rather than return the value.
-    assert.equal(await store.readApiKey(image.secretRef, "image-generation"), "sk-image-secret-value");
-    assert.equal(await store.readApiKey(image.secretRef, "agent-runtime"), null);
-    assert.equal(await store.readApiKey(agent.secretRef, "image-generation"), null);
-    // Omitting the scope keeps the Agent runtime default, so existing callers
-    // cannot silently start resolving image-generation keys.
-    assert.equal(await store.readApiKey(agent.secretRef), "sk-agent-secret-value");
-    assert.equal(await store.readApiKey(image.secretRef), null);
-    assert.equal(await store.readApiKeyMask(image.secretRef, "image-generation"), "sk-********alue");
-
-    const stored = await readFile(join(
-      root, "instance", "image-generation", "api-key", "versions", `${image.version}.key`,
-    ), "utf8");
-    assert.equal(stored, "sk-image-secret-value");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

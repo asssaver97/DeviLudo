@@ -167,7 +167,7 @@ BEGIN
      WHERE singleton = true;
     UPDATE deviludo.workflow_instances
        SET state = 'AGENT_RUNNING', version = version + 1,
-           development_actor_account_id = (p_payload->>'requestedByAccountId')::uuid,
+           development_actor_id = (p_payload->>'requestedByActorId')::uuid,
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     PERFORM deviludo.enqueue_job(
@@ -206,7 +206,7 @@ BEGIN
        AND state <> 'CANCELLED';
     UPDATE deviludo.workflow_instances
        SET state = deviludo.stage_running_state(rerun_stage), version = version + 1,
-           development_actor_account_id = (p_payload->>'requestedByAccountId')::uuid,
+           development_actor_id = (p_payload->>'requestedByActorId')::uuid,
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     IF rerun_stage IN ('E2E_TEST', 'ARTIFACT_SIGN', 'STEAM_CLEAN_INSTALL') THEN
@@ -260,7 +260,7 @@ BEGIN
       jsonb_build_object(
         'targetPlatforms', workflow.target_platforms,
         'approvalSignalId', inserted_id,
-        'approvedByAccountId', p_payload->>'requestedByAccountId'
+        'approvedByActorId', p_payload->>'requestedByActorId'
       )
     );
   ELSIF p_signal_kind = 'CANCEL_REQUESTED' THEN
@@ -368,13 +368,13 @@ BEGIN
     THEN RAISE EXCEPTION 'validated persistent source revision is required'; END IF;
     INSERT INTO deviludo.project_source_revisions(
       workspace_id, project_id, revision, relative_path, content_digest,
-      file_count, total_bytes, workflow_id, job_id, actor_account_id, fencing_token
+      file_count, total_bytes, workflow_id, job_id, actor_id, fencing_token
     ) VALUES (
       job.workspace_id, job.project_id, (p_receipt #>> '{sourceRevision,revision}')::bigint,
       p_receipt #>> '{sourceRevision,relativePath}', p_receipt #>> '{sourceRevision,digest}',
       (p_receipt #>> '{sourceRevision,fileCount}')::integer,
       (p_receipt #>> '{sourceRevision,totalBytes}')::bigint,
-      job.workflow_id, job.id, workflow.development_actor_account_id, job.fencing_token
+      job.workflow_id, job.id, workflow.development_actor_id, job.fencing_token
     ) ON CONFLICT (workspace_id, project_id, revision) DO NOTHING;
 
     -- The Agent plans the game's assets while writing the source that expects
@@ -604,7 +604,7 @@ BEGIN
            content = p_receipt #> '{projectDocument,content}',
            markdown = p_receipt #>> '{projectDocument,markdown}',
            maintained_by = 'AGENT',
-           updated_by_actor_account_id = NULL,
+           updated_by_actor_id = NULL,
            last_agent_maintained_at = clock_timestamp(),
            updated_at = clock_timestamp()
      WHERE workspace_id = job.workspace_id AND project_id = job.project_id;
@@ -716,20 +716,6 @@ BEGIN
   THEN
     UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
-  END IF;
-  SELECT * INTO workflow FROM deviludo.workflow_instances
-   WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-  IF workflow.state = 'SUCCEEDED' AND workflow.development_actor_account_id IS NOT NULL THEN
-    INSERT INTO deviludo.project_source_ready_outbox(
-      workspace_id, project_id, workflow_id, source_revision, content_digest,
-      development_actor_account_id
-    )
-    SELECT source.workspace_id, source.project_id, job.workflow_id, source.revision,
-           source.content_digest, workflow.development_actor_account_id
-      FROM deviludo.project_source_revisions source
-     WHERE source.workspace_id = job.workspace_id AND source.project_id = job.project_id
-     ORDER BY source.revision DESC LIMIT 1
-    ON CONFLICT (workspace_id, project_id, workflow_id, source_revision) DO NOTHING;
   END IF;
   RETURN true;
 END

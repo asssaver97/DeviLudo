@@ -3,8 +3,8 @@ import { resolve, sep } from "node:path";
 import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import pg from "pg";
 
-if (!process.argv.includes("--confirm=RESET_DEVILUDO_SOURCE_V1")) {
-  throw new Error("Refusing destructive reset without --confirm=RESET_DEVILUDO_SOURCE_V1");
+if (!process.argv.includes("--confirm=RESET_DEVILUDO_SELF_HOSTED")) {
+  throw new Error("Refusing destructive reset without --confirm=RESET_DEVILUDO_SELF_HOSTED");
 }
 for (const name of [
   "DEVILUDO_MIGRATION_DATABASE_URL_FILE", "DEVILUDO_ARTIFACT_BUCKET",
@@ -39,7 +39,7 @@ do {
 await deleteVaultTree("deviludo");
 await rm(projectsRoot, { recursive: true, force: true });
 
-const client = new pg.Client({ connectionString: databaseUrl, application_name: "deviludo-destructive-source-reset" });
+const client = new pg.Client({ connectionString: databaseUrl, application_name: "deviludo-destructive-self-hosted-reset" });
 await client.connect();
 try {
   await client.query("DROP SCHEMA IF EXISTS deviludo CASCADE");

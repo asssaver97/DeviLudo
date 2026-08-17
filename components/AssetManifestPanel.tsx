@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AssetManifest, AssetItem, ImageGenerationConfig } from "@/lib/product/asset-manifest";
+import type { AssetManifest, AssetItem } from "@/lib/product/asset-manifest";
+import type { InstanceAgentSettings } from "@/lib/product/contracts";
+import { useLanguage } from "./i18n/LanguageProvider";
 
 type AssetManifestPanelProps = {
   projectId: string;
@@ -28,10 +30,11 @@ const EMPTY_COMPLETION: AssetCompletion = Object.freeze({
 });
 
 export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestPanelProps) {
+  const { errorText, text } = useLanguage();
   const [manifest, setManifest] = useState<AssetManifest | null>(null);
   const [items, setItems] = useState<readonly AssetItem[]>([]);
   const [autoGenerateEnabled, setAutoGenerateEnabled] = useState(false);
-  const [generationConfig, setGenerationConfig] = useState<ImageGenerationConfig | null>(null);
+  const [imageGenerationReady, setImageGenerationReady] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [rebuilding, setRebuilding] = useState(false);
@@ -66,9 +69,11 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     return response.ok ? await response.json() as AssetManifestPayload : null;
   }, [projectId]);
 
-  const fetchGenerationConfig = useCallback(async (signal: AbortSignal): Promise<ImageGenerationConfig | null> => {
-    const response = await fetch("/api/settings/image-generation", { signal });
-    return response.ok ? await response.json() as ImageGenerationConfig | null : null;
+  const fetchAgentSettings = useCallback(async (signal: AbortSignal): Promise<InstanceAgentSettings | null> => {
+    const response = await fetch("/api/settings/agent", { signal });
+    if (!response.ok) return null;
+    const payload = await response.json() as { settings?: InstanceAgentSettings };
+    return payload.settings ?? null;
   }, []);
 
   useEffect(() => {
@@ -80,11 +85,11 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
       })
       .catch(() => undefined)
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    void fetchGenerationConfig(controller.signal)
-      .then(config => { if (!controller.signal.aborted) setGenerationConfig(config); })
+    void fetchAgentSettings(controller.signal)
+      .then(settings => { if (!controller.signal.aborted) setImageGenerationReady(settings?.imageGenerationReady === true); })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [applyManifest, fetchGenerationConfig, fetchManifest]);
+  }, [applyManifest, fetchAgentSettings, fetchManifest]);
 
   // Generation settles in the background and gates artifact construction, so the
   // panel polls while work is outstanding and stops once it is not.
@@ -138,12 +143,12 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setUploadError(payload?.message ?? "素材上传失败，请确认格式为 PNG/JPEG/WebP");
+        setUploadError(errorText(payload?.message, "素材上传失败，请确认格式为 PNG/JPEG/WebP", "Asset upload failed. Use a PNG, JPEG, or WebP image."));
         return;
       }
       await loadManifest();
     } catch {
-      setUploadError("素材上传失败，请稍后再试");
+      setUploadError(text("素材上传失败，请稍后再试", "Asset upload failed. Try again shortly."));
     } finally {
       setUploading(false);
     }
@@ -177,71 +182,61 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setRebuildError(payload?.message ?? "重新构建启动失败，请稍后再试");
+        setRebuildError(errorText(payload?.message, "重新构建启动失败，请稍后再试", "Unable to start the rebuild. Try again shortly."));
         return;
       }
       onRerunStarted?.();
     } catch {
-      setRebuildError("重新构建启动失败，请稍后再试");
+      setRebuildError(text("重新构建启动失败，请稍后再试", "Unable to start the rebuild. Try again shortly."));
     } finally {
       setRebuilding(false);
     }
   };
 
   if (loading) {
-    return <div className="asset-manifest-loading">加载素材清单...</div>;
+    return <div className="asset-manifest-loading">{text("加载素材清单…", "Loading asset manifest…")}</div>;
   }
 
   if (!manifest) {
-    return <div className="asset-manifest-empty">项目尚未生成素材清单</div>;
+    return <div className="asset-manifest-empty">{text("项目尚未生成素材清单", "No asset manifest has been generated for this project")}</div>;
   }
 
   const generatingCount = items.filter(item => item.status === "generating").length;
 
-  // A credential is what generation actually needs; an endpoint alone cannot
-  // authenticate a request. Treating endpoint-only as configured let the toggle be
-  // switched on for a setup that could never generate anything.
-  const configComplete = Boolean(generationConfig?.provider && generationConfig.apiKeyMask);
-  // Midjourney has no synchronous HTTP generation API, so the generator rejects
-  // it per asset. Saying so here is better than letting every asset fail.
-  const providerSupported = generationConfig?.provider !== "midjourney";
-
+  // Readiness comes from the selected Agent connection and its optional image
+  // model; the asset panel never owns a second Provider or credential.
   return (
     <div className="asset-manifest-panel">
       <div className="asset-manifest-header">
-        <h3>游戏素材</h3>
+        <h3>{text("游戏素材", "GAME ASSETS")}</h3>
         <div className="asset-manifest-controls">
           <label className="auto-generate-toggle">
             <input
               type="checkbox"
               checked={autoGenerateEnabled}
               onChange={toggleAutoGenerate}
-              disabled={!autoGenerateEnabled && (!configComplete || !providerSupported)}
+              disabled={!autoGenerateEnabled && !imageGenerationReady}
             />
-            <span>自动生成素材</span>
+            <span>{text("自动生成素材", "Generate assets automatically")}</span>
           </label>
           {/* The toggle used to be disabled with no explanation, which read as a
               bug. Whenever it cannot be used, say which condition is missing. */}
-          {!configComplete && !autoGenerateEnabled ? (
+          {!imageGenerationReady && !autoGenerateEnabled ? (
             <span className="config-warning">
-              ⚠️ 需要先在<a href="/settings">设置</a>里配置图片生成模型和 API Key
-            </span>
-          ) : !providerSupported && !autoGenerateEnabled ? (
-            <span className="config-warning">
-              ⚠️ Midjourney 没有可用的同步生成接口，请在设置里改用 DALL-E 3、Stable Diffusion XL 或 Replicate
+              {text("⚠️ 需要先在", "⚠️ Configure an image model in ")}<a href="/settings">{text("设置", "Settings")}</a>{text("的 Agent 连接中选择一个图片模型", " under the selected Agent connection first")}
             </span>
           ) : null}
         </div>
       </div>
 
       <div className="asset-manifest-status">
-        <span>总计: {completion.total}</span>
-        <span>已完成: {completion.uploaded}</span>
-        {generatingCount > 0 && <span className="generating">正在生成: {generatingCount}</span>}
-        {completion.failed > 0 && <span className="failed">失败: {completion.failed}</span>}
+        <span>{text("总计", "Total")}: {completion.total}</span>
+        <span>{text("已完成", "Complete")}: {completion.uploaded}</span>
+        {generatingCount > 0 && <span className="generating">{text("正在生成", "Generating")}: {generatingCount}</span>}
+        {completion.failed > 0 && <span className="failed">{text("失败", "Failed")}: {completion.failed}</span>}
         {completion.complete && (
           <button className="rebuild-button" disabled={rebuilding} onClick={() => void triggerRebuild()} type="button">
-            {rebuilding ? "正在启动重新构建..." : "✓ 使用素材重新构建"}
+            {rebuilding ? text("正在启动重新构建…", "Starting rebuild…") : text("✓ 使用素材重新构建", "✓ Rebuild with assets")}
           </button>
         )}
       </div>
@@ -250,7 +245,10 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
           count with no next step. */}
       {completion.failed > 0 && (
         <p className="asset-manifest-note">
-          有 {completion.failed} 个素材自动生成失败（已达重试上限）。可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词。
+          {text(
+            `有 ${completion.failed} 个素材自动生成失败（已达重试上限）。可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词。`,
+            `${completion.failed} asset${completion.failed === 1 ? "" : "s"} failed automatic generation after all retries. Upload replacement art below or re-run Agent Generation to create a new plan.`,
+          )}
         </p>
       )}
 
@@ -270,7 +268,7 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
           if (file && assetKey) void handleUpload(assetKey, file);
         }}
       />
-      <div aria-label="图片素材列表" className="asset-items-list" role="region" tabIndex={0}>
+      <div aria-label={text("图片素材列表", "Image asset list")} className="asset-items-list" role="region" tabIndex={0}>
         {items.map(item => (
           <div key={item.id} className={`asset-item asset-item-${item.status}`}>
             <div className="asset-item-header">
@@ -281,12 +279,12 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
             <div className="asset-description">{item.description}</div>
             {item.frameCount && (
               <div className="asset-meta">
-                动画帧数: {item.frameCount} | 尺寸: {item.dimensions || "自动"}
+                {text("动画帧数", "Animation frames")}: {item.frameCount} | {text("尺寸", "Size")}: {item.dimensions || text("自动", "Auto")}
               </div>
             )}
             {item.generationPrompt && (
               <div className="asset-prompt-box">
-                <div className="asset-prompt-label">生成提示词:</div>
+                <div className="asset-prompt-label">{text("生成提示词", "Generation prompt")}:</div>
                 <div className="asset-prompt-content">{item.generationPrompt}</div>
               </div>
             )}
@@ -303,17 +301,17 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
                   disabled={uploading}
                   onClick={() => openUploadPicker(item.assetKey)}
                   type="button"
-                >{item.status === "generated" || item.status === "uploaded" ? "替换文件" : "上传文件"}</button>
+                >{item.status === "generated" || item.status === "uploaded" ? text("替换文件", "Replace file") : text("上传文件", "Upload file")}</button>
                 {item.status === "planned" && autoGenerateEnabled ? (
-                  <small className="asset-upload-hint">排队自动生成中，也可以直接上传自备素材</small>
+                  <small className="asset-upload-hint">{text("排队自动生成中，也可以直接上传自备素材", "Queued for automatic generation; you can also upload your own asset")}</small>
                 ) : null}
                 {item.status === "generated" || item.status === "uploaded" ? (
-                  <small className="asset-upload-hint">已有素材，上传新文件会替换它</small>
+                  <small className="asset-upload-hint">{text("已有素材，上传新文件会替换它", "An asset already exists; uploading a new file will replace it")}</small>
                 ) : null}
               </div>
             )}
             {item.errorMessage && (
-              <div className="asset-error">{item.errorMessage}</div>
+              <div className="asset-error">{errorText(item.errorMessage, "素材生成失败", "Asset generation failed")}</div>
             )}
           </div>
         ))}

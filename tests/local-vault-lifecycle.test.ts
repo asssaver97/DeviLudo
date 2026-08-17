@@ -40,11 +40,8 @@ test("the Core Vault policy grants each secret scope its own path", async () => 
     readFile(new URL("../deploy/assets/vault-api.hcl", import.meta.url), "utf8"),
   ]);
   for (const policy of [local, deployed]) {
-    for (const scope of ["agent-runtime", "image-generation"]) {
-      assert.match(policy, new RegExp(
-        `path "secret/data/deviludo/instance/${scope}/api-key/versions/\\*" \\{\\s*capabilities = \\["create", "update", "read"\\]`,
-      ));
-    }
+    assert.match(policy, /path "secret\/data\/deviludo\/instance\/agent-runtime\/api-key\/versions\/\*" \{\s*capabilities = \["create", "update", "read"\]/);
+    assert.doesNotMatch(policy, /image-generation/);
     // Core writes and reads keys; it never enumerates or deletes them.
     assert.doesNotMatch(policy, /"delete"|"list"|"sudo"/);
   }

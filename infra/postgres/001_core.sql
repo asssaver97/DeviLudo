@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '039_manual_agent_rerun_uses_build_failure');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '040_unify_image_generation_with_agent_connection');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -109,9 +109,9 @@ CREATE TABLE deviludo.server_pools (
 INSERT INTO deviludo.server_pools
   (kind, operating_system, minimum_nodes, maximum_nodes, desired_nodes, capabilities, public_ingress)
 VALUES
-  ('WEB', 'linux', 1, 1, 1, ARRAY['CUSTOMER_WEB', 'STREAMING_BFF'], true),
+  ('WEB', 'linux', 1, 1, 1, ARRAY['SELF_HOSTED_WEB', 'STREAMING_BFF'], true),
   ('CORE', 'linux', 1, 1, 1, ARRAY[
-    'BUSINESS_API', 'WORKFLOW_SCHEDULER', 'AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH',
+    'AUTOMATION_API', 'WORKFLOW_SCHEDULER', 'AGENT_GENERATION', 'ARTIFACT_BUILD', 'STEAM_PUBLISH',
     'RESTRICTED_CONTAINER', 'NETWORK_POLICY'
   ], false),
   ('E2E_LINUX', 'linux', 1, 1, 1, ARRAY['E2E_TEST'], false),
@@ -188,7 +188,7 @@ CREATE TABLE deviludo.workspace_steam_settings (
   credential_fingerprint text NOT NULL CHECK (credential_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
   credential_version uuid NOT NULL,
   revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
-  updated_by_actor_account_id uuid NOT NULL,
+  updated_by_actor_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
@@ -200,7 +200,7 @@ CREATE TABLE deviludo.e2e_enrollment_tokens (
   expires_at timestamptz NOT NULL,
   used_at timestamptz,
   node_id uuid REFERENCES deviludo.server_nodes(id),
-  created_by_actor_account_id uuid NOT NULL,
+  created_by_actor_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CHECK (expires_at > created_at),
   CHECK ((used_at IS NULL) = (node_id IS NULL))
@@ -233,6 +233,7 @@ CREATE TABLE deviludo.instance_agent_settings (
     AND (role_models->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
     AND (role_models->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
   ),
+  image_model text CHECK (image_model IS NULL OR image_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
   credential_secret_ref text NOT NULL CHECK (
     length(credential_secret_ref) BETWEEN 32 AND 1000
     AND credential_secret_ref LIKE 'vault://instance/agent-runtime/api-key/versions/%'
@@ -247,8 +248,12 @@ CREATE TABLE deviludo.instance_agent_settings (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT instance_agent_settings_runtime_models CHECK (
-    agent_runtime = 'CLAUDE_CODE' AND primary_model IS NOT NULL AND opus_model IS NOT NULL
-      AND sonnet_model IS NOT NULL AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL
+    (agent_runtime = 'CLAUDE_CODE' AND primary_model IS NOT NULL AND opus_model IS NOT NULL
+      AND sonnet_model IS NOT NULL AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
+    OR
+    (agent_runtime = 'CODEX_CLI' AND primary_model IS NOT NULL AND opus_model IS NULL
+      AND sonnet_model IS NULL AND haiku_model IS NULL AND subagent_model IS NULL
+      AND image_model IS NULL)
   )
 );
 
@@ -266,7 +271,7 @@ CREATE TABLE deviludo.runtime_images (
 CREATE TABLE deviludo.projects (
   workspace_id uuid NOT NULL REFERENCES deviludo.workspaces(id),
   id uuid NOT NULL DEFAULT gen_random_uuid(),
-  created_by_actor_account_id uuid NOT NULL,
+  created_by_actor_id uuid NOT NULL,
   name text NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
   last_activity_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -283,7 +288,7 @@ CREATE TABLE deviludo.project_steam_settings (
   test_branch text NOT NULL DEFAULT 'deviludo-test'
     CHECK (test_branch ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' AND test_branch <> 'default'),
   revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
-  updated_by_actor_account_id uuid NOT NULL,
+  updated_by_actor_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, project_id),
@@ -309,29 +314,12 @@ CREATE TABLE deviludo.project_source_revisions (
   e2e_contract_digest text CHECK (e2e_contract_digest ~ '^sha256:[0-9a-f]{64}$'),
   workflow_id uuid,
   job_id uuid,
-  actor_account_id uuid NOT NULL,
+  actor_id uuid NOT NULL,
   fencing_token bigint CHECK (fencing_token IS NULL OR fencing_token > 0),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, project_id, revision),
   FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE
 );
-
-CREATE TABLE deviludo.project_source_ready_outbox (
-  event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id uuid NOT NULL,
-  project_id uuid NOT NULL,
-  workflow_id uuid NOT NULL,
-  source_revision bigint NOT NULL,
-  content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
-  development_actor_account_id uuid NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  acknowledged_at timestamptz,
-  UNIQUE (workspace_id, project_id, workflow_id, source_revision),
-  FOREIGN KEY (workspace_id, project_id, source_revision)
-    REFERENCES deviludo.project_source_revisions(workspace_id, project_id, revision) ON DELETE CASCADE
-);
-CREATE INDEX project_source_ready_outbox_pending
-  ON deviludo.project_source_ready_outbox(created_at, event_id) WHERE acknowledged_at IS NULL;
 
 CREATE TABLE deviludo.project_documents (
   workspace_id uuid NOT NULL,
@@ -348,7 +336,7 @@ CREATE TABLE deviludo.project_documents (
   ),
   markdown text NOT NULL CHECK (length(markdown) BETWEEN 1 AND 100000),
   maintained_by text NOT NULL CHECK (maintained_by IN ('SYSTEM', 'USER', 'AGENT')),
-  updated_by_actor_account_id uuid,
+  updated_by_actor_id uuid,
   last_agent_maintained_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, project_id),
@@ -363,7 +351,7 @@ CREATE TABLE deviludo.project_document_revisions (
   content jsonb NOT NULL CHECK (jsonb_typeof(content) = 'object'),
   markdown text NOT NULL CHECK (length(markdown) BETWEEN 1 AND 100000),
   source text NOT NULL CHECK (source IN ('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE')),
-  author_actor_account_id uuid,
+  author_actor_id uuid,
   maintenance_job_id uuid,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, project_id, revision),
@@ -422,7 +410,7 @@ CREATE TABLE deviludo.workflow_instances (
   project_id uuid NOT NULL,
   iteration_number integer NOT NULL DEFAULT 1 CHECK (iteration_number > 0),
   parent_workflow_id uuid,
-  development_actor_account_id uuid,
+  development_actor_id uuid,
   profile deviludo.workflow_profile NOT NULL DEFAULT 'VALIDATE',
   target_platforms deviludo.server_os[] NOT NULL DEFAULT ARRAY['macos']::deviludo.server_os[]
     CHECK (cardinality(target_platforms) BETWEEN 1 AND 3),
@@ -465,7 +453,7 @@ CREATE TABLE deviludo.steam_releases (
   build_digests jsonb NOT NULL CHECK (jsonb_typeof(build_digests) = 'object'),
   steam_build_id text,
   failure_message text,
-  requested_by_actor_account_id uuid NOT NULL,
+  requested_by_actor_id uuid NOT NULL,
   uploaded_at timestamptz,
   live_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -801,31 +789,6 @@ CREATE TABLE deviludo.project_creation_receipts (
   )
 );
 
--- Instance-wide image generation provider. Like the Agent runtime settings this
--- is a singleton and keeps only a secret reference plus a mask; the API key
--- itself lives in the Secret store.
-CREATE TABLE deviludo.instance_image_generation_settings (
-  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-  provider text NOT NULL
-    CHECK (provider IN ('dalle-3', 'stable-diffusion-xl', 'midjourney', 'replicate')),
-  api_endpoint text CHECK (
-    api_endpoint IS NULL
-    OR (length(api_endpoint) BETWEEN 8 AND 2048 AND api_endpoint ~ '^https?://')
-  ),
-  model text CHECK (model IS NULL OR model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  credential_secret_ref text NOT NULL CHECK (
-    length(credential_secret_ref) BETWEEN 32 AND 1000
-    AND credential_secret_ref LIKE 'vault://instance/image-generation/api-key/versions/%'
-  ),
-  api_key_mask text NOT NULL CHECK (api_key_mask ~ '^.{3}\*{8}.{4}$'),
-  api_key_fingerprint text NOT NULL CHECK (api_key_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
-  credential_version uuid NOT NULL,
-  revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
-  updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
-  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
-);
-
 CREATE TABLE deviludo.asset_manifests (
   workspace_id uuid NOT NULL,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -997,7 +960,7 @@ DECLARE
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'workspace_steam_settings', 'projects', 'project_steam_settings',
-    'project_source_revisions', 'project_source_ready_outbox',
+    'project_source_revisions',
     'project_documents', 'project_document_revisions',
     'project_conversations', 'conversation_messages',
     'agent_installations', 'workflow_instances', 'steam_releases', 'workflow_events',
@@ -1337,7 +1300,7 @@ RETURNS TABLE (
   "workspaceId" uuid,
   "projectId" uuid,
   "workflowId" uuid,
-  "actorUserId" uuid,
+  "actorId" uuid,
   "leaseToken" uuid,
   "sourceKind" text,
   "repositoryUrl" text,
@@ -1360,7 +1323,7 @@ BEGIN
     RAISE EXCEPTION 'invalid project import analysis lease';
   END IF;
   SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
-         workflow.state_data, project.created_by_actor_account_id
+         workflow.state_data, project.created_by_actor_id
     INTO candidate
     FROM deviludo.workflow_instances workflow
     JOIN deviludo.projects project
@@ -1399,7 +1362,7 @@ BEGIN
     candidate.workspace_id,
     candidate.project_id,
     candidate.workflow_id,
-    candidate.created_by_actor_account_id,
+    candidate.created_by_actor_id,
     next_token,
     candidate.state_data #>> '{source,kind}',
     candidate.state_data #>> '{source,repositoryUrl}',
@@ -1687,7 +1650,7 @@ ALTER FUNCTION deviludo.fail_local_git_commit(uuid, uuid, uuid, text)
 -- request cannot strand an item in 'generating' forever.
 --
 -- Only items whose manifest has auto-generate on are returned, and only when the
--- instance actually has image-generation settings configured: without a
+-- selected Agent connection actually has an image model configured: without a
 -- credential there is nothing to call, and flipping to 'generating' would just
 -- burn an attempt.
 CREATE OR REPLACE FUNCTION deviludo.claim_asset_generation(
@@ -1716,7 +1679,8 @@ BEGIN
     RAISE EXCEPTION 'invalid asset generation claim';
   END IF;
   IF NOT EXISTS (
-    SELECT 1 FROM deviludo.instance_image_generation_settings WHERE singleton = true
+    SELECT 1 FROM deviludo.instance_agent_settings
+     WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL
   ) THEN RETURN; END IF;
 
   RETURN QUERY
@@ -2128,7 +2092,7 @@ BEGIN
      WHERE singleton = true;
     UPDATE deviludo.workflow_instances
        SET state = 'AGENT_RUNNING', version = version + 1,
-           development_actor_account_id = (p_payload->>'requestedByAccountId')::uuid,
+           development_actor_id = (p_payload->>'requestedByActorId')::uuid,
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     PERFORM deviludo.enqueue_job(
@@ -2168,7 +2132,7 @@ BEGIN
        AND state <> 'CANCELLED';
     UPDATE deviludo.workflow_instances
        SET state = deviludo.stage_running_state(rerun_stage), version = version + 1,
-           development_actor_account_id = (p_payload->>'requestedByAccountId')::uuid,
+           development_actor_id = (p_payload->>'requestedByActorId')::uuid,
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
     IF rerun_stage = 'E2E_TEST' THEN
@@ -2258,7 +2222,7 @@ BEGIN
       jsonb_build_object(
         'targetPlatforms', workflow.target_platforms,
         'approvalSignalId', inserted_id,
-        'approvedByAccountId', p_payload->>'requestedByAccountId',
+        'approvedByActorId', p_payload->>'requestedByActorId',
         'steamRelease', jsonb_build_object(
           'releaseId', steam_release.id,
           'version', steam_release.version,
@@ -2281,18 +2245,6 @@ BEGIN
        SET state = 'SUCCEEDED', version = version + 1, updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id
        AND state = 'RELEASE_DECISION_PENDING';
-    IF workflow.development_actor_account_id IS NOT NULL THEN
-      INSERT INTO deviludo.project_source_ready_outbox(
-        workspace_id, project_id, workflow_id, source_revision, content_digest,
-        development_actor_account_id
-      )
-      SELECT source.workspace_id, source.project_id, workflow.id, source.revision,
-             source.content_digest, workflow.development_actor_account_id
-        FROM deviludo.project_source_revisions source
-       WHERE source.workspace_id = workflow.workspace_id AND source.project_id = workflow.project_id
-       ORDER BY source.revision DESC LIMIT 1
-      ON CONFLICT (workspace_id, project_id, workflow_id, source_revision) DO NOTHING;
-    END IF;
   ELSIF p_signal_kind = 'CANCEL_REQUESTED' THEN
     UPDATE deviludo.workflow_instances
        SET state = 'CANCELLED', version = version + 1, updated_at = clock_timestamp()
@@ -2464,7 +2416,7 @@ BEGIN
       workspace_id, project_id, revision, relative_path, content_digest,
       file_count, total_bytes, test_manifest_schema, test_manifest_digest,
       e2e_timeout_seconds, e2e_contract_digest,
-      workflow_id, job_id, actor_account_id, fencing_token
+      workflow_id, job_id, actor_id, fencing_token
     ) VALUES (
       job.workspace_id, job.project_id, (p_receipt #>> '{sourceRevision,revision}')::bigint,
       p_receipt #>> '{sourceRevision,relativePath}', p_receipt #>> '{sourceRevision,digest}',
@@ -2474,7 +2426,7 @@ BEGIN
       p_receipt->>'testManifestDigest',
       (p_receipt #>> '{e2eExecutionPlan,plannedTimeoutSeconds}')::integer,
       p_receipt #>> '{e2eExecutionPlan,contractDigest}',
-      job.workflow_id, job.id, workflow.development_actor_account_id, job.fencing_token
+      job.workflow_id, job.id, workflow.development_actor_id, job.fencing_token
     ) ON CONFLICT (workspace_id, project_id, revision) DO NOTHING;
 
     -- The Agent plans the game's assets while writing the source that expects
@@ -2520,7 +2472,8 @@ BEGIN
       )
       VALUES (
         job.workspace_id, job.project_id, job.workflow_id,
-        EXISTS (SELECT 1 FROM deviludo.instance_image_generation_settings WHERE singleton = true)
+        EXISTS (SELECT 1 FROM deviludo.instance_agent_settings
+          WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL)
       )
       ON CONFLICT (workspace_id, project_id) DO UPDATE
         SET workflow_id = excluded.workflow_id,
@@ -2766,7 +2719,7 @@ BEGIN
            content = p_receipt #> '{projectDocument,content}',
            markdown = p_receipt #>> '{projectDocument,markdown}',
            maintained_by = 'AGENT',
-           updated_by_actor_account_id = NULL,
+           updated_by_actor_id = NULL,
            last_agent_maintained_at = clock_timestamp(),
            updated_at = clock_timestamp()
      WHERE workspace_id = job.workspace_id AND project_id = job.project_id;
@@ -2858,18 +2811,6 @@ BEGIN
   END IF;
   SELECT * INTO workflow FROM deviludo.workflow_instances
    WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-  IF workflow.state = 'SUCCEEDED' AND workflow.development_actor_account_id IS NOT NULL THEN
-    INSERT INTO deviludo.project_source_ready_outbox(
-      workspace_id, project_id, workflow_id, source_revision, content_digest,
-      development_actor_account_id
-    )
-    SELECT source.workspace_id, source.project_id, job.workflow_id, source.revision,
-           source.content_digest, workflow.development_actor_account_id
-      FROM deviludo.project_source_revisions source
-     WHERE source.workspace_id = job.workspace_id AND source.project_id = job.project_id
-     ORDER BY source.revision DESC LIMIT 1
-    ON CONFLICT (workspace_id, project_id, workflow_id, source_revision) DO NOTHING;
-  END IF;
   RETURN true;
 END
 $$;
@@ -2996,55 +2937,6 @@ BEGIN
 END
 $$;
 ALTER FUNCTION deviludo.recover_expired_jobs() OWNER TO deviludo_claim_executor;
-
-CREATE OR REPLACE FUNCTION deviludo.pull_source_ready_events(p_limit integer DEFAULT 100)
-RETURNS TABLE (
-  event_id uuid,
-  workspace_id uuid,
-  project_id uuid,
-  workflow_id uuid,
-  source_revision bigint,
-  content_digest text,
-  development_actor_account_id uuid,
-  created_at timestamptz
-)
-LANGUAGE sql
-SECURITY DEFINER
-STABLE
-SET search_path = pg_catalog, deviludo
-SET row_security = off
-AS $$
-  SELECT event.event_id, event.workspace_id, event.project_id, event.workflow_id,
-         event.source_revision, event.content_digest,
-         event.development_actor_account_id, event.created_at
-    FROM deviludo.project_source_ready_outbox event
-   WHERE event.acknowledged_at IS NULL
-   ORDER BY event.created_at, event.event_id
-   LIMIT greatest(1, least(p_limit, 500))
-$$;
-ALTER FUNCTION deviludo.pull_source_ready_events(integer) OWNER TO deviludo_claim_executor;
-
-CREATE OR REPLACE FUNCTION deviludo.acknowledge_source_ready_events(p_event_ids uuid[])
-RETURNS bigint
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, deviludo
-SET row_security = off
-AS $$
-DECLARE
-  acknowledged bigint;
-BEGIN
-  IF cardinality(p_event_ids) NOT BETWEEN 1 AND 500 THEN
-    RAISE EXCEPTION 'source event acknowledgement size is invalid';
-  END IF;
-  UPDATE deviludo.project_source_ready_outbox
-     SET acknowledged_at = coalesce(acknowledged_at, clock_timestamp())
-   WHERE event_id = ANY(p_event_ids);
-  GET DIAGNOSTICS acknowledged = ROW_COUNT;
-  RETURN acknowledged;
-END
-$$;
-ALTER FUNCTION deviludo.acknowledge_source_ready_events(uuid[]) OWNER TO deviludo_claim_executor;
 
 CREATE OR REPLACE FUNCTION deviludo.reconcile_p0_capacity()
 RETURNS void
@@ -3185,8 +3077,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_api, devilud
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.workspaces, deviludo.workspace_steam_settings,
   deviludo.projects, deviludo.project_steam_settings, deviludo.steam_releases,
-  deviludo.project_source_revisions,
-  deviludo.project_source_ready_outbox, deviludo.project_documents,
+  deviludo.project_source_revisions, deviludo.project_documents,
   deviludo.project_document_revisions, deviludo.project_conversations,
   deviludo.conversation_messages, deviludo.agent_installations,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
@@ -3197,11 +3088,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.e2e_policy_locks, deviludo.e2e_policy_decisions, deviludo.e2e_regression_traces
   TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api;
-GRANT SELECT, INSERT, UPDATE ON deviludo.instance_image_generation_settings TO deviludo_api;
 GRANT INSERT ON deviludo.object_cleanup_queue TO deviludo_api, deviludo_sandbox;
 GRANT SELECT, INSERT, DELETE ON deviludo.project_creation_receipts TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON
-  deviludo.projects, deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
+  deviludo.projects, deviludo.project_source_revisions,
   deviludo.project_documents, deviludo.project_document_revisions,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
   deviludo.external_signals, deviludo.job_progress_events, deviludo.job_guidance_messages,
@@ -3213,12 +3103,10 @@ GRANT SELECT, UPDATE ON deviludo.steam_releases TO deviludo_scheduler;
 -- The asset generator resolves the configured provider and credential ref through
 -- an ordinary pooled read before calling out, so the scheduler reads this row
 -- directly rather than through a definer function.
-GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_scheduler;
 -- complete_job is SECURITY INVOKER and Agent generation is completed by the
 -- sandbox role, which checks whether automatic image generation is configured.
-GRANT SELECT ON deviludo.instance_image_generation_settings TO deviludo_sandbox;
 GRANT SELECT, INSERT, UPDATE ON
-  deviludo.projects, deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
+  deviludo.projects, deviludo.project_source_revisions,
   deviludo.project_documents, deviludo.project_document_revisions,
   deviludo.workflow_instances, deviludo.jobs, deviludo.workflow_events, deviludo.operation_receipts,
   deviludo.job_progress_events, deviludo.job_guidance_messages,
@@ -3267,8 +3155,6 @@ GRANT EXECUTE ON FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, t
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.fail_asset_generation(uuid, uuid, text) TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.advance_asset_workflows(integer) TO deviludo_scheduler;
-GRANT EXECUTE ON FUNCTION deviludo.pull_source_ready_events(integer),
-  deviludo.acknowledge_source_ready_events(uuid[]) TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, integer)
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.claim_project_import_analysis(integer) TO deviludo_api;
@@ -3289,18 +3175,17 @@ GRANT INSERT ON deviludo.jobs, deviludo.artifact_inputs, deviludo.external_signa
 GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.workflow_instances TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.project_documents,
-  deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
+  deviludo.project_source_revisions,
   deviludo.workflow_instances, deviludo.instance_agent_settings,
   deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs,
   deviludo.external_signals, deviludo.steam_releases, deviludo.e2e_regression_traces
   TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.steam_releases TO deviludo_claim_executor;
-GRANT UPDATE ON deviludo.project_source_ready_outbox TO deviludo_claim_executor;
 -- The asset generation lease and its settlement run as this role, which is the
 -- owner of those SECURITY DEFINER functions.
 GRANT SELECT, UPDATE ON deviludo.asset_items TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.object_cleanup_queue TO deviludo_claim_executor;
-GRANT SELECT ON deviludo.asset_manifests, deviludo.instance_image_generation_settings
+GRANT SELECT ON deviludo.asset_manifests, deviludo.instance_agent_settings
   TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE ON deviludo.workspace_claim_fairness TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.workspaces TO deviludo_claim_executor;

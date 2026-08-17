@@ -34,10 +34,10 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
   });
   expect(wrongPool.status()).toBe(409);
 
-  await stack.coreWeb(`/v1/admin/server-nodes/${mac.id}/drain`, { method: "POST", data: {} });
+  await stack.coreWeb(`/v1/runtime/server-nodes/${mac.id}/drain`, { method: "POST", data: {} });
   const drained = await claimResponse(stack, mac);
   expect(drained.status()).toBe(409);
-  await stack.coreWeb(`/v1/admin/server-nodes/${mac.id}/activate`, { method: "POST", data: {} });
+  await stack.coreWeb(`/v1/runtime/server-nodes/${mac.id}/activate`, { method: "POST", data: {} });
 
   const job = await claim(stack, mac);
   expect(job.jobKind).toBe("E2E_TEST");

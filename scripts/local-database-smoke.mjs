@@ -36,7 +36,7 @@ async function runDatabaseSmoke(url) {
        WHERE n.nspname = 'deviludo' AND c.relrowsecurity AND c.relforcerowsecurity
     `);
     const requiredRls = [
-      "workspaces", "projects", "project_source_revisions", "project_source_ready_outbox",
+      "workspaces", "projects", "project_source_revisions",
       "project_conversations", "conversation_messages", "agent_installations",
       "workflow_instances", "workflow_events", "jobs", "external_signals",
       "job_progress_events", "job_guidance_messages", "operation_receipts",
@@ -47,13 +47,13 @@ async function runDatabaseSmoke(url) {
     const forcedNames = new Set(forced.rows.map(row => row.relname));
     if (requiredRls.some(table => !forcedNames.has(table))) throw new Error("A workspace table is missing forced RLS");
 
-    const accountTables = await owner.query(`
+    const identityTables = await owner.query(`
       SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'deviludo'
          AND table_name = ANY(ARRAY['users','sessions','workspace_memberships','workspace_invitations',
            'github_oauth_flows','project_repository_connections','project_github_permissions'])
     `);
-    if (accountTables.rowCount) throw new Error("Core still contains account or GitHub authority tables");
+    if (identityTables.rowCount) throw new Error("Core still contains hosted identity or GitHub authority tables");
 
     const roles = await owner.query(`
       SELECT rolname, rolbypassrls, rolcanlogin FROM pg_roles
@@ -83,28 +83,26 @@ async function runDatabaseSmoke(url) {
        ORDER BY function.proname
     `);
     const expectedDefiners = [
-      "acknowledge_source_ready_events", "advance_asset_workflows", "claim_asset_generation", "claim_job",
+      "advance_asset_workflows", "claim_asset_generation", "claim_job",
       "claim_local_git_commit", "claim_object_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
       "complete_asset_generation", "complete_local_git_commit", "complete_object_cleanup",
       "fail_asset_generation", "fail_local_git_commit", "fail_object_cleanup",
-      "pull_source_ready_events", "recover_expired_jobs",
+      "recover_expired_jobs",
       "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
       || definers.rows.some(row => row.owner !== "deviludo_claim_executor")) {
       throw new Error("A SECURITY DEFINER function has an unexpected owner or scope");
     }
-    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.pull_source_ready_events(integer)", true);
-    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.pull_source_ready_events(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.cleanup_expired_executor_state()", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.cleanup_expired_executor_state()", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.advance_asset_workflows(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.advance_asset_workflows(integer)", false);
-    const sandboxImageSettings = await sandbox.query(
-      "SELECT count(*)::integer AS count FROM deviludo.instance_image_generation_settings",
+    const sandboxAgentSettings = await sandbox.query(
+      "SELECT count(*)::integer AS count FROM deviludo.instance_agent_settings",
     );
-    if (!Number.isInteger(sandboxImageSettings.rows[0]?.count)) {
-      throw new Error("Sandbox cannot read image generation settings required by complete_job");
+    if (!Number.isInteger(sandboxAgentSettings.rows[0]?.count)) {
+      throw new Error("Sandbox cannot read the selected Agent connection required by complete_job");
     }
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_local_git_commit(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_local_git_commit(integer)", false);
@@ -128,19 +126,19 @@ async function runDatabaseSmoke(url) {
       $1::uuid, $2::text, $3::text, $4::uuid) AS completed`, [workspaceIds[0], "deviludo-artifacts", cleanupKey, cleanupClaim.rows[0].leaseToken]);
     if (cleanupSettled.rows[0]?.completed !== true) throw new Error("Object cleanup lease was not settled");
     await expectRlsRejection(() => api.query(
-      "INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name) VALUES ($1::uuid, $2::uuid, $3::uuid, 'missing-context')",
+      "INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_id, name) VALUES ($1::uuid, $2::uuid, $3::uuid, 'missing-context')",
       [workspaceIds[0], randomUUID(), actorId],
     ));
 
     for (let index = 0; index < 2; index += 1) {
       await withWorkspace(api, workspaceIds[index], client => client.query(
-        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_account_id, name)
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_id, name)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
         [workspaceIds[index], projectIds[index], actorId, `source-smoke-${index}`],
       ));
       await owner.query(
         `INSERT INTO deviludo.workflow_instances(
-           workspace_id, id, project_id, profile, target_platforms, state, development_actor_account_id
+           workspace_id, id, project_id, profile, target_platforms, state, development_actor_id
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, 'VALIDATE', ARRAY['macos']::deviludo.server_os[],
            'AGENT_RUNNING', $4::uuid)`,
         [workspaceIds[index], workflowIds[index], projectIds[index], actorId],
@@ -153,25 +151,11 @@ async function runDatabaseSmoke(url) {
       await client.query(
         `INSERT INTO deviludo.project_source_revisions(
            workspace_id, project_id, revision, relative_path, content_digest, file_count, total_bytes,
-           workflow_id, actor_account_id
+           workflow_id, actor_id
          ) VALUES ($1::uuid, $2::uuid, 1, $3, $4, 1, 128, $5::uuid, $6::uuid)`,
         [workspaceIds[0], projectIds[0], relativePath, digest, workflowIds[0], actorId],
       );
-      await client.query(
-        `INSERT INTO deviludo.project_source_ready_outbox(
-           workspace_id, project_id, workflow_id, source_revision, content_digest, development_actor_account_id
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, 1, $4, $5::uuid)`,
-        [workspaceIds[0], projectIds[0], workflowIds[0], digest, actorId],
-      );
     });
-    const events = await api.query("SELECT * FROM deviludo.pull_source_ready_events(500)");
-    const ownEvent = events.rows.find(row => row.workspace_id === workspaceIds[0] && row.content_digest === digest);
-    if (!ownEvent) throw new Error("Source outbox replay is invalid");
-    const acknowledged = await api.query(
-      "SELECT deviludo.acknowledge_source_ready_events($1::uuid[])::integer AS count",
-      [[ownEvent.event_id]],
-    );
-    if (acknowledged.rows[0]?.count !== 1) throw new Error("Source outbox acknowledgement is invalid");
 
     const gitRequestId = randomUUID();
     const bindingId = randomUUID();
@@ -331,7 +315,7 @@ async function runDatabaseSmoke(url) {
     await owner.query(`
       INSERT INTO deviludo.workspace_steam_settings(
         workspace_id, builder_username, credential_secret_ref, credential_mask,
-        credential_fingerprint, credential_version, updated_by_actor_account_id
+        credential_fingerprint, credential_version, updated_by_actor_id
       ) VALUES ($1::uuid, 'deviludo_builder',
         'vault://workspaces/' || $1::text || '/steam/build-token/versions/' || $3::text,
         'tok********smoke', 'sha256:123456789abc', $3::uuid, $2::uuid)
@@ -339,7 +323,7 @@ async function runDatabaseSmoke(url) {
     await owner.query(`
       INSERT INTO deviludo.project_steam_settings(
         workspace_id, project_id, app_id, depot_linux, depot_windows, depot_macos,
-        test_branch, updated_by_actor_account_id
+        test_branch, updated_by_actor_id
       ) VALUES ($1::uuid, $3::uuid, 1000, 1001, 1002, 1003, 'deviludo-test', $2::uuid)
     `, [workspaceIds[0], actorId, projectIds[0]]);
     await owner.query(`
@@ -347,7 +331,7 @@ async function runDatabaseSmoke(url) {
         workspace_id, id, project_id, workflow_id, version, release_number, channel,
         target_branch, app_id, depot_linux, depot_windows, depot_macos,
         project_settings_revision, builder_username, credential_secret_ref,
-        credential_revision, build_digests, requested_by_actor_account_id
+        credential_revision, build_digests, requested_by_actor_id
       ) VALUES ($1::uuid, $4::uuid, $3::uuid, $5::uuid, '1.0.0', 1, 'TEST',
         'deviludo-test', 1000, 1001, 1002, 1003, 1, 'deviludo_builder',
         'vault://workspaces/' || $1::text || '/steam/build-token/versions/' || $6::text,
@@ -355,7 +339,7 @@ async function runDatabaseSmoke(url) {
           'windows', 'sha256:${"e".repeat(64)}', 'macos', 'sha256:${"f".repeat(64)}'), $2::uuid)
     `, [workspaceIds[0], actorId, projectIds[0], steamReleaseId, workflowIds[0], steamCredentialVersion]);
     const releaseAccepted = await withWorkspace(api, workspaceIds[0], client => client.query(
-      "SELECT deviludo.start_steam_release($1::uuid, $2::uuid, $3, jsonb_build_object('requestedByAccountId', $4::text)) AS accepted",
+      "SELECT deviludo.start_steam_release($1::uuid, $2::uuid, $3, jsonb_build_object('requestedByActorId', $4::text)) AS accepted",
       [workflowIds[0], steamReleaseId, `release-smoke:${workflowIds[0]}`, actorId],
     ));
     if (releaseAccepted.rows[0]?.accepted !== true) throw new Error("Release approval signal was not accepted");
@@ -441,7 +425,7 @@ async function cleanup(owner, workspaceIds) {
     "asset_items", "asset_manifests",
     "workflow_events", "job_guidance_messages", "job_progress_events", "jobs",
     "workspace_claim_fairness", "conversation_messages",
-    "project_conversations", "agent_installations", "project_source_ready_outbox",
+    "project_conversations", "agent_installations",
     "project_source_revisions", "project_document_revisions", "project_documents",
     "workflow_instances", "project_creation_receipts", "projects",
   ]) {

@@ -3,9 +3,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isServerPoolKind, SERVER_POOL_KINDS, type ServerPoolKind } from "@/lib/runtime/server-pools";
 
-export const ACCESS_MODES = ["standalone", "platform"] as const;
-export type AccessMode = typeof ACCESS_MODES[number];
-
 export type CoreConfig = Readonly<{
   role: CoreRole;
   port: number;
@@ -22,13 +19,13 @@ export type CoreConfig = Readonly<{
   tlsCertificateFile: string | null;
   tlsKeyFile: string | null;
   tlsClientCaFile: string | null;
-  accessMode: AccessMode;
-  platformAccountApiUrl: string | null;
-  platformInternalToken: string | null;
   projectsRoot: string;
   localDirectoryBindings: boolean;
   localProjectBridgeUrl: string | null;
   localProjectBridgeToken: string | null;
+  telemetryEnabled: boolean;
+  telemetryEndpoint: string | null;
+  releaseVersion: string;
 }>;
 
 export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
@@ -91,23 +88,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   if (env.NODE_ENV === "production" && (![tlsCertificateFile, tlsKeyFile, tlsClientCaFile].every(value => value?.startsWith("/")))) {
     throw new Error("Production Core API requires TLS certificate, key, and E2E client CA files");
   }
-  const configuredAccessMode = env.DEVILUDO_ACCESS_MODE?.trim();
-  if (env.NODE_ENV === "production" && !configuredAccessMode) {
-    throw new Error("DEVILUDO_ACCESS_MODE must be explicitly configured in production");
-  }
-  const accessMode = configuredAccessMode || "standalone";
-  if (!(ACCESS_MODES as readonly string[]).includes(accessMode)) {
-    throw new Error("DEVILUDO_ACCESS_MODE must be standalone or platform");
-  }
-  const platformAccountApiUrl = accessMode === "platform"
-    ? normalizeServiceBaseUrl(env.DEVILUDO_PLATFORM_ACCOUNT_API_URL ?? "", env.NODE_ENV)
-    : null;
-  const platformInternalToken = accessMode === "platform"
-    ? secretValue(env, "DEVILUDO_PLATFORM_INTERNAL_TOKEN")
-    : null;
-  if (accessMode === "platform" && (!platformInternalToken || platformInternalToken.length < 32)) {
-    throw new Error("DEVILUDO_PLATFORM_INTERNAL_TOKEN is required in platform mode");
-  }
   const projectsRoot = resolve(env.DEVILUDO_PROJECTS_ROOT?.trim() || ".deviludo/projects");
   if (env.NODE_ENV === "production" && !env.DEVILUDO_PROJECTS_ROOT?.startsWith("/")) {
     throw new Error("DEVILUDO_PROJECTS_ROOT must be an absolute path in production");
@@ -121,6 +101,12 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     : null;
   if (localDirectoryBindings && !/^[A-Za-z0-9_-]{40,200}$/.test(localProjectBridgeToken ?? "")) {
     throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN is invalid");
+  }
+  const telemetryEnabled = parseBoolean(env.DEVILUDO_TELEMETRY_ENABLED ?? "1", "DEVILUDO_TELEMETRY_ENABLED");
+  const telemetryEndpoint = normalizeTelemetryEndpoint(env.DEVILUDO_TELEMETRY_ENDPOINT ?? "", env.NODE_ENV);
+  const releaseVersion = (env.DEVILUDO_RELEASE_VERSION ?? "development").trim();
+  if (!/^(development|v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/.test(releaseVersion)) {
+    throw new Error("DEVILUDO_RELEASE_VERSION is invalid");
   }
   return Object.freeze({
     role: typedRole,
@@ -138,13 +124,13 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     tlsCertificateFile,
     tlsKeyFile,
     tlsClientCaFile,
-    accessMode: accessMode as AccessMode,
-    platformAccountApiUrl,
-    platformInternalToken,
     projectsRoot,
     localDirectoryBindings,
     localProjectBridgeUrl,
     localProjectBridgeToken,
+    telemetryEnabled,
+    telemetryEndpoint,
+    releaseVersion,
   });
 }
 
@@ -158,16 +144,23 @@ function normalizeLocalProjectBridgeUrl(value: string): string {
   return url.href.replace(/\/$/, "");
 }
 
-function normalizeServiceBaseUrl(value: string, environment: string | undefined): string {
-  if (!value) throw new Error("DEVILUDO_PLATFORM_ACCOUNT_API_URL is required in platform mode");
+function normalizeTelemetryEndpoint(value: string, environment: string | undefined): string | null {
+  if (!value.trim()) return null;
   const url = new URL(value);
-  const clusterLocal = url.hostname.endsWith(".svc") || !url.hostname.includes(".");
-  if (url.username || url.password || url.search || url.hash || url.pathname !== "/"
+  const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (url.username || url.password || url.search || url.hash
     || !["http:", "https:"].includes(url.protocol)
-    || (environment === "production" && url.protocol !== "https:" && !clusterLocal)) {
-    throw new Error("DEVILUDO_PLATFORM_ACCOUNT_API_URL is invalid");
+    || (environment === "production" && url.protocol !== "https:")
+    || (url.protocol === "http:" && !local && !url.hostname.endsWith(".svc"))) {
+    throw new Error("DEVILUDO_TELEMETRY_ENDPOINT is invalid");
   }
-  return url.href.replace(/\/$/, "");
+  return url.href;
+}
+
+function parseBoolean(value: string, name: string): boolean {
+  if (value === "1") return true;
+  if (value === "0") return false;
+  throw new Error(`${name} must be 0 or 1`);
 }
 
 function secretValue(env: NodeJS.ProcessEnv, key: string): string {

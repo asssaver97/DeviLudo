@@ -19,8 +19,8 @@ import type { CoreRepository } from "./repository";
 
 /**
  * The lease has to outlive the slowest provider call, or a still-running
- * generation gets re-claimed by the next tick. Replicate polling is bounded at
- * 120s, so this leaves room for the S3 write on top.
+ * generation gets re-claimed by the next tick. Provider calls are bounded at
+ * 120s, so this leaves room for the object-store write on top.
  */
 const LEASE_SECONDS = 300;
 
@@ -60,14 +60,13 @@ export async function runAssetGenerationBatch(
   const { repository, secrets } = dependencies;
   // Resolve the credential once per batch rather than per asset: it is one
   // instance-wide setting, and Vault reads are not free.
-  const settings = await repository.readImageGenerationSettings();
-  if (!settings) return IDLE;
-  const apiKey = await secrets.readApiKey(settings.credentialSecretRef, "image-generation");
+  const settings = await repository.readAgentSettings();
+  if (!settings || settings.agentRuntime !== "CLAUDE_CODE" || !settings.imageModel) return IDLE;
+  const apiKey = await secrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) return IDLE;
   const target: ImageGenerationTarget = Object.freeze({
-    provider: settings.provider,
-    apiEndpoint: settings.apiEndpoint,
-    model: settings.model,
+    baseUrl: settings.baseUrl,
+    model: settings.imageModel,
     apiKey,
   });
 

@@ -15,7 +15,7 @@ export function ProductDashboard({
   creationOnly?: boolean;
   initialMode?: "IDEA" | "IMPORT";
 }) {
-  const { locale, text } = useLanguage();
+  const { errorText, locale, text } = useLanguage();
   const router = useRouter();
   const conceptRef = useRef<HTMLTextAreaElement>(null);
   const operationKey = useRef<string | null>(null);
@@ -38,7 +38,7 @@ export function ProductDashboard({
     if (creationOnly && initialMode === "IMPORT") void preloadLocalProjectBridgeUrl();
     void loadCached(clientCacheKeys.projects, 10_000, async () => {
       const response = await fetch("/api/projects");
-      const payload = response.status === 409 ? { projects: [] } : await readJson(response);
+      const payload = response.status === 409 ? { projects: [] } : await readJson(response, errorText);
       return (payload as { projects: readonly ProductProjectSummary[] }).projects;
     }).then(value => {
       if (active) setProjects(value);
@@ -49,7 +49,7 @@ export function ProductDashboard({
     });
     if (creationOnly && initialMode === "IDEA") setTimeout(() => conceptRef.current?.focus(), 0);
     return () => { active = false; };
-  }, [creationOnly, initialMode, text]);
+  }, [creationOnly, errorText, initialMode, text]);
 
   const hasProjectAnalysisInProgress = projects.some(project =>
     project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING",
@@ -62,7 +62,7 @@ export function ProductDashboard({
       if (document.visibilityState === "visible") {
         try {
           const response = await fetch("/api/projects", { cache: "no-store" });
-          const payload = await readJson(response) as { projects: readonly ProductProjectSummary[] };
+          const payload = await readJson(response, errorText) as { projects: readonly ProductProjectSummary[] };
           if (!stopped) {
             setProjects(payload.projects);
             storeCached(clientCacheKeys.projects, payload.projects, 10_000);
@@ -76,7 +76,7 @@ export function ProductDashboard({
     };
     timer = setTimeout(poll, 600);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [creationOnly, hasProjectAnalysisInProgress]);
+  }, [creationOnly, errorText, hasProjectAnalysisInProgress]);
 
   async function createProject() {
     if (concept.trim().length < 10 || creating) return;
@@ -88,7 +88,7 @@ export function ProductDashboard({
         headers: { "content-type": "application/json", "idempotency-key": `project:${crypto.randomUUID()}` },
         body: JSON.stringify({ name: name.trim(), concept: concept.trim() }),
       });
-      const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
+      const payload = await readJson(response, errorText) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       cacheProjectSummary(payload.project);
       router.push(`/projects/${payload.project.id}`);
     } catch (reason) {
@@ -111,7 +111,7 @@ export function ProductDashboard({
       const selectionResponse = await fetch(`${bridgeUrl}/directory/select`, {
         method: "POST",
       });
-      const local = await bridgeProjectBinding(selectionResponse, text);
+      const local = await bridgeProjectBinding(selectionResponse, text, errorText);
       const response = await fetch("/api/projects/bind/local-directory", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": operationKey.current },
@@ -121,7 +121,7 @@ export function ProductDashboard({
           ...(local.gitBranch ? { gitBranch: local.gitBranch } : {}),
         }),
       });
-      const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
+      const payload = await readJson(response, errorText) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       operationKey.current = null;
       cacheProjectSummary(payload.project);
       router.push("/projects");
@@ -152,7 +152,7 @@ export function ProductDashboard({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ repositoryUrl }),
       });
-      const local = await bridgeProjectBinding(cloneResponse, text);
+      const local = await bridgeProjectBinding(cloneResponse, text, errorText);
       const response = await fetch("/api/projects/bind/github", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": operationKey.current },
@@ -163,7 +163,7 @@ export function ProductDashboard({
           ...(local.gitBranch ? { gitBranch: local.gitBranch } : {}),
         }),
       });
-      const payload = await readJson(response) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
+      const payload = await readJson(response, errorText) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       operationKey.current = null;
       cacheProjectSummary(payload.project);
       router.push("/projects");
@@ -189,7 +189,7 @@ export function ProductDashboard({
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/analysis/retry`, {
         method: "POST",
       });
-      const payload = await readJson(response) as { project: ProductProjectSummary };
+      const payload = await readJson(response, errorText) as { project: ProductProjectSummary };
       setProjects(current => {
         const next = current.map(project => project.id === projectId ? payload.project : project);
         storeCached(clientCacheKeys.projects, next, 10_000);
@@ -342,10 +342,11 @@ function preloadLocalProjectBridgeUrl(): Promise<string | null> {
 async function bridgeProjectBinding(
   response: Response,
   text: (chinese: string, english: string) => string,
+  errorText: (message: unknown, chineseFallback: string, englishFallback: string) => string,
 ): Promise<Readonly<{ name: string; bindingId: string; gitBranch: string | null }>> {
   if (!response.ok) {
     const failure = await response.json().catch(() => ({})) as { code?: string; message?: string };
-    throw new ApiError(failure.code ?? "LOCAL_PROJECT_OPERATION_FAILED", localProjectOperationMessage(failure.code, failure.message, text));
+    throw new ApiError(failure.code ?? "LOCAL_PROJECT_OPERATION_FAILED", localProjectOperationMessage(failure.code, failure.message, text, errorText));
   }
   const result = await response.json().catch(() => ({})) as { bindingId?: unknown; displayName?: unknown; gitBranch?: unknown };
   const bindingId = typeof result.bindingId === "string" ? result.bindingId : "";
@@ -359,11 +360,14 @@ async function bridgeProjectBinding(
   return Object.freeze({ name, bindingId, gitBranch: branch || null });
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(
+  response: Response,
+  errorText: (message: unknown, chineseFallback: string, englishFallback: string) => string,
+): Promise<unknown> {
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) throw new ApiError(
     typeof payload.code === "string" ? payload.code : "REQUEST_FAILED",
-    typeof payload.message === "string" ? payload.message : `请求失败 (${response.status})`,
+    errorText(payload.message, `请求失败 (${response.status})`, `Request failed (${response.status})`),
   );
   return payload;
 }
@@ -372,6 +376,7 @@ function localProjectOperationMessage(
   code: string | undefined,
   fallback: string | undefined,
   text: (chinese: string, english: string) => string,
+  errorText: (message: unknown, chineseFallback: string, englishFallback: string) => string,
 ): string {
   if (code === "GIT_CREDENTIALS_REQUIRED") return text(
     "本地 Git 凭证无法访问该仓库，请先在终端确认 git clone 可用",
@@ -379,11 +384,11 @@ function localProjectOperationMessage(
   );
   if (code === "GIT_IMPORT_BUSY") return text("已有 GitHub 项目正在克隆，请稍后重试", "Another GitHub project is being cloned. Try again shortly.");
   if (code === "INVALID_GITHUB_REPOSITORY") return text("请输入有效的 GitHub 仓库地址", "Enter a valid GitHub repository URL");
-  if (code === "GITHUB_TARGET_EXISTS") return fallback ?? text("目标目录已存在，请改从本地项目关联", "The destination already exists. Link it as a local project instead.");
+  if (code === "GITHUB_TARGET_EXISTS") return errorText(fallback, "目标目录已存在，请改从本地项目关联", "The destination already exists. Link it as a local project instead.");
   if (code === "NOT_A_GODOT_PROJECT") return text("请选择包含 project.godot 的项目根目录", "Choose the project root containing project.godot");
   if (code === "LOCAL_PROJECT_CHANGED") return text("本地项目在 Agent 运行期间已变化，为避免覆盖，本次写回已停止", "The local project changed while the Agent was running, so write-back was stopped to prevent overwriting it");
   if (code === "LOCAL_PROJECT_BUSY") return text("已有本地项目正在处理，请稍后重试", "Another local project is being processed. Try again shortly.");
-  return fallback ?? text("本地项目操作失败", "Local project operation failed");
+  return errorText(fallback, "本地项目操作失败", "Local project operation failed");
 }
 
 class ApiError extends Error {

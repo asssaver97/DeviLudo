@@ -1,5 +1,6 @@
 import { gzipSync, inflateRawSync } from "node:zlib";
 import type { StoredInstanceAgentSettings } from "./repository";
+import { runCodexPrompt } from "./codex-cli";
 import {
   crc32,
   isSensitiveProjectPath,
@@ -245,47 +246,37 @@ async function requestAnalysis(
     '{"name":"项目名","introduction":"游戏介绍","gameplay":"玩法说明","categories":["分类"],"features":["特性"],"coreLoop":["循环步骤"],"playerExperience":"玩家体验","acceptanceCriteria":["验收标准"],"gameContent":"游戏内容概括","currentDevelopmentState":"当前开发状态","completedWork":["已完成事项"],"remainingWork":["未完成事项"],"startupFlow":"从配置和源码推断的启动流程","startupIssues":["启动体验问题"],"risks":["风险"],"recommendedPlan":["下一步计划"],"questions":["需要用户确认的问题"]}',
     "name 长度 2-200；recommendedPlan 必须非空；其余列表允许为空，但不得用虚构条目填充。",
   ].join("\n");
-  const endpoint = providerEndpoint(settings.baseUrl, settings.agentRuntime === "CLAUDE_CODE" ? "messages" : "responses");
-  const headers: Record<string, string> = settings.agentRuntime === "CLAUDE_CODE"
-    ? {
-        authorization: `Bearer ${apiKey}`,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-      }
-    : { authorization: `Bearer ${apiKey}`, "content-type": "application/json" };
+  if (settings.agentRuntime === "CODEX_CLI") {
+    return runCodexPrompt({
+      authJson: apiKey,
+      model,
+      prompt: `${system}\n\nPROJECT SOURCE CONTEXT:\n${sourceContext}`,
+      timeoutMs: 180_000,
+    });
+  }
+  const endpoint = messagesEndpoint(settings.baseUrl);
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${apiKey}`,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "x-api-key": apiKey,
+  };
   const request: RequestInit = {
     method: "POST",
     headers,
-    body: JSON.stringify(settings.agentRuntime === "CLAUDE_CODE" ? {
+    body: JSON.stringify({
       model,
       system,
       max_tokens: 6_500,
       temperature: 0.2,
       messages: [{ role: "user", content: sourceContext }],
-    } : {
-      model,
-      instructions: system,
-      input: sourceContext,
-      max_output_tokens: 6_500,
     }),
   };
   const response = await fetchProviderWithRetry(fetchImpl, endpoint, request);
   const body = await response.json() as Record<string, unknown>;
-  if (settings.agentRuntime === "CLAUDE_CODE") {
-    const content = Array.isArray(body.content) ? body.content : [];
-    const text = content.find(item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text");
-    if (text && typeof (text as Record<string, unknown>).text === "string") return (text as Record<string, unknown>).text as string;
-  } else {
-    if (typeof body.output_text === "string") return body.output_text;
-    const output = Array.isArray(body.output) ? body.output : [];
-    for (const item of output) {
-      if (!item || typeof item !== "object") continue;
-      const content = Array.isArray((item as Record<string, unknown>).content) ? (item as Record<string, unknown>).content as unknown[] : [];
-      const text = content.find(value => value && typeof value === "object" && typeof (value as Record<string, unknown>).text === "string");
-      if (text) return (text as Record<string, unknown>).text as string;
-    }
-  }
+  const content = Array.isArray(body.content) ? body.content : [];
+  const text = content.find(item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text");
+  if (text && typeof (text as Record<string, unknown>).text === "string") return (text as Record<string, unknown>).text as string;
   throw new Error("项目分析 Agent 未返回有效结果");
 }
 
@@ -697,10 +688,10 @@ function optionalList(value: unknown, label: string, maximum = 32): string[] {
   return value.map(item => requiredText(item, label, 300));
 }
 
-function providerEndpoint(baseUrl: string, resource: "messages" | "responses"): string {
+function messagesEndpoint(baseUrl: string): string {
   const url = new URL(baseUrl);
   const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/${resource}`.replace(/\/{2,}/g, "/");
+  url.pathname = `${path.endsWith("/v1") ? path : `${path}/v1`}/messages`.replace(/\/{2,}/g, "/");
   return url.href;
 }
 

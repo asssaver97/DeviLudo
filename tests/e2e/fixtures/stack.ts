@@ -37,12 +37,12 @@ const NODE_DEFINITIONS: readonly Readonly<{
   operatingSystem: ServerOperatingSystem;
   capabilities: readonly string[];
 }>[] = Object.freeze([
-  { poolKind: "WEB", operatingSystem: "linux", capabilities: ["CUSTOMER_WEB", "STREAMING_BFF"] },
+  { poolKind: "WEB", operatingSystem: "linux", capabilities: ["SELF_HOSTED_WEB", "STREAMING_BFF"] },
   {
     poolKind: "CORE",
     operatingSystem: "linux",
     capabilities: [
-      "BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+      "AUTOMATION_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
       "RESTRICTED_CONTAINER", "NETWORK_POLICY",
     ],
   },
@@ -73,7 +73,6 @@ export class StackHarness {
       TRUNCATE TABLE
         deviludo.workspace_claim_fairness,
         deviludo.project_creation_receipts,
-        deviludo.project_source_ready_outbox,
         deviludo.project_source_revisions,
         deviludo.instance_agent_settings,
         deviludo.operation_receipts,
@@ -102,9 +101,9 @@ export class StackHarness {
       ON CONFLICT (executor_id) DO UPDATE SET public_key_pem = EXCLUDED.public_key_pem,
         enabled = true, updated_at = clock_timestamp();
     `);
-    const session = await this.web("/api/session");
-    expect(session.ok(), await session.text()).toBeTruthy();
-    expect(await session.json()).toMatchObject({ session: { authenticated: true, authMode: "STANDALONE", canLogout: false, user: { instanceAdmin: true } } });
+    const instance = await this.web("/api/instance");
+    expect(instance.ok(), await instance.text()).toBeTruthy();
+    expect(await instance.json()).toMatchObject({ instance: { mode: "SELF_HOSTED", workspace: { name: "Local workspace" } } });
   }
 
   async web(path: string, options: FetchOptions = {}): Promise<APIResponse> {
@@ -170,9 +169,9 @@ export class StackHarness {
   }
 
   async selectWorkspace(workspaceId: string): Promise<void> {
-    const session=await this.web("/api/session");
-    const body=await session.json() as {session:{selectedWorkspace:{id:string}}};
-    expect(body.session.selectedWorkspace.id).toBe(workspaceId);
+    const instance=await this.web("/api/instance");
+    const body=await instance.json() as {instance:{workspace:{id:string}}};
+    expect(body.instance.workspace.id).toBe(workspaceId);
   }
 
   async waitForProject(
@@ -193,10 +192,10 @@ export class StackHarness {
   async registerFixedNodes(): Promise<readonly NodeRecord[]> {
     const nodes: NodeRecord[] = [];
     for (const definition of NODE_DEFINITIONS) {
-      const created = await this.coreWeb("/v1/admin/server-nodes", { method: "POST", data: definition });
+      const created = await this.coreWeb("/v1/runtime/server-nodes", { method: "POST", data: definition });
       expect(created.status(), created.status() === 201 ? undefined : await created.text()).toBe(201);
       const node = (await created.json() as { node: NodeRecord }).node;
-      const activated = await this.coreWeb(`/v1/admin/server-nodes/${node.id}/activate`, {
+      const activated = await this.coreWeb(`/v1/runtime/server-nodes/${node.id}/activate`, {
         method: "POST",
         data: {},
       });

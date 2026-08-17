@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
 import { ProjectStudio } from "@/components/ProjectStudio";
+import { localizedMetadata } from "@/lib/web/localized-metadata";
 
-export const metadata: Metadata = { title: "项目 · DeviLudo" };
+export async function generateMetadata(): Promise<Metadata> {
+  return localizedMetadata("项目 · DeviLudo", "Project · DeviLudo");
+}
 
 export default async function ProjectPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;

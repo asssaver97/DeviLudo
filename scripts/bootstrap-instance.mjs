@@ -24,9 +24,9 @@ try {
     );
   }
   for (const definition of [
-    ["WEB", "linux", ["CUSTOMER_WEB", "STREAMING_BFF"]],
+    ["WEB", "linux", ["SELF_HOSTED_WEB", "STREAMING_BFF"]],
     ["CORE", "linux", [
-      "BUSINESS_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+      "AUTOMATION_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
       "RESTRICTED_CONTAINER", "NETWORK_POLICY",
     ]],
     ["E2E_MACOS", "macos", ["E2E_TEST"]],

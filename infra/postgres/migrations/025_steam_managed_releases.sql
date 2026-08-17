@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS deviludo.workspace_steam_settings (
   credential_fingerprint text NOT NULL CHECK (credential_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
   credential_version uuid NOT NULL,
   revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
-  updated_by_actor_account_id uuid NOT NULL,
+  updated_by_actor_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS deviludo.project_steam_settings (
   test_branch text NOT NULL DEFAULT 'deviludo-test'
     CHECK (test_branch ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' AND test_branch <> 'default'),
   revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
-  updated_by_actor_account_id uuid NOT NULL,
+  updated_by_actor_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, project_id),
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS deviludo.steam_releases (
   build_digests jsonb NOT NULL CHECK (jsonb_typeof(build_digests) = 'object'),
   steam_build_id text,
   failure_message text,
-  requested_by_actor_account_id uuid NOT NULL,
+  requested_by_actor_id uuid NOT NULL,
   uploaded_at timestamptz,
   live_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -206,7 +206,7 @@ BEGIN
     jsonb_build_object(
       'targetPlatforms', workflow.target_platforms,
       'approvalSignalId', signal_id,
-      'approvedByAccountId', p_payload->>'requestedByAccountId',
+      'approvedByActorId', p_payload->>'requestedByActorId',
       'steamRelease', jsonb_build_object(
         'releaseId', release.id, 'version', release.version,
         'releaseNumber', release.release_number, 'channel', release.channel,
@@ -242,17 +242,6 @@ BEGIN
   VALUES (workflow.workspace_id, workflow.id, 'RELEASE_SKIPPED', p_payload, 'signal:' || p_idempotency_key);
   UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED', version = version + 1,
     updated_at = clock_timestamp() WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
-  IF workflow.development_actor_account_id IS NOT NULL THEN
-    INSERT INTO deviludo.project_source_ready_outbox(
-      workspace_id, project_id, workflow_id, source_revision, content_digest, development_actor_account_id
-    )
-    SELECT source.workspace_id, source.project_id, workflow.id, source.revision,
-           source.content_digest, workflow.development_actor_account_id
-      FROM deviludo.project_source_revisions source
-     WHERE source.workspace_id = workflow.workspace_id AND source.project_id = workflow.project_id
-     ORDER BY source.revision DESC LIMIT 1
-    ON CONFLICT (workspace_id, project_id, workflow_id, source_revision) DO NOTHING;
-  END IF;
   RETURN true;
 END
 $$;

@@ -61,7 +61,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /--reset-incompatible-baseline/);
   assert.match(localUp, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
   assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);
-  assert.match(localUp, /npm run local:reset:source-v1/);
+  assert.match(localUp, /npm run local:reset:self-hosted/);
   assert.doesNotMatch(compose, /deviludo-local-client(?:-secret)?/);
 });
 
@@ -699,7 +699,7 @@ test("E2E failures and isolation cleanup remove transient workspaces", async () 
   assert.match(windows, /Filter "deviludo-\$JobId-\*"[\s\S]*Remove-Item -Recurse -Force/);
 });
 
-test("the shared product shell is mounted once in the root layout so route changes preserve its session", async () => {
+test("the shared product shell is mounted once so route changes preserve the local instance", async () => {
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const page = await readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8");
   assert.match(layout, /<LanguageProvider[\s\S]*<ProductShell>\{children\}<\/ProductShell>[\s\S]*<\/LanguageProvider>/);
@@ -707,12 +707,45 @@ test("the shared product shell is mounted once in the root layout so route chang
   assert.doesNotMatch(page, /ProductShell/);
 });
 
-test("image generation settings unwrap the Core response envelope before rendering", async () => {
-  const component = await readFile(new URL("../components/ImageGenerationSettings.tsx", import.meta.url), "utf8");
-  assert.match(component, /const payload = await response\.json\(\) as ImageGenerationSettingsPayload/);
-  assert.match(component, /const settings = payload\.settings \?\? null/);
-  assert.match(component, /applyConfig\(payload\.settings\)/);
-  assert.doesNotMatch(component, /response\.json\(\) as ImageGenerationConfig \| null/);
+test("image generation is part of the selected Agent connection", async () => {
+  const [page, agent, assets] = await Promise.all([
+    readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(page, /ImageGenerationSettings/);
+  assert.match(agent, /name="imageModel"/);
+  assert.match(agent, /selected connection's Provider, Base URL, and credential/);
+  assert.match(assets, /imageGenerationReady/);
+});
+
+test("settings and project details use unnumbered sections and Codex remains selectable", async () => {
+  const [settingsPage, agent, studio] = await Promise.all([
+    readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(`${settingsPage}\n${agent}\n${studio}`, /section-number|step-number|stage-number|agent-settings-summary|agent-config-security/);
+  assert.match(agent, /<input checked=\{agentRuntime === kind\} name="agentRuntime" onChange=\{\(\) => selectRuntime\(kind\)\} type="radio"/);
+  assert.doesNotMatch(agent, /disabled=\{[^}]*CODEX_CLI/);
+  assert.match(settingsPage, /settings-secondary-grid/);
+});
+
+test("English mode localizes settings, assets, metadata, and server error fallbacks", async () => {
+  const [agentSettings, assetPanel, language, layout, proxy] = await Promise.all([
+    readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/i18n/LanguageProvider.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/[...segments]/route.ts", import.meta.url), "utf8"),
+  ]);
+  for (const component of [agentSettings, assetPanel]) {
+    assert.match(component, /useLanguage\(\)/);
+    assert.doesNotMatch(component, />\s*[\p{Script=Han}][^<{]*</u);
+  }
+  assert.match(language, /locale === "en" && \/\\p\{Script=Han\}\//);
+  assert.match(layout, /localizedMetadata\(/);
+  assert.match(proxy, /requestText\(request, "请求来源校验失败", "Request origin validation failed"\)/);
 });
 
 test("remote E2E node connectivity refreshes from server heartbeats", async () => {
@@ -722,16 +755,16 @@ test("remote E2E node connectivity refreshes from server heartbeats", async () =
   assert.match(dashboard, /Date\.now\(\) - Date\.parse\(value\) < 90_000/);
 });
 
-test("product pages share session data and never poll an idle project", async () => {
+test("product pages share local instance data and never poll an idle project", async () => {
   const shell = await readFile(new URL("../components/ProductShell.tsx", import.meta.url), "utf8");
   const dashboard = await readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8");
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
-  const access = await readFile(new URL("../components/AccessSettings.tsx", import.meta.url), "utf8");
-  assert.match(shell, /fetch\("\/api\/session"/);
-  for (const source of [dashboard,studio,access]) assert.doesNotMatch(source,/fetch\("\/api\/session"/);
+  const telemetry = await readFile(new URL("../components/TelemetrySettings.tsx", import.meta.url), "utf8");
+  assert.match(shell, /fetch\("\/api\/instance"/);
+  for (const source of [dashboard,studio,telemetry]) assert.doesNotMatch(source,/fetch\("\/api\/instance"/);
   assert.doesNotMatch(studio,/setInterval|1500/);
   assert.match(studio,/workflowNeedsPolling\(workflowState\)/);
-  assert.match(studio,/repositoryNeedsPolling\(repositorySyncState\)/);
+  assert.doesNotMatch(studio,/repositoryNeedsPolling|platformManaged|github\/repositories/);
 });
 
 test("the API Key field stays outside browser password managers", async () => {
@@ -765,12 +798,12 @@ test("connection variables do not render helper copy below their inputs", async 
   assert.doesNotMatch(component, /<small>\{variable\}<\/small>/);
 });
 
-test("Core product surfaces use their asserted workspace without an account selector", async () => {
+test("Core product surfaces use their fixed local workspace without an identity selector", async () => {
   const shell = await readFile(new URL("../components/ProductShell.tsx", import.meta.url), "utf8");
   const home = await readFile(new URL("../components/HomeChat.tsx", import.meta.url), "utf8");
   const projects = await readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8");
-  assert.match(shell, /const workspace = session\.selectedWorkspace/);
-  assert.match(shell, /session\.authMode === "STANDALONE"/);
+  assert.match(shell, /const workspace = instance\.workspace/);
+  assert.match(shell, /Free self-hosted instance/);
   assert.doesNotMatch(shell, /Select workspace|Add workspace|No workspace selected/);
   assert.doesNotMatch(shell, /displayName|WorkspaceAdmin|SANDBOX LOCKED|PRODUCTION SLOT/);
   assert.doesNotMatch(home, /选择一个项目继续修改|从需求和细节开始沟通/);
@@ -794,14 +827,14 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   assert.match(panel, /stage: "ARTIFACT_BUILD"/);
   assert.doesNotMatch(panel, /rebuild-with-assets/);
   // The panel goes through the authenticated Core proxy, never straight to S3 or
-  // the database, and the key is only ever shown masked.
+  // the database, and it only reads readiness from the selected Agent connection.
   assert.doesNotMatch(panel, /FormData|s3|S3Client|aws-sdk/);
-  assert.match(panel, /generationConfig\.apiKeyMask/);
-  assert.doesNotMatch(panel, /generationConfig\.apiKey\b/);
+  assert.match(panel, /imageGenerationReady/);
+  assert.doesNotMatch(panel, /apiKeyMask|apiKey\b/);
   assert.match(panel, /accept="image\/png,image\/jpeg,image\/webp"/);
 });
 
-test("image assets gate the first build and Steam upload is an administrator-owned release decision", async () => {
+test("image assets gate the first build and Steam upload remains an explicit local decision", async () => {
   const sql = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
   const api = await readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8");
   const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
@@ -826,12 +859,12 @@ test("image assets gate the first build and Steam upload is an administrator-own
   assert.match(sql, /CREATE TABLE deviludo\.steam_releases/);
   assert.match(api, /"\/v1\/projects\/:projectId\/steam-releases"/);
   assert.match(api, /"\/v1\/projects\/:projectId\/iterations\/:workflowId\/complete"/);
-  assert.match(api, /principal\.role !== "OWNER" && principal\.role !== "ADMIN"/);
+  assert.doesNotMatch(api, /principal\.role|workspaceRole|instanceAdmin/);
   assert.doesNotMatch(api, /approve-release|signing-grant/);
   assert.match(studio, /<ProjectSteamPanel/);
   assert.match(steamPanel, /APPROVE & UPLOAD TO STEAM/);
   assert.match(steamPanel, /FINISH WITHOUT PUBLISHING/);
-  assert.match(steamSettings, /WORKSPACE STEAM CREDENTIAL/);
+  assert.match(steamSettings, /STEAM BUILD CREDENTIAL/);
   assert.match(runner, /file\.startsWith\(`build-\$\{platform\}-`\)/);
   assert.match(runner, /steam\.channel === "TEST" \? `  "SetLive"/);
   assert.doesNotMatch(runner, /signed-build-|STEAM_APP_ID|STEAM_DEPOT_/);
@@ -847,12 +880,9 @@ test("auto-generate never removes the user's own way to supply an asset", async 
   assert.doesNotMatch(panel, /item\.status === "planned" && !autoGenerateEnabled/);
   // A disabled toggle with no explanation reads as a bug, so each blocking
   // condition names itself.
-  assert.match(panel, /disabled=\{!autoGenerateEnabled && \(!configComplete \|\| !providerSupported\)\}/);
-  assert.match(panel, /需要先在.*设置.*里配置图片生成模型和 API Key/);
-  assert.match(panel, /providerSupported = generationConfig\?\.provider !== "midjourney"/);
-  // An endpoint cannot authenticate a request, so endpoint-only is not configured.
-  assert.match(panel, /configComplete = Boolean\(generationConfig\?\.provider && generationConfig\.apiKeyMask\)/);
-  assert.doesNotMatch(panel, /generationConfig\.apiKeyMask \|\| generationConfig\.apiEndpoint/);
+  assert.match(panel, /disabled=\{!autoGenerateEnabled && !imageGenerationReady\}/);
+  assert.match(panel, /Agent 连接中选择一个图片模型/);
+  assert.doesNotMatch(panel, /generationConfig|providerSupported|configComplete/);
   // Generation settles in the background with nothing to push the result, so the
   // panel polls while work is outstanding and stops when it is not.
   assert.match(panel, /const generationOutstanding = autoGenerateEnabled/);
@@ -870,16 +900,16 @@ test("expanded image assets stay in a bounded scrolling list with one immediate 
   assert.match(styles, /overscroll-behavior: contain/);
   assert.equal([...panel.matchAll(/type="file"/g)].length, 1);
   assert.match(panel, /uploadInputRef\.current\.click\(\)/);
-  assert.match(panel, /aria-label="图片素材列表"[\s\S]*role="region"[\s\S]*tabIndex=\{0\}/);
+  assert.match(panel, /aria-label=\{text\("图片素材列表", "Image asset list"\)\}[\s\S]*role="region"[\s\S]*tabIndex=\{0\}/);
 });
 
-test("all standalone artifacts open through the verified host bridge", async () => {
+test("all self-hosted artifacts open through the verified host bridge", async () => {
   const [studio, bridge, localUp] = await Promise.all([
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8"),
   ]);
-  assert.match(studio, /const opensOnHost = session\.authMode === "STANDALONE"/);
+  assert.match(studio, /const opensOnHost = true/);
   assert.match(studio, /fetch\(`\$\{bridgeUrl\}\/artifact\/open`/);
   assert.match(studio, /text\("打开", "OPEN"\)/);
   assert.match(bridge, /"E2E_REPORT"/);
@@ -1123,42 +1153,4 @@ test("the async asset branch is anchored to its stage, not placed by a guessed o
   assert.match(studio, /aria-expanded=\{assetPanelExpanded\}/);
   assert.match(studio, /assetPanelExpanded\s*\?\s*text\("收起素材清单", "Hide asset list"\)/);
   assert.match(styles, /\.product-delivery-async-node:focus-visible \{[\s\S]*?outline: 2px solid var\(--blue\)/);
-});
-
-test("the baseline repair replays functions from the baseline rather than copying them", async () => {
-  const repair = await readFile(new URL("../scripts/repair-local-baseline.mjs", import.meta.url), "utf8");
-  const ddl = await readFile(
-    new URL("../infra/postgres/repair/001_asset_baseline_catchup.sql", import.meta.url),
-    "utf8",
-  );
-  // Duplicating the function bodies into the repair file is what would let the two
-  // drift apart, recreating the problem the repair exists to fix. They are read out
-  // of the baseline instead, and the count is checked against the file so a body the
-  // scanner cannot parse fails loudly rather than being skipped.
-  assert.doesNotMatch(ddl, /CREATE OR REPLACE FUNCTION/);
-  assert.match(repair, /extractFunctions\(baseline\)/);
-  assert.match(repair, /functions\.length !== declared/);
-  // A SECURITY DEFINER function replaced without its owner would run as whoever ran
-  // the repair, silently widening what the sweep can reach.
-  assert.match(repair, /ALTER FUNCTION deviludo[\\.]+\$\{match\[1\]\}/);
-  assert.match(repair, /OWNER TO \[a-z_\]\+/);
-  // The repair rewrites function bodies in place, which is a local recovery step;
-  // shared databases get the reviewed baseline.
-  assert.match(repair, /NODE_ENV === "production"/);
-  assert.match(repair, /Refusing to repair a production database/);
-  // The digest is the claim that the repair completed, so it has to be written last.
-  assert.ok(
-    repair.indexOf("SET source_digest = $1") > repair.indexOf("applied.functions.push"),
-    "the source digest must be stamped only after the functions are replaced",
-  );
-  // Re-running it must be safe: this is aimed at databases that already hold the
-  // user's projects, so the DDL adds what is missing and never recreates a table.
-  assert.match(ddl, /CREATE TABLE IF NOT EXISTS deviludo\.asset_manifests/);
-  assert.match(ddl, /CREATE TABLE IF NOT EXISTS deviludo\.asset_items/);
-  assert.doesNotMatch(ddl, /DROP TABLE|TRUNCATE|DELETE FROM/);
-  // The asset tables carry workspace data, so isolation has to arrive with them.
-  assert.match(ddl, /ENABLE ROW LEVEL SECURITY/);
-  assert.match(ddl, /FORCE ROW LEVEL SECURITY/);
-  assert.match(ddl, /workspace_id = deviludo\.current_workspace_id\(\)/);
-  assert.match(ddl, /GRANT SELECT, UPDATE ON deviludo\.asset_items TO deviludo_claim_executor/);
 });

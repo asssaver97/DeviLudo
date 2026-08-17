@@ -29,7 +29,7 @@ export type SandboxPlan = Readonly<{
     model: string | null;
     models: AgentModelConfiguration | null;
     credentialRef: string;
-    credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_API_KEY";
+    credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_AUTH_JSON";
     environment: Readonly<Record<string, string>>;
     revision: number;
   }> | null;
@@ -301,7 +301,7 @@ function agentCompletionContract(assetManifest: unknown, testManifest: unknown) 
   if (!validateTestManifest(testManifest)) throw new Error("Generated test manifest is invalid");
   // Reserve the full allowed current-regression duration. The pointer can be
   // replaced after this source revision is published, but a frozen job budget
-  // must never become too small because the managed trace changed meanwhile.
+  // must never become too small because the current trace changed meanwhile.
   const plan = planE2eExecution(testManifest, 300_000);
   return Object.freeze({
     assetManifest,
@@ -392,10 +392,10 @@ function agentConfigurationFromPayload(
     model,
     models,
     credentialRef: input.credentialRef,
-    credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_API_KEY",
+    credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_AUTH_JSON",
     environment: input.runtime === "CLAUDE_CODE"
       ? claudeCodeEnvironment(baseUrl, models)
-      : Object.freeze({ DEVILUDO_CODEX_BASE_URL: baseUrl, DEVILUDO_CODEX_MODEL: model ?? "" }),
+      : Object.freeze({ DEVILUDO_CODEX_MODEL: model ?? "" }),
     revision: Number(input.revision),
   });
 }
