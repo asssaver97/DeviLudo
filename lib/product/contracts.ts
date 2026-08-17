@@ -97,6 +97,7 @@ export type AgentRoleModelConfiguration = Readonly<{
 export type InstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
+  model: string | null;
   models: AgentModelConfiguration | null;
   roleModels: AgentRoleModelConfiguration;
   apiKeyConfigured: boolean;
@@ -106,6 +107,11 @@ export type InstanceAgentSettings = Readonly<{
   testPolicyReady: boolean;
   updatedAt: string | null;
 }>;
+
+export type InstanceAgentSettingsProfiles = Readonly<Record<
+  AgentRuntimeKind,
+  InstanceAgentSettings | null
+>>;
 
 export type ProductProjectSummary = Readonly<{
   id: string;

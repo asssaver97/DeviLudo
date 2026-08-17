@@ -1,4 +1,3 @@
-import type { AgentRuntimeKind } from "@/lib/product/contracts";
 import type { StoredInstanceAgentSettings } from "./repository";
 
 type FetchLike = typeof fetch;
@@ -21,7 +20,7 @@ export async function generateProjectName(input: Readonly<{
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
     ? await requestClaudeName(fetchImpl, input.settings, input.apiKey, prompt)
-    : await requestCodexName(fetchImpl, input.settings.agentRuntime, input.settings.baseUrl, input.apiKey, prompt);
+    : await requestCodexName(fetchImpl, input.settings, input.apiKey, prompt);
   return normalizeGeneratedProjectName(raw);
 }
 
@@ -58,20 +57,19 @@ async function requestClaudeName(
 
 async function requestCodexName(
   fetchImpl: FetchLike,
-  runtime: AgentRuntimeKind,
-  baseUrl: string,
+  settings: StoredInstanceAgentSettings,
   apiKey: string,
   prompt: string,
 ): Promise<string> {
-  if (runtime !== "CODEX_CLI") throw new Error("Agent 运行时配置无效");
-  const response = await fetchImpl(providerEndpoint(baseUrl, "responses"), {
+  if (settings.agentRuntime !== "CODEX_CLI" || !settings.model) throw new Error("Codex CLI 模型尚未配置");
+  const response = await fetchImpl(providerEndpoint(settings.baseUrl, "responses"), {
     method: "POST",
     headers: {
       authorization: `Bearer ${apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.DEVILUDO_CODEX_NAMING_MODEL ?? "codex-mini-latest",
+      model: settings.model,
       input: prompt,
       max_output_tokens: 80,
     }),

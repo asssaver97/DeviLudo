@@ -215,7 +215,7 @@ export async function analyzeImportedProject(input: Readonly<{
 }>): Promise<ImportedProjectAnalysis> {
   const model = input.settings.agentRuntime === "CLAUDE_CODE"
     ? input.settings.models?.primary?.trim()
-    : process.env.DEVILUDO_CODEX_CONVERSATION_MODEL ?? "codex-mini-latest";
+    : input.settings.model?.trim();
   if (!model) throw new Error("Agent 主模型尚未配置");
   const fixture = process.env.NODE_ENV === "test" ? process.env.DEVILUDO_PROJECT_IMPORT_TEST_RESPONSE?.trim() : "";
   const raw = fixture || await requestAnalysis(input.fetchImpl ?? fetch, input.settings, input.apiKey, model, input.source.context);

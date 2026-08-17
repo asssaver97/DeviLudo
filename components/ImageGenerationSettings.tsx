@@ -1,9 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import type { ImageGenerationConfig, ImageGenerationProvider } from "@/lib/product/asset-manifest";
+import {
+  isImageGenerationProvider,
+  type ImageGenerationConfig,
+  type ImageGenerationProvider,
+} from "@/lib/product/asset-manifest";
 
 const PROVIDERS: readonly ImageGenerationProvider[] = ["dalle-3", "stable-diffusion-xl", "midjourney", "replicate"];
+
+type ImageGenerationSettingsPayload = Readonly<{
+  settings?: ImageGenerationConfig | null;
+  message?: string;
+}>;
 
 const PROVIDER_INFO: Record<ImageGenerationProvider, { name: string; description: string; requiresApiKey: boolean }> = {
   "dalle-3": {
@@ -50,25 +59,25 @@ export function ImageGenerationSettings() {
   // comes back as a mask. Fetching stays separate from applying so the effect
   // below sets state in a promise callback rather than synchronously.
   const fetchConfig = useCallback(async (signal?: AbortSignal): Promise<ImageGenerationConfig | null> => {
-    const response = await fetch("/api/settings/image-generation", { signal });
-    return response.ok ? await response.json() as ImageGenerationConfig | null : null;
-  }, []);
-
-  const loadConfig = useCallback(async () => {
-    try {
-      applyConfig(await fetchConfig());
-    } catch (error) {
-      console.error("Failed to load image generation config:", error);
-    } finally {
-      setLoading(false);
+    const response = await fetch("/api/settings/image-generation", { cache: "no-store", signal });
+    const payload = await response.json() as ImageGenerationSettingsPayload;
+    if (!response.ok) throw new Error(payload.message ?? "无法读取图片生成配置");
+    const settings = payload.settings ?? null;
+    if (settings && !isImageGenerationProvider(settings.provider)) {
+      throw new Error("图片生成配置包含不受支持的提供商，请重新配置");
     }
-  }, [applyConfig, fetchConfig]);
+    return settings;
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
     void fetchConfig(controller.signal)
       .then(data => { if (!controller.signal.aborted) applyConfig(data); })
-      .catch(() => undefined)
+      .catch(error => {
+        if (!controller.signal.aborted) {
+          setNotice(error instanceof Error ? error.message : "无法读取图片生成配置");
+        }
+      })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [applyConfig, fetchConfig]);
@@ -81,7 +90,7 @@ export function ImageGenerationSettings() {
     try {
       // Core rejects unknown fields, and JSON.stringify drops the undefined
       // ones, so an omitted endpoint/model/key means "leave unchanged".
-      const payload: {
+      const input: {
         provider: ImageGenerationProvider;
         apiKey?: string;
         apiEndpoint?: string;
@@ -92,21 +101,21 @@ export function ImageGenerationSettings() {
         model: model || undefined,
       };
 
-      if (apiKey) payload.apiKey = apiKey;
+      if (apiKey) input.apiKey = apiKey;
 
       const response = await fetch("/api/settings/image-generation", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(input),
       });
 
-      if (response.ok) {
+      const payload = await response.json() as ImageGenerationSettingsPayload;
+      if (response.ok && payload.settings) {
         setNotice("配置已保存");
         setApiKey("");
-        await loadConfig();
+        applyConfig(payload.settings);
       } else {
-        const error = await response.json();
-        setNotice(`保存失败: ${error.message || response.statusText}`);
+        setNotice(`保存失败: ${payload.message || response.statusText}`);
       }
     } catch (error) {
       setNotice(`保存失败: ${error instanceof Error ? error.message : "未知错误"}`);

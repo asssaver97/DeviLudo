@@ -7,7 +7,7 @@ import {
   type AgentModelConfiguration,
   type AgentRuntimeKind,
 } from "@/lib/product/contracts";
-import { normalizeAgentModels, normalizeBaseUrl } from "./agent-settings";
+import { normalizeAgentModel, normalizeAgentModels, normalizeBaseUrl } from "./agent-settings";
 import type { CoreConfig } from "./config";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
@@ -26,6 +26,7 @@ export type SandboxPlan = Readonly<{
   agentConfiguration: Readonly<{
     runtime: AgentRuntimeKind;
     baseUrl: string;
+    model: string | null;
     models: AgentModelConfiguration | null;
     credentialRef: string;
     credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_API_KEY";
@@ -366,10 +367,17 @@ function agentConfigurationFromPayload(
     throw new Error("Agent configuration lock is invalid");
   }
   const input = value as Record<string, unknown>;
+  const runtime = input.runtime as AgentRuntimeKind;
   const baseUrl = typeof input.baseUrl === "string"
     ? normalizeBaseUrl(input.baseUrl, process.env.NODE_ENV ?? "development")
     : "";
-  const models = normalizeAgentModels(input.models);
+  const legacyModels = input.models && typeof input.models === "object" && !Array.isArray(input.models)
+    ? input.models as Record<string, unknown>
+    : null;
+  const model = runtime === "CODEX_CLI"
+    ? normalizeAgentModel(input.model ?? legacyModels?.primary)
+    : null;
+  const models = runtime === "CLAUDE_CODE" ? normalizeAgentModels(input.models) : null;
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.runtime)
     || !baseUrl
     || typeof input.credentialRef !== "string"
@@ -381,12 +389,13 @@ function agentConfigurationFromPayload(
   return Object.freeze({
     runtime: input.runtime as AgentRuntimeKind,
     baseUrl,
+    model,
     models,
     credentialRef: input.credentialRef,
     credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_API_KEY",
     environment: input.runtime === "CLAUDE_CODE"
       ? claudeCodeEnvironment(baseUrl, models)
-      : Object.freeze({ DEVILUDO_CODEX_BASE_URL: baseUrl }),
+      : Object.freeze({ DEVILUDO_CODEX_BASE_URL: baseUrl, DEVILUDO_CODEX_MODEL: model ?? "" }),
     revision: Number(input.revision),
   });
 }

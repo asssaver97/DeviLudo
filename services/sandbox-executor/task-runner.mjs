@@ -961,7 +961,9 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     environment.CODEX_HOME = "/workspace/codex-home";
     await mkdir(environment.CODEX_HOME, { recursive: true });
     const baseUrl = configuration.baseUrl.replace(/"/g, "");
+    const model = configuration.model.replace(/"/g, "");
     await writeFile(`${environment.CODEX_HOME}/config.toml`, [
+      `model = "${model}"`,
       'model_provider = "deviludo"',
       '[model_providers.deviludo]',
       'name = "Deviludo Provider"',
@@ -1226,7 +1228,9 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
   environment.CODEX_HOME = "/workspace/codex-home";
   await mkdir(environment.CODEX_HOME, { recursive: true });
   const baseUrl = configuration.baseUrl.replace(/"/g, "");
+  const model = configuration.model.replace(/"/g, "");
   await writeFile(`${environment.CODEX_HOME}/config.toml`, [
+    `model = "${model}"`,
     'model_provider = "deviludo"',
     '[model_providers.deviludo]',
     'name = "Deviludo Provider"',

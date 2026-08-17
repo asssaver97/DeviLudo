@@ -17,15 +17,17 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1/",
     apiKey: "sk-valid-secret",
+    model: "gpt-5.3-codex",
   }, "production"), {
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
     apiKey: "sk-valid-secret",
+    model: "gpt-5.3-codex",
     models: null,
     roleModels: {
-      design: "codex-mini-latest",
-      development: "codex-mini-latest",
-      test: "codex-mini-latest",
+      design: "gpt-5.3-codex",
+      development: "gpt-5.3-codex",
+      test: "gpt-5.3-codex",
     },
   });
   assert.throws(() => parseAgentSettingsInput({
@@ -77,6 +79,7 @@ test("Claude settings.json accepts only the supported connection fields", () => 
     agentRuntime: "CLAUDE_CODE",
     baseUrl: "https://gateway.example.com/anthropic",
     apiKey: "sk-gateway-secret",
+    model: null,
     models: {
       primary: "claude-fable-5-max",
       opus: "claude-opus-route",

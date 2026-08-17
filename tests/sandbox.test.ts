@@ -72,6 +72,7 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
       agentConfiguration: Object.freeze({
         runtime: "CODEX_CLI",
         baseUrl: "https://api.example.com/v1",
+        model: "gpt-5.3-codex",
         models: null,
         credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
         revision: 3,
@@ -81,10 +82,11 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
   assert.deepEqual(configured.agentConfiguration, {
     runtime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
+    model: "gpt-5.3-codex",
     models: null,
     credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
     credentialEnvironmentVariable: "CODEX_API_KEY",
-    environment: { DEVILUDO_CODEX_BASE_URL: "https://api.example.com/v1" },
+    environment: { DEVILUDO_CODEX_BASE_URL: "https://api.example.com/v1", DEVILUDO_CODEX_MODEL: "gpt-5.3-codex" },
     revision: 3,
   });
   assert.throws(() => sandboxPlan(Object.freeze({
@@ -105,6 +107,7 @@ test("Claude Code sandbox plans map each configured model route to its environme
       agentConfiguration: Object.freeze({
         runtime: "CLAUDE_CODE",
         baseUrl: "https://www.sotamodel.net",
+        model: null,
         models: {
           primary: "claude-fable-5-max",
           opus: "claude-opus-route",

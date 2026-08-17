@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '031_agent_workflow_source_baseline');
+VALUES (true, '001', 'deviludo-core-source-v1', '033_revoke_new_function_public');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -246,12 +246,56 @@ CREATE TABLE deviludo.instance_agent_settings (
   updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  CHECK (
-    (primary_model IS NULL AND opus_model IS NULL AND sonnet_model IS NULL
-      AND haiku_model IS NULL AND subagent_model IS NULL)
+  CONSTRAINT instance_agent_settings_runtime_models CHECK (
+    (agent_runtime = 'CLAUDE_CODE' AND primary_model IS NOT NULL AND opus_model IS NOT NULL
+      AND sonnet_model IS NOT NULL AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
     OR
-    (primary_model IS NOT NULL AND opus_model IS NOT NULL AND sonnet_model IS NOT NULL
+    (agent_runtime = 'CODEX_CLI' AND primary_model IS NOT NULL AND opus_model IS NULL
+      AND sonnet_model IS NULL AND haiku_model IS NULL AND subagent_model IS NULL)
+  )
+);
+
+-- Provider credentials and model routes are owned by their runtime profile.
+-- The singleton table above remains the immutable job-scheduling snapshot of
+-- the currently selected profile; switching runtimes never mutates the other
+-- profile.
+CREATE TABLE deviludo.instance_agent_provider_profiles (
+  agent_runtime deviludo.agent_runtime PRIMARY KEY,
+  base_url text NOT NULL CHECK (
+    length(base_url) BETWEEN 8 AND 2048
+    AND base_url ~ '^https?://'
+  ),
+  primary_model text NOT NULL CHECK (primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  opus_model text CHECK (opus_model IS NULL OR opus_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  sonnet_model text CHECK (sonnet_model IS NULL OR sonnet_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  haiku_model text CHECK (haiku_model IS NULL OR haiku_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  subagent_model text CHECK (subagent_model IS NULL OR subagent_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  role_models jsonb NOT NULL CHECK (
+    jsonb_typeof(role_models) = 'object'
+    AND role_models ?& ARRAY['design', 'development', 'test']
+    AND (role_models->>'design') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
+    AND (role_models->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
+    AND (role_models->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
+  ),
+  credential_secret_ref text NOT NULL CHECK (
+    length(credential_secret_ref) BETWEEN 32 AND 1000
+    AND credential_secret_ref LIKE 'vault://instance/agent-runtime/api-key/versions/%'
+  ),
+  api_key_mask text NOT NULL CHECK (api_key_mask ~ '^.{3}\*{8}.{4}$'),
+  api_key_fingerprint text NOT NULL CHECK (api_key_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
+  credential_version uuid NOT NULL,
+  revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+  test_policy_ready boolean NOT NULL DEFAULT false,
+  test_policy_checked_revision bigint CHECK (test_policy_checked_revision IS NULL OR test_policy_checked_revision > 0),
+  updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (
+    (agent_runtime = 'CLAUDE_CODE' AND opus_model IS NOT NULL AND sonnet_model IS NOT NULL
       AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
+    OR
+    (agent_runtime = 'CODEX_CLI' AND opus_model IS NULL AND sonnet_model IS NULL
+      AND haiku_model IS NULL AND subagent_model IS NULL)
   )
 );
 
@@ -1311,7 +1355,8 @@ BEGIN
         'agentConfiguration', jsonb_build_object(
           'runtime', agent_settings.agent_runtime::text,
           'baseUrl', agent_settings.base_url,
-          'models', CASE WHEN agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
+          'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
+          'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
             'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
             'opus', agent_settings.opus_model,
             'sonnet', agent_settings.sonnet_model,
@@ -2099,7 +2144,8 @@ BEGIN
         'agentConfiguration', jsonb_build_object(
           'runtime', agent_settings.agent_runtime::text,
           'baseUrl', agent_settings.base_url,
-          'models', CASE WHEN agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
+          'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
+          'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
             'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
             'opus', agent_settings.opus_model,
             'sonnet', agent_settings.sonnet_model,
@@ -2151,7 +2197,8 @@ BEGIN
           'agentConfiguration', jsonb_build_object(
             'runtime', agent_settings.agent_runtime::text,
             'baseUrl', agent_settings.base_url,
-            'models', CASE WHEN agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
+            'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
+            'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
               'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
               'opus', agent_settings.opus_model,
               'sonnet', agent_settings.sonnet_model,
@@ -2688,7 +2735,8 @@ BEGIN
           'agentConfiguration', jsonb_build_object(
             'runtime', agent_settings.agent_runtime::text,
             'baseUrl', agent_settings.base_url,
-            'models', CASE WHEN agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
+            'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
+            'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
               'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
               'opus', agent_settings.opus_model,
               'sonnet', agent_settings.sonnet_model,
@@ -3133,7 +3181,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.asset_manifests, deviludo.asset_items,
   deviludo.e2e_policy_locks, deviludo.e2e_policy_decisions, deviludo.e2e_regression_traces
   TO deviludo_api;
-GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api;
+GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings, deviludo.instance_agent_provider_profiles TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON deviludo.instance_image_generation_settings TO deviludo_api;
 GRANT INSERT ON deviludo.object_cleanup_queue TO deviludo_api, deviludo_sandbox;
 GRANT SELECT, INSERT, DELETE ON deviludo.project_creation_receipts TO deviludo_api;
@@ -3227,7 +3275,7 @@ GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.workflow_instances TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.project_documents,
   deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
-  deviludo.workflow_instances, deviludo.instance_agent_settings,
+  deviludo.workflow_instances, deviludo.instance_agent_settings, deviludo.instance_agent_provider_profiles,
   deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs,
   deviludo.external_signals, deviludo.steam_releases, deviludo.e2e_regression_traces
   TO deviludo_claim_executor;

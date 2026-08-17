@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
-import type { ProductConversation, ProductProjectDetail, ProjectAgentRole, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
+import type { AgentRuntimeKind, ProductConversation, ProductProjectDetail, ProjectAgentRole, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -321,8 +321,9 @@ export async function runApi(
   app.get("/v1/settings/agent", async (request, reply) => {
     const principal = productAccess(request, config);
     if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
-    const [settings, runtimes] = await Promise.all([
+    const [settings, profiles, runtimes] = await Promise.all([
       repository.readAgentSettings(),
+      repository.readAgentSettingsProfiles(),
       detectAgentRuntimes(),
     ]);
     const apiKeyMask = settings
@@ -331,6 +332,7 @@ export async function runApi(
       : null;
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(settings, apiKeyMask),
+      profiles: publicAgentSettingsProfiles(profiles),
       runtimes,
     });
   });
@@ -339,7 +341,8 @@ export async function runApi(
     const principal = productAccess(request, config);
     if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
     const input = parseAgentSettingsInput(request.body);
-    const current = await repository.readAgentSettings();
+    const profiles = await repository.readAgentSettingsProfiles();
+    const current = profiles.get(input.agentRuntime) ?? null;
     const currentMask = current
       ? current.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
@@ -361,6 +364,7 @@ export async function runApi(
     const saved = await repository.saveAgentSettings({
       agentRuntime: input.agentRuntime,
       baseUrl: input.baseUrl,
+      model: input.model,
       models: input.models,
       roleModels: input.roleModels,
       credentialSecretRef: credential.secretRef,
@@ -369,7 +373,12 @@ export async function runApi(
       credentialVersion: credential.version,
       updatedBy: principal.user.username,
     });
-    return reply.header("cache-control", "no-store").send({ settings: publicAgentSettings(saved) });
+    const savedProfiles = new Map(profiles);
+    savedProfiles.set(saved.agentRuntime, saved);
+    return reply.header("cache-control", "no-store").send({
+      settings: publicAgentSettings(saved),
+      profiles: publicAgentSettingsProfiles(savedProfiles),
+    });
   });
 
   app.get("/v1/settings/image-generation", async (request, reply) => {
@@ -2362,11 +2371,12 @@ function publicAgentSettings(
   return Object.freeze({
     agentRuntime: settings?.agentRuntime ?? "CLAUDE_CODE",
     baseUrl: settings?.baseUrl ?? "https://api.anthropic.com",
+    model: settings?.model ?? null,
     models: settings?.models ?? null,
     roleModels: settings?.roleModels ?? Object.freeze({
-      design: "codex-mini-latest",
-      development: "codex-mini-latest",
-      test: "codex-mini-latest",
+      design: "gpt-5.3-codex",
+      development: "gpt-5.3-codex",
+      test: "gpt-5.3-codex",
     }),
     apiKeyConfigured: settings !== null,
     apiKeyMasked: apiKeyMask,
@@ -2374,6 +2384,19 @@ function publicAgentSettings(
     revision: settings?.revision ?? 0,
     testPolicyReady: settings?.testPolicyReady ?? false,
     updatedAt: settings?.updatedAt ?? null,
+  });
+}
+
+function publicAgentSettingsProfiles(
+  profiles: ReadonlyMap<AgentRuntimeKind, StoredInstanceAgentSettings>,
+) {
+  return Object.freeze({
+    CLAUDE_CODE: profiles.has("CLAUDE_CODE")
+      ? publicAgentSettings(profiles.get("CLAUDE_CODE") ?? null)
+      : null,
+    CODEX_CLI: profiles.has("CODEX_CLI")
+      ? publicAgentSettings(profiles.get("CODEX_CLI") ?? null)
+      : null,
   });
 }
 

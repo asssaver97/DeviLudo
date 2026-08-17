@@ -692,6 +692,14 @@ test("the shared product shell is mounted once in the root layout so route chang
   assert.doesNotMatch(page, /ProductShell/);
 });
 
+test("image generation settings unwrap the Core response envelope before rendering", async () => {
+  const component = await readFile(new URL("../components/ImageGenerationSettings.tsx", import.meta.url), "utf8");
+  assert.match(component, /const payload = await response\.json\(\) as ImageGenerationSettingsPayload/);
+  assert.match(component, /const settings = payload\.settings \?\? null/);
+  assert.match(component, /applyConfig\(payload\.settings\)/);
+  assert.doesNotMatch(component, /response\.json\(\) as ImageGenerationConfig \| null/);
+});
+
 test("remote E2E node connectivity refreshes from server heartbeats", async () => {
   const dashboard = await readFile(new URL("../components/ServerPoolDashboard.tsx", import.meta.url), "utf8");
   assert.match(dashboard, /window\.setInterval\(\(\) => refresh\(0\), 15_000\)/);
@@ -717,7 +725,7 @@ test("the API Key field stays outside browser password managers", async () => {
   assert.match(component, /autoComplete="off"/);
   assert.match(component, /data-form-type="other"/);
   assert.match(component, /name="providerCredential"/);
-  assert.match(component, /placeholder=\{settings\.apiKeyMasked \?\? text\("输入 API Key", "Enter API Key"\)\}/);
+  assert.match(component, /placeholder=\{selectedProfile\?\.apiKeyMasked \?\? text\("输入 API Key", "Enter API Key"\)\}/);
   assert.doesNotMatch(component, /autoComplete="new-password"/);
   assert.doesNotMatch(component, /当前指纹/);
   assert.doesNotMatch(component, /已保存 \$\{settings\.apiKeyMasked/);

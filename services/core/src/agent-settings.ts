@@ -12,6 +12,7 @@ export type AgentSettingsInput = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
   apiKey: string | null;
+  model: string | null;
   models: AgentModelConfiguration | null;
   roleModels: AgentRoleModelConfiguration;
 }>;
@@ -62,13 +63,13 @@ export function parseAgentSettingsInput(
     throw new Error("Agent settings must be an object");
   }
   const input = value as Record<string, unknown>;
-  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "models", "roleModels", "settingsJson"].includes(key));
+  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "model", "models", "roleModels", "settingsJson"].includes(key));
   if (unknown.length > 0) throw new Error("Agent settings contain unsupported fields");
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.agentRuntime)) {
     throw new Error("Agent runtime must be Claude Code or Codex CLI");
   }
   const fromJson = input.settingsJson !== undefined;
-  if (fromJson && (input.baseUrl !== undefined || input.apiKey !== undefined || input.models !== undefined)) {
+  if (fromJson && (input.baseUrl !== undefined || input.apiKey !== undefined || input.model !== undefined || input.models !== undefined)) {
     throw new Error("Use either simple connection fields or Claude settings.json");
   }
   if (fromJson && input.agentRuntime !== "CLAUDE_CODE") {
@@ -91,19 +92,24 @@ export function parseAgentSettingsInput(
     apiKey = connection.apiKey;
   }
   const models = normalizeAgentModels(connection.models);
+  const model = input.agentRuntime === "CODEX_CLI" ? normalizeAgentModel(input.model) : null;
   if (input.agentRuntime === "CLAUDE_CODE" && models === null) {
     throw new Error("Claude Code requires all five model routes");
   }
   if (input.agentRuntime === "CODEX_CLI" && models !== null) {
     throw new Error("Claude model routes cannot be used with Codex CLI");
   }
+  if (input.agentRuntime === "CLAUDE_CODE" && input.model !== undefined) {
+    throw new Error("Codex model cannot be used with Claude Code");
+  }
   const roleModels = input.roleModels === undefined
-    ? defaultAgentRoleModels(input.agentRuntime as AgentRuntimeKind, models)
+    ? defaultAgentRoleModels(input.agentRuntime as AgentRuntimeKind, models, model)
     : normalizeAgentRoleModels(input.roleModels);
   return Object.freeze({
     agentRuntime: input.agentRuntime as AgentRuntimeKind,
     baseUrl,
     apiKey,
+    model,
     models,
     roleModels,
   });
@@ -205,6 +211,7 @@ export function normalizeAgentRoleModels(value: unknown): AgentRoleModelConfigur
 function defaultAgentRoleModels(
   runtime: AgentRuntimeKind,
   models: AgentModelConfiguration | null,
+  model: string | null,
 ): AgentRoleModelConfiguration {
   if (runtime === "CLAUDE_CODE" && models) {
     return Object.freeze({
@@ -213,13 +220,11 @@ function defaultAgentRoleModels(
       test: models.haiku,
     });
   }
-  const fallback = process.env.DEVILUDO_CODEX_CONVERSATION_MODEL
-    ?? process.env.DEVILUDO_CODEX_NAMING_MODEL
-    ?? "codex-mini-latest";
+  const fallback = model ?? "gpt-5.3-codex";
   return Object.freeze({ design: fallback, development: fallback, test: fallback });
 }
 
-function normalizeAgentModel(value: unknown): string {
+export function normalizeAgentModel(value: unknown): string {
   if (typeof value !== "string" || value !== value.trim()
     || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)) {
     throw new Error("Agent model format is invalid");

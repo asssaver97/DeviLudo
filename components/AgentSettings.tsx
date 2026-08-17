@@ -9,22 +9,28 @@ import {
   type AgentRuntimeAvailability,
   type AgentRuntimeKind,
   type InstanceAgentSettings,
+  type InstanceAgentSettingsProfiles,
 } from "@/lib/product/contracts";
 import { FileIcon, LinkIcon, SettingsIcon, ShieldIcon, SparkIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 
 type ConfigurationMode = "SIMPLE" | "SETTINGS_JSON";
 type ModelMode = "SINGLE" | "EXPANDED";
-type AgentSettingsPayload = Readonly<{ settings: InstanceAgentSettings; runtimes: readonly AgentRuntimeAvailability[] }>;
+type AgentSettingsPayload = Readonly<{
+  settings: InstanceAgentSettings;
+  profiles: InstanceAgentSettingsProfiles;
+  runtimes: readonly AgentRuntimeAvailability[];
+}>;
 
 const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE",
   baseUrl: "https://api.anthropic.com",
+  model: null,
   models: null,
   roleModels: Object.freeze({
-    design: "codex-mini-latest",
-    development: "codex-mini-latest",
-    test: "codex-mini-latest",
+    design: "claude-sonnet-4-5",
+    development: "claude-opus-4-1",
+    test: "claude-haiku-4-5",
   }),
   apiKeyConfigured: false,
   testPolicyReady: false,
@@ -32,6 +38,11 @@ const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   apiKeyFingerprint: null,
   revision: 0,
   updatedAt: null,
+});
+
+const EMPTY_PROFILES: InstanceAgentSettingsProfiles = Object.freeze({
+  CLAUDE_CODE: null,
+  CODEX_CLI: null,
 });
 
 const RUNTIME_COPY: Readonly<Record<AgentRuntimeKind, Readonly<{ name: string; description: string }>>> = Object.freeze({
@@ -53,9 +64,10 @@ export function AgentSettings() {
   const initialSettings = initialPayload?.settings ?? DEFAULT_SETTINGS;
   const initialModels = initialSettings.models ?? EMPTY_MODELS;
   const initialRoleModels = initialSettings.roleModels ?? roleModelsFromRoutes(initialSettings.agentRuntime, initialModels);
-  const [settings, setSettings] = useState<InstanceAgentSettings>(initialSettings);
+  const [profiles, setProfiles] = useState<InstanceAgentSettingsProfiles>(initialPayload?.profiles ?? EMPTY_PROFILES);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(initialSettings.agentRuntime);
   const [baseUrl, setBaseUrl] = useState(initialSettings.baseUrl);
+  const [codexModel, setCodexModel] = useState(initialSettings.model ?? initialRoleModels.development);
   const [modelMode, setModelMode] = useState<ModelMode>(hasDistinctModels(initialModels) ? "EXPANDED" : "SINGLE");
   const [singleModel, setSingleModel] = useState(initialModels.primary);
   const [expandedModels, setExpandedModels] = useState<AgentModelConfiguration>(initialModels);
@@ -75,18 +87,20 @@ export function AgentSettings() {
         const response = await fetch("/api/settings/agent", { cache: "no-store" });
         const body = await response.json() as {
           settings?: InstanceAgentSettings;
+          profiles?: InstanceAgentSettingsProfiles;
           runtimes?: readonly AgentRuntimeAvailability[];
           message?: string;
         };
         if (!response.ok || !body.settings) throw new Error(body.message ?? text("无法读取 Agent 设置", "Unable to load Agent settings"));
-        return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [] });
+        return Object.freeze({ settings: body.settings, profiles: body.profiles ?? EMPTY_PROFILES, runtimes: body.runtimes ?? [] });
       })
       .then(body => {
         if (!active) return;
         const value = body.settings;
-        setSettings(value);
+        setProfiles(body.profiles);
         setAgentRuntime(value.agentRuntime);
         setBaseUrl(value.baseUrl);
+        setCodexModel(value.model ?? value.roleModels.development);
         const loadedModels = value.models ?? EMPTY_MODELS;
         setExpandedModels(loadedModels);
         setSingleModel(loadedModels.primary);
@@ -116,17 +130,20 @@ export function AgentSettings() {
           : {
               agentRuntime,
               baseUrl,
+              ...(agentRuntime === "CODEX_CLI" ? { model: codexModel } : {}),
               roleModels,
               ...(agentRuntime === "CLAUDE_CODE" ? { models: effectiveModels(modelMode, singleModel, expandedModels) } : {}),
               ...(apiKey ? { apiKey } : {}),
             }),
       });
-      const body = await response.json() as { settings?: InstanceAgentSettings; message?: string };
+      const body = await response.json() as { settings?: InstanceAgentSettings; profiles?: InstanceAgentSettingsProfiles; message?: string };
       if (!response.ok || !body.settings) throw new Error(body.message ?? text("保存失败", "Save failed"));
-      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes }), 60_000);
-      setSettings(body.settings);
+      const nextProfiles = body.profiles ?? Object.freeze({ ...profiles, [body.settings.agentRuntime]: body.settings });
+      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, profiles: nextProfiles, runtimes }), 60_000);
+      setProfiles(nextProfiles);
       setAgentRuntime(body.settings.agentRuntime);
       setBaseUrl(body.settings.baseUrl);
+      setCodexModel(body.settings.model ?? body.settings.roleModels.development);
       const savedModels = body.settings.models ?? EMPTY_MODELS;
       setExpandedModels(savedModels);
       setSingleModel(savedModels.primary);
@@ -149,6 +166,17 @@ export function AgentSettings() {
   function selectRuntime(kind: AgentRuntimeKind) {
     setAgentRuntime(kind);
     if (kind !== "CLAUDE_CODE") setConfigurationMode("SIMPLE");
+    const profile = profiles[kind];
+    const next = profile ?? runtimeDefaults(kind);
+    setBaseUrl(next.baseUrl);
+    setCodexModel(next.model ?? next.roleModels.development);
+    const nextModels = next.models ?? EMPTY_MODELS;
+    setExpandedModels(nextModels);
+    setSingleModel(nextModels.primary);
+    setModelMode(hasDistinctModels(nextModels) ? "EXPANDED" : "SINGLE");
+    setRoleModels(next.roleModels);
+    setApiKey("");
+    setSettingsJson(formatClaudeSettingsJson(next.baseUrl, next.apiKeyMasked ?? "", next.models));
   }
 
   function switchConfigurationMode(mode: ConfigurationMode) {
@@ -156,7 +184,7 @@ export function AgentSettings() {
     if (mode === "SETTINGS_JSON") {
       setSettingsJson(formatClaudeSettingsJson(
         baseUrl,
-        apiKey || settings.apiKeyMasked || "",
+        apiKey || selectedProfile?.apiKeyMasked || "",
         effectiveModels(modelMode, singleModel, expandedModels),
       ));
       setConfigurationMode(mode);
@@ -194,6 +222,7 @@ export function AgentSettings() {
   }
 
   const runtime = RUNTIME_COPY[agentRuntime];
+  const selectedProfile = profiles[agentRuntime];
   const runtimeAvailability = runtimes.find(candidate => candidate.kind === agentRuntime);
   return (
     <>
@@ -208,8 +237,8 @@ export function AgentSettings() {
 
       <section className="agent-settings-summary" aria-label={text("当前 Agent 配置", "Current Agent configuration")}>
         <article><span><SparkIcon /></span><div><small>Agent Runtime</small><strong>{runtime.name}</strong><p>{runtimeAvailability?.installed ? text(`已检测 · v${runtimeAvailability.version}`, `Detected · v${runtimeAvailability.version}`) : loading ? text("正在检测本地运行时", "Detecting local runtime") : text("未检测到安装", "Not installed")}</p></div></article>
-        <article><span><LinkIcon /></span><div><small>Provider Endpoint</small><strong>{hostLabel(baseUrl)}</strong><p>{modelSummary(modelMode, singleModel, expandedModels) || baseUrl}</p></div></article>
-        <article><span><ShieldIcon /></span><div><small>Credential</small><strong>{settings.apiKeyConfigured ? text("已安全配置", "SECURELY CONFIGURED") : text("等待配置", "NOT CONFIGURED")}</strong><p>{settings.apiKeyMasked ?? text("API Key 尚未配置", "API Key not configured")}</p></div></article>
+        <article><span><LinkIcon /></span><div><small>Provider Endpoint</small><strong>{hostLabel(baseUrl)}</strong><p>{agentRuntime === "CODEX_CLI" ? `MODEL · ${codexModel}` : modelSummary(modelMode, singleModel, expandedModels) || baseUrl}</p></div></article>
+        <article><span><ShieldIcon /></span><div><small>Credential</small><strong>{selectedProfile?.apiKeyConfigured ? text("已安全配置", "SECURELY CONFIGURED") : text("等待配置", "NOT CONFIGURED")}</strong><p>{selectedProfile?.apiKeyMasked ?? text("API Key 尚未配置", "API Key not configured")}</p></div></article>
       </section>
 
       <div className="agent-config-layout">
@@ -262,8 +291,8 @@ export function AgentSettings() {
                     minLength={8}
                     name="providerCredential"
                     onChange={event => setApiKey(event.target.value)}
-                    placeholder={settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")}
-                    required={!settings.apiKeyConfigured}
+                    placeholder={selectedProfile?.apiKeyMasked ?? text("输入 API Key", "Enter API Key")}
+                    required={!selectedProfile?.apiKeyConfigured}
                     spellCheck={false}
                     type="text"
                     value={apiKey}
@@ -299,7 +328,14 @@ export function AgentSettings() {
                       </div>
                     )}
                   </fieldset>
-                ) : null}
+                ) : (
+                  <fieldset className="agent-model-fieldset">
+                    <legend>Model</legend>
+                    <label className="agent-model-single"><span>{text("Codex 模型", "Codex model")}</span>
+                      <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} onChange={event => setCodexModel(event.target.value)} placeholder="gpt-5.3-codex" required type="text" value={codexModel} />
+                    </label>
+                  </fieldset>
+                )}
               </>
             ) : (
               <label className="settings-json-editor">Claude Code settings.json
@@ -317,7 +353,7 @@ export function AgentSettings() {
                 <ModelInput disabled={loading || saving} label={text("设计 Agent", "Design Agent")} onChange={value => updateRoleModel("design", value)} value={roleModels.design} />
                 <ModelInput disabled={loading || saving} label={text("开发 Agent", "Development Agent")} onChange={value => updateRoleModel("development", value)} value={roleModels.development} />
                 <ModelInput disabled={loading || saving} label={text("测试 Agent", "Test Agent")} onChange={value => updateRoleModel("test", value)} value={roleModels.test} />
-                <p className={`agent-config-notice ${settings.testPolicyReady ? "is-success" : ""}`} role="status">{settings.testPolicyReady
+                <p className={`agent-config-notice ${selectedProfile?.testPolicyReady ? "is-success" : ""}`} role="status">{selectedProfile?.testPolicyReady
                   ? text("测试 Agent 玩家策略已通过真实视觉决策校验", "Test Agent player policy is ready for visual decisions")
                   : text("测试 Agent 玩家策略将在下一次 E2E 首次视觉决策时完成校验", "Test Agent player policy will be verified by the next E2E visual decision")}</p>
               </div>
@@ -337,7 +373,7 @@ export function AgentSettings() {
             <li><b>{text("任务配置冻结", "IMMUTABLE JOB SETTINGS")}</b><span>{text("已运行任务不会被改写，新任务锁定当时的运行时、Base URL 和凭据版本。", "Running jobs are never rewritten; new jobs lock the current runtime, Base URL, and credential version.")}</span></li>
             <li><b>{text("Agent 只在 CORE 执行", "AGENT RUNS IN CORE ONLY")}</b><span>{text("E2E Linux、Windows、macOS 节点永远不会获得 Agent 或 Provider 凭据。", "E2E Linux, Windows, and macOS nodes never receive Agent or provider credentials.")}</span></li>
           </ul>
-          {settings.updatedAt ? <p className="agent-config-updated">{text("最后更新", "Last updated")} {formatTime(settings.updatedAt, localeTag(locale))}</p> : null}
+          {selectedProfile?.updatedAt ? <p className="agent-config-updated">{text("最后更新", "Last updated")} {formatTime(selectedProfile.updatedAt, localeTag(locale))}</p> : null}
         </aside>
       </div>
     </>
@@ -498,9 +534,22 @@ function roleModelsFromRoutes(
     test: models.haiku || models.primary,
   });
   return Object.freeze({
-    design: "codex-mini-latest",
-    development: "codex-mini-latest",
-    test: "codex-mini-latest",
+    design: "gpt-5.3-codex",
+    development: "gpt-5.3-codex",
+    test: "gpt-5.3-codex",
+  });
+}
+
+function runtimeDefaults(runtime: AgentRuntimeKind): InstanceAgentSettings {
+  const model = runtime === "CODEX_CLI" ? "gpt-5.3-codex" : null;
+  return Object.freeze({
+    ...DEFAULT_SETTINGS,
+    agentRuntime: runtime,
+    baseUrl: runtime === "CODEX_CLI" ? "https://api.openai.com/v1" : "https://api.anthropic.com",
+    model,
+    roleModels: runtime === "CODEX_CLI"
+      ? Object.freeze({ design: model!, development: model!, test: model! })
+      : DEFAULT_SETTINGS.roleModels,
   });
 }
 

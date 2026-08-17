@@ -8,6 +8,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     settings: {
       agentRuntime: "CLAUDE_CODE",
       baseUrl: "https://api.anthropic.com",
+      model: null,
       models: null,
       apiKeyConfigured: false,
       apiKeyMasked: null,
@@ -23,10 +24,10 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
 
   for (const invalid of [
     { agentRuntime: "UNKNOWN", baseUrl: "https://api.example.com", apiKey: "sk-valid-value" },
-    { agentRuntime: "CODEX_CLI", baseUrl: "http://api.example.com", apiKey: "sk-valid-value" },
-    { agentRuntime: "CODEX_CLI", baseUrl: "https://user:pass@example.com", apiKey: "sk-valid-value" },
-    { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com", workspaceId: "attacker" },
-    { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com" },
+    { agentRuntime: "CODEX_CLI", baseUrl: "http://api.example.com", model: "gpt-5.3-codex", apiKey: "sk-valid-value" },
+    { agentRuntime: "CODEX_CLI", baseUrl: "https://user:pass@example.com", model: "gpt-5.3-codex", apiKey: "sk-valid-value" },
+    { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com", model: "gpt-5.3-codex", workspaceId: "attacker" },
+    { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com", model: "gpt-5.3-codex" },
   ]) {
     const response = await stack.web("/api/settings/agent", { method: "PUT", data: invalid });
     expect(response.status()).toBe(400);
@@ -35,7 +36,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   const apiKey = "sk-instance-secret-value";
   const created = await stack.web("/api/settings/agent", {
     method: "PUT",
-    data: { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com/v1/", apiKey },
+    data: { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com/v1/", model: "gpt-5.3-codex", apiKey },
   });
   const createdText = await created.text();
   expect(created.ok(), createdText).toBeTruthy();
@@ -50,6 +51,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   expect(createdBody.settings).toMatchObject({
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
+    model: "gpt-5.3-codex",
     apiKeyConfigured: true,
     apiKeyMasked: "sk-********alue",
     revision: 1,
@@ -62,6 +64,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     data: {
       agentRuntime: "CODEX_CLI",
       baseUrl: "https://api.example.com/v1",
+      model: "gpt-5.3-codex",
       apiKey: "bad********mask",
     },
   });
@@ -80,6 +83,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   expect(locked[0]?.payload.agentConfiguration).toMatchObject({
     runtime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
+    model: "gpt-5.3-codex",
     revision: 1,
   });
   expect(String(locked[0]?.payload.agentConfiguration.credentialRef)).toMatch(
@@ -93,7 +97,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
       settingsJson: JSON.stringify({
         env: {
           ANTHROPIC_BASE_URL: "https://api.anthropic.com",
-          ANTHROPIC_AUTH_TOKEN: createdBody.settings.apiKeyMasked,
+          ANTHROPIC_AUTH_TOKEN: "sk-claude-instance-secret",
           ANTHROPIC_MODEL: "claude-fable-5-max",
           ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
           ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
@@ -111,10 +115,15 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
       models: Record<string, string> | null;
       revision: number;
     };
+    profiles: Record<string, { apiKeyFingerprint: string; model: string | null }>;
   };
-  expect(updatedBody.settings.apiKeyMasked).toBe(createdBody.settings.apiKeyMasked);
-  expect(updatedBody.settings.apiKeyFingerprint).toBe(createdBody.settings.apiKeyFingerprint);
+  expect(updatedBody.settings.apiKeyMasked).toBe("sk-********cret");
+  expect(updatedBody.settings.apiKeyFingerprint).not.toBe(createdBody.settings.apiKeyFingerprint);
   expect(updatedBody.settings.revision).toBe(2);
+  expect(updatedBody.profiles.CODEX_CLI).toMatchObject({
+    apiKeyFingerprint: createdBody.settings.apiKeyFingerprint,
+    model: "gpt-5.3-codex",
+  });
   expect(updatedBody.settings.models).toEqual({
     primary: "claude-fable-5-max",
     opus: "claude-opus-route",
@@ -124,16 +133,18 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   });
 
   const rows = await stack.queryRows<{
+    agent_runtime: string;
     credential_secret_ref: string;
     api_key_mask: string;
     api_key_fingerprint: string;
   }>(`
-    SELECT credential_secret_ref, api_key_mask, api_key_fingerprint
-      FROM deviludo.instance_agent_settings
-     WHERE singleton = true
+    SELECT agent_runtime::text, credential_secret_ref, api_key_mask, api_key_fingerprint
+      FROM deviludo.instance_agent_provider_profiles
+     ORDER BY agent_runtime
   `);
-  expect(rows).toHaveLength(1);
+  expect(rows).toHaveLength(2);
   expect(JSON.stringify(rows)).not.toContain(apiKey);
-  expect(rows[0].api_key_mask).toBe(createdBody.settings.apiKeyMasked);
-  expect(rows[0].credential_secret_ref).toMatch(/^vault:\/\/instance\/agent-runtime\/api-key\/versions\//);
+  expect(rows.find(row => row.agent_runtime === "CODEX_CLI")?.api_key_mask).toBe(createdBody.settings.apiKeyMasked);
+  expect(rows[0].credential_secret_ref).not.toBe(rows[1].credential_secret_ref);
+  expect(rows.every(row => /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//.test(row.credential_secret_ref))).toBe(true);
 });

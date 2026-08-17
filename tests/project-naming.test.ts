@@ -6,6 +6,7 @@ import type { StoredInstanceAgentSettings } from "@/services/core/src/repository
 const settings: StoredInstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE",
   baseUrl: "https://gateway.example.com/anthropic/v1",
+  model: null,
   models: Object.freeze({
     primary: "claude-primary",
     opus: "claude-opus",

@@ -284,7 +284,8 @@ test("instance Agent settings are frozen into new workspace jobs by secret refer
   assert.match(sql, /agent_settings deviludo\.instance_agent_settings%ROWTYPE/);
   assert.match(sql, /'credentialRef', agent_settings\.credential_secret_ref/);
   assert.match(sql, /'runtime', agent_settings\.agent_runtime::text/);
-  assert.match(sql, /'models', CASE WHEN agent_settings\.primary_model IS NULL/);
+  assert.match(sql, /'model', CASE WHEN agent_settings\.agent_runtime = 'CODEX_CLI'/);
+  assert.match(sql, /'models', CASE WHEN agent_settings\.agent_runtime <> 'CLAUDE_CODE'/);
   assert.match(sql, /'revision', agent_settings\.revision/);
 });
 
