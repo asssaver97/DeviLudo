@@ -103,6 +103,19 @@ async function runAgent(plan) {
     e2eRepairContext = await extractE2eRepairEvidence(`/workspace/inputs/${filename}`);
     emitProgress("PHASE", `Agent 正在修复 ${plan.job.payload.failedPlatform ?? "目标平台"} E2E 发现的游戏问题`);
   }
+  const upstreamFailureKind = plan.job.payload.repairFailureKind === "ARTIFACT_BUILD"
+    ? "ARTIFACT_BUILD"
+    : null;
+  const upstreamFailureSummary = upstreamFailureKind
+    && typeof plan.job.payload.repairFailureSummary === "string"
+    && plan.job.payload.repairFailureSummary.length > 0
+    && plan.job.payload.repairFailureSummary.length <= 1_800
+    ? plan.job.payload.repairFailureSummary
+    : null;
+  if (upstreamFailureSummary && !e2eRepairContext) {
+    emitProgress("PHASE", "Agent 正在修复制品构建发现的源码问题");
+  }
+  const isRepairPass = e2eRepairContext !== null || upstreamFailureSummary !== null;
   const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
   const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Include asynchronous UI lifecycle changes: a window, popup, dialog, overlay, animation, or deferred layout must publish again from its real visibility/layout signal or a completed draw frame, not only from the synchronous input handler that requested the change. Show and hide must both advance the sequence, and the snapshot must read the actual rendered state. Map every control and embedded Window/Popup rectangle against the root game client viewport before converting to 1280x720; never use a child window's own content size as the root scale, clamp an invalid rectangle, or publish an out-of-client snapshot. A node detached from the scene tree or without a live root viewport must never be published as visible or enabled: wait until it is attached and laid out, or publish the truthful non-actionable state using the last valid in-client rectangle. Never invent a fallback viewport size to make a detached node appear actionable. If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content; never shrink, clip, or substitute only the Probe rectangle. Every control reported visible and enabled for an action must be connected to its production input handler. After real OS input, successful, rejected, and asynchronously completed actions must all converge on a final UI refresh and publish a newer Probe with the truthful outcome, so an action can never silently leave the previous sequence in place. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
   const coherentJourneyInstructions = [
@@ -205,11 +218,20 @@ async function runAgent(plan) {
     `E2E failure summary: ${JSON.stringify(e2eRepairPromptSummary(e2eRepairContext))}`,
     "",
   ] : [];
+  const upstreamRepairInstructions = upstreamFailureSummary && !e2eRepairContext ? [
+    "",
+    "BLOCKING BUILD REPAIR: fix the trusted controlled Builder failure before any broad audit, feature work, refactor, or explanation.",
+    "Open the exact file and line named by the diagnostic first, make the smallest concrete source correction, and preserve unrelated working behavior and the validated test manifest.",
+    "Do not dismiss, rewrite, or work around the diagnostic. The next controlled Builder will rerun the real Godot import and export checks.",
+    `Builder failure summary: ${JSON.stringify(upstreamFailureSummary)}`,
+    "",
+  ] : [];
   const prompt = [
     importedSource || restoredCheckpoint
       ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
       : "Create a complete Godot 4 project in /workspace/project.",
     ...e2eRepairInstructions,
+    ...upstreamRepairInstructions,
     "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson, the optional read-only /workspace/baseline, and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
     ...(baselineSourceAvailable ? [
       "A read-only snapshot of the workflow-start source is available at /workspace/baseline. The current /workspace/project remains authoritative for approved work. Use the baseline only to compare behavior and restore accidentally deleted or structurally damaged existing declarations; never copy it wholesale, revert unrelated approved changes, or edit files under /workspace/baseline.",
@@ -274,7 +296,12 @@ async function runAgent(plan) {
         return currentDigest;
       },
       5 * 60_000,
-      e2eRepairContext ? 3 * 60_000 : undefined,
+      // Real E2E evidence includes screenshots, Probe snapshots, and the
+      // failing interaction trace. Three minutes repeatedly terminated Claude
+      // while it was still reading that bounded evidence, before the first
+      // edit. Keep a hard no-change deadline, but allow one useful diagnosis
+      // and edit pass instead of paying for several interrupted resumptions.
+      isRepairPass ? 8 * 60_000 : undefined,
       async () => {
         await readGeneratedAgentManifest(requirementCatalog);
       },
@@ -976,7 +1003,13 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
   const deadline = Date.now() + Math.max(60_000, Math.min(80 * 60_000, (timeoutSeconds - 600) * 1_000));
   let lastError;
   let resumeInstruction = "Resume from the current session and files. Finish only the remaining requested implementation and one bounded validation pass. Do not restart analysis or spawn background agents, background shell commands, or background tasks.";
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  // A no-change completion is different from a Provider/CLI interruption: the
+  // model has usually finished useful diagnosis and only needs another turn
+  // in the same session to make and validate the concrete edit. Keep those
+  // continuations inside this container so an outer database retry does not
+  // destroy the Claude session and repeat the project scan from scratch. All
+  // calls still share the single 80-minute deadline above.
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
     const resumedClaude = configuration.runtime === "CLAUDE_CODE" && attempt > 1;
     const continuation = attempt === 1 ? prompt : resumedClaude
       ? resumeInstruction
@@ -1055,7 +1088,9 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       flushAgentOutput();
       lastError = error instanceof Error ? error : new Error("Agent CLI failed");
       const failure = classifyAgentFailure(lastError);
-      const maxAttemptsForFailure = failure.code === "GUIDANCE_PENDING" ? 3 : 2;
+      const maxAttemptsForFailure = failure.code === "INCOMPLETE_OUTPUT"
+        ? 4
+        : failure.code === "GUIDANCE_PENDING" ? 3 : 2;
       if (attempt >= maxAttemptsForFailure || !failure.recoverable) {
         throw new Error(`Agent generation failed [${failure.code}]: ${failure.detail}`);
       }
@@ -1083,11 +1118,12 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
         resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
       }
       const delaySeconds = ["TEST_MANIFEST_INVALID", "GUIDANCE_PENDING"].includes(failure.code) ? 0 : agentRetryDelaySeconds(failure);
+      const nextAttempt = attempt + 1;
       emitProgress("PHASE", failure.code === "GUIDANCE_PENDING"
         ? "执行期间收到新的实时指导；旧范围结果已拒绝，正在同一会话按最新范围继续"
         : failure.code === "TEST_MANIFEST_INVALID"
-        ? `Agent 输出未通过完成门禁：${failure.detail}；正在同一会话定向修正（2/2）`
-        : `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（2/2）`);
+        ? `Agent 输出未通过完成门禁：${failure.detail}；正在同一会话定向修正（${nextAttempt}/${maxAttemptsForFailure}）`
+        : `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（${nextAttempt}/${maxAttemptsForFailure}）`);
       if (delaySeconds > 0) await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
     }
   }

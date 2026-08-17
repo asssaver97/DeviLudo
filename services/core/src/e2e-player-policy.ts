@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { crc32, deflateSync } from "node:zlib";
+import sharp from "sharp";
 import type { AgentRuntimeKind } from "@/lib/product/contracts";
 
 export const PLAYER_POLICY_STATUSES = ["CONTINUE", "GOAL_REACHED", "UNRECOVERABLE"] as const;
@@ -20,13 +22,56 @@ export type PlayerPolicyResult = Readonly<{
 const VISION_SMOKE_CASES = Object.freeze([
   Object.freeze({
     left: "RED", right: "BLUE",
-    png: "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAZUlEQVR4nO3PQQ3AMBDAsHYaf8jrUFz9iQFEyv7WrGed0f47Wr+gAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAe0HEmsC/a0PiqEAAAAASUVORK5CYII=",
+    png: visionCalibrationPng([255, 0, 0], [0, 0, 255]),
   }),
   Object.freeze({
     left: "BLUE", right: "YELLOW",
-    png: "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAZklEQVR4nO3PwQnAMAzAQAe6/8hpp3D1uRtAoDPzzqZ7z2r/Wa3/wEDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDNQM1AzUDtA2PvA/rQQD9HAAAAAElFTkSuQmCC",
+    png: visionCalibrationPng([0, 0, 255], [255, 255, 0]),
   }),
 ]);
+
+/** Build the calibration images instead of embedding opaque PNG blobs. The
+ * previous blobs had invalid IDAT CRC/zlib checksums, so every visual model
+ * correctly rejected them and the E2E preflight reported a false negative. */
+function visionCalibrationPng(left: readonly [number, number, number], right: readonly [number, number, number]): string {
+  const width = 64;
+  const height = 64;
+  const channels = 3;
+  const rowBytes = 1 + width * channels;
+  const pixels = Buffer.alloc(rowBytes * height);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * rowBytes;
+    pixels[row] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const color = x < width / 2 ? left : right;
+      const offset = row + 1 + x * channels;
+      pixels[offset] = color[0];
+      pixels[offset + 1] = color[1];
+      pixels[offset + 2] = color[2];
+    }
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels, { level: 9 })),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]).toString("base64");
+}
+
+function pngChunk(kind: "IHDR" | "IDAT" | "IEND", data: Buffer): Buffer {
+  const type = Buffer.from(kind, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  type.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([type, data])) >>> 0, 8 + data.length);
+  return chunk;
+}
 
 export type PlayerPolicyRequest = Readonly<{
   rolloutIndex: number;
@@ -97,11 +142,21 @@ export async function generateE2ePlayerDecision(input: Readonly<{
 }>): Promise<PlayerPolicyResult> {
   const prompt = policyPrompt(input.request);
   const fetchImpl = input.fetchImpl ?? fetch;
+  const providerFrameBase64 = await downsamplePlayerFrame(input.request.screenshotBase64);
   let lastRaw = "";
   let inputTokens = 0;
   let outputTokens = 0;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const correction = attempt === 0 ? "" : `\nYour previous response was invalid: ${lastRaw.slice(0, 1_000)}\nReturn only the required JSON object.`;
+  let transportRetryUsed = false;
+  let structuredRepairUsed = false;
+  let lostImageRetries = 0;
+  // These are independent recovery budgets: one transport/status retry, one
+  // structured-output repair and up to three clean image reattachments. Keep
+  // enough total attempts for all of them to occur in one decision instead of
+  // letting an earlier transient failure silently consume the vision budget.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const correction = attempt === 0 || lastRaw.length === 0
+      ? ""
+      : `\nYour previous response was invalid: ${lastRaw.slice(0, 1_000)}\nReturn only the required JSON object.`;
     let response: Response;
     try {
       response = input.runtime === "CLAUDE_CODE"
@@ -117,13 +172,13 @@ export async function generateE2ePlayerDecision(input: Readonly<{
             model: input.model, max_tokens: 1_200, temperature: 0.1,
             system: PLAYER_POLICY_SYSTEM,
             messages: [{ role: "user", content: [
-              { type: "image", source: { type: "base64", media_type: "image/png", data: input.request.screenshotBase64 } },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: providerFrameBase64 } },
               { type: "text", text: prompt + correction },
             ] }],
             tools: [playerDecisionTool(input.request.allowedActions)],
             tool_choice: { type: "tool", name: "submit_player_decision" },
           }),
-          signal: AbortSignal.timeout(25_000),
+          signal: AbortSignal.timeout(75_000),
         })
         : await fetchImpl(providerEndpoint(input.baseUrl, "responses"), {
           method: "POST",
@@ -132,24 +187,38 @@ export async function generateE2ePlayerDecision(input: Readonly<{
             model: input.model,
             instructions: PLAYER_POLICY_SYSTEM,
             input: [{ role: "user", content: [
-              { type: "input_image", image_url: `data:image/png;base64,${input.request.screenshotBase64}` },
+              { type: "input_image", image_url: `data:image/png;base64,${providerFrameBase64}` },
               { type: "input_text", text: prompt + correction },
             ] }], max_output_tokens: 1_200,
           }),
-          signal: AbortSignal.timeout(25_000),
+          signal: AbortSignal.timeout(75_000),
         });
     } catch {
       lastRaw = "provider request failed";
-      if (attempt === 0) continue;
+      if (!transportRetryUsed) {
+        transportRetryUsed = true;
+        continue;
+      }
       throw providerFailure("Test Agent provider request failed");
     }
-    if (!response.ok) throw providerFailure(`Test Agent provider returned ${response.status}`);
+    if (!response.ok) {
+      if (!transportRetryUsed && (response.status === 408 || response.status === 425
+        || response.status === 429 || response.status >= 500)) {
+        transportRetryUsed = true;
+        lastRaw = "provider temporarily unavailable";
+        continue;
+      }
+      throw providerFailure(`Test Agent provider returned ${response.status}`);
+    }
     const responseText = await response.text();
     let body: Record<string, unknown>;
     try { body = JSON.parse(responseText) as Record<string, unknown>; }
     catch {
       lastRaw = "provider returned a non-JSON response";
-      if (attempt === 0) continue;
+      if (!structuredRepairUsed) {
+        structuredRepairUsed = true;
+        continue;
+      }
       throw providerFailure("Test Agent provider returned a non-JSON response");
     }
     const usage = body.usage && typeof body.usage === "object" && !Array.isArray(body.usage)
@@ -162,6 +231,7 @@ export async function generateE2ePlayerDecision(input: Readonly<{
     try {
       const decision = parsePlayerPolicyDecision(lastRaw, input.request.allowedActions);
       assertScreenshotWasInspected(decision.observation);
+      assertDecisionExploresAfterNoProgress(decision, input.request);
       assertUnrecoverableFollowsRecovery(decision, input.request);
       return Object.freeze({
         decision,
@@ -170,14 +240,25 @@ export async function generateE2ePlayerDecision(input: Readonly<{
       });
     }
     catch (error) {
-      // A provider that says it cannot see the image has already proved that
-      // this model route is not usable for black-box play. Asking it to repair
-      // the JSON encourages a text-only model to invent visible controls, which
-      // turns an infrastructure capability problem into unsafe product input.
-      if (isVisionUnavailable(error)) throw error;
-      if (attempt === 1) {
+      // The route has already passed the independent two-image calibration
+      // before a VM is allocated. A single policy response can still lose its
+      // image attachment at a flaky compatibility gateway, so resend the same
+      // frame up to three times. Never accept that response: only a new response that passes
+      // the screenshot-inspection assertion may drive native input.
+      if (isVisionUnavailable(error)) {
+        if (lostImageRetries >= 3) throw error;
+        lostImageRetries += 1;
+        // Resend as a clean multimodal request. Feeding the model its previous
+        // "image unavailable" wording in the repair prompt makes otherwise
+        // visual routes echo that statement instead of inspecting the newly
+        // attached frame.
+        lastRaw = "";
+        continue;
+      }
+      if (structuredRepairUsed) {
         throw providerFailure(error instanceof Error ? error.message : "Test Agent returned invalid actions");
       }
+      structuredRepairUsed = true;
       const reason = error instanceof Error ? error.message : "Test Agent returned invalid actions";
       lastRaw = `Validation error: ${reason}. Previous payload: ${lastRaw.slice(0, 700)}`;
     }
@@ -220,7 +301,7 @@ export async function verifyE2ePlayerVision(input: Readonly<{
             tools: [VISION_SMOKE_TOOL],
             tool_choice: { type: "tool", name: "submit_vision_smoke" },
           }),
-          signal: AbortSignal.timeout(25_000),
+          signal: AbortSignal.timeout(40_000),
         })
         : await fetchImpl(providerEndpoint(input.baseUrl, "responses"), {
           method: "POST",
@@ -234,7 +315,7 @@ export async function verifyE2ePlayerVision(input: Readonly<{
             ] }],
             max_output_tokens: 120,
           }),
-          signal: AbortSignal.timeout(25_000),
+          signal: AbortSignal.timeout(40_000),
         });
     } catch {
       throw providerFailure("Test Agent visual capability request failed");
@@ -315,12 +396,13 @@ function validatePolicyAction(
 
 function policyPrompt(request: PlayerPolicyRequest): string {
   return [
-    `The attached ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} image is the exact current game client. Inspect this image before choosing actions.`,
-    "Describe concrete controls or gameplay elements visible in the current image. Do not claim that the frame is unavailable when visible UI exists.",
+    `The attached ${E2E_PROVIDER_WIDTH}x${E2E_PROVIDER_HEIGHT} image is an exact half-scale observation of the current ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} game client. Inspect this image before choosing actions.`,
+    "Describe at least one concrete visual fact from the current image: visible text, color, shape, texture, or an element with its screen location. Generic claims that no control is discernible are invalid visual inspection.",
+    "If the frame is still loading, ground that conclusion in a visible logo, progress indicator, background color, or other concrete pixel detail. Do not repeatedly wait on a rendered, unchanged interface.",
     "Highest priority: identify the topmost interactive layer. If a dialog, menu, mode selector, save selector, tutorial, consent prompt, or overlay blocks the underlying game, complete that layer before sending gameplay input.",
     "This rollout starts with clean user data. Prefer a visible control that creates a fresh playable session over one that requires an existing save or prior progress.",
     "When a menu, modal, toolbar, or rectangular button is visible and POINTER is allowed, click the relevant visible control. Never send a keyboard key through a blocking overlay.",
-    "Thin cyan guide lines are drawn at every x and y multiple of 80 pixels without changing the 1280x720 coordinate space. Count from the top-left origin and use the nearest guide lines to estimate the visible target center.",
+    "Thin cyan guide lines in the observation appear every 40 pixels and correspond to every 80 pixels in the native 1280x720 client. Count from the top-left origin, then multiply observed x/y coordinates by 2 when returning pointer actions.",
     "Before every pointer action, describe the visible target and its approximate left, top, right, and bottom pixel bounds in observation, then place the pointer inside those bounds.",
     "Do not guess SPACE, ENTER, movement keys, or other keyboard controls from the goal or game genre. Use a keyboard action only when the current frame visibly shows that exact key or a clear keyboard hint.",
     "Unreadable or non-English button text does not make the frame unavailable: use the visible control geometry and report its approximate position.",
@@ -443,6 +525,8 @@ function playerDecisionTool(allowedGroups: PlayerPolicyRequest["allowedActions"]
 
 const E2E_PLAYER_WIDTH = 1280;
 const E2E_PLAYER_HEIGHT = 720;
+const E2E_PROVIDER_WIDTH = 640;
+const E2E_PROVIDER_HEIGHT = 360;
 const PLAYER_POLICY_KEYS = Object.freeze([
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
   "SPACE", "ENTER", "TAB", "ESCAPE", "LEFT", "RIGHT", "UP", "DOWN", "MINUS", "EQUAL",
@@ -476,6 +560,18 @@ function digestBase64(value: string): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+async function downsamplePlayerFrame(value: string): Promise<string> {
+  try {
+    const resized = await sharp(Buffer.from(value, "base64"), { limitInputPixels: E2E_PLAYER_WIDTH * E2E_PLAYER_HEIGHT })
+      .resize(E2E_PROVIDER_WIDTH, E2E_PROVIDER_HEIGHT, { fit: "fill", kernel: "lanczos3" })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
+    return resized.toString("base64");
+  } catch {
+    throw providerFailure("Core could not prepare the downsampled Test Agent frame");
+  }
+}
+
 function invalid(message: string): Error { return Object.assign(new Error(message), { code: "INVALID_PLAYER_POLICY_REQUEST", statusCode: 400 }); }
 function providerFailure(message: string): Error { return Object.assign(new Error(message), { code: "PLAYER_POLICY_PROVIDER", statusCode: 503 }); }
 function visionUnavailable(message: string): Error { return Object.assign(new Error(message), { code: "PLAYER_POLICY_VISION_UNAVAILABLE", statusCode: 503 }); }
@@ -487,7 +583,17 @@ function assertScreenshotWasInspected(observation: string): void {
     /\bno\b.{0,120}\b(?:pixels?|images?|frames?|game ui|client ui|visible ui|interactive controls?)\b.{0,120}\b(?:included|available|accessible|provided|present|visible|exposed|rendered)\b/i,
     /\b(?:pixels?|images?|frames?|game ui|client ui|visible ui|interactive controls?)\b.{0,120}\b(?:is|are|was|were|does|do|did)?\s*(?:not|n't)\b.{0,80}\b(?:included|available|accessible|provided|present|visible|exposed|rendered|shown)\b/i,
     /\b(?:frame|image|view|context|frame description|supplied view)\b.{0,120}\b(?:does|do|did|is|are|was|were)?\s*(?:not|n't)\b.{0,60}\b(?:expose|include|provide|show|contain|present)\b/i,
+    /\b(?:prompt|message|input|context)\b.{0,120}\b(?:does|did)\s+not\b.{0,60}\b(?:include|provide|show|contain|present)\b.{0,60}\b(?:image|frame|pixels?)\b/i,
     /\b(?:cannot|can't|unable to)\b.{0,80}\b(?:see|view|access|inspect|identify|verify)\b.{0,80}\b(?:image|frame|pixels?|ui|controls?|geometry)\b/i,
+    /\bno\b.{0,100}\b(?:controls?|buttons?|menus?|dialogs?|ui|gameplay elements?|interactive layers?|keyboard hints?|pointer targets?)\b.{0,80}\b(?:discernible|identifiable|grounded|verifiable|verified|visible)\b/i,
+    /\bno\b.{0,100}\b(?:controls?|control labels?|buttons?|menus?|dialogs?|ui|gameplay elements?|interactive layers?|keyboard hints?|pointer targets?|target bounds?)\b.{0,100}\b(?:available|exposed|visible|discernible|identifiable|identified|grounded|verifiable|verified|provided|present)\b/i,
+    /\bno\b.{0,50}\b(?:discernible|identifiable|grounded|verifiable|verified|visible)\b.{0,100}\b(?:pixels?|controls?|buttons?|menus?|dialogs?|ui|gameplay elements?|interactive layers?|keyboard hints?|pointer targets?)\b/i,
+    /\b(?:controls?|buttons?|menus?|dialogs?|ui|gameplay elements?|interactive layers?|keyboard hints?|pointer targets?)\b.{0,100}\b(?:cannot|can't|unable to|not)\b.{0,60}\b(?:discerned|identified|grounded|verified)\b/i,
+    /(?:当前|本次)?.{0,20}(?:消息|输入|对话|上下文).{0,30}(?:未|没有).{0,20}(?:呈现|提供|包含|给出).{0,30}(?:可读取|可见|可访问)?.{0,20}(?:截图|图像|像素|游戏画面|游戏截图)/u,
+    /(?:画面|帧|截图).{0,20}未.{0,20}(?:消息|输入|对话|上下文).{0,20}(?:呈现|提供|包含|给出).{0,30}(?:可读取|可见|可访问)?.{0,20}(?:截图|图像|像素|游戏画面|游戏截图)/u,
+    /(?:无法|不能|未能).{0,40}(?:查看|看到|访问|检查|核验|确认|识别|读取).{0,40}(?:画面|图像|截图|帧|像素|界面|控件)/u,
+    /(?:画面|图像|截图|帧|像素|界面|可见内容).{0,40}(?:信息|内容)?.{0,20}(?:不足以|不足|不可用|未提供|无法访问|无法查看).{0,50}(?:确认|识别|判断|核验|安全)/u,
+    /(?:未见|看不到|没有).{0,50}(?:可见|明确|可确认|可识别|可依据|可读取).{0,40}(?:按钮|控件|菜单|弹窗|界面|元素|目标|提示|像素)/u,
   ].some(pattern => pattern.test(observation));
   if (unavailable) throw visionUnavailable("Test Agent model did not inspect the attached game screenshot");
 }
@@ -496,6 +602,31 @@ function assertUnrecoverableFollowsRecovery(decision: PlayerPolicyDecision, requ
   if (decision.status === "UNRECOVERABLE" && !request.recovery) {
     throw new Error("Test Agent cannot declare UNRECOVERABLE before recovery mode");
   }
+}
+
+function assertDecisionExploresAfterNoProgress(decision: PlayerPolicyDecision, request: PlayerPolicyRequest): void {
+  const recent = request.history.slice(-3).filter(item => /no verified progress/i.test(item.result));
+  if (recent.length === 0 || decision.status !== "CONTINUE") return;
+  const previousActions = recent.flatMap(item => item.actions);
+  if (decision.actions.every(action => action.type === "wait")
+    && recent.at(-1)?.actions.every(action => action.type === "wait")) {
+    throw new Error("Test Agent repeated a wait after no verified progress; inspect the current pixels and choose a different visible action");
+  }
+  for (const action of decision.actions) {
+    if (previousActions.some(previous => equivalentNoProgressAction(action, previous))) {
+      throw new Error("Test Agent repeated an action that made no verified progress; choose a different visible control or input");
+    }
+  }
+}
+
+function equivalentNoProgressAction(left: PlayerPolicyAction, right: PlayerPolicyAction): boolean {
+  const pointerTypes = new Set(["click", "double_click"]);
+  if (pointerTypes.has(left.type) && pointerTypes.has(right.type)) {
+    return typeof left.x === "number" && typeof left.y === "number"
+      && typeof right.x === "number" && typeof right.y === "number"
+      && Math.abs(left.x - right.x) <= 32 && Math.abs(left.y - right.y) <= 32;
+  }
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 function safeTokenCount(value: unknown): number {
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;

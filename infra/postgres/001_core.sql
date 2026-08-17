@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-core-source-v1', '033_revoke_new_function_public');
+VALUES (true, '001', 'deviludo-core-source-v1', '039_manual_agent_rerun_uses_build_failure');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -247,55 +247,8 @@ CREATE TABLE deviludo.instance_agent_settings (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT instance_agent_settings_runtime_models CHECK (
-    (agent_runtime = 'CLAUDE_CODE' AND primary_model IS NOT NULL AND opus_model IS NOT NULL
-      AND sonnet_model IS NOT NULL AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
-    OR
-    (agent_runtime = 'CODEX_CLI' AND primary_model IS NOT NULL AND opus_model IS NULL
-      AND sonnet_model IS NULL AND haiku_model IS NULL AND subagent_model IS NULL)
-  )
-);
-
--- Provider credentials and model routes are owned by their runtime profile.
--- The singleton table above remains the immutable job-scheduling snapshot of
--- the currently selected profile; switching runtimes never mutates the other
--- profile.
-CREATE TABLE deviludo.instance_agent_provider_profiles (
-  agent_runtime deviludo.agent_runtime PRIMARY KEY,
-  base_url text NOT NULL CHECK (
-    length(base_url) BETWEEN 8 AND 2048
-    AND base_url ~ '^https?://'
-  ),
-  primary_model text NOT NULL CHECK (primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  opus_model text CHECK (opus_model IS NULL OR opus_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  sonnet_model text CHECK (sonnet_model IS NULL OR sonnet_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  haiku_model text CHECK (haiku_model IS NULL OR haiku_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  subagent_model text CHECK (subagent_model IS NULL OR subagent_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  role_models jsonb NOT NULL CHECK (
-    jsonb_typeof(role_models) = 'object'
-    AND role_models ?& ARRAY['design', 'development', 'test']
-    AND (role_models->>'design') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
-    AND (role_models->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
-    AND (role_models->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
-  ),
-  credential_secret_ref text NOT NULL CHECK (
-    length(credential_secret_ref) BETWEEN 32 AND 1000
-    AND credential_secret_ref LIKE 'vault://instance/agent-runtime/api-key/versions/%'
-  ),
-  api_key_mask text NOT NULL CHECK (api_key_mask ~ '^.{3}\*{8}.{4}$'),
-  api_key_fingerprint text NOT NULL CHECK (api_key_fingerprint ~ '^sha256:[0-9a-f]{12}$'),
-  credential_version uuid NOT NULL,
-  revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
-  test_policy_ready boolean NOT NULL DEFAULT false,
-  test_policy_checked_revision bigint CHECK (test_policy_checked_revision IS NULL OR test_policy_checked_revision > 0),
-  updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
-  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  CHECK (
-    (agent_runtime = 'CLAUDE_CODE' AND opus_model IS NOT NULL AND sonnet_model IS NOT NULL
-      AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
-    OR
-    (agent_runtime = 'CODEX_CLI' AND opus_model IS NULL AND sonnet_model IS NULL
-      AND haiku_model IS NULL AND subagent_model IS NULL)
+    agent_runtime = 'CLAUDE_CODE' AND primary_model IS NOT NULL AND opus_model IS NOT NULL
+      AND sonnet_model IS NOT NULL AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL
   )
 );
 
@@ -2043,6 +1996,12 @@ DECLARE
   stage_list deviludo.job_kind[];
   stage_index integer;
   downstream_stages deviludo.job_kind[];
+  repair_e2e_job_id uuid;
+  repair_e2e_platform deviludo.server_os;
+  repair_e2e_updated_at timestamptz;
+  repair_build_job_id uuid;
+  repair_build_summary text;
+  repair_build_updated_at timestamptz;
 BEGIN
   -- The routing below is a chain of guarded branches, so a kind this version does
   -- not know falls through it: the signal row inserts, the function returns true,
@@ -2085,6 +2044,41 @@ BEGIN
        WHERE singleton = true;
       IF agent_settings.singleton IS NULL THEN
         RAISE EXCEPTION 'Agent configuration is required before rerunning agent generation';
+      END IF;
+      -- A manual Agent rerun after a product-level E2E failure starts a fresh
+      -- repair cycle, but must retain the evidence that explains the failure.
+      -- Infrastructure failures deliberately never enter the source-repair path.
+      SELECT failed_job.id, failed_job.target_operating_system, failed_job.updated_at
+        INTO repair_e2e_job_id, repair_e2e_platform, repair_e2e_updated_at
+        FROM deviludo.jobs failed_job
+       WHERE failed_job.workspace_id = workflow.workspace_id
+         AND failed_job.workflow_id = workflow.id
+         AND failed_job.kind = 'E2E_TEST'
+         AND failed_job.receipt #>> '{execution,outcome}' = 'FAILED'
+         AND failed_job.receipt #>> '{execution,failureDomain}' = 'PRODUCT'
+         AND EXISTS (
+           SELECT 1
+             FROM deviludo.artifacts evidence
+            WHERE evidence.workspace_id = failed_job.workspace_id
+              AND evidence.producing_job_id = failed_job.id
+              AND evidence.kind = 'E2E_REPORT'
+         )
+       ORDER BY failed_job.updated_at DESC, failed_job.created_at DESC, failed_job.id DESC
+       LIMIT 1;
+      SELECT failed_job.id, left(failed_job.last_error, 1800), failed_job.updated_at
+        INTO repair_build_job_id, repair_build_summary, repair_build_updated_at
+        FROM deviludo.jobs failed_job
+       WHERE failed_job.workspace_id = workflow.workspace_id
+         AND failed_job.workflow_id = workflow.id
+         AND failed_job.kind = 'ARTIFACT_BUILD'
+         AND failed_job.state = 'FAILED'
+         AND length(coalesce(failed_job.last_error, '')) > 0
+       ORDER BY failed_job.updated_at DESC, failed_job.created_at DESC, failed_job.id DESC
+       LIMIT 1;
+      IF repair_build_updated_at > coalesce(repair_e2e_updated_at, '-infinity'::timestamptz) THEN
+        repair_e2e_job_id := NULL;
+      ELSE
+        repair_build_job_id := NULL;
       END IF;
     END IF;
     IF rerun_stage = 'STEAM_PUBLISH' AND NOT EXISTS (
@@ -2194,6 +2188,7 @@ BEGIN
         workflow.workspace_id, workflow.id, workflow.project_id, 'AGENT_GENERATION', NULL,
         workflow.id::text || ':rerun:agent:' || inserted_id::text,
         jsonb_build_object(
+          'manualRerun', true,
           'agentConfiguration', jsonb_build_object(
             'runtime', agent_settings.agent_runtime::text,
             'baseUrl', agent_settings.base_url,
@@ -2208,7 +2203,14 @@ BEGIN
             'credentialRef', agent_settings.credential_secret_ref,
             'revision', agent_settings.revision
           )
-        )
+        ) || CASE WHEN repair_e2e_job_id IS NOT NULL THEN jsonb_build_object(
+          'repairFromE2eJobId', repair_e2e_job_id,
+          'failedPlatform', repair_e2e_platform
+        ) WHEN repair_build_job_id IS NOT NULL THEN jsonb_build_object(
+          'repairFailureJobId', repair_build_job_id,
+          'repairFailureKind', 'ARTIFACT_BUILD',
+          'repairFailureSummary', repair_build_summary
+        ) ELSE '{}'::jsonb END
       );
     ELSE
       PERFORM deviludo.enqueue_job(
@@ -2707,6 +2709,7 @@ BEGIN
        AND previous_repair.workflow_id = job.workflow_id
        AND previous_repair.kind = 'AGENT_GENERATION'
        AND previous_repair.payload ? 'repairFromE2eJobId'
+       AND previous_repair.payload->>'manualRerun' IS DISTINCT FROM 'true'
        -- A user-requested Agent rerun starts a new repair cycle. Counting every
        -- historical repair forever made independently regenerated source unable
        -- to use the bounded automatic repair path.
@@ -2716,7 +2719,7 @@ BEGIN
           WHERE manual_agent.workspace_id = job.workspace_id
             AND manual_agent.workflow_id = job.workflow_id
             AND manual_agent.kind = 'AGENT_GENERATION'
-            AND NOT (manual_agent.payload ? 'repairFromE2eJobId')
+            AND manual_agent.payload->>'manualRerun' = 'true'
        ), '-infinity'::timestamptz);
     SELECT * INTO agent_settings
       FROM deviludo.instance_agent_settings
@@ -2955,7 +2958,7 @@ BEGIN
            lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
            last_error = 'lease expired', updated_at = clock_timestamp()
      WHERE state = 'RUNNING' AND lease_expires_at < clock_timestamp()
-     RETURNING workspace_id, workflow_id, id, attempt, state
+     RETURNING workspace_id, workflow_id, id, kind, attempt, state
   ), replay_guidance AS (
     UPDATE deviludo.job_guidance_messages guidance
        SET state = 'PENDING', delivered_at = NULL
@@ -2975,6 +2978,18 @@ BEGIN
       'lease-expired:' || id::text || ':' || attempt::text
     FROM expired
     ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING
+  ), failed_workflows AS (
+    UPDATE deviludo.workflow_instances workflow
+       SET state = 'FAILED', version = version + 1, updated_at = clock_timestamp()
+      FROM (
+        SELECT DISTINCT workspace_id, workflow_id
+          FROM expired
+         WHERE state = 'FAILED' AND kind <> 'PROJECT_DOCUMENT_MAINTENANCE'
+      ) terminal
+     WHERE workflow.workspace_id = terminal.workspace_id
+       AND workflow.id = terminal.workflow_id
+       AND workflow.state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+    RETURNING workflow.id
   )
   SELECT count(*) INTO recovered FROM expired;
   RETURN recovered;
@@ -3181,7 +3196,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.asset_manifests, deviludo.asset_items,
   deviludo.e2e_policy_locks, deviludo.e2e_policy_decisions, deviludo.e2e_regression_traces
   TO deviludo_api;
-GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings, deviludo.instance_agent_provider_profiles TO deviludo_api;
+GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON deviludo.instance_image_generation_settings TO deviludo_api;
 GRANT INSERT ON deviludo.object_cleanup_queue TO deviludo_api, deviludo_sandbox;
 GRANT SELECT, INSERT, DELETE ON deviludo.project_creation_receipts TO deviludo_api;
@@ -3275,7 +3290,7 @@ GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.workflow_instances TO deviludo_claim_executor;
 GRANT SELECT ON deviludo.project_documents,
   deviludo.project_source_revisions, deviludo.project_source_ready_outbox,
-  deviludo.workflow_instances, deviludo.instance_agent_settings, deviludo.instance_agent_provider_profiles,
+  deviludo.workflow_instances, deviludo.instance_agent_settings,
   deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs,
   deviludo.external_signals, deviludo.steam_releases, deviludo.e2e_regression_traces
   TO deviludo_claim_executor;

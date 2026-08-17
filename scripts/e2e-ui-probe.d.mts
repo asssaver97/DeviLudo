@@ -47,5 +47,6 @@ export function waitForProbePostconditions(path: string, expected: E2EProbeExpec
   passed: boolean;
 }>>;
 export function resolveProbeControl(snapshot: E2EProbeSnapshot, targetId: string, options?: Readonly<{ requireEnabled?: boolean }>): Readonly<{ control: E2EProbeControl; center: Readonly<{ x: number; y: number }> }>;
+export function resolveProbeControlAtPoint(snapshot: E2EProbeSnapshot, x: number, y: number): E2EProbeControl | null;
 export function evaluateProbeAssertions(assertions: readonly ProbeAssertion[], before: E2EProbeSnapshot, after: E2EProbeSnapshot): readonly E2EProbeAssertionResult[];
 export function probeStateDigest(snapshot: E2EProbeSnapshot): string;

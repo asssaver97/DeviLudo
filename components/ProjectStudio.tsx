@@ -717,6 +717,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     && historicalIteration?.workflowId === selectedWorkflowId;
   const viewedWorkflowState = viewingHistoricalIteration ? historicalIteration.state : project.workflowState;
   const viewedJobs = viewingHistoricalIteration ? historicalIteration.jobs : project.jobs;
+  const viewedEvents = viewingHistoricalIteration ? historicalIteration.events : project.events;
   const viewedArtifacts = latestArtifactsByKindAndPlatform(
     viewingHistoricalIteration ? historicalIteration.artifacts : artifacts,
   );
@@ -732,6 +733,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const viewedIterationNumber = viewingHistoricalIteration
     ? historicalIteration.iterationNumber
     : project.iterationNumber;
+  const discoveryFinishedAt = discoveryStage.view.kind === "completed"
+    ? pipelineEventFinishedAt(viewedEvents, "SPEC_APPROVED")
+    : null;
   const deliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
   const viewedDeliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
   const latestFailedJob = viewedWorkflowState === "FAILED"
@@ -819,6 +823,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               <b>{discoveryStage.title}</b>
               <strong>{discoveryStage.view.label}</strong>
               <small>{discoveryStage.detail}</small>
+              {discoveryFinishedAt ? (
+                <time className="product-delivery-stage-finished-at" dateTime={discoveryFinishedAt}>
+                  {text("运行结束", "Finished")} · {formatConversationTime(discoveryFinishedAt, localeTag(locale), text)}
+                </time>
+              ) : null}
             </li>
             {PIPELINE.map(([kind, chineseLabel, englishLabel], index) => {
               const jobs = latestPipelineJobs(viewedJobs.filter(job => job.kind === kind));
@@ -1328,6 +1337,17 @@ export function pipelineStageFinishedAt(jobs: ProductProjectDetail["jobs"]): str
   const timestamps = jobs.map(job => Date.parse(job.updatedAt));
   if (timestamps.some(value => !Number.isFinite(value))) return null;
   return new Date(Math.max(...timestamps)).toISOString();
+}
+
+export function pipelineEventFinishedAt(
+  events: ProductProjectDetail["events"],
+  eventKind: string,
+): string | null {
+  const timestamps = events
+    .filter(event => event.kind === eventKind)
+    .map(event => Date.parse(event.createdAt))
+    .filter(Number.isFinite);
+  return timestamps.length ? new Date(Math.max(...timestamps)).toISOString() : null;
 }
 
 type JobFailurePresentation = Readonly<{ title: string; reason: string; action: string }>;

@@ -112,7 +112,7 @@ export function startChildProtocolWatchdog(child, options) {
 
 export async function readProtocolLineWithTimeout(iterator, childClosed, timeoutMs) {
   if (!iterator || typeof iterator.next !== "function"
-    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 180_000) {
     throw new Error("Protocol response wait configuration is invalid");
   }
   let timer = null;

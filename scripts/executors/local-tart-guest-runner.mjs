@@ -56,11 +56,11 @@ const command = [
   ...(remoteRegression ? ["--regression", remoteRegression] : []),
 ];
 const killProcessGroup = process.platform !== "win32";
-// A Test Agent decision is allowed up to 65 seconds end-to-end. The SSH
+// A Test Agent decision is allowed up to 160 seconds end-to-end. The SSH
 // transport watchdog must therefore stay strictly outside that window: while
 // this relay is awaiting its parent response it cannot consume guest heartbeat
 // frames, so a shorter idle deadline would kill a healthy guest mid-decision.
-const policyResponseTimeoutMs = 65_000;
+const policyResponseTimeoutMs = 170_000;
 const protocolIdleTimeoutMs = policyResponseTimeoutMs + 10_000;
 const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], {
   stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,

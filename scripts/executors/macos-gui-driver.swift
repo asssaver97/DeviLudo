@@ -74,12 +74,17 @@ func windowDiagnostics(pid: pid_t) -> String {
 
 func focus(pid: pid_t) -> Bool {
     guard AXIsProcessTrusted() else { fail("accessibility permission is not authorized") }
-    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
+    guard let application = NSRunningApplication(processIdentifier: pid), !application.isTerminated else { return false }
+    application.activate(options: [.activateAllWindows])
     let app = AXUIElementCreateApplication(pid)
-    var windowValue: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
-          let window = windowValue else { return false }
-    return CFGetTypeID(window) == AXUIElementGetTypeID()
+    // Godot's custom NSWindow can be visible and frontmost without publishing
+    // kAXFocusedWindowAttribute. Requiring that optional accessibility value
+    // rejects a healthy game even though WindowServer and AppKit both identify
+    // the correct PID. Request frontmost status here; the caller separately
+    // requires this exact application to become active and to own a visible
+    // layer-zero window before any system-level input is posted.
+    _ = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    return true
 }
 
 func waitForFocusedGameWindow(pid: pid_t, timeout: TimeInterval = 2.0) -> GameWindow? {

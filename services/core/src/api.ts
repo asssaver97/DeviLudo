@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
-import type { AgentRuntimeKind, ProductConversation, ProductProjectDetail, ProjectAgentRole, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
+import type { ProductConversation, ProductProjectDetail, ProjectAgentRole, UserRecord, WorkspaceSummary } from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -321,9 +321,8 @@ export async function runApi(
   app.get("/v1/settings/agent", async (request, reply) => {
     const principal = productAccess(request, config);
     if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
-    const [settings, profiles, runtimes] = await Promise.all([
+    const [settings, runtimes] = await Promise.all([
       repository.readAgentSettings(),
-      repository.readAgentSettingsProfiles(),
       detectAgentRuntimes(),
     ]);
     const apiKeyMask = settings
@@ -332,7 +331,6 @@ export async function runApi(
       : null;
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(settings, apiKeyMask),
-      profiles: publicAgentSettingsProfiles(profiles),
       runtimes,
     });
   });
@@ -341,8 +339,7 @@ export async function runApi(
     const principal = productAccess(request, config);
     if (!principal.user.instanceAdmin) throw httpError(403, "INSTANCE_ADMIN_REQUIRED", "需要实例管理员权限");
     const input = parseAgentSettingsInput(request.body);
-    const profiles = await repository.readAgentSettingsProfiles();
-    const current = profiles.get(input.agentRuntime) ?? null;
+    const current = await repository.readAgentSettings();
     const currentMask = current
       ? current.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
@@ -364,7 +361,6 @@ export async function runApi(
     const saved = await repository.saveAgentSettings({
       agentRuntime: input.agentRuntime,
       baseUrl: input.baseUrl,
-      model: input.model,
       models: input.models,
       roleModels: input.roleModels,
       credentialSecretRef: credential.secretRef,
@@ -373,11 +369,8 @@ export async function runApi(
       credentialVersion: credential.version,
       updatedBy: principal.user.username,
     });
-    const savedProfiles = new Map(profiles);
-    savedProfiles.set(saved.agentRuntime, saved);
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(saved),
-      profiles: publicAgentSettingsProfiles(savedProfiles),
     });
   });
 
@@ -1385,6 +1378,13 @@ export async function runApi(
       runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
       credentialSecretRef: settings.credentialSecretRef, configurationDigest,
     });
+    if (settings.testPolicyReady && settings.testPolicyCheckedRevision === settings.revision) {
+      return reply.send({ ready: true, policy: {
+        configurationDigest: policy.configurationDigest,
+        settingsRevision: policy.settingsRevision,
+        model: policy.model,
+      } });
+    }
     const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
     if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
     try {
@@ -1396,6 +1396,11 @@ export async function runApi(
       const code = error instanceof Error && "code" in error && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE"
         ? "PLAYER_POLICY_VISION_UNAVAILABLE"
         : "PLAYER_POLICY_PROVIDER";
+      request.log.warn({
+        event: "e2e_player_vision_failed",
+        code,
+        reason: error instanceof Error ? error.message : "Test Agent visual capability check failed",
+      }, "Test Agent visual capability check failed");
       return reply.code(503).send({
         code,
         message: code === "PLAYER_POLICY_VISION_UNAVAILABLE"
@@ -1450,10 +1455,17 @@ export async function runApi(
           request: policyRequest, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
         });
       } catch (error) {
-        if (error && typeof error === "object" && "code" in error && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE") {
-          await repository.markTestPolicyUnavailable(policy.settingsRevision);
-        }
-        throw error;
+        const code = error && typeof error === "object" && "code" in error
+          && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE"
+          ? "PLAYER_POLICY_VISION_UNAVAILABLE"
+          : "PLAYER_POLICY_PROVIDER";
+        request.log.warn({ failureCode: code }, "Test Agent policy request failed");
+        return reply.code(503).send({
+          code,
+          message: code === "PLAYER_POLICY_VISION_UNAVAILABLE"
+            ? "Test Agent Provider 未向模型提供图像输入，无法执行真实画面自适应测试"
+            : "Test Agent Provider 请求失败",
+        });
       }
       const stored = await repository.saveE2ePlayerDecision({
         workspaceId: job.workspaceId, jobId: job.jobId,
@@ -2374,9 +2386,9 @@ function publicAgentSettings(
     model: settings?.model ?? null,
     models: settings?.models ?? null,
     roleModels: settings?.roleModels ?? Object.freeze({
-      design: "gpt-5.3-codex",
-      development: "gpt-5.3-codex",
-      test: "gpt-5.3-codex",
+      design: "claude-sonnet-4-5",
+      development: "claude-opus-4-1",
+      test: "claude-haiku-4-5",
     }),
     apiKeyConfigured: settings !== null,
     apiKeyMasked: apiKeyMask,
@@ -2384,19 +2396,6 @@ function publicAgentSettings(
     revision: settings?.revision ?? 0,
     testPolicyReady: settings?.testPolicyReady ?? false,
     updatedAt: settings?.updatedAt ?? null,
-  });
-}
-
-function publicAgentSettingsProfiles(
-  profiles: ReadonlyMap<AgentRuntimeKind, StoredInstanceAgentSettings>,
-) {
-  return Object.freeze({
-    CLAUDE_CODE: profiles.has("CLAUDE_CODE")
-      ? publicAgentSettings(profiles.get("CLAUDE_CODE") ?? null)
-      : null,
-    CODEX_CLI: profiles.has("CODEX_CLI")
-      ? publicAgentSettings(profiles.get("CODEX_CLI") ?? null)
-      : null,
   });
 }
 

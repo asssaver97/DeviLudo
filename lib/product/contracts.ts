@@ -75,6 +75,7 @@ export type AgentRuntimeAvailability = Readonly<{
   installed: boolean;
   version: string | null;
   scope: "LOCAL_HOST" | "CORE_RUNTIME";
+  authentication: "CHATGPT" | "API_KEY" | "SIGNED_OUT" | null;
 }>;
 
 export type AgentModelConfiguration = Readonly<{
@@ -107,11 +108,6 @@ export type InstanceAgentSettings = Readonly<{
   testPolicyReady: boolean;
   updatedAt: string | null;
 }>;
-
-export type InstanceAgentSettingsProfiles = Readonly<Record<
-  AgentRuntimeKind,
-  InstanceAgentSettings | null
->>;
 
 export type ProductProjectSummary = Readonly<{
   id: string;

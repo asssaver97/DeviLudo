@@ -457,26 +457,9 @@ export class CoreRepository {
     return result.rows[0] ? agentSettingsFromRow(result.rows[0]) : null;
   }
 
-  async readAgentSettingsProfiles(): Promise<ReadonlyMap<AgentRuntimeKind, StoredInstanceAgentSettings>> {
-    const result = await this.database.pool.query<AgentSettingsRow>(
-      `SELECT agent_runtime::text, base_url, primary_model, opus_model,
-              sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
-              test_policy_ready, test_policy_checked_revision::text,
-              api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
-              updated_by, updated_at::text
-         FROM deviludo.instance_agent_provider_profiles
-        ORDER BY agent_runtime`,
-    );
-    return new Map(result.rows.map(row => {
-      const settings = agentSettingsFromRow(row);
-      return [settings.agentRuntime, settings] as const;
-    }));
-  }
-
   async saveAgentSettings(input: Readonly<{
     agentRuntime: AgentRuntimeKind;
     baseUrl: string;
-    model: string | null;
     models: AgentModelConfiguration | null;
     roleModels: AgentRoleModelConfiguration;
     credentialSecretRef: string;
@@ -486,43 +469,14 @@ export class CoreRepository {
     updatedBy: string;
   }>): Promise<StoredInstanceAgentSettings> {
       const result = await this.database.pool.query<AgentSettingsRow>(
-        `WITH profile AS (
-         INSERT INTO deviludo.instance_agent_provider_profiles(
-           agent_runtime, base_url, primary_model, opus_model,
-           sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
-           api_key_mask, api_key_fingerprint, credential_version, updated_by
-         ) VALUES (
-           $1::deviludo.agent_runtime, $2, $3, $4, $5, $6, $7,
-           $8::jsonb, $9, $10, $11, $12::uuid, $13
-         )
-         ON CONFLICT (agent_runtime) DO UPDATE SET
-           base_url = EXCLUDED.base_url,
-           primary_model = EXCLUDED.primary_model,
-           opus_model = EXCLUDED.opus_model,
-           sonnet_model = EXCLUDED.sonnet_model,
-           haiku_model = EXCLUDED.haiku_model,
-           subagent_model = EXCLUDED.subagent_model,
-           role_models = EXCLUDED.role_models,
-           credential_secret_ref = EXCLUDED.credential_secret_ref,
-           api_key_mask = EXCLUDED.api_key_mask,
-           api_key_fingerprint = EXCLUDED.api_key_fingerprint,
-           credential_version = EXCLUDED.credential_version,
-           test_policy_ready = false,
-           test_policy_checked_revision = NULL,
-           revision = deviludo.instance_agent_provider_profiles.revision + 1,
-           updated_by = EXCLUDED.updated_by,
-           updated_at = clock_timestamp()
-         RETURNING *
-       ), active AS (
-         INSERT INTO deviludo.instance_agent_settings(
+        `INSERT INTO deviludo.instance_agent_settings(
            singleton, agent_runtime, base_url, primary_model, opus_model,
            sonnet_model, haiku_model, subagent_model, role_models, credential_secret_ref,
            api_key_mask, api_key_fingerprint, credential_version, updated_by
-         ) SELECT true, agent_runtime, base_url, primary_model, opus_model,
-                  sonnet_model, haiku_model, subagent_model, role_models,
-                  credential_secret_ref, api_key_mask, api_key_fingerprint,
-                  credential_version, updated_by
-             FROM profile
+         ) VALUES (
+           true, $1::deviludo.agent_runtime, $2, $3, $4, $5, $6, $7,
+           $8::jsonb, $9, $10, $11, $12::uuid, $13
+         )
          ON CONFLICT (singleton) DO UPDATE SET
            agent_runtime = EXCLUDED.agent_runtime,
            base_url = EXCLUDED.base_url,
@@ -546,11 +500,11 @@ export class CoreRepository {
                    test_policy_ready, test_policy_checked_revision::text,
                    api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                    updated_by, updated_at::text
-       ) SELECT * FROM active`,
+       `,
         [
           input.agentRuntime,
           input.baseUrl,
-          input.model ?? input.models?.primary ?? null,
+          input.models?.primary ?? null,
           input.models?.opus ?? null,
           input.models?.sonnet ?? null,
           input.models?.haiku ?? null,
@@ -571,13 +525,7 @@ export class CoreRepository {
       `UPDATE deviludo.instance_agent_settings
           SET test_policy_ready = true, test_policy_checked_revision = revision,
               updated_at = clock_timestamp()
-        WHERE singleton = true AND revision = $1::bigint;
-       UPDATE deviludo.instance_agent_provider_profiles profile
-          SET test_policy_ready = true, test_policy_checked_revision = profile.revision,
-              updated_at = clock_timestamp()
-         FROM deviludo.instance_agent_settings active
-        WHERE active.singleton = true AND active.revision = $1::bigint
-          AND profile.agent_runtime = active.agent_runtime`,
+        WHERE singleton = true AND revision = $1::bigint`,
       [settingsRevision],
     );
     return (result.rowCount ?? 0) === 1;
@@ -588,13 +536,7 @@ export class CoreRepository {
       `UPDATE deviludo.instance_agent_settings
           SET test_policy_ready = false, test_policy_checked_revision = NULL,
               updated_at = clock_timestamp()
-        WHERE singleton = true AND revision = $1::bigint;
-       UPDATE deviludo.instance_agent_provider_profiles profile
-          SET test_policy_ready = false, test_policy_checked_revision = NULL,
-              updated_at = clock_timestamp()
-         FROM deviludo.instance_agent_settings active
-        WHERE active.singleton = true AND active.revision = $1::bigint
-          AND profile.agent_runtime = active.agent_runtime`,
+        WHERE singleton = true AND revision = $1::bigint`,
       [settingsRevision],
     );
     return (result.rowCount ?? 0) === 1;

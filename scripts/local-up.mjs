@@ -97,9 +97,10 @@ await writeFile(
   `${JSON.stringify(gitImportConfiguration, null, 2)}\n`,
   { mode: 0o600 },
 );
-const [claudeVersion, codexVersion] = await Promise.all([
+const [claudeVersion, codexVersion, codexLoginMethod] = await Promise.all([
   detectLocalRuntime("claude"),
   detectLocalRuntime("codex"),
+  detectLocalCodexAuthentication(),
 ]);
 await requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 await requireCommand("docker", ["compose", "version"]);
@@ -192,6 +193,7 @@ const environment = {
   DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE: "LOCAL_HOST",
   DEVILUDO_CLAUDE_CODE_VERSION: claudeVersion ?? "NOT_INSTALLED",
   DEVILUDO_CODEX_CLI_VERSION: codexVersion ?? "NOT_INSTALLED",
+  DEVILUDO_CODEX_LOGIN_METHOD: codexVersion ? codexLoginMethod : "SIGNED_OUT",
   DEVILUDO_EXECUTOR_ALLOWED_IMAGES: [...new Set([
     ...Object.values(JSON.parse(runtimeImages)), imageIds["deviludo-agent-fixture:local"], ...retainedJobRuntimeImages,
   ])].join(","),
@@ -652,6 +654,22 @@ async function detectLocalRuntime(command) {
   }
 }
 
+async function detectLocalCodexAuthentication() {
+  try {
+    const result = await execute("codex", ["login", "status"], {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024,
+      timeout: 30_000,
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (/Logged in using ChatGPT/i.test(output)) return "CHATGPT";
+    if (/Logged in using (?:an )?API key/i.test(output)) return "API_KEY";
+    return "SIGNED_OUT";
+  } catch {
+    return "SIGNED_OUT";
+  }
+}
+
 async function requireCommand(command, arguments_) {
   try {
     await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
@@ -687,6 +705,7 @@ async function persistLocalComposeEnvironment(environment) {
     "DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE",
     "DEVILUDO_CLAUDE_CODE_VERSION",
     "DEVILUDO_CODEX_CLI_VERSION",
+    "DEVILUDO_CODEX_LOGIN_METHOD",
     "DEVILUDO_EXECUTOR_ALLOWED_IMAGES",
     "DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE",
     "DEVILUDO_DOCKER_GID",
@@ -773,7 +792,7 @@ async function detectLocalProviderUpstreamProxy() {
   const explicit = process.env.DEVILUDO_PROVIDER_UPSTREAM_PROXY?.trim();
   if (explicit) return normalizeLocalUpstreamProxy(explicit);
   if (process.platform !== "darwin") return "";
-  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,www.sotamodel.net")
+  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com")
     .split(",").map(value => value.trim()).filter(Boolean);
   let fakeIpDetected = false;
   for (const host of hosts) {

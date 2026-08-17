@@ -141,8 +141,8 @@ test("Agent generation preserves partial work and retries transient Provider fai
   ]);
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
   const checkpointRestore = await readFile(new URL("../services/sandbox-executor/src/checkpoint-restore.ts", import.meta.url), "utf8");
-  assert.match(runner, /attempt <= 3/);
-  assert.match(runner, /failure\.code === "GUIDANCE_PENDING" \? 3 : 2/);
+  assert.match(runner, /attempt <= 4/);
+  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3 : 2/);
   assert.match(runner, /readAgentGuidanceSnapshot/);
   assert.match(runner, /agentGuidanceArrivedDuringRun/);
   assert.match(runner, /TEST_MANIFEST_INVALID/);
@@ -154,7 +154,7 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /EXISTS and CHANGED assertions must not contain value/);
   assert.match(runner, /await readGeneratedAgentManifest\(requirementCatalog\)/);
   assert.doesNotMatch(runner, /E2E_REPAIR_INCOMPLETE|interactionRepairProgressIssue|repairLocator/);
-  assert.match(runner, /e2eRepairContext \? 3 \* 60_000 : undefined/);
+  assert.match(runner, /isRepairPass \? 8 \* 60_000 : undefined/);
   assert.doesNotMatch(claudeImage, /e2e-repair-contract/);
   assert.doesNotMatch(codexImage, /e2e-repair-contract/);
   assert.match(claudeImage, /COPY services\/sandbox-executor\/agent-guidance-contract\.mjs \/usr\/local\/lib\/deviludo\/agent-guidance-contract\.mjs/);
@@ -355,6 +355,9 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /projectTreeDigest\("\/workspace\/project"\)/);
   assert.match(taskRunner, /Agent returned before making required source changes/);
   assert.match(taskRunner, /"INCOMPLETE_OUTPUT"/);
+  assert.match(taskRunner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4/);
+  assert.match(taskRunner, /for \(let attempt = 1; attempt <= 4; attempt \+= 1\)/);
+  assert.match(taskRunner, /All[\s\S]*calls still share the single 80-minute deadline/);
   assert.match(taskRunner, /previous response stopped before changing any source files/);
   assert.match(taskRunner, /Core has already validated the existing agent\.json/);
   assert.match(taskRunner, /const manifestInstructions = existingManifestValid \?/);
@@ -363,13 +366,17 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /Never model checkpoints as zero-time events/);
   assert.match(taskRunner, /adding each event delay before recording the action/);
   assert.match(taskRunner, /BLOCKING E2E REPAIR:[\s\S]*E2E failure summary:[\s\S]*e2eRepairPromptSummary\(e2eRepairContext\)/);
+  assert.match(taskRunner, /plan\.job\.payload\.repairFailureKind === "ARTIFACT_BUILD"/);
+  assert.match(taskRunner, /repairFailureSummary\.length <= 1_800/);
+  assert.match(taskRunner, /BLOCKING BUILD REPAIR:[\s\S]*Builder failure summary: \$\{JSON\.stringify\(upstreamFailureSummary\)\}/);
+  assert.match(taskRunner, /const isRepairPass = e2eRepairContext !== null \|\| upstreamFailureSummary !== null/);
   assert.doesNotMatch(taskRunner, /E2E failure report:[\s\S]*e2eRepairContext\.report/);
   assert.match(taskRunner, /failures\.filter\(value => typeof value === "string"\)\.slice\(0, 50\)/);
   assert.match(taskRunner, /const specificationInstructions = existingManifestValid[\s\S]*Current revision notes:/);
   assert.match(taskRunner, /: \[`Specification: \$\{JSON\.stringify\(specification\)\}`\]/);
   assert.match(taskRunner, /make the first concrete source edit before inspecting broad regression coverage/);
   assert.match(taskRunner, /Open only the exact source\/test file named by the evidence first/);
-  assert.match(taskRunner, /\n      5 \* 60_000,\n      e2eRepairContext \? 3 \* 60_000 : undefined/);
+  assert.match(taskRunner, /\n      5 \* 60_000,\n[\s\S]*isRepairPass \? 8 \* 60_000 : undefined/);
   assert.doesNotMatch(taskRunner, /e2eRepairContext \? 60_000 : undefined/);
   assert.match(taskRunner, /initialProgressDeadlineMs: verifyCompletion \? initialProgressDeadlineMs/);
   assert.match(taskRunner, /completionQuiescenceMs: verifyCompletion \? completionQuiescenceMs/);
@@ -572,6 +579,10 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(guest, /ADAPTIVE_REQUIRED_SUCCESSES\s*=\s*2/);
   assert.match(guest, /PLAYER_STUCK/);
   assert.match(guest, /solidifyRegression/);
+  assert.match(guest, /compactRegressionActions/);
+  assert.match(guest, /resolveProbeControlAtPoint/);
+  assert.match(guest, /所有成功候选轨迹均未能连续完成两次干净语义回放/);
+  assert.doesNotMatch(guest, /find\(rollout => rollout\.decisions\.flatMap\(decision => decision\.semanticActions\)/);
   assert.doesNotMatch(guest, /STEAM_CLIENT_INSTALL|steam-clean-install/);
   assert.match(guest, /journey\.timeoutMs/);
   assert.match(guest, /UNIT_TIMEOUT/);
@@ -604,6 +615,10 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(macDriver, /case "sequence"/);
   assert.match(macDriver, /func waitForFocusedGameWindow\(pid: pid_t, timeout: TimeInterval = 2\.0\)/);
   assert.match(macDriver, /focus\(pid: pid\)[\s\S]*application\?\.isActive == true[\s\S]*window\.isOnScreen/);
+  assert.match(macDriver, /AXUIElementSetAttributeValue\(app, kAXFrontmostAttribute/);
+  const macFocus = macDriver.match(/func focus\(pid: pid_t\)[\s\S]*?(?=func waitForFocusedGameWindow)/)?.[0] ?? "";
+  assert.doesNotMatch(macFocus, /guard AXUIElementCopyAttributeValue\(app, kAXFocusedWindowAttribute/);
+  assert.match(macFocus, /!application\.isTerminated/);
   const macInput = macDriver.match(/case "event":[\s\S]*?(?=case "capture")/)?.[0] ?? "";
   assert.match(macInput, /waitForFocusedGameWindow\(pid: pid\)/);
   assert.doesNotMatch(macInput, /activate\(options: \[\.activateAllWindows\]\)[\s\S]*performInputEvent/);
@@ -725,7 +740,7 @@ test("the API Key field stays outside browser password managers", async () => {
   assert.match(component, /autoComplete="off"/);
   assert.match(component, /data-form-type="other"/);
   assert.match(component, /name="providerCredential"/);
-  assert.match(component, /placeholder=\{selectedProfile\?\.apiKeyMasked \?\? text\("输入 API Key", "Enter API Key"\)\}/);
+  assert.match(component, /placeholder=\{settings\.apiKeyMasked \?\? text\("输入 API Key", "Enter API Key"\)\}/);
   assert.doesNotMatch(component, /autoComplete="new-password"/);
   assert.doesNotMatch(component, /当前指纹/);
   assert.doesNotMatch(component, /已保存 \$\{settings\.apiKeyMasked/);
@@ -1015,6 +1030,7 @@ test("one rerun endpoint covers every delivery node once the workflow is at rest
   assert.match(api, /"\/v1\/projects\/:projectId\/rerun-stage"/);
   assert.match(api, /"\/v1\/e2e\/jobs\/:jobId\/player-policy\/verify"/);
   assert.match(api, /PLAYER_POLICY_VISION_UNAVAILABLE[\s\S]*reply\.code\(503\)\.send/);
+  assert.match(api, /Test Agent policy request failed[\s\S]*return reply\.code\(503\)\.send/);
   assert.match(studio, /mutate\("rerun-stage", \{ stage: kind \}\)/);
   assert.match(studio, /mutate\("rerun-stage", \{ stage: rerunnableFailedStage \}\)/);
   // A rerun supersedes downstream jobs, so it stays closed while executors may

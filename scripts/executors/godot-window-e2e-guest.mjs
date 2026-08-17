@@ -22,6 +22,7 @@ import {
   evaluateProbeAssertions,
   probeStateDigest,
   resolveProbeControl,
+  resolveProbeControlAtPoint,
   waitForProbePostconditions,
   waitForProbeSnapshot,
 } from "../e2e-ui-probe.mjs";
@@ -541,20 +542,22 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
   let initialProbe;
   let madeVerifiedProgress = false;
   let noProgressDecisions = 0;
-  let lastProgressAt = Date.now();
+  let policyWaitMs = 0;
+  let lastProgressActiveMs = 0;
   let recoveryStartedAt = null;
   let recoveryDecisionIndex = null;
   let recovery = false;
   let outcome = "FAILED";
   let failureCode = "MAX_DECISIONS";
   const rolloutStartedAt = Date.now();
+  const activeRolloutMs = () => Date.now() - rolloutStartedAt - policyWaitMs;
   try {
     await testEnvironment.prepare();
     currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
     initialProbe = currentProbe;
     for (let decisionIndex = 0; decisionIndex < contract.maxDecisions; decisionIndex += 1) {
       assertPlatformBudget();
-      if (Date.now() - rolloutStartedAt > contract.rolloutTimeoutMs) { failureCode = "ADAPTIVE_TIMEOUT"; break; }
+      if (activeRolloutMs() > contract.rolloutTimeoutMs) { failureCode = "ADAPTIVE_TIMEOUT"; break; }
       if (!await processAlive(launched.pid)) { failureCode = "GAME_CRASHED"; break; }
       const success = evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe);
       if (decisions.length > 0 && madeVerifiedProgress && success.every(assertion => assertion.passed)) {
@@ -582,7 +585,16 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         rolloutIndex, decisionIndex, screenshotBase64: screenshotBytes.toString("base64"), screenshotSha256: playerObservationSha256,
         goal: contract.goal, allowedActions: contract.allowedActions, history: history.slice(-6), recovery,
       };
-      const policyResponse = await requestPlayerPolicy(policyRequest);
+      const policyStartedAt = Date.now();
+      let policyResponse;
+      try {
+        policyResponse = await requestPlayerPolicy(policyRequest);
+      } finally {
+        // Provider inference is infrastructure time, not time in which the
+        // player can make progress. A slow or briefly unavailable visual
+        // model must not be misclassified as a stuck game or product timeout.
+        policyWaitMs += Date.now() - policyStartedAt;
+      }
       playerPolicy = policyResponse.policy;
       const decision = policyResponse.decision;
       const beforeDigest = probeStateDigest(currentProbe);
@@ -607,15 +619,15 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       if (changed) {
         madeVerifiedProgress = true;
         noProgressDecisions = 0;
-        lastProgressAt = Date.now();
+        lastProgressActiveMs = activeRolloutMs();
         recovery = false;
         recoveryStartedAt = null;
         recoveryDecisionIndex = null;
       } else {
         noProgressDecisions += 1;
-        if (!recovery && (noProgressDecisions >= 5 || Date.now() - lastProgressAt >= 30_000)) {
+        if (!recovery && (noProgressDecisions >= 5 || activeRolloutMs() - lastProgressActiveMs >= 30_000)) {
           recovery = true;
-          recoveryStartedAt = Date.now();
+          recoveryStartedAt = activeRolloutMs();
           recoveryDecisionIndex = decisionIndex;
         }
       }
@@ -643,7 +655,7 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         break;
       }
       if (recovery && recoveryStartedAt !== null && recoveryDecisionIndex !== null
-        && (decisionIndex - recoveryDecisionIndex >= 3 || Date.now() - recoveryStartedAt >= 20_000)) {
+        && (decisionIndex - recoveryDecisionIndex >= 3 || activeRolloutMs() - recoveryStartedAt >= 20_000)) {
         failureCode = "PLAYER_STUCK";
         break;
       }
@@ -675,31 +687,66 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
 }
 
 async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
-  const candidate = [...successfulRollouts]
-    .sort((left, right) => left.decisionCount - right.decisionCount || left.durationMs - right.durationMs)
-    .find(rollout => rollout.decisions.flatMap(decision => decision.semanticActions)
-      .every(action => action.type === "drag" ? typeof action.fromTargetId === "string" && typeof action.toTargetId === "string"
-        : !["click", "double_click", "scroll"].includes(action.type) || typeof action.targetId === "string"));
-  if (!candidate) throw productFailure("REGRESSION_CANDIDATE_MISSING", "没有可固化的成功玩家轨迹");
-  const actions = candidate.decisions.flatMap(decision => decision.semanticActions).filter(action => action.type !== "wait");
-  if (!actions.length) throw productFailure("REGRESSION_CANDIDATE_INVALID", "成功轨迹不包含可回放的真实输入");
-  const trace = {
-    schema: "deviludo.e2e-regression", contractDigest: jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }),
-    inputProfile: manifest.primaryInputProfile, estimatedDurationMs: Math.min(300_000, Math.max(1, candidate.durationMs)),
-    goal: manifest.adaptivePlayer.goal, actions, successAssertions: manifest.adaptivePlayer.successAssertions,
-  };
-  for (let replayIndex = 0; replayIndex < 2; replayIndex += 1) {
-    const passed = await replayRegression(gamePackage, trace, replayIndex);
-    if (!passed) throw productFailure("REGRESSION_REPLAY_FAILED", `候选回归轨迹第 ${replayIndex + 1} 次干净回放失败`);
+  const candidates = [...successfulRollouts]
+    .map(rollout => ({ rollout, actions: compactRegressionActions(rollout.decisions) }))
+    .filter(candidate => candidate.actions.length > 0)
+    .sort((left, right) => left.actions.length - right.actions.length
+      || left.rollout.durationMs - right.rollout.durationMs);
+  if (!candidates.length) throw productFailure("REGRESSION_CANDIDATE_MISSING", "成功游玩不包含可安全语义回放的玩家轨迹");
+
+  let trace = null;
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    const proposed = {
+      schema: "deviludo.e2e-regression", contractDigest: jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }),
+      inputProfile: manifest.primaryInputProfile,
+      estimatedDurationMs: Math.min(300_000, Math.max(1, candidate.rollout.durationMs)),
+      goal: manifest.adaptivePlayer.goal, actions: candidate.actions,
+      successAssertions: manifest.adaptivePlayer.successAssertions,
+    };
+    let passedTwice = true;
+    for (let replayIndex = 0; replayIndex < 2; replayIndex += 1) {
+      if (!await replayRegression(gamePackage, proposed, `${candidateIndex + 1}-${replayIndex + 1}`)) {
+        passedTwice = false;
+        break;
+      }
+    }
+    if (passedTwice) {
+      trace = proposed;
+      break;
+    }
   }
+  if (!trace) throw productFailure("REGRESSION_REPLAY_FAILED", "所有成功候选轨迹均未能连续完成两次干净语义回放");
   const path = join(workspace, "evidence-regression", "current.json");
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(trace, null, 2)}\n`, { mode: 0o600 });
   regressions.push({ id: "current", path });
 }
 
+function compactRegressionActions(decisions) {
+  const compacted = [];
+  for (const decision of decisions) {
+    for (const action of decision.semanticActions) {
+      if (action.type === "wait" || !regressionSafeAction(action)) continue;
+      const previous = compacted.at(-1);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(action)) compacted.push(action);
+    }
+  }
+  return compacted;
+}
+
+function regressionSafeAction(action) {
+  if (["click", "double_click", "scroll"].includes(action.type)) {
+    return typeof action.targetId === "string" && !Number.isFinite(action.x) && !Number.isFinite(action.y);
+  }
+  if (action.type === "drag") {
+    return typeof action.fromTargetId === "string" && typeof action.toTargetId === "string"
+      && ![action.fromX, action.fromY, action.toX, action.toY].some(Number.isFinite);
+  }
+  return true;
+}
+
 async function replayRegression(gamePackage, trace, replayIndex) {
-  const runId = replayIndex === "current" ? "regression-current" : `regression-replay-${replayIndex + 1}`;
+  const runId = replayIndex === "current" ? "regression-current" : `regression-replay-${replayIndex}`;
   const probePath = join(workspace, "ui-probe", `${runId}.json`);
   const gameLogPath = join(workspace, "game-logs", `${runId}.log`);
   await Promise.all([probePath, gameLogPath].map(path => mkdir(dirname(path), { recursive: true })));
@@ -727,12 +774,7 @@ async function replayRegression(gamePackage, trace, replayIndex) {
 
 function semanticizePolicyActions(actions, probe) {
   return actions.map(action => {
-    const targetAt = (x, y) => {
-      const matches = probe.controls.filter(control => control.visible && control.enabled
-        && Number(x) >= control.rect.x && Number(x) < control.rect.x + control.rect.width
-        && Number(y) >= control.rect.y && Number(y) < control.rect.y + control.rect.height);
-      return matches.length === 1 ? matches[0].id : null;
-    };
+    const targetAt = (x, y) => resolveProbeControlAtPoint(probe, x, y)?.id ?? null;
     if (["click", "double_click", "scroll"].includes(action.type)) {
       const targetId = targetAt(action.x, action.y);
       if (!targetId) return action;
@@ -797,12 +839,35 @@ function policyNativeEvents(actions) {
 }
 
 async function requestPlayerPolicy(request) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await requestPlayerPolicyOnce(request);
+    } catch (error) {
+      lastError = error;
+      const detail = error instanceof Error ? error.message : String(error ?? "");
+      const retryable = /PLAYER_POLICY_PROVIDER|PLAYER_POLICY_VISION_UNAVAILABLE|player policy timed out/i.test(detail);
+      if (!retryable || attempt === 2) throw error;
+      // Keep the current game/window/probe state alive. Retrying here avoids
+      // replaying every deterministic journey and consumes no extra model
+      // charge if the first call actually completed: Core's decision key is
+      // idempotent for this job, rollout and decision index.
+      await delay(5_000 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function requestPlayerPolicyOnce(request) {
   if (!streamProtocol || !policyLines) throw new Error("INFRASTRUCTURE: Test Agent player policy relay is unavailable");
   const id = randomUUID();
   process.stdout.write(`${JSON.stringify({ type: "policy_request", id, request })}\n`);
   const responseLine = await Promise.race([
     policyLines.next(),
-    delay(65_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
+    // The host policy client owns a 160-second Provider budget, including one
+    // structured-output repair. The guest must not exit before that bounded
+    // host request can return its decision or explicit infrastructure error.
+    delay(170_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
   ]);
   if (responseLine.done) throw new Error("INFRASTRUCTURE: Test Agent player policy relay closed");
   const message = JSON.parse(responseLine.value);

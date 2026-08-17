@@ -11,25 +11,14 @@ import {
   parseAgentSettingsInput,
   parseClaudeSettingsJson,
 } from "@/services/core/src/agent-settings";
+import { CoreRepository } from "@/services/core/src/repository";
 
 test("Agent settings accept fixed runtimes and normalize safe provider URLs", () => {
-  assert.deepEqual(parseAgentSettingsInput({
+  assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1/",
     apiKey: "sk-valid-secret",
-    model: "gpt-5.3-codex",
-  }, "production"), {
-    agentRuntime: "CODEX_CLI",
-    baseUrl: "https://api.example.com/v1",
-    apiKey: "sk-valid-secret",
-    model: "gpt-5.3-codex",
-    models: null,
-    roleModels: {
-      design: "gpt-5.3-codex",
-      development: "gpt-5.3-codex",
-      test: "gpt-5.3-codex",
-    },
-  });
+  }, "production"), /official ChatGPT login/i);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
     baseUrl: "https://api.example.com",
@@ -47,6 +36,26 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     baseUrl: "https://api.anthropic.com",
     apiKey: "sk-valid-secret",
   }), /five model routes/i);
+});
+
+test("Test Agent vision readiness updates only the active Claude configuration", async () => {
+  const queries: string[] = [];
+  const repository = new CoreRepository({
+    pool: {
+      async query(sql: string) {
+        queries.push(sql);
+        return { rows: [{ updated: true }], rowCount: 1 };
+      },
+    },
+  } as never);
+
+  assert.equal(await repository.markTestPolicyReady(7), true);
+  assert.equal(await repository.markTestPolicyUnavailable(7), true);
+  assert.equal(queries.length, 2);
+  for (const sql of queries) {
+    assert.match(sql, /^UPDATE deviludo\.instance_agent_settings/);
+    assert.doesNotMatch(sql, /instance_agent_provider_profiles/);
+  }
 });
 
 test("Claude settings.json accepts only the supported connection fields", () => {
@@ -79,7 +88,6 @@ test("Claude settings.json accepts only the supported connection fields", () => 
     agentRuntime: "CLAUDE_CODE",
     baseUrl: "https://gateway.example.com/anthropic",
     apiKey: "sk-gateway-secret",
-    model: null,
     models: {
       primary: "claude-fable-5-max",
       opus: "claude-opus-route",
@@ -96,7 +104,7 @@ test("Claude settings.json accepts only the supported connection fields", () => 
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     settingsJson,
-  }), /only available for Claude Code/i);
+  }), /official ChatGPT login/i);
   assert.throws(() => parseClaudeSettingsJson(JSON.stringify({
     env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com", SHELL: "/bin/sh" },
   })), /unsupported environment fields/i);

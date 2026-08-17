@@ -18,8 +18,8 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     },
   });
   expect(initialBody.runtimes).toEqual([
-    { kind: "CLAUDE_CODE", installed: false, version: null, scope: "CORE_RUNTIME" },
-    { kind: "CODEX_CLI", installed: false, version: null, scope: "CORE_RUNTIME" },
+    { kind: "CLAUDE_CODE", installed: false, version: null, scope: "CORE_RUNTIME", authentication: null },
+    { kind: "CODEX_CLI", installed: false, version: null, scope: "CORE_RUNTIME", authentication: null },
   ]);
 
   for (const invalid of [
@@ -33,10 +33,23 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     expect(response.status()).toBe(400);
   }
 
-  const apiKey = "sk-instance-secret-value";
+  const apiKey = "sk-claude-instance-secret";
   const created = await stack.web("/api/settings/agent", {
     method: "PUT",
-    data: { agentRuntime: "CODEX_CLI", baseUrl: "https://api.example.com/v1/", model: "gpt-5.3-codex", apiKey },
+    data: {
+      agentRuntime: "CLAUDE_CODE",
+      settingsJson: JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+          ANTHROPIC_AUTH_TOKEN: apiKey,
+          ANTHROPIC_MODEL: "claude-fable-5-max",
+          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
+          ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
+          CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
+        },
+      }),
+    },
   });
   const createdText = await created.text();
   expect(created.ok(), createdText).toBeTruthy();
@@ -46,14 +59,14 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     apiKeyConfigured: boolean;
     apiKeyMasked: string;
     apiKeyFingerprint: string;
+    models: Record<string, string> | null;
     revision: number;
   } };
   expect(createdBody.settings).toMatchObject({
-    agentRuntime: "CODEX_CLI",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-5.3-codex",
+    agentRuntime: "CLAUDE_CODE",
+    baseUrl: "https://api.anthropic.com",
     apiKeyConfigured: true,
-    apiKeyMasked: "sk-********alue",
+    apiKeyMasked: "sk-********cret",
     revision: 1,
   });
   expect(createdBody.settings.apiKeyFingerprint).toMatch(/^sha256:[0-9a-f]{12}$/);
@@ -64,7 +77,6 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     data: {
       agentRuntime: "CODEX_CLI",
       baseUrl: "https://api.example.com/v1",
-      model: "gpt-5.3-codex",
       apiKey: "bad********mask",
     },
   });
@@ -81,50 +93,22 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
        AND kind = 'AGENT_GENERATION'
   `);
   expect(locked[0]?.payload.agentConfiguration).toMatchObject({
-    runtime: "CODEX_CLI",
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-5.3-codex",
+    runtime: "CLAUDE_CODE",
+    baseUrl: "https://api.anthropic.com",
+    models: {
+      primary: "claude-fable-5-max",
+      opus: "claude-opus-route",
+      sonnet: "claude-sonnet-route",
+      haiku: "claude-haiku-route",
+      subagent: "claude-subagent-route",
+    },
     revision: 1,
   });
   expect(String(locked[0]?.payload.agentConfiguration.credentialRef)).toMatch(
     /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//,
   );
 
-  const updated = await stack.web("/api/settings/agent", {
-    method: "PUT",
-    data: {
-      agentRuntime: "CLAUDE_CODE",
-      settingsJson: JSON.stringify({
-        env: {
-          ANTHROPIC_BASE_URL: "https://api.anthropic.com",
-          ANTHROPIC_AUTH_TOKEN: "sk-claude-instance-secret",
-          ANTHROPIC_MODEL: "claude-fable-5-max",
-          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
-          ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
-          CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
-        },
-      }),
-    },
-  });
-  expect(updated.ok()).toBeTruthy();
-  const updatedBody = await updated.json() as {
-    settings: {
-      apiKeyMasked: string;
-      apiKeyFingerprint: string;
-      models: Record<string, string> | null;
-      revision: number;
-    };
-    profiles: Record<string, { apiKeyFingerprint: string; model: string | null }>;
-  };
-  expect(updatedBody.settings.apiKeyMasked).toBe("sk-********cret");
-  expect(updatedBody.settings.apiKeyFingerprint).not.toBe(createdBody.settings.apiKeyFingerprint);
-  expect(updatedBody.settings.revision).toBe(2);
-  expect(updatedBody.profiles.CODEX_CLI).toMatchObject({
-    apiKeyFingerprint: createdBody.settings.apiKeyFingerprint,
-    model: "gpt-5.3-codex",
-  });
-  expect(updatedBody.settings.models).toEqual({
+  expect(createdBody.settings.models).toEqual({
     primary: "claude-fable-5-max",
     opus: "claude-opus-route",
     sonnet: "claude-sonnet-route",
@@ -139,12 +123,11 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     api_key_fingerprint: string;
   }>(`
     SELECT agent_runtime::text, credential_secret_ref, api_key_mask, api_key_fingerprint
-      FROM deviludo.instance_agent_provider_profiles
-     ORDER BY agent_runtime
+      FROM deviludo.instance_agent_settings
   `);
-  expect(rows).toHaveLength(2);
+  expect(rows).toHaveLength(1);
   expect(JSON.stringify(rows)).not.toContain(apiKey);
-  expect(rows.find(row => row.agent_runtime === "CODEX_CLI")?.api_key_mask).toBe(createdBody.settings.apiKeyMasked);
-  expect(rows[0].credential_secret_ref).not.toBe(rows[1].credential_secret_ref);
+  expect(rows[0].agent_runtime).toBe("CLAUDE_CODE");
+  expect(rows[0].api_key_mask).toBe(createdBody.settings.apiKeyMasked);
   expect(rows.every(row => /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//.test(row.credential_secret_ref))).toBe(true);
 });

@@ -125,6 +125,24 @@ export function resolveProbeControl(snapshot, targetId, options = {}) {
   return Object.freeze({ control, center });
 }
 
+/**
+ * Resolves a visual policy click to a stable semantic control without falling
+ * back to persisted screen coordinates. Godot UIs commonly expose both a
+ * clickable leaf and one or more containing panels at the same point. In that
+ * case the smallest hit rectangle is the actionable leaf. Equal-size hits are
+ * still ambiguous and are deliberately rejected.
+ */
+export function resolveProbeControlAtPoint(snapshot, x, y) {
+  const matches = snapshot.controls
+    .filter(control => control.visible && control.enabled
+      && Number(x) >= control.rect.x && Number(x) < control.rect.x + control.rect.width
+      && Number(y) >= control.rect.y && Number(y) < control.rect.y + control.rect.height)
+    .map(control => ({ control, area: control.rect.width * control.rect.height }))
+    .sort((left, right) => left.area - right.area || left.control.id.localeCompare(right.control.id));
+  if (matches.length === 0 || (matches.length > 1 && matches[0].area === matches[1].area)) return null;
+  return matches[0].control;
+}
+
 export function evaluateProbeAssertions(assertions, before, after) {
   if (!Array.isArray(assertions) || !assertions.length) throw new Error("Probe assertions are required");
   return assertions.map(assertion => {

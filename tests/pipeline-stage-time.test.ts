@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pipelineStageFinishedAt } from "../components/ProjectStudio";
-import type { ProductJob } from "../lib/product/contracts";
+import { pipelineEventFinishedAt, pipelineStageFinishedAt } from "../components/ProjectStudio";
+import type { ProductEvent, ProductJob } from "../lib/product/contracts";
 
 function job(state: string, updatedAt: string, targetOperatingSystem: string | null = null): ProductJob {
   return Object.freeze({
@@ -38,4 +38,14 @@ test("failed and cancelled terminal stages retain their finish time", () => {
   assert.equal(pipelineStageFinishedAt([
     job("CANCELLED", "2026-08-16T01:03:04.000Z"),
   ]), "2026-08-16T01:03:04.000Z");
+});
+
+test("the requirements or analysis node uses the latest approval event as its finish time", () => {
+  const events: ProductEvent[] = [
+    { id: "linked", kind: "PROJECT_LINKED", data: {}, createdAt: "2026-08-16T00:00:00.000Z" },
+    { id: "approved-1", kind: "SPEC_APPROVED", data: {}, createdAt: "2026-08-16T01:00:00.000Z" },
+    { id: "approved-2", kind: "SPEC_APPROVED", data: {}, createdAt: "2026-08-16T01:03:04.000Z" },
+  ];
+  assert.equal(pipelineEventFinishedAt(events, "SPEC_APPROVED"), "2026-08-16T01:03:04.000Z");
+  assert.equal(pipelineEventFinishedAt(events, "JOB_SUCCEEDED"), null);
 });

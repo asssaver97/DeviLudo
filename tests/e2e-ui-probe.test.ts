@@ -8,6 +8,7 @@ import {
   probeSnapshotValidationError,
   probeStateDigest,
   resolveProbeControl,
+  resolveProbeControlAtPoint,
   validateProbeSnapshot,
   waitForProbePostconditions,
   waitForProbeSnapshot,
@@ -73,6 +74,22 @@ describe("deviludo.e2e-ui-probe", () => {
     const disabled = snapshot({ controls: [{ ...snapshot().controls[0], enabled: false }] });
     assert.throws(() => resolveProbeControl(disabled as never, "primary-control"), /visible and enabled/);
     assert.equal(resolveProbeControl(disabled as never, "primary-control", { requireEnabled: false }).control.enabled, false);
+  });
+
+  test("maps nested visual hits to the unique smallest semantic control", () => {
+    const nested = snapshot({ controls: [
+      { id: "dialog", visible: true, enabled: true, rect: { x: 40, y: 80, width: 600, height: 400 } },
+      { id: "confirm-button", visible: true, enabled: true, rect: { x: 300, y: 360, width: 160, height: 48 } },
+    ] });
+    assert.equal(resolveProbeControlAtPoint(nested as never, 380, 384)?.id, "confirm-button");
+  });
+
+  test("rejects equal-size semantic hit ambiguity instead of persisting fixed coordinates", () => {
+    const ambiguous = snapshot({ controls: [
+      { id: "choice-a", visible: true, enabled: true, rect: { x: 100, y: 100, width: 120, height: 50 } },
+      { id: "choice-b", visible: true, enabled: true, rect: { x: 100, y: 100, width: 120, height: 50 } },
+    ] });
+    assert.equal(resolveProbeControlAtPoint(ambiguous as never, 160, 125), null);
   });
 
   test("waits for an atomically replaced newer snapshot", async () => {

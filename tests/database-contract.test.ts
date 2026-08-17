@@ -63,6 +63,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /CREATE TABLE deviludo\.job_guidance_messages[\s\S]*state IN \('PENDING', 'DELIVERED', 'REJECTED'\)/);
   assert.match(sql, /FUNCTION deviludo\.fail_job[\s\S]*job\.kind = 'AGENT_GENERATION'[\s\S]*job_guidance_messages[\s\S]*state = 'PENDING'/);
   assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*replay_guidance AS[\s\S]*job_guidance_messages/);
+  assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*failed_workflows AS[\s\S]*UPDATE deviludo\.workflow_instances[\s\S]*terminal\.workflow_id/);
   assert.match(sql, /GRANT SELECT, UPDATE ON deviludo\.job_guidance_messages TO deviludo_claim_executor/);
   assert.match(sql, /credential_secret_ref text NOT NULL/);
   assert.match(sql, /api_key_mask text NOT NULL/);
@@ -72,6 +73,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /role_models jsonb NOT NULL CHECK/);
   assert.match(sql, /role_models->>'development'/);
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
+  assert.doesNotMatch(sql, /instance_agent_provider_profiles/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
   assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD', 'E2E_TEST'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
   assert.match(sql, /CREATE TRIGGER jobs_snapshot_agent_baseline_source/);
@@ -95,12 +97,17 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /testManifest,schema\}', ''\) <> 'deviludo\.test-manifest'/);
   assert.match(sql, /e2e_timeout_seconds integer CHECK/);
   assert.match(sql, /e2e_contract_digest text CHECK/);
-  assert.match(sql, /previous_repair\.created_at > coalesce\(\([\s\S]*max\(manual_agent\.created_at\)[\s\S]*NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
+  assert.match(sql, /previous_repair\.payload->>'manualRerun' IS DISTINCT FROM 'true'/);
+  assert.match(sql, /previous_repair\.created_at > coalesce\(\([\s\S]*max\(manual_agent\.created_at\)[\s\S]*manual_agent\.payload->>'manualRerun' = 'true'/);
   assert.match(sql, /'repairFromE2eJobId', job\.id/);
   assert.match(sql, /p_signal_kind = 'STAGE_RERUN_REQUESTED'/);
   assert.match(sql, /rerun_stage := \(p_payload->>'stage'\)::deviludo\.job_kind/);
   assert.match(sql, /stage_list := deviludo\.delivery_stages\(workflow\.profile\)/);
   assert.match(sql, /downstream_stages := stage_list\[stage_index:/);
+  assert.match(sql, /failed_job\.receipt #>> '\{execution,outcome\}' = 'FAILED'[\s\S]*failed_job\.receipt #>> '\{execution,failureDomain\}' = 'PRODUCT'[\s\S]*evidence\.kind = 'E2E_REPORT'/);
+  assert.match(sql, /failed_job\.kind = 'ARTIFACT_BUILD'[\s\S]*failed_job\.state = 'FAILED'[\s\S]*length\(coalesce\(failed_job\.last_error, ''\)\) > 0/);
+  assert.match(sql, /repair_build_updated_at > coalesce\(repair_e2e_updated_at, '-infinity'::timestamptz\)/);
+  assert.match(sql, /'manualRerun', true[\s\S]*'repairFromE2eJobId', repair_e2e_job_id[\s\S]*'failedPlatform', repair_e2e_platform[\s\S]*'repairFailureJobId', repair_build_job_id[\s\S]*'repairFailureKind', 'ARTIFACT_BUILD'[\s\S]*'repairFailureSummary', repair_build_summary/);
   assert.match(sql, /last_error = 'superseded by stage rerun from ' \|\| rerun_stage::text[\s\S]*AND kind = ANY\(downstream_stages\)/);
   assert.match(sql, /:rerun:/);
   assert.match(sql, /successful_test\.target_operating_system = required_platform\.operating_system/);
@@ -119,14 +126,33 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.doesNotMatch(sql, /api_key\s+text/i);
 });
 
-test("manual Agent reruns reset the bounded E2E repair cycle", async () => {
-  const migration = await readFile(
-    new URL("../infra/postgres/migrations/021_reset_e2e_repair_budget_after_manual_agent.sql", import.meta.url),
+test("manual Agent reruns retain product-failure evidence and reset the bounded repair cycle", async () => {
+  const rerunMigration = await readFile(
+    new URL("../infra/postgres/migrations/037_manual_agent_rerun_uses_e2e_evidence.sql", import.meta.url),
     "utf8",
   );
-  assert.match(migration, /complete_job\(uuid,uuid,bigint,bigint,jsonb,jsonb,text,text,text\)/);
-  assert.match(migration, /previous_repair\.created_at > coalesce/);
-  assert.match(migration, /NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
+  const evidenceMigration = await readFile(
+    new URL("../infra/postgres/migrations/038_preserve_superseded_e2e_repair_evidence.sql", import.meta.url),
+    "utf8",
+  );
+  const buildMigration = await readFile(
+    new URL("../infra/postgres/migrations/039_manual_agent_rerun_uses_build_failure.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(rerunMigration, /accept_workflow_signal\(uuid,text,text,jsonb\)/);
+  assert.match(rerunMigration, /evidence\.kind = 'E2E_REPORT'/);
+  assert.match(rerunMigration, /'manualRerun', true/);
+  assert.match(rerunMigration, /'repairFromE2eJobId', repair_e2e_job_id/);
+  assert.match(rerunMigration, /complete_job\(uuid,uuid,bigint,bigint,jsonb,jsonb,text,text,text\)/);
+  assert.match(rerunMigration, /previous_repair\.payload->>'manualRerun' IS DISTINCT FROM 'true'/);
+  assert.match(rerunMigration, /manual_agent\.payload->>'manualRerun' = 'true'/);
+  assert.match(evidenceMigration, /failed_job\.receipt #>> '\{execution,outcome\}' = 'FAILED'/);
+  assert.match(evidenceMigration, /failed_job\.receipt #>> '\{execution,failureDomain\}' = 'PRODUCT'/);
+  assert.match(buildMigration, /failed_job\.kind = 'ARTIFACT_BUILD'/);
+  assert.match(buildMigration, /repair_build_updated_at > coalesce\(repair_e2e_updated_at, '-infinity'::timestamptz\)/);
+  assert.match(buildMigration, /'repairFailureJobId', repair_build_job_id/);
+  assert.match(buildMigration, /'repairFailureKind', 'ARTIFACT_BUILD'/);
+  assert.match(buildMigration, /'repairFailureSummary', repair_build_summary/);
 });
 
 test("Core stores only opaque external actor identifiers and has no account authority", async () => {
@@ -277,6 +303,15 @@ test("applied migrations are immutable and fresh baselines stamp incorporated ve
     .filter(name => /^\d{3}_[a-z0-9_]+\.sql$/.test(name))
     .sort();
   assert.match(sql, new RegExp(`'${migrationNames.at(-1)?.slice(0, -4)}'`));
+});
+
+test("the Provider ownership repair restores Claude and removes custom Codex credentials", async () => {
+  const migration = await readFile(new URL("../infra/postgres/migrations/034_restore_claude_provider_ownership.sql", import.meta.url), "utf8");
+  const removal = await readFile(new URL("../infra/postgres/migrations/036_remove_agent_provider_profiles.sql", import.meta.url), "utf8");
+  assert.match(migration, /SELECT 'CLAUDE_CODE'::deviludo\.agent_runtime/);
+  assert.match(migration, /DELETE FROM deviludo\.instance_agent_provider_profiles[\s\S]*agent_runtime = 'CODEX_CLI'/);
+  assert.match(migration, /instance_agent_settings_claude_provider_only/);
+  assert.match(removal, /DROP TABLE deviludo\.instance_agent_provider_profiles/);
 });
 
 test("instance Agent settings are frozen into new workspace jobs by secret reference", async () => {
